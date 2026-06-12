@@ -1,9 +1,9 @@
 ---
 role: plan
 next_role: sequence
-auto_advance_eligible: false
-auto_advance_reason: pre-merge Engineer Gate approval is still required for PRD + spec + master chain-bootstrap admission; run Sequence only after the admission PR is approved and merged
-open_questions: 1
+auto_advance_eligible: true
+auto_advance_reason: pre-merge Engineer Gate approval captured 2026-06-12T21:58:08Z; after this admission PR is merged, Sequence may admit the polished Phase 1 pillars
+open_questions: 0
 blocking_todos: 0
 pipeline: codebase
 ---
@@ -12,7 +12,7 @@ pipeline: codebase
 
 **Run:** `/idc:plan` chain-bootstrap admission · run-id `2026-06-12-lifecycle`
 **Branch/worktree:** `idc-plan/lifecycle-uninstall-upgrade` · `.claude/worktrees/idc-plan-lifecycle-uninstall-upgrade/`
-**Status:** Plan artifacts landed on the admission branch; PR open/merge is gated by pre-merge Engineer Gate approval.
+**Status:** Plan artifacts landed on the admission branch; pre-merge Engineer Gate approval captured 2026-06-12T21:58:08Z; merge may proceed, then Sequence is next.
 
 ## What landed in this Plan branch
 
@@ -53,10 +53,11 @@ Run from the worktree root:
 4. CI-equivalent checks from `.github/workflows/ci.yml`: manifest `jq` checks, template smoke-render, and `bash -n scripts/*.sh`.
 5. `git diff --check`.
 
-## Operator gate / open question
+## Operator gate
 
-- **Open question (blocking merge):** pre-merge Engineer Gate approval for the chain-bootstrap PRD + spec + master admission. Pre-drafting approval was captured before this resume; pre-merge approval is still pending.
-- Do **not** merge the admission PR until the operator explicitly approves the pre-merge Engineer Gate.
+- Pre-drafting approval was captured before this resume.
+- Pre-merge Engineer Gate approval for the chain-bootstrap PRD + spec + master admission was captured from the operator at 2026-06-12T21:58:08Z.
+- With the gate approved, merge may proceed; after merge, advance to Sequence.
 
 ## Sequence pickup after merge
 

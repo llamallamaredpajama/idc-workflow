@@ -668,7 +668,7 @@ These are the operative fences for the implementation work the phases admit. Bui
 | Gate | Mode | Action | Operator response | ISO timestamp |
 |------|------|--------|-------------------|---------------|
 | Engineer Gate | engineer | drafting (PRD + spec + master chain bootstrap) | approved | 2026-06-12 (captured before interrupted draft session) |
-| Engineer Gate | engineer | pre_merge (PRD + spec + master chain bootstrap) | pending — required before merge | pending |
+| Engineer Gate | engineer | pre_merge (PRD + spec + master chain bootstrap) | approved | 2026-06-12T21:58:08Z |
 
 ## 9. Phase-wide planning artifacts audited
 

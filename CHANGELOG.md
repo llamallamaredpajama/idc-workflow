@@ -4,6 +4,13 @@ All notable changes to the IDC Workflow plugin are documented in this file.
 
 ## Unreleased
 
+- Docs: hardened `/idc:init` and `/idc:doctor` from first live-install field evidence
+  (2026-06-12, two clean installs). `init.md` Phase 3 now ships a tested zsh-safe
+  docs-tree copy loop (an improvised loop hit zsh's unmatched-glob abort in the field);
+  `gh project list` carries `--limit 200` so a >30-board account can't silently create
+  a duplicate tracker; both `gh project field-list` calls carry `--limit 50` (a fresh
+  board already has 20 fields vs the gh default limit of 30). `doctor.md` check 5 now
+  names the five Codex adapter links explicitly instead of relying on wildcard matching.
 - Docs: fixed the first-run bootstrap deadlock. With the plugin disabled at user scope
   (the per-project scoping model), a never-initialized repo has no `/idc:*` commands —
   so `/idc:init` could not be the documented first step. `README.md` and

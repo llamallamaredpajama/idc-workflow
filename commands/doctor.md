@@ -53,8 +53,11 @@ Check whether `$HOME/.agents/.idc-install-state` exists.
   --codex to enable Codex)`.
 - If it exists → confirm each of the five IDC Codex adapter links under
   `$HOME/.agents/skills/` resolves to a readable `SKILL.md` (i.e. the adapter directories
-  reachable through that path each contain a `SKILL.md`). PASS if all five resolve; else
-  FAIL hint: `re-run the Codex installer:
+  reachable through that path each contain a `SKILL.md`). The five adapter names are
+  exactly `codex-idc-build`, `codex-idc-plan`, `codex-idc-ripple`, `codex-idc-sequence`, <!-- lint-allow: bare Codex link names under $HOME/.agents/skills, bare by design -->
+  `codex-idc-think` (the authoritative list lives in `scripts/install-codex.sh`'s <!-- lint-allow: bare Codex link name under $HOME/.agents/skills, bare by design -->
+  `ADAPTERS` variable) — check these names, not a wildcard match. PASS if all five
+  resolve; else FAIL hint: `re-run the Codex installer:
   bash "${CLAUDE_PLUGIN_ROOT}/scripts/install-codex.sh" "${CLAUDE_PLUGIN_ROOT}"`.
 
 ## Output

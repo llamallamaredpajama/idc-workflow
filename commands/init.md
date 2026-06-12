@@ -60,7 +60,20 @@ For each target that Phase 2 marked absent, copy from `${CLAUDE_PLUGIN_ROOT}/tem
   (`mkdir -p docs/workflow` first)
 - each `templates/docs-tree/` entry absent from `./docs/workflow/` → copy it there
   (the standard dirs each keep their `.gitkeep`; `docs-tree/README.md` →
-  `docs/workflow/README.md`); entries that already exist are never touched
+  `docs/workflow/README.md`); entries that already exist are never touched:
+  ```bash
+  for entry in "${CLAUDE_PLUGIN_ROOT}/templates/docs-tree/"*; do
+    name="$(basename "$entry")"
+    if [ ! -e "docs/workflow/$name" ]; then
+      cp -R "$entry" "docs/workflow/$name" && echo "created: docs/workflow/$name"
+    else
+      echo "skipped-existing: docs/workflow/$name"
+    fi
+  done
+  ```
+  Use this loop as written. The glob is deliberately visible-entries-only — `docs-tree/`
+  has no hidden top-level entries, and adding a `.*`-style hidden glob aborts the whole
+  loop under zsh (the shell behind the Bash tool on macOS) when it matches nothing.
 
 Then substitute the tokens in the copied files (the board number is filled after Phase 4).
 On macOS use `sed -i ''` (BSD); on Linux use `sed -i` (GNU):
@@ -84,8 +97,10 @@ Decide create-vs-link first:
   (pre-existing install) → **link**: reuse it, skip creation, but still verify the board is
   reachable with `gh project view <n> --owner <owner>`.
 - Else look for an existing board:
-  `gh project list --owner <owner> --format json` — if one is titled
-  `"<PROJECT_NAME> IDC Tracker"`, link to it. Otherwise **create** it:
+  `gh project list --owner <owner> --format json --limit 200` — if one is titled
+  `"<PROJECT_NAME> IDC Tracker"`, link to it. (Always pass `--limit`: the gh default is
+  30, and a truncated listing here silently creates a duplicate board.) Otherwise
+  **create** it:
   ```bash
   gh project create --owner "$GITHUB_OWNER" --title "$PROJECT_NAME IDC Tracker" --format json
   ```
@@ -123,7 +138,9 @@ gh project field-create <number> --owner "$GITHUB_OWNER" --name "Pillar trace ke
 ```
 Reconcile the built-in `Status` field to the four IDC values. Get the project node id and
 the `Status` field node id from `gh project field-list <number> --owner "$GITHUB_OWNER"
---format json`, then replace its option set with the destructive
+--format json --limit 50` (a provisioned board already has 20 fields; the gh default
+limit of 30 leaves no room for operator-added fields), then replace its option set with
+the destructive
 `updateProjectV2Field(singleSelectOptions: [...])` GraphQL mutation (send the full desired
 list — `Pending`, `Active`, `Blocked`, `Complete`). This is destructive by design but safe
 on a brand-new empty board. If the built-in field cannot be updated in your gh version,
@@ -141,9 +158,9 @@ sed -i '' -e "s|\"{{TRACKER_PROJECT_NUMBER}}\"|$TRACKER_PROJECT_NUMBER|g" \
 sed -i '' -e "s|{{TRACKER_PROJECT_NUMBER}}|$TRACKER_PROJECT_NUMBER|g" WORKFLOW.md
 ```
 Then:
-- Re-run `gh project field-list <number> --owner "$GITHUB_OWNER" --format json` and write
-  each field's node `id` into the matching `field_ids:` entry (use precise edits so the
-  inline comments and the `"Pillar trace key"` quoting survive).
+- Re-run `gh project field-list <number> --owner "$GITHUB_OWNER" --format json --limit 50`
+  and write each field's node `id` into the matching `field_ids:` entry (use precise
+  edits so the inline comments and the `"Pillar trace key"` quoting survive).
 Option ids do not need caching — the runtime resolves them by name at call-time per the
 skill.
 

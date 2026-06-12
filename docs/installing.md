@@ -1,8 +1,8 @@
 # Installing IDC
 
-This guide covers four flows: installing the plugin on a machine, turning IDC on for a
-project, enabling Codex support, and setting up a second machine. It ends with
-troubleshooting via `/idc:doctor`.
+This guide covers six flows: installing the plugin on a machine, turning IDC on for a
+project, enabling Codex support, updating an initialized project, uninstalling IDC from a
+project, and setting up a second machine. It ends with troubleshooting via `/idc:doctor`.
 
 ## Prerequisites
 
@@ -68,6 +68,9 @@ What it does (idempotent — anything that already exists is left untouched and 
 3. **Per-project enablement** — merges `{"enabledPlugins": {"idc@idc-workflow": true}}` into
    `.claude/settings.json`, preserving your existing settings. This is why IDC stays off in
    your other repositories: enablement is per-project, not global.
+4. **Install receipt** — writes `docs/workflow/install-receipt.yaml` with SHA-256
+   fingerprints of files created by init. `/idc:update`, `/idc:upgrade`, and
+   `/idc:uninstall` use this receipt to preserve operator customizations.
 
 Pass a project name as the first argument to override the default (the repo directory
 name): `/idc:init my-service`.
@@ -93,7 +96,52 @@ leaking into your other Claude projects as bare skills.
   `~/.agents/skills` symlink (the installer records the prior state before changing
   anything).
 
-## 4. Set up a second machine
+## 4. Update an initialized project
+
+Run:
+
+```
+/idc:update
+```
+
+`/idc:update` refreshes stamped IDC scaffold files from the currently installed plugin.
+It reads `docs/workflow/install-receipt.yaml`, compares SHA-256 fingerprints, and updates
+only files still matching the receipt. If a file has a fingerprint mismatch, the command
+prints a diff and requires operator review; there is no silent overwrite of customized
+files. The refreshed receipt records `written_by: idc:update`, preserves
+`state: customized` entries, and the command finishes with one revertable commit when it
+actually changes files.
+
+`/idc:upgrade` is kept as a compatibility alias for `/idc:update`; prefer
+`/idc:update` in new docs and runbooks.
+
+## 5. Uninstall IDC from a project
+
+Run:
+
+```
+/idc:uninstall
+```
+
+`/idc:uninstall` removes repo-local IDC scaffold safely:
+
+1. Verifies tracked files are clean and checks for in-flight tracker items. If the tracker
+   read fails, it reports `could not verify in-flight items` and requires confirmation.
+2. Builds a manifest from `docs/workflow/install-receipt.yaml` plus the hardcoded runtime
+   footprint list (`WORKFLOW.md`, `WORKFLOW-config.yaml`, `docs/workflow/`, filesystem
+   `TRACKER.md`, and the IDC enablement key in `.claude/settings.json`).
+3. Archives existing manifest paths to `idc-archive-<date>.tar.gz` before deleting
+   anything.
+4. Removes files, strips only `.enabledPlugins["idc@idc-workflow"]`, and creates a single
+   revertable commit.
+
+GitHub is untouched by default. `--close-issues` closes board-linked issues but never
+deletes them. `--delete-board` is permanent and requires typed confirmation of the board
+title. Machine-global cleanup stays manual: run `claude plugin uninstall idc@idc-workflow`
+and `bash "<plugin-root>/scripts/install-codex.sh" --revert` only if you also want to undo
+machine-level plugin/Codex installation.
+
+## 6. Set up a second machine
 
 1. Install the plugin on the new machine (step 1).
 2. `git clone` and `cd` into each governed repo. Per-project enablement lives in the repo's

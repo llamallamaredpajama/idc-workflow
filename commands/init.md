@@ -203,9 +203,53 @@ argument (it is text-substituted here but is NOT a shell env var inside the scri
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/install-codex.sh" "${CLAUDE_PLUGIN_ROOT}"
 ```
 
-## Phase 7 — Summary
-Print a table of every target with `created` / `skipped-existing`, the board number + URL,
-and whether Codex adapters were installed:
+## Phase 7 — Write the install receipt
+After Phases 2–5 (and Phase 6 when `--codex`) complete successfully, write the install
+receipt at `docs/workflow/install-receipt.yaml`. The receipt is fully init-generated — do
+not add a receipt file to `templates/`, and do not invent placeholder fingerprints.
+Fingerprints are computed from the final on-disk bytes after every token substitution and
+after the GitHub Project number has been written.
+
+Receipt serialization is exactly:
+
+```yaml
+receipt_version: 1
+fingerprint_method: sha256
+written_by: idc:init
+written_at: 2026-06-12T14:00:00Z
+files:
+  - path: WORKFLOW.md
+    fingerprint: 3a91c2...64-lowercase-hex-chars
+    state: stamped
+```
+
+Rules:
+- Entry keys are exactly `path`, `fingerprint`, and `state`.
+- Sort `files` entries by repo-relative path for deterministic diffs.
+- `fingerprint_method: sha256` means the SHA-256 hex digest of final on-disk bytes; use
+  `shasum -a 256 "$f"` on macOS or `sha256sum "$f"` on Linux.
+- `written_by: idc:init`; future lifecycle commands may preserve `state: customized`, but
+  init-created entries are always `state: stamped`.
+- The receipt never lists itself (`docs/workflow/install-receipt.yaml`) because it is the
+  manifest of the scaffold, not part of the scaffold payload it fingerprints.
+- The receipt never lists `TRACKER.md`; filesystem tracker runtime files are covered by
+  uninstall's hardcoded footprint list.
+- Entries are every file Phase 2/3 marked `created` in this run, including `WORKFLOW.md`,
+  `WORKFLOW-config.yaml`, `docs/workflow/tracker-config.yaml`, copied `docs/workflow/`
+  tree files, `.claude/settings.json` when created or modified by Phase 5, and Codex
+  adapter state only when Phase 6 writes repo-local files.
+- Gap-fill re-run with an existing receipt: preserve existing entries byte-for-byte and
+  append entries only for files newly created this run. If nothing was created, leave the
+  receipt untouched and report `skipped-existing`.
+- Pre-receipt posture: if the receipt is absent and nothing was created in this run, do
+  not fabricate provenance for files init cannot prove it wrote. Report
+  `install-receipt.yaml: not-written (pre-receipt install — run /idc:update to graduate a receipt)`.
+- The Phase 8 summary table must include `docs/workflow/install-receipt.yaml` as
+  `created`, `skipped-existing`, or the explicit pre-receipt install line above.
+
+## Phase 8 — Summary
+Print a table of every target with `created` / `skipped-existing`, the receipt status, the
+board number + URL, and whether Codex adapters were installed:
 
 | Item | Status |
 |------|--------|

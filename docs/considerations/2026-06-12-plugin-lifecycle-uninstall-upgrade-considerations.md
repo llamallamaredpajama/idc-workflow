@@ -24,9 +24,11 @@ substrate emerged that both commands consume.
   `--close-issues` (reversible) and `--delete-board` (permanent, typed confirmation; issue deletion never
   offered). All repo footprints removed in ONE revertable commit: scaffold, configs, TRACKER.md when
   filesystem backend, `enabledPlugins` key stripped preserving other keys. Removal list is receipt-driven
-  ("only delete what you created"); hardcoded footprint list retained solely as pre-receipt fallback.
+  ("only delete what you created"); hardcoded footprint list retained as pre-receipt fallback — and note
+  TRACKER.md is runtime-created (never written by init), so its receipt coverage is an open decision below.
   Re-runs report skipped-absent.
-- **Uninstall preflight, two layers.** Clean git state required, plus a board state check: in-flight items
+- **Uninstall preflight, two layers.** Clean git state required (tracked files; prior runs' untracked
+  `idc-archive-*.tar.gz` must be exempt or re-runs self-block), plus a board state check: in-flight items
   ("N issues still in progress — orphaning") reported plainly with an explicit confirmation gate
   (warn-and-confirm; rejected: hard block, and no check at all).
 - **/idc:upgrade — receipt-only detection (v1).** Silently re-stamp only files the receipt proves untouched;
@@ -56,18 +58,29 @@ substrate emerged that both commands consume.
 
 ## Open Decisions
 
-- Receipt schema internals: field shape, fingerprint method, exact filename/path within the scaffold.
+- Receipt schema internals: field shape, fingerprint method, exact filename/path within the scaffold; what a
+  receipt entry records for files the operator kept customized at diff-and-ask (mark customized / template
+  fingerprint / exclude) — same answer for graduation and the end-of-run rewrite, else the next upgrade
+  treats kept customizations as "untouched" and silently re-stamps them.
+- Runtime-created footprints (TRACKER.md): does the tracker adapter append them to the receipt on first
+  write, or does the hardcoded list permanently cover them (making it more than a pre-receipt fallback)?
+- Failure-path postures, never silent: receipt present but invalid (abort loudly vs announce-and-confirm
+  fallback); board read fails at uninstall preflight (hard block vs explicit "could not verify in-flight
+  items" confirm); board drift check cannot run (third explicit outcome, distinct from "no drift").
 
 ## Engineering Implications
 
-- /idc:init gains a new write surface (the receipt) and must fingerprint everything it stamps.
+- /idc:init gains a new write surface (the receipt) and must fingerprint everything it stamps — fingerprints
+  of the rendered as-written files (post token-substitution), not the templates.
+- Upgrade and receipt-driven uninstall recompute on-disk fingerprints and compare against the receipt; that
+  compare is the safety-critical surface and must fail toward asking, never toward silent re-stamp.
 - Receipt is a committed scaffold file: covered by the clean-git preflight, removed in uninstall's single
   revertable commit, portable across machines and clones.
 - Uninstall preflight extends beyond git-clean to a tracker/board read for in-flight detection.
 - Upgrade needs access to the new plugin version's expected board schema to diff against the live board
   (report-only).
-- Both commands carry init's idempotency reporting vocabulary (created / skipped-existing / skipped-absent /
-  skipped-already-current).
+- Both commands carry init's idempotency vocabulary (created / skipped-existing), extended with two new
+  statuses: skipped-absent (uninstall re-runs) and skipped-already-current (upgrade re-runs).
 
 ## Source Pointers
 

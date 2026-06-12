@@ -53,7 +53,16 @@ IDC on for every repo — see below.)
 
 ## Install into a project
 
-Inside the repository you want to govern, run:
+The plugin ships disabled outside IDC projects, so a repo that has never been initialized
+has no `/idc:*` commands yet — including `/idc:init` itself. Bootstrap from your terminal
+first, then start a new Claude Code session in the repo:
+
+```
+cd <your-repo>
+claude plugin enable idc@idc-workflow --scope project
+```
+
+Then, inside that new session, run:
 
 ```
 /idc:init

@@ -26,12 +26,26 @@ From inside Claude Code:
 ```
 
 This repo hosts its own marketplace (`.claude-plugin/marketplace.json`), so the first
-command points Claude Code at it and the second installs the `idc` plugin. Installing makes
-the commands, agents, and skills available but does **not** activate IDC in any repo yet.
+command points Claude Code at it and the second installs the `idc` plugin. Installing puts
+the plugin on the machine but does **not** activate IDC in any repo yet. In the
+per-project scoping model the plugin stays **disabled** at the user level (check with
+`claude plugin list`) — the `/idc:*` commands only exist inside projects that enable it,
+which is what the next step does.
 
 ## 2. Turn IDC on for a project
 
-From the root of the repository you want to govern:
+A repo that has never been initialized has no `/idc:*` commands yet — including
+`/idc:init` itself — so the first enablement has to happen from your **terminal**, not
+from inside Claude Code:
+
+```
+cd <your-repo>
+claude plugin enable idc@idc-workflow --scope project
+```
+
+This writes `{"enabledPlugins": {"idc@idc-workflow": true}}` into the repo's
+`.claude/settings.json` (the same key `/idc:init` maintains). Then start a **new** Claude
+Code session in that repo — existing sessions don't pick up enablement changes — and run:
 
 ```
 /idc:init
@@ -84,9 +98,10 @@ leaking into your other Claude projects as bare skills.
 1. Install the plugin on the new machine (step 1).
 2. `git clone` and `cd` into each governed repo. Per-project enablement lives in the repo's
    `.claude/settings.json`; if your repo commits that file, IDC is already on. Many repos
-   gitignore `.claude/` — in that case re-run `/idc:init` (idempotent) or add
-   `{"enabledPlugins":{"idc@idc-workflow":true}}` to `.claude/settings.json` on the new
-   machine. The scaffold and board need no re-init either way.
+   gitignore `.claude/` — in that case run `claude plugin enable idc@idc-workflow
+   --scope project` from the repo root on the new machine (the section 2 bootstrap; you
+   can't re-run `/idc:init` while the plugin is disabled there). The scaffold and board
+   need no re-init either way.
 3. Make sure `gh` is authenticated with the `project` scope on the new machine.
 4. If you use Codex on the new machine, run `/idc:init --codex` there once (the Codex link
    wiring is machine-local, not stored in the repo).
@@ -107,6 +122,10 @@ hint:
 
 Common issues:
 
+- **No `/idc:*` command exists at all (not even `/idc:doctor`)** — the plugin isn't
+  enabled for this project and is disabled at the user level, so every fix-it command is
+  itself unavailable. This can only be repaired from the terminal:
+  `claude plugin enable idc@idc-workflow --scope project`, then start a new session.
 - **"board not reachable" / field IDs empty** — the `project` scope is usually missing.
   Refresh it and re-run `/idc:init`; board provisioning needs the scope to create fields.
 - **A non-IDC repo is picking up IDC** — check that repo's `.claude/settings.json`; remove

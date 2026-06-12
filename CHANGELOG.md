@@ -2,6 +2,16 @@
 
 All notable changes to the IDC Workflow plugin are documented in this file.
 
+## Unreleased
+
+- Docs: fixed the first-run bootstrap deadlock. With the plugin disabled at user scope
+  (the per-project scoping model), a never-initialized repo has no `/idc:*` commands —
+  so `/idc:init` could not be the documented first step. `README.md` and
+  `docs/installing.md` now bootstrap each project with
+  `claude plugin enable idc@idc-workflow --scope project` from the terminal before the
+  first `/idc:init`, and `/idc:doctor` troubleshooting covers the
+  "no `/idc:*` commands at all" state.
+
 ## 0.1.0 — 2026-06-11
 
 Initial public release: the IDC workflow (Think → Plan → Sequence → Build → Ripple),

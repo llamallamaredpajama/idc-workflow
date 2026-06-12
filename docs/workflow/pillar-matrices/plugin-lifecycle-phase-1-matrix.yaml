@@ -1,0 +1,100 @@
+phase_tag: plugin-lifecycle-phase-1
+matrix_version: 1
+planning_scope: phase-wide
+source_manifest: docs/workflow/phase-planning/plugin-lifecycle-phase-1-planning-manifest.yaml
+source_master_section: plugin-lifecycle/phase-1
+active_pillars: []
+completed_pillars: []
+pending_pillars:
+  - plugin-lifecycle-phase-1-subphase-1-pillar-1-receipt-format-and-init-writer
+  - plugin-lifecycle-phase-1-subphase-2-pillar-1-uninstall-command
+pillars:
+  - pillar_id: plugin-lifecycle-phase-1-subphase-1-pillar-1-receipt-format-and-init-writer
+    status: pending
+    admission_status: ready
+    phase: Phase 1
+    domain: plugin-lifecycle
+    track: default
+    wave: wave-1
+    subphase_plan: docs/plans/subphases/plugin-lifecycle-phase-1-subphase-1-install-receipt-plan.md
+    pillar_plan: docs/plans/pillars/plugin-lifecycle-phase-1-subphase-1-pillar-1-receipt-format-and-init-writer-plan.md
+    depends_on: []
+    blocks:
+      - plugin-lifecycle-phase-1-subphase-2-pillar-1-uninstall-command
+    file_surfaces:
+      - commands/init.md
+      - .github/workflows/ci.yml
+      - CHANGELOG.md
+    shared_writers:
+      - plugin-lifecycle-phase-1-subphase-2-pillar-1-uninstall-command
+    unsafe_parallel_with: []
+    parallel_safe_with:
+      - plugin-lifecycle-phase-1-subphase-2-pillar-1-uninstall-command
+    clash_with:
+      - plugin-lifecycle-phase-1-subphase-1-pillar-1-receipt-format-and-init-writer-plugin-lifecycle-phase-1-subphase-2-pillar-1-uninstall-command-pillar-conflicts.md
+  - pillar_id: plugin-lifecycle-phase-1-subphase-2-pillar-1-uninstall-command
+    status: pending
+    admission_status: ready
+    phase: Phase 1
+    domain: plugin-lifecycle
+    track: default
+    wave: wave-2
+    subphase_plan: docs/plans/subphases/plugin-lifecycle-phase-1-subphase-2-uninstall-command-plan.md
+    pillar_plan: docs/plans/pillars/plugin-lifecycle-phase-1-subphase-2-pillar-1-uninstall-command-plan.md
+    depends_on:
+      - plugin-lifecycle-phase-1-subphase-1-pillar-1-receipt-format-and-init-writer
+    blocks: []
+    file_surfaces:
+      - commands/uninstall.md
+      - docs/installing.md
+      - README.md
+      - CHANGELOG.md
+    shared_writers:
+      - plugin-lifecycle-phase-1-subphase-1-pillar-1-receipt-format-and-init-writer
+    unsafe_parallel_with: []
+    parallel_safe_with:
+      - plugin-lifecycle-phase-1-subphase-1-pillar-1-receipt-format-and-init-writer
+    clash_with:
+      - plugin-lifecycle-phase-1-subphase-1-pillar-1-receipt-format-and-init-writer-plugin-lifecycle-phase-1-subphase-2-pillar-1-uninstall-command-pillar-conflicts.md
+dependency_dag:
+  active: []
+  pending:
+    - id: plugin-lifecycle-phase-1-subphase-1-pillar-1-receipt-format-and-init-writer
+      depends_on: []
+      blocks:
+        - plugin-lifecycle-phase-1-subphase-2-pillar-1-uninstall-command
+      clash_with:
+        - plugin-lifecycle-phase-1-subphase-1-pillar-1-receipt-format-and-init-writer-plugin-lifecycle-phase-1-subphase-2-pillar-1-uninstall-command-pillar-conflicts.md
+    - id: plugin-lifecycle-phase-1-subphase-2-pillar-1-uninstall-command
+      depends_on:
+        - plugin-lifecycle-phase-1-subphase-1-pillar-1-receipt-format-and-init-writer
+      blocks: []
+      clash_with:
+        - plugin-lifecycle-phase-1-subphase-1-pillar-1-receipt-format-and-init-writer-plugin-lifecycle-phase-1-subphase-2-pillar-1-uninstall-command-pillar-conflicts.md
+parallel_safety:
+  active: []
+  pending:
+    - id: plugin-lifecycle-phase-1-subphase-1-pillar-1-receipt-format-and-init-writer
+      parallel_safe_with:
+        - plugin-lifecycle-phase-1-subphase-2-pillar-1-uninstall-command
+      unsafe_parallel_with: []
+      shared_writers:
+        - plugin-lifecycle-phase-1-subphase-2-pillar-1-uninstall-command
+    - id: plugin-lifecycle-phase-1-subphase-2-pillar-1-uninstall-command
+      parallel_safe_with:
+        - plugin-lifecycle-phase-1-subphase-1-pillar-1-receipt-format-and-init-writer
+      unsafe_parallel_with: []
+      shared_writers:
+        - plugin-lifecycle-phase-1-subphase-1-pillar-1-receipt-format-and-init-writer
+wave_ordering:
+  active: []
+  pending:
+    - wave: wave-1
+      pillars:
+        - plugin-lifecycle-phase-1-subphase-1-pillar-1-receipt-format-and-init-writer
+      seeded_from: []
+    - wave: wave-2
+      pillars:
+        - plugin-lifecycle-phase-1-subphase-2-pillar-1-uninstall-command
+      seeded_from:
+        - plugin-lifecycle-phase-1-subphase-1-pillar-1-receipt-format-and-init-writer

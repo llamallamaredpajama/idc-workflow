@@ -1,0 +1,35 @@
+# WORKFLOW-config.yaml — IDC contract sidecar (lives at the governed repo root).
+#
+# Hard requirement: project.name. Everything else is optional/recommended.
+# Tracker field IDs live exclusively in docs/workflow/tracker-config.yaml.
+#
+# Template tokens are written as quoted strings so this file stays valid YAML;
+# `/idc:init` replaces each token with the concrete value (and drops the quotes
+# around numeric values such as the project number).
+workflow:
+  schema: idc
+  version: 1
+  # Optional external-harness compatibility keys (uncomment if this repo is
+  # executed by a governance-compiling harness such as pi-idc-collab):
+  # contract_profile: pi-idc-collab/v1
+  # min_harness_version: "0.1.0"
+
+project:
+  name: "idc-workflow"
+
+# Recommended — canonical document map for the IDC roles.
+documents:
+  workflow: WORKFLOW.md
+  tracker_config: docs/workflow/tracker-config.yaml
+  pillar_matrix: docs/workflow/pillar-matrices/<phase-tag>-matrix.yaml
+  prd: docs/prd/
+  specs: docs/specs/
+  plans: docs/plans/
+  pillar_matrices: docs/workflow/pillar-matrices/
+  considerations: docs/considerations/
+  ripple: docs/workflow/ripple/
+
+# Optional convenience mirror; the live tracker contract is tracker-config.yaml.
+tracker:
+  backend: github                                  # github | filesystem
+  github_project_number: 4  # integer; set after `gh project create`

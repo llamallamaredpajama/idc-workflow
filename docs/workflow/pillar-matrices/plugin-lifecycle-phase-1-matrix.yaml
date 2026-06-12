@@ -17,7 +17,7 @@ pillars:
     track: default
     wave: wave-1
     subphase_plan: docs/plans/subphases/plugin-lifecycle-phase-1-subphase-1-install-receipt-plan.md
-    pillar_plan: docs/plans/pillars/plugin-lifecycle-phase-1-subphase-1-pillar-1-receipt-format-and-init-writer-plan.md
+    pillar_plan: docs/plans/pillars/archive/plugin-lifecycle-phase-1-subphase-1-pillar-1-receipt-format-and-init-writer-plan.md
     depends_on: []
     blocks:
       - plugin-lifecycle-phase-1-subphase-2-pillar-1-uninstall-command
@@ -40,7 +40,7 @@ pillars:
     track: default
     wave: wave-2
     subphase_plan: docs/plans/subphases/plugin-lifecycle-phase-1-subphase-2-uninstall-command-plan.md
-    pillar_plan: docs/plans/pillars/plugin-lifecycle-phase-1-subphase-2-pillar-1-uninstall-command-plan.md
+    pillar_plan: docs/plans/pillars/archive/plugin-lifecycle-phase-1-subphase-2-pillar-1-uninstall-command-plan.md
     depends_on:
       - plugin-lifecycle-phase-1-subphase-1-pillar-1-receipt-format-and-init-writer
     blocks: []

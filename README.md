@@ -32,8 +32,8 @@ that the plan didn't ask for, and nothing in the plan drifts silently out of syn
 
 This repo is the plugin itself **and** its own marketplace. It ships:
 
-- **8 commands** — the role entry points (`/idc:think`, `/idc:plan`, …) plus `/idc:init`
-  and `/idc:doctor`.
+- **11 commands** — the role entry points (`/idc:think`, `/idc:plan`, …) plus
+  `/idc:init`, `/idc:doctor`, `/idc:update`, `/idc:upgrade`, and `/idc:uninstall`.
 - **23 agents** — the role orchestrators and the specialized teammates they spawn.
 - **38 skills** — the reusable procedures the roles compose (tracker operations, plan
   review, change-order authoring, …), including Codex-native adapters.
@@ -75,7 +75,10 @@ Then, inside that new session, run:
 - provisions a **GitHub Projects v2 board** with the eight IDC tracker fields (or links an
   existing one), and records its field IDs in `docs/workflow/tracker-config.yaml`;
 - enables the plugin **for this project only** by writing
-  `{"enabledPlugins": {"idc@idc-workflow": true}}` into `.claude/settings.json`.
+  `{"enabledPlugins": {"idc@idc-workflow": true}}` into `.claude/settings.json`;
+- writes `docs/workflow/install-receipt.yaml`, which lets `/idc:update`, `/idc:upgrade`,
+  and `/idc:uninstall` distinguish stamped IDC scaffold files from operator
+  customizations.
 
 That last step is the key to keeping things clean: IDC turns on **per-project**, so your
 non-IDC repositories never see the workflow. Run `/idc:doctor` afterward to verify the
@@ -98,8 +101,11 @@ gh auth refresh -h github.com -s project
 | `/idc:build` | Implement the next admitted tracker item against its pillar plan. |
 | `/idc:ripple` | File change orders and resolve drift across the canonical chain. |
 | `/idc:autorun` | Run a consideration end-to-end through Plan → Sequence without pausing. |
-| `/idc:init` | Install IDC into the current repo (scaffold + board + per-project enable). |
+| `/idc:init` | Install IDC into the current repo (scaffold + board + per-project enable + receipt). |
 | `/idc:doctor` | Read-only health check of an IDC-governed repo. |
+| `/idc:update` | Refresh stamped IDC scaffold files from the installed plugin while preserving customizations. |
+| `/idc:upgrade` | Compatibility alias for `/idc:update`. |
+| `/idc:uninstall` | Archive and remove repo-local IDC scaffold in one revertable commit. |
 
 ## Codex support
 
@@ -135,7 +141,7 @@ each push and pull request.
 .claude-plugin/      plugin.json (manifest) + marketplace.json (self-hosted marketplace)
 agents/              23 role orchestrators + teammate roleplayers (+ references/)
 skills/              38 reusable procedures (incl. codex-idc-* adapters, idc-workflow)
-commands/            8 slash commands (think|plan|sequence|build|ripple|autorun|init|doctor)
+commands/            11 slash commands (think|plan|sequence|build|ripple|autorun|init|doctor|update|upgrade|uninstall)
 templates/           per-project scaffold copied by /idc:init
 scripts/             lint-references.sh, install-codex.sh, run-evals.sh, materialize-sandbox.sh
 docs/                architecture, installing, and developer notes (docs/dev/)

@@ -4,6 +4,12 @@ All notable changes to the IDC Workflow plugin are documented in this file.
 
 ## Unreleased
 
+- Lifecycle: added the install receipt substrate plus `/idc:uninstall`, `/idc:update`,
+  and `/idc:upgrade`. `/idc:init` now documents
+  `docs/workflow/install-receipt.yaml` with SHA-256 fingerprints so lifecycle commands can
+  distinguish stamped scaffold files from customized files; uninstall archives the repo
+  footprint before one revertable removal commit, while update/upgrade refresh stamped
+  scaffold files without silent overwrites.
 - Docs: closed two adversarial-review findings on the install-hardening pass.
   `/idc:init`'s destructive Status option replacement is now gated by board provenance
   (board created this run → safe; linked board already matching → no-op; linked board

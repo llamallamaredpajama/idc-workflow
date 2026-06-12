@@ -43,8 +43,9 @@ jobs:
           out=$(mktemp -d)
           cp templates/WORKFLOW.md templates/WORKFLOW-config.yaml templates/tracker-config.yaml "$out/"
           # Substitute EXACTLY what /idc:init substitutes (keep in sync with
-          # commands/init.md Phase 3 + Phase 4) — substituting more than init does
-          # would mask an init-side gap where a template token survives scaffolding.
+          # commands/init.md Phase 3 + Phase 4; Phase 7 writes the computed receipt
+          # with no template tokens) — substituting more than init does would mask an
+          # init-side gap where a template token survives scaffolding.
           # init Phase 3: the three name tokens, all files.
           for f in "$out"/*; do
             sed -i \

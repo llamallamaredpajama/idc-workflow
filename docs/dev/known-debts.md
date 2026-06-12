@@ -106,6 +106,11 @@ fixed). One line of rationale each; nothing silently dropped.
 - **EVAL note (agent-side `bypassPermissions`):** retained by design and now documented
   in `run-evals.sh`'s header + `docs/dev/evals.md` §Permissions caveat (the judge-side
   grant was dropped).
+- **Nit (firestore stack-example literals):** `idc-skill-ripple-verdict` SKILL.md ~L144
+  and `idc-role-wave-blocker-diagnostic.md` ~L58 cite `firestore.rules` /
+  `firestore.indexes.json` as protected-source-surface examples — stack examples
+  inherited from the original governed repo; knowingly shipped (Firestore is a common
+  stack and the lines are illustrative, not binding). Genericize in a polish pass.
 
 ## Handling policy during migration
 

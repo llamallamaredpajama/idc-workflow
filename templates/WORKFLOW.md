@@ -230,9 +230,13 @@ non-`(idle)` pointers simultaneously (parallel-safe).
 **Bookend events.** Bookend events resolve through the configured adapter. Filesystem
 backend: commits with the `tracker:` prefix that update `TRACKER.md`. GitHub backend:
 label/state mutations — open sets `ClaimState=Claimed` then `Running`, adds
-`bookend-open` + `attempt:<n>` labels, sets `Lane=<lane>`; close verifies, sets
-`ClaimState=Released`, removes `bookend-open`, adds `bookend-close`. Status mutations
-belong to Sequence at admit / queue rollover, NOT to Build's bookend cycle. Each side
+`bookend-open` + `attempt:<n>` labels, sets `Lane=<lane>`; close routes through the
+adapter's `complete_claimed_item` op, which verifies and applies one mutation set —
+`Status=Complete`, `ClaimState=Released`, `Lane=(idle)`, issue closed — then removes
+`bookend-open` and adds `bookend-close`. That `Status=Complete` write is exactly the
+§6.6 Build carve-out; every other Status mutation belongs to Sequence at admit (or to
+Build's `promote_next_eligible_wave` carve-out at queue rollover) — never to ad-hoc
+bookend writes outside `complete_claimed_item`. Each side
 of the bookend ends with verify-after-write reconciliation: read back the item state
 and confirm the writes applied; on divergence, emit a reconciliation report under
 `docs/workflow/audits/`, release the lock, and fail closed.

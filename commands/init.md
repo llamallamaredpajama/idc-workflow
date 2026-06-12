@@ -136,17 +136,37 @@ gh project field-create <number> --owner "$GITHUB_OWNER" --name "Lane"   --data-
 gh project field-create <number> --owner "$GITHUB_OWNER" --name "Domain" --data-type SINGLE_SELECT --single-select-options "default"
 gh project field-create <number> --owner "$GITHUB_OWNER" --name "Pillar trace key" --data-type TEXT
 ```
-Reconcile the built-in `Status` field to the four IDC values. Get the project node id and
-the `Status` field node id from `gh project field-list <number> --owner "$GITHUB_OWNER"
---format json --limit 50` (a provisioned board already has 20 fields; the gh default
-limit of 30 leaves no room for operator-added fields), then replace its option set with
-the destructive
-`updateProjectV2Field(singleSelectOptions: [...])` GraphQL mutation (send the full desired
-list — `Pending`, `Active`, `Blocked`, `Complete`). This is destructive by design but safe
-on a brand-new empty board. If the built-in field cannot be updated in your gh version,
-do NOT try to delete it — the built-in Projects v2 `Status` field cannot be deleted via
-the API. Instead record an operator-todo: the operator sets the option list to exactly
-`Pending`, `Active`, `Blocked`, `Complete` in the board's web UI (field settings).
+Reconcile the built-in `Status` field to the four IDC values — **gated by board
+provenance**, because the option-replacement mutation is destructive (it regenerates
+every option id and wipes the field's value on every existing item). Get the project
+node id and the `Status` field node id + current options from
+`gh project field-list <number> --owner "$GITHUB_OWNER" --format json --limit 50`
+(a provisioned board already has 20 fields; the gh default limit of 30 leaves no room
+for operator-added fields), then take exactly one of these paths:
+
+- **Board created this run** → safe: replace the option set with the destructive
+  `updateProjectV2Field(singleSelectOptions: [...])` GraphQL mutation (send the full
+  desired list — `Pending`, `Active`, `Blocked`, `Complete`). A brand-new board has no
+  items, so the wipe has nothing to destroy.
+- **Linked board whose Status options are already exactly** `Pending`, `Active`,
+  `Blocked`, `Complete` → no-op: report `skipped-existing`. Never re-send the mutation
+  on a match — same-name replacement still re-IDs the options and wipes item values.
+- **Linked board with any other option set** → check the item count first
+  (`gh project view <number> --owner "$GITHUB_OWNER" --format json` → `.items.totalCount`).
+  Zero items → the mutation is safe; proceed as for a new board. One or more items →
+  **STOP — do not mutate.** Leave the board untouched and record an operator-todo
+  pointing at the snapshot → mutate → re-fetch ids → rebuild values → verify SOP in
+  `idc:idc-skill-github-tracker-implementation` §Single-select option mutation
+  (safe form); `/idc:init` never runs that SOP itself.
+
+The same provenance rule applies to the seven `field-create` calls above: on a linked
+board, create only the fields missing from the `field-list` output — `field-create`
+fails on duplicate names.
+
+If the built-in field cannot be updated in your gh version, do NOT try to delete it —
+the built-in Projects v2 `Status` field cannot be deleted via the API. Instead record an
+operator-todo: the operator sets the option list to exactly `Pending`, `Active`,
+`Blocked`, `Complete` in the board's web UI (field settings).
 
 Now cache the contract into the scaffolded files — substitute the project number in
 all THREE places it appears (on macOS use `sed -i ''`; on Linux `sed -i`):

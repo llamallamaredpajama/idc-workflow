@@ -60,7 +60,20 @@ For each target that Phase 2 marked absent, copy from `${CLAUDE_PLUGIN_ROOT}/tem
   (`mkdir -p docs/workflow` first)
 - each `templates/docs-tree/` entry absent from `./docs/workflow/` → copy it there
   (the standard dirs each keep their `.gitkeep`; `docs-tree/README.md` →
-  `docs/workflow/README.md`); entries that already exist are never touched
+  `docs/workflow/README.md`); entries that already exist are never touched:
+  ```bash
+  for entry in "${CLAUDE_PLUGIN_ROOT}/templates/docs-tree/"*; do
+    name="$(basename "$entry")"
+    if [ ! -e "docs/workflow/$name" ]; then
+      cp -R "$entry" "docs/workflow/$name" && echo "created: docs/workflow/$name"
+    else
+      echo "skipped-existing: docs/workflow/$name"
+    fi
+  done
+  ```
+  Use this loop as written. The glob is deliberately visible-entries-only — `docs-tree/`
+  has no hidden top-level entries, and adding a `.*`-style hidden glob aborts the whole
+  loop under zsh (the shell behind the Bash tool on macOS) when it matches nothing.
 
 Then substitute the tokens in the copied files (the board number is filled after Phase 4).
 On macOS use `sed -i ''` (BSD); on Linux use `sed -i` (GNU):
@@ -84,8 +97,10 @@ Decide create-vs-link first:
   (pre-existing install) → **link**: reuse it, skip creation, but still verify the board is
   reachable with `gh project view <n> --owner <owner>`.
 - Else look for an existing board:
-  `gh project list --owner <owner> --format json` — if one is titled
-  `"<PROJECT_NAME> IDC Tracker"`, link to it. Otherwise **create** it:
+  `gh project list --owner <owner> --format json --limit 200` — if one is titled
+  `"<PROJECT_NAME> IDC Tracker"`, link to it. (Always pass `--limit`: the gh default is
+  30, and a truncated listing here silently creates a duplicate board.) Otherwise
+  **create** it:
   ```bash
   gh project create --owner "$GITHUB_OWNER" --title "$PROJECT_NAME IDC Tracker" --format json
   ```
@@ -121,15 +136,37 @@ gh project field-create <number> --owner "$GITHUB_OWNER" --name "Lane"   --data-
 gh project field-create <number> --owner "$GITHUB_OWNER" --name "Domain" --data-type SINGLE_SELECT --single-select-options "default"
 gh project field-create <number> --owner "$GITHUB_OWNER" --name "Pillar trace key" --data-type TEXT
 ```
-Reconcile the built-in `Status` field to the four IDC values. Get the project node id and
-the `Status` field node id from `gh project field-list <number> --owner "$GITHUB_OWNER"
---format json`, then replace its option set with the destructive
-`updateProjectV2Field(singleSelectOptions: [...])` GraphQL mutation (send the full desired
-list — `Pending`, `Active`, `Blocked`, `Complete`). This is destructive by design but safe
-on a brand-new empty board. If the built-in field cannot be updated in your gh version,
-do NOT try to delete it — the built-in Projects v2 `Status` field cannot be deleted via
-the API. Instead record an operator-todo: the operator sets the option list to exactly
-`Pending`, `Active`, `Blocked`, `Complete` in the board's web UI (field settings).
+Reconcile the built-in `Status` field to the four IDC values — **gated by board
+provenance**, because the option-replacement mutation is destructive (it regenerates
+every option id and wipes the field's value on every existing item). Get the project
+node id and the `Status` field node id + current options from
+`gh project field-list <number> --owner "$GITHUB_OWNER" --format json --limit 50`
+(a provisioned board already has 20 fields; the gh default limit of 30 leaves no room
+for operator-added fields), then take exactly one of these paths:
+
+- **Board created this run** → safe: replace the option set with the destructive
+  `updateProjectV2Field(singleSelectOptions: [...])` GraphQL mutation (send the full
+  desired list — `Pending`, `Active`, `Blocked`, `Complete`). A brand-new board has no
+  items, so the wipe has nothing to destroy.
+- **Linked board whose Status options are already exactly** `Pending`, `Active`,
+  `Blocked`, `Complete` → no-op: report `skipped-existing`. Never re-send the mutation
+  on a match — same-name replacement still re-IDs the options and wipes item values.
+- **Linked board with any other option set** → check the item count first
+  (`gh project view <number> --owner "$GITHUB_OWNER" --format json` → `.items.totalCount`).
+  Zero items → the mutation is safe; proceed as for a new board. One or more items →
+  **STOP — do not mutate.** Leave the board untouched and record an operator-todo
+  pointing at the snapshot → mutate → re-fetch ids → rebuild values → verify SOP in
+  `idc:idc-skill-github-tracker-implementation` §Single-select option mutation
+  (safe form); `/idc:init` never runs that SOP itself.
+
+The same provenance rule applies to the seven `field-create` calls above: on a linked
+board, create only the fields missing from the `field-list` output — `field-create`
+fails on duplicate names.
+
+If the built-in field cannot be updated in your gh version, do NOT try to delete it —
+the built-in Projects v2 `Status` field cannot be deleted via the API. Instead record an
+operator-todo: the operator sets the option list to exactly `Pending`, `Active`,
+`Blocked`, `Complete` in the board's web UI (field settings).
 
 Now cache the contract into the scaffolded files — substitute the project number in
 all THREE places it appears (on macOS use `sed -i ''`; on Linux `sed -i`):
@@ -141,9 +178,9 @@ sed -i '' -e "s|\"{{TRACKER_PROJECT_NUMBER}}\"|$TRACKER_PROJECT_NUMBER|g" \
 sed -i '' -e "s|{{TRACKER_PROJECT_NUMBER}}|$TRACKER_PROJECT_NUMBER|g" WORKFLOW.md
 ```
 Then:
-- Re-run `gh project field-list <number> --owner "$GITHUB_OWNER" --format json` and write
-  each field's node `id` into the matching `field_ids:` entry (use precise edits so the
-  inline comments and the `"Pillar trace key"` quoting survive).
+- Re-run `gh project field-list <number> --owner "$GITHUB_OWNER" --format json --limit 50`
+  and write each field's node `id` into the matching `field_ids:` entry (use precise
+  edits so the inline comments and the `"Pillar trace key"` quoting survive).
 Option ids do not need caching — the runtime resolves them by name at call-time per the
 skill.
 

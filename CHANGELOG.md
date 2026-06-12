@@ -4,6 +4,21 @@ All notable changes to the IDC Workflow plugin are documented in this file.
 
 ## Unreleased
 
+- Docs: closed two adversarial-review findings on the install-hardening pass.
+  `/idc:init`'s destructive Status option replacement is now gated by board provenance
+  (board created this run → safe; linked board already matching → no-op; linked board
+  with items → fail closed to the snapshot/rebuild SOP in the github tracker skill,
+  never run by init itself), and `WORKFLOW.md` §6.7 bookend-close now routes through
+  `complete_claimed_item` with the verified mutation set (`Status=Complete`,
+  `ClaimState=Released`, `Lane=(idle)`) instead of contradicting the §6.6 Build
+  Status carve-out (template and instantiated copy fixed identically).
+- Docs: hardened `/idc:init` and `/idc:doctor` from first live-install field evidence
+  (2026-06-12, two clean installs). `init.md` Phase 3 now ships a tested zsh-safe
+  docs-tree copy loop (an improvised loop hit zsh's unmatched-glob abort in the field);
+  `gh project list` carries `--limit 200` so a >30-board account can't silently create
+  a duplicate tracker; both `gh project field-list` calls carry `--limit 50` (a fresh
+  board already has 20 fields vs the gh default limit of 30). `doctor.md` check 5 now
+  names the five Codex adapter links explicitly instead of relying on wildcard matching.
 - Docs: fixed the first-run bootstrap deadlock. With the plugin disabled at user scope
   (the per-project scoping model), a never-initialized repo has no `/idc:*` commands —
   so `/idc:init` could not be the documented first step. `README.md` and

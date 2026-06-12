@@ -1,4 +1,4 @@
-# WORKFLOW.md — {{PROJECT_NAME}} IDC governance contract
+# WORKFLOW.md — idc-workflow IDC governance contract
 
 > **This file is a hard contract.** Its existence marks the repo as IDC-governed,
 > and its section numbers are **stable** so the IDC roles can cite governance rules
@@ -30,8 +30,8 @@ full substrate contract — operations, schema, writer authority, bookend mechan
 fail-closed posture — is **§6 Tracker substrate**):
 
 - **`github`** — a GitHub Projects v2 board with eight custom fields. This repo's
-  board is project number `{{TRACKER_PROJECT_NUMBER}}`, tracking work in the
-  `{{GITHUB_OWNER}}/{{GITHUB_REPO}}` repository. A board item is a **candidate** when
+  board is project number `4`, tracking work in the
+  `llamallamaredpajama/idc-workflow` repository. A board item is a **candidate** when
   `Status="Active"` AND `ClaimState="Unclaimed"`, with `Phase` matching the active
   matrix phase-tag and `Pillar trace key` matching a matrix `pillar_id`. Values are
   read by name; field node IDs live in `tracker-config.yaml`.

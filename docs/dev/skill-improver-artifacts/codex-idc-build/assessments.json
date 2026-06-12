@@ -1,0 +1,229 @@
+{
+  "skill_name": "codex-idc-build",
+  "assessment_items": [
+    {
+      "id": 1,
+      "text": "The response correctly describes or implements the tracker state machine in the prescribed sequence (Unclaimed \u2192 Claimed \u2192 Running \u2192 RetryQueued \u2192 Released) with no steps omitted, reordered, or conflated.",
+      "category": "correctness",
+      "applies_to": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ]
+    },
+    {
+      "id": 2,
+      "text": "Tracker bookend commit messages use the exact prescribed format: 'tracker: open/close Phase <N> Stage <M> bookend (attempt <n>)' \u2014 no paraphrase, no alternative wording.",
+      "category": "correctness",
+      "applies_to": [
+        1,
+        3,
+        4
+      ]
+    },
+    {
+      "id": 3,
+      "text": "When describing matrix dispatch-check CLI commands, the response uses the correct flag spellings: 'export-state' (not '--export-state'), '--tracker-state' (not '--tracker-state-path'), and '--pillar' (not '--pillar-trace-key').",
+      "category": "correctness",
+      "applies_to": [
+        1,
+        2
+      ]
+    },
+    {
+      "id": 4,
+      "text": "All tracker state-transition operations are routed through idc-skill-tracker-adapter; the response never proposes direct 'gh project item-edit' calls or raw TRACKER.md edits.",
+      "category": "tool_selection",
+      "applies_to": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ]
+    },
+    {
+      "id": 5,
+      "text": "Before any pillar worker is dispatched, the response invokes idc-skill-matrix-dispatch-check; it never suggests reading matrix YAML directly or skipping the dispatch gate.",
+      "category": "tool_selection",
+      "applies_to": [
+        1,
+        2,
+        5
+      ]
+    },
+    {
+      "id": 6,
+      "text": "Merge conflicts surfaced by implementer sessions are routed to idc-role-merge-deconflictor; implementers are never instructed to resolve conflicts themselves.",
+      "category": "tool_selection",
+      "applies_to": [
+        2,
+        3
+      ]
+    },
+    {
+      "id": 7,
+      "text": "When a review/fix loop reaches 3 failed attempts on the same finding cluster, the response correctly triggers a halt with 'BLOCKED: review_fix_ceiling' rather than looping further or silently continuing.",
+      "category": "error_handling",
+      "applies_to": [
+        3,
+        4,
+        5
+      ]
+    },
+    {
+      "id": 8,
+      "text": "The response does not halt, block phase-close, or stall the pipeline on Minor/Nit/INFO findings; it treats them as file-to-operator-todos items and keeps work moving.",
+      "category": "error_handling",
+      "applies_to": [
+        3,
+        4,
+        5
+      ]
+    },
+    {
+      "id": 9,
+      "text": "When generating or describing a per-issue brief, all required fields are present: issue_number, pillar_trace_key, pillar_plan_path, worktree_path, branch, base_branch, bookend_open_sha, file_surfaces, tests_required, goal_recipe, skill_matrix, [SEC] flag, and bootstrap_research_pointer.",
+      "category": "completeness",
+      "applies_to": [
+        2
+      ]
+    },
+    {
+      "id": 10,
+      "text": "The Build closeout or session-end report includes all required output sections: admitted pillars/issues/trace keys, PRs with merge SHAs, bookend references, files changed, tests/reviews run with paths, operator todos status and blocking count, ripple obligations or parked pillars, handoff path, cleanup manifest path, and next safe IDC role.",
+      "category": "completeness",
+      "applies_to": [
+        3,
+        4
+      ]
+    },
+    {
+      "id": 11,
+      "text": "When all matrix candidates conflict only with current wave peers (no external blocks), the response correctly identifies and enters WAVE_SERIAL_ONLY mode \u2014 selecting one deterministic issue, dispatching N=1, and prescribing the reassess-then-repeat cadence.",
+      "category": "edge_cases",
+      "applies_to": [
+        5
+      ]
+    },
+    {
+      "id": 12,
+      "text": "The startup sequence explicitly includes reading the idc-build runbook (agents/idc-build-runbook.md in the idc-workflow plugin) in full before dispatching workers or making any edits; this step is not deferred, abbreviated, or skipped.",
+      "category": "instruction_following",
+      "applies_to": [
+        1,
+        5
+      ]
+    },
+    {
+      "id": 13,
+      "text": "Build execution never proceeds on main/master; the response always creates or verifies an orchestrator worktree branch (idc-build/<slug>) before any worker dispatch or repo mutation.",
+      "category": "best_practices",
+      "applies_to": [
+        1,
+        2,
+        5
+      ]
+    },
+    {
+      "id": 14,
+      "text": "For Variant B writer merges, the response instructs removing the writer worktree ('git worktree remove') before executing 'gh pr merge --delete-branch', not after.",
+      "category": "best_practices",
+      "applies_to": [
+        2,
+        3
+      ]
+    },
+    {
+      "id": 15,
+      "text": "The response does not propose editing any forbidden artifact from Build logic: PRD, architecture spec, master implementation plan, subphase plans, root CLAUDE.md, or AGENTS.md.",
+      "category": "instruction_following",
+      "applies_to": [
+        1,
+        4,
+        5
+      ]
+    }
+  ],
+  "test_prompts": [
+    {
+      "id": 1,
+      "prompt": "Start a new IDC Build session for the governed repo. We're beginning Phase 3 Stage 1. I'm on the main branch right now. Bootstrap for the current active wave and walk me through everything you'd do in Phase 0 and the first three workflow steps.",
+      "scenario": "Cold-start: tests whether the agent correctly performs Phase 0 worktree isolation, reads the mandatory runbook, routes tracker writes through the adapter, uses correct CLI flag syntax, and avoids forbidden writes during startup.",
+      "applicable_assertions": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        12,
+        13,
+        15
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "The bootstrap researcher has finished. Issues #42 (auth-layer pillar, lane A), #47 (data-service pillar, lane B), and #51 (api-gateway pillar, lane C) are all matrix-safe and ready to dispatch. Walk me through setting up the writer worktrees for all three and dispatching the implementers. Include the per-issue brief schema for issue #42 and show the exact worktree materialization commands.",
+      "scenario": "Multi-issue parallel dispatch: tests brief schema completeness, correct matrix dispatch-check invocation, writer worktree branch naming and materialization commands, merge order discipline, and tracker adapter usage.",
+      "applicable_assertions": [
+        1,
+        3,
+        4,
+        5,
+        6,
+        9,
+        13,
+        14
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Two things just happened simultaneously. First, the implementer for issue #47 sent CONFLICT_BLOCKED after attempting to merge its PR into the orchestrator branch. Second, the implementer for issue #51 just sent MERGED successfully after its third review-fix attempt on a Critical finding \u2014 but that third attempt still has the finding unresolved. Handle both situations completely, including any tracker writes and closeout requirements.",
+      "scenario": "Concurrent merge-conflict and fix-ceiling scenario: tests conflict routing to deconflictor, correct halt-ceiling enforcement, tracker adapter usage for bookend transitions, and distinction between blocking halt conditions vs non-blocking findings.",
+      "applicable_assertions": [
+        1,
+        2,
+        4,
+        6,
+        7,
+        8,
+        10,
+        14
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "All PRs in Phase 3 Stage 1 have merged and the bookend-close has landed. Run me through the phase-close adversarial gate. The adversarial review returns: 2 critical findings (security injection and data loss path), 1 high finding (auth bypass edge case), 3 medium findings (logging gaps), and 5 low findings (style inconsistencies). Tell me exactly what you do with each severity tier, including any tracker writes, and produce the closeout report.",
+      "scenario": "Phase-close gate with mixed severity findings: tests correct severity-to-action mapping, non-halt on minor/info findings, tracker adapter usage, auto-fix loop for blockers/majors, operator-todos routing for lower severities, and complete closeout report format.",
+      "applicable_assertions": [
+        1,
+        2,
+        4,
+        7,
+        8,
+        10,
+        15
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "Resume an interrupted IDC Build session. The active handoff is at docs/workflow/handoffs/builds/2026-05-13-1430-wave3-auth.md. During drift verification you find: (a) the pillar matrix shows 'auth-layer' as 'in-progress' but its PR was merged 2 hours ago \u2014 the matrix evidence looks stale; (b) bootstrap researcher returns BLOCKED for 2 of 3 wave candidates; and (c) the third candidate's matrix shows it conflicts only with its two BLOCKED wave peers, not with any external dependency. Describe your full resume procedure and how you handle each of these three findings.",
+      "scenario": "Resume with drift, stale matrix evidence, and WAVE_SERIAL_ONLY edge case: tests mandatory runbook read on resume, tracker adapter for handoff pointer, worktree isolation verification, stale-matrix escalation path, correct WAVE_SERIAL_ONLY identification, and non-halt discipline when one candidate remains viable.",
+      "applicable_assertions": [
+        1,
+        4,
+        5,
+        7,
+        8,
+        11,
+        12,
+        13,
+        15
+      ]
+    }
+  ],
+  "generated_at": "2026-05-15T04:19:04.984997+00:00",
+  "model": "claude-sonnet-4-6"
+}

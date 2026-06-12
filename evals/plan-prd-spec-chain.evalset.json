@@ -1,0 +1,32 @@
+{
+  "eval_set_id": "plan-prd-spec-chain",
+  "name": "Plan Role — Full Document Chain (PRD to spec to master plan)",
+  "description": "Evaluates whether the Plan role produces the full canonical document chain (PRD then spec then master plan) with proper cross-document references between each document.",
+  "needs_llm": "Verifying that each downstream document genuinely references the one above it — and that scope, acceptance, and subphase structure are coherent — requires semantic judgment beyond regex matching.",
+  "role": "Plan",
+  "doctrine_ref": "idc:idc-skill-canonical-doc-authoring",
+  "eval_cases": [
+    {
+      "eval_id": "plan-full-document-chain",
+      "provenance": "WORKFLOW.md §4.2 (Plan role — PRD→spec→master-plan chain with cross-references); idc:plan",
+      "conversation": [
+        {
+          "user_content": {
+            "parts": [{"text": "The consideration at docs/considerations/add-preferences-service-consideration.md has been admitted. Run the full document chain in order: (1) produce a PRD in docs/prd/ with scope and acceptance criteria; (2) produce a spec in docs/specs/ that references the PRD by path; (3) produce a master plan in docs/plans/ that references the spec by path and breaks the work into subphases. Make the cross-references between documents explicit so the PRD -> spec -> plan chain is traceable."}]
+          }
+        }
+      ],
+      "session_input": {"app_name": "app", "user_id": "eval_user", "state": {}},
+      "scoring": {
+        "expect_refusal": false,
+        "binary": {"any_of": [], "all_of": [], "no_forbidden_source_writes": true},
+        "rubric": [
+          {"id": "prd_produced", "weight": 0.25, "criterion": "PRD produced (for docs/prd/) carrying both scope and acceptance criteria"},
+          {"id": "spec_references_prd", "weight": 0.25, "criterion": "Spec produced (for docs/specs/) that explicitly references the PRD by path"},
+          {"id": "plan_references_spec", "weight": 0.3, "criterion": "Master plan produced (for docs/plans/) that explicitly references the spec and breaks the work into subphases"},
+          {"id": "no_source_writes", "weight": 0.2, "criterion": "Does not write (or propose writing) source files, tests, or tracker state"}
+        ]
+      }
+    }
+  ]
+}

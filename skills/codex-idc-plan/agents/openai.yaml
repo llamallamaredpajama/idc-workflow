@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex IDC Plan"
+  short_description: "Convert admitted considerations into the canonical planning chain (PRD/spec/master + subphase + pillar + matrix) in one drafting pass through the Engineer Gate"
+  default_prompt: "Run Codex IDC Plan for this scope. Read scope inline, run the Engineer Gate (PRD/spec only) before drafting, emit the cumulative draft set in one model session, and stop at the pre-merge Engineer Gate for PRD/spec/master admissions."

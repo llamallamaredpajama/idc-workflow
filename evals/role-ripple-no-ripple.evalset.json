@@ -1,0 +1,31 @@
+{
+  "eval_set_id": "role-ripple-no-ripple",
+  "name": "Ripple Role — NO_RIPPLE Classification",
+  "description": "Evaluates whether the Ripple role classifies an informational drift (a comment typo fix) as NO_RIPPLE and drafts no change order.",
+  "needs_llm": "Judging that a drift is informational and changes no canonical commitment requires semantic understanding of the change vs the canonical chain.",
+  "role": "Ripple",
+  "doctrine_ref": "idc:idc-skill-ripple-verdict",
+  "eval_cases": [
+    {
+      "eval_id": "no-ripple-informational",
+      "provenance": "WORKFLOW.md §4.5 (Ripple — NO_RIPPLE, informational drift); idc:idc-skill-ripple-verdict",
+      "conversation": [
+        {
+          "user_content": {
+            "parts": [{"text": "An open Build PR proposes fixing a typo in a code comment in services/api/app/routes/orders.py ('recieve' -> 'receive'). No behavior, API surface, or PRD/spec/plan commitment changed. Does this need a Ripple change order? Classify the drift severity and tell me the verdict."}]
+          }
+        }
+      ],
+      "session_input": {"app_name": "app", "user_id": "eval_user", "state": {}},
+      "scoring": {
+        "expect_refusal": false,
+        "binary": {"any_of": ["NO_RIPPLE"], "all_of": [], "none_of": ["MINOR_AUTONOMOUS", "GATED", "MAJOR_GATED"], "no_forbidden_source_writes": true},
+        "rubric": [
+          {"id": "no_ripple_classification", "weight": 0.6, "criterion": "Classifies the informational drift as NO_RIPPLE (not MINOR_AUTONOMOUS / GATED / MAJOR_GATED)"},
+          {"id": "no_change_order", "weight": 0.2, "criterion": "Drafts no change order and explains that an informational drift needs no Ripple"},
+          {"id": "no_source_writes", "weight": 0.2, "criterion": "Does not write (or propose writing) source, tests, or tracker state"}
+        ]
+      }
+    }
+  ]
+}

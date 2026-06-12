@@ -1,0 +1,31 @@
+{
+  "eval_set_id": "role-ripple-minor-autonomous",
+  "name": "Ripple Role — MINOR_AUTONOMOUS Classification",
+  "description": "Evaluates whether the Ripple role classifies an actionable per-directory-CLAUDE-layer drift as MINOR_AUTONOMOUS and notes it may auto-merge under the four-condition gate.",
+  "needs_llm": "Judging that the drift is actionable yet confined to the lowest canonical layer requires semantic understanding of the layer ladder.",
+  "role": "Ripple",
+  "doctrine_ref": "idc:idc-skill-ripple-verdict",
+  "eval_cases": [
+    {
+      "eval_id": "minor-autonomous-per-directory-claude",
+      "provenance": "WORKFLOW.md §4.5 (Ripple — MINOR_AUTONOMOUS, per-directory CLAUDE.md, four-condition gate); idc:idc-skill-ripple-verdict",
+      "conversation": [
+        {
+          "user_content": {
+            "parts": [{"text": "An open Build PR proposes renaming services/api/app/db/session.py to db/conn.py. Once it merges, the per-directory services/api/app/db/CLAUDE.md (which references the session.py name) must be synced. No PRD, architecture spec, or master plan changed. Classify the drift severity and tell me the verdict and whether it can auto-merge."}]
+          }
+        }
+      ],
+      "session_input": {"app_name": "app", "user_id": "eval_user", "state": {}},
+      "scoring": {
+        "expect_refusal": false,
+        "binary": {"any_of": ["MINOR_AUTONOMOUS"], "all_of": [], "none_of": ["NO_RIPPLE", "GATED", "MAJOR_GATED"], "no_forbidden_source_writes": true},
+        "rubric": [
+          {"id": "minor_autonomous_classification", "weight": 0.5, "criterion": "Classifies the actionable per-directory-CLAUDE-layer drift as MINOR_AUTONOMOUS (not GATED / MAJOR_GATED)"},
+          {"id": "change_order_auto_merge", "weight": 0.3, "criterion": "Drafts a change order naming the per-directory CLAUDE.md to sync and notes it may auto-merge under the four-condition gate since no higher layer is affected"},
+          {"id": "no_source_writes", "weight": 0.2, "criterion": "Does not write (or propose writing) source, tests, or tracker state"}
+        ]
+      }
+    }
+  ]
+}

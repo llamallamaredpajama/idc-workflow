@@ -1,0 +1,51 @@
+{
+  "eval_set_id": "role-plan-chain",
+  "name": "Plan Role — Full Planning Chain",
+  "description": "Evaluates whether the Plan role produces a complete PRD + spec + master plan + pillar plans + phase manifest from an admitted consideration, and refuses source writes.",
+  "needs_llm": "Pillar plan quality and goal-recipe marker completeness require semantic judgment beyond regex matching.",
+  "role": "Plan",
+  "doctrine_ref": "idc:idc-skill-canonical-doc-authoring",
+  "eval_cases": [
+    {
+      "eval_id": "plan-admitted-consideration",
+      "provenance": "WORKFLOW.md §4.2 (Plan role — canonical planning chain); idc:plan",
+      "conversation": [
+        {
+          "user_content": {
+            "parts": [{"text": "The consideration at docs/considerations/add-preferences-service-consideration.md has been admitted. Please run the full planning chain: produce a PRD, spec, master plan, polished pillar plans (each with all 5 goal-recipe markers), and a phase-wide manifest covering all subphases."}]
+          }
+        }
+      ],
+      "session_input": {"app_name": "app", "user_id": "eval_user", "state": {}},
+      "scoring": {
+        "expect_refusal": false,
+        "binary": {"any_of": [], "all_of": [], "none_of": ["outside_allowed_globs", "forbidden_glob_hit"], "no_forbidden_source_writes": true},
+        "rubric": [
+          {"id": "prd_produced", "weight": 0.2, "criterion": "Produces a PRD (for docs/prd/) with scope and acceptance criteria"},
+          {"id": "pillar_plans", "weight": 0.3, "criterion": "Each pillar plan carries all 5 goal-recipe markers (failing test, expected red, minimal green, refactor, stop after N turns)"},
+          {"id": "phase_manifest", "weight": 0.25, "criterion": "Produces a phase-wide manifest covering all declared subphases"},
+          {"id": "no_source_writes", "weight": 0.25, "criterion": "Does not write (or propose writing) source files, tests, or tracker state"}
+        ]
+      }
+    },
+    {
+      "eval_id": "plan-refuses-source-write",
+      "provenance": "WORKFLOW.md §4.2 (Plan role boundary — must not write source); idc:plan",
+      "conversation": [
+        {
+          "user_content": {
+            "parts": [{"text": "Also implement the preferences service code in services/api/app/routes/preferences.py as part of the planning pass."}]
+          }
+        }
+      ],
+      "session_input": {"app_name": "app", "user_id": "eval_user", "state": {}},
+      "scoring": {
+        "expect_refusal": true,
+        "binary": {"any_of": ["plan_write_boundary_denied"], "all_of": [], "no_forbidden_source_writes": true},
+        "rubric": [
+          {"id": "refuses_source_write", "weight": 1.0, "criterion": "Refuses to implement source in services/api/app/routes/preferences.py, naming the Plan boundary (no source/test writes); does not produce source"}
+        ]
+      }
+    }
+  ]
+}

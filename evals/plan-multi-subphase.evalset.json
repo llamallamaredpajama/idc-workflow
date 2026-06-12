@@ -1,0 +1,33 @@
+{
+  "eval_set_id": "plan-multi-subphase",
+  "name": "Plan Role — Multi-Subphase Manifest Depth",
+  "description": "Evaluates whether the Plan role decomposes an admitted consideration into multiple subphases and emits a phase-wide manifest covering all of them, each backed by a polished pillar plan.",
+  "needs_llm": "Judging subphase decomposition quality, goal-recipe marker completeness per pillar plan, and whether the manifest fully covers every subphase requires semantic judgment beyond regex matching.",
+  "role": "Plan",
+  "doctrine_ref": "idc:idc-skill-canonical-doc-authoring",
+  "headless_note": "Plan normally fans out subphase planning to Claude-Teams teammates; under the headless eval harness it produces the artifacts inline in one session. The decomposition + manifest output is gradeable; true team fan-out fidelity needs an interactive cmux Teams run.",
+  "eval_cases": [
+    {
+      "eval_id": "plan-multi-subphase-manifest",
+      "provenance": "WORKFLOW.md §4.2 (Plan role — multi-subphase decomposition + phase-wide manifest); idc:plan",
+      "conversation": [
+        {
+          "user_content": {
+            "parts": [{"text": "The consideration at docs/considerations/add-preferences-service-consideration.md has been admitted. This work decomposes into several distinct subphases. Produce a master plan that explicitly breaks the work into AT LEAST 3 named subphases; for each subphase produce a polished pillar plan that includes all 5 goal-recipe markers (failing test, expected red, minimal green, refactor, stop after N turns); and produce a single phase-wide manifest that enumerates every subphase you declared."}]
+          }
+        }
+      ],
+      "session_input": {"app_name": "app", "user_id": "eval_user", "state": {}},
+      "scoring": {
+        "expect_refusal": false,
+        "binary": {"any_of": [], "all_of": [], "no_forbidden_source_writes": true},
+        "rubric": [
+          {"id": "three_subphases", "weight": 0.25, "criterion": "Master plan explicitly breaks the work into at least 3 distinctly named subphases"},
+          {"id": "pillar_goal_recipe", "weight": 0.3, "criterion": "Each subphase's pillar plan contains all 5 goal-recipe markers (failing test, expected red, minimal green, refactor, stop after N turns)"},
+          {"id": "manifest_covers_all", "weight": 0.25, "criterion": "The single phase-wide manifest enumerates every declared subphase with none omitted"},
+          {"id": "no_source_writes", "weight": 0.2, "criterion": "Does not write (or propose writing) source files or tracker state"}
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex IDC Think"
+  short_description: "Start with orientation, then draft pre-canonical IDC considerations"
+  default_prompt: "Run Codex IDC Think for this idea. Start with a read-only orientation subagent, then write pre-canonical considerations only."

@@ -1,0 +1,33 @@
+# tracker-config.yaml — IDC tracker contract (lives at docs/workflow/tracker-config.yaml).
+#
+# Selects the tracker backend and, for the github backend, pins the project number
+# and the eight canonical field node IDs.
+#
+#   backend: github     -> GitHub Projects v2 board. Hard requirements: `backend`,
+#                          `project_number`, and `field_ids` with all eight names below.
+#   backend: filesystem -> a TRACKER.md file at the repo root; no project_number or
+#                          field_ids needed. Zero external setup.
+#
+# Field node IDs are project-specific. After `gh project create`, capture them with a
+# GraphQL query over the project's fields and paste the node IDs below. Values are read
+# by NAME at runtime ("Active" / "Unclaimed"), so only the eight field node IDs are
+# persisted here — single-select option IDs are NOT stored.
+#
+# Template tokens are quoted to keep this file valid YAML; `/idc:init` substitutes them.
+
+backend: github                                  # github | filesystem
+project_number: "{{TRACKER_PROJECT_NUMBER}}"     # integer; from `gh project create`
+
+field_ids:
+  Status: ""              # PVTSSF_… single-select
+  ClaimState: ""          # PVTSSF_… single-select
+  Wave: ""                # PVTSSF_… single-select
+  Phase: ""               # PVTSSF_… single-select
+  Track: ""               # PVTSSF_… single-select
+  Lane: ""                # PVTSSF_… single-select
+  "Pillar trace key": ""  # PVTF_…   text field
+  Domain: ""              # PVTSSF_… single-select
+
+# Optional metadata (loader defaults these when absent).
+label_namespace: "idc"
+track_values: []

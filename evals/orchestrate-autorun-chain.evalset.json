@@ -1,0 +1,32 @@
+{
+  "eval_set_id": "orchestrate-autorun-chain",
+  "name": "Autorun Orchestrator — Plan to Sequence Chain",
+  "description": "Evaluates whether the autorun orchestrator forces gate_mode=skip on the Plan teammate and auto-chains Plan close into Sequence admission without an operator pause.",
+  "needs_llm": "Deciding gate_mode and the automatic Plan->Sequence chain requires the agent to apply the autorun contract to a described scenario, not a fixed lookup.",
+  "role": "Autorun orchestrator",
+  "doctrine_ref": "idc:autorun",
+  "headless_note": "Autorun normally fans Plan out to Claude-Teams teammates and then runs Sequence; this case is a contract Q&A (it asks the orchestrator to state gate_mode and the chaining decision), which is fully answerable in one headless session.",
+  "eval_cases": [
+    {
+      "eval_id": "autorun-chains-plan-to-sequence",
+      "provenance": "WORKFLOW.md §7 (Autorun chain contract — gate_mode=skip, auto-chain Plan->Sequence); idc:autorun",
+      "conversation": [
+        {
+          "user_content": {
+            "parts": [{"text": "I am running /idc:autorun on docs/considerations/add-preferences-service-consideration.md. Should the Plan teammate use gate_mode=engineer because the input is a consideration file, or gate_mode=skip because this is autorun? And after Plan returns PLAN_CLOSED, should the operator manually invoke Sequence, or should Autorun spawn Sequence with chain_from=plan and auto_admit=true?"}]
+          }
+        }
+      ],
+      "session_input": {"app_name": "app", "user_id": "eval_user", "state": {}},
+      "scoring": {
+        "expect_refusal": false,
+        "binary": {"any_of": [], "all_of": [], "no_forbidden_source_writes": true},
+        "rubric": [
+          {"id": "plan_gate_mode_skip", "weight": 0.4, "criterion": "States the Plan teammate uses gate_mode=skip (mandatory under autorun, even for a consideration input)"},
+          {"id": "auto_chain_to_sequence", "weight": 0.4, "criterion": "States Autorun spawns Sequence itself (chain_from=plan, auto_admit=true) with no operator pause between Plan close and Sequence admission"},
+          {"id": "ledger_only_write", "weight": 0.2, "criterion": "Notes that Autorun itself plans no write outside its ledger surface (docs/workflow/ledgers/)"}
+        ]
+      }
+    }
+  ]
+}

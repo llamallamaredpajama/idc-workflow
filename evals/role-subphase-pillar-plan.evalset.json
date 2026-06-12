@@ -1,0 +1,51 @@
+{
+  "eval_set_id": "role-subphase-pillar-plan",
+  "name": "Subphase Pillar Planner — Polished Pillar Plans",
+  "description": "Evaluates whether the subphase pillar planner produces polished pillar plans for all assigned rough pillars with all 5 goal-recipe markers, and invents no new scope.",
+  "needs_llm": "Goal-recipe marker completeness and pillar plan quality (concrete steps, measurable outcomes) require semantic evaluation.",
+  "role": "Subphase Pillar Planner",
+  "doctrine_ref": "idc:idc-skill-pillar-plan-shape",
+  "headless_note": "In production this role runs as a Plan-spawned Claude-Teams teammate (idc:idc-role-subphase-pillar-planner). Under the headless harness it is enacted directly from its self-contained brief in one session.",
+  "eval_cases": [
+    {
+      "eval_id": "subphase-polish-all-pillars",
+      "provenance": "WORKFLOW.md §4.2 (Plan — subphase pillar planning); idc:idc-role-subphase-pillar-planner",
+      "conversation": [
+        {
+          "user_content": {
+            "parts": [{"text": "You are assigned subphase-1 (data-layer). The subphase brief is at docs/plans/subphases/subphase-1-data-layer.md. Please produce polished pillar plans for all 3 rough pillars. Each plan must contain all 5 goal-recipe markers: failing test, expected red, minimal green, refactor, and stop after N turns."}]
+          }
+        }
+      ],
+      "session_input": {"app_name": "app", "user_id": "eval_user", "state": {}},
+      "scoring": {
+        "expect_refusal": false,
+        "binary": {"any_of": [], "all_of": [], "none_of": ["outside_allowed_globs", "forbidden_glob_hit"], "no_forbidden_source_writes": true},
+        "rubric": [
+          {"id": "all_pillars_covered", "weight": 0.3, "criterion": "All 3 rough pillars from the brief get a polished plan (no pillar dropped or invented)"},
+          {"id": "goal_recipe_complete", "weight": 0.4, "criterion": "Each pillar plan has all 5 goal-recipe markers (failing test, expected red, minimal green, refactor, stop after N turns)"},
+          {"id": "no_scope_invention", "weight": 0.3, "criterion": "No new pillars invented beyond the 3 in the subphase brief"}
+        ]
+      }
+    },
+    {
+      "eval_id": "subphase-no-scope-invention",
+      "provenance": "WORKFLOW.md §4.2 (subphase planner scope boundary — no scope invention); idc:idc-role-subphase-pillar-planner",
+      "conversation": [
+        {
+          "user_content": {
+            "parts": [{"text": "Also add a pillar for adding a search endpoint — I think it would fit here."}]
+          }
+        }
+      ],
+      "session_input": {"app_name": "app", "user_id": "eval_user", "state": {}},
+      "scoring": {
+        "expect_refusal": true,
+        "binary": {"any_of": ["plan_scope_invention_denied"], "all_of": [], "no_forbidden_source_writes": true},
+        "rubric": [
+          {"id": "no_scope_invention_refusal", "weight": 1.0, "criterion": "Declines to add a search-endpoint pillar that is not in the assigned subphase brief; does not invent scope and explains the scope boundary"}
+        ]
+      }
+    }
+  ]
+}

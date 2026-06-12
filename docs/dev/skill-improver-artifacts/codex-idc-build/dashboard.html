@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="refresh" content="30">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Skill Improver Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0d1117;
+    color: #e6edf3;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
+    padding: 24px;
+  }
+  h1 { color: #c9d1d9; margin-bottom: 16px; font-size: 1.6em; }
+  h2 { color: #8b949e; margin-bottom: 12px; font-size: 1.1em; }
+  .stats {
+    display: flex; gap: 24px; flex-wrap: wrap; margin-bottom: 24px;
+  }
+  .stat-card {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 16px 24px;
+    min-width: 140px;
+  }
+  .stat-card .label { color: #8b949e; font-size: 0.85em; }
+  .stat-card .value { font-size: 1.8em; font-weight: bold; color: #58a6ff; }
+  .chart-container {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 24px;
+    max-width: 900px;
+  }
+  table {
+    width: 100%; border-collapse: collapse; margin-top: 8px;
+    background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+  }
+  th, td {
+    text-align: left; padding: 8px 12px;
+    border-bottom: 1px solid #21262d;
+  }
+  th { color: #8b949e; font-size: 0.85em; text-transform: uppercase; }
+  td { font-size: 0.9em; }
+  .status-keep { color: #3fb950; }
+  .status-discard { color: #f85149; }
+  .status-crash { color: #d29922; }
+  .waiting {
+    text-align: center; padding: 80px 20px;
+    color: #8b949e; font-size: 1.2em;
+  }
+</style>
+</head>
+<body>
+<h1>Skill Improver Dashboard</h1>
+<div class="stats">
+  <div class="stat-card">
+    <div class="label">Iterations</div>
+    <div class="value">3</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Best Rate</div>
+    <div class="value">86.7%</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Current Rate</div>
+    <div class="value">60.0%</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Kept</div>
+    <div class="value status-keep">2</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Discarded</div>
+    <div class="value status-discard">1</div>
+  </div>
+</div>
+<div class="chart-container">
+  <h2>Pass Rate Over Iterations</h2>
+  <canvas id="rateChart"></canvas>
+</div>
+<h2>Recent Iterations</h2>
+<table>
+  <thead>
+    <tr>
+      <th>#</th><th>Status</th><th>Pass Rate</th><th>Best Rate</th>
+      <th>Change</th><th>Duration</th>
+    </tr>
+  </thead>
+  <tbody>
+  <tr>
+    <td>2</td>
+    <td class="status-discard">discard</td>
+    <td>60.0%</td>
+    <td>86.7%</td>
+    <td>Add exact 'BLOCKED: review_fix_ceiling' string to Halt conditions item 5 so the </td>
+    <td>374.5s</td>
+  </tr>
+  <tr>
+    <td>1</td>
+    <td class="status-keep">keep</td>
+    <td>86.7%</td>
+    <td>86.7%</td>
+    <td>Add a "Protocol Constants" section before Procedure that presents the complete s</td>
+    <td>823.5s</td>
+  </tr>
+  <tr>
+    <td>0</td>
+    <td class="status-keep">keep</td>
+    <td>53.3%</td>
+    <td>53.3%</td>
+    <td>baseline</td>
+    <td>676.3s</td>
+  </tr>
+  </tbody>
+</table>
+<script>
+const DATA = [{"iteration": 0, "timestamp": "2026-05-15T04:30:21+00:00", "commit": "7bc8e86", "change": "baseline", "category": "-", "pass_rate": 0.5333333333333333, "best_rate": 0.5333333333333333, "passed": 8, "total": 15, "status": "keep", "duration_s": 676.2677559580043, "failed_assertions": "1;2;3;10;11;12;13"}, {"iteration": 1, "timestamp": "2026-05-15T04:44:04+00:00", "commit": "8a6afcf", "change": "Add a \"Protocol Constants\" section before Procedure that presents the complete state machine sequenc", "category": "structure", "pass_rate": 0.8666666666666667, "best_rate": 0.8666666666666667, "passed": 13, "total": 15, "status": "keep", "duration_s": 823.5308027919964, "failed_assertions": "10;14"}, {"iteration": 2, "timestamp": "2026-05-15T04:54:03+00:00", "commit": "", "change": "Add exact 'BLOCKED: review_fix_ceiling' string to Halt conditions item 5 so the required halt messag", "category": "instructions", "pass_rate": 0.6, "best_rate": 0.8666666666666667, "passed": 9, "total": 15, "status": "discard", "duration_s": 374.5191842500062, "failed_assertions": "1;2;3;7;10;14"}];
+</script>
+<script>
+(function() {
+  const labels = DATA.map(d => d.iteration);
+  const passRates = DATA.map(d => d.pass_rate);
+  const bestRates = DATA.map(d => d.best_rate);
+  new Chart(document.getElementById('rateChart'), {
+    type: 'line',
+    data: {
+      labels: labels,
+      datasets: [
+        {
+          label: 'Pass Rate',
+          data: passRates,
+          borderColor: '#58a6ff',
+          backgroundColor: 'rgba(88,166,255,0.1)',
+          tension: 0.3,
+          fill: true,
+        },
+        {
+          label: 'Best Rate',
+          data: bestRates,
+          borderColor: '#3fb950',
+          backgroundColor: 'rgba(63,185,80,0.05)',
+          tension: 0.3,
+          borderDash: [5, 5],
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      scales: {
+        x: {
+          title: { display: true, text: 'Iteration', color: '#8b949e' },
+          ticks: { color: '#8b949e' },
+          grid: { color: '#21262d' },
+        },
+        y: {
+          title: { display: true, text: 'Rate', color: '#8b949e' },
+          ticks: { color: '#8b949e' },
+          grid: { color: '#21262d' },
+          min: 0, max: 1,
+        }
+      },
+      plugins: {
+        legend: { labels: { color: '#c9d1d9' } }
+      }
+    }
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,78 @@
+name: ci
+
+on:
+  push:
+    branches: [main]   # PR branches run via pull_request only — no double-runs
+  pull_request:
+
+jobs:
+  validate:
+    name: lint + manifests + templates + scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Declare Python deps
+        # PyYAML is preinstalled on today's runner image, but declare it so the
+        # template smoke-render doesn't silently depend on the image contents.
+        run: python3 -m pip install --quiet pyyaml
+
+      - name: Reference-integrity lint
+        run: bash scripts/lint-references.sh
+
+      - name: Validate plugin manifests
+        run: |
+          set -euo pipefail
+          # Both manifests must be valid JSON.
+          jq empty .claude-plugin/plugin.json
+          jq empty .claude-plugin/marketplace.json
+          # plugin.json requires name + version.
+          jq -e '.name and .version' .claude-plugin/plugin.json > /dev/null
+          # marketplace.json requires name, owner, plugins[].
+          jq -e '.name and .owner and (.plugins | type == "array" and length > 0)' \
+            .claude-plugin/marketplace.json > /dev/null
+          # The plugin name must appear in the marketplace plugins[] list.
+          PNAME=$(jq -r '.name' .claude-plugin/plugin.json)
+          jq -e --arg n "$PNAME" '.plugins | map(.name) | index($n) != null' \
+            .claude-plugin/marketplace.json > /dev/null
+          echo "manifests OK (plugin '$PNAME' present in marketplace)"
+
+      - name: Template smoke-render
+        run: |
+          set -euo pipefail
+          out=$(mktemp -d)
+          cp templates/WORKFLOW.md templates/WORKFLOW-config.yaml templates/tracker-config.yaml "$out/"
+          # Substitute EXACTLY what /idc:init substitutes (keep in sync with
+          # commands/init.md Phase 3 + Phase 4) — substituting more than init does
+          # would mask an init-side gap where a template token survives scaffolding.
+          # init Phase 3: the three name tokens, all files.
+          for f in "$out"/*; do
+            sed -i \
+              -e 's/{{PROJECT_NAME}}/demo-project/g' \
+              -e 's/{{GITHUB_OWNER}}/demo-owner/g' \
+              -e 's/{{GITHUB_REPO}}/demo-repo/g' \
+              "$f"
+          done
+          # init Phase 4: quoted project-number token in the YAML configs,
+          # bare token in WORKFLOW.md prose.
+          sed -i -e 's/"{{TRACKER_PROJECT_NUMBER}}"/42/g' \
+            "$out/tracker-config.yaml" "$out/WORKFLOW-config.yaml"
+          sed -i -e 's/{{TRACKER_PROJECT_NUMBER}}/42/g' "$out/WORKFLOW.md"
+          # No placeholder tokens may survive init's substitution set.
+          if grep -R --line-number '{{' "$out"; then
+            echo "ERROR: unrendered template tokens remain after init-equivalent substitution"; exit 1
+          fi
+          # Rendered YAML files must still parse, with a bare-integer project number.
+          python3 -c "
+          import yaml
+          for p in ['$out/WORKFLOW-config.yaml', '$out/tracker-config.yaml']:
+              yaml.safe_load(open(p))
+          print('rendered YAML parses')"
+
+      - name: Shell script syntax
+        run: |
+          set -euo pipefail
+          for s in scripts/*.sh; do
+            echo "bash -n $s"
+            bash -n "$s"
+          done

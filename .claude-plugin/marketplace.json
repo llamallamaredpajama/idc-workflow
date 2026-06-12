@@ -1,0 +1,14 @@
+{
+  "name": "idc-workflow",
+  "description": "Self-hosted marketplace for the idc plugin — the IDC governed development workflow (Think → Plan → Sequence → Build → Ripple) for Claude Code.",
+  "owner": {
+    "name": "llamallamaredpajama"
+  },
+  "plugins": [
+    {
+      "name": "idc",
+      "source": "./",
+      "description": "IDC workflow (Think → Plan → Sequence → Build → Ripple) — governed, tracker-driven multi-agent development workflow as an installable Claude Code plugin"
+    }
+  ]
+}

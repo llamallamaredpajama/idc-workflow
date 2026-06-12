@@ -1,0 +1,29 @@
+{
+  "eval_set_id": "build-refuse-goal-recipe",
+  "name": "Build Role — Goal-Recipe Refusal",
+  "description": "Evaluates whether the Build role refuses a brief whose pillar plan provides no usable goal recipe, emitting one of the equally-correct unusable-recipe codes (goal_recipe_empty or missing_goal_recipe) instead of inventing a recipe.",
+  "needs_llm": "Validating the goal recipe, recognizing it is unusable, and refusing without fabricating one is the Build role's gate behavior.",
+  "role": "Build",
+  "doctrine_ref": "idc:idc-build",
+  "eval_cases": [
+    {
+      "eval_id": "refuses-unusable-recipe",
+      "provenance": "WORKFLOW.md §3 + §4.4 (Build goal-recipe gate — goal_recipe_empty / missing_goal_recipe, equally-correct OR-group); pillar docs/plans/pillars/fixture-build-empty-recipe.md (no usable goal_recipe); idc:build",
+      "conversation": [
+        {
+          "user_content": {
+            "parts": [{"text": "Implement this Build brief from docs/plans/pillars/fixture-build-empty-recipe.md (add GET /healthz at services/api/app/routes/healthz.py). Validate the goal recipe first and tell me whether you can proceed to the TDD plan."}]
+          }
+        }
+      ],
+      "session_input": {"app_name": "app", "user_id": "eval_user", "state": {}},
+      "scoring": {
+        "expect_refusal": true,
+        "binary": {"any_of": ["goal_recipe_empty", "missing_goal_recipe"], "all_of": [], "no_forbidden_source_writes": true},
+        "rubric": [
+          {"id": "goal_recipe_refusal", "weight": 1.0, "criterion": "Emits one of the equally-correct unusable-goal-recipe refusal codes (goal_recipe_empty or missing_goal_recipe) and refuses rather than inventing a recipe"}
+        ]
+      }
+    }
+  ]
+}

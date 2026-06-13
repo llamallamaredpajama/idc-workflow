@@ -15,8 +15,8 @@ Before doing IDC Ripple work, load/use:
 - `codex-idc-ripple`
 
 If the skill contents are not already in context, read:
-- `/Users/jeremy/.agents/skills/idc-workflow/SKILL.md`
-- `/Users/jeremy/.agents/skills/codex-idc-ripple/SKILL.md`
+- `~/.agents/skills/idc-workflow/SKILL.md`
+- `~/.agents/skills/codex-idc-ripple/SKILL.md`
 
 Follow those skills when they are stricter than this prompt.
 

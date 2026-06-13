@@ -761,7 +761,7 @@ build_role_argv() {
 		--session-dir "$session_dir"
 		--session-id "idc-$role"
 		--append-system-prompt "$prompt"
-		--skill "/Users/jeremy/.agents/skills/idc-workflow"
+		--skill "$HOME/.agents/skills/idc-workflow"
 		--skill "$skill"
 		--project "$PROJECT"
 		--name "$role"
@@ -816,7 +816,8 @@ wait_for_server() {
 		if server_running; then return 0; fi
 		sleep 0.5
 	done
-	echo "idc-pi: warning: coms-net server did not become healthy within 10s" >&2
+	echo "idc-pi: error: coms-net server did not become healthy within 10s" >&2
+	return 1
 }
 
 server_json_path() {
@@ -855,11 +856,11 @@ role_prompt() {
 
 role_skill() {
 	case "$1" in
-		think) echo "/Users/jeremy/.agents/skills/codex-idc-think" ;;
-		plan) echo "/Users/jeremy/.agents/skills/codex-idc-plan" ;;
-		sequence) echo "/Users/jeremy/.agents/skills/codex-idc-sequence" ;;
-		ripple) echo "/Users/jeremy/.agents/skills/codex-idc-ripple" ;;
-		build-impl|build-review|build-finish) echo "/Users/jeremy/.agents/skills/codex-idc-build" ;;
+		think) echo "$HOME/.agents/skills/codex-idc-think" ;;
+		plan) echo "$HOME/.agents/skills/codex-idc-plan" ;;
+		sequence) echo "$HOME/.agents/skills/codex-idc-sequence" ;;
+		ripple) echo "$HOME/.agents/skills/codex-idc-ripple" ;;
+		build-impl|build-review|build-finish) echo "$HOME/.agents/skills/codex-idc-build" ;;
 	esac
 }
 

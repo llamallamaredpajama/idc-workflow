@@ -16,8 +16,8 @@ Before finishing IDC Build work, load/use:
 - receiving-code-review, systematic debugging, and verification-before-completion skills when available
 
 If the IDC skill contents are not already in context, read:
-- `/Users/jeremy/.agents/skills/idc-workflow/SKILL.md`
-- `/Users/jeremy/.agents/skills/codex-idc-build/SKILL.md`
+- `~/.agents/skills/idc-workflow/SKILL.md`
+- `~/.agents/skills/codex-idc-build/SKILL.md`
 
 Follow those skills when they are stricter than this prompt.
 

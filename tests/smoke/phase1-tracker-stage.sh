@@ -48,6 +48,17 @@ if [ -f "$DRAIN" ]; then
   echo "$elig" | grep -qE "(^| )$ptr( |$)" && fail "a Consideration pointer $ptr must NEVER be eligible build work — the glass wall (got: '$elig')"
 fi
 
+# ---- (a3) F5: legacy 4-field board — an issue with EMPTY/missing Stage reads as Buildable -----
+#         WORKFLOW.md: "an empty Stage reads as buildable". The exact-equality filter must NOT
+#         silently drop legacy Todo work that predates the 5th Stage field.
+legacy="$(run create --title 'legacy todo (no stage)' --wave 'Wave 1' --phase 'Phase 1' --domain ui)" \
+  || fail "create legacy issue (no --stage) failed"
+[ "$(run show --num "$legacy" --field Stage)" = "" ] \
+  || fail "legacy issue should have empty Stage, got '$(run show --num "$legacy" --field Stage)'"
+buildables_legacy="$(run query --stage Buildable)"
+echo "$buildables_legacy" | grep -qw "$legacy" \
+  || fail "Stage=Buildable query must INCLUDE a legacy empty-Stage issue $legacy (empty Stage reads as buildable) (got: '$buildables_legacy')"
+
 # ---- (b) schema check: a pointer's shape is DISTINCT from a full buildable goal-contract ------
 # A valid pointer: repo-file reference + Stage/Phase/Domain, with NO duplicated canonical content.
 cat > "$WORK/pointer.md" <<'MD'

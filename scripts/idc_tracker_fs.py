@@ -178,8 +178,12 @@ def op_query(path, args):
             continue
         if args.domain and it.get("domain") != args.domain:
             continue
-        if args.stage and it.get("stage") != args.stage:
-            continue
+        if args.stage:
+            # Legacy 4-field board compatibility (WORKFLOW.md): an empty/missing Stage reads
+            # as Buildable, so a pre-Stage Todo issue still surfaces under `--stage Buildable`.
+            item_stage = it.get("stage") or "Buildable"
+            if item_stage != args.stage:
+                continue
         out.append(str(it["number"]))
     print("\n".join(out))
 

@@ -429,7 +429,9 @@ async function readPrMetadata(pi: ExtensionAPI, cwd: string, pr: number): Promis
 }
 
 async function postPrReview(pi: ExtensionAPI, cwd: string, pr: number, verdict: string, reportAbs: string, runId: string, packetRoot: string): Promise<boolean> {
-  const args = ["pr", "review", String(pr), verdict === "FAIL/BLOCKED" ? "--request-changes" : "--approve", "--body-file", reportAbs];
+  // IDC-LOCAL: any FAIL-rung verdict (FAIL or FAIL-BLOCKED) requests changes; only PASS/PASS-WITH-NITS approve.
+  const requestChanges = verdict === "FAIL" || verdict === "FAIL-BLOCKED";
+  const args = ["pr", "review", String(pr), requestChanges ? "--request-changes" : "--approve", "--body-file", reportAbs];
   const result = await pi.exec("gh", args, { cwd, timeout: 30_000 });
   const ok = result.code === 0;
   appendEvent(cwd, packetRoot, makeReviewEvent({

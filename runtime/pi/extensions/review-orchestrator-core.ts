@@ -13,7 +13,10 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync,
 import { basename, dirname, join, resolve } from "node:path";
 
 export type ReviewRiskTier = "trivial" | "lite" | "full";
-export type ReviewVerdict = "PASS" | "PASS-WITH-NITS" | "FAIL/BLOCKED";
+// IDC-LOCAL: the verdict enum is the IDC ladder (scripts/idc_review_verdict_check.py is the
+// source of truth), not the upstream single "FAIL/BLOCKED". blocker→FAIL-BLOCKED, major→FAIL,
+// so a Pi review report is a valid IDC automerge gate. See verdictForFindings below.
+export type ReviewVerdict = "PASS" | "PASS-WITH-NITS" | "FAIL" | "FAIL-BLOCKED";
 export type FindingSeverity = "blocker" | "major" | "minor" | "nit";
 
 export interface DiffEntry {
@@ -440,7 +443,12 @@ export function consolidateReviewFindings(outputs: ReviewerOutput[]): Consolidat
 }
 
 export function verdictForFindings(findings: Array<Pick<ReviewFinding, "severity">>): ReviewVerdict {
-  if (findings.some((finding) => ["blocker", "major"].includes(String(finding.severity).toLowerCase()))) return "FAIL/BLOCKED";
+  // IDC-LOCAL: emit the IDC ladder (validated by idc_review_verdict_check.py). Upstream
+  // collapsed blocker+major into one "FAIL/BLOCKED"; IDC keeps them distinct so the finisher
+  // can tell a hard block (blocker) from a fixable failure (major).
+  const sev = (s: ReviewFinding["severity"]) => String(s).toLowerCase();
+  if (findings.some((finding) => sev(finding.severity) === "blocker")) return "FAIL-BLOCKED";
+  if (findings.some((finding) => sev(finding.severity) === "major")) return "FAIL";
   if (findings.length > 0) return "PASS-WITH-NITS";
   return "PASS";
 }
@@ -450,9 +458,11 @@ export function verdictForFindings(findings: Array<Pick<ReviewFinding, "severity
 // This is the single source of truth for run completeness — the verdict, the PR-post
 // gate, and the operator-facing reason all derive from it.
 export function resolveRunOutcome(input: { packetOnly: boolean; reviewerCount: number; acceptedCount: number; findings: Array<Pick<ReviewFinding, "severity">> }): { verdict: ReviewVerdict; complete: boolean; incompleteReason?: string } {
-  if (input.packetOnly) return { verdict: "FAIL/BLOCKED", complete: false, incompleteReason: "packet-only run" };
+  // IDC-LOCAL: an incomplete run is fail-closed at the hard-block rung (FAIL-BLOCKED), the IDC
+  // enum value — never the upstream "FAIL/BLOCKED" string the validator rejects.
+  if (input.packetOnly) return { verdict: "FAIL-BLOCKED", complete: false, incompleteReason: "packet-only run" };
   if (input.acceptedCount < input.reviewerCount) {
-    return { verdict: "FAIL/BLOCKED", complete: false, incompleteReason: `${input.reviewerCount - input.acceptedCount}/${input.reviewerCount} reviewer(s) failed` };
+    return { verdict: "FAIL-BLOCKED", complete: false, incompleteReason: `${input.reviewerCount - input.acceptedCount}/${input.reviewerCount} reviewer(s) failed` };
   }
   return { verdict: verdictForFindings(input.findings), complete: true };
 }

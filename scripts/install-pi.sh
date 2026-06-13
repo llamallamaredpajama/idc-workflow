@@ -35,14 +35,30 @@ LINKS="$HOME/.agents/.idc-pi-install-links"
 LAUNCHER_NAME="idc-pi"
 runtime_dir() { printf '%s/runtime/pi\n' "$1"; }
 
-# Minimum vendored runtime that must exist for the IDC Pi runtime to boot.
+# The vendored runtime that must exist for the IDC Pi runtime to boot — i.e. EXACTLY the
+# harness files `idc-pi run <role>` loads (the `-e` extensions + the `--append-system-prompt`
+# role prompts) plus the coms-net hub and license. Kept in lockstep with build_role_argv()
+# in runtime/pi/scripts/idc-pi; tests/smoke/phase8-pi-launchable.sh asserts they agree.
+# (The `pi` agent binary and the role `--skill` packages are operator-provided install-time
+# deps that live OUTSIDE the harness tree and are intentionally not listed here.)
 runtime_required() {
   local root="$1" rt
   rt="$(runtime_dir "$root")"
   printf '%s\n' \
+    "$rt/scripts/idc-pi" \
     "$rt/scripts/coms-net-server.ts" \
+    "$rt/extensions/coms-net.ts" \
+    "$rt/extensions/minimal.ts" \
+    "$rt/extensions/theme-cycler.ts" \
     "$rt/extensions/idc-role-harness.ts" \
     "$rt/extensions/guard-shell-core.ts" \
+    "$rt/.pi/agents/idc/think.md" \
+    "$rt/.pi/agents/idc/plan.md" \
+    "$rt/.pi/agents/idc/sequence.md" \
+    "$rt/.pi/agents/idc/ripple.md" \
+    "$rt/.pi/agents/idc/build-implementer.md" \
+    "$rt/.pi/agents/idc/build-reviewer.md" \
+    "$rt/.pi/agents/idc/build-finisher.md" \
     "$rt/LICENSE-pi-harnesses"
 }
 

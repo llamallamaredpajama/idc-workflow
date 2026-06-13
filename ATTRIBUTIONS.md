@@ -27,6 +27,9 @@ Vendored files:
 | `runtime/pi/extensions/review-orchestrator.ts` | `extensions/review-orchestrator.ts` | review orchestration command |
 | `runtime/pi/extensions/review-orchestrator-core.ts` | `extensions/review-orchestrator-core.ts` | review orchestration core helpers |
 | `runtime/pi/extensions/themeMap.ts` | `extensions/themeMap.ts` | shared theme defaults (transitive dep) |
+| `runtime/pi/extensions/minimal.ts` | `extensions/minimal.ts` | compact footer extension (`-e` launch dep) |
+| `runtime/pi/extensions/theme-cycler.ts` | `extensions/theme-cycler.ts` | theme-cycler extension (`-e` launch dep) |
+| `runtime/pi/.pi/agents/idc/*.md` | `.pi/agents/idc/*.md` | role system prompts loaded by `idc-pi run` (7 files, byte-faithful) |
 
 ### IDC-local additions (not upstream)
 

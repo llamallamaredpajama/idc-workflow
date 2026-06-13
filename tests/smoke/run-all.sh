@@ -22,6 +22,7 @@ for t in \
   phase5-ripple \
   phase6-autorun \
   phase7-lifecycle \
+  phase8-pi-launchable \
   phase8-pi-runtime \
   phase8-pi-review-verdict \
   phase8-governance \

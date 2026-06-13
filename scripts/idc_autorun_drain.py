@@ -8,6 +8,8 @@ eligibility over the filesystem tracker — the deterministic exit condition.
 
 Eligible build work = an issue that is:
   * `Status = Todo`,
+  * `Stage = Buildable` (or no Stage on a legacy 4-field repo) — an upstream pointer item
+    (`Stage = Consideration`/`Planning`) is never scooped as build work (the glass wall),
   * NOT an operator-action gate issue (title starting with `[operator-action]`), and
   * has every native blocked-by upstream `Done`.
 
@@ -58,6 +60,8 @@ def main():
     for it in sorted(issues, key=lambda x: x["number"]):
         if it.get("status") != "Todo":
             continue
+        if it.get("stage") in ("Consideration", "Planning"):
+            continue  # an upstream pointer item, not build work (the glass wall)
         if str(it.get("title", "")).strip().startswith("[operator-action]"):
             continue  # the operator's gate issue, not build work
         if all(status_by_num.get(b) == "Done" for b in it.get("blocked_by", [])):

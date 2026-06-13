@@ -169,10 +169,15 @@ export function isIdcRole(role: string): role is IdcRole {
 // STRICTLY DOWNSTREAM of it in the IDC river, plus the Ripple peer — never an
 // upstream peer. Fail-closed: an unknown sender or unmappable target denies.
 //
-// NOTE (te-B1 RED): this is the failing-test STUB — the seam is reachable but the
-// directional policy is NOT yet wired, so every send is (wrongly) allowed. The
-// green commit replaces this body with the real river-order policy.
+// The IDC river is a linear order — think → plan → sequence → build-impl →
+// build-review → build-finish — with Ripple a universal DOWNSTREAM sink reachable
+// from any role. A send is allowed iff the target is strictly later in this order
+// than the sender, OR the target is Ripple. Everything else (upstream, self, an
+// unknown sender, or an unmappable target) is denied fail-closed. Ripple as a
+// SOURCE has no non-Ripple downstream, so it may only target Ripple.
 // ─────────────────────────────────────────────────────────────────────────────
+
+const RIVER_ORDER: IdcRole[] = ["think", "plan", "sequence", "build-impl", "build-review", "build-finish"];
 
 export interface ComsNetSendEvaluation {
 	allowed: boolean;
@@ -193,10 +198,40 @@ export function resolveComsNetPeerRole(nameOrRole: string): IdcRole | undefined 
 }
 
 export function evaluateComsNetSendForRole(senderRaw: string, targetRaw: string): ComsNetSendEvaluation {
-	// STUB (red): glass-wall directional ACL not yet wired on the send seam.
 	const senderRole = resolveComsNetPeerRole(senderRaw);
 	const targetRole = resolveComsNetPeerRole(targetRaw);
-	return { allowed: true, reason: "coms-net glass-wall ACL not yet implemented (stub)", senderRole, targetRole };
+
+	// Fail-closed: an unidentifiable sender or target denies.
+	if (!senderRole) {
+		return { allowed: false, reason: `coms-net glass-wall: unknown sender '${senderRaw}' — fail-closed deny` };
+	}
+	if (!targetRole) {
+		return { allowed: false, reason: `coms-net glass-wall: unknown target '${targetRaw}' — fail-closed deny`, senderRole };
+	}
+
+	// Ripple is the universal downstream sink — always an allowed target.
+	if (targetRole === "ripple") {
+		return { allowed: true, reason: "target is the Ripple peer (universal downstream sink)", senderRole, targetRole };
+	}
+	// Ripple as a source: no non-Ripple peer is downstream of the sink.
+	if (senderRole === "ripple") {
+		return { allowed: false, reason: "coms-net glass-wall: ripple is a sink; no downstream non-Ripple peer", senderRole, targetRole };
+	}
+
+	const si = RIVER_ORDER.indexOf(senderRole);
+	const ti = RIVER_ORDER.indexOf(targetRole);
+	if (si < 0 || ti < 0) {
+		return { allowed: false, reason: "coms-net glass-wall: role not in river order — fail-closed deny", senderRole, targetRole };
+	}
+	if (ti > si) {
+		return { allowed: true, reason: `target ${targetRole} is downstream of ${senderRole}`, senderRole, targetRole };
+	}
+	return {
+		allowed: false,
+		reason: `coms-net glass-wall: ${targetRole} is upstream of or equal to ${senderRole} — send denied`,
+		senderRole,
+		targetRole,
+	};
 }
 
 export function evaluatePathForRole(

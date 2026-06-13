@@ -39,8 +39,11 @@ Vendored files:
   before any message is queued**, so a direct POST to `/v1/messages` cannot bypass the wall
   (the hub imports the same pure decision — single source of truth). The hub also binds the
   evaluated identity to a **per-session token** issued at registration (presented via the
-  `x-coms-session-token` header), so a shared-bearer-token holder cannot spoof another peer's
-  `sender_session` to send as an upstream role. A role resident may message
+  `x-coms-session-token` header) on **every session-scoped endpoint** — send, SSE stream
+  (`/v1/events`), terminal response submit, heartbeat, and delete — so a shared-bearer-token
+  holder cannot spoof another peer's `sender_session`, hijack its stream, or forge its reply.
+  Duplicate role residents are uniquified with a hyphenated suffix (`build-impl-2`) so they stay
+  resolvable to their IdcRole under the ACL. A role resident may message
   only peers strictly downstream in the IDC river
   (think → plan → sequence → build-impl → build-review → build-finish) plus the Ripple sink;
   upstream/unknown sends are denied fail-closed and logged to the `coms-net-log` channel.

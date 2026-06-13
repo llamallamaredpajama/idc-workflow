@@ -330,6 +330,16 @@ function authed(req: Request): boolean {
 	return tokensEqual(h.slice(7), TOKEN);
 }
 
+// IDC-LOCAL (codex F2): a session-scoped request (open this session's SSE stream, beat its
+// heartbeat, delete it, or submit its response) must present THAT session's per-session token,
+// not just the shared bearer. Without this, any bearer-token holder could hijack another peer's
+// stream or forge its replies — defeating the per-session credential as a trust boundary.
+function sessionAuthorized(req: Request, entry: RegistryEntry | undefined): boolean {
+	if (!entry) return false;
+	const presented = req.headers.get("x-coms-session-token") ?? "";
+	return presented.length > 0 && tokensEqual(presented, entry.session_token);
+}
+
 export function json(body: unknown, status = 200): Response {
 	return new Response(JSON.stringify(body), {
 		status,
@@ -390,10 +400,14 @@ export function resolveUniqueName(
 	const liveNames = new Set(
 		[...project.agents.values()].map((a) => a.name),
 	);
+	// IDC-LOCAL (codex F2): uniquify with a HYPHENATED suffix (`build-impl-2`, not `build-impl2`)
+	// so a duplicate role resident still resolves to its IdcRole under the glass-wall ACL
+	// (resolveComsNetPeerRole strips a trailing `-<n>`). Otherwise a second parallel-pool resident
+	// becomes an unknown sender/target and is fail-closed denied, stalling parallel Build.
 	if (!liveNames.has(desiredName)) return desiredName;
 	let n = 2;
-	while (liveNames.has(`${desiredName}${n}`)) n++;
-	return `${desiredName}${n}`;
+	while (liveNames.has(`${desiredName}-${n}`)) n++;
+	return `${desiredName}-${n}`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -651,6 +665,11 @@ function handleEvents(req: Request, url: URL): Response {
 	const p = getOrCreateProject(projectName);
 	const entry = p.agents.get(session_id);
 	if (!entry) return errorJson("agent_not_found", 404);
+	// IDC-LOCAL (codex F2): only the session itself may open (and thereby replace) its stream.
+	if (!sessionAuthorized(req, entry)) {
+		logRejected("session_auth", `events ${entry.name} (${session_id.slice(-6)}) — session token missing/mismatched`);
+		return errorJson("session_auth_failed", 403, { reason: "events must present the session's own token" });
+	}
 
 	const enc = new TextEncoder();
 	let writer: SseWriter | null = null;
@@ -795,6 +814,11 @@ async function handleHeartbeat(
 	if (!p) return errorJson("agent_not_found", 404);
 	const entry = p.agents.get(sessionId);
 	if (!entry) return errorJson("agent_not_found", 404);
+	// IDC-LOCAL (codex F2): only the session itself may beat its own heartbeat (forging another
+	// session's liveness/context would let a token holder mask or impersonate it).
+	if (!sessionAuthorized(req, entry)) {
+		return errorJson("session_auth_failed", 403, { reason: "heartbeat must present the session's own token" });
+	}
 
 	const before: Partial<AgentCard> = {
 		context_used_pct: entry.context_used_pct,
@@ -1191,6 +1215,13 @@ async function handleSubmitResponse(
 	if (body.responder_session !== msg.target_session) {
 		return errorJson("not_target", 403);
 	}
+	// IDC-LOCAL (codex F2): the terminal response must come from the actual target, not merely a
+	// bearer-token holder who learned the msg_id + target_session from /v1/messages. Bind to the
+	// target session's per-session token, else a sender could forge a downstream reply.
+	if (!sessionAuthorized(req, project.agents.get(msg.target_session))) {
+		logRejected("session_auth", `response ${msg_id} — target session token missing/mismatched`);
+		return errorJson("session_auth_failed", 403, { reason: "response must present the target session's own token" });
+	}
 	if (
 		msg.status === "complete" ||
 		msg.status === "error" ||
@@ -1238,12 +1269,17 @@ async function handleSubmitResponse(
 	return json({ ok: true });
 }
 
-function handleDeleteAgent(_req: Request, url: URL, sessionId: string): Response {
+function handleDeleteAgent(req: Request, url: URL, sessionId: string): Response {
 	const projectName = url.searchParams.get("project") ?? "default";
 	const p = state.projects.get(projectName);
 	if (!p) return errorJson("agent_not_found", 404);
 	const entry = p.agents.get(sessionId);
 	if (!entry) return errorJson("agent_not_found", 404);
+	// IDC-LOCAL (codex F2): only the session itself may unregister itself (else a token holder
+	// could deregister another peer — a denial-of-service / forced-offline vector).
+	if (!sessionAuthorized(req, entry)) {
+		return errorJson("session_auth_failed", 403, { reason: "delete must present the session's own token" });
+	}
 
 	// Close stream first; the abort handler may also fire.
 	const stream = p.streams.get(sessionId);

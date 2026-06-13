@@ -985,6 +985,8 @@ export default function (pi: ExtensionAPI) {
 			"Authorization": `Bearer ${authToken}`,
 			"Accept": "text/event-stream",
 		};
+		// IDC-LOCAL (codex F2): the hub binds the SSE stream to the session's per-session token.
+		if (sessionToken) headers["x-coms-session-token"] = sessionToken;
 		let resp: Response;
 		try {
 			resp = await fetch(url, { method: "GET", headers, signal: ac.signal });

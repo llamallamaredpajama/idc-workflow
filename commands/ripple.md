@@ -3,14 +3,28 @@ description: IDC Ripple — autonomous doc-sync across the canonical chain; one 
 argument-hint: '<drift-description | "scope summary">'
 ---
 
-`/idc:ripple` is the only retrograde path from Build back to the planning docs. It
-determines the highest affected layer and answers one question — does user-facing product
-function change? **No** → it updates every affected doc down the chain in **one PR**
-(arch spec, master plan, subphases, pillars, affected open issues), automerged, with the PR
-body as the change order. **Yes** → the same gate mechanism as Plan (a blocked operator-todo
-gate issue + plain-terms summary + PRD diff + push notification). **Zero durable workers.**
-No verdict taxonomy, no change-order files — the PR body is the record (`WORKFLOW.md §2`,
-`§4.4`).
+You are running `/idc:ripple`, the only retrograde path from Build back to the planning docs.
+Operate as the Ripple orchestrator **in this session**: read
+`${CLAUDE_PLUGIN_ROOT}/agents/idc-ripple.md` end-to-end, then execute its procedure (absorb
+the drift → decide → sync or gate → close out).
 
-> v2 rebuild status: the Ripple playbook + doc-sync skill are authored in **Phase 5** of
-> the IDC v2 rebuild. (stub)
+Operator input: `$ARGUMENTS` — a drift description or scope summary (from Build, another
+role, or the operator).
+
+**Zero durable workers** — any analysis is bounded read-only fan-out per the runtime adapter.
+Use `idc:idc-ripple-sync` to determine the highest affected canonical layer, the downstream
+sync set, and the gate decision:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_ripple_layers.py" <prd|spec|master|subphase|pillar>
+```
+
+If user-facing product function does **not** change, update that layer and every layer below
+it — arch spec, master plan, subphases, pillars, affected open issues — **synchronized in one
+PR**, automerged, with the **PR body as the change order**. If it **does** (the highest
+affected layer is the PRD), take the same gate as Plan via `idc:idc-gate-issue` (blocked gate
+issue + plain-terms summary + PRD diff + push notification); pause only the affected work.
+
+No verdict taxonomy, no change-order files — they are deleted; the PR body is the record. Do
+not write source or tests; do not edit the PRD without the gate; never leave the doc chain
+half-updated (`WORKFLOW.md §4.4`).

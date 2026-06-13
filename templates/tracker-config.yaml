@@ -1,17 +1,22 @@
 # tracker-config.yaml — IDC tracker contract (lives at docs/workflow/tracker-config.yaml).
 #
-# Selects the tracker backend and, for the github backend, pins the project number
-# and the eight canonical field node IDs.
+# Selects the tracker backend and, for the github backend, pins the project number and
+# the four canonical field node IDs.
 #
 #   backend: github     -> GitHub Projects v2 board. Hard requirements: `backend`,
-#                          `project_number`, and `field_ids` with all eight names below.
+#                          `project_number`, and `field_ids` with all four names below.
 #   backend: filesystem -> a TRACKER.md file at the repo root; no project_number or
 #                          field_ids needed. Zero external setup.
 #
+# The v2 board carries exactly FOUR custom fields (Status, Wave, Phase, Domain) plus
+# native blocked-by links, an `attempt:<n>` label, and claim comments. There is no
+# claim-state / lane / track / pillar-trace-key field — an issue is workable cold by any
+# outside agent from its body + the plain GitHub API.
+#
 # Field node IDs are project-specific. After `gh project create`, capture them with a
-# GraphQL query over the project's fields and paste the node IDs below. Values are read
-# by NAME at runtime ("Active" / "Unclaimed"), so only the eight field node IDs are
-# persisted here — single-select option IDs are NOT stored.
+# GraphQL query over the project's fields and paste the node IDs below. Single-select
+# option values are read by NAME at runtime ("In Progress" / "Todo"), so only the four
+# field node IDs are persisted here.
 #
 # Template tokens are quoted to keep this file valid YAML; `/idc:init` substitutes them.
 
@@ -19,15 +24,10 @@ backend: github                                  # github | filesystem
 project_number: "{{TRACKER_PROJECT_NUMBER}}"     # integer; from `gh project create`
 
 field_ids:
-  Status: ""              # PVTSSF_… single-select
-  ClaimState: ""          # PVTSSF_… single-select
-  Wave: ""                # PVTSSF_… single-select
-  Phase: ""               # PVTSSF_… single-select
-  Track: ""               # PVTSSF_… single-select
-  Lane: ""                # PVTSSF_… single-select
-  "Pillar trace key": ""  # PVTF_…   text field
-  Domain: ""              # PVTSSF_… single-select
+  Status: ""    # PVTSSF_… single-select (Blocked | Todo | In Progress | Done)
+  Wave: ""      # PVTSSF_… single-select (Wave N)
+  Phase: ""     # PVTSSF_… single-select (Phase N)
+  Domain: ""    # PVTSSF_… single-select
 
-# Optional metadata (loader defaults these when absent).
+# Optional metadata (loader defaults this when absent).
 label_namespace: "idc"
-track_values: []

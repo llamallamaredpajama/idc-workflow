@@ -1,5 +1,0 @@
-interface:
-  display_name: "Codex IDC Ripple"
-  short_description: "File IDC Ripple change orders and gated doc sync"
-  default_prompt: "Run Codex IDC Ripple for this drift evidence and file the change order first."
-

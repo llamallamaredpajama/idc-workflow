@@ -1,0 +1,52 @@
+#!/bin/bash
+# idc_init_scaffold.sh — the deterministic filesystem scaffold step of /idc:init.
+#
+# Copies the plugin templates into a target repo, substitutes {{PROJECT_NAME}}, lays down
+# the lean v2 docs/workflow tree, sets the tracker backend, and (filesystem backend only)
+# initializes TRACKER.md. It does NOT provision a GitHub board, derive domains, or write the
+# install receipt — those are /idc:init's agent-driven phases (board provisioning needs live
+# gh; domain derivation is a judgment step; the receipt fingerprints the final bytes). This
+# helper is the mechanical, idempotent, testable core both /idc:init and the smoke tests use.
+#
+# Usage: idc_init_scaffold.sh PLUGIN_ROOT REPO_ROOT PROJECT_NAME [BACKEND]
+#   BACKEND ∈ {github (default), filesystem}
+set -euo pipefail
+
+PLUGIN_ROOT="${1:?PLUGIN_ROOT required}"
+REPO_ROOT="${2:?REPO_ROOT required}"
+PROJECT_NAME="${3:?PROJECT_NAME required}"
+BACKEND="${4:-github}"
+T="$PLUGIN_ROOT/templates"
+
+[ -d "$T" ] || { echo "idc-init: templates not found at $T" >&2; exit 2; }
+case "$BACKEND" in github|filesystem) ;; *) echo "idc-init: BACKEND must be github|filesystem" >&2; exit 2 ;; esac
+
+cd "$REPO_ROOT"
+mkdir -p docs/workflow
+
+# Root + config files (idempotent: never clobber an operator's file).
+[ -f WORKFLOW.md ]                        || cp "$T/WORKFLOW.md" WORKFLOW.md
+[ -f WORKFLOW-config.yaml ]               || cp "$T/WORKFLOW-config.yaml" WORKFLOW-config.yaml
+[ -f docs/workflow/tracker-config.yaml ]  || cp "$T/tracker-config.yaml" docs/workflow/tracker-config.yaml
+
+# docs/workflow tree from docs-tree/ (visible entries only; each absent entry copied).
+for entry in "$T/docs-tree/"*; do
+  name="$(basename "$entry")"
+  [ -e "docs/workflow/$name" ] || cp -R "$entry" "docs/workflow/$name"
+done
+
+# Substitute {{PROJECT_NAME}} (portable: temp file, no sed -i flavor split).
+for f in WORKFLOW.md WORKFLOW-config.yaml docs/workflow/tracker-config.yaml; do
+  [ -f "$f" ] || continue
+  tmp="$(mktemp)"; sed "s|{{PROJECT_NAME}}|$PROJECT_NAME|g" "$f" > "$tmp" && mv "$tmp" "$f"
+done
+
+# Select the backend; for filesystem, initialize TRACKER.md.
+if [ "$BACKEND" = "filesystem" ]; then
+  tmp="$(mktemp)"
+  sed "s|^backend: .*|backend: filesystem|" docs/workflow/tracker-config.yaml > "$tmp" \
+    && mv "$tmp" docs/workflow/tracker-config.yaml
+  python3 "$PLUGIN_ROOT/scripts/idc_tracker_fs.py" --tracker "$REPO_ROOT/TRACKER.md" init
+fi
+
+echo "idc-init scaffold complete (backend=$BACKEND, project=$PROJECT_NAME)"

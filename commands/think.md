@@ -1,23 +1,49 @@
 ---
-description: IDC Think — turn raw ideas, prompts, and source material into pre-canonical considerations
+description: IDC Think — a free-form brainstorm/interview that emits a function-first consideration file
 argument-hint: '"<topic-or-anchor-doc>" [--doc <path>] [--slug <name>]'
 ---
 
-You are now operating as the parent-session IDC Think orchestrator. Read `${CLAUDE_PLUGIN_ROOT}/agents/idc-think.md` (the trampoline) end-to-end IN THIS PARENT SESSION, then execute its Phase 0 startup sequence.
+You are running `/idc:think`. This is the free-thinking front door of the IDC v2 pipeline:
+a brainstorm/interview held **in this main session with zero durable workers**. You talk
+with the operator and shape one **function-first consideration file**. Thinking stays free
+— there are no gates, no teammates, no admission language here; the one PRD gate lives in
+Plan (`WORKFLOW.md §2`, `§4.1`).
 
-**DO NOT dispatch this workflow via the `Agent` (Task) tool.** `/idc:think` is a parent-session orchestrator that uses `TeamCreate` + `SendMessage` + `TeamDelete` to manage durable Claude Teams teammates in their own cmux panes. A Task-subagent dispatch does not have the Teams primitives and will fail or silently degrade.
+Operator input: `$ARGUMENTS` — a topic, an anchor doc (`--doc <path>`), and/or a slug.
 
-Operator invocation arguments: `$ARGUMENTS`
+## How to run it
 
-Pass the arguments through to the trampoline as invocation inputs. They may name:
+1. **Interview, don't lecture.** Draw the idea out: what should the product *do for the
+   user*, how should it behave, what's in and out. A grill-me-style back-and-forth is
+   welcome when the operator wants to stress-test the idea. Keep the operator in the loop;
+   this is a conversation, not a delivery.
+2. **Research on demand via bounded fan-out.** When a question needs the codebase or the
+   web, send it to a throwaway subagent / Workflow fan-out (per the runtime adapter) and
+   fold back the digest. **Never spawn a durable worker** and never let research stall the
+   conversation — the budget here is zero teammates.
+3. **Stay function-first.** Capture what the user gets and how it behaves, organized by
+   domain where natural. Describe intended product function, not implementation tasks or a
+   file plan. Note `PRD impact:` (does user-facing function change?) — state it, do not act
+   on it; Plan owns the gate.
 
-- `--doc <path>` (repeatable) — anchor doc(s) for scoped brainstorm
-- `--slug <name>` — explicit kebab-case directory slug; otherwise derive from topic
-- Bare positional argument with no flag = treat as topic-from-scratch
-- Free-form natural language is acceptable — extract topic and any path-like tokens as anchor docs
+## Output
 
-Do not pre-read anchor docs or considerations here. The trampoline's researcher teammate (Think's bootstrap equivalent, per `idc-think.md` Startup Flow) owns orientation and returns a compact packet. Your first concrete actions are: verify Teams tools, enforce worktree isolation, `TeamCreate`, spawn the researcher teammate first with `team_name` set, and wait for its `STARTING` handshake before any operator conversation begins.
+Write exactly one file: `docs/considerations/<YYYY-MM-DD>-<slug>-considerations.md`,
+following `idc:idc-consideration-schema` (H1 title; Date/Status/PRD-impact metadata; a
+"What this does for the user" function-first section; behavior by domain; Open questions for
+Plan). Then validate it before finishing:
 
-Operating boundary: Think writes ONLY `docs/considerations/<YYYY-MM-DD>-<domain>-<slug>-considerations.md`. Do not edit PRD, architecture spec, master plan, subphase plans, pillar plans, TRACKER, or source code. Do not declare scope admitted — that is Engineer's gate.
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_consideration_check.py" \
+  docs/considerations/<YYYY-MM-DD>-<slug>-considerations.md
+```
 
-End with domain-organized considerations and open questions for Engineer. Halt only on the conditions enumerated in the trampoline's §Key Gates And Banlist; do not stop the train on routine investigator failures, divergent operator direction, or token cost concerns.
+Fix anything it flags (it requires the function-first section, the PRD-impact line, and an
+Open-questions handoff) until it reports `PASS`.
+
+## Boundaries
+
+Write **only** `docs/considerations/`. Do not edit the PRD, specs, plans, the tracker, or
+source. Do not declare scope admitted or recommend admission — that is Plan's seat. End by
+naming the consideration file and its open questions; the next stage is `/idc:plan` (or
+`/idc:autorun` to drain the whole pipe).

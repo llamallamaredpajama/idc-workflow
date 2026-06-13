@@ -1,71 +1,81 @@
 ---
-description: IDC health check — verify plugin enablement, gh auth + project scope, tracker board, scaffold, and Codex links (read-only)
+description: IDC health check — verify plugin enablement, gh auth + project scope, the 4-field tracker board, and the v2 scaffold (read-only)
 argument-hint: (no arguments)
 ---
 
-You are running `/idc:doctor`. Diagnose whether the current repository is correctly set
-up for the IDC workflow. **This command is strictly read-only — never create, edit, or
-delete any file, and never mutate gh/board state.** Run each check below, then print one
-results table where every row is `PASS`, `FAIL`, or `SKIP` with a one-line fix hint.
-
-Run from the root of the governed repo (the directory that should contain `WORKFLOW.md`).
+`/idc:doctor` diagnoses whether the current repository is correctly set up for IDC v2. **It
+is strictly read-only** — it never creates, edits, or deletes a file, and never mutates
+`gh`/board state. Run every check below from the governed repo root, then print ONE results
+table with `PASS`/`FAIL`/`SKIP` and a one-line fix hint per row, ending with a one-line
+verdict. Make NO changes. See `WORKFLOW.md §3`.
 
 ## Checks
 
-### 1. Plugin enabled for this project
-Read `.claude/settings.json` AND `.claude/settings.local.json` — either may carry the
-key. PASS if `.enabledPlugins["idc@idc-workflow"]` is `true` in either file. If neither
-carries it, the plugin may still be enabled at user scope: this command running at all
-implies the plugin is loaded, so report `PASS (user-scope or local override)` rather
-than FAIL when the project files lack the key but the plugin is demonstrably active.
-FAIL hint (plugin genuinely off): `run /idc:init, or add
-{"enabledPlugins":{"idc@idc-workflow":true}} to .claude/settings.json`.
+**1 — Plugin enabled.** Read `.claude/settings.json` and `.claude/settings.local.json` (a
+missing file is fine). PASS if `.enabledPlugins["idc@idc-workflow"]` is `true` in either:
+```bash
+cat .claude/settings.json .claude/settings.local.json 2>/dev/null \
+  | jq -s 'add // {} | .enabledPlugins."idc@idc-workflow" == true'
+```
+If neither file flags it but this command is running, the plugin is enabled at user scope or
+by local override → still **PASS** (note "user-scope / local override"). Only a genuine
+disabled state is FAIL. Fix hint: run `/idc:init`.
 
-### 2. gh authenticated with project scope
-Run `gh auth status 2>&1`. PASS only if it shows a logged-in account AND the token scopes
-include `project` (look for `project` in the "Token scopes" line). If logged in but the
-`project` scope is absent → FAIL hint: `gh auth refresh -h github.com -s project`. If not
-logged in at all → FAIL hint: `gh auth login`.
+**2 — gh authenticated with `project` scope.** PASS only if logged in AND the token scopes
+include `project`:
+```bash
+gh auth status 2>&1 | grep -q "Token scopes:.*'project'" && echo project-ok
+```
+FAIL hints: `gh auth refresh -h github.com -s project` (logged in, scope missing) or
+`gh auth login` (not logged in).
 
-### 3. Tracker contract present + board reachable
-Read `docs/workflow/tracker-config.yaml`.
-- If missing → FAIL hint: `run /idc:init to scaffold docs/workflow/tracker-config.yaml`.
-- If `backend: filesystem` → PASS if `TRACKER.md` exists at the repo root; else FAIL hint:
-  `create TRACKER.md or run /idc:init`. (No board probe needed for the filesystem backend.)
-- If `backend: github` → confirm `project_number` is a real integer (not a `{{...}}` token
-  or null) AND probe the board read-only with
-  `gh project view <project_number> --owner <owner> --format json` (derive `<owner>` from
-  `gh repo view --json owner -q .owner.login`). PASS if the probe exits 0; else FAIL hint:
-  `board not reachable — re-run /idc:init or check gh project scope / project_number`.
-  Also note (do not fail) if any `field_ids` value is still empty — hint: `field_ids not
-  cached; re-run /idc:init board provisioning`.
+**3 — Tracker contract present + reachable.** Read `docs/workflow/tracker-config.yaml`.
+Missing → FAIL (hint: run `/idc:init`). Otherwise branch on `backend:`:
+- `filesystem` → PASS if `TRACKER.md` exists at the repo root, else FAIL (hint: run
+  `/idc:init`).
+- `github` → `project_number` must be a real integer (not a `{{…}}` token), then probe the
+  board read-only:
+  ```bash
+  owner=$(gh repo view --json owner -q .owner.login)
+  num=$(grep -E '^project_number:' docs/workflow/tracker-config.yaml | grep -oE '[0-9]+')
+  gh project view "$num" --owner "$owner" --format json >/dev/null && echo board-ok
+  ```
+  PASS on exit 0; FAIL otherwise (hint: token still present → run `/idc:init`; board gone →
+  re-provision via `/idc:init`). **Note (do not fail)** if any of the four `field_ids`
+  (`Status`, `Wave`, `Phase`, `Domain`) is still empty — flag "field_ids incomplete".
 
-### 4. Governance scaffold present
-PASS if `WORKFLOW.md` exists at the repo root AND `docs/workflow/` exists with its standard
-subdirectories (`audits`, `code-reviews`, `diagrams`, `handoffs`, `ledgers`,
-`operator-todos`, `phase-planning`, `pillar-conflicts`, `pillar-matrices`, `plans`,
-`ripple`). FAIL hint names whichever is missing: `run /idc:init to scaffold WORKFLOW.md +
-docs/workflow/`. A partial tree (some dirs present) is a FAIL listing the missing dirs.
+**4 — Governance scaffold present.** PASS only if all of these exist: `WORKFLOW.md` at the
+repo root, `WORKFLOW-config.yaml` at the repo root, and `docs/workflow/` containing exactly
+its two v2 subdirectories `pillar-matrices` and `code-reviews`:
+```bash
+ls WORKFLOW.md WORKFLOW-config.yaml docs/workflow/pillar-matrices docs/workflow/code-reviews
+```
+A partial tree is a FAIL that lists the missing paths. Fix hint: run `/idc:init`.
 
-### 5. Codex adapter links (only if Codex install was run)
-Check whether `$HOME/.agents/.idc-install-state` exists.
-- If it does NOT exist → `SKIP` with hint: `Codex adapters not installed (run /idc:init
-  --codex to enable Codex)`.
-- If it exists → confirm each of the five IDC Codex adapter links under
-  `$HOME/.agents/skills/` resolves to a readable `SKILL.md` (i.e. the adapter directories
-  reachable through that path each contain a `SKILL.md`). The five adapter names are
-  exactly `codex-idc-build`, `codex-idc-plan`, `codex-idc-ripple`, `codex-idc-sequence`, <!-- lint-allow: bare Codex link names under $HOME/.agents/skills, bare by design -->
-  `codex-idc-think` (the authoritative list lives in `scripts/install-codex.sh`'s <!-- lint-allow: bare Codex link name under $HOME/.agents/skills, bare by design -->
-  `ADAPTERS` variable) — check these names, not a wildcard match. PASS if all five
-  resolve; else FAIL hint: `re-run the Codex installer:
-  bash "${CLAUDE_PLUGIN_ROOT}/scripts/install-codex.sh" "${CLAUDE_PLUGIN_ROOT}"`.
+**5 — Install receipt present.** PASS if `docs/workflow/install-receipt.yaml` exists and
+parses with the expected keys (`receipt_version`, `fingerprint_method: sha256`, `files[]`):
+```bash
+test -f docs/workflow/install-receipt.yaml \
+  && grep -Eq '^fingerprint_method:[[:space:]]*sha256' docs/workflow/install-receipt.yaml \
+  && echo receipt-ok
+```
+If absent → **SKIP** with the note "pre-receipt install — run `/idc:init` to graduate a
+receipt" (a filesystem-only or pre-receipt repo is valid; do not hard-FAIL). Do **not**
+recompute or verify fingerprints here — that is upgrade's job; doctor only checks presence
+and parse.
 
 ## Output
 
-Print a single table:
+Emit a single table, then a one-line verdict. Tally PASS / FAIL / SKIP across the five rows:
 
+```
 | # | Check | Result | Fix hint |
-|---|-------|--------|----------|
+|---|---|---|---|
+| 1 | Plugin enabled | PASS | — |
+| 2 | gh + project scope | PASS | — |
+| 3 | Tracker contract reachable | PASS | — |
+| 4 | Governance scaffold | PASS | — |
+| 5 | Install receipt | SKIP | run /idc:init to graduate a receipt |
 
-End with a one-line verdict: `IDC doctor: N passed, M failed, K skipped`. If everything
-that ran is `PASS`, say the repo is IDC-ready. Make no changes.
+IDC doctor: N passed, M failed, K skipped
+```

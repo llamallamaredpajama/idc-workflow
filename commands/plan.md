@@ -1,31 +1,31 @@
 ---
-description: IDC Plan — convert admitted considerations into the canonical planning chain (PRD/spec/master + subphase + pillar + clash evidence + matrix YAML) in one orchestrated Plan run with phase-wide Claude Teams fan-out when needed
-argument-hint: '[--considerations <path>...] [--master-section "<domain>/<phase-N>"] [--subphase <path>...] [--directive "<one-liner>"] [--scope prd|spec|master|subphase|pillar|unspecified] [--expansion {phase-wide,first-slice,subphase-batch}] [--slug <name>] [free-form notes]'
+description: IDC Plan — turn a consideration into goal-contract issues on the board (domain experts, doc chain, matrix deconfliction, one PRD gate)
+argument-hint: '[--consideration <path>] [--slug <name>] [free-form notes]'
 ---
 
-You are now operating as the parent-session IDC Plan orchestrator. Read `${CLAUDE_PLUGIN_ROOT}/agents/idc-plan.md` (the trampoline) end-to-end IN THIS PARENT SESSION, then execute its Phase 0 startup sequence.
+You are running `/idc:plan`, the planning stage of the IDC v2 pipeline. Operate as the Plan
+orchestrator **in this session**: read `${CLAUDE_PLUGIN_ROOT}/agents/idc-plan.md` end-to-end,
+then execute its phases (Absorb → domain experts → doc chain → goal contracts → matrix →
+validate + admit).
 
-**DO NOT dispatch this workflow via the `Agent` (Task) tool.** `/idc:plan` is a parent-session orchestrator that uses `TeamCreate` + `SendMessage` + `TeamDelete` to manage durable Claude Teams teammates in their own cmux panes. A Task-subagent dispatch does not have the Teams primitives and will fail or silently degrade.
+Operator input: `$ARGUMENTS` — a consideration path (`--consideration <path>`), an optional
+slug, and/or free-form notes naming the scope.
 
-Operator invocation arguments: `$ARGUMENTS`
+**Zero durable workers.** Plan never uses Claude Teams / durable teammates. Every fan-out —
+domain experts, doc drafters, clash pairs — is **bounded read-only fan-out** (the Workflow
+tool or Task subagents, per `idc:idc-adapter-claude`; `--ephemeral`/`spawn_agent` per
+`idc:idc-adapter-codex`). Drafters write to disk and return digests; you never absorb full
+doc bodies.
 
-Pass the arguments through to the trampoline as invocation inputs. They may name:
+What the run produces and where it writes (`WORKFLOW.md §4.2`): the five-layer doc chain
+(`docs/prd/`, `docs/specs/`, `docs/plans/` master + subphases + pillars — only the PRD
+gated), the phase matrix (`docs/workflow/pillar-matrices/`), and goal-contract issues on the
+board via `idc:idc-tracker-adapter`. Every issue body passes `idc:idc-schema-check` before
+admission; the matrix passes `idc:idc-matrix-analysis`'s check; re-sequencing is global but
+`In Progress` issues are immutable. If the run changes the PRD, the PRD-touching issues land
+`Blocked` behind one `idc:idc-gate-issue` while non-PRD work flows. Close by opening the
+planning PR (body = audit trail) and automerging when green.
 
-- `--considerations <path>` (repeatable) — admitted considerations file(s) from a prior `/idc:think` run
-- `--master-section "<domain>/<phase-N>"` — admitted master-plan section the run expands into subphase + pillar plans
-- `--subphase <path>` (repeatable) — admitted subphase plan(s) the run polishes into pillar plans
-- `--directive "<one-liner>"` — operator-supplied admission directive when no considerations file exists
-- `--scope {prd,spec,master,subphase,pillar,unspecified}` — operator hint about the highest layer the run targets
-- `--expansion {phase-wide,first-slice,subphase-batch}` — planning frontier mode; default `phase-wide` when a master-plan phase / consideration packet implies multiple missing or TBD subphases; `first-slice` is valid only when explicit
-- `--slug <name>` — explicit kebab-case slug; otherwise derive from inputs
-- Free-form natural language is acceptable — extract scope summary, considerations references, master-plan §Domain/§Phase, and operator caveats
-
-Do not pre-read considerations, plans, the master plan, or matrices here. The trampoline's bootstrap-researcher owns ingestion and returns a compact telegram. Your first concrete actions are: verify Teams tools, enforce worktree isolation, `TeamCreate`, spawn the bootstrap-researcher teammate with `team_name` set, and wait for its `STARTING bootstrap-researcher` handshake.
-
-Operating boundary: Plan collapses the prior Engineer + Develop + Deconflict roles into one orchestrator surface and emits PRD/spec/master-plan diffs, canonical subphase plans, polished pillar plans, per-pillar Resource Ownership tables, pair-wise clash evidence, the phase-wide planning manifest, and the polished matrix YAML in one Plan run. When the frontier spans multiple subphases, Plan uses Claude Teams fan-out (`idc:idc-role-subphase-pillar-planner`, one teammate per subphase) rather than Task subagents. Authority writes: `docs/prd/prd.md`, `docs/specs/master-architectural-spec.md`, `docs/plans/master-implementation-plan.md`, `docs/plans/subphases/<…>-plan.md`, `docs/plans/pillars/<…>-plan.md`, `docs/workflow/pillar-conflicts/<…>.md`, `docs/workflow/pillar-matrices/<phase-tag>-matrix.yaml` (+ three derived siblings), `docs/workflow/phase-planning/<phase-tag>-planning-manifest.yaml`, `docs/workflow/audits/<YYYY-MM-DD>-<slug>-planning-admission-audit.md`, and handoff artifacts under `docs/workflow/handoffs/{phases,subphases,pillars}/`. Do not write source code or tests. Do not edit TRACKER (`idc-sequence`'s authority). Do not edit `CLAUDE.md`, `AGENTS.md`, or per-directory CLAUDE.md files (those route through `/idc:ripple`).
-
-**Engineer Gate is the only operator gate this role surfaces.** PRD and arch-spec edits require operator approval BEFORE drafting AND BEFORE merge; master-plan-only edits require pre-merge approval only; subphase / pillar / matrix / clash-evidence-only runs have no gate beyond the standard per-PR review-fix-merge cycle.
-
-**Ripple trigger:** if a clash analysis surfaces a `ripple-required` verdict, park the affected pillars, draft a Ripple change-order proposal at scratch, continue with non-clashing pillars, and surface the Ripple obligation in the handoff — do not edit upstream docs from this seat.
-
-End by naming the artifacts written (PRD/spec/master diff anchors, subphase plan paths, pillar plan paths, phase-wide planning manifest path + `planning_scope`, clash evidence files, matrix YAML), the handoff path, any Ripple change orders filed, and the next IDC role (`/idc:sequence` to admit polished pillars into TRACKER ordering). Halt only on the conditions enumerated in the agent file's §Halt conditions.
+Do not write source or tests; do not edit the PRD without the gate; do not reorder
+`In Progress` issues. Halt only on the conditions in the playbook's §Authority & halt. The
+next stage is `/idc:build` (or `/idc:autorun` to drain the whole pipe).

@@ -1,79 +1,147 @@
-# Master Architectural Spec — IDC Workflow Plugin
+# Master Architectural Spec — IDC Workflow Plugin (v2)
 
-**Upstream trace:** §2 foundations are seeded from `docs/architecture.md` (pre-IDC architecture doc); §3 lifecycle architecture is admitted from `docs/considerations/2026-06-12-plugin-lifecycle-uninstall-upgrade-considerations.md` (merged at `main` 95d7ab4, PR #12). Realizes PRD requirements R1–R3 and the §6 cross-cutting safety requirement (`docs/prd/prd.md`).
+**Upstream trace:** this spec realizes `docs/prd/prd.md` (v2) and is derived from
+`docs/considerations/2026-06-12-idc-v2-overhaul-considerations.md` (the authoritative v2
+spec — operator interview, 16 decisions). Where this doc and the consideration conflict,
+the consideration wins.
 
-> First architectural spec authored for this repository (chain-bootstrap admission). §2 restates the existing IDC architecture compactly so the spec is self-contained; the new material is §3 (the plugin-lifecycle architecture).
+> This is the architecture of the **plugin itself** — how IDC v2 is built and wired. It is
+> distinct from `templates/WORKFLOW.md`, which is the per-project governance *contract* the
+> plugin installs into consuming repos. This spec governs the plugin; WORKFLOW.md governs a
+> governed repo.
 
 ## 1. Scope
 
-This spec governs the IDC Workflow plugin's architecture: the role chain and write-authority model it already ships (§2, absorbed from `docs/architecture.md`), and the **plugin-lifecycle substrate** this admission adds (§3) — the committed install receipt and the install/upgrade/uninstall commands that produce and consume it. The receipt is a new **shared substrate**, so its contract (location, fingerprint method, entry semantics, writers, failure postures) is fixed here at the architectural layer; per-command implementation detail is deferred to subphase/pillar plans.
+The IDC Workflow plugin packages **IDC** — the Iterative Development Cycle — as an
+installable [Claude Code](https://claude.com/claude-code) plugin: a guardrail-framed,
+tracker-driven, goal-contract pipeline that carries software work from a raw idea to
+merged, reviewed code. This spec fixes the plugin's component architecture, naming
+convention, the tracker substrate, the one gate, the runtime model, and the inventory
+invariants. Per-command/skill behaviour is authored in the build phases; this spec is the
+contract those phases hold to.
 
-## 2. Foundations (absorbed from `docs/architecture.md`)
+## 2. What IDC v2 is (function)
 
-Compact restatement; `docs/architecture.md` is the long-form source.
+The operator casts an idea into the stream at `/idc:think`; the stream carries it to
+merged, tested code; the only time it stops to ask is when the product's user-facing
+function is about to change.
 
-- **Role chain.** Five roles run as a chain — Think → Plan → Sequence → Build — with **Ripple** as the drift escape hatch triggerable from any role. The canonical document chain is PRD → architecture spec → master implementation plan → subphase plans → pillar plans → TRACKER.
-- **Write-authority boundaries.** Each role is the **sole writer** of its surface and edits nothing upstream of it. A lower role that finds a higher layer wrong does not fix it; it files a Ripple and pauses. (Authority table: `docs/architecture.md §Write-authority boundaries`.)
-- **Engineer Gate.** PRD / arch-spec edits need operator approval before drafting **and** before merge; master/subphase/pillar plan edits need approval before merge; subphase plans, pillar plans, clash evidence, and the planning manifest are autonomous.
-- **Two edit pipelines.** A `codebase` pipeline (Think → Plan → Sequence → Build) and a lighter `governance` pipeline (Audit → Plan → PR); every change order declares its `Pipeline:`.
-- **Tracker contract.** Sequence and Build coordinate through a tracker selected by `backend:` in `docs/workflow/tracker-config.yaml` — `github` (Projects v2 board, **eight canonical fields**: `Status`, `ClaimState`, `Wave`, `Phase`, `Track`, `Lane`, `Domain`, `Pillar trace key`) or `filesystem` (a root `TRACKER.md`). The backend is hidden behind `idc:idc-skill-tracker-adapter`.
-- **Composition.** Commands (`commands/*.md`) are slash entry points; agents (`agents/*.md`) are orchestrators + teammates; skills (`skills/*/SKILL.md`) are reusable procedures. `${CLAUDE_PLUGIN_ROOT}` resolves to the install path inside command/agent/skill bodies (it is text-substituted, **not** a shell env var).
-- **Required trace.** Subphase plans record their upstream master §Domain/§Phase; pillar plans record their upstream subphase + tracker trace key; tracker edits cite a pillar-derived unit.
+- **Pipeline:** `Think → Plan → Build`, `Ripple` the only retrograde path, `Autorun` the
+  one-shot drainer. Seven commands total: `init`, `doctor`, `think`, `plan`, `build`,
+  `ripple`, `autorun`.
+- **Five guardrails, nothing else:** the one PRD gate; matrix deconfliction; real
+  verification surfaces; ripple drift-healing; one-way flow through the glass wall. v2
+  trusts the model and deletes v1's standing reviewer/fixer/researcher roles, multi-pass
+  plan reviews, claim-state machine, and per-edit gates.
 
-## 3. Plugin-lifecycle architecture (this admission)
+## 3. Component architecture & naming convention
 
-### 3.1 The install receipt — shared substrate
+### 3.1 Composition
 
-The install receipt is a **committed scaffold file** that records every file `/idc:init` stamps, each with a content fingerprint of the file **as written** (post token-substitution, not the template) (per consideration §Named Ideas: install receipt; §Engineering Implications).
+- `commands/*.md` — slash entry points (auto-discovered; namespaced `idc:<name>` by the
+  harness at load time).
+- `agents/*.md` — orchestrator playbooks + the one durable-worker role + the review
+  coordinator (invoked as subagents or read as trampolines).
+- `skills/<name>/SKILL.md` — reusable procedures (invoked via the Skill tool as
+  `idc:<name>`).
+- `${CLAUDE_PLUGIN_ROOT}` resolves to the install path inside command/agent/skill bodies
+  (text-substituted, **not** a shell env var). `plugin.json` carries no explicit component
+  lists — discovery is by directory.
 
-- **Canonical location (RESOLVED).** `docs/workflow/install-receipt.yaml` — a sibling of the existing `docs/workflow/tracker-config.yaml`, inside the governance tree `/idc:init` already scaffolds. Rationale: committed (travels with clones), discoverable next to the other per-project IDC config, YAML to match repo convention (`WORKFLOW-config.yaml`, `tracker-config.yaml`), and naturally covered by the clean-git preflight and removed inside uninstall's single revertable commit. The receipt is the manifest of the scaffold; it does not need to fingerprint-gate its own removal (it is removed as part of the scaffold it lists).
-- **Fingerprint method (RESOLVED).** A **SHA-256 hex digest of the file's as-written bytes**. Chosen because the repo has no pre-existing hashing convention to inherit (per consideration §Next Role Questions; nothing in the repo hashes files today), and because the same method must be computed identically by `/idc:init` (write), `/idc:upgrade` (compare), and `/idc:uninstall` (compare) — a single fixed method is what makes the compare surface trustworthy. The exact YAML key names and serialization are pillar-level (see master plan deferrals).
-- **Entry semantics (RESOLVED).** Each receipt entry records: the repo-relative `path`, the `fingerprint` (SHA-256 of the as-written bytes), and a `state` marker ∈ `{stamped, customized}`:
-  - `stamped` — IDC authored the file; the fingerprint is IDC's render. Upgrade MAY silently re-stamp this file **iff** the on-disk fingerprint still matches.
-  - `customized` — the operator kept their own version at a `/idc:upgrade` diff-and-ask; the fingerprint is the **operator's kept-content bytes** (not the template fingerprint, not excluded). Upgrade MUST NOT silently re-stamp a `customized` file; it re-enters diff-and-ask when a newer template render is available, and detects further operator edits by recomputing against the recorded kept-content fingerprint. Recording the template fingerprint would make a kept customization indistinguishable from a pristine file (silent-restamp risk); excluding the file would lose drift detection. This same marking is written identically at **receipt graduation** and at the **end-of-run rewrite**, satisfying the consideration's "same answer for graduation and the end-of-run rewrite" requirement (consideration §Open Decisions).
-- **Writers (RESOLVED).** The receipt is written by `/idc:init` and `/idc:upgrade` **only**. Runtime-created footprints (notably `TRACKER.md` under the filesystem backend) are **not** added to the receipt — `/idc:init` never writes `TRACKER.md`, so it cannot fingerprint it, and routing receipt mutations through the tracker adapter would put a Build/Sequence-time surface inside an init/upgrade-owned artifact. Such runtime-created footprints are instead covered permanently by `/idc:uninstall`'s **hardcoded footprint list** — which is therefore a permanent complement to the receipt, not merely a pre-receipt fallback (consideration §Open Decisions: runtime-created footprints).
-- **Rewrite timing.** The receipt is written **once** by `/idc:init` at the end of a successful install, and rewritten by `/idc:upgrade` **only at the end of a successful run** — so a half-done run can never leave a receipt that masquerades as finished (per consideration §Named Ideas: re-run to repair).
+### 3.2 The v2 namespace (flat `idc-*`)
 
-### 3.2 The safety-critical compare surface
+All agents and skills use a flat `idc-<thing>` name (no `idc-skill-` / `idc-role-` /
+`codex-idc-` prefixes — those were v1). Frontmatter `name:` is **bare** (the harness adds
+the `idc:` namespace). Body references to a sibling component are written `idc:<name>` and
+MUST resolve to a real `skills/<name>/`, `agents/<name>.md`, or `commands/<name>.md` — the
+reference-integrity linter (`scripts/lint-references.sh`) enforces this.
 
-`/idc:upgrade` and receipt-driven `/idc:uninstall` both recompute on-disk fingerprints and compare them against the receipt. **Invariant (load-bearing):** this compare MUST **fail toward asking** — show-diff-and-ask on upgrade, confirm-before-remove on uninstall — and MUST NEVER fail toward a silent re-stamp or a silent delete (per consideration §Engineering Implications; PRD §6). Every ambiguity in the compare resolves to the more conservative, operator-confirming branch.
+**Agents (≤ 8):**
 
-### 3.3 Provenance-gated destructive operations
+| Agent | Role |
+|---|---|
+| `idc-think` | Think orchestrator playbook (free-form, zero teammates). |
+| `idc-plan` | Plan orchestrator playbook (domain dispatch → doc chain → contracts → matrix → admit). |
+| `idc-build` | Build orchestrator + finisher/merge-queue. |
+| `idc-implementer` | The one durable-worker role — executes an issue contract as a goal loop. |
+| `idc-review-coordinator` | Merged review engine coordinator (dedup, confidence, verdict). |
+| `idc-ripple` | Ripple orchestrator playbook (doc-sync, PRD-only gate). |
+| `idc-autorun` | Autorun two-lane drainer playbook. |
 
-Destructive lifecycle operations are gated on **provenance** — acting only on what IDC demonstrably created — mirroring the pattern already shipped in `/idc:init`'s Status-field reconciliation (board created this run → safe to mutate; linked board already matching → no-op; linked board with items → fail closed to the snapshot/rebuild SOP) (per `commands/init.md`; `CHANGELOG.md` Unreleased).
+**Skills (≤ 14, target ~12):**
 
-- **"Only delete what you created."** `/idc:uninstall`'s removal set is the receipt (the manifest of what init wrote) plus the hardcoded footprint list for runtime-created files. The in-repo precedent is `scripts/install-codex.sh --revert`, which records pre-install state and only ever deletes symlinks it created, failing loudly rather than touching unrecorded data (per consideration §Context Notes; `scripts/install-codex.sh`).
-- **Single revertable commit.** All repo footprint removals land in **one** commit — scaffold, configs, `TRACKER.md` (filesystem backend only), and the `enabledPlugins["idc@idc-workflow"]` key stripped from `.claude/settings.json` while preserving every other key (the inverse of `/idc:init` Phase 5's `jq` write).
-- **GitHub default-untouched.** `/idc:uninstall` leaves GitHub alone unless the operator opts in: `--close-issues` (reversible) and `--delete-board` (permanent, typed confirmation). Issue deletion is never offered.
-- **Work products preserved.** Before removal, work products are archived to an untracked repo-root `idc-archive-<date>.tar.gz`, path always announced.
+| Skill | Purpose |
+|---|---|
+| `idc-adapter-claude` | Claude runtime adapter — primitives → Claude mechanics + tier→model resolution. |
+| `idc-adapter-codex` | Codex runtime adapter — primitives → Codex mechanics (untiered). |
+| `idc-tracker-adapter` | Backend dispatch (reads `tracker-config.yaml::backend`). |
+| `idc-tracker-github` | GitHub Projects v2 backend (4 fields, blocked-by, claim comments, attempt label). |
+| `idc-tracker-filesystem` | Filesystem backend (`TRACKER.md`; zero setup; the sandbox test substrate). |
+| `idc-gate-issue` | Operator PRD gate-issue helper + push notification. |
+| `idc-consideration-schema` | Function-first consideration file schema (Think output). |
+| `idc-goal-contract` | 6-element goal-contract authoring shape (Plan authors; Build executes). |
+| `idc-matrix-analysis` | Pairwise clash check + matrix synthesis + wave sequencing. |
+| `idc-schema-check` | Mechanical issue-body schema check (contract + ownership + deps + trace). |
+| `idc-review-engine` | Merged 13-dimension review engine (specialist fan-out brief + dimensions). |
+| `idc-ripple-sync` | Ripple doc-sync: highest-affected-layer + downstream synchronization set. |
 
-### 3.4 Idempotency vocabulary
+### 3.3 Runtime-neutral core + thin adapters
 
-All lifecycle commands carry `/idc:init`'s idempotency contract — each step checks current state, present targets are left untouched — extended with two new statuses (per `commands/init.md`; consideration §Engineering Implications):
+Process docs (commands, agents, the non-runtime skills) are written against the three
+abstract primitives only (durable worker / bounded fan-out / goal loop; `WORKFLOW.md §5`).
+Exactly **one** adapter per runtime (`idc-adapter-claude`, `idc-adapter-codex`) maps the
+primitives to concrete mechanics and resolves model tiers. There is no per-runtime process
+tree — one copy of the truth; mirrors cannot drift. (v1's five `codex-idc-*` skill trees
+are deleted.)
 
-| Status | Meaning | Used by |
-|--------|---------|---------|
-| `created` | target written this run | init, upgrade |
-| `skipped-existing` | target already present, left untouched | init |
-| `skipped-absent` | target already gone, nothing to remove | uninstall re-runs |
-| `skipped-already-current` | target already matches the current template | upgrade re-runs |
+## 4. Tracker substrate
 
-### 3.5 Failure-path postures (never silent) — spec invariants
+The contract is fixed in `templates/WORKFLOW.md §3`; the plugin implements it as a
+dispatch skill + two backends.
 
-The following failure paths have **fixed, non-silent postures** (per consideration §Open Decisions: failure-path postures):
+- **Dispatch.** `idc-tracker-adapter` resolves `docs/workflow/tracker-config.yaml::backend`
+  and routes to `idc-tracker-github` or `idc-tracker-filesystem`. Unknown backend → halt
+  (`unknown_backend`), never a silent default.
+- **Schema.** Four fields — `Status` (`Blocked|Todo|In Progress|Done`), `Wave`, `Phase`,
+  `Domain` — plus native blocked-by, an `attempt:<n>` label, and claim comments. No
+  ClaimState/Lane/Track/Pillar-trace-key field, no bookend ceremony.
+- **Six operations.** `createTicket`, `setField`, `link`, `move`, `query`, `comment`. A
+  seventh is a contract change requiring a Ripple.
+- **The issue is the contract.** Each issue body is a self-sufficient 6-element goal
+  contract + Dependencies + Trace (`WORKFLOW.md §3.2`), authored by Plan via
+  `idc-goal-contract`, executable cold by an outside agent.
+- **Claim protocol.** Claim = `Status → In Progress` + a claim comment naming the agent.
+  No lock primitive; a single merge-queue (the Build orchestrator) serializes merges so
+  parallel PRs never race.
 
-- **Receipt present but invalid/corrupt.** Never silently degrade to the hardcoded fallback. The command announces the invalidity and requires **explicit operator confirmation** before any fallback path runs — for `/idc:uninstall`, before falling back to the hardcoded footprint list; for `/idc:upgrade`, before treating the install as pre-receipt (diff-and-ask everything once). Consistent with §3.2 (fail toward asking).
-- **Board read fails at `/idc:uninstall` preflight.** The in-flight check is reported as an **explicit "could not verify in-flight items" outcome requiring confirmation** to proceed — not a silent skip and not an automatic hard block. (Default GitHub-untouched posture means proceeding does not delete issues; the residual risk is orphaning unseen in-flight items, which the operator confirms knowingly.)
-- **Board drift check cannot run at `/idc:upgrade`.** The drift check has exactly **three** reportable outcomes — `no drift`, `drift detected (enumerated)`, and `could not verify` — and the third is always distinct from "no drift". Upgrade never reports "no drift" when the check did not execute.
+## 5. The one gate (PRD)
 
-### 3.6 Board-drift detection (upgrade, report-only)
+When Plan or Ripple determines the PRD must change, affected issues land `Blocked`, chained
+by native blocked-by to one gate issue (`idc-gate-issue`) carrying a plain-terms summary +
+the PRD diff; the operator is push-notified and approves from the GitHub web UI; approval
+unblocks the chain. Implemented identically by Plan and Ripple. This is the **only** human
+checkpoint; everything else automerges when green.
 
-`/idc:upgrade` is **files-only** and never mutates the board. It compares the live board's schema against the new plugin version's expected eight-field contract (per §2 tracker contract) and reports drift explicitly per §3.5. No board-migration machinery exists (rejected — real risk to live issues and in-flight waves; per consideration §Named Ideas: upgrade scope).
+## 6. Runtime primitives & model routing
 
-### 3.7 Version/stamp markers — current absence
+- **Primitives** (`WORKFLOW.md §5`): durable worker, bounded fan-out, goal loop. Concurrency
+  budget: Think/Plan/Ripple = 0 durable workers; Build = 1 per parallel-safe issue (serial
+  in-session fallback); review = bounded fan-out everywhere.
+- **Model routing** (`WORKFLOW.md §6`): tier-symbolic (`reasoning`/`standard`/`utility`)
+  resolved by the runtime adapter from `WORKFLOW-config.yaml::model_routing`; no hardcoded
+  model IDs in process docs. Codex runtime untiered.
 
-No version or install-stamp markers exist in stamped files today; `templates/WORKFLOW-config.yaml`'s `workflow.version` is a **schema** version, not an install stamp (per consideration §Context Notes). The install receipt is therefore the **first** install-provenance artifact in the repo; upgrade's "is the running plugin the newest version" question is answered by the cache-refresh advisory (PRD R3), not by a stamp comparison in v1.
+## 7. Inventory invariants & fitness fences
 
-## 4. Downstream-sync & fence obligations
+These are load-bearing and verified by the rebuild's verification surface:
 
-Enumerated in the companion side-files `ripple-targets-spec.md` and `fitness-fences-spec.md` (this admission). The lifecycle architecture is realized by Build, per pillar plans, under the master plan's §Domain: plugin-lifecycle (this admission) — the spec fixes invariants; it authors no source, tests, or command bodies.
+- `commands/` = exactly the seven v2 commands (no `sequence`/`uninstall`/`update`/`upgrade`).
+- `agents/` ≤ 8 files; `skills/` ≤ 14 directories.
+- No v1 vocabulary (`ClaimState`, `bookend-`, `idc-role-`, `codex-idc-`,
+  `MINOR_AUTONOMOUS`, `MAJOR_GATED`, `Pillar trace key`) in `commands/ agents/ skills/
+  templates/ README.md llms.txt`.
+- `scripts/lint-references.sh` exits 0 (genuine cross-reference integrity over the v2
+  namespace).
+- The merged review engine ships **inside the plugin** (`idc-review-engine` +
+  `idc-review-coordinator`), so consuming repos and outside/cloud agents get it.
+- `plugin.json` version `2.0.0` at release.

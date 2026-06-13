@@ -77,3 +77,6 @@ jobs:
             echo "bash -n $s"
             bash -n "$s"
           done
+
+      - name: Functional smoke suite
+        run: bash tests/smoke/run-all.sh

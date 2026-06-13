@@ -689,7 +689,7 @@ async function handleRegister(req: Request): Promise<Response> {
 		p,
 		"agent_joined",
 		{ project: projectName, agent: entryToCard(entry) },
-		body.session_id,
+		sessionId,
 	);
 
 	const sse_url = `/v1/events?project=${encodeURIComponent(projectName)}&session_id=${encodeURIComponent(sessionId)}`;

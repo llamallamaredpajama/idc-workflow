@@ -17,7 +17,8 @@ for t in \
   phase3-plan \
   phase4-build \
   phase5-ripple \
-  phase6-autorun; do
+  phase6-autorun \
+  phase7-lifecycle; do
   if out="$(bash "$HERE/$t.sh" 2>&1)"; then
     echo "  PASS  $t"
   else

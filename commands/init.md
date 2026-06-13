@@ -130,7 +130,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/install-codex.sh" "${CLAUDE_PLUGIN_ROOT}"
 
 ## Phase 7 — Write the install receipt
 After Phases 2–6 complete successfully, write `docs/workflow/install-receipt.yaml` — the
-manifest that `/idc:doctor` checks and a future uninstall/upgrade consumes. Fully
+manifest that `/idc:doctor` checks and a future uninstall/update consumes. Fully
 init-generated; never add a receipt to `templates/`, never invent fingerprints. Fingerprints
 are the SHA-256 hex of each file's final on-disk bytes (after token substitution):
 
@@ -144,8 +144,9 @@ files:
     state: stamped
 ```
 Rules: entry keys exactly `path`/`fingerprint`/`state`; sort by path; compute with
-`shasum -a 256` (macOS) or `sha256sum` (Linux); init entries are always `state: stamped`;
-the receipt never lists itself, `TRACKER.md` (runtime footprint), or `.claude/settings.json`
+`shasum -a 256` (macOS) or `sha256sum` (Linux); init entries are always `state: stamped`
+(`idc:update` may later record `state: customized` for files the operator kept at its
+diff-and-ask); the receipt never lists itself, `TRACKER.md` (runtime footprint), or `.claude/settings.json`
 (operator-owned; IDC manages only one enablement key and never fingerprints the whole file).
 On a gap-fill re-run, preserve existing entries byte-for-byte and append only newly-created
 files; if nothing was created, leave it and report `skipped-existing`.

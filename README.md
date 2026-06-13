@@ -36,8 +36,10 @@ permission.
 
 This repo is the plugin **and** its own marketplace:
 
-- **7 commands** — `/idc:think`, `/idc:plan`, `/idc:build`, `/idc:ripple`, `/idc:autorun`,
-  plus `/idc:init` (per-project scaffold) and `/idc:doctor` (read-only health check).
+- **9 commands** — `/idc:think`, `/idc:plan`, `/idc:build`, `/idc:ripple`, `/idc:autorun`,
+  plus `/idc:init` (per-project scaffold), `/idc:doctor` (read-only health check), and the
+  lifecycle pair `/idc:update` (refresh stamped files after a plugin update) and
+  `/idc:uninstall` (remove IDC footprints in one revertable commit).
 - **6 agents** — the per-stage orchestrator playbooks, the one durable-worker implementer,
   and the review-engine coordinator.
 - **12 skills** — the runtime adapters (Claude + Codex), the tracker adapter + its two
@@ -101,7 +103,7 @@ bash tests/smoke/run-all.sh
 .claude-plugin/   plugin.json (manifest) + marketplace.json (self-hosted marketplace)
 agents/           6 stage orchestrators + implementer + review coordinator
 skills/           12 reusable procedures (runtime adapters, tracker, review engine, …)
-commands/         7 slash commands (think|plan|build|ripple|autorun|init|doctor)
+commands/         9 slash commands (think|plan|build|ripple|autorun|init|doctor|update|uninstall)
 templates/        per-project scaffold copied by /idc:init
 scripts/          lint-references.sh, the filesystem tracker + plan/review/ripple/autorun
                   helpers, install-codex.sh, run-evals.sh, materialize-sandbox.sh

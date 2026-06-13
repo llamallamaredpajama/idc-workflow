@@ -50,13 +50,17 @@ trying to message upstream or impersonate a peer.
 The role-cap boundary requires the master key `K` to reach the hub and each resident over a channel
 that is **both secret and shared** — which only one launch mode provides:
 
-- **`idc-pi fleet` — the SECURE supervised mode (role-cap ENFORCED).** One supervisor process holds
-  `K` in memory and **direct-spawns** the hub and every resident as its own child, setting each
-  child's environ via a real `env -i` array. `K` reaches only the hub; each resident gets only its
-  own `HMAC(K, role)` cap. `K` never touches disk and never appears in a `ps`-visible command
-  string. This is the mode where role-minting is actually closed. Test seam: `PI_IDC_RESIDENT_BIN`
-  (a fake resident) — `tests/smoke/phase8-pi-fleet-secret.sh` proves each resident gets only its cap
-  and never `K`.
+- **`idc-pi fleet` — the SECURE supervised mode (role-cap ENFORCED).** A small **bun supervisor**
+  (`runtime/pi/scripts/fleet-supervisor.ts`) holds `K` in memory and spawns the hub + every resident
+  via `Bun.spawn` **execve env maps** — so `K` reaches only the hub, each resident gets only its own
+  `HMAC(K, role)` cap (computed in-memory with `node:crypto`), and **neither `K` nor any cap ever
+  appears in a process argv / command string** (the earlier bash `env -i VAR=val` + `openssl
+  -macopt key:` forms leaked them via `ps`; the launcher passes the secrets to the supervisor as
+  shell env *assignments*, not argv, and the spec it hands over is secret-free). `K` never touches
+  disk. The fleet also runs the **fail-closed governance preflight** before spawning anything. This
+  is the mode where role-minting is actually closed. Tests: `phase8-pi-fleet-secret.sh` proves each
+  resident gets only its cap, never `K`, and that **`ps` never shows `K`/caps**; the governance gate
+  test covers `idc-pi fleet` with a drifted sidecar. Test seam: `PI_IDC_RESIDENT_BIN` (fake resident).
 - **`idc-pi open` / `open-all` / `open-cmux` / iTerm — the dev/inspect pane mode (role-cap OFF).**
   Each pane is a separate `env -i` invocation launched via a `ps`-visible command string. There is
   **no channel through cmux panes that is both secret and cross-pane**: filing `K` (like the bearer)

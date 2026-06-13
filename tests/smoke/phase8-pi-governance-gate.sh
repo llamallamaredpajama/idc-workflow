@@ -77,4 +77,14 @@ grep -q "FAKE-PI-RAN" "$OUT" && { cat "$OUT"; fail "B: resident launched despite
 run_role "PI_IDC_GOVERNANCE_CHECK=off"; rcC=$?
 grep -q "FAKE-PI-RAN" "$OUT" || { cat "$OUT"; fail "C: bypass (PI_IDC_GOVERNANCE_CHECK=off) did not let the resident launch"; }
 
-echo "PASS: launcher governance gate blocks drift (fail-closed), allows a matching sidecar, honors the bypass"
+# (D) the SUPERVISED `idc-pi fleet` is gated too (codex round-5 finding 2) — drift still present, so
+#     the fleet must fail-closed BEFORE spawning the hub/residents.
+fleet_out="$SBX/fleet.out"
+( cd "$REPO" && env PATH="$BIN:$PATH" PI_IDC_HARNESS_REPO="$RT" PI_IDC_RESIDENT_BIN="$BIN/pi" \
+    PI_COMS_NET_ROLE_HMAC_KEY="testkey" PI_COMS_NET_HOST="127.0.0.1" PI_COMS_NET_PORT="0" PI_COMS_NET_LOG_QUIET="1" \
+    bash "$LAUNCHER" fleet think ) >"$fleet_out" 2>&1
+rcD=$?
+grep -q "FAKE-PI-RAN" "$fleet_out" && { cat "$fleet_out"; fail "D: fleet spawned residents despite governance DRIFT (fleet bypasses the gate)"; }
+[ "$rcD" -ne 0 ] || { cat "$fleet_out"; fail "D: fleet returned 0 despite governance drift"; }
+
+echo "PASS: governance gate blocks drift (fail-closed) for both idc-pi run AND idc-pi fleet; allows a matching sidecar; honors the bypass"

@@ -39,15 +39,26 @@ ROLES="think plan build-impl"
 FLEET_PID=$!
 
 OUT="$SBX/fleet-out"
+cap_for() { printf '%s' "$1" | openssl dgst -sha256 -mac HMAC -macopt "key:$K" | awk '{print $NF}'; }
+
+# Sample `ps` repeatedly DURING startup — the master key K and the per-role caps must NEVER appear
+# in any process argv / command string (codex round-5 finding 1: the bash `env -i VAR=val` +
+# `openssl -macopt key:` forms leaked them; the bun supervisor passes secrets via execve env maps).
+PSLOG="$SBX/ps-sample.txt"; : > "$PSLOG"
 ok=0
 for _ in $(seq 1 60); do
-  if [ -f "$OUT/think.cap" ] && [ -f "$OUT/plan.cap" ] && [ -f "$OUT/build-impl.cap" ]; then ok=1; break; fi
+  ps -eo args 2>/dev/null >> "$PSLOG" || ps -ax -o command 2>/dev/null >> "$PSLOG" || true
+  if [ -f "$OUT/think.cap" ] && [ -f "$OUT/plan.cap" ] && [ -f "$OUT/build-impl.cap" ]; then ok=1; ps -eo args 2>/dev/null >> "$PSLOG" || true; break; fi
   if ! kill -0 "$FLEET_PID" >/dev/null 2>&1; then echo "--- fleet.log ---"; cat "$SBX/fleet.log" 2>/dev/null; fail "fleet exited before residents recorded their env"; fi
   sleep 0.25
 done
 [ "$ok" -eq 1 ] || { echo "--- fleet.log ---"; cat "$SBX/fleet.log" 2>/dev/null; fail "residents never recorded their env (fleet didn't bring them up)"; }
 
-cap_for() { printf '%s' "$1" | openssl dgst -sha256 -mac HMAC -macopt "key:$K" | awk '{print $NF}'; }
+# (0) NO SECRET IN ARGV — K and every cap must be absent from the ps samples taken during startup.
+grep -qF "$K" "$PSLOG" && fail "the master key K appeared in a process argv (ps) — secret leaked via command string"
+for role in $ROLES; do
+  grep -qF "$(cap_for "$role")" "$PSLOG" && fail "the $role role cap appeared in a process argv (ps) — secret leaked via command string"
+done
 
 # (1) each resident got the CORRECT cap = HMAC(K, role).
 for role in $ROLES; do

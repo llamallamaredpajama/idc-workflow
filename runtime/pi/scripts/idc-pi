@@ -303,39 +303,47 @@ command_fleet() {
 	local resident_bin="${PI_IDC_RESIDENT_BIN:-}"
 
 	if [[ "$dry_run" == "1" ]]; then
-		echo "# idc-pi fleet (supervised, role-cap enforced)"
-		echo "# hub: env -i … PI_COMS_NET_ROLE_HMAC_KEY=<in-memory K> bun coms-net-server.ts"
+		echo "# idc-pi fleet (supervised, role-cap enforced) -> bun fleet-supervisor.ts"
+		echo "# K + caps are passed to children via execve env maps (never argv); spec is non-secret."
+		echo "# hub: coms-net-server.ts (env PI_COMS_NET_ROLE_HMAC_KEY=<in-memory K>)"
 		for role in "${roles[@]}"; do
-			echo "# resident $role: env -i … PI_COMS_NET_ROLE_CAP=<HMAC(K,$role)> ${resident_bin:-pi} …"
+			echo "# resident $role: ${resident_bin:-pi} … (env PI_COMS_NET_ROLE_CAP=<HMAC(K,$role)>)"
 		done
 		return
 	fi
 
-	# 1) Hub child — K via real env (never filed, never a command string). Bearer is auto-generated
-	#    by the hub into its 0600 secret file (unchanged), or supplied explicitly via AUTH_TOKEN.
-	local hub_env=(env -i "${SAFE_ENV_PAIRS[@]}" "PI_COMS_NET_PROJECT=$PROJECT" "PI_IDC_HARNESS_REPO=$HARNESS_REPO" "PI_COMS_NET_ROLE_HMAC_KEY=$ROLE_HMAC_KEY")
-	[[ -n "$AUTH_TOKEN" ]] && hub_env+=("PI_COMS_NET_AUTH_TOKEN=$AUTH_TOKEN")
-	"${hub_env[@]}" bun "$HARNESS_REPO/scripts/coms-net-server.ts" &
-	local hub_pid=$!
-	# Tear the whole fleet down together.
-	trap 'kill "$hub_pid" $(jobs -p) >/dev/null 2>&1' EXIT INT TERM
-	wait_for_server
+	# Gate the whole fleet on governance drift, fail-closed, BEFORE anything spawns (same gate as
+	# `idc-pi run`; codex round-5 finding 2 — the fleet must not bypass it).
+	governance_preflight
 
-	# 2) One resident child per role — ONLY its own cap via real env; never K.
-	local pids=()
+	# Hand the SECRET-FREE spec (each child's argv + base env) to the supervisor via NUL-delimited
+	# files; the supervisor (bun) computes the caps in memory and sets each child's env via execve
+	# maps. K + the optional explicit bearer flow to the supervisor as shell env ASSIGNMENTS (execve
+	# env, NOT argv) — so neither K nor any cap ever appears in a ps-visible command string.
+	local spec; spec="$(mktemp -d)"
+	local base=("${SAFE_ENV_PAIRS[@]}" "PI_COMS_NET_PROJECT=$PROJECT" "PI_IDC_HARNESS_REPO=$HARNESS_REPO")
+	printf '%s\0' "${base[@]}" > "$spec/hub.env"
+	printf '%s\0' bun "$HARNESS_REPO/scripts/coms-net-server.ts" > "$spec/hub.argv"
+	printf '%s\0' "${roles[@]}" > "$spec/roles"
 	for role in "${roles[@]}"; do
 		build_role_argv "$role"
-		local res_env=(env -i "${SAFE_ENV_PAIRS[@]}" "PI_COMS_NET_PROJECT=$PROJECT" "PI_IDC_HARNESS_REPO=$HARNESS_REPO" "PI_COMS_NET_ROLE_CAP=$(role_cap "$role")")
-		[[ -n "$AUTH_TOKEN" ]] && res_env+=("PI_COMS_NET_AUTH_TOKEN=$AUTH_TOKEN")
-		append_idc_runtime_env res_env
+		local renv=("${SAFE_ENV_PAIRS[@]}" "PI_COMS_NET_PROJECT=$PROJECT" "PI_IDC_HARNESS_REPO=$HARNESS_REPO")
+		append_idc_runtime_env renv
+		printf '%s\0' "${renv[@]}" > "$spec/$role.env"
 		if [[ -n "$resident_bin" ]]; then
-			"${res_env[@]}" "$resident_bin" "${ROLE_CMD[@]:1}" &
+			printf '%s\0' "$resident_bin" "${ROLE_CMD[@]:1}" > "$spec/$role.argv"
 		else
-			"${res_env[@]}" "${ROLE_CMD[@]}" &
+			printf '%s\0' "${ROLE_CMD[@]}" > "$spec/$role.argv"
 		fi
-		pids+=($!)
 	done
-	wait
+
+	if [[ -n "$AUTH_TOKEN" ]]; then
+		PI_COMS_NET_ROLE_HMAC_KEY="$ROLE_HMAC_KEY" PI_COMS_NET_AUTH_TOKEN="$AUTH_TOKEN" PI_IDC_FLEET_SPEC="$spec" \
+			exec bun "$HARNESS_REPO/scripts/fleet-supervisor.ts"
+	else
+		PI_COMS_NET_ROLE_HMAC_KEY="$ROLE_HMAC_KEY" PI_IDC_FLEET_SPEC="$spec" \
+			exec bun "$HARNESS_REPO/scripts/fleet-supervisor.ts"
+	fi
 }
 
 command_open_all_cmux() {

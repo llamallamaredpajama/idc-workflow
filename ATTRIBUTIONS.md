@@ -61,5 +61,9 @@ Vendored files:
   runtime loads under the installed agent rather than a stale local cache. `tests/smoke/
   phase8-pi-launchable.sh` import-tests every `-e` extension under Bun to keep this honest.
 
+- **`runtime/pi/scripts/fleet-supervisor.ts`** is original IDC work (not upstream): the secure
+  fleet supervisor that distributes the role-cap master key + per-role caps via execve env maps so
+  no secret appears in a `ps`-visible argv. See `runtime/pi/SECURITY.md`.
+
 The launcher (`runtime/pi/scripts/idc-pi`) is vendored as **reference source**; wiring the
 full multi-role orchestration onto a host is the concern of the Pi adapter (unit B2).

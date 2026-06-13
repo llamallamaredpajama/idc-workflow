@@ -1,0 +1,47 @@
+---
+name: idc-autorun
+description: 'IDC Autorun orchestrator playbook — the one-shot two-lane drainer: plan every unplanned consideration, heal the board, build eligible waves, exit when nothing actionable remains.'
+---
+# idc-autorun
+
+The Autorun orchestrator playbook (`WORKFLOW.md §4.5`). One shot traverses the whole pipe
+top-to-bottom and exits when nothing actionable remains. It is the janitor — running it on a
+quiet repo just heals board hygiene and drains stragglers. Standard tier (the autorun
+parent). Loopable via `/loop /idc:autorun` for standing operation.
+
+## Two lanes
+
+- **Planning lane.** One plan-run durable worker per **unplanned consideration** (parallel
+  analysis/drafting via the runtime adapter), each running `idc:idc-plan` — which itself uses
+  zero teammates (bounded fan-out only). **Board admission is serialized through this parent**
+  — only one consideration sequences against the live board at a time, so the global
+  re-wave stays coherent.
+- **Build lane.** Activates as soon as eligible issues exist and keeps claiming waves via
+  `idc:idc-build`, including ones unblocked mid-run from the operator's phone (a PRD gate
+  approved during the run).
+
+## The drain loop
+
+1. **Scan for unplanned considerations** in `docs/considerations/`. For each, dispatch a
+   planning-lane worker; admit its issues one consideration at a time. Skip this stage when
+   there are none.
+2. **Heal board hygiene in passing** — fix obvious board inconsistencies as you traverse
+   (this is the auto `--fix`; `/idc:doctor` stays read-only).
+3. **Build eligible waves.** Check the build lane's exit condition with
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --tracker <TRACKER.md>`
+   (or the github-backend equivalent via `idc:idc-tracker-adapter`). While it reports
+   `drain: continue`, run `idc:idc-build` on the eligible waves; re-check after each.
+4. **Exit** when no considerations remain unplanned AND the drain predicate reports
+   `drain: complete` — i.e. only Done items, PRD-gated Blocked items, and the operator's gate
+   issues are left. Emit the exit report: considerations planned, issues admitted, waves
+   built/merged, board state, and anything waiting on the operator (the PRD gate).
+
+## Authority & halt
+
+- Owns no canonical writes of its own — every cognitive write happens inside the `idc:idc-plan`
+  and `idc:idc-build` runs it dispatches; it only orchestrates lanes, serializes admission,
+  and heals board hygiene through `idc:idc-tracker-adapter`. Never edits the PRD/spec/plans or
+  source directly.
+- Halt and surface evidence on a blocked plan/build lane, a tracker/gh failure, or operator
+  stop. A pending PRD gate is **not** a halt — it is the one gate; autorun reports it and
+  exits clean.

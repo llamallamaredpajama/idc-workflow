@@ -3,14 +3,32 @@ description: IDC Autorun — one-shot full-pipe drainer (plan unplanned consider
 argument-hint: '[--consideration <path>...] [free-form notes]'
 ---
 
-`/idc:autorun` traverses the whole pipe end-to-end in one shot. It plans every consideration
-not yet planned (one plan-run worker per consideration, with board admission **serialized**
-through the autorun parent), heals board hygiene as it passes, and activates Build to claim
-eligible waves as they land — including ones unblocked mid-run from the operator's phone. On
-a quiet repo it just fixes the board and drains stragglers. It exits with a report when
-nothing actionable remains (only PRD-gated items waiting on the operator). Loopable via
-`/loop /idc:autorun` for standing operation. This is the janitor — `/idc:doctor` stays
-read-only (`WORKFLOW.md §4.5`).
+You are running `/idc:autorun`, the one button. Operate as the Autorun orchestrator **in this
+session**: read `${CLAUDE_PLUGIN_ROOT}/agents/idc-autorun.md` end-to-end, then run its two-lane
+drain loop.
 
-> v2 rebuild status: the Autorun two-lane orchestrator playbook is authored in **Phase 6**
-> of the IDC v2 rebuild. (stub)
+Operator input: `$ARGUMENTS` — optional consideration paths or notes; otherwise drain the
+whole repo.
+
+Traverse the pipe top-to-bottom and exit when nothing actionable remains:
+
+1. **Planning lane** — one plan-run durable worker per unplanned consideration in
+   `docs/considerations/` (each runs `idc:idc-plan`, itself zero-teammate); **serialize board
+   admission** through this parent so the global re-wave stays coherent. Skip if none.
+2. **Heal board hygiene** in passing (the auto `--fix`; `/idc:doctor` stays read-only).
+3. **Build lane** — while eligible build work exists, run `idc:idc-build` on the eligible
+   waves, including waves unblocked mid-run from the operator's phone. Check the exit
+   condition with:
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --tracker <TRACKER.md>
+   ```
+   (or the github-backend equivalent via `idc:idc-tracker-adapter`).
+4. **Exit** when no considerations remain unplanned and the drain predicate reports
+   `drain: complete` (only Done + PRD-gated Blocked + operator gate issues left). Emit the
+   exit report: planned, admitted, built/merged, board state, and anything waiting on the
+   operator.
+
+A pending PRD gate is not a halt — autorun reports it and exits clean. Run
+`/loop /idc:autorun` for always-on operation. Autorun owns no direct canonical or source
+writes — every cognitive write happens inside the `/idc:plan` and `/idc:build` runs it
+dispatches (`WORKFLOW.md §4.5`).

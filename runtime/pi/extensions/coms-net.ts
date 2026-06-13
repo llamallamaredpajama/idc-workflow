@@ -1092,6 +1092,10 @@ export default function (pi: ExtensionAPI) {
 		}
 		// IDC-LOCAL (codex F2): keep the per-session credential for subsequent sends/re-registers.
 		if (resp.session_token) sessionToken = resp.session_token;
+		// IDC-LOCAL (codex round-4 Layer 1.1): adopt the hub-issued registry id. Every later call
+		// (SSE via reg.sse_url, sends, heartbeat, response, delete, self-filters) reads this mutable
+		// identity.session_id, so adopting it here propagates everywhere; re-register re-adopts.
+		if (resp.agent?.session_id) identity.session_id = resp.agent.session_id;
 		// Server may auto-suffix the name on collision.
 		if (resp.agent.name !== identity.name) {
 			try {

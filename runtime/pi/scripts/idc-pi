@@ -48,14 +48,13 @@ HARNESS_REPO="$(cd "$HARNESS_REPO" 2>/dev/null && pwd -P || printf '%s' "$HARNES
 SCRIPT_SELF="$SCRIPT_PATH"
 PROJECT=""
 
-# IDC-LOCAL (codex round-4): hub master key for per-role registration capabilities. The hub
-# validates each role resident's cap = HMAC(key, role) so a resident can prove its role rather than
-# self-assert it. EXPORT PI_COMS_NET_ROLE_HMAC_KEY so `idc-pi server` and every `idc-pi run` in the
-# session share one key; otherwise a per-invocation key is generated (fine for a self-contained
-# launch where the hub + residents come from the same exported env). The key is NEVER written to a
-# file — residents can read same-user 0600 files, so it stays in env only and each resident receives
-# ONLY its own role's cap (this raises the bar against cross-role escalation; on a same-OS-user host
-# it is defense-in-depth, not an absolute boundary — see runtime/pi/SECURITY.md).
+# IDC-LOCAL (codex round-4): hub master key for per-role registration capabilities, used ONLY by the
+# supervised `idc-pi fleet` mode — which holds K in this one process's memory and direct-spawns the
+# hub + residents, so K reaches only the hub and each resident receives only its own HMAC(K, role)
+# cap (K never filed, never in a ps-visible string). The cmux/iterm pane mode does NOT use K (it
+# runs unconfigured) because no channel through separate `env -i` panes is both secret and shared.
+# K is taken from the env if present (so a wrapper can pin it), else generated in memory here.
+# See runtime/pi/SECURITY.md for the two modes + the same-OS-user residual.
 ROLE_HMAC_KEY="${PI_COMS_NET_ROLE_HMAC_KEY:-}"
 if [[ -z "$ROLE_HMAC_KEY" ]]; then
 	ROLE_HMAC_KEY="$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
@@ -77,6 +76,7 @@ Usage:
   idc-pi open-all [--dry-run] [pi args...]
   idc-pi open <roles...> [--dry-run]
   idc-pi run <role> [--dry-run] [pi args...]
+  idc-pi fleet [roles...] [--dry-run]      # SECURE supervised launch (role-cap enforced)
   idc-pi open-all-cmux [--dry-run]
   idc-pi open-cmux <roles...> [--dry-run]
   idc-pi cmux-doctor
@@ -146,6 +146,7 @@ main() {
 		open-all) command_open_all "$@" ;;
 		open) command_open "$@" ;;
 		run) command_run "$@" ;;
+		fleet) command_fleet "$@" ;;
 		open-all-cmux) command_open_all_cmux "$@" ;;
 		open-cmux) command_open_cmux "$@" ;;
 		cmux-doctor) command_cmux_doctor "$@" ;;
@@ -177,8 +178,11 @@ command_server() {
 	fi
 	cd "$TARGET_REPO"
 	build_safe_env_pairs
-	# IDC-LOCAL (codex round-4): give the hub the master key + the explicit bearer (if any).
-	local env_cmd=(env -i "${SAFE_ENV_PAIRS[@]}" "PI_COMS_NET_PROJECT=$PROJECT" "PI_IDC_HARNESS_REPO=$HARNESS_REPO" "PI_COMS_NET_ROLE_HMAC_KEY=$ROLE_HMAC_KEY")
+	# IDC-LOCAL (codex round-4): standalone/pane hub launch is UNCONFIGURED for role caps — it does
+	# NOT inject the master key K (each pane is a separate `env -i` invocation, so a per-pane K can't
+	# match the residents'; baking K into the ps-visible pane string would leak it). Role-cap
+	# enforcement lives only in the supervised `idc-pi fleet` (one in-memory K). See runtime/pi/SECURITY.md.
+	local env_cmd=(env -i "${SAFE_ENV_PAIRS[@]}" "PI_COMS_NET_PROJECT=$PROJECT" "PI_IDC_HARNESS_REPO=$HARNESS_REPO")
 	[[ -n "$AUTH_TOKEN" ]] && env_cmd+=("PI_COMS_NET_AUTH_TOKEN=$AUTH_TOKEN")
 	if (( ${#extra[@]} )); then
 		exec "${env_cmd[@]}" bun "$HARNESS_REPO/scripts/coms-net-server.ts" "${extra[@]}"
@@ -267,12 +271,71 @@ command_run() {
 		build_role_argv "$role"
 	fi
 	build_safe_env_pairs
-	# IDC-LOCAL (codex round-4): hand the resident ONLY its own role's registration capability (env)
-	# — never the master key. Plus the explicit bearer passthrough (if any).
-	local env_cmd=(env -i "${SAFE_ENV_PAIRS[@]}" "PI_COMS_NET_PROJECT=$PROJECT" "PI_IDC_HARNESS_REPO=$HARNESS_REPO" "PI_COMS_NET_ROLE_CAP=$(role_cap "$role")")
+	# IDC-LOCAL (codex round-4): standalone/pane resident launch is UNCONFIGURED for role caps (the
+	# pane hub above runs without K, so no cap is required). The role capability is injected ONLY by
+	# the supervised `idc-pi fleet`, which holds K in memory and direct-spawns residents. (Bearer
+	# passthrough kept for the explicit-token / non-loopback case.)
+	local env_cmd=(env -i "${SAFE_ENV_PAIRS[@]}" "PI_COMS_NET_PROJECT=$PROJECT" "PI_IDC_HARNESS_REPO=$HARNESS_REPO")
 	[[ -n "$AUTH_TOKEN" ]] && env_cmd+=("PI_COMS_NET_AUTH_TOKEN=$AUTH_TOKEN")
 	append_idc_runtime_env env_cmd
 	exec "${env_cmd[@]}" "${ROLE_CMD[@]}"
+}
+
+# IDC-LOCAL (codex round-4 Layer 2): the SECURE supervised launch. ONE process holds the role-cap
+# master key K in memory and DIRECT-spawns the hub + every resident as its own child, setting each
+# child's environ via a real `env -i` array — so K reaches ONLY the hub and each resident receives
+# ONLY its own role's cap. K never touches disk and never appears in a ps-visible command string
+# (unlike the cmux/iterm pane mode, which therefore runs unconfigured). The bearer stays on its
+# existing 0600 server.secret.json channel (a legitimately-shared secret). See runtime/pi/SECURITY.md.
+#
+# Test seam: PI_IDC_RESIDENT_BIN overrides the `pi` binary (a fake resident for the smoke) so the
+# distribution property — each child gets its cap, none gets K — is verifiable without a real agent.
+command_fleet() {
+	local dry_run=0
+	local roles=()
+	parse_dry_run dry_run roles "$@"
+	if [[ "${#roles[@]}" -eq 0 ]]; then roles=("${ALL_ROLES[@]}"); fi
+	local role
+	for role in "${roles[@]}"; do validate_role "$role"; done
+
+	cd "$TARGET_REPO"
+	build_safe_env_pairs
+	local resident_bin="${PI_IDC_RESIDENT_BIN:-}"
+
+	if [[ "$dry_run" == "1" ]]; then
+		echo "# idc-pi fleet (supervised, role-cap enforced)"
+		echo "# hub: env -i … PI_COMS_NET_ROLE_HMAC_KEY=<in-memory K> bun coms-net-server.ts"
+		for role in "${roles[@]}"; do
+			echo "# resident $role: env -i … PI_COMS_NET_ROLE_CAP=<HMAC(K,$role)> ${resident_bin:-pi} …"
+		done
+		return
+	fi
+
+	# 1) Hub child — K via real env (never filed, never a command string). Bearer is auto-generated
+	#    by the hub into its 0600 secret file (unchanged), or supplied explicitly via AUTH_TOKEN.
+	local hub_env=(env -i "${SAFE_ENV_PAIRS[@]}" "PI_COMS_NET_PROJECT=$PROJECT" "PI_IDC_HARNESS_REPO=$HARNESS_REPO" "PI_COMS_NET_ROLE_HMAC_KEY=$ROLE_HMAC_KEY")
+	[[ -n "$AUTH_TOKEN" ]] && hub_env+=("PI_COMS_NET_AUTH_TOKEN=$AUTH_TOKEN")
+	"${hub_env[@]}" bun "$HARNESS_REPO/scripts/coms-net-server.ts" &
+	local hub_pid=$!
+	# Tear the whole fleet down together.
+	trap 'kill "$hub_pid" $(jobs -p) >/dev/null 2>&1' EXIT INT TERM
+	wait_for_server
+
+	# 2) One resident child per role — ONLY its own cap via real env; never K.
+	local pids=()
+	for role in "${roles[@]}"; do
+		build_role_argv "$role"
+		local res_env=(env -i "${SAFE_ENV_PAIRS[@]}" "PI_COMS_NET_PROJECT=$PROJECT" "PI_IDC_HARNESS_REPO=$HARNESS_REPO" "PI_COMS_NET_ROLE_CAP=$(role_cap "$role")")
+		[[ -n "$AUTH_TOKEN" ]] && res_env+=("PI_COMS_NET_AUTH_TOKEN=$AUTH_TOKEN")
+		append_idc_runtime_env res_env
+		if [[ -n "$resident_bin" ]]; then
+			"${res_env[@]}" "$resident_bin" "${ROLE_CMD[@]:1}" &
+		else
+			"${res_env[@]}" "${ROLE_CMD[@]}" &
+		fi
+		pids+=($!)
+	done
+	wait
 }
 
 command_open_all_cmux() {

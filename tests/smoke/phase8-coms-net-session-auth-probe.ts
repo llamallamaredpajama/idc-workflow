@@ -144,6 +144,14 @@ async function main() {
 	const crossRole = await http("POST", "/v1/agents/register", { session_id: "sa-mint-3", project: PROJECT, name: "think" }, { "x-coms-role-cap": roleCapFor("build-impl") });
 	expect(crossRole.status === 403, "ROLE-CAP: a valid build-impl cap cannot register as think (role-specific)", `expected 403, got ${crossRole.status}`);
 
+	// (5) HUB-ISSUED ID (codex round-4 Layer 1.1): the hub issues the registry id for a fresh
+	//     registration and ignores the caller-chosen one (removes caller control of the id namespace).
+	const proposed = "sa-caller-chosen-id";
+	const issued = await http("POST", "/v1/agents/register", { session_id: proposed, project: PROJECT, name: "build-finish" }, { "x-coms-role-cap": roleCapFor("build-finish") });
+	expect(issued.status === 200 && typeof issued.json?.agent?.session_id === "string" && issued.json.agent.session_id !== proposed,
+		"HUB-ISSUED-ID: a fresh registration gets a hub-issued id, not the caller's",
+		`got status=${issued.status} id=${JSON.stringify(issued.json?.agent?.session_id)}`);
+
 	if (failures > 0) { console.error(`${failures} session-auth gap(s)`); process.exit(1); }
 	console.log("every session-scoped endpoint is token-bound; role-mint blocked; duplicate residents stay ACL-resolvable");
 }

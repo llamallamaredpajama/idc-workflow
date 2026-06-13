@@ -605,6 +605,11 @@ async function handleRegister(req: Request): Promise<Response> {
 	let resolvedName = desiredName;
 	const existing = p.agents.get(body.session_id);
 	const isReregister = !!existing;
+	// IDC-LOCAL (codex round-4 Layer 1.1): the HUB issues the registry id for a FRESH registration
+	// (don't trust a caller-chosen id); a re-registration keeps the id it presents (gated by its
+	// per-session token). The client adopts the returned agent.session_id. Defense-in-depth over the
+	// tombstone + per-session-token gates: removes caller control of the session-id namespace.
+	const sessionId = existing ? body.session_id : ulid();
 	// IDC-LOCAL (codex F2): per-session credential. A re-registration must present the existing
 	// session's own token (proving it is the original registrant) — otherwise a bearer-token holder
 	// could hijack a live session_id and impersonate its role. A fresh session is issued a new token.
@@ -648,7 +653,7 @@ async function handleRegister(req: Request): Promise<Response> {
 	}
 
 	const card: AgentCard = {
-		session_id: body.session_id,
+		session_id: sessionId,
 		name: resolvedName,
 		purpose: body.purpose ?? "",
 		model: body.model ?? "unknown",
@@ -671,12 +676,12 @@ async function handleRegister(req: Request): Promise<Response> {
 	};
 
 	if (existing && existing.name !== entry.name) {
-		nameIndexRemove(p, existing.name, body.session_id);
+		nameIndexRemove(p, existing.name, sessionId);
 	}
-	p.agents.set(body.session_id, entry);
-	nameIndexAdd(p, entry.name, body.session_id);
+	p.agents.set(sessionId, entry);
+	nameIndexAdd(p, entry.name, sessionId);
 
-	logRegister(entry.name, projectName, body.session_id, isReregister);
+	logRegister(entry.name, projectName, sessionId, isReregister);
 
 	// Emit agent_joined to OTHER streams (do not echo to a stream that may not
 	// exist yet — the registering client opens SSE next).
@@ -687,7 +692,7 @@ async function handleRegister(req: Request): Promise<Response> {
 		body.session_id,
 	);
 
-	const sse_url = `/v1/events?project=${encodeURIComponent(projectName)}&session_id=${encodeURIComponent(body.session_id)}`;
+	const sse_url = `/v1/events?project=${encodeURIComponent(projectName)}&session_id=${encodeURIComponent(sessionId)}`;
 	const resp: RegisterResponse = {
 		ok: true,
 		agent: entryToCard(entry),

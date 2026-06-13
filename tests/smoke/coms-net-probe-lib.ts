@@ -39,7 +39,9 @@ export async function registerPeer(http: Http, role: string, sessionId: string, 
 	const headers = cap ? { "x-coms-role-cap": cap } : undefined;
 	const { status, json } = await http("POST", "/v1/agents/register", { session_id: sessionId, project, name: role }, headers);
 	if (status !== 200 || !json?.ok) throw new Error(`register(${role}) failed: status=${status} body=${JSON.stringify(json)}`);
-	return { sessionId, token: json.session_token };
+	// IDC-LOCAL (Layer 1.1): adopt the HUB-issued registry id (the hub ignores our proposed id for a
+	// fresh registration), mirroring the real client — all later calls key off this id.
+	return { sessionId: json.agent?.session_id ?? sessionId, token: json.session_token };
 }
 
 // A send carrying the sender's per-session token (the x-coms-session-token credential header).

@@ -26,7 +26,7 @@ against a fully-malicious same-user process.
 |---|---|---|
 | **Glass-wall directional ACL** (client + hub) | A role resident may message only peers strictly downstream in the IDC river (+ Ripple). Enforced on the hub before queue/deliver, off the launcher-proven role — not a self-asserted name. | `evaluateComsNetSendForRole`, `handleSendMessage` |
 | **Per-session token** | Every session-scoped endpoint (send, SSE `/v1/events`, response submit, get, await, heartbeat, delete) requires the session's own token (`x-coms-session-token`), issued at registration and `timingSafeEqual`-compared. One resident cannot hijack another's stream, forge its reply, poll its messages, forge its liveness, or unregister it. | `sessionAuthorized` |
-| **Per-role registration capability** | Registering an IDC role requires `x-coms-role-cap = HMAC(K, role)`, where `K` is a hub master key the `idc-pi` launcher holds and hands each resident **only its own** role's cap (env-only, never a file). A resident cannot *mint* a role it wasn't launched as. The ACL runs off the proven `canonical_role`. | `roleCap`, `handleRegister` |
+| **Per-role registration capability** (`idc-pi fleet` mode only) | Registering an IDC role requires `x-coms-role-cap = HMAC(K, role)`, where `K` is a hub master key the **fleet supervisor** holds in memory and hands each resident **only its own** role's cap (env-only, never a file). A resident cannot *mint* a role it wasn't launched as. The ACL runs off the proven `canonical_role`. **In pane mode the hub is unconfigured** and this control is off (see below). | `roleCap`, `handleRegister`, `command_fleet` |
 
 These together make role identity and per-session actions **launcher-proven**, so workflow
 integrity (the river order, the glass wall) holds even if a resident's LLM is prompt-injected into
@@ -45,11 +45,26 @@ trying to message upstream or impersonate a peer.
   `PI_COMS_NET_AUTH_TOKEN` (the launcher passes it through) and re-evaluate this model — it was
   designed for loopback.
 
-## Operating notes
+## Two launch modes (where the role-cap boundary actually holds)
 
-- **Provisioning the master key:** export `PI_COMS_NET_ROLE_HMAC_KEY` before launching so
-  `idc-pi server` and every `idc-pi run` in the session share one key; otherwise a per-invocation
-  key is generated (only coherent within a single self-contained launch).
-- **Unconfigured hub:** with no `PI_COMS_NET_ROLE_HMAC_KEY`, role-cap enforcement is **off**
-  (generic coms-net use); role authority then falls back to the resolved name. The `idc-pi`
-  launcher always provisions a key, so the enforced path is the default for IDC.
+The role-cap boundary requires the master key `K` to reach the hub and each resident over a channel
+that is **both secret and shared** — which only one launch mode provides:
+
+- **`idc-pi fleet` — the SECURE supervised mode (role-cap ENFORCED).** One supervisor process holds
+  `K` in memory and **direct-spawns** the hub and every resident as its own child, setting each
+  child's environ via a real `env -i` array. `K` reaches only the hub; each resident gets only its
+  own `HMAC(K, role)` cap. `K` never touches disk and never appears in a `ps`-visible command
+  string. This is the mode where role-minting is actually closed. Test seam: `PI_IDC_RESIDENT_BIN`
+  (a fake resident) — `tests/smoke/phase8-pi-fleet-secret.sh` proves each resident gets only its cap
+  and never `K`.
+- **`idc-pi open` / `open-all` / `open-cmux` / iTerm — the dev/inspect pane mode (role-cap OFF).**
+  Each pane is a separate `env -i` invocation launched via a `ps`-visible command string. There is
+  **no channel through cmux panes that is both secret and cross-pane**: filing `K` (like the bearer)
+  would make it same-user-readable, and putting `K` in the pane string would leak it via `ps`. So
+  the pane mode runs the hub **unconfigured** — role authority falls back to the resolved name and
+  role-minting is open (bounded by the OS user, as above). Use it for development/inspection; use
+  **`idc-pi fleet`** when you want the enforced boundary.
+
+> Earlier guidance to "export `PI_COMS_NET_ROLE_HMAC_KEY` so server and run share one key" was wrong
+> for the pane path (`env -i` strips it; whitelisting it would leak it via `ps`) — superseded by the
+> two modes above.

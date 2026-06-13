@@ -185,6 +185,37 @@ command_open() {
 	open_cmux_workspace "$dry_run" 0 "${args[@]}"
 }
 
+# IDC-LOCAL: fail-closed governance gate (issue #28 / codex F4). A long-lived role resident
+# loads the compiled governance sidecar (docs/workflow/idc-governance-contract.yaml) once and
+# consults it instead of re-reading WORKFLOW.md. Before spawning a resident we prove that the
+# sidecar still matches the governed sources on disk (scripts/idc_governance_check.py is
+# fail-closed: drift or a missing/malformed sidecar exits non-zero). A failing check BLOCKS the
+# launch so no resident boots on governance it cannot prove. Non-IDC repos (no WORKFLOW.md) are
+# not gated. Bypass with PI_IDC_GOVERNANCE_CHECK=off (reported on stderr).
+governance_preflight() {
+	if [[ "${PI_IDC_GOVERNANCE_CHECK:-on}" == "off" ]]; then
+		echo "idc-pi: governance preflight SKIPPED (PI_IDC_GOVERNANCE_CHECK=off)" >&2
+		return 0
+	fi
+	[[ -f "$TARGET_REPO/WORKFLOW.md" ]] || return 0  # not an IDC-governed repo
+	local plugin_root check
+	plugin_root="$(cd "$HARNESS_REPO/../.." 2>/dev/null && pwd -P || true)"
+	check="$plugin_root/scripts/idc_governance_check.py"
+	if [[ ! -f "$check" ]]; then
+		echo "idc-pi: governance preflight: checker not found at $check —" >&2
+		echo "        cannot verify governance; set PI_IDC_GOVERNANCE_CHECK=off to bypass." >&2
+		exit 3
+	fi
+	if python3 "$check" --repo "$TARGET_REPO" >&2; then
+		echo "idc-pi: governance preflight OK (compiled sidecar matches governed sources)" >&2
+		return 0
+	fi
+	echo "idc-pi: governance preflight FAILED (fail-closed) — recompile the sidecar:" >&2
+	echo "        python3 \"$plugin_root/scripts/idc_governance_compile.py\" --repo \"$TARGET_REPO\"" >&2
+	echo "        then relaunch (bypass: PI_IDC_GOVERNANCE_CHECK=off)." >&2
+	exit 3
+}
+
 command_run() {
 	local dry_run=0
 	local args=()
@@ -206,6 +237,7 @@ command_run() {
 		echo "$cmd"
 		return
 	fi
+	governance_preflight
 	cd "$TARGET_REPO"
 	if (( ${#extra[@]} )); then
 		build_role_argv "$role" "${extra[@]}"

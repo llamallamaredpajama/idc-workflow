@@ -26,6 +26,7 @@ for t in \
   phase8-pi-runtime \
   phase8-pi-review-verdict \
   phase8-governance \
+  phase8-pi-governance-gate \
   phase8-adapter-pi; do
   if out="$(bash "$HERE/$t.sh" 2>&1)"; then
     echo "  PASS  $t"

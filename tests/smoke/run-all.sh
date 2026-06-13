@@ -20,7 +20,8 @@ for t in \
   phase4-review-agent \
   phase5-ripple \
   phase6-autorun \
-  phase7-lifecycle; do
+  phase7-lifecycle \
+  phase8-pi-runtime; do
   if out="$(bash "$HERE/$t.sh" 2>&1)"; then
     echo "  PASS  $t"
   else

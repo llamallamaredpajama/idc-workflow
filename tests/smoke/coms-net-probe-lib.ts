@@ -22,10 +22,22 @@ export function makeHttp(serverUrl: string, token: string): Http {
 
 export type Peer = { sessionId: string; token: string };
 
-// Register a role peer under an explicit session id; returns its per-session token (the credential
-// the hub binds sends to). Throws on a non-ok hub response.
+// The launcher-issued role capability = HMAC(K, role). The smoke provisions the hub master key K
+// via PI_COMS_NET_ROLE_HMAC_KEY (env), and here we compute each role's cap to simulate what idc-pi
+// hands a resident. Empty when K is unset (unconfigured hub — no cap enforcement).
+import { createHmac } from "node:crypto";
+export function roleCapFor(role: string): string {
+	const k = process.env.PI_COMS_NET_ROLE_HMAC_KEY ?? "";
+	return k ? createHmac("sha256", k).update(role).digest("hex") : "";
+}
+
+// Register a role peer under an explicit session id; presents its launcher-issued role cap (when a
+// hub master key is configured) so a role-shaped registration is accepted. Returns its per-session
+// token (the credential the hub binds sends to). Throws on a non-ok hub response.
 export async function registerPeer(http: Http, role: string, sessionId: string, project: string): Promise<Peer> {
-	const { status, json } = await http("POST", "/v1/agents/register", { session_id: sessionId, project, name: role });
+	const cap = roleCapFor(role);
+	const headers = cap ? { "x-coms-role-cap": cap } : undefined;
+	const { status, json } = await http("POST", "/v1/agents/register", { session_id: sessionId, project, name: role }, headers);
 	if (status !== 200 || !json?.ok) throw new Error(`register(${role}) failed: status=${status} body=${JSON.stringify(json)}`);
 	return { sessionId, token: json.session_token };
 }

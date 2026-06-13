@@ -1,13 +1,16 @@
 // phase8-coms-net-session-auth-probe.ts — every session-scoped hub endpoint binds to the
-// per-session token, and duplicate role residents stay ACL-resolvable (codex round-2 findings).
+// per-session token; role identity is bound to a launcher capability; duplicate role residents
+// stay ACL-resolvable (codex round-2..4 findings).
 //
-// Boots against the already-running hub. Covers:
-//   1. SSE hijack: a foreign token cannot open another session's /v1/events stream (403); the
-//      session's own token can (200).
-//   2. Response forge: a sender cannot submit the terminal response as the target (403); the
-//      real target (its own token) can (200).
-//   3. Duplicate resident: a second `build-impl` is uniquified to `build-impl-2` (hyphenated) and
-//      still resolves to its IdcRole, so it can send downstream to build-review (200).
+// Boots against the already-running hub. Covers (each foreign/no token -> 403, own token -> 200):
+//   1. SSE stream (/v1/events) hijack.
+//   2. Response forge (terminal response submit, bound to the TARGET's token).
+//   2b/2c. Message GET + AWAIT (bound to the SENDER's token).
+//   2d/2e. Heartbeat + Delete (session-mutation endpoints).
+//   3. Duplicate resident: a second `build-impl` uniquifies to `build-impl-2` and still resolves
+//      to its IdcRole, so it can send downstream (200).
+//   4. Role-cap: registering an IDC role WITHOUT / with a WRONG launcher cap is rejected (403) —
+//      role-minting is blocked at registration.
 //
 // Usage: bun phase8-coms-net-session-auth-probe.ts <serverUrl> <token> [project]
 // Exit 0 = all bound; exit 1 = a gap (printed).
@@ -81,6 +84,28 @@ async function main() {
 	const getOwn = await http("GET", getPath, undefined, { "x-coms-session-token": buildImpl.token });
 	expect(getOwn.status === 200, "GET message: sender's own token accepted", `expected 200, got ${getOwn.status}`);
 
+	// (2c) AWAIT must be sender-token-bound too (the round-4 /await fix).
+	const awaitPath = `/v1/messages/${msgId}/await?project=${encodeURIComponent(PROJECT)}&sender_session=${encodeURIComponent(buildImpl.sessionId)}`;
+	const awaitForeign = await http("GET", awaitPath, undefined, { "x-coms-session-token": buildReview.token });
+	expect(awaitForeign.status === 403, "AWAIT message: foreign token rejected", `expected 403, got ${awaitForeign.status}`);
+	const awaitOwn = await http("GET", awaitPath, undefined, { "x-coms-session-token": buildImpl.token });
+	expect(awaitOwn.status === 200, "AWAIT message: sender's own token accepted", `expected 200, got ${awaitOwn.status}`);
+
+	// (2d) HEARTBEAT must be session-token-bound (forging another peer's liveness/context).
+	const hbPath = `/v1/agents/${encodeURIComponent(buildImpl.sessionId)}/heartbeat`;
+	const hbForeign = await http("POST", hbPath, { project: PROJECT, status: "online" }, { "x-coms-session-token": buildReview.token });
+	expect(hbForeign.status === 403, "HEARTBEAT: foreign token rejected", `expected 403, got ${hbForeign.status}`);
+	const hbOwn = await http("POST", hbPath, { project: PROJECT, status: "online" }, { "x-coms-session-token": buildImpl.token });
+	expect(hbOwn.status === 200, "HEARTBEAT: own token accepted", `expected 200, got ${hbOwn.status}`);
+
+	// (2e) DELETE must be session-token-bound (forced-offline / unregister of another peer).
+	const sacrificial = await register("ripple", "sa-ripple-victim");
+	const delPath = (sid: string) => `/v1/agents/${encodeURIComponent(sid)}?project=${encodeURIComponent(PROJECT)}`;
+	const delForeign = await http("DELETE", delPath(sacrificial.sessionId), undefined, { "x-coms-session-token": buildImpl.token });
+	expect(delForeign.status === 403, "DELETE: foreign token cannot unregister another peer", `expected 403, got ${delForeign.status}`);
+	const delOwn = await http("DELETE", delPath(sacrificial.sessionId), undefined, { "x-coms-session-token": sacrificial.token });
+	expect(delOwn.status === 200, "DELETE: own token unregisters self", `expected 200, got ${delOwn.status}`);
+
 	// (3) Duplicate resident — a second build-impl uniquifies to build-impl-2 and can still send
 	//     downstream (resolves to the build-impl IdcRole).
 	const dup = await register("build-impl", "sa-build-impl-2");  // hub uniquifies the name -> build-impl-2
@@ -92,8 +117,16 @@ async function main() {
 		"DUPLICATE: a second build-impl (uniquified, hyphenated) can send downstream",
 		`expected 200+msg_id, got status=${dupSend.status} body=${JSON.stringify(dupSend.json)}`);
 
+	// (4) ROLE-CAP (codex round-4): minting a role is rejected. A fresh session claiming an IDC role
+	//     without the launcher-issued cap (or with a wrong one) cannot register — so it can never
+	//     reach the ACL as that role. The honest registrations above already prove a VALID cap works.
+	const noCap = await http("POST", "/v1/agents/register", { session_id: "sa-mint-1", project: PROJECT, name: "think" }, {});
+	expect(noCap.status === 403, "ROLE-CAP: registering 'think' WITHOUT a cap is rejected (mint blocked)", `expected 403, got ${noCap.status}`);
+	const badCap = await http("POST", "/v1/agents/register", { session_id: "sa-mint-2", project: PROJECT, name: "think" }, { "x-coms-role-cap": "deadbeef" });
+	expect(badCap.status === 403, "ROLE-CAP: registering 'think' with a WRONG cap is rejected", `expected 403, got ${badCap.status}`);
+
 	if (failures > 0) { console.error(`${failures} session-auth gap(s)`); process.exit(1); }
-	console.log("every session-scoped endpoint is token-bound; duplicate residents stay ACL-resolvable");
+	console.log("every session-scoped endpoint is token-bound; role-mint blocked; duplicate residents stay ACL-resolvable");
 }
 
 main().catch((e) => { console.error(`session-auth-probe error: ${e?.message ?? e}`); process.exit(2); });

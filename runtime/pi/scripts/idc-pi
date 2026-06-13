@@ -48,6 +48,26 @@ HARNESS_REPO="$(cd "$HARNESS_REPO" 2>/dev/null && pwd -P || printf '%s' "$HARNES
 SCRIPT_SELF="$SCRIPT_PATH"
 PROJECT=""
 
+# IDC-LOCAL (codex round-4): hub master key for per-role registration capabilities. The hub
+# validates each role resident's cap = HMAC(key, role) so a resident can prove its role rather than
+# self-assert it. EXPORT PI_COMS_NET_ROLE_HMAC_KEY so `idc-pi server` and every `idc-pi run` in the
+# session share one key; otherwise a per-invocation key is generated (fine for a self-contained
+# launch where the hub + residents come from the same exported env). The key is NEVER written to a
+# file — residents can read same-user 0600 files, so it stays in env only and each resident receives
+# ONLY its own role's cap (this raises the bar against cross-role escalation; on a same-OS-user host
+# it is defense-in-depth, not an absolute boundary — see runtime/pi/SECURITY.md).
+ROLE_HMAC_KEY="${PI_COMS_NET_ROLE_HMAC_KEY:-}"
+if [[ -z "$ROLE_HMAC_KEY" ]]; then
+	ROLE_HMAC_KEY="$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+fi
+# Optional explicit bearer passthrough — fixes the env -i strip so the documented explicit-token /
+# non-loopback hub mode is reachable; empty => the hub auto-generates a loopback token (the default).
+AUTH_TOKEN="${PI_COMS_NET_AUTH_TOKEN:-}"
+
+role_cap() {  # $1 = IDC role -> HMAC-SHA256(ROLE_HMAC_KEY, role); empty if openssl is unavailable
+	printf '%s' "$1" | openssl dgst -sha256 -mac HMAC -macopt "key:$ROLE_HMAC_KEY" 2>/dev/null | awk '{print $NF}'
+}
+
 usage() {
 	cat <<'USAGE'
 IDC Pi Network portable launcher
@@ -157,7 +177,9 @@ command_server() {
 	fi
 	cd "$TARGET_REPO"
 	build_safe_env_pairs
-	local env_cmd=(env -i "${SAFE_ENV_PAIRS[@]}" "PI_COMS_NET_PROJECT=$PROJECT" "PI_IDC_HARNESS_REPO=$HARNESS_REPO")
+	# IDC-LOCAL (codex round-4): give the hub the master key + the explicit bearer (if any).
+	local env_cmd=(env -i "${SAFE_ENV_PAIRS[@]}" "PI_COMS_NET_PROJECT=$PROJECT" "PI_IDC_HARNESS_REPO=$HARNESS_REPO" "PI_COMS_NET_ROLE_HMAC_KEY=$ROLE_HMAC_KEY")
+	[[ -n "$AUTH_TOKEN" ]] && env_cmd+=("PI_COMS_NET_AUTH_TOKEN=$AUTH_TOKEN")
 	if (( ${#extra[@]} )); then
 		exec "${env_cmd[@]}" bun "$HARNESS_REPO/scripts/coms-net-server.ts" "${extra[@]}"
 	else
@@ -245,7 +267,10 @@ command_run() {
 		build_role_argv "$role"
 	fi
 	build_safe_env_pairs
-	local env_cmd=(env -i "${SAFE_ENV_PAIRS[@]}" "PI_COMS_NET_PROJECT=$PROJECT" "PI_IDC_HARNESS_REPO=$HARNESS_REPO")
+	# IDC-LOCAL (codex round-4): hand the resident ONLY its own role's registration capability (env)
+	# — never the master key. Plus the explicit bearer passthrough (if any).
+	local env_cmd=(env -i "${SAFE_ENV_PAIRS[@]}" "PI_COMS_NET_PROJECT=$PROJECT" "PI_IDC_HARNESS_REPO=$HARNESS_REPO" "PI_COMS_NET_ROLE_CAP=$(role_cap "$role")")
+	[[ -n "$AUTH_TOKEN" ]] && env_cmd+=("PI_COMS_NET_AUTH_TOKEN=$AUTH_TOKEN")
 	append_idc_runtime_env env_cmd
 	exec "${env_cmd[@]}" "${ROLE_CMD[@]}"
 }

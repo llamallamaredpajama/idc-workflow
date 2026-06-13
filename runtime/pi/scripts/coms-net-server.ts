@@ -34,7 +34,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 // IDC-LOCAL (codex F2): the hub is the authoritative glass-wall gate. Reuse the SAME pure ACL
 // decision the client extension uses (single source of truth) so the two can never drift.
-import { evaluateComsNetSendForRole } from "../extensions/idc-role-harness.ts";
+import { evaluateComsNetSendForRole, resolveComsNetPeerRole } from "../extensions/idc-role-harness.ts";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Env-var reads (module scope; all tunables here)
@@ -45,6 +45,12 @@ const PORT = Number(process.env.PI_COMS_NET_PORT ?? 0);
 const PUBLIC_URL = process.env.PI_COMS_NET_PUBLIC_URL;
 const PROJECT = process.env.PI_COMS_NET_PROJECT ?? "default";
 const ENV_TOKEN = process.env.PI_COMS_NET_AUTH_TOKEN;
+// IDC-LOCAL (codex round-4): the hub master key for launcher-issued per-role registration
+// capabilities. When set (the idc-pi launcher provisions it via env), a registration claiming an
+// IDC river role must present x-coms-role-cap = HMAC-SHA256(K, role) — binding role authority to a
+// launcher-held secret instead of the self-asserted display name. Unset = unconfigured (generic
+// coms-net / no role-cap enforcement); role authority then falls back to the (unproven) name.
+const ROLE_HMAC_KEY = process.env.PI_COMS_NET_ROLE_HMAC_KEY ?? "";
 const REG_ROOT = path.join(os.homedir(), ".pi", "coms-net");
 
 const MAX_HOPS = Number(process.env.PI_COMS_NET_MAX_HOPS ?? 5);
@@ -175,6 +181,10 @@ export type RegistryEntry = AgentCard & {
 	// secret, NOT to the caller-supplied `sender_session`, so a shared-bearer-token holder cannot
 	// spoof another peer's identity. Never included in AgentCard / never broadcast (see entryToCard).
 	session_token: string;
+	// IDC-LOCAL (codex round-4): the launcher-proven IDC role (set only when a valid role
+	// capability was presented at registration, or, when unconfigured, the resolved name). The
+	// glass-wall ACL runs off THIS, so role authority never derives from a self-asserted name.
+	canonical_role?: string;
 };
 
 export type ComsMessage = {
@@ -338,6 +348,15 @@ function sessionAuthorized(req: Request, entry: RegistryEntry | undefined): bool
 	if (!entry) return false;
 	const presented = req.headers.get("x-coms-session-token") ?? "";
 	return presented.length > 0 && tokensEqual(presented, entry.session_token);
+}
+
+// IDC-LOCAL (codex round-4): the registration capability for an IDC role — HMAC-SHA256(K, role)
+// over the hub master key. The idc-pi launcher hands each resident ONLY its own role's cap (env),
+// so a resident can prove its role but cannot forge another role's; the master key never leaves
+// the hub. Same-OS-user limitation is documented — this raises the bar against cross-role
+// escalation (prompt injection), it is not an absolute boundary.
+function roleCap(role: string): string {
+	return crypto.createHmac("sha256", ROLE_HMAC_KEY).update(role).digest("hex");
 }
 
 export function json(body: unknown, status = 200): Response {
@@ -608,6 +627,26 @@ async function handleRegister(req: Request): Promise<Response> {
 		resolvedName = resolveUniqueName(p, desiredName);
 	}
 
+	// IDC-LOCAL (codex round-4): bind ROLE authority to a launcher-issued HMAC capability, not the
+	// self-asserted display name. When a hub master key is configured, registering a name that
+	// resolves to an IDC river role requires x-coms-role-cap = HMAC(K, role); the proven role is
+	// recorded as canonical_role and the glass-wall ACL runs off it. Without the key the hub is
+	// unconfigured (generic use) and falls back to the resolved name — no weaker than before.
+	let canonicalRole: string | undefined;
+	const claimedRole = resolveComsNetPeerRole(resolvedName);
+	if (claimedRole) {
+		if (ROLE_HMAC_KEY) {
+			const presentedCap = req.headers.get("x-coms-role-cap") ?? "";
+			if (!presentedCap || !tokensEqual(presentedCap, roleCap(claimedRole))) {
+				logRejected("role_cap", `register ${resolvedName} — role capability missing/invalid`);
+				return errorJson("role_cap_invalid", 403, {
+					reason: "registering an IDC role requires a valid launcher-issued role capability",
+				});
+			}
+		}
+		canonicalRole = claimedRole;
+	}
+
 	const card: AgentCard = {
 		session_id: body.session_id,
 		name: resolvedName,
@@ -628,6 +667,7 @@ async function handleRegister(req: Request): Promise<Response> {
 		registered_at: existing?.registered_at ?? nowIso(),
 		last_seen_at: nowIso(),
 		session_token: sessionToken,
+		canonical_role: canonicalRole,
 	};
 
 	if (existing && existing.name !== entry.name) {
@@ -960,11 +1000,14 @@ async function handleSendMessage(req: Request): Promise<Response> {
 	// IDC-LOCAL (codex F2): authoritative server-side glass-wall ACL. The directional rule was
 	// enforced only in the client extension, so any holder of the shared bearer token could POST
 	// an upstream (or otherwise forbidden) send straight here and bypass it. Enforce it on the
-	// hub — using the registered sender/target peer names (roles) — BEFORE the message is queued
-	// or delivered. Mirrors the client's fail-closed decision exactly (same pure function).
-	const acl = evaluateComsNetSendForRole(sender.name, target.name);
+	// hub BEFORE the message is queued or delivered, mirroring the client's fail-closed decision
+	// (same pure function). IDC-LOCAL (codex round-4): evaluate off the launcher-PROVEN
+	// canonical_role, never the self-asserted display name — so a minted role can't send.
+	const senderRole = sender.canonical_role ?? sender.name;
+	const targetRole = target.canonical_role ?? target.name;
+	const acl = evaluateComsNetSendForRole(senderRole, targetRole);
 	if (!acl.allowed) {
-		logRejected("prompt_blocked", `glass-wall ${sender.name} → ${target.name}: ${acl.reason}`);
+		logRejected("prompt_blocked", `glass-wall ${senderRole} → ${targetRole}: ${acl.reason}`);
 		return errorJson("glass_wall_denied", 403, {
 			reason: acl.reason,
 			sender_role: acl.senderRole ?? null,

@@ -43,7 +43,11 @@ Vendored files:
   (`/v1/events`), terminal response submit, heartbeat, and delete — so a shared-bearer-token
   holder cannot spoof another peer's `sender_session`, hijack its stream, or forge its reply.
   Duplicate role residents are uniquified with a hyphenated suffix (`build-impl-2`) so they stay
-  resolvable to their IdcRole under the ACL. A role resident may message
+  resolvable to their IdcRole under the ACL. Role identity itself is bound to a **launcher-issued
+  per-role HMAC capability** (`x-coms-role-cap` = HMAC(K, role)); the ACL runs off the proven
+  `canonical_role`, so a bearer holder cannot *mint* a role by self-asserting its name. The full
+  trust model + its honest residual (defense-in-depth on a same-OS-user host, not an absolute
+  boundary) is documented in `runtime/pi/SECURITY.md`. A role resident may message
   only peers strictly downstream in the IDC river
   (think → plan → sequence → build-impl → build-review → build-finish) plus the Ripple sink;
   upstream/unknown sends are denied fail-closed and logged to the `coms-net-log` channel.

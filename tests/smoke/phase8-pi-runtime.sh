@@ -35,12 +35,19 @@ trap cleanup EXIT
 # Random loopback token so the server never writes a secret file (env token branch).
 TOK="$(openssl rand -hex 16 2>/dev/null || head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 [ -n "$TOK" ] || fail "could not generate an auth token"
+# Hub master key for per-role registration capabilities (codex round-4): the probes compute each
+# role's HMAC cap from it (simulating what idc-pi hands a resident), so role registrations are
+# accepted and the role-cap enforcement path is exercised.
+ROLE_KEY="$(openssl rand -hex 16 2>/dev/null || head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+[ -n "$ROLE_KEY" ] || fail "could not generate a role hmac key"
+export PI_COMS_NET_ROLE_HMAC_KEY="$ROLE_KEY"   # inherited by the probe processes below
 PROJECT="default"
 
 # Boot the hub under Bun with an isolated HOME (registry writes land in $SBX/.pi, not ~/.pi)
 # and an ephemeral port (PORT=0 -> the server picks a free port and records it in server.json).
 env HOME="$SBX" \
     PI_COMS_NET_AUTH_TOKEN="$TOK" \
+    PI_COMS_NET_ROLE_HMAC_KEY="$ROLE_KEY" \
     PI_COMS_NET_PROJECT="$PROJECT" \
     PI_COMS_NET_HOST="127.0.0.1" \
     PI_COMS_NET_PORT="0" \
@@ -85,10 +92,11 @@ BYPASS_TS="$PLUGIN/tests/smoke/phase8-coms-net-bypass-probe.ts"
 [ -f "$BYPASS_TS" ] || fail "hub-ACL bypass probe missing at $BYPASS_TS"
 bun "$BYPASS_TS" "$URL" "$TOK" "$PROJECT" || fail "hub did not enforce the glass-wall ACL on a direct /v1/messages POST (server-side bypass)"
 
-# (5) F2 round-2 — every session-scoped endpoint (SSE, response submit, heartbeat, delete) is
-#     bound to the per-session token, and duplicate role residents stay ACL-resolvable.
+# (5) codex round-2..4 — every session-scoped endpoint (SSE, response submit, get, await,
+#     heartbeat, delete) is bound to the per-session token; role identity is bound to a launcher
+#     capability (role-mint rejected); duplicate role residents stay ACL-resolvable.
 SESSION_AUTH_TS="$PLUGIN/tests/smoke/phase8-coms-net-session-auth-probe.ts"
 [ -f "$SESSION_AUTH_TS" ] || fail "session-auth probe missing at $SESSION_AUTH_TS"
-bun "$SESSION_AUTH_TS" "$URL" "$TOK" "$PROJECT" || fail "a session-scoped hub endpoint is not token-bound (SSE/response forge) or a duplicate resident can't resolve"
+bun "$SESSION_AUTH_TS" "$URL" "$TOK" "$PROJECT" || fail "a session-scoped endpoint is not token-bound, role-mint is not blocked, or a duplicate resident can't resolve"
 
-echo "PASS: vendored coms-net boots under Bun; install --check + /health OK; glass-wall ACL holds (client + hub); session-scoped endpoints token-bound"
+echo "PASS: vendored coms-net boots under Bun; install --check + /health OK; glass-wall ACL holds (client + hub); session endpoints token-bound; role identity capability-bound"

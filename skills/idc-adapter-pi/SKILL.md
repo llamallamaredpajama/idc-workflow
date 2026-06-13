@@ -49,6 +49,14 @@ playbook per runtime.
 
 ### The Build triplet as residents — worked example
 
+> **Launcher status (codex round-4 reconcile):** the coms-net hub *supports* a multi-resident pool
+> — duplicate role names uniquify to a resolvable `build-impl-2` (hyphenated) and the role
+> capability is keyed on the **role**, so every pool member shares one `build-impl` cap. But the
+> vendored **reference** `idc-pi` launcher currently opens **one resident per role**
+> (`--session-id idc-<role>` / `--name <role>`); spawning the N-resident pool below is the Pi
+> adapter's (B2) wiring, not yet produced by `idc-pi run`. The model here is the design + is
+> hub-supported; treat the pool fan-out as adapter-driven.
+
 Build is the explicit three-role triplet realized as a standing **resident pool** (`§2
 decision 7`, `agents/idc-build.md`). Worked example for one wave:
 

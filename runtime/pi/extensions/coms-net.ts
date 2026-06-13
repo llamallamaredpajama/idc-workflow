@@ -629,6 +629,10 @@ export default function (pi: ExtensionAPI) {
 	// IDC-LOCAL (codex F2): per-session credential from register; presented on every send so the
 	// hub binds our identity to it rather than to the spoofable sender_session body field.
 	let sessionToken: string | null = null;
+	// IDC-LOCAL (codex round-4): launcher-issued role capability (HMAC(K, role)) for THIS resident,
+	// provisioned via env. Presented on register so the hub can prove our role authority instead of
+	// trusting the display name. We never hold the master key K — only our own role's cap.
+	const roleCap = process.env.PI_COMS_NET_ROLE_CAP ?? "";
 	let sseUrlPath: string | null = null;
 	const peerCards: Map<string, AgentCard> = new Map();
 	const pendingReplies: Map<string, PendingReply> = new Map();
@@ -656,6 +660,8 @@ export default function (pi: ExtensionAPI) {
 			"Accept": "application/json",
 		};
 		if (sessionToken) headers["x-coms-session-token"] = sessionToken;
+		// The role cap is only consumed by the hub at registration; harmless elsewhere.
+		if (roleCap && urlPath === "/v1/agents/register") headers["x-coms-role-cap"] = roleCap;
 		const init: any = { method, headers };
 		if (body !== undefined) {
 			headers["Content-Type"] = "application/json";

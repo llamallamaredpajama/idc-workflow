@@ -1,266 +1,181 @@
 # WORKFLOW.md — {{PROJECT_NAME}} IDC governance contract
 
-> **This file is a hard contract.** Its existence marks the repo as IDC-governed,
-> and its section numbers are **stable** so the IDC roles can cite governance rules
-> by anchor (e.g. "WORKFLOW.md §4.2"). Keep the numbering stable when you edit.
+> **This file is a hard contract.** Its existence marks the repo as IDC-governed, and its
+> section numbers are **stable** so the IDC roles and skills can cite rules by anchor
+> (e.g. "WORKFLOW.md §3.1"). Keep the numbering stable when you edit.
 
-This repository is governed by the full **IDC** chain — `Think → Plan → Sequence →
-Build`, with `Ripple` handling drift. Each role is the sole writer of its own surface;
-Ripple is the canonical-edit guard for cross-role drift. The chain runs on Claude-Teams
-primitives (TeamCreate, SendMessage). The role slash surfaces are `/idc:think`,
-`/idc:plan`, `/idc:sequence`, `/idc:build`, and `/idc:ripple`.
+IDC carries an idea from a raw thought to merged, tested code. It is built on
+**guardrails, not train tracks**: the model is trusted to do the work; the process
+intervenes only where a real derailment would otherwise ship. There are exactly five
+guardrails — the one PRD gate (§2), matrix deconfliction (§4.2), real verification
+surfaces (§4.3), ripple drift-healing (§4.4), and one-way flow through the glass wall
+(§1.2). Everything else flows autonomously.
 
-## 1. Canonical chain & document map
+## 1. Canonical chain & flow
 
-`Think → Plan → Sequence → Build`, with `Ripple` handling drift. Each role writes only
-the surface listed here:
+### 1.1 The pipeline
+
+`Think → Plan → Build`, with `Ripple` as the only retrograde path and `Autorun` as the
+one-shot drainer that traverses the whole pipe. Slash surfaces: `/idc:think`,
+`/idc:plan`, `/idc:build`, `/idc:ripple`, `/idc:autorun`, plus `/idc:init` (per-project
+scaffold) and `/idc:doctor` (read-only health check).
 
 | Stage | Slash surface | Surface it writes |
 |---|---|---|
 | Think | `/idc:think` | `docs/considerations/` (pre-canonical) |
-| Plan | `/idc:plan` | `docs/prd/`, `docs/specs/`, `docs/plans/`, `docs/plans/pillars/`, pillar matrices, planning manifest |
-| Sequence | `/idc:sequence` | TRACKER ordering only |
-| Build | `/idc:build` | source surfaces (per pillar `surfaces[]`), tests, `docs/workflow/operator-todos/`, status-only TRACKER bookends |
-| Ripple | `/idc:ripple` | `docs/workflow/ripple/` change orders + gated canonical-doc PRs |
+| Plan | `/idc:plan` | `docs/prd/`, `docs/specs/`, `docs/plans/` (master + subphases + pillars), pillar matrices, and tracker issues |
+| Build | `/idc:build` | source surfaces (per issue `BOUNDARIES`), tests, review reports, and tracker status |
+| Ripple | `/idc:ripple` | every affected canonical doc, synchronized in one PR |
 
-## 2. Tracker discipline
+### 1.2 One-way flow + the glass wall
 
-The tracker is selected by `backend:` in `docs/workflow/tracker-config.yaml` (the
-full substrate contract — operations, schema, writer authority, bookend mechanics,
-fail-closed posture — is **§6 Tracker substrate**):
+Planning reaches Build **only** through tracker issues (the glass wall). Build reaches
+planning **only** through Ripple. No role edits a layer above it; a lower role that finds
+a higher layer wrong files a Ripple and pauses only the affected issue.
 
-- **`github`** — a GitHub Projects v2 board with eight custom fields. This repo's
-  board is project number `{{TRACKER_PROJECT_NUMBER}}`, tracking work in the
-  `{{GITHUB_OWNER}}/{{GITHUB_REPO}}` repository. A board item is a **candidate** when
-  `Status="Active"` AND `ClaimState="Unclaimed"`, with `Phase` matching the active
-  matrix phase-tag and `Pillar trace key` matching a matrix `pillar_id`. Values are
-  read by name; field node IDs live in `tracker-config.yaml`.
-- **`filesystem`** — a `TRACKER.md` file at the repo root. Zero external setup; good
-  for getting started or for repos without a GitHub Project.
+### 1.3 The five-layer doc chain
 
-## 3. Pillar matrix & goal-recipe
+PRD → master architectural spec → master implementation plan → subphase plans → pillar
+plans. All five survive as files for traceability. **Only the PRD is gated (§2); every
+other doc is drafted, updated, and merged autonomously** by Plan and Ripple.
 
-Each build pillar declares its editable `surfaces[]` in the phase matrix under
-`docs/workflow/pillar-matrices/`. Every build pillar plan body carries the five
-goal-recipe markers: a failing test, the expected red, the minimal green, a refactor
-step, and a stop-after-N-turns bound.
+## 2. The one gate — PRD (user-facing function)
 
-## 4. Role authority & forbidden writes
+The single human checkpoint in the entire system. When Plan or Ripple determines that
+the **PRD must change** — i.e. what the product does for its users changes — the affected
+tracker issues land **Blocked**, chained by native blocked-by to one **gate issue** that
+carries a plain-terms summary ("here's what your app will do differently") plus the
+proposed PRD diff. The operator receives a push notification and approves from the GitHub
+web UI; approval unblocks the chained issues, which builders pick up on the next claim
+cycle. **Nothing else in the system asks for permission.** Non-PRD work from the same run
+flows through untouched.
 
-Each role is the sole writer of its surface. The boundaries below are load-bearing —
-do not blur them.
+## 3. Tracker substrate
+
+The tracker is the glass wall (§1.2). Its backend is selected by `backend:` in
+`docs/workflow/tracker-config.yaml` and hidden behind the configured tracker adapter —
+roles never hard-code backend semantics. Two backends ship: `github` (a GitHub Projects
+v2 board; first-class) and `filesystem` (a root `TRACKER.md`; zero external setup).
+
+### 3.1 Board schema — four fields
+
+| Field | Values | Meaning |
+|---|---|---|
+| `Status` | `Blocked` / `Todo` / `In Progress` / `Done` | Where the issue sits in the queue. |
+| `Wave` | `Wave N` | Parallel-execution wave (matrix-assigned by Plan). |
+| `Phase` | `Phase N` | Master-plan phase trace. |
+| `Domain` | single-select | Master-plan domain trace. |
+
+Plus **native blocked-by** links (dependencies), an `attempt:<n>` label (per-issue
+fix-loop counter for unattended observability), and **claim comments** (a builder claims
+an issue by flipping `Status` to `In Progress` and posting a comment naming the agent).
+There is no claim-state machine, no lane or track field, and no bookend ceremony — a board
+item is workable cold by any outside agent from its body + the plain GitHub API.
+
+### 3.2 The issue is a self-sufficient goal contract
+
+Every issue body is a distilled 6-element goal contract a builder can work cold:
+
+```
+GOAL: <single observable end-state>
+VERIFICATION SURFACE: <exact runnable commands + what passing looks like; real
+  functional tests, never placeholder/shallow suites; failing-test-first when untested>
+CONSTRAINTS: <what must not regress; the no-punt rule>
+BOUNDARIES: touch <owned surfaces — the deconfliction output> / off-limits <…>
+ITERATION POLICY: record-and-vary
+BLOCKED-STOP: <halt conditions + attempt ceiling>
+ASSUMPTIONS: <inferred details, vetoable>
+---
+Dependencies: native blocked-by links
+Trace: pillar file · consideration · PRD section
+```
+
+### 3.3 Six operations
+
+`createTicket`, `setField`, `link` (`sub`|`blocks`), `move` (status), `query`, `comment`.
+Adding a seventh or dropping one is a contract change that requires a Ripple to admit.
+
+## 4. Role authority & the guardrails
+
+Each role is the sole writer of its surface and edits nothing above it (§1.2).
 
 ### 4.1 Think
-Pre-canonical only. Writes **only** `docs/considerations/`. Refuses source, test,
-canonical-doc, and tracker writes; refuses admission or recommendation language
-(admission belongs to Plan). Hands off active consideration files + open questions to
-Plan.
 
-### 4.2 Plan
-Owns the PRD, architecture spec, master plan, canonical subphase plans, polished pillar
-plans, per-pillar Resource Ownership tables, pair-wise clash evidence
-(`docs/workflow/pillar-conflicts/`), and the phase-wide planning manifest
-(`docs/workflow/phase-planning/`). Operates the **Engineer Gate**: operator approval is
-required before drafting AND before merge for PRD / architecture-spec edits, and
-pre-merge only for master-plan-only edits; subphase plans, pillar plans, ownership
-tables, clash evidence, and the manifest are autonomous. If a clash proves the PRD,
-architecture spec, or master plan is wrong, Plan files a Ripple — it never edits
-upstream docs directly. Refuses source and test writes; refuses TRACKER sequencing;
-refuses scope not traceable to an admitted upstream.
+Free-form brainstorm/interview in the main session, **zero durable workers** (research
+goes to bounded fan-out). Writes only `docs/considerations/`. No PRD pre-clearing, no
+admission language — thinking stays free; the gate lives in Plan.
 
-### 4.3 Sequence
-Status / order overlay only — admits existing polished pillar plans to TRACKER order and
-synthesizes the polished matrix YAML at
-`docs/workflow/pillar-matrices/<phase-tag>-matrix.yaml`. Every TRACKER edit must cite an
-existing plan-derived unit from a polished pillar plan; missing scope routes to Ripple or
-Plan, never to TRACKER. Refuses scope invention (`scope_invention_denied`), non-idle Lane
-writes (`non_idle_lane_write_denied`), admission without a polished-pillar reference
-(`missing_polished_pillar_reference`), incomplete phase-wide admission
-(`partial_phasewide_admission_denied`), and diff-gate violations (`diff_gate_rejected`).
-Refuses PRD / spec / plan / pillar edits and all source and test writes.
+### 4.2 Plan — matrix deconfliction
 
-### 4.4 Build
-The only board-polled role. Implements the next admitted pillar against its goal-recipe,
-obeying the diff-gate (`forbidden_glob_hit`, `outside_allowed_globs`, …). Writes source,
-tests, implementation-PR artifacts, `docs/workflow/operator-todos/`, closeout artifacts,
-and status-only TRACKER bookends. Does NOT edit the PRD, architecture spec, master plan,
-subphase plans, or pillar plans. Exit gate: code review + tests + Ripple Audit; if the
-implementation diverged from the pillar or the pillar diverged from upstream docs, Build
-files Ripple and pauses affected work.
+One run goes consideration → issues: domain-expert fan-out → doc-chain drafting →
+goal-contract authoring → **pairwise clash/matrix analysis** (parallel work never
+collides) → global re-sequencing against the live board (`In Progress` issues immutable;
+re-sequencing happens ONLY here) → mechanical schema check → board admission, opening a
+planning PR whose body is the audit trail. **Zero durable workers** (bounded fan-out
+only). The only plan review is matrix deconfliction + the schema check.
 
-### 4.5 Ripple
-Owns change orders under `docs/workflow/ripple/` and gated canonical / planning-doc PRs
-after operator approval. Returns one of four verdicts per change order: `NO_RIPPLE |
-MINOR_AUTONOMOUS | GATED | MAJOR_GATED`. Every decision declares the highest affected
-layer, why higher layers do or do not change, and which downstream docs must be
-synchronized in the same PR. Refuses source and test writes; refuses direct automatic
-canonical edits; refuses PRD / architecture-spec edits without operator approval before
-drafting and before merge.
+### 4.3 Build — real verification surfaces
 
-## 5. Commit / PR conventions
+The only board-polled role. One **durable worker per parallel-safe issue** executes the
+issue's goal contract as a goal loop (record-and-vary, evidence-before-assertion, and the
+**no-punt rule** — incidental work needed for success is fixed in the same loop, never
+deferred). Review is fresh-context **bounded fan-out** — iterate → reverify → automerge
+when all green → close. **Nothing merges that isn't green on real functional tests; a
+shallow or placeholder suite is a review FAIL.** Builders never edit canonical docs;
+divergence files a Ripple and pauses only the affected issue.
 
-Every commit carries the project's governance trailer, and PRs cite the TRACKER item or
-change order they close. Never commit with `--no-verify`. If this repo has a
-`CONVENTIONS.md`, its commit-trailer and PR-footer rules are authoritative.
+### 4.4 Ripple — drift healing
 
-## 6. Tracker substrate
+The only retrograde path. Determines the highest affected layer and answers one question:
+does user-facing product function change? **No** → update every affected doc down the
+chain in one autonomous PR (PR body = the change order). **Yes** → the §2 gate. **Zero
+durable workers.**
 
-Canonical specification of the **Tracker abstraction** that terminates the canonical
-chain. Every tracker read or mutation routes through the dispatch surface
-`idc:idc-skill-tracker-adapter`, which resolves the active backend from
-`docs/workflow/tracker-config.yaml::backend` and routes to the matching implementation
-skill (`idc:idc-skill-github-tracker-implementation` or
-`idc:idc-skill-filesystem-tracker-implementation`). §2 is the operating summary; this
-section is the contract those skills cite by anchor.
+### 4.5 Autorun
 
-### 6.1 Backend selector (`tracker-config.yaml`)
+One-shot full-pipe drainer: unplanned considerations → plan-run workers (board admission
+serialized) → build eligible waves as they land → exit report when nothing actionable
+remains (only PRD-gated items waiting on the operator). Loopable via `/loop`. Running it
+on a quiet repo just heals board hygiene and drains stragglers. `/idc:doctor` stays
+read-only.
 
-Backend selection lives in `docs/workflow/tracker-config.yaml::backend`. Recognized
-values: `github` (GitHub Projects v2 board; first-class) and `filesystem` (`TRACKER.md`
-at the repo root; zero-setup local fallback). Per-repo configuration (project number,
-cached field node IDs, Track-value allowlist) lives in the same file. Roles never
-hard-code backend semantics — every call goes through the adapter.
+## 5. Runtime primitives & concurrency budget
 
-### 6.2 Six core operations
+The process is written against three abstract primitives; the runtime adapter for your
+harness maps them to concrete mechanics.
 
-The Tracker interface is exactly six operations. Adding a seventh or dropping one is a
-contract change that requires a Ripple to admit.
+| Primitive | Used for |
+|---|---|
+| **Durable worker** | Build implementers, autorun lanes |
+| **Bounded fan-out** | domain experts, drafters, clash pairs, reviewers |
+| **Goal loop** | issue execution |
 
-| Operation | Signature | Meaning |
-|---|---|---|
-| `createTicket` | `(title, body, type, labels) → ticket_id` | New tracker item (GitHub issue + board item, or a `TRACKER.md` entry). |
-| `setField` | `(ticket_id, field, value)` | Write one of the eight fields enumerated in §6.3. |
-| `link` | `(parent_id, child_id, kind ∈ {sub, blocks})` | Sub-item or blocked-by relation. |
-| `move` | `(ticket_id, status)` | Status transition (`Pending \| Active \| Blocked \| Complete`). |
-| `query` | `(filter) → [ticket_id, …]` | Filtered item listing. |
-| `comment` | `(ticket_id, body)` | Append a note to the item. |
+**Concurrency budget:** Think / Plan / Ripple = **zero** durable workers (bounded fan-out
+only); Build = one durable worker per parallel-safe issue; review = bounded fan-out in
+every runtime. **Fallback ladder:** with no durable-worker environment, that work runs
+serially in the main session; review fan-out is always available (fresh context = true
+adversarial independence, and token-optimal).
 
-**Operational ops.** The following surround the six core operations and ride the same
-adapter dispatch: `export-state(--output <state.json>)` — emits a `{pillar_id: status}`
-state file (string-keyed dict) for downstream tooling; `acquire-lane-lock(--lane=<lane>,
---ticket=<id>, --idempotency-key=<sha>)` — the atomic lane-lock primitive backing the
-bookend-open transaction; `flip-to-filesystem(--reason=<text>, --audit-log=<path>)` —
-operator-gated outage fallback (see §6.8).
+## 6. Model routing (tier-symbolic)
 
-### 6.3 Project schema (8 fields)
+Process docs name **tiers**, never concrete models. The tier → model map lives in
+`WORKFLOW-config.yaml::model_routing`; the runtime adapter resolves a tier to a concrete
+model at spawn time, and Ripple maintains the table when models change.
 
-The GitHub backend's Projects v2 board carries exactly **eight** custom fields;
-`tracker-config.yaml::field_ids` caches the GraphQL node IDs once provisioning
-populates them.
+- `reasoning` — planning cognition, the review coordinator/verdict + all judgment review
+  dimensions, ripple layer-impact analysis + PRD diffs, clash/matrix + sequencing, merge
+  deconfliction.
+- `standard` — think/interview, build implementers (goal loops), the finisher/orchestrator,
+  the autorun parent.
+- `utility` — the execute-never-decide lane: research digestion, repo reconnaissance,
+  templated emission from up-tier content, board mechanics, the schema check, and the
+  inventory-style review dimensions under the coordinator.
 
-| Field | Type | Purpose |
-|-------|------|---------|
-| `Status` | single-select (`Pending \| Active \| Blocked \| Complete`) | Tracker-state — Sequence-written by default; "where in the queue." Build writes Status only via the named carve-outs in §6.6. |
-| `ClaimState` | single-select (`Unclaimed \| Claimed \| Running \| RetryQueued \| Released`) | Runtime claim-state — Build-written; "is a writer holding this right now." Sequence never writes ClaimState. |
-| `Wave` | single-select (`Wave N` enumeration) | Implementation-wave overlay (per Sequence). |
-| `Phase` | single-select (`Phase N` enumeration) | Master-plan §Phase trace. |
-| `Track` | single-select | Cross-cutting workstream tag. **Operator-only** — values mutate via a Ripple change order; `tracker-config.yaml::track_values` is the enumerated source of truth. Sequence and Build never write Track. |
-| `Lane` | single-select | Per-lane parallel-dispatch pointer (sole writer is Build per §6.7). |
-| `Pillar trace key` | text | Polished pillar plan's filename stem (matches `pillars[].pillar_id` in the phase matrix). |
-| `Domain` | single-select | Master-plan §Domain trace. |
+The Codex runtime is **untiered**: highest available model at highest reasoning effort for
+every role.
 
-**Enum extension SOP.** Wave / Phase / Domain are finite enumerations. When a new
-phase, wave, or domain comes online, the field option MUST be pre-seeded (one
-`gh project field-edit … --add-option <value>` per new value) BEFORE Sequence's TRACKER
-admit attempts to set it — otherwise the write rejects because the option doesn't
-exist. Skipping the pre-seed is the most common bootstrap-failure mode for a new phase.
+## 7. Commit / PR conventions
 
-**Label namespace.** Labels follow `phase:<N>`, `wave:<N>`, `lane:<name>`,
-`domain:<name>`, plus `operator-action-blocking` (mirrors the BLOCKING operator-todo
-surface), `bookend-open` / `bookend-close` (bookend lifecycle markers), `side-job`
-(agent-doable-but-blocked side issues; open `side-job` issues block phase-close),
-`attempt:1`–`attempt:5` (per-PR fix-loop attempt counter; see §6.5), and
-`deferred_to_phase_close=<phase-tag>` (the §6.7 main-reachability deferral carve-out).
-
-### 6.4 Claim-state vs tracker-state
-
-Two fields, not one, because they answer different questions:
-
-- **`Status ∈ {Pending, Active, Blocked, Complete}`** is *tracker-state* —
-  Sequence-written; "where in the queue."
-- **`ClaimState ∈ {Unclaimed, Claimed, Running, RetryQueued, Released}`** is
-  *claim-state* — Build-written; "is a writer holding this right now."
-
-Pairing: `Status=Pending` ↔ `ClaimState=Unclaimed`; `Status=Active` ↔ ClaimState
-progresses `Claimed → Running` (and `Running → RetryQueued → Running` on per-PR
-fix-loop retry); `Status=Complete` ↔ `ClaimState=Released`. Disagreement at
-observation time (e.g. `Status=Complete` with `ClaimState=Running`) is a load-bearing
-inconsistency that fail-closes Build dispatch. The lane pointer reads ClaimState, not
-Status — `ClaimState ∈ {Claimed, Running}` is the "writer is holding this" signal.
-
-### 6.5 Attempt counter on bookend-open
-
-Per-PR fix-loop attempts are tracked on the item itself, not just in commit history:
-(1) the bookend-open commit message carries `(attempt <n>)` — a new write packet after
-a 3-attempt halt increments it; a same-packet retry does not; (2) Build's bookend-open
-mutation sets the `attempt:<n>` label (single-valued — replaces any prior
-`attempt:*`); (3) per-attempt review files get distinct names
-(`docs/workflow/code-reviews/<YYYY-MM-DD>-pr-<N>-attempt-<n>-review.md`).
-
-### 6.6 Writer authority matrix
-
-Per-field writer authority for the eight §6.3 fields. This matrix is the single
-source of truth.
-
-| Field | Writer | Event | Invariant |
-|---|---|---|---|
-| `Status` | Sequence (default); Build (carve-out) | TRACKER admit / queue rollover (Sequence); `promote_next_eligible_wave` rollover + `complete_claimed_item` close (Build) | `Pending → Active → Complete` only; `Blocked` is operator-set out-of-band. **Carve-out:** Build is admitted as a Status writer for exactly two adapter ops — `promote_next_eligible_wave` (flip the lowest-numbered eligible Pending wave `Pending → Active` where `blocks_on` upstream is cleared AND the target phase has a matrix YAML present) and `complete_claimed_item` (`Active → Complete` for items Build claimed and merged in the current run only). **Sequence retains:** initial `Pending → Active` admission for items Build did not claim, retroactive corrections, and janitor `Active → Complete` for items Build did not claim. |
-| `ClaimState` | Build (sole) | bookend-open / fix-loop / bookend-close | `Unclaimed → Claimed → Running → Released` happy path; `Running → RetryQueued → Running` on per-PR fix-loop retry. |
-| `Lane` | Build (sole) | bookend-open / bookend-close | `(idle) ↔ <pillar-trace-key>` only; one non-`(idle)` per lane at a time. |
-| `Pillar trace key` | Sequence | TRACKER admit | Locked post-emit; matches `pillars[].pillar_id` in the phase matrix. |
-| `Wave` | Sequence | TRACKER admit | Matches the wave column in the phase matrix. |
-| `Phase` | Sequence | TRACKER admit | Matches master-plan §Phase trace. |
-| `Domain` | Sequence | TRACKER admit | Matches master-plan §Domain trace. |
-| `Track` | Operator (Ripple-governed) | Ripple change order | Values enumerated in `tracker-config.yaml::track_values`; agents never write it. |
-
-Build is the sole writer of the in-flight pair (`ClaimState` / `Lane`) and the named
-exception writer for `Status` (the two carve-out ops above); Sequence writes the rest
-of the queue layer; `Track` is operator-only.
-
-### 6.7 Lane pointer + bookend mechanics
-
-**Per-lane pointer.** Each active lane (one worktree OR one orchestrator session)
-carries a single `Currently building` pointer — the polished pillar plan's filename
-stem, or `(idle)` — stored in the `Lane` field (filesystem backend: the lane block in
-`TRACKER.md`). Sequence emits `(idle)` lane blocks at admit; Build is the sole
-non-`(idle)` writer (sets on bookend-open dispatch, clears on bookend-close PR merge).
-Each lane has at most one non-`(idle)` pointer at any moment; multiple lanes may carry
-non-`(idle)` pointers simultaneously (parallel-safe).
-
-**Bookend events.** Bookend events resolve through the configured adapter. Filesystem
-backend: commits with the `tracker:` prefix that update `TRACKER.md`. GitHub backend:
-label/state mutations — open sets `ClaimState=Claimed` then `Running`, adds
-`bookend-open` + `attempt:<n>` labels, sets `Lane=<lane>`; close routes through the
-adapter's `complete_claimed_item` op, which verifies and applies one mutation set —
-`Status=Complete`, `ClaimState=Released`, `Lane=(idle)`, issue closed — then removes
-`bookend-open` and adds `bookend-close`. That `Status=Complete` write is exactly the
-§6.6 Build carve-out; every other Status mutation belongs to Sequence at admit (or to
-Build's `promote_next_eligible_wave` carve-out at queue rollover) — never to ad-hoc
-bookend writes outside `complete_claimed_item`. Each side
-of the bookend ends with verify-after-write reconciliation: read back the item state
-and confirm the writes applied; on divergence, emit a reconciliation report under
-`docs/workflow/audits/`, release the lock, and fail closed.
-
-**Main-reachability invariant (deferral carve-out).** Before setting
-`ClaimState=Released`, Build MUST verify the close-SHA is reachable from `origin/main`
-(`git merge-base --is-ancestor <sha> origin/main`). For mid-phase waves where the
-session PR is deferred to phase-close, the check may pass with a recorded
-`deferred_to_phase_close=<phase-tag>` annotation on the tracker item. The annotation
-MUST clear (i.e. the SHAs MUST become main-reachable) before any sibling wave whose
-`blocks_on` references this item promotes to Active, and no later than phase-close.
-
-### 6.8 Fail-closed posture + flip-to-filesystem
-
-On backend failure (CLI exit code ≠ 0, GraphQL error, network timeout) the adapter:
-
-1. Emits a structured failure event to the run ledger with the failing operation and
-   raw error.
-2. Refuses dispatch (returns non-zero so Build halts before any source-code commit).
-3. Surfaces an operator decision: continue waiting, or invoke the explicit
-   `flip-to-filesystem` op, which writes an audit-log entry, mutates
-   `tracker-config.yaml::backend` from `github` to `filesystem` for the duration of
-   the outage, and re-runs the dispatch-check via the filesystem adapter against the
-   most recent `<state.json>` cached on disk.
-4. Records the eventual flip back to `backend: github` after recovery as a paired
-   audit-log entry. Backend cutover in either direction is operator-gated and
-   audit-logged — never automatic.
+Every commit traces to the issue or change order it advances. Never commit with
+`--no-verify`. Planning PRs and ripple PRs automerge when green (the §2 PRD gate is the
+only human touchpoint); build PRs automerge on a PASS review with real tests green.

@@ -1,73 +1,86 @@
-# Product Requirements — IDC Workflow Plugin
+# Product Requirements — IDC Workflow Plugin (v2)
 
-**Upstream trace:** lifecycle requirements (§4 below) are admitted from `docs/considerations/2026-06-12-plugin-lifecycle-uninstall-upgrade-considerations.md` (merged at `main` 95d7ab4, PR #12). The v0.1.0 baseline (§3) is summarized from `README.md` and `CHANGELOG.md`, not re-litigated.
+**Upstream trace:** derived from `docs/considerations/2026-06-12-idc-v2-overhaul-considerations.md`
+(operator interview, 16 decisions). The v2 PRD rewrite was operator-approved live during
+that interview — it is admitted work, not a pending gate.
 
-> This is the first PRD authored for this repository (chain-bootstrap admission). It states what the IDC Workflow plugin is, who it serves, the existing shipped surface as a fixed baseline, and the new plugin-lifecycle requirements this admission adds.
+> This PRD states what the IDC v2 plugin does for its users. The architecture that realizes
+> it is `docs/specs/master-architectural-spec.md`.
 
 ## 1. Purpose
 
-The IDC Workflow plugin packages **IDC** — the Iterative Development Chain — as an installable [Claude Code](https://claude.com/claude-code) plugin: a governed, tracker-driven, multi-agent workflow that carries software work from a raw idea to merged, reviewed code (per `README.md`). Its defining property is **traceability**: every line of built code walks back through a pillar plan, a master plan, an architecture spec, and a product requirement, and nothing in the plan drifts silently out of sync (per `README.md`; `docs/architecture.md §Required trace`).
+The IDC Workflow plugin packages **IDC** — the Iterative Development Cycle — as an
+installable Claude Code plugin: a guardrail-framed, tracker-driven, goal-contract pipeline
+that carries software work from a raw idea to merged, reviewed code. Its defining property
+is **autonomy with one consent point**: the operator casts an idea into the stream and it
+flows to merged, tested code on its own; the stream stops to ask exactly once — when the
+product's user-facing function is about to change.
 
-The product's job is to install that workflow **cleanly and per-project** into a target repository and to keep it auditable over the repository's life. Today the plugin can be installed (`/idc:init`) but has **no exit path and no update path** (per consideration §Frame). This PRD adds those two lifecycle capabilities plus the shared substrate they require.
+v2 is **guardrails, not train tracks**. v1 hand-held a weaker model with standing
+reviewer/fixer/researcher roles, multi-pass plan reviews, a claim-state machine, and
+per-edit gates. v2 trusts the model and keeps only the guardrails that catch real
+derailments.
 
 ## 2. Users
 
-The plugin's users are **operators** — the engineer who installs IDC into a repository and runs the role commands. Operators are not the plugin's developers; they consume the shipped commands, agents, and skills. The product's lifecycle obligations are written from the operator's seat:
+The plugin's users are **operators** — the engineer who installs IDC into a repository and
+runs the pipeline. Operators consume the shipped commands; they are not the plugin's
+developers. The operator's whole job is to think, occasionally approve a product-function
+change from their phone, and let the pipeline run.
 
-- An operator must be able to install IDC into a repo, **remove it cleanly later**, and **update it safely** after a new plugin version ships, without hand-editing scaffold files or guessing which files IDC owns.
-- Destructive steps must never surprise the operator: removals are announced, reversible where possible, and gated on explicit confirmation where permanent (per consideration §Named Ideas: uninstall).
+## 3. What v2 does (requirements)
 
-## 3. Existing surface — v0.1.0 baseline (summarized, not re-litigated)
+### R1 — Think (`/idc:think`)
+A free-form brainstorm/interview in the main session (zero teammates; research on demand).
+Emits one **function-first consideration file** under `docs/considerations/` — what the
+code should do for the user and how it behaves. No gates, no admission language.
 
-The shipped v0.1.0 surface is the fixed baseline this admission builds on. It is **not** reopened here (per `CHANGELOG.md` 0.1.0; `README.md`):
+### R2 — Plan (`/idc:plan`)
+Turns one consideration into **goal-contract issues** on the tracker board, in a single
+zero-teammate run: domain-expert fan-out → the five-layer doc chain (PRD → spec → master →
+subphase → pillar, only the PRD gated) → a 6-element goal contract per pillar → pairwise
+matrix deconfliction → global re-sequencing against the live board → a mechanical schema
+check → board admission, with a planning PR whose body is the audit trail.
 
-- **8 commands** — five role entry points (`/idc:think`, `/idc:plan`, `/idc:sequence`, `/idc:build`, `/idc:ripple`) plus `/idc:autorun`, `/idc:init` (idempotent per-repo scaffold + tracker provisioning), and `/idc:doctor` (read-only five-check verifier).
-- **23 agents** and **38 skills** — role orchestrators, teammate roleplayers, and the reusable `idc-skill-*` substrate, including Codex-native adapters.
-- **Per-project install model** — `/idc:init` scaffolds `WORKFLOW.md` + `docs/workflow/` from `templates/`, provisions (or links) a GitHub Projects v2 board with the eight IDC tracker fields, and enables the plugin **for that project only** by writing `enabledPlugins["idc@idc-workflow"]=true` into `.claude/settings.json` (per `commands/init.md`; `docs/installing.md`).
-- **Two tracker backends** — `github` (Projects v2 board) and `filesystem` (a root `TRACKER.md`), hidden behind the tracker-adapter dispatch skill (per `docs/architecture.md §The tracker contract`).
-- **Codex runtime support** — five `codex-idc-*` adapters wired by `scripts/install-codex.sh`, which records prior state and offers `--revert` (per `README.md §Codex support`).
+### R3 — Build (`/idc:build`)
+Executes eligible issues as goal loops (one durable worker per parallel-safe issue), each
+PR reviewed by the **merged review engine** (13 dimensions, fresh-context fan-out, with
+test-genuineness as a dimension). Iterate → reverify real tests green → **automerge on
+PASS** → close. Nothing merges that isn't green on genuine functional tests.
 
-`/idc:init` already carries an **idempotency contract** (anything present is left untouched and reported `skipped-existing`) that the new lifecycle commands inherit and extend (per `commands/init.md`).
+### R4 — Ripple (`/idc:ripple`)
+Heals drift between docs and reality in **one PR** (the PR body is the change order),
+automerged — unless user-facing product function changes, in which case it takes the same
+PRD gate as Plan.
 
-## 4. Lifecycle requirements (this admission)
+### R5 — Autorun (`/idc:autorun`)
+The one button: a one-shot drainer that plans every unplanned consideration, heals board
+hygiene, and builds eligible work, exiting when nothing actionable remains. Loopable via
+`/loop` for standing operation.
 
-All requirements below are admitted from `docs/considerations/2026-06-12-plugin-lifecycle-uninstall-upgrade-considerations.md`. Operator sequencing preference (consideration §Next Role Questions) is **two trains, uninstall first**; the master plan realizes this as Phase 1 (R1 + R2) and Phase 2 (R3 + R4).
+### R6 — The one gate (PRD)
+When planning or ripple determines the PRD must change, affected issues land **Blocked**
+behind a single approval issue with a plain-terms summary ("here's what your app will do
+differently") + the PRD diff. The operator gets a **push notification** and approves from
+the GitHub web UI on their phone; approval flips the status and builders proceed.
+**Nothing else in the system asks for permission.**
 
-### R1 — Install receipt (shared substrate)
+### R7 — Install & health (`/idc:init`, `/idc:doctor`)
+`/idc:init` scaffolds a repo for IDC v2: the governance contract, config with
+codebase-derived domains + tier-symbolic model routing, a four-field tracker board, and
+install receipts enabling clean uninstall/upgrade. `/idc:doctor` is a read-only health
+check of those surfaces.
 
-`/idc:init` MUST write a **committed repo file** that lists every file it stamps plus a content fingerprint of each file **as written** (post token-substitution, not the template) (per consideration §Named Ideas: install receipt; §Engineering Implications). The receipt is the shared substrate both later commands consume: `/idc:upgrade` uses it to prove a file untouched; `/idc:uninstall` uses it as the removal manifest ("only delete what you created"). A committed file (rejected alternative: an untracked machine-local file) is required so the substrate travels with clones and is covered by git state checks.
+### R8 — Runtime-neutral
+The pipeline runs on Claude Code or Codex through **one thin adapter per runtime** over a
+shared runtime-neutral core. Model selection is tier-symbolic and operator-tunable; the
+Codex runtime runs untiered at highest effort.
 
-### R2 — `/idc:uninstall`
+## 4. Out of scope (this rebuild)
 
-A new command MUST remove all of IDC's repo footprints safely (per consideration §Named Ideas: uninstall):
-
-- **Phased, idempotent mirror of `/idc:init`.** Re-runs report `skipped-absent`; nothing is half-removed.
-- **Work products archived first** to an untracked repo-root `idc-archive-<date>.tar.gz`, whose path is always announced.
-- **All repo footprints removed in ONE revertable commit** — scaffold, configs, `TRACKER.md` (filesystem backend only), and the `enabledPlugins` key stripped while preserving every other key in `.claude/settings.json`. The removal list is **receipt-driven**, with a hardcoded footprint list as fallback.
-- **GitHub untouched by default.** Opt-in `--close-issues` (reversible) and `--delete-board` (permanent; requires typed confirmation). **Issue deletion is never offered.**
-- **Two-layer preflight.** (a) Clean git state for tracked files, exempting prior `idc-archive-*.tar.gz` so re-runs don't self-block; (b) a board in-flight check that reports orphaning plainly and requires explicit confirmation (warn-and-confirm, not a hard block).
-- **Machine-global surfaces are out of scope.** The closing summary names `claude plugin uninstall` and `scripts/install-codex.sh --revert` for the operator to run separately (per consideration §Context Notes).
-
-### R3 — `/idc:upgrade`
-
-A new command MUST refresh stamped files after a plugin update, safely (per consideration §Named Ideas: upgrade):
-
-- **Receipt-only detection (v1).** Silently re-stamp ONLY files the receipt proves untouched; any customized file gets **show-diff-and-ask**. Pre-receipt installs get diff-and-ask for every file, **one time**, then the run ends by writing a fresh receipt (**receipt graduation**).
-- **Files only; never mutates the board.** Upgrade MUST compare the live board schema against the new plugin version's expected schema and **report drift explicitly** — never silently, and never via board-migration machinery (rejected).
-- **Re-run to repair.** Each step checks current state; re-runs report `skipped-already-current`. The receipt is rewritten ONLY at the end of a successful run, so a half-done upgrade can never look finished.
-- **Surfaces the plugin cache-refresh advisory.** Upgrade MUST NOT silently assume the running plugin is the newest version; it surfaces the known cache quirk (a repo-edited plugin needs `claude plugin uninstall && install` because the install cache does not track the working tree — per `docs/dev/2026-06-12-v0.1.0-release-report.md` line ~140).
-
-### R4 — `docs/installing.md` "Updating" section
-
-`docs/installing.md` has no updating section today (per consideration §Context Notes). This admission's Train 2 MUST add one documenting `/idc:upgrade` and the cache-refresh advisory.
-
-## 5. Out of scope
-
-- Machine-global plugin removal and Codex-link revert (operator runs `claude plugin uninstall` / `install-codex.sh --revert` separately — per consideration §Context Notes).
-- Board **migration** machinery — upgrade reports schema drift but does not mutate the live board (real risk to in-flight waves; rejected — per consideration §Named Ideas: upgrade scope).
-- GitHub issue **deletion** — never offered by uninstall.
-- Compare-against-prior-version-templates and layered all-three upgrade detection — rejected for v1 (per consideration §Named Ideas: upgrade).
-
-## 6. Cross-cutting safety requirement
-
-The fingerprint compare that both upgrade and receipt-driven uninstall depend on is **safety-critical**: it MUST fail toward **asking** (show-diff-and-ask / confirm), never toward a silent re-stamp or silent delete (per consideration §Engineering Implications). The architectural invariants that make this true — receipt location, fingerprint method, customized-file semantics, and failure-path postures — are specified in `docs/specs/master-architectural-spec.md §3` (this admission).
+- A full v2 evaluation suite — only minimal smoke evalsets if the eval harness requires a
+  non-empty set (a real v2 eval suite is deferred).
+- Board **migration** machinery — `/idc:doctor` reports board-schema drift but no command
+  mutates a live board's schema.
+- Re-enabling the plugin inside this repo's own `.claude/settings` (the rebuild stays a
+  branch + PR; the operator merges).

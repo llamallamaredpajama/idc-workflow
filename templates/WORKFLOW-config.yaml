@@ -4,32 +4,57 @@
 # Tracker field IDs live exclusively in docs/workflow/tracker-config.yaml.
 #
 # Template tokens are written as quoted strings so this file stays valid YAML;
-# `/idc:init` replaces each token with the concrete value (and drops the quotes
-# around numeric values such as the project number).
+# `/idc:init` replaces each token with the concrete value.
 workflow:
   schema: idc
-  version: 1
-  # Optional external-harness compatibility keys (uncomment if this repo is
-  # executed by a governance-compiling harness such as pi-idc-collab):
-  # contract_profile: pi-idc-collab/v1
-  # min_harness_version: "0.1.0"
+  version: 2
 
 project:
   name: "{{PROJECT_NAME}}"
 
-# Recommended — canonical document map for the IDC roles.
+# Canonical document map for the IDC roles (v2 — five-layer chain + lean process tree).
 documents:
   workflow: WORKFLOW.md
   tracker_config: docs/workflow/tracker-config.yaml
-  pillar_matrix: docs/workflow/pillar-matrices/<phase-tag>-matrix.yaml
   prd: docs/prd/
   specs: docs/specs/
   plans: docs/plans/
-  pillar_matrices: docs/workflow/pillar-matrices/
   considerations: docs/considerations/
-  ripple: docs/workflow/ripple/
+  pillar_matrices: docs/workflow/pillar-matrices/
+  code_reviews: docs/workflow/code-reviews/
 
-# Optional convenience mirror; the live tracker contract is tracker-config.yaml.
-tracker:
-  backend: github                                  # github | filesystem
-  github_project_number: "{{TRACKER_PROJECT_NUMBER}}"  # integer; set after `gh project create`
+# Standing domains for this repo — config-seeded at `/idc:init` from codebase analysis,
+# pruned to touched domains and ad-hoc-extended by each `/idc:plan` run, maintained by
+# Ripple. Each entry: a single-select Domain value, a one-line brief, and primary
+# surfaces. Empty until `/idc:init` populates it.
+domains: []
+  # - name: api
+  #   brief: HTTP surface + request handlers
+  #   surfaces: [src/api/, src/handlers/]
+  # - name: data
+  #   brief: persistence + migrations
+  #   surfaces: [src/db/, migrations/]
+
+# Tier-symbolic model routing. Process docs (commands/agents/skills) reference ONLY the
+# tier name; the runtime adapter resolves a tier to a concrete model HERE at spawn time.
+# Ripple updates this table when models change. The Codex runtime ignores tiers entirely
+# (untiered: highest available model at highest reasoning effort for every role).
+model_routing:
+  reasoning:
+    claude: { model: "claude-fable-5", thinking: max }
+    use: >-
+      planning cognition; the review coordinator/verdict + all judgment review dimensions;
+      ripple layer-impact analysis + PRD diffs; clash/matrix + sequencing; merge deconfliction
+  standard:
+    claude: { model: "claude-opus-4-8", effort: extra-high }
+    use: >-
+      think/interview; build implementers (goal loops); the finisher/orchestrator; the
+      autorun parent
+  utility:
+    claude: { model: "claude-sonnet-4-6" }
+    use: >-
+      execute-never-decide: research digestion, repo reconnaissance, templated emission from
+      up-tier content, board mechanics, the schema check, the inventory review dimensions
+  codex:
+    untiered: true
+    note: highest available Codex model at highest reasoning effort for every role

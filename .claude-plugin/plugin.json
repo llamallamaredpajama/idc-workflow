@@ -1,7 +1,7 @@
 {
   "name": "idc",
   "version": "0.1.0",
-  "description": "IDC workflow (Think → Plan → Sequence → Build → Ripple) — governed, tracker-driven multi-agent development workflow as an installable Claude Code plugin",
+  "description": "IDC workflow (Think → Plan → Build → Ripple, drained by Autorun) — a guardrail-framed, tracker-driven, goal-contract development pipeline as an installable Claude Code plugin",
   "author": {
     "name": "llamallamaredpajama"
   }

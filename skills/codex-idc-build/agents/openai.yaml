@@ -1,5 +1,0 @@
-interface:
-  display_name: "Codex IDC Build"
-  short_description: "Implement sequence-admitted IDC work with Codex subagents"
-  default_prompt: "Run Codex IDC Build for the next sequence-admitted tracker item."
-

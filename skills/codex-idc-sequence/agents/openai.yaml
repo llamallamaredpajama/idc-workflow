@@ -1,5 +1,0 @@
-interface:
-  display_name: "Codex IDC Sequence"
-  short_description: "Sequence polished pillar work into TRACKER waves"
-  default_prompt: "Run Codex IDC Sequence for these pillar plans and update TRACKER ordering only."
-

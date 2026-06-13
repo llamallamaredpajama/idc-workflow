@@ -30,7 +30,7 @@ Identical across backends; the adapter routes without reshaping signatures.
 | Op | Signature |
 |---|---|
 | `createTicket` | `(title, body, type, labels) → ticket_id` |
-| `setField` | `(ticket_id, field ∈ {Status, Wave, Phase, Domain}, value)` |
+| `setField` | `(ticket_id, field ∈ {Status, Stage, Wave, Phase, Domain}, value)` |
 | `link` | `(parent_id, child_id, kind ∈ {sub, blocks})` |
 | `move` | `(ticket_id, status ∈ {Blocked, Todo, In Progress, Done})` |
 | `query` | `(filter) → [ticket_id, …]` |

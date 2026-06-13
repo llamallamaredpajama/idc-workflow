@@ -12,6 +12,10 @@ the Build finisher can trust it for the automerge decision. It checks:
   * the verdict is CONSISTENT with the findings — the worst severity present determines it:
     blocker→FAIL-BLOCKED, major→FAIL, minor/nit→PASS-WITH-NITS, none→PASS. A PASS that hides
     a major, or a FAIL with no actionable finding, is rejected.
+  * a `test-genuineness` finding (a shallow/shortcut/placeholder test — one that asserts
+    nothing, mirrors the implementation, or stubs the thing under test) is a FAIL, never a
+    nit: its severity must be `major` or `blocker`. A `minor`/`nit` test-genuineness finding
+    is rejected so a fake-green suite can never merge as a nit (`WORKFLOW.md §4.3`).
 
 Usage: idc_review_verdict_check.py <verdict.json>   (exit 0 = PASS, 1 = FAIL, 2 = usage)
 """
@@ -22,6 +26,9 @@ VERDICTS = {"PASS", "PASS-WITH-NITS", "FAIL", "FAIL-BLOCKED"}
 SEVERITIES = {"blocker", "major", "minor", "nit"}
 REQUIRED_FINDING = ("dimension", "severity", "confidence", "evidence", "attack", "unblock", "fingerprint")
 CONFIDENCE_FLOOR = 0.8
+# Test genuineness is fail-closed: a shallow/placeholder test is a FAIL, not a nit.
+TEST_GENUINENESS_DIM = "test-genuineness"
+TEST_GENUINENESS_MIN = {"major", "blocker"}
 
 
 def expected_verdict(severities):
@@ -52,6 +59,9 @@ def check(doc):
                 problems.append(f"finding[{i}] missing/empty `{k}`")
         if f.get("severity") not in SEVERITIES:
             problems.append(f"finding[{i}] severity must be one of {sorted(SEVERITIES)}")
+        elif f.get("dimension") == TEST_GENUINENESS_DIM and f.get("severity") not in TEST_GENUINENESS_MIN:
+            problems.append(f"finding[{i}] test-genuineness severity {f.get('severity')!r} too low — "
+                            f"a shallow/placeholder test is a FAIL ({sorted(TEST_GENUINENESS_MIN)}), not a nit")
         c = f.get("confidence")
         if not isinstance(c, (int, float)) or c < CONFIDENCE_FLOOR or c > 1:
             problems.append(f"finding[{i}] confidence must be a number in [{CONFIDENCE_FLOOR}, 1] (the reporting floor)")

@@ -57,11 +57,12 @@ The tracker is the glass wall (§1.2). Its backend is selected by `backend:` in
 roles never hard-code backend semantics. Two backends ship: `github` (a GitHub Projects
 v2 board; first-class) and `filesystem` (a root `TRACKER.md`; zero external setup).
 
-### 3.1 Board schema — four fields
+### 3.1 Board schema — five fields
 
 | Field | Values | Meaning |
 |---|---|---|
 | `Status` | `Blocked` / `Todo` / `In Progress` / `Done` | Where the issue sits in the queue. |
+| `Stage` | `Consideration` / `Planning` / `Buildable` | Pipeline column: upstream pointer items ride `Consideration`/`Planning`; buildable issues ride `Buildable`. The board's one-stop to-do index. |
 | `Wave` | `Wave N` | Parallel-execution wave (matrix-assigned by Plan). |
 | `Phase` | `Phase N` | Master-plan phase trace. |
 | `Domain` | single-select | Master-plan domain trace. |
@@ -71,6 +72,10 @@ fix-loop counter for unattended observability), and **claim comments** (a builde
 an issue by flipping `Status` to `In Progress` and posting a comment naming the agent).
 There is no claim-state machine, no lane or track field, and no bookend ceremony — a board
 item is workable cold by any outside agent from its body + the plain GitHub API.
+
+`Stage` is the column-grouping field and is **additive**: a repo provisioned before it
+existed keeps working as a 4-field board (an empty `Stage` reads as buildable) until
+`/idc:init` (or `/idc:doctor`) provisions the field — no migration step, no data rewrite.
 
 ### 3.2 The issue is a self-sufficient goal contract
 
@@ -89,6 +94,20 @@ ASSUMPTIONS: <inferred details, vetoable>
 Dependencies: native blocked-by links
 Trace: pillar file · consideration · PRD section
 ```
+
+A **buildable** issue (`Stage = Buildable`) carries the full contract above. An upstream
+**pointer item** (`Stage = Consideration`/`Planning`) carries only a repo-file reference plus
+`Phase`/`Domain` — it indexes a consideration, in-flight plan, or pillar on the board without
+copying its content (files stay the source of truth). A pointer is **reference + labels
+only**: it never carries a goal-contract, and Build only ever claims `Stage = Buildable`
+issues — so a staged-upstream pointer is never scooped (the glass wall, §1.2). The schema
+check (`idc:idc-schema-check`) validates the two shapes apart.
+
+**Pointer-write authority** (additive to §4): a pointer is written by the stage that produces
+the artifact — **Think** writes the consideration pointer (`Stage = Consideration`), **Plan**
+writes plan/pillar pointers and advances them (`Consideration → Planning`), retiring them as
+buildable issues land (`Stage = Buildable`). No role writes a pointer for a stage it does not
+own.
 
 ### 3.3 Six operations
 

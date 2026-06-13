@@ -11,9 +11,11 @@ State of record is a JSON block embedded in TRACKER.md between
 re-rendered beneath it on every write for humans. Standard library only.
 
 Six core ops (createTicket/setField/link/move/query/comment) + convenience
-(init/claim/block/close/show). Four fields only: Status, Wave, Phase, Domain. Status is
-one of Blocked | Todo | In Progress | Done. Dependencies are native blocked-by; claims are
-a Status flip + a comment naming the agent; per-issue fix attempts live on `attempt`.
+(init/claim/block/close/show). Five fields: Status, Wave, Phase, Domain, Stage. Status is
+one of Blocked | Todo | In Progress | Done; Stage is the column-grouping field, one of
+Consideration | Planning | Buildable (upstream pointer items ride Consideration/Planning,
+buildable issues ride Buildable). Dependencies are native blocked-by; claims are a Status
+flip + a comment naming the agent; per-issue fix attempts live on `attempt`.
 """
 import argparse
 import json
@@ -23,7 +25,8 @@ import sys
 import tempfile
 
 STATUSES = ("Blocked", "Todo", "In Progress", "Done")
-FIELDS = ("Status", "Wave", "Phase", "Domain")
+STAGES = ("Consideration", "Planning", "Buildable")
+FIELDS = ("Status", "Wave", "Phase", "Domain", "Stage")
 BEGIN = "<!-- idc-tracker-state:begin -->"
 END = "<!-- idc-tracker-state:end -->"
 
@@ -64,11 +67,12 @@ def find(state, num):
 
 
 def render_table(state):
-    rows = ["| # | Title | Status | Wave | Phase | Domain | Blocked-by |",
-            "|---|-------|--------|------|-------|--------|------------|"]
+    rows = ["| # | Title | Status | Stage | Wave | Phase | Domain | Blocked-by |",
+            "|---|-------|--------|-------|------|-------|--------|------------|"]
     for it in sorted(state["issues"], key=lambda x: x["number"]):
         bb = ", ".join(f"#{n}" for n in it.get("blocked_by", [])) or "—"
         rows.append(f"| {it['number']} | {it['title']} | {it['status']} | "
+                    f"{it.get('stage','') or '—'} | "
                     f"{it.get('wave','') or '—'} | {it.get('phase','') or '—'} | "
                     f"{it.get('domain','') or '—'} | {bb} |")
     return "\n".join(rows)
@@ -111,10 +115,13 @@ def op_create(path, args):
     state = load(path, allow_missing=True)
     if args.status not in STATUSES:
         die(f"invalid status '{args.status}' (one of {STATUSES})")
+    if args.stage and args.stage not in STAGES:
+        die(f"invalid stage '{args.stage}' (one of {STAGES})")
     num = state["next_number"]
     blocked_by = [int(x) for x in args.blocked_by.split(",")] if args.blocked_by else []
     state["issues"].append({
         "number": num, "title": args.title, "status": args.status,
+        "stage": args.stage or "",
         "wave": args.wave or "", "phase": args.phase or "", "domain": args.domain or "",
         "blocked_by": blocked_by, "attempt": 0, "comments": [],
     })
@@ -130,6 +137,8 @@ def op_set(path, args):
         die(f"unknown field '{args.field}' (one of {FIELDS})")
     if args.field == "Status" and args.value not in STATUSES:
         die(f"invalid status '{args.value}' (one of {STATUSES})")
+    if args.field == "Stage" and args.value not in STAGES:
+        die(f"invalid stage '{args.value}' (one of {STAGES})")
     it[args.field.lower()] = args.value
     save(path, state)
 
@@ -168,6 +177,8 @@ def op_query(path, args):
         if args.phase and it.get("phase") != args.phase:
             continue
         if args.domain and it.get("domain") != args.domain:
+            continue
+        if args.stage and it.get("stage") != args.stage:
             continue
         out.append(str(it["number"]))
     print("\n".join(out))
@@ -229,6 +240,7 @@ def main():
     c = sub.add_parser("create")
     c.add_argument("--title", required=True)
     c.add_argument("--status", default="Todo")
+    c.add_argument("--stage", default="")
     c.add_argument("--wave", default="")
     c.add_argument("--phase", default="")
     c.add_argument("--domain", default="")
@@ -250,6 +262,7 @@ def main():
 
     q = sub.add_parser("query")
     q.add_argument("--status")
+    q.add_argument("--stage")
     q.add_argument("--wave")
     q.add_argument("--phase")
     q.add_argument("--domain")

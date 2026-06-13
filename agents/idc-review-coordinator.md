@@ -6,7 +6,9 @@ description: 'The merged review engine coordinator — fans out the specialist r
 
 The coordinator half of the merged review engine (`idc:idc-review-engine`,
 `WORKFLOW.md §4.3`). It runs as fresh-context bounded fan-out — never a durable worker — and
-is invoked by the Build finisher per PR and at phase close. Reasoning tier.
+is driven by the standing review service (`idc:idc-review-agent`), which risk-tiers the run
+and sanitizes the packet before handing the lane findings here. Build invokes that service
+per PR and at phase close. Reasoning tier.
 
 ## Procedure
 
@@ -28,7 +30,9 @@ is invoked by the Build finisher per PR and at phase close. Reasoning tier.
 
 Enforce **test genuineness**: a verification surface that is shallow, shortcut, or
 placeholder (asserts nothing, mirrors the implementation, stubs the thing under test) is a
-`FAIL` finding, not a nit.
+`FAIL` finding, not a nit — file it at `major`/`blocker` under the `test-genuineness`
+dimension. The verdict validator rejects a `test-genuineness` finding filed at `minor`/`nit`,
+so a fake-green suite can never slip through as a nit.
 
 ## Authority boundaries
 

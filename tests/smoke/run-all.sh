@@ -18,10 +18,11 @@ for t in \
   phase4-build \
   phase5-ripple \
   phase6-autorun; do
-  if bash "$HERE/$t.sh" >/dev/null 2>&1; then
+  if out="$(bash "$HERE/$t.sh" 2>&1)"; then
     echo "  PASS  $t"
   else
     echo "  FAIL  $t"
+    printf '%s\n' "$out" | sed 's/^/        /'
     fails=$((fails + 1))
   fi
 done

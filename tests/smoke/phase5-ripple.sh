@@ -33,7 +33,7 @@ python3 "$RL" bogus >/dev/null 2>&1 && fail "unknown layer should error"
 
 # ---- (b) PRD path reuses the one gate; non-PRD path creates no gate ---------------
 T="$WORK/TRACKER.md"
-python3 "$TRK" --tracker "$T" init
+python3 "$TRK" --tracker "$T" init || fail "tracker init failed"
 gate=$(python3 "$TRK" --tracker "$T" create --title "[operator-action] PRD change — ripple")
 doc_issue=$(python3 "$TRK" --tracker "$T" create --title "Sync PRD-affected open issue")
 python3 "$TRK" --tracker "$T" block --num "$doc_issue" --by "$gate" >/dev/null

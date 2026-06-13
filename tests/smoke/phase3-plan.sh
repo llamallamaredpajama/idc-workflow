@@ -72,9 +72,30 @@ pillars:
 MD
 python3 "$MATRIX" "$WORK/matrix-collide.yaml" >/dev/null 2>&1 && fail "colliding matrix (same wave, shared surface) was accepted (must reject)"
 
+# block-style YAML surfaces (an idiomatic hand-edit) must parse and still detect the collision —
+# not silently mis-report it as "declares no surfaces"
+cat > "$WORK/matrix-collide-block.yaml" <<'MD'
+phase: Phase 1
+pillars:
+  - id: pillar-a
+    wave: 1
+    domain: ui
+    surfaces:
+      - src/theme/
+    blocks_on: []
+  - id: pillar-b
+    wave: 1
+    domain: ui
+    surfaces:
+      - src/theme/
+    blocks_on: []
+MD
+out="$(python3 "$MATRIX" "$WORK/matrix-collide-block.yaml" 2>&1)" && fail "block-style colliding matrix was accepted (must reject)"
+echo "$out" | grep -q "share surface" || fail "block-style collision must be detected as a shared-surface clash, not mis-reported as 'no surfaces' (got: $out)"
+
 # ---- (c) PRD gate mechanism over the real tracker --------------------------------
 T="$WORK/TRACKER.md"
-python3 "$TRK" --tracker "$T" init
+python3 "$TRK" --tracker "$T" init || fail "tracker init failed"
 gate=$(python3 "$TRK" --tracker "$T" create --title "[operator-action] PRD change — dark mode")
 prd_dep=$(python3 "$TRK" --tracker "$T" create --title "Add appearance setting (PRD-touching)")
 non_prd=$(python3 "$TRK" --tracker "$T" create --title "Refactor theme util (no PRD change)")

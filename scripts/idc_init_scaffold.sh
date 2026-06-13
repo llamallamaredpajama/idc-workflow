@@ -30,15 +30,19 @@ mkdir -p docs/workflow
 [ -f docs/workflow/tracker-config.yaml ]  || cp "$T/tracker-config.yaml" docs/workflow/tracker-config.yaml
 
 # docs/workflow tree from docs-tree/ (visible entries only; each absent entry copied).
+shopt -s nullglob
 for entry in "$T/docs-tree/"*; do
   name="$(basename "$entry")"
   [ -e "docs/workflow/$name" ] || cp -R "$entry" "docs/workflow/$name"
 done
+shopt -u nullglob
 
 # Substitute {{PROJECT_NAME}} (portable: temp file, no sed -i flavor split).
+# Escape sed replacement metacharacters (\ & |) so any project name substitutes literally.
+esc_name="$(printf '%s' "$PROJECT_NAME" | sed -e 's/[\\&|]/\\&/g')"
 for f in WORKFLOW.md WORKFLOW-config.yaml docs/workflow/tracker-config.yaml; do
   [ -f "$f" ] || continue
-  tmp="$(mktemp)"; sed "s|{{PROJECT_NAME}}|$PROJECT_NAME|g" "$f" > "$tmp" && mv "$tmp" "$f"
+  tmp="$(mktemp)"; sed "s|{{PROJECT_NAME}}|$esc_name|g" "$f" > "$tmp" && mv "$tmp" "$f"
 done
 
 # Select the backend; for filesystem, initialize TRACKER.md.

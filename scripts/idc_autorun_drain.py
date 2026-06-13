@@ -27,7 +27,8 @@ END = "<!-- idc-tracker-state:end -->"
 
 
 def load(path):
-    text = open(path, encoding="utf-8").read()
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
     m = re.search(re.escape(BEGIN) + r"\s*```json\s*(.*?)\s*```\s*" + re.escape(END), text, re.S)
     if not m:
         sys.stderr.write(f"idc-autorun-drain: no tracker state block in {path}\n")
@@ -46,6 +47,12 @@ def main():
         sys.exit(2)
 
     issues = state.get("issues", [])
+    # eager guard: the dict-comp and sort key below subscript it["number"] unconditionally,
+    # so a corrupt issue must fail loudly here rather than KeyError mid-computation.
+    for it in issues:
+        if "number" not in it:
+            sys.stderr.write("idc-autorun-drain: corrupt tracker — an issue is missing `number`\n")
+            sys.exit(2)
     status_by_num = {it["number"]: it.get("status") for it in issues}
     eligible = []
     for it in sorted(issues, key=lambda x: x["number"]):

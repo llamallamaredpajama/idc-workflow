@@ -50,9 +50,17 @@ cat > "$WORK/verdict-malformed.json" <<'JSON'
 JSON
 python3 "$VC" "$WORK/verdict-malformed.json" >/dev/null 2>&1 && fail "malformed finding (no attack/unblock) was accepted"
 
+# a non-object element in findings[] must produce a CLEAN error, not a Python traceback
+cat > "$WORK/verdict-nondict.json" <<'JSON'
+{"verdict":"PASS","dimensions_run":["security"],"findings":["not-an-object"]}
+JSON
+out="$(python3 "$VC" "$WORK/verdict-nondict.json" 2>&1)" && fail "verdict with a non-object finding was accepted"
+echo "$out" | grep -qi "traceback" && fail "non-object finding produced a Python traceback instead of a clean message: $out"
+echo "$out" | grep -q "not a JSON object" || fail "non-object finding should report a clean 'not a JSON object' problem (got: $out)"
+
 # ---- (b) build lifecycle over the real tracker -----------------------------------
 T="$WORK/TRACKER.md"
-python3 "$TRK" --tracker "$T" init
+python3 "$TRK" --tracker "$T" init || fail "tracker init failed"
 issue=$(python3 "$TRK" --tracker "$T" create --title "Trivial contract issue" --wave "Wave 1")
 python3 "$TRK" --tracker "$T" claim --num "$issue" --agent idc-implementer >/dev/null
 [ "$(python3 "$TRK" --tracker "$T" show --num "$issue" --field Status)" = "In Progress" ] || fail "claim should set In Progress"

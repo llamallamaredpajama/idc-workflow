@@ -72,6 +72,15 @@ async function main() {
 		{ "x-coms-session-token": buildReview.token });
 	expect(realReply.status === 200, "RESPONSE: the real target submits its reply", `expected 200, got ${realReply.status}`);
 
+	// (2b) GET message must be sender-token-bound (a bearer holder can't poll another's response).
+	const getPath = `/v1/messages/${msgId}?project=${encodeURIComponent(PROJECT)}&sender_session=${encodeURIComponent(buildImpl.sessionId)}`;
+	const getForeign = await http("GET", getPath, undefined, { "x-coms-session-token": buildReview.token });
+	expect(getForeign.status === 403, "GET message: foreign token rejected", `expected 403, got ${getForeign.status}`);
+	const getNoTok = await http("GET", getPath, undefined, {});
+	expect(getNoTok.status === 403, "GET message: missing token rejected", `expected 403, got ${getNoTok.status}`);
+	const getOwn = await http("GET", getPath, undefined, { "x-coms-session-token": buildImpl.token });
+	expect(getOwn.status === 200, "GET message: sender's own token accepted", `expected 200, got ${getOwn.status}`);
+
 	// (3) Duplicate resident — a second build-impl uniquifies to build-impl-2 and can still send
 	//     downstream (resolves to the build-impl IdcRole).
 	const dup = await register("build-impl", "sa-build-impl-2");  // hub uniquifies the name -> build-impl-2

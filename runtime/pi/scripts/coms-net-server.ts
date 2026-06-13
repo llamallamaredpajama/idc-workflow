@@ -1053,7 +1053,7 @@ async function handleSendMessage(req: Request): Promise<Response> {
 	return json(resp);
 }
 
-function lookupMessageForSender(url: URL, msg_id: string): { project: ProjectState; msg: ComsMessage } | Response {
+function lookupMessageForSender(req: Request, url: URL, msg_id: string): { project: ProjectState; msg: ComsMessage } | Response {
 	const projectName = url.searchParams.get("project") ?? "";
 	if (!projectName) return errorJson("missing_project", 400);
 	const senderSession = url.searchParams.get("sender_session") ?? "";
@@ -1063,11 +1063,17 @@ function lookupMessageForSender(url: URL, msg_id: string): { project: ProjectSta
 	const msg = project?.messages.get(msg_id);
 	if (!project || !msg) return errorJson("message_not_found", 404);
 	if (msg.sender_session !== senderSession) return errorJson("not_sender", 403);
+	// IDC-LOCAL (codex F2): reading/awaiting a message's terminal response is sender-scoped — bind
+	// it to the sender's per-session token so a bearer holder who learns msg_id + sender_session
+	// can't poll another sender's response.
+	if (!sessionAuthorized(req, project.agents.get(senderSession))) {
+		return errorJson("session_auth_failed", 403, { reason: "get/await must present the sender session's own token" });
+	}
 	return { project, msg };
 }
 
-function handleGetMessage(url: URL, msg_id: string): Response {
-	const scoped = lookupMessageForSender(url, msg_id);
+function handleGetMessage(req: Request, url: URL, msg_id: string): Response {
+	const scoped = lookupMessageForSender(req, url, msg_id);
 	if (scoped instanceof Response) return scoped;
 	const { msg } = scoped;
 	return json({
@@ -1079,7 +1085,7 @@ function handleGetMessage(url: URL, msg_id: string): Response {
 }
 
 function handleAwaitMessage(req: Request, url: URL, msg_id: string): Response {
-	const scoped = lookupMessageForSender(url, msg_id);
+	const scoped = lookupMessageForSender(req, url, msg_id);
 	if (scoped instanceof Response) return scoped;
 	const { project, msg } = scoped;
 	// Already terminal? Resolve immediately.
@@ -1383,7 +1389,7 @@ async function router(req: Request): Promise<Response> {
 		const msg_id = decodeURIComponent(msgMatch[1]);
 		const tail = msgMatch[2];
 		if (!tail && method === "GET") {
-			return handleGetMessage(url, msg_id);
+			return handleGetMessage(req, url, msg_id);
 		}
 		if (tail === "await" && method === "GET") {
 			return handleAwaitMessage(req, url, msg_id);

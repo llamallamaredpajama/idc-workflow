@@ -78,6 +78,14 @@ DEFAULT="$SBX/docs/workflow/idc-governance-contract.yaml"
 # --- check: a matching sidecar returns 0 -----------------------------------------------------
 python3 "$CHECK" --repo "$SBX" || fail "check must return 0 on a matching sidecar"
 
+# --- content integrity (codex round-7): a sidecar with VALID source hashes but an EDITED summary
+#     body (e.g. the tracker/glass_wall fields a resident trusts) is rejected — it no longer matches
+#     a fresh deterministic compile, even though no source changed. ------------------------------
+EDITED="$SBX/edited.yaml"
+sed 's/backend: github/backend: evil-backend/' "$DEFAULT" > "$EDITED"
+python3 "$CHECK" --repo "$SBX" --sidecar "$EDITED" >/dev/null 2>&1 \
+  && fail "check must reject a sidecar whose body was edited (hashes intact, content drifted)"
+
 # --- drift: mutate WORKFLOW.md -> check returns NON-ZERO (fail-closed reload signal) ----------
 printf '\nsneaky operator edit\n' >> "$SBX/WORKFLOW.md"
 python3 "$CHECK" --repo "$SBX" >/dev/null 2>&1 && fail "check must return non-zero after WORKFLOW.md drift"

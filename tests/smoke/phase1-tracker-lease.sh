@@ -72,4 +72,12 @@ run comment --num 1 --body "ordinary write while lease held" >/dev/null || fail 
 run lease-show --lease merge | grep -q '"held": true' || fail "an ordinary tracker write dropped the held lease"
 run lease-release --lease merge --token "$tokE" || fail "final release failed"
 
-echo "PASS: merge-lease primitive — single-holder, release-by-token, expiry, concurrency-safe, clobber-proof"
+# (h) MALFORMED state is fail-closed (codex round-7): a corrupt lease sidecar is UNKNOWN lock state,
+#     not "free" — acquire/show must fail rather than grant a lease over an unreadable file.
+printf 'not json {{' > "$WORK/TRACKER.md.leases.json"
+run lease-acquire --lease merge --owner finisher-Z --ttl 60 >/dev/null 2>&1 \
+  && fail "lease-acquire granted a lease over a CORRUPT sidecar (fail-open) — must fail-closed"
+run lease-show --lease merge >/dev/null 2>&1 \
+  && fail "lease-show succeeded over a corrupt sidecar — must fail-closed"
+
+echo "PASS: merge-lease primitive — single-holder, release-by-token, expiry, concurrency-safe, clobber-proof, corrupt-state fail-closed"

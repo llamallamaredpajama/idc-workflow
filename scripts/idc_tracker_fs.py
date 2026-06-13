@@ -276,12 +276,18 @@ def lease_sidecar(path):
 def load_leases(path):
     sc = lease_sidecar(path)
     if not os.path.exists(sc):
-        return {}
+        return {}  # MISSING == unheld (no lease has ever been written)
+    # MALFORMED is NOT the same as missing (codex round-7): a truncated/merge-conflicted/hand-edited
+    # lease sidecar is UNKNOWN lock state — treating it as "no lease" would let a second finisher
+    # acquire while a holder may still be active. Fail closed: surface the corruption, don't grant.
     try:
         with open(sc, encoding="utf-8") as fh:
-            return json.load(fh)
-    except (OSError, json.JSONDecodeError):
-        return {}  # a missing/corrupt sidecar means no lease held (fail-closed: nothing to trust)
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError) as e:
+        die(f"lease sidecar {sc} is unreadable/corrupt ({e}) — fail-closed; repair or remove it")
+    if not isinstance(data, dict):
+        die(f"lease sidecar {sc} is malformed (not a JSON object) — fail-closed")
+    return data
 
 
 def save_leases(path, leases):

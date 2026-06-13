@@ -47,22 +47,31 @@ function teardown(code = 0): never {
 process.on("SIGINT", () => teardown(0));
 process.on("SIGTERM", () => teardown(0));
 
+const HOME = hubEnv.HOME ?? process.env.HOME ?? "";
+const PROJECT = hubEnv.PI_COMS_NET_PROJECT ?? "default";
+const serverJson = join(HOME, ".pi", "coms-net", "projects", PROJECT, "server.json");
+// IDC-LOCAL (codex round-7): remove any STALE server.json from a prior hub for this project BEFORE
+// spawning, so the health wait can't accept an old hub's file and let residents register with the
+// wrong hub. (Defense in depth: the wait also requires server.json.pid === our hub's pid.)
+try { rmSync(serverJson, { force: true }); } catch { /* noop */ }
+
 // Hub child — K via the env MAP (execve), never argv. Bearer stays its existing 0600-file channel
 // unless an explicit token was supplied.
 const hub = Bun.spawn(hubArgv, { env: withBearer({ ...hubEnv, PI_COMS_NET_ROLE_HMAC_KEY: K }), stdout: "inherit", stderr: "inherit", stdin: "inherit" });
 children.push(hub);
 
-const HOME = hubEnv.HOME ?? process.env.HOME ?? "";
-const PROJECT = hubEnv.PI_COMS_NET_PROJECT ?? "default";
-const serverJson = join(HOME, ".pi", "coms-net", "projects", PROJECT, "server.json");
 async function waitForServer(): Promise<boolean> {
 	const ticks = Number(process.env.PI_IDC_FLEET_HEALTH_TICKS ?? 60);
 	for (let i = 0; i < ticks; i++) {
 		if (hub.exitCode !== null) return false;   // hub died during startup
 		if (existsSync(serverJson)) {
 			try {
-				const url = JSON.parse(readFileSync(serverJson, "utf8")).local_url;
-				if (url) { const r = await fetch(`${url}/health`).catch(() => null); if (r && r.ok) return true; }
+				const j = JSON.parse(readFileSync(serverJson, "utf8"));
+				// Only accept the hub WE spawned — a stale/other hub's server.json has a different pid.
+				if (Number(j.pid) === hub.pid && j.local_url) {
+					const r = await fetch(`${j.local_url}/health`).catch(() => null);
+					if (r && r.ok) return true;
+				}
 			} catch { /* not ready */ }
 		}
 		await new Promise((r) => setTimeout(r, 250));

@@ -24,7 +24,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import subprocess
 import sys
+import tempfile
 
 SCHEMA_VERSION = 1
 SIDECAR_RELPATH = "docs/workflow/idc-governance-contract.yaml"
@@ -119,7 +121,33 @@ def cmd_check(args: argparse.Namespace) -> int:
         )
         return 1
 
-    print(f"idc-governance: ok — sidecar matches all {len(entries)} source hashes")
+    # Content integrity (codex round-7): matching source_hashes is not enough — the rest of the
+    # sidecar (the workflow/tracker/glass_wall summary residents trust) must ALSO be the deterministic
+    # compile of the current sources. A hand-edit or merge-conflict that alters those fields while
+    # leaving valid hashes must be rejected, or residents boot on corrupted governance. The compiler
+    # is byte-stable (phase8-governance.sh), so we recompile to a temp and byte-compare.
+    compiler = os.path.join(os.path.dirname(os.path.abspath(__file__)), "idc_governance_compile.py")
+    if os.path.isfile(compiler):
+        fd, tmp = tempfile.mkstemp(prefix=".gov-recompile-", suffix=".yaml")
+        os.close(fd)
+        try:
+            res = subprocess.run([sys.executable, compiler, "--repo", repo, "--out", tmp],
+                                 capture_output=True, text=True)
+            if res.returncode != 0:
+                die(f"could not recompile for the integrity check: {res.stderr.strip()}")
+            with open(tmp, "rb") as a, open(sidecar, "rb") as b:
+                if a.read() != b.read():
+                    print("DRIFT\tcontent\tsidecar body differs from a fresh deterministic compile", file=sys.stderr)
+                    print("idc-governance: RELOAD REQUIRED — the sidecar was edited/corrupted (hashes "
+                          "intact but the compiled body differs); recompile before acting.", file=sys.stderr)
+                    return 1
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+    print(f"idc-governance: ok — sidecar matches all {len(entries)} source hashes + the deterministic compile")
     return 0
 
 

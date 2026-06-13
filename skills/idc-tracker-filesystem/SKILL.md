@@ -45,6 +45,9 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_tracker_fs.py" --tracker <repo>/TRACK
 | block | `block --num N [--by M]` (Status→Blocked + optional blocked-by) |
 | close | `close --num N` (Status→Done; idempotent) |
 | read | `show --num N [--field F \| --comments \| --blocked-by]` |
+| lease-acquire | `lease-acquire [--lease merge] --owner NAME [--ttl S]` → prints an opaque token, or exits non-zero if already held (fail-closed) |
+| lease-release | `lease-release [--lease merge] --token TOKEN` (release-by-token; idempotent when unheld; a wrong token is rejected) |
+| lease-show | `lease-show [--lease merge]` → JSON `{owner, acquired_at, expires_at, held}` (token omitted), or empty when unheld |
 
 The helper writes atomically (temp + replace), re-renders the board table on every
 mutation, validates Status and Stage against their option sets, and never lets the JSON
@@ -53,8 +56,12 @@ block and the table diverge. The caller commits `TRACKER.md` with a `tracker:` p
 ## Claim protocol
 
 A builder claims an issue by `claim --num N --agent <name>` — that flips `Status` to
-`In Progress` and records a claim comment naming the agent. No lock primitive: the Build
-orchestrator is the single merge-queue, so parallel claims on distinct issues never race.
+`In Progress` and records a claim comment naming the agent. Parallel claims on distinct
+issues never race (disjoint surfaces). Where a single holder must be proven **atomically** —
+e.g. flat pi finisher residents with no orchestrator contending to update the integration ref —
+use the fail-closed **merge lease** (`lease-acquire`/`lease-release`): an advisory `flock` on a
+sidecar lock file makes acquire-if-empty-or-expired atomic across processes, returns an opaque
+token, and enforces release-by-token + TTL expiry. No lease → no merge.
 
 ## Authority boundaries
 

@@ -33,8 +33,16 @@ playbook per runtime.
   peers **strictly downstream** of it in the river order — `think → plan → sequence →
   build-impl → build-review → build-finish` — plus the **Ripple** peer (the universal
   downstream sink). Upstream, self, an unknown sender, or an unmappable target is **denied
-  fail-closed**. Work that must travel "back" (re-review, fix iteration) rides the **board +
-  the role's own goal loop**, never an upstream send.
+  fail-closed**. The rule is enforced in the client extension **and authoritatively re-enforced
+  at the coms-net hub** (`handleSendMessage`) before any message is queued, so a direct
+  `/v1/messages` POST by a token holder cannot bypass it. Work that must travel "back"
+  (re-review, fix iteration) rides the **board + the role's own goal loop**, never an upstream send.
+- **Governance is gated at resident spawn (fail-closed).** A long-lived resident consults the
+  compiled governance sidecar (`docs/workflow/idc-governance-contract.yaml`) instead of
+  re-reading `WORKFLOW.md`; the `idc-pi` launcher runs `idc_governance_check.py` before exec'ing
+  any resident and **blocks the launch** on drift or a missing sidecar (recompile with
+  `idc_governance_compile.py`, then relaunch; bypass: `PI_IDC_GOVERNANCE_CHECK=off`). A resident
+  re-runs the same checker mid-life to detect drift while it is alive.
 - **Never two residents on one surface.** One unit per resident; the planning matrix already
   guarantees same-wave issues own **disjoint** file surfaces. Each durable worker runs in a
   **pre-created worktree** (never an isolation param).
@@ -57,15 +65,20 @@ decision 7`, `agents/idc-build.md`). Worked example for one wave:
 4. **A finisher resident** (`build-finish`) runs the **whole** `idc:idc-finisher`: its **own**
    `/fullauto-goal` loop over **all** reviewer findings (incl. side issues) → `/simplify` → git
    finalization → Ripple on the unsolvable.
-5. **Merge-serialization mechanism = a board-backed merge lease.** Two layers, both required:
+5. **Merge-serialization mechanism = a tracker-backed merge lease.** Two layers, both required:
    **(a) matrix-disjoint surfaces** make parallel diffs content-commutative (primary defense);
    **(b) a single-holder merge lease, fail-closed (no lease → no merge).** Because the pi pool
-   is flat with **no master orchestrator**, the **authoritative GitHub Projects board IS the
-   lock-holder**: the finisher resident acquires the board-backed lease, merges only the
-   integration-ref update (never content), then releases; coms-net carries only the
-   liveness/notification. This is the **pi row** of the one A2 merge contract (Claude Teams /
-   collapsed: the sole Build orchestrator merges; Codex: the app-server serially merges
-   finisher threads).
+   is flat with **no master orchestrator**, the finisher resident proves exclusive ownership
+   through the tracker adapter's lease primitive (`leaseAcquire(merge, owner, ttl) → token`)
+   before it merges **only** the integration-ref update (never content), then releases
+   (`leaseRelease(merge, token)`); coms-net carries only the liveness/notification. The lease is
+   a real, atomic primitive — **on the filesystem backend** it is `lease-acquire`/`lease-release`
+   (flock-backed acquire-if-empty-or-expired, opaque token, TTL expiry, release-by-token; see
+   `idc:idc-tracker-filesystem`); **on the GitHub backend** there is no native compare-and-set
+   lease yet, so the interim is **single-holder fail-closed** — exactly one orchestrator merges,
+   a finisher never self-merges concurrently (a native Projects-field CAS lease is a tracked
+   follow-up). This is the **pi row** of the one A2 merge contract (Claude Teams / collapsed: the
+   sole Build orchestrator merges; Codex: the app-server serially merges finisher threads).
 
 The forward triplet notifications — `build-impl → build-review → build-finish` — are all
 downstream-legal under the glass-wall ACL; Ripple is reachable from any of them.

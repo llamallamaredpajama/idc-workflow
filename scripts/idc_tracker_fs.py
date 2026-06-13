@@ -18,11 +18,15 @@ buildable issues ride Buildable). Dependencies are native blocked-by; claims are
 flip + a comment naming the agent; per-issue fix attempts live on `attempt`.
 """
 import argparse
+import fcntl
 import json
 import os
 import re
 import sys
 import tempfile
+import time
+import uuid
+from contextlib import contextmanager
 
 STATUSES = ("Blocked", "Todo", "In Progress", "Done")
 STAGES = ("Consideration", "Planning", "Buildable")
@@ -234,6 +238,81 @@ def op_show(path, args):
         print(json.dumps(it, indent=2, ensure_ascii=False))
 
 
+# ── merge lease (single-holder serialization primitive) ──────────────────────
+# The pi adapter's merge-serialization contract names "a single-holder merge lease, fail-closed
+# (no lease -> no merge)". This is its filesystem-backend implementation: an atomic
+# acquire-if-empty-or-expired returning an opaque token, release-by-token, and TTL expiry. True
+# cross-process mutual exclusion comes from an advisory flock on a sidecar lock file, so the
+# read-modify-write cannot race between two concurrent finishers.
+
+
+@contextmanager
+def tracker_lock(path):
+    lock_path = path + ".lock"
+    parent = os.path.dirname(os.path.abspath(path)) or "."
+    os.makedirs(parent, exist_ok=True)
+    fh = open(lock_path, "w")  # noqa: SIM115 — held for the duration of the with-block
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        fh.close()
+
+
+def iso(epoch):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def op_lease_acquire(path, args):
+    if args.ttl <= 0:
+        die("lease --ttl must be a positive number of seconds")
+    with tracker_lock(path):
+        state = load(path, allow_missing=True)
+        leases = state.setdefault("leases", {})
+        now = time.time()
+        cur = leases.get(args.lease)
+        if cur and float(cur.get("expires_at_epoch", 0)) > now:
+            # Held and unexpired -> fail-closed: never hand out a second concurrent holder.
+            die(f"lease '{args.lease}' held by {cur.get('owner')!r} until {cur.get('expires_at')} "
+                f"(no lease -> no merge)")
+        token = uuid.uuid4().hex
+        exp = now + args.ttl
+        leases[args.lease] = {
+            "owner": args.owner,
+            "token": token,
+            "acquired_at": iso(now),
+            "expires_at": iso(exp),
+            "expires_at_epoch": exp,
+        }
+        save(path, state)
+    print(token)
+
+
+def op_lease_release(path, args):
+    with tracker_lock(path):
+        state = load(path, allow_missing=True)
+        leases = state.setdefault("leases", {})
+        cur = leases.get(args.lease)
+        if not cur:
+            return  # idempotent: nothing to release
+        if cur.get("token") != args.token:
+            die(f"lease '{args.lease}' release rejected — token mismatch "
+                f"(held by {cur.get('owner')!r})")
+        del leases[args.lease]
+        save(path, state)
+
+
+def op_lease_show(path, args):
+    state = load(path, allow_missing=True)
+    cur = state.get("leases", {}).get(args.lease)
+    if not cur:
+        return  # unheld -> empty output
+    out = {k: v for k, v in cur.items() if k != "token"}
+    out["held"] = float(cur.get("expires_at_epoch", 0)) > time.time()
+    print(json.dumps(out, indent=2, ensure_ascii=False))
+
+
 def main():
     p = argparse.ArgumentParser(description="IDC v2 filesystem tracker backend")
     p.add_argument("--tracker", required=True, help="path to TRACKER.md")
@@ -292,11 +371,25 @@ def main():
     sh.add_argument("--comments", action="store_true")
     sh.add_argument("--blocked-by", dest="blocked_by", action="store_true")
 
+    la = sub.add_parser("lease-acquire")
+    la.add_argument("--lease", default="merge")
+    la.add_argument("--owner", required=True)
+    la.add_argument("--ttl", type=float, default=900.0, help="lease lifetime in seconds")
+
+    lr = sub.add_parser("lease-release")
+    lr.add_argument("--lease", default="merge")
+    lr.add_argument("--token", required=True)
+
+    lsw = sub.add_parser("lease-show")
+    lsw.add_argument("--lease", default="merge")
+
     args = p.parse_args()
     ops = {
         "init": op_init, "create": op_create, "set": op_set, "move": op_move,
         "link": op_link, "query": op_query, "comment": op_comment, "claim": op_claim,
         "block": op_block, "close": op_close, "show": op_show,
+        "lease-acquire": op_lease_acquire, "lease-release": op_lease_release,
+        "lease-show": op_lease_show,
     }
     ops[args.op](args.tracker, args)
 

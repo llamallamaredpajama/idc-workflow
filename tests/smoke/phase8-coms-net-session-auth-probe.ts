@@ -121,6 +121,26 @@ async function main() {
 	expect(afterDel.json?.status === "error" || afterDel.json?.status === "timeout",
 		"TOMBSTONE: orphaned message is terminal after target removal",
 		`expected error/timeout, got ${JSON.stringify(afterDel.json)}`);
+	// THREAT, not just mechanism: a session that re-registers after the victim is gone cannot answer
+	// the orphaned message (Layer 1.1 issues it a fresh id ≠ the old target; Layer 1.2 left the msg
+	// terminal). Either guard rejects it — assert the answer fails, not the exact code.
+	const reborn = await register("ripple", "sa-tomb-reborn");
+	const hijack = await http("POST", `/v1/messages/${tombId}/response`,
+		{ project: PROJECT, responder_session: victim.sessionId, response: "hijack", error: null },
+		{ "x-coms-session-token": reborn.token });
+	expect(hijack.status >= 400, "RESURRECTION: a re-registered session cannot answer the predecessor's orphaned message", `expected 4xx, got ${hijack.status}`);
+
+	// (2g) SENDER-gone half: delete the SENDER mid-flight → its pending message terminates, and a
+	//      re-registrant of the sender can't poll a fresh response (the GET is sender-token-bound).
+	const s2 = await register("build-impl", "sa-sender-gone");
+	const t2 = await register("build-review", "sa-target2");
+	const m2 = await sendAs(http, s2.token, { project: PROJECT, sender_session: s2.sessionId, target_session: t2.sessionId, target: null, prompt: "sender will vanish", hops: 0 });
+	const m2Id = m2.json?.msg_id;
+	expect(typeof m2Id === "string" && m2Id.length > 0, "SENDER-GONE setup: message queued", `got ${m2.status}`);
+	await http("DELETE", `/v1/agents/${encodeURIComponent(s2.sessionId)}?project=${encodeURIComponent(PROJECT)}`, undefined, { "x-coms-session-token": s2.token });
+	const m2After = await http("GET", `/v1/messages/${m2Id}?project=${encodeURIComponent(PROJECT)}&sender_session=${encodeURIComponent(s2.sessionId)}`, undefined, { "x-coms-session-token": s2.token });
+	// the original sender's token no longer authorizes (session removed) → 403; the message is terminal either way
+	expect(m2After.status >= 400, "SENDER-GONE: a re-registrant cannot poll the vanished sender's response", `expected 4xx, got ${m2After.status}`);
 
 	// (3) Duplicate resident — a second build-impl uniquifies to build-impl-2 and can still send
 	//     downstream (resolves to the build-impl IdcRole).

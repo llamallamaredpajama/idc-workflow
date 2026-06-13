@@ -82,8 +82,17 @@ python3 "$CHECK" --repo "$SBX" || fail "check must return 0 on a matching sideca
 printf '\nsneaky operator edit\n' >> "$SBX/WORKFLOW.md"
 python3 "$CHECK" --repo "$SBX" >/dev/null 2>&1 && fail "check must return non-zero after WORKFLOW.md drift"
 
+# --- completeness (codex round-6): an INCOMPLETE sidecar (a governing source omitted) is REJECTED
+#     even if the remaining hashes match — so a hand-edited sidecar can't pass the gate while
+#     skipping one file's drift check. (Recompile first; WORKFLOW.md was drifted above.)
+python3 "$COMPILE" --repo "$SBX" || fail "recompile (for completeness test) failed"
+INCOMPLETE="$SBX/incomplete.yaml"
+grep -vE '^[[:space:]]*docs/workflow/tracker-config\.yaml:[[:space:]]*[0-9a-f]{64}' "$DEFAULT" > "$INCOMPLETE"
+python3 "$CHECK" --repo "$SBX" --sidecar "$INCOMPLETE" >/dev/null 2>&1 \
+  && fail "check must reject an incomplete sidecar (a governing source omitted)"
+
 # --- fail-closed: a missing sidecar -> NON-ZERO (never silently treats sources as current) ----
 rm -f "$DEFAULT"
 python3 "$CHECK" --repo "$SBX" >/dev/null 2>&1 && fail "check must fail-closed on a missing sidecar"
 
-echo "PASS: governance compiler is byte-stable + drift check is fail-closed"
+echo "PASS: governance compiler byte-stable; drift, incompleteness, and a missing sidecar all fail-closed"

@@ -28,6 +28,9 @@ import sys
 
 SCHEMA_VERSION = 1
 SIDECAR_RELPATH = "docs/workflow/idc-governance-contract.yaml"
+# The fixed governing source set the compiler pins (idc_governance_compile.py::SOURCES). A valid
+# sidecar must cover EXACTLY these — no missing source (or its drift goes unchecked), no extras.
+EXPECTED_SOURCES = ("WORKFLOW.md", "WORKFLOW-config.yaml", "docs/workflow/tracker-config.yaml")
 
 
 def die(message: str, code: int = 2) -> None:
@@ -79,6 +82,17 @@ def parse_sidecar(path: str) -> list[tuple[str, str]]:
     for rel, h in entries:
         if len(h) != 64 or any(c not in "0123456789abcdef" for c in h):
             die(f"invalid sidecar: source {rel} has a non-sha256 hash")
+    # Fail-closed completeness (codex round-6): a sidecar must cover EXACTLY the governing source
+    # set — reject duplicate keys, absolute/traversal paths, and any missing/extra source, so an
+    # incomplete or hand-edited sidecar can't pass the gate while skipping a file's drift check.
+    keys = [rel for rel, _ in entries]
+    if len(keys) != len(set(keys)):
+        die("invalid sidecar: duplicate key(s) in source_hashes")
+    for rel in keys:
+        if os.path.isabs(rel) or rel != os.path.normpath(rel) or ".." in rel.split("/"):
+            die(f"invalid sidecar: source key {rel!r} must be a clean relative path")
+    if set(keys) != set(EXPECTED_SOURCES):
+        die(f"invalid sidecar: source_hashes must cover exactly {sorted(EXPECTED_SOURCES)}, got {sorted(keys)}")
     return entries
 
 

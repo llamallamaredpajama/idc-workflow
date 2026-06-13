@@ -26,6 +26,7 @@ for t in \
   phase8-pi-launchable \
   phase8-pi-runtime \
   phase8-pi-fleet-secret \
+  phase8-pi-fleet-failclose \
   phase8-pi-review-verdict \
   phase8-governance \
   phase8-pi-governance-gate \

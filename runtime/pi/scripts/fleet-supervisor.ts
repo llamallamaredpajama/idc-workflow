@@ -55,19 +55,26 @@ children.push(hub);
 const HOME = hubEnv.HOME ?? process.env.HOME ?? "";
 const PROJECT = hubEnv.PI_COMS_NET_PROJECT ?? "default";
 const serverJson = join(HOME, ".pi", "coms-net", "projects", PROJECT, "server.json");
-async function waitForServer(): Promise<void> {
-	for (let i = 0; i < 60; i++) {
+async function waitForServer(): Promise<boolean> {
+	const ticks = Number(process.env.PI_IDC_FLEET_HEALTH_TICKS ?? 60);
+	for (let i = 0; i < ticks; i++) {
+		if (hub.exitCode !== null) return false;   // hub died during startup
 		if (existsSync(serverJson)) {
 			try {
 				const url = JSON.parse(readFileSync(serverJson, "utf8")).local_url;
-				if (url) { const r = await fetch(`${url}/health`).catch(() => null); if (r && r.ok) return; }
+				if (url) { const r = await fetch(`${url}/health`).catch(() => null); if (r && r.ok) return true; }
 			} catch { /* not ready */ }
 		}
 		await new Promise((r) => setTimeout(r, 250));
 	}
-	console.error("fleet-supervisor: hub did not become healthy in time");
+	return false;
 }
-await waitForServer();
+// Fail-closed: a hub that never becomes healthy aborts the fleet — do NOT spawn residents against
+// a dead hub and report success (codex round-6 finding 2).
+if (!(await waitForServer())) {
+	console.error("fleet-supervisor: hub did not become healthy — aborting fleet");
+	teardown(1);
+}
 
 // Resident children — each gets ONLY its own cap (computed here, in memory) via the env MAP.
 for (const role of roles) {
@@ -78,6 +85,10 @@ for (const role of roles) {
 	children.push(child);
 }
 
-// Supervise: exit (and tear the fleet down) when any child exits.
-await Promise.race(children.map((c) => c.exited));
-teardown(0);
+// Supervise: the fleet is healthy only while every child runs. When ANY child exits, tear down and
+// PROPAGATE its exit code — a hub/resident crash must surface as a non-zero fleet exit, not a clean
+// one (codex round-6 finding 2).
+const firstExit = await Promise.race(children.map((c) => c.exited));
+const code = typeof firstExit === "number" ? firstExit : 1;
+if (code !== 0) console.error(`fleet-supervisor: a fleet child exited with code ${code} — tearing down`);
+teardown(code);

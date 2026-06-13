@@ -48,24 +48,9 @@ HARNESS_REPO="$(cd "$HARNESS_REPO" 2>/dev/null && pwd -P || printf '%s' "$HARNES
 SCRIPT_SELF="$SCRIPT_PATH"
 PROJECT=""
 
-# IDC-LOCAL (codex round-4): hub master key for per-role registration capabilities, used ONLY by the
-# supervised `idc-pi fleet` mode — which holds K in this one process's memory and direct-spawns the
-# hub + residents, so K reaches only the hub and each resident receives only its own HMAC(K, role)
-# cap (K never filed, never in a ps-visible string). The cmux/iterm pane mode does NOT use K (it
-# runs unconfigured) because no channel through separate `env -i` panes is both secret and shared.
-# K is taken from the env if present (so a wrapper can pin it), else generated in memory here.
-# See runtime/pi/SECURITY.md for the two modes + the same-OS-user residual.
-ROLE_HMAC_KEY="${PI_COMS_NET_ROLE_HMAC_KEY:-}"
-if [[ -z "$ROLE_HMAC_KEY" ]]; then
-	ROLE_HMAC_KEY="$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-fi
 # Optional explicit bearer passthrough — fixes the env -i strip so the documented explicit-token /
 # non-loopback hub mode is reachable; empty => the hub auto-generates a loopback token (the default).
 AUTH_TOKEN="${PI_COMS_NET_AUTH_TOKEN:-}"
-
-role_cap() {  # $1 = IDC role -> HMAC-SHA256(ROLE_HMAC_KEY, role); empty if openssl is unavailable
-	printf '%s' "$1" | openssl dgst -sha256 -mac HMAC -macopt "key:$ROLE_HMAC_KEY" 2>/dev/null | awk '{print $NF}'
-}
 
 usage() {
 	cat <<'USAGE'
@@ -315,6 +300,14 @@ command_fleet() {
 	# Gate the whole fleet on governance drift, fail-closed, BEFORE anything spawns (same gate as
 	# `idc-pi run`; codex round-5 finding 2 — the fleet must not bypass it).
 	governance_preflight
+
+	# The hub master key K — used ONLY here (the supervised fleet). Pinned from the env if a wrapper
+	# set it, else generated in memory. K never touches disk and never enters an argv (it flows to
+	# the supervisor as a shell env assignment below; the supervisor computes caps in-memory).
+	local ROLE_HMAC_KEY="${PI_COMS_NET_ROLE_HMAC_KEY:-}"
+	if [[ -z "$ROLE_HMAC_KEY" ]]; then
+		ROLE_HMAC_KEY="$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+	fi
 
 	# Hand the SECRET-FREE spec (each child's argv + base env) to the supervisor via NUL-delimited
 	# files; the supervisor (bun) computes the caps in memory and sets each child's env via execve

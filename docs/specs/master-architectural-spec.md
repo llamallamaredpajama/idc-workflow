@@ -60,13 +60,14 @@ reference-integrity linter (`scripts/lint-references.sh`) enforces this.
 
 | Agent | Role |
 |---|---|
-| `idc-think` | Think orchestrator playbook (free-form, zero teammates). |
 | `idc-plan` | Plan orchestrator playbook (domain dispatch → doc chain → contracts → matrix → admit). |
 | `idc-build` | Build orchestrator + finisher/merge-queue. |
 | `idc-implementer` | The one durable-worker role — executes an issue contract as a goal loop. |
 | `idc-review-coordinator` | Merged review engine coordinator (dedup, confidence, verdict). |
 | `idc-ripple` | Ripple orchestrator playbook (doc-sync, PRD-only gate). |
 | `idc-autorun` | Autorun two-lane drainer playbook. |
+
+(Think has no standing agent — `commands/think.md` runs it inline, free-form with zero teammates.)
 
 **Skills (≤ 14, target ~12):**
 

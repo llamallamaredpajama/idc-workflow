@@ -19,7 +19,7 @@ drain() { python3 "$DRAIN" --tracker "$T"; }
 [ -f "$DRAIN" ] || fail "autorun drain helper not found at $DRAIN (not implemented yet)"
 
 # empty board -> nothing actionable -> drain complete
-python3 "$TRK" --tracker "$T" init
+python3 "$TRK" --tracker "$T" init || fail "tracker init failed"
 drain | grep -q "^drain: complete$" || fail "empty board should drain complete"
 
 # add a buildable Todo issue -> actionable

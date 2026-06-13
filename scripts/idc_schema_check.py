@@ -53,7 +53,8 @@ def main():
         sys.stderr.write("usage: idc_schema_check.py <issue-body.md>\n")
         sys.exit(2)
     try:
-        text = open(sys.argv[1], encoding="utf-8").read()
+        with open(sys.argv[1], encoding="utf-8") as fh:
+            text = fh.read()
     except OSError as e:
         sys.stderr.write(f"idc-schema-check: cannot read {sys.argv[1]}: {e}\n")
         sys.exit(2)

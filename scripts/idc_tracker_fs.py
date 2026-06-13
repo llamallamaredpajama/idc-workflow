@@ -7,7 +7,7 @@ A zero-setup, executable implementation of the portable Tracker interface
 substrate the sandbox smoke tests run against (no GitHub required).
 
 State of record is a JSON block embedded in TRACKER.md between
-`<!-- idc:tracker:begin -->` / `<!-- idc:tracker:end -->`; a markdown board table is
+`<!-- idc-tracker-state:begin -->` / `<!-- idc-tracker-state:end -->`; a markdown board table is
 re-rendered beneath it on every write for humans. Standard library only.
 
 Six core ops (createTicket/setField/link/move/query/comment) + convenience
@@ -20,6 +20,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 
 STATUSES = ("Blocked", "Todo", "In Progress", "Done")
 FIELDS = ("Status", "Wave", "Phase", "Domain")
@@ -41,7 +42,8 @@ def load(path, allow_missing=False):
         if allow_missing:
             return empty_state()
         die(f"TRACKER not found at {path} — run `init` first")
-    text = open(path, encoding="utf-8").read()
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
     m = re.search(re.escape(BEGIN) + r"\s*```json\s*(.*?)\s*```\s*" + re.escape(END), text, re.S)
     if not m:
         die(f"TRACKER at {path} has no idc:tracker JSON block (corrupt or not an IDC tracker)")
@@ -56,7 +58,7 @@ def load(path, allow_missing=False):
 
 def find(state, num):
     for it in state["issues"]:
-        if it["number"] == num:
+        if it.get("number") == num:
             return it
     die(f"issue #{num} not found")
 
@@ -82,10 +84,19 @@ def save(path, state):
         "## Board\n\n"
         f"{render_table(state)}\n"
     )
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(body)
-    os.replace(tmp, path)
+    # atomic write: same-dir temp + fsync + os.replace (mirrors scripts/idc_settings_json.py)
+    parent = os.path.dirname(os.path.abspath(path))
+    fd, tmp = tempfile.mkstemp(prefix=".tracker-", suffix=".tmp", dir=parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(body)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        tmp = ""
+    finally:
+        if tmp and os.path.exists(tmp):
+            os.unlink(tmp)
 
 
 def op_init(path, args):

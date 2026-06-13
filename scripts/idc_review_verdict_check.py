@@ -44,6 +44,9 @@ def check(doc):
         return ["`findings` must be a list"]
     seen = set()
     for i, f in enumerate(findings):
+        if not isinstance(f, dict):
+            problems.append(f"finding[{i}] is not a JSON object")
+            continue
         for k in REQUIRED_FINDING:
             if k not in f or (isinstance(f.get(k), str) and not f[k].strip()):
                 problems.append(f"finding[{i}] missing/empty `{k}`")
@@ -58,7 +61,7 @@ def check(doc):
         elif fp:
             seen.add(fp)
     if verdict in VERDICTS:
-        sevs = {f.get("severity") for f in findings if f.get("severity") in SEVERITIES}
+        sevs = {f.get("severity") for f in findings if isinstance(f, dict) and f.get("severity") in SEVERITIES}
         exp = expected_verdict(sevs)
         if verdict != exp:
             problems.append(f"verdict {verdict!r} inconsistent with findings — worst severity "
@@ -71,7 +74,8 @@ def main():
         sys.stderr.write("usage: idc_review_verdict_check.py <verdict.json>\n")
         sys.exit(2)
     try:
-        doc = json.load(open(sys.argv[1], encoding="utf-8"))
+        with open(sys.argv[1], encoding="utf-8") as fh:
+            doc = json.load(fh)
     except (OSError, json.JSONDecodeError) as e:
         sys.stderr.write(f"idc-review-verdict-check: cannot parse {sys.argv[1]}: {e}\n")
         sys.exit(2)

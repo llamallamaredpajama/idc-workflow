@@ -35,6 +35,7 @@ def parse_matrix(text):
     pillars = []
     cur = None
     in_pillars = False
+    block_key = None  # a list key (surfaces|blocks_on) currently collecting a YAML block sequence
     for raw in text.splitlines():
         if re.match(r"^pillars:\s*$", raw):
             in_pillars = True
@@ -45,16 +46,26 @@ def parse_matrix(text):
         if m:
             cur = {"id": m.group(1).strip(), "wave": None, "surfaces": [], "blocks_on": []}
             pillars.append(cur)
+            block_key = None
             continue
         if cur is None:
             continue
+        # a block-sequence item ("  - value") feeds the most recent list key (block style)
+        m = re.match(r"^\s*-\s*(.+?)\s*$", raw)
+        if m and block_key is not None:
+            cur[block_key].append(m.group(1).strip())
+            continue
         m = re.match(r"^\s*(wave|domain|surfaces|blocks_on):\s*(.*)$", raw)
         if m:
-            key, val = m.group(1), m.group(2)
+            key, val = m.group(1), m.group(2).strip()
+            block_key = None
             if key in ("surfaces", "blocks_on"):
+                # inline `[a, b]` populates now; a bare `key:` opens a block sequence
                 cur[key] = parse_list(val)
+                if not val:
+                    block_key = key
             else:
-                cur[key] = val.strip()
+                cur[key] = val
     return pillars
 
 
@@ -92,7 +103,8 @@ def main():
         sys.stderr.write("usage: idc_matrix_check.py <matrix.yaml>\n")
         sys.exit(2)
     try:
-        text = open(sys.argv[1], encoding="utf-8").read()
+        with open(sys.argv[1], encoding="utf-8") as fh:
+            text = fh.read()
     except OSError as e:
         sys.stderr.write(f"idc-matrix-check: cannot read {sys.argv[1]}: {e}\n")
         sys.exit(2)

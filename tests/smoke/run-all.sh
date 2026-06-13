@@ -11,6 +11,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 fails=0
 for t in \
   phase1-tracker-fs \
+  phase1-tracker-stage \
   phase1-init-doctor \
   phase1-settings-json \
   phase2-think \

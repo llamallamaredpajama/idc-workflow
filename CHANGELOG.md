@@ -2,6 +2,25 @@
 
 All notable changes to the IDC Workflow plugin are documented in this file.
 
+## Unreleased
+
+- **Plugin lifecycle commands (built on the install receipt).** Two receipt-driven lifecycle
+  commands rejoin the surface — now **nine** commands:
+  - `/idc:update` — refresh stamped scaffold files after a plugin update. Silently re-stamps
+    files the install receipt proves untouched, shows a diff and asks on files you customized
+    (never silently overwriting your edits), and **reports** GitHub board drift without ever
+    mutating the board. Files-only, idempotent (`skipped-already-current`); graduates a
+    pre-receipt repo to receipt-driven on first run.
+  - `/idc:uninstall` — remove IDC's repo footprints as the inverse of `/idc:init`: a
+    receipt-driven removal manifest (with a hardcoded pre-receipt fallback), work products
+    archived to an untracked `idc-archive-<date>.tar.gz`, and one **revertable** commit that
+    strips only IDC's scaffold/config/enablement key. GitHub is untouched by default; opt-in
+    `--close-issues` (reversible) and `--delete-board` (permanent, typed confirmation).
+  - Both consume the install receipt `/idc:init` already writes; the safety-critical
+    fingerprint compare lives in the dependency-free helper `scripts/idc_receipt_check.py`
+    (`stamp` + `verify`), covered by the `tests/smoke/phase7-lifecycle.sh` round-trip. (At
+    2.0.0 these commands were retired pending this receipt substrate; this re-adds them on it.)
+
 ## 2.0.0 — 2026-06-12
 
 Full v2 overhaul — a clean-slate rebuild from the operator interview in

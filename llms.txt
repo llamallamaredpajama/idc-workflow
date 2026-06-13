@@ -20,6 +20,8 @@ Slash entry points (`commands/<name>.md` → `/idc:<name>`).
 - commands/autorun.md — `/idc:autorun`: one-shot full-pipe drainer; loopable via `/loop`.
 - commands/init.md — `/idc:init`: scaffold a repo for IDC v2 (config + codebase-derived domains + 4-field board + install receipt); idempotent.
 - commands/doctor.md — `/idc:doctor`: read-only health check of an IDC-governed repo.
+- commands/update.md — `/idc:update`: resync a repo's stamped scaffold to the installed plugin (receipt-driven; pristine files silently re-stamped, customized files diff-and-asked; board report-only, never mutated).
+- commands/uninstall.md — `/idc:uninstall`: remove IDC repo footprints in one revertable commit (receipt-driven removal manifest + hardcoded pre-receipt fallback; work products archived; GitHub untouched by default).
 
 ## Agents
 
@@ -65,6 +67,7 @@ Per-project scaffold copied by `/idc:init` (tokens: `{{PROJECT_NAME}}`, `{{TRACK
 - scripts/idc_tracker_fs.py — the filesystem tracker backend (six ops + claim/block/close over `TRACKER.md`).
 - scripts/idc_init_scaffold.sh — deterministic, idempotent filesystem scaffold core used by `/idc:init`.
 - scripts/idc_settings_json.py — safe `.claude/settings.json` enable/disable helper (preserve operator keys; atomic write).
+- scripts/idc_receipt_check.py — install-receipt substrate: `stamp` (emit the SHA-256 manifest) + `verify` (classify stamped files unchanged/modified/missing; fail-loud on a missing/invalid receipt); the safety-critical compare `/idc:update` and `/idc:uninstall` consume.
 - scripts/idc_consideration_check.py — validate a consideration is function-first and Plan-ready.
 - scripts/idc_schema_check.py — validate an issue body is a complete goal contract.
 - scripts/idc_matrix_check.py — matrix deconfliction (same-wave pillars must own disjoint surfaces).

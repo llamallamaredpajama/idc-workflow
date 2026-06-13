@@ -61,7 +61,7 @@ test -f docs/workflow/install-receipt.yaml \
 ```
 If absent → **SKIP** with the note "pre-receipt install — run `/idc:init` to graduate a
 receipt" (a filesystem-only or pre-receipt repo is valid; do not hard-FAIL). Do **not**
-recompute or verify fingerprints here — that is upgrade's job; doctor only checks presence
+recompute or verify fingerprints here — that is update's job; doctor only checks presence
 and parse.
 
 ## Output

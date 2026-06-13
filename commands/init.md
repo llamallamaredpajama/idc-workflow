@@ -112,13 +112,15 @@ gh project field-list <n> --owner "$OWNER" --format json --limit 50   # → fiel
 ```
 
 ## Phase 5 — Enable the plugin for this project
-Merge the enablement key into `.claude/settings.json`, preserving every existing key:
+Merge the enablement key into `.claude/settings.json`, preserving every existing key, via
+the shipped safe-write helper (same-directory temp file + atomic replace):
 ```bash
-mkdir -p .claude
-[ -f .claude/settings.json ] || echo '{}' > .claude/settings.json
-tmp="$(mktemp)"; jq '.enabledPlugins["idc@idc-workflow"] = true' .claude/settings.json > "$tmp" && mv "$tmp" .claude/settings.json
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_settings_json.py" \
+  enable .claude/settings.json idc@idc-workflow
 ```
-If `jq` is unavailable, add the key with a precise edit — never drop existing settings.
+If the settings file contains invalid JSON, stop and report the parse error; never replace,
+truncate, or drop existing settings. `.claude/settings.json` remains operator-owned — IDC
+manages only the `enabledPlugins["idc@idc-workflow"]` key.
 
 ## Phase 6 — Codex adapter (only with `--codex`)
 If `$ARGUMENTS` contains `--codex`, wire the single v2 Codex runtime adapter:
@@ -143,8 +145,9 @@ files:
 ```
 Rules: entry keys exactly `path`/`fingerprint`/`state`; sort by path; compute with
 `shasum -a 256` (macOS) or `sha256sum` (Linux); init entries are always `state: stamped`;
-the receipt never lists itself or `TRACKER.md` (the latter is a runtime footprint). On a
-gap-fill re-run, preserve existing entries byte-for-byte and append only newly-created
+the receipt never lists itself, `TRACKER.md` (runtime footprint), or `.claude/settings.json`
+(operator-owned; IDC manages only one enablement key and never fingerprints the whole file).
+On a gap-fill re-run, preserve existing entries byte-for-byte and append only newly-created
 files; if nothing was created, leave it and report `skipped-existing`.
 
 ## Phase 8 — Summary

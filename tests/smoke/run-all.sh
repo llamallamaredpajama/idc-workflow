@@ -12,6 +12,7 @@ fails=0
 for t in \
   phase1-tracker-fs \
   phase1-init-doctor \
+  phase1-settings-json \
   phase2-think \
   phase3-plan \
   phase4-build \

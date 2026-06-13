@@ -52,11 +52,14 @@ Start a **new** Claude Code session in the repo, then run `/idc:init`. It is ide
    `tracker-config.yaml`. For the `filesystem` backend it initializes a root `TRACKER.md` and
    needs no board.
 3. **Enables the plugin for this project** by merging
-   `{"enabledPlugins": {"idc@idc-workflow": true}}` into `.claude/settings.json` (preserving
-   your other settings). This is why IDC stays off in your other repos.
+   `{"enabledPlugins": {"idc@idc-workflow": true}}` into `.claude/settings.json` with the
+   shipped safe-write helper (preserving every other setting; invalid JSON fails without
+   truncation). This is why IDC stays off in your other repos.
 4. **Writes an install receipt** (`docs/workflow/install-receipt.yaml`) with SHA-256
-   fingerprints of the files it stamped — the manifest that makes clean removal/upgrade
-   possible (it distinguishes stamped scaffold files from your customizations).
+   fingerprints of the IDC-owned scaffold files it stamped — the manifest that makes clean
+   removal/upgrade possible (it distinguishes stamped scaffold files from your
+   customizations). `.claude/settings.json` is operator-owned and is never fingerprinted as a
+   stamped receipt entry; IDC manages only its enablement key.
 
 Pass a project name to override the default: `/idc:init my-service`. Afterward run
 `/idc:doctor` (read-only) to verify the install.
@@ -80,9 +83,9 @@ restores the original state (the installer records the prior state first).
 
 1. Install the plugin (step 1).
 2. `git clone` and `cd` into each governed repo. Per-project enablement lives in the repo's
-   `.claude/settings.json`; if your repo commits that file, IDC is already on. Otherwise run
-   `claude plugin enable idc@idc-workflow --scope project` from the repo root. The scaffold +
-   board need no re-init.
+   `.claude/settings.json`; if your repo commits that operator-owned file, IDC is already on.
+   Otherwise run `claude plugin enable idc@idc-workflow --scope project` from the repo root.
+   The scaffold + board need no re-init.
 3. Ensure `gh` is authenticated with the `project` scope (github backend).
 4. If you use Codex, run `/idc:init --codex` there once (the link wiring is machine-local).
 5. Run `/idc:doctor` to confirm everything resolves.

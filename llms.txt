@@ -64,6 +64,7 @@ Per-project scaffold copied by `/idc:init` (tokens: `{{PROJECT_NAME}}`, `{{TRACK
 - scripts/lint-references.sh — reference-integrity linter (namespacing, path/frontmatter integrity, no personal paths, no dangling refs).
 - scripts/idc_tracker_fs.py — the filesystem tracker backend (six ops + claim/block/close over `TRACKER.md`).
 - scripts/idc_init_scaffold.sh — deterministic, idempotent filesystem scaffold core used by `/idc:init`.
+- scripts/idc_settings_json.py — safe `.claude/settings.json` enable/disable helper (preserve operator keys; atomic write).
 - scripts/idc_consideration_check.py — validate a consideration is function-first and Plan-ready.
 - scripts/idc_schema_check.py — validate an issue body is a complete goal contract.
 - scripts/idc_matrix_check.py — matrix deconfliction (same-wave pillars must own disjoint surfaces).

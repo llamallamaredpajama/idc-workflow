@@ -31,7 +31,10 @@ Full v2 overhaul — a clean-slate rebuild from the operator interview in
   `code-review-custom` features + the pi-idc-collab review agent), with test genuineness as a
   review dimension.
 - **Verification:** the functional smoke suite (`tests/smoke/`) over executable helpers; the
-  v1 behavioral evalsets are retired.
+  v1 behavioral evalsets are retired. CI runs the smoke suite on every PR/push.
+- **Settings safety:** `/idc:init` uses a tested safe-write helper for
+  `.claude/settings.json` and the install receipt excludes that operator-owned file from
+  stamped fingerprints.
 - New v2 PRD + master architectural spec for the plugin itself; rewritten README, `llms.txt`,
   architecture, and installing docs.
 

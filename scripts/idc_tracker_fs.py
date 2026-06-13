@@ -241,9 +241,14 @@ def op_show(path, args):
 # ── merge lease (single-holder serialization primitive) ──────────────────────
 # The pi adapter's merge-serialization contract names "a single-holder merge lease, fail-closed
 # (no lease -> no merge)". This is its filesystem-backend implementation: an atomic
-# acquire-if-empty-or-expired returning an opaque token, release-by-token, and TTL expiry. True
-# cross-process mutual exclusion comes from an advisory flock on a sidecar lock file, so the
-# read-modify-write cannot race between two concurrent finishers.
+# acquire-if-empty-or-expired returning an opaque token, release-by-token, and TTL expiry.
+#
+# Lease state lives in its OWN sidecar file (`<tracker>.leases.json`), NOT inside the TRACKER.md
+# JSON blob. That isolation is load-bearing: ordinary tracker ops (create/comment/claim/...) do
+# unlocked load-modify-save of TRACKER.md, so a writer that loaded a stale copy before a lease was
+# acquired could otherwise save it back and erase a live lease. With a separate sidecar, no
+# TRACKER.md write can touch the lease. Cross-process mutual exclusion for the lease read-modify-
+# write comes from an advisory flock on `<tracker>.lock`.
 
 
 @contextmanager
@@ -264,12 +269,42 @@ def iso(epoch):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
 
 
+def lease_sidecar(path):
+    return path + ".leases.json"
+
+
+def load_leases(path):
+    sc = lease_sidecar(path)
+    if not os.path.exists(sc):
+        return {}
+    try:
+        with open(sc, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return {}  # a missing/corrupt sidecar means no lease held (fail-closed: nothing to trust)
+
+
+def save_leases(path, leases):
+    sc = lease_sidecar(path)
+    parent = os.path.dirname(os.path.abspath(sc)) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".leases-", suffix=".tmp", dir=parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(leases, indent=2, ensure_ascii=False))
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, sc)
+        tmp = ""
+    finally:
+        if tmp and os.path.exists(tmp):
+            os.unlink(tmp)
+
+
 def op_lease_acquire(path, args):
     if args.ttl <= 0:
         die("lease --ttl must be a positive number of seconds")
     with tracker_lock(path):
-        state = load(path, allow_missing=True)
-        leases = state.setdefault("leases", {})
+        leases = load_leases(path)
         now = time.time()
         cur = leases.get(args.lease)
         if cur and float(cur.get("expires_at_epoch", 0)) > now:
@@ -285,14 +320,13 @@ def op_lease_acquire(path, args):
             "expires_at": iso(exp),
             "expires_at_epoch": exp,
         }
-        save(path, state)
+        save_leases(path, leases)
     print(token)
 
 
 def op_lease_release(path, args):
     with tracker_lock(path):
-        state = load(path, allow_missing=True)
-        leases = state.setdefault("leases", {})
+        leases = load_leases(path)
         cur = leases.get(args.lease)
         if not cur:
             return  # idempotent: nothing to release
@@ -300,12 +334,11 @@ def op_lease_release(path, args):
             die(f"lease '{args.lease}' release rejected — token mismatch "
                 f"(held by {cur.get('owner')!r})")
         del leases[args.lease]
-        save(path, state)
+        save_leases(path, leases)
 
 
 def op_lease_show(path, args):
-    state = load(path, allow_missing=True)
-    cur = state.get("leases", {}).get(args.lease)
+    cur = load_leases(path).get(args.lease)
     if not cur:
         return  # unheld -> empty output
     out = {k: v for k, v in cur.items() if k != "token"}

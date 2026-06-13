@@ -54,5 +54,22 @@ winners=0
 [ -s "$WORK/x.out" ] && winners=$((winners + 1))
 [ -s "$WORK/y.out" ] && winners=$((winners + 1))
 [ "$winners" -eq 1 ] || fail "concurrent acquire: expected exactly 1 winner, got $winners (two finishers could both merge)"
+run lease-release --lease merge --token "$(cat "$WORK/x.out" "$WORK/y.out")" >/dev/null 2>&1 || true
 
-echo "PASS: merge-lease primitive — single-holder, release-by-token, expiry, concurrency-safe"
+# (g) CLOBBER REGRESSION (codex round-2 F3): the lease must NOT live in the racy TRACKER.md blob,
+#     or an ordinary unlocked tracker write that loaded a STALE copy can erase a live lease.
+#     Reproduce the exact race: snapshot TRACKER.md (a writer's pre-lease view), acquire a lease,
+#     then write the stale snapshot back (the writer saving its stale state). The lease must survive.
+run create --title 'unrelated work' >/dev/null || fail "setup create failed"
+cp "$T" "$WORK/stale.md"                                   # writer X's pre-lease view of TRACKER.md
+tokE="$(run lease-acquire --lease merge --owner finisher-E --ttl 60)" || fail "acquire (clobber test) failed"
+grep -q "$tokE" "$T" && fail "lease token is stored inside TRACKER.md — any tracker write can clobber it"
+cp "$WORK/stale.md" "$T"                                   # writer X saves its stale state (the clobber)
+run lease-show --lease merge | grep -q '"held": true' \
+  || fail "a stale TRACKER.md overwrite ERASED a held lease (lease must live in its own sidecar)"
+# and an ordinary mutation while held leaves the lease intact
+run comment --num 1 --body "ordinary write while lease held" >/dev/null || fail "comment failed"
+run lease-show --lease merge | grep -q '"held": true' || fail "an ordinary tracker write dropped the held lease"
+run lease-release --lease merge --token "$tokE" || fail "final release failed"
+
+echo "PASS: merge-lease primitive — single-holder, release-by-token, expiry, concurrency-safe, clobber-proof"

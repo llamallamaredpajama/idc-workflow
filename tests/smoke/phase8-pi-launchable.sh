@@ -50,4 +50,29 @@ EOF
 # install-pi.sh --check must pass and (after the fix) verify the real launch set fail-closed.
 "$INSTALL" --check >/dev/null 2>&1 || { "$INSTALL" --check; fail "install-pi.sh --check failed (vendored runtime incomplete)"; }
 
-echo "PASS: every harness file idc-pi run loads is vendored ($(printf '%s\n' "$paths" | grep -c .) paths verified)"
+# (codex round-2 F1) the `-e` extensions must target the CURRENT pi packages. The installed agent
+# is @earendil-works/* (idc-role-harness.ts already uses it); an obsolete @mariozechner/* import
+# only resolves via a stale local cache and fails on a clean machine. Existence is not loadability.
+ts_paths="$(printf '%s\n' "$paths" | grep -E '\.ts$' || true)"
+while IFS= read -r ext; do
+  [ -z "$ext" ] && continue
+  if grep -qE '@mariozechner/' "$ext"; then
+    fail "vendored extension imports an obsolete @mariozechner/* package (won't load under the installed pi): ${ext#"$PLUGIN"/}"
+  fi
+done <<EOF
+$ts_paths
+EOF
+
+# Loadability: actually import each `-e` extension under Bun (catches a missing/renamed module,
+# not just a missing file). Skipped only if Bun is unavailable on this host.
+if command -v bun >/dev/null 2>&1; then
+  while IFS= read -r ext; do
+    [ -z "$ext" ] && continue
+    bun -e "import(process.argv[1]).then(()=>process.exit(0)).catch(e=>{console.error(e.message);process.exit(1)})" "$ext" >/dev/null 2>&1 \
+      || fail "vendored extension failed to import under Bun (module not resolvable): ${ext#"$PLUGIN"/}"
+  done <<EOF
+$ts_paths
+EOF
+fi
+
+echo "PASS: every harness file idc-pi run loads is vendored + extensions load under the installed pi ($(printf '%s\n' "$paths" | grep -c .) paths verified)"

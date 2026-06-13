@@ -44,5 +44,12 @@ Vendored files:
   This is original IDC work layered onto the vendored guard machinery; no separate upstream
   license applies.
 
+- **Pi package-namespace retarget.** The upstream pi-harnesses source imported the
+  `@mariozechner/*` packages (`pi-coding-agent`, `pi-tui`); the shipped Pi agent was renamed to
+  the `@earendil-works/*` scope. All vendored extension imports are retargeted to
+  `@earendil-works/*` (API-compatible — `truncateToWidth`/`visibleWidth`/`Text` unchanged) so the
+  runtime loads under the installed agent rather than a stale local cache. `tests/smoke/
+  phase8-pi-launchable.sh` import-tests every `-e` extension under Bun to keep this honest.
+
 The launcher (`runtime/pi/scripts/idc-pi`) is vendored as **reference source**; wiring the
 full multi-role orchestration onto a host is the concern of the Pi adapter (unit B2).

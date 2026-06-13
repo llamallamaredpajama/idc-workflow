@@ -15,7 +15,7 @@
 // Usage: bun phase8-coms-net-session-auth-probe.ts <serverUrl> <token> [project]
 // Exit 0 = all bound; exit 1 = a gap (printed).
 
-import { makeHttp, registerPeer, sendAs } from "./coms-net-probe-lib.ts";
+import { makeHttp, registerPeer, sendAs, roleCapFor } from "./coms-net-probe-lib.ts";
 
 const [, , SERVER_URL, TOKEN, PROJECT_ARG] = process.argv;
 const PROJECT = `${PROJECT_ARG || "default"}-sessauth`;
@@ -106,6 +106,22 @@ async function main() {
 	const delOwn = await http("DELETE", delPath(sacrificial.sessionId), undefined, { "x-coms-session-token": sacrificial.token });
 	expect(delOwn.status === 200, "DELETE: own token unregisters self", `expected 200, got ${delOwn.status}`);
 
+	// (2f) TOMBSTONE (codex round-4 Layer 1): when a target is deleted/expires, its in-flight
+	//      messages are terminated — so a later registrant of the same session_id can't inherit or
+	//      answer them (closes the session-resurrection residue).
+	const victim = await register("ripple", "sa-tomb-victim");
+	const tomb = await sendAs(http, buildImpl.token, {
+		project: PROJECT, sender_session: buildImpl.sessionId, target_session: victim.sessionId, target: null,
+		prompt: "to be orphaned", hops: 0,
+	});
+	const tombId = tomb.json?.msg_id;
+	expect(typeof tombId === "string" && tombId.length > 0, "TOMBSTONE setup: message queued to victim", `got status=${tomb.status}`);
+	await http("DELETE", `/v1/agents/${encodeURIComponent(victim.sessionId)}?project=${encodeURIComponent(PROJECT)}`, undefined, { "x-coms-session-token": victim.token });
+	const afterDel = await http("GET", `/v1/messages/${tombId}?project=${encodeURIComponent(PROJECT)}&sender_session=${encodeURIComponent(buildImpl.sessionId)}`, undefined, { "x-coms-session-token": buildImpl.token });
+	expect(afterDel.json?.status === "error" || afterDel.json?.status === "timeout",
+		"TOMBSTONE: orphaned message is terminal after target removal",
+		`expected error/timeout, got ${JSON.stringify(afterDel.json)}`);
+
 	// (3) Duplicate resident — a second build-impl uniquifies to build-impl-2 and can still send
 	//     downstream (resolves to the build-impl IdcRole).
 	const dup = await register("build-impl", "sa-build-impl-2");  // hub uniquifies the name -> build-impl-2
@@ -124,6 +140,9 @@ async function main() {
 	expect(noCap.status === 403, "ROLE-CAP: registering 'think' WITHOUT a cap is rejected (mint blocked)", `expected 403, got ${noCap.status}`);
 	const badCap = await http("POST", "/v1/agents/register", { session_id: "sa-mint-2", project: PROJECT, name: "think" }, { "x-coms-role-cap": "deadbeef" });
 	expect(badCap.status === 403, "ROLE-CAP: registering 'think' with a WRONG cap is rejected", `expected 403, got ${badCap.status}`);
+	// Caps are ROLE-SPECIFIC: a resident's valid cap for its own role can't register as another role.
+	const crossRole = await http("POST", "/v1/agents/register", { session_id: "sa-mint-3", project: PROJECT, name: "think" }, { "x-coms-role-cap": roleCapFor("build-impl") });
+	expect(crossRole.status === 403, "ROLE-CAP: a valid build-impl cap cannot register as think (role-specific)", `expected 403, got ${crossRole.status}`);
 
 	if (failures > 0) { console.error(`${failures} session-auth gap(s)`); process.exit(1); }
 	console.log("every session-scoped endpoint is token-bound; role-mint blocked; duplicate residents stay ACL-resolvable");

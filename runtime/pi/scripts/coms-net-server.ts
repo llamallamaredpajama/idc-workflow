@@ -1318,6 +1318,30 @@ async function handleSubmitResponse(
 	return json({ ok: true });
 }
 
+// IDC-LOCAL (codex round-4 Layer 1): when a session is removed (unregister or stale), terminate its
+// in-flight messages so a later registrant of the SAME session_id can't inherit or answer them
+// (closes the session-resurrection residue). A message with this session as target can no longer be
+// answered; one from this session is moot. Notify + release the sender's awaiters.
+function tombstoneSessionMessages(p: ProjectState, sessionId: string, reason: string): void {
+	for (const msg of p.messages.values()) {
+		if (msg.status === "complete" || msg.status === "error" || msg.status === "timeout") continue;
+		if (msg.target_session !== sessionId && msg.sender_session !== sessionId) continue;
+		msg.status = "error";
+		msg.error = reason;
+		msg.completed_at = nowIso();
+		sendToStream(p, msg.sender_session, "response", {
+			msg_id: msg.msg_id,
+			project: msg.project,
+			responder: null,
+			response: null,
+			error: reason,
+			status: "error",
+		});
+		sendToStream(p, msg.sender_session, "message_status", { msg_id: msg.msg_id, status: "error" });
+		releaseAwaiters(p, msg.msg_id);
+	}
+}
+
 function handleDeleteAgent(req: Request, url: URL, sessionId: string): Response {
 	const projectName = url.searchParams.get("project") ?? "default";
 	const p = state.projects.get(projectName);
@@ -1343,6 +1367,7 @@ function handleDeleteAgent(req: Request, url: URL, sessionId: string): Response 
 
 	p.agents.delete(sessionId);
 	nameIndexRemove(p, entry.name, sessionId);
+	tombstoneSessionMessages(p, sessionId, "session unregistered before the message completed");
 
 	logUnregister(entry.name, "shutdown");
 
@@ -1482,6 +1507,7 @@ function staleScanTick(): void {
 				// Remove agent, close stream, emit agent_left.
 				p.agents.delete(sid);
 				nameIndexRemove(p, entry.name, sid);
+				tombstoneSessionMessages(p, sid, "session went offline before the message completed");
 				const stream = p.streams.get(sid);
 				if (stream) {
 					try {

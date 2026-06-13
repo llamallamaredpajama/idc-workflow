@@ -11,7 +11,10 @@ whole 6-element goal contract plus declared boundaries, dependencies, and trace.
 deleted the multi-pass plan-review suite; content defects surface cheaply downstream as a
 Ripple.
 
-## Required issue body
+The board carries two shapes, told apart by the `Stage:` field, and the check validates each
+on its own terms (`idc:idc-tracker-github` §schema).
+
+## Buildable issue body (`Stage: Buildable`, or no Stage on a legacy 4-field repo)
 
 ```
 GOAL: <single observable end-state>
@@ -26,17 +29,32 @@ Dependencies: <native blocked-by links>
 Trace: <pillar file · consideration · PRD section>
 ```
 
+## Pointer item body (`Stage: Consideration` | `Stage: Planning`)
+
+An upstream artifact (consideration, in-flight plan, pillar) rides the board as a lightweight
+pointer — a **reference + labels only**, never a copy of canonical file content:
+
+```
+Stage: Consideration            # or Planning
+File: docs/considerations/<topic>.md   # the repo-file reference (source of truth)
+Phase: Phase <N>
+Domain: <domain>
+```
+
 ## The check
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_schema_check.py" <issue-body.md>
 ```
 
-It requires every labelled element to be present, `GOAL` and `VERIFICATION SURFACE` to be
-non-empty, and `BOUNDARIES` to declare both `touch` and `off-limits` (the deconfliction
-output). Exit non-zero with a reason list otherwise. It checks **structure, not prose** —
-genuineness of the verification surface (real tests vs shallow) is enforced later by the
-review engine's test-genuineness dimension at Build.
+It dispatches on `Stage:`. For a **buildable** body it requires every labelled contract
+element to be present, `GOAL` and `VERIFICATION SURFACE` to be non-empty, and `BOUNDARIES` to
+declare both `touch` and `off-limits` (the deconfliction output). For a **pointer** body it
+requires a `File:` repo-file reference plus `Phase`/`Domain`, and **rejects** any
+goal-contract marker (`GOAL`/`VERIFICATION SURFACE`) — a pointer that duplicates canonical
+content collapses the distinction. Exit non-zero with a reason list otherwise. It checks
+**structure, not prose** — genuineness of the verification surface (real tests vs shallow) is
+enforced later by the review engine's test-genuineness dimension at Build.
 
 ## Authority boundaries
 

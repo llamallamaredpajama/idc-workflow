@@ -64,9 +64,26 @@ receipt" (a filesystem-only or pre-receipt repo is valid; do not hard-FAIL). Do 
 recompute or verify fingerprints here — that is update's job; doctor only checks presence
 and parse.
 
+**6 — Pi runtime (optional).** The IDC Pi runtime (`runtime/pi/`, vendored) needs **Bun** to
+boot the coms-net hub + role harness; the **Pi agent** itself (the `pi` binary / npm package
+`@earendil-works/pi-coding-agent`, historically `@mariozechner/pi-*`) is a separate
+install-time dependency. This check is **read-only** — it shells out to the plugin's dry-run
+probe, which detects Bun + Pi presence/version and mutates nothing:
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/install-pi.sh" --check
+```
+Read the report rows (Bun / Pi agent / runtime/pi):
+- **Pi agent ABSENT** → **SKIP** (note "Pi runtime not installed — optional"). The Pi runtime
+  is opt-in; a repo driven by the Claude/Codex runtimes is valid and must not FAIL here.
+- **Pi agent PRESENT** and the probe exits `0` (Bun present + vendored runtime OK) → **PASS**
+  (note the reported Bun + Pi versions).
+- Probe exits non-zero — **fail-closed FAIL**: a hard prerequisite is missing (Bun absent, or
+  `runtime/pi/` incomplete) so the Pi runtime cannot boot. Fix hint: install Bun
+  (https://bun.sh) or re-pull the plugin to restore `runtime/pi/`.
+
 ## Output
 
-Emit a single table, then a one-line verdict. Tally PASS / FAIL / SKIP across the five rows:
+Emit a single table, then a one-line verdict. Tally PASS / FAIL / SKIP across the six rows:
 
 ```
 | # | Check | Result | Fix hint |
@@ -76,6 +93,7 @@ Emit a single table, then a one-line verdict. Tally PASS / FAIL / SKIP across th
 | 3 | Tracker contract reachable | PASS | — |
 | 4 | Governance scaffold | PASS | — |
 | 5 | Install receipt | SKIP | run /idc:init to graduate a receipt |
+| 6 | Pi runtime (optional) | SKIP | Pi runtime not installed — optional |
 
 IDC doctor: N passed, M failed, K skipped
 ```

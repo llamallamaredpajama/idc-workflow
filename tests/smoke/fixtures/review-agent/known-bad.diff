@@ -1,0 +1,33 @@
+# Fixture: a known-bad diff for the combined review agent smoke
+# (tests/smoke/phase4-review-agent.sh). It deliberately introduces two defects so a correct
+# review produces a fail-closed verdict:
+#   1. a BLOCKER  — SQL injection: user input interpolated straight into a query (dim 5);
+#   2. a placeholder TEST — asserts nothing and stubs the thing under test, so the suite is
+#      fake-green. That is a `test-genuineness` FAIL (major), never a nit (dims 2/7/8).
+# The smoke validates the emitted verdict against scripts/idc_review_verdict_check.py; this
+# file is the grounded diff the verdict's evidence cites. It is intentionally vulnerable —
+# it is never imported or executed, only reviewed.
+--- a/app/auth.py
++++ b/app/auth.py
+@@ -1,6 +1,12 @@
+ import sqlite3
+
++
++def login(db, username, password):
++    # BLOCKER (dim 5 security): username/password interpolated into the SQL string.
++    cur = db.cursor()
++    cur.execute(
++        "SELECT id FROM users WHERE name = '%s' AND pw = '%s'" % (username, password)
++    )
++    return cur.fetchone()
+--- a/tests/test_auth.py
++++ b/tests/test_auth.py
+@@ -0,0 +1,9 @@
++# Placeholder suite: green, but proves nothing — asserts a constant and stubs login().
++# A real test would exercise app.auth.login over a seeded DB and assert behavior + that an
++# injection payload does NOT authenticate. This is a test-genuineness FAIL, not a nit.
++def test_login():
++    def login(*_args, **_kwargs):
++        return (1,)          # stubs the thing under test
++    assert login("admin", "x") == (1,)
++    assert True              # asserts nothing about real behavior

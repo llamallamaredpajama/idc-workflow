@@ -1,7 +1,7 @@
 # tracker-config.yaml — IDC tracker contract (lives at docs/workflow/tracker-config.yaml).
 #
 # Selects the tracker backend and, for the github backend, pins the project number and
-# the four canonical field node IDs.
+# the five canonical field node IDs.
 #
 #   backend: github     -> GitHub Projects v2 board. Hard requirements: `backend`,
 #                          `project_number`, and `field_ids` with all five names below.

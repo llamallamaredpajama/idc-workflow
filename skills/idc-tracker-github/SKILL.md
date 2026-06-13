@@ -83,10 +83,13 @@ gh project item-list "$PROJ" --owner "$OWNER" --format json \
   | jq -r --arg s "${STATUS:-}" --arg st "${STAGE:-}" --arg w "${WAVE:-}" \
           --arg p "${PHASE:-}" --arg d "${DOMAIN:-}" '
     .items[]
-    | select($s=="" or .status==$s) | select($st=="" or .stage==$st)
+    | select($s=="" or .status==$s) | select($st=="" or (.stage // "Buildable")==$st)
     | select($w=="" or .wave==$w) | select($p=="" or .phase==$p)
     | select($d=="" or .domain==$d) | .content.number' || die_gh
 ```
+A legacy 4-field board has no `Stage` set, so `.stage` is null; `(.stage // "Buildable")`
+reads an absent Stage as `Buildable` — matching the filesystem backend and the additive promise
+above (existing boards keep surfacing under `--stage Buildable` with no migration step).
 
 **comment(ticket, body)** — `gh issue comment "$NUM" --body "$BODY" || die_gh`.
 

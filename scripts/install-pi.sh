@@ -35,10 +35,13 @@ LINKS="$HOME/.agents/.idc-pi-install-links"
 LAUNCHER_NAME="idc-pi"
 runtime_dir() { printf '%s/runtime/pi\n' "$1"; }
 
-# The vendored runtime that must exist for the IDC Pi runtime to boot — i.e. EXACTLY the
-# harness files `idc-pi run <role>` loads (the `-e` extensions + the `--append-system-prompt`
-# role prompts) plus the coms-net hub and license. Kept in lockstep with build_role_argv()
-# in runtime/pi/scripts/idc-pi; tests/smoke/phase8-pi-launchable.sh asserts they agree.
+# The vendored runtime that must exist for the IDC Pi runtime to boot — i.e. the harness files
+# `idc-pi run <role>` loads (the `-e` extensions + the `--append-system-prompt` role prompts)
+# plus the coms-net hub and license. This is a hand-maintained completeness checklist over the
+# in-repo tree, kept in step with build_role_argv() in runtime/pi/scripts/idc-pi.
+# tests/smoke/phase8-pi-launchable.sh independently drives the REAL launcher (`run --dry-run`)
+# and asserts every path it emits exists in the vendored tree — that is the authoritative
+# "fresh clone can boot" check; this list is the fail-closed signal in `--check`.
 # (The `pi` agent binary and the role `--skill` packages are operator-provided install-time
 # deps that live OUTSIDE the harness tree and are intentionally not listed here.)
 runtime_required() {

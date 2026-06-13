@@ -15,6 +15,7 @@
 // Exit 0 = all expectations met; exit 1 = at least one mismatch (printed).
 
 import { evaluateComsNetSendForRole } from "../../runtime/pi/extensions/idc-role-harness.ts";
+import { makeHttp, registerPeer } from "./coms-net-probe-lib.ts";
 
 const [, , SERVER_URL, TOKEN, PROJECT_ARG] = process.argv;
 const PROJECT = PROJECT_ARG || "default";
@@ -24,25 +25,8 @@ if (!SERVER_URL || !TOKEN) {
 	process.exit(2);
 }
 
-const authHeaders = { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" };
-
-async function http(method: string, urlPath: string, body?: unknown): Promise<{ status: number; json: any }> {
-	const resp = await fetch(`${SERVER_URL}${urlPath}`, {
-		method,
-		headers: authHeaders,
-		body: body === undefined ? undefined : JSON.stringify(body),
-	});
-	let json: any = null;
-	try { json = await resp.json(); } catch { /* non-JSON */ }
-	return { status: resp.status, json };
-}
-
-async function register(role: string): Promise<string> {
-	const session_id = `sess-${role}-1`;
-	const { status, json } = await http("POST", "/v1/agents/register", { session_id, project: PROJECT, name: role });
-	if (status !== 200 || !json?.ok) throw new Error(`register(${role}) failed: status=${status} body=${JSON.stringify(json)}`);
-	return session_id;
-}
+const http = makeHttp(SERVER_URL, TOKEN);
+const register = (role: string) => registerPeer(http, role, `sess-${role}-1`, PROJECT);
 
 // The guarded send: identical gate to the production coms_net_send seam. The ACL decision
 // is the single source of truth; only an allowed decision is POSTed to the hub.

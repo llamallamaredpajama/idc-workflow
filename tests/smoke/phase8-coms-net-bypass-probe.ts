@@ -14,6 +14,8 @@
 // Usage: bun phase8-coms-net-bypass-probe.ts <serverUrl> <token> [project]
 // Exit 0 = hub enforced every case; exit 1 = at least one bypass (printed).
 
+import { makeHttp, registerPeer } from "./coms-net-probe-lib.ts";
+
 const [, , SERVER_URL, TOKEN, PROJECT_ARG] = process.argv;
 // Isolate in a dedicated project so these peers never collide with the companion probe's peers
 // in the shared hub (a collision would trigger the hub's no-hyphen uniquifier, e.g. build-impl2,
@@ -23,25 +25,8 @@ if (!SERVER_URL || !TOKEN) {
 	console.error("bypass-probe: missing serverUrl/token args");
 	process.exit(2);
 }
-const authHeaders = { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" };
-
-async function http(method: string, urlPath: string, body?: unknown): Promise<{ status: number; json: any }> {
-	const resp = await fetch(`${SERVER_URL}${urlPath}`, {
-		method,
-		headers: authHeaders,
-		body: body === undefined ? undefined : JSON.stringify(body),
-	});
-	let json: any = null;
-	try { json = await resp.json(); } catch { /* non-JSON */ }
-	return { status: resp.status, json };
-}
-
-async function register(role: string): Promise<string> {
-	const session_id = `bypass-${role}-1`;
-	const { status, json } = await http("POST", "/v1/agents/register", { session_id, project: PROJECT, name: role });
-	if (status !== 200 || !json?.ok) throw new Error(`register(${role}) failed: status=${status} body=${JSON.stringify(json)}`);
-	return session_id;
-}
+const http = makeHttp(SERVER_URL, TOKEN);
+const register = (role: string) => registerPeer(http, role, `bypass-${role}-1`, PROJECT);
 
 // Raw direct POST — the bypass attempt. No ACL evaluation here on purpose.
 async function rawSend(senderSession: string, target: string): Promise<{ status: number; msgId: string | null }> {

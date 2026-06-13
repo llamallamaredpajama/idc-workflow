@@ -86,6 +86,15 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
+# v2 note: the behavioral evalset suite is retired (the v1 evalsets tested deleted v1
+# machinery). The v2 verification surface is the functional smoke suite under tests/smoke/.
+# If there are no evalsets, exit cleanly and point there — don't require a sandbox.
+if [ "$WANT_ALL" -eq 1 ] && ! ls "$EVALS_DIR"/*.evalset.json >/dev/null 2>&1; then
+  echo "run-evals: no evalsets in $EVALS_DIR."
+  echo "run-evals: v2 verification is the functional smoke suite — run: bash tests/smoke/run-all.sh"
+  exit 0
+fi
+
 # ---- preconditions ----------------------------------------------------------
 command -v claude >/dev/null 2>&1 || { echo "run-evals: 'claude' CLI not on PATH" >&2; exit 2; }
 command -v jq     >/dev/null 2>&1 || { echo "run-evals: 'jq' not on PATH" >&2; exit 2; }

@@ -6,7 +6,9 @@
 # Symlinking the IDC plugin's Codex adapters into ~/.claude/skills would pollute every
 # Claude project with bare skills, so instead we convert ~/.agents/skills into a REAL
 # directory that (a) re-links every existing ~/.claude/skills entry — preserving Codex's
-# current view — and (b) links the five Codex IDC adapters to the installed plugin copy.
+# current view — and (b) links the IDC plugin skills (the single Codex runtime adapter
+# idc-adapter-codex + the shared skills) to the installed plugin copy. v2 has one Codex
+# adapter over the shared runtime-neutral skills — Codex resolves them by bare name.
 #
 # Usage:
 #   install-codex.sh <plugin_root>   install / refresh adapter links (idempotent)
@@ -37,8 +39,10 @@ CLAUDE_SKILLS="$HOME/.claude/skills"
 STATE="$AGENTS_DIR/.idc-install-state"
 LINKS="$AGENTS_DIR/.idc-install-links"
 
-# The five Codex IDC adapter skill dirs that must resolve to the plugin copy.
-ADAPTERS="codex-idc-build codex-idc-plan codex-idc-ripple codex-idc-sequence codex-idc-think"
+# The IDC plugin skill dirs to link into the Codex skill view (computed from the plugin's
+# skills/ in install(); idc-adapter-codex is the load-bearing one). Empty until install().
+ADAPTERS=""
+REQUIRED_ADAPTER="idc-adapter-codex"
 
 is_adapter() {
   case " $ADAPTERS " in
@@ -227,6 +231,14 @@ install() {
     exit 2
   fi
 
+  # Link every plugin skill (Codex resolves skills by bare name; v2 ships one Codex
+  # adapter over the shared runtime-neutral skills).
+  ADAPTERS="$(cd "$PLUGIN_ROOT/skills" && ls -d */ 2>/dev/null | sed 's#/##')"
+  if [ ! -d "$PLUGIN_ROOT/skills/$REQUIRED_ADAPTER" ]; then
+    echo "install-codex: ERROR the Codex adapter '$REQUIRED_ADAPTER' is missing from the plugin." >&2
+    exit 2
+  fi
+
   # Classify before mutating: a plain file at the skills path is user data.
   if [ -e "$AGENTS_SKILLS" ] && [ ! -L "$AGENTS_SKILLS" ] && [ ! -d "$AGENTS_SKILLS" ]; then
     echo "install-codex: ERROR $AGENTS_SKILLS exists and is a plain file — refusing to touch it." >&2
@@ -272,20 +284,25 @@ install() {
     fi
   done
 
-  # Verify each adapter link resolves to a real SKILL.md (two-hop reachability).
-  resolved=0
+  # Verify each plugin-skill link resolves to a real SKILL.md (two-hop reachability).
+  total=0; resolved=0
   for name in $ADAPTERS; do
+    total=$((total + 1))
     if [ -f "$AGENTS_SKILLS/$name/SKILL.md" ]; then
       resolved=$((resolved + 1))
     else
-      echo "install-codex: WARN adapter link does not resolve: $AGENTS_SKILLS/$name"
+      echo "install-codex: WARN skill link does not resolve: $AGENTS_SKILLS/$name"
     fi
   done
 
-  echo "install-codex: linked $linked adapter(s); $resolved/5 resolve to SKILL.md."
-  if [ "$resolved" -ne 5 ]; then
-    echo "install-codex: ERROR only $resolved/5 adapter links resolve — install FAILED." >&2
-    echo "install-codex: fix the warnings above (missing adapter dirs / path collisions), then re-run." >&2
+  echo "install-codex: linked $linked skill(s); $resolved/$total resolve to SKILL.md."
+  if [ ! -f "$AGENTS_SKILLS/$REQUIRED_ADAPTER/SKILL.md" ]; then
+    echo "install-codex: ERROR the Codex adapter '$REQUIRED_ADAPTER' link does not resolve — install FAILED." >&2
+    exit 1
+  fi
+  if [ "$resolved" -ne "$total" ]; then
+    echo "install-codex: ERROR only $resolved/$total skill links resolve — install FAILED." >&2
+    echo "install-codex: fix the warnings above (path collisions), then re-run." >&2
     exit 1
   fi
   echo "install-codex: Codex skill view is now the real directory $AGENTS_SKILLS"

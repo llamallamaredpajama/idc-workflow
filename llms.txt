@@ -1,133 +1,85 @@
 # IDC Workflow
 
-> IDC (Iterative Development Chain) is a governed, tracker-driven, multi-agent development
-> workflow packaged as a Claude Code plugin. Five roles run as a chain — Think → Plan →
-> Sequence → Build, with Ripple handling drift — each the sole writer of its surface so all
-> work traces from a product requirement down to merged code. This index lists every
-> command, agent, skill, template, script, and contract in the plugin with a one-line
-> purpose. Names are plugin-namespaced (`idc:`); files reference each other via
-> `${CLAUDE_PLUGIN_ROOT}`.
+> IDC (Iterative Development Cycle) is a guardrail-framed, tracker-driven, goal-contract
+> development pipeline packaged as a Claude Code plugin. The flow is Think → Plan → Build,
+> with Ripple healing drift and Autorun draining the whole pipe. It is built on five
+> guardrails — the one PRD gate, matrix deconfliction, real verification surfaces, ripple,
+> and one-way flow through the glass wall (tracker issues) — and trusts the model with
+> everything else. This index lists every command, agent, skill, template, script, and
+> contract with a one-line purpose. Names are plugin-namespaced (`idc:`); files reference
+> each other via `${CLAUDE_PLUGIN_ROOT}`.
 
 ## Commands
 
 Slash entry points (`commands/<name>.md` → `/idc:<name>`).
 
-- commands/think.md — `/idc:think`: turn raw ideas, prompts, and source material into pre-canonical considerations.
-- commands/plan.md — `/idc:plan`: convert admitted considerations into the canonical planning chain (PRD/spec/master + subphase + pillar + matrix).
-- commands/sequence.md — `/idc:sequence`: admit polished pillar plans into tracker wave order (status/order overlay only).
-- commands/build.md — `/idc:build`: implement the next admitted tracker item against its polished pillar plan.
-- commands/ripple.md — `/idc:ripple`: own change orders and drift resolution across the canonical chain.
-- commands/autorun.md — `/idc:autorun`: chain a consideration through Plan → Sequence end-to-end without operator pause.
-- commands/init.md — `/idc:init`: install IDC into the current repo (scaffold + tracker board + per-project enablement); idempotent.
+- commands/think.md — `/idc:think`: free-form brainstorm (zero teammates) → one function-first consideration.
+- commands/plan.md — `/idc:plan`: consideration → goal-contract issues (domain experts, five-layer doc chain, matrix deconfliction, board admission, one PRD gate).
+- commands/build.md — `/idc:build`: execute each issue's goal contract as a goal loop; merged review engine per PR; automerge on PASS.
+- commands/ripple.md — `/idc:ripple`: heal doc/reality drift in one PR (PR body = change order); PRD changes take the gate.
+- commands/autorun.md — `/idc:autorun`: one-shot full-pipe drainer; loopable via `/loop`.
+- commands/init.md — `/idc:init`: scaffold a repo for IDC v2 (config + codebase-derived domains + 4-field board + install receipt); idempotent.
 - commands/doctor.md — `/idc:doctor`: read-only health check of an IDC-governed repo.
 
-## Agents — role orchestrators
+## Agents
 
-Parent-session orchestrators (and the Build runbook). Run via `TeamCreate` + teammates,
-not as Task subagents.
+Per-stage orchestrator playbooks + the one durable-worker role + the review coordinator.
 
-- agents/idc-think.md — Think role: raw ideas → active pre-canonical considerations under `docs/considerations/`.
-- agents/idc-plan.md — Plan role: admitted considerations → canonical chain (PRD/spec/master/subphase/pillar/matrix) through the Engineer Gate.
-- agents/idc-sequence.md — Sequence role: admit polished pillars to tracker wave order; janitor cleanup. No scope origination.
-- agents/idc-build.md — Build role: implement the next admitted tracker item; owns source/tests/PR/operator-todos/status bookends.
-- agents/idc-ripple.md — Ripple role: change orders + gated canonical/planning-doc synchronization on detected drift.
-- agents/idc-autorun.md — Autonomous consideration→Plan→Sequence→tracker chain with no procedural gates.
-- agents/idc-build-runbook.md — Worker-loaded runbook detailing the Build flow; loaded by Build teammates, read on demand by the parent.
+- agents/idc-plan.md — Plan orchestrator: consideration → goal-contract issues in one zero-teammate run.
+- agents/idc-build.md — Build orchestrator + finisher/merge-queue: claim waves, dispatch implementers, review, automerge + close.
+- agents/idc-implementer.md — the one durable worker: executes a single issue's goal contract as a goal loop (failing-test-first, record-and-vary, no-punt).
+- agents/idc-review-coordinator.md — merged review engine coordinator: fan out specialists, dedup/score, emit the fail-closed verdict.
+- agents/idc-ripple.md — Ripple orchestrator: highest-affected-layer doc-sync in one PR; PRD-only gate.
+- agents/idc-autorun.md — Autorun two-lane drainer: plan unplanned considerations (serialized admission) + build eligible waves; exit on drain-complete.
 
-## Agents — roleplayer teammates
+## Skills
 
-Durable teammates a role orchestrator spawns (`subagent_type: "idc:idc-role-<x>"`).
+Reusable procedures (`skills/<name>/SKILL.md`).
 
-- agents/idc-role-bootstrap-researcher.md — Absorbs codebase + canonical-chain context for a Plan/Sequence/Ripple/Build parent; stays alive for follow-up research.
-- agents/idc-role-change-order-author.md — Ripple teammate: drafts a change order via the drift-evidence → verdict → shape skill chain.
-- agents/idc-role-fixer.md — Per-PR fixer: applies reviewer fixes (TDD), runs /simplify, pushes, attempts merge; stops on conflict.
-- agents/idc-role-integration-verifier.md — Post-batch architectural-fitness fence sweep + repo tests + ledger update + side-job filing (read-only on source).
-- agents/idc-role-issue-implementer.md — Implements one assigned GitHub issue end-to-end via a goal-driven loop; owns the full per-PR ceremony.
-- agents/idc-role-merge-deconflictor.md — Per-PR merge-conflict resolver; `code-semantic` (default) or `prose` mode.
-- agents/idc-role-phase-close-adversarial-reviewer.md — Runs the phase-close adversarial review at phase-delta scope; categorizes findings by IDC severity.
-- agents/idc-role-plan-reviewer.md — Transient Plan Phase-3 reviewer; `custom` or `codex-adversarial` mode.
-- agents/idc-role-ripple-orchestrator.md — Runs the full Ripple workflow as a teammate (parallel ripple-during-planning).
-- agents/idc-role-subphase-pillar-planner.md — Plan phase-wide expansion teammate; owns one subphase bundle (plan + rough/polished pillars + manifest shard).
-- agents/idc-role-think-brainstormer.md — Think brainstorming teammate; operator-facing, one open question at a time, writes no files.
-- agents/idc-role-think-decision-documenter.md — Think teammate that captures decisions and writes the final concise consideration file.
-- agents/idc-role-think-investigator.md — Think research roleplayer; single body with a `subtype` parameter folding many Claude/Codex investigator variants.
-- agents/idc-role-think-researcher.md — Think research teammate for bootstrap orientation and follow-up research; returns compact digests.
-- agents/idc-role-wave-blocker-diagnostic.md — Read-only autowave blocker diagnostic; classifies why a Pending wave can't promote, files a BLOCKING todo.
-- agents/idc-role-writer.md — Per-pillar Build writer; TDD chain in an assigned worktree → bookend-close → PR.
-- agents/references/codex-name-aliases.md — Alias map from `idc-role-think-investigator` subtypes to their Claude/Codex variant names.
-
-## Skills — IDC procedures
-
-Reusable procedures the roles compose (`skills/<name>/SKILL.md`).
-
-- skills/idc-workflow/ — Top-level IDC routing from Think through Ripple, especially in Codex/non-pane environments.
-- skills/idc-skill-tracker-adapter/ — Route tracker operations through the repo-configured backend (dispatch surface; hides github⇄filesystem).
-- skills/idc-skill-github-tracker-implementation/ — GitHub Projects v2 tracker backend (six core ops + board contract).
-- skills/idc-skill-filesystem-tracker-implementation/ — Filesystem (`TRACKER.md`) tracker backend.
-- skills/idc-skill-matrix-dispatch-check/ — Gate Build dispatch against the active pillar matrix.
-- skills/idc-skill-canonical-admission-audit/ — Verdict on canonical-chain compliance before document/implementation work proceeds.
-- skills/idc-skill-canonical-doc-authoring/ — Draft or update canonical PRD/architecture/plan/tracker documentation.
-- skills/idc-skill-considerations-admissibility-review/ — Review consideration files for admission readiness before planning.
-- skills/idc-skill-governance-trace-audit/ — Trace whether work is admitted by canonical governance.
-- skills/idc-skill-planning-substrate/ — Context curation, spawn discipline, and gate enforcement for IDC orchestrators.
-- skills/idc-skill-subphase-ingestion/ — Ingest canonical subphase plans into structured pillar inputs.
-- skills/idc-skill-rough-pillars-section/ — Draft or validate the Rough Pillars section of a subphase plan.
-- skills/idc-skill-pillar-plan-shape/ — Canonical structure of an IDC pillar plan.
-- skills/idc-skill-pillar-resource-ownership/ — Resource-ownership tables inside pillar plans.
-- skills/idc-skill-pillar-clash-analysis/ — Analyze cross-pillar clashes from subphase/pillar inputs.
-- skills/idc-skill-clash-evidence/ — Record pillar-conflict evidence.
-- skills/idc-skill-sibling-pillar-precedent-review/ — Pull precedent from sibling pillar plans before resolving a clash.
-- skills/idc-skill-prior-art-pattern-read/ — Surface prior-art patterns from sibling/pillar plans and handoffs.
-- skills/idc-skill-pillar-matrix-synth/ — Synthesize dispatch matrices from pillar plans and dependencies.
-- skills/idc-skill-plan-review-base/ — Shared severity/confidence/output contract every plan-review specialization inherits.
-- skills/idc-skill-plan-review/ — Specialized IDC plan review (feasibility, governance, sequencing, fence coverage).
-- skills/idc-skill-plan-adversarial-review/ — Adversarial Codex review of a plan-shaped artifact; emits IDC-bucketed findings.
-- skills/idc-skill-plan-patch-from-findings/ — Apply review findings to produce a revised plan draft.
-- skills/idc-skill-ripple-trigger-precheck/ — Decide whether a clash should trigger Ripple.
-- skills/idc-skill-drift-evidence/ — Emit a standardized drift-evidence artifact for Ripple ingestion.
-- skills/idc-skill-ripple-verdict/ — Structured Ripple verdict on drift, canonical impact, and downstream repair.
-- skills/idc-skill-change-order-shape/ — Emit a schema-validated, fixed-shape Ripple change-order draft to a scratch path.
-- skills/idc-skill-pr-deconflict-resolve/ — Resolve pull-request conflicts under IDC deconflict rules (prose-mode substrate).
-- skills/idc-skill-file-operator-todo/ — Record an operator-only action instead of performing it.
-- skills/idc-skill-think-brainstorming-substrate/ — Substrate for the Think brainstormer teammate (operator-led, no recommendations).
-- skills/idc-skill-think-considerations-file-schema/ — Schema for active consideration files under `docs/considerations/`.
-- skills/idc-skill-think-reconciliation/ — Reconcile research, considerations, and decisions into final Think artifacts.
-- skills/idc-skill-think-research-archive/ — Archive polished research outputs with source and decision context.
-
-## Skills — Codex adapters
-
-Role adapters for the Codex runtime (bodies use skill-relative paths, not `${CLAUDE_PLUGIN_ROOT}`).
-
-- skills/codex-idc-think/ — Codex-native Think role adapter.
-- skills/codex-idc-plan/ — Codex-native Plan role adapter (considerations → planning chain in one drafting pass).
-- skills/codex-idc-sequence/ — Codex-native Sequence role adapter (admit pillars to tracker wave order).
-- skills/codex-idc-build/ — Codex-native Build role adapter.
-- skills/codex-idc-ripple/ — Codex-native Ripple role adapter (change orders + drift synchronization).
+- skills/idc-adapter-claude/ — Claude runtime adapter: primitives → Claude mechanics (Teams / Workflow / Task / goal) + model-tier resolution.
+- skills/idc-adapter-codex/ — Codex runtime adapter: primitives → Codex mechanics (app-server threads / spawn_agent / exec fan-out); untiered.
+- skills/idc-tracker-adapter/ — route tracker ops through the configured backend (dispatch surface; hides github⇄filesystem).
+- skills/idc-tracker-github/ — GitHub Projects v2 backend (six ops over the 4 fields, native blocked-by, claim comments, attempt label).
+- skills/idc-tracker-filesystem/ — filesystem backend (`TRACKER.md`); documents the executable helper scripts/idc_tracker_fs.py.
+- skills/idc-gate-issue/ — the one PRD gate: gate issue + chained blocked-by + push notification + approval/unblock.
+- skills/idc-consideration-schema/ — the function-first, Plan-ready consideration shape + its mechanical check.
+- skills/idc-goal-contract/ — the 6-element goal-contract authoring shape (Plan authors, Build executes).
+- skills/idc-matrix-analysis/ — pairwise clash fan-out, phase-matrix synthesis, parallel-safe wave re-sequencing.
+- skills/idc-schema-check/ — the mechanical issue-body gate (full contract + boundaries + deps + trace).
+- skills/idc-review-engine/ — the merged 13-dimension review engine (fan-out + dedup + confidence floor + fail-closed verdicts + test genuineness).
+- skills/idc-ripple-sync/ — highest-affected-layer + downstream sync set + the binary gate decision.
 
 ## Templates
 
-Per-project scaffold copied into a governed repo by `/idc:init` (tokens: `{{PROJECT_NAME}}`,
-`{{GITHUB_OWNER}}`, `{{GITHUB_REPO}}`, `{{TRACKER_PROJECT_NUMBER}}`).
+Per-project scaffold copied by `/idc:init` (tokens: `{{PROJECT_NAME}}`, `{{TRACKER_PROJECT_NUMBER}}`).
 
-- templates/WORKFLOW.md — the per-repo IDC governance contract (role authority, doc map, tracker discipline). → repo root.
-- templates/WORKFLOW-config.yaml — IDC contract sidecar (project name + document map). → repo root.
-- templates/tracker-config.yaml — tracker backend + eight-field IDs. → `docs/workflow/tracker-config.yaml`.
-- templates/docs-tree/ — the standard `docs/workflow/` artifact directories (+ README). → `docs/workflow/`.
+- templates/WORKFLOW.md — the per-repo IDC governance contract (five guardrails, three primitives, 4-field tracker, tier routing). → repo root.
+- templates/WORKFLOW-config.yaml — contract sidecar: project name, codebase-derived domains, tier-symbolic model_routing. → repo root.
+- templates/tracker-config.yaml — tracker backend + the four field IDs (Status/Wave/Phase/Domain). → `docs/workflow/tracker-config.yaml`.
+- templates/docs-tree/ — the lean `docs/workflow/` tree (pillar-matrices/, code-reviews/ + README). → `docs/workflow/`.
 - templates/README.md — token reference and `/idc:init` destination map.
 
 ## Scripts
 
-- scripts/lint-references.sh — reference-integrity linter (namespacing, no personal paths, no project naming, no dangling refs).
-- scripts/install-codex.sh — wire the five IDC Codex adapters into `~/.agents/skills` without polluting other projects; `--revert` undoes it.
-- scripts/run-evals.sh — headless eval runner: reset the sandbox, enact each role via `claude -p --plugin-dir`, capture, and score.
-- scripts/materialize-sandbox.sh — create the disposable IDC-governed sandbox repo the evalsets run against.
+- scripts/lint-references.sh — reference-integrity linter (namespacing, path/frontmatter integrity, no personal paths, no dangling refs).
+- scripts/idc_tracker_fs.py — the filesystem tracker backend (six ops + claim/block/close over `TRACKER.md`).
+- scripts/idc_init_scaffold.sh — deterministic, idempotent filesystem scaffold core used by `/idc:init`.
+- scripts/idc_consideration_check.py — validate a consideration is function-first and Plan-ready.
+- scripts/idc_schema_check.py — validate an issue body is a complete goal contract.
+- scripts/idc_matrix_check.py — matrix deconfliction (same-wave pillars must own disjoint surfaces).
+- scripts/idc_review_verdict_check.py — validate a review verdict's structure + taxonomy consistency.
+- scripts/idc_ripple_layers.py — ripple downstream sync set + gate decision over the doc chain.
+- scripts/idc_autorun_drain.py — autorun's drain predicate (eligible build work vs PRD-gated/operator-only).
+- scripts/install-codex.sh — link the plugin skills (incl. the Codex adapter) into `~/.agents/skills`; `--revert` undoes it.
+- scripts/run-evals.sh — legacy eval runner; v2 verification is the tests/smoke/ suite.
+- scripts/materialize-sandbox.sh — create a disposable IDC-governed sandbox repo.
 
-## Contracts and manifests
+## Tests & contracts
 
-- .claude-plugin/plugin.json — plugin manifest (`name: idc`, version).
+- tests/smoke/run-all.sh — the v2 functional verification suite (per-phase real round-trips against a throwaway sandbox).
+- .claude-plugin/plugin.json — plugin manifest (`name: idc`, version 2.0.0).
 - .claude-plugin/marketplace.json — self-hosted marketplace listing the `idc` plugin.
-- .github/workflows/ci.yml — CI: lint + manifest validation + template smoke-render + shell syntax.
-- docs/architecture.md — role chain, write-authority boundaries, tracker contract, agent/skill/command composition.
-- docs/installing.md — machine, project, Codex, and second-machine install flows + `/idc:doctor` troubleshooting.
-- docs/dev/evals.md — the behavioral eval suite: what each role-case measures, how to run, and how scoring works.
-- evals/ — 19 `*.evalset.json` behavioral cases for the IDC roles (run via `scripts/run-evals.sh`).
+- docs/prd/prd.md — the v2 product requirements.
+- docs/specs/master-architectural-spec.md — the v2 plugin architecture + naming convention + inventory invariants.
+- docs/architecture.md — role flow, the five guardrails, the tracker contract, command/agent/skill composition.
+- docs/installing.md — machine, project, and Codex install flows + `/idc:doctor` troubleshooting.

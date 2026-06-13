@@ -2,52 +2,40 @@
 
 All notable changes to the IDC Workflow plugin are documented in this file.
 
-## Unreleased
+## 2.0.0 — 2026-06-12
 
-- Lifecycle: added the install receipt substrate plus `/idc:uninstall`, `/idc:update`,
-  and `/idc:upgrade`. `/idc:init` now documents
-  `docs/workflow/install-receipt.yaml` with SHA-256 fingerprints so lifecycle commands can
-  distinguish stamped scaffold files from customized files; uninstall archives the repo
-  footprint before one revertable removal commit, while update/upgrade refresh stamped
-  scaffold files without silent overwrites.
-- Docs: closed two adversarial-review findings on the install-hardening pass.
-  `/idc:init`'s destructive Status option replacement is now gated by board provenance
-  (board created this run → safe; linked board already matching → no-op; linked board
-  with items → fail closed to the snapshot/rebuild SOP in the github tracker skill,
-  never run by init itself), and `WORKFLOW.md` §6.7 bookend-close now routes through
-  `complete_claimed_item` with the verified mutation set (`Status=Complete`,
-  `ClaimState=Released`, `Lane=(idle)`) instead of contradicting the §6.6 Build
-  Status carve-out (template and instantiated copy fixed identically).
-- Docs: hardened `/idc:init` and `/idc:doctor` from first live-install field evidence
-  (2026-06-12, two clean installs). `init.md` Phase 3 now ships a tested zsh-safe
-  docs-tree copy loop (an improvised loop hit zsh's unmatched-glob abort in the field);
-  `gh project list` carries `--limit 200` so a >30-board account can't silently create
-  a duplicate tracker; both `gh project field-list` calls carry `--limit 50` (a fresh
-  board already has 20 fields vs the gh default limit of 30). `doctor.md` check 5 now
-  names the five Codex adapter links explicitly instead of relying on wildcard matching.
-- Docs: fixed the first-run bootstrap deadlock. With the plugin disabled at user scope
-  (the per-project scoping model), a never-initialized repo has no `/idc:*` commands —
-  so `/idc:init` could not be the documented first step. `README.md` and
-  `docs/installing.md` now bootstrap each project with
-  `claude plugin enable idc@idc-workflow --scope project` from the terminal before the
-  first `/idc:init`, and `/idc:doctor` troubleshooting covers the
-  "no `/idc:*` commands at all" state.
+Full v2 overhaul — a clean-slate rebuild from the operator interview in
+`docs/considerations/2026-06-12-idc-v2-overhaul-considerations.md`. **Breaking.**
+
+- **Guardrails, not train tracks.** v2 trusts the model and keeps only five guardrails: the
+  one PRD gate, matrix deconfliction, real verification surfaces, ripple, and one-way flow
+  through the glass wall. The standing reviewer/fixer/researcher roles, the multi-pass plan
+  reviews, the claim-state machine, and the per-edit gates are gone.
+- **Command surface:** seven commands — `think`, `plan`, `build`, `ripple`, `autorun`,
+  `init`, `doctor`. The `sequence` command is retired (sequencing is now a phase inside
+  plan); the standalone uninstall/update/upgrade commands are retired (their lifecycle scope
+  folds into init-written install receipts).
+- **Inventory:** ~23 agents → 6 (per-stage orchestrators + one durable-worker implementer +
+  the review coordinator); ~38 skills → 12; the five Codex skill trees → one Codex adapter
+  over a shared runtime-neutral core.
+- **Tracker:** the board is now **four** fields — `Status` (`Blocked|Todo|In Progress|Done`),
+  `Wave`, `Phase`, `Domain` — plus native blocked-by, an `attempt:<n>` label, and claim
+  comments; an issue is workable cold by an outside agent. The eight-field
+  claim-state/lane/track machinery is gone.
+- **The one gate:** a single PRD-change approval issue (plain-terms summary + diff + push
+  notification, approved from the GitHub web UI). Everything else automerges when green.
+- **Runtime model:** a runtime-neutral core over three primitives (durable worker, bounded
+  fan-out, goal loop) with one thin adapter per runtime (Claude, Codex); tier-symbolic model
+  routing in `WORKFLOW-config.yaml`.
+- **Review engine:** the merged 13-dimension review engine now ships inside the plugin (all
+  `code-review-custom` features + the pi-idc-collab review agent), with test genuineness as a
+  review dimension.
+- **Verification:** the functional smoke suite (`tests/smoke/`) over executable helpers; the
+  v1 behavioral evalsets are retired.
+- New v2 PRD + master architectural spec for the plugin itself; rewritten README, `llms.txt`,
+  architecture, and installing docs.
 
 ## 0.1.0 — 2026-06-11
 
-Initial public release: the IDC workflow (Think → Plan → Sequence → Build → Ripple),
-migrated from a local `~/.claude` installation into a standalone, installable Claude
-Code plugin.
-
-- Slash surfaces: `/idc:think`, `/idc:plan`, `/idc:sequence`, `/idc:build`,
-  `/idc:ripple`, `/idc:autorun`, plus `/idc:init` (idempotent per-repo scaffold +
-  tracker provisioning) and `/idc:doctor` (five-check install verifier).
-- Role orchestrator agents, roleplayer agents, and the `idc-skill-*` substrate skills,
-  all namespaced under `idc:`.
-- Codex runtime adapters (`codex-idc-*`) with `scripts/install-codex.sh` managing the
-  `~/.agents/skills` resolution view.
-- Per-repo governance scaffold templates (`WORKFLOW.md`, `WORKFLOW-config.yaml` with
-  `workflow.schema`/`workflow.version` + optional external-harness compatibility keys,
-  tracker config, `docs/workflow/` tree).
-- Behavioral eval suite (19 evalsets / 24 cases) with a disposable governed sandbox,
-  deterministic token gate + LLM-judge scoring, and infra-error-aware exit codes.
+Initial public release: the v1 IDC workflow, migrated from a local `~/.claude` installation
+into a standalone, installable Claude Code plugin. (Superseded by 2.0.0.)

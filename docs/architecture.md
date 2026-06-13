@@ -1,136 +1,98 @@
-# IDC Architecture
+# IDC Architecture (v2)
 
-This page explains how the pieces of the IDC plugin fit together: the role chain, the
-write-authority boundaries that keep roles from stepping on each other, the tracker
-contract, and how commands, agents, and skills compose at runtime.
+How the pieces of the IDC plugin fit together: the flow, the five guardrails, the
+write-authority boundaries, the tracker contract, the runtime model, and how commands,
+agents, and skills compose. It is derived from `templates/WORKFLOW.md` (the contract a
+governed repo installs) and `docs/specs/master-architectural-spec.md` (the plugin's own
+architecture). For the rules a governed project runs under, read that project's `WORKFLOW.md`.
 
-It is derived from the governance contract shipped in `templates/WORKFLOW.md` and the
-`idc:idc-workflow` routing skill. For the per-repo rules a governed project actually runs
-under, read that project's own `WORKFLOW.md`.
-
-## The role chain
-
-IDC is a chain of five roles. The everyday path is linear; **Ripple** is the escape hatch
-that runs whenever any role discovers the plan no longer matches reality.
+## The flow
 
 ```
-Think → Plan → Sequence → Build
-                      ↑
-                   Ripple   (drift handling — can be triggered from any role)
+Think → Plan → Build        (Ripple heals drift; Autorun drains the whole pipe)
 ```
 
-The canonical document chain — the spine everything traces to — is:
+The five-layer canonical chain — the spine everything traces to — is:
 
 ```
-PRD → architecture spec → master implementation plan → subphase plans → pillar plans → TRACKER
+PRD → architecture spec → master implementation plan → subphase plans → pillar plans → tracker issues
 ```
 
-`docs/considerations/` is pre-canonical input (Think's output). `docs/workflow/ripple/` is a
-change-order inbox: a proposal is not accepted truth until a gated Ripple PR lands.
+`docs/considerations/` is pre-canonical input (Think's output). Tracker issues are the
+**glass wall**: planning reaches Build only through them, and Build reaches planning only
+through Ripple.
 
-> Historically the cognitive work now owned by **Plan** was split across three sub-roles
-> (Engineer, Develop, Deconflict). Those are merged into Plan; you may still see the older
-> names in some skill bodies, but the live surface is the five roles above.
+## Guardrails, not train tracks
+
+v1 hand-held a weaker model with standing reviewer/fixer/researcher roles, multi-pass plan
+reviews, a claim-state machine, and per-edit gates. v2 trusts the model and keeps only the
+five guardrails that catch real derailments:
+
+1. **The one PRD gate** — product function never changes without consent.
+2. **Matrix deconfliction** — parallel work never collides.
+3. **Real verification surfaces** — nothing merges that isn't green on genuine functional tests.
+4. **Ripple** — docs and reality never silently diverge.
+5. **One-way flow + the glass wall** — the chain is auditable end to end.
+
+Everything else flows autonomously and automerges when green.
 
 ## Write-authority boundaries
 
-The core invariant: **each role is the sole writer of its surface, and no role edits a
-surface upstream of it.** This is what makes the chain auditable.
+Each role is the sole writer of its surface and edits nothing upstream of it.
 
 | Role | May write | Must NOT write |
 |------|-----------|----------------|
-| **Think** | `docs/considerations/` only | any canonical doc, tracker, source, tests; may not declare scope admitted |
-| **Plan** | PRD, architecture spec, master plan, subphase plans, pillar plans, clash evidence, planning manifest, matrix | source, tests, tracker ordering |
-| **Sequence** | tracker ordering/status, optional wave handoffs | PRD, specs, plans, pillars, source, tests |
-| **Build** | source, tests, implementation-PR artifacts, `docs/workflow/operator-todos/`, status-only tracker bookends | PRD, specs, master/subphase/pillar plans |
-| **Ripple** | change orders + gated canonical/planning-doc PRs (after operator approval) | source, tests; no automatic canonical edits |
+| **Think** | `docs/considerations/` only | any canonical doc, tracker, source, tests |
+| **Plan** | PRD, spec, master/subphase/pillar plans, pillar matrices, tracker issues | source, tests |
+| **Build** | source, tests, review reports, tracker status (claim/close) | PRD, spec, plans |
+| **Ripple** | every affected canonical doc (one synchronized PR), affected open issues | source, tests |
 
-When a lower role discovers a higher layer is wrong (e.g. Build finds the pillar plan
-contradicts the architecture spec), it does **not** fix the upstream doc itself. It stops,
-files a Ripple, and pauses the affected work. Ripple is the single guarded path for
-cross-role canonical edits.
+When a lower role finds a higher layer wrong, it files a Ripple and pauses only the affected
+issue — it never edits the upstream doc itself.
 
-### The Engineer Gate
+## The one gate (PRD)
 
-Plan and Ripple edits to the most authoritative docs are operator-gated:
-
-- **PRD / architecture spec** edits need operator approval **before drafting** and **before
-  merge** (Ripple verdict `MAJOR_GATED`).
-- **Master / subphase / pillar plan** edits need approval **before merge** (`GATED`).
-- Subphase plans, pillar plans, clash evidence, and the planning manifest are autonomous.
-
-## Two edit pipelines
-
-Ripple is the shared canonical-edit guard for two pipelines (from the `idc:idc-workflow`
-skill):
-
-- **Codebase pipeline** — the `Think → Plan → Sequence → Build` chain, for changes whose
-  source-of-truth is product/runtime code, specs, and plans. Originates from product need.
-- **Governance pipeline** — a lighter `Audit → Plan → PR` path, for changes whose
-  source-of-truth is governance itself: agent files, skill bodies, the `CLAUDE.md` tree,
-  `docs/workflow/`, hooks. Originates from audits or observed friction.
-
-Every change order declares a `Pipeline:` field (`governance` or `codebase`) so hand-back
-resumes the right upstream flow.
+When Plan or Ripple determines the PRD must change, the affected issues land `Blocked` behind
+a single gate issue (plain-terms summary + the PRD diff); the operator is push-notified and
+approves from the GitHub web UI; approval unblocks the chain. Implemented identically by Plan
+and Ripple via `idc:idc-gate-issue`. Nothing else asks for permission.
 
 ## The tracker contract
 
-Sequence and Build coordinate through a tracker, selected by `backend:` in
-`docs/workflow/tracker-config.yaml`:
+The backend is selected by `backend:` in `docs/workflow/tracker-config.yaml` and hidden
+behind `idc:idc-tracker-adapter` (→ `idc:idc-tracker-github` or `idc:idc-tracker-filesystem`).
+The board carries **four** fields — `Status` (`Blocked|Todo|In Progress|Done`), `Wave`,
+`Phase`, `Domain` — plus native blocked-by, an `attempt:<n>` label, and claim comments. The
+interface is six ops (createTicket/setField/link/move/query/comment). An issue body is a
+self-sufficient 6-element goal contract, so an outside agent can work it cold.
 
-- **`github`** — a GitHub Projects v2 board. IDC defines **eight custom fields**, read by
-  name (the runtime resolves option IDs at call time):
+## Runtime model — one core, thin adapters
 
-  | Field | Type | Notes |
-  |-------|------|-------|
-  | `Status` | single-select | `Pending` · `Active` · `Blocked` · `Complete` (queue state; Sequence-owned) |
-  | `ClaimState` | single-select | `Unclaimed` · `Claimed` · `Running` · `RetryQueued` · `Released` (runtime claim; Build-owned) |
-  | `Wave` | single-select | execution wave |
-  | `Phase` | single-select | phase tag |
-  | `Track` | single-select | parallel track |
-  | `Lane` | single-select | build lane (includes `(idle)`) |
-  | `Domain` | single-select | subsystem/domain |
-  | `Pillar trace key` | text | links a board item back to its pillar plan |
+The process is written against three abstract primitives — **durable worker**, **bounded
+fan-out**, **goal loop** — and exactly one adapter per runtime maps them to mechanics
+(`idc:idc-adapter-claude`, `idc:idc-adapter-codex`). There is no per-runtime process tree.
+Concurrency budget: Think/Plan/Ripple use zero durable workers (bounded fan-out only); Build
+uses one durable worker per parallel-safe issue; review is bounded fan-out everywhere. Model
+selection is **tier-symbolic** (`reasoning`/`standard`/`utility` in
+`WORKFLOW-config.yaml::model_routing`, resolved by the adapter at spawn time); the Codex
+runtime is untiered.
 
-  A board item is a **candidate** for Build when `Status="Active"` AND
-  `ClaimState="Unclaimed"`, with `Phase` matching the active matrix and `Pillar trace key`
-  matching a matrix `pillar_id`. `/idc:init` provisions exactly these fields; the GitHub
-  Projects backend needs the `project` OAuth scope.
+## Composition + naming
 
-- **`filesystem`** — a `TRACKER.md` file at the repo root. Zero external setup; good for
-  getting started or repos without a GitHub Project.
+- **Commands** (`commands/*.md`) are the slash entry points; `/idc:plan` tells the session to
+  operate as the Plan orchestrator by reading the matching agent playbook.
+- **Agents** (`agents/*.md`) are the per-stage orchestrators, the one durable-worker
+  implementer, and the review coordinator.
+- **Skills** (`skills/<name>/SKILL.md`) are the reusable procedures the roles compose.
 
-The backend is hidden behind the `idc:idc-skill-tracker-adapter` dispatch skill, so roles
-never call a backend directly and a `github ⇄ filesystem` flip is transparent.
-
-## How commands, agents, and skills compose
-
-Three layers, from operator-facing to reusable:
-
-1. **Commands** (`commands/*.md`) are the slash entry points. `/idc:plan`, for example,
-   tells the current session to operate as the Plan orchestrator by reading the matching
-   agent file.
-2. **Agents** (`agents/*.md`) are the orchestrators and the teammates they spawn. A role
-   orchestrator (e.g. `idc-plan`) runs in the parent session and dispatches **teammates**
-   — durable, separately-context'd Claude Code sessions created with `TeamCreate` +
-   `Agent` (e.g. `idc-role-subphase-pillar-planner`) — never one-shot Task subagents,
-   because teammates can hold context, coordinate, and be messaged mid-run.
-3. **Skills** (`skills/*/SKILL.md`) are the reusable procedures agents compose: tracker
-   operations, plan review, change-order shaping, drift evidence, and so on. The
-   `codex-idc-*` skills are role adapters for the Codex runtime; `idc-workflow` is the
-   top-level routing skill for non-pane environments.
-
-`${CLAUDE_PLUGIN_ROOT}` resolves to the plugin's install path inside command, agent, and
-skill bodies, so files reference each other portably (e.g.
-`${CLAUDE_PLUGIN_ROOT}/agents/idc-build-runbook.md`). It is **not** a shell environment
-variable — scripts receive the plugin root as an explicit argument instead.
+All agents and skills use a flat `idc-<thing>` name; the harness adds the `idc:` namespace.
+`${CLAUDE_PLUGIN_ROOT}` resolves to the install path inside command/agent/skill bodies (it is
+text-substituted, not a shell env var). `scripts/lint-references.sh` enforces that every
+`idc:<name>` reference and every shipped-path token resolves to a real file.
 
 ## Required trace (the audit rule)
 
-- Subphase plans must record `Upstream Master Plan Domain/Phase`.
-- Pillar plans must record `Upstream Subphase` and `Tracker Trace Key`.
-- Tracker edits must cite an existing polished pillar-derived unit.
-
-These traces are what let any board item be walked back to the product requirement that
-justified it — and what let Ripple compute the "highest affected layer" when something
-drifts.
+Subphase plans record their upstream master domain/phase; pillar plans record their upstream
+subphase; each issue's `Trace:` line cites its pillar · consideration · PRD section. These
+traces let any issue be walked back to the requirement that justified it — and let Ripple
+compute the highest affected layer when something drifts.

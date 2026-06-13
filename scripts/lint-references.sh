@@ -10,7 +10,9 @@
 #      by design — there is no sanctioned dangling namespaced ref.
 #   B. Every ${CLAUDE_PLUGIN_ROOT}/<path> and ../<path> file token resolves to a real file.
 #   C. No machine-local paths (~/.claude/{agents,skills,commands,plugins}/, /Users/<user>)
-#      or personal-memory references.
+#      or personal-memory references. The vendored runtime/ tree (idc-pi launcher, role
+#      prompts, extensions) ships to users too, so it gets a dedicated machine-local-path
+#      scan below — markdown-surface globbing would otherwise miss its non-.md files.
 #   D. No "Knowledge Engine" project naming outside the history allowlist.
 #   E. Frontmatter `name:` is bare (the harness adds the idc: namespace) AND matches the
 #      component's directory/file stem.
@@ -36,6 +38,11 @@ FILE_COUNT=$(echo "$MD_FILES" | wc -l | tr -d ' ')
 # History allowlist: files allowed to mention migration history / the original project.
 HISTORY_ALLOW='^(CHANGELOG\.md|docs/dev/)'
 
+# Rule C personal/machine-local path sub-pattern, shared by the markdown per-file scan and the
+# runtime/ scan so the two cannot drift. The per-file scan layers personal-memory alternatives
+# on top of this; the runtime/ scan uses it alone (those memory tokens would false-match code).
+PERSONAL_PATH_RE='~/\.claude/(agents|skills|commands|plugins)/|/Users/[a-z]+'
+
 filtered_grep() { # pattern, file — grep -n minus lint-allow lines
   grep -nE -- "$1" "$2" 2>/dev/null | grep -v 'lint-allow' || true
 }
@@ -53,7 +60,7 @@ for f in $MD_FILES; do
   while IFS= read -r hit; do
     [ -z "$hit" ] && continue
     report "$f:${hit%%:*}: [personal-path-or-memory] ${hit#*:}"
-  done < <(filtered_grep '(~/\.claude/(agents|skills|commands|plugins)/|/Users/[a-z]+|see memory|memory feedback_|(^|[^a-zA-Z0-9_])feedback_[a-z0-9_]+)' "$f")
+  done < <(filtered_grep "($PERSONAL_PATH_RE|see memory|memory feedback_|(^|[^a-zA-Z0-9_])feedback_[a-z0-9_]+)" "$f")
 
   # Rule D — original project naming (outside history allowlist).
   if ! echo "$f" | grep -qE "$HISTORY_ALLOW"; then
@@ -110,6 +117,17 @@ for f in $MD_FILES; do
     done
   done < <(filtered_grep 'idc-[a-z0-9-]+' "$f")
 done
+
+# Rule C (runtime/) — the vendored runtime tree ships to users but is not markdown and sits
+# outside the surfaces globbed above. Scan every regular file under runtime/ for machine-local
+# paths so a personal-path leak (e.g. /Users/<user> in the launcher) cannot hide there.
+if [ -d runtime ]; then
+  while IFS= read -r hit; do
+    [ -z "$hit" ] && continue
+    rfile="${hit%%:*}"; rest="${hit#*:}"; rline="${rest%%:*}"; rtext="${rest#*:}"
+    report "$rfile:$rline: [personal-path] $rtext"
+  done < <(grep -rnE -- "($PERSONAL_PATH_RE)" runtime 2>/dev/null | grep -v 'lint-allow' || true)
+fi
 
 # Rule A — dangling namespaced references (ignores lint-allow by design).
 ALL_REFS=$(grep -hoE 'idc:[a-z0-9][a-z0-9-]*' $MD_FILES 2>/dev/null | sort -u)

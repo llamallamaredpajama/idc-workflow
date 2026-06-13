@@ -11,14 +11,26 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 fails=0
 for t in \
   phase1-tracker-fs \
+  phase1-tracker-stage \
+  phase1-tracker-lease \
   phase1-init-doctor \
   phase1-settings-json \
   phase2-think \
   phase3-plan \
   phase4-build \
+  phase4-review-agent \
+  phase4-triplet \
   phase5-ripple \
   phase6-autorun \
-  phase7-lifecycle; do
+  phase7-lifecycle \
+  phase8-pi-launchable \
+  phase8-pi-runtime \
+  phase8-pi-fleet-secret \
+  phase8-pi-fleet-failclose \
+  phase8-pi-review-verdict \
+  phase8-governance \
+  phase8-pi-governance-gate \
+  phase8-adapter-pi; do
   if out="$(bash "$HERE/$t.sh" 2>&1)"; then
     echo "  PASS  $t"
   else

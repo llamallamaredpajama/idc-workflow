@@ -30,7 +30,7 @@ Identical across backends; the adapter routes without reshaping signatures.
 | Op | Signature |
 |---|---|
 | `createTicket` | `(title, body, type, labels) → ticket_id` |
-| `setField` | `(ticket_id, field ∈ {Status, Wave, Phase, Domain}, value)` |
+| `setField` | `(ticket_id, field ∈ {Status, Stage, Wave, Phase, Domain}, value)` |
 | `link` | `(parent_id, child_id, kind ∈ {sub, blocks})` |
 | `move` | `(ticket_id, status ∈ {Blocked, Todo, In Progress, Done})` |
 | `query` | `(filter) → [ticket_id, …]` |
@@ -39,6 +39,19 @@ Identical across backends; the adapter routes without reshaping signatures.
 Conveniences layered on the six: `claim(ticket, agent)` (Status→In Progress + claim
 comment), `block(ticket, by)` (Status→Blocked + native blocked-by), `close(ticket)`
 (Status→Done; idempotent). A seventh core op is a contract change requiring a Ripple.
+
+### Merge lease (single-holder serialization)
+
+For merge serialization — where one holder must be proven **atomically** before touching the
+integration ref (e.g. flat pi finisher residents with no orchestrator) — the adapter exposes a
+fail-closed lease: `leaseAcquire(name, owner, ttl) → token | fail` and `leaseRelease(name,
+token)`. Backends realize it differently:
+
+- **filesystem** — implemented: `lease-acquire`/`lease-release` (flock-backed acquire-if-empty-
+  or-expired, release-by-token, TTL expiry). See `idc:idc-tracker-filesystem`.
+- **github** — **interim**: no native compare-and-set lease yet, so merge stays **single-holder
+  fail-closed** — exactly one orchestrator merges (no lease → no merge); a finisher never
+  self-merges concurrently. A native Projects-field CAS lease is a tracked follow-up.
 
 ## Fail-closed posture
 

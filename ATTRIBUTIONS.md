@@ -1,0 +1,69 @@
+# Attributions
+
+Third-party source vendored into this plugin, with upstream provenance and license.
+
+## pi-harnesses — Pi runtime (`runtime/pi/`)
+
+The IDC Pi runtime is **vendored source** from the `pi-harnesses` project (the Pi Coding
+Agent extension playground). Only the IDC-relevant runtime is vendored — not the full
+extension set. The Pi *agent* itself (the `pi` binary / npm package
+`@earendil-works/pi-coding-agent`, historically `@mariozechner/pi-*`) is **not** bundled; it
+is an install-time dependency installed separately.
+
+- **Upstream:** pi-harnesses (© 2026 IndyDevDan)
+- **License:** MIT — preserved verbatim at [`runtime/pi/LICENSE-pi-harnesses`](runtime/pi/LICENSE-pi-harnesses) (no-edit)
+- **Each vendored file** carries a top-of-file attribution header citing its upstream path.
+  IDC-local additions are marked with an `IDC-LOCAL` banner comment.
+
+Vendored files:
+
+| Vendored path | Upstream path | Role |
+|---|---|---|
+| `runtime/pi/scripts/coms-net-server.ts` | `scripts/coms-net-server.ts` | coms-net Bun HTTP/SSE hub (server; **glass-wall ACL enforced server-side**, IDC-local) |
+| `runtime/pi/scripts/idc-pi` | `scripts/idc-pi` | role launcher (reference source) |
+| `runtime/pi/extensions/coms-net.ts` | `extensions/coms-net.ts` | coms-net client + `coms_net_send` seam (**glass-wall ACL wired**, IDC-local) |
+| `runtime/pi/extensions/idc-role-harness.ts` | `extensions/idc-role-harness.ts` | per-role guardrails + **glass-wall directional ACL** (IDC-local) |
+| `runtime/pi/extensions/guard-shell-core.ts` | `extensions/guard-shell-core.ts` | shared bash/path/secret guard core |
+| `runtime/pi/extensions/review-orchestrator.ts` | `extensions/review-orchestrator.ts` | review orchestration command |
+| `runtime/pi/extensions/review-orchestrator-core.ts` | `extensions/review-orchestrator-core.ts` | review orchestration core helpers |
+| `runtime/pi/extensions/themeMap.ts` | `extensions/themeMap.ts` | shared theme defaults (transitive dep) |
+| `runtime/pi/extensions/minimal.ts` | `extensions/minimal.ts` | compact footer extension (`-e` launch dep) |
+| `runtime/pi/extensions/theme-cycler.ts` | `extensions/theme-cycler.ts` | theme-cycler extension (`-e` launch dep) |
+| `runtime/pi/.pi/agents/idc/*.md` | `.pi/agents/idc/*.md` | role system prompts loaded by `idc-pi run` (7 files, byte-faithful) |
+
+### IDC-local additions (not upstream)
+
+- **Glass-wall directional ACL** on the `coms_net_send` seam — `evaluateComsNetSendForRole` /
+  `resolveComsNetPeerRole` in `idc-role-harness.ts`, enforced in `coms-net.ts` before any
+  network send **and authoritatively re-enforced in `coms-net-server.ts` (`handleSendMessage`)
+  before any message is queued**, so a direct POST to `/v1/messages` cannot bypass the wall
+  (the hub imports the same pure decision — single source of truth). The hub also binds the
+  evaluated identity to a **per-session token** issued at registration (presented via the
+  `x-coms-session-token` header) on **every session-scoped endpoint** — send, SSE stream
+  (`/v1/events`), terminal response submit, heartbeat, and delete — so a shared-bearer-token
+  holder cannot spoof another peer's `sender_session`, hijack its stream, or forge its reply.
+  Duplicate role residents are uniquified with a hyphenated suffix (`build-impl-2`) so they stay
+  resolvable to their IdcRole under the ACL. Role identity itself is bound to a **launcher-issued
+  per-role HMAC capability** (`x-coms-role-cap` = HMAC(K, role)); the ACL runs off the proven
+  `canonical_role`, so a bearer holder cannot *mint* a role by self-asserting its name. The full
+  trust model + its honest residual (defense-in-depth on a same-OS-user host, not an absolute
+  boundary) is documented in `runtime/pi/SECURITY.md`. A role resident may message
+  only peers strictly downstream in the IDC river
+  (think → plan → sequence → build-impl → build-review → build-finish) plus the Ripple sink;
+  upstream/unknown sends are denied fail-closed and logged to the `coms-net-log` channel.
+  This is original IDC work layered onto the vendored guard machinery; no separate upstream
+  license applies.
+
+- **Pi package-namespace retarget.** The upstream pi-harnesses source imported the
+  `@mariozechner/*` packages (`pi-coding-agent`, `pi-tui`); the shipped Pi agent was renamed to
+  the `@earendil-works/*` scope. All vendored extension imports are retargeted to
+  `@earendil-works/*` (API-compatible — `truncateToWidth`/`visibleWidth`/`Text` unchanged) so the
+  runtime loads under the installed agent rather than a stale local cache. `tests/smoke/
+  phase8-pi-launchable.sh` import-tests every `-e` extension under Bun to keep this honest.
+
+- **`runtime/pi/scripts/fleet-supervisor.ts`** is original IDC work (not upstream): the secure
+  fleet supervisor that distributes the role-cap master key + per-role caps via execve env maps so
+  no secret appears in a `ps`-visible argv. See `runtime/pi/SECURITY.md`.
+
+The launcher (`runtime/pi/scripts/idc-pi`) is vendored as **reference source**; wiring the
+full multi-role orchestration onto a host is the concern of the Pi adapter (unit B2).

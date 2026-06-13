@@ -1,11 +1,11 @@
 ---
-description: IDC Init — scaffold a repo for the v2 IDC pipeline (WORKFLOW.md, config with codebase-derived domains, 4-field board, install receipts)
+description: IDC Init — scaffold a repo for the v2 IDC pipeline (WORKFLOW.md, config with codebase-derived domains, 5-field board, install receipts)
 argument-hint: "[PROJECT_NAME] [--codex]"
 ---
 
 You are running `/idc:init`. Install the IDC v2 workflow into the **current repository**:
 scaffold the governance contract from the plugin templates, derive the repo's standing
-domains, provision (or link) a GitHub Projects v2 board matching the **four-field** v2
+domains, provision (or link) a GitHub Projects v2 board matching the **five-field** v2
 contract, enable the plugin for the project, write an install receipt, and — with
 `--codex` — wire the Codex adapter.
 
@@ -71,18 +71,20 @@ Decide create-vs-link:
   Capture `number` (→ `TRACKER_PROJECT_NUMBER`) and the node `id`/`url`. Derive
   `OWNER=$(gh repo view --json owner -q .owner.login)`.
 
-Provision the **four** v2 fields. A new Projects v2 board ships a built-in single-select
-`Status` — **reconcile** it (don't duplicate); create the other three. Single-selects need
+Provision the **five** v2 fields. A new Projects v2 board ships a built-in single-select
+`Status` — **reconcile** it (don't duplicate); create the other four. Single-selects need
 ≥1 option at creation:
 
 | Field | Type | Options |
 |-------|------|---------|
 | `Status` | SINGLE_SELECT (reconcile built-in) | `Blocked`, `Todo`, `In Progress`, `Done` |
+| `Stage` | SINGLE_SELECT (create) | `Consideration`, `Planning`, `Buildable` |
 | `Wave` | SINGLE_SELECT (create) | seed `Wave 1` |
 | `Phase` | SINGLE_SELECT (create) | seed `Phase 1` |
 | `Domain` | SINGLE_SELECT (create) | seed with the Phase-1 derived domain names |
 
 ```bash
+gh project field-create <n> --owner "$OWNER" --name "Stage"  --data-type SINGLE_SELECT --single-select-options "Consideration,Planning,Buildable"
 gh project field-create <n> --owner "$OWNER" --name "Wave"   --data-type SINGLE_SELECT --single-select-options "Wave 1"
 gh project field-create <n> --owner "$OWNER" --name "Phase"  --data-type SINGLE_SELECT --single-select-options "Phase 1"
 gh project field-create <n> --owner "$OWNER" --name "Domain" --data-type SINGLE_SELECT --single-select-options "<domain1>,<domain2>,..."
@@ -104,8 +106,8 @@ forbids deleting the built-in `Status`); record an operator action to set the fo
 in the web UI.
 
 Cache the contract: substitute the project number, then write each field's node `id` into
-`tracker-config.yaml::field_ids` (`Status`, `Wave`, `Phase`, `Domain`) with precise edits
-so the inline comments survive:
+`tracker-config.yaml::field_ids` (`Status`, `Stage`, `Wave`, `Phase`, `Domain`) with precise
+edits so the inline comments survive:
 ```bash
 sed -i '' -e "s|\"{{TRACKER_PROJECT_NUMBER}}\"|$TRACKER_PROJECT_NUMBER|g" docs/workflow/tracker-config.yaml
 gh project field-list <n> --owner "$OWNER" --format json --limit 50   # → field node ids

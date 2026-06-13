@@ -22,12 +22,17 @@ parent). Loopable via `/loop /idc:autorun` for standing operation.
 
 ## The drain loop
 
-1. **Scan for unplanned considerations** in `docs/considerations/`. For each, dispatch a
-   planning-lane worker; admit its issues one consideration at a time. Skip this stage when
-   there are none.
+1. **Find unplanned considerations** by querying the board for `Stage = Consideration`
+   pointer items (the one-stop index — no filesystem scan; the files under
+   `docs/considerations/` stay the source of truth). For each, dispatch a planning-lane
+   worker; admit its issues one consideration at a time, and advance the pointer
+   (`Consideration → Planning` while in flight, retired as buildable issues land). Skip this
+   stage when there are none.
 2. **Heal board hygiene in passing** — fix obvious board inconsistencies as you traverse
    (this is the auto `--fix`; `/idc:doctor` stays read-only).
-3. **Build eligible waves.** Check the build lane's exit condition with
+3. **Build eligible waves.** Eligible build work is `Stage = Buildable` issues only — an
+   upstream `Consideration`/`Planning` pointer is never scooped (the glass wall). Check the
+   build lane's exit condition with
    `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --tracker <TRACKER.md>`
    (or the github-backend equivalent via `idc:idc-tracker-adapter`). While it reports
    `drain: continue`, run `idc:idc-build` on the eligible waves; re-check after each.

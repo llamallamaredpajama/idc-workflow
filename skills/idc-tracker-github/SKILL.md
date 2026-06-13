@@ -10,14 +10,22 @@ dispatched **only** by `idc:idc-tracker-adapter` when
 and never decides routing. Its op surface mirrors the sibling filesystem backend
 `idc:idc-tracker-filesystem` (`scripts/idc_tracker_fs.py`) so callers stay backend-blind.
 
-The board carries exactly **four** custom fields and nothing else: `Status` (single-select:
-`Blocked | Todo | In Progress | Done`), `Wave` (single-select `Wave N`), `Phase`
-(single-select `Phase N`), `Domain` (single-select). Field **node IDs** are cached in
-`tracker-config.yaml::field_ids`; option values are resolved **by name at call time**
-(never cached). Plus: native blocked-by dependency links, one `attempt:<n>` label
+The board carries exactly **five** custom fields and nothing else: `Status` (single-select:
+`Blocked | Todo | In Progress | Done`), `Stage` (single-select:
+`Consideration | Planning | Buildable` — the column-grouping field), `Wave` (single-select
+`Wave N`), `Phase` (single-select `Phase N`), `Domain` (single-select). Field **node IDs**
+are cached in `tracker-config.yaml::field_ids`; option values are resolved **by name at call
+time** (never cached). Plus: native blocked-by dependency links, one `attempt:<n>` label
 (single-valued), and claim comments. There is no claim-state machine (removed), no lane, no
 track, no pillar-trace-key field, and no bookend ceremony — a board item is workable cold by
 any outside agent from its body + the plain GitHub API.
+
+Upstream artifacts (considerations, in-flight plans, pillars) ride the board as lightweight
+**pointer items**: an issue carrying `Stage = Consideration`/`Planning`, a repo-file
+reference, and Phase/Domain — never a copy of canonical content (files stay the source of
+truth). Buildable issues carry `Stage = Buildable`, and Build queries `Stage = Buildable`, so
+an upstream pointer is never scooped (the glass wall). `Stage` is **additive** — existing
+4-field boards keep working until `/idc:init` (or `/idc:doctor`) provisions the field.
 
 ## Preamble — resolve config once per op
 
@@ -72,12 +80,16 @@ gh project item-edit --id "$(itemid "$NUM")" --project-id "$PROJ" \
 **query(filter) -> [#...]** — list board items and filter by field value(s).
 ```bash
 gh project item-list "$PROJ" --owner "$OWNER" --format json \
-  | jq -r --arg s "${STATUS:-}" --arg w "${WAVE:-}" --arg p "${PHASE:-}" --arg d "${DOMAIN:-}" '
+  | jq -r --arg s "${STATUS:-}" --arg st "${STAGE:-}" --arg w "${WAVE:-}" \
+          --arg p "${PHASE:-}" --arg d "${DOMAIN:-}" '
     .items[]
-    | select($s=="" or .status==$s)
+    | select($s=="" or .status==$s) | select($st=="" or (.stage // "Buildable")==$st)
     | select($w=="" or .wave==$w) | select($p=="" or .phase==$p)
     | select($d=="" or .domain==$d) | .content.number' || die_gh
 ```
+A legacy 4-field board has no `Stage` set, so `.stage` is null; `(.stage // "Buildable")`
+reads an absent Stage as `Buildable` — matching the filesystem backend and the additive promise
+above (existing boards keep surfacing under `--stage Buildable` with no migration step).
 
 **comment(ticket, body)** — `gh issue comment "$NUM" --body "$BODY" || die_gh`.
 

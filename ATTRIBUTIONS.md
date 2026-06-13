@@ -37,7 +37,10 @@ Vendored files:
   `resolveComsNetPeerRole` in `idc-role-harness.ts`, enforced in `coms-net.ts` before any
   network send **and authoritatively re-enforced in `coms-net-server.ts` (`handleSendMessage`)
   before any message is queued**, so a direct POST to `/v1/messages` cannot bypass the wall
-  (the hub imports the same pure decision — single source of truth). A role resident may message
+  (the hub imports the same pure decision — single source of truth). The hub also binds the
+  evaluated identity to a **per-session token** issued at registration (presented via the
+  `x-coms-session-token` header), so a shared-bearer-token holder cannot spoof another peer's
+  `sender_session` to send as an upstream role. A role resident may message
   only peers strictly downstream in the IDC river
   (think → plan → sequence → build-impl → build-review → build-finish) plus the Ripple sink;
   upstream/unknown sends are denied fail-closed and logged to the `coms-net-log` channel.

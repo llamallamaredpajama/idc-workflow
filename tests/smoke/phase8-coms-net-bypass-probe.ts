@@ -14,7 +14,7 @@
 // Usage: bun phase8-coms-net-bypass-probe.ts <serverUrl> <token> [project]
 // Exit 0 = hub enforced every case; exit 1 = at least one bypass (printed).
 
-import { makeHttp, registerPeer } from "./coms-net-probe-lib.ts";
+import { makeHttp, registerPeer, sendAs, type Peer } from "./coms-net-probe-lib.ts";
 
 const [, , SERVER_URL, TOKEN, PROJECT_ARG] = process.argv;
 // Isolate in a dedicated project so these peers never collide with the companion probe's peers
@@ -28,9 +28,10 @@ if (!SERVER_URL || !TOKEN) {
 const http = makeHttp(SERVER_URL, TOKEN);
 const register = (role: string) => registerPeer(http, role, `bypass-${role}-1`, PROJECT);
 
-// Raw direct POST — the bypass attempt. No ACL evaluation here on purpose.
-async function rawSend(senderSession: string, target: string): Promise<{ status: number; msgId: string | null }> {
-	const { status, json } = await http("POST", "/v1/messages", {
+// Raw direct POST — the bypass attempt. `token` is the per-session credential the caller presents;
+// `senderSession` is the identity it CLAIMS. The hub must bind identity to the token, not the claim.
+async function rawSend(token: string, senderSession: string, target: string): Promise<{ status: number; msgId: string | null }> {
+	const { status, json } = await sendAs(http, token, {
 		project: PROJECT,
 		sender_session: senderSession,
 		target,
@@ -41,7 +42,7 @@ async function rawSend(senderSession: string, target: string): Promise<{ status:
 	return { status, msgId: json?.msg_id ?? null };
 }
 
-type Case = { name: string; sender: string; target: string; mustReject: boolean };
+type Case = { name: string; token: string; senderSession: string; target: string; mustReject: boolean };
 
 async function main() {
 	const buildImpl = await register("build-impl");
@@ -49,17 +50,22 @@ async function main() {
 	const buildFinish = await register("build-finish");
 	await register("ripple");
 	const ghost = await register("ghost");
+	const think = await register("think");
 
 	const cases: Case[] = [
-		{ name: "build-impl → plan (UPSTREAM)", sender: buildImpl, target: "plan", mustReject: true },
-		{ name: "build-impl → build-finish (DOWNSTREAM)", sender: buildImpl, target: "build-finish", mustReject: false },
-		{ name: "build-impl → ripple (Ripple sink)", sender: buildImpl, target: "ripple", mustReject: false },
-		{ name: "ghost → build-finish (unknown sender, fail-closed)", sender: ghost, target: "build-finish", mustReject: true },
+		// Honest sends (caller presents its own token + claims its own session).
+		{ name: "build-impl → plan (UPSTREAM)", token: buildImpl.token, senderSession: buildImpl.sessionId, target: "plan", mustReject: true },
+		{ name: "build-impl → build-finish (DOWNSTREAM)", token: buildImpl.token, senderSession: buildImpl.sessionId, target: "build-finish", mustReject: false },
+		{ name: "build-impl → ripple (Ripple sink)", token: buildImpl.token, senderSession: buildImpl.sessionId, target: "ripple", mustReject: false },
+		{ name: "ghost → build-finish (unknown sender role, fail-closed)", token: ghost.token, senderSession: ghost.sessionId, target: "build-finish", mustReject: true },
+		// F2 round-2 SPOOF: a downstream token holder CLAIMS an upstream peer's session id to send
+		// upstream. The hub must reject because the presented token isn't that session's credential.
+		{ name: "SPOOF: build-finish's token claims sender_session=think → plan", token: buildFinish.token, senderSession: think.sessionId, target: "plan", mustReject: true },
 	];
 
 	let failures = 0;
 	for (const c of cases) {
-		const { status, msgId } = await rawSend(c.sender, c.target);
+		const { status, msgId } = await rawSend(c.token, c.senderSession, c.target);
 		if (c.mustReject) {
 			// The hub must reject BEFORE queuing: a forbidden POST gets a 4xx and NO msg_id.
 			const rejected = status === 403 && msgId === null;

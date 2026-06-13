@@ -15,7 +15,7 @@
 // Exit 0 = all expectations met; exit 1 = at least one mismatch (printed).
 
 import { evaluateComsNetSendForRole } from "../../runtime/pi/extensions/idc-role-harness.ts";
-import { makeHttp, registerPeer } from "./coms-net-probe-lib.ts";
+import { makeHttp, registerPeer, sendAs, type Peer } from "./coms-net-probe-lib.ts";
 
 const [, , SERVER_URL, TOKEN, PROJECT_ARG] = process.argv;
 const PROJECT = PROJECT_ARG || "default";
@@ -29,19 +29,20 @@ const http = makeHttp(SERVER_URL, TOKEN);
 const register = (role: string) => registerPeer(http, role, `sess-${role}-1`, PROJECT);
 
 // The guarded send: identical gate to the production coms_net_send seam. The ACL decision
-// is the single source of truth; only an allowed decision is POSTed to the hub.
+// is the single source of truth; only an allowed decision is POSTed to the hub. The send
+// carries the sender's per-session token (the credential the hub binds identity to).
 async function guardedSend(
+	sender: Peer,
 	senderRole: string,
-	senderSession: string,
 	target: string,
 ): Promise<{ allowed: boolean; reason: string; msgId: string | null; httpStatus: number | null }> {
 	const acl = evaluateComsNetSendForRole(senderRole, target);
 	if (!acl.allowed) {
 		return { allowed: false, reason: acl.reason, msgId: null, httpStatus: null };
 	}
-	const { status, json } = await http("POST", "/v1/messages", {
+	const { status, json } = await sendAs(http, sender.token, {
 		project: PROJECT,
-		sender_session: senderSession,
+		sender_session: sender.sessionId,
 		target,
 		target_session: null,
 		prompt: `probe ${senderRole}->${target}`,
@@ -67,7 +68,7 @@ async function main() {
 
 	let failures = 0;
 	for (const c of cases) {
-		const r = await guardedSend("build-impl", buildImpl, c.target);
+		const r = await guardedSend(buildImpl, "build-impl", c.target);
 		const ok =
 			r.allowed === c.expectAllowed &&
 			// an allowed send must actually reach the hub (msg_id); a denied send must not

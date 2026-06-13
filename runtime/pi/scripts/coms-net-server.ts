@@ -171,6 +171,10 @@ export type AgentCard = {
 export type RegistryEntry = AgentCard & {
 	last_seen_at: string;
 	registered_at: string;
+	// IDC-LOCAL (codex F2): per-session credential. The hub binds send authorization to this
+	// secret, NOT to the caller-supplied `sender_session`, so a shared-bearer-token holder cannot
+	// spoof another peer's identity. Never included in AgentCard / never broadcast (see entryToCard).
+	session_token: string;
 };
 
 export type ComsMessage = {
@@ -208,6 +212,9 @@ export type RegisterResponse = {
 	agent: AgentCard;
 	heartbeat_interval_ms: number;
 	sse_url: string;
+	// IDC-LOCAL (codex F2): the per-session credential the registrant must present (header
+	// `x-coms-session-token`) on every send. Returned only to the registrant.
+	session_token: string;
 };
 
 export type HeartbeatRequest = {
@@ -565,13 +572,25 @@ async function handleRegister(req: Request): Promise<Response> {
 	let resolvedName = desiredName;
 	const existing = p.agents.get(body.session_id);
 	const isReregister = !!existing;
+	// IDC-LOCAL (codex F2): per-session credential. A re-registration must present the existing
+	// session's own token (proving it is the original registrant) — otherwise a bearer-token holder
+	// could hijack a live session_id and impersonate its role. A fresh session is issued a new token.
+	const presentedToken = req.headers.get("x-coms-session-token") ?? "";
+	let sessionToken: string;
 	if (existing) {
+		if (!presentedToken || !tokensEqual(presentedToken, existing.session_token)) {
+			return errorJson("session_reregister_denied", 403, {
+				reason: "re-registration must present the session's own token",
+			});
+		}
+		sessionToken = existing.session_token;
 		// upsert: keep their existing name unless they ask for a different one
 		resolvedName =
 			body.name && body.name !== existing.name
 				? resolveUniqueName(p, desiredName)
 				: existing.name;
 	} else {
+		sessionToken = crypto.randomUUID();
 		resolvedName = resolveUniqueName(p, desiredName);
 	}
 
@@ -594,6 +613,7 @@ async function handleRegister(req: Request): Promise<Response> {
 		...card,
 		registered_at: existing?.registered_at ?? nowIso(),
 		last_seen_at: nowIso(),
+		session_token: sessionToken,
 	};
 
 	if (existing && existing.name !== entry.name) {
@@ -619,6 +639,7 @@ async function handleRegister(req: Request): Promise<Response> {
 		agent: entryToCard(entry),
 		heartbeat_interval_ms: HEARTBEAT_MS,
 		sse_url,
+		session_token: sessionToken,
 	};
 	return json(resp);
 }
@@ -862,6 +883,15 @@ async function handleSendMessage(req: Request): Promise<Response> {
 
 	const sender = p.agents.get(body.sender_session);
 	if (!sender) return errorJson("sender_not_registered", 404);
+
+	// IDC-LOCAL (codex F2): bind authorization to the actual sender, not the caller-supplied
+	// `sender_session`. The caller must present THIS session's per-session token; otherwise a
+	// shared-bearer-token holder could claim any registered session id and impersonate its role.
+	const presentedToken = req.headers.get("x-coms-session-token") ?? "";
+	if (!presentedToken || !tokensEqual(presentedToken, sender.session_token)) {
+		logRejected("sender_auth", `${sender.name} (${body.sender_session.slice(-6)}) — session token missing/mismatched`);
+		return errorJson("sender_auth_failed", 403, { reason: "send must present the sender session's own token" });
+	}
 
 	const hops = typeof body.hops === "number" ? body.hops : 0;
 	if (hops >= MAX_HOPS) {

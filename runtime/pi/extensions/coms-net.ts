@@ -108,6 +108,8 @@ interface RegisterResponse {
 	agent: AgentCard;
 	heartbeat_interval_ms: number;
 	sse_url: string;
+	// IDC-LOCAL (codex F2): per-session credential issued by the hub; presented on every send.
+	session_token?: string;
 }
 
 interface HeartbeatRequest {
@@ -624,6 +626,9 @@ export default function (pi: ExtensionAPI) {
 	} | null = null;
 	let serverUrl: string | null = null;
 	let authToken: string | null = null;
+	// IDC-LOCAL (codex F2): per-session credential from register; presented on every send so the
+	// hub binds our identity to it rather than to the spoofable sender_session body field.
+	let sessionToken: string | null = null;
 	let sseUrlPath: string | null = null;
 	const peerCards: Map<string, AgentCard> = new Map();
 	const pendingReplies: Map<string, PendingReply> = new Map();
@@ -650,6 +655,7 @@ export default function (pi: ExtensionAPI) {
 			"Authorization": `Bearer ${authToken}`,
 			"Accept": "application/json",
 		};
+		if (sessionToken) headers["x-coms-session-token"] = sessionToken;
 		const init: any = { method, headers };
 		if (body !== undefined) {
 			headers["Content-Type"] = "application/json";
@@ -1076,6 +1082,8 @@ export default function (pi: ExtensionAPI) {
 		if (!resp || !resp.agent) {
 			throw new Error("coms-net: malformed register response");
 		}
+		// IDC-LOCAL (codex F2): keep the per-session credential for subsequent sends/re-registers.
+		if (resp.session_token) sessionToken = resp.session_token;
 		// Server may auto-suffix the name on collision.
 		if (resp.agent.name !== identity.name) {
 			try {

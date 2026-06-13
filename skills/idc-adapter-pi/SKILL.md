@@ -48,13 +48,13 @@ decision 7`, `agents/idc-build.md`). Worked example for one wave:
    `Status=Todo` issues whose blocked-by upstreams are `Done`, and coordinates the wave
    (within-stage only — no cross-stage master).
 2. **It dispatches N implementer residents** (`build-impl`, …`build-impl-<n>`), one per
-   parallel-safe issue, each running the **whole** `idc-implementer.md`: claim the issue, run
+   parallel-safe issue, each running the **whole** `idc:idc-implementer`: claim the issue, run
    its `/fullauto-goal` loop to a green implementation, hand off to review. (The engine never
    fixes findings or merges.)
 3. **Review fan-out** is bounded fan-out, not a resident: each implementer's PR goes to
    **fresh cold child-processes** (the combined review agent, A1) → deduped, confidence-floored,
    fail-closed verdict.
-4. **A finisher resident** (`build-finish`) runs the **whole** `idc-finisher.md`: its **own**
+4. **A finisher resident** (`build-finish`) runs the **whole** `idc:idc-finisher`: its **own**
    `/fullauto-goal` loop over **all** reviewer findings (incl. side issues) → `/simplify` → git
    finalization → Ripple on the unsolvable.
 5. **Merge-serialization mechanism = a board-backed merge lease.** Two layers, both required:
@@ -75,7 +75,7 @@ downstream-legal under the glass-wall ACL; Ripple is reachable from any of them.
 pi residents run the **Pi coding agent**; the tier-symbolic contract still holds — process docs
 name only the **tier** (`WORKFLOW.md §6`), and the `idc-pi` launcher resolves it from
 `WORKFLOW-config.yaml::model_routing` and applies the resolved model/effort to the Pi agent at
-resident spawn (mirroring `idc-adapter-claude`, not Codex's untiered carve-out). Never hardcode
+resident spawn (mirroring `idc:idc-adapter-claude`, not Codex's untiered carve-out). Never hardcode
 a model id in a command, agent, or non-adapter skill; Ripple maintains the table when models
 change.
 

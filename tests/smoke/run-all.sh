@@ -23,6 +23,7 @@ for t in \
   phase6-autorun \
   phase7-lifecycle \
   phase8-pi-runtime \
+  phase8-governance \
   phase8-adapter-pi; do
   if out="$(bash "$HERE/$t.sh" 2>&1)"; then
     echo "  PASS  $t"

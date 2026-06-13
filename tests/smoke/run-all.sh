@@ -16,6 +16,7 @@ for t in \
   phase2-think \
   phase3-plan \
   phase4-build \
+  phase4-triplet \
   phase5-ripple \
   phase6-autorun \
   phase7-lifecycle; do

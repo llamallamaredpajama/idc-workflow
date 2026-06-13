@@ -19,7 +19,7 @@ Vendored files:
 
 | Vendored path | Upstream path | Role |
 |---|---|---|
-| `runtime/pi/scripts/coms-net-server.ts` | `scripts/coms-net-server.ts` | coms-net Bun HTTP/SSE hub (server) |
+| `runtime/pi/scripts/coms-net-server.ts` | `scripts/coms-net-server.ts` | coms-net Bun HTTP/SSE hub (server; **glass-wall ACL enforced server-side**, IDC-local) |
 | `runtime/pi/scripts/idc-pi` | `scripts/idc-pi` | role launcher (reference source) |
 | `runtime/pi/extensions/coms-net.ts` | `extensions/coms-net.ts` | coms-net client + `coms_net_send` seam (**glass-wall ACL wired**, IDC-local) |
 | `runtime/pi/extensions/idc-role-harness.ts` | `extensions/idc-role-harness.ts` | per-role guardrails + **glass-wall directional ACL** (IDC-local) |
@@ -35,7 +35,10 @@ Vendored files:
 
 - **Glass-wall directional ACL** on the `coms_net_send` seam — `evaluateComsNetSendForRole` /
   `resolveComsNetPeerRole` in `idc-role-harness.ts`, enforced in `coms-net.ts` before any
-  network send. A role resident may message only peers strictly downstream in the IDC river
+  network send **and authoritatively re-enforced in `coms-net-server.ts` (`handleSendMessage`)
+  before any message is queued**, so a direct POST to `/v1/messages` cannot bypass the wall
+  (the hub imports the same pure decision — single source of truth). A role resident may message
+  only peers strictly downstream in the IDC river
   (think → plan → sequence → build-impl → build-review → build-finish) plus the Ripple sink;
   upstream/unknown sends are denied fail-closed and logged to the `coms-net-log` channel.
   This is original IDC work layered onto the vendored guard machinery; no separate upstream

@@ -32,6 +32,9 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+// IDC-LOCAL (codex F2): the hub is the authoritative glass-wall gate. Reuse the SAME pure ACL
+// decision the client extension uses (single source of truth) so the two can never drift.
+import { evaluateComsNetSendForRole } from "../extensions/idc-role-harness.ts";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Env-var reads (module scope; all tunables here)
@@ -898,6 +901,21 @@ async function handleSendMessage(req: Request): Promise<Response> {
 			target = p.agents.get(onlySid);
 			if (!target) return errorJson("target_not_found", 404);
 		}
+	}
+
+	// IDC-LOCAL (codex F2): authoritative server-side glass-wall ACL. The directional rule was
+	// enforced only in the client extension, so any holder of the shared bearer token could POST
+	// an upstream (or otherwise forbidden) send straight here and bypass it. Enforce it on the
+	// hub — using the registered sender/target peer names (roles) — BEFORE the message is queued
+	// or delivered. Mirrors the client's fail-closed decision exactly (same pure function).
+	const acl = evaluateComsNetSendForRole(sender.name, target.name);
+	if (!acl.allowed) {
+		logRejected("prompt_blocked", `glass-wall ${sender.name} → ${target.name}: ${acl.reason}`);
+		return errorJson("glass_wall_denied", 403, {
+			reason: acl.reason,
+			sender_role: acl.senderRole ?? null,
+			target_role: acl.targetRole ?? null,
+		});
 	}
 
 	// Inbox cap.

@@ -76,7 +76,13 @@ case "$HEALTH" in
   *) fail "coms-net /health did not return ok:true (got: $HEALTH)" ;;
 esac
 
-# (3) the glass-wall ACL deny/allow matrix on the real send path.
+# (3) the glass-wall ACL deny/allow matrix on the real send path (client gate).
 bun "$PROBE_TS" "$URL" "$TOK" "$PROJECT" || fail "glass-wall ACL probe failed (upstream send not denied, or downstream/ripple not allowed)"
 
-echo "PASS: vendored coms-net boots under Bun; install --check + /health OK; glass-wall ACL holds"
+# (4) F2 — the HUB itself must enforce the ACL: direct POSTs to /v1/messages that bypass the
+#     client gate (a compromised resident / any token holder) must be rejected server-side.
+BYPASS_TS="$PLUGIN/tests/smoke/phase8-coms-net-bypass-probe.ts"
+[ -f "$BYPASS_TS" ] || fail "hub-ACL bypass probe missing at $BYPASS_TS"
+bun "$BYPASS_TS" "$URL" "$TOK" "$PROJECT" || fail "hub did not enforce the glass-wall ACL on a direct /v1/messages POST (server-side bypass)"
+
+echo "PASS: vendored coms-net boots under Bun; install --check + /health OK; glass-wall ACL holds (client + hub)"

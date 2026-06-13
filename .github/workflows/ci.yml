@@ -12,6 +12,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Setup Bun
+        # The pi runtime smoke phases (phase8-pi-*) boot the vendored coms-net hub and
+        # fleet supervisor via Bun and run the review-verdict core under it; without Bun
+        # those phases fail closed. CI must provide Bun so the vendored runtime this repo
+        # ships is actually exercised here, not silently skipped. (The real `pi` agent
+        # binary is NOT needed — the phases use --dry-run, the hub itself, and a fake-pi
+        # resident seam; verified bun-present/pi-absent runs all phase8-pi-* green.)
+        uses: oven-sh/setup-bun@v2
+
       - name: Declare Python deps
         # PyYAML is preinstalled on today's runner image, but declare it so the
         # template smoke-render doesn't silently depend on the image contents.

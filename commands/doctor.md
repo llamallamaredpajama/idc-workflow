@@ -1,5 +1,5 @@
 ---
-description: IDC health check — verify plugin scoping (no global leak), gh auth + project scope, the 4-field tracker board, and the v2 scaffold (read-only)
+description: IDC health check — verify plugin scoping (no global leak), gh auth + project scope, the tracker board, and the v2 scaffold (read-only)
 argument-hint: (no arguments)
 ---
 
@@ -51,12 +51,14 @@ Missing → FAIL (hint: run `/idc:init`). Otherwise branch on `backend:`:
   gh project view "$num" --owner "$owner" --format json >/dev/null && echo board-ok
   ```
   PASS on exit 0; FAIL otherwise (hint: token still present → run `/idc:init`; board gone →
-  re-provision via `/idc:init`). **Note (do not fail)** if any of the four `field_ids`
-  (`Status`, `Wave`, `Phase`, `Domain`) is still empty — flag "field_ids incomplete".
+  re-provision via `/idc:init`). **Note (do not fail)** if any of the five `field_ids`
+  (`Status`, `Stage`, `Wave`, `Phase`, `Domain`) is still empty — flag "field_ids
+  incomplete". `Stage` is additive: a legacy board with no `Stage` field id is treated as
+  `Buildable` elsewhere, so note its absence but never FAIL on it.
 
 **4 — Governance scaffold present.** PASS only if all of these exist: `WORKFLOW.md` at the
-repo root, `WORKFLOW-config.yaml` at the repo root, and `docs/workflow/` containing exactly
-its two v2 subdirectories `pillar-matrices` and `code-reviews`:
+repo root, `WORKFLOW-config.yaml` at the repo root, and `docs/workflow/` containing (at
+least) its two v2 subdirectories `pillar-matrices` and `code-reviews`:
 ```bash
 ls WORKFLOW.md WORKFLOW-config.yaml docs/workflow/pillar-matrices docs/workflow/code-reviews
 ```

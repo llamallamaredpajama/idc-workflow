@@ -25,12 +25,11 @@ jq -r '.enabledPlugins."idc@idc-workflow" // "absent"' ~/.claude/settings.json 2
   key): `claude plugin disable idc@idc-workflow --scope user`.
 - **PASS** if the user-scope read is not `true` and the project/local read is `true` (IDC is
   correctly pinned to this repo).
-- **SKIP** (not PASS) if neither the user-scope read is `true` nor the project/local read is
-  `true`, yet this command is running — IDC is active via an opaque managed/`--plugin-dir`
-  override, so a proper per-repo opt-in can't be proven. Note the override and pin it for a real
-  install: `claude plugin install idc@idc-workflow --scope project` (or run `/idc:init`). A
-  genuinely disabled state can't reach this command; reserve **PASS** strictly for the explicit
-  project-scope case above.
+- **SKIP** (not PASS) if this command is running but neither read proves an explicit opt-in —
+  no project/local key here, and the user switch isn't `true`. IDC is active via an opaque
+  managed/`--plugin-dir` override, so per-repo scoping can't be proven. Pin a real install:
+  `claude plugin install idc@idc-workflow --scope project` (or run `/idc:init`). A genuinely
+  disabled state can't reach this command.
 
 **2 — gh authenticated with `project` scope.** PASS only if logged in AND the token scopes
 include `project`:

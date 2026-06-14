@@ -107,8 +107,8 @@ bash tests/smoke/run-all.sh
 
 ```
 .claude-plugin/   plugin.json (manifest) + marketplace.json (self-hosted marketplace)
-agents/           6 stage orchestrators + implementer + review coordinator
-skills/           12 reusable procedures (runtime adapters, tracker, review engine, …)
+agents/           8 agents — stage playbooks + implementer + finisher + review coordinator/agent
+skills/           13 reusable procedures (runtime adapters, tracker, review engine, …)
 commands/         9 slash commands (think|plan|build|ripple|autorun|init|doctor|update|uninstall)
 templates/        per-project scaffold copied by /idc:init
 scripts/          lint-references.sh, the filesystem tracker + plan/review/ripple/autorun

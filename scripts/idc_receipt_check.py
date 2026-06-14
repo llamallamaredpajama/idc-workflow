@@ -221,10 +221,17 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
     if args.json:
         import json
-        buckets: dict[str, list[str]] = {"unchanged": [], "modified": [], "missing": []}
+        out: dict[str, object] = {"unchanged": [], "modified": [], "missing": []}
         for state, rel in classified:
-            buckets[state].append(rel)
-        print(json.dumps(buckets, indent=2, sort_keys=True))
+            out[state].append(rel)  # type: ignore[union-attr]
+        # Additive top-level pass/fail + human summary (existing buckets unchanged for
+        # back-compat): a consumer no longer has to derive "ok" from two empty lists.
+        out["ok"] = counts["modified"] == 0 and counts["missing"] == 0
+        out["summary"] = (
+            f"{counts['unchanged']} unchanged, "
+            f"{counts['modified']} modified, {counts['missing']} missing"
+        )
+        print(json.dumps(out, indent=2, sort_keys=True))
     else:
         for state, rel in classified:
             print(f"{state}\t{rel}")
@@ -253,7 +260,10 @@ def main(argv: list[str]) -> int:
     vp = sub.add_parser("verify", help="classify each stamped file as unchanged/modified/missing")
     vp.add_argument("--repo", required=True, help="repo root the receipt paths are relative to")
     vp.add_argument("--receipt", help=f"receipt path (default: <repo>/{RECEIPT_RELPATH})")
-    vp.add_argument("--json", action="store_true", help="emit JSON buckets instead of TSV lines")
+    vp.add_argument("--json", action="store_true",
+                    help="emit JSON instead of TSV. Schema: {\"unchanged\":[paths], "
+                         "\"modified\":[paths], \"missing\":[paths], \"ok\": bool (true iff "
+                         "modified+missing both empty), \"summary\": str}")
     vp.set_defaults(func=cmd_verify)
 
     args = parser.parse_args(argv)

@@ -23,6 +23,7 @@ for t in \
   phase5-ripple \
   phase6-autorun \
   phase7-lifecycle \
+  phase7-update-preserves-data \
   phase8-pi-launchable \
   phase8-pi-runtime \
   phase8-pi-fleet-secret \

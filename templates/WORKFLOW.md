@@ -75,7 +75,8 @@ item is workable cold by any outside agent from its body + the plain GitHub API.
 
 `Stage` is the column-grouping field and is **additive**: a repo provisioned before it
 existed keeps working as a 4-field board (an empty `Stage` reads as buildable) until
-`/idc:init` (or `/idc:doctor`) provisions the field — no migration step, no data rewrite.
+`/idc:init` provisions the field (`/idc:doctor` is read-only — it only *flags* a missing
+`Stage`, never provisions it) — no migration step, no data rewrite.
 
 ### 3.2 The issue is a self-sufficient goal contract
 

@@ -24,6 +24,15 @@ very end of a fully successful run**, so a half-finished update can never masque
    Claude Code session won't see until the plugin cache refreshes — tell the operator that if a
    newly-shipped `/idc:*` command is missing after updating, they should restart the session (this
    is a client cache quirk, not an update failure).
+3. **Scope-aware plugin update (terminal step, done before this command).** `/idc:update` only
+   resyncs this repo's scaffold files; pulling the new *plugin* version itself is a terminal
+   command — `claude plugin update idc@idc-workflow --scope project`. The bare
+   `claude plugin update idc@idc-workflow` defaults to `--scope user` and **errors**
+   (`Plugin 'idc' is not installed at scope user`) for a project-scoped install, so always pass
+   `--scope project`. If that step was skipped, `${CLAUDE_PLUGIN_ROOT}` still resolves to the old
+   cached version and this command will only see the old templates (reporting
+   `skipped-already-current`) — surface that as the likely cause rather than declaring the repo
+   current.
 
 ## Phase 1 — Classify the stamped files against the receipt
 
@@ -62,11 +71,14 @@ files — never source, never tests, never the board.
 Compare the live tracker against the installed version's expectation and **report** — take no
 action on the board:
 - `github` backend: read the board's fields read-only (`gh project field-list <num> --owner
-  <owner> --format json`) and compare against the v2 contract — four fields `Status`
-  (`Blocked|Todo|In Progress|Done`), `Wave`, `Phase`, `Domain`. Report any drift explicitly
-  (missing field, unexpected `Status` option set, etc.). Do **not** add, rename, or re-option any
-  field — board migration is out of scope (it risks live issues and in-flight waves); surface the
-  drift and let the operator decide via `idc:idc-tracker-github`.
+  <owner> --format json`) and compare against the v2 contract — five fields `Status`
+  (`Blocked|Todo|In Progress|Done`), `Stage` (`Consideration|Planning|Buildable`), `Wave`,
+  `Phase`, `Domain`. Report any drift explicitly (missing field, unexpected `Status` option
+  set, etc.). `Stage` is **additive**: a board with no `Stage` field predates it — note its
+  absence as informational drift, not a failure (an absent `Stage` reads as `Buildable`). Do
+  **not** add, rename, or re-option any field — board migration is out of scope (it risks live
+  issues and in-flight waves); surface the drift and let the operator decide via
+  `idc:idc-tracker-github`.
 - If the drift check **cannot run** (board unreachable, or `filesystem` backend), report a distinct
   third outcome — "board drift: could not verify (reason)" — never silently report "no drift".
 

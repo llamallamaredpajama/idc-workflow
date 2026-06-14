@@ -60,6 +60,40 @@ unit suite `bash tests/smoke/run-all.sh` (filesystem backend, no GitHub, fast). 
 definitions load — Claude caches those at session start. Python under `scripts/` is read fresh each
 call, so script edits are picked up live.
 
+## Why the version-keyed cache can serve stale code (and how to dodge it)
+
+Claude Code keeps **three** copies of the plugin, and they do not move in lockstep:
+
+- the **marketplace clone** (`~/.claude/plugins/marketplaces/idc-workflow`) — a git clone that
+  `claude plugin marketplace update` fast-forwards to `main` HEAD;
+- the **version-keyed cache** (`~/.claude/plugins/cache/idc-workflow/idc/<version>/`) — the copy
+  that `/idc:*` commands and `${CLAUDE_PLUGIN_ROOT}` actually run from, rebuilt **only when the
+  `plugin.json` version string changes**;
+- your **dev checkout** (this repo), loaded only via `claude --plugin-dir`.
+
+Consequence: pulling `main` into the marketplace clone does **not** refresh the cache when the
+version is unchanged, so `${CLAUDE_PLUGIN_ROOT}` can resolve to **stale cached code** even though
+the clone is current — and in a single session it can resolve to the stale cache for one command
+and the fresh tree for another. This is exactly what invalidated the 2026-06-14 install test
+(cached `2.0.0` templates vs a fast-forwarded clone). Only `claude --plugin-dir <this-checkout>`
+reliably loads uncached latest code for a dev loop.
+
+**Releasing (maintainer note).** Because of the above, a `main`-branch merge does **not** reach
+installed users until the plugin **version is bumped and republished**: bump
+`.claude-plugin/plugin.json` *and* the matching `.claude-plugin/marketplace.json` entry in
+lockstep (the `scripts/idc_release_check.py` guard, run by `lint-references.sh`, fails the build
+otherwise), then cut the tag with `claude plugin tag` — it creates `idc--v<version>` and
+validates that `plugin.json` and the enclosing marketplace entry agree (add `--push` to publish).
+An unchanged version makes `claude plugin update` a silent no-op.
+
+In short: **every shippable change (`commands/`, `skills/`, `agents/`, `scripts/`, `templates/`,
+`.claude-plugin/`) MUST bump the version** — without it the version-keyed cache serves stale code
+and install/update tests lie. Verify a release actually took: after the version is on `main` and
+you run `claude plugin marketplace update`, a fresh
+`~/.claude/plugins/cache/idc-workflow/idc/<new-version>/` directory appears (the cache is keyed by
+version — you can confirm by `ls`-ing that path and checking its `templates/tracker-config.yaml`
+carries the new contract). The shipped `/idc:doctor` check 7 surfaces this staleness to end users.
+
 ## Observability — the "flight recorder"
 
 Lives **outside** the sandboxes at `/Users/jeremy/dev/sandbox/_idc-observability/` so

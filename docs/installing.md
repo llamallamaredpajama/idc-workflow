@@ -16,31 +16,35 @@ Codex support, and a second machine — then troubleshooting with `/idc:doctor`.
 - **`jq`** and **`python3`** — used by `/idc:init` and the shipped tracker/check helpers;
   usually preinstalled.
 
-## 1. Install the plugin on a machine
+## 1. Register the marketplace (once per machine)
 
-From inside Claude Code:
+This repo hosts its own marketplace (`.claude-plugin/marketplace.json`). Registering it does
+**not** install or enable anything — it just makes the `idc` plugin available to install:
 
 ```
-/plugin marketplace add llamallamaredpajama/idc-workflow
-/plugin install idc@idc-workflow
+claude plugin marketplace add llamallamaredpajama/idc-workflow
 ```
 
-This repo hosts its own marketplace (`.claude-plugin/marketplace.json`). Installing puts the
-plugin on the machine but does **not** activate IDC in any repo — it stays disabled at the
-user level (the per-project scoping model).
+## 2. Install IDC into a project (project scope — never global)
 
-## 2. Turn IDC on for a project
-
-A never-initialized repo has no `/idc:*` commands yet — including `/idc:init` — so bootstrap
-from your **terminal** first:
+IDC is **opt-in per repo**: install it at **`project` scope** from inside each repo you want
+governed. This puts the plugin's files on the machine (shared) but enables its `/idc:*`
+commands for **this repo only** — it enables IDC in the repo's own `.claude/settings.json` and
+registers it **disabled** (`false`) at the global `~/.claude/settings.json`, so it stays off
+everywhere else:
 
 ```
 cd <your-repo>
-claude plugin enable idc@idc-workflow --scope project
+claude plugin install idc@idc-workflow --scope project
 ```
 
-Start a **new** Claude Code session in the repo, then run `/idc:init`. It is idempotent
-(anything present is reported `skipped-existing`) and:
+> **Why `--scope project`?** `claude plugin install` defaults to `--scope user`, which enables
+> IDC in **every** repo on the machine — the leak you don't want. `--scope project` keeps it
+> pinned here. Already installed at user scope from an older version? Seal the leak with
+> `claude plugin disable idc@idc-workflow --scope user`; your project-scoped repos keep working.
+
+Start a **new** Claude Code session in the repo (so the `/idc:*` commands load), then run
+`/idc:init`. It is idempotent (anything present is reported `skipped-existing`) and:
 
 1. **Scaffolds** `WORKFLOW.md` + `WORKFLOW-config.yaml` at the root and the lean
    `docs/workflow/` tree (`pillar-matrices/`, `code-reviews/`) + `tracker-config.yaml`,
@@ -81,10 +85,10 @@ restores the original state (the installer records the prior state first).
 
 ## 4. Set up a second machine
 
-1. Install the plugin (step 1).
+1. Register the marketplace (step 1).
 2. `git clone` and `cd` into each governed repo. Per-project enablement lives in the repo's
    `.claude/settings.json`; if your repo commits that operator-owned file, IDC is already on.
-   Otherwise run `claude plugin enable idc@idc-workflow --scope project` from the repo root.
+   Otherwise run `claude plugin install idc@idc-workflow --scope project` from the repo root.
    The scaffold + board need no re-init.
 3. Ensure `gh` is authenticated with the `project` scope (github backend).
 4. If you use Codex, run `/idc:init --codex` there once (the link wiring is machine-local).
@@ -92,8 +96,10 @@ restores the original state (the installer records the prior state first).
 
 ## 5. Update IDC after a plugin update
 
-When you update the installed plugin (`/plugin install idc@idc-workflow` again, or your plugin
-manager pulls a new version), the scaffold already living in your repo doesn't change on its own.
+When you update the installed plugin — run `claude plugin update idc@idc-workflow --scope project`
+from each governed repo (the bare command defaults to `--scope user` and would update the global
+copy, not your project-scoped install), or let your plugin manager pull a new version — the
+scaffold already living in your repo doesn't change on its own.
 Run `/idc:update` from the repo to refresh it:
 
 - It reads the **install receipt** to tell pristine scaffold files (which it refreshes to the new
@@ -131,7 +137,7 @@ session — that's a client-side plugin-cache refresh, not an update failure.
 
 | Check | If it FAILs |
 |-------|-------------|
-| Plugin enabled for this project | Run `/idc:init`, or add `{"enabledPlugins":{"idc@idc-workflow":true}}` to `.claude/settings.json`. |
+| Plugin scoped to this repo (no global leak) | Enabled at `user` scope? `claude plugin disable idc@idc-workflow --scope user`. Not enabled here? `claude plugin install idc@idc-workflow --scope project` (or `/idc:init`). |
 | `gh` authenticated with `project` scope | `gh auth login`, then `gh auth refresh -h github.com -s project`. |
 | Tracker contract present + reachable | Re-run `/idc:init`; check the `project` scope and `project_number`. For the filesystem backend, ensure `TRACKER.md` exists. |
 | Governance scaffold present | Re-run `/idc:init` to scaffold `WORKFLOW.md` + the `docs/workflow/` tree. |
@@ -139,10 +145,12 @@ session — that's a client-side plugin-cache refresh, not an update failure.
 
 Common issues:
 
-- **No `/idc:*` command exists at all** — the plugin isn't enabled for this project and is
-  disabled at the user level. Repair from the terminal:
-  `claude plugin enable idc@idc-workflow --scope project`, then start a new session.
+- **No `/idc:*` command exists at all** — IDC isn't enabled for this repo. Install it at
+  project scope from the terminal: `claude plugin install idc@idc-workflow --scope project`,
+  then start a new session.
 - **"board not reachable" / field IDs empty** — the `project` scope is usually missing;
   refresh it and re-run `/idc:init`.
-- **A non-IDC repo is picking up IDC** — remove the `idc@idc-workflow` enablement key from
-  that repo's `.claude/settings.json`.
+- **A non-IDC repo is picking up IDC** — IDC is enabled at the global `user` scope. Seal it
+  with `claude plugin disable idc@idc-workflow --scope user` (repos that want IDC keep their
+  own project key). If instead one specific repo committed the key, remove `idc@idc-workflow`
+  from that repo's `.claude/settings.json`. `/idc:doctor`'s first check flags this state.

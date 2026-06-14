@@ -34,6 +34,16 @@ All notable changes to the IDC Workflow plugin are documented in this file.
     (`stamp` + `verify`), covered by the `tests/smoke/phase7-lifecycle.sh` round-trip. (At
     2.0.0 these commands were retired pending this receipt substrate; this re-adds them on it.)
 
+- **Update-path + release hardening.** `/idc:init` now records the two operator/board-data
+  scaffold files (`WORKFLOW-config.yaml` `domains`, `tracker-config.yaml` `field_ids`) as
+  `state: customized`, so `/idc:update` shows-diff-and-asks instead of silently overwriting
+  them from the template — closing a data-loss bug that wiped `domains`/board wiring on every
+  update. Update's board-drift report (and `/idc:doctor`) are now on the full **five-field**
+  Stage contract (a missing `Stage` is additive/informational, never a failure), the docs spell
+  out the scope-aware `claude plugin update idc@idc-workflow --scope project` (the bare command
+  targets `user` scope and errors for a project install), and a release-discipline lint guard
+  fails a ship-without-version-bump and a `plugin.json`/`marketplace.json` version mismatch.
+
 ## 2.0.0 — 2026-06-12
 
 Full v2 overhaul — a clean-slate rebuild from the operator interview in

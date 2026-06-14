@@ -139,18 +139,30 @@ manifest that `/idc:doctor` checks and a future uninstall/update consumes. Don't
 YAML or compute fingerprints by hand: call the shipped deterministic writer, which sorts by
 path, fingerprints each file's final on-disk bytes (after token substitution) with SHA-256,
 excludes the receipt itself / `TRACKER.md` / `.claude/settings.json`, and atomic-writes. Pass
-exactly the scaffold files Phase 2/3 created or gap-filled:
+exactly the scaffold files Phase 2/3 created or gap-filled, marking the two operator-data files
+`--customized` (see the data-loss guard below):
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_receipt_check.py" stamp \
   --repo "$(git rev-parse --show-toplevel)" \
   --out docs/workflow/install-receipt.yaml \
+  --customized WORKFLOW-config.yaml --customized docs/workflow/tracker-config.yaml \
   WORKFLOW.md WORKFLOW-config.yaml \
   docs/workflow/tracker-config.yaml docs/workflow/README.md \
   docs/workflow/pillar-matrices/.gitkeep docs/workflow/code-reviews/.gitkeep
 ```
-Never add a receipt to `templates/`. The helper records every entry `state: stamped` and omits
-itself, `TRACKER.md` (runtime footprint), and `.claude/settings.json` (operator-owned — IDC
-manages only its one enablement key) even if those paths are passed.
+Never add a receipt to `templates/`. The helper omits the receipt itself, `TRACKER.md`
+(runtime footprint), and `.claude/settings.json` (operator-owned — IDC manages only its one
+enablement key) even if those paths are passed.
+
+**Data-loss guard — stamp operator-data files `customized`.** Two scaffold files get real
+operator/board data written into them *after* the template is copied: `WORKFLOW-config.yaml`
+(the Phase-1 derived `domains:` list) and `docs/workflow/tracker-config.yaml` (the
+`project_number` + board `field_ids` node IDs from Phase 4). Stamped plain `state: stamped`,
+`/idc:update` would class them pristine and silently overwrite them from the template —
+wiping `domains` back to `[]` and the board wiring back to empty. Stamping them `--customized`
+routes them to update's **show-diff-and-ask** instead, so those values are never silently
+lost. Pass both flags on every backend (the `filesystem` backend simply has nothing in the
+board half yet).
 
 **Gap-fill re-run (idempotency).** `stamp` rewrites the receipt from the paths you pass — it
 does **not** append to an existing one. So on a re-run pass the **full** final set of

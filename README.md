@@ -66,10 +66,11 @@ cd <your-repo>
 claude plugin install idc@idc-workflow --scope project
 ```
 
-`--scope project` writes the enablement into the repo's own `.claude/settings.json` and never
-touches your global `~/.claude/settings.json`, so IDC stays invisible everywhere else. (Already
-installed at the default `user` scope from an older version? Seal the leak with `claude plugin
-disable idc@idc-workflow --scope user` — your project-scoped repos keep working.)
+`--scope project` enables IDC in the repo's own `.claude/settings.json` and registers it
+**disabled** (`idc@idc-workflow: false`) at the global `user` scope — an explicit off-switch,
+stronger than merely being absent — so IDC stays invisible everywhere else. (Already installed at
+the default `user` scope from an older version? Seal the leak with `claude plugin disable
+idc@idc-workflow --scope user` — your project-scoped repos keep working.)
 
 Start a **new** Claude Code session in the repo (so the commands load), then run `/idc:init`
 (idempotent). It scaffolds the governance contract + config (filling `domains` from a codebase

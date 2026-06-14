@@ -29,8 +29,9 @@ claude plugin marketplace add llamallamaredpajama/idc-workflow
 
 IDC is **opt-in per repo**: install it at **`project` scope** from inside each repo you want
 governed. This puts the plugin's files on the machine (shared) but enables its `/idc:*`
-commands for **this repo only** — it writes the enablement into the repo's own
-`.claude/settings.json` and never touches your global `~/.claude/settings.json`:
+commands for **this repo only** — it enables IDC in the repo's own `.claude/settings.json` and
+registers it **disabled** (`false`) at the global `~/.claude/settings.json`, so it stays off
+everywhere else:
 
 ```
 cd <your-repo>
@@ -95,9 +96,10 @@ restores the original state (the installer records the prior state first).
 
 ## 5. Update IDC after a plugin update
 
-When you update the installed plugin (`claude plugin update idc@idc-workflow`, or your plugin
-manager pulls a new version — neither changes the enablement scope), the scaffold already living
-in your repo doesn't change on its own.
+When you update the installed plugin — run `claude plugin update idc@idc-workflow --scope project`
+from each governed repo (the bare command defaults to `--scope user` and would update the global
+copy, not your project-scoped install), or let your plugin manager pull a new version — the
+scaffold already living in your repo doesn't change on its own.
 Run `/idc:update` from the repo to refresh it:
 
 - It reads the **install receipt** to tell pristine scaffold files (which it refreshes to the new

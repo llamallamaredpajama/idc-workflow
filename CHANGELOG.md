@@ -10,7 +10,10 @@ All notable changes to the IDC Workflow plugin are documented in this file.
   scope, which surfaced IDC in **every** repo; the README + install guide now document the
   project-scoped flow and the `claude plugin disable idc@idc-workflow --scope user` reseal for
   older installs. `/idc:doctor`'s first check now **FAILs** when IDC is enabled at `user` scope
-  (it previously rubber-stamped that state as PASS), with the one-line fix.
+  (it previously rubber-stamped that state as PASS), with the one-line fix. The project-scope
+  install registers IDC `false` at the global `user` scope (an explicit off-switch, not "absent");
+  doctor **SKIP**s an opaque `--plugin-dir`/managed override instead of passing it; and scoped
+  updates use `claude plugin update idc@idc-workflow --scope project`.
 
 - **Plugin lifecycle commands (built on the install receipt).** Two receipt-driven lifecycle
   commands rejoin the surface — now **nine** commands:

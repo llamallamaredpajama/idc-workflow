@@ -47,8 +47,12 @@ claude --plugin-dir /Users/jeremy/dev/proj/idc-workflow      # load THIS dev che
   moving the original aside), then plain `cd <sandbox> && claude` always runs dev code. Revert when
   done.
 - Caveat: `--plugin-dir` (and the symlink) load the plugin directly, which **sidesteps the per-repo
-  enable step**. To faithfully test the *released* from-scratch install (the `claude plugin enable
-  idc@idc-workflow --scope project` step itself), use the installed marketplace copy instead.
+  install step**. To faithfully test the *released* from-scratch install — the
+  `claude plugin install idc@idc-workflow --scope project` path this hardening changed — run the
+  **release-fidelity lane** instead: from the sandbox, `claude plugin install idc@idc-workflow
+  --scope project`, then `/idc:doctor`, and confirm `~/.claude/settings.json` has the `idc` key set
+  to `false` (the install registers it disabled there, not `true`). Use the installed marketplace
+  copy, not `--plugin-dir`, for that lane.
 
 Use a session **in this plugin-source repo** only for *editing* the plugin and running its hermetic
 unit suite `bash tests/smoke/run-all.sh` (filesystem backend, no GitHub, fast). After editing

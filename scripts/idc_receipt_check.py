@@ -221,10 +221,17 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
     if args.json:
         import json
-        buckets: dict[str, list[str]] = {"unchanged": [], "modified": [], "missing": []}
+        out: dict[str, object] = {"unchanged": [], "modified": [], "missing": []}
         for state, rel in classified:
-            buckets[state].append(rel)
-        print(json.dumps(buckets, indent=2, sort_keys=True))
+            out[state].append(rel)  # type: ignore[union-attr]
+        # Additive top-level pass/fail + human summary (existing buckets unchanged for
+        # back-compat): a consumer no longer has to derive "ok" from two empty lists.
+        out["ok"] = counts["modified"] == 0 and counts["missing"] == 0
+        out["summary"] = (
+            f"{counts['unchanged']} unchanged, "
+            f"{counts['modified']} modified, {counts['missing']} missing"
+        )
+        print(json.dumps(out, indent=2, sort_keys=True))
     else:
         for state, rel in classified:
             print(f"{state}\t{rel}")

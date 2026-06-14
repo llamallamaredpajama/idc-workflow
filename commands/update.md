@@ -62,11 +62,14 @@ files — never source, never tests, never the board.
 Compare the live tracker against the installed version's expectation and **report** — take no
 action on the board:
 - `github` backend: read the board's fields read-only (`gh project field-list <num> --owner
-  <owner> --format json`) and compare against the v2 contract — four fields `Status`
-  (`Blocked|Todo|In Progress|Done`), `Wave`, `Phase`, `Domain`. Report any drift explicitly
-  (missing field, unexpected `Status` option set, etc.). Do **not** add, rename, or re-option any
-  field — board migration is out of scope (it risks live issues and in-flight waves); surface the
-  drift and let the operator decide via `idc:idc-tracker-github`.
+  <owner> --format json`) and compare against the v2 contract — five fields `Status`
+  (`Blocked|Todo|In Progress|Done`), `Stage` (`Consideration|Planning|Buildable`), `Wave`,
+  `Phase`, `Domain`. Report any drift explicitly (missing field, unexpected `Status` option
+  set, etc.). `Stage` is **additive**: a board with no `Stage` field predates it — note its
+  absence as informational drift, not a failure (an absent `Stage` reads as `Buildable`). Do
+  **not** add, rename, or re-option any field — board migration is out of scope (it risks live
+  issues and in-flight waves); surface the drift and let the operator decide via
+  `idc:idc-tracker-github`.
 - If the drift check **cannot run** (board unreachable, or `filesystem` backend), report a distinct
   third outcome — "board drift: could not verify (reason)" — never silently report "no drift".
 

@@ -51,10 +51,10 @@ Start a **new** Claude Code session in the repo (so the `/idc:*` commands load),
    substituting `{{PROJECT_NAME}}`. It fills `WORKFLOW-config.yaml::domains` from a codebase
    scan and ships the tier-symbolic `model_routing` table.
 2. **Provisions the tracker.** For the `github` backend it creates (or links) a GitHub
-   Projects v2 board and provisions the **four** v2 fields — `Status`
-   (`Blocked|Todo|In Progress|Done`), `Wave`, `Phase`, `Domain` — caching their node IDs in
-   `tracker-config.yaml`. For the `filesystem` backend it initializes a root `TRACKER.md` and
-   needs no board.
+   Projects v2 board and provisions the **five** v2 fields — `Status`
+   (`Blocked|Todo|In Progress|Done`), `Stage` (`Consideration|Planning|Buildable`), `Wave`,
+   `Phase`, `Domain` — caching their node IDs in `tracker-config.yaml`. For the `filesystem`
+   backend it initializes a root `TRACKER.md` and needs no board.
 3. **Enables the plugin for this project** by merging
    `{"enabledPlugins": {"idc@idc-workflow": true}}` into `.claude/settings.json` with the
    shipped safe-write helper (preserving every other setting; invalid JSON fails without

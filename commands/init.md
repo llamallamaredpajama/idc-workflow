@@ -109,7 +109,10 @@ Cache the contract: substitute the project number, then write each field's node 
 `tracker-config.yaml::field_ids` (`Status`, `Stage`, `Wave`, `Phase`, `Domain`) with precise
 edits so the inline comments survive:
 ```bash
-sed -i '' -e "s|\"{{TRACKER_PROJECT_NUMBER}}\"|$TRACKER_PROJECT_NUMBER|g" docs/workflow/tracker-config.yaml
+# portable in-place edit: temp file + mv, no BSD/GNU `sed -i` flavor split
+tmp="$(mktemp)"
+sed -e "s|\"{{TRACKER_PROJECT_NUMBER}}\"|$TRACKER_PROJECT_NUMBER|g" docs/workflow/tracker-config.yaml > "$tmp" \
+  && mv "$tmp" docs/workflow/tracker-config.yaml
 gh project field-list <n> --owner "$OWNER" --format json --limit 50   # → field node ids
 ```
 
@@ -132,26 +135,31 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/install-codex.sh" "${CLAUDE_PLUGIN_ROOT}"
 
 ## Phase 7 — Write the install receipt
 After Phases 2–6 complete successfully, write `docs/workflow/install-receipt.yaml` — the
-manifest that `/idc:doctor` checks and a future uninstall/update consumes. Fully
-init-generated; never add a receipt to `templates/`, never invent fingerprints. Fingerprints
-are the SHA-256 hex of each file's final on-disk bytes (after token substitution):
-
-```yaml
-receipt_version: 1
-fingerprint_method: sha256
-written_by: idc:init
-files:
-  - path: WORKFLOW.md
-    fingerprint: <64-lowercase-hex>
-    state: stamped
+manifest that `/idc:doctor` checks and a future uninstall/update consumes. Don't hand-roll the
+YAML or compute fingerprints by hand: call the shipped deterministic writer, which sorts by
+path, fingerprints each file's final on-disk bytes (after token substitution) with SHA-256,
+excludes the receipt itself / `TRACKER.md` / `.claude/settings.json`, and atomic-writes. Pass
+exactly the scaffold files Phase 2/3 created or gap-filled:
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_receipt_check.py" stamp \
+  --repo "$(git rev-parse --show-toplevel)" \
+  --out docs/workflow/install-receipt.yaml \
+  WORKFLOW.md WORKFLOW-config.yaml \
+  docs/workflow/tracker-config.yaml docs/workflow/README.md \
+  docs/workflow/pillar-matrices/.gitkeep docs/workflow/code-reviews/.gitkeep
 ```
-Rules: entry keys exactly `path`/`fingerprint`/`state`; sort by path; compute with
-`shasum -a 256` (macOS) or `sha256sum` (Linux); init entries are always `state: stamped`
-(`idc:update` may later record `state: customized` for files the operator kept at its
-diff-and-ask); the receipt never lists itself, `TRACKER.md` (runtime footprint), or `.claude/settings.json`
-(operator-owned; IDC manages only one enablement key and never fingerprints the whole file).
-On a gap-fill re-run, preserve existing entries byte-for-byte and append only newly-created
-files; if nothing was created, leave it and report `skipped-existing`.
+Never add a receipt to `templates/`. The helper records every entry `state: stamped` and omits
+itself, `TRACKER.md` (runtime footprint), and `.claude/settings.json` (operator-owned — IDC
+manages only its one enablement key) even if those paths are passed.
+
+**Gap-fill re-run (idempotency).** `stamp` rewrites the receipt from the paths you pass — it
+does **not** append to an existing one. So on a re-run pass the **full** final set of
+receipt-listed files, not just the newly-created ones: a file untouched since the last run
+re-fingerprints to identical bytes, so its entry is preserved exactly. Carry forward any
+`state: customized` entries by reading them out of the current `install-receipt.yaml` first and
+re-passing each with `--customized <path>`, so a file the operator kept at `/idc:update`'s
+diff-and-ask is never silently re-stamped. If nothing was created or changed, the rewritten
+receipt is byte-identical — report `skipped-existing`.
 
 ## Phase 8 — Summary
 Print a table of every target (`created` / `skipped-existing`), the receipt status, the

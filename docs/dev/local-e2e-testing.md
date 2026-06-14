@@ -16,7 +16,7 @@ original project or its board.
 
 | | Path | GitHub remote | IDC state | Tests |
 |---|---|---|---|---|
-| **Install** | `/Users/jeremy/dev/sandbox/ke-idc-test-repo-install` | `llamallamaredpajama/ke-idc-test-repo-install` (private) | **plugin NOT enabled** (blank slate) | from-scratch install: `claude plugin enable …` → `/idc:doctor` → `/idc:init` → `/idc:think` → `/idc:plan` → `/idc:build` |
+| **Install** | `/Users/jeremy/dev/sandbox/ke-idc-test-repo-install` | `llamallamaredpajama/ke-idc-test-repo-install` (private) | **plugin NOT enabled** (blank slate) | from-scratch install: `claude plugin install idc@idc-workflow --scope project` → confirm `~/.claude/settings.json` has `idc@idc-workflow: false` (global off-switch) → `/idc:doctor` → `/idc:init` → `/idc:think` → `/idc:plan` → `/idc:build` |
 | **Update** | `/Users/jeremy/dev/sandbox/ke-idc-test-repo-update` | `llamallamaredpajama/ke-idc-test-repo-update` (private) | **plugin enabled** | update path: `/idc:init` first (lays down scaffold + receipt), then `/idc:update` |
 
 Each repo's own `CLAUDE.md` / `AGENTS.md` opens with a "IDC TEST SANDBOX" banner repeating this, so

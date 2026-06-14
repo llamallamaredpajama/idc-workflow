@@ -1,5 +1,5 @@
 ---
-description: IDC health check — verify plugin enablement, gh auth + project scope, the 4-field tracker board, and the v2 scaffold (read-only)
+description: IDC health check — verify plugin scoping (no global leak), gh auth + project scope, the 4-field tracker board, and the v2 scaffold (read-only)
 argument-hint: (no arguments)
 ---
 
@@ -11,15 +11,23 @@ verdict. Make NO changes. See `WORKFLOW.md §3`.
 
 ## Checks
 
-**1 — Plugin enabled.** Read `.claude/settings.json` and `.claude/settings.local.json` (a
-missing file is fine). PASS if `.enabledPlugins["idc@idc-workflow"]` is `true` in either:
+**1 — Plugin scoped to this repo (no global leak).** IDC must be enabled at **project** scope
+(this repo only), never at the **user** scope (every repo on the machine). Read this repo's
+`.claude/settings.json` + `.claude/settings.local.json` (missing is fine) for the per-repo
+opt-in, and `~/.claude/settings.json` for the global switch:
 ```bash
 cat .claude/settings.json .claude/settings.local.json 2>/dev/null \
-  | jq -s 'add // {} | .enabledPlugins."idc@idc-workflow" == true'
+  | jq -s 'add // {} | .enabledPlugins."idc@idc-workflow" == true'   # true = opted in HERE
+jq -r '.enabledPlugins."idc@idc-workflow" // "absent"' ~/.claude/settings.json 2>/dev/null
 ```
-If neither file flags it but this command is running, the plugin is enabled at user scope or
-by local override → still **PASS** (note "user-scope / local override"). Only a genuine
-disabled state is FAIL. Fix hint: run `/idc:init`.
+- **FAIL (global leak)** if the user-scope read is `true` — IDC is active in *every* repo on
+  the machine. Fix: turn off the global switch (repos that want IDC keep their own project
+  key): `claude plugin disable idc@idc-workflow --scope user`.
+- **PASS** if the user-scope read is not `true` and the project/local read is `true` (IDC is
+  correctly pinned to this repo).
+- Otherwise (running via a managed/other override, no user-scope leak) → **PASS**, note the
+  override. A genuinely disabled state can't reach this command. To opt a repo in:
+  `claude plugin install idc@idc-workflow --scope project` (or run `/idc:init`).
 
 **2 — gh authenticated with `project` scope.** PASS only if logged in AND the token scopes
 include `project`:
@@ -88,7 +96,7 @@ Emit a single table, then a one-line verdict. Tally PASS / FAIL / SKIP across th
 ```
 | # | Check | Result | Fix hint |
 |---|---|---|---|
-| 1 | Plugin enabled | PASS | — |
+| 1 | Plugin scoped to this repo | PASS | — |
 | 2 | gh + project scope | PASS | — |
 | 3 | Tracker contract reachable | PASS | — |
 | 4 | Governance scaffold | PASS | — |

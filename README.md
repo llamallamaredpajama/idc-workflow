@@ -40,40 +40,45 @@ This repo is the plugin **and** its own marketplace:
   plus `/idc:init` (per-project scaffold), `/idc:doctor` (read-only health check), and the
   lifecycle pair `/idc:update` (refresh stamped files after a plugin update) and
   `/idc:uninstall` (remove IDC footprints in one revertable commit).
-- **6 agents** — the per-stage orchestrator playbooks, the one durable-worker implementer,
-  and the review-engine coordinator.
-- **12 skills** — the runtime adapters (Claude + Codex), the tracker adapter + its two
+- **8 agents** — the per-stage orchestrator playbooks (plan, build, ripple, autorun), the
+  durable-worker implementer and finisher, and the review coordinator + review agent.
+- **13 skills** — the runtime adapters (Claude, Codex, Pi), the tracker adapter + its two
   backends, the gate-issue helper, the consideration schema, the goal-contract shape, matrix
   analysis, the schema check, the merged 13-dimension review engine, and ripple doc-sync.
 - **`templates/`** — the per-project scaffold `/idc:init` copies into a governed repo
   (`WORKFLOW.md`, `WORKFLOW-config.yaml` with codebase-derived domains + tier-symbolic model
   routing, the 4-field `tracker-config.yaml`, and a lean `docs/workflow/` tree).
 
-## Install on a machine
+## Install
 
-From inside Claude Code:
-
-```
-/plugin marketplace add llamallamaredpajama/idc-workflow
-/plugin install idc@idc-workflow
-```
-
-## Install into a project
-
-The plugin ships disabled outside IDC projects, so bootstrap from your terminal, then start a
-new Claude Code session in the repo:
+IDC is **opt-in per repo** — its `/idc:*` commands must never appear in a repo you didn't
+choose. Claude Code installs a plugin's *files* machine-wide but decides where its commands
+*activate* by an enablement **scope**, so the rule is: register the marketplace once, then
+install at **`project` scope** inside each repo you want governed — never the default `user`
+scope, which would turn IDC on in *every* repo on the machine.
 
 ```
+# once per machine — register the marketplace (installs/enables nothing on its own)
+claude plugin marketplace add llamallamaredpajama/idc-workflow
+
+# per repo — install AND enable for THIS repo only
 cd <your-repo>
-claude plugin enable idc@idc-workflow --scope project
+claude plugin install idc@idc-workflow --scope project
 ```
 
-Then run `/idc:init` (idempotent). It scaffolds the governance contract + config (filling
-`domains` from a codebase scan), provisions a **4-field** GitHub Projects board (`Status` =
+`--scope project` writes the enablement into the repo's own `.claude/settings.json` and never
+touches your global `~/.claude/settings.json`, so IDC stays invisible everywhere else. (Already
+installed at the default `user` scope from an older version? Seal the leak with `claude plugin
+disable idc@idc-workflow --scope user` — your project-scoped repos keep working.)
+
+Start a **new** Claude Code session in the repo (so the commands load), then run `/idc:init`
+(idempotent). It scaffolds the governance contract + config (filling `domains` from a codebase
+scan), provisions a **4-field** GitHub Projects board (`Status` =
 `Blocked|Todo|In Progress|Done`, `Wave`, `Phase`, `Domain`) or uses the zero-setup
 `filesystem` backend, enables the plugin **for this project only**, and writes an install
-receipt. Run `/idc:doctor` afterward to verify (read-only). A GitHub board needs the
-`project` OAuth scope: `gh auth refresh -h github.com -s project`.
+receipt. Run `/idc:doctor` afterward to verify (read-only) — its first check fails loudly if
+IDC is ever enabled at the global `user` scope. A GitHub board needs the `project` OAuth
+scope: `gh auth refresh -h github.com -s project`.
 
 ## Runtime model
 

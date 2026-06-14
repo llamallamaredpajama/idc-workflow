@@ -4,6 +4,14 @@ All notable changes to the IDC Workflow plugin are documented in this file.
 
 ## Unreleased
 
+- **Per-repo opt-in hardening (no global leak).** IDC now installs at `project` scope
+  (`claude plugin install idc@idc-workflow --scope project`), so its `/idc:*` commands activate
+  only in repos you opt in — never machine-wide. The old install docs used the default `user`
+  scope, which surfaced IDC in **every** repo; the README + install guide now document the
+  project-scoped flow and the `claude plugin disable idc@idc-workflow --scope user` reseal for
+  older installs. `/idc:doctor`'s first check now **FAILs** when IDC is enabled at `user` scope
+  (it previously rubber-stamped that state as PASS), with the one-line fix.
+
 - **Plugin lifecycle commands (built on the install receipt).** Two receipt-driven lifecycle
   commands rejoin the surface — now **nine** commands:
   - `/idc:update` — refresh stamped scaffold files after a plugin update. Silently re-stamps

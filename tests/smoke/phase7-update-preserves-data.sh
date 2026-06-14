@@ -31,11 +31,17 @@ CFG="$SBX/WORKFLOW-config.yaml"
 RECEIPT="$SBX/docs/workflow/install-receipt.yaml"
 SENTINEL="alpha-domain-sentinel"
 
-# 2. Simulate init Phase 3's agent step: write derived domains into WORKFLOW-config.yaml.
-#    (inline flow-list keeps the test sed portable across BSD/GNU — no newline in replacement)
+# Simulate init Phase 3's agent step: write derived domains into $CFG, sourced from $1.
+# (inline flow-list keeps the test sed portable across BSD/GNU — no newline in replacement)
+inject_domains() {
+  local tmp; tmp="$(mktemp)"
+  sed "s|domains: \[\]|domains: [\"$SENTINEL\"]|" "$1" > "$tmp" && mv "$tmp" "$CFG"
+  grep -q "$SENTINEL" "$CFG" || fail "could not inject operator domains from $1"
+}
+
+# 2. Inject the operator's domains into the scaffolded config.
 grep -q 'domains: \[\]' "$CFG" || fail "template no longer has 'domains: []' to populate"
-tmp="$(mktemp)"; sed "s|domains: \[\]|domains: [\"$SENTINEL\"]|" "$CFG" > "$tmp" && mv "$tmp" "$CFG"
-grep -q "$SENTINEL" "$CFG" || fail "could not inject operator domains"
+inject_domains "$CFG"
 
 # 3. Stamp exactly as commands/init.md Phase 7 now prescribes: the two operator-data files
 #    flagged --customized, the rest plain.
@@ -72,7 +78,7 @@ silently_refreshable WORKFLOW.md \
 
 # 6. Negative control — without --customized the data loss returns, proving the flag is what
 #    protects the file (guards against a silent revert of the init.md Phase 7 change).
-tmp="$(mktemp)"; sed "s|domains: \[\]|domains: [\"$SENTINEL\"]|" "$PLUGIN/templates/WORKFLOW-config.yaml" > "$tmp" && mv "$tmp" "$CFG"
+inject_domains "$PLUGIN/templates/WORKFLOW-config.yaml"
 ( cd "$SBX" && python3 "$HELPER" stamp --repo "$SBX" --out "$RECEIPT" --written-by idc:init \
     WORKFLOW.md WORKFLOW-config.yaml \
     docs/workflow/tracker-config.yaml docs/workflow/README.md \

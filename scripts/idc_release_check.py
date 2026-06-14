@@ -35,7 +35,8 @@ def load_json(path: str) -> dict:
 
 def heading_version(line: str) -> str:
     """First token after `## ` — `## 2.1.0 — 2026-06-14` -> `2.1.0`, `## Unreleased` -> `Unreleased`."""
-    return line[len("## "):].strip().split()[0] if line[len("## "):].strip() else ""
+    rest = line[len("## "):].strip()
+    return rest.split()[0] if rest else ""
 
 
 def parse_changelog(path: str) -> tuple[bool, str | None]:

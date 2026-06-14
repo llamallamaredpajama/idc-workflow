@@ -86,6 +86,14 @@ otherwise), then cut the tag with `claude plugin tag` — it creates `idc--v<ver
 validates that `plugin.json` and the enclosing marketplace entry agree (add `--push` to publish).
 An unchanged version makes `claude plugin update` a silent no-op.
 
+In short: **every shippable change (`commands/`, `skills/`, `agents/`, `scripts/`, `templates/`,
+`.claude-plugin/`) MUST bump the version** — without it the version-keyed cache serves stale code
+and install/update tests lie. Verify a release actually took: after the version is on `main` and
+you run `claude plugin marketplace update`, a fresh
+`~/.claude/plugins/cache/idc-workflow/idc/<new-version>/` directory appears (the cache is keyed by
+version — you can confirm by `ls`-ing that path and checking its `templates/tracker-config.yaml`
+carries the new contract). The shipped `/idc:doctor` check 7 surfaces this staleness to end users.
+
 ## Observability — the "flight recorder"
 
 Lives **outside** the sandboxes at `/Users/jeremy/dev/sandbox/_idc-observability/` so

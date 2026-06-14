@@ -268,3 +268,35 @@ repo's tree.)
 - `Stage` itself — it is correct and intentional (five-field is the live contract). Do **not**
   remove it. F2 brings the *one straggler* (doctor) up to it; it does not relitigate the design.
 - Any broad refactor of `/idc:init` beyond F3/F4. No new abstractions.
+
+---
+
+## Addendum 2 — reconciliation against the relayed root-cause task (2026-06-14, post-PR-open)
+
+A third relayed task (from a sandbox session) restated the stale-cache root cause and asked for
+prevention-in-the-plugin. Cross-checked item-by-item; most was already in PR #38. Closed the
+remaining gaps:
+
+- **F10 — [NEW] `/idc:doctor` cache-freshness advisory (Fix 3 — "make staleness user-detectable").**
+  Added doctor **check 7**: a read-only, **fail-open** (never FAIL) check that surfaces the running
+  version (`${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json`) and, best-effort, compares it to the
+  marketplace clone (`$HOME/.claude/plugins/marketplaces/idc-workflow/...`), warning when the cache
+  is stale with the exact `claude plugin update … --scope project` + re-enable fix. Reimplemented
+  the comparison in-plugin (mirrors the sandbox `ke-preflight` idea; no dependency on the sandbox).
+- **Release guard (Fix 2) — already present, choice flagged.** `scripts/idc_release_check.py`
+  exists and runs in CI via `lint-references.sh` (ci.yml line 30 → Rule H). It uses a **git-free**
+  mechanism (manifest lockstep + CHANGELOG-`## Unreleased`-content-without-bump) rather than the
+  relayed task's git-diff "shippable-surface-changed-since-last-release." Deliberate: git-diff in a
+  stdlib lint script breaks on shallow CI checkouts and risks false positives. The git-free guard
+  catches the actual bug (the 2026-06-14 unreleased block with no bump). Known residual hole: a code
+  change with *no* CHANGELOG entry at all won't trip it — relies on changelog discipline. Kept as-is;
+  noted for a possible future git-aware CI-only variant.
+- **Release-discipline doc (Fix 4) — strengthened.** `docs/dev/local-e2e-testing.md` now states the
+  imperative ("every shippable change MUST bump the version") + the post-merge empirical check.
+- **`verify --json` schema (secondary) — documented** in the `--json` arg help
+  (`{unchanged, modified, missing, ok, summary}`).
+- **Step 0 (empirical cache rebuild) — confirmed read-only, full proof is post-merge.** The cache IS
+  version-keyed (`~/.claude/plugins/cache/idc-workflow/idc/` holds `0.1.0` + `2.0.0` dirs; the
+  `2.0.0` cache still carries the stale 4-field template). The "fresh `idc/2.1.0/` cache appears"
+  loop can only run once `2.1.0` is on `origin/main` (the clone tracks main), i.e. **after this PR
+  merges** — recipe documented in `local-e2e-testing.md`.

@@ -260,7 +260,10 @@ def main(argv: list[str]) -> int:
     vp = sub.add_parser("verify", help="classify each stamped file as unchanged/modified/missing")
     vp.add_argument("--repo", required=True, help="repo root the receipt paths are relative to")
     vp.add_argument("--receipt", help=f"receipt path (default: <repo>/{RECEIPT_RELPATH})")
-    vp.add_argument("--json", action="store_true", help="emit JSON buckets instead of TSV lines")
+    vp.add_argument("--json", action="store_true",
+                    help="emit JSON instead of TSV. Schema: {\"unchanged\":[paths], "
+                         "\"modified\":[paths], \"missing\":[paths], \"ok\": bool (true iff "
+                         "modified+missing both empty), \"summary\": str}")
     vp.set_defaults(func=cmd_verify)
 
     args = parser.parse_args(argv)

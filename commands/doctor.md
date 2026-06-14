@@ -1,5 +1,5 @@
 ---
-description: IDC health check — verify plugin scoping (no global leak), gh auth + project scope, the tracker board, and the v2 scaffold (read-only)
+description: IDC health check — verify plugin scoping (no global leak), gh auth + project scope, the tracker board, the v2 scaffold, and plugin-cache freshness (read-only)
 argument-hint: (no arguments)
 ---
 
@@ -93,9 +93,31 @@ Read the report rows (Bun / Pi agent / runtime/pi):
   `runtime/pi/` incomplete) so the Pi runtime cannot boot. Fix hint: install Bun
   (https://bun.sh) or re-pull the plugin to restore `runtime/pi/`.
 
+**7 — Plugin cache freshness (advisory; never FAIL).** The code `/idc:*` runs from Claude
+Code's **version-keyed cache** (`${CLAUDE_PLUGIN_ROOT}`), rebuilt **only when `plugin.json`'s
+`version` changes** — so a `claude plugin marketplace update` that pulled new commits under an
+unchanged version leaves the session running **stale cached code**. Surface the running version
+and compare it best-effort, read-only, to the marketplace clone:
+```bash
+ver() { grep -E '"version"' "$1" 2>/dev/null | head -1 \
+  | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/'; }
+run_ver=$(ver "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json")
+clone_ver=$(ver "$HOME/.claude/plugins/marketplaces/idc-workflow/.claude-plugin/plugin.json")
+echo "running ${run_ver:-unknown}; marketplace ${clone_ver:-absent}"
+```
+- **PASS** — `run_ver` is readable and the clone is `absent` or equals it. Note the running
+  version, e.g. "running 2.1.0".
+- **PASS with ⚠** — clone version differs from the running version: the cache is **stale**. Fix
+  hint: `claude plugin update idc@idc-workflow --scope project`, then re-enable (or restart the
+  session) to rebuild the cache. (Still counts as PASS — a stale cache is a heads-up, not a
+  broken repo.)
+- **SKIP** — `run_ver` unreadable (a managed / `--plugin-dir` load with no manifest on the cache
+  path). This row is **advisory and is never FAIL.**
+
 ## Output
 
-Emit a single table, then a one-line verdict. Tally PASS / FAIL / SKIP across the six rows:
+Emit a single table, then a one-line verdict. Tally PASS / FAIL / SKIP across the seven rows
+(row 7 is advisory — it is only ever PASS or SKIP, never FAIL):
 
 ```
 | # | Check | Result | Fix hint |
@@ -106,6 +128,7 @@ Emit a single table, then a one-line verdict. Tally PASS / FAIL / SKIP across th
 | 4 | Governance scaffold | PASS | — |
 | 5 | Install receipt | SKIP | run /idc:init to graduate a receipt |
 | 6 | Pi runtime (optional) | SKIP | Pi runtime not installed — optional |
+| 7 | Plugin cache freshness | PASS | running 2.1.0 |
 
 IDC doctor: N passed, M failed, K skipped
 ```

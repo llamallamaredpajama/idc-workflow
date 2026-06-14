@@ -4,6 +4,8 @@ All notable changes to the IDC Workflow plugin are documented in this file.
 
 ## Unreleased
 
+## 2.1.0 — 2026-06-14
+
 - **Per-repo opt-in hardening (no global leak).** IDC now installs at `project` scope
   (`claude plugin install idc@idc-workflow --scope project`), so its `/idc:*` commands activate
   only in repos you opt in — never machine-wide. The old install docs used the default `user`

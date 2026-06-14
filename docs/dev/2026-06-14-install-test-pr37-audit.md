@@ -39,8 +39,9 @@ sandbox repo — not in this audit's scope).
 
 ## Scope for this work unit
 
-**Core (do all):** F1, F2, F3, F4, F5.
-**Optional stretch (only if cheap + fully tested):** F1b (release guard), F6.
+**Core (do all):** F1 (+F1b, now core), F2, F3, F4, F5, **F7, F8, F9** (the `/idc:update`-test
+addendum at the bottom of this file — read it; F8 is HIGH and pairs with F3).
+**Optional stretch (only if cheap + fully tested):** F6.
 Keep every change **surgical** — touch only what each finding names. This is shipped-file work:
 `scripts/lint-references.sh` MUST exit 0, and `tests/smoke/run-all.sh` MUST stay green. Honour
 the repo conventions in `CLAUDE.md` (namespacing, `${CLAUDE_PLUGIN_ROOT}` is not a shell var,
@@ -185,6 +186,78 @@ iff `missing` and `modified` are both empty) and a `"summary"` count line to the
 If it risks the smoke suite's expectations, skip it and leave a `known-debts.md` note instead.
 
 **Verify:** `tests/smoke/run-all.sh` green (confirm nothing parses the old JSON shape strictly).
+
+---
+
+---
+
+## Addendum — `/idc:update` test (`ke-idc-test-repo-update` sandbox @ `272ce9f8`, a genuine PR#23 install)
+
+A second sandbox test exercised the **update** path (install a real prior version, then update to
+latest). It independently confirmed F1 & F2 with sharper evidence and surfaced three new items.
+All claims below were re-verified against the live source this session.
+
+### F1 (enriched)
+Update test confirmed the no-op directly: `claude plugin update idc@idc-workflow --scope project`
+→ "✔ already at the latest version (2.0.0)", cache **not** rebuilt; cached `WORKFLOW.md` = 181
+lines vs marketplace = 200 lines. Add to the F1 fix:
+- bump the matching `marketplace.json` plugin entry version in lockstep with `plugin.json` (first
+  verify whether a local `"source": "./"` marketplace reads version from `plugin.json`; if so a
+  PR note suffices — but make the two agree either way);
+- **F1b is now CORE:** add a release check that FAILs when `CHANGELOG.md` has `## Unreleased`
+  content but `plugin.json` `version` wasn't bumped (wire into `lint-references.sh` or a small
+  script it calls);
+- if `claude plugin tag` is a real command in this Claude Code version, document it for
+  plugin.json/marketplace agreement — **verify it exists before referencing it**; don't cite a
+  command that doesn't exist;
+- document (docs/installing.md or release notes) that main-branch merges don't reach users until a
+  version bump + republish.
+
+### F2 (expanded — the Stage half-migration is broader than doctor.md)
+- `commands/update.md` Phase 3 board-drift (lines ~64–67) **also** hardcodes the four-field
+  contract ("four fields `Status`, `Wave`, `Phase`, `Domain`") and is Stage-blind → bring to five
+  fields. It is **report-only** (must not add/migrate the field); just report a missing `Stage` as
+  drift, honouring Stage's additive promise.
+- `templates/WORKFLOW.md` (lines ~76–78) claims `Stage` is provisioned by "`/idc:init` (or
+  `/idc:doctor`)" — but `/idc:doctor` is **read-only by contract** and cannot provision anything.
+  Reconcile the wording: only `/idc:init` provisions; doctor at most *flags* a missing `Stage`.
+- (unchanged) `commands/doctor.md` description + check-3 field-id list → add `Stage`.
+
+### F7 — [MED, CONFIRMED] scope-blind update error
+`claude plugin update idc@idc-workflow` with no `--scope` errors `Plugin 'idc' is not installed at
+scope user` for a project-scope install. Fix: `/idc:update` Phase 0 (and/or `/idc:doctor`) detects
+the install scope and prints the exact `claude plugin update idc@idc-workflow --scope project`
+command; add a line to `docs/installing.md`.
+
+### F8 — [HIGH, CONFIRMED dry-run] `/idc:update` silently wipes operator data (data loss)
+`/idc:init` writes **operator/runtime data** into two scaffold files *after* copying the template,
+then fingerprints them `state: stamped`:
+- `WORKFLOW-config.yaml` → the derived `domains:` list (5 entries in the test)
+- `docs/workflow/tracker-config.yaml` → `project_number` + the `field_ids` board node IDs
+`/idc:update` Phase 1 classifies `unchanged + state: stamped` = pristine → Phase 2 refreshes them
+silently (re-substituting only `{{PROJECT_NAME}}` / `{{TRACKER_PROJECT_NUMBER}}`), **wiping**
+`domains` → `[]` and `field_ids` → empty. Confirmed by dry-run (`commands/update.md` is
+byte-identical PR#23↔#37). This destroys the board wiring on every update.
+
+**Fix (a) — verified viable, folds into F3:** have `/idc:init` record those two files as
+`state: customized` in the receipt. `update.md` Phase 1 (lines 38–40) already routes
+`state: customized` to **show-diff-and-ask** ("Never silently overwrite a customization"), and
+Phase 4 already re-stamps kept files with `--customized`, so `customized` is first-class. Concretely:
+when F3 switches Phase 7 to `idc_receipt_check.py stamp`, pass
+`--customized WORKFLOW-config.yaml --customized docs/workflow/tracker-config.yaml`. (Options (b)
+structured-merge and (c) always-ask are heavier; (a) is the minimal root-cause fix. Follow-up,
+out of scope: letting a future update add the new `Stage:` field_ids slot without clobbering values
+— (a) stops the data loss; operator re-runs init/doctor to populate Stage.)
+**Verify:** extend the smoke suite — init a repo (writes `domains` into WORKFLOW-config.yaml), run
+update non-interactively, assert `domains` survives (diff-and-ask defaults to keep). The
+filesystem backend exercises the receipt-state logic even without a real board.
+
+### F9 — [LOW] methodology doc note (this repo's `docs/dev/local-e2e-testing.md`)
+Add a note: the marketplace clone auto-pulls main HEAD but the runtime **cache does not follow
+it**; `${CLAUDE_PLUGIN_ROOT}` can resolve to the stale cache for one command and the fresh
+marketplace for another in the same session; only `claude --plugin-dir <checkout>` reliably loads
+uncached latest code. (This is the deferred methodology note — now in scope since you own this
+repo's tree.)
 
 ---
 

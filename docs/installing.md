@@ -97,9 +97,9 @@ restores the original state (the installer records the prior state first).
 ## 5. Update IDC after a plugin update
 
 When you update the installed plugin — run `claude plugin update idc@idc-workflow --scope project`
-from each governed repo (the bare command defaults to `--scope user` and would update the global
-copy, not your project-scoped install), or let your plugin manager pull a new version — the
-scaffold already living in your repo doesn't change on its own.
+from each governed repo (the bare command defaults to `--scope user` and **errors** with
+`Plugin 'idc' is not installed at scope user` for a project-scoped install), or let your plugin
+manager pull a new version — the scaffold already living in your repo doesn't change on its own.
 Run `/idc:update` from the repo to refresh it:
 
 - It reads the **install receipt** to tell pristine scaffold files (which it refreshes to the new

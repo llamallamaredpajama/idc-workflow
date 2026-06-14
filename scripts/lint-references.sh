@@ -139,6 +139,15 @@ for ref in $ALL_REFS; do
   report "(repo): [dangling-ref] $ref resolves to neither skills/$target, agents/$target.md, nor commands/$target.md"
 done
 
+# Rule H — release discipline (version lockstep + bump-on-ship). JSON/CHANGELOG parsing is
+# delegated to a small dependency-free helper so it stays robust; any finding fails the lint.
+if [ -f scripts/idc_release_check.py ]; then
+  if ! rel_out=$(python3 scripts/idc_release_check.py 2>&1); then
+    printf '%s\n' "$rel_out"
+    FAIL=1
+  fi
+fi
+
 if [ "$FAIL" -eq 0 ]; then
   echo "lint-references: CLEAN ($FILE_COUNT files scanned)"
 else

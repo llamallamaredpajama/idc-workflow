@@ -111,12 +111,6 @@ fixed). One line of rationale each; nothing silently dropped.
   `firestore.indexes.json` as protected-source-surface examples — stack examples
   inherited from the original governed repo; knowingly shipped (Firestore is a common
   stack and the lines are illustrative, not binding). Genericize in a polish pass.
-- **F1b deferred (release-discipline lint guard):** no automated check FAILs when shipped
-  files change without a `plugin.json` version bump — the root cause of the 2026-06-14
-  stale-cache install test (see `docs/dev/2026-06-14-install-test-pr37-audit.md` §F1/§F1b).
-  Adding it to `scripts/lint-references.sh` needs git-diff/baseline awareness (last release
-  tag or commit) the pure reference-integrity linter lacks today, and risks CI
-  false-positives, so it was deferred from the PR #37-audit fix pass (which shipped F1–F6).
 
 ## Handling policy during migration
 

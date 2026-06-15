@@ -44,6 +44,13 @@ RECEIPT_RELPATH = "docs/workflow/install-receipt.yaml"
 # Paths the receipt must never list, by exact repo-relative path or basename.
 EXCLUDED_RELPATHS = {"TRACKER.md", ".claude/settings.json"}
 EXCLUDED_BASENAMES = {"install-receipt.yaml"}
+# Data-bearing scaffold files: /idc:init writes operator/board data into these AFTER copying the
+# template (WORKFLOW-config.yaml gets the derived `domains:`; tracker-config.yaml gets
+# project_number + board field_ids). /idc:update must ALWAYS show-diff-and-ask for them regardless
+# of receipt state — a pre-guard receipt (written before init stamped them --customized) marks them
+# `state: stamped`, and silently re-stamping would wipe that data. This set is the single source of
+# truth update consumes (verify --json -> "always_ask"); never silently refresh a path listed here.
+ALWAYS_ASK_RELPATHS = {"WORKFLOW-config.yaml", "docs/workflow/tracker-config.yaml"}
 
 
 def die(message: str, code: int = 2) -> None:
@@ -231,6 +238,12 @@ def cmd_verify(args: argparse.Namespace) -> int:
             f"{counts['unchanged']} unchanged, "
             f"{counts['modified']} modified, {counts['missing']} missing"
         )
+        # Data-bearing files /idc:update must always show-diff-and-ask for, never silently refresh —
+        # even when classified unchanged + state: stamped (legacy-receipt guard). Single source of
+        # truth for the guard; intersected with the receipt's own paths so a consumer sees only
+        # files this repo actually stamps.
+        receipt_paths = {e["path"] for e in entries}
+        out["always_ask"] = sorted(ALWAYS_ASK_RELPATHS & receipt_paths)
         print(json.dumps(out, indent=2, sort_keys=True))
     else:
         for state, rel in classified:
@@ -263,7 +276,9 @@ def main(argv: list[str]) -> int:
     vp.add_argument("--json", action="store_true",
                     help="emit JSON instead of TSV. Schema: {\"unchanged\":[paths], "
                          "\"modified\":[paths], \"missing\":[paths], \"ok\": bool (true iff "
-                         "modified+missing both empty), \"summary\": str}")
+                         "modified+missing both empty), \"summary\": str, \"always_ask\":[paths] "
+                         "(data-bearing files update must always diff-and-ask, never silently "
+                         "refresh)}")
     vp.set_defaults(func=cmd_verify)
 
     args = parser.parse_args(argv)

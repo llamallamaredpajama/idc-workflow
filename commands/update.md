@@ -40,10 +40,17 @@ very end of a fully successful run**, so a half-finished update can never masque
   ```bash
   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_receipt_check.py" verify --repo "$ROOT" --json
   ```
+  The JSON's `always_ask` list names the **data-bearing configs** (`WORKFLOW-config.yaml`,
+  `docs/workflow/tracker-config.yaml`) that carry init-derived data (`domains`, `field_ids`,
+  `project_number`). **Always show-diff-and-ask for any file in `always_ask`, regardless of its
+  drift class or recorded `state`** — a pre-guard receipt (written before init began stamping them
+  `--customized`) marks them `state: stamped`, and silently re-stamping would wipe that data. This
+  legacy-receipt guard takes precedence over the pristine rule below.
   Branch per file on the drift class **and** the recorded `state`:
-  - `unchanged` **and** `state: stamped` → pristine. Safe to refresh silently — but only if the
-    installed plugin's template for that file actually differs from what's on disk; if identical,
-    `skipped-already-current`.
+  - in `always_ask` → **show-diff-and-ask** (legacy-receipt guard; never silently refresh).
+  - `unchanged` **and** `state: stamped` **and not in `always_ask`** → pristine. Safe to refresh
+    silently — but only if the installed plugin's template for that file actually differs from
+    what's on disk; if identical, `skipped-already-current`.
   - `modified`, **or** any entry the receipt marked `state: customized` → operator-customized:
     **show-diff-and-ask** (on-disk vs the installed template's rendered bytes); the operator
     chooses keep or replace. Never silently overwrite a customization.
@@ -58,10 +65,29 @@ very end of a fully successful run**, so a half-finished update can never masque
 ## Phase 2 — Apply the approved refreshes (files only)
 
 For each file approved for refresh (pristine-and-differing, operator-chose-replace, or
-restore-missing): render the installed plugin's template and write it, substituting the same tokens
+restore-missing): **resolve its template source through the shared resolver — never guess the
+template by basename or path-tail** — then render and write it, substituting the same tokens
 `/idc:init` does — `{{PROJECT_NAME}}` (read from `WORKFLOW-config.yaml`) and, for the github
-backend, `{{TRACKER_PROJECT_NUMBER}}` (read from `docs/workflow/tracker-config.yaml`). The templates
-live under `${CLAUDE_PLUGIN_ROOT}/templates/`. Record, per file, what changed.
+backend, `{{TRACKER_PROJECT_NUMBER}}` (read from `docs/workflow/tracker-config.yaml`). Record, per
+file, what changed.
+```bash
+src="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_template_for.py" \
+        --plugin-root "${CLAUDE_PLUGIN_ROOT}" "<dest-relative-to-repo-root>")"
+```
+The resolver is the single source of truth `idc_init_scaffold.sh` also uses, so the dest→template
+mapping can't drift between scaffold and resync. It encodes exactly:
+
+| Governed file (dest) | Template source |
+|----------------------|-----------------|
+| `WORKFLOW.md` | `templates/WORKFLOW.md` |
+| `WORKFLOW-config.yaml` | `templates/WORKFLOW-config.yaml` |
+| `docs/workflow/tracker-config.yaml` | `templates/tracker-config.yaml` |
+| `docs/workflow/<rest>` (e.g. `README.md`, `code-reviews/…`, `pillar-matrices/…`) | `templates/docs-tree/<rest>` |
+
+This closes the docs-tree ambiguity: `docs/workflow/README.md` resolves to
+`templates/docs-tree/README.md`, **never** the unrelated `templates/README.md` (which documents the
+templates dir itself). If the resolver exits non-zero for a path, **STOP** — do not fall back to a
+guessed template.
 
 Files the operator chose to keep are left exactly as-is. Update touches **only** stamped scaffold
 files — never source, never tests, never the board.

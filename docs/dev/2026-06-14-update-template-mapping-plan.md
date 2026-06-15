@@ -1,7 +1,10 @@
 # Plan — `/idc:update` template-path hardening (+ legacy-receipt clobber guard)
 
-**Branch:** `fix/update-template-mapping` · **Targets:** `2.1.2` (sequence after PR #40 / 2.1.1)
-**Status:** plan only — no implementation yet.
+**Branch:** `fix/update-template-mapping` · **Targets:** `2.1.3` (2.1.2 was taken by PR #42's board-mutation gate)
+**Status:** IMPLEMENTED — B1 (pinned map in `update.md`), B2 (`scripts/idc_template_for.py`, shared
+with `idc_init_scaffold.sh`), and A-hardening (`always_ask` in `idc_receipt_check.py` +
+legacy-receipt guard in `update.md`) all shipped; two new smoke cases
+(`phase7-update-template-mapping.sh`, `phase7-update-legacy-receipt-guard.sh`) green.
 
 ## Context
 

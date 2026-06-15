@@ -24,6 +24,8 @@ for t in \
   phase6-autorun \
   phase7-lifecycle \
   phase7-update-preserves-data \
+  phase7-update-template-mapping \
+  phase7-update-legacy-receipt-guard \
   phase8-pi-launchable \
   phase8-pi-runtime \
   phase8-pi-fleet-secret \

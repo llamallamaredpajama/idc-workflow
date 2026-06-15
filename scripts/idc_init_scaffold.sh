@@ -24,16 +24,20 @@ case "$BACKEND" in github|filesystem) ;; *) echo "idc-init: BACKEND must be gith
 cd "$REPO_ROOT"
 mkdir -p docs/workflow
 
-# Root + config files (idempotent: never clobber an operator's file).
-[ -f WORKFLOW.md ]                        || cp "$T/WORKFLOW.md" WORKFLOW.md
-[ -f WORKFLOW-config.yaml ]               || cp "$T/WORKFLOW-config.yaml" WORKFLOW-config.yaml
-[ -f docs/workflow/tracker-config.yaml ]  || cp "$T/tracker-config.yaml" docs/workflow/tracker-config.yaml
+# Resolve every governed dest's template source through the shared resolver — the single source of
+# truth /idc:update also uses, so the dest->template mapping can never drift between the two.
+resolve() { python3 "$PLUGIN_ROOT/scripts/idc_template_for.py" --plugin-root "$PLUGIN_ROOT" "$1"; }
 
-# docs/workflow tree from docs-tree/ (visible entries only; each absent entry copied).
+# Root + config files (idempotent: never clobber an operator's file).
+[ -f WORKFLOW.md ]                        || cp "$(resolve WORKFLOW.md)" WORKFLOW.md
+[ -f WORKFLOW-config.yaml ]               || cp "$(resolve WORKFLOW-config.yaml)" WORKFLOW-config.yaml
+[ -f docs/workflow/tracker-config.yaml ]  || cp "$(resolve docs/workflow/tracker-config.yaml)" docs/workflow/tracker-config.yaml
+
+# docs/workflow tree from docs-tree/ (visible entries only; each absent entry resolved + copied).
 shopt -s nullglob
 for entry in "$T/docs-tree/"*; do
   name="$(basename "$entry")"
-  [ -e "docs/workflow/$name" ] || cp -R "$entry" "docs/workflow/$name"
+  [ -e "docs/workflow/$name" ] || cp -R "$(resolve "docs/workflow/$name")" "docs/workflow/$name"
 done
 shopt -u nullglob
 

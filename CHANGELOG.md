@@ -4,6 +4,24 @@ All notable changes to the IDC Workflow plugin are documented in this file.
 
 ## Unreleased
 
+## 2.1.3 — 2026-06-14
+
+- **`/idc:update` now resolves every template through one shared map, closing a docs-tree clobber
+  footgun.** Update re-derived each stamped file's template source loosely ("the templates live
+  under `templates/`"), so an agent resolving `docs/workflow/README.md` by basename/path-tail could
+  pick the unrelated `templates/README.md` (the templates-dir doc) and overwrite the governed
+  README. A new `scripts/idc_template_for.py` is the single source of truth for the dest→template
+  mapping — `docs/workflow/<rest>` → `templates/docs-tree/<rest>`, with `WORKFLOW.md`,
+  `WORKFLOW-config.yaml`, and `docs/workflow/tracker-config.yaml` special-cased — and **both**
+  `idc_init_scaffold.sh` and `/idc:update` now resolve through it, so scaffold and resync can't
+  drift. Update stops rather than guessing if the resolver rejects a path.
+- **Legacy-receipt guard: `/idc:update` always diff-and-asks for the two data-bearing configs.**
+  A repo installed by a pre-2.1.0 plugin carries a receipt that marks `WORKFLOW-config.yaml` and
+  `docs/workflow/tracker-config.yaml` `state: stamped` (they predate the `--customized` guard), so
+  the first post-upgrade update could silently overwrite their `domains` / `field_ids` /
+  `project_number`. `idc_receipt_check.py verify --json` now emits an `always_ask` set, and update
+  shows-diff-and-asks for those paths regardless of receipt state. Additive, back-compatible.
+
 ## 2.1.2 — 2026-06-14
 
 - **`/idc:init` now gates *every* Phase-4 board mutation behind the provenance check.** 2.1.1 moved

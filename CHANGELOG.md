@@ -4,6 +4,28 @@ All notable changes to the IDC Workflow plugin are documented in this file.
 
 ## Unreleased
 
+## 2.1.4 — 2026-06-15
+
+- **`/idc:update` no longer presents a destructive keep-vs-replace prompt for the two data-bearing
+  configs.** `WORKFLOW-config.yaml` and `docs/workflow/tracker-config.yaml` are operator-owned data
+  files seeded once from a *blank stub* template, so a filled config always differs from the
+  template byte-wise — that difference is the operator's data, not drift. The old flow surfaced this
+  as a "keep your data / replace with the blank stub" decision on every update, where "replace"
+  could only ever destroy data and align nothing. Update now **preserves these files unconditionally
+  and never offers to overwrite them.** A new `scripts/idc_config_keys.py` extracts *structural*
+  key-paths (list contents, block scalars, and flow values treated as opaque), so update can tell
+  "only your data differs" (→ `preserved — config current`, silent) from "the new version added a
+  key/field" (→ a non-destructive advisory listing the new optional keys to adopt by hand). This is
+  the smooth, non-breaking, structure-aligning behavior an update should have. Subsumes and
+  strengthens 2.1.3's `always_ask` guard.
+- **`/idc:update` Phase 0 now halts on a stale-session load.** Claude Code caches a command's
+  markdown at session start and runs it from a version-keyed cache dir; updating the plugin
+  mid-session can leave the session executing the OLD command body against a NEWER install (which
+  can re-introduce just-fixed bugs). A new `scripts/idc_plugin_freshness.py` compares the running
+  version against the newest version in the cache; if a newer one is installed, update STOPs and
+  tells the operator to `/reload-plugins` or restart. Fail-open: `--plugin-dir` dev loads and
+  undetectable cases proceed normally.
+
 ## 2.1.3 — 2026-06-14
 
 - **`/idc:update` now resolves every template through one shared map, closing a docs-tree clobber

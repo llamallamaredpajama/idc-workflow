@@ -20,10 +20,19 @@ very end of a fully successful run**, so a half-finished update can never masque
 1. **Git repo + scaffold present.** `git rev-parse --show-toplevel`; confirm `WORKFLOW.md` and
    `docs/workflow/` exist (else this repo isn't initialized — point at `/idc:init`). A clean tree
    is recommended so the refreshed files are reviewable as a discrete change.
-2. **Cache-refresh note.** A plugin update may ship new commands/skills that an already-running
-   Claude Code session won't see until the plugin cache refreshes — tell the operator that if a
-   newly-shipped `/idc:*` command is missing after updating, they should restart the session (this
-   is a client cache quirk, not an update failure).
+2. **Stale-session guard (HALT if stale).** Claude Code caches this command's markdown at session
+   start and runs it from a **version-keyed cache** dir. If the plugin was updated *this session*,
+   a newer version sits in the cache but the body executing now may be the OLD one — running stale
+   update logic against a newer install can re-introduce just-fixed bugs. Check before doing
+   anything:
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_plugin_freshness.py" --plugin-root "${CLAUDE_PLUGIN_ROOT}"
+   ```
+   If it prints `verdict stale` (exit 4), **STOP immediately** and tell the operator: a newer IDC
+   version is installed than the one this session loaded — run `/reload-plugins` (or restart the
+   session) and re-run `/idc:update`. Do **not** proceed on stale logic. `verdict current` or
+   `unknown` (e.g. a `--plugin-dir` dev load) → proceed. A plugin update may also ship new
+   commands/skills an already-running session won't see until reload — same fix.
 3. **Scope-aware plugin update (terminal step, done before this command).** `/idc:update` only
    resyncs this repo's scaffold files; pulling the new *plugin* version itself is a terminal
    command — `claude plugin update idc@idc-workflow --scope project`. The bare
@@ -41,28 +50,61 @@ very end of a fully successful run**, so a half-finished update can never masque
   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_receipt_check.py" verify --repo "$ROOT" --json
   ```
   The JSON's `always_ask` list names the **data-bearing configs** (`WORKFLOW-config.yaml`,
-  `docs/workflow/tracker-config.yaml`) that carry init-derived data (`domains`, `field_ids`,
-  `project_number`). **Always show-diff-and-ask for any file in `always_ask`, regardless of its
-  drift class or recorded `state`** — a pre-guard receipt (written before init began stamping them
-  `--customized`) marks them `state: stamped`, and silently re-stamping would wipe that data. This
-  legacy-receipt guard takes precedence over the pristine rule below.
-  Branch per file on the drift class **and** the recorded `state`:
-  - in `always_ask` → **show-diff-and-ask** (legacy-receipt guard; never silently refresh).
-  - `unchanged` **and** `state: stamped` **and not in `always_ask`** → pristine. Safe to refresh
+  `docs/workflow/tracker-config.yaml`). These are **operator-owned data files**: `/idc:init` seeds
+  them from a blank stub template, then fills them with this repo's data (`domains`, `field_ids`,
+  `project_number`, the `prd` path, …). Because the template is a stub by design, a filled config
+  *always* differs from it byte-wise — that difference is the operator's data, **not drift**. So
+  update **never overwrites a data-bearing config and never offers a destructive keep/replace.**
+  Handle every `always_ask` file **present on disk** with the **structure-only rule (Phase 2 §A)**
+  regardless of its drift class or recorded `state`; this takes precedence over the rules below (and
+  subsumes the old legacy-receipt guard — a `state: stamped` data config is preserved, never silently
+  re-stamped). The one exception is a `missing` data config (the operator deleted it): there is no
+  data on disk to preserve and no file for §A's structure check to read, so it follows the `missing`
+  rule below — restore as the blank stub, default leave-removed — which §A also points to.
+  Branch the remaining (non-`always_ask`) files on the drift class **and** the recorded `state`:
+  - `unchanged` **and** `state: stamped` → pristine. Safe to refresh
     silently — but only if the installed plugin's template for that file actually differs from
     what's on disk; if identical, `skipped-already-current`.
   - `modified`, **or** any entry the receipt marked `state: customized` → operator-customized:
     **show-diff-and-ask** (on-disk vs the installed template's rendered bytes); the operator
     chooses keep or replace. Never silently overwrite a customization.
   - `missing` → was stamped but removed; offer to restore it from the template (default: leave
-    removed unless the operator wants it back).
+    removed unless the operator wants it back). A missing data-bearing config restores as the blank
+    stub for the operator to re-fill.
   If the receipt is present but **invalid** (the helper exits non-zero), STOP and report the parse
   error — do not silently treat files as untouched.
 - **No receipt (pre-receipt install):** this is the one-time graduation. **Diff-and-ask for every
   scaffold file** (treat them all as possibly-customized), apply what the operator approves, then
-  Phase 4 writes the repo's first receipt.
+  Phase 4 writes the repo's first receipt. The two data-bearing configs are the exception even here:
+  apply the **structure-only rule (Phase 2 §A)** — preserve, never offer to overwrite their data.
 
 ## Phase 2 — Apply the approved refreshes (files only)
+
+### §A — Data-bearing configs (`always_ask`): preserve, structure-only advisory, never overwrite
+
+For each `always_ask` file **present on disk**, **leave the file exactly as-is** — it holds the
+operator's data. (A `missing` data config — the operator deleted it — has no data to preserve and no
+file for the check below to read; do **not** run the structure helper against a nonexistent path —
+follow the Phase 1 `missing` rule instead: restore as the blank stub, default leave-removed.) Check
+*only* whether the installed template introduced **new structure** worth adopting: resolve + render
+the template (the §B mechanics below), then compare structural keys (list contents, block scalars,
+and flow values are treated as opaque, so `domains` entries / `field_ids` values / model-routing
+prose never read as drift — only a genuinely new key does):
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_config_keys.py" --added "$ROOT/<dest>" "<rendered-template>"
+```
+- **Nothing printed** → the file is already structurally current; report `preserved — config
+  current`. **Do not show a diff, do not ask anything.**
+- **Key-paths printed** → the new version added that structure (e.g. a new `field_ids.*` field).
+  Report `preserved — N new optional key(s): <list>` and tell the operator how to adopt them **by
+  hand** (add the key, keep your values). **Never** overwrite the file or offer a whole-file
+  replace — that discards the operator's data and is never the right move for these files.
+
+This is the same notion of "structure" `/idc:init` seeds, so a data config can be brought into
+structural alignment without ever risking the `domains`, `field_ids`, `project_number`, or `prd`
+values it carries.
+
+### §B — Template-stamped files (everything else)
 
 For each file approved for refresh (pristine-and-differing, operator-chose-replace, or
 restore-missing): **resolve its template source through the shared resolver — never guess the
@@ -112,11 +154,14 @@ action on the board:
 
 Once every approved refresh is applied, write a fresh receipt over the stamped set so the next
 update and `/idc:uninstall` stay accurate. Pass the files the operator **kept customized** via
-`--customized` so the next update asks again instead of silently re-stamping over them:
+`--customized` so the next update asks again instead of silently re-stamping over them — this
+**always includes the two data-bearing configs** (preserved in Phase 2 §A), which keeps a
+pre-guard `state: stamped` receipt from re-appearing:
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_receipt_check.py" stamp \
   --repo "$ROOT" --out docs/workflow/install-receipt.yaml --written-by idc:update \
-  [--customized <kept-file> ...] <stamped-file> <stamped-file> ...
+  --customized WORKFLOW-config.yaml --customized docs/workflow/tracker-config.yaml \
+  [--customized <other-kept-file> ...] <stamped-file> <stamped-file> ...
 ```
 This graduates a pre-receipt repo to receipt-driven, and — because it runs only at the very end —
 guarantees a partial update never leaves a receipt that claims more than was actually done. The
@@ -127,8 +172,8 @@ If a receipt already existed and nothing changed this run, leave it untouched an
 
 ## Phase 5 — Summary
 
-Print one table of every stamped file (`refreshed` / `kept (customized)` / `restored` /
-`skipped-already-current`), then:
+Print one table of every stamped file (`refreshed` / `preserved — config current` / `preserved — N
+new optional key(s)` / `restored` / `skipped-already-current`), then:
 - the board-drift outcome (one of: no drift / drift details / could not verify),
 - the receipt status (`rewritten` / `graduated` / `skipped-already-current`),
 - and the cache-refresh reminder if any newly-shipped command/skill files arrived with this update.

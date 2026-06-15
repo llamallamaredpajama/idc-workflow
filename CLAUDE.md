@@ -56,48 +56,68 @@ contents, the `ke-snap` commands, teardown — live in
 [`docs/dev/local-e2e-testing.md`](docs/dev/local-e2e-testing.md); read it before an e2e run.** This
 section is the *how-to-drive-it* playbook for when the user asks to test a change.
 
-### Two levels of test — know which one you can run from here
+### YOU drive the sandbox e2e yourself — the user never has to open a sandbox
 
-- **Smoke suite (fast, hermetic) — you CAN run this yourself, right here.** `bash tests/smoke/run-all.sh`
-  exercises the whole lifecycle in its own throwaway temp repos (filesystem backend, no GitHub). This
-  is the inner loop; run it from this repo, no sandbox needed.
-- **Full GitHub-fidelity e2e — must execute in a separate session INSIDE a sandbox.** You cannot run
-  the interactive `/idc:*` flow against a sandbox from this repo: IDC commands act on the **session's
-  own working directory**, so a session rooted here would target *this* repo, not the sandbox. This
-  repo's agent **sets it up and reads the results** — it does not run the e2e inline.
+When the user asks to test a change, **run the full lifecycle against the sandbox yourself and
+report results.** Do **not** tell the user to go run `/idc:*` in the sandbox. Two test levels, both
+runnable from here:
 
-### When the user asks to "test this" / iterate
+- **Smoke suite (fast, hermetic).** `bash tests/smoke/run-all.sh` exercises the whole lifecycle in
+  its own throwaway temp repos (filesystem backend, no GitHub). The inner loop; no sandbox needed.
+- **Full GitHub-fidelity e2e (against a sandbox).** The old caveat was over-stated: *inline* `/idc:*`
+  slash commands in THIS session act on THIS repo's cwd, so they can't target a sandbox — but a
+  **separate `claude` process whose cwd IS the sandbox does** (verified: it reads the sandbox's board
+  + install-receipt, not this repo's). So you spawn that session from the shell:
+  ```bash
+  ( cd /Users/jeremy/dev/sandbox/ke-idc-test-repo-update && \
+    claude --plugin-dir /Users/jeremy/dev/proj/idc-workflow-2.1.1 \
+           --permission-mode bypassPermissions -p "/idc:update" ) \
+    2>&1 | tee /Users/jeremy/dev/sandbox/_idc-observability/run-<label>.txt
+  ```
+  - `--plugin-dir <checkout>` selects **which code version runs** (it bypasses the version-keyed
+    cache). For a version-accurate **update** test, keep two checkouts side by side via a `git
+    worktree` — `main` (= current production) and the candidate branch — and point `--plugin-dir` at
+    whichever a step needs (resync-to-prod uses `main`; the candidate test uses the branch worktree).
+  - `--permission-mode bypassPermissions` so the headless run never hangs on a prompt (sandboxes are
+    disposable + git-tracked, so it's safe).
+  - `-p "<command + any decisions>"`: each run is a **fresh non-interactive session**, so edited
+    command/skill markdown loads **every run automatically** (no restart; `scripts/*.py` apply live
+    too). It can't stop to ask, so put any interactive choice **in the prompt**, e.g.
+    `-p "/idc:update — apply the safe path: refresh WORKFLOW.md only, keep the configs, re-stamp them --customized"`.
+
+### The loop you run when asked to "test this"
 
 1. **Pick the sandbox by what you changed:** install / scaffold / `init` / `doctor` / `think` /
    `plan` / `build` → the **install** sandbox (`/Users/jeremy/dev/sandbox/ke-idc-test-repo-install`);
    `update` / receipt-resync / drift → the **update** sandbox
    (`/Users/jeremy/dev/sandbox/ke-idc-test-repo-update`).
 2. **Smoke-gate here first:** `bash tests/smoke/run-all.sh`. Fix failures before spending an e2e run.
-3. **Run the full e2e in a sandbox session** (open it; this repo's agent can't run it inline):
-   ```bash
-   cd <sandbox-path>
-   claude --plugin-dir /Users/jeremy/dev/proj/idc-workflow   # runs your EDITED code, not the installed copy
-   ```
-4. **Read what happened from here:** the snapshots live OUTSIDE the sandboxes at
-   `/Users/jeremy/dev/sandbox/_idc-observability/`, so inspect them from this repo's session —
-   `ke-snap-diff <pre> <post>` for the delta, the `transcript.txt` pointer for the full trace — and
-   iterate on the plugin code.
+3. **Sync the baseline, then drive the run(s)** — all from here, by spawning sandbox-rooted `claude
+   -p` calls (snapshot pre/post with `ke-snap`):
+   - **Reset / baseline / version-sync is YOUR job.** A clean start is `git -C <sandbox> reset --hard
+     <baseline-commit>`, or a spawned `/idc:uninstall --delete-board` to wipe; re-scaffold to the
+     target version with a spawned `/idc:init` or `/idc:update` using `--plugin-dir` at the matching
+     checkout. The sandbox carries **no version number** — its install receipt is fingerprint-only —
+     so "sync to version X" = "its scaffold files match what checkout X produces," achieved by an
+     `/idc:update` from that checkout.
+   - **Run the candidate:** spawn the command(s) with `--plugin-dir` at the candidate, capturing each
+     to `_idc-observability/`.
+4. **Read + iterate from here:** snapshots live OUTSIDE the sandboxes at
+   `/Users/jeremy/dev/sandbox/_idc-observability/` — `ke-snap-diff <pre> <post>` for the delta, the
+   captured `run-*.txt` / `transcript.txt` for the full trace — then fix the plugin code here and
+   re-spawn. **Only ask the user to run something in the sandbox if a spawned `claude -p` genuinely
+   can't do it (e.g. an interactive `gh auth` / login step).**
 
 ### Teammates & Codex (cmux)
 
-The spawn tools (TeamCreate / Agent) have **no "different directory" option** — a teammate inherits
-**this** repo as its working dir (and `isolation: worktree` is same-repo-only and unreliable here).
-So a teammate can run the **smoke suite** from here, but it **cannot aim `/idc:*` at a sandbox** —
-even after a Bash `cd`, its slash-commands still target this repo. Likewise Codex runs in its own
-launch directory, and the `/idc:*` lifecycle is Claude-Code-only.
-
-Don't try to make a teammate "be" the sandbox. The **shared snapshot dir (`_idc-observability/`) is
-the integration point**: run the full e2e in a separate sandbox session (you / another window), and
-the lead — or any teammate, or Codex — reads those snapshot files **from anywhere** and iterates on
-the code here. Run the test wherever it must run; analyze the results here.
+A teammate's *inline* `/idc:*` still can't aim at a sandbox (its cwd is this repo) — but ANY agent
+(lead, teammate, or Codex) can spawn a **sandbox-rooted `claude -p`** via Bash exactly as above, so
+sandbox e2e is fully delegable. The **shared snapshot dir (`_idc-observability/`)** stays the
+read-side integration point: whoever spawns the run captures output there; the lead reads it anywhere.
 
 ### Iterative loop
 
-Edit here → `tests/smoke/run-all.sh` → (sandbox session) re-run the IDC command → read the snapshot
-diff here → repeat. After editing **command/skill markdown**, restart the sandbox session so new
-definitions load; `scripts/*.py` edits apply live. Reset a sandbox with `/idc:uninstall --delete-board`.
+Edit here → `bash tests/smoke/run-all.sh` → spawn the sandbox-rooted `claude -p "/idc:<cmd>"` →
+`ke-snap-diff` the result here → fix → re-spawn. Each `-p` run is a fresh session, so edited
+command/skill markdown loads automatically every run; `scripts/*.py` apply live. Reset between runs
+with `git -C <sandbox> reset --hard <baseline>` or a spawned `/idc:uninstall --delete-board`.

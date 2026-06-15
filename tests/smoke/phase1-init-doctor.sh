@@ -2,7 +2,7 @@
 # Phase 1 smoke — init scaffolds the v2 tree + doctor's deterministic checks pass, on a
 # throwaway filesystem-backend repo (no live GitHub). REAL artifacts + assertions:
 # exercises the shipped scaffold helper, then asserts exactly what /idc:doctor checks.
-# Also statically guards the github-backend link-step ordering in commands/init.md (the
+# Also statically guards the github-backend board-mutation ordering in commands/init.md (the
 # hermetic suite has no live GitHub, so this is a line-order assertion, not a round-trip).
 # Failing-test-first: fails until scripts/idc_init_scaffold.sh exists.
 #
@@ -44,17 +44,21 @@ grep -q "idc-tracker-state:begin" "$SBX/TRACKER.md" || fail "TRACKER.md missing 
 python3 "$PLUGIN/scripts/idc_tracker_fs.py" --tracker "$SBX/TRACKER.md" create --title "smoke" >/dev/null \
                                                  || fail "tracker unusable after scaffold"
 
-# --- static guard: github-backend link-step ordering (no live GitHub in this hermetic suite) ---
-# Codex adversarial review (PR 40): `gh project link` mutates repo-visible GitHub state, so it
-# must run only AFTER the destructive Status-options gate — otherwise an existing populated board
-# with incompatible Status options gets linked to the repo and THEN STOPs half-provisioned. Assert
-# the link invocation sits below the **STOP** gate line in commands/init.md.
+# --- static guard: EVERY github-backend board mutation runs AFTER the destructive Status gate ---
+# Codex adversarial review (PR 40) + altitude follow-up: `gh project field-create` (adds fields)
+# and `gh project link` (publishes the board to the repo) both mutate an operator's board, so they
+# must run only AFTER the destructive Status-options **STOP** gate — otherwise an existing populated
+# board with incompatible Status options gets stray fields added / gets linked, then init STOPs
+# half-provisioned. The hermetic suite has no live GitHub, so assert both mutation lines sit below
+# the **STOP** gate line in commands/init.md.
 INIT_MD="$PLUGIN/commands/init.md"
-link_ln=$(grep -nF 'gh project link "$TRACKER_PROJECT_NUMBER"' "$INIT_MD" | head -1 | cut -d: -f1)
 stop_ln=$(grep -nF '**STOP**' "$INIT_MD" | head -1 | cut -d: -f1)
-[ -n "$link_ln" ] || fail "init.md: gh project link invocation not found"
 [ -n "$stop_ln" ] || fail "init.md: destructive Status **STOP** gate not found"
-[ "$link_ln" -gt "$stop_ln" ] \
-  || fail "init.md: gh project link (line $link_ln) must run AFTER the Status **STOP** gate (line $stop_ln)"
+for marker in 'gh project field-create' 'gh project link "$TRACKER_PROJECT_NUMBER"'; do
+  mut_ln=$(grep -nF "$marker" "$INIT_MD" | head -1 | cut -d: -f1)
+  [ -n "$mut_ln" ] || fail "init.md: board mutation '$marker' not found"
+  [ "$mut_ln" -gt "$stop_ln" ] \
+    || fail "init.md: '$marker' (line $mut_ln) must run AFTER the Status **STOP** gate (line $stop_ln)"
+done
 
-echo "PASS: init scaffolds the v2 tree (filesystem backend) + doctor checks satisfied + link-step ordering guarded"
+echo "PASS: init scaffolds the v2 tree (filesystem backend) + doctor checks satisfied + board-mutation ordering guarded"

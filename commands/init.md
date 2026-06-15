@@ -71,9 +71,11 @@ Decide create-vs-link:
   Capture `number` (→ `TRACKER_PROJECT_NUMBER`) and the node `id`/`url`. Derive
   `OWNER=$(gh repo view --json owner -q .owner.login)`.
 
-Provision the **five** v2 fields. A new Projects v2 board ships a built-in single-select
-`Status` — **reconcile** it (don't duplicate); create the other four. Single-selects need
-≥1 option at creation:
+Provision the **five** v2 fields — but **gate every board mutation behind the provenance check
+first**. The destructive risk is concentrated in one place (reconciling the built-in single-select
+`Status`), so resolve that gate **before** any other mutation: the four added fields and the repo
+link all run **only past it**, so a STOP on someone else's populated board leaves it exactly as
+found — no fields added, not linked. Single-selects need ≥1 option at creation:
 
 | Field | Type | Options |
 |-------|------|---------|
@@ -83,12 +85,7 @@ Provision the **five** v2 fields. A new Projects v2 board ships a built-in singl
 | `Phase` | SINGLE_SELECT (create) | seed `Phase 1` |
 | `Domain` | SINGLE_SELECT (create) | seed with the Phase-1 derived domain names |
 
-```bash
-gh project field-create <n> --owner "$OWNER" --name "Stage"  --data-type SINGLE_SELECT --single-select-options "Consideration,Planning,Buildable"
-gh project field-create <n> --owner "$OWNER" --name "Wave"   --data-type SINGLE_SELECT --single-select-options "Wave 1"
-gh project field-create <n> --owner "$OWNER" --name "Phase"  --data-type SINGLE_SELECT --single-select-options "Phase 1"
-gh project field-create <n> --owner "$OWNER" --name "Domain" --data-type SINGLE_SELECT --single-select-options "<domain1>,<domain2>,..."
-```
+**Provenance gate (run first — it decides whether this board is safe to provision at all).**
 Reconcile the built-in `Status` to the four v2 values — **gated by board provenance** (the
 option-replacement mutation is destructive: it re-IDs every option and wipes item values;
 see `idc:idc-tracker-github`). Get the `Status` field node id + current options from
@@ -99,18 +96,31 @@ see `idc:idc-tracker-github`). Get the `Status` field node id + current options 
   re-send (same-name replacement still re-IDs + wipes).
 - **Linked board, any other option set** → check item count
   (`gh project view <n> --owner "$OWNER" --format json` → `.items.totalCount`); zero → safe,
-  proceed; ≥1 → **STOP**, leave the board untouched **and unlinked**, record an operator action
-  pointing at the snapshot→mutate→rebuild SOP in `idc:idc-tracker-github`.
-If the built-in field cannot be updated by your gh version, do not delete it (the API
-forbids deleting the built-in `Status`); record an operator action to set the four options
-in the web UI.
+  proceed; ≥1 → **STOP** before any further mutation — leave the board untouched **and unlinked**
+  (no fields added, not linked), record an operator action pointing at the snapshot→mutate→rebuild
+  SOP in `idc:idc-tracker-github`.
+If the built-in field cannot be updated by your gh version, do not delete it (the API forbids
+deleting the built-in `Status`); record an operator action to set the four options in the web UI,
+then continue (not a STOP — the board is conformant enough to provision).
+
+**Past the gate — add the other four fields** (`Stage`, `Wave`, `Phase`, `Domain`). **Idempotent —
+create only what's missing:** `gh project field-create` does *not* dedupe, so on a linked board that
+already carries these a blind re-create would add a second same-named field. Re-read the field list
+and skip names that already exist:
+```bash
+existing=$(gh project field-list <n> --owner "$OWNER" --format json --limit 50 --jq '.fields[].name')
+have() { printf '%s\n' "$existing" | grep -qx "$1"; }
+have Stage  || gh project field-create <n> --owner "$OWNER" --name "Stage"  --data-type SINGLE_SELECT --single-select-options "Consideration,Planning,Buildable"
+have Wave   || gh project field-create <n> --owner "$OWNER" --name "Wave"   --data-type SINGLE_SELECT --single-select-options "Wave 1"
+have Phase  || gh project field-create <n> --owner "$OWNER" --name "Phase"  --data-type SINGLE_SELECT --single-select-options "Phase 1"
+have Domain || gh project field-create <n> --owner "$OWNER" --name "Domain" --data-type SINGLE_SELECT --single-select-options "<domain1>,<domain2>,..."
+```
 
 **Link the board to this repo** (both paths) so it surfaces on the repo's **Projects tab** and
 issue sidebar — a v2 board is owned by the user/org and is invisible from the repo until linked.
-**Do this only after the destructive `Status` gate above has passed** — linking is a visible
-GitHub mutation, so on the ≥1-item STOP the board is deliberately left *unlinked*: init couldn't
-complete the tracker contract, so it must not publish a half-provisioned, non-conforming board to
-the repo. The board number is resolved by now regardless of create-vs-link, so one idempotent
+This is the **last** post-gate mutation — linking is what publishes the board to the repo, so on
+the ≥1-item STOP the board is deliberately left *unlinked*: init couldn't complete the tracker
+contract, so it must not publish a half-provisioned, non-conforming board to the repo. The board number is resolved by now regardless of create-vs-link, so one idempotent
 step covers both. Check first; skip if already linked (re-link errors on some `gh` versions);
 report `linked` / `skipped-existing`:
 ```bash

@@ -4,6 +4,18 @@ All notable changes to the IDC Workflow plugin are documented in this file.
 
 ## Unreleased
 
+## 2.1.2 — 2026-06-14
+
+- **`/idc:init` now gates *every* Phase-4 board mutation behind the provenance check.** 2.1.1 moved
+  the repo-link past the destructive `Status`-options gate, but the four `gh project field-create`
+  calls (`Stage`, `Wave`, `Phase`, `Domain`) still ran *before* it — so an existing populated board
+  with incompatible `Status` options got those fields added and then STOPped half-provisioned. The
+  provenance gate now runs **first**; the four field-creates and the link both run **only past it**,
+  so a STOP leaves someone else's board exactly as found (no fields added, not linked). The
+  field-creates are also **idempotent** now (check-first against `field-list`) — `gh project
+  field-create` does not dedupe, so re-running/linking an already-provisioned board no longer adds
+  duplicate same-named fields.
+
 ## 2.1.1 — 2026-06-14
 
 - **`/idc:init` now links the GitHub Projects board to the governed repo.** A Projects v2 board

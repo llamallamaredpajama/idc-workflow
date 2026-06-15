@@ -26,9 +26,39 @@ has "$U" 'idc_template_for\.py' \
   || fail "update.md must resolve templates via the shared idc_template_for.py resolver"
 has "$U" 'idc_plugin_freshness\.py' \
   || fail "update.md must run the stale-session freshness guard"
-# It must NOT tell the agent to overwrite/replace a data-bearing config.
-grep -iE 'overwrite .*(WORKFLOW-config|tracker-config)|replace .*(WORKFLOW-config|tracker-config) with' "$U" \
-  && fail "update.md appears to instruct overwriting/replacing a data config — the 2.1.3 footgun" || true
+# It must NOT tell the agent to do anything destructive to a data-bearing config. The 2.1.3 footgun
+# was a keep/replace OFFER over operator data; a future edit could reintroduce it with any wording.
+# A plain ordered grep ('overwrite .* WORKFLOW-config') is brittle — it misses the generic "data
+# config" phrasing and the reversed word order. Scan line-by-line instead: flag any line that pairs a
+# data-config REFERENT with a DESTRUCTIVE action, *unless* the destructive verb is directly negated
+# (the legitimate prose is "**never** overwrite …" / "never offer a destructive keep/replace" — the
+# negation sits immediately on the verb, only an adverb like "silently" may intervene). Order-
+# independent; an incidental "not"/"no" elsewhere in the sentence does NOT excuse a destructive verb.
+# Exit 2 = a destructive instruction was found.
+python3 - "$U" <<'PY' || fail "update.md appears to instruct a destructive action on a data config (keep/replace offer, overwrite, clobber, or 'write … over it') — the 2.1.3 footgun"
+import re, sys
+text = open(sys.argv[1], encoding="utf-8").read()
+referent = re.compile(r"data[- ]?(bearing )?config|workflow-config|tracker-config|always_ask", re.I)
+# Destructive actions over operator data: overwrite/clobber/replace-the-file, a keep/replace OFFER,
+# a whole-file replace, or the "write … over it/the file" idiom (what 2.1.3 actually did).
+destructive = re.compile(
+    r"\b(overwrit\w*|clobber\w*|whole-file replace|keep[\s-]?(or|/|-|and)[\s-]?replace|"
+    r"keep[- ]?vs[.-]? ?replace|replace[- ]?(or|/|-|and)[\s-]?keep|"
+    r"offer\w*[^.\n]{0,30}?\b(keep|replace)|replac\w*|write[^.\n]*\bover\b)", re.I)
+# Legitimate prose negates the destructive VERB directly: "never[/Never/don't/no/not] [adverb] <verb>"
+# (only a single adverb like "silently" may sit between). An incidental negation elsewhere in the
+# sentence is NOT a licence — the negation must immediately govern the destructive token.
+neg_governs = re.compile(r"\b(never|n't|do not|not|no)\b(\s+\w+ly)?\s+(?=[^.\n]{0,4}?"
+                         r"(overwrit|clobber|whole-file replace|offer|replace|write\b))", re.I)
+offenders = []
+for ln in text.splitlines():
+    if not (referent.search(ln) and destructive.search(ln)):
+        continue
+    if neg_governs.search(ln):
+        continue
+    offenders.append(ln)
+sys.exit(2 if offenders else 0)
+PY
 
 # --- init.md: the two data configs are stamped --customized (so update/uninstall protect them) ---
 I="$C/init.md"

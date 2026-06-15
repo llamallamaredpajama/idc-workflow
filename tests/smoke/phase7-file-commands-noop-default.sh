@@ -28,6 +28,21 @@ in_always_ask() {  # repo, dest -> 0 if dest is in verify --json always_ask
   python3 "$PLUGIN/scripts/idc_receipt_check.py" verify --repo "$1" --json 2>/dev/null \
     | python3 -c 'import json,sys; sys.exit(0 if sys.argv[1] in set(json.load(sys.stdin).get("always_ask",[])) else 1)' "$2"
 }
+advisory_for_extra_key() {  # repo, dest, newkey -> the keys added when the template gains `newkey`
+  # The mirror of added_for: render the REAL shipped template, then append ONE extra top-level key to
+  # the rendered COPY (never the shipped template on disk) and diff the on-disk file against it. This
+  # makes the quiet-default assertion FALSIFIABLE — added_for() alone is tautological because the
+  # fixture scaffolds the on-disk config FROM the same template, so it is empty by construction; only
+  # an *injected* new key proves the advisory path actually fires when the template gains structure.
+  local repo="$1" dest="$2" newkey="$3"
+  local tmpl rendered
+  tmpl="$(python3 "$PLUGIN/scripts/idc_template_for.py" --plugin-root "$PLUGIN" "$dest")" || return 2
+  rendered="$(mktemp)"
+  sed -e 's/{{PROJECT_NAME}}/RealProj/g' -e 's/{{TRACKER_PROJECT_NUMBER}}/7/g' "$tmpl" > "$rendered"
+  printf '%s: injected\n' "$newkey" >> "$rendered"
+  python3 "$PLUGIN/scripts/idc_config_keys.py" --added "$repo/$dest" "$rendered"
+  rm -f "$rendered"
+}
 
 # ============ REALISTIC, already-current repo ============
 R="$SBX/current"; make_realistic_repo "$R" || fail "could not build realistic repo"
@@ -40,6 +55,16 @@ WC="$R/WORKFLOW-config.yaml"; TC="$R/docs/workflow/tracker-config.yaml"
   || fail "update would raise an advisory on an already-current WORKFLOW-config.yaml — not quiet"
 [ -z "$(added_for "$R" docs/workflow/tracker-config.yaml)" ] \
   || fail "update would raise an advisory on an already-current tracker-config.yaml — not quiet"
+
+# ...but the advisory path MUST fire when the template genuinely gains structure — otherwise the
+# "quiet" assertion above is a constant (the fixture's on-disk config is scaffolded from the same
+# template, so added_for is empty by construction). Prove the other direction: a template with ONE
+# extra key surfaces exactly that key, so "quiet when current, advise when the template grew" is a
+# real, breakable assertion, not a tautology.
+[ "$(advisory_for_extra_key "$R" WORKFLOW-config.yaml zzz_new_struct)" = "zzz_new_struct" ] \
+  || fail "update did NOT surface a genuinely new template key on WORKFLOW-config.yaml — quiet default is a tautology, not a real assertion"
+[ "$(advisory_for_extra_key "$R" docs/workflow/tracker-config.yaml zzz_new_struct)" = "zzz_new_struct" ] \
+  || fail "update did NOT surface a genuinely new template key on tracker-config.yaml — quiet default is a tautology"
 
 # UPDATE never silently overwrites the data configs (always_ask guard holds for a real repo).
 in_always_ask "$R" WORKFLOW-config.yaml || fail "WORKFLOW-config.yaml must be in always_ask"

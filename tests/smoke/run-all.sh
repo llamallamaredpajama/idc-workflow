@@ -26,6 +26,8 @@ for t in \
   phase7-update-preserves-data \
   phase7-update-template-mapping \
   phase7-update-legacy-receipt-guard \
+  phase7-update-config-structure \
+  phase7-update-staleness-guard \
   phase8-pi-launchable \
   phase8-pi-runtime \
   phase8-pi-fleet-secret \

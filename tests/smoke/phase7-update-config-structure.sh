@@ -112,6 +112,23 @@ printf '%s\n' "$out" | grep -qx 'field_ids.Stage'   || fail "must detect new fie
 printf '%s\n' "$out" | grep -qx 'new_top_level'      || fail "must detect new top-level key; got: [$out]"
 printf '%s\n' "$out" | grep -qx 'new_top_level.child' || fail "must detect nested new key; got: [$out]"
 
+# 5. MISSING-CONFIG CONTRACT: a data-bearing config the operator deleted has no on-disk file, so the
+#    structure-only check (§A) CANNOT run against it — `--added <nonexistent> <template>` exits 3.
+#    `verify --json` still lists it under `always_ask` (intersection with receipt paths, no missing
+#    exclusion), so Phase 1's "route every always_ask file to §A" would send a missing config into a
+#    helper call that errors. §A must therefore carve out the missing sub-case (don't run the helper;
+#    defer to restore-as-stub). This pins both halves: the helper error AND the doc carve-out.
+python3 "$HELPER" --added "$SBX/does-not-exist.yaml" "$SBX/template-v2.yaml" >/dev/null 2>&1
+[ "$?" -eq 3 ] || fail "idc_config_keys.py --added on a nonexistent on-disk config must exit 3 (cannot read)"
+UPDATE_MD="$PLUGIN/commands/update.md"
+grep -qiE 'missing|absent|deleted|removed' "$UPDATE_MD" \
+  || fail "commands/update.md must mention the missing/absent data-config case"
+# §A (the data-bearing-config section) must explicitly handle a missing/absent file so it never runs
+# the structure helper against a nonexistent path. Extract §A's body and assert it names that case.
+SECTION_A="$(awk '/^### §A —/{f=1;next} /^### §B —/{f=0} f' "$UPDATE_MD")"
+printf '%s' "$SECTION_A" | grep -qiE 'missing|absent|does not exist|not present|no file on disk' \
+  || fail "§A of commands/update.md must carve out the missing/absent always_ask config (so it never runs idc_config_keys.py against a nonexistent file)"
+
 # --- Real-template parity: the lootr-web shape against the SHIPPED templates ----------------------
 # Scaffold a repo, populate the configs the way /idc:init does, then assert the SHIPPED templates
 # add no structure over the populated files (so a real update stays smooth — no destructive prompt).

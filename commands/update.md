@@ -55,9 +55,12 @@ very end of a fully successful run**, so a half-finished update can never masque
   `project_number`, the `prd` path, …). Because the template is a stub by design, a filled config
   *always* differs from it byte-wise — that difference is the operator's data, **not drift**. So
   update **never overwrites a data-bearing config and never offers a destructive keep/replace.**
-  Handle every `always_ask` file with the **structure-only rule (Phase 2 §A)** regardless of its
-  drift class or recorded `state`; this takes precedence over the rules below (and subsumes the old
-  legacy-receipt guard — a `state: stamped` data config is preserved, never silently re-stamped).
+  Handle every `always_ask` file **present on disk** with the **structure-only rule (Phase 2 §A)**
+  regardless of its drift class or recorded `state`; this takes precedence over the rules below (and
+  subsumes the old legacy-receipt guard — a `state: stamped` data config is preserved, never silently
+  re-stamped). The one exception is a `missing` data config (the operator deleted it): there is no
+  data on disk to preserve and no file for §A's structure check to read, so it follows the `missing`
+  rule below — restore as the blank stub, default leave-removed — which §A also points to.
   Branch the remaining (non-`always_ask`) files on the drift class **and** the recorded `state`:
   - `unchanged` **and** `state: stamped` → pristine. Safe to refresh
     silently — but only if the installed plugin's template for that file actually differs from
@@ -79,7 +82,10 @@ very end of a fully successful run**, so a half-finished update can never masque
 
 ### §A — Data-bearing configs (`always_ask`): preserve, structure-only advisory, never overwrite
 
-For each `always_ask` file, **leave the file exactly as-is** — it holds the operator's data. Check
+For each `always_ask` file **present on disk**, **leave the file exactly as-is** — it holds the
+operator's data. (A `missing` data config — the operator deleted it — has no data to preserve and no
+file for the check below to read; do **not** run the structure helper against a nonexistent path —
+follow the Phase 1 `missing` rule instead: restore as the blank stub, default leave-removed.) Check
 *only* whether the installed template introduced **new structure** worth adopting: resolve + render
 the template (the §B mechanics below), then compare structural keys (list contents, block scalars,
 and flow values are treated as opaque, so `domains` entries / `field_ids` values / model-routing

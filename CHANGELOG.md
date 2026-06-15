@@ -4,6 +4,21 @@ All notable changes to the IDC Workflow plugin are documented in this file.
 
 ## Unreleased
 
+## 2.1.1 — 2026-06-14
+
+- **`/idc:init` now links the GitHub Projects board to the governed repo.** A Projects v2 board
+  is owned by the user/org, so creating it with `gh project create` left it invisible from the
+  repo — its **Projects tab** read "Add projects from your organization…" and operators looking
+  at the repo to approve `operator-action` gate issues couldn't find the board. Init now runs an
+  idempotent link step on **both** the create and link-existing paths (repo-rooted probe → `gh
+  project link`; reports `linked` / `skipped-existing`), and the Phase 8 summary reports the
+  outcome. Tooling was never affected — it addresses the board by `owner + number` — so this is
+  purely a human-gate UX fix.
+- **`/idc:doctor` gains a report-only "board not linked" advisory.** Check 3's `github` branch
+  now surfaces a never-FAIL **PASS with ⚠** when a reachable board isn't linked to the repo (with
+  the one-line `gh project link` fix), mirroring the stale-cache advisory; a transient/auth
+  GraphQL error yields a could-not-determine note, never a FAIL.
+
 ## 2.1.0 — 2026-06-14
 
 - **Per-repo opt-in hardening (no global leak).** IDC now installs at `project` scope

@@ -56,6 +56,22 @@ Missing → FAIL (hint: run `/idc:init`). Otherwise branch on `backend:`:
   incomplete". `Stage` is additive: a legacy board with no `Stage` field id is treated as
   `Buildable` elsewhere, so note its absence but never FAIL on it.
 
+  **Note (do not fail) — repo link.** A v2 board is owned by the user/org and only appears on
+  the repo's **Projects tab** + issue sidebar once linked; an unlinked board is still fully
+  workable by `owner + number`, so this is a heads-up, never a FAIL. Probe repo-rooted (reuses
+  `$owner` / `$num` from above):
+  ```bash
+  repo=$(gh repo view --json name -q .name)
+  linked=$(gh api graphql -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){projectsV2(first:100){nodes{number}}}}' \
+    -f o="$owner" -f r="$repo" --jq '.data.repository.projectsV2.nodes[].number' 2>/dev/null)
+  printf '%s\n' "$linked" | grep -qx "$num" && echo board-linked || echo board-not-linked
+  ```
+  - `board-linked` → no note.
+  - `board-not-linked` → **PASS with ⚠**, note: "board not linked to this repo — it won't appear
+    on the repo's Projects tab; run `/idc:init` to link it (or `gh project link <num> --owner
+    <owner> --repo <owner>/<repo>`)."
+  - GraphQL call itself errors (transient / auth) → could-not-determine note, **never FAIL**.
+
 **4 — Governance scaffold present.** PASS only if all of these exist: `WORKFLOW.md` at the
 repo root, `WORKFLOW-config.yaml` at the repo root, and `docs/workflow/` containing (at
 least) its two v2 subdirectories `pillar-matrices` and `code-reviews`:

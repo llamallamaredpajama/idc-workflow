@@ -71,6 +71,24 @@ Decide create-vs-link:
   Capture `number` (→ `TRACKER_PROJECT_NUMBER`) and the node `id`/`url`. Derive
   `OWNER=$(gh repo view --json owner -q .owner.login)`.
 
+**Link the board to this repo** (both paths) so it surfaces on the repo's **Projects tab** and
+issue sidebar — a v2 board is owned by the user/org and is invisible from the repo until linked.
+The board number is resolved by now regardless of create-vs-link, so one idempotent step covers
+both. Check first; skip if already linked (re-link errors on some `gh` versions); report
+`linked` / `skipped-existing`:
+```bash
+OWNER=$(gh repo view --json owner -q .owner.login)
+REPO=$(gh repo view --json name -q .name)
+# Repo-rooted probe: is THIS board already among the repo's linked projects?
+linked=$(gh api graphql -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){projectsV2(first:100){nodes{number}}}}' \
+  -f o="$OWNER" -f r="$REPO" --jq '.data.repository.projectsV2.nodes[].number' 2>/dev/null)
+if printf '%s\n' "$linked" | grep -qx "$TRACKER_PROJECT_NUMBER"; then
+  :  # already linked → skipped-existing
+else
+  gh project link "$TRACKER_PROJECT_NUMBER" --owner "$OWNER" --repo "$OWNER/$REPO"  # → linked
+fi
+```
+
 Provision the **five** v2 fields. A new Projects v2 board ships a built-in single-select
 `Status` — **reconcile** it (don't duplicate); create the other four. Single-selects need
 ≥1 option at creation:
@@ -175,9 +193,9 @@ receipt is byte-identical — report `skipped-existing`.
 
 ## Phase 8 — Summary
 Print a table of every target (`created` / `skipped-existing`), the receipt status, the
-board number + URL (github) or `TRACKER.md` (filesystem), and whether the Codex adapter was
-installed. End by suggesting `/idc:doctor`, and — if any scope/probe was skipped — name
-exactly what remains.
+board number + URL with the repo-link outcome (`linked` / `skipped-existing`) for github, or
+`TRACKER.md` (filesystem), and whether the Codex adapter was installed. End by suggesting
+`/idc:doctor`, and — if any scope/probe was skipped — name exactly what remains.
 
 | Item | Status |
 |------|--------|

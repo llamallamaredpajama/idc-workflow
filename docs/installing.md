@@ -51,7 +51,8 @@ Start a **new** Claude Code session in the repo (so the `/idc:*` commands load),
    substituting `{{PROJECT_NAME}}`. It fills `WORKFLOW-config.yaml::domains` from a codebase
    scan and ships the tier-symbolic `model_routing` table.
 2. **Provisions the tracker.** For the `github` backend it creates (or links) a GitHub
-   Projects v2 board and provisions the **five** v2 fields — `Status`
+   Projects v2 board, **links it to this repo** (so it appears on the repo's Projects tab +
+   issue sidebar), and provisions the **five** v2 fields — `Status`
    (`Blocked|Todo|In Progress|Done`), `Stage` (`Consideration|Planning|Buildable`), `Wave`,
    `Phase`, `Domain` — caching their node IDs in `tracker-config.yaml`. For the `filesystem`
    backend it initializes a root `TRACKER.md` and needs no board.
@@ -150,6 +151,9 @@ Common issues:
   then start a new session.
 - **"board not reachable" / field IDs empty** — the `project` scope is usually missing;
   refresh it and re-run `/idc:init`.
+- **Board doesn't show on the repo's Projects tab** — the board is created but not linked to the
+  repo. `/idc:doctor` flags this as a **PASS with ⚠** advisory; re-run `/idc:init` to link it (or
+  `gh project link <num> --owner <owner> --repo <owner>/<repo>`).
 - **A non-IDC repo is picking up IDC** — IDC is enabled at the global `user` scope. Seal it
   with `claude plugin disable idc@idc-workflow --scope user` (repos that want IDC keep their
   own project key). If instead one specific repo committed the key, remove `idc@idc-workflow`

@@ -130,7 +130,7 @@ Start a **new** Claude Code session in the repo (so the commands load), then:
 ```
 
 `/idc:init` scaffolds the governance contract + config (filling `domains` from a codebase
-scan), provisions a **5-field** GitHub Projects board — or uses the zero-setup `filesystem`
+scan), provisions a **5-field** GitHub Projects board **linked to this repo** — or uses the zero-setup `filesystem`
 backend — enables the plugin **for this project only**, and writes an install receipt.
 `/idc:doctor`'s first check fails loudly if IDC is ever enabled at the global `user` scope.
 
@@ -191,7 +191,8 @@ See [`docs/architecture.md`](docs/architecture.md) for the full picture and
 The tracker is the glass wall. Its backend is selected in `docs/workflow/tracker-config.yaml`
 and hidden behind an adapter — roles never hard-code backend semantics. Two backends ship:
 `github` (a GitHub Projects v2 board, first-class) and `filesystem` (a root `TRACKER.md`, zero
-external setup). The board carries **five** custom fields:
+external setup). `/idc:init` links the github board to this repo, so it shows on the repo's
+**Projects tab** and issue sidebar. The board carries **five** custom fields:
 
 | Field | Values |
 |-------|--------|

@@ -67,6 +67,9 @@ v2 board; first-class) and `filesystem` (a root `TRACKER.md`; zero external setu
 | `Phase` | `Phase N` | Master-plan phase trace. |
 | `Domain` | single-select | Master-plan domain trace. |
 
+`/idc:init` links this board to the governed repo, so it appears on the repo's **Projects tab**
+and issue sidebar (a v2 board is org/user-owned and otherwise invisible from the repo).
+
 Plus **native blocked-by** links (dependencies), an `attempt:<n>` label (per-issue
 fix-loop counter for unattended observability), and **claim comments** (a builder claims
 an issue by flipping `Status` to `In Progress` and posting a comment naming the agent).

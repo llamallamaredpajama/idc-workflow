@@ -99,11 +99,32 @@ see `idc:idc-tracker-github`). Get the `Status` field node id + current options 
   re-send (same-name replacement still re-IDs + wipes).
 - **Linked board, any other option set** → check item count
   (`gh project view <n> --owner "$OWNER" --format json` → `.items.totalCount`); zero → safe,
-  proceed; ≥1 → **STOP**, leave untouched, record an operator action pointing at the
-  snapshot→mutate→rebuild SOP in `idc:idc-tracker-github`.
+  proceed; ≥1 → **STOP**, leave the board untouched **and unlinked**, record an operator action
+  pointing at the snapshot→mutate→rebuild SOP in `idc:idc-tracker-github`.
 If the built-in field cannot be updated by your gh version, do not delete it (the API
 forbids deleting the built-in `Status`); record an operator action to set the four options
 in the web UI.
+
+**Link the board to this repo** (both paths) so it surfaces on the repo's **Projects tab** and
+issue sidebar — a v2 board is owned by the user/org and is invisible from the repo until linked.
+**Do this only after the destructive `Status` gate above has passed** — linking is a visible
+GitHub mutation, so on the ≥1-item STOP the board is deliberately left *unlinked*: init couldn't
+complete the tracker contract, so it must not publish a half-provisioned, non-conforming board to
+the repo. The board number is resolved by now regardless of create-vs-link, so one idempotent
+step covers both. Check first; skip if already linked (re-link errors on some `gh` versions);
+report `linked` / `skipped-existing`:
+```bash
+OWNER=$(gh repo view --json owner -q .owner.login)
+REPO=$(gh repo view --json name -q .name)
+# Repo-rooted probe: is THIS board already among the repo's linked projects?
+linked=$(gh api graphql -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){projectsV2(first:100){nodes{number}}}}' \
+  -f o="$OWNER" -f r="$REPO" --jq '.data.repository.projectsV2.nodes[].number' 2>/dev/null)
+if printf '%s\n' "$linked" | grep -qx "$TRACKER_PROJECT_NUMBER"; then
+  :  # already linked → skipped-existing
+else
+  gh project link "$TRACKER_PROJECT_NUMBER" --owner "$OWNER" --repo "$OWNER/$REPO"  # → linked
+fi
+```
 
 Cache the contract: substitute the project number, then write each field's node `id` into
 `tracker-config.yaml::field_ids` (`Status`, `Stage`, `Wave`, `Phase`, `Domain`) with precise
@@ -175,9 +196,9 @@ receipt is byte-identical — report `skipped-existing`.
 
 ## Phase 8 — Summary
 Print a table of every target (`created` / `skipped-existing`), the receipt status, the
-board number + URL (github) or `TRACKER.md` (filesystem), and whether the Codex adapter was
-installed. End by suggesting `/idc:doctor`, and — if any scope/probe was skipped — name
-exactly what remains.
+board number + URL with the repo-link outcome (`linked` / `skipped-existing`) for github, or
+`TRACKER.md` (filesystem), and whether the Codex adapter was installed. End by suggesting
+`/idc:doctor`, and — if any scope/probe was skipped — name exactly what remains.
 
 | Item | Status |
 |------|--------|

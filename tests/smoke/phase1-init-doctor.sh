@@ -2,6 +2,8 @@
 # Phase 1 smoke — init scaffolds the v2 tree + doctor's deterministic checks pass, on a
 # throwaway filesystem-backend repo (no live GitHub). REAL artifacts + assertions:
 # exercises the shipped scaffold helper, then asserts exactly what /idc:doctor checks.
+# Also statically guards the github-backend link-step ordering in commands/init.md (the
+# hermetic suite has no live GitHub, so this is a line-order assertion, not a round-trip).
 # Failing-test-first: fails until scripts/idc_init_scaffold.sh exists.
 #
 # Usage: bash tests/smoke/phase1-init-doctor.sh   (exit 0 = pass)
@@ -42,4 +44,17 @@ grep -q "idc-tracker-state:begin" "$SBX/TRACKER.md" || fail "TRACKER.md missing 
 python3 "$PLUGIN/scripts/idc_tracker_fs.py" --tracker "$SBX/TRACKER.md" create --title "smoke" >/dev/null \
                                                  || fail "tracker unusable after scaffold"
 
-echo "PASS: init scaffolds the v2 tree (filesystem backend) + doctor checks satisfied"
+# --- static guard: github-backend link-step ordering (no live GitHub in this hermetic suite) ---
+# Codex adversarial review (PR 40): `gh project link` mutates repo-visible GitHub state, so it
+# must run only AFTER the destructive Status-options gate — otherwise an existing populated board
+# with incompatible Status options gets linked to the repo and THEN STOPs half-provisioned. Assert
+# the link invocation sits below the **STOP** gate line in commands/init.md.
+INIT_MD="$PLUGIN/commands/init.md"
+link_ln=$(grep -nF 'gh project link "$TRACKER_PROJECT_NUMBER"' "$INIT_MD" | head -1 | cut -d: -f1)
+stop_ln=$(grep -nF '**STOP**' "$INIT_MD" | head -1 | cut -d: -f1)
+[ -n "$link_ln" ] || fail "init.md: gh project link invocation not found"
+[ -n "$stop_ln" ] || fail "init.md: destructive Status **STOP** gate not found"
+[ "$link_ln" -gt "$stop_ln" ] \
+  || fail "init.md: gh project link (line $link_ln) must run AFTER the Status **STOP** gate (line $stop_ln)"
+
+echo "PASS: init scaffolds the v2 tree (filesystem backend) + doctor checks satisfied + link-step ordering guarded"

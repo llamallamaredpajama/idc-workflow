@@ -13,7 +13,9 @@ All notable changes to the IDC Workflow plugin are documented in this file.
   idempotent link step on **both** the create and link-existing paths (repo-rooted probe → `gh
   project link`; reports `linked` / `skipped-existing`), and the Phase 8 summary reports the
   outcome. Tooling was never affected — it addresses the board by `owner + number` — so this is
-  purely a human-gate UX fix.
+  purely a human-gate UX fix. The link step runs only **after** the destructive `Status`-options
+  gate passes, so an existing populated board with incompatible `Status` options STOPs **unlinked**
+  rather than being published to the repo half-provisioned.
 - **`/idc:doctor` gains a report-only "board not linked" advisory.** Check 3's `github` branch
   now surfaces a never-FAIL **PASS with ⚠** when a reachable board isn't linked to the repo (with
   the one-line `gh project link` fix), mirroring the stale-cache advisory; a transient/auth

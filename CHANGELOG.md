@@ -4,6 +4,28 @@ All notable changes to the IDC Workflow plugin are documented in this file.
 
 ## Unreleased
 
+## 2.1.5 — 2026-06-15
+
+- **Testing-suite overhaul so "green" means "ready for production."** 2.1.3 passed lint + smoke +
+  e2e + adversarial review yet shipped a bad `/idc:update` experience, because the suite tested a
+  bash re-encoding of the rules (never the real command), used blank inputs, and never asserted the
+  quiet/no-op default. This release closes those holes for the file-changing commands
+  (`init`/`update`/`uninstall`/`doctor`):
+  - **Realistic-input + no-op-default tests** (`tests/smoke/phase7-file-commands-noop-default.sh`,
+    shared fixture `tests/smoke/lib/realistic-repo.sh`): the commands' decision helpers are now
+    exercised against a *filled-in, already-set-up* repo (and an older-schema upgrade), asserting the
+    non-destructive/quiet default — when a project is already correct, nothing changes and no prompt
+    is raised. This is the exact assertion 2.1.3 lacked.
+  - **Prose-invariant backstop** (`tests/smoke/phase7-command-prose-invariants.sh`): cheap grep
+    checks lock the must-hold instructions in the file-changing command markdown (e.g. update never
+    offers to overwrite a data config; init stamps data configs `--customized`; doctor is read-only).
+  - **`docs/RELEASING.md`** — a three-gate production-ready checklist (automated checks green; no-op
+    default holds on a realistic repo; a read-only sanity check against a *real* configured repo
+    before tagging). An audit confirmed every repo-mutating decision in the file-changing commands
+    already lives in a testable helper, not free-form prose.
+  No shipped runtime behavior changed; this is test/doc/process hardening (version bump per the
+  shippable-change rule).
+
 ## 2.1.4 — 2026-06-15
 
 - **`/idc:update` no longer presents a destructive keep-vs-replace prompt for the two data-bearing

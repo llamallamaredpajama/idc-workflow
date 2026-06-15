@@ -28,6 +28,8 @@ for t in \
   phase7-update-legacy-receipt-guard \
   phase7-update-config-structure \
   phase7-update-staleness-guard \
+  phase7-file-commands-noop-default \
+  phase7-command-prose-invariants \
   phase8-pi-launchable \
   phase8-pi-runtime \
   phase8-pi-fleet-secret \

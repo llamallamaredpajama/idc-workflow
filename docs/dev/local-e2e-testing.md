@@ -30,14 +30,26 @@ repo being scaffolded.
 
 ## Where to run Claude Code (the recommended dev loop)
 
-**Run Claude Code _inside the sandbox repo_, and point it at your dev clone of the plugin.** You
-cannot drive `/idc:*` from a session rooted in this plugin-source repo — it would scaffold *this*
-repo, not the sandbox. So:
+**Run Claude Code _inside the sandbox repo_, and point it at your dev clone of the plugin.** An
+*inline* `/idc:*` from a session rooted in this plugin-source repo would scaffold *this* repo, not
+the sandbox — so the sandbox session must be rooted in the sandbox:
 
 ```bash
 cd /Users/jeremy/dev/sandbox/ke-idc-test-repo-install
 claude --plugin-dir /Users/jeremy/dev/proj/idc-workflow      # load THIS dev checkout for the session
 ```
+
+> **The lead agent drives this itself — no human needs to open the sandbox.** A separate `claude`
+> process whose cwd IS the sandbox targets the sandbox, so spawn it headlessly from anywhere (incl.
+> a session rooted in this plugin repo, or a teammate/Codex):
+> ```bash
+> ( cd /Users/jeremy/dev/sandbox/ke-idc-test-repo-install && \
+>   claude --plugin-dir /Users/jeremy/dev/proj/idc-workflow \
+>          --permission-mode bypassPermissions -p "/idc:doctor" ) \
+>   2>&1 | tee /Users/jeremy/dev/sandbox/_idc-observability/run-<label>.txt
+> ```
+> Each `-p` run is a fresh session (edited markdown loads automatically; put interactive choices in
+> the prompt). See the root `CLAUDE.md` "Local end-to-end testing" section for the full loop.
 
 - `--plugin-dir` loads the plugin straight from your working tree, so you test the code you're
   editing — not the installed marketplace copy (`~/.claude/plugins/marketplaces/idc-workflow`, a

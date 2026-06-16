@@ -1,9 +1,9 @@
 <p align="center">
-  <img src="docs/assets/idc-banner.png" alt="IDC — Iterative Development Cycle · guardrails, not train tracks" width="100%">
+  <img src="docs/assets/idc-banner.svg" alt="IDC — Iterative Development Cycle · guardrails, not train tracks" width="100%">
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.1.5-9CA689?style=flat-square&labelColor=252427" alt="version 2.1.5">
+  <img src="https://img.shields.io/badge/version-3.0.0-9CA689?style=flat-square&labelColor=252427" alt="version 3.0.0">
   <img src="https://img.shields.io/badge/Claude%20Code-plugin-9CA689?style=flat-square&labelColor=252427" alt="Claude Code plugin">
   <img src="https://img.shields.io/badge/commands-9-9CA689?style=flat-square&labelColor=252427" alt="9 commands">
   <img src="https://img.shields.io/badge/runtime-Claude%20%C2%B7%20Codex%20%C2%B7%20Pi-9CA689?style=flat-square&labelColor=252427" alt="runtimes">
@@ -18,24 +18,25 @@
 
 ---
 
-IDC is a **water rig for software**. You drop an idea into the **Think Tank**; the rig carries it
-down the pipe — planning, building, reviewing — purifies it through a **Filter** of real tests,
-and pours it out the **Faucet** as merged, working code in your **Glass**. The flow runs on its
-own and **automerges when it's clean**. It stops to ask you exactly **one** question — and only
-that one: when a change would alter **what your software does for its users**.
+IDC is a **water rig for software**. You drop an idea into the **Think Tank**; Think crystallizes it
+into a **PRD** (*what* it does) and a **TRD** (*how* it's built) and carries both to the **one gate** —
+a reviewable **Think PR** you merge to admit it. From there the rig plans, builds, and reviews on its
+own and **automerges when clean**, pouring merged code out the **Faucet** into your **Glass**. It stops
+to ask you exactly **one** question, **once, at the top**: *do you approve these requirements?*
 
 ## The whole system, in one picture
 
 <p align="center">
-  <img src="docs/assets/mental-model-hero.png" alt="The IDC water rig — an idea in, working software out" width="100%">
+  <img src="docs/assets/mental-model-hero-vector.svg" alt="The IDC water rig — an idea in, working software out" width="100%">
 </p>
 
-An idea enters the **Think Tank** and firms up into one *consideration*. It flows into the pipe
-and spins a run of **turbines** — each a stage of development. The **Diverter Valve** (the one
-gate) lets anything that doesn't change your product's function flow straight through; anything
-that *does* gets diverted up to the **PRD**, behind a lock only **you** can open. The water is
-screened by the **Filter** and poured out the **Faucet**. The only way anything flows backward is
-the **Bleed Valve** — a controlled return that runs all the way back to the gate.
+An idea enters the **Think Tank** and Think crystallizes it into a **PRD + TRD**. The **first Diverter**
+(the one gate) is a **Think PR** you merge to admit it. Admitted work runs through the **processing
+train** — sliced into the **matrix**, screened by the **matrix-analysis filter**, fanned out by the
+**sequencer manifold** into parallel **waves** — spins the build triplet of **turbines** (implementer →
+review filter → finisher), and hits the **second Diverter**: clean water pours out the **Faucet** into
+your **Glass**; anything not-good goes to the **Recirculator** — the one controlled way back, all the
+way to the gate.
 
 **→ The full mental model, part by part, lives in [`docs/mental-model.md`](docs/mental-model.md).**
 
@@ -56,39 +57,42 @@ the **Bleed Valve** — a controlled return that runs all the way back to the ga
 
 ## What IDC is
 
-IDC — the **Iterative Development Cycle** — is the rig in the picture above: a pipe with a few
-**turbines** (Think → Plan → Build), one **Diverter Valve** that can divert flow to the **PRD**,
-and one **Bleed Valve** for controlled backflow. Everything flows autonomously and **automerges
-when green**; the rig intervenes only where a real derailment would otherwise ship.
+IDC — the **Iterative Development Cycle** — is the rig in the picture above: a **Think Tank** that
+feeds the **one gate** (a Think PR admitting the PRD + TRD), a **processing train** that plans, a build
+triplet of **turbines**, **two Diverters** (the gate at the top; ship-or-return at the end), and one
+**Recirculator** for controlled backflow. Everything flows autonomously and **automerges when green**;
+the rig intervenes only where a real derailment would otherwise ship.
 
 | Stage | Command | The part of the rig | Writes |
 |-------|---------|--------------------|--------|
-| **Think** | `/idc:think` | 🛢️ **Think Tank** — free brainstorm (zero teammates) → one function-first consideration. | `docs/considerations/` |
-| **Plan** | `/idc:plan` | ⊙ **Planning turbine** — consideration → goal-contract issues: domain experts, the five-layer doc chain (only the PRD gated), matrix sequencing, board admission. | `docs/prd/`, `docs/specs/`, `docs/plans/`, matrices, issues |
-| **Build** | `/idc:build` | ⊙ **Implementer → ▒ Filter → ⊙ Finisher** — each issue's goal contract runs as a goal loop; independent review screens every PR; automerge on PASS. | source, tests, review reports, tracker status |
-| **Recirculator** | `/idc:recirculate` | 🩸 **Bleed Valve** — heals doc/reality drift in one PR (PR body = change order); PRD changes take the gate. | every affected canonical doc |
+| **Think** | `/idc:think` | 🛢️ **Think Tank → ╳ Diverter #1** — free brainstorm (zero teammates) → crystallize a function-first **PRD + TRD** → the **Think PR** gate (admit by merging). | `docs/considerations/`, `docs/prd/`, `docs/specs/` |
+| **Plan** | `/idc:plan` | 🚂 **Processing train** — admitted idea → goal-contract issues: domain experts, the **matrix** (two grid-plates), the **matrix-analysis filter**, the **sequencer manifold** into waves. Pure decomposition — no requirements docs, no gate. | `docs/plans/`, matrices, issues |
+| **Build** | `/idc:build` | ⊙ **Implementer → ▒ review filter → ⊙ Finisher → ╳ Diverter #2** — each issue's goal contract runs as a turbine (iterative loop); independent review screens every PR; automerge on PASS. | source, tests, review reports, tracker status |
+| **Recirculator** | `/idc:recirculate` | ▶ **the backflow** — Diverter #2's return path: heals doc/reality drift in one PR (PR body = change order); a requirements change rides the Think-PR gate. | every affected canonical doc |
 | **Autorun** | `/idc:autorun` | 🚰 **Faucet** — open it and the whole pipe drains on its own; loop it with `/loop`. | — |
 
-> **Autorun** opens the faucet full: unplanned considerations → plan → build eligible waves as
-> they land → exit when nothing actionable remains.
+> **Autorun** opens the faucet full: admitted considerations → plan → build eligible waves as they
+> land → exit when nothing actionable remains (an open Think PR is reported + skipped, never bypassed).
 
 ## The five guardrails
 
-IDC v2 trusts the model and keeps only the parts of the rig that catch real derailments. There
+IDC v3 trusts the model and keeps only the parts of the rig that catch real derailments. There
 are exactly **five**:
 
 | # | Guardrail (the part) | What it prevents |
 |---|-----------|------------------|
-| 1 | **The one locked valve to the PRD** | Your product's function never changes without your consent. |
-| 2 | **Parallel pipes on separate sections** (matrix) | Wide builds never collide. |
-| 3 | **The Filter** (real verification surfaces) | Nothing reaches the Glass that isn't green on genuine functional tests. |
-| 4 | **The Bleed Valve** (the Recirculator) | Docs and reality never silently diverge. |
+| 1 | **The one gate at the top** (the Think PR admitting the PRD + TRD) | Your product's function — and, on brownfield, its architecture — never changes without your consent, asked once before any work begins. |
+| 2 | **Parallel pipes on separate sections** (the matrix + sequencer manifold) | Wide builds never collide. |
+| 3 | **The review filter** (real verification surfaces) | Nothing reaches the Glass that isn't green on genuine functional tests. |
+| 4 | **The Recirculator** (controlled backflow) | Docs and reality never silently diverge. |
 | 5 | **One-way flow + the metered dashboard** | The chain stays auditable end to end. |
 
-**The one gate.** When planning or the Recirculator determines the PRD must change, the affected issues
-park `Blocked` behind a single approval issue (a plain-terms summary + the PRD diff). You get a
-push notification and open the valve from the GitHub web UI — on your phone. Nothing else asks for
-permission.
+**The one gate.** At the **end of Think**, the PRD + TRD ride a **Think PR** — they stay **draft until
+you merge it** (merge = approval = admission). You get a push notification with a plain-terms summary +
+the diff and open the gate from the GitHub web UI — on your phone, in-session, or later. The PRD always
+gates (`gating.prd: on`); the TRD gates when `gating.trd: on` (brownfield on / greenfield off). Once the
+Think PR merges, planning and building free-flow — nothing else asks for permission, and the
+Recirculator reuses this same gate for any backflow that needs a requirements change.
 
 ## Install
 
@@ -128,14 +132,15 @@ Start a **new** Claude Code session in the repo (so the commands load), then:
 ```bash
 /idc:init        # install the rig: contract + config + board + receipt
 /idc:doctor      # pressure-test it (read-only health check)
-/idc:think       # cast in your first idea
-/idc:plan        # → goal-contract issues on the board
+/idc:think       # cast in your first idea → PRD + TRD → the Think PR gate (merge to admit)
+/idc:plan        # admitted idea → goal-contract issues on the board
 /idc:build       # drain the buildable issues to merged, reviewed code
 ```
 
 `/idc:init` scaffolds the governance contract + config (filling `domains` from a codebase
 scan), provisions a **5-field** GitHub Projects board **linked to this repo** — or uses the
-zero-setup `filesystem` backend — enables the plugin **for this project only**, and writes an
+zero-setup `filesystem` backend — sets the type-aware TRD gate (brownfield on / greenfield off) by
+scanning + confirming what already exists, enables the plugin **for this project only**, and writes an
 install receipt. `/idc:doctor`'s first check fails loudly if IDC is ever enabled at the global
 `user` scope.
 
@@ -145,10 +150,10 @@ Nine slash entry points:
 
 | Command | The part of the rig |
 |---------|------|
-| `/idc:think` | 🛢️ Think Tank — brainstorm → one consideration |
-| `/idc:plan` | ⊙ Planning turbine — consideration → goal-contract issues |
+| `/idc:think` | 🛢️ Think Tank → ╳ Diverter #1 — brainstorm → crystallize PRD + TRD → the Think PR gate |
+| `/idc:plan` | 🚂 Processing train — admitted idea → goal-contract issues |
 | `/idc:build` | ⊙▒⊙ the build triplet — issues → merged, reviewed code |
-| `/idc:recirculate` | 🩸 Bleed Valve — heal doc/reality drift in one PR |
+| `/idc:recirculate` | ▶ Recirculator — Diverter #2's controlled backflow; heal doc/reality drift in one PR |
 | `/idc:autorun` | 🚰 Faucet — open the whole pipe, drain it hands-off |
 | `/idc:init` | 🔧 install the rig (idempotent) |
 | `/idc:doctor` | 🔧 pressure-test the rig (read-only) |
@@ -157,21 +162,22 @@ Nine slash entry points:
 
 ## Architecture
 
-The spine everything traces to is a **five-layer canonical chain**. Planning reaches Build *only*
-by turning plans into issues — the water in the pipe; Build reaches planning *only* through the
-Bleed Valve (the Recirculator). Flow is one-way, and a sensor on every turbine keeps the chain auditable end
-to end.
+The spine everything traces to is a **five-layer canonical chain**. Its top two layers — the **PRD**
+and the **TRD** — are authored by Think and admitted **once, at the Think PR gate**; everything below
+is drafted autonomously. Planning reaches Build *only* by turning plans into issues — the water in the
+pipe; Build reaches planning *only* through the Recirculator. Flow is one-way, and a sensor on every
+component keeps the chain auditable end to end.
 
 ```mermaid
 %%{init: {'theme':'base','themeVariables':{'primaryColor':'#9CA689','primaryTextColor':'#1b1a1c','primaryBorderColor':'#252427','lineColor':'#6f7a5e','fontFamily':'Trebuchet MS, Verdana, sans-serif'}}}%%
 flowchart LR
-    subgraph chain["Five-layer canonical chain — only the PRD is gated"]
+    subgraph chain["Five-layer canonical chain — PRD + TRD admitted at the Think PR gate"]
         direction LR
-        PRD["PRD"]:::doc --> SPEC["Arch spec"]:::doc --> MP["Master plan"]:::doc --> SUB["Subphase plans"]:::doc --> PIL["Pillar plans"]:::doc
+        PRD["PRD"]:::doc --> SPEC["TRD<br/>(arch spec)"]:::doc --> MP["Master plan"]:::doc --> SUB["Subphase plans"]:::doc --> PIL["Pillar plans"]:::doc
     end
     PIL --> ISS["Tracker issues<br/>· the water in the pipe ·"]:::wall
     ISS --> BUILD["Build"]:::stage
-    BUILD -.->|"Bleed Valve — the only way back"| PRD
+    BUILD -.->|"Recirculator — the only way back"| PRD
 
     classDef doc fill:#F9FAFD,stroke:#252427,color:#252427;
     classDef stage fill:#9CA689,stroke:#252427,color:#1b1a1c;
@@ -179,14 +185,14 @@ flowchart LR
 ```
 
 **Write-authority boundaries** — each role is the sole writer of its surface and edits nothing
-upstream of it. When a lower role finds a higher layer wrong, it opens the Bleed Valve (files a
-recirculation) and pauses only the affected issue.
+upstream of it. When a lower role finds a higher layer wrong, it routes through the Recirculator
+(files a recirculation) and pauses only the affected issue.
 
 | Role | May write | Must NOT write |
 |------|-----------|----------------|
-| **Think** | `docs/considerations/` only | any canonical doc, tracker, source, tests |
-| **Plan** | PRD, spec, master/subphase/pillar plans, pillar matrices, tracker issues | source, tests |
-| **Build** | source, tests, review reports, tracker status | PRD, spec, plans |
+| **Think** | `docs/considerations/` + the gated **PRD + TRD** (drafted on the Think PR) | plans, tracker, source, tests |
+| **Plan** | master/subphase/pillar plans, pillar matrices, tracker issues — pure decomposition | PRD, TRD, source, tests |
+| **Build** | source, tests, review reports, tracker status | PRD, TRD, plans |
 | **Recirculator** | every affected canonical doc (one PR), affected open issues | source, tests |
 
 See [`docs/mental-model.md`](docs/mental-model.md) for the water-rig picture in full,
@@ -196,16 +202,16 @@ See [`docs/mental-model.md`](docs/mental-model.md) for the water-rig picture in 
 ## The dashboard
 
 The tracker is the rig's **dashboard** — instrumentation bolted onto the pipe, a sensor on every
-turbine. Its backend is selected in `docs/workflow/tracker-config.yaml` and hidden behind an
-adapter — roles never hard-code backend semantics. Two backends ship: `github` (a GitHub Projects
-v2 board, first-class) and `filesystem` (a root `TRACKER.md`, zero external setup). `/idc:init`
-links the github board to this repo, so it shows on the repo's **Projects tab** and issue sidebar.
-The board carries **five** sensor readings:
+component and a status light on every wave-pipe. Its backend is selected in
+`docs/workflow/tracker-config.yaml` and hidden behind an adapter — roles never hard-code backend
+semantics. Two backends ship: `github` (a GitHub Projects v2 board, first-class) and `filesystem` (a
+root `TRACKER.md`, zero external setup). `/idc:init` links the github board to this repo, so it shows
+on the repo's **Projects tab** and issue sidebar. The board carries **five** sensor readings:
 
 | Field | Values |
 |-------|--------|
 | `Status` | `Blocked` · `Todo` · `In Progress` · `Done` |
-| `Stage` | `Consideration` · `Planning` · `Buildable` (which part of the pipe the drop is in) |
+| `Stage` | `Consideration` · `Planning` · `Buildable` (which part of the pipe the drop is in; `Consideration` = an open Think PR pending admission) |
 | `Wave` | `Wave N` (which parallel pipe — matrix-assigned) |
 | `Phase` | `Phase N` (master-plan phase trace) |
 | `Domain` | single-select (master-plan domain trace) |

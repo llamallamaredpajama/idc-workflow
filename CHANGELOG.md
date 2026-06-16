@@ -2,7 +2,50 @@
 
 All notable changes to the IDC Workflow plugin are documented in this file.
 
-## Unreleased
+## 3.0.0 — 2026-06-16
+
+IDC v3 — **the gate moves to the top, requirements grow a second half, and Ripple becomes the
+Recirculator.** A single idea is now approved **once, at the end of Think**, then planning and
+building free-flow. **Breaking** (the `/idc:ripple` command is renamed and the human gate relocates).
+
+- **`/idc:ripple` → `/idc:recirculate` (Ripple → Recirculator).** A full, atomic rename of the
+  backflow stage across the command, the agent, the doc-sync skill, the layers helper script, every
+  prose reference, and — load-bearingly — the **typed `ripple` coms-net role** in the pi runtime (the
+  `IdcRole` type, the role Set, the glass-wall ACL special-cases, the path-policy switch, and the
+  persona peer-lists). The retrograde path is now the **Recirculator** everywhere. **Breaking:** scripts
+  or muscle-memory calling `/idc:ripple` must switch to `/idc:recirculate`.
+- **The one gate moved to the end of Think (requirements admission via the Think PR).** Previously the
+  single human gate sat mid-pipeline and the PRD auto-merged before approval. Now **Think** crystallizes
+  an idea into its requirements and opens a **Think PR** carrying them; the PRD/TRD stay **draft until
+  you merge it** — **merge = approval = admission**. Approval is **sync or async** (in-session, or leave
+  the PR open and approve later from the GitHub web UI). **Plan sheds all requirements authoring** and
+  becomes pure decomposition (no PRD/TRD, no gate). **Autorun** treats an **open Think PR** exactly like
+  an open gate — *report + skip*, never stall or bypass — so an unattended run only ever
+  plans/builds **admitted** ideas. The Recirculator reuses this same gate for any backflow that needs a
+  requirements change. **Breaking:** the approval point and the doc-write authorities changed.
+- **The TRD is now a first-class, gateable requirements doc, with a toggle.** The old un-gated `spec`
+  layer is elevated to a **TRD** (the technical *how*), authored by Think alongside the PRD. A new
+  `gating:` block in `WORKFLOW-config.yaml` controls admission: **`gating.prd`** (default **on** — the
+  PRD always gates) and **`gating.trd`** (default **off** for greenfield; **on** for brownfield, to
+  protect an established stack from silent re-architecture). The gate predicate becomes
+  `gate = prd_changed OR (spec_changed AND trd_gating)`. The gate's arming switch **fails closed**: a
+  present-but-unrecognized `gating.*` value (typo / mis-indent) gates **on** rather than silently
+  defaulting off, and an unreadable explicit config is a hard error — a brownfield's intended
+  `trd: on` is never silently lost.
+- **TRD establishment at `/idc:init` (brownfield scan-and-confirm; no-invent).** Init now scans a
+  brownfield repo for existing PRD/TRD/spec files + the stack and **confirms what it found** with you
+  (scaffold-from-repo / from-scratch / a mix) — it **never invents** an exhaustive architecture doc at
+  setup — and sets the type-aware gating default (brownfield `gating.trd: on` / greenfield off).
+  Greenfield keeps the PRD-then-TRD conversation in Think (no starter docs written at init). PRD/TRD
+  template shapes updated to the two-doc model.
+- **Metaphor + docs rebuilt to the two-diverter model.** `docs/mental-model.md`, `README.md`,
+  `docs/architecture.md`, and the hero/banner diagram assets are rebuilt to the v3 picture:
+  **Diverter #1** = the one gate (the Think PR admitting the PRD + TRD); planning is a **processing
+  train** (grid-plates → the matrix → the matrix-analysis filter → the sequencer manifold → parallel
+  **waves**, *no turbines*); **Build** is the only place with **turbines** (iterative loops —
+  implementer → review filter → finisher); **Diverter #2** = ship-or-return at the end of Build,
+  feeding the **Recirculator** backflow up to Diverter #1; the tracker is the **dashboard**. The old
+  "Bleed Valve" term is retired.
 
 ## 2.1.5 — 2026-06-15
 

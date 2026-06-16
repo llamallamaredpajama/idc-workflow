@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="820" viewBox="0 0 1600 820" role="img"
-     aria-label="The IDC water rig: ideas flow from the Think Tank through a Planning turbine, past the Diverter Valve (the one PRD gate that can divert user-facing changes up to the PRD for your authorization), through the Implementer turbine, the Filter (review/tests), and the Finisher turbine, out the Autorun faucet into the glass of working software. The Finisher's bleed valve sends controlled backflow all the way to the gate. A dashboard reads sensors on every turbine.">
+     aria-label="The IDC water rig: ideas leave the Think Tank as a PRD + TRD and hit Diverter #1 (the one gate, the Think PR you merge to admit them, branching up to the locked PRD + TRD). Admitted work runs through the processing train (the matrix grid-plates and sequencer manifold), then the Implementer turbine, the review Filter, and the Finisher turbine, reaching Diverter #2 (ship or return): clean water pours out the Autorun faucet into the glass; anything not-good goes to the Recirculator, which carries controlled backflow all the way to Diverter #1. A dashboard reads sensors on every component.">
   <!-- Coal House palette: coal #252427, canvas #F9FAFD, sage #9CA689, coral #F56A6A, deep #1b1a1c -->
   <defs>
     <symbol id="turbine" viewBox="-40 -40 80 80">
@@ -67,19 +67,34 @@
     <text x="155" y="633" text-anchor="middle" font-size="12.5" fill="#9CA689" letter-spacing="0.5">/idc:think · ideas float free</text>
     <text x="155" y="651" text-anchor="middle" font-size="12.5" fill="#9CA689" letter-spacing="0.5">→ one consideration enters the pipe</text>
 
-    <!-- ===================== PLANNING TURBINE ===================== -->
-    <use href="#turbine" x="327" y="417" width="66" height="66"/>
-    <text x="360" y="548" text-anchor="middle" font-size="16" font-weight="bold" letter-spacing="1.5" fill="#F9FAFD">PLANNING TURBINE</text>
-    <text x="360" y="568" text-anchor="middle" font-size="12" fill="#9CA689">/idc:plan · domains · doc chain</text>
-    <text x="360" y="584" text-anchor="middle" font-size="12" fill="#9CA689">· sequence into waves</text>
+    <!-- ===================== PROCESSING TRAIN (planning — no turbine) ===================== -->
+    <!-- matrix grid-plates (two offset plates) + sequencer manifold (fan of pipes) -->
+    <g>
+      <rect x="330" y="424" width="40" height="40" rx="4" fill="#252427" stroke="#9CA689" stroke-width="2"/>
+      <rect x="337" y="431" width="40" height="40" rx="4" fill="#252427" stroke="#F9FAFD" stroke-width="2.5"/>
+      <g stroke="#9CA689" stroke-width="1.2" stroke-opacity="0.85">
+        <line x1="350.3" y1="431" x2="350.3" y2="471"/>
+        <line x1="363.6" y1="431" x2="363.6" y2="471"/>
+        <line x1="337" y1="444.3" x2="377" y2="444.3"/>
+        <line x1="337" y1="457.6" x2="377" y2="457.6"/>
+      </g>
+      <g stroke="#F9FAFD" stroke-width="2" fill="none">
+        <path d="M377,451 L395,438"/>
+        <path d="M377,451 L395,451"/>
+        <path d="M377,451 L395,464"/>
+      </g>
+    </g>
+    <text x="360" y="548" text-anchor="middle" font-size="16" font-weight="bold" letter-spacing="1.5" fill="#F9FAFD">PROCESSING TRAIN</text>
+    <text x="360" y="568" text-anchor="middle" font-size="12" fill="#9CA689">/idc:plan · grid-plates → matrix</text>
+    <text x="360" y="584" text-anchor="middle" font-size="12" fill="#9CA689">→ analysis filter → manifold = waves</text>
 
-    <!-- ===================== DIVERTER VALVE + PRD branch ===================== -->
+    <!-- ===================== DIVERTER #1 (the gate) + PRD + TRD branch ===================== -->
     <!-- branch pipe up to PRD -->
     <line x1="512" y1="436" x2="512" y2="186" stroke="#F56A6A" stroke-width="2.5"/>
     <line x1="528" y1="436" x2="528" y2="186" stroke="#F56A6A" stroke-width="2.5"/>
     <path d="M520,250 l-6,11 l12,0 z" fill="#F56A6A"/>
-    <text x="556" y="300" font-size="11.5" fill="#F56A6A" letter-spacing="0.5">changes what the</text>
-    <text x="556" y="316" font-size="11.5" fill="#F56A6A" letter-spacing="0.5">software DOES? ↑</text>
+    <text x="556" y="300" font-size="11.5" fill="#F56A6A" letter-spacing="0.5">approve the</text>
+    <text x="556" y="316" font-size="11.5" fill="#F56A6A" letter-spacing="0.5">PRD + TRD? ↑</text>
     <!-- padlock on the branch -->
     <path d="M512,232 a8,8 0 0 1 16,0" fill="none" stroke="#F56A6A" stroke-width="2.5"/>
     <rect x="506" y="232" width="28" height="22" rx="3" fill="#252427" stroke="#F56A6A" stroke-width="2.5"/>
@@ -87,18 +102,18 @@
     <!-- the valve -->
     <rect x="503" y="433" width="34" height="34" rx="3" fill="#252427" stroke="#F56A6A" stroke-width="3" transform="rotate(45 520 450)"/>
     <circle cx="520" cy="450" r="5" fill="#F56A6A"/>
-    <text x="520" y="404" text-anchor="middle" font-size="16" font-weight="bold" letter-spacing="1.5" fill="#F56A6A">DIVERTER VALVE</text>
-    <text x="520" y="388" text-anchor="middle" font-size="11.5" letter-spacing="2.5" fill="#F56A6A" fill-opacity="0.95">THE ONE GATE</text>
+    <text x="520" y="404" text-anchor="middle" font-size="16" font-weight="bold" letter-spacing="1.5" fill="#F56A6A">DIVERTER #1</text>
+    <text x="520" y="388" text-anchor="middle" font-size="11.5" letter-spacing="2" fill="#F56A6A" fill-opacity="0.95">THE ONE GATE · THE THINK PR</text>
 
     <!-- PRD tank -->
     <ellipse cx="520" cy="95" rx="66" ry="12" fill="#252427" stroke="#F9FAFD" stroke-width="3"/>
     <rect x="454" y="95" width="132" height="92" rx="8" fill="#252427" stroke="#F9FAFD" stroke-width="3"/>
     <ellipse cx="520" cy="187" rx="66" ry="12" fill="#252427" stroke="#F9FAFD" stroke-width="3"/>
-    <text x="520" y="150" text-anchor="middle" font-size="30" font-weight="bold" letter-spacing="3" fill="#F9FAFD">PRD</text>
+    <text x="520" y="148" text-anchor="middle" font-size="23" font-weight="bold" letter-spacing="1.5" fill="#F9FAFD">PRD + TRD</text>
     <text x="438" y="120" text-anchor="end" font-size="13" font-weight="bold" letter-spacing="1" fill="#F56A6A">YOU</text>
     <text x="438" y="138" text-anchor="end" font-size="13" font-weight="bold" letter-spacing="1" fill="#F56A6A">AUTHORIZE</text>
-    <text x="438" y="158" text-anchor="end" font-size="11" fill="#9CA689">the only valve</text>
-    <text x="438" y="172" text-anchor="end" font-size="11" fill="#9CA689">only you open</text>
+    <text x="438" y="158" text-anchor="end" font-size="11" fill="#9CA689">what + how —</text>
+    <text x="438" y="172" text-anchor="end" font-size="11" fill="#9CA689">admit by merging</text>
 
     <!-- ===================== IMPLEMENTER TURBINE ===================== -->
     <use href="#turbine" x="687" y="417" width="66" height="66"/>
@@ -123,16 +138,16 @@
     <use href="#turbine" x="967" y="417" width="66" height="66"/>
     <text x="1000" y="548" text-anchor="middle" font-size="16" font-weight="bold" letter-spacing="1.5" fill="#F9FAFD">FINISHER TURBINE</text>
     <text x="1000" y="568" text-anchor="middle" font-size="12" fill="#9CA689">fix → re-review → merge</text>
-    <text x="1000" y="584" text-anchor="middle" font-size="12" fill="#9CA689">the caboose · talks to Ripple</text>
+    <text x="1000" y="584" text-anchor="middle" font-size="12" fill="#9CA689">the caboose · talks to Diverter #2</text>
 
-    <!-- ===================== BLEED VALVE + BACKFLOW ===================== -->
-    <!-- bleed valve (bowtie) on the pipe just past the finisher -->
+    <!-- ===================== DIVERTER #2 → RECIRCULATOR + BACKFLOW ===================== -->
+    <!-- diverter #2 (bowtie) on the pipe just past the finisher: ship or return -->
     <g transform="translate(1080,450)">
       <path d="M0,0 L-13,-11 L-13,11 z" fill="#252427" stroke="#F56A6A" stroke-width="2.5"/>
       <path d="M0,0 L13,-11 L13,11 z" fill="#252427" stroke="#F56A6A" stroke-width="2.5"/>
     </g>
-    <text x="1080" y="408" text-anchor="middle" font-size="15" font-weight="bold" letter-spacing="1" fill="#F56A6A">BLEED VALVE</text>
-    <text x="1080" y="392" text-anchor="middle" font-size="11.5" fill="#F56A6A">/idc:ripple</text>
+    <text x="1080" y="408" text-anchor="middle" font-size="15" font-weight="bold" letter-spacing="1" fill="#F56A6A">DIVERTER #2</text>
+    <text x="1080" y="392" text-anchor="middle" font-size="11.5" fill="#F56A6A">ship or return</text>
     <!-- backflow pipe: down, left across the bottom, up to just in front of the diverter -->
     <path d="M1080,464 L1080,690 L470,690 L470,464" fill="none" stroke="#F56A6A" stroke-width="3"/>
     <g fill="#F56A6A">
@@ -140,8 +155,8 @@
       <path d="M680,690 l11,-6 l0,12 z"/>
       <path d="M470,486 l-6,11 l12,0 z" transform="rotate(180 470 491)"/>
     </g>
-    <text x="775" y="714" text-anchor="middle" font-size="13" font-weight="bold" letter-spacing="1.5" fill="#F56A6A">CONTROLLED BACKFLOW</text>
-    <text x="775" y="732" text-anchor="middle" font-size="11.5" fill="#F56A6A" fill-opacity="0.9">the only way back — re-decided at the gate (auto, or up to the PRD)</text>
+    <text x="775" y="714" text-anchor="middle" font-size="13" font-weight="bold" letter-spacing="1.5" fill="#F56A6A">THE RECIRCULATOR — /idc:recirculate</text>
+    <text x="775" y="732" text-anchor="middle" font-size="11.5" fill="#F56A6A" fill-opacity="0.9">the only way back — carries it to Diverter #1 (re-plan, or up to the PRD + TRD)</text>
 
     <!-- ===================== FAUCET + GLASS ===================== -->
     <!-- riser + gooseneck -->
@@ -171,7 +186,7 @@
       <rect x="952" y="162" width="86"  height="7" fill="#9CA689" opacity="0.7"/>
       <rect x="952" y="174" width="104" height="7" fill="#F56A6A" opacity="0.85"/>
     </g>
-    <text x="640" y="184" font-size="9.5" letter-spacing="1" fill="#9CA689" fill-opacity="0.7">SENSORS ON EVERY TURBINE</text>
+    <text x="640" y="184" font-size="9.5" letter-spacing="1" fill="#9CA689" fill-opacity="0.7">SENSORS ON EVERY COMPONENT</text>
     <!-- sensor wires -->
     <g stroke="#F9FAFD" stroke-opacity="0.4" stroke-width="1.2" stroke-dasharray="3 5" fill="none">
       <path d="M650,192 C500,300 400,360 360,414"/>

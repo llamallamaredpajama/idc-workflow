@@ -34,11 +34,11 @@
     <g transform="translate(240,230)">
       <!-- track -->
       <line x1="18" y1="22" x2="724" y2="22" stroke="#9CA689" stroke-width="3"/>
-      <!-- ripple: retrograde heal-path (shallow return arc, kept inside the frame) -->
-      <path d="M490 31 C 360 70, 150 70, 18 31" fill="none" stroke="#F56A6A"
+      <!-- recirculator: retrograde heal-path returning to the gate at the end of Think -->
+      <path d="M490 31 C 360 72, 245 72, 135 31" fill="none" stroke="#F56A6A"
             stroke-width="2" stroke-dasharray="2 5" opacity="0.85"/>
-      <text x="160" y="45" text-anchor="middle" font-size="12.5" letter-spacing="3"
-            fill="#F56A6A" opacity="0.95">RIPPLE ↩</text>
+      <text x="312" y="52" text-anchor="middle" font-size="12.5" letter-spacing="3"
+            fill="#F56A6A" opacity="0.95">RECIRCULATE ↩</text>
 
       <!-- stations -->
       <g fill="#F9FAFD" font-size="16" font-weight="600" letter-spacing="2.5">
@@ -48,10 +48,10 @@
         <circle cx="245" cy="22" r="9" fill="#252427" stroke="#F9FAFD" stroke-width="3.5"/>
         <text x="245" y="-4" text-anchor="middle">PLAN</text>
 
-        <!-- PRD gate: the one stop that can ask -->
+        <!-- the one gate: at the END of Think — admits the PRD + TRD (the Think PR) -->
         <g>
-          <rect x="356" y="11" width="22" height="22" fill="#F56A6A" transform="rotate(45 367 22)"/>
-          <text x="367" y="-4" text-anchor="middle" fill="#F56A6A" font-size="12.5" letter-spacing="2">PRD GATE</text>
+          <rect x="124" y="11" width="22" height="22" fill="#F56A6A" transform="rotate(45 135 22)"/>
+          <text x="135" y="-4" text-anchor="middle" fill="#F56A6A" font-size="12.5" letter-spacing="2">GATE · PRD+TRD</text>
         </g>
 
         <circle cx="490" cy="22" r="9" fill="#9CA689" stroke="#F9FAFD" stroke-width="3.5"/>
@@ -66,6 +66,6 @@
 
     <!-- footer ticks -->
     <text x="1240" y="290" text-anchor="end" font-size="13" letter-spacing="3"
-          fill="#9CA689" fill-opacity="0.85">v2.1.5 · CLAUDE CODE PLUGIN</text>
+          fill="#9CA689" fill-opacity="0.85">v3.0.0 · CLAUDE CODE PLUGIN</text>
   </g>
 </svg>

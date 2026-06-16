@@ -47,7 +47,7 @@ Run `idc:idc-matrix-analysis`: pairwise clash fan-out → synthesize the phase m
 `docs/workflow/pillar-matrices/<phase-tag>-matrix.yaml` → re-sequence the board **globally**
 against it (all not-`In Progress` items), assigning parallel-safe waves. Validate with
 `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_matrix_check.py" <matrix>`. A genuine upstream
-contradiction that can't be deconflicted is parked and surfaced for a Ripple — never papered.
+contradiction that can't be deconflicted is parked and surfaced for a recirculation — never papered.
 
 ## Phase 5 — Validate + admit
 
@@ -75,5 +75,5 @@ contradiction that can't be deconflicted is parked and surfaced for a Ripple —
   matrices, and tracker issues. **Never** source/tests, never reorders `In Progress`, never
   edits the PRD without the gate.
 - Halt and surface evidence on: a consideration that fails the schema check; an
-  undeconflictable clash / upstream contradiction (park + Ripple); a tracker/gh failure the
+  undeconflictable clash / upstream contradiction (park + recirculation); a tracker/gh failure the
   adapter surfaces; or missing input.

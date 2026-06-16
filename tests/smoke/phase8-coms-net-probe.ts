@@ -8,7 +8,7 @@
 //
 //   build-impl → plan         (UPSTREAM)    must be DENIED  (never POSTed)
 //   build-impl → build-finish (DOWNSTREAM)  must be ALLOWED (server queues a msg_id)
-//   build-impl → ripple       (Ripple sink) must be ALLOWED (server queues a msg_id)
+//   build-impl → recirculator (Recirculator sink) must be ALLOWED (server queues a msg_id)
 //   build-impl → ghost-peer   (unknown)     must be DENIED  (fail-closed)
 //
 // Usage: bun tests/smoke/phase8-coms-net-probe.ts <serverUrl> <token> [project]
@@ -57,12 +57,12 @@ async function main() {
 	const buildImpl = await register("build-impl");
 	await register("plan");
 	await register("build-finish");
-	await register("ripple");
+	await register("recirculator");
 
 	const cases: Case[] = [
 		{ name: "build-impl → plan (UPSTREAM)", target: "plan", expectAllowed: false },
 		{ name: "build-impl → build-finish (DOWNSTREAM)", target: "build-finish", expectAllowed: true },
-		{ name: "build-impl → ripple (Ripple sink)", target: "ripple", expectAllowed: true },
+		{ name: "build-impl → recirculator (Recirculator sink)", target: "recirculator", expectAllowed: true },
 		{ name: "build-impl → ghost-peer (unknown)", target: "ghost-peer", expectAllowed: false },
 	];
 

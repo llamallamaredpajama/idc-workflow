@@ -38,7 +38,7 @@ Identical across backends; the adapter routes without reshaping signatures.
 
 Conveniences layered on the six: `claim(ticket, agent)` (Status→In Progress + claim
 comment), `block(ticket, by)` (Status→Blocked + native blocked-by), `close(ticket)`
-(Status→Done; idempotent). A seventh core op is a contract change requiring a Ripple.
+(Status→Done; idempotent). A seventh core op is a contract change requiring a recirculation.
 
 ### Merge lease (single-holder serialization)
 

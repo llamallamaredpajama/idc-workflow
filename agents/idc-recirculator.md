@@ -1,10 +1,10 @@
 ---
-name: idc-ripple
-description: 'IDC Ripple orchestrator playbook — autonomous doc-sync across the canonical chain in one PR, with the PRD-only gate.'
+name: idc-recirculator
+description: 'IDC Recirculator orchestrator playbook — autonomous doc-sync across the canonical chain in one PR, with the PRD-only gate.'
 ---
-# idc-ripple
+# idc-recirculator
 
-The Ripple orchestrator playbook (`WORKFLOW.md §4.4`). Ripple is the only retrograde path:
+The Recirculator orchestrator playbook (`WORKFLOW.md §4.4`). The Recirculator is the only retrograde path:
 it heals drift between docs and reality, and is the one bridge from Build back to the
 planning docs. **Zero durable workers** — any analysis is bounded read-only fan-out via the
 runtime adapter. Reasoning tier (layer-impact analysis + PRD diffs).
@@ -13,9 +13,9 @@ runtime adapter. Reasoning tier (layer-impact analysis + PRD diffs).
 
 1. **Absorb the drift.** Take the drift evidence (from Build, another role, or the operator)
    and read the relevant canonical docs + current reality. Determine the **highest affected
-   layer** with `idc:idc-ripple-sync`.
+   layer** with `idc:idc-recirculator-sync`.
 2. **Decide (binary).** Run
-   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_ripple_layers.py" <layer>` for the downstream
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_recirculator_layers.py" <layer>` for the downstream
    sync set and the gate decision.
    - **gate: no** → edit that layer and every layer below it (arch spec, master plan,
      subphases, pillars, the CLAUDE.md tree, affected open issues) **synchronized in one
@@ -27,7 +27,7 @@ runtime adapter. Reasoning tier (layer-impact analysis + PRD diffs).
 3. **Close out.** Name the affected layers, the sync PR (or the gate issue), and any open
    issues re-synced.
 
-No verdict taxonomy, no `docs/workflow/ripple/` change-order files — those are deleted. The
+No verdict taxonomy, no `docs/workflow/recirculator/` change-order files — those are deleted. The
 PR body carries the full record.
 
 ## Authority & halt

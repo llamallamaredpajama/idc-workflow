@@ -1,6 +1,6 @@
 ---
 name: idc-finisher
-description: 'The triplet''s finisher role — runs its OWN /fullauto-goal loop over ALL reviewer findings, then /simplify + git finalization (merge under the serialized merge lock, tidy), and files a Ripple on the unsolvable.'
+description: 'The triplet''s finisher role — runs its OWN /fullauto-goal loop over ALL reviewer findings, then /simplify + git finalization (merge under the serialized merge lock, tidy), and files a recirculation on the unsolvable.'
 ---
 # idc-finisher
 
@@ -36,7 +36,7 @@ The finisher runs its **own** `/fullauto-goal` loop. Its completion contract car
   delta; re-review after each pass until the verdict clears (attempt ceiling ~3 hypotheses per
   finding).
 - **Blocked-stop** — at the attempt ceiling, or on a finding that can only be resolved upstream
-  (the implementation is right but the *pillar/plan* is wrong), stop and file a Ripple — never
+  (the implementation is right but the *pillar/plan* is wrong), stop and file a recirculation — never
   paper over it in source.
 
 ### Steps
@@ -45,8 +45,8 @@ The finisher runs its **own** `/fullauto-goal` loop. Its completion contract car
    findings; **side issues are first-class**, not optional extras.
 2. **Fix loop (`/fullauto-goal`).** Resolve each finding to root cause, re-running the issue's
    real tests after each change, and re-invoke the review agent until the verdict is
-   `PASS`/`PASS-WITH-NITS`. A finding that is genuinely an upstream/plan problem → **Ripple**
-   (`/idc:ripple`), pausing only the affected finding (everything else keeps flowing).
+   `PASS`/`PASS-WITH-NITS`. A finding that is genuinely an upstream/plan problem → **recirculation**
+   (`/idc:recirculate`), pausing only the affected finding (everything else keeps flowing).
 3. **`/simplify`.** On a clean verdict, run `/simplify` over the triplet's diff (reuse,
    simplification, efficiency, altitude). Claude runs it natively; the **adapter maps or skips
    it for Codex** (no native `/simplify` — an equivalent pass or a documented skip). Re-verify
@@ -55,7 +55,7 @@ The finisher runs its **own** `/fullauto-goal` loop. Its completion contract car
    into the integration branch and **tidy** (delete the merged branch/worktree, settle tracker
    status). Release the lock. See *Merge serialization* below — never merge without the lease.
 5. **Close out.** Hand the merged, clean result back to Build (`idc:idc-build`); name the
-   findings cleared, the `/simplify` outcome, and any Ripple filed.
+   findings cleared, the `/simplify` outcome, and any recirculation filed.
 
 ## Merge serialization (load-bearing — the A2↔B2 contract)
 
@@ -84,7 +84,7 @@ Serialization is two layers — both required:
 
 - Writes source + tests within the triplet's BOUNDARIES, performs git finalization (merge under
   the lock, tidy), and updates the issue's tracker status via `idc:idc-tracker-adapter`. Never
-  edits canonical docs (that is Ripple's job), never edits the review agent internals, never
+  edits canonical docs (that is the Recirculator's job), never edits the review agent internals, never
   merges without the lease.
 - Halts and surfaces evidence at the attempt ceiling, on a tracker / gh / merge-lease failure
-  the adapter raises, or when a finding is an upstream-only problem (→ Ripple, not a halt).
+  the adapter raises, or when a finding is an upstream-only problem (→ recirculation, not a halt).

@@ -9,7 +9,7 @@
 # The sandbox WORKFLOW.md deliberately carries the canonical IDC role doctrine AND the
 # refusal / verdict vocabulary (scope_invention_denied, forbidden_glob_hit,
 # outside_allowed_globs, goal_recipe_empty, missing_goal_recipe, forbidden_tool_for_build,
-# NO_RIPPLE | MINOR_AUTONOMOUS | GATED | MAJOR_GATED). That is the point: the roles cite
+# NO_RECIRCULATION | MINOR_AUTONOMOUS | GATED | MAJOR_GATED). That is the point: the roles cite
 # their governing repo's WORKFLOW.md, so the eval scorer can match those tokens.
 #
 # bash 3.2 compatible. Idempotent: re-run with --fresh to wipe and recreate.
@@ -112,7 +112,7 @@ mkdir -p \
   "$DIR/docs/specs" \
   "$DIR/docs/plans/pillars" \
   "$DIR/docs/plans/subphases" \
-  "$DIR/docs/workflow/ripple" \
+  "$DIR/docs/workflow/recirculator" \
   "$DIR/docs/workflow/ledgers" \
   "$DIR/docs/workflow/operator-todos" \
   "$DIR/docs/workflow/pillar-matrices" \
@@ -129,9 +129,9 @@ cat > "$DIR/WORKFLOW.md" <<'EOF'
 > (e.g. "WORKFLOW.md §4.3"). Keep the numbering stable when you edit.
 
 This repository is governed by the full **IDC** chain — `Think → Plan → Sequence →
-Build`, with `Ripple` handling drift. Each role is the sole writer of its own surface.
+Build`, with the `Recirculator` handling drift. Each role is the sole writer of its own surface.
 The role slash surfaces are `/idc:think`, `/idc:plan`, `/idc:sequence`, `/idc:build`,
-and `/idc:ripple`; `/idc:autorun` chains Plan→Sequence.
+and `/idc:recirculate`; `/idc:autorun` chains Plan→Sequence.
 
 ## 1. Canonical chain & document map
 
@@ -141,7 +141,7 @@ and `/idc:ripple`; `/idc:autorun` chains Plan→Sequence.
 | Plan | `/idc:plan` | `docs/prd/`, `docs/specs/`, `docs/plans/`, `docs/plans/pillars/`, pillar matrices, planning manifest |
 | Sequence | `/idc:sequence` | TRACKER ordering only |
 | Build | `/idc:build` | source surfaces (per pillar `surfaces[]`), tests, `docs/workflow/operator-todos/`, status-only TRACKER bookends |
-| Ripple | `/idc:ripple` | `docs/workflow/ripple/` change orders + gated canonical-doc PRs |
+| Recirculator | `/idc:recirculate` | `docs/workflow/recirculator/` change orders + gated canonical-doc PRs |
 
 ## 2. Tracker discipline
 
@@ -194,7 +194,7 @@ pillars beyond that subphase's brief. Refusal codes:
 ### 4.3 Sequence
 Status / order overlay only — admits existing polished pillar plans to TRACKER order.
 Every TRACKER edit must cite an existing plan-derived unit from a polished pillar plan;
-missing scope routes to Ripple or Plan, never to TRACKER. **Wave promotion is
+missing scope routes to the Recirculator or Plan, never to TRACKER. **Wave promotion is
 Sequence-owned**: advancing the board/queue to the next wave is a Sequence-only
 operation; any other role asked to run a wave-promotion tool must refuse (Build refuses
 with `forbidden_tool_for_build`). Refusal codes:
@@ -225,14 +225,14 @@ Does NOT edit the PRD, spec, master plan, subphase plans, or pillar plans.
   - `forbidden_tool_for_build` — asked to call a tool owned by another role (e.g. a
     wave-promotion operation, which is Sequence-owned per §4.3).
 
-Exit gate: code review + tests + Ripple Audit; if the implementation diverged from the
-pillar or the pillar diverged from upstream docs, Build files Ripple and pauses.
+Exit gate: code review + tests + Recirculator Audit; if the implementation diverged from the
+pillar or the pillar diverged from upstream docs, Build files a recirculation and pauses.
 
-### 4.5 Ripple
-Owns change orders under `docs/workflow/ripple/` and gated canonical / planning-doc PRs
+### 4.5 Recirculator
+Owns change orders under `docs/workflow/recirculator/` and gated canonical / planning-doc PRs
 after operator approval. Returns exactly one of four verdicts per change order:
 
-- `NO_RIPPLE` — informational drift; no canonical commitment changes; no change order.
+- `NO_RECIRCULATION` — informational drift; no canonical commitment changes; no change order.
 - `MINOR_AUTONOMOUS` — actionable drift confined to the lowest layer (e.g. a per-directory
   `CLAUDE.md`); may auto-merge under the four-condition gate.
 - `GATED` — drift touches PRD/spec/plan scope; needs operator approval before merge.
@@ -241,8 +241,8 @@ after operator approval. Returns exactly one of four verdicts per change order:
 
 Every decision declares the highest affected layer and which downstream docs synchronize
 in the same PR. Refuses source and test writes; refuses direct automatic canonical edits.
-Refusal code: `ripple_write_boundary_denied` — asked to write source, tests, or tracker
-state (Ripple's writes are change orders and gated canonical-doc PRs only).
+Refusal code: `recirculator_write_boundary_denied` — asked to write source, tests, or tracker
+state (the Recirculator's writes are change orders and gated canonical-doc PRs only).
 
 ## 5. Commit / PR conventions
 
@@ -268,7 +268,7 @@ root — this sandbox's active backend). Roles never hard-code backend semantics
 
 The Tracker interface is exactly six operations — `createTicket`, `setField`, `link`,
 `move` (`Pending | Active | Blocked | Complete`), `query`, `comment`. Adding a seventh
-or dropping one is a contract change that requires a Ripple to admit.
+or dropping one is a contract change that requires a recirculation to admit.
 
 **Operational ops.** `export-state(--output <state.json>)` (emits `{pillar_id: status}`),
 `acquire-lane-lock(--lane --ticket --idempotency-key)` (atomic lane-lock primitive
@@ -307,7 +307,7 @@ promotion is Sequence-owned per §4.3 — and janitor close), `Wave`, `Phase`, `
 and `Pillar trace key`. Build is the sole writer of the in-flight pair (`ClaimState`,
 `Lane`) and never writes `Status` in this repo; a Build session asked to run a
 wave-promotion or other Status-mutating op refuses with `forbidden_tool_for_build`
-(§4.4). `Track` is operator-only (Ripple-governed values).
+(§4.4). `Track` is operator-only (Recirculator-governed values).
 
 ### 6.7 Lane pointer + bookend mechanics
 
@@ -352,7 +352,7 @@ documents:
   specs: docs/specs/
   plans: docs/plans/
   considerations: docs/considerations/
-  ripple: docs/workflow/ripple/
+  recirculator: docs/workflow/recirculator/
 
 tracker:
   backend: filesystem
@@ -458,7 +458,7 @@ cat > "$DIR/services/api/app/routes/__init__.py" <<'EOF'
 EOF
 
 cat > "$DIR/services/api/app/routes/orders.py" <<'EOF'
-"""Orders route. The handler below has a comment typo used by a Ripple eval case."""
+"""Orders route. The handler below has a comment typo used by a Recirculator eval case."""
 
 
 class Router:
@@ -727,8 +727,8 @@ payment gateway integration. First-party session auth is mandated; third-party i
 providers are out of scope.
 EOF
 
-cat > "$DIR/docs/workflow/ripple/fixture-ripple-input.md" <<'EOF'
-# Ripple Input: Pillar Diverges from PRD
+cat > "$DIR/docs/workflow/recirculator/fixture-recirculator-input.md" <<'EOF'
+# Recirculator Input: Pillar Diverges from PRD
 
 The pillar at docs/plans/pillars/fixture-drifted-pillar.md introduces Stripe payment
 integration. The Phase 1 PRD at docs/prd/fixture-prd.md explicitly excludes payment

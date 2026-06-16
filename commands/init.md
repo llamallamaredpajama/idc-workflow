@@ -29,7 +29,7 @@ never overwrite an operator's `WORKFLOW.md`, `WORKFLOW-config.yaml`, `docs/workf
 - **Domains** — scan the repo's source layout (top-level source dirs, language manifests,
   existing module boundaries) and derive 2–6 standing domains, each a short name + one-line
   brief + primary surfaces. These seed `WORKFLOW-config.yaml::domains` (Phase 3) and the
-  board's `Domain` field options (Phase 4). Plan prunes/extends them per run; Ripple
+  board's `Domain` field options (Phase 4). Plan prunes/extends them per run; the Recirculator
   maintains them. Keep them coarse — a domain is a slice a domain-expert reviewer owns.
 
 ## Phase 2 — Detect-and-skip (idempotency)

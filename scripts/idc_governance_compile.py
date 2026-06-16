@@ -52,8 +52,8 @@ SIDECAR_RELPATH = "docs/workflow/idc-governance-contract.yaml"
 # The three governing source files, in fixed emit order (deterministic regardless of FS order).
 SOURCES = ["WORKFLOW.md", "WORKFLOW-config.yaml", "docs/workflow/tracker-config.yaml"]
 # Glass-wall flow is an IDC v2 invariant (WORKFLOW.md §1.2): planning reaches Build only through
-# tracker issues; Build reaches planning only through Ripple.
-GLASS_WALL = (("planning_to_build", "github_issues_only"), ("build_to_planning", "ripple_only"))
+# tracker issues; Build reaches planning only through the Recirculator.
+GLASS_WALL = (("planning_to_build", "github_issues_only"), ("build_to_planning", "recirculator_only"))
 
 
 def die(message: str, code: int = 2) -> None:

@@ -101,6 +101,14 @@ everywhere. Model selection is **tier-symbolic** (`reasoning`/`standard`/`utilit
 `WORKFLOW-config.yaml::model_routing`, resolved by the adapter at spawn time); the Codex runtime
 is untiered.
 
+**Known limitation — the experimental Pi runtime's gate model.** The default **Claude** runtime
+(and the **Codex** runtime) implement the v3 gate at the end of Think: Think authors **and** gates
+the PRD + TRD, and Plan authors no requirements and runs no gate (Diverter #1 → the Think PR). The
+optional, **experimental Pi runtime** received only the Ripple → Recirculator role rename in 3.0.0;
+its role-harness write-authority and personas still encode the **v2 gate model** (Plan authors the
+PRD/spec under an in-pipeline gate). Migrating the Pi runtime to the v3 gate-at-Think model is a
+tracked follow-up — until then, run the v3 pipeline on the Claude (or Codex) runtime.
+
 ## Composition + naming
 
 - **Commands** (`commands/*.md`) are the slash entry points; `/idc:plan` tells the session to

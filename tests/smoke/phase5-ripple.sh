@@ -57,6 +57,15 @@ python3 "$RL" prd --config "$CFG_OFF" | grep -q "^gate: yes$" \
   || fail "TRD toggle: PRD MUST always gate regardless of the TRD toggle"
 # default (no --config) preserves greenfield: spec ungated, prd gated (asserted in (a) above).
 
+# ---- (a3) malformed gating value FAILS CLOSED to gated (U4 / gotcha #7) -------------
+# The gating block is the gate's ARMING SWITCH. A present-but-unrecognized value (typo /
+# flow-style / mis-indent) must NOT silently fall back to off — that is exactly the brownfield
+# "silent architecture rewrites" trap. It fails closed to gated instead. Break it (let a
+# malformed value default to off) and a `spec` drift would print `gate: no` and this fails red.
+CFG_BAD="$WORK/cfg-trd-bad.yaml"; printf 'gating:\n  prd: on\n  trd: maybe\n' > "$CFG_BAD"
+python3 "$RL" spec --config "$CFG_BAD" 2>/dev/null | grep -q "^gate: yes$" \
+  || fail "malformed gating.trd value must FAIL CLOSED to gated (gate: yes), not silently default to off"
+
 # ---- (b) requirements path reuses the ONE (Think-PR) gate; non-requirements path: no gate -----
 T="$WORK/TRACKER.md"
 python3 "$TRK" --tracker "$T" init || fail "tracker init failed"

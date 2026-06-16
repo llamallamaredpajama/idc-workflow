@@ -31,59 +31,95 @@ _FALSE = {"off", "false", "no"}
 
 
 def read_gating(config_path):
-    """Lift the `gating:` block (one level of two-space nesting) from a WORKFLOW-config.yaml.
+    """Lift the `gating:` block from a WORKFLOW-config.yaml and resolve the prd/trd toggles.
 
-    Dependency-free, format-specific scanner (the config ships to repos that may lack PyYAML) —
-    broadly the shape `idc_governance_compile.py::parse_config_scalars` reads, with one addition: it
+    Dependency-free, format-specific scanner (the config ships to repos that may lack PyYAML). It
+    finds the `gating:` header at any indent, then reads its `prd`/`trd` children — in block style at
+    ANY deeper indent (not just two spaces) and in flow style (`gating: {prd: on, trd: off}`) — and
     strips an inline `# comment` before classifying, because the shipped WORKFLOW-config.yaml ships
-    its gating lines commented (`trd: off   # ...`). An ABSENT key falls back to the greenfield
-    default; an unreadable explicit --config is a hard usage error (exit 2) so a brownfield's
-    `trd: on` is never silently lost to a default-off.
+    its gating lines commented (`trd: off   # ...`). An ABSENT `gating:` block falls back to the
+    greenfield defaults (`prd: on`, `trd: off`); an unreadable explicit --config is a hard usage
+    error (exit 2) so a brownfield's `trd: on` is never silently lost to a default-off.
 
-    Gate-arming strictness (deliberate local divergence from the lenient house parser): a gating key
-    that is PRESENT but carries an unrecognized value (typo / flow-style / mis-indent) does NOT fall
-    back to off — it FAILS CLOSED to gated (True). This is the gate's arming switch and the failure
-    is security-relevant: a malformed `trd:` value silently defaulting to off is exactly gotcha #7
-    (silent architecture rewrites on a brownfield repo that intended `trd: on`). The house parser
-    (`idc_governance_compile.py::parse_config_scalars`) reads such values leniently; here we are
-    stricter ON PURPOSE because the cost of a wrongly-disarmed gate is unreviewed re-architecture.
+    Gate-arming strictness (deliberate local divergence from the lenient house parser) — the failure
+    is security-relevant because the cost of a wrongly-disarmed gate is unreviewed re-architecture
+    (gotcha #7: a silent architecture rewrite on a brownfield repo that intended `trd: on`):
+      * a key PRESENT but carrying an unrecognized value (typo / mis-quote) FAILS CLOSED to gated
+        (True) — never falls back to off;
+      * a `gating:` block that is PRESENT but yields no parseable prd/trd (a shape the scanner cannot
+        read — a list/mapping with no prd/trd keys, an unreadable flow block) FAILS CLOSED — both
+        switches default to gated rather than to the greenfield defaults. (The old parser only saw
+        children at EXACTLY two-space indent, so a hand-edited 4-space `trd: on` fell through to the
+        greenfield default-off and silently DISARMED the gate; reading any deeper indent closes that.)
+    Only a PRESENT block triggers the fail-closed default; an absent block keeps the greenfield
+    defaults. The house parser (`idc_governance_compile.py::parse_config_scalars`) reads such values
+    leniently; here we are stricter ON PURPOSE.
     """
-    gating = dict(GATING_DEFAULTS)
     try:
         lines = open(config_path, "r", encoding="utf-8").read().splitlines()
     except OSError as exc:
         sys.stderr.write(f"idc_recirculator_layers: cannot read config {config_path}: {exc}\n")
         sys.exit(2)
-    in_block = False
-    for raw in lines:
-        if not raw.strip() or raw.lstrip().startswith("#"):
+
+    def classify(key, val):
+        # Strip an inline `# comment` BEFORE classifying — the shipped WORKFLOW-config.yaml ships its
+        # gating lines commented (`trd: off   # ...`); a boolean toggle never legitimately holds `#`.
+        val = val.split("#", 1)[0].strip().strip("'\"").lower()
+        if val in _TRUE:
+            return True
+        if val in _FALSE:
+            return False
+        sys.stderr.write(
+            f"idc_recirculator_layers: gating.{key} has unrecognized value "
+            f"{val!r}; failing closed to gated (on)\n")
+        return True
+
+    # Locate the `gating:` header (at any indent). Blank / full-comment lines never count.
+    header_idx = None
+    header_indent = 0
+    header_rest = ""
+    for idx, raw in enumerate(lines):
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
             continue
-        indent = len(raw) - len(raw.lstrip(" "))
-        if indent == 0:
-            in_block = raw.startswith("gating:")
-            continue
-        if in_block and indent == 2 and ":" in raw:
-            key, _, val = raw.strip().partition(":")
-            key = key.strip()
-            # Strip an inline `# comment` BEFORE classifying — the shipped WORKFLOW-config.yaml
-            # ships its gating lines commented (`trd: off   # ...`), so without this the whole
-            # `off   # ...` string is "unrecognized" and the fail-closed branch below would gate
-            # every default greenfield repo ON. A boolean toggle value never legitimately holds `#`.
-            val = val.split("#", 1)[0].strip().strip("'\"").lower()
-            if key not in gating:
+        key, sep, rest = stripped.partition(":")
+        if sep and key.strip() == "gating":
+            header_idx = idx
+            header_indent = len(raw) - len(raw.lstrip(" "))
+            header_rest = rest
+            break
+
+    if header_idx is None:
+        # No `gating:` block at all → greenfield defaults (the PRD gates, the TRD does not).
+        return dict(GATING_DEFAULTS)
+
+    parsed = {}
+    flow = header_rest.split("#", 1)[0].strip()
+    if flow.startswith("{"):
+        # Flow style: `gating: {prd: on, trd: off}` on the header line itself.
+        for part in flow.strip("{}").split(","):
+            k, sep, v = part.partition(":")
+            if sep and k.strip() in GATING_DEFAULTS:
+                parsed[k.strip()] = classify(k.strip(), v)
+    else:
+        # Block style: the `gating:` children are the following lines indented DEEPER than the
+        # header — at any depth, so a 4-space `trd: on` is honored, not dropped. The block ends at
+        # the first non-blank/non-comment line that dedents to the header level or beyond.
+        for raw in lines[header_idx + 1:]:
+            stripped = raw.strip()
+            if not stripped or stripped.startswith("#"):
                 continue
-            if val in _TRUE:
-                gating[key] = True
-            elif val in _FALSE:
-                gating[key] = False
-            else:
-                # Present-but-unrecognized value on the gate's arming switch: FAIL CLOSED to gated
-                # rather than silently defaulting to off (gotcha #7). See the docstring for why this
-                # diverges from the lenient house parser.
-                sys.stderr.write(
-                    f"idc_recirculator_layers: gating.{key} has unrecognized value "
-                    f"{val!r}; failing closed to gated (on)\n")
-                gating[key] = True
+            if len(raw) - len(raw.lstrip(" ")) <= header_indent:
+                break
+            k, sep, v = stripped.partition(":")
+            if sep and k.strip() in GATING_DEFAULTS:
+                parsed[k.strip()] = classify(k.strip(), v)
+
+    # A `gating:` block IS present: start fail-closed (BOTH switches gated) and apply only the
+    # toggles we positively parsed. A present-but-unparseable block therefore GATES rather than
+    # silently defaulting off — closing the gotcha-#7 hole where a non-2-space `trd: on` disarmed it.
+    gating = {"prd": True, "trd": True}
+    gating.update(parsed)
     return gating
 
 

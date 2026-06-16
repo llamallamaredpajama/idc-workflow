@@ -5,15 +5,16 @@
 > (e.g. "WORKFLOW.md §3.1"). Keep the numbering stable when you edit.
 
 > **The mental model — the water rig.** Picture IDC as a water rig. Ideas drop into the **Think
-> Tank** (`/idc:think`), firm up into one consideration, and flow down a pipe of **turbines** —
-> the **Planning turbine** (`/idc:plan`), then the build triplet **Implementer → Filter →
-> Finisher** (`/idc:build`) — and pour out the **Faucet** (`/idc:autorun`) as merged software in
-> your glass. The **Diverter Valve** is the one gate (§2): fired at the **end of Think** on the
-> **Think PR**, it is where you admit an idea's **PRD + TRD** (the user-facing *what* and the
-> technical *how*) — the one valve only you can open. The **Bleed
-> Valve** (`/idc:recirculate`, §4.4) is the single controlled way back. The board is the **dashboard**
-> that meters every turbine (§3.1). This is the friendly picture; the numbered sections below are
-> the authoritative contract.
+> Tank** (`/idc:think`) and firm up into one consideration; Think then carries that idea's **PRD +
+> TRD** (the user-facing *what* and the technical *how*) to the **first Diverter** — the one gate
+> (§2), fired at the **end of Think** on the **Think PR**, the one valve only you can open. Admitted
+> water runs through the **planning train** (`/idc:plan`), then the build triplet of **turbines** —
+> **Implementer → Filter → Finisher** (`/idc:build`) — and reaches the **second Diverter**: clean
+> water pours out the **Faucet** (`/idc:autorun`) as merged software in your glass, while anything
+> not-good goes to the **Recirculator** (`/idc:recirculate`, §4.4), the single controlled way back,
+> which carries it up to the first Diverter again. The board is the **dashboard** that meters every
+> turbine (§3.1). This is the friendly picture; the numbered sections below are the authoritative
+> contract.
 
 IDC carries an idea from a raw thought to merged, tested code. It is built on
 **guardrails, not train tracks**: the model is trusted to do the work; the process

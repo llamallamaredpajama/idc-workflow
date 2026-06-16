@@ -286,8 +286,8 @@ skills/           13 reusable procedures (runtime adapters, tracker, review engi
 commands/         9 slash commands (think|plan|build|recirculate|autorun|init|doctor|update|uninstall)
 templates/        per-project scaffold copied by /idc:init
 scripts/          lint-references.sh, release check, the filesystem tracker + stage helpers,
-                  install-codex.sh, run-evals.sh
-tests/smoke/      the v2 functional verification suite
+                  install-codex.sh / install-pi.sh, run-evals.sh
+tests/smoke/      the full-lifecycle functional verification suite
 docs/             mental-model, architecture, installing, PRD/specs/plans, developer notes, assets
 llms.txt          agent-readable index of the whole plugin
 ```

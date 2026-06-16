@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/idc-banner.png" alt="IDC — Iterative Development Cycle · guardrails, not train tracks" width="100%">
+  <img src="docs/assets/idc-banner.svg" alt="IDC — Iterative Development Cycle · guardrails, not train tracks" width="100%">
 </p>
 
 <p align="center">
@@ -27,7 +27,7 @@ to ask you exactly **one** question, **once, at the top**: *do you approve these
 ## The whole system, in one picture
 
 <p align="center">
-  <img src="docs/assets/mental-model-hero.png" alt="The IDC water rig — an idea in, working software out" width="100%">
+  <img src="docs/assets/mental-model-hero-vector.svg" alt="The IDC water rig — an idea in, working software out" width="100%">
 </p>
 
 An idea enters the **Think Tank** and Think crystallizes it into a **PRD + TRD**. The **first Diverter**

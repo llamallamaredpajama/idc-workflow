@@ -4,15 +4,15 @@
 > software comes out the other, and the flow only ever stops to ask you one question — at the top.
 
 <p align="center">
-  <img src="assets/mental-model-hero.png" alt="The IDC water rig — an idea in, working software out" width="100%">
+  <img src="assets/mental-model-hero-vector.svg" alt="The IDC water rig — an idea in, working software out" width="100%">
 </p>
 
-<sub>The hero above is a painted blueprint of the rig with a **native-vector label layer** — so
-every label stays perfectly crisp and editable (it never garbles or drifts from the words below).
-Sources: [`assets/mental-model-hero.svg`](assets/mental-model-hero.svg) (the labels) over
-[`assets/mental-model-hero-base.png`](assets/mental-model-hero-base.png) (the painting). A fully
-vector alternate lives at
-[`assets/mental-model-hero-vector.svg`](assets/mental-model-hero-vector.svg).</sub>
+<sub>The hero above is a **fully native-vector** diagram
+([`assets/mental-model-hero-vector.svg`](assets/mental-model-hero-vector.svg)) — every label stays
+perfectly crisp and editable, and it never drifts from the words below. A painted-blueprint variant
+lives in [`assets/mental-model-hero.svg`](assets/mental-model-hero.svg) (a native-vector label layer
+over [`assets/mental-model-hero-base.png`](assets/mental-model-hero-base.png)); the painted base is
+pending a regen to this v3 model, so the vector diagram is the one embedded here.</sub>
 
 ## The one-sentence version
 

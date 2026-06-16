@@ -77,7 +77,7 @@ it authors the PRD+TRD draft and fires the one gate via the Think PR.)
 | `idc-adapter-claude` | Claude runtime adapter — primitives → Claude mechanics + tier→model resolution. |
 | `idc-adapter-codex` | Codex runtime adapter — primitives → Codex mechanics (untiered). |
 | `idc-tracker-adapter` | Backend dispatch (reads `tracker-config.yaml::backend`). |
-| `idc-tracker-github` | GitHub Projects v2 backend (4 fields, blocked-by, claim comments, attempt label). |
+| `idc-tracker-github` | GitHub Projects v2 backend (5 fields, blocked-by, claim comments, attempt label). |
 | `idc-tracker-filesystem` | Filesystem backend (`TRACKER.md`; zero setup; the sandbox test substrate). |
 | `idc-gate-issue` | Requirements gate-issue helper (the Think PR; sync/async approval) + push notification. |
 | `idc-consideration-schema` | Function-first consideration file schema (Think output). |
@@ -104,8 +104,9 @@ dispatch skill + two backends.
 - **Dispatch.** `idc-tracker-adapter` resolves `docs/workflow/tracker-config.yaml::backend`
   and routes to `idc-tracker-github` or `idc-tracker-filesystem`. Unknown backend → halt
   (`unknown_backend`), never a silent default.
-- **Schema.** Four fields — `Status` (`Blocked|Todo|In Progress|Done`), `Wave`, `Phase`,
-  `Domain` — plus native blocked-by, an `attempt:<n>` label, and claim comments. No
+- **Schema.** Five fields — `Status` (`Blocked|Todo|In Progress|Done`), `Stage`
+  (`Consideration|Planning|Buildable`; additive), `Wave`, `Phase`, `Domain` — plus native
+  blocked-by, an `attempt:<n>` label, and claim comments. No
   ClaimState/Lane/Track/Pillar-trace-key field, no bookend ceremony.
 - **Six operations.** `createTicket`, `setField`, `link`, `move`, `query`, `comment`. A
   seventh is a contract change requiring a recirculation.

@@ -66,6 +66,6 @@
 
     <!-- footer ticks -->
     <text x="1240" y="290" text-anchor="end" font-size="13" letter-spacing="3"
-          fill="#9CA689" fill-opacity="0.85">v2.1.0 · CLAUDE CODE PLUGIN</text>
+          fill="#9CA689" fill-opacity="0.85">v2.1.5 · CLAUDE CODE PLUGIN</text>
   </g>
 </svg>

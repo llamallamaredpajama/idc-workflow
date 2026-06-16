@@ -4,6 +4,16 @@
 > section numbers are **stable** so the IDC roles and skills can cite rules by anchor
 > (e.g. "WORKFLOW.md §3.1"). Keep the numbering stable when you edit.
 
+> **The mental model — the water rig.** Picture IDC as a water rig. Ideas drop into the **Think
+> Tank** (`/idc:think`), firm up into one consideration, and flow down a pipe of **turbines** —
+> the **Planning turbine** (`/idc:plan`), then the build triplet **Implementer → Filter →
+> Finisher** (`/idc:build`) — and pour out the **Faucet** (`/idc:autorun`) as merged software in
+> your glass. The **Diverter Valve** is the one gate (§2): it sends any change to *what the
+> software does for the user* up to the **PRD**, the one valve only you can open. The **Bleed
+> Valve** (`/idc:ripple`, §4.4) is the single controlled way back. The board is the **dashboard**
+> that meters every turbine (§3.1). This is the friendly picture; the numbered sections below are
+> the authoritative contract.
+
 IDC carries an idea from a raw thought to merged, tested code. It is built on
 **guardrails, not train tracks**: the model is trusted to do the work; the process
 intervenes only where a real derailment would otherwise ship. There are exactly five

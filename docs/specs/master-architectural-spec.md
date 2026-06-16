@@ -1,11 +1,11 @@
-# Master Architectural Spec — IDC Workflow Plugin (v2)
+# Master Architectural Spec — IDC Workflow Plugin (v3)
 
 **Upstream trace:** this spec realizes `docs/prd/prd.md` (v2) and is derived from
 `docs/considerations/2026-06-12-idc-v2-overhaul-considerations.md` (the authoritative v2
 spec — operator interview, 16 decisions). Where this doc and the consideration conflict,
 the consideration wins.
 
-> This is the architecture of the **plugin itself** — how IDC v2 is built and wired. It is
+> This is the architecture of the **plugin itself** — how IDC v3 is built and wired. It is
 > distinct from `templates/WORKFLOW.md`, which is the per-project governance *contract* the
 > plugin installs into consuming repos. This spec governs the plugin; WORKFLOW.md governs a
 > governed repo.
@@ -20,15 +20,15 @@ convention, the tracker substrate, the one gate, the runtime model, and the inve
 invariants. Per-command/skill behaviour is authored in the build phases; this spec is the
 contract those phases hold to.
 
-## 2. What IDC v2 is (function)
+## 2. What IDC v3 is (function)
 
 The operator casts an idea into the stream at `/idc:think`; the stream carries it to
 merged, tested code; it stops to ask exactly once — at the **end of Think**, when the operator
 admits the idea's requirements (PRD + TRD) by merging the Think PR.
 
 - **Pipeline:** `Think → Plan → Build`, `Recirculator` the only retrograde path, `Autorun` the
-  one-shot drainer. Seven commands total: `init`, `doctor`, `think`, `plan`, `build`,
-  `recirculate`, `autorun`.
+  one-shot drainer. Nine commands total: `init`, `doctor`, `think`, `plan`, `build`,
+  `recirculate`, `autorun`, `update`, `uninstall`.
 - **Five guardrails, nothing else:** the one requirements gate at the end of Think; matrix
   deconfliction; real verification surfaces; recirculator drift-healing; one-way flow through
   the glass wall. The model is trusted; there are no standing reviewer/fixer/researcher roles,
@@ -48,7 +48,7 @@ admits the idea's requirements (PRD + TRD) by merging the Think PR.
   (text-substituted, **not** a shell env var). `plugin.json` carries no explicit component
   lists — discovery is by directory.
 
-### 3.2 The v2 namespace (flat `idc-*`)
+### 3.2 The v3 namespace (flat `idc-*`)
 
 All agents and skills use a flat `idc-<thing>` name (no `idc-skill-` / `idc-role-` /
 `codex-idc-` prefixes — those were v1). Frontmatter `name:` is **bare** (the harness adds
@@ -140,13 +140,14 @@ recirculations automerge when green.
 
 These are load-bearing and verified by the rebuild's verification surface:
 
-- `commands/` = exactly the seven v2 commands (no `sequence`/`uninstall`/`update`/`upgrade`).
+- `commands/` = exactly the nine v3 commands (`init`, `doctor`, `think`, `plan`, `build`,
+  `recirculate`, `autorun`, `update`, `uninstall`; no `sequence`/`upgrade`).
 - `agents/` ≤ 8 files; `skills/` ≤ 14 directories.
 - No v1 vocabulary (`ClaimState`, `bookend-`, `idc-role-`, `codex-idc-`,
   `MINOR_AUTONOMOUS`, `MAJOR_GATED`, `Pillar trace key`) in `commands/ agents/ skills/
   templates/ README.md llms.txt`.
-- `scripts/lint-references.sh` exits 0 (genuine cross-reference integrity over the v2
+- `scripts/lint-references.sh` exits 0 (genuine cross-reference integrity over the v3
   namespace).
 - The merged review engine ships **inside the plugin** (`idc-review-engine` +
   `idc-review-coordinator`), so consuming repos and outside/cloud agents get it.
-- `plugin.json` version `2.0.0` at release.
+- `plugin.json` version `3.0.0` at release.

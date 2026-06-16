@@ -66,6 +66,28 @@ CFG_BAD="$WORK/cfg-trd-bad.yaml"; printf 'gating:\n  prd: on\n  trd: maybe\n' > 
 python3 "$RL" spec --config "$CFG_BAD" 2>/dev/null | grep -q "^gate: yes$" \
   || fail "malformed gating.trd value must FAIL CLOSED to gated (gate: yes), not silently default to off"
 
+# ---- (a4) SHIPPED config shape: inline `# comments` on gating lines must be stripped (U4 / B1) ----
+# The shipped templates/WORKFLOW-config.yaml ships its gating lines COMMENTED
+# (`trd: off   # ...`). read_gating must strip the inline comment BEFORE classifying — otherwise the
+# whole `off   # ...` string is "unrecognized" and the (a3) fail-closed branch would gate EVERY
+# default greenfield repo ON, defeating the greenfield invariant. This case runs against the real
+# shipped file (not a bare fixture), so it guards the shape every `/idc:init` actually produces.
+# Break it (drop the inline-comment strip) and the commented `trd: off` reads as unrecognized → the
+# warning fires and spec drift gates `yes` → both assertions below fail red.
+WFCFG="$PLUGIN/templates/WORKFLOW-config.yaml"
+[ -f "$WFCFG" ] || fail "shipped templates/WORKFLOW-config.yaml missing"
+err="$(python3 "$RL" spec --config "$WFCFG" 2>&1 >/dev/null)"
+printf '%s' "$err" | grep -q 'unrecognized value' \
+  && fail "shipped (commented) gating lines tripped the fail-closed warning — inline # not stripped (B1)"
+python3 "$RL" spec --config "$WFCFG" 2>/dev/null | grep -q "^gate: no$" \
+  || fail "shipped (commented) greenfield template: spec drift must NOT gate (trd: off # ...)"
+python3 "$RL" prd  --config "$WFCFG" 2>/dev/null | grep -q "^gate: yes$" \
+  || fail "shipped (commented) template: PRD (prd: on # ...) must gate"
+# brownfield: the shipped template with trd flipped on (still commented) → spec now gates
+BROWN_WF="$WORK/brownfield-config.yaml"; sed "s|^  trd: off|  trd: on |" "$WFCFG" > "$BROWN_WF"
+python3 "$RL" spec --config "$BROWN_WF" 2>/dev/null | grep -q "^gate: yes$" \
+  || fail "shipped (commented) brownfield template (trd: on # ...): spec drift MUST gate"
+
 # ---- (b) requirements path reuses the ONE (Think-PR) gate; non-requirements path: no gate -----
 T="$WORK/TRACKER.md"
 python3 "$TRK" --tracker "$T" init || fail "tracker init failed"

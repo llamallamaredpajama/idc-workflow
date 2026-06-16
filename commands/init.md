@@ -81,11 +81,13 @@ empty `domains: []` with the list, each `- name: / brief: / surfaces: [...]`).
 default (`gating.prd: on`, `gating.trd: off`). If Phase 1b classified the repo **brownfield**
 (`TRD_GATING_DEFAULT=on`), flip the TRD gate on so an established stack can't be silently
 re-architected (the predicate in `scripts/idc_recirculator_layers.py` reads it); greenfield leaves
-it off. Edit only the one `trd:` line under `gating:`, preserving the comments:
+it off. Rewrite the one `trd:` line under `gating:` — value **and** its inline comment, so the
+comment doesn't keep saying "greenfield default: off" next to a `trd: on`:
 ```bash
 if [ "$TRD_GATING_DEFAULT" = "on" ]; then
   tmp="$(mktemp)"
-  sed "s|^  trd: off|  trd: on |" WORKFLOW-config.yaml > "$tmp" && mv "$tmp" WORKFLOW-config.yaml
+  sed "s|^  trd: off.*|  trd: on     # TRD/spec changes gate (brownfield default: on)|" \
+    WORKFLOW-config.yaml > "$tmp" && mv "$tmp" WORKFLOW-config.yaml
 fi
 ```
 `gating.prd` stays `on` for both repo types. The operator can toggle either gate anytime.

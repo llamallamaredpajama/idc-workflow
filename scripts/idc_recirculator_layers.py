@@ -33,10 +33,12 @@ _FALSE = {"off", "false", "no"}
 def read_gating(config_path):
     """Lift the `gating:` block (one level of two-space nesting) from a WORKFLOW-config.yaml.
 
-    Dependency-free, format-specific scanner (the config ships to repos that may lack PyYAML) — the
-    same shape `idc_governance_compile.py::parse_config_scalars` reads. An ABSENT key falls back to
-    the greenfield default; an unreadable explicit --config is a hard usage error (exit 2) so a
-    brownfield's `trd: on` is never silently lost to a default-off.
+    Dependency-free, format-specific scanner (the config ships to repos that may lack PyYAML) —
+    broadly the shape `idc_governance_compile.py::parse_config_scalars` reads, with one addition: it
+    strips an inline `# comment` before classifying, because the shipped WORKFLOW-config.yaml ships
+    its gating lines commented (`trd: off   # ...`). An ABSENT key falls back to the greenfield
+    default; an unreadable explicit --config is a hard usage error (exit 2) so a brownfield's
+    `trd: on` is never silently lost to a default-off.
 
     Gate-arming strictness (deliberate local divergence from the lenient house parser): a gating key
     that is PRESENT but carries an unrecognized value (typo / flow-style / mis-indent) does NOT fall
@@ -63,7 +65,11 @@ def read_gating(config_path):
         if in_block and indent == 2 and ":" in raw:
             key, _, val = raw.strip().partition(":")
             key = key.strip()
-            val = val.strip().strip("'\"").lower()
+            # Strip an inline `# comment` BEFORE classifying — the shipped WORKFLOW-config.yaml
+            # ships its gating lines commented (`trd: off   # ...`), so without this the whole
+            # `off   # ...` string is "unrecognized" and the fail-closed branch below would gate
+            # every default greenfield repo ON. A boolean toggle value never legitimately holds `#`.
+            val = val.split("#", 1)[0].strip().strip("'\"").lower()
             if key not in gating:
                 continue
             if val in _TRUE:

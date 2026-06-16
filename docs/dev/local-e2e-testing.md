@@ -43,11 +43,21 @@ claude --plugin-dir /Users/jeremy/dev/proj/idc-workflow      # load THIS dev che
 > process whose cwd IS the sandbox targets the sandbox, so spawn it headlessly from anywhere (incl.
 > a session rooted in this plugin repo, or a teammate/Codex):
 > ```bash
-> ( cd /Users/jeremy/dev/sandbox/ke-idc-test-repo-install && \
+> # one-time: printf '{"mcpServers":{}}' > /tmp/empty-mcp.json
+> ( unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN; \
+>   cd /Users/jeremy/dev/sandbox/ke-idc-test-repo-install && \
 >   claude --plugin-dir /Users/jeremy/dev/proj/idc-workflow \
->          --permission-mode bypassPermissions -p "/idc:doctor" ) \
->   2>&1 | tee /Users/jeremy/dev/sandbox/_idc-observability/run-<label>.txt
+>          --strict-mcp-config --mcp-config /tmp/empty-mcp.json \
+>          --permission-mode bypassPermissions -p "/idc:doctor" < /dev/null ) \
+>   > /Users/jeremy/dev/sandbox/_idc-observability/run-<label>.txt 2>&1
 > ```
+> **Two spawn traps** (handled in the command above): a stale or rotated
+> `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` left in the env makes the nested session die instantly
+> with `Invalid API key` (→ `unset` both so it falls back to your subscription OAuth login); and it
+> otherwise hangs ~6 min booting your full global MCP set (→ `--strict-mcp-config --mcp-config
+> /tmp/empty-mcp.json` — IDC never uses MCP). Capture with `> file 2>&1` and check `wc -c` > 0; `tee`
+> buffers until the session exits, so a live capture reads 0 bytes mid-run.
+>
 > Each `-p` run is a fresh session (edited markdown loads automatically; put interactive choices in
 > the prompt). See the root `CLAUDE.md` "Local end-to-end testing" section for the full loop.
 

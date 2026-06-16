@@ -11,8 +11,8 @@
 ([`assets/mental-model-hero-vector.svg`](assets/mental-model-hero-vector.svg)) — every label stays
 perfectly crisp and editable, and it never drifts from the words below. A painted-blueprint variant
 lives in [`assets/mental-model-hero.svg`](assets/mental-model-hero.svg) (a native-vector label layer
-over [`assets/mental-model-hero-base.png`](assets/mental-model-hero-base.png)); the painted base is
-pending a regen to this v3 model, so the vector diagram is the one embedded here.</sub>
+over [`assets/mental-model-hero-base.png`](assets/mental-model-hero-base.png)); the painted base now
+depicts this v3 two-diverter / recirculator model, and the crisp vector diagram is the one embedded here.</sub>
 
 ## The one-sentence version
 

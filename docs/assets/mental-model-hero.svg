@@ -2,9 +2,8 @@
      width="1376" height="768" viewBox="0 0 1376 768" role="img"
      aria-label="The IDC water rig — painted blueprint: Think Tank crystallizing a PRD + TRD, Diverter #1 (the one gate, the Think PR) branching up to the locked PRD + TRD, the processing train (planning), Implementer turbine, the review Filter, Finisher turbine, Diverter #2 (ship or return) feeding the Recirculator backflow, the Autorun faucet pouring into the glass, and the dashboard wired to every component.">
   <!-- Painted base (Gemini blueprint) + native-vector label layer. Coal House palette. -->
-  <!-- NOTE (v3): the painted base below depicts the older single-diverter / planning-turbine layout
-       and needs a manual Gemini regen to the two-diverter / processing-train / manifold-with-lights
-       model; this label layer already carries the v3 vocabulary. -->
+  <!-- NOTE (v3): the painted base below now depicts the two-diverter / processing-train / recirculator
+       model (regenerated via the image-gen skill); this label layer carries the matching v3 vocabulary. -->
   <image xlink:href="mental-model-hero-base.png" x="0" y="0" width="1376" height="768"/>
 
   <g font-family="Gill Sans, Gill Sans MT, Futura, Trebuchet MS, sans-serif">

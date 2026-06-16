@@ -96,11 +96,14 @@ above (existing boards keep surfacing under `--stage Buildable` with no migratio
 ## Blocked-by mechanism (native, with documented fallback)
 
 `blocks` uses the native GitHub **issue dependencies** "blocked by" relation through the REST
-API, so the dependency is first-class on the issue and surfaces in the §2 requirements gate chain:
+API, so the dependency is first-class on the issue and surfaces in the §2 requirements gate chain.
+The endpoint keys the blocking issue by its **database id** (`issue_id`), **not** its issue number —
+passing the number returns a `422`, so resolve the number to the id first:
 ```bash
+PARENT_ID=$(gh api "repos/{owner}/{repo}/issues/$PARENT" --jq '.id')  # number → database id
 gh api --method POST \
   "repos/{owner}/{repo}/issues/$CHILD/dependencies/blocked_by" \
-  -f blocked_by_issue_number="$PARENT" || blocks_fallback "$CHILD" "$PARENT"
+  -F issue_id="$PARENT_ID" || blocks_fallback "$CHILD" "$PARENT"
 ```
 **Fallback** (`blocks_fallback`) — if the dependencies endpoint is unavailable (404/501),
 record the relation as a tracked `blocks-on:#<parent>` line appended to the child's body and

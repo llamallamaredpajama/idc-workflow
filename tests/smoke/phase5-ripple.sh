@@ -31,6 +31,19 @@ echo "$out" | grep -q "^gate: yes$" || fail "PRD drift MUST gate"
 # unknown layer -> error
 python3 "$RL" bogus >/dev/null 2>&1 && fail "unknown layer should error"
 
+# ---- (a2) TRD-gating toggle: spec drift gates iff gating.trd is on (U2) ------------
+# The `spec` layer IS the TRD. With gating.trd:on it now reaches the gate; with :off it stays
+# autonomous (greenfield default). The PRD always gates regardless of the TRD toggle.
+CFG_ON="$WORK/cfg-trd-on.yaml";  printf 'gating:\n  prd: on\n  trd: on\n'  > "$CFG_ON"
+CFG_OFF="$WORK/cfg-trd-off.yaml"; printf 'gating:\n  prd: on\n  trd: off\n' > "$CFG_OFF"
+python3 "$RL" spec --config "$CFG_ON" | grep -q "^gate: yes$" \
+  || fail "TRD toggle: spec drift MUST gate when gating.trd is on"
+python3 "$RL" spec --config "$CFG_OFF" | grep -q "^gate: no$" \
+  || fail "TRD toggle: spec drift must stay ungated when gating.trd is off"
+python3 "$RL" prd --config "$CFG_OFF" | grep -q "^gate: yes$" \
+  || fail "TRD toggle: PRD MUST always gate regardless of the TRD toggle"
+# default (no --config) preserves greenfield: spec ungated, prd gated (asserted in (a) above).
+
 # ---- (b) PRD path reuses the one gate; non-PRD path creates no gate ---------------
 T="$WORK/TRACKER.md"
 python3 "$TRK" --tracker "$T" init || fail "tracker init failed"

@@ -69,10 +69,13 @@ runnable from here:
   **separate `claude` process whose cwd IS the sandbox does** (verified: it reads the sandbox's board
   + install-receipt, not this repo's). So you spawn that session from the shell:
   ```bash
-  ( cd /Users/jeremy/dev/sandbox/ke-idc-test-repo-update && \
+  # one-time setup: printf '{"mcpServers":{}}' > /tmp/empty-mcp.json
+  ( unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN; \
+    cd /Users/jeremy/dev/sandbox/ke-idc-test-repo-update && \
     claude --plugin-dir /Users/jeremy/dev/proj/idc-workflow-2.1.1 \
-           --permission-mode bypassPermissions -p "/idc:update" ) \
-    2>&1 | tee /Users/jeremy/dev/sandbox/_idc-observability/run-<label>.txt
+           --strict-mcp-config --mcp-config /tmp/empty-mcp.json \
+           --permission-mode bypassPermissions -p "/idc:update" < /dev/null ) \
+    > /Users/jeremy/dev/sandbox/_idc-observability/run-<label>.txt 2>&1
   ```
   - `--plugin-dir <checkout>` selects **which code version runs** (it bypasses the version-keyed
     cache). For a version-accurate **update** test, keep two checkouts side by side via a `git
@@ -84,6 +87,17 @@ runnable from here:
     command/skill markdown loads **every run automatically** (no restart; `scripts/*.py` apply live
     too). It can't stop to ask, so put any interactive choice **in the prompt**, e.g.
     `-p "/idc:update — apply the safe path: refresh WORKFLOW.md only, keep the configs, re-stamp them --customized"`.
+  - **Two spawn traps you MUST handle, or the run silently hangs / dies at 0 bytes:**
+    1. **Auth.** The nested session inherits this shell's env; a stale or rotated `ANTHROPIC_API_KEY`
+       / `ANTHROPIC_AUTH_TOKEN` makes it die instantly with `Invalid API key · Fix external API key`.
+       `unset` both at the front of the subshell so it falls back to your subscription OAuth login.
+       (Don't `echo`/print those var names — the secret-guard hook blocks it.)
+    2. **MCP startup hang.** Otherwise it boots your full global MCP set (firecrawl/github/playwright/…)
+       and hangs ~6 min at ~0 CPU / 0 bytes out. `--strict-mcp-config --mcp-config /tmp/empty-mcp.json`
+       (create once: `printf '{"mcpServers":{}}' > /tmp/empty-mcp.json`) disables MCP — IDC uses `gh`
+       + python, never MCP, so it's safe.
+    Also `< /dev/null` (skips the 3s stdin wait) and capture with `> file 2>&1`, then verify `wc -c` > 0
+    — `tee` buffers all stdout until the session exits, so a live capture reads 0 bytes mid-run and looks dead.
 
 ### The loop you run when asked to "test this"
 

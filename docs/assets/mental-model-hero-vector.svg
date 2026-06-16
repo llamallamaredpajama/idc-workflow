@@ -27,9 +27,9 @@
     <text x="1556" y="792" text-anchor="end" font-size="12.5" letter-spacing="2.5" fill="#9CA689" fill-opacity="0.85">ONE-WAY FLOW · ONE GATE · ONE WAY BACK</text>
 
     <!-- ===================== LEFT TRUNK PIPE (tank → fan-out) ===================== -->
-    <rect x="213" y="408" width="349" height="24" fill="#9CA689" fill-opacity="0.10"/>
-    <line x1="213" y1="408" x2="562" y2="408" stroke="#F9FAFD" stroke-width="2.5"/>
-    <line x1="213" y1="432" x2="562" y2="432" stroke="#F9FAFD" stroke-width="2.5"/>
+    <rect x="213" y="408" width="333" height="24" fill="#9CA689" fill-opacity="0.10"/>
+    <line x1="213" y1="408" x2="546" y2="408" stroke="#F9FAFD" stroke-width="2.5"/>
+    <line x1="213" y1="432" x2="546" y2="432" stroke="#F9FAFD" stroke-width="2.5"/>
     <g fill="#9CA689">
       <path d="M330,420 l-10,-6 l0,12 z"/>
       <path d="M522,420 l-10,-6 l0,12 z"/>
@@ -118,18 +118,25 @@
     <text x="493" y="500" text-anchor="middle" font-size="10.5" fill="#9CA689">deconflict → buildable issues</text>
 
     <!-- ===================== SEQUENCER MANIFOLD — fan into 5 parallel wave-pipes ===================== -->
-    <text x="867" y="250" text-anchor="middle" font-size="16" font-weight="bold" letter-spacing="1.5" fill="#F9FAFD">THE SEQUENCER MANIFOLD — PARALLEL WAVE-PIPES</text>
+    <text x="867" y="250" text-anchor="middle" font-size="16" font-weight="bold" letter-spacing="1.5" fill="#F9FAFD">PARALLEL WAVE-PIPES — THE BUILD</text>
     <text x="867" y="612" text-anchor="middle" font-size="12" fill="#9CA689">each wave runs the build triplet inline:  ⊙ implementer turbine  →  ▒ review filter  →  ⊙ finisher turbine</text>
     <text x="867" y="630" text-anchor="middle" font-size="12" fill="#9CA689">a status light on every wave — <tspan fill="#F56A6A">red</tspan> / <tspan fill="#9CA689">green</tspan> · the matrix gives each pipe its own files, so streams never cross</text>
 
-    <!-- artery fan-out (single pipe → 5 capillaries) -->
-    <g fill="none" stroke="#F9FAFD" stroke-width="2" stroke-opacity="0.9">
-      <path d="M562,420 C592,420 590,300 618,300"/>
-      <path d="M562,420 C592,420 592,360 618,360"/>
-      <path d="M562,420 L618,420"/>
-      <path d="M562,420 C592,420 592,480 618,480"/>
-      <path d="M562,420 C592,420 590,540 618,540"/>
+    <!-- SEQUENCING MANIFOLD — the labeled junction/header where the single pipe fans into the wave-pipes -->
+    <rect x="546" y="286" width="33" height="268" rx="9" fill="#252427" stroke="#F9FAFD" stroke-width="3"/>
+    <rect x="546" y="286" width="33" height="268" rx="9" fill="#9CA689" fill-opacity="0.08" stroke="none"/>
+    <!-- inlet from the trunk -->
+    <rect x="538" y="412" width="9" height="16" rx="2" fill="#252427" stroke="#F9FAFD" stroke-width="2"/>
+    <!-- five outlet ports feeding the wave-pipes -->
+    <g stroke="#F9FAFD" stroke-width="2" fill="#252427">
+      <rect x="579" y="294" width="8" height="12" rx="2"/>
+      <rect x="579" y="354" width="8" height="12" rx="2"/>
+      <rect x="579" y="414" width="8" height="12" rx="2"/>
+      <rect x="579" y="474" width="8" height="12" rx="2"/>
+      <rect x="579" y="534" width="8" height="12" rx="2"/>
     </g>
+    <text x="562" y="576" text-anchor="middle" font-size="11.5" font-weight="bold" letter-spacing="0.5" fill="#9CA689">SEQUENCING</text>
+    <text x="562" y="590" text-anchor="middle" font-size="11.5" font-weight="bold" letter-spacing="0.5" fill="#9CA689">MANIFOLD</text>
     <!-- vein fan-in (5 capillaries → single pipe) -->
     <g fill="none" stroke="#F9FAFD" stroke-width="2" stroke-opacity="0.9">
       <path d="M1118,300 C1146,300 1144,420 1176,420"/>
@@ -140,55 +147,55 @@
     </g>
 
     <!-- LANE 0 (y=300) green -->
-    <line x1="618" y1="300" x2="1118" y2="300" stroke="#F9FAFD" stroke-width="2" stroke-opacity="0.85"/>
+    <line x1="586" y1="300" x2="1118" y2="300" stroke="#F9FAFD" stroke-width="2" stroke-opacity="0.85"/>
     <use href="#turbine" x="663" y="285" width="30" height="30"/>
     <rect x="810" y="285" width="20" height="30" rx="3" fill="#252427" stroke="#F9FAFD" stroke-width="2"/>
     <path d="M814,293 l6,7 l-6,7" fill="none" stroke="#9CA689" stroke-width="1.6"/>
     <use href="#turbine" x="940" y="285" width="30" height="30"/>
     <path d="M1052,300 l-9,-5 l0,10 z" fill="#9CA689"/>
-    <circle cx="1093" cy="300" r="6.5" fill="#9CA689"/><circle cx="1093" cy="300" r="10.5" fill="none" stroke="#9CA689" stroke-opacity="0.4" stroke-width="2"/>
+    <circle cx="620" cy="300" r="6.5" fill="#9CA689"/><circle cx="620" cy="300" r="10.5" fill="none" stroke="#9CA689" stroke-opacity="0.4" stroke-width="2"/>
 
     <!-- LANE 1 (y=360) green -->
-    <line x1="618" y1="360" x2="1118" y2="360" stroke="#F9FAFD" stroke-width="2" stroke-opacity="0.85"/>
+    <line x1="586" y1="360" x2="1118" y2="360" stroke="#F9FAFD" stroke-width="2" stroke-opacity="0.85"/>
     <use href="#turbine" x="663" y="345" width="30" height="30"/>
     <rect x="810" y="345" width="20" height="30" rx="3" fill="#252427" stroke="#F9FAFD" stroke-width="2"/>
     <path d="M814,353 l6,7 l-6,7" fill="none" stroke="#9CA689" stroke-width="1.6"/>
     <use href="#turbine" x="940" y="345" width="30" height="30"/>
     <path d="M1052,360 l-9,-5 l0,10 z" fill="#9CA689"/>
-    <circle cx="1093" cy="360" r="6.5" fill="#9CA689"/><circle cx="1093" cy="360" r="10.5" fill="none" stroke="#9CA689" stroke-opacity="0.4" stroke-width="2"/>
+    <circle cx="620" cy="360" r="6.5" fill="#9CA689"/><circle cx="620" cy="360" r="10.5" fill="none" stroke="#9CA689" stroke-opacity="0.4" stroke-width="2"/>
 
     <!-- LANE 2 (y=420) red (in progress / finding) -->
-    <line x1="618" y1="420" x2="1118" y2="420" stroke="#F9FAFD" stroke-width="2.5"/>
+    <line x1="586" y1="420" x2="1118" y2="420" stroke="#F9FAFD" stroke-width="2.5"/>
     <use href="#turbine" x="663" y="405" width="30" height="30"/>
     <rect x="810" y="405" width="20" height="30" rx="3" fill="#252427" stroke="#F9FAFD" stroke-width="2"/>
     <path d="M814,413 l6,7 l-6,7" fill="none" stroke="#9CA689" stroke-width="1.6"/>
     <use href="#turbine" x="940" y="405" width="30" height="30"/>
     <path d="M1052,420 l-9,-5 l0,10 z" fill="#9CA689"/>
-    <circle cx="1093" cy="420" r="6.5" fill="#F56A6A"/><circle cx="1093" cy="420" r="10.5" fill="none" stroke="#F56A6A" stroke-opacity="0.4" stroke-width="2"/>
+    <circle cx="620" cy="420" r="6.5" fill="#F56A6A"/><circle cx="620" cy="420" r="10.5" fill="none" stroke="#F56A6A" stroke-opacity="0.4" stroke-width="2"/>
 
     <!-- LANE 3 (y=480) green -->
-    <line x1="618" y1="480" x2="1118" y2="480" stroke="#F9FAFD" stroke-width="2" stroke-opacity="0.85"/>
+    <line x1="586" y1="480" x2="1118" y2="480" stroke="#F9FAFD" stroke-width="2" stroke-opacity="0.85"/>
     <use href="#turbine" x="663" y="465" width="30" height="30"/>
     <rect x="810" y="465" width="20" height="30" rx="3" fill="#252427" stroke="#F9FAFD" stroke-width="2"/>
     <path d="M814,473 l6,7 l-6,7" fill="none" stroke="#9CA689" stroke-width="1.6"/>
     <use href="#turbine" x="940" y="465" width="30" height="30"/>
     <path d="M1052,480 l-9,-5 l0,10 z" fill="#9CA689"/>
-    <circle cx="1093" cy="480" r="6.5" fill="#9CA689"/><circle cx="1093" cy="480" r="10.5" fill="none" stroke="#9CA689" stroke-opacity="0.4" stroke-width="2"/>
+    <circle cx="620" cy="480" r="6.5" fill="#9CA689"/><circle cx="620" cy="480" r="10.5" fill="none" stroke="#9CA689" stroke-opacity="0.4" stroke-width="2"/>
 
     <!-- LANE 4 (y=540) red -->
-    <line x1="618" y1="540" x2="1118" y2="540" stroke="#F9FAFD" stroke-width="2" stroke-opacity="0.85"/>
+    <line x1="586" y1="540" x2="1118" y2="540" stroke="#F9FAFD" stroke-width="2" stroke-opacity="0.85"/>
     <use href="#turbine" x="663" y="525" width="30" height="30"/>
     <rect x="810" y="525" width="20" height="30" rx="3" fill="#252427" stroke="#F9FAFD" stroke-width="2"/>
     <path d="M814,533 l6,7 l-6,7" fill="none" stroke="#9CA689" stroke-width="1.6"/>
     <use href="#turbine" x="940" y="525" width="30" height="30"/>
     <path d="M1052,540 l-9,-5 l0,10 z" fill="#9CA689"/>
-    <circle cx="1093" cy="540" r="6.5" fill="#F56A6A"/><circle cx="1093" cy="540" r="10.5" fill="none" stroke="#F56A6A" stroke-opacity="0.4" stroke-width="2"/>
+    <circle cx="620" cy="540" r="6.5" fill="#F56A6A"/><circle cx="620" cy="540" r="10.5" fill="none" stroke="#F56A6A" stroke-opacity="0.4" stroke-width="2"/>
 
     <!-- triplet annotation on lane 0 -->
     <text x="678" y="272" text-anchor="middle" font-size="9.5" fill="#9CA689" fill-opacity="0.85">implementer</text>
     <text x="820" y="272" text-anchor="middle" font-size="9.5" fill="#9CA689" fill-opacity="0.85">filter</text>
     <text x="955" y="272" text-anchor="middle" font-size="9.5" fill="#9CA689" fill-opacity="0.85">finisher</text>
-    <text x="1093" y="272" text-anchor="middle" font-size="9.5" fill="#9CA689" fill-opacity="0.85">wave light</text>
+    <text x="612" y="272" text-anchor="middle" font-size="9.5" fill="#9CA689" fill-opacity="0.85">wave light</text>
 
     <!-- ===================== VEIN TRUNK → DIVERTER #2 ===================== -->
     <rect x="1176" y="408" width="78" height="24" fill="#9CA689" fill-opacity="0.10"/>
@@ -255,8 +262,8 @@
       <path d="M664,184 C480,300 360,360 271,408"/>
       <path d="M712,184 C520,300 430,380 386,402"/>
       <path d="M812,184 L493,396"/>
-      <path d="M980,184 C1040,260 1080,300 1093,290"/>
-      <path d="M1010,184 C1060,300 1090,420 1093,470"/>
+      <path d="M690,184 C662,250 632,288 620,294"/>
+      <path d="M744,184 C702,330 636,452 620,476"/>
     </g>
     <g fill="#9CA689">
       <circle cx="271" cy="408" r="3.2"/>

@@ -1,6 +1,6 @@
 {
   "name": "idc-workflow",
-  "description": "Self-hosted marketplace for the idc plugin — the IDC guardrail-framed development pipeline (Think → Plan → Build → Ripple, drained by Autorun) for Claude Code.",
+  "description": "Self-hosted marketplace for the idc plugin — the IDC guardrail-framed development pipeline (Think → Plan → Build → Recirculator, drained by Autorun) for Claude Code.",
   "owner": {
     "name": "llamallamaredpajama"
   },
@@ -9,7 +9,7 @@
       "name": "idc",
       "source": "./",
       "version": "2.1.5",
-      "description": "IDC workflow (Think → Plan → Build → Ripple, drained by Autorun) — a guardrail-framed, tracker-driven, goal-contract development pipeline as an installable Claude Code plugin"
+      "description": "IDC workflow (Think → Plan → Build → Recirculator, drained by Autorun) — a guardrail-framed, tracker-driven, goal-contract development pipeline as an installable Claude Code plugin"
     }
   ]
 }

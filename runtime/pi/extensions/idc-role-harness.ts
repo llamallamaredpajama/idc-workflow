@@ -67,15 +67,19 @@ const IDC_ROLES = new Set<IdcRole>([
 	"build-finish",
 ]);
 
+// v3 gate-at-Think model: Think authors AND gates the PRD + TRD (the `docs/specs`
+// layer) at the end of Think, so the canonical requirements docs are Think's write
+// authority — not Plan's. Plan becomes pure decomposition (no requirements authoring,
+// no gate). See docs/architecture.md "Runtime model".
 const THINK_ALLOWED = [
 	"docs/considerations/**",
+	"docs/prd/**",
+	"docs/specs/**",
 	"/tmp/pi-idc/think/**",
 	"/tmp/ke-idc-think/**",
 ];
 
 const PLAN_ALLOWED = [
-	"docs/prd/**",
-	"docs/specs/**",
 	"docs/plans/**",
 	"docs/workflow/pillar-conflicts/**",
 	"docs/workflow/pillar-matrices/**",
@@ -471,12 +475,12 @@ function pathPolicyFor(role: IdcRole, options: GuardOptions): PathPolicy {
 		case "think":
 			return {
 				allowedRoots: THINK_ALLOWED,
-				blockedSurfaces: ["canonical docs", "TRACKER.md", "source/tests", "release/merge artifacts"],
+				blockedSurfaces: ["master/subphase/pillar plans", "TRACKER.md", "source/tests", "release/merge artifacts"],
 			};
 		case "plan":
 			return {
 				allowedRoots: PLAN_ALLOWED,
-				blockedSurfaces: ["source/tests", "TRACKER ordering/status", "Build runtime state"],
+				blockedSurfaces: ["PRD/TRD requirements docs (Think authors + gates them)", "source/tests", "TRACKER ordering/status", "Build runtime state"],
 			};
 		case "sequence":
 			return {

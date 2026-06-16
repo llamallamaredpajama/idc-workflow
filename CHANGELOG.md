@@ -46,12 +46,12 @@ building free-flow. **Breaking** (the `/idc:ripple` command is renamed and the h
   implementer → review filter → finisher); **Diverter #2** = ship-or-return at the end of Build,
   feeding the **Recirculator** backflow up to Diverter #1; the tracker is the **dashboard**. The old
   "Bleed Valve" term is retired.
-- **Known limitation — the experimental Pi runtime keeps the v2 gate model.** The v3 gate relocation
-  (Think authors + gates the PRD/TRD; Plan authors nothing) ships on the **default Claude runtime**
-  (and Codex). The optional, **experimental Pi runtime** received only the Ripple → Recirculator role
-  rename this release; its role-harness write-authority and personas still encode the **v2 gate model**
-  (Plan authors the PRD/spec). Its v3 migration is a tracked follow-up — run the v3 pipeline on the
-  Claude or Codex runtime. See `docs/architecture.md` (Runtime model).
+- **The v3 gate model reaches every runtime, including the experimental Pi runtime.** The gate
+  relocation (Think authors + gates the PRD/TRD; Plan is pure decomposition that authors nothing and
+  runs no gate) now holds on the **default Claude runtime**, **Codex**, **and** the optional,
+  experimental **Pi runtime**: its role-harness write-authority gives Think (not Plan) `docs/prd` +
+  `docs/specs`, and the `think`/`plan` personas encode author-at-Think / pure-decompose — fail-closed,
+  no fail-open gate. See `docs/architecture.md` (Runtime model).
 
 ## 2.1.5 — 2026-06-15
 

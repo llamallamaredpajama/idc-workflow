@@ -1,7 +1,7 @@
 # idc-workflow — IDC plugin source (Codex/agent entry)
 
 This repo is the **source of the IDC Claude Code plugin** (`idc@idc-workflow`) — a
-guardrail-framed, tracker-driven pipeline (Think → Plan → Build, healed by Ripple, drained by
+guardrail-framed, tracker-driven pipeline (Think → Plan → Build, healed by the Recirculator, drained by
 Autorun). See `README.md` for what the plugin does and `docs/architecture.md` for how the pieces
 fit.
 
@@ -22,11 +22,11 @@ Live-loading the EDITED plugin against a sandbox is the e2e loop below.
 | Path | What |
 |------|------|
 | `.claude-plugin/` | `plugin.json` (manifest) + `marketplace.json` (self-hosted marketplace) |
-| `commands/*.md` | 9 slash entry points (`think · plan · build · ripple · autorun · init · doctor · update · uninstall`) |
+| `commands/*.md` | 9 slash entry points (`think · plan · build · recirculate · autorun · init · doctor · update · uninstall`) |
 | `agents/*.md` | stage orchestrators + the durable-worker implementer + finisher + review coordinator/agent |
-| `skills/<name>/SKILL.md` | reusable procedures — runtime adapters (claude/codex/pi), tracker adapter + backends, review engine, gate-issue, goal-contract, matrix, schema, ripple-sync |
+| `skills/<name>/SKILL.md` | reusable procedures — runtime adapters (claude/codex/pi), tracker adapter + backends, review engine, gate-issue, goal-contract, matrix, schema, recirculator-sync |
 | `templates/` | per-project scaffold `/idc:init` copies into a governed repo |
-| `scripts/` | `lint-references.sh`, filesystem tracker + plan/review/ripple/autorun helpers, installers |
+| `scripts/` | `lint-references.sh`, filesystem tracker + plan/review/recirculator/autorun helpers, installers |
 | `tests/smoke/` | the phase1–8 functional verification suite (`run-all.sh` drives it) |
 | `docs/` | `architecture.md`, `installing.md`, PRD/specs/plans, `dev/` notes |
 

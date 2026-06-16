@@ -24,7 +24,7 @@ against a fully-malicious same-user process.
 
 | Control | Guarantee | Code |
 |---|---|---|
-| **Glass-wall directional ACL** (client + hub) | A role resident may message only peers strictly downstream in the IDC river (+ Ripple). Enforced on the hub before queue/deliver, off the launcher-proven role — not a self-asserted name. | `evaluateComsNetSendForRole`, `handleSendMessage` |
+| **Glass-wall directional ACL** (client + hub) | A role resident may message only peers strictly downstream in the IDC river (+ the Recirculator). Enforced on the hub before queue/deliver, off the launcher-proven role — not a self-asserted name. | `evaluateComsNetSendForRole`, `handleSendMessage` |
 | **Per-session token** | Every session-scoped endpoint (send, SSE `/v1/events`, response submit, get, await, heartbeat, delete) requires the session's own token (`x-coms-session-token`), issued at registration and `timingSafeEqual`-compared. One resident cannot hijack another's stream, forge its reply, poll its messages, forge its liveness, or unregister it. | `sessionAuthorized` |
 | **Per-role registration capability** (`idc-pi fleet` mode only) | Registering an IDC role requires `x-coms-role-cap = HMAC(K, role)`, where `K` is a hub master key the **fleet supervisor** holds in memory and hands each resident **only its own** role's cap (env-only, never a file). A resident cannot *mint* a role it wasn't launched as. The ACL runs off the proven `canonical_role`. **In pane mode the hub is unconfigured** and this control is off (see below). | `roleCap`, `handleRegister`, `command_fleet` |
 

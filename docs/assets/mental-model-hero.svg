@@ -1,7 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
      width="1376" height="768" viewBox="0 0 1376 768" role="img"
-     aria-label="The IDC water rig — painted blueprint: Think Tank, Planning turbine, the Diverter Valve (one gate) branching up to the locked PRD, Implementer turbine, Filter, Finisher turbine, the Bleed Valve backflow, the Autorun faucet pouring into the glass, and the dashboard wired to every turbine.">
+     aria-label="The IDC water rig — painted blueprint: Think Tank crystallizing a PRD + TRD, Diverter #1 (the one gate, the Think PR) branching up to the locked PRD + TRD, the processing train (planning), Implementer turbine, the review Filter, Finisher turbine, Diverter #2 (ship or return) feeding the Recirculator backflow, the Autorun faucet pouring into the glass, and the dashboard wired to every component.">
   <!-- Painted base (Gemini blueprint) + native-vector label layer. Coal House palette. -->
+  <!-- NOTE (v3): the painted base below depicts the older single-diverter / planning-turbine layout
+       and needs a manual Gemini regen to the two-diverter / processing-train / manifold-with-lights
+       model; this label layer already carries the v3 vocabulary. -->
   <image xlink:href="mental-model-hero-base.png" x="0" y="0" width="1376" height="768"/>
 
   <g font-family="Gill Sans, Gill Sans MT, Futura, Trebuchet MS, sans-serif">
@@ -22,18 +25,18 @@
     <text x="185" y="668" text-anchor="middle" font-size="19" font-weight="bold" letter-spacing="1.5" fill="#F9FAFD">THINK TANK</text>
     <text x="185" y="689" text-anchor="middle" font-size="12.5" fill="#9CA689">/idc:think · ideas → one consideration</text>
 
-    <!-- PLANNING TURBINE -->
-    <text x="405" y="302" text-anchor="middle" font-size="15" font-weight="bold" letter-spacing="1" fill="#F9FAFD">PLANNING TURBINE</text>
-    <text x="405" y="320" text-anchor="middle" font-size="11.5" fill="#9CA689">/idc:plan</text>
+    <!-- PROCESSING TRAIN (planning — no turbine) -->
+    <text x="405" y="302" text-anchor="middle" font-size="15" font-weight="bold" letter-spacing="1" fill="#F9FAFD">PROCESSING TRAIN</text>
+    <text x="405" y="320" text-anchor="middle" font-size="11.5" fill="#9CA689">/idc:plan · grid-plates → manifold</text>
 
-    <!-- PRD (locked tank) -->
-    <text x="492" y="178" text-anchor="end" font-size="17" font-weight="bold" letter-spacing="1" fill="#F9FAFD">PRD</text>
+    <!-- PRD + TRD (locked tank) -->
+    <text x="492" y="178" text-anchor="end" font-size="17" font-weight="bold" letter-spacing="1" fill="#F9FAFD">PRD + TRD</text>
     <text x="492" y="197" text-anchor="end" font-size="12" font-weight="bold" fill="#F56A6A">you authorize</text>
-    <text x="492" y="213" text-anchor="end" font-size="10.5" fill="#9CA689">the one valve only you open</text>
+    <text x="492" y="213" text-anchor="end" font-size="10.5" fill="#9CA689">admitted by merging the Think PR</text>
 
-    <!-- DIVERTER VALVE -->
-    <text x="600" y="322" font-size="15" font-weight="bold" letter-spacing="1" fill="#F56A6A">DIVERTER VALVE</text>
-    <text x="600" y="340" font-size="11.5" fill="#9CA689">the one gate</text>
+    <!-- DIVERTER #1 (the gate) -->
+    <text x="600" y="322" font-size="15" font-weight="bold" letter-spacing="1" fill="#F56A6A">DIVERTER #1</text>
+    <text x="600" y="340" font-size="11.5" fill="#9CA689">the one gate · the Think PR</text>
 
     <!-- DASHBOARD -->
     <text x="966" y="138" font-size="14" font-weight="bold" letter-spacing="1" fill="#F9FAFD">THE DASHBOARD</text>
@@ -41,9 +44,9 @@
     <text x="966" y="170" font-size="11" fill="#9CA689">on every turbine</text>
     <text x="812" y="284" text-anchor="middle" font-size="11" letter-spacing="1.5" fill="#9CA689">STATUS · STAGE · WAVE · PHASE · DOMAIN</text>
 
-    <!-- BLEED VALVE -->
-    <text x="1085" y="320" text-anchor="middle" font-size="14" font-weight="bold" letter-spacing="1" fill="#F56A6A">BLEED VALVE</text>
-    <text x="1085" y="338" text-anchor="middle" font-size="11.5" fill="#9CA689">/idc:ripple</text>
+    <!-- DIVERTER #2 → RECIRCULATOR -->
+    <text x="1085" y="320" text-anchor="middle" font-size="14" font-weight="bold" letter-spacing="1" fill="#F56A6A">DIVERTER #2 → RECIRCULATOR</text>
+    <text x="1085" y="338" text-anchor="middle" font-size="11.5" fill="#9CA689">/idc:recirculate · ship or return</text>
 
     <!-- build triplet (below the backflow) -->
     <text x="665" y="702" text-anchor="middle" font-size="14" font-weight="bold" letter-spacing="0.5" fill="#F9FAFD">IMPLEMENTER</text>
@@ -54,7 +57,7 @@
     <text x="985" y="719" text-anchor="middle" font-size="11" fill="#9CA689">the caboose · fix → merge</text>
 
     <!-- backflow caption -->
-    <text x="760" y="652" text-anchor="middle" font-size="12" font-weight="bold" letter-spacing="0.5" fill="#F56A6A">CONTROLLED BACKFLOW — the only way back, re-decided at the gate</text>
+    <text x="760" y="652" text-anchor="middle" font-size="12" font-weight="bold" letter-spacing="0.5" fill="#F56A6A">CONTROLLED BACKFLOW — the Recirculator carries it all the way to Diverter #1</text>
 
     <!-- FAUCET -->
     <text x="1230" y="116" text-anchor="middle" font-size="14" font-weight="bold" letter-spacing="1" fill="#F9FAFD">FAUCET</text>

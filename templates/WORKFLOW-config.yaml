@@ -12,6 +12,15 @@ workflow:
 project:
   name: "{{PROJECT_NAME}}"
 
+# Requirements-gate toggles — which canonical "requirements" layer change pauses for the one human
+# gate (the operator-approval issue). The PRD (user-facing *what*) always gates; the TRD (the
+# technical *how* — the `spec` layer) gates only where the repo opts in. `/idc:init` sets the TRD
+# default by repo type: greenfield leaves it off, brownfield flips it on. Read by the gate predicate
+# (`scripts/idc_recirculator_layers.py`); Plan and the Recirculator honor it.
+gating:
+  prd: on    # PRD changes always gate (user-facing product function)
+  trd: off   # TRD/spec changes gate only when on (greenfield default: off)
+
 # Canonical document map for the IDC roles (v2 — five-layer chain + lean process tree).
 documents:
   workflow: WORKFLOW.md
@@ -25,7 +34,7 @@ documents:
 
 # Standing domains for this repo — config-seeded at `/idc:init` from codebase analysis,
 # pruned to touched domains and ad-hoc-extended by each `/idc:plan` run, maintained by
-# Ripple. Each entry: a single-select Domain value, a one-line brief, and primary
+# the Recirculator. Each entry: a single-select Domain value, a one-line brief, and primary
 # surfaces. Empty until `/idc:init` populates it.
 domains: []
   # - name: api
@@ -37,14 +46,14 @@ domains: []
 
 # Tier-symbolic model routing. Process docs (commands/agents/skills) reference ONLY the
 # tier name; the runtime adapter resolves a tier to a concrete model HERE at spawn time.
-# Ripple updates this table when models change. The Codex runtime ignores tiers entirely
+# The Recirculator updates this table when models change. The Codex runtime ignores tiers entirely
 # (untiered: highest available model at highest reasoning effort for every role).
 model_routing:
   reasoning:
     claude: { model: "claude-fable-5", thinking: max }
     use: >-
       planning cognition; the review coordinator/verdict + all judgment review dimensions;
-      ripple layer-impact analysis + PRD diffs; clash/matrix + sequencing; merge deconfliction
+      recirculator layer-impact analysis + PRD diffs; clash/matrix + sequencing; merge deconfliction
   standard:
     claude: { model: "claude-opus-4-8", effort: extra-high }
     use: >-

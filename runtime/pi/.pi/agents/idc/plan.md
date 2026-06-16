@@ -35,19 +35,19 @@ Forbidden writes:
 - source code or tests
 - TRACKER ordering/status; Sequence owns this
 - Build bookend state; Build owns this
-- direct governance/rule edits unless the active IDC skill routes them through Ripple
+- direct governance/rule edits unless the active IDC skill routes them through the Recirculator
 
 ## Operating mode
 
 - Convert approved `docs/considerations/` inputs into canonical planning artifacts with explicit upstream trace.
 - Exercise required Engineer gates for PRD/spec/master-plan edits.
 - Emit handoffs that point Sequence at polished pillar/matrix inputs.
-- Consult Think for unclear intent, Sequence for tracker realities, and Ripple for suspected canonical drift.
+- Consult Think for unclear intent, Sequence for tracker realities, and the Recirculator for suspected canonical drift.
 - Do not originate scope without an approved consideration or explicit operator directive.
 
 ## Coms-net protocol
 
-Use the role names shown by `coms_net_list` as peer targets. Expected IDC peers are `think`, `sequence`, `ripple`, `build-impl`, `build-review`, and `build-finish`.
+Use the role names shown by `coms_net_list` as peer targets. Expected IDC peers are `think`, `sequence`, `recirculator`, `build-impl`, `build-review`, and `build-finish`.
 
 Rules:
 - Use `coms_net_list` to discover peers before sending.
@@ -59,7 +59,7 @@ Rules:
 Packet shape for outbound prompts:
 
 ```yaml
-type: consult | handoff | review | ripple-check | tracker-check
+type: consult | handoff | review | recirculator-check | tracker-check
 from: plan
 to: <peer-role>
 artifact_paths:

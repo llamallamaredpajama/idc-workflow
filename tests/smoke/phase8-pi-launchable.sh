@@ -22,7 +22,7 @@ PLUGIN="$(cd "$(dirname "$0")/../.." && pwd)"
 LAUNCHER="$PLUGIN/runtime/pi/scripts/idc-pi"
 RT="$PLUGIN/runtime/pi"
 INSTALL="$PLUGIN/scripts/install-pi.sh"
-ROLES="think plan sequence ripple build-impl build-review build-finish"
+ROLES="think plan sequence recirculator build-impl build-review build-finish"
 
 fail() { echo "FAIL: $1"; exit 1; }
 [ -f "$LAUNCHER" ] || fail "vendored launcher missing at $LAUNCHER"

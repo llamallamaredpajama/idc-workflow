@@ -96,7 +96,7 @@ above (existing boards keep surfacing under `--stage Buildable` with no migratio
 ## Blocked-by mechanism (native, with documented fallback)
 
 `blocks` uses the native GitHub **issue dependencies** "blocked by" relation through the REST
-API, so the dependency is first-class on the issue and surfaces in the §2 PRD gate chain:
+API, so the dependency is first-class on the issue and surfaces in the §2 requirements gate chain:
 ```bash
 gh api --method POST \
   "repos/{owner}/{repo}/issues/$CHILD/dependencies/blocked_by" \

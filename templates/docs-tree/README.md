@@ -7,12 +7,18 @@ documents under `docs/prd/`, `docs/specs/`, and `docs/plans/`.
 
 ## Canonical chain
 
-`docs/prd/ → docs/specs/ → docs/plans/master-implementation-plan.md →
-docs/plans/subphases/ → docs/plans/pillars/ → tracker issues`
+Think authors the **two gated requirements docs** — the **PRD** (`docs/prd/`, the user-facing
+*what*) and the **TRD** (`docs/specs/`, the technical *how*) — and gates them at the end of Think on
+the Think PR (`docs/considerations/` records the brainstorm that drives them). Plan then **decomposes
+the admitted PRD+TRD** down the plan chain into tracker issues — it authors no requirements:
 
-Supporting route: `docs/considerations/` (pre-canonical Think input) → the canonical chain
-→ tracker issues (the glass wall) → Build. Ripple is the only retrograde path; it syncs
-the whole chain in one PR rather than leaving change-order files behind.
+`docs/prd/ + docs/specs/ (PRD + TRD — authored & gated at Think) →
+docs/plans/master-implementation-plan.md → docs/plans/subphases/ → docs/plans/pillars/ →
+tracker issues`
+
+Decomposed issues cross the glass wall into Build. The Recirculator is the only retrograde path; it
+syncs the whole chain in one PR rather than leaving change-order files behind, reusing the Think-PR
+gate when a requirements layer (PRD, or the TRD when gated) changes.
 
 ## Directories
 

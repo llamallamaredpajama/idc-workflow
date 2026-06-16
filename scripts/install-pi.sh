@@ -58,7 +58,7 @@ runtime_required() {
     "$rt/.pi/agents/idc/think.md" \
     "$rt/.pi/agents/idc/plan.md" \
     "$rt/.pi/agents/idc/sequence.md" \
-    "$rt/.pi/agents/idc/ripple.md" \
+    "$rt/.pi/agents/idc/recirculator.md" \
     "$rt/.pi/agents/idc/build-implementer.md" \
     "$rt/.pi/agents/idc/build-reviewer.md" \
     "$rt/.pi/agents/idc/build-finisher.md" \

@@ -84,7 +84,7 @@ case "$HEALTH" in
 esac
 
 # (3) the glass-wall ACL deny/allow matrix on the real send path (client gate).
-bun "$PROBE_TS" "$URL" "$TOK" "$PROJECT" || fail "glass-wall ACL probe failed (upstream send not denied, or downstream/ripple not allowed)"
+bun "$PROBE_TS" "$URL" "$TOK" "$PROJECT" || fail "glass-wall ACL probe failed (upstream send not denied, or downstream/recirculator not allowed)"
 
 # (4) F2 — the HUB itself must enforce the ACL: direct POSTs to /v1/messages that bypass the
 #     client gate (a compromised resident / any token holder) must be rejected server-side.

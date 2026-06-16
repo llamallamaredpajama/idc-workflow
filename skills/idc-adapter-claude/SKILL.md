@@ -30,12 +30,15 @@ the process docs stay runtime-neutral and cannot drift per-runtime.
 
 Read `WORKFLOW-config.yaml::model_routing`. For a spawn at tier `<tier>`, resolve
 `model_routing.<tier>.claude.model` and apply its `thinking` / `effort` hint. Process docs
-name only the tier; this skill resolves the concrete model. Ripple maintains the table when
+name only the tier; this skill resolves the concrete model. The Recirculator maintains the table when
 models change — never hardcode a model id in a command, agent, or non-adapter skill.
+`WORKFLOW-config.yaml` also carries the `gating:` requirements-gate toggle (`gating.prd` /
+`gating.trd`), but that is read by the gate predicate (`scripts/idc_recirculator_layers.py`) for
+Plan and the Recirculator — not by tier resolution.
 
 | Tier | Resolves to (per config) | Applied to |
 |---|---|---|
-| `reasoning` | `model_routing.reasoning.claude` | planning cognition; review coordinator/verdict + judgment dimensions; ripple analysis + PRD diffs; clash/matrix + sequencing; merge deconfliction |
+| `reasoning` | `model_routing.reasoning.claude` | planning cognition; review coordinator/verdict + judgment dimensions; recirculation analysis + PRD diffs; clash/matrix + sequencing; merge deconfliction |
 | `standard` | `model_routing.standard.claude` | think/interview; build implementers; finisher/orchestrator; autorun parent |
 | `utility` | `model_routing.utility.claude` | execute-never-decide: research digestion, recon, templated emission, board mechanics, the schema check, inventory review dimensions |
 
@@ -43,5 +46,5 @@ models change — never hardcode a model id in a command, agent, or non-adapter 
 
 - Maps primitives and resolves tiers only — never authors contracts, makes judgment calls,
   or issues verdicts.
-- Never mutates the tracker, canonical docs, or `WORKFLOW-config.yaml` (Ripple owns the
+- Never mutates the tracker, canonical docs, or `WORKFLOW-config.yaml` (the Recirculator owns the
   model table).

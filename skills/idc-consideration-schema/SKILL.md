@@ -4,11 +4,12 @@ description: 'Use when authoring or validating a /idc:think consideration file �
 ---
 # idc-consideration-schema
 
-The shape of a consideration — `/idc:think`'s only output (`WORKFLOW.md §4.1`). A
-consideration is **function-first**: it describes what the code should do for the user and
-how it behaves, organized by domain where natural. It is heavily PRD-shaped (intended
-product function, not implementation tasks) and pre-canonical — Plan turns it into the doc
-chain + issues; Think never pre-clears the PRD.
+The shape of a consideration — `/idc:think`'s function-first output (`WORKFLOW.md §4.1`). A
+consideration describes what the code should do for the user and how it behaves, organized by
+domain where natural. It is heavily PRD-shaped (intended product function, not implementation
+tasks). In v3 Think **crystallizes** the consideration into a **PRD + TRD draft** and fires the one
+gate at the end of Think (the Think PR), so the consideration declares **both** the user-facing
+*what* (`PRD impact`) and the technical *how* (`TRD impact`) it drives.
 
 ## Required shape
 
@@ -18,6 +19,7 @@ chain + issues; Think never pre-clears the PRD.
 - Date: <YYYY-MM-DD>
 - Status: Active
 - PRD impact: <yes|no> — <one plain phrase on whether user-facing function changes>
+- TRD impact: <yes|no> — <one plain phrase on whether the technical approach changes>
 
 ## What this does for the user
 <plain, function-first description — what someone using the product gets and notices>
@@ -30,7 +32,8 @@ chain + issues; Think never pre-clears the PRD.
 ```
 
 Function FIRST: lead with user-facing function, not a task list or file plan. The
-`PRD impact` line is informational for Plan's one gate — Think states it but does not gate.
+`PRD impact` and `TRD impact` lines name the requirements the consideration drives — Think
+crystallizes them into the gated PRD + TRD draft and fires the one gate at the end of Think.
 
 ## Mechanical check
 
@@ -46,7 +49,8 @@ with a reason list when any are absent:
 1. an H1 title;
 2. a function-first section (a heading mentioning the user or the function);
 3. a `PRD impact:` statement;
-4. an `Open questions` section.
+4. a `TRD impact:` statement;
+5. an `Open questions` section.
 
 `/idc:think` runs this on its emitted file before finishing; `/idc:plan` may re-run it on
 intake. It checks structure, not prose quality.

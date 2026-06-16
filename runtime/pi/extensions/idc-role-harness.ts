@@ -30,7 +30,7 @@ export type IdcRole =
 	| "think"
 	| "plan"
 	| "sequence"
-	| "ripple"
+	| "recirculator"
 	| "build-impl"
 	| "build-review"
 	| "build-finish";
@@ -38,7 +38,7 @@ export type IdcRole =
 type GuardMode = "off" | "warn" | "block";
 
 export interface GuardOptions {
-	rippleAllowCanonical?: boolean;
+	recirculatorAllowCanonical?: boolean;
 	liveOpsApproved?: boolean;
 }
 
@@ -61,7 +61,7 @@ const IDC_ROLES = new Set<IdcRole>([
 	"think",
 	"plan",
 	"sequence",
-	"ripple",
+	"recirculator",
 	"build-impl",
 	"build-review",
 	"build-finish",
@@ -97,15 +97,15 @@ const SEQUENCE_ALLOWED = [
 	"/tmp/ke-idc-sequence/**",
 ];
 
-const RIPPLE_ALLOWED_BASE = [
-	"docs/workflow/ripple/**",
+const RECIRCULATOR_ALLOWED_BASE = [
+	"docs/workflow/recirculator/**",
 	"docs/workflow/audits/**",
-	"docs/workflow/handoffs/ripples/**",
-	"/tmp/pi-idc/ripple/**",
-	"/tmp/ke-idc-ripple/**",
+	"docs/workflow/handoffs/recirculations/**",
+	"/tmp/pi-idc/recirculator/**",
+	"/tmp/ke-idc-recirculator/**",
 ];
 
-const RIPPLE_CANONICAL_ALLOWED = [
+const RECIRCULATOR_CANONICAL_ALLOWED = [
 	"docs/prd/**",
 	"docs/specs/**",
 	"docs/plans/**",
@@ -138,7 +138,7 @@ const BUILD_BLOCKED = [
 	"docs/prd/**",
 	"docs/specs/**",
 	"docs/plans/**",
-	"docs/workflow/ripple/**",
+	"docs/workflow/recirculator/**",
 	"docs/workflow/pillar-matrices/**",
 	"docs/workflow/pillar-conflicts/**",
 	"TRACKER.md",
@@ -166,15 +166,16 @@ export function isIdcRole(role: string): role is IdcRole {
 // IDC-LOCAL — glass-wall directional ACL for the coms_net_send seam (absorbs
 // source contract B3). Extends the per-role guard machinery from the path/bash
 // seams to the coms-net send seam: a role resident may message only peers
-// STRICTLY DOWNSTREAM of it in the IDC river, plus the Ripple peer — never an
-// upstream peer. Fail-closed: an unknown sender or unmappable target denies.
+// STRICTLY DOWNSTREAM of it in the IDC river, plus the Recirculator peer — never
+// an upstream peer. Fail-closed: an unknown sender or unmappable target denies.
 //
 // The IDC river is a linear order — think → plan → sequence → build-impl →
-// build-review → build-finish — with Ripple a universal DOWNSTREAM sink reachable
-// from any role. A send is allowed iff the target is strictly later in this order
-// than the sender, OR the target is Ripple. Everything else (upstream, self, an
-// unknown sender, or an unmappable target) is denied fail-closed. Ripple as a
-// SOURCE has no non-Ripple downstream, so it may only target Ripple.
+// build-review → build-finish — with the Recirculator a universal DOWNSTREAM sink
+// reachable from any role. A send is allowed iff the target is strictly later in
+// this order than the sender, OR the target is the Recirculator. Everything else
+// (upstream, self, an unknown sender, or an unmappable target) is denied
+// fail-closed. The Recirculator as a SOURCE has no non-Recirculator downstream,
+// so it may only target the Recirculator.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const RIVER_ORDER: IdcRole[] = ["think", "plan", "sequence", "build-impl", "build-review", "build-finish"];
@@ -209,13 +210,13 @@ export function evaluateComsNetSendForRole(senderRaw: string, targetRaw: string)
 		return { allowed: false, reason: `coms-net glass-wall: unknown target '${targetRaw}' — fail-closed deny`, senderRole };
 	}
 
-	// Ripple is the universal downstream sink — always an allowed target.
-	if (targetRole === "ripple") {
-		return { allowed: true, reason: "target is the Ripple peer (universal downstream sink)", senderRole, targetRole };
+	// The Recirculator is the universal downstream sink — always an allowed target.
+	if (targetRole === "recirculator") {
+		return { allowed: true, reason: "target is the Recirculator peer (universal downstream sink)", senderRole, targetRole };
 	}
-	// Ripple as a source: no non-Ripple peer is downstream of the sink.
-	if (senderRole === "ripple") {
-		return { allowed: false, reason: "coms-net glass-wall: ripple is a sink; no downstream non-Ripple peer", senderRole, targetRole };
+	// The Recirculator as a source: no non-Recirculator peer is downstream of the sink.
+	if (senderRole === "recirculator") {
+		return { allowed: false, reason: "coms-net glass-wall: recirculator is a sink; no downstream non-Recirculator peer", senderRole, targetRole };
 	}
 
 	const si = RIVER_ORDER.indexOf(senderRole);
@@ -482,9 +483,9 @@ function pathPolicyFor(role: IdcRole, options: GuardOptions): PathPolicy {
 				allowedRoots: SEQUENCE_ALLOWED,
 				blockedSurfaces: ["PRD/spec/master/subphase/pillar plans", "source/tests", "new product scope"],
 			};
-		case "ripple":
+		case "recirculator":
 			return {
-				allowedRoots: options.rippleAllowCanonical ? [...RIPPLE_ALLOWED_BASE, ...RIPPLE_CANONICAL_ALLOWED] : RIPPLE_ALLOWED_BASE,
+				allowedRoots: options.recirculatorAllowCanonical ? [...RECIRCULATOR_ALLOWED_BASE, ...RECIRCULATOR_CANONICAL_ALLOWED] : RECIRCULATOR_ALLOWED_BASE,
 				blockedSurfaces: ["source/tests", "tracker scope/order", "ungated canonical edits"],
 			};
 		case "build-impl":
@@ -520,7 +521,7 @@ function readGuardMode(pi: ExtensionAPI): GuardMode {
 
 function readGuardOptions(): GuardOptions {
 	return {
-		rippleAllowCanonical: process.env.PI_IDC_RIPPLE_ALLOW_CANONICAL === "1",
+		recirculatorAllowCanonical: process.env.PI_IDC_RECIRCULATOR_ALLOW_CANONICAL === "1",
 		liveOpsApproved: process.env[LIVE_OP_APPROVAL_ENV] === "1",
 	};
 }

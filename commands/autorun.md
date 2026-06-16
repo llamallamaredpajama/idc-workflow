@@ -12,9 +12,11 @@ whole repo.
 
 Traverse the pipe top-to-bottom and exit when nothing actionable remains:
 
-1. **Planning lane** — one plan-run durable worker per unplanned consideration in
-   `docs/considerations/` (each runs `idc:idc-plan`, itself zero-teammate); **serialize board
-   admission** through this parent so the global re-wave stays coherent. Skip if none.
+1. **Planning lane** — one plan-run durable worker per **approved**, unplanned consideration
+   (each runs `idc:idc-plan`, itself zero-teammate). A consideration with an **open Think PR**
+   (pending admission) is treated like an open gate — **report + skip, never plan past it**;
+   **serialize board admission** through this parent so the global re-wave stays coherent. Skip if
+   none.
 2. **Heal board hygiene** in passing (the auto `--fix`; `/idc:doctor` stays read-only).
 3. **Build lane** — while eligible build work exists, run `idc:idc-build` on the eligible
    waves, including waves unblocked mid-run from the operator's phone. Check the exit
@@ -23,12 +25,13 @@ Traverse the pipe top-to-bottom and exit when nothing actionable remains:
    python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --tracker <TRACKER.md>
    ```
    (or the github-backend equivalent via `idc:idc-tracker-adapter`).
-4. **Exit** when no considerations remain unplanned and the drain predicate reports
-   `drain: complete` (only Done + PRD-gated Blocked + operator gate issues left). Emit the
-   exit report: planned, admitted, built/merged, board state, and anything waiting on the
-   operator.
+4. **Exit** when no approved considerations remain unplanned and the drain predicate reports
+   `drain: complete` (only Done + requirements-gated Blocked + operator gate issues + un-admitted
+   considerations left). Emit the exit report: planned, admitted, built/merged, board state, and
+   anything waiting on the operator.
 
-A pending PRD gate is not a halt — autorun reports it and exits clean. Run
+A pending Think-PR gate (incl. an open Think PR pending admission) is not a halt — autorun reports
+it and exits clean. Run
 `/loop /idc:autorun` for always-on operation. Autorun owns no direct canonical or source
 writes — every cognitive write happens inside the `/idc:plan` and `/idc:build` runs it
 dispatches (`WORKFLOW.md §4.5`).

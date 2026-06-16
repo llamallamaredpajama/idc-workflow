@@ -2,9 +2,10 @@
 
 > IDC (Iterative Development Cycle) is a guardrail-framed, tracker-driven, goal-contract
 > development pipeline packaged as a Claude Code plugin. The flow is Think → Plan → Build,
-> with Ripple healing drift and Autorun draining the whole pipe. It is built on five
-> guardrails — the one PRD gate, matrix deconfliction, real verification surfaces, ripple,
-> and one-way flow through the glass wall (tracker issues) — and trusts the model with
+> with the Recirculator healing drift and Autorun draining the whole pipe. It is built on five
+> guardrails — the one gate at the end of Think (a Think PR admitting the PRD + TRD), matrix
+> deconfliction, real verification surfaces, recirculator, and one-way flow through the glass
+> wall (tracker issues) — and trusts the model with
 > everything else. This index lists every command, agent, skill, template, script, and
 > contract with a one-line purpose. Names are plugin-namespaced (`idc:`); files reference
 > each other via `${CLAUDE_PLUGIN_ROOT}`.
@@ -13,12 +14,12 @@
 
 Slash entry points (`commands/<name>.md` → `/idc:<name>`).
 
-- commands/think.md — `/idc:think`: free-form brainstorm (zero teammates) → one function-first consideration.
-- commands/plan.md — `/idc:plan`: consideration → goal-contract issues (domain experts, five-layer doc chain, matrix deconfliction, board admission, one PRD gate).
+- commands/think.md — `/idc:think`: free-form brainstorm (zero teammates) → one function-first consideration; at the end of Think it authors the PRD + TRD and opens the Think PR that gates their admission (draft until merge).
+- commands/plan.md — `/idc:plan`: consideration → goal-contract issues — pure decomposition (domain experts, plan-layer doc chain, matrix deconfliction, board admission); authors no requirements docs and runs no gate (the PRD + TRD gate lives at the end of Think).
 - commands/build.md — `/idc:build`: execute each issue's goal contract as a goal loop; merged review engine per PR; automerge on PASS.
-- commands/ripple.md — `/idc:ripple`: heal doc/reality drift in one PR (PR body = change order); PRD changes take the gate.
+- commands/recirculate.md — `/idc:recirculate`: heal doc/reality drift in one PR (PR body = change order); a requirements change (the PRD always, the TRD when `gating.trd: on`) reuses the end-of-Think gate.
 - commands/autorun.md — `/idc:autorun`: one-shot full-pipe drainer; loopable via `/loop`.
-- commands/init.md — `/idc:init`: scaffold a repo for IDC v2 (config + codebase-derived domains + 4-field board + install receipt); idempotent.
+- commands/init.md — `/idc:init`: scaffold a repo for IDC v3 (config + codebase-derived domains + 5-field board + install receipt; brownfield scan-and-confirm sets the TRD gating default); idempotent.
 - commands/doctor.md — `/idc:doctor`: read-only health check of an IDC-governed repo.
 - commands/update.md — `/idc:update`: resync a repo's stamped scaffold to the installed plugin (receipt-driven; pristine files silently re-stamped, customized files diff-and-asked; board report-only, never mutated).
 - commands/uninstall.md — `/idc:uninstall`: remove IDC repo footprints in one revertable commit (receipt-driven removal manifest + hardcoded pre-receipt fallback; work products archived; GitHub untouched by default).
@@ -31,7 +32,7 @@ Per-stage orchestrator playbooks + the one durable-worker role + the review coor
 - agents/idc-build.md — Build orchestrator + finisher/merge-queue: claim waves, dispatch implementers, review, automerge + close.
 - agents/idc-implementer.md — the one durable worker: executes a single issue's goal contract as a goal loop (failing-test-first, record-and-vary, no-punt).
 - agents/idc-review-coordinator.md — merged review engine coordinator: fan out specialists, dedup/score, emit the fail-closed verdict.
-- agents/idc-ripple.md — Ripple orchestrator: highest-affected-layer doc-sync in one PR; PRD-only gate.
+- agents/idc-recirculator.md — Recirculator orchestrator: highest-affected-layer doc-sync in one PR; reuses the end-of-Think PRD + TRD gate for requirements changes.
 - agents/idc-autorun.md — Autorun two-lane drainer: plan unplanned considerations (serialized admission) + build eligible waves; exit on drain-complete.
 
 ## Skills
@@ -41,23 +42,23 @@ Reusable procedures (`skills/<name>/SKILL.md`).
 - skills/idc-adapter-claude/ — Claude runtime adapter: primitives → Claude mechanics (Teams / Workflow / Task / goal) + model-tier resolution.
 - skills/idc-adapter-codex/ — Codex runtime adapter: primitives → Codex mechanics (app-server threads / spawn_agent / exec fan-out); untiered.
 - skills/idc-tracker-adapter/ — route tracker ops through the configured backend (dispatch surface; hides github⇄filesystem).
-- skills/idc-tracker-github/ — GitHub Projects v2 backend (six ops over the 4 fields, native blocked-by, claim comments, attempt label).
+- skills/idc-tracker-github/ — GitHub Projects v2 backend (six ops over the 5 fields, native blocked-by, claim comments, attempt label).
 - skills/idc-tracker-filesystem/ — filesystem backend (`TRACKER.md`); documents the executable helper scripts/idc_tracker_fs.py.
-- skills/idc-gate-issue/ — the one PRD gate: gate issue + chained blocked-by + push notification + approval/unblock.
+- skills/idc-gate-issue/ — the one requirements gate (PRD + TRD, at the end of Think): the Think PR (merge = admission) + gate issue + chained blocked-by + push notification + merge-detect/unblock.
 - skills/idc-consideration-schema/ — the function-first, Plan-ready consideration shape + its mechanical check.
 - skills/idc-goal-contract/ — the 6-element goal-contract authoring shape (Plan authors, Build executes).
 - skills/idc-matrix-analysis/ — pairwise clash fan-out, phase-matrix synthesis, parallel-safe wave re-sequencing.
 - skills/idc-schema-check/ — the mechanical issue-body gate (full contract + boundaries + deps + trace).
 - skills/idc-review-engine/ — the merged 13-dimension review engine (fan-out + dedup + confidence floor + fail-closed verdicts + test genuineness).
-- skills/idc-ripple-sync/ — highest-affected-layer + downstream sync set + the binary gate decision.
+- skills/idc-recirculator-sync/ — highest-affected-layer + downstream sync set + the binary gate decision.
 
 ## Templates
 
 Per-project scaffold copied by `/idc:init` (tokens: `{{PROJECT_NAME}}`, `{{TRACKER_PROJECT_NUMBER}}`).
 
-- templates/WORKFLOW.md — the per-repo IDC governance contract (five guardrails, three primitives, 4-field tracker, tier routing). → repo root.
-- templates/WORKFLOW-config.yaml — contract sidecar: project name, codebase-derived domains, tier-symbolic model_routing. → repo root.
-- templates/tracker-config.yaml — tracker backend + the four field IDs (Status/Wave/Phase/Domain). → `docs/workflow/tracker-config.yaml`.
+- templates/WORKFLOW.md — the per-repo IDC governance contract (five guardrails, three primitives, 5-field tracker, tier routing). → repo root.
+- templates/WORKFLOW-config.yaml — contract sidecar: project name, codebase-derived domains, the `gating:` PRD/TRD toggles, tier-symbolic model_routing. → repo root.
+- templates/tracker-config.yaml — tracker backend + the five field IDs (Status/Stage/Wave/Phase/Domain). → `docs/workflow/tracker-config.yaml`.
 - templates/docs-tree/ — the lean `docs/workflow/` tree (pillar-matrices/, code-reviews/ + README). → `docs/workflow/`.
 - templates/README.md — token reference and `/idc:init` destination map.
 
@@ -72,7 +73,7 @@ Per-project scaffold copied by `/idc:init` (tokens: `{{PROJECT_NAME}}`, `{{TRACK
 - scripts/idc_schema_check.py — validate an issue body is a complete goal contract.
 - scripts/idc_matrix_check.py — matrix deconfliction (same-wave pillars must own disjoint surfaces).
 - scripts/idc_review_verdict_check.py — validate a review verdict's structure + taxonomy consistency.
-- scripts/idc_ripple_layers.py — ripple downstream sync set + gate decision over the doc chain.
+- scripts/idc_recirculator_layers.py — recirculator downstream sync set + gate decision over the doc chain.
 - scripts/idc_autorun_drain.py — autorun's drain predicate (eligible build work vs PRD-gated/operator-only).
 - scripts/install-codex.sh — link the plugin skills (incl. the Codex adapter) into `~/.agents/skills`; `--revert` undoes it.
 - scripts/run-evals.sh — legacy eval runner; v2 verification is the tests/smoke/ suite.
@@ -81,7 +82,7 @@ Per-project scaffold copied by `/idc:init` (tokens: `{{PROJECT_NAME}}`, `{{TRACK
 ## Tests & contracts
 
 - tests/smoke/run-all.sh — the v2 functional verification suite (per-phase real round-trips against a throwaway sandbox).
-- .claude-plugin/plugin.json — plugin manifest (`name: idc`, version 2.0.0).
+- .claude-plugin/plugin.json — plugin manifest (`name: idc`, version 3.0.0).
 - .claude-plugin/marketplace.json — self-hosted marketplace listing the `idc` plugin.
 - docs/prd/prd.md — the v2 product requirements.
 - docs/specs/master-architectural-spec.md — the v2 plugin architecture + naming convention + inventory invariants.

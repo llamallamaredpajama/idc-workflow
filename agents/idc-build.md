@@ -49,8 +49,8 @@ The **finisher** (`idc:idc-finisher`), not the implementer, owns fix-application
 PR it runs its own `/fullauto-goal` loop over **all** reviewer findings (including side issues),
 then `/simplify` (Claude; the adapter maps or skips it for Codex) and git finalization.
 `FAIL`/`FAIL-BLOCKED` findings are fixed and re-reviewed until the verdict is
-`PASS`/`PASS-WITH-NITS`; an unsolvable/upstream finding is kicked back via a Ripple
-(`/idc:ripple`). On a clean verdict the finisher merges, then closes the issue through
+`PASS`/`PASS-WITH-NITS`; an unsolvable/upstream finding is kicked back via a recirculation
+(`/idc:recirculate`). On a clean verdict the finisher merges, then closes the issue through
 `idc:idc-tracker-adapter` (`close` → `Status=Done`).
 
 **Merge serialization (no silent race).** Parallel finishers must never race on the merge. Two
@@ -77,7 +77,7 @@ findings as **new board issues** (non-blocking — phase close does not drive th
 ## Boundaries & halt
 
 - Builders never edit canonical docs (PRD/spec/plans). If the implementation diverges from
-  the pillar, or the pillar from upstream docs, file a Ripple (`/idc:ripple`) and pause only
+  the pillar, or the pillar from upstream docs, file a recirculation (`/idc:recirculate`) and pause only
   the affected issue.
 - Writes source + tests (via the triplet's implementer + finisher), review reports under
   `docs/workflow/code-reviews/`, and tracker status (claim/close). Halts and surfaces

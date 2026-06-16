@@ -29,8 +29,32 @@ never overwrite an operator's `WORKFLOW.md`, `WORKFLOW-config.yaml`, `docs/workf
 - **Domains** — scan the repo's source layout (top-level source dirs, language manifests,
   existing module boundaries) and derive 2–6 standing domains, each a short name + one-line
   brief + primary surfaces. These seed `WORKFLOW-config.yaml::domains` (Phase 3) and the
-  board's `Domain` field options (Phase 4). Plan prunes/extends them per run; Ripple
+  board's `Domain` field options (Phase 4). Plan prunes/extends them per run; the Recirculator
   maintains them. Keep them coarse — a domain is a slice a domain-expert reviewer owns.
+
+### Phase 1b — Requirements-doc scan + repo type (brownfield vs greenfield)
+
+Before Phase 3 lays down the tree, run the bounded **read-only** scan that finds any PRD / TRD /
+spec / consideration docs the repo already carries and classifies it brownfield vs greenfield:
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_brownfield_scan.py" "$(git rev-parse --show-toplevel)"
+```
+It prints `type:` (brownfield|greenfield), `gating-trd-default:` (on|off), and the found `prd:` /
+`trd:` / `considerations:` / `stack:` paths (`<none>` when empty). Capture `type` (→ `REPO_TYPE`)
+and `gating-trd-default` (→ `TRD_GATING_DEFAULT`, consumed in Phase 3).
+
+- **HARD CONSTRAINT — confirm what exists, never invent.** The scan is strictly read-only and the
+  command must stay that way at this step: **do not author, fabricate, or overwrite any PRD/TRD/spec
+  doc here.** When the scan finds existing requirements docs, **report them to the operator** (list
+  the found `prd:`/`trd:`/spec paths) and **confirm** how to proceed — offer **scaffold-from-repo**
+  (keep + reference the found docs), **from-scratch** (author fresh later, in Think), or a **mix**.
+  Authoring a full architecture doc at setup is explicitly out of scope: the PRD-then-TRD
+  conversation happens in `/idc:think` (`commands/think.md`), not here.
+- **Greenfield** (`type: greenfield`) → init writes **no** starter PRD/spec. Confirm the
+  PRD-then-TRD conversation is deferred to the first `/idc:think`, and leave the TRD gate off.
+- The scan's `gating-trd-default` encodes the type-aware default Phase 3 writes: **brownfield → TRD
+  gate on** (protect an established stack from silent re-architecture), **greenfield → off** (let
+  architecture flex). The PRD always gates by default (`gating.prd: on`).
 
 ## Phase 2 — Detect-and-skip (idempotency)
 Check each target independently, recording `created` / `skipped-existing`:
@@ -52,6 +76,21 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/idc_init_scaffold.sh" \
 ```
 Then write the Phase-1 derived domains into `WORKFLOW-config.yaml::domains` (replace the
 empty `domains: []` with the list, each `- name: / brief: / surfaces: [...]`).
+
+**Type-aware TRD-gating default.** The scaffolded `WORKFLOW-config.yaml` ships the greenfield
+default (`gating.prd: on`, `gating.trd: off`). If Phase 1b classified the repo **brownfield**
+(`TRD_GATING_DEFAULT=on`), flip the TRD gate on so an established stack can't be silently
+re-architected (the predicate in `scripts/idc_recirculator_layers.py` reads it); greenfield leaves
+it off. Rewrite the one `trd:` line under `gating:` — value **and** its inline comment, so the
+comment doesn't keep saying "greenfield default: off" next to a `trd: on`:
+```bash
+if [ "$TRD_GATING_DEFAULT" = "on" ]; then
+  tmp="$(mktemp)"
+  sed "s|^  trd: off.*|  trd: on     # TRD/spec changes gate (brownfield default: on)|" \
+    WORKFLOW-config.yaml > "$tmp" && mv "$tmp" WORKFLOW-config.yaml
+fi
+```
+`gating.prd` stays `on` for both repo types. The operator can toggle either gate anytime.
 
 For the **filesystem** backend the board is now ready (`TRACKER.md` initialized) — skip
 Phase 4. For **github**, the `{{TRACKER_PROJECT_NUMBER}}` token stays until Phase 4 fills
@@ -187,7 +226,8 @@ enablement key) even if those paths are passed.
 
 **Data-loss guard — stamp operator-data files `customized`.** Two scaffold files get real
 operator/board data written into them *after* the template is copied: `WORKFLOW-config.yaml`
-(the Phase-1 derived `domains:` list) and `docs/workflow/tracker-config.yaml` (the
+(the Phase-1 derived `domains:` list + the type-aware `gating.trd` default) and
+`docs/workflow/tracker-config.yaml` (the
 `project_number` + board `field_ids` node IDs from Phase 4). Stamped plain `state: stamped`,
 `/idc:update` would class them pristine and silently overwrite them from the template —
 wiping `domains` back to `[]` and the board wiring back to empty. Stamping them `--customized`

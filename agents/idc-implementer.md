@@ -30,8 +30,8 @@ triplet into one sequential session is the last-resort fallback only. Standard t
    independent combined review agent). The **finisher** (`idc:idc-finisher`), not the
    implementer, owns applying the review findings and merging — the implementer does not fix
    review findings or merge.
-5. **Divergence → Ripple.** If the implementation diverges from the pillar, or the pillar
-   diverges from upstream docs, file a Ripple (`/idc:ripple`) and pause **only this issue** —
+5. **Divergence → recirculation.** If the implementation diverges from the pillar, or the pillar
+   diverges from upstream docs, file a recirculation (`/idc:recirculate`) and pause **only this issue** —
    never paper over the drift in source.
 
 ## Authority boundaries

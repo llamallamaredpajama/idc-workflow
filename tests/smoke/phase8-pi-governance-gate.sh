@@ -33,7 +33,7 @@ REPO="$SBX/repo"; mkdir -p "$REPO/docs/workflow"
 cat > "$REPO/WORKFLOW.md" <<'EOF'
 # WORKFLOW.md — governance gate test
 ## 1. Canonical chain
-Think -> Plan -> Build; Ripple is the only retrograde path.
+Think -> Plan -> Build; the Recirculator is the only retrograde path.
 EOF
 cat > "$REPO/WORKFLOW-config.yaml" <<'EOF'
 workflow:

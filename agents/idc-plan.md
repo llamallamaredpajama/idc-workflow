@@ -32,7 +32,8 @@ risks, and goal-shaped work items. The orchestrator absorbs the digests, not ful
 Draft the five-layer chain — PRD diff (only if user-facing function changes), arch-spec
 updates, the master-plan section, subphase plans, pillar plans. Parallel drafting fan-out
 **writes to disk and returns digests**; the orchestrator never absorbs full doc bodies. All
-five layers survive as files for traceability; **only the PRD is gated** (Phase 5).
+five layers survive as files for traceability; **the PRD is gated, and the TRD/spec layer too
+when `gating.trd: on`** (Phase 5).
 
 ## Phase 3 — Author the goal contracts
 
@@ -55,12 +56,13 @@ contradiction that can't be deconflicted is parked and surfaced for a recirculat
    (`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_schema_check.py" <body>`); fix until PASS.
 2. Create issues and set `Status`/`Wave`/`Phase`/`Domain` + native blocked-by through
    `idc:idc-tracker-adapter`.
-3. **PRD gate:** if the run changes the PRD, hand the PRD-touching issues to
-   `idc:idc-gate-issue` — they land `Blocked` behind one gate issue (plain-terms summary +
-   PRD diff + push notification). Non-PRD issues from the same run flow as `Todo`.
+3. **Requirements gate:** read the `gating:` toggle from `WORKFLOW-config.yaml`. If the run
+   changes the PRD (always gated), or the TRD/spec layer when `gating.trd: on`, hand the gated
+   issues to `idc:idc-gate-issue` — they land `Blocked` behind one gate issue (plain-terms
+   summary + the doc diff + push notification). Ungated issues from the same run flow as `Todo`.
 4. Archive the consideration; open the planning PR whose **body is the audit trail** (what
-   was planned, the matrix, the trace); automerge when green (the PRD gate is the only human
-   touchpoint).
+   was planned, the matrix, the trace); automerge when green (the requirements gate is the only
+   human touchpoint).
 
 ## Model tiers (resolved by the runtime adapter)
 

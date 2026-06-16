@@ -98,7 +98,9 @@ name only the **tier** (`WORKFLOW.md §6`), and the `idc-pi` launcher resolves i
 `WORKFLOW-config.yaml::model_routing` and applies the resolved model/effort to the Pi agent at
 resident spawn (mirroring `idc:idc-adapter-claude`, not Codex's untiered carve-out). Never hardcode
 a model id in a command, agent, or non-adapter skill; the Recirculator maintains the table when models
-change.
+change. `WORKFLOW-config.yaml` also carries the `gating:` requirements-gate toggle (`gating.prd` /
+`gating.trd`), read by the gate predicate (`scripts/idc_recirculator_layers.py`) for Plan and the
+Recirculator — not by tier resolution.
 
 ## Authority boundaries
 

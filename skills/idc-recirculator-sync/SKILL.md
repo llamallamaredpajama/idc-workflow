@@ -12,14 +12,15 @@ change order.
 
 ## The one question
 
-Determine the **highest affected canonical layer** and answer: does user-facing product
-function change?
+Determine the **highest affected canonical layer** and answer: does a **gated requirements layer**
+change? The PRD (user-facing *what*) always gates; the TRD — the `spec` layer (*how*) — gates only
+when the repo opts in with `gating.trd: on` in `WORKFLOW-config.yaml`.
 
 - **No** → update that layer and **every layer below it** down the chain in **one PR**
   (synchronized together), automerge. The doc chain never half-updates.
-- **Yes** → the highest affected layer is the PRD; take the same gate as Plan via
-  `idc:idc-gate-issue` (blocked operator-todo gate + plain-terms summary + PRD diff + push
-  notification). Only the PRD gates.
+- **Yes** → the highest affected layer is the PRD (or the TRD/`spec` layer when `gating.trd: on`);
+  take the same gate as Plan via `idc:idc-gate-issue` (blocked operator-todo gate + plain-terms
+  summary + the doc diff + push notification).
 
 ## Downstream sync set
 
@@ -28,10 +29,14 @@ plus everything downstream of it, in one PR, plus any affected open issues. Comp
 and the gate decision deterministically:
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_recirculator_layers.py" <prd|spec|master|subphase|pillar>
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_recirculator_layers.py" <prd|spec|master|subphase|pillar> --config WORKFLOW-config.yaml
 # -> sync: <layer> ... pillar
-#    gate: yes|no   (yes iff the highest affected layer is the PRD)
+#    gate: yes|no   (yes iff the highest affected layer is a gated requirements layer:
+#                    the PRD always, or the TRD/`spec` layer when gating.trd: on)
 ```
+
+`--config` points the helper at the repo's `WORKFLOW-config.yaml` so the `gating:` toggle is
+honored; omit it and the gate falls back to the greenfield default (PRD gates, TRD does not).
 
 ## The PR is the change order
 

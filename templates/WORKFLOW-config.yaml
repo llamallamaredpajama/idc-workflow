@@ -25,7 +25,7 @@ documents:
 
 # Standing domains for this repo — config-seeded at `/idc:init` from codebase analysis,
 # pruned to touched domains and ad-hoc-extended by each `/idc:plan` run, maintained by
-# Ripple. Each entry: a single-select Domain value, a one-line brief, and primary
+# the Recirculator. Each entry: a single-select Domain value, a one-line brief, and primary
 # surfaces. Empty until `/idc:init` populates it.
 domains: []
   # - name: api
@@ -37,14 +37,14 @@ domains: []
 
 # Tier-symbolic model routing. Process docs (commands/agents/skills) reference ONLY the
 # tier name; the runtime adapter resolves a tier to a concrete model HERE at spawn time.
-# Ripple updates this table when models change. The Codex runtime ignores tiers entirely
+# The Recirculator updates this table when models change. The Codex runtime ignores tiers entirely
 # (untiered: highest available model at highest reasoning effort for every role).
 model_routing:
   reasoning:
     claude: { model: "claude-fable-5", thinking: max }
     use: >-
       planning cognition; the review coordinator/verdict + all judgment review dimensions;
-      ripple layer-impact analysis + PRD diffs; clash/matrix + sequencing; merge deconfliction
+      recirculator layer-impact analysis + PRD diffs; clash/matrix + sequencing; merge deconfliction
   standard:
     claude: { model: "claude-opus-4-8", effort: extra-high }
     use: >-

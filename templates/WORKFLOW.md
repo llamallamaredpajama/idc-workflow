@@ -10,7 +10,7 @@
 > Finisher** (`/idc:build`) — and pour out the **Faucet** (`/idc:autorun`) as merged software in
 > your glass. The **Diverter Valve** is the one gate (§2): it sends any change to *what the
 > software does for the user* up to the **PRD**, the one valve only you can open. The **Bleed
-> Valve** (`/idc:ripple`, §4.4) is the single controlled way back. The board is the **dashboard**
+> Valve** (`/idc:recirculate`, §4.4) is the single controlled way back. The board is the **dashboard**
 > that meters every turbine (§3.1). This is the friendly picture; the numbered sections below are
 > the authoritative contract.
 
@@ -18,16 +18,16 @@ IDC carries an idea from a raw thought to merged, tested code. It is built on
 **guardrails, not train tracks**: the model is trusted to do the work; the process
 intervenes only where a real derailment would otherwise ship. There are exactly five
 guardrails — the one PRD gate (§2), matrix deconfliction (§4.2), real verification
-surfaces (§4.3), ripple drift-healing (§4.4), and one-way flow through the glass wall
+surfaces (§4.3), recirculator drift-healing (§4.4), and one-way flow through the glass wall
 (§1.2). Everything else flows autonomously.
 
 ## 1. Canonical chain & flow
 
 ### 1.1 The pipeline
 
-`Think → Plan → Build`, with `Ripple` as the only retrograde path and `Autorun` as the
+`Think → Plan → Build`, with the `Recirculator` as the only retrograde path and `Autorun` as the
 one-shot drainer that traverses the whole pipe. Slash surfaces: `/idc:think`,
-`/idc:plan`, `/idc:build`, `/idc:ripple`, `/idc:autorun`, plus `/idc:init` (per-project
+`/idc:plan`, `/idc:build`, `/idc:recirculate`, `/idc:autorun`, plus `/idc:init` (per-project
 scaffold) and `/idc:doctor` (read-only health check).
 
 | Stage | Slash surface | Surface it writes |
@@ -35,23 +35,23 @@ scaffold) and `/idc:doctor` (read-only health check).
 | Think | `/idc:think` | `docs/considerations/` (pre-canonical) |
 | Plan | `/idc:plan` | `docs/prd/`, `docs/specs/`, `docs/plans/` (master + subphases + pillars), pillar matrices, and tracker issues |
 | Build | `/idc:build` | source surfaces (per issue `BOUNDARIES`), tests, review reports, and tracker status |
-| Ripple | `/idc:ripple` | every affected canonical doc, synchronized in one PR |
+| Recirculator | `/idc:recirculate` | every affected canonical doc, synchronized in one PR |
 
 ### 1.2 One-way flow + the glass wall
 
 Planning reaches Build **only** through tracker issues (the glass wall). Build reaches
-planning **only** through Ripple. No role edits a layer above it; a lower role that finds
-a higher layer wrong files a Ripple and pauses only the affected issue.
+planning **only** through the Recirculator. No role edits a layer above it; a lower role that finds
+a higher layer wrong files a recirculation and pauses only the affected issue.
 
 ### 1.3 The five-layer doc chain
 
 PRD → master architectural spec → master implementation plan → subphase plans → pillar
 plans. All five survive as files for traceability. **Only the PRD is gated (§2); every
-other doc is drafted, updated, and merged autonomously** by Plan and Ripple.
+other doc is drafted, updated, and merged autonomously** by Plan and the Recirculator.
 
 ## 2. The one gate — PRD (user-facing function)
 
-The single human checkpoint in the entire system. When Plan or Ripple determines that
+The single human checkpoint in the entire system. When Plan or the Recirculator determines that
 the **PRD must change** — i.e. what the product does for its users changes — the affected
 tracker issues land **Blocked**, chained by native blocked-by to one **gate issue** that
 carries a plain-terms summary ("here's what your app will do differently") plus the
@@ -126,7 +126,7 @@ own.
 ### 3.3 Six operations
 
 `createTicket`, `setField`, `link` (`sub`|`blocks`), `move` (status), `query`, `comment`.
-Adding a seventh or dropping one is a contract change that requires a Ripple to admit.
+Adding a seventh or dropping one is a contract change that requires a recirculation to admit.
 
 ## 4. Role authority & the guardrails
 
@@ -155,9 +155,9 @@ issue's goal contract as a goal loop (record-and-vary, evidence-before-assertion
 deferred). Review is fresh-context **bounded fan-out** — iterate → reverify → automerge
 when all green → close. **Nothing merges that isn't green on real functional tests; a
 shallow or placeholder suite is a review FAIL.** Builders never edit canonical docs;
-divergence files a Ripple and pauses only the affected issue.
+divergence files a recirculation and pauses only the affected issue.
 
-### 4.4 Ripple — drift healing
+### 4.4 Recirculator — drift healing
 
 The only retrograde path. Determines the highest affected layer and answers one question:
 does user-facing product function change? **No** → update every affected doc down the
@@ -183,7 +183,7 @@ harness maps them to concrete mechanics.
 | **Bounded fan-out** | domain experts, drafters, clash pairs, reviewers |
 | **Goal loop** | issue execution |
 
-**Concurrency budget:** Think / Plan / Ripple = **zero** durable workers (bounded fan-out
+**Concurrency budget:** Think / Plan / Recirculator = **zero** durable workers (bounded fan-out
 only); Build = one durable worker per parallel-safe issue; review = bounded fan-out in
 every runtime. **Fallback ladder:** with no durable-worker environment, that work runs
 serially in the main session; review fan-out is always available (fresh context = true
@@ -193,10 +193,10 @@ adversarial independence, and token-optimal).
 
 Process docs name **tiers**, never concrete models. The tier → model map lives in
 `WORKFLOW-config.yaml::model_routing`; the runtime adapter resolves a tier to a concrete
-model at spawn time, and Ripple maintains the table when models change.
+model at spawn time, and the Recirculator maintains the table when models change.
 
 - `reasoning` — planning cognition, the review coordinator/verdict + all judgment review
-  dimensions, ripple layer-impact analysis + PRD diffs, clash/matrix + sequencing, merge
+  dimensions, recirculator layer-impact analysis + PRD diffs, clash/matrix + sequencing, merge
   deconfliction.
 - `standard` — think/interview, build implementers (goal loops), the finisher/orchestrator,
   the autorun parent.
@@ -210,5 +210,5 @@ every role.
 ## 7. Commit / PR conventions
 
 Every commit traces to the issue or change order it advances. Never commit with
-`--no-verify`. Planning PRs and ripple PRs automerge when green (the §2 PRD gate is the
+`--no-verify`. Planning PRs and recirculation PRs automerge when green (the §2 PRD gate is the
 only human touchpoint); build PRs automerge on a PASS review with real tests green.

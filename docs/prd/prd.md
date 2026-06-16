@@ -48,7 +48,7 @@ PR reviewed by the **merged review engine** (13 dimensions, fresh-context fan-ou
 test-genuineness as a dimension). Iterate → reverify real tests green → **automerge on
 PASS** → close. Nothing merges that isn't green on genuine functional tests.
 
-### R4 — Ripple (`/idc:ripple`)
+### R4 — Recirculator (`/idc:recirculate`)
 Heals drift between docs and reality in **one PR** (the PR body is the change order),
 automerged — unless user-facing product function changes, in which case it takes the same
 PRD gate as Plan.
@@ -59,7 +59,7 @@ hygiene, and builds eligible work, exiting when nothing actionable remains. Loop
 `/loop` for standing operation.
 
 ### R6 — The one gate (PRD)
-When planning or ripple determines the PRD must change, affected issues land **Blocked**
+When planning or the Recirculator determines the PRD must change, affected issues land **Blocked**
 behind a single approval issue with a plain-terms summary ("here's what your app will do
 differently") + the PRD diff. The operator gets a **push notification** and approves from
 the GitHub web UI on their phone; approval flips the status and builders proceed.

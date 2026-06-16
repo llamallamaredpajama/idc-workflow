@@ -66,7 +66,7 @@ when green**; the rig intervenes only where a real derailment would otherwise sh
 | **Think** | `/idc:think` | 🛢️ **Think Tank** — free brainstorm (zero teammates) → one function-first consideration. | `docs/considerations/` |
 | **Plan** | `/idc:plan` | ⊙ **Planning turbine** — consideration → goal-contract issues: domain experts, the five-layer doc chain (only the PRD gated), matrix sequencing, board admission. | `docs/prd/`, `docs/specs/`, `docs/plans/`, matrices, issues |
 | **Build** | `/idc:build` | ⊙ **Implementer → ▒ Filter → ⊙ Finisher** — each issue's goal contract runs as a goal loop; independent review screens every PR; automerge on PASS. | source, tests, review reports, tracker status |
-| **Ripple** | `/idc:ripple` | 🩸 **Bleed Valve** — heals doc/reality drift in one PR (PR body = change order); PRD changes take the gate. | every affected canonical doc |
+| **Recirculator** | `/idc:recirculate` | 🩸 **Bleed Valve** — heals doc/reality drift in one PR (PR body = change order); PRD changes take the gate. | every affected canonical doc |
 | **Autorun** | `/idc:autorun` | 🚰 **Faucet** — open it and the whole pipe drains on its own; loop it with `/loop`. | — |
 
 > **Autorun** opens the faucet full: unplanned considerations → plan → build eligible waves as
@@ -82,10 +82,10 @@ are exactly **five**:
 | 1 | **The one locked valve to the PRD** | Your product's function never changes without your consent. |
 | 2 | **Parallel pipes on separate sections** (matrix) | Wide builds never collide. |
 | 3 | **The Filter** (real verification surfaces) | Nothing reaches the Glass that isn't green on genuine functional tests. |
-| 4 | **The Bleed Valve** (Ripple) | Docs and reality never silently diverge. |
+| 4 | **The Bleed Valve** (the Recirculator) | Docs and reality never silently diverge. |
 | 5 | **One-way flow + the metered dashboard** | The chain stays auditable end to end. |
 
-**The one gate.** When planning or ripple determines the PRD must change, the affected issues
+**The one gate.** When planning or the Recirculator determines the PRD must change, the affected issues
 park `Blocked` behind a single approval issue (a plain-terms summary + the PRD diff). You get a
 push notification and open the valve from the GitHub web UI — on your phone. Nothing else asks for
 permission.
@@ -148,7 +148,7 @@ Nine slash entry points:
 | `/idc:think` | 🛢️ Think Tank — brainstorm → one consideration |
 | `/idc:plan` | ⊙ Planning turbine — consideration → goal-contract issues |
 | `/idc:build` | ⊙▒⊙ the build triplet — issues → merged, reviewed code |
-| `/idc:ripple` | 🩸 Bleed Valve — heal doc/reality drift in one PR |
+| `/idc:recirculate` | 🩸 Bleed Valve — heal doc/reality drift in one PR |
 | `/idc:autorun` | 🚰 Faucet — open the whole pipe, drain it hands-off |
 | `/idc:init` | 🔧 install the rig (idempotent) |
 | `/idc:doctor` | 🔧 pressure-test the rig (read-only) |
@@ -159,7 +159,7 @@ Nine slash entry points:
 
 The spine everything traces to is a **five-layer canonical chain**. Planning reaches Build *only*
 by turning plans into issues — the water in the pipe; Build reaches planning *only* through the
-Bleed Valve (Ripple). Flow is one-way, and a sensor on every turbine keeps the chain auditable end
+Bleed Valve (the Recirculator). Flow is one-way, and a sensor on every turbine keeps the chain auditable end
 to end.
 
 ```mermaid
@@ -180,14 +180,14 @@ flowchart LR
 
 **Write-authority boundaries** — each role is the sole writer of its surface and edits nothing
 upstream of it. When a lower role finds a higher layer wrong, it opens the Bleed Valve (files a
-Ripple) and pauses only the affected issue.
+recirculation) and pauses only the affected issue.
 
 | Role | May write | Must NOT write |
 |------|-----------|----------------|
 | **Think** | `docs/considerations/` only | any canonical doc, tracker, source, tests |
 | **Plan** | PRD, spec, master/subphase/pillar plans, pillar matrices, tracker issues | source, tests |
 | **Build** | source, tests, review reports, tracker status | PRD, spec, plans |
-| **Ripple** | every affected canonical doc (one PR), affected open issues | source, tests |
+| **Recirculator** | every affected canonical doc (one PR), affected open issues | source, tests |
 
 See [`docs/mental-model.md`](docs/mental-model.md) for the water-rig picture in full,
 [`docs/architecture.md`](docs/architecture.md) for the precise architecture, and
@@ -244,13 +244,13 @@ at highest effort. `/idc:init --codex` wires the Codex adapter
 
 This repo is the plugin **and** its own marketplace:
 
-- **9 commands** — the pipeline (`think · plan · build · ripple · autorun`) plus `init`,
+- **9 commands** — the pipeline (`think · plan · build · recirculate · autorun`) plus `init`,
   `doctor`, and the lifecycle pair `update` / `uninstall`.
 - **8 agents** — the per-stage orchestrator playbooks, the durable-worker implementer + finisher,
   and the review coordinator + review agent.
 - **13 skills** — the runtime adapters (Claude · Codex · Pi), the tracker adapter + its two
   backends, the gate-issue helper, the consideration schema, the goal-contract shape, matrix
-  analysis, the schema check, the merged review engine, and ripple doc-sync.
+  analysis, the schema check, the merged review engine, and recirculator doc-sync.
 - **`templates/`** — the per-project scaffold `/idc:init` copies into a governed repo
   (`WORKFLOW.md`, `WORKFLOW-config.yaml`, the 5-field `tracker-config.yaml`, and a lean
   `docs/workflow/` tree).
@@ -277,7 +277,7 @@ bash tests/smoke/run-all.sh
 .claude-plugin/   plugin.json (manifest) + marketplace.json (self-hosted marketplace)
 agents/           8 agents — stage playbooks + implementer + finisher + review coordinator/agent
 skills/           13 reusable procedures (runtime adapters, tracker, review engine, …)
-commands/         9 slash commands (think|plan|build|ripple|autorun|init|doctor|update|uninstall)
+commands/         9 slash commands (think|plan|build|recirculate|autorun|init|doctor|update|uninstall)
 templates/        per-project scaffold copied by /idc:init
 scripts/          lint-references.sh, release check, the filesystem tracker + stage helpers,
                   install-codex.sh, run-evals.sh

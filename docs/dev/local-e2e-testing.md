@@ -5,12 +5,12 @@
 > of the shipped plugin. Paths are specific to this workstation.
 
 There is a live, isolated harness for exercising the IDC plugin's full lifecycle
-(`/idc:doctor → init → think → plan → build`, and `/idc:update`) against realistic repos, with
-automatic observability — without touching any real project.
+(`/idc:doctor → init → think → plan → build`, `/idc:update`, and `/idc:autorun`) against realistic
+repos, with automatic observability — without touching any real project.
 
-## The two sandbox repos
+## The three sandbox repos
 
-Both are throwaway clones of an unrelated real project (`knowledge-engine`), used purely as a
+All three are throwaway clones of an unrelated real project (`knowledge-engine`), used purely as a
 realistic codebase fixture. Each has its **own private GitHub repo** and **cannot reach** the
 original project or its board.
 
@@ -18,9 +18,35 @@ original project or its board.
 |---|---|---|---|---|
 | **Install** | `/Users/jeremy/dev/sandbox/ke-idc-test-repo-install` | `llamallamaredpajama/ke-idc-test-repo-install` (private) | **plugin NOT enabled** (blank slate) | from-scratch install: `claude plugin install idc@idc-workflow --scope project` → confirm `~/.claude/settings.json` has `idc@idc-workflow: false` (global off-switch) → `/idc:doctor` → `/idc:init` → `/idc:think` → `/idc:plan` → `/idc:build` |
 | **Update** | `/Users/jeremy/dev/sandbox/ke-idc-test-repo-update` | `llamallamaredpajama/ke-idc-test-repo-update` (private) | **plugin enabled** | update path: `/idc:init` first (lays down scaffold + receipt), then `/idc:update` |
+| **Autorun** | `/Users/jeremy/dev/sandbox/ke-idc-test-repo-autorun` | `llamallamaredpajama/ke-idc-test-repo-autorun` (private); board = GitHub Project #10, **github backend** | **plugin enabled, seeded mid-lifecycle board** | autorun drain: starts on a populated board (both lanes carry work) → `/idc:autorun` drains the Planning + Build lanes to `drain: complete` |
 
 Each repo's own `CLAUDE.md` / `AGENTS.md` opens with a "IDC TEST SANDBOX" banner repeating this, so
 any agent dropped into them is oriented automatically.
+
+### The Autorun sandbox — seeded mid-lifecycle
+
+Unlike Install (blank slate) and Update (just scaffolded), the **Autorun** sandbox starts on a
+**populated mid-lifecycle board** so `/idc:autorun` has real work to drain in *both* lanes. The
+seeded baseline is: ~2 approved + unplanned considerations (Planning lane) + a W1→W2 buildable chain
+where W2 is natively `blocked_by` W1 (Build lane — proves the dependency gate) + 1 gated edge-case (a
+Blocked consideration behind an OPEN `operator-action` gate whose Think PR stays unmerged, so autorun
+must report-and-skip it). All buildable work is tiny additive files under `scratch/`, so the headless
+`/idc:build` reliably completes. A clean drain ends both lanes at `drain: complete`.
+
+- **Reset / re-seed (the reset mechanism):** `bash
+  /Users/jeremy/dev/sandbox/ke-idc-test-repo-autorun/seed-autorun-board.sh` — full board wipe + `git
+  reset --hard autorun-baseline` (the git tag on the post-`/idc:init` scaffold commit) + recreate the
+  seeded considerations. Safety-guarded to refuse any repo but this one. (Backed up in
+  `_idc-observability/bin/`.)
+- **Run the e2e:** `bash /Users/jeremy/dev/sandbox/_idc-observability/bin/run-autorun-e2e.sh <label>`
+  — spawns a sandbox-rooted `claude -p "/idc:autorun"`, handles the dead-key + MCP-hang traps, and
+  captures to `_idc-observability/`.
+- **Verify the drain:** `bash /Users/jeremy/dev/sandbox/_idc-observability/bin/verify-drain.sh`.
+
+> **GraphQL-budget caveat.** This sandbox runs the **github backend**, which is GraphQL-heavy: a full
+> seed + autorun drain costs ≈ 4.75k of GitHub's 5,000-per-hour GraphQL budget. **Budget one
+> `/idc:autorun` e2e per GitHub API hour** — back-to-back runs will rate-limit. Poll `gh api
+> rate_limit` (the `graphql` bucket) before re-running.
 
 ## Golden rule
 

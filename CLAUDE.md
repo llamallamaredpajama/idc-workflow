@@ -104,7 +104,9 @@ runnable from here:
 1. **Pick the sandbox by what you changed:** install / scaffold / `init` / `doctor` / `think` /
    `plan` / `build` → the **install** sandbox (`/Users/jeremy/dev/sandbox/ke-idc-test-repo-install`);
    `update` / receipt-resync / drift → the **update** sandbox
-   (`/Users/jeremy/dev/sandbox/ke-idc-test-repo-update`).
+   (`/Users/jeremy/dev/sandbox/ke-idc-test-repo-update`); `autorun` / autorun-drain → the
+   **autorun** sandbox (`/Users/jeremy/dev/sandbox/ke-idc-test-repo-autorun`, a seeded
+   mid-lifecycle board — see `docs/dev/local-e2e-testing.md`).
 2. **Smoke-gate here first:** `bash tests/smoke/run-all.sh`. Fix failures before spending an e2e run.
 3. **Sync the baseline, then drive the run(s)** — all from here, by spawning sandbox-rooted `claude
    -p` calls (snapshot pre/post with `ke-snap`):

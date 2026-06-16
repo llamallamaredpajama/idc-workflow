@@ -32,15 +32,18 @@ change from their phone, and let the pipeline run.
 
 ### R1 — Think (`/idc:think`)
 A free-form brainstorm/interview in the main session (zero teammates; research on demand).
-Emits one **function-first consideration file** under `docs/considerations/` — what the
-code should do for the user and how it behaves. No gates, no admission language.
+Crystallizes one **function-first consideration** under `docs/considerations/` and the **two gated
+requirements docs** it drives — the **PRD** (the user-facing *what*, `docs/prd/`) and the **TRD**
+(the technical *how* — the `spec` layer, `docs/specs/`). Think fires the **one gate at its end** by
+opening the **Think PR**; the PRD/TRD stay **draft until merge = admission**.
 
 ### R2 — Plan (`/idc:plan`)
-Turns one consideration into **goal-contract issues** on the tracker board, in a single
-zero-teammate run: domain-expert fan-out → the five-layer doc chain (PRD → spec → master →
-subphase → pillar, only the PRD gated) → a 6-element goal contract per pillar → pairwise
-matrix deconfliction → global re-sequencing against the live board → a mechanical schema
-check → board admission, with a planning PR whose body is the audit trail.
+**Pure decomposition** of one **admitted** consideration into **goal-contract issues** on the
+tracker board, in a single zero-teammate run: domain-expert fan-out → decompose the admitted PRD+TRD
+down the chain (master → subphase → pillar) → a 6-element goal contract per pillar → pairwise matrix
+deconfliction → global re-sequencing against the live board → a mechanical schema check → board
+admission, with a planning PR whose body is the audit trail. Plan **authors no requirements** — the
+PRD and TRD are written and gated at Think.
 
 ### R3 — Build (`/idc:build`)
 Executes eligible issues as goal loops (one durable worker per parallel-safe issue), each
@@ -50,19 +53,21 @@ PASS** → close. Nothing merges that isn't green on genuine functional tests.
 
 ### R4 — Recirculator (`/idc:recirculate`)
 Heals drift between docs and reality in **one PR** (the PR body is the change order),
-automerged — unless user-facing product function changes, in which case it takes the same
-PRD gate as Plan.
+automerged — unless a **requirements** layer changes (the PRD, or the TRD when gated), in which
+case it reuses the same one gate (the Think PR).
 
 ### R5 — Autorun (`/idc:autorun`)
 The one button: a one-shot drainer that plans every unplanned consideration, heals board
 hygiene, and builds eligible work, exiting when nothing actionable remains. Loopable via
 `/loop` for standing operation.
 
-### R6 — The one gate (PRD)
-When planning or the Recirculator determines the PRD must change, affected issues land **Blocked**
-behind a single approval issue with a plain-terms summary ("here's what your app will do
-differently") + the PRD diff. The operator gets a **push notification** and approves from
-the GitHub web UI on their phone; approval flips the status and builders proceed.
+### R6 — The one gate (PRD + TRD, at the end of Think)
+Think crystallizes an idea into a **PRD + TRD** draft and fires the single gate by opening the
+**Think PR** + a plain-terms approval issue ("here's what your app will do differently") carrying
+the PRD/TRD diff. The operator gets a **push notification** and approves **sync or async** from the
+GitHub web UI — **merge = approval = admission**, and the docs stay draft until then. The **PRD
+always gates** (`gating.prd`); the **TRD gates when `gating.trd: on`** (the brownfield default). The
+Recirculator reuses this same gate for any backflow needing a requirements change.
 **Nothing else in the system asks for permission.**
 
 ### R7 — Install & health (`/idc:init`, `/idc:doctor`)

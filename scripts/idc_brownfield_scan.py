@@ -76,6 +76,8 @@ def _md_files_in(repo_root, rel_dir):
 def _named_docs(repo_root, names):
     """Conventional doc names at repo root and one level under docs/ (case-insensitive)."""
     wanted = {n.lower() for n in names}
+    if not wanted:
+        return []  # no conventional single-file names (e.g. considerations) → skip the repo+docs walk
     hits = []
     # repo root
     for name in sorted(os.listdir(repo_root)) if os.path.isdir(repo_root) else []:

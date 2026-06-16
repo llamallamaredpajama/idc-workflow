@@ -88,6 +88,28 @@ BROWN_WF="$WORK/brownfield-config.yaml"; sed "s|^  trd: off|  trd: on |" "$WFCFG
 python3 "$RL" spec --config "$BROWN_WF" 2>/dev/null | grep -q "^gate: yes$" \
   || fail "shipped (commented) brownfield template (trd: on # ...): spec drift MUST gate"
 
+# ---- (a5) arming switch must not depend on EXACTLY two-space indent (FIX 1 / gotcha #7 via indent) ----
+# The template invites operators to "toggle either gate anytime" by hand. The old parser only saw
+# gating children at indent==2, so a hand-edited 4-space `trd: on` fell through to the greenfield
+# default (off) and SILENTLY DISARMED the TRD gate — a fail-OPEN on the gate's arming switch.
+# read_gating must read prd/trd at ANY deeper indent. Break it (recognize only indent==2) and the
+# 4-space spec drift below prints `gate: no` → fails red.
+CFG_4SP="$WORK/cfg-trd-on-4space.yaml"; printf 'gating:\n    prd: on\n    trd: on\n' > "$CFG_4SP"
+python3 "$RL" spec --config "$CFG_4SP" 2>/dev/null | grep -q "^gate: yes$" \
+  || fail "4-space-indented gating.trd: on must ARM the TRD gate (spec drift -> gate: yes), not silently default off"
+# flow style `gating: {prd: on, trd: on}` is parsed too — trd: on still arms the gate.
+CFG_FLOW="$WORK/cfg-flow-on.yaml"; printf 'gating: { prd: on, trd: on }\n' > "$CFG_FLOW"
+python3 "$RL" spec --config "$CFG_FLOW" 2>/dev/null | grep -q "^gate: yes$" \
+  || fail "flow-style gating {trd: on} must ARM the TRD gate (spec drift -> gate: yes)"
+# A `gating:` block that IS PRESENT but yields no parseable prd/trd (here a YAML list, not a mapping)
+# FAILS CLOSED — both switches gate — rather than silently falling back to the greenfield default-off.
+# Break it (default-off on an unparseable present block) and the spec drift below prints `gate: no`.
+CFG_UNPARSE="$WORK/cfg-unparseable.yaml"; printf 'gating:\n  - prd\n  - trd\n' > "$CFG_UNPARSE"
+python3 "$RL" spec --config "$CFG_UNPARSE" 2>/dev/null | grep -q "^gate: yes$" \
+  || fail "a present-but-unparseable gating: block must FAIL CLOSED for the TRD (spec drift -> gate: yes), not default off"
+python3 "$RL" prd  --config "$CFG_UNPARSE" 2>/dev/null | grep -q "^gate: yes$" \
+  || fail "a present-but-unparseable gating: block must FAIL CLOSED for the PRD too (gate: yes)"
+
 # ---- (b) requirements path reuses the ONE (Think-PR) gate; non-requirements path: no gate -----
 T="$WORK/TRACKER.md"
 python3 "$TRK" --tracker "$T" init || fail "tracker init failed"
@@ -107,5 +129,23 @@ grep -qiE 'Think PR' "$RECIRC" \
 [ -f "$WORKFLOW" ] || fail "templates/WORKFLOW.md missing"
 grep -qiE 'Think PR' "$WORKFLOW" \
   || fail "WORKFLOW.md must describe the one gate as the Think PR (requirements admission at the end of Think)"
+
+# ---- (c) the ONLY block-clearing/admission signal is the Think PR MERGING (FIX 2 / draft-until-merge) ----
+# The PRD/TRD live in the Think PR and stay DRAFT until it merges. A closed-but-unmerged gate issue
+# (or an `approved` comment) must therefore NOT clear the block — admitting on close/comment would let
+# Plan/Autorun proceed against requirements that are still only draft in an open PR. The gate-issue
+# skill must teach merge-only admission and must NOT offer close/comment as an approval/admission path.
+GATE_SKILL="$PLUGIN/skills/idc-gate-issue/SKILL.md"
+[ -f "$GATE_SKILL" ] || fail "skills/idc-gate-issue/SKILL.md missing"
+# The retired close/comment-admits wording must be GONE. These substrings exist ONLY in the pre-fix
+# skill (body: "merge the Think PR (or close this issue / comment ...)"; step 4: a close/comment is an
+# "equivalent manual signal"), so their presence means the contract violation has returned → red.
+grep -qiE 'or close this issue' "$GATE_SKILL" \
+  && fail "gate-issue skill still offers 'close this issue' as an approval path — only MERGING the Think PR admits"
+grep -qiE 'equivalent manual signal' "$GATE_SKILL" \
+  && fail "gate-issue skill still treats a close/comment as an 'equivalent manual signal' — admission must be merge-only"
+# And it must positively state that a closed-but-unmerged gate does NOT unblock (merge is admission).
+grep -qiE 'closed-but-unmerged' "$GATE_SKILL" \
+  || fail "gate-issue skill must state that a closed-but-unmerged gate does NOT unblock (Think-PR merge is the only admission)"
 
 echo "PASS: recirculation downstream-sync + requirements-only gate doctrine + Think-PR gate reuse green"

@@ -38,9 +38,9 @@ PROPOSED REQUIREMENTS CHANGE (PRD / TRD)
 <the proposed PRD/TRD diff: inline fenced diff if short, else a link to the diff in the
  Think PR (or the recirculation PR)>
 
-TO APPROVE: merge the Think PR (or close this issue / comment "approved"). Merge = admission —
-the idea enters the pipeline and Plan decomposes it. To reject: comment what to change and
-leave it open.
+TO APPROVE: merge the Think PR. Merge = admission — the idea enters the pipeline and Plan
+decomposes it. (Closing this issue or commenting does NOT admit: the PRD/TRD live in the Think
+PR and only merging it lands them.) To reject: comment what to change and leave the PR open.
 
 Gates: <the consideration pointer (at Think) or the affected work issues (at the Recirculator)>
 ```
@@ -71,14 +71,18 @@ Record the chained ids in the gate body's `Gates:` line.
 **3 — Notify the operator.** Send one push notification (see below). Never block the run on
 delivery.
 
-**4 — Detect approval + unblock (sync now or on a later run).** Approval is **the Think PR merging**
-(the durable admission signal); a closed gate issue or an `approved` comment is an equivalent
-manual signal. `/idc:think` (in-session), `/idc:plan`, `/idc:recirculate`, and `/idc:autorun`
-re-check open gates at the start of a run: `query` for `operator-action` issues. When a gate is
-**approved** (its Think PR merged, or the issue closed/`approved`), for each thing it blocked:
-remove the blocks link via the adapter and `setField` `Status=Todo`. The admitted consideration is
-now Plan's to decompose; chained work builders claim on the next cycle. A gate still open → leave
-the chain `Blocked` and move on; the run never waits on the operator.
+**4 — Detect admission + unblock (sync now or on a later run).** Admission is **the Think PR
+merging** — the single, durable block-clearing signal. A closed gate issue or an `approved`
+comment is **not** admission: it records intent, but the PRD/TRD stay **draft until the Think PR
+merges**, so a closed-but-unmerged gate must **not** unblock anything — else Plan/Autorun would
+proceed against requirements that are still only draft in an open PR (the draft-until-merge
+contract). `/idc:think` (in-session), `/idc:plan`, `/idc:recirculate`, and `/idc:autorun` re-check
+open gates at the start of a run: `query` for `operator-action` issues and confirm the linked
+**Think PR has merged**. Only once it has, for each thing the gate blocked: remove the blocks link
+via the adapter and `setField` `Status=Todo`. The admitted consideration is now Plan's to
+decompose; chained work builders claim on the next cycle. A gate whose Think PR is **not yet
+merged** (still open, even if the issue was closed) → leave the chain `Blocked` and move on; the
+run never waits on the operator.
 
 ## Push notification (graceful no-op fallback)
 

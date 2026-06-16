@@ -1,6 +1,6 @@
 ---
 name: idc-recirculator-sync
-description: 'Use in the Recirculator to determine the highest affected canonical layer, the downstream sync set, and whether the change is autonomous (one PR) or PRD-gated.'
+description: 'Use in the Recirculator to determine the highest affected canonical layer, the downstream sync set, and whether the change is autonomous (one PR) or requirements-gated (reuses the one Think-PR gate).'
 ---
 # idc-recirculator-sync
 
@@ -19,8 +19,9 @@ when the repo opts in with `gating.trd: on` in `WORKFLOW-config.yaml`.
 - **No** → update that layer and **every layer below it** down the chain in **one PR**
   (synchronized together), automerge. The doc chain never half-updates.
 - **Yes** → the highest affected layer is the PRD (or the TRD/`spec` layer when `gating.trd: on`);
-  take the same gate as Plan via `idc:idc-gate-issue` (blocked operator-todo gate + plain-terms
-  summary + the doc diff + push notification).
+  **reuse the one gate** (`WORKFLOW.md §2`) via `idc:idc-gate-issue` — it opens a new gated **Think
+  PR** carrying the requirements diff (blocked operator-todo gate + plain-terms summary + push
+  notification), the same admission Think fires.
 
 ## Downstream sync set
 
@@ -49,4 +50,4 @@ written.
 - Determines the affected layers, the sync set, and the gate decision; the Recirculator
   orchestrator (`idc:idc-recirculator`) performs the doc edits and opens the PR. Tracker mutation
   (the gate path, affected open issues) routes through `idc:idc-tracker-adapter`. Never
-  writes source or tests; never edits the PRD without the gate.
+  writes source or tests; never admits a requirements (PRD/TRD) change without the gate.

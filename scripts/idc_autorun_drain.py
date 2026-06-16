@@ -2,14 +2,17 @@
 """idc_autorun_drain.py — Autorun's drain predicate (`WORKFLOW.md §4.5`).
 
 Autorun is the one-shot full-pipe drainer: it keeps claiming build work while any is
-actionable and exits when nothing actionable remains (only Done items, PRD-gated Blocked
-items, and the operator's own gate issues left). This helper computes the build lane's
-eligibility over the filesystem tracker — the deterministic exit condition.
+actionable and exits when nothing actionable remains (only Done items, requirements-gated
+Blocked items, the operator's own gate issues, and un-admitted considerations left). This helper
+computes the build lane's eligibility over the filesystem tracker — the deterministic exit
+condition.
 
 Eligible build work = an issue that is:
   * `Status = Todo`,
   * `Stage = Buildable` (or no Stage on a legacy 4-field repo) — an upstream pointer item
-    (`Stage = Consideration`/`Planning`) is never scooped as build work (the glass wall),
+    (`Stage = Consideration`/`Planning`) is never scooped as build work (the glass wall). A
+    `Stage = Consideration` pointer is a consideration **pending admission behind its Think PR**
+    (the one gate), so it must never be built past until the operator merges that PR,
   * NOT an operator-action gate issue (title starting with `[operator-action]`), and
   * has every native blocked-by upstream `Done`.
 

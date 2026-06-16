@@ -23,16 +23,16 @@ contract those phases hold to.
 ## 2. What IDC v2 is (function)
 
 The operator casts an idea into the stream at `/idc:think`; the stream carries it to
-merged, tested code; the only time it stops to ask is when the product's user-facing
-function is about to change.
+merged, tested code; it stops to ask exactly once — at the **end of Think**, when the operator
+admits the idea's requirements (PRD + TRD) by merging the Think PR.
 
 - **Pipeline:** `Think → Plan → Build`, `Recirculator` the only retrograde path, `Autorun` the
   one-shot drainer. Seven commands total: `init`, `doctor`, `think`, `plan`, `build`,
   `recirculate`, `autorun`.
-- **Five guardrails, nothing else:** the one PRD gate; matrix deconfliction; real
-  verification surfaces; recirculator drift-healing; one-way flow through the glass wall. v2
-  trusts the model and deletes v1's standing reviewer/fixer/researcher roles, multi-pass
-  plan reviews, claim-state machine, and per-edit gates.
+- **Five guardrails, nothing else:** the one requirements gate at the end of Think; matrix
+  deconfliction; real verification surfaces; recirculator drift-healing; one-way flow through
+  the glass wall. The model is trusted; there are no standing reviewer/fixer/researcher roles,
+  multi-pass plan reviews, claim-state machine, or per-edit gates.
 
 ## 3. Component architecture & naming convention
 
@@ -60,14 +60,15 @@ reference-integrity linter (`scripts/lint-references.sh`) enforces this.
 
 | Agent | Role |
 |---|---|
-| `idc-plan` | Plan orchestrator playbook (domain dispatch → doc chain → contracts → matrix → admit). |
+| `idc-plan` | Plan orchestrator playbook — pure decomposition (domain dispatch → contracts → matrix → admit; no requirements authoring). |
 | `idc-build` | Build orchestrator + finisher/merge-queue. |
 | `idc-implementer` | The one durable-worker role — executes an issue contract as a goal loop. |
 | `idc-review-coordinator` | Merged review engine coordinator (dedup, confidence, verdict). |
-| `idc-recirculator` | Recirculator orchestrator playbook (doc-sync, PRD-only gate). |
+| `idc-recirculator` | Recirculator orchestrator playbook (doc-sync; a requirements change reuses the Think-PR gate). |
 | `idc-autorun` | Autorun two-lane drainer playbook. |
 
-(Think has no standing agent — `commands/think.md` runs it inline, free-form with zero teammates.)
+(Think has no standing agent — `commands/think.md` runs it inline, free-form with zero teammates;
+it authors the PRD+TRD draft and fires the one gate via the Think PR.)
 
 **Skills (≤ 14, target ~12):**
 
@@ -78,7 +79,7 @@ reference-integrity linter (`scripts/lint-references.sh`) enforces this.
 | `idc-tracker-adapter` | Backend dispatch (reads `tracker-config.yaml::backend`). |
 | `idc-tracker-github` | GitHub Projects v2 backend (4 fields, blocked-by, claim comments, attempt label). |
 | `idc-tracker-filesystem` | Filesystem backend (`TRACKER.md`; zero setup; the sandbox test substrate). |
-| `idc-gate-issue` | Operator PRD gate-issue helper + push notification. |
+| `idc-gate-issue` | Requirements gate-issue helper (the Think PR; sync/async approval) + push notification. |
 | `idc-consideration-schema` | Function-first consideration file schema (Think output). |
 | `idc-goal-contract` | 6-element goal-contract authoring shape (Plan authors; Build executes). |
 | `idc-matrix-analysis` | Pairwise clash check + matrix synthesis + wave sequencing. |
@@ -115,13 +116,16 @@ dispatch skill + two backends.
   No lock primitive; a single merge-queue (the Build orchestrator) serializes merges so
   parallel PRs never race.
 
-## 5. The one gate (PRD)
+## 5. The one gate (requirements admission, at the end of Think)
 
-When Plan or the Recirculator determines the PRD must change, affected issues land `Blocked`, chained
-by native blocked-by to one gate issue (`idc-gate-issue`) carrying a plain-terms summary +
-the PRD diff; the operator is push-notified and approves from the GitHub web UI; approval
-unblocks the chain. Implemented identically by Plan and the Recirculator. This is the **only** human
-checkpoint; everything else automerges when green.
+The single human checkpoint fires at the **end of Think**. Think crystallizes an idea into a
+**PRD + TRD** draft and opens a **Think PR** carrying it, plus one gate issue (`idc-gate-issue`)
+with a plain-terms summary + the PRD/TRD diff; the operator is push-notified and approves from the
+GitHub web UI. Approval is **sync or async**, and the PRD/TRD stay **draft until merge** — **merge
+= approval = admission**. The PRD always gates (`gating.prd`); the TRD (the `spec` layer) gates
+when `gating.trd: on`. The Recirculator **reuses this same gate** for any backflow that needs a
+requirements change. This is the **only** human checkpoint; Plan, Build, and non-gated
+recirculations automerge when green.
 
 ## 6. Runtime primitives & model routing
 

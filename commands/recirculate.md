@@ -1,5 +1,5 @@
 ---
-description: IDC Recirculator — autonomous doc-sync across the canonical chain; one PR, PRD-only gate
+description: IDC Recirculator — autonomous doc-sync across the canonical chain; one PR, or reuse the one gate (a new gated Think PR) when requirements change
 argument-hint: '<drift-description | "scope summary">'
 ---
 
@@ -23,10 +23,11 @@ The helper reads the `gating:` toggle from `WORKFLOW-config.yaml`: the PRD alway
 TRD (the `spec` layer) gates only when `gating.trd: on`. If no gated layer changes, update that
 layer and every layer below it — arch spec, master plan, subphases, pillars, affected open
 issues — **synchronized in one PR**, automerged, with the **PR body as the change order**. If a
-gated layer changes (the PRD, or the TRD/`spec` layer when `gating.trd: on`), take the same gate as
-Plan via `idc:idc-gate-issue` (blocked gate issue + plain-terms summary + the doc diff + push
-notification); pause only the affected work.
+gated requirements layer changes (the PRD, or the TRD/`spec` layer when `gating.trd: on`), **reuse
+the one gate** (`WORKFLOW.md §2`) via `idc:idc-gate-issue` — it opens a new gated **Think PR**
+carrying the requirements diff (blocked gate issue + plain-terms summary + push notification), the
+same admission Think fires; pause only the affected work.
 
 No verdict taxonomy, no change-order files — they are deleted; the PR body is the record. Do
-not write source or tests; do not edit the PRD without the gate; never leave the doc chain
-half-updated (`WORKFLOW.md §4.4`).
+not write source or tests; never admit a requirements (PRD/TRD) change without the gate; never
+leave the doc chain half-updated (`WORKFLOW.md §4.4`).

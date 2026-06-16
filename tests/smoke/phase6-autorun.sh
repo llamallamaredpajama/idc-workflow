@@ -1,9 +1,12 @@
 #!/bin/bash
-# Phase 6 smoke — Autorun's drain predicate (the one-shot exit condition):
-#   eligible build work = Status=Todo issues that are NOT operator-action gate issues and
-#   whose every blocked-by upstream is Done. Autorun keeps draining while eligible work
-#   exists and exits when nothing actionable remains (only Done + PRD-gated Blocked + the
-#   operator's own gate issue left).
+# Phase 6 smoke — Autorun's drain predicate (the one-shot exit condition) and its v3 autonomy
+# boundary: with the gate at the END of Think, Autorun only decomposes/builds APPROVED
+# considerations and treats an OPEN Think PR exactly like an open requirements gate (report + skip).
+#   eligible build work = Status=Todo issues that are NOT operator-action gate issues, NOT an
+#   upstream pointer (Stage=Consideration/Planning — a consideration pending admission behind the
+#   Think PR), and whose every blocked-by upstream is Done. Autorun keeps draining while eligible
+#   work exists and exits when nothing actionable remains (only Done + requirements-gated Blocked +
+#   the operator's own gate issue + un-admitted considerations left).
 # Failing-test-first: fails until scripts/idc_autorun_drain.py exists.
 #
 # Usage: bash tests/smoke/phase6-autorun.sh   (exit 0 = pass)
@@ -11,6 +14,7 @@ set -uo pipefail
 PLUGIN="$(cd "$(dirname "$0")/../.." && pwd)"
 DRAIN="$PLUGIN/scripts/idc_autorun_drain.py"
 TRK="$PLUGIN/scripts/idc_tracker_fs.py"
+AUTORUN="$PLUGIN/agents/idc-autorun.md"
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 T="$WORK/TRACKER.md"
 fail() { echo "FAIL: $1"; exit 1; }
@@ -36,9 +40,24 @@ drain | grep -q "^drain: continue$" || fail "still actionable while issue a is T
 drain | grep -qE "(^| )$gate( |$)" && fail "the operator-action gate must not be eligible build work"
 drain | grep -qE "(^| )$b( |$)" && fail "a Blocked PRD-dependent issue must not be eligible"
 
-# build issue a to Done -> only the gate (operator) + Blocked b remain -> drain complete
+# add a consideration pointer that is Todo but NOT YET ADMITTED (an open Think PR / pending the
+# end-of-Think gate). Build must NEVER scoop it — Autorun only builds APPROVED considerations.
+# This is the guard that fails red if the drain predicate stops skipping a Stage=Consideration
+# pointer (i.e. lets Autorun proceed past an open Think PR).
+c=$(python3 "$TRK" --tracker "$T" create --title "Pending consideration (open Think PR)" --stage Consideration)
+drain | grep -qE "(^| )$c( |$)" && fail "a Stage=Consideration pointer (open Think PR / pending admission) must not be eligible build work"
+
+# build issue a to Done -> only the gate (operator) + Blocked b + the un-admitted consideration
+# remain -> drain complete (nothing the autorun may build without operator admission)
 python3 "$TRK" --tracker "$T" claim --num "$a" --agent idc-implementer >/dev/null
 python3 "$TRK" --tracker "$T" close --num "$a" >/dev/null
-drain | grep -q "^drain: complete$" || fail "with only a gate + a Blocked dependent left, autorun should exit (complete)"
+drain | grep -q "^drain: complete$" || fail "with only a gate + a Blocked dependent + a pending consideration left, autorun should exit (complete)"
 
-echo "PASS: autorun drain predicate (eligible build work vs PRD-gated/operator-only) green"
+# ---- prose invariant: the planning lane only plans APPROVED considerations (v3) ---------------
+[ -f "$AUTORUN" ] || fail "agents/idc-autorun.md missing"
+grep -qiE 'Think PR' "$AUTORUN" \
+  || fail "idc-autorun.md must treat an open Think PR like an open gate (report + skip) — the planning lane only plans approved considerations"
+grep -qiE 'approved consideration' "$AUTORUN" \
+  || fail "idc-autorun.md must state Autorun only decomposes/builds approved considerations"
+
+echo "PASS: autorun drain predicate (eligible build work vs gated/operator-only/un-admitted) green"

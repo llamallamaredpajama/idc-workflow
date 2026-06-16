@@ -1,9 +1,10 @@
 #!/bin/bash
-# Phase 3 smoke — Plan's deterministic guardrails are real and enforced:
+# Phase 3 smoke — Plan's deterministic guardrails are real and enforced, and (v3) Plan is now
+# PURE DECOMPOSITION — it no longer authors the PRD/TRD or fires the gate (that moved to Think):
 #   (a) the issue-body schema check accepts a complete 6-element contract, rejects a partial one;
 #   (b) the matrix deconfliction check accepts disjoint same-wave surfaces, rejects a collision;
-#   (c) the PRD gate mechanism: a PRD-dependent issue lands Blocked behind a gate issue while
-#       a non-PRD issue keeps flowing (Todo) — enacted over the real tracker.
+#   (c) command/agent-prose invariants: Plan sheds requirements authoring — agents/idc-plan.md
+#       does NOT draft a PRD diff and does NOT run idc:idc-gate-issue; it decomposes only.
 # Failing-test-first: fails until the two checkers exist.
 #
 # Usage: bash tests/smoke/phase3-plan.sh   (exit 0 = pass)
@@ -11,7 +12,8 @@ set -uo pipefail
 PLUGIN="$(cd "$(dirname "$0")/../.." && pwd)"
 SCHEMA="$PLUGIN/scripts/idc_schema_check.py"
 MATRIX="$PLUGIN/scripts/idc_matrix_check.py"
-TRK="$PLUGIN/scripts/idc_tracker_fs.py"
+PLAN="$PLUGIN/agents/idc-plan.md"
+PLAN_CMD="$PLUGIN/commands/plan.md"
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 fail() { echo "FAIL: $1"; exit 1; }
 
@@ -93,16 +95,23 @@ MD
 out="$(python3 "$MATRIX" "$WORK/matrix-collide-block.yaml" 2>&1)" && fail "block-style colliding matrix was accepted (must reject)"
 echo "$out" | grep -q "share surface" || fail "block-style collision must be detected as a shared-surface clash, not mis-reported as 'no surfaces' (got: $out)"
 
-# ---- (c) PRD gate mechanism over the real tracker --------------------------------
-T="$WORK/TRACKER.md"
-python3 "$TRK" --tracker "$T" init || fail "tracker init failed"
-gate=$(python3 "$TRK" --tracker "$T" create --title "[operator-action] PRD change — dark mode")
-prd_dep=$(python3 "$TRK" --tracker "$T" create --title "Add appearance setting (PRD-touching)")
-non_prd=$(python3 "$TRK" --tracker "$T" create --title "Refactor theme util (no PRD change)")
-# chain the PRD-dependent issue Blocked behind the gate; leave the non-PRD issue alone
-python3 "$TRK" --tracker "$T" block --num "$prd_dep" --by "$gate" >/dev/null
-[ "$(python3 "$TRK" --tracker "$T" show --num "$prd_dep" --field Status)" = "Blocked" ] || fail "PRD-dependent issue should be Blocked behind the gate"
-python3 "$TRK" --tracker "$T" show --num "$prd_dep" --blocked-by | grep -qw "$gate" || fail "PRD-dependent issue should be blocked-by the gate issue"
-[ "$(python3 "$TRK" --tracker "$T" show --num "$non_prd" --field Status)" = "Todo" ] || fail "non-PRD issue should keep flowing (Todo)"
+# ---- (c) Plan is pure decomposition — it sheds requirements authoring + the gate (v3) --------
+# The requirements gate (PRD+TRD admission) moved to the END of Think. Plan must therefore NOT
+# author a PRD diff and must NOT fire the gate. These are the guards that fail red if Plan's
+# requirements authoring is restored.
+[ -f "$PLAN" ] || fail "agents/idc-plan.md missing"
+if grep -qiE 'PRD diff' "$PLAN"; then
+  fail "agents/idc-plan.md still drafts a PRD diff — Plan sheds requirements authoring in v3 (the PRD+TRD are authored + gated by Think)"
+fi
+if grep -qF 'idc-gate-issue' "$PLAN"; then
+  fail "agents/idc-plan.md still references idc:idc-gate-issue — the gate moved to the end of Think; Plan does not gate"
+fi
+grep -qiE 'pure decomposition|decompos' "$PLAN" \
+  || fail "agents/idc-plan.md must declare Plan as pure decomposition (no requirements authoring)"
+# the command surface must not advertise a PRD gate or doc-chain authoring either
+[ -f "$PLAN_CMD" ] || fail "commands/plan.md missing"
+if grep -qiE 'PRD gate|only the PRD' "$PLAN_CMD"; then
+  fail "commands/plan.md still advertises a PRD gate — Plan no longer gates in v3"
+fi
 
-echo "PASS: schema check + matrix deconfliction + PRD gate mechanism all green"
+echo "PASS: schema check + matrix deconfliction green; Plan is pure decomposition (no PRD authoring, no gate)"

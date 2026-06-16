@@ -1,12 +1,12 @@
 ---
 name: idc-gate-issue
-description: 'Use when Plan or Ripple determines the PRD (user-facing product function) must change and the affected work must be gated behind one operator approval.'
+description: 'Use when Plan or the Recirculator determines the PRD (user-facing product function) must change and the affected work must be gated behind one operator approval.'
 ---
 # idc-gate-issue
 
 The PRD gate. This is the **only** gate in IDC v2 — everything else flows autonomously and
 automerges when green (`WORKFLOW.md §2`). It fires **only** when user-facing product function
-changes, i.e. the PRD must change. Both `/idc:plan` and `/idc:ripple` use this **identical**
+changes, i.e. the PRD must change. Both `/idc:plan` and `/idc:recirculate` use this **identical**
 mechanism; nothing else in the system asks the operator for permission.
 
 The gate is **tracker-native**: one gate issue carries the human decision; every affected
@@ -28,7 +28,7 @@ WHAT YOUR APP WILL DO DIFFERENTLY
 
 PROPOSED PRD CHANGE
 <the proposed PRD diff: inline fenced diff if short, else a link to the PRD diff in
- the planning/ripple PR>
+ the planning/recirculation PR>
 
 TO APPROVE: close this issue (or comment "approved"). That unblocks the work below and
 builders start on the next cycle. To reject: comment what to change and leave it open.
@@ -39,7 +39,7 @@ Blocks: <the chained work issues>
 Label it `operator-action` (the gate label) so it is findable. The body is plain terms +
 the diff — nothing else.
 
-## Procedure (identical for Plan and Ripple)
+## Procedure (identical for Plan and the Recirculator)
 
 All tracker ops route through `idc:idc-tracker-adapter` (`createTicket`, `setField`,
 `link`, `comment`, `query`) — **never hard-code github vs filesystem semantics**; the
@@ -59,7 +59,7 @@ they stay `Todo` and flow.
 **3 — Notify the operator.** Send one push notification (see below). Never block the run on
 delivery.
 
-**4 — Detect approval + unblock (on a later run).** `/idc:plan`, `/idc:ripple`, and
+**4 — Detect approval + unblock (on a later run).** `/idc:plan`, `/idc:recirculate`, and
 `/idc:autorun` re-check open gates at the start of a run: `query` for `operator-action`
 issues. When a gate is **closed** (or carries an `approved` comment), for each issue it
 blocked: remove the blocks link via the adapter and `setField` `Status=Todo`. Builders
@@ -87,7 +87,7 @@ convenience nudge.
 - Creates **exactly one** gate issue per run and chains the PRD-affected work issues behind
   it. It does not create or modify any other issue.
 - **Never edits canonical docs.** The PRD diff is authored upstream (by `/idc:plan` or
-  `/idc:ripple`) and only referenced here; this skill writes the gate issue, not the PRD.
+  `/idc:recirculate`) and only referenced here; this skill writes the gate issue, not the PRD.
 - **Never approves on the operator's behalf** and never closes the gate itself — approval is
   the operator's act in the GitHub web UI. This skill only *detects* an approval and clears
   the resulting block.

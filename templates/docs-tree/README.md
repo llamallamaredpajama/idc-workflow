@@ -11,7 +11,7 @@ documents under `docs/prd/`, `docs/specs/`, and `docs/plans/`.
 docs/plans/subphases/ → docs/plans/pillars/ → tracker issues`
 
 Supporting route: `docs/considerations/` (pre-canonical Think input) → the canonical chain
-→ tracker issues (the glass wall) → Build. Ripple is the only retrograde path; it syncs
+→ tracker issues (the glass wall) → Build. The Recirculator is the only retrograde path; it syncs
 the whole chain in one PR rather than leaving change-order files behind.
 
 ## Directories

@@ -9,7 +9,7 @@ The mechanical gate Plan runs on every issue body before admission (`WORKFLOW.md
 whole 6-element goal contract plus declared boundaries, dependencies, and trace. This is the
 *only* structural plan review besides matrix deconfliction (`idc:idc-matrix-analysis`) — v2
 deleted the multi-pass plan-review suite; content defects surface cheaply downstream as a
-Ripple.
+recirculation.
 
 The board carries two shapes, told apart by the `Stage:` field, and the check validates each
 on its own terms (`idc:idc-tracker-github` §schema).

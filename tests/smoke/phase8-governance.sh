@@ -30,9 +30,9 @@ mkdir -p "$SBX/docs/workflow"
 cat > "$SBX/WORKFLOW.md" <<'EOF'
 # WORKFLOW.md — Demo IDC governance contract
 ## 1. Canonical chain & flow
-Think -> Plan -> Build, with Ripple as the only retrograde path.
+Think -> Plan -> Build, with the Recirculator as the only retrograde path.
 ## 1.2 One-way flow + the glass wall
-Planning reaches Build only through tracker issues; Build reaches planning only through Ripple.
+Planning reaches Build only through tracker issues; Build reaches planning only through the Recirculator.
 EOF
 cat > "$SBX/WORKFLOW-config.yaml" <<'EOF'
 workflow:
@@ -67,7 +67,7 @@ grep -Eq 'WORKFLOW-config.yaml:[[:space:]]*[0-9a-f]{64}$'       "$SIDE1" || fail
 grep -Eq 'tracker-config.yaml:[[:space:]]*[0-9a-f]{64}$'        "$SIDE1" || fail "tracker-config.yaml hash missing"
 grep -q  'glass_wall:'                                          "$SIDE1" || fail "no glass_wall summary"
 grep -q  'planning_to_build: github_issues_only'               "$SIDE1" || fail "glass-wall planning->build not summarized"
-grep -q  'build_to_planning: ripple_only'                      "$SIDE1" || fail "glass-wall build->planning not summarized"
+grep -q  'build_to_planning: recirculator_only'                "$SIDE1" || fail "glass-wall build->planning not summarized"
 grep -q  'backend: github'                                      "$SIDE1" || fail "tracker backend not summarized"
 
 # --- default emit path lands at docs/workflow/idc-governance-contract.yaml --------------------

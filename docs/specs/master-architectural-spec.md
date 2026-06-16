@@ -26,11 +26,11 @@ The operator casts an idea into the stream at `/idc:think`; the stream carries i
 merged, tested code; the only time it stops to ask is when the product's user-facing
 function is about to change.
 
-- **Pipeline:** `Think → Plan → Build`, `Ripple` the only retrograde path, `Autorun` the
+- **Pipeline:** `Think → Plan → Build`, `Recirculator` the only retrograde path, `Autorun` the
   one-shot drainer. Seven commands total: `init`, `doctor`, `think`, `plan`, `build`,
-  `ripple`, `autorun`.
+  `recirculate`, `autorun`.
 - **Five guardrails, nothing else:** the one PRD gate; matrix deconfliction; real
-  verification surfaces; ripple drift-healing; one-way flow through the glass wall. v2
+  verification surfaces; recirculator drift-healing; one-way flow through the glass wall. v2
   trusts the model and deletes v1's standing reviewer/fixer/researcher roles, multi-pass
   plan reviews, claim-state machine, and per-edit gates.
 
@@ -64,7 +64,7 @@ reference-integrity linter (`scripts/lint-references.sh`) enforces this.
 | `idc-build` | Build orchestrator + finisher/merge-queue. |
 | `idc-implementer` | The one durable-worker role — executes an issue contract as a goal loop. |
 | `idc-review-coordinator` | Merged review engine coordinator (dedup, confidence, verdict). |
-| `idc-ripple` | Ripple orchestrator playbook (doc-sync, PRD-only gate). |
+| `idc-recirculator` | Recirculator orchestrator playbook (doc-sync, PRD-only gate). |
 | `idc-autorun` | Autorun two-lane drainer playbook. |
 
 (Think has no standing agent — `commands/think.md` runs it inline, free-form with zero teammates.)
@@ -84,7 +84,7 @@ reference-integrity linter (`scripts/lint-references.sh`) enforces this.
 | `idc-matrix-analysis` | Pairwise clash check + matrix synthesis + wave sequencing. |
 | `idc-schema-check` | Mechanical issue-body schema check (contract + ownership + deps + trace). |
 | `idc-review-engine` | Merged 13-dimension review engine (specialist fan-out brief + dimensions). |
-| `idc-ripple-sync` | Ripple doc-sync: highest-affected-layer + downstream synchronization set. |
+| `idc-recirculator-sync` | Recirculator doc-sync: highest-affected-layer + downstream synchronization set. |
 
 ### 3.3 Runtime-neutral core + thin adapters
 
@@ -107,7 +107,7 @@ dispatch skill + two backends.
   `Domain` — plus native blocked-by, an `attempt:<n>` label, and claim comments. No
   ClaimState/Lane/Track/Pillar-trace-key field, no bookend ceremony.
 - **Six operations.** `createTicket`, `setField`, `link`, `move`, `query`, `comment`. A
-  seventh is a contract change requiring a Ripple.
+  seventh is a contract change requiring a recirculation.
 - **The issue is the contract.** Each issue body is a self-sufficient 6-element goal
   contract + Dependencies + Trace (`WORKFLOW.md §3.2`), authored by Plan via
   `idc-goal-contract`, executable cold by an outside agent.
@@ -117,16 +117,16 @@ dispatch skill + two backends.
 
 ## 5. The one gate (PRD)
 
-When Plan or Ripple determines the PRD must change, affected issues land `Blocked`, chained
+When Plan or the Recirculator determines the PRD must change, affected issues land `Blocked`, chained
 by native blocked-by to one gate issue (`idc-gate-issue`) carrying a plain-terms summary +
 the PRD diff; the operator is push-notified and approves from the GitHub web UI; approval
-unblocks the chain. Implemented identically by Plan and Ripple. This is the **only** human
+unblocks the chain. Implemented identically by Plan and the Recirculator. This is the **only** human
 checkpoint; everything else automerges when green.
 
 ## 6. Runtime primitives & model routing
 
 - **Primitives** (`WORKFLOW.md §5`): durable worker, bounded fan-out, goal loop. Concurrency
-  budget: Think/Plan/Ripple = 0 durable workers; Build = 1 per parallel-safe issue (serial
+  budget: Think/Plan/Recirculator = 0 durable workers; Build = 1 per parallel-safe issue (serial
   in-session fallback); review = bounded fan-out everywhere.
 - **Model routing** (`WORKFLOW.md §6`): tier-symbolic (`reasoning`/`standard`/`utility`)
   resolved by the runtime adapter from `WORKFLOW-config.yaml::model_routing`; no hardcoded

@@ -55,7 +55,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_matrix_check.py" docs/workflow/pillar
 
 It rejects a matrix where same-wave pillars share a surface (not parallel-safe) or a pillar
 lacks an id/wave/surfaces. A clash that cannot be deconflicted into separate waves and is a
-genuine upstream contradiction is parked and surfaced for a Ripple — never papered over.
+genuine upstream contradiction is parked and surfaced for a recirculation — never papered over.
 
 ## Authority boundaries
 

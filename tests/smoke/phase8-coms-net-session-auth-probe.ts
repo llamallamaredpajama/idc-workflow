@@ -99,7 +99,7 @@ async function main() {
 	expect(hbOwn.status === 200, "HEARTBEAT: own token accepted", `expected 200, got ${hbOwn.status}`);
 
 	// (2e) DELETE must be session-token-bound (forced-offline / unregister of another peer).
-	const sacrificial = await register("ripple", "sa-ripple-victim");
+	const sacrificial = await register("recirculator", "sa-recirculator-victim");
 	const delPath = (sid: string) => `/v1/agents/${encodeURIComponent(sid)}?project=${encodeURIComponent(PROJECT)}`;
 	const delForeign = await http("DELETE", delPath(sacrificial.sessionId), undefined, { "x-coms-session-token": buildImpl.token });
 	expect(delForeign.status === 403, "DELETE: foreign token cannot unregister another peer", `expected 403, got ${delForeign.status}`);
@@ -109,7 +109,7 @@ async function main() {
 	// (2f) TOMBSTONE (codex round-4 Layer 1): when a target is deleted/expires, its in-flight
 	//      messages are terminated — so a later registrant of the same session_id can't inherit or
 	//      answer them (closes the session-resurrection residue).
-	const victim = await register("ripple", "sa-tomb-victim");
+	const victim = await register("recirculator", "sa-tomb-victim");
 	const tomb = await sendAs(http, buildImpl.token, {
 		project: PROJECT, sender_session: buildImpl.sessionId, target_session: victim.sessionId, target: null,
 		prompt: "to be orphaned", hops: 0,
@@ -124,7 +124,7 @@ async function main() {
 	// THREAT, not just mechanism: a session that re-registers after the victim is gone cannot answer
 	// the orphaned message (Layer 1.1 issues it a fresh id ≠ the old target; Layer 1.2 left the msg
 	// terminal). Either guard rejects it — assert the answer fails, not the exact code.
-	const reborn = await register("ripple", "sa-tomb-reborn");
+	const reborn = await register("recirculator", "sa-tomb-reborn");
 	const hijack = await http("POST", `/v1/messages/${tombId}/response`,
 		{ project: PROJECT, responder_session: victim.sessionId, response: "hijack", error: null },
 		{ "x-coms-session-token": reborn.token });

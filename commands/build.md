@@ -29,6 +29,6 @@ Merges across parallel finishers are **serialized** (matrix-disjoint surfaces + 
 lock/queue — no silent race). Wave close runs the full suite and promotes the next wave; phase
 close files a delta review's findings as non-blocking issues.
 
-Builders never edit canonical docs — divergence files a Ripple (`/idc:ripple`) and pauses
+Builders never edit canonical docs — divergence files a recirculation (`/idc:recirculate`) and pauses
 only the affected issue. Halt only on the conditions in the playbook. The retrograde path is
-`/idc:ripple`; the full-pipe drainer is `/idc:autorun`.
+`/idc:recirculate`; the full-pipe drainer is `/idc:autorun`.

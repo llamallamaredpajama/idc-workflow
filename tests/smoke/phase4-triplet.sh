@@ -1,7 +1,7 @@
 #!/bin/bash
 # Phase 4 triplet smoke — Build is the explicit impl->review->finish triplet:
 #   (a) agents/idc-finisher.md exists and names the /simplify + git-finalization steps, its
-#       OWN /fullauto-goal fix loop, the Ripple-on-unsolvable, and the 6-element posture
+#       OWN /fullauto-goal fix loop, the recirculation-on-unsolvable, and the 6-element posture
 #       (outcome, verification surface, constraints, boundaries, iteration policy, blocked-stop);
 #   (b) agents/idc-build.md references all three roles (implementer, reviewer-agent, finisher),
 #       the per-runtime session mapping (pi residents / Teams teammates / Codex threads), the
@@ -25,7 +25,7 @@ has "$FIN" 'git finaliz'    || fail "finisher must name git finalization"
 has "$FIN" 'merge'          || fail "finisher must name the merge step"
 has "$FIN" 'tidy'           || fail "finisher must name the tidy step"
 has "$FIN" '/fullauto-goal' || fail "finisher must run its OWN /fullauto-goal loop"
-has "$FIN" 'ripple'         || fail "finisher must file a Ripple on the unsolvable"
+has "$FIN" 'recirculat'     || fail "finisher must file a recirculation on the unsolvable"
 # the 6-element posture: the contract's six named elements
 has "$FIN" '6-element' || fail "finisher must name the 6-element posture"
 for el in 'outcome' 'verification surface' 'constraints' 'boundaries' 'iteration policy' 'blocked-stop'; do

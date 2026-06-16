@@ -1461,7 +1461,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			// ── IDC-LOCAL glass wall: a role resident may message only downstream peers +
-			// Ripple, never an upstream peer. Fail-closed on an unknown sender/target. The
+			// the Recirculator, never an upstream peer. Fail-closed on an unknown sender/target. The
 			// decision is enforced BEFORE any network send, so a denied prompt never leaves
 			// the agent; the denial is logged to the coms-net audit channel.
 			const senderRole = readIdcRoleForComsNet(pi, identity.name);

@@ -39,7 +39,7 @@ That's the whole system. Everything below is just naming the parts.
 | ⊙ **Implementer turbine** | "The engine." Pulls a buildable issue off the board and writes the code in a test-first loop. | `/idc:build` (implementer) |
 | ▒ **Filter** | Independent review + the real test surfaces (unit, e2e, agentic visual). Only **clean water passes** — nothing ships that isn't green. | the review engine |
 | ⊙ **Finisher turbine** | "The caboose." Works through the Filter's findings (fix → re-review → simplify), then **merges**. It is the one part that talks to the Bleed Valve. | `/idc:build` (finisher) |
-| 🩸 **Bleed Valve** | The single controlled **backflow**. When the Finisher hits a problem that can only be fixed *upstream* (the plan or the PRD is wrong), it opens the Bleed Valve and the flow returns to the gate. | `/idc:ripple` |
+| 🩸 **Bleed Valve** | The single controlled **backflow**. When the Finisher hits a problem that can only be fixed *upstream* (the plan or the PRD is wrong), it opens the Bleed Valve and the flow returns to the gate. | `/idc:recirculate` |
 | 🚰 **Faucet** | Open it and the whole rig runs on its own — draining every idea in the tank to shipped software, hands-off. (Run the turbines by hand, stage by stage, and you're just working the faucet manually.) | `/idc:autorun` |
 | 🥛 **The Glass** | The running software you actually consume. Clean water in the glass = working features in your hands. | your shipped app |
 | 📺 **Dashboard + sensors** | The tracker board. It isn't part of the plumbing — it's **instrumentation bolted onto it**, a sensor on every turbine. Its readouts (`Status · Stage · Wave · Phase · Domain`) tell you where every drop is. | the board |
@@ -75,7 +75,7 @@ flowchart LR
     IMPL["⊙ IMPLEMENTER turbine<br/>the engine · writes code, test-first"]:::turbine --> FILT
     FILT["▒ FILTER<br/>independent review · tests · e2e · visual"]:::filter --> FIN
     FIN["⊙ FINISHER turbine<br/>fix → re-review → simplify → merge"]:::turbine --> GLASS["🥛 merged — in the Glass"]:::done
-    FIN -. "finding that can only<br/>be fixed upstream" .-> BLEED{{"🩸 BLEED VALVE<br/>/idc:ripple"}}:::valve
+    FIN -. "finding that can only<br/>be fixed upstream" .-> BLEED{{"🩸 BLEED VALVE<br/>/idc:recirculate"}}:::valve
     BLEED -. "controlled backflow" .-> GATE["╳ DIVERTER VALVE<br/>the one gate"]:::valve
 
     classDef water fill:#F9FAFD,stroke:#252427,color:#252427;

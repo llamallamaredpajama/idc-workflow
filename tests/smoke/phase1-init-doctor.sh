@@ -33,7 +33,7 @@ grep -q "Test Project" "$SBX/WORKFLOW.md"        || fail "PROJECT_NAME not subst
 # doctor check 4: exactly the two v2 subdirs, no v1 subdirs
 [ -d "$SBX/docs/workflow/pillar-matrices" ]      || fail "docs/workflow/pillar-matrices missing"
 [ -d "$SBX/docs/workflow/code-reviews" ]         || fail "docs/workflow/code-reviews missing"
-for v1 in audits ledgers ripple operator-todos phase-planning pillar-conflicts handoffs diagrams plans; do
+for v1 in audits ledgers recirculator operator-todos phase-planning pillar-conflicts handoffs diagrams plans; do
   [ -e "$SBX/docs/workflow/$v1" ] && fail "v1 subdir docs/workflow/$v1 should not be scaffolded in v2"
 done
 # doctor check 3: filesystem backend selected + TRACKER.md present and valid

@@ -10,7 +10,7 @@ primitives (`WORKFLOW.md §5`); this skill maps each to concrete mechanics on th
 vendored `idc-pi` launcher under Bun + the Pi coding agent). There is exactly one adapter per
 runtime — this is the only place pi mechanics live, so the process docs stay runtime-neutral
 and cannot drift per-runtime. The playbooks are single-source: each stage resident runs its
-**whole** playbook (`think.md / plan.md / build.md / ripple.md` + implementer / review-agent /
+**whole** playbook (`think.md / plan.md / build.md / recirculator.md` + implementer / review-agent /
 finisher); the adapter decides only how their **sessions** are realized, never forking a
 playbook per runtime.
 
@@ -18,7 +18,7 @@ playbook per runtime.
 
 | Primitive | pi / coms-net mechanic | Fallback |
 |---|---|---|
-| **Durable worker** (Build implementer/finisher, autorun lane) | A **standing coms-net resident**: a long-lived role peer the `idc-pi` launcher opens with `--name <role>` (`think`, `plan`, `sequence`, `ripple`, `build-impl`, `build-review`, `build-finish`); Build is a **pool of triplets** (one resident per triplet role, the hub uniquifies a duplicate role with a trailing `-<n>`). Residents are flat peers — **no master orchestrator** at the cross-stage level; the board is the authoritative cross-stage handoff. | No pi runtime / no Bun → run the work **serially in the main session**, one unit at a time. |
+| **Durable worker** (Build implementer/finisher, autorun lane) | A **standing coms-net resident**: a long-lived role peer the `idc-pi` launcher opens with `--name <role>` (`think`, `plan`, `sequence`, `recirculator`, `build-impl`, `build-review`, `build-finish`); Build is a **pool of triplets** (one resident per triplet role, the hub uniquifies a duplicate role with a trailing `-<n>`). Residents are flat peers — **no master orchestrator** at the cross-stage level; the board is the authoritative cross-stage handoff. | No pi runtime / no Bun → run the work **serially in the main session**, one unit at a time. |
 | **Bounded fan-out** (domain experts, drafters, clash pairs, reviewers) | An **ephemeral coms-net helper / isolated child-process** spawned off a resident — short-lived, outside the standing pool, deterministic. Review fan-out is always **fresh cold child-processes per PR** (cold read = adversarial independence, token-optimal), never a standing resident. | Child-process fan-out is available wherever the runtime is; no fallback needed. |
 | **Goal loop** (issue execution) | The native `/fullauto-goal` loop with auto-goal discipline: render-before-run, record-and-vary iteration, evidence-before-assertion, the attempt ceiling, and the no-punt rule. The issue body IS the contract. | — |
 
@@ -31,7 +31,7 @@ playbook per runtime.
   its own triplet — that is *inside* the playbook, not a global master (`§2 decision 2`).
 - **Glass-wall ACL (fail-closed) governs every `coms_net_send`.** A resident may message only
   peers **strictly downstream** of it in the river order — `think → plan → sequence →
-  build-impl → build-review → build-finish` — plus the **Ripple** peer (the universal
+  build-impl → build-review → build-finish` — plus the **Recirculator** peer (the universal
   downstream sink). Upstream, self, an unknown sender, or an unmappable target is **denied
   fail-closed**. The rule is enforced in the client extension **and authoritatively re-enforced
   at the coms-net hub** (`handleSendMessage`) before any message is queued, so a direct
@@ -72,7 +72,7 @@ decision 7`, `agents/idc-build.md`). Worked example for one wave:
    fail-closed verdict.
 4. **A finisher resident** (`build-finish`) runs the **whole** `idc:idc-finisher`: its **own**
    `/fullauto-goal` loop over **all** reviewer findings (incl. side issues) → `/simplify` → git
-   finalization → Ripple on the unsolvable.
+   finalization → recirculation on the unsolvable.
 5. **Merge-serialization mechanism = a tracker-backed merge lease.** Two layers, both required:
    **(a) matrix-disjoint surfaces** make parallel diffs content-commutative (primary defense);
    **(b) a single-holder merge lease, fail-closed (no lease → no merge).** Because the pi pool
@@ -89,7 +89,7 @@ decision 7`, `agents/idc-build.md`). Worked example for one wave:
    sole Build orchestrator merges; Codex: the app-server serially merges finisher threads).
 
 The forward triplet notifications — `build-impl → build-review → build-finish` — are all
-downstream-legal under the glass-wall ACL; Ripple is reachable from any of them.
+downstream-legal under the glass-wall ACL; the Recirculator is reachable from any of them.
 
 ## Model selection
 
@@ -97,7 +97,7 @@ pi residents run the **Pi coding agent**; the tier-symbolic contract still holds
 name only the **tier** (`WORKFLOW.md §6`), and the `idc-pi` launcher resolves it from
 `WORKFLOW-config.yaml::model_routing` and applies the resolved model/effort to the Pi agent at
 resident spawn (mirroring `idc:idc-adapter-claude`, not Codex's untiered carve-out). Never hardcode
-a model id in a command, agent, or non-adapter skill; Ripple maintains the table when models
+a model id in a command, agent, or non-adapter skill; the Recirculator maintains the table when models
 change.
 
 ## Authority boundaries
@@ -105,4 +105,4 @@ change.
 - Maps primitives to coms-net mechanics (residents / child-process fan-out / `/fullauto-goal`)
   only — never authors contracts, makes judgment calls, or issues verdicts.
 - Never forks a playbook per runtime (single-source), never mutates the tracker, the canonical
-  docs, the vendored runtime internals, or `WORKFLOW-config.yaml` (Ripple owns the model table).
+  docs, the vendored runtime internals, or `WORKFLOW-config.yaml` (the Recirculator owns the model table).

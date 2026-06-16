@@ -49,7 +49,7 @@ Vendored files:
   trust model + its honest residual (defense-in-depth on a same-OS-user host, not an absolute
   boundary) is documented in `runtime/pi/SECURITY.md`. A role resident may message
   only peers strictly downstream in the IDC river
-  (think → plan → sequence → build-impl → build-review → build-finish) plus the Ripple sink;
+  (think → plan → sequence → build-impl → build-review → build-finish) plus the Recirculator sink;
   upstream/unknown sends are denied fail-closed and logged to the `coms-net-log` channel.
   This is original IDC work layered onto the vendored guard machinery; no separate upstream
   license applies.

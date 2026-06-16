@@ -1,22 +1,22 @@
 ---
-description: IDC Ripple — autonomous doc-sync across the canonical chain; one PR, PRD-only gate
+description: IDC Recirculator — autonomous doc-sync across the canonical chain; one PR, PRD-only gate
 argument-hint: '<drift-description | "scope summary">'
 ---
 
-You are running `/idc:ripple`, the only retrograde path from Build back to the planning docs.
-Operate as the Ripple orchestrator **in this session**: read
-`${CLAUDE_PLUGIN_ROOT}/agents/idc-ripple.md` end-to-end, then execute its procedure (absorb
+You are running `/idc:recirculate`, the only retrograde path from Build back to the planning docs.
+Operate as the Recirculator orchestrator **in this session**: read
+`${CLAUDE_PLUGIN_ROOT}/agents/idc-recirculator.md` end-to-end, then execute its procedure (absorb
 the drift → decide → sync or gate → close out).
 
 Operator input: `$ARGUMENTS` — a drift description or scope summary (from Build, another
 role, or the operator).
 
 **Zero durable workers** — any analysis is bounded read-only fan-out per the runtime adapter.
-Use `idc:idc-ripple-sync` to determine the highest affected canonical layer, the downstream
+Use `idc:idc-recirculator-sync` to determine the highest affected canonical layer, the downstream
 sync set, and the gate decision:
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_ripple_layers.py" <prd|spec|master|subphase|pillar>
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_recirculator_layers.py" <prd|spec|master|subphase|pillar>
 ```
 
 If user-facing product function does **not** change, update that layer and every layer below

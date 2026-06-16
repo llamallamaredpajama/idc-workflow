@@ -8,7 +8,7 @@
 //
 //   build-impl → plan         (UPSTREAM)        hub must REJECT (403), no msg_id
 //   build-impl → build-finish (DOWNSTREAM)      hub must ACCEPT (200 + msg_id)
-//   build-impl → ripple       (Ripple sink)     hub must ACCEPT (200 + msg_id)
+//   build-impl → recirculator (Recirculator sink) hub must ACCEPT (200 + msg_id)
 //   ghost      → build-finish (unknown sender)  hub must REJECT (403, fail-closed)
 //
 // Usage: bun phase8-coms-net-bypass-probe.ts <serverUrl> <token> [project]
@@ -48,7 +48,7 @@ async function main() {
 	const buildImpl = await register("build-impl");
 	await register("plan");
 	const buildFinish = await register("build-finish");
-	await register("ripple");
+	await register("recirculator");
 	const ghost = await register("ghost");
 	const think = await register("think");
 
@@ -56,7 +56,7 @@ async function main() {
 		// Honest sends (caller presents its own token + claims its own session).
 		{ name: "build-impl → plan (UPSTREAM)", token: buildImpl.token, senderSession: buildImpl.sessionId, target: "plan", mustReject: true },
 		{ name: "build-impl → build-finish (DOWNSTREAM)", token: buildImpl.token, senderSession: buildImpl.sessionId, target: "build-finish", mustReject: false },
-		{ name: "build-impl → ripple (Ripple sink)", token: buildImpl.token, senderSession: buildImpl.sessionId, target: "ripple", mustReject: false },
+		{ name: "build-impl → recirculator (Recirculator sink)", token: buildImpl.token, senderSession: buildImpl.sessionId, target: "recirculator", mustReject: false },
 		{ name: "ghost → build-finish (unknown sender role, fail-closed)", token: ghost.token, senderSession: ghost.sessionId, target: "build-finish", mustReject: true },
 		// F2 round-2 SPOOF: a downstream token holder CLAIMS an upstream peer's session id to send
 		// upstream. The hub must reject because the presented token isn't that session's credential.

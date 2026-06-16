@@ -1,0 +1,191 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="820" viewBox="0 0 1600 820" role="img"
+     aria-label="The IDC water rig: ideas flow from the Think Tank through a Planning turbine, past the Diverter Valve (the one PRD gate that can divert user-facing changes up to the PRD for your authorization), through the Implementer turbine, the Filter (review/tests), and the Finisher turbine, out the Autorun faucet into the glass of working software. The Finisher's bleed valve sends controlled backflow all the way to the gate. A dashboard reads sensors on every turbine.">
+  <!-- Coal House palette: coal #252427, canvas #F9FAFD, sage #9CA689, coral #F56A6A, deep #1b1a1c -->
+  <defs>
+    <symbol id="turbine" viewBox="-40 -40 80 80">
+      <circle r="33" fill="#252427" stroke="#F9FAFD" stroke-width="3"/>
+      <g stroke="#F9FAFD" stroke-width="2">
+        <line x1="0" y1="-33" x2="0" y2="33"/>
+        <line x1="-33" y1="0" x2="33" y2="0"/>
+        <line x1="-23.3" y1="-23.3" x2="23.3" y2="23.3"/>
+        <line x1="-23.3" y1="23.3" x2="23.3" y2="-23.3"/>
+      </g>
+      <circle r="7" fill="#9CA689" stroke="#252427" stroke-width="1.5"/>
+      <circle r="33" fill="none" stroke="#9CA689" stroke-width="1.5" stroke-dasharray="2 6" opacity="0.7"/>
+    </symbol>
+    <clipPath id="frame"><rect x="0" y="0" width="1600" height="820"/></clipPath>
+  </defs>
+
+  <g clip-path="url(#frame)" font-family="Gill Sans, Gill Sans MT, Futura, Trebuchet MS, sans-serif">
+    <!-- canvas + frame -->
+    <rect width="1600" height="820" fill="#252427"/>
+    <rect x="20.5" y="20.5" width="1559" height="779" fill="none" stroke="#9CA689" stroke-opacity="0.35" stroke-width="1"/>
+
+    <!-- corner captions -->
+    <text x="44" y="52" font-size="13" letter-spacing="3" fill="#9CA689" fill-opacity="0.9">THE IDC WATER RIG</text>
+    <text x="44" y="76" font-size="20" font-weight="bold" letter-spacing="0.5" fill="#F9FAFD">An idea in. Working software out.</text>
+    <text x="1556" y="790" text-anchor="end" font-size="12.5" letter-spacing="2.5" fill="#9CA689" fill-opacity="0.85">ONE-WAY FLOW · ONE GATE · ONE WAY BACK</text>
+
+    <!-- ===================== MAIN PIPE ===================== -->
+    <rect x="250" y="436" width="950" height="28" fill="#9CA689" fill-opacity="0.10"/>
+    <line x1="250" y1="436" x2="1200" y2="436" stroke="#F9FAFD" stroke-width="2.5"/>
+    <line x1="250" y1="464" x2="1200" y2="464" stroke="#F9FAFD" stroke-width="2.5"/>
+    <!-- forward flow arrows (sage) -->
+    <g fill="#9CA689">
+      <path d="M305,450 l-11,-6 l0,12 z"/>
+      <path d="M455,450 l-11,-6 l0,12 z"/>
+      <path d="M640,450 l-11,-6 l0,12 z"/>
+      <path d="M940,450 l-11,-6 l0,12 z"/>
+      <path d="M1150,450 l-11,-6 l0,12 z"/>
+    </g>
+
+    <!-- ===================== THINK TANK ===================== -->
+    <g>
+      <ellipse cx="155" cy="250" rx="85" ry="17" fill="#252427" stroke="#F9FAFD" stroke-width="3"/>
+      <rect x="70" y="250" width="170" height="320" rx="10" fill="#252427" stroke="#F9FAFD" stroke-width="3"/>
+      <line x1="70" y1="250" x2="70" y2="570" stroke="#F9FAFD" stroke-width="3"/>
+      <line x1="240" y1="250" x2="240" y2="570" stroke="#F9FAFD" stroke-width="3"/>
+      <ellipse cx="155" cy="570" rx="85" ry="17" fill="#252427" stroke="#F9FAFD" stroke-width="3"/>
+      <!-- rivets -->
+      <g fill="#9CA689">
+        <circle cx="84" cy="300" r="2.6"/><circle cx="84" cy="360" r="2.6"/><circle cx="84" cy="420" r="2.6"/><circle cx="84" cy="480" r="2.6"/><circle cx="84" cy="540" r="2.6"/>
+        <circle cx="226" cy="300" r="2.6"/><circle cx="226" cy="360" r="2.6"/><circle cx="226" cy="420" r="2.6"/><circle cx="226" cy="540" r="2.6"/>
+      </g>
+      <!-- floating ideas (bubbles) -->
+      <g fill="#9CA689" fill-opacity="0.55" stroke="#9CA689" stroke-opacity="0.8">
+        <circle cx="128" cy="330" r="13"/>
+        <circle cx="182" cy="375" r="9"/>
+        <circle cx="120" cy="420" r="10"/>
+        <circle cx="178" cy="460" r="14"/>
+        <circle cx="140" cy="505" r="8"/>
+        <circle cx="108" cy="478" r="6"/>
+      </g>
+      <!-- outlet to the pipe -->
+      <path d="M240,450 L250,450" stroke="#F9FAFD" stroke-width="3"/>
+    </g>
+    <text x="155" y="612" text-anchor="middle" font-size="18" font-weight="bold" letter-spacing="2" fill="#F9FAFD">THINK TANK</text>
+    <text x="155" y="633" text-anchor="middle" font-size="12.5" fill="#9CA689" letter-spacing="0.5">/idc:think · ideas float free</text>
+    <text x="155" y="651" text-anchor="middle" font-size="12.5" fill="#9CA689" letter-spacing="0.5">→ one consideration enters the pipe</text>
+
+    <!-- ===================== PLANNING TURBINE ===================== -->
+    <use href="#turbine" x="327" y="417" width="66" height="66"/>
+    <text x="360" y="548" text-anchor="middle" font-size="16" font-weight="bold" letter-spacing="1.5" fill="#F9FAFD">PLANNING TURBINE</text>
+    <text x="360" y="568" text-anchor="middle" font-size="12" fill="#9CA689">/idc:plan · domains · doc chain</text>
+    <text x="360" y="584" text-anchor="middle" font-size="12" fill="#9CA689">· sequence into waves</text>
+
+    <!-- ===================== DIVERTER VALVE + PRD branch ===================== -->
+    <!-- branch pipe up to PRD -->
+    <line x1="512" y1="436" x2="512" y2="186" stroke="#F56A6A" stroke-width="2.5"/>
+    <line x1="528" y1="436" x2="528" y2="186" stroke="#F56A6A" stroke-width="2.5"/>
+    <path d="M520,250 l-6,11 l12,0 z" fill="#F56A6A"/>
+    <text x="556" y="300" font-size="11.5" fill="#F56A6A" letter-spacing="0.5">changes what the</text>
+    <text x="556" y="316" font-size="11.5" fill="#F56A6A" letter-spacing="0.5">software DOES? ↑</text>
+    <!-- padlock on the branch -->
+    <path d="M512,232 a8,8 0 0 1 16,0" fill="none" stroke="#F56A6A" stroke-width="2.5"/>
+    <rect x="506" y="232" width="28" height="22" rx="3" fill="#252427" stroke="#F56A6A" stroke-width="2.5"/>
+    <circle cx="520" cy="241" r="2.6" fill="#F56A6A"/>
+    <!-- the valve -->
+    <rect x="503" y="433" width="34" height="34" rx="3" fill="#252427" stroke="#F56A6A" stroke-width="3" transform="rotate(45 520 450)"/>
+    <circle cx="520" cy="450" r="5" fill="#F56A6A"/>
+    <text x="520" y="404" text-anchor="middle" font-size="16" font-weight="bold" letter-spacing="1.5" fill="#F56A6A">DIVERTER VALVE</text>
+    <text x="520" y="388" text-anchor="middle" font-size="11.5" letter-spacing="2.5" fill="#F56A6A" fill-opacity="0.95">THE ONE GATE</text>
+
+    <!-- PRD tank -->
+    <ellipse cx="520" cy="95" rx="66" ry="12" fill="#252427" stroke="#F9FAFD" stroke-width="3"/>
+    <rect x="454" y="95" width="132" height="92" rx="8" fill="#252427" stroke="#F9FAFD" stroke-width="3"/>
+    <ellipse cx="520" cy="187" rx="66" ry="12" fill="#252427" stroke="#F9FAFD" stroke-width="3"/>
+    <text x="520" y="150" text-anchor="middle" font-size="30" font-weight="bold" letter-spacing="3" fill="#F9FAFD">PRD</text>
+    <text x="438" y="120" text-anchor="end" font-size="13" font-weight="bold" letter-spacing="1" fill="#F56A6A">YOU</text>
+    <text x="438" y="138" text-anchor="end" font-size="13" font-weight="bold" letter-spacing="1" fill="#F56A6A">AUTHORIZE</text>
+    <text x="438" y="158" text-anchor="end" font-size="11" fill="#9CA689">the only valve</text>
+    <text x="438" y="172" text-anchor="end" font-size="11" fill="#9CA689">only you open</text>
+
+    <!-- ===================== IMPLEMENTER TURBINE ===================== -->
+    <use href="#turbine" x="687" y="417" width="66" height="66"/>
+    <text x="720" y="548" text-anchor="middle" font-size="16" font-weight="bold" letter-spacing="1.5" fill="#F9FAFD">IMPLEMENTER TURBINE</text>
+    <text x="720" y="568" text-anchor="middle" font-size="12" fill="#9CA689">the engine · pulls issues, TDD loop</text>
+
+    <!-- ===================== FILTER ===================== -->
+    <rect x="826" y="412" width="68" height="76" rx="9" fill="#252427" stroke="#F9FAFD" stroke-width="3"/>
+    <line x1="826" y1="430" x2="894" y2="430" stroke="#F9FAFD" stroke-width="1.5" stroke-opacity="0.6"/>
+    <line x1="826" y1="470" x2="894" y2="470" stroke="#F9FAFD" stroke-width="1.5" stroke-opacity="0.6"/>
+    <g fill="none" stroke="#9CA689" stroke-width="2.5">
+      <path d="M836,440 l10,10 l-10,10"/>
+      <path d="M852,440 l10,10 l-10,10"/>
+      <path d="M868,440 l10,10 l-10,10"/>
+    </g>
+    <text x="860" y="616" text-anchor="middle" font-size="16" font-weight="bold" letter-spacing="1.5" fill="#F9FAFD">FILTER</text>
+    <text x="860" y="636" text-anchor="middle" font-size="12" fill="#9CA689">review · tests · e2e · visual</text>
+    <text x="860" y="652" text-anchor="middle" font-size="12" fill="#9CA689">only clean water passes</text>
+    <line x1="860" y1="592" x2="860" y2="494" stroke="#F9FAFD" stroke-width="1" stroke-opacity="0.4"/>
+
+    <!-- ===================== FINISHER TURBINE ===================== -->
+    <use href="#turbine" x="967" y="417" width="66" height="66"/>
+    <text x="1000" y="548" text-anchor="middle" font-size="16" font-weight="bold" letter-spacing="1.5" fill="#F9FAFD">FINISHER TURBINE</text>
+    <text x="1000" y="568" text-anchor="middle" font-size="12" fill="#9CA689">fix → re-review → merge</text>
+    <text x="1000" y="584" text-anchor="middle" font-size="12" fill="#9CA689">the caboose · talks to Ripple</text>
+
+    <!-- ===================== BLEED VALVE + BACKFLOW ===================== -->
+    <!-- bleed valve (bowtie) on the pipe just past the finisher -->
+    <g transform="translate(1080,450)">
+      <path d="M0,0 L-13,-11 L-13,11 z" fill="#252427" stroke="#F56A6A" stroke-width="2.5"/>
+      <path d="M0,0 L13,-11 L13,11 z" fill="#252427" stroke="#F56A6A" stroke-width="2.5"/>
+    </g>
+    <text x="1080" y="408" text-anchor="middle" font-size="15" font-weight="bold" letter-spacing="1" fill="#F56A6A">BLEED VALVE</text>
+    <text x="1080" y="392" text-anchor="middle" font-size="11.5" fill="#F56A6A">/idc:ripple</text>
+    <!-- backflow pipe: down, left across the bottom, up to just in front of the diverter -->
+    <path d="M1080,464 L1080,690 L470,690 L470,464" fill="none" stroke="#F56A6A" stroke-width="3"/>
+    <g fill="#F56A6A">
+      <path d="M900,690 l11,-6 l0,12 z"/>
+      <path d="M680,690 l11,-6 l0,12 z"/>
+      <path d="M470,486 l-6,11 l12,0 z" transform="rotate(180 470 491)"/>
+    </g>
+    <text x="775" y="714" text-anchor="middle" font-size="13" font-weight="bold" letter-spacing="1.5" fill="#F56A6A">CONTROLLED BACKFLOW</text>
+    <text x="775" y="732" text-anchor="middle" font-size="11.5" fill="#F56A6A" fill-opacity="0.9">the only way back — re-decided at the gate (auto, or up to the PRD)</text>
+
+    <!-- ===================== FAUCET + GLASS ===================== -->
+    <!-- riser + gooseneck -->
+    <path d="M1200,450 L1200,360 Q1200,332 1228,332 L1304,332 Q1332,332 1332,360 L1332,388"
+          fill="none" stroke="#F9FAFD" stroke-width="5"/>
+    <!-- pour -->
+    <path d="M1332,388 q-6,28 0,56 q6,28 0,52" fill="none" stroke="#9CA689" stroke-width="3.5" opacity="0.85"/>
+    <!-- glass -->
+    <path d="M1299,470 L1365,470 L1357,602 L1307,602 z" fill="none" stroke="#F9FAFD" stroke-width="3"/>
+    <path d="M1303,524 L1361,524 L1357,602 L1307,602 z" fill="#9CA689" fill-opacity="0.35" stroke="none"/>
+    <text x="1332" y="640" text-anchor="middle" font-size="15" font-weight="bold" letter-spacing="1" fill="#F9FAFD">THE GLASS</text>
+    <text x="1332" y="660" text-anchor="middle" font-size="12" fill="#9CA689">the software you consume</text>
+    <text x="1232" y="560" text-anchor="middle" font-size="15" font-weight="bold" letter-spacing="1" fill="#F9FAFD">FAUCET</text>
+    <text x="1232" y="580" text-anchor="middle" font-size="12" fill="#9CA689">/idc:autorun</text>
+    <text x="1232" y="596" text-anchor="middle" font-size="12" fill="#9CA689">open it — it flows on its own</text>
+
+    <!-- ===================== DASHBOARD + SENSORS ===================== -->
+    <text x="855" y="50" text-anchor="middle" font-size="16" font-weight="bold" letter-spacing="2" fill="#F9FAFD">THE DASHBOARD — THE BOARD</text>
+    <rect x="620" y="64" width="470" height="128" rx="10" fill="#1b1a1c" stroke="#F9FAFD" stroke-width="2"/>
+    <text x="855" y="88" text-anchor="middle" font-size="10.5" letter-spacing="2" fill="#9CA689">STATUS · STAGE · WAVE · PHASE · DOMAIN</text>
+    <!-- mini trend line -->
+    <polyline points="640,150 680,134 720,142 760,118 800,128 840,108 880,120 920,104"
+              fill="none" stroke="#9CA689" stroke-width="2"/>
+    <!-- mini bars -->
+    <g>
+      <rect x="952" y="150" width="120" height="7" fill="#9CA689" opacity="0.85"/>
+      <rect x="952" y="162" width="86"  height="7" fill="#9CA689" opacity="0.7"/>
+      <rect x="952" y="174" width="104" height="7" fill="#F56A6A" opacity="0.85"/>
+    </g>
+    <text x="640" y="184" font-size="9.5" letter-spacing="1" fill="#9CA689" fill-opacity="0.7">SENSORS ON EVERY TURBINE</text>
+    <!-- sensor wires -->
+    <g stroke="#F9FAFD" stroke-opacity="0.4" stroke-width="1.2" stroke-dasharray="3 5" fill="none">
+      <path d="M650,192 C500,300 400,360 360,414"/>
+      <path d="M700,192 C600,300 540,360 520,418"/>
+      <path d="M770,192 L720,414"/>
+      <path d="M870,192 L860,410"/>
+      <path d="M1000,192 L1000,414"/>
+    </g>
+    <g fill="#9CA689">
+      <circle cx="360" cy="414" r="3.2"/>
+      <circle cx="520" cy="418" r="3.2"/>
+      <circle cx="720" cy="414" r="3.2"/>
+      <circle cx="860" cy="410" r="3.2"/>
+      <circle cx="1000" cy="414" r="3.2"/>
+    </g>
+  </g>
+</svg>

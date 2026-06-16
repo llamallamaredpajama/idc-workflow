@@ -6,8 +6,8 @@ argument-hint: '"<topic-or-anchor-doc>" [--doc <path>] [--slug <name>]'
 You are running `/idc:think`. This is the free-thinking front door of the IDC v2 pipeline:
 a brainstorm/interview held **in this main session with zero durable workers**. You talk
 with the operator and shape one **function-first consideration file**. Thinking stays free
-— there are no gates, no teammates, no admission language here; the one PRD gate lives in
-Plan (`WORKFLOW.md §2`, `§4.1`).
+— there are no gates, no teammates, no admission language here; the requirements gate (the PRD
+always, the TRD when `gating.trd: on`) lives in Plan (`WORKFLOW.md §2`, `§4.1`).
 
 Operator input: `$ARGUMENTS` — a topic, an anchor doc (`--doc <path>`), and/or a slug.
 
@@ -23,8 +23,9 @@ Operator input: `$ARGUMENTS` — a topic, an anchor doc (`--doc <path>`), and/or
    conversation — the budget here is zero teammates.
 3. **Stay function-first.** Capture what the user gets and how it behaves, organized by
    domain where natural. Describe intended product function, not implementation tasks or a
-   file plan. Note `PRD impact:` (does user-facing function change?) — state it, do not act
-   on it; Plan owns the gate.
+   file plan. Note `PRD impact:` (does user-facing function change?) — and, where the technical
+   approach shifts, the TRD/spec impact too — state them, do not act on them; Plan owns the gate
+   (which covers the TRD only when `gating.trd: on`).
 
 ## Output
 

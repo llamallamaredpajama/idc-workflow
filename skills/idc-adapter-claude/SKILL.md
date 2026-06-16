@@ -32,6 +32,9 @@ Read `WORKFLOW-config.yaml::model_routing`. For a spawn at tier `<tier>`, resolv
 `model_routing.<tier>.claude.model` and apply its `thinking` / `effort` hint. Process docs
 name only the tier; this skill resolves the concrete model. The Recirculator maintains the table when
 models change — never hardcode a model id in a command, agent, or non-adapter skill.
+`WORKFLOW-config.yaml` also carries the `gating:` requirements-gate toggle (`gating.prd` /
+`gating.trd`), but that is read by the gate predicate (`scripts/idc_recirculator_layers.py`) for
+Plan and the Recirculator — not by tier resolution.
 
 | Tier | Resolves to (per config) | Applied to |
 |---|---|---|

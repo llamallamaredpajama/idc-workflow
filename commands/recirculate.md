@@ -16,14 +16,16 @@ Use `idc:idc-recirculator-sync` to determine the highest affected canonical laye
 sync set, and the gate decision:
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_recirculator_layers.py" <prd|spec|master|subphase|pillar>
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_recirculator_layers.py" <prd|spec|master|subphase|pillar> --config WORKFLOW-config.yaml
 ```
 
-If user-facing product function does **not** change, update that layer and every layer below
-it — arch spec, master plan, subphases, pillars, affected open issues — **synchronized in one
-PR**, automerged, with the **PR body as the change order**. If it **does** (the highest
-affected layer is the PRD), take the same gate as Plan via `idc:idc-gate-issue` (blocked gate
-issue + plain-terms summary + PRD diff + push notification); pause only the affected work.
+The helper reads the `gating:` toggle from `WORKFLOW-config.yaml`: the PRD always gates, and the
+TRD (the `spec` layer) gates only when `gating.trd: on`. If no gated layer changes, update that
+layer and every layer below it — arch spec, master plan, subphases, pillars, affected open
+issues — **synchronized in one PR**, automerged, with the **PR body as the change order**. If a
+gated layer changes (the PRD, or the TRD/`spec` layer when `gating.trd: on`), take the same gate as
+Plan via `idc:idc-gate-issue` (blocked gate issue + plain-terms summary + the doc diff + push
+notification); pause only the affected work.
 
 No verdict taxonomy, no change-order files — they are deleted; the PR body is the record. Do
 not write source or tests; do not edit the PRD without the gate; never leave the doc chain

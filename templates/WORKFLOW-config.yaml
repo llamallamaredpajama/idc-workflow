@@ -12,6 +12,15 @@ workflow:
 project:
   name: "{{PROJECT_NAME}}"
 
+# Requirements-gate toggles — which canonical "requirements" layer change pauses for the one human
+# gate (the operator-approval issue). The PRD (user-facing *what*) always gates; the TRD (the
+# technical *how* — the `spec` layer) gates only where the repo opts in. `/idc:init` sets the TRD
+# default by repo type: greenfield leaves it off, brownfield flips it on. Read by the gate predicate
+# (`scripts/idc_recirculator_layers.py`); Plan and the Recirculator honor it.
+gating:
+  prd: on    # PRD changes always gate (user-facing product function)
+  trd: off   # TRD/spec changes gate only when on (greenfield default: off)
+
 # Canonical document map for the IDC roles (v2 — five-layer chain + lean process tree).
 documents:
   workflow: WORKFLOW.md

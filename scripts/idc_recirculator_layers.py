@@ -23,7 +23,7 @@ import sys
 
 CHAIN = ["prd", "spec", "master", "subphase", "pillar"]
 
-# Greenfield defaults applied when a gating key is absent (or no --config is given): the PRD gates,
+# Greenfield defaults applied when a gating key is ABSENT (or no --config is given): the PRD gates,
 # the TRD does not. A missing/unreadable toggle must never silently DROP a gate the operator wanted.
 GATING_DEFAULTS = {"prd": True, "trd": False}
 _TRUE = {"on", "true", "yes"}
@@ -33,10 +33,20 @@ _FALSE = {"off", "false", "no"}
 def read_gating(config_path):
     """Lift the `gating:` block (one level of two-space nesting) from a WORKFLOW-config.yaml.
 
-    Dependency-free, format-specific scanner (the config ships to repos that may lack PyYAML) — the
-    same shape `idc_governance_compile.py::parse_config_scalars` reads. Absent or malformed values
-    fall back to the greenfield defaults; an unreadable explicit --config is a hard usage error
-    (exit 2) so a brownfield's `trd: on` is never silently lost to a default-off.
+    Dependency-free, format-specific scanner (the config ships to repos that may lack PyYAML) —
+    broadly the shape `idc_governance_compile.py::parse_config_scalars` reads, with one addition: it
+    strips an inline `# comment` before classifying, because the shipped WORKFLOW-config.yaml ships
+    its gating lines commented (`trd: off   # ...`). An ABSENT key falls back to the greenfield
+    default; an unreadable explicit --config is a hard usage error (exit 2) so a brownfield's
+    `trd: on` is never silently lost to a default-off.
+
+    Gate-arming strictness (deliberate local divergence from the lenient house parser): a gating key
+    that is PRESENT but carries an unrecognized value (typo / flow-style / mis-indent) does NOT fall
+    back to off — it FAILS CLOSED to gated (True). This is the gate's arming switch and the failure
+    is security-relevant: a malformed `trd:` value silently defaulting to off is exactly gotcha #7
+    (silent architecture rewrites on a brownfield repo that intended `trd: on`). The house parser
+    (`idc_governance_compile.py::parse_config_scalars`) reads such values leniently; here we are
+    stricter ON PURPOSE because the cost of a wrongly-disarmed gate is unreviewed re-architecture.
     """
     gating = dict(GATING_DEFAULTS)
     try:
@@ -55,11 +65,25 @@ def read_gating(config_path):
         if in_block and indent == 2 and ":" in raw:
             key, _, val = raw.strip().partition(":")
             key = key.strip()
-            val = val.strip().strip("'\"").lower()
-            if key in gating and val in _TRUE:
+            # Strip an inline `# comment` BEFORE classifying — the shipped WORKFLOW-config.yaml
+            # ships its gating lines commented (`trd: off   # ...`), so without this the whole
+            # `off   # ...` string is "unrecognized" and the fail-closed branch below would gate
+            # every default greenfield repo ON. A boolean toggle value never legitimately holds `#`.
+            val = val.split("#", 1)[0].strip().strip("'\"").lower()
+            if key not in gating:
+                continue
+            if val in _TRUE:
                 gating[key] = True
-            elif key in gating and val in _FALSE:
+            elif val in _FALSE:
                 gating[key] = False
+            else:
+                # Present-but-unrecognized value on the gate's arming switch: FAIL CLOSED to gated
+                # rather than silently defaulting to off (gotcha #7). See the docstring for why this
+                # diverges from the lenient house parser.
+                sys.stderr.write(
+                    f"idc_recirculator_layers: gating.{key} has unrecognized value "
+                    f"{val!r}; failing closed to gated (on)\n")
+                gating[key] = True
     return gating
 
 

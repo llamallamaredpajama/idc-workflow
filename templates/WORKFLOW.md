@@ -8,8 +8,9 @@
 > Tank** (`/idc:think`), firm up into one consideration, and flow down a pipe of **turbines** —
 > the **Planning turbine** (`/idc:plan`), then the build triplet **Implementer → Filter →
 > Finisher** (`/idc:build`) — and pour out the **Faucet** (`/idc:autorun`) as merged software in
-> your glass. The **Diverter Valve** is the one gate (§2): it sends any change to *what the
-> software does for the user* up to the **PRD**, the one valve only you can open. The **Bleed
+> your glass. The **Diverter Valve** is the one gate (§2): fired at the **end of Think** on the
+> **Think PR**, it is where you admit an idea's **PRD + TRD** (the user-facing *what* and the
+> technical *how*) — the one valve only you can open. The **Bleed
 > Valve** (`/idc:recirculate`, §4.4) is the single controlled way back. The board is the **dashboard**
 > that meters every turbine (§3.1). This is the friendly picture; the numbered sections below are
 > the authoritative contract.
@@ -17,9 +18,9 @@
 IDC carries an idea from a raw thought to merged, tested code. It is built on
 **guardrails, not train tracks**: the model is trusted to do the work; the process
 intervenes only where a real derailment would otherwise ship. There are exactly five
-guardrails — the one PRD gate (§2), matrix deconfliction (§4.2), real verification
-surfaces (§4.3), recirculator drift-healing (§4.4), and one-way flow through the glass wall
-(§1.2). Everything else flows autonomously.
+guardrails — the one requirements gate at the end of Think (§2), matrix deconfliction (§4.2),
+real verification surfaces (§4.3), recirculator drift-healing (§4.4), and one-way flow through
+the glass wall (§1.2). Everything else flows autonomously.
 
 ## 1. Canonical chain & flow
 
@@ -32,33 +33,40 @@ scaffold) and `/idc:doctor` (read-only health check).
 
 | Stage | Slash surface | Surface it writes |
 |---|---|---|
-| Think | `/idc:think` | `docs/considerations/` (pre-canonical) |
-| Plan | `/idc:plan` | `docs/prd/`, `docs/specs/`, `docs/plans/` (master + subphases + pillars), pillar matrices, and tracker issues |
+| Think | `/idc:think` | `docs/considerations/` + the gated **PRD** (`docs/prd/`) and **TRD** (`docs/specs/`) draft, opened on the Think PR (§2) |
+| Plan | `/idc:plan` | `docs/plans/` (master + subphases + pillars), pillar matrices, and tracker issues — pure decomposition, no requirements docs |
 | Build | `/idc:build` | source surfaces (per issue `BOUNDARIES`), tests, review reports, and tracker status |
 | Recirculator | `/idc:recirculate` | every affected canonical doc, synchronized in one PR |
 
 ### 1.2 One-way flow + the glass wall
 
-Planning reaches Build **only** through tracker issues (the glass wall). Build reaches
-planning **only** through the Recirculator. No role edits a layer above it; a lower role that finds
-a higher layer wrong files a recirculation and pauses only the affected issue.
+Requirements enter the pipeline **only** through the one gate at the end of Think (§2) — an
+idea is admitted once, at the top, by merging its Think PR. Downstream, planning reaches Build
+**only** through tracker issues (the glass wall); Build reaches planning **only** through the
+Recirculator. No role edits a layer above it; a lower role that finds a higher layer wrong files
+a recirculation and pauses only the affected issue.
 
 ### 1.3 The five-layer doc chain
 
-PRD → master architectural spec → master implementation plan → subphase plans → pillar
-plans. All five survive as files for traceability. **Only the PRD is gated (§2); every
-other doc is drafted, updated, and merged autonomously** by Plan and the Recirculator.
+PRD → master architectural spec (the TRD) → master implementation plan → subphase plans →
+pillar plans. All five survive as files for traceability. **The requirements layers — the PRD
+(always) and the TRD when `gating.trd: on` — are gated at the end of Think (§2) and authored
+there; every plan-layer doc below them is drafted, updated, and merged autonomously** by Plan
+and the Recirculator.
 
-## 2. The one gate — PRD (user-facing function)
+## 2. The one gate — requirements admission (the Think PR)
 
-The single human checkpoint in the entire system. When Plan or the Recirculator determines that
-the **PRD must change** — i.e. what the product does for its users changes — the affected
-tracker issues land **Blocked**, chained by native blocked-by to one **gate issue** that
-carries a plain-terms summary ("here's what your app will do differently") plus the
-proposed PRD diff. The operator receives a push notification and approves from the GitHub
-web UI; approval unblocks the chained issues, which builders pick up on the next claim
-cycle. **Nothing else in the system asks for permission.** Non-PRD work from the same run
-flows through untouched.
+The single human checkpoint in the entire system, and it fires at the **end of Think**. When an
+idea is crystallized, Think drafts its **PRD** (the user-facing *what*) and **TRD** (the
+technical *how*; the `spec` layer) and opens a **Think PR** carrying that draft, plus one
+**gate issue** (`idc:idc-gate-issue`) that carries a plain-terms summary ("here's what your app
+will do differently") plus the proposed PRD/TRD diff. The PRD/TRD stay **draft until merge**:
+**merge = approval = admission** to the pipeline. Approval is **sync or async** — the operator
+may approve in-session, or leave the PR open and approve later from the GitHub web UI (a saved-
+but-unapproved idea is just an open Think PR). The PRD always gates while `gating.prd: on`; the
+TRD gates when `gating.trd: on` (greenfield off / brownfield on). **Nothing else in the system
+asks for permission** — once the Think PR merges, planning and building free-flow. The
+Recirculator reuses this **same** gate for any backflow that needs a requirements change (§4.4).
 
 ## 3. Tracker substrate
 
@@ -72,7 +80,7 @@ v2 board; first-class) and `filesystem` (a root `TRACKER.md`; zero external setu
 | Field | Values | Meaning |
 |---|---|---|
 | `Status` | `Blocked` / `Todo` / `In Progress` / `Done` | Where the issue sits in the queue. |
-| `Stage` | `Consideration` / `Planning` / `Buildable` | Pipeline column: upstream pointer items ride `Consideration`/`Planning`; buildable issues ride `Buildable`. The board's one-stop to-do index. |
+| `Stage` | `Consideration` / `Planning` / `Buildable` | Pipeline column: `Consideration` = an open Think PR / **pending admission** at the end-of-Think gate (§2); `Planning` = an admitted idea being decomposed; `Buildable` = a workable issue. Upstream `Consideration`/`Planning` items are pointers; the board's one-stop to-do index. |
 | `Wave` | `Wave N` | Parallel-execution wave (matrix-assigned by Plan). |
 | `Phase` | `Phase N` | Master-plan phase trace. |
 | `Domain` | single-select | Master-plan domain trace. |
@@ -118,10 +126,11 @@ issues — so a staged-upstream pointer is never scooped (the glass wall, §1.2)
 check (`idc:idc-schema-check`) validates the two shapes apart.
 
 **Pointer-write authority** (additive to §4): a pointer is written by the stage that produces
-the artifact — **Think** writes the consideration pointer (`Stage = Consideration`), **Plan**
-writes plan/pillar pointers and advances them (`Consideration → Planning`), retiring them as
-buildable issues land (`Stage = Buildable`). No role writes a pointer for a stage it does not
-own.
+the artifact — **Think** writes the consideration pointer (`Stage = Consideration`), held
+**Blocked** behind its gate issue while the Think PR is open (pending admission); merging the
+Think PR (approval) unblocks it. **Plan** then decomposes the admitted consideration, advancing
+it (`Consideration → Planning`) and writing plan/pillar pointers, retiring them as buildable
+issues land (`Stage = Buildable`). No role writes a pointer for a stage it does not own.
 
 ### 3.3 Six operations
 
@@ -135,17 +144,22 @@ Each role is the sole writer of its surface and edits nothing above it (§1.2).
 ### 4.1 Think
 
 Free-form brainstorm/interview in the main session, **zero durable workers** (research
-goes to bounded fan-out). Writes only `docs/considerations/`. No PRD pre-clearing, no
-admission language — thinking stays free; the gate lives in Plan.
+goes to bounded fan-out). The conversation stays free, then Think **crystallizes** it: it writes
+`docs/considerations/` and **authors the gated requirements docs — the PRD (`docs/prd/`) and the
+TRD (`docs/specs/`) — and fires the one gate** by opening the **Think PR** + gate issue
+(`idc:idc-gate-issue`). PRD/TRD stay draft until merge = approval = admission (§2). Think is the
+sole author of the requirements layers; everything below them is decomposition.
 
-### 4.2 Plan — matrix deconfliction
+### 4.2 Plan — pure decomposition (matrix deconfliction)
 
-One run goes consideration → issues: domain-expert fan-out → doc-chain drafting →
-goal-contract authoring → **pairwise clash/matrix analysis** (parallel work never
+Plan **sheds requirements authoring** — it never writes the PRD/TRD and never gates (the gate
+already fired at Think). One run decomposes an **admitted** consideration → issues: domain-expert
+fan-out → goal-contract authoring → **pairwise clash/matrix analysis** (parallel work never
 collides) → global re-sequencing against the live board (`In Progress` issues immutable;
 re-sequencing happens ONLY here) → mechanical schema check → board admission, opening a
-planning PR whose body is the audit trail. **Zero durable workers** (bounded fan-out
-only). The only plan review is matrix deconfliction + the schema check.
+planning PR whose body is the audit trail and which **automerges when green** (no gate here).
+**Zero durable workers** (bounded fan-out only). The only plan review is matrix deconfliction +
+the schema check.
 
 ### 4.3 Build — real verification surfaces
 
@@ -160,15 +174,19 @@ divergence files a recirculation and pauses only the affected issue.
 ### 4.4 Recirculator — drift healing
 
 The only retrograde path. Determines the highest affected layer and answers one question:
-does user-facing product function change? **No** → update every affected doc down the
-chain in one autonomous PR (PR body = the change order). **Yes** → the §2 gate. **Zero
-durable workers.**
+does a **gated requirements layer** change (the PRD always; the TRD/`spec` layer when
+`gating.trd: on`)? **No** → update every affected doc down the chain in one autonomous PR (PR
+body = the change order). **Yes** → reuse the §2 gate — a new gated **Think PR** carrying the
+requirements diff, admitted the same way. **Zero durable workers.**
 
 ### 4.5 Autorun
 
-One-shot full-pipe drainer: unplanned considerations → plan-run workers (board admission
+One-shot full-pipe drainer. It only decomposes/builds **admitted** ideas: an **open Think PR**
+(a consideration pending admission) is treated exactly like an open gate — **report + skip,
+never stall or bypass**. Approved considerations → plan-run workers (board admission
 serialized) → build eligible waves as they land → exit report when nothing actionable
-remains (only PRD-gated items waiting on the operator). Loopable via `/loop`. Running it
+remains (only requirements-gated items, the operator's gate issues, and un-admitted
+considerations waiting on the operator). Loopable via `/loop`. Running it
 on a quiet repo just heals board hygiene and drains stragglers. `/idc:doctor` stays
 read-only.
 
@@ -210,5 +228,7 @@ every role.
 ## 7. Commit / PR conventions
 
 Every commit traces to the issue or change order it advances. Never commit with
-`--no-verify`. Planning PRs and recirculation PRs automerge when green (the §2 PRD gate is the
-only human touchpoint); build PRs automerge on a PASS review with real tests green.
+`--no-verify`. Planning PRs and (non-gated) recirculation PRs automerge when green; build PRs
+automerge on a PASS review with real tests green. The **Think PR** is the one human touchpoint
+(§2) — it stays **draft until the operator merges it** (= approval = admission); a gated
+recirculation rides the same Think-PR gate.

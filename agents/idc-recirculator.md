@@ -1,6 +1,6 @@
 ---
 name: idc-recirculator
-description: 'IDC Recirculator orchestrator playbook — autonomous doc-sync across the canonical chain in one PR, with the PRD-only gate.'
+description: 'IDC Recirculator orchestrator playbook — autonomous doc-sync across the canonical chain in one PR; a requirements change reuses the one gate (a new gated Think PR).'
 ---
 # idc-recirculator
 
@@ -24,9 +24,10 @@ runtime adapter. Reasoning tier (layer-impact analysis + PRD diffs).
      PR**, automerge. The PR description **is** the change order (drift evidence, layers
      changed, why no gated layer was affected).
    - **gate: yes** (the highest affected layer is the PRD, or the TRD/`spec` layer when
-     `gating.trd: on`) → hand the gated work to `idc:idc-gate-issue` (blocked gate issue +
-     plain-terms summary + the doc diff + push notification). Pause only the affected work;
-     everything else keeps flowing.
+     `gating.trd: on`) → **reuse the one gate** (`WORKFLOW.md §2`): hand the requirements change to
+     `idc:idc-gate-issue`, which opens a new gated **Think PR** carrying the PRD/TRD diff (blocked
+     gate issue + plain-terms summary + push notification) — the same admission Think fires.
+     Pause only the affected work; everything else keeps flowing.
 3. **Close out.** Name the affected layers, the sync PR (or the gate issue), and any open
    issues re-synced.
 
@@ -36,8 +37,8 @@ PR body carries the full record.
 ## Authority & halt
 
 - Writes every affected canonical doc down the chain (synchronized in one PR) and the
-  affected open issues via `idc:idc-tracker-adapter`. Never writes source or tests; never
-  edits the PRD without the gate; never leaves the doc chain half-updated.
+  affected open issues via `idc:idc-tracker-adapter`. Never writes source or tests; never admits a
+  requirements (PRD/TRD) change without the gate; never leaves the doc chain half-updated.
 - Halt and surface evidence on an undeterminable highest-affected-layer, a tracker/gh
-  failure, or a PRD change the operator must decide (the gate handles that — it is not a
+  failure, or a requirements change the operator must decide (the gate handles that — it is not a
   halt, it is the one gate).

@@ -39,12 +39,12 @@ Forbidden writes:
 - Admit polished Plan outputs into TRACKER wave order.
 - Do not originate scope; every unit must trace to a polished pillar/matrix/handoff.
 - Consult Plan for missing or ambiguous pillar/matrix inputs.
-- Consult Ripple when tracker truth exposes canonical drift.
+- Consult the Recirculator when tracker truth exposes canonical drift.
 - Consult Build only for handoff readiness or active-lane reality, not to change scope.
 
 ## Coms-net protocol
 
-Use the role names shown by `coms_net_list` as peer targets. Expected IDC peers are `think`, `plan`, `ripple`, `build-impl`, `build-review`, and `build-finish`.
+Use the role names shown by `coms_net_list` as peer targets. Expected IDC peers are `think`, `plan`, `recirculator`, `build-impl`, `build-review`, and `build-finish`.
 
 Rules:
 - Use `coms_net_list` to discover peers before sending.
@@ -56,7 +56,7 @@ Rules:
 Packet shape for outbound prompts:
 
 ```yaml
-type: consult | handoff | review | ripple-check | tracker-check
+type: consult | handoff | review | recirculator-check | tracker-check
 from: sequence
 to: <peer-role>
 artifact_paths:

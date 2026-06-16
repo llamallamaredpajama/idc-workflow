@@ -47,7 +47,7 @@ The launch recipe intentionally omits `write` and `edit`. Treat `bash` as read-o
 
 ## Coms-net protocol
 
-Use the role names shown by `coms_net_list` as peer targets. Expected IDC peers are `think`, `plan`, `sequence`, `ripple`, `build-impl`, and `build-finish`.
+Use the role names shown by `coms_net_list` as peer targets. Expected IDC peers are `think`, `plan`, `sequence`, `recirculator`, `build-impl`, and `build-finish`.
 
 Rules:
 - Use `coms_net_list` to discover peers before sending.
@@ -59,7 +59,7 @@ Rules:
 Packet shape for outbound prompts:
 
 ```yaml
-type: consult | handoff | review | ripple-check | tracker-check
+type: consult | handoff | review | recirculator-check | tracker-check
 from: build-review
 to: <peer-role>
 artifact_paths:

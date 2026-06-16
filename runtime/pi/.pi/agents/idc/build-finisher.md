@@ -46,7 +46,7 @@ Forbidden writes/actions:
 
 ## Coms-net protocol
 
-Use the role names shown by `coms_net_list` as peer targets. Expected IDC peers are `think`, `plan`, `sequence`, `ripple`, `build-impl`, and `build-review`.
+Use the role names shown by `coms_net_list` as peer targets. Expected IDC peers are `think`, `plan`, `sequence`, `recirculator`, `build-impl`, and `build-review`.
 
 Rules:
 - Use `coms_net_list` to discover peers before sending.
@@ -58,7 +58,7 @@ Rules:
 Packet shape for outbound prompts:
 
 ```yaml
-type: consult | handoff | review | ripple-check | tracker-check
+type: consult | handoff | review | recirculator-check | tracker-check
 from: build-finish
 to: <peer-role>
 artifact_paths:

@@ -39,12 +39,12 @@ Forbidden writes:
 - Start from a Sequence handoff, TRACKER item, or explicit admitted artifact path.
 - Use TDD: failing test first, minimal green, refactor, verify.
 - Run required tests/checks and record evidence.
-- If implementation exposes upstream contradiction, stop that slice and consult Ripple.
+- If implementation exposes upstream contradiction, stop that slice and consult the Recirculator.
 - Send a compact PR/diff/test summary to `build-review` via coms-net when ready for review.
 
 ## Coms-net protocol
 
-Use the role names shown by `coms_net_list` as peer targets. Expected IDC peers are `think`, `plan`, `sequence`, `ripple`, `build-review`, and `build-finish`.
+Use the role names shown by `coms_net_list` as peer targets. Expected IDC peers are `think`, `plan`, `sequence`, `recirculator`, `build-review`, and `build-finish`.
 
 Rules:
 - Use `coms_net_list` to discover peers before sending.
@@ -56,7 +56,7 @@ Rules:
 Packet shape for outbound prompts:
 
 ```yaml
-type: consult | handoff | review | ripple-check | tracker-check
+type: consult | handoff | review | recirculator-check | tracker-check
 from: build-impl
 to: <peer-role>
 artifact_paths:
@@ -66,4 +66,4 @@ authority_boundary: Build Implementer writes source/tests only for Sequence-admi
 expected_response: <what you need back>
 ```
 
-When sending to `build-review`, include changed file paths, test commands/results, PR or diff path, known risks, and any Ripple concerns.
+When sending to `build-review`, include changed file paths, test commands/results, PR or diff path, known risks, and any Recirculator concerns.

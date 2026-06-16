@@ -1,71 +1,62 @@
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
      width="1376" height="768" viewBox="0 0 1376 768" role="img"
-     aria-label="The IDC water rig — painted blueprint: Think Tank crystallizing a PRD + TRD, Diverter #1 (the one gate, the Think PR) branching up to the locked PRD + TRD, the processing train (planning), Implementer turbine, the review Filter, Finisher turbine, Diverter #2 (ship or return) feeding the Recirculator backflow, the Autorun faucet pouring into the glass, and the dashboard wired to every component.">
+     aria-label="The IDC water rig — painted blueprint: the Think Tank drains through one inline Diverter #1 (the one gate, with the locked PRD + TRD), two planning grid-plates (domain × phase/wave) and the matrix-analysis filter, the sequencer manifold fanning into five parallel wave-pipes that each run the build triplet inline (implementer turbine, review filter, finisher turbine) with their own status lights, Diverter #2 (ship or return) feeding the Recirculator backflow, the Autorun faucet with its on/off handle pouring into the glass, and the dashboard wired to every component.">
   <!-- Painted base (Gemini blueprint) + native-vector label layer. Coal House palette. -->
-  <!-- NOTE (v3): the painted base below now depicts the two-diverter / processing-train / recirculator
-       model (regenerated via the image-gen skill); this label layer carries the matching v3 vocabulary. -->
+  <!-- NOTE (v3): the painted base now depicts the two-diverter / sequencer-manifold / recirculator
+       model (single-drain inline gate, two grid-plates, five parallel wave-pipes with status lights,
+       faucet on/off handle) — regenerated via the image-gen skill; this label layer matches it. -->
   <image xlink:href="mental-model-hero-base.png" x="0" y="0" width="1376" height="768"/>
 
   <g font-family="Gill Sans, Gill Sans MT, Futura, Trebuchet MS, sans-serif">
-    <!-- leader lines + sensor dots -->
-    <g stroke="#F9FAFD" stroke-opacity="0.5" stroke-width="1.2" fill="none">
-      <line x1="405" y1="326" x2="405" y2="352"/>
-      <line x1="585" y1="332" x2="556" y2="378"/>
-      <line x1="498" y1="198" x2="520" y2="210"/>
-      <line x1="1085" y1="346" x2="1085" y2="388"/>
-      <line x1="1230" y1="158" x2="1216" y2="248"/>
-    </g>
-
     <!-- title -->
     <text x="60" y="52" font-size="14" letter-spacing="3" fill="#9CA689">THE IDC WATER RIG</text>
     <text x="60" y="82" font-size="22" font-weight="bold" fill="#F9FAFD">An idea in. Working software out.</text>
 
-    <!-- THINK TANK -->
-    <text x="185" y="668" text-anchor="middle" font-size="19" font-weight="bold" letter-spacing="1.5" fill="#F9FAFD">THINK TANK</text>
-    <text x="185" y="689" text-anchor="middle" font-size="12.5" fill="#9CA689">/idc:think · ideas → one consideration</text>
-
-    <!-- PROCESSING TRAIN (planning — no turbine) -->
-    <text x="405" y="302" text-anchor="middle" font-size="15" font-weight="bold" letter-spacing="1" fill="#F9FAFD">PROCESSING TRAIN</text>
-    <text x="405" y="320" text-anchor="middle" font-size="11.5" fill="#9CA689">/idc:plan · grid-plates → manifold</text>
-
-    <!-- PRD + TRD (locked tank) -->
-    <text x="492" y="178" text-anchor="end" font-size="17" font-weight="bold" letter-spacing="1" fill="#F9FAFD">PRD + TRD</text>
-    <text x="492" y="197" text-anchor="end" font-size="12" font-weight="bold" fill="#F56A6A">you authorize</text>
-    <text x="492" y="213" text-anchor="end" font-size="10.5" fill="#9CA689">admitted by merging the Think PR</text>
-
-    <!-- DIVERTER #1 (the gate) -->
-    <text x="600" y="322" font-size="15" font-weight="bold" letter-spacing="1" fill="#F56A6A">DIVERTER #1</text>
-    <text x="600" y="340" font-size="11.5" fill="#9CA689">the one gate · the Think PR</text>
-
     <!-- DASHBOARD -->
-    <text x="966" y="138" font-size="14" font-weight="bold" letter-spacing="1" fill="#F9FAFD">THE DASHBOARD</text>
-    <text x="966" y="156" font-size="11" fill="#9CA689">the board · a sensor</text>
-    <text x="966" y="170" font-size="11" fill="#9CA689">on every turbine</text>
-    <text x="812" y="284" text-anchor="middle" font-size="11" letter-spacing="1.5" fill="#9CA689">STATUS · STAGE · WAVE · PHASE · DOMAIN</text>
+    <text x="675" y="40" text-anchor="middle" font-size="14" font-weight="bold" letter-spacing="1.5" fill="#F9FAFD">THE DASHBOARD — THE BOARD</text>
+    <text x="675" y="250" text-anchor="middle" font-size="11" letter-spacing="1.5" fill="#9CA689">STATUS · STAGE · WAVE · PHASE · DOMAIN</text>
+    <text x="675" y="265" text-anchor="middle" font-size="10" fill="#9CA689" fill-opacity="0.85">a sensor on every component · a status light on every wave</text>
 
-    <!-- DIVERTER #2 → RECIRCULATOR -->
-    <text x="1085" y="320" text-anchor="middle" font-size="14" font-weight="bold" letter-spacing="1" fill="#F56A6A">DIVERTER #2 → RECIRCULATOR</text>
-    <text x="1085" y="338" text-anchor="middle" font-size="11.5" fill="#9CA689">/idc:recirculate · ship or return</text>
+    <!-- DIVERTER #1 (inline on the one drain) -->
+    <text x="400" y="200" text-anchor="middle" font-size="14" font-weight="bold" letter-spacing="1" fill="#F56A6A">DIVERTER #1</text>
+    <text x="400" y="216" text-anchor="middle" font-size="12" font-weight="bold" letter-spacing="1.5" fill="#F56A6A">THE ONE GATE</text>
+    <text x="400" y="232" text-anchor="middle" font-size="11.5" fill="#F56A6A" fill-opacity="0.95">inline on the one drain · the Think PR</text>
+    <text x="400" y="248" text-anchor="middle" font-size="11" fill="#9CA689">PRD + TRD locked — you merge to admit</text>
 
-    <!-- build triplet (below the backflow) -->
-    <text x="665" y="702" text-anchor="middle" font-size="14" font-weight="bold" letter-spacing="0.5" fill="#F9FAFD">IMPLEMENTER</text>
-    <text x="665" y="719" text-anchor="middle" font-size="11" fill="#9CA689">the engine · TDD loop</text>
-    <text x="845" y="702" text-anchor="middle" font-size="14" font-weight="bold" letter-spacing="0.5" fill="#F9FAFD">FILTER</text>
-    <text x="845" y="719" text-anchor="middle" font-size="11" fill="#9CA689">review · tests · e2e · visual</text>
-    <text x="985" y="702" text-anchor="middle" font-size="14" font-weight="bold" letter-spacing="0.5" fill="#F9FAFD">FINISHER</text>
-    <text x="985" y="719" text-anchor="middle" font-size="11" fill="#9CA689">the caboose · fix → merge</text>
+    <!-- THINK TANK -->
+    <text x="186" y="704" text-anchor="middle" font-size="18" font-weight="bold" letter-spacing="2" fill="#F9FAFD">THINK TANK</text>
+    <text x="186" y="724" text-anchor="middle" font-size="11.5" fill="#9CA689">/idc:think · ideas float free → one drain out</text>
 
-    <!-- backflow caption -->
-    <text x="760" y="652" text-anchor="middle" font-size="12" font-weight="bold" letter-spacing="0.5" fill="#F56A6A">CONTROLLED BACKFLOW — the Recirculator carries it all the way to Diverter #1</text>
+    <!-- PLANNING (two grid-plates) -->
+    <text x="468" y="398" text-anchor="middle" font-size="13" font-weight="bold" letter-spacing="1" fill="#F9FAFD">PLANNING</text>
+    <text x="468" y="414" text-anchor="middle" font-size="10.5" fill="#9CA689">/idc:plan · domain × phase/wave</text>
 
-    <!-- FAUCET -->
-    <text x="1230" y="116" text-anchor="middle" font-size="14" font-weight="bold" letter-spacing="1" fill="#F9FAFD">FAUCET</text>
-    <text x="1230" y="134" text-anchor="middle" font-size="11.5" fill="#9CA689">/idc:autorun</text>
-    <text x="1230" y="149" text-anchor="middle" font-size="10.5" fill="#9CA689">open it — it flows on its own</text>
+    <!-- MATRIX-ANALYSIS FILTER -->
+    <text x="648" y="398" text-anchor="middle" font-size="12" font-weight="bold" letter-spacing="0.5" fill="#F9FAFD">MATRIX-ANALYSIS FILTER</text>
+    <text x="648" y="414" text-anchor="middle" font-size="10.5" fill="#9CA689">deconflict → buildable issues</text>
+
+    <!-- SEQUENCER MANIFOLD -->
+    <text x="935" y="290" text-anchor="middle" font-size="14" font-weight="bold" letter-spacing="1" fill="#F9FAFD">THE SEQUENCER MANIFOLD — PARALLEL WAVE-PIPES</text>
+    <text x="935" y="632" text-anchor="middle" font-size="11" fill="#9CA689">each wave runs the build triplet inline:  ⊙ implementer turbine  →  ▒ review filter  →  ⊙ finisher turbine</text>
+    <text x="935" y="648" text-anchor="middle" font-size="11" fill="#9CA689">a status light on every wave — <tspan fill="#F56A6A">red</tspan> / <tspan fill="#9CA689">green</tspan> · the matrix gives each pipe its own files</text>
+
+    <!-- DIVERTER #2 -->
+    <text x="1178" y="432" text-anchor="middle" font-size="14" font-weight="bold" letter-spacing="0.5" fill="#F56A6A">DIVERTER #2</text>
+    <text x="1178" y="448" text-anchor="middle" font-size="11" fill="#F56A6A">ship or return</text>
+
+    <!-- FAUCET + on/off handle -->
+    <text x="1255" y="110" text-anchor="middle" font-size="14" font-weight="bold" letter-spacing="1" fill="#F9FAFD">FAUCET</text>
+    <text x="1255" y="126" text-anchor="middle" font-size="11" fill="#9CA689">/idc:autorun · the ON/OFF handle</text>
+    <text x="1255" y="141" text-anchor="middle" font-size="10.5" fill="#9CA689">open it — it flows on its own</text>
+    <text x="1188" y="378" text-anchor="end" font-size="10.5" font-weight="bold" letter-spacing="1" fill="#9CA689">ON · off</text>
 
     <!-- GLASS -->
-    <text x="1232" y="652" text-anchor="middle" font-size="14" font-weight="bold" letter-spacing="1" fill="#F9FAFD">THE GLASS</text>
-    <text x="1232" y="670" text-anchor="middle" font-size="11" fill="#9CA689">the software you consume</text>
+    <text x="1293" y="702" text-anchor="middle" font-size="14" font-weight="bold" letter-spacing="1" fill="#F9FAFD">THE GLASS</text>
+    <text x="1293" y="718" text-anchor="middle" font-size="11" fill="#9CA689">the software you consume</text>
+
+    <!-- RECIRCULATOR -->
+    <text x="700" y="706" text-anchor="middle" font-size="13" font-weight="bold" letter-spacing="1" fill="#F56A6A">THE RECIRCULATOR — /idc:recirculate</text>
+    <text x="700" y="722" text-anchor="middle" font-size="11" fill="#F56A6A" fill-opacity="0.9">the only way back — all the way to Diverter #1 (re-plan, or up to the PRD + TRD)</text>
 
     <!-- corner caption -->
     <text x="1340" y="744" text-anchor="end" font-size="11" letter-spacing="2.5" fill="#9CA689" fill-opacity="0.85">ONE-WAY FLOW · ONE GATE · ONE WAY BACK</text>

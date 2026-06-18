@@ -3,12 +3,12 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-3.0.0-9CA689?style=flat-square&labelColor=252427" alt="version 3.0.0">
-  <img src="https://img.shields.io/badge/Claude%20Code-plugin-9CA689?style=flat-square&labelColor=252427" alt="Claude Code plugin">
-  <img src="https://img.shields.io/badge/commands-9-9CA689?style=flat-square&labelColor=252427" alt="9 commands">
-  <img src="https://img.shields.io/badge/runtime-Claude%20%C2%B7%20Codex%20%C2%B7%20Pi-9CA689?style=flat-square&labelColor=252427" alt="runtimes">
-  <img src="https://img.shields.io/badge/guardrails-5-F56A6A?style=flat-square&labelColor=252427" alt="5 guardrails">
-  <img src="https://img.shields.io/badge/license-MIT-F9FAFD?style=flat-square&labelColor=252427" alt="MIT license">
+  <img src="https://img.shields.io/badge/version-3.0.0-e8e7df?style=flat-square&labelColor=1a1a1a" alt="version 3.0.0">
+  <img src="https://img.shields.io/badge/Claude%20Code-plugin-e8e7df?style=flat-square&labelColor=1a1a1a" alt="Claude Code plugin">
+  <img src="https://img.shields.io/badge/commands-9-e8e7df?style=flat-square&labelColor=1a1a1a" alt="9 commands">
+  <img src="https://img.shields.io/badge/runtime-Claude%20%C2%B7%20Codex%20%C2%B7%20Pi-e8e7df?style=flat-square&labelColor=1a1a1a" alt="runtimes">
+  <img src="https://img.shields.io/badge/guardrails-5-c8dc00?style=flat-square&labelColor=1a1a1a" alt="5 guardrails">
+  <img src="https://img.shields.io/badge/license-MIT-e8e7df?style=flat-square&labelColor=1a1a1a" alt="MIT license">
 </p>
 
 <p align="center">
@@ -27,7 +27,7 @@ to ask you exactly **one** question, **once, at the top**: *do you approve these
 ## The whole system, in one picture
 
 <p align="center">
-  <img src="docs/assets/mental-model-hero-vector.svg" alt="The IDC pipeline — an idea in, working software out" width="100%">
+  <img src="docs/assets/pipeline-hero.png" alt="The IDC pipeline as a labeled rig — an idea in, working software out" width="100%">
 </p>
 
 An idea enters **Think**, which crystallizes it into a **PRD + TRD**. The **one gate** is a **Think PR**
@@ -184,7 +184,7 @@ pipe; Build reaches planning *only* through the Recirculator. Flow is one-way, a
 component keeps the chain auditable end to end.
 
 ```mermaid
-%%{init: {'theme':'base','themeVariables':{'primaryColor':'#9CA689','primaryTextColor':'#1b1a1c','primaryBorderColor':'#252427','lineColor':'#6f7a5e','fontFamily':'Trebuchet MS, Verdana, sans-serif'}}}%%
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#c8dc00','primaryTextColor':'#1a1a1a','primaryBorderColor':'#1a1a1a','lineColor':'#3a3a38','clusterBkg':'#faf9f1','clusterBorder':'#b3b0a4','titleColor':'#1a1a1a','fontFamily':'Helvetica Neue, Helvetica, Arial, sans-serif'}}}%%
 flowchart LR
     subgraph chain["Five-layer canonical chain — PRD + TRD admitted at the Think PR gate"]
         direction LR
@@ -194,9 +194,9 @@ flowchart LR
     ISS --> BUILD["Build"]:::stage
     BUILD -.->|"Recirculator — the only way back"| PRD
 
-    classDef doc fill:#F9FAFD,stroke:#252427,color:#252427;
-    classDef stage fill:#9CA689,stroke:#252427,color:#1b1a1c;
-    classDef wall fill:#252427,stroke:#252427,color:#F9FAFD;
+    classDef doc fill:#f7f6ee,stroke:#1a1a1a,color:#1a1a1a;
+    classDef stage fill:#c8dc00,stroke:#1a1a1a,color:#1a1a1a;
+    classDef wall fill:#1a1a1a,stroke:#1a1a1a,color:#f5f4ec;
 ```
 
 **Write-authority boundaries** — each role is the sole writer of its surface and edits nothing
@@ -279,7 +279,7 @@ runtime** maps them to real mechanics. There is no per-runtime process tree, and
 every supported runtime.
 
 ```mermaid
-%%{init: {'theme':'base','themeVariables':{'primaryColor':'#9CA689','primaryTextColor':'#1b1a1c','primaryBorderColor':'#252427','lineColor':'#6f7a5e','fontFamily':'Trebuchet MS, Verdana, sans-serif'}}}%%
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#c8dc00','primaryTextColor':'#1a1a1a','primaryBorderColor':'#1a1a1a','lineColor':'#3a3a38','clusterBkg':'#faf9f1','clusterBorder':'#b3b0a4','titleColor':'#1a1a1a','fontFamily':'Helvetica Neue, Helvetica, Arial, sans-serif'}}}%%
 flowchart LR
     subgraph core["One core · three primitives"]
         direction LR
@@ -291,8 +291,8 @@ flowchart LR
     core --> CX["Codex adapter"]:::ad
     core --> PI["Pi adapter"]:::ad
 
-    classDef p fill:#F9FAFD,stroke:#252427,color:#252427;
-    classDef ad fill:#9CA689,stroke:#252427,color:#1b1a1c;
+    classDef p fill:#f7f6ee,stroke:#1a1a1a,color:#1a1a1a;
+    classDef ad fill:#c8dc00,stroke:#1a1a1a,color:#1a1a1a;
 ```
 
 | Runtime | Status | How it runs the work | Enable |
@@ -376,7 +376,7 @@ llms.txt          agent-readable index of the whole plugin
 
 <p align="center">
   <br>
-  <img src="https://img.shields.io/badge/%E2%97%89-guardrails%2C%20not%20train%20tracks-252427?style=flat-square&labelColor=9CA689" alt="guardrails, not train tracks">
+  <img src="https://img.shields.io/badge/%E2%97%89-guardrails%2C%20not%20train%20tracks-1a1a1a?style=flat-square&labelColor=c8dc00" alt="guardrails, not train tracks">
   <br><br>
-  <sub>Visual identity adapted from the industrial-chic aesthetic of <a href="https://www.coalhouse.co.uk">Coal House, Cardiff</a> — coal-black ink, sage, and coral, set in the Johnston/Gill lineage.</sub>
+  <sub>Visual identity in the editorial language of the <a href="https://www.oliverwymanforum.com">Oliver Wyman Forum</a> — paper ground, charcoal ink, and a single chartreuse accent.</sub>
 </p>

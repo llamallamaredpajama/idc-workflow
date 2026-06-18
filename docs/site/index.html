@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IDC — an idea in, working software out</title>
+<meta name="description" content="IDC is a Claude Code plugin: an autonomous, agentic software-development pipeline that carries an idea to merged, reviewed code. Guardrails, not train tracks.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600;8..60,700&family=Hanken+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  /* ===== tokens — cloned from the Oliver Wyman Forum: pale chartreuse ground,
+          charcoal ink, one acid-chartreuse accent, sharp 0-radius, serif display ===== */
+  :root{
+    --paper:    oklch(0.975 0.034 116);   /* ≈ #F9FBE5 pale chartreuse ground */
+    --paper-2:  oklch(0.955 0.040 116);   /* slightly deeper band */
+    --card:     oklch(0.995 0.004 110);   /* near-white */
+    --ink:      oklch(0.205 0.004 110);   /* ≈ #1A1A1A */
+    --ink-2:    oklch(0.33 0.004 110);
+    --muted:    oklch(0.46 0.008 110);    /* grey secondary text */
+    --acid:     oklch(0.86 0.19 118);     /* ≈ #C8DC00 the one accent */
+    --hair:     oklch(0.205 0.004 110 / 0.16);
+    --hair-2:   oklch(0.205 0.004 110 / 0.32);
+
+    --serif:"Source Serif 4", Georgia, "Times New Roman", serif;
+    --sans:"Hanken Grotesk", system-ui, sans-serif;
+
+    --sp-1:4px;--sp-2:8px;--sp-3:12px;--sp-4:16px;--sp-6:24px;--sp-8:32px;
+    --sp-12:48px;--sp-16:64px;--sp-20:80px;--sp-24:96px;
+    --frame:1200px; --col:70ch;
+  }
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{
+    margin:0; background:var(--paper); color:var(--ink);
+    font-family:var(--sans); font-size:17px; line-height:1.6; font-weight:400;
+    -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+  }
+  h1,h2,h3{font-family:var(--serif); font-weight:600; line-height:1.06; letter-spacing:-0.015em; margin:0;}
+  p{margin:0}
+  a{color:inherit}
+  .frame{max-width:var(--frame); margin-inline:auto; padding-inline:clamp(20px,5vw,56px);}
+  .read{max-width:var(--col)}
+
+  .eyebrow{font-size:.72rem; font-weight:600; letter-spacing:.18em; text-transform:uppercase; color:var(--ink-2); display:inline-flex; align-items:center; gap:.7em;}
+  .eyebrow::before{content:""; width:9px; height:9px; border-radius:50%; background:var(--acid); flex:none}
+
+  /* sharp buttons (OWF: 0 radius, no shadow) */
+  .btn{display:inline-block; font-family:var(--sans); font-weight:600; font-size:.92rem; text-decoration:none; padding:13px 22px; border-radius:0; border:1.5px solid var(--ink); background:var(--ink); color:var(--paper); transition:background .16s ease,color .16s ease;}
+  .btn:hover{background:var(--acid); border-color:var(--ink); color:var(--ink);}
+  .btn.ghost{background:transparent; color:var(--ink);}
+  .btn.ghost:hover{background:var(--ink); color:var(--paper);}
+
+  /* ===== masthead ===== */
+  header.top{position:sticky; top:0; z-index:30; background:color-mix(in oklab,var(--paper) 90%, transparent); backdrop-filter:blur(8px); border-bottom:1px solid var(--hair);}
+  .top .frame{display:flex; align-items:center; gap:var(--sp-6); height:64px;}
+  .brand{display:flex; align-items:center; gap:11px; font-family:var(--serif); font-weight:700; font-size:1.25rem; letter-spacing:-.02em; text-decoration:none;}
+  .roundel{width:28px;height:28px;border-radius:50%;border:2.5px solid var(--ink);position:relative;display:grid;place-items:center;flex:none}
+  .roundel::after{content:"";position:absolute;left:-4px;right:-4px;height:8px;background:var(--acid);}
+  .roundel span{font-family:var(--sans);font-weight:700;font-size:8px;letter-spacing:.03em;position:relative;z-index:1}
+  nav.top-nav{margin-left:auto; display:flex; gap:var(--sp-8); align-items:center}
+  nav.top-nav a{font-size:.93rem; font-weight:500; text-decoration:none; color:var(--ink-2)}
+  nav.top-nav a:hover{color:var(--ink)}
+  .btn.sm{padding:9px 16px; font-size:.86rem}
+  @media (max-width:760px){ nav.top-nav a:not(.btn){display:none} }
+
+  /* ===== hero (light, NO dark band) ===== */
+  .hero .frame{padding-block:clamp(48px,8vw,104px) clamp(32px,5vw,56px);}
+  .hero h1{font-size:clamp(2.8rem,7.2vw,5.6rem); font-weight:600; max-width:15ch; margin-top:var(--sp-6);}
+  .hero h1 .mark{position:relative; white-space:nowrap;}
+  .hero h1 .mark::after{content:""; position:absolute; left:0; right:0; bottom:.08em; height:.16em; background:var(--acid); z-index:-1;}
+  .hero .deck{margin-top:var(--sp-8); max-width:54ch; font-size:clamp(1.05rem,1.6vw,1.28rem); color:var(--muted); line-height:1.5;}
+  .hero .actions{margin-top:var(--sp-12); display:flex; gap:var(--sp-3); flex-wrap:wrap;}
+
+  /* the pipeline diagram — charcoal line-art on pale ground, chartreuse accents */
+  .diagram{border-top:1px solid var(--hair); padding-top:var(--sp-8);}
+  .diagram svg{width:100%; height:auto; display:block}
+  .diagram .cap{margin-top:var(--sp-4); font-size:.84rem; color:var(--muted); display:flex; gap:var(--sp-6); flex-wrap:wrap}
+  .diagram .cap b{color:var(--ink); font-weight:600}
+
+  /* ===== by-the-numbers strip (OWF data-viz energy) ===== */
+  .stats{background:var(--paper-2); border-block:1px solid var(--hair);}
+  .stats .frame{display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); }
+  .stat{padding:var(--sp-12) var(--sp-4); border-left:1px solid var(--hair);}
+  .stat:first-child{border-left:0}
+  .stat .n{font-family:var(--serif); font-size:clamp(2.6rem,5vw,3.6rem); font-weight:600; line-height:1; display:flex; align-items:flex-start; gap:.12em;}
+  .stat .n::after{content:""; width:11px; height:11px; border-radius:50%; background:var(--acid); margin-top:.5em; flex:none}
+  .stat .l{margin-top:var(--sp-3); font-size:.92rem; color:var(--muted)}
+  @media (max-width:560px){ .stat{border-left:0; border-top:1px solid var(--hair); padding-block:var(--sp-8)} .stat:first-child{border-top:0} }
+
+  /* ===== sections ===== */
+  section{padding-block:clamp(56px,9vw,112px)}
+  section + section{border-top:1px solid var(--hair)}
+  h2.sec{font-size:clamp(2rem,4.4vw,3.2rem); max-width:16ch;}
+  .lead{font-family:var(--serif); font-size:clamp(1.45rem,2.5vw,2.05rem); line-height:1.36; font-weight:400; margin-top:var(--sp-6);}
+  .lead b{font-weight:600}
+  .prose{margin-top:var(--sp-8); color:var(--ink-2)} .prose p + p{margin-top:var(--sp-6)}
+  .prose a{color:var(--ink); text-decoration:none; box-shadow:inset 0 -.5em 0 var(--acid); transition:box-shadow .16s ease}
+  .prose a:hover{box-shadow:inset 0 -1.05em 0 var(--acid)}
+
+  /* lifecycle — editorial numbered list, sharp rules */
+  .stage{display:grid; grid-template-columns:auto 1fr; gap:var(--sp-6) var(--sp-8); padding-block:var(--sp-8); border-top:1px solid var(--hair);}
+  .stage:first-of-type{border-top:2px solid var(--ink)}
+  .stage .no{font-family:var(--serif); font-size:clamp(2rem,4vw,3rem); font-weight:600; line-height:.9; color:var(--ink); position:relative; padding-left:.05em;}
+  .stage .no::after{content:""; display:block; width:18px; height:5px; background:var(--acid); margin-top:.4em;}
+  .stage h3{font-size:1.4rem}
+  .stage .cmd{font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:.8rem; background:var(--card); border:1px solid var(--hair-2); color:var(--ink-2); padding:3px 9px; display:inline-block; margin-bottom:var(--sp-3);}
+  .stage p{color:var(--ink-2); max-width:64ch}
+  @media (max-width:620px){ .stage{grid-template-columns:1fr; gap:var(--sp-3)} }
+
+  /* guardrails grid */
+  .rails{display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:var(--sp-16) var(--sp-12); margin-top:var(--sp-12);}
+  .rail .n{font-family:var(--serif); font-weight:600; font-size:1rem; color:var(--ink-2)}
+  .rail h3{font-size:1.25rem; margin:var(--sp-2) 0 var(--sp-3); padding-top:var(--sp-3); border-top:2px solid var(--acid); display:inline-block}
+  .rail p{color:var(--ink-2)}
+
+  /* runtimes — three columns */
+  .runtimes{display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:var(--sp-12); margin-top:var(--sp-12);}
+  .rt h3{font-size:1.3rem; display:flex; align-items:center; gap:.5em}
+  .rt .tag{font-family:var(--sans); font-size:.62rem; font-weight:700; letter-spacing:.1em; text-transform:uppercase; padding:3px 7px; background:var(--acid); color:var(--ink);}
+  .rt .tag.exp{background:transparent; color:var(--muted); border:1px solid var(--hair-2)}
+  .rt p{margin-top:var(--sp-3); color:var(--ink-2); font-size:.97rem}
+
+  /* install — light sharp code card */
+  .term{margin-top:var(--sp-8); background:var(--card); border:1.5px solid var(--ink); max-width:780px;}
+  .term .bar{display:flex; gap:7px; padding:12px 16px; border-bottom:1px solid var(--hair);}
+  .term .bar i{width:10px;height:10px;border-radius:50%;background:var(--hair-2)}
+  .term .bar i:first-child{background:var(--acid)}
+  .term pre{margin:0; padding:20px 22px; font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:.85rem; line-height:1.9; overflow-x:auto; color:var(--ink)}
+  .term .p{color:var(--ink); font-weight:700; user-select:none}
+  .term .p::before{content:"$ "; color:oklch(0.55 0.15 118)}
+  .term .c{color:var(--muted)}
+
+  /* footer */
+  footer{border-top:2px solid var(--ink); padding-block:var(--sp-16) var(--sp-12);}
+  footer .frame{display:flex; flex-wrap:wrap; gap:var(--sp-12); justify-content:space-between; align-items:flex-start;}
+  footer a{color:var(--ink); text-decoration:none} footer a:hover{box-shadow:inset 0 -.5em 0 var(--acid)}
+  footer .links{display:flex; gap:var(--sp-12); flex-wrap:wrap}
+  footer .col{display:flex; flex-direction:column; gap:var(--sp-3); font-size:.93rem}
+  footer .col .h{font-size:.72rem; letter-spacing:.16em; text-transform:uppercase; color:var(--muted); margin-bottom:var(--sp-1)}
+  .fine{margin-top:var(--sp-12); padding-top:var(--sp-6); border-top:1px solid var(--hair); font-size:.82rem; color:var(--muted); max-width:80ch}
+
+  @media (prefers-reduced-motion:no-preference){
+    .reveal{opacity:0; transform:translateY(12px); animation:rise .7s cubic-bezier(.2,.7,.2,1) forwards}
+    .d1{animation-delay:.04s}.d2{animation-delay:.12s}.d3{animation-delay:.2s}.d4{animation-delay:.28s}
+    @keyframes rise{to{opacity:1;transform:none}}
+  }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="frame">
+    <a class="brand" href="#top"><span class="roundel"><span>IDC</span></span>IDC</a>
+    <nav class="top-nav">
+      <a href="#what">What it is</a>
+      <a href="#lifecycle">Lifecycle</a>
+      <a href="#runtimes">Runtimes</a>
+      <a href="#install">Install</a>
+      <a class="btn sm" href="https://github.com/llamallamaredpajama/idc-workflow">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+  <!-- ===== HERO ===== -->
+  <section class="hero">
+    <div class="frame">
+      <span class="eyebrow reveal d1">A Claude Code plugin</span>
+      <h1 class="reveal d2">An idea in. <span class="mark">Working software</span> out.</h1>
+      <p class="deck reveal d3">IDC is an autonomous, agentic software-development pipeline. It carries an
+        idea from intake to merged, reviewed code — planning, building, and reviewing on its own and
+        automerging when clean. It stops to ask you exactly one question, once, at the top.</p>
+      <div class="actions reveal d4">
+        <a class="btn" href="#install">Install IDC</a>
+        <a class="btn ghost" href="#lifecycle">See the lifecycle</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== BY THE NUMBERS ===== -->
+  <div class="stats">
+    <div class="frame">
+      <div class="stat"><div class="n">3</div><div class="l">runtimes — Claude&nbsp;· Codex&nbsp;· Pi</div></div>
+      <div class="stat"><div class="n">5</div><div class="l">guardrails, and no more</div></div>
+      <div class="stat"><div class="n">9</div><div class="l">slash commands</div></div>
+      <div class="stat"><div class="n">1</div><div class="l">human gate — at the top</div></div>
+    </div>
+  </div>
+
+  <!-- ===== PIPELINE DIAGRAM ===== -->
+  <section style="padding-block:clamp(40px,6vw,72px)">
+    <div class="frame">
+      <span class="eyebrow">The whole pipeline, one picture</span>
+      <div class="diagram" style="margin-top:var(--sp-8)">
+        <img src="pipeline-base.png" alt="The IDC pipeline — the Think tank and the one approval gate (padlocked, with the PRD and TRD), planning grid-plates feeding a matrix-analysis filter, a manifold fanning into four parallel build waves (each a status lamp then implementer turbine, review filter, finisher turbine), the waves merging at a ship-or-return gate, a faucet pouring shipped code into the output vessel, the Recirculate return loop back to the gate, and a dashboard metering every stage." style="width:100%;height:auto;display:block;border:1px solid var(--hair)">
+        <div class="cap">
+          <span><b>One gate</b> at the top</span><span><b>Four</b> parallel waves</span><span><b>One</b> return path</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== WHAT ===== -->
+  <section id="what">
+    <div class="frame">
+      <span class="eyebrow">What IDC is</span>
+      <p class="lead read">IDC is an <b>autonomous, agentic software-development pipeline</b>. You start an idea
+        in Think; it crystallizes into a <b>PRD</b> (what it does) and a <b>TRD</b> (how it's built) and reaches
+        the one gate — a reviewable Think PR you merge to admit it. From there the pipeline plans, builds, and
+        reviews on its own and automerges clean code.</p>
+      <div class="prose read">
+        <p>Everything runs autonomously and automerges when green; the pipeline intervenes only where a real
+          derailment would otherwise ship. The full picture lives in the
+          <a href="https://github.com/llamallamaredpajama/idc-workflow/blob/main/docs/mental-model.md">mental model</a>.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== LIFECYCLE ===== -->
+  <section id="lifecycle">
+    <div class="frame">
+      <span class="eyebrow">The lifecycle</span>
+      <h2 class="sec" style="margin-top:var(--sp-4)">Five commands, one direction of flow.</h2>
+      <div style="margin-top:var(--sp-12)">
+        <div class="stage"><div class="no">01</div><div><span class="cmd">/idc:think</span><h3>Think → the one gate</h3>
+          <p>Free brainstorm, then crystallize a function-first PRD + TRD and open the Think PR gate. Merge to admit — the only place the pipeline asks you for anything.</p></div></div>
+        <div class="stage"><div class="no">02</div><div><span class="cmd">/idc:plan</span><h3>Plan into parallel waves</h3>
+          <p>Admitted idea → goal-contract issues. Work is sliced on two axes (domain × phase/wave) into a matrix, deconflicted so no two items touch the same files, then fanned by the sequencer into parallel waves.</p></div></div>
+        <div class="stage"><div class="no">03</div><div><span class="cmd">/idc:build</span><h3>The build triplet</h3>
+          <p>Each issue runs a build triplet — implementer → review → finisher. Independent review screens every PR; nothing ships that isn't green; automerge on pass.</p></div></div>
+        <div class="stage"><div class="no">04</div><div><span class="cmd">/idc:recirculate</span><h3>The return path</h3>
+          <p>The one controlled way back. When a finding is genuinely upstream, the Recirculator heals doc/reality drift in one PR — or rides the Think-PR gate for a requirements change.</p></div></div>
+        <div class="stage"><div class="no">05</div><div><span class="cmd">/idc:autorun</span><h3>Run it end to end</h3>
+          <p>Turn it on and the whole pipeline runs on its own — admitted considerations → plan → build eligible waves as they land → exit when nothing actionable remains.</p></div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== RUNTIMES ===== -->
+  <section id="runtimes">
+    <div class="frame">
+      <span class="eyebrow">Built to run in parallel</span>
+      <h2 class="sec" style="margin-top:var(--sp-4)">Three runtimes. Real multi-agent throughput.</h2>
+      <p class="prose read" style="margin-top:var(--sp-6)">IDC is runtime-neutral — one process against three primitives, one thin adapter each. A whole wave of issues builds at once, one agent per parallel-safe issue.</p>
+      <div class="runtimes">
+        <div class="rt"><h3>Claude Code <span class="tag">Default</span></h3>
+          <p>Durable workers are <b>Claude Teams teammates</b> — one session per issue in the wave, coordinated by a single merger — plus <code>Agent</code>/<code>Workflow</code> fan-out for planning and review swarms.</p></div>
+        <div class="rt"><h3>Codex <span class="tag">Supported</span></h3>
+          <p>Durable workers are <b>app-server threads</b> over JSON-RPC, with native <code>spawn_agent</code>/<code>wait_agent</code> fan-out (≤6) or <code>codex exec --ephemeral</code> processes. Runs untiered, at highest effort.</p></div>
+        <div class="rt"><h3>Pi <span class="tag exp">Experimental</span></h3>
+          <p>Standing <b>residents</b> over <b>coms-net</b>, a local Bun HTTP/SSE hub — flat peers, no master, with liveness, coordination, and an atomic merge lease; the board stays the source of truth.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== INSTALL ===== -->
+  <section id="install">
+    <div class="frame">
+      <span class="eyebrow">Install</span>
+      <h2 class="sec" style="margin-top:var(--sp-4)">Opt-in, per repo.</h2>
+      <p class="prose read">Register the marketplace once, then install at <b>project</b> scope inside each repo you want governed — never the default user scope.</p>
+      <div class="term">
+        <div class="bar"><i></i><i></i><i></i></div>
+        <pre><span class="c"># once per machine — register the marketplace</span>
+<span class="p">claude plugin marketplace add llamallamaredpajama/idc-workflow</span>
+
+<span class="c"># per repo — install AND enable for THIS repo only</span>
+<span class="p">cd your-repo</span>
+<span class="p">claude plugin install idc@idc-workflow --scope project</span></pre>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="frame">
+    <div>
+      <a class="brand" href="#top"><span class="roundel"><span>IDC</span></span>IDC</a>
+      <p style="margin-top:var(--sp-4); max-width:32ch; color:var(--muted); font-size:.93rem">Iterative Development Cycle — guardrails, not train tracks.</p>
+    </div>
+    <div class="links">
+      <div class="col"><span class="h">Docs</span>
+        <a href="https://github.com/llamallamaredpajama/idc-workflow/blob/main/docs/mental-model.md">Mental model</a>
+        <a href="https://github.com/llamallamaredpajama/idc-workflow/blob/main/docs/architecture.md">Architecture</a>
+        <a href="https://github.com/llamallamaredpajama/idc-workflow/blob/main/docs/installing.md">Installing</a>
+      </div>
+      <div class="col"><span class="h">Project</span>
+        <a href="https://github.com/llamallamaredpajama/idc-workflow">GitHub</a>
+        <a href="https://github.com/llamallamaredpajama/idc-workflow/blob/main/README.md">README</a>
+        <a href="https://github.com/llamallamaredpajama/idc-workflow/blob/main/LICENSE">License — MIT</a>
+      </div>
+    </div>
+  </div>
+  <div class="frame"><p class="fine">© 2026 llamallamaredpajama · Visual language adapted in the editorial mode of the Oliver Wyman Forum — a pale chartreuse ground, charcoal ink, one acid-chartreuse accent, sharp edges, and a serif display over a clean sans body.</p></div>
+</footer>
+
+</body>
+</html>

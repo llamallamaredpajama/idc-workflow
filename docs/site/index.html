@@ -225,7 +225,7 @@
       <span class="eyebrow">The whole pipeline, one picture</span>
       <div class="diagram" style="margin-top:var(--sp-8)">
         <figure class="diagram-fig">
-          <img src="pipeline-gen-2.png" alt="The IDC pipeline as a labeled rig: an idea enters the Think tank, passes the one gate (the Think PR, holding the locked PRD and TRD), runs through the planning matrix and matrix-analysis filter, fans through the sequencer into four parallel build waves (each lamp then implementer, review, and finisher), reaches the ship-or-return gate, ships through the Autorun faucet into your repo, with a recirculate return path along the bottom and a dashboard wiring sensors to every stage.">
+          <img src="pipeline-base.png" alt="The IDC pipeline as a labeled rig: an idea enters the Think tank, passes the one gate (the Think PR, holding the locked PRD and TRD), runs through the planning matrix and matrix-analysis filter, fans through the sequencer into four parallel build waves (each lamp then implementer, review, and finisher), reaches the ship-or-return gate, ships through the Autorun faucet into your repo, with a recirculate return path along the bottom and a dashboard wiring sensors to every stage.">
           <svg class="overlay" viewBox="0 0 1376 768" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
             <defs>
               <marker id="ah" markerWidth="11" markerHeight="11" refX="6.5" refY="3.5" orient="auto" markerUnits="userSpaceOnUse">
@@ -238,6 +238,12 @@
 
             <!-- hide the padlock on valve #2 (Product Diverter Valve is automerge-gated, not user-gated) -->
             <rect x="1152" y="409" width="55" height="64" fill="#faf9f1"/>
+
+            <!-- de-clutter the dashboard fan: cover the crossing painted lines, redraw 3 clean ones (one per nub, farthest on top) -->
+            <rect x="776" y="102" width="240" height="132" fill="#f9f8f1"/>
+            <path class="sensor" d="M770,113 L998,113 Q1010,113 1010,125 L1010,233"/>
+            <path class="sensor" d="M770,133 L908,133 Q920,133 920,145 L920,233"/>
+            <path class="sensor" d="M770,149 L834,149 Q846,149 846,161 L846,233"/>
 
             <!-- sensor lines: GitHub Dashboard monitors every stage; Think Tank + PRD plug into the panel's left terminals -->
             <rect x="599" y="118" width="9" height="16" rx="2.5" fill="#d9d1c5" stroke="#4f4d47" stroke-width="1.5"/>
@@ -292,8 +298,8 @@
             <g class="lbl"><line class="lead" x1="724" y1="392" x2="700" y2="234"/><circle class="dot" cx="724" cy="392" r="5.5"/>
               <text class="lab" x="520" y="216">05 · Sequencer Manifold</text></g>
 
-            <g class="lbl"><line class="lead" x1="1140" y1="412" x2="1116" y2="544"/><circle class="dot" cx="1140" cy="412" r="5.5"/>
-              <text class="lab" x="1090" y="566">07 · Product</text><text class="lab" x="1090" y="588">Diverter Valve</text><text class="sub" x="1090" y="608">ship or recirculate</text></g>
+            <g class="lbl"><line class="lead" x1="1140" y1="406" x2="1100" y2="360"/><circle class="dot" cx="1140" cy="406" r="5.5"/>
+              <text class="lab" x="1097" y="312" text-anchor="middle" style="font-size:15px">07 · Product</text><text class="lab" x="1097" y="332" text-anchor="middle" style="font-size:15px">Diverter Valve</text><text class="sub" x="1097" y="350" text-anchor="middle">ship or recirculate</text></g>
 
             <g class="lbl"><line class="lead" x1="1212" y1="150" x2="1264" y2="112"/><circle class="dot" cx="1212" cy="150" r="5.5"/>
               <text class="lab" x="1356" y="108" text-anchor="end">08 · Autorun</text></g>

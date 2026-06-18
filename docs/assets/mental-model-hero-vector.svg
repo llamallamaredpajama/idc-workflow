@@ -198,8 +198,8 @@
       <path d="M0,0 L13,-11 L13,11 z" fill="#252427" stroke="#F56A6A" stroke-width="3"/>
       <circle r="4" fill="#F56A6A"/>
     </g>
-    <text x="1254" y="386" text-anchor="middle" font-size="14" font-weight="bold" letter-spacing="0.5" fill="#F56A6A">DIVERTER #2</text>
-    <text x="1254" y="402" text-anchor="middle" font-size="11" fill="#F56A6A">ship or return</text>
+    <text x="1235" y="356" text-anchor="middle" font-size="14" font-weight="bold" letter-spacing="0.5" fill="#F56A6A">DIVERTER #2</text>
+    <text x="1235" y="372" text-anchor="middle" font-size="11" fill="#F56A6A">ship or return</text>
 
     <!-- ===================== FAUCET (with ON/OFF handle) + GLASS ===================== -->
     <!-- riser + gooseneck -->

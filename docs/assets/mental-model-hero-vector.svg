@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="820" viewBox="0 0 1600 820" role="img"
-     aria-label="The IDC water rig: ideas leave the Think Tank through ONE drain carrying an inline Diverter #1 — the one gate — which either holds the flow as the locked PRD + TRD (you authorize by merging the Think PR) or admits it down the pipe. Admitted work crosses two planning grid-plates (domain x phase/wave) and the matrix-analysis filter, then the labeled Sequencing Manifold junction fans the single pipe into four parallel wave-pipes — each running the build triplet inline (implementer turbine, review filter, finisher turbine) with its own red/green status light at the head — before the pipes reform and reach Diverter #2 (ship or return): clean water pours out the Autorun faucet (with its on/off handle) into the glass, while not-good work takes the Recirculator all the way back to Diverter #1. A dashboard reads a sensor on every component and the light on every wave.">
+     aria-label="The IDC pipeline: ideas leave the Think Tank through ONE drain carrying an inline Diverter #1 — the one gate — which either holds the flow as the locked PRD + TRD (you authorize by merging the Think PR) or admits it down the pipe. Admitted work crosses two planning grid-plates (domain x phase/wave) and the matrix-analysis filter, then the labeled Sequencing Manifold junction fans the single pipe into four parallel wave-pipes — each running the build triplet inline (implementer turbine, review filter, finisher turbine) with its own red/green status light at the head — before the pipes reform and reach Diverter #2 (ship or return): clean water pours out the Autorun faucet (with its on/off handle) into the glass, while not-good work takes the Recirculator all the way back to Diverter #1. A dashboard reads a sensor on every component and the light on every wave.">
   <!-- Coal House palette: coal #252427, canvas #F9FAFD, sage #9CA689, coral #F56A6A, deep #1b1a1c -->
   <defs>
     <symbol id="turbine" viewBox="-40 -40 80 80">
@@ -22,7 +22,7 @@
     <rect x="20.5" y="20.5" width="1559" height="779" fill="none" stroke="#9CA689" stroke-opacity="0.35" stroke-width="1"/>
 
     <!-- corner captions -->
-    <text x="44" y="52" font-size="13" letter-spacing="3" fill="#9CA689" fill-opacity="0.9">THE IDC WATER RIG</text>
+    <text x="44" y="52" font-size="13" letter-spacing="3" fill="#9CA689" fill-opacity="0.9">THE IDC PIPELINE</text>
     <text x="44" y="76" font-size="20" font-weight="bold" letter-spacing="0.5" fill="#F9FAFD">An idea in. Working software out.</text>
     <text x="1556" y="792" text-anchor="end" font-size="12.5" letter-spacing="2.5" fill="#9CA689" fill-opacity="0.85">ONE-WAY FLOW · ONE GATE · ONE WAY BACK</text>
 

@@ -4,7 +4,7 @@
 > section numbers are **stable** so the IDC roles and skills can cite rules by anchor
 > (e.g. "WORKFLOW.md §3.1"). Keep the numbering stable when you edit.
 
-> **The mental model — the water rig.** Picture IDC as a water rig. Ideas drop into the **Think
+> **The mental model — the pipeline.** Picture IDC as a pipeline. Ideas drop into the **Think
 > Tank** (`/idc:think`) and firm up into one consideration; Think then carries that idea's **PRD +
 > TRD** (the user-facing *what* and the technical *how*) to the **first Diverter** — the one gate
 > (§2), fired at the **end of Think** on the **Think PR**, the one valve only you can open. Admitted

@@ -5,7 +5,7 @@ write-authority boundaries, the tracker contract, the runtime model, and how com
 agents, and skills compose. It is derived from `templates/WORKFLOW.md` (the contract a
 governed repo installs) and `docs/specs/master-architectural-spec.md` (the plugin's own
 architecture). For the human-facing picture of the whole system, read
-[`mental-model.md`](mental-model.md) — the **water rig**; this document is its precise
+[`mental-model.md`](mental-model.md) — the **pipeline**; this document is its precise
 counterpart. For the rules a governed project runs under, read that project's `WORKFLOW.md`.
 
 ## The flow

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
      width="1376" height="768" viewBox="0 0 1376 768" role="img"
-     aria-label="The IDC water rig — painted blueprint: the Think Tank drains through one inline Diverter #1 (the one gate, with the locked PRD + TRD), two planning grid-plates (domain × phase/wave) and the matrix-analysis filter, the labeled Sequencing Manifold junction fanning into four parallel wave-pipes that each run the build triplet inline (implementer turbine, review filter, finisher turbine) with their own status light at the head, Diverter #2 (ship or return) feeding the Recirculator backflow, the Autorun faucet with its on/off handle pouring into the glass, and the dashboard wired to every component.">
+     aria-label="The IDC pipeline — painted blueprint: the Think Tank drains through one inline Diverter #1 (the one gate, with the locked PRD + TRD), two planning grid-plates (domain × phase/wave) and the matrix-analysis filter, the labeled Sequencing Manifold junction fanning into four parallel wave-pipes that each run the build triplet inline (implementer turbine, review filter, finisher turbine) with their own status light at the head, Diverter #2 (ship or return) feeding the Recirculator backflow, the Autorun faucet with its on/off handle pouring into the glass, and the dashboard wired to every component.">
   <!-- Painted base (Gemini blueprint) + native-vector label layer. Coal House palette. -->
   <!-- NOTE (v3): the painted base now depicts the two-diverter / sequencing-manifold / recirculator
        model — single-drain inline gate, two grid-plates, a labeled manifold junction fanning into four
@@ -10,7 +10,7 @@
 
   <g font-family="Gill Sans, Gill Sans MT, Futura, Trebuchet MS, sans-serif">
     <!-- title -->
-    <text x="60" y="52" font-size="14" letter-spacing="3" fill="#9CA689">THE IDC WATER RIG</text>
+    <text x="60" y="52" font-size="14" letter-spacing="3" fill="#9CA689">THE IDC PIPELINE</text>
     <text x="60" y="82" font-size="22" font-weight="bold" fill="#F9FAFD">An idea in. Working software out.</text>
 
     <!-- DASHBOARD -->

@@ -24,6 +24,10 @@ has "$FIN" '/simplify'      || fail "finisher must name the /simplify step"
 has "$FIN" 'git finaliz'    || fail "finisher must name git finalization"
 has "$FIN" 'merge'          || fail "finisher must name the merge step"
 has "$FIN" 'tidy'           || fail "finisher must name the tidy step"
+# F2b: branch cleanup must be deterministic/atomic with the merge, not a best-effort tidy — an
+# orphaned build/* branch survived in the autorun e2e because deletion was soft prose.
+grep -qF -- '--delete-branch' "$FIN" \
+  || fail "finisher must delete the merged branch atomically (--delete-branch) — else orphaned build/* branches survive (F2b)"
 has "$FIN" '/fullauto-goal' || fail "finisher must run its OWN /fullauto-goal loop"
 has "$FIN" 'recirculat'     || fail "finisher must file a recirculation on the unsolvable"
 # the 6-element posture: the contract's six named elements

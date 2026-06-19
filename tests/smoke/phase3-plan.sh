@@ -114,4 +114,11 @@ if grep -qiE 'PRD gate|only the PRD' "$PLAN_CMD"; then
   fail "commands/plan.md still advertises a PRD gate — Plan no longer gates in v3"
 fi
 
-echo "PASS: schema check + matrix deconfliction green; Plan is pure decomposition (no PRD authoring, no gate)"
+# ---- (d) F2b: the planning PR automerge deletes its branch deterministically ------------------
+# An orphaned plan/* branch survived a merged plan PR (autorun e2e) because branch cleanup was an
+# unstated step. The automerge must delete the branch atomically (deleteBranchOnMerge may be off).
+grep -qiE 'automerge when green' "$PLAN" || fail "agents/idc-plan.md must automerge the planning PR"
+grep -qF -- '--delete-branch' "$PLAN" \
+  || fail "agents/idc-plan.md must delete the merged plan branch (--delete-branch) — else orphaned plan/* branches survive (F2b)"
+
+echo "PASS: schema check + matrix deconfliction green; Plan is pure decomposition; plan PR automerge deletes its branch"

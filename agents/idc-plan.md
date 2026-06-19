@@ -62,7 +62,10 @@ contradiction that can't be deconflicted is parked and surfaced for a recirculat
    requirements were already admitted at the end of Think.
 3. Advance the consideration pointer (`Consideration → Planning`, retired as buildable issues
    land); open the planning PR whose **body is the audit trail** (what was planned, the matrix,
-   the trace) and **automerge when green** (no human touchpoint here).
+   the trace) and **automerge when green, deleting the merged branch as part of the merge**
+   (`gh pr merge … --delete-branch`; no human touchpoint here). Branch deletion is **atomic with
+   the merge**, not a separate best-effort step — so no orphaned `plan/*` branch survives
+   (the repo's `deleteBranchOnMerge` may be off, so the merge must delete it explicitly).
 
 ## Model tiers (resolved by the runtime adapter)
 

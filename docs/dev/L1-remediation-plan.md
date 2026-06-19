@@ -60,7 +60,48 @@ contract forbids.
 - **Prose lock:** assert `SKILL.md` no longer uses `--format json | jq` for gh project reads and
   the setField recipe contains the empty-id guard.
 
-## F2 (hygiene) — review-report artifacts left untracked at clean drain exit
+### F1 addendum (authoritative scope update) — explicit retire helper
+
+The autorun agent **hand-rolled** the retire (captured `gh project item-list --format json` into a
+var, re-parsed with external jq) instead of using the skill ops — which is exactly how the
+store-and-reparse fragility reached the live board. Op-level robustness (above) is necessary but
+not sufficient; the skill also ships an explicit **`retire(pointer, reason)`** convenience that
+resolves ids in-process via `itemid` (gh `--jq`) + the guard, and a prose warning to **never
+hand-roll** the store-and-reparse pattern. Locked by phase4-tracker-github-recipe.sh (asserts the
+retire op exists, the warning is present, and no board read pipes `--format json` to external jq).
+
+## F2 (review-report artifacts) — VERIFIED REAL but fix REVERTED (ambiguous product decision)
+
+The review-report files ARE real plugin output (the review agent writes them to
+`docs/workflow/code-reviews/`) and ARE left untracked — not pure snapshot residue. BUT the second
+independent audit did not corroborate it as a defect, and the README is internally in tension on
+intent: "a PR body is the audit trail" (→ local scratch, gitignore) vs. "referenced from issues" /
+".gitkeep … delete once the dir has real content" (→ durable, commit). Choosing scratch-vs-durable
+is a **product decision** that locking in autonomously could get wrong (a gitignore would foreclose
+a durable audit trail the team may want). Per the lead's "verify-if-real / don't manufacture", the
+gitignore commit was **reverted**. Deferred to a human: decide whether review reports are committed
+durable audit artifacts (add a commit step to the finisher) or local scratch (gitignore them).
+
+## F2b (NEW · substantive) — orphaned plan/build branch after a merged PR
+
+`plan/sandbox-version-stamp-32` (merged PR #41) survived while its peers were deleted. Repo
+`deleteBranchOnMerge=false`, so branch cleanup is the plugin's job — but it was **soft prose**:
+`agents/idc-plan.md` automerged the planning PR with **no** branch-delete step at all, and
+`agents/idc-finisher.md:55` only said "tidy (delete the merged branch/worktree)" parenthetically →
+applied non-deterministically. **Fix:** both the plan automerge and the finisher merge now delete
+the merged branch **atomically with the merge** (`gh pr merge … --delete-branch`), called out as a
+required step (not best-effort), noting `deleteBranchOnMerge` may be off. Locked red-when-broken by
+phase3-plan.sh (plan) + phase4-triplet.sh (finisher).
+
+### Optional nits — documented, not changed
+- **#3 (Stage=Planning on Done pointers):** SKIPPED. The `Stage` enum has no terminal value
+  (`Consideration|Planning|Buildable`); a retired pointer is **closed** (`gh issue close`), so it
+  drops off the active board regardless of Stage. Adding a "done" Stage option is a destructive
+  option-set mutation the skill explicitly forbids. Left as-is (low value, no safe target).
+- **#4 (phantom "heal board hygiene" task), #5/#6/F4 (harness):** out of scope — not shipped-plugin
+  behavior / harness-only.
+
+## F2 (superseded — original gitignore approach, reverted; see F2 above)
 
 **Finding premise is FALSE:** no review artifact was ever committed by ANY wave
 (`git log --all -- 'docs/workflow/code-reviews/*report*'` is empty); only the final wave's

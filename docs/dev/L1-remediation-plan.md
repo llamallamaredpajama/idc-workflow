@@ -100,8 +100,33 @@ phase3-plan.sh (plan) + phase4-triplet.sh (finisher).
   (`Consideration|Planning|Buildable`); a retired pointer is **closed** (`gh issue close`), so it
   drops off the active board regardless of Stage. Adding a "done" Stage option is a destructive
   option-set mutation the skill explicitly forbids. Left as-is (low value, no safe target).
+  *(See L2-2 below for the strengthened FINAL determination — clearing is also unsafe.)*
 - **#4 (phantom "heal board hygiene" task), #5/#6/F4 (harness):** out of scope — not shipped-plugin
   behavior / harness-only.
+
+---
+
+## Loop 2 (L2-discovery) — `docs/dev/L2-findings.md`; both friction/nit
+
+L2 verified both L1 substantive bugs FIXED live (F1: zero jq/empty-id errors; F2b: zero orphaned
+`plan/*`/`build/*` branches). Two new items, no blockers:
+
+### L2-1 (friction) — autorun exit report under-counted untracked litter — FIXED
+The exit report's working-tree claim was sourced from a **session-START** `git status` (the build
+lane then wrote 8 review files it never re-counted → claimed "2 stale" vs. 10 actual). There was no
+litter prose in the plugin — the agent improvised a stale-snapshot claim. **Fix:** both
+`commands/autorun.md` and `agents/idc-autorun.md` now spec the exit report's working-tree state from
+a **final post-build `git status --porcelain`** (never a start-of-run snapshot). Locked
+red-when-broken by `phase6-autorun.sh`.
+
+### L2-2 (nit) — retired pointer ends `Status=Done` but `Stage=Planning` — FINAL: WON'T-FIX
+Final determination (the candidate "clear the Stage field" fix was evaluated and **rejected as
+unsafe**): clearing `Stage` makes the item read as **`Buildable`** via the `(.stage // "Buildable")`
+legacy default in `query` — a latent glass-wall footgun (a retired pointer masquerading as buildable
+work). Setting a terminal `Stage` needs a forbidden destructive option-set mutation. The retired
+pointer is `Status=Done` + **closed** → filtered from active board views, and no query acts on a
+`Done`+`Planning` item, so the current terminal state is correct and footgun-free. Documented at the
+retire code site (`skills/idc-tracker-github/SKILL.md`). No code change.
 
 ## F2 (original investigation notes — the gitignore approach that SHIPPED; see F2 above)
 

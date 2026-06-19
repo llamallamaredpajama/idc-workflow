@@ -27,8 +27,10 @@ Traverse the pipe top-to-bottom and exit when nothing actionable remains:
    (or the github-backend equivalent via `idc:idc-tracker-adapter`).
 4. **Exit** when no approved considerations remain unplanned and the drain predicate reports
    `drain: complete` (only Done + requirements-gated Blocked + operator gate issues + un-admitted
-   considerations left). Emit the exit report: planned, admitted, built/merged, board state, and
-   anything waiting on the operator.
+   considerations left). Emit the exit report: planned, admitted, built/merged, board state, the
+   **final working-tree state from a post-build `git status --porcelain`** (run it at exit, never a
+   start-of-run snapshot — the build lane writes files mid-run, so a stale snapshot under-counts any
+   uncommitted/untracked artifact), and anything waiting on the operator.
 
 A pending Think-PR gate (incl. an open Think PR pending admission) is not a halt — autorun reports
 it and exits clean. Run

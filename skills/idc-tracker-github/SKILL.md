@@ -143,6 +143,12 @@ degradation of the *link representation only* — it never silently drops the de
   while the loop reports "retired → Done" — the swallowed failure the contract forbids. `setField`
   resolves the id **in-process via `itemid` (gh `--jq`)** and guards the empty id, so the failure
   surfaces non-zero instead.
+  *Stage on a retired pointer is intentionally left at its last value (`Planning`), not cleared or
+  advanced:* there is no terminal `Stage` option and adding one is a forbidden destructive option-set
+  mutation; and **clearing** `Stage` would make the item read as `Buildable` via the
+  `(.stage // "Buildable")` legacy default in `query` (a latent glass-wall footgun). The retired
+  pointer is `Status=Done` + **closed**, so it is filtered from active board views and no query acts
+  on a `Done`+`Planning` item — leaving `Stage` is the correct, footgun-free terminal state.
 
 ## Provisioning caveat (read before any option write)
 

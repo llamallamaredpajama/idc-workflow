@@ -24,6 +24,17 @@ has "$FIN" '/simplify'      || fail "finisher must name the /simplify step"
 has "$FIN" 'git finaliz'    || fail "finisher must name git finalization"
 has "$FIN" 'merge'          || fail "finisher must name the merge step"
 has "$FIN" 'tidy'           || fail "finisher must name the tidy step"
+# F2b: branch cleanup must be deterministic/atomic with the merge, not a best-effort tidy — an
+# orphaned build/* branch survived in the autorun e2e because deletion was soft prose.
+grep -qF -- '--delete-branch' "$FIN" \
+  || fail "finisher must delete the merged branch atomically (--delete-branch) — else orphaned build/* branches survive (F2b)"
+# F2b (cont.): remove the worktree BEFORE the --delete-branch merge — otherwise build/* is still
+# checked out and its local delete fails (`cannot delete branch … used by worktree`, exit 1). And
+# the merge must be DIRECT/blocking, NOT GitHub --auto (auto-merge defers → skips the delete).
+grep -qiE 'worktree first|worktree[^.]*before[^.]*merge' "$FIN" \
+  || fail "finisher must remove the build worktree BEFORE the --delete-branch merge (else the local branch delete fails) (F2b)"
+grep -qiE 'not[^.]*--auto|--auto[^.]*(defer|skip)' "$FIN" \
+  || fail "finisher merge must be a direct blocking merge, NOT GitHub --auto (else --delete-branch no-ops under deleteBranchOnMerge=off) (F2b)"
 has "$FIN" '/fullauto-goal' || fail "finisher must run its OWN /fullauto-goal loop"
 has "$FIN" 'recirculat'     || fail "finisher must file a recirculation on the unsolvable"
 # the 6-element posture: the contract's six named elements

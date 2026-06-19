@@ -114,4 +114,15 @@ if grep -qiE 'PRD gate|only the PRD' "$PLAN_CMD"; then
   fail "commands/plan.md still advertises a PRD gate — Plan no longer gates in v3"
 fi
 
-echo "PASS: schema check + matrix deconfliction green; Plan is pure decomposition (no PRD authoring, no gate)"
+# ---- (d) F2b: the planning PR automerge deletes its branch deterministically ------------------
+# An orphaned plan/* branch survived a merged plan PR (autorun e2e) because branch cleanup was an
+# unstated step. The automerge must delete the branch atomically (deleteBranchOnMerge may be off).
+grep -qiE 'automerge when green' "$PLAN" || fail "agents/idc-plan.md must automerge the planning PR"
+grep -qF -- '--delete-branch' "$PLAN" \
+  || fail "agents/idc-plan.md must delete the merged plan branch (--delete-branch) — else orphaned plan/* branches survive (F2b)"
+# F2b (cont.): the merge must be a DIRECT, blocking merge — NOT GitHub --auto. Auto-merge defers the
+# merge server-side and, with deleteBranchOnMerge off, would skip --delete-branch → orphan plan/*.
+grep -qiE 'not[^.]*--auto|--auto[^.]*(defer|skip)' "$PLAN" \
+  || fail "agents/idc-plan.md must disambiguate the plan merge as a direct blocking merge, NOT GitHub --auto (else --delete-branch no-ops under deleteBranchOnMerge=off) (F2b)"
+
+echo "PASS: schema check + matrix deconfliction green; Plan is pure decomposition; plan PR direct-merges (not --auto) and deletes its branch"

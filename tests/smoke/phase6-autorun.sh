@@ -60,4 +60,21 @@ grep -qiE 'Think PR' "$AUTORUN" \
 grep -qiE 'approved consideration' "$AUTORUN" \
   || fail "idc-autorun.md must state Autorun only decomposes/builds approved considerations"
 
-echo "PASS: autorun drain predicate (eligible build work vs gated/operator-only/un-admitted) green"
+# ---- L2-1: the exit report's working-tree claim is sourced from a FINAL post-build git status ---
+# The L2 e2e exit report under-counted untracked artifacts (claimed 2, actual 10) because the
+# working-tree view was a session-START snapshot taken before the build lane wrote files. The exit
+# report must reconcile the tree at EXIT (post-build), not from a stale snapshot.
+grep -qiE 'post-build .*git status' "$AUTORUN" \
+  || fail "idc-autorun.md exit report must source its working-tree state from a post-build git status, not a start-of-run snapshot (L2-1)"
+grep -qiE 'start-of-run snapshot' "$AUTORUN" \
+  || fail "idc-autorun.md must warn against a start-of-run working-tree snapshot in the exit report (L2-1)"
+# M1 (L2 review): commands/autorun.md carries the SAME post-build reconciliation prose — lock it too
+# so the command entry can't silently diverge from the (authoritative) agent file it delegates to.
+CMD="$PLUGIN/commands/autorun.md"
+[ -f "$CMD" ] || fail "commands/autorun.md missing"
+grep -qiE 'post-build .*git status' "$CMD" \
+  || fail "commands/autorun.md exit report must source its working-tree state from a post-build git status (L2-1 parity)"
+grep -qiE 'start-of-run snapshot' "$CMD" \
+  || fail "commands/autorun.md must warn against a start-of-run working-tree snapshot in the exit report (L2-1 parity)"
+
+echo "PASS: autorun drain predicate green; exit report reconciles the working tree post-build, agent + command in parity (L2-1)"

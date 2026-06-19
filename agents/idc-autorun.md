@@ -44,8 +44,11 @@ parent). Loopable via `/loop /idc:autorun` for standing operation.
 4. **Exit** when no approved considerations remain unplanned AND the drain predicate reports
    `drain: complete` — i.e. only Done items, requirements-gated Blocked items, the operator's gate
    issues, and un-admitted considerations (open Think PRs) are left. Emit the exit report:
-   considerations planned, issues admitted, waves built/merged, board state, and anything waiting on
-   the operator (the Think-PR requirements gate, incl. any open Think PR pending admission).
+   considerations planned, issues admitted, waves built/merged, board state, the **final
+   working-tree state from a post-build `git status --porcelain`** (captured at exit, never a
+   start-of-run snapshot — the build lane writes files mid-run, so a stale snapshot under-counts any
+   uncommitted/untracked artifact), and anything waiting on the operator (the Think-PR requirements
+   gate, incl. any open Think PR pending admission).
 
 ## Authority & halt
 

@@ -62,7 +62,11 @@ contradiction that can't be deconflicted is parked and surfaced for a recirculat
    requirements were already admitted at the end of Think.
 3. Advance the consideration pointer (`Consideration → Planning`, retired as buildable issues
    land); open the planning PR whose **body is the audit trail** (what was planned, the matrix,
-   the trace) and **automerge when green** (no human touchpoint here).
+   the trace) and **automerge when green, deleting the merged branch as part of the merge**:
+   a **direct, blocking** `gh pr merge --squash --delete-branch` (no human touchpoint; pick the
+   method the repo allows) — **not** GitHub `--auto`. Auto-merge defers the merge server-side and,
+   with the repo's `deleteBranchOnMerge` off, would skip the branch delete and leave an orphaned
+   `plan/*`. Branch deletion is **atomic with the merge**, not a separate best-effort step.
 
 ## Model tiers (resolved by the runtime adapter)
 

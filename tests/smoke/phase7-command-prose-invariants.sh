@@ -74,6 +74,14 @@ UN="$C/uninstall.md"
 has "$UN" 'receipt' || fail "uninstall.md must drive removal from the install receipt"
 has "$UN" 'only delete what IDC' \
   || fail "uninstall.md must state it only deletes what IDC created"
+# F1 completeness (overnight-e2e-hardening): the in-flight board count must use gh's BUILT-IN
+# --jq — never pipe `gh project item-list … --format json` to an EXTERNAL jq. A raw control char
+# (U+0000–U+001F) in any issue body crashes external jq → a wrong/empty count silently mis-reports
+# in-flight work and can orphan board items on uninstall (the same class as the F1 skill bug).
+has "$UN" 'item-list .*--format json .*--jq' \
+  || fail "uninstall.md in-flight count must use gh's built-in --jq (control-char-robust), not an external-jq reparse (F1 completeness)"
+grep -E 'gh project item-list[^|]*--format json[^|]*\| *jq' "$UN" \
+  && fail "uninstall.md still pipes item-list --format json to an external jq (the F1 control-char fragility)"
 
 # --- doctor.md: read-only (it must never mutate the repo or board) ------------------------------
 D="$C/doctor.md"

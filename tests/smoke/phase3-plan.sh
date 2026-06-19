@@ -120,5 +120,9 @@ fi
 grep -qiE 'automerge when green' "$PLAN" || fail "agents/idc-plan.md must automerge the planning PR"
 grep -qF -- '--delete-branch' "$PLAN" \
   || fail "agents/idc-plan.md must delete the merged plan branch (--delete-branch) — else orphaned plan/* branches survive (F2b)"
+# F2b (cont.): the merge must be a DIRECT, blocking merge — NOT GitHub --auto. Auto-merge defers the
+# merge server-side and, with deleteBranchOnMerge off, would skip --delete-branch → orphan plan/*.
+grep -qiE 'not[^.]*--auto|--auto[^.]*(defer|skip)' "$PLAN" \
+  || fail "agents/idc-plan.md must disambiguate the plan merge as a direct blocking merge, NOT GitHub --auto (else --delete-branch no-ops under deleteBranchOnMerge=off) (F2b)"
 
-echo "PASS: schema check + matrix deconfliction green; Plan is pure decomposition; plan PR automerge deletes its branch"
+echo "PASS: schema check + matrix deconfliction green; Plan is pure decomposition; plan PR direct-merges (not --auto) and deletes its branch"

@@ -143,6 +143,14 @@ const GIT_ROLES = new Set<IdcRole>(["think", "plan", "build-impl", "build-finish
 // role's behavioral green/gate decision; build-finish is hard-gated on the review verdict.
 const MERGE_ROLES = new Set<IdcRole>(["build-finish", "plan", "recirculator"]);
 
+// IDC-LOCAL (guard-bypass B-4, class-level): the git subcommands an IDC git-role may run. A
+// SAFELIST, not a denylist — every OTHER worktree-rewriting/history subcommand (apply, am,
+// cherry-pick, revert, reset, merge, rebase, pull, stash, clean, …) is DENIED by default, so a
+// new dangerous subcommand can't slip through. The path-bearing members (rm/mv/restore/checkout)
+// are ADDITIONALLY path-checked via gitTouchedPaths; commit/add/push/fetch/switch/branch/tag carry
+// no targeted worktree-file write (push force/ref-delete is caught separately by isGitForcePush).
+const GIT_SAFE_SUBCOMMANDS = new Set(["commit", "add", "push", "fetch", "switch", "checkout", "restore", "rm", "mv", "branch", "tag"]);
+
 const BUILD_IMPL_ALLOWED = [
 	"repo source/tests/implementation files except blocked governance surfaces",
 	...BUILD_ALLOWED_EXPLICIT,
@@ -416,6 +424,17 @@ export function evaluateBashForRole(
 
 		for (const rawPath of mutation.paths) {
 			if (isAlwaysAllowedDevice(rawPath)) continue;
+			// IDC-LOCAL (guard-bypass M-5): a glob operand (`rm -rf *`, `rm -rf docs/*`) can expand
+			// across a protected surface, which the static guard cannot enumerate — refuse it.
+			if (/[*?[]/.test(rawPath)) {
+				return {
+					allowed: false,
+					reason: `${mutation.kind} uses a glob (${rawPath}) that cannot be statically bounded against protected surfaces`,
+					allowedRoots: policy.allowedRoots,
+					blockedSurfaces: policy.blockedSurfaces,
+					attemptedPaths: [rawPath],
+				};
+			}
 			const normalized = normalizeToolPath(rawPath, cwd);
 			const pathEval = evaluatePathForRole(role, normalized, cwd, options);
 			if (!pathEval.allowed) {
@@ -453,6 +472,9 @@ function evaluateGitForRole(role: IdcRole, mutation: BashMutation, cwd: string, 
 	if (isGitForcePush(mutation)) return deny(`force/destructive push is blocked for all roles (${mutation.kind})`);
 	if (gitGlobalPathOutsideCwd(mutation, cwd)) return deny(`${mutation.kind} targets a repo outside the run repo via -C/--git-dir/--work-tree (or an unresolvable $VAR)`);
 	if (!GIT_ROLES.has(role)) return deny(`${mutation.kind} is outside ${role} git authority`);
+	if (!GIT_SAFE_SUBCOMMANDS.has(mutation.gitSubcommand ?? "")) {
+		return deny(`git ${mutation.gitSubcommand} is not in the IDC git safelist (a worktree-rewriting/history op that could reach a protected surface)`);
+	}
 	// IDC-LOCAL (guard-bypass B-2): git must NOT widen the file-write ACL. A `git rm`/`checkout`/
 	// `restore`/`mv` that names a path overwrites/deletes that WORKING-TREE file, so each named
 	// pathspec is re-checked against the role's path authority — a blocked governance/canonical
@@ -475,20 +497,34 @@ function gitTouchedPaths(mutation: BashMutation): string[] {
 	if (!["rm", "mv", "restore", "checkout"].includes(sub)) return [];
 	const args = mutation.gitArgs ?? [];
 	const dd = args.indexOf("--");
+	// Everything after a `--` separator is an explicit pathspec, for every form.
 	if (dd >= 0) return args.slice(dd + 1).filter((a) => a.length > 0);
-	if (sub === "checkout") return [];
+
 	const valueFlags = new Set(["-s", "--source", "--pathspec-from-file"]);
-	const out: string[] = [];
-	for (let i = 0; i < args.length; i++) {
-		const arg = args[i];
-		if (valueFlags.has(arg)) {
-			i++;
-			continue;
+	const operands = (list: string[]): string[] => {
+		const out: string[] = [];
+		for (let i = 0; i < list.length; i++) {
+			const arg = list[i];
+			if (valueFlags.has(arg)) {
+				i++;
+				continue;
+			}
+			if (arg.startsWith("-")) continue;
+			out.push(arg);
 		}
-		if (arg.startsWith("-")) continue;
-		out.push(arg);
-	}
-	return out;
+		return out;
+	};
+
+	// rm/mv/restore are always pathspec-oriented — every bare operand is a file.
+	if (sub === "rm" || sub === "mv" || sub === "restore") return operands(args);
+
+	// checkout is BRANCH-vs-pathspec ambiguous without `--`:
+	//   `checkout -b/-B <branch>`     → branch creation, operand is a ref name → no file touched
+	//   `checkout <branch>`           → branch switch, single operand is a ref → no file touched
+	//   `checkout <ref> <path…>`      → the operands AFTER the leading ref are pathspecs → checked
+	if (args.includes("-b") || args.includes("-B")) return [];
+	const ops = operands(args);
+	return ops.length >= 2 ? ops.slice(1) : [];
 }
 
 // IDC-LOCAL: per-role GitHub-CLI ACL for the gated gh ops.

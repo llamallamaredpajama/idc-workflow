@@ -531,18 +531,22 @@ export function classifyGhCommand(args: string[]): BashMutation | null {
 	if (a0 === "sub-issue" && ["add", "remove", "create"].includes(a1)) return { kind: `gh sub-issue ${a1}`, paths: [], unscoped: true, ghOp: "tracker-write" };
 	if (a0 === "pr" && ["edit", "close", "reopen", "ready", "lock", "unlock"].includes(a1)) return { kind: `gh pr ${a1}`, paths: [], unscoped: true, ghOp: "tracker-write" };
 	if (a0 === "api") {
-		// IDC-LOCAL (guard-bypass M-2): `gh api` defaults to GET, but it POSTs implicitly when a
-		// request body is supplied (`-f`/`-F`/`--field`/`--raw-field`/`--input`) and `gh api graphql`
-		// is ALWAYS a POST (its query may carry a `mutation { … }`). Treat those as writes UNLESS an
-		// explicit read method is given. Only an explicit `-X GET`/`--method GET` keeps it a read.
+		// IDC-LOCAL (guard-bypass B-3, class-level): `gh api` is a RAW REST/GraphQL surface that can
+		// express ANY mutation — merge a PR (`PUT pulls/*/merge`), delete a repo, cut a release,
+		// `mutation { mergePullRequest … }`. The static guard cannot bound an arbitrary endpoint or
+		// graphql query, so a WRITE via `gh api` is treated as UNBOUNDED → "dangerous" (denied for
+		// every role), with ONE safelisted exception: the native blocked-by dependency endpoint the
+		// tracker adapter genuinely needs. GET reads (the `issues/$N` id lookup) stay allowed. This
+		// forces every merge through the gated `gh pr merge` surface and every board write through
+		// the structured `gh issue`/`gh project` surfaces the classifier CAN bound.
 		const { method, explicit } = ghApiMethodInfo(args);
-		if (explicit) {
-			return method === "GET" || method === "HEAD" ? null : { kind: `gh api ${method}`, paths: [], unscoped: true, ghOp: "tracker-write" };
-		}
 		const isGraphql = args.slice(1).includes("graphql");
 		const hasBody = args.some((a) => a === "-f" || a === "-F" || a === "--field" || a === "--raw-field" || a === "--input" || /^-[fF]./.test(a) || /^--(field|raw-field|input)=/.test(a));
-		if (isGraphql || hasBody) return { kind: `gh api ${isGraphql ? "graphql" : "POST"}`, paths: [], unscoped: true, ghOp: "tracker-write" };
-		return null; // genuine GET read
+		const isWrite = isGraphql || hasBody || (explicit && method !== "GET" && method !== "HEAD");
+		if (!isWrite) return null; // a GET read
+		const isBlockedByDependency = !isGraphql && args.slice(1).some((a) => /\bdependencies\/blocked_by\b/.test(a));
+		if (isBlockedByDependency) return { kind: "gh api dependencies/blocked_by", paths: [], unscoped: true, ghOp: "tracker-write" };
+		return { kind: `gh api ${isGraphql ? "graphql" : explicit ? method : "POST"}`, paths: [], unscoped: true, ghOp: "dangerous" };
 	}
 
 	// Everything else (issue/pr comment, *-list, *-view, field-list, search, label, status,

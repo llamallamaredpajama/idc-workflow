@@ -106,7 +106,9 @@ const cases: Case[] = [
 	{ tag: "M2", role: "build-review", kind: "bash", input: "gh api repos/o/r/issues -f title=pwn", allow: false, note: "-f implies POST" },
 	{ tag: "M2", role: "build-review", kind: "bash", input: "gh api repos/o/r/issues", allow: true, note: "bare gh api is a GET read" },
 	{ tag: "M2", role: "build-review", kind: "bash", input: "gh api repos/o/r/issues -X GET", allow: true, note: "explicit GET stays a read" },
-	{ tag: "M2", role: "plan", kind: "bash", input: "gh api graphql -f query='mutation{ x }'", allow: true, note: "plan may do tracker writes" },
+	{ tag: "M2", role: "plan", kind: "bash", input: "gh project item-edit --id X --field-id F --single-select-option-id O", allow: true, note: "plan does tracker writes via the bounded gh project surface" },
+	{ tag: "M2", role: "plan", kind: "bash", input: "gh api graphql -f query='mutation{ x }'", allow: false, note: "gh api graphql is an unbounded raw surface — denied for all" },
+	{ tag: "M2", role: "plan", kind: "bash", input: "gh api --method POST repos/o/r/issues/5/dependencies/blocked_by -F issue_id=9", allow: true, note: "the bounded blocked-by dependency endpoint is the one safelisted gh-api write" },
 
 	// ── [M3b] $VAR-bearing cross-repo target refused fail-closed ─────────────────────────────
 	{ tag: "M3b", role: "build-finish", kind: "bash", input: "git --git-dir=$PWD/../other/.git --work-tree=$PWD/../other commit -m x", allow: false, note: "$PWD indirection" },
@@ -134,6 +136,35 @@ const cases: Case[] = [
 
 	// ── [ADMIN] gh pr merge --admin bypasses branch protection — blocked even with PASS ──────
 	{ tag: "ADMIN", role: "build-finish", kind: "bash", input: "gh pr merge 7 --admin --squash", allow: false, note: "--admin blocked even with a PASS verdict" },
+
+	// ── [SAFELIST] git is a SAFELIST — every non-listed worktree/history op is denied (B-4) ──
+	{ tag: "SAFELIST", role: "build-finish", kind: "bash", input: "git apply /tmp/evil.patch", allow: false, note: "git apply writes the worktree" },
+	{ tag: "SAFELIST", role: "build-finish", kind: "bash", input: "git am /tmp/x.patch", allow: false, note: "git am" },
+	{ tag: "SAFELIST", role: "build-finish", kind: "bash", input: "git reset --hard origin/main", allow: false, note: "git reset --hard overwrites the worktree" },
+	{ tag: "SAFELIST", role: "build-finish", kind: "bash", input: "git cherry-pick deadbeef", allow: false, note: "git cherry-pick" },
+	{ tag: "SAFELIST", role: "build-finish", kind: "bash", input: "git stash pop", allow: false, note: "git stash pop" },
+	{ tag: "SAFELIST", role: "build-finish", kind: "bash", input: "git revert HEAD", allow: false, note: "git revert" },
+	{ tag: "SAFELIST", role: "build-finish", kind: "bash", input: "git rebase main", allow: false, note: "git rebase" },
+	{ tag: "SAFELIST", role: "build-finish", kind: "bash", input: "git merge other", allow: false, note: "git merge (local) — merges go through gh pr merge" },
+	// the `<ref> <pathspec>` checkout form WITHOUT `--` is now path-checked
+	{ tag: "SAFELIST", role: "build-finish", kind: "bash", input: "git checkout HEAD~1 docs/prd/x.md", allow: false, note: "checkout <ref> <pathspec> overwrites the PRD" },
+	{ tag: "SAFELIST", role: "build-finish", kind: "bash", input: "git checkout other docs/workflow/code-reviews/pr-7.verdict.json", allow: false, note: "checkout <ref> <verdict> forges the verdict" },
+
+	// ── [APIMERGE] every merge goes through the gated `gh pr merge` — not via raw gh api (B-3) ─
+	{ tag: "APIMERGE", role: "build-finish", kind: "bash", input: "gh api -X PUT repos/o/r/pulls/8/merge", allow: false, note: "api REST merge bypasses MG-B" },
+	{ tag: "APIMERGE", role: "build-impl", kind: "bash", input: "gh api -X PUT repos/o/r/pulls/8/merge", allow: false, note: "api merge for a non-merge role" },
+	{ tag: "APIMERGE", role: "build-impl", kind: "bash", input: "gh api graphql -f query='mutation{ mergePullRequest(input:{pullRequestId:\"X\"}){clientMutationId} }'", allow: false, note: "graphql merge mutation" },
+
+	// ── [GLOB] glob destruction across a protected surface is refused (M-5) ──────────────────
+	{ tag: "GLOB", role: "build-finish", kind: "bash", input: "rm -rf *", allow: false, note: "rm -rf * unbounded" },
+	{ tag: "GLOB", role: "build-finish", kind: "bash", input: "rm -rf docs/*", allow: false, note: "rm -rf docs/* unbounded" },
+
+	// ── [REG3] class-level fixes must NOT over-block the legit git lifecycle ─────────────────
+	{ tag: "REG3", role: "think", kind: "bash", input: "git checkout -b think/x", allow: true, note: "branch creation (operand is a ref, not a pathspec)" },
+	{ tag: "REG3", role: "build-impl", kind: "bash", input: "git switch -c build/x", allow: true, note: "switch -c branch creation" },
+	{ tag: "REG3", role: "build-impl", kind: "bash", input: "git restore src/x.ts", allow: true, note: "restore a source file (in authority)" },
+	{ tag: "REG3", role: "build-impl", kind: "bash", input: "git add src/x.ts", allow: true, note: "staging is safe + needed" },
+	{ tag: "REG3", role: "build-finish", kind: "bash", input: "git fetch origin", allow: true, note: "fetch updates refs, no worktree write" },
 ];
 
 let failures = 0;

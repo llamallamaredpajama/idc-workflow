@@ -1,0 +1,7 @@
+# Review-engine reports/verdicts are LOCAL working artifacts — the PR body is the audit trail
+# (see ../README.md; matrices are the durable record, code-reviews are not). Ignore them so a
+# clean autorun/build exit never leaves untracked review litter in the operator's repo. The
+# operator can still read the latest report on disk; it just isn't committed.
+*
+!.gitkeep
+!.gitignore

@@ -36,6 +36,26 @@ grep -q "Test Project" "$SBX/WORKFLOW.md"        || fail "PROJECT_NAME not subst
 for v1 in audits ledgers recirculator operator-todos phase-planning pillar-conflicts handoffs diagrams plans; do
   [ -e "$SBX/docs/workflow/$v1" ] && fail "v1 subdir docs/workflow/$v1 should not be scaffolded in v2"
 done
+
+# F2 (overnight-e2e-hardening): review reports are LOCAL working artifacts (the PR body is the
+# audit trail — see templates/docs-tree/README.md), so a fresh scaffold must gitignore them and a
+# clean autorun/build exit leaves no untracked review litter. Matrices stay durable (NOT ignored).
+CR="$SBX/docs/workflow/code-reviews"
+[ -f "$CR/.gitignore" ] || fail "code-reviews/.gitignore not scaffolded (review reports would be left as untracked litter)"
+[ -f "$SBX/docs/workflow/pillar-matrices/.gitignore" ] \
+  && fail "pillar-matrices must NOT be gitignored — matrices are the durable deconfliction record"
+printf 'x'  > "$CR/pr-9-issue-1-run-checks.report.md"
+printf '{}' > "$CR/pr-9-issue-1-run-checks.verdict.json"
+( cd "$SBX" && git add -A ) >/dev/null 2>&1
+# the review report + verdict must be IGNORED (never appear in status), but .gitkeep stays tracked
+git -C "$SBX" check-ignore -q "docs/workflow/code-reviews/pr-9-issue-1-run-checks.report.md" \
+  || fail "code-reviews/.gitignore does not ignore *.report.md (untracked review litter would remain)"
+git -C "$SBX" check-ignore -q "docs/workflow/code-reviews/pr-9-issue-1-run-checks.verdict.json" \
+  || fail "code-reviews/.gitignore does not ignore *.verdict.json"
+git -C "$SBX" status --porcelain | grep -q 'code-reviews/pr-9-' \
+  && fail "review report/verdict showed up as an untracked/added change — gitignore not effective"
+git -C "$SBX" ls-files --error-unmatch "docs/workflow/code-reviews/.gitkeep" >/dev/null 2>&1 \
+  || fail "code-reviews/.gitkeep must stay tracked so the scaffold survives a fresh clone"
 # doctor check 3: filesystem backend selected + TRACKER.md present and valid
 grep -q "^backend: filesystem" "$SBX/docs/workflow/tracker-config.yaml" || fail "backend not set to filesystem"
 [ -f "$SBX/TRACKER.md" ]                          || fail "filesystem backend should init TRACKER.md"

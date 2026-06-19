@@ -38,6 +38,42 @@ the "Corrected direction" section first — it dissolves most of the open comple
 
 ---
 
+## Precise MG-B remove-vs-keep map (from pi-e2e-fixer — surgical simplification guide)
+
+PR #71's latest commit is `05d87dd` (round-4, analyzer class-exhaustive). To strip the MG-B hard
+interlock while keeping the validated alignment + defense-in-depth, the fixer left this exact map:
+
+**REMOVE (the MG-B machinery — defends a guarantee Pi doesn't need):**
+- `runtime/pi/extensions/idc-role-harness.ts`: the `readMergeVerdict()` function; the
+  `if (role === "build-finish") { … verdict check … }` block inside `evaluateGhForRole`'s `merge`
+  case (KEEP the surrounding `MERGE_ROLES` scope + `--auto`/`--admin` denials); the
+  `REVIEW_VERDICT_ALLOWED` const + build-review's verdict-dir write policy (revert build-review's path
+  policy to `readOnly: true`); the `docs/workflow/code-reviews/**` line added to `BUILD_BLOCKED`.
+- `runtime/pi/scripts/idc-pi`: revert build-review `role_tools` to `read,bash,grep,find,ls,coms`
+  (drop the added `write`).
+- `build-reviewer.md`: revert `tools:` frontmatter (drop `write`); remove "sole author of the
+  PR-keyed verdict" / verdict-file-writing language → read-only reviewer sending findings via coms-net.
+- `build-finisher.md`: KEEP "merge ONLY on green + PASS verdict" (behavioral); drop the "pass the
+  explicit `<PR-NUMBER>` for the verdict lookup" sentence (plain `gh pr merge <PR> --squash --delete-branch`).
+- `tests/smoke/phase8-pi-guard-acl.ts`: remove the `[MGB]`-tagged cases + the `[MGB-symlink]` block +
+  the verdict-fixture setup.
+
+**KEEP (validated, reviewer-confirmed zero over-blocks — alignment + pure defense-in-depth):**
+- All 7 prompts' 5-field-board alignment (minus the build-reviewer verdict specifics above).
+- Guard hardening: B-1 subshell/brace recursion, B-2 git path-ACL (`gitTouchedPaths`), M-1 cmdsubst
+  recursion, M-3 case-fold, the gh-op classifier + gh-api-write handling, M-5/M-6 glob refusal,
+  **B-5 inline-`-c`/unknown-verb git safelist** (highest-value general fix — closes a `git -c
+  alias='!shell'` arbitrary-shell evasion that defeats the whole guard for *all* roles incl.
+  read-only), B-6 `--pathspec-from-file`, m-1 destructive-push, m-2 `--admin`, force-push/`--auto`
+  blocks, `isAncestorOfBlockedSurface` (general parent-dir protection), the role-scoped merge grant.
+
+**Net after removal:** build-finish keeps role-scoped merge authority + merges behaviorally on
+green+PASS (mirroring `agents/idc-finisher.md`); build-review is read-only again; alignment + general
+hardening stand. The gh-api "dangerous-write" denial harmlessly forces merges through `gh pr merge`
+(keep as DiD). (Ignore `PLAN.md §10` — the architectural backstop is mooted by the corrected direction.)
+
+---
+
 ## Corrected direction (the key insight — read this)
 
 The operator clarified: **their production Claude IDC merges on green by trusting the agent — a

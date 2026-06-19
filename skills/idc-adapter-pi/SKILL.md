@@ -93,14 +93,20 @@ downstream-legal under the glass-wall ACL; the Recirculator is reachable from an
 
 ## Model selection
 
-pi residents run the **Pi coding agent**; the tier-symbolic contract still holds — process docs
-name only the **tier** (`WORKFLOW.md §6`), and the `idc-pi` launcher resolves it from
-`WORKFLOW-config.yaml::model_routing` and applies the resolved model/effort to the Pi agent at
-resident spawn (mirroring `idc:idc-adapter-claude`, not Codex's untiered carve-out). Never hardcode
-a model id in a command, agent, or non-adapter skill; the Recirculator maintains the table when models
-change. `WORKFLOW-config.yaml` also carries the `gating:` requirements-gate toggle (`gating.prd` /
-`gating.trd`), read by the gate predicate (`scripts/idc_recirculator_layers.py`) for Plan and the
-Recirculator — not by tier resolution.
+pi residents run the **Pi coding agent**. Process docs name only the **tier** (`WORKFLOW.md §6`).
+The tier-symbolic contract is the target end-state, but on the **experimental Pi runtime it is not
+yet wired**: the `idc-pi` launcher picks each role's model from `role_model()`
+(`runtime/pi/scripts/idc-pi`) — a per-role **hardcoded stock default** (an Anthropic Opus tier for
+think / plan / build-impl / build-finish, a DeepSeek tier for sequence / recirculator, an OpenAI tier
+for build-review; see `role_model()` for the exact ids), each overridable per role via a
+`PI_IDC_<ROLE>_MODEL` environment variable. It does **not** read
+`WORKFLOW-config.yaml::model_routing`, so the governed repo's tier table is bypassed on Pi — unlike
+`idc:idc-adapter-claude`, which is tier-resolved. Wiring `role_model()` to read `model_routing` is a
+known experimental-runtime maturity gap; until then this launcher is the documented carve-out. The
+general rule still holds everywhere else: never hardcode a model id in a command, agent, or
+non-adapter skill; the Recirculator maintains the tier table when models change. `WORKFLOW-config.yaml`
+also carries the `gating:` requirements-gate toggle (`gating.prd` / `gating.trd`), read by the gate
+predicate (`scripts/idc_recirculator_layers.py`) for Plan and the Recirculator — not by tier resolution.
 
 ## Authority boundaries
 

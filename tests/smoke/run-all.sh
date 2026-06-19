@@ -16,6 +16,8 @@ for t in \
   phase1-init-doctor \
   phase1-brownfield-scan \
   phase1-settings-json \
+  phase1-lint-rules \
+  phase1-codex-mirror-sync \
   phase2-think \
   phase3-plan \
   phase4-build \

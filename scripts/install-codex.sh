@@ -284,6 +284,22 @@ install() {
     fi
   done
 
+  # (c) Prune STALE mirror links. The manifest ($LINKS) was just regenerated with exactly the
+  # links this run created, so any SYMLINK in $AGENTS_SKILLS that is NOT in the manifest — or
+  # that no longer resolves — is a leftover from an earlier install (e.g. a ~/.claude/skills
+  # entry deleted since the last run) and is removed. Mirrors link_one's safety posture: only
+  # ever delete symlinks, never a real file or directory we did not create.
+  pruned=0
+  for entry in "$AGENTS_SKILLS"/*; do
+    [ -L "$entry" ] || continue                      # symlink-only — never touch a real file/dir
+    if grep -qxF "$(basename "$entry")" "$LINKS" 2>/dev/null && [ -e "$entry" ]; then
+      continue                                       # current link that still resolves — keep it
+    fi
+    rm -f "$entry"                                    # removes only the symlink, never its target
+    pruned=$((pruned + 1))
+  done
+  [ "$pruned" -gt 0 ] && echo "install-codex: pruned $pruned stale mirror link(s)."
+
   # Verify each plugin-skill link resolves to a real SKILL.md (two-hop reachability).
   total=0; resolved=0
   for name in $ADAPTERS; do

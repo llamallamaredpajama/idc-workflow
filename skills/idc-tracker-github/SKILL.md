@@ -144,11 +144,16 @@ degradation of the *link representation only* — it never silently drops the de
   resolves the id **in-process via `itemid` (gh `--jq`)** and guards the empty id, so the failure
   surfaces non-zero instead.
   *Stage on a retired pointer is intentionally left at its last value (`Planning`), not cleared or
-  advanced:* there is no terminal `Stage` option and adding one is a forbidden destructive option-set
-  mutation; and **clearing** `Stage` would make the item read as `Buildable` via the
-  `(.stage // "Buildable")` legacy default in `query` (a latent glass-wall footgun). The retired
-  pointer is `Status=Done` + **closed**, so it is filtered from active board views and no query acts
-  on a `Done`+`Planning` item — leaving `Stage` is the correct, footgun-free terminal state.
+  advanced* — clearing was evaluated and rejected as NOT a clean fix: (1) the sibling **filesystem**
+  backend's `setField Stage` rejects any non-enum value (`scripts/idc_tracker_fs.py`), so a
+  cleared/empty `Stage` is not expressible there — clearing would make `retire` diverge by backend
+  and break the adapter's backend-blindness; (2) a cleared `Stage` reads as `Buildable` via the
+  `(.stage // "Buildable")` legacy default shared by both backends, so it drops the drain's
+  stage-based exclusion (`idc_autorun_drain.py` excludes `Consideration`/`Planning`) — reduced
+  defense-in-depth; (3) there is no terminal `Stage` option and adding one is a forbidden destructive
+  option-set mutation. The retired pointer is `Status=Done` + **closed**, so it is filtered from
+  active board views and no consumer acts on a `Done`+`Planning` item (Build/drain pair `Stage` with
+  `Status=Todo`) — leaving `Stage` is the correct, backend-consistent, doubly-guarded terminal state.
 
 ## Provisioning caveat (read before any option write)
 

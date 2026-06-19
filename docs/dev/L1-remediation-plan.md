@@ -120,13 +120,29 @@ a **final post-build `git status --porcelain`** (never a start-of-run snapshot).
 red-when-broken by `phase6-autorun.sh`.
 
 ### L2-2 (nit) — retired pointer ends `Status=Done` but `Stage=Planning` — FINAL: WON'T-FIX
-Final determination (the candidate "clear the Stage field" fix was evaluated and **rejected as
-unsafe**): clearing `Stage` makes the item read as **`Buildable`** via the `(.stage // "Buildable")`
-legacy default in `query` — a latent glass-wall footgun (a retired pointer masquerading as buildable
-work). Setting a terminal `Stage` needs a forbidden destructive option-set mutation. The retired
-pointer is `Status=Done` + **closed** → filtered from active board views, and no query acts on a
-`Done`+`Planning` item, so the current terminal state is correct and footgun-free. Documented at the
-retire code site (`skills/idc-tracker-github/SKILL.md`). No code change.
+The lead's candidate fix — CLEAR the Stage field (an item-field update, not an option-set mutation) —
+was evaluated against the code and **rejected as NOT a clean fix** (`gh project item-edit --clear`
+exists, so it is technically possible — but):
+1. **Breaks backend-blindness.** The sibling filesystem backend's `setField Stage` rejects any
+   non-enum value (`scripts/idc_tracker_fs.py:144` — `"" not in STAGES → die`), so a cleared/empty
+   `Stage` is **not expressible on the filesystem backend**. Clearing would make `retire` leave a
+   different board state per backend, breaking the adapter's core "callers stay backend-blind" promise.
+2. **Reduces drain defense-in-depth.** The drain excludes a Planning pointer on BOTH `status != Todo`
+   AND `stage in (Consideration, Planning)` (`scripts/idc_autorun_drain.py:64,66`). A cleared Stage
+   reads as `Buildable` via the `(.stage // "Buildable")` default shared by both backends, dropping
+   the stage-based guard — the retired pointer would then rely SOLELY on `Status=Done`, and would
+   surface as `Buildable` on the public `query --stage Buildable` interface (a stage a consideration
+   pointer never legitimately occupies — it goes Consideration→Planning→retired; Buildable is its
+   child issues' stage).
+3. **No terminal Stage option** exists; adding one is the forbidden destructive option-set mutation.
+
+The retired pointer is `Status=Done` + **closed** → filtered from active board views; no consumer
+acts on a `Done`+`Planning` item (Build/drain pair `Stage` with `Status=Todo`). So
+`Status=Done + Stage=Planning + closed` is the correct, backend-consistent, doubly-guarded,
+footgun-free terminal state. The "mixed signal" is purely cosmetic. Documented at the retire code
+site (`skills/idc-tracker-github/SKILL.md`). No code change. *(If the operator still wants the
+cosmetic clear despite the backend divergence, it is functionally harmless on a github-only repo —
+but it is not a clean cross-backend fix, hence won't-fix.)*
 
 ## F2 (original investigation notes — the gitignore approach that SHIPPED; see F2 above)
 

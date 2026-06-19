@@ -70,17 +70,19 @@ resolves ids in-process via `itemid` (gh `--jq`) + the guard, and a prose warnin
 hand-roll** the store-and-reparse pattern. Locked by phase4-tracker-github-recipe.sh (asserts the
 retire op exists, the warning is present, and no board read pipes `--format json` to external jq).
 
-## F2 (review-report artifacts) — VERIFIED REAL but fix REVERTED (ambiguous product decision)
+## F2 (review-report artifacts) — SHIPS (lead decision): gitignore as local scratch
 
 The review-report files ARE real plugin output (the review agent writes them to
-`docs/workflow/code-reviews/`) and ARE left untracked — not pure snapshot residue. BUT the second
-independent audit did not corroborate it as a defect, and the README is internally in tension on
-intent: "a PR body is the audit trail" (→ local scratch, gitignore) vs. "referenced from issues" /
-".gitkeep … delete once the dir has real content" (→ durable, commit). Choosing scratch-vs-durable
-is a **product decision** that locking in autonomously could get wrong (a gitignore would foreclose
-a durable audit trail the team may want). Per the lead's "verify-if-real / don't manufacture", the
-gitignore commit was **reverted**. Deferred to a human: decide whether review reports are committed
-durable audit artifacts (add a commit step to the finisher) or local scratch (gitignore them).
+`docs/workflow/code-reviews/`) and ARE left untracked — not snapshot residue. The README tension
+(`"a PR body is the audit trail"` → scratch, vs. `"referenced from issues"` / `.gitkeep` "real
+content" → durable) is a product decision; the **lead resolved it: review reports are local working
+artifacts, gitignore them.** Fix (commit `66889f7`): scaffold
+`templates/docs-tree/code-reviews/.gitignore` (`*`, keep `.gitkeep`+`.gitignore`) so a fresh
+`/idc:init` ignores reports/verdicts → no untracked litter at a clean drain exit; rides the existing
+`cp -R` scaffold (no scaffold-script change). `pillar-matrices` gets NO ignore (matrices are the
+durable record). Locked red-when-broken by `phase1-init-doctor.sh` (deleting the template
+`.gitignore` fails the test). *(History note: an earlier autonomous reversion of this fix was
+restored by the lead via cherry-pick once the scratch-vs-durable call was made.)*
 
 ## F2b (NEW · substantive) — orphaned plan/build branch after a merged PR
 
@@ -101,7 +103,7 @@ phase3-plan.sh (plan) + phase4-triplet.sh (finisher).
 - **#4 (phantom "heal board hygiene" task), #5/#6/F4 (harness):** out of scope — not shipped-plugin
   behavior / harness-only.
 
-## F2 (superseded — original gitignore approach, reverted; see F2 above)
+## F2 (original investigation notes — the gitignore approach that SHIPPED; see F2 above)
 
 **Finding premise is FALSE:** no review artifact was ever committed by ANY wave
 (`git log --all -- 'docs/workflow/code-reviews/*report*'` is empty); only the final wave's

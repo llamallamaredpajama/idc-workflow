@@ -19,6 +19,7 @@ original project or its board.
 | **Install** | `/Users/jeremy/dev/sandbox/ke-idc-test-repo-install` | `llamallamaredpajama/ke-idc-test-repo-install` (private) | **plugin NOT enabled** (blank slate) | from-scratch install: `claude plugin install idc@idc-workflow --scope project` → confirm `~/.claude/settings.json` has `idc@idc-workflow: false` (global off-switch) → `/idc:doctor` → `/idc:init` → `/idc:think` → `/idc:plan` → `/idc:build` |
 | **Update** | `/Users/jeremy/dev/sandbox/ke-idc-test-repo-update` | `llamallamaredpajama/ke-idc-test-repo-update` (private) | **plugin enabled** | update path: `/idc:init` first (lays down scaffold + receipt), then `/idc:update` |
 | **Autorun** | `/Users/jeremy/dev/sandbox/ke-idc-test-repo-autorun` | `llamallamaredpajama/ke-idc-test-repo-autorun` (private); board = GitHub Project #10, **github backend** | **plugin enabled, seeded mid-lifecycle board** | autorun drain: starts on a populated board (both lanes carry work) → `/idc:autorun` drains the Planning + Build lanes to `drain: complete` |
+| **Pi** | `/Users/jeremy/dev/sandbox/ke-idc-test-repo-pi` | `llamallamaredpajama/ke-idc-test-repo-pi` (private); **github backend** | **plugin enabled, clean Think-start** | **Pi runtime** e2e: real `pi` agent + real Gemini LLM drives Think→Plan→Build from one un-admitted idea. See [The Pi runtime e2e](#the-pi-runtime-e2e--4th-sandbox--real-pi--real-llm) below |
 
 Each repo's own `CLAUDE.md` / `AGENTS.md` opens with a "IDC TEST SANDBOX" banner repeating this, so
 any agent dropped into them is oriented automatically.
@@ -47,6 +48,132 @@ must report-and-skip it). All buildable work is tiny additive files under `scrat
 > seed + autorun drain costs ≈ 4.75k of GitHub's 5,000-per-hour GraphQL budget. **Budget one
 > `/idc:autorun` e2e per GitHub API hour** — back-to-back runs will rate-limit. Poll `gh api
 > rate_limit` (the `graphql` bucket) before re-running.
+
+## The Pi runtime e2e — 4th sandbox — real `pi` + real LLM
+
+The first three sandboxes are **claude-runtime only**. The IDC plugin also ships a **pi** runtime
+adapter (experimental): long-lived IDC role *residents* on a coms-net hub under Bun + the `pi` coding
+agent (`runtime/pi/scripts/idc-pi`). It has the most *automated* coverage of any runtime — the
+`phase8-pi-*` smoke tests boot the real coms-net hub and drive the real launcher — but always
+**hermetically with a fake `pi`** (no real agent, no LLM). The **Pi sandbox** closes the one untested
+gap: a **real `pi` agent + real Gemini LLM** driving a real IDC stage end-to-end on a governed repo,
+observed on real git/board.
+
+Unlike the Autorun sandbox (which seeds *already-admitted* considerations), the Pi sandbox starts at a
+**clean Think-start**: an empty board + `main` at the `pi-baseline` tag. The seeded "idea" is **one
+crisp, un-admitted raw idea** (staged in `_idc-observability/ke-idc-test-repo-pi.seed-idea.md`) whose
+buildable outcome is a tiny additive file under `scratch/`.
+
+**The drive model (what the e2e actually established).** Under the production glass-wall guard
+(`block`), an IDC pi role **authors content within its lane but cannot perform git finalization** —
+that is reserved for the operator (see *Per-role authority* below). So the e2e runs each stage as a
+single `idc-pi run <role> --print "<instruction>"` resident that does the **real LLM authoring**, and a
+**scripted operator** (the harness) does the git/PR finalization the guard walls off — **loudly
+labelled (`HARNESS-BRIDGE`) so the green drain is never oversold.** The GitHub board + files are the
+handoff substrate between stages. The pipeline:
+
+1. `run think` **drafts** the consideration + PRD + TRD (it correctly defers PR-opening to the operator).
+2. **HARNESS-BRIDGE** commits those docs to a branch and opens the **Think PR** + the one `operator-action` gate.
+3. The operator **merges** the Think PR (= admission) and closes the gate.
+4. `run plan` **decomposes** the admitted consideration into a buildable goal-contract issue (native `gh issue`/`gh project`); **HARNESS-NORMALIZE** dedupes to one.
+5. `run build-impl` **authors** the `scratch/` file + its test; **HARNESS-BRIDGE** opens the build PR; the operator merges it → the artifact lands on `main` → drain complete.
+
+### The harness scripts (operator-local, in `_idc-observability/bin/`)
+
+- **`seed-pi-board.sh`** — repo-locked reset to clean Think-start: wipe board/PRs/branches + `git
+  reset --hard pi-baseline` (+ `git clean -fd` to clear a prior run's untracked drafts), and (re)write
+  the canonical raw-idea sidecar. Refuses any repo but `ke-idc-test-repo-pi`.
+- **`run-pi-e2e.sh <label> [rung]`** — pins the environment, seeds the credential (value-blind), drives
+  the run, captures to `_idc-observability/run-<label>.txt`. The derisking ladder of rungs:
+  `think` (draft + bridge Think PR) → `think-plan` (+ merge + `run plan`) → `plan` (reuse an open Think
+  PR) → `build` (build stage against an already-admitted consideration) → **`full`** (the whole drain) →
+  `fleet` (the cooperative-peer stretch).
+- **`verify-pi-drain.sh`** — read-only github-native assertions: Think PR **merged** (admission), build
+  PR merged + `scratch/` file on `main`, build + planning lanes drained, gate closed, no orphan branches.
+
+### Why the env pins are mandatory (each verified 2026-06-19)
+
+The launcher runs every resident under `env -i` + a `SAFE_ENV` allow-list (a role-cap isolation
+measure — `idc-pi:35-42`), which **strips `GEMINI_API_KEY`**. So a present key in your shell never
+reaches the resident `pi`. The pins handle this:
+
+| Pin | Why |
+|-----|-----|
+| `PI_CODING_AGENT_DIR=<obs>/…/_pi-agent` | **The auth fix.** This var *is* allow-listed, so it survives `env -i`. `run-pi-e2e.sh` seeds `<dir>/auth.json` = `{"google":{"type":"api_key","key":"<GEMINI_API_KEY>"}}` (value-blind, mode 0600) and the resident reads its credential from there. The user's **global `~/.pi/agent/auth.json` is never touched**; the dir is deleted at teardown. |
+| `PI_IDC_<ROLE>_MODEL` (all 7 roles) | **Provider-QUALIFY the string** (`google/gemini-2.5-flash`): a *bare* `gemini-2.5-pro` mis-resolves to the `github-copilot` provider and fails-closed. The launcher hardcodes claude/openai/deepseek defaults — not google — so pin every role (`THINK`/`PLAN`/`SEQUENCE`/`RECIRCULATOR`/`BUILD_IMPL`/`BUILD_REVIEW`/`BUILD_FINISH`). |
+| `PI_E2E_PLAN_MODEL=google/gemini-2.5-pro` | **Plan is the unreliable run-mode stage** (below); pin it to a stronger model while think/build stay on cheap flash. |
+| `PI_IDC_BUILD_REVIEW_PROVIDER=google` | `build-review` is the only role that gets a `--provider` flag and it defaults to `openai`; without this it would route a gemini model to the wrong provider. |
+| `PI_IDC_GUARD_MODE` (default `block`) | Keep the **production** guard (faithful); the harness bridges the git finalization it reserves for the operator. (`PI_E2E_GUARD_MODE` overrides.) |
+| `PI_IDC_HARNESS_REPO=<idc>/runtime/pi` | Test the **vendored** runtime (extensions/prompts/server), not the installed `~/dev/proj/pi-harnesses` symlink. |
+| `PI_IDC_SESSION_DIR=<obs>/…/_pi-sessions/<label>` | Capture per-resident transcripts into the snapshot tree. |
+
+> The adapter skill (`skills/idc-adapter-pi/SKILL.md`) is now truthful about this: `idc-pi`'s
+> `role_model()` (`runtime/pi/scripts/idc-pi:899-907`) **hardcodes a per-role stock default,
+> overridable per role via `PI_IDC_<ROLE>_MODEL`** — exactly the mechanism these pins use.
+
+### Per-role authority under the production guard (run-mode A) — the load-bearing finding
+
+Verified empirically + in `runtime/pi/extensions/idc-role-harness.ts:352-371`. Under `idc-pi run
+<role>` (a single docs/source-scoped resident, guard `block`):
+
+- **The git lifecycle is walled.** `think`/`plan`/`sequence`/`recirculator`/`build-impl` have **all**
+  git ops blocked (`git checkout -b` → *"outside think authority"*); `build-review` is fully read-only;
+  **`build-finish`** is the *only* role with git authority — `git commit`/`git merge`/`gh pr merge`
+  (finalization) are allowed, but `git push` / branch-create are **not**. So **no single role can do the
+  full open-a-PR lifecycle** (branch+push is blocked for everyone, build-finish included) — the
+  operator/harness bridges it.
+- **But the GitHub tracker is native.** `gh issue create` / `gh project item-*` are a **separate
+  category, NOT guard-blocked** (one plan run drove 20 issue-creates + 100 project calls, zero blocks).
+  The seam is precise: *the git/PR lifecycle is walled; the GitHub tracker is free.*
+- **Plan is the unreliable run-mode stage.** Same prompt, run to run: flash produced **5 duplicate**
+  unfielded issues one run and **0** the next (it narrated its tracker commands instead of executing
+  them; a body control-char escaping error). Pinning plan to `google/gemini-2.5-pro` produced **exactly
+  one** properly-fielded buildable issue. The harness **dedupes** plan-authored duplicates but **never
+  fabricates** a buildable issue when plan made none — that would be doing plan's job, not git mechanics
+  (a zero is a clean blocked-stop).
+
+This is direct evidence for the **#66 L1/L4** debts (no parallel build pool; no autonomous drain loop):
+a run-mode resident can operate the tracker but cannot self-drive the git/PR lifecycle, nor do it
+reliably/idempotently, headlessly. **Scope:** all of the above is `idc-pi run <role>` (mode A); whether
+the `fleet` topology wires a git-capable finalizer is a separate question (the `fleet` rung / mode B).
+
+### The captured green drain
+
+`run-pi-e2e.sh pi-full2 full` (plan=`google/gemini-2.5-pro`, think/build=flash) produced one captured
+green drain: un-admitted idea → pi-drafted, harness-opened Think PR → merged (admission) → pro-Plan
+created the buildable issue → flash build-impl authored `scratch/print_repo_name.sh` + its test →
+harness-opened build PR → merged → `verify-pi-drain.sh` **PASS (7/7)**; the artifact runs and prints
+`ke-idc-test-repo-pi` (exit 0). Audited the full capture + per-resident transcripts + live git/board
+(no hidden failures, no orphans). The audit also caught + fixed three real harness bugs (untracked-draft
+cleanup in the seed; a `verify` orphan-count `grep -vc … || echo 0` that emitted `0\n0` and false-FAILed
+a clean drain; a field-id regex that truncated hyphenated node ids and silently dropped board
+field-writes) — a reminder to keep harness assertions red-when-broken.
+
+### Fleet teardown + the headless-fleet limitation (mode B, the stretch)
+
+- **Fleet teardown.** `idc-pi fleet` **does not self-terminate on board drain** — the supervisor races
+  child exits and stops only on a child exit or a signal. The harness owns completion-detection (poll
+  until the `scratch/` artifact is on `origin/main`) then **SIGTERMs the supervisor** (the backgrounded
+  `idc-pi fleet` pid, which `exec`s the bun supervisor in place → clean `teardown(0)`).
+- **Completion predicate is github-native.** `idc_autorun_drain.py` reads a filesystem `TRACKER.md` and
+  is **useless against a github-backend board**; the run/verify scripts query GitHub directly.
+- **Headless-fleet idea delivery — blocked-stop (live-confirmed).** A headless `idc-pi fleet think`
+  **boots correctly** (the hub comes up and the `think` resident registers on coms-net), but then `think`
+  **idles with no reachable input source**, so a headless fleet cannot be handed a raw idea:
+  - no stdin/pane headlessly (the interactive operator path);
+  - coms-net inbound-to-`think` is **structurally blocked** — `think` is the river HEAD
+    (`RIVER_ORDER[0]`, `idc-role-harness.ts`), the glass-wall ACL allows sends **downstream only** (so
+    nothing may send *to* think), an external "operator" is a non-role **"unknown sender" → fail-closed
+    deny**, and registering *as* a river role requires the launcher's in-memory **HMAC role-cap**.
+  - **What a live operator would need:** drive the fleet **interactively** — `idc-pi open-all` (or
+    `idc-pi open think …`) in cmux/iTerm panes — and type the idea into the `think` pane's TUI; the
+    coms-net peers then handle the downstream Think→Plan→Build handoffs. The fully-headless drain path
+    is **mode A** (per-stage `run <role> --print` + board handoff), which is what the captured green
+    drain used. (Whether the fleet's cooperative build phase wires a git-capable finalizer that mode A's
+    single residents lack is a separate, still-open question that needs the interactive path to test.)
+
+> **GraphQL-budget caveat.** The github backend is GraphQL-heavy. Budget **one Pi drain per GitHub API
+> hour**; poll `gh api rate_limit` (the `graphql` bucket) before re-running.
 
 ## Golden rule
 

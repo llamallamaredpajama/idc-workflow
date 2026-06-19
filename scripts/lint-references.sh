@@ -9,8 +9,10 @@
 #      `idc:<name>` ASSERTS that <name> ships here, so Rule A ignores the lint-allow marker
 #      by design — there is no sanctioned dangling namespaced ref.
 #   B. Every ${CLAUDE_PLUGIN_ROOT}/<path> and ../<path> file token resolves to a real file.
-#   C. No machine-local paths (~/.claude/{agents,skills,commands,plugins}/, /Users/<user>)
-#      or personal-memory references. The vendored runtime/ tree (idc-pi launcher, role
+#   C. No machine-local paths (~/.claude/{agents,skills,commands,plugins}<content>, /Users/<User>)
+#      or personal-memory references. The content separator is any path char (a no-slash leak is
+#      caught too); a bare standalone dir name stays exempt as a universal-harness mention. The
+#      username class is case-insensitive. The vendored runtime/ tree (idc-pi launcher, role
 #      prompts, extensions) ships to users too, so it gets a dedicated machine-local-path
 #      scan below — markdown-surface globbing would otherwise miss its non-.md files.
 #   D. No "Knowledge Engine" project naming outside the history allowlist.
@@ -18,9 +20,13 @@
 #      component's directory/file stem.
 #   G. A bare `idc-<component>` mention that resolves to a real component must be namespaced
 #      `idc:idc-<component>` (catches un-namespaced skill/agent references in body text).
+#   I. No doubled namespace prefix `idc:idc:<x>` (the correct form is `idc:idc-<name>`).
+#   J. Every `/idc:<token>` slash command names one of the 9 real commands (typos and a slash
+#      pointed at a skill/agent — which Rule A's resolution check passes — are caught here).
+#   K. No `idc-` reference broken across a line break (Rule G is line-based and misses it).
 #
 # Exit 0 = clean. Exit 1 = findings printed as <file>:<line>: <rule> <excerpt>.
-# Lines containing "lint-allow" are exempt for Rules B–G (use sparingly, with a reason);
+# Lines containing "lint-allow" are exempt for Rules B–K (use sparingly, with a reason);
 # Rule A ignores the marker by design (see above).
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
@@ -41,7 +47,13 @@ HISTORY_ALLOW='^(CHANGELOG\.md|docs/dev/)'
 # Rule C personal/machine-local path sub-pattern, shared by the markdown per-file scan and the
 # runtime/ scan so the two cannot drift. The per-file scan layers personal-memory alternatives
 # on top of this; the runtime/ scan uses it alone (those memory tokens would false-match code).
-PERSONAL_PATH_RE='~/\.claude/(agents|skills|commands|plugins)/|/Users/[a-z]+'
+# The separator after a plugin dir is now any path char, not only `/` — so a no-slash CONTENT leak
+# (`~/.claude/skills.bak`, `~/.claude/agents-mirror`) is caught, not just `~/.claude/skills/foo`. A
+# BARE standalone dir name (`~/.claude/skills` followed by whitespace/backtick/EOL) stays exempt:
+# it is a universal-harness mention, the same class as the allowed ~/.claude/teams ~/.claude/tasks
+# (doctor.md's Codex-mirror check legitimately describes ~/.claude/skills this way). The username
+# class is case-insensitive so a Capitalized `/Users/Jeremy` is caught too.
+PERSONAL_PATH_RE='~/\.claude/(agents|skills|commands|plugins)[A-Za-z0-9._/-]|/Users/[A-Za-z]+'
 
 filtered_grep() { # pattern, file — grep -n minus lint-allow lines
   grep -nE -- "$1" "$2" 2>/dev/null | grep -v 'lint-allow' || true
@@ -52,6 +64,12 @@ COMPONENTS=$( { ls -d skills/*/ 2>/dev/null | sed 's|skills/||; s|/$||'; \
                 ls agents/*.md 2>/dev/null | sed 's|agents/||; s|\.md$||'; \
                 ls commands/*.md 2>/dev/null | sed 's|commands/||; s|\.md$||'; } | sort -u)
 is_component() { printf '%s\n' "$COMPONENTS" | grep -qxF "$1"; }
+
+# Real slash-command stems, derived from commands/*.md, for Rule J. A /idc:<token> SLASH command
+# must name one of these — a skill/agent is referenced WITHOUT a slash, so a slash pointed at a
+# non-command (or a typo'd command) is a bug Rule A's component-resolution check cannot see.
+COMMANDS=$(ls commands/*.md 2>/dev/null | sed 's|commands/||; s|\.md$||' | sort -u)
+is_command() { printf '%s\n' "$COMMANDS" | grep -qxF "$1"; }
 
 for f in $MD_FILES; do
   # Rule C — personal / machine-local references.
@@ -116,6 +134,35 @@ for f in $MD_FILES; do
       fi
     done
   done < <(filtered_grep 'idc-[a-z0-9-]+' "$f")
+
+  # Rule I — a doubled namespace prefix (idc:idc:<x>). The correct namespaced-component form is
+  # idc:idc-<name> (a hyphen, not a second colon), so a literal idc:idc: is always a mistake.
+  while IFS= read -r hit; do
+    [ -z "$hit" ] && continue
+    report "$f:${hit%%:*}: [doubled-namespace] ${hit#*:}"
+  done < <(filtered_grep 'idc:idc:' "$f")
+
+  # Rule J — a /idc:<token> slash command must name one of the 9 real commands. The [a-z]-anchored
+  # token deliberately skips placeholders (/idc:* , /idc:<cmd>); a surviving token that is not a
+  # command is a typo or a slash mistakenly pointed at a skill/agent.
+  while IFS= read -r hit; do
+    [ -z "$hit" ] && continue
+    lineno="${hit%%:*}"; line_txt="${hit#*:}"
+    for tok in $(printf '%s\n' "$line_txt" | grep -oE '/idc:[a-z][a-z-]*' | sed 's|/idc:||' | sort -u); do
+      is_command "$tok" || report "$f:$lineno: [unknown-slash-command] /idc:$tok is not one of the IDC commands"
+    done
+  done < <(filtered_grep '/idc:[a-z][a-z-]*' "$f")
+
+  # Rule K — an idc- reference broken across a line break (whitespace-tolerant). Rule G is
+  # line-based, so a token soft-wrapped at its hyphen (a line ending in `idc-`, the rest resuming
+  # the next line) slips past it. Flag the line that ends in `idc-` when the next line resumes with
+  # a token char; lint-allow on the `idc-` line exempts it.
+  while IFS= read -r ln; do
+    [ -z "$ln" ] && continue
+    report "$f:$ln: [split-component-ref] an 'idc-' reference is broken across this line break"
+  done < <(awk '
+    NR>1 && prev ~ /idc-[ \t]*$/ && prev !~ /lint-allow/ && $0 ~ /^[ \t]*[a-z0-9]/ { print prevno }
+    { prev=$0; prevno=NR }' "$f")
 done
 
 # Rule C (runtime/) — the vendored runtime tree ships to users but is not markdown and sits

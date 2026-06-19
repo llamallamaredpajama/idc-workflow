@@ -109,7 +109,35 @@ Read the report rows (Bun / Pi agent / runtime/pi):
   `runtime/pi/` incomplete) so the Pi runtime cannot boot. Fix hint: install Bun
   (https://bun.sh) or re-pull the plugin to restore `runtime/pi/`.
 
-**7 — Plugin cache freshness (advisory; never FAIL).** The code `/idc:*` runs from Claude
+**7 — Codex skill-mirror in sync (optional).** The optional Codex runtime mirror
+(`scripts/install-codex.sh`) turns `~/.agents/skills` into a real directory of symlinks — one per
+`$HOME/.claude/skills` entry plus the IDC adapters. A skill deleted since the last install leaves a
+**dangling** mirror link, and a skill added since leaves a **missing** one, until the installer is
+re-run. This check is **read-only** — it only inspects symlinks, mutating nothing. Gate on the
+install-state file, then look for drift:
+```bash
+if [ ! -f "$HOME/.agents/.idc-install-state" ]; then echo "mirror-absent"; else
+  # dangling: a mirror symlink whose target no longer resolves (e.g. a since-deleted skill)
+  for l in "$HOME/.agents/skills"/*; do [ -L "$l" ] && [ ! -e "$l" ] && echo "dangling: $(basename "$l")"; done
+  # missing: a $HOME/.claude/skills entry with no mirror link yet
+  for d in "$HOME/.claude/skills"/*/; do n=$(basename "$d"); [ -d "$d" ] && { [ -L "$HOME/.agents/skills/$n" ] || echo "missing: $n"; }; done
+  # load-bearing: the Codex adapter link must resolve to a SKILL.md
+  [ -f "$HOME/.agents/skills/idc-adapter-codex/SKILL.md" ] || echo "adapter-broken"
+fi
+```
+- **SKIP** — `mirror-absent` (no install-state file): the Codex mirror is not installed (an
+  optional runtime). A Claude/Codex-without-mirror repo is valid; never FAIL here.
+- **PASS** — state file present and no `dangling:` / `missing:` / `adapter-broken` lines: the mirror
+  matches `$HOME/.claude/skills` + the adapters.
+- **PASS with ⚠** — only `dangling:` / `missing:` lines (the Codex adapter still resolves): stale
+  mirror cruft Codex ignores, not a boot blocker. Note the drifted names. Fix hint: re-sync (the
+  re-run prunes its own stale links) — `bash "${CLAUDE_PLUGIN_ROOT}/scripts/install-codex.sh"
+  "${CLAUDE_PLUGIN_ROOT}"`.
+- **FAIL** — `adapter-broken`: the mirror is installed but the load-bearing Codex adapter link
+  (`~/.agents/skills/idc-adapter-codex`) does not resolve, so IDC will not load under Codex. Same
+  fix: re-run the installer above.
+
+**8 — Plugin cache freshness (advisory; never FAIL).** The code `/idc:*` runs from Claude
 Code's **version-keyed cache** (`${CLAUDE_PLUGIN_ROOT}`), rebuilt **only when `plugin.json`'s
 `version` changes** — so a `claude plugin marketplace update` that pulled new commits under an
 unchanged version leaves the session running **stale cached code**. Surface the running version
@@ -132,8 +160,8 @@ echo "running ${run_ver:-unknown}; marketplace ${clone_ver:-absent}"
 
 ## Output
 
-Emit a single table, then a one-line verdict. Tally PASS / FAIL / SKIP across the seven rows
-(row 7 is advisory — it is only ever PASS or SKIP, never FAIL):
+Emit a single table, then a one-line verdict. Tally PASS / FAIL / SKIP across the eight rows
+(row 8, plugin cache freshness, is advisory — it is only ever PASS or SKIP, never FAIL):
 
 ```
 | # | Check | Result | Fix hint |
@@ -144,7 +172,8 @@ Emit a single table, then a one-line verdict. Tally PASS / FAIL / SKIP across th
 | 4 | Governance scaffold | PASS | — |
 | 5 | Install receipt | SKIP | run /idc:init to graduate a receipt |
 | 6 | Pi runtime (optional) | SKIP | Pi runtime not installed — optional |
-| 7 | Plugin cache freshness | PASS | running 2.1.0 |
+| 7 | Codex skill-mirror (optional) | SKIP | Codex mirror not installed — optional |
+| 8 | Plugin cache freshness | PASS | running 2.1.0 |
 
 IDC doctor: N passed, M failed, K skipped
 ```

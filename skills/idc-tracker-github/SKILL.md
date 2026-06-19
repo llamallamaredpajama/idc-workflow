@@ -40,11 +40,16 @@ fid()  { grep -E "^[[:space:]]+$1:" "$CFG" | head -1 \
 # gh applies the filter to its in-memory data, so an issue body carrying a raw control char
 # (U+0000–U+001F) is never round-tripped through a strict external jq, which would reject it
 # (`parse error: control characters … must be escaped`) and silently yield an EMPTY id.
+# Precondition (controlled inputs only): these resolvers interpolate their args into the jq program,
+# so callers pass ONLY plugin-controlled values — issue numbers IDC resolved and the five fixed v2
+# field/enum names — never board-derived free text. `itemid` additionally hard-guards its number
+# argument, so the one bare-interpolated value can never carry a raw jq fragment.
 # Resolve a single-select option id BY NAME at call time (never cached):
 optid() { gh project field-list "$PROJ" --owner "$OWNER" --format json \
   --jq ".fields[] | select(.name==\"$1\") | .options[] | select(.name==\"$2\") | .id"; }
 # Map an issue number -> its project item id (board membership):
-itemid() { gh project item-list "$PROJ" --owner "$OWNER" --format json \
+itemid() { case "$1" in ''|*[!0-9]*) die_gh ;; esac   # $1 is interpolated BARE into the jq below
+  gh project item-list "$PROJ" --owner "$OWNER" --format json \
   --jq ".items[] | select(.content.number==$1) | .id"; }
 ```
 

@@ -147,6 +147,7 @@ grep -qi 'never hand-roll the' "$SKILL"            || fail "retire recipe must w
 } > "$HARNESS"
 
 run_setfield() { ( export PATH="$WORK/bin:$PATH"; source "$HARNESS"; setField "$@" ); }
+run_itemid()   { ( export PATH="$WORK/bin:$PATH"; source "$HARNESS"; itemid  "$@" ); }
 
 # ---- Case A: issue ON the board → resolves the real id → item-edit succeeds -------------------
 : > "$GH_LOG"
@@ -165,4 +166,16 @@ grep -q 'ITEM_EDIT_EMPTY_ID' "$GH_LOG" && fail "case B: GraphQL mutation ran wit
 grep -q 'ITEM_EDIT_OK' "$GH_LOG"       && fail "case B: item-edit should not have run at all for an off-board issue"
 grep -q 'backend.*github' "$WORK/errB" || fail "case B: die_gh did not surface a structured non-zero error"
 
-echo "PASS: github tracker recipe resolves ids via gh --jq (control-char-robust) and setField refuses to mutate with a blank id"
+# ---- Case C (injection-hardening): itemid must REJECT a non-integer/empty arg, not inject jq -----
+# The --jq conversion interpolates $1 BARE into the jq program (select(.content.number==$1)); a
+# non-integer arg like '31 or true' would otherwise inject raw jq and select ALL items. itemid must
+# integer-guard $1 and die_gh (non-zero) instead — so a malformed/board-derived NUM never becomes a
+# jq injection. (optid/query interpolate fixed v2 enums and are controlled-inputs-only by contract.)
+run_itemid '31 or true' >/dev/null 2>&1 \
+  && fail "case C: itemid accepted a non-integer arg (raw-jq injection / select-all) — the integer guard is missing"
+run_itemid '' >/dev/null 2>&1 \
+  && fail "case C: itemid accepted an empty arg — the integer guard is missing"
+cid="$(run_itemid 31 2>/dev/null)" || fail "case C: itemid rejected a VALID integer arg — guard too strict"
+[ "$cid" = "PVTI_aaa" ] || fail "case C: itemid 31 must still resolve PVTI_aaa (got '$cid')"
+
+echo "PASS: github tracker recipe resolves ids via gh --jq (control-char-robust), setField refuses a blank id, and itemid rejects non-integer args"

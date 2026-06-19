@@ -125,6 +125,12 @@ printf '%s\n' "$ITEMID_SRC" | grep -q '| jq'    && fail "extracted itemid() stil
 # Sanity: setField must guard BOTH resolved ids before mutating.
 printf '%s\n' "$SETFIELD_SRC" | grep -q '\[ -n "\$IID" \] || die_gh' || fail "setField is missing the empty item-id guard"
 printf '%s\n' "$SETFIELD_SRC" | grep -q '\[ -n "\$OID" \] || die_gh' || fail "setField is missing the empty option-id guard"
+# Sanity: NO board read pipes gh's --format json text to an external jq (the store-and-reparse bug).
+grep -E 'gh project (item-list|field-list)[^|]*--format json[^|]*\| *jq' "$SKILL" \
+  && fail "a board read still pipes gh --format json to external jq (store-and-reparse — the F1 fragility)"
+# Sanity: an explicit retire helper exists and steers away from hand-rolled store-and-reparse.
+grep -q '\*\*retire(pointer, reason)\*\*' "$SKILL" || fail "skill is missing the explicit retire convenience (agents will hand-roll the fragile retire)"
+grep -qi 'never hand-roll the' "$SKILL"            || fail "retire recipe must warn against the hand-rolled store-and-reparse pattern"
 
 # Assemble a runnable harness from the EXTRACTED shipped source + minimal stubs.
 {

@@ -128,6 +128,16 @@ degradation of the *link representation only* — it never silently drops the de
 - **block(issue, by)** — `move "$NUM" Blocked` + `link "$BY" "$NUM" blocks` (native blocked-by).
 - **close(issue)** — `move "$NUM" Done` + `gh issue close "$NUM"`. Idempotent: a re-close is a
   no-op (already-`Done` / already-closed exits 0).
+- **retire(pointer, reason)** — retire a consideration pointer that is fully decomposed +
+  built: `setField "$NUM" Status Done` then `gh issue close "$NUM" --reason completed --comment
+  "$REASON" || die_gh`. Use this op (or `setField`/`close` above) — **never hand-roll the
+  retire by capturing `gh project … --format json` into a shell var and re-parsing it with an
+  external `jq`**: a raw control char (U+0000–U+001F) in any board title/body trips external jq
+  (`parse error: control characters … must be escaped`), yields an **empty** item id, and the
+  edit fails on the blank global id `''` (`Could not resolve to a node with the global id of ''`)
+  while the loop reports "retired → Done" — the swallowed failure the contract forbids. `setField`
+  resolves the id **in-process via `itemid` (gh `--jq`)** and guards the empty id, so the failure
+  surfaces non-zero instead.
 
 ## Provisioning caveat (read before any option write)
 

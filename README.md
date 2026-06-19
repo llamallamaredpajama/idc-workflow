@@ -27,7 +27,7 @@ to ask you exactly **one** question, **once, at the top**: *do you approve these
 ## The whole system, in one picture
 
 <p align="center">
-  <img src="docs/assets/pipeline-hero.png" alt="The IDC pipeline as a labeled rig — an idea in, working software out" width="100%">
+  <img src="docs/assets/pipeline-flow.png" alt="The IDC pipeline — an idea in: Think, the PRD gate, Plan, parallel Build waves (implementer, review, finisher), Ship, working software out, with a Recirculate return path from Ship back to the gate." width="100%">
 </p>
 
 An idea enters **Think**, which crystallizes it into a **PRD + TRD**. The **one gate** is a **Think PR**
@@ -183,21 +183,9 @@ is drafted autonomously. Planning reaches Build *only* by turning plans into iss
 pipe; Build reaches planning *only* through the Recirculator. Flow is one-way, and a sensor on every
 component keeps the chain auditable end to end.
 
-```mermaid
-%%{init: {'theme':'base','themeVariables':{'primaryColor':'#c8dc00','primaryTextColor':'#1a1a1a','primaryBorderColor':'#1a1a1a','lineColor':'#3a3a38','clusterBkg':'#faf9f1','clusterBorder':'#b3b0a4','titleColor':'#1a1a1a','fontFamily':'Helvetica Neue, Helvetica, Arial, sans-serif'}}}%%
-flowchart LR
-    subgraph chain["Five-layer canonical chain — PRD + TRD admitted at the Think PR gate"]
-        direction LR
-        PRD["PRD"]:::doc --> SPEC["TRD<br/>(arch spec)"]:::doc --> MP["Master plan"]:::doc --> SUB["Subphase plans"]:::doc --> PIL["Pillar plans"]:::doc
-    end
-    PIL --> ISS["Tracker issues<br/>· the work in flight ·"]:::wall
-    ISS --> BUILD["Build"]:::stage
-    BUILD -.->|"Recirculator — the only way back"| PRD
-
-    classDef doc fill:#f7f6ee,stroke:#1a1a1a,color:#1a1a1a;
-    classDef stage fill:#c8dc00,stroke:#1a1a1a,color:#1a1a1a;
-    classDef wall fill:#1a1a1a,stroke:#1a1a1a,color:#f5f4ec;
-```
+<p align="center">
+  <img src="docs/assets/write-authority.png" alt="Write-authority — each role is the sole writer of one surface: Think writes the gated PRD + TRD, Plan writes plans + tracker issues, Build writes source + tests; flow is one-way down and the Recirculator is the only way back up." width="100%">
+</p>
 
 **Write-authority boundaries** — each role is the sole writer of its surface and edits nothing
 upstream of it. When a lower role finds a higher layer wrong, it routes through the Recirculator
@@ -278,22 +266,9 @@ IDC is **runtime-neutral**: the whole process is written against **three abstrac
 runtime** maps them to real mechanics. There is no per-runtime process tree, and every stage runs on
 every supported runtime.
 
-```mermaid
-%%{init: {'theme':'base','themeVariables':{'primaryColor':'#c8dc00','primaryTextColor':'#1a1a1a','primaryBorderColor':'#1a1a1a','lineColor':'#3a3a38','clusterBkg':'#faf9f1','clusterBorder':'#b3b0a4','titleColor':'#1a1a1a','fontFamily':'Helvetica Neue, Helvetica, Arial, sans-serif'}}}%%
-flowchart LR
-    subgraph core["One core · three primitives"]
-        direction LR
-        DW["Durable worker"]:::p
-        BF["Bounded fan-out"]:::p
-        GL["Goal loop"]:::p
-    end
-    core --> CL["Claude adapter"]:::ad
-    core --> CX["Codex adapter"]:::ad
-    core --> PI["Pi adapter"]:::ad
-
-    classDef p fill:#f7f6ee,stroke:#1a1a1a,color:#1a1a1a;
-    classDef ad fill:#c8dc00,stroke:#1a1a1a,color:#1a1a1a;
-```
+<p align="center">
+  <img src="docs/assets/runtime-model.png" alt="One process, three runtimes — a 3x3 matrix mapping the three primitives (durable worker, bounded fan-out, goal loop) to each runtime: Claude (default), Codex (supported), Pi (experimental)." width="100%">
+</p>
 
 | Runtime | Status | How it runs the work | Enable |
 |---------|--------|----------------------|--------|

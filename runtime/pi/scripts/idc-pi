@@ -761,7 +761,7 @@ build_role_argv() {
 		--session-dir "$session_dir"
 		--session-id "idc-$role"
 		--append-system-prompt "$prompt"
-		--skill "$HOME/.agents/skills/idc-workflow"
+		--skill "$HOME/.agents/skills/idc-tracker-adapter"
 		--skill "$skill"
 		--project "$PROJECT"
 		--name "$role"
@@ -854,13 +854,18 @@ role_prompt() {
 	esac
 }
 
+# Per-role companion skill. Points at skills that actually SHIP (installed under
+# ~/.agents/skills/), not the never-built `codex-idc-<role>` set the reference launcher used to
+# name. The role prompts self-carry the board/claim/idempotency procedure; these skills add the
+# stage-specific mechanics (schema, matrix, tracker recipes, recirculator sync, goal loop, review).
 role_skill() {
 	case "$1" in
-		think) echo "$HOME/.agents/skills/codex-idc-think" ;;
-		plan) echo "$HOME/.agents/skills/codex-idc-plan" ;;
-		sequence) echo "$HOME/.agents/skills/codex-idc-sequence" ;;
-		recirculator) echo "$HOME/.agents/skills/codex-idc-recirculator" ;;
-		build-impl|build-review|build-finish) echo "$HOME/.agents/skills/codex-idc-build" ;;
+		think) echo "$HOME/.agents/skills/idc-consideration-schema" ;;
+		plan) echo "$HOME/.agents/skills/idc-matrix-analysis" ;;
+		sequence) echo "$HOME/.agents/skills/idc-tracker-adapter" ;;
+		recirculator) echo "$HOME/.agents/skills/idc-recirculator-sync" ;;
+		build-impl|build-finish) echo "$HOME/.agents/skills/idc-goal-contract" ;;
+		build-review) echo "$HOME/.agents/skills/idc-review-engine" ;;
 	esac
 }
 
@@ -890,7 +895,10 @@ role_color() {
 
 role_tools() {
 	if [[ "$1" == "build-review" ]]; then
-		printf 'read,bash,grep,find,ls,%s\n' "$COMS_TOOLS"
+		# build-review is read-only on the code under review, but it authors the PR-keyed
+		# review verdict the merge gate (MG-B) consults — the guard scopes its `write` to
+		# docs/workflow/code-reviews/** only (everything else, all git, all gh writes blocked).
+		printf 'read,write,bash,grep,find,ls,%s\n' "$COMS_TOOLS"
 	else
 		printf 'read,write,edit,bash,grep,find,ls,%s\n' "$COMS_TOOLS"
 	fi

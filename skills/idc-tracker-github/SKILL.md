@@ -36,13 +36,16 @@ PROJ=$(grep -E '^project_number:' "$CFG" | grep -oE '[0-9]+')   # integer
 OWNER=$(gh repo view --json owner -q .owner.login)              # project owner (user/org)
 fid()  { grep -E "^[[:space:]]+$1:" "$CFG" | head -1 \
            | sed -E 's/^[^:]*:[[:space:]]*"?([A-Za-z0-9_]+)"?.*/\1/'; }   # cached field node id, by name
+# All board reads use gh's BUILT-IN `--jq` (never `gh … --format json | jq` to an external jq):
+# gh applies the filter to its in-memory data, so an issue body carrying a raw control char
+# (U+0000–U+001F) is never round-tripped through a strict external jq, which would reject it
+# (`parse error: control characters … must be escaped`) and silently yield an EMPTY id.
 # Resolve a single-select option id BY NAME at call time (never cached):
 optid() { gh project field-list "$PROJ" --owner "$OWNER" --format json \
-  | jq -r --arg f "$1" --arg v "$2" \
-    '.fields[] | select(.name==$f) | .options[] | select(.name==$v) | .id'; }
+  --jq ".fields[] | select(.name==\"$1\") | .options[] | select(.name==\"$2\") | .id"; }
 # Map an issue number -> its project item id (board membership):
 itemid() { gh project item-list "$PROJ" --owner "$OWNER" --format json \
-  | jq -r --argjson n "$1" '.items[] | select(.content.number==$n) | .id'; }
+  --jq ".items[] | select(.content.number==$1) | .id"; }
 ```
 
 `PROJ` is the project node id (`PVT_…`) where GraphQL is used; `gh project` subcommands
@@ -62,10 +65,15 @@ printf '%s\n' "$NUM"
 
 **setField(ticket, field, value)** — resolve the cached field node id + the option id (by
 name) and write the single-select value. Pre-seed the option first if it is new (see
-provisioning caveat).
+provisioning caveat). **Guard the resolved ids before the mutation** — an empty item or option
+id (issue not on the board, or no such option) would otherwise reach
+`updateProjectV2ItemFieldValue` as `''` (`Could not resolve to a node with the global id of ''`),
+so `die_gh` first rather than mutating with a blank id:
 ```bash
-gh project item-edit --id "$(itemid "$NUM")" --project-id "$PROJ" \
-  --field-id "$(fid "$FIELD")" --single-select-option-id "$(optid "$FIELD" "$VALUE")" || die_gh
+IID="$(itemid "$NUM")";           [ -n "$IID" ] || die_gh   # #NUM not on the board → never mutate with ''
+OID="$(optid "$FIELD" "$VALUE")";  [ -n "$OID" ] || die_gh   # no such option for $FIELD=$VALUE → never mutate with ''
+gh project item-edit --id "$IID" --project-id "$PROJ" \
+  --field-id "$(fid "$FIELD")" --single-select-option-id "$OID" || die_gh
 ```
 
 **link(parent, child, kind)** — `kind ∈ {sub, blocks}`.
@@ -77,15 +85,18 @@ gh project item-edit --id "$(itemid "$NUM")" --project-id "$PROJ" \
 **move(ticket, status)** — convenience over `setField` for `Status`:
 `setField "$NUM" Status "$STATUS"` (status must be one of the four).
 
-**query(filter) -> [#...]** — list board items and filter by field value(s).
+**query(filter) -> [#...]** — list board items and filter by field value(s). Uses gh's
+built-in `--jq` (same control-char robustness as the preamble helpers); the controlled filter
+values interpolate as jq string literals.
 ```bash
-gh project item-list "$PROJ" --owner "$OWNER" --format json \
-  | jq -r --arg s "${STATUS:-}" --arg st "${STAGE:-}" --arg w "${WAVE:-}" \
-          --arg p "${PHASE:-}" --arg d "${DOMAIN:-}" '
+gh project item-list "$PROJ" --owner "$OWNER" --format json --jq "
     .items[]
-    | select($s=="" or .status==$s) | select($st=="" or (.stage // "Buildable")==$st)
-    | select($w=="" or .wave==$w) | select($p=="" or .phase==$p)
-    | select($d=="" or .domain==$d) | .content.number' || die_gh
+    | select(\"${STATUS:-}\"==\"\" or .status==\"${STATUS:-}\")
+    | select(\"${STAGE:-}\"==\"\" or (.stage // \"Buildable\")==\"${STAGE:-}\")
+    | select(\"${WAVE:-}\"==\"\" or .wave==\"${WAVE:-}\")
+    | select(\"${PHASE:-}\"==\"\" or .phase==\"${PHASE:-}\")
+    | select(\"${DOMAIN:-}\"==\"\" or .domain==\"${DOMAIN:-}\")
+    | .content.number" || die_gh
 ```
 A legacy 4-field board has no `Stage` set, so `.stage` is null; `(.stage // "Buildable")`
 reads an absent Stage as `Buildable` — matching the filesystem backend and the additive promise
@@ -129,10 +140,13 @@ it — never inline during the value write.
 
 ## Fail-closed posture
 
-`die_gh` is the only error path: on any `gh` exit ≠ 0 or GraphQL error, emit a structured
-error (`{"backend":"github","op":"<op>","ticket":"<n>","error":"<gh stderr>"}`) and return
-non-zero. Never silently degrade, never invent a value, never swallow a non-zero exit. The
-caller (`idc:idc-tracker-adapter`, then the role) decides retry vs. halt.
+`die_gh` is the only error path: on any `gh` exit ≠ 0, GraphQL error, **or an empty resolved
+item/option id** (refuse to mutate with a blank global id — see `setField`), it emits a structured
+error (`{"backend":"github","op":"<op>","ticket":"<n>","error":"<gh stderr>"}`) and **exits
+non-zero, halting the op** (`die_gh() { …; exit 1; }`) — so a mid-recipe guard like
+`[ -n "$IID" ] || die_gh` actually stops before the next line rather than falling through. Never
+silently degrade, never invent a value, never swallow a non-zero exit. The caller
+(`idc:idc-tracker-adapter`, then the role) sees the non-zero exit and decides retry vs. halt.
 
 ## Authority boundaries
 

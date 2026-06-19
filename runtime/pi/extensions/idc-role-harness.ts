@@ -304,6 +304,20 @@ export function evaluatePathForRole(
 			};
 		}
 
+		// IDC-LOCAL (guard-bypass B-1/M-4): deny operating on a PARENT directory of a protected
+		// surface (e.g. `rm -rf docs/workflow`, `ln -s scratch docs/workflow`). The blocked
+		// surfaces are leaf patterns, so without this a role could delete/redirect the ancestor
+		// dir and thereby destroy or forge the protected files (e.g. the MG-B review verdict).
+		if (isAncestorOfBlockedSurface(absPath, cwd, policy.blockedSurfaces)) {
+			return {
+				allowed: false,
+				reason: `path is an ancestor of a blocked governance/canonical surface for ${role} (cannot rm/redirect a directory that contains protected files)`,
+				allowedRoots: policy.allowedRoots,
+				blockedSurfaces: policy.blockedSurfaces,
+				attemptedPaths: [absPath],
+			};
+		}
+
 		const explicitAllowed = policy.allowedRoots.filter((rule) => rule !== "repo source/tests/implementation files except blocked governance surfaces");
 		if (matchesAny(absPath, cwd, explicitAllowed) || isInsideOrEqual(path.resolve(cwd), absPath)) {
 			return {
@@ -436,10 +450,45 @@ function evaluateGitForRole(role: IdcRole, mutation: BashMutation, cwd: string, 
 		blockedSurfaces: policy.blockedSurfaces,
 		attemptedPaths: collectMutationPaths([mutation], cwd),
 	});
-	if (isGitForcePush(mutation)) return deny(`force-push is blocked for all roles (${mutation.kind})`);
-	if (gitGlobalPathOutsideCwd(mutation, cwd)) return deny(`${mutation.kind} targets a repo outside the run repo via -C/--git-dir/--work-tree`);
+	if (isGitForcePush(mutation)) return deny(`force/destructive push is blocked for all roles (${mutation.kind})`);
+	if (gitGlobalPathOutsideCwd(mutation, cwd)) return deny(`${mutation.kind} targets a repo outside the run repo via -C/--git-dir/--work-tree (or an unresolvable $VAR)`);
 	if (!GIT_ROLES.has(role)) return deny(`${mutation.kind} is outside ${role} git authority`);
+	// IDC-LOCAL (guard-bypass B-2): git must NOT widen the file-write ACL. A `git rm`/`checkout`/
+	// `restore`/`mv` that names a path overwrites/deletes that WORKING-TREE file, so each named
+	// pathspec is re-checked against the role's path authority — a blocked governance/canonical
+	// surface (PRD/spec/plans/CLAUDE.md/the review verdict) is DENIED exactly as a direct write is.
+	for (const touched of gitTouchedPaths(mutation)) {
+		const abs = normalizeToolPath(touched, cwd);
+		const pathEval = evaluatePathForRole(role, abs, cwd);
+		if (!pathEval.allowed) return deny(`git ${mutation.gitSubcommand} would touch ${abs}: ${pathEval.reason}`);
+	}
 	return { allowed: true, reason: `${mutation.kind} is within ${role} git authority`, allowedRoots: policy.allowedRoots, blockedSurfaces: policy.blockedSurfaces };
+}
+
+// IDC-LOCAL (B-2): the working-tree file operands of a git subcommand that writes/deletes/moves
+// specific files. Operands after a `--` separator are always pathspecs; for rm/mv/restore the
+// bare non-flag operands are pathspecs too (skipping the `-s`/`--source` value). A bare `git
+// checkout <ref>` / `git checkout -b X` (no `--`) is a branch/ref op with no targeted file write,
+// so it contributes no pathspec — only the explicit `checkout … -- <paths>` form does.
+function gitTouchedPaths(mutation: BashMutation): string[] {
+	const sub = mutation.gitSubcommand ?? "";
+	if (!["rm", "mv", "restore", "checkout"].includes(sub)) return [];
+	const args = mutation.gitArgs ?? [];
+	const dd = args.indexOf("--");
+	if (dd >= 0) return args.slice(dd + 1).filter((a) => a.length > 0);
+	if (sub === "checkout") return [];
+	const valueFlags = new Set(["-s", "--source", "--pathspec-from-file"]);
+	const out: string[] = [];
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i];
+		if (valueFlags.has(arg)) {
+			i++;
+			continue;
+		}
+		if (arg.startsWith("-")) continue;
+		out.push(arg);
+	}
+	return out;
 }
 
 // IDC-LOCAL: per-role GitHub-CLI ACL for the gated gh ops.
@@ -458,6 +507,7 @@ function evaluateGhForRole(role: IdcRole, mutation: BashMutation, cwd: string, p
 		case "merge": {
 			if (!MERGE_ROLES.has(role)) return deny(`gh pr merge is outside ${role} authority`);
 			if (mutation.ghAuto) return deny("gh pr merge --auto is blocked; IDC uses a direct blocking merge");
+			if (mutation.ghAdmin) return deny("gh pr merge --admin is blocked; it bypasses branch protection / the green-gate");
 			// MG-B: build-finish's merge of the build PR is hard-gated on the review verdict
 			// authored by build-review. plan/recirculator merge their own non-source PRs on the
 			// role's behavioral green/gate decision (no review verdict exists for those PRs).
@@ -479,13 +529,21 @@ function evaluateGhForRole(role: IdcRole, mutation: BashMutation, cwd: string, p
 // under docs/workflow/code-reviews/. Returns the verdict string, or null when the file is
 // absent/unreadable/malformed — null is treated as "not PASS", so the merge is blocked.
 function readMergeVerdict(cwd: string, prNumber: number): string | null {
-	const file = path.resolve(cwd, "docs/workflow/code-reviews", `pr-${prNumber}.verdict.json`);
 	try {
+		// IDC-LOCAL (guard-bypass B-1): realpath-resolve and reject any symlink redirect. A role
+		// that redirected `docs`/`docs/workflow` to an attacker tree (now also blocked by the
+		// ancestor check) could otherwise plant a forged PASS here; require the reviews dir AND the
+		// verdict file to resolve to their canonical in-cwd locations with no symlink in the path.
+		const realCwd = fs.realpathSync(path.resolve(cwd));
+		const expectedReviews = path.join(realCwd, "docs/workflow/code-reviews");
+		if (fs.realpathSync(expectedReviews) !== expectedReviews) return null;
+		const file = path.join(expectedReviews, `pr-${prNumber}.verdict.json`);
+		if (fs.realpathSync(file) !== file) return null;
 		const raw = fs.readFileSync(file, "utf8");
 		const match = raw.match(/"verdict"\s*:\s*"([^"]+)"/);
 		return match ? match[1] : null;
 	} catch {
-		return null;
+		return null; // missing / unreadable / unresolvable → fail-closed → not PASS → merge blocked
 	}
 }
 
@@ -675,6 +733,20 @@ function formatGuardMessage(role: IdcRole, mode: GuardMode, tool: string, attemp
 
 function matchesAny(absPath: string, cwd: string, rules: string[]): boolean {
 	return rules.some((rule) => matchesRule(absPath, cwd, rule));
+}
+
+// IDC-LOCAL (guard-bypass B-1/M-4): true when `absPath` is an ancestor-or-equal of the base
+// directory of any `…/**` blocked surface — i.e. operating on `absPath` (rm/ln/mv of a dir)
+// would reach into a protected surface. Case-folded to match the M3 host semantics.
+function isAncestorOfBlockedSurface(absPath: string, cwd: string, blockedSurfaces: string[]): boolean {
+	const lc = (value: string): string => value.toLowerCase();
+	const target = lc(path.normalize(absPath));
+	return blockedSurfaces.some((rule) => {
+		if (!rule.endsWith("/**")) return false;
+		const baseRule = rule.slice(0, -3);
+		const base = lc(path.isAbsolute(baseRule) ? path.normalize(baseRule) : path.resolve(cwd, baseRule));
+		return isInsideOrEqual(target, base);
+	});
 }
 
 function matchesRule(absPath: string, cwd: string, rule: string): boolean {

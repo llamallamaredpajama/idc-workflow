@@ -95,6 +95,45 @@ const cases: Case[] = [
 	{ tag: "DANGER", role: "build-finish", kind: "bash", input: "gh secret set X --body y", allow: false, note: "secret blocked" },
 	{ tag: "DANGER", role: "plan", kind: "bash", input: "gh repo delete owner/repo --yes", allow: false, note: "repo delete blocked" },
 	{ tag: "DANGER", role: "plan", kind: "bash", input: "gh repo view", allow: true, note: "repo view is a read" },
+
+	// ── [M1b] command-substitution / backtick bodies still see the inner command ────────────
+	{ tag: "M1b", role: "build-review", kind: "bash", input: `$( rm -rf ${inRepo("src")} )`, allow: false, note: "$( … ) cmdsubst rm" },
+	{ tag: "M1b", role: "build-review", kind: "bash", input: "`rm -rf " + inRepo("src") + "`", allow: false, note: "backtick rm" },
+	{ tag: "M1b", role: "build-review", kind: "bash", input: `>( rm -rf ${inRepo("src")} )`, allow: false, note: "process-subst rm" },
+
+	// ── [M2] gh api implicit-POST / graphql is a tracker write (build-review read-only) ──────
+	{ tag: "M2", role: "build-review", kind: "bash", input: "gh api graphql -f query='mutation{ x }'", allow: false, note: "graphql is always POST" },
+	{ tag: "M2", role: "build-review", kind: "bash", input: "gh api repos/o/r/issues -f title=pwn", allow: false, note: "-f implies POST" },
+	{ tag: "M2", role: "build-review", kind: "bash", input: "gh api repos/o/r/issues", allow: true, note: "bare gh api is a GET read" },
+	{ tag: "M2", role: "build-review", kind: "bash", input: "gh api repos/o/r/issues -X GET", allow: true, note: "explicit GET stays a read" },
+	{ tag: "M2", role: "plan", kind: "bash", input: "gh api graphql -f query='mutation{ x }'", allow: true, note: "plan may do tracker writes" },
+
+	// ── [M3b] $VAR-bearing cross-repo target refused fail-closed ─────────────────────────────
+	{ tag: "M3b", role: "build-finish", kind: "bash", input: "git --git-dir=$PWD/../other/.git --work-tree=$PWD/../other commit -m x", allow: false, note: "$PWD indirection" },
+	{ tag: "M3b", role: "build-finish", kind: "bash", input: 'git -C "$HOME/victim" commit -m x', allow: false, note: "$HOME indirection" },
+	{ tag: "M3b", role: "build-finish", kind: "bash", input: "git -C ../../x commit -m x", allow: false, note: "literal ../../ escape" },
+
+	// ── [WIDEN] git must respect the path ACL (B-2: no widening file authority) ──────────────
+	{ tag: "WIDEN", role: "build-finish", kind: "bash", input: "git rm docs/specs/x.md", allow: false, note: "git rm of a blocked spec" },
+	{ tag: "WIDEN", role: "build-finish", kind: "bash", input: "git checkout HEAD -- docs/prd/x.md", allow: false, note: "git checkout overwrites the PRD" },
+	{ tag: "WIDEN", role: "build-finish", kind: "bash", input: "git restore --source=HEAD CLAUDE.md", allow: false, note: "git restore overwrites CLAUDE.md" },
+	{ tag: "WIDEN", role: "build-finish", kind: "bash", input: "git checkout other -- docs/workflow/code-reviews/pr-7.verdict.json", allow: false, note: "git checkout forges the verdict" },
+	{ tag: "WIDEN", role: "build-finish", kind: "bash", input: "git rm src/old.test.ts", allow: true, note: "git rm of a source file is fine" },
+	{ tag: "WIDEN", role: "build-finish", kind: "bash", input: "git checkout -b build/wave1", allow: true, note: "branch creation is not a targeted file write" },
+
+	// ── [PARENT] cannot rm/redirect a dir that contains a protected surface (B-1/M-4) ────────
+	{ tag: "PARENT", role: "build-finish", kind: "bash", input: "rm -rf docs", allow: false, note: "rm of docs (contains prd/specs/…)" },
+	{ tag: "PARENT", role: "build-finish", kind: "bash", input: "rm -rf docs/workflow", allow: false, note: "rm of docs/workflow (contains code-reviews)" },
+	{ tag: "PARENT", role: "build-finish", kind: "bash", input: "ln -s /tmp/pi-idc/build-finish/wf docs/workflow", allow: false, note: "redirect docs/workflow" },
+	{ tag: "PARENT", role: "build-finish", kind: "bash", input: "rm -rf src/legacy", allow: true, note: "rm of a source subdir is fine" },
+
+	// ── [PUSH] remote-ref destruction is blocked for all (m-1) ──────────────────────────────
+	{ tag: "PUSH", role: "build-impl", kind: "bash", input: "git push origin :main", allow: false, note: "empty-source refspec deletes the ref" },
+	{ tag: "PUSH", role: "build-impl", kind: "bash", input: "git push origin --delete main", allow: false, note: "--delete remote ref" },
+	{ tag: "PUSH", role: "build-impl", kind: "bash", input: "git push --mirror origin", allow: false, note: "--mirror overwrites all refs" },
+
+	// ── [ADMIN] gh pr merge --admin bypasses branch protection — blocked even with PASS ──────
+	{ tag: "ADMIN", role: "build-finish", kind: "bash", input: "gh pr merge 7 --admin --squash", allow: false, note: "--admin blocked even with a PASS verdict" },
 ];
 
 let failures = 0;
@@ -105,6 +144,21 @@ for (const c of cases) {
 		failures++;
 		console.log(`FAIL [${c.tag}] ${c.role} ${c.kind} "${c.input}" — expected ${c.allow ? "ALLOW" : "BLOCK"}, got ${evaluation.allowed ? "ALLOW" : "BLOCK"} :: ${evaluation.reason}`);
 	}
+}
+
+// ── [MGB-symlink] a docs→attacker symlink supplying a forged PASS must NOT unlock the merge ──
+{
+	const sCwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-guard-sym-"));
+	const fake = path.join(sCwd, "fakewf");
+	fs.mkdirSync(path.join(fake, "workflow/code-reviews"), { recursive: true });
+	fs.writeFileSync(path.join(fake, "workflow/code-reviews", "pr-8.verdict.json"), JSON.stringify({ pr: 8, verdict: "PASS" }));
+	fs.symlinkSync(fake, path.join(sCwd, "docs"), "dir"); // docs -> attacker tree holding a forged PASS
+	const e = evaluateBashForRole("build-finish", "gh pr merge 8 --squash", sCwd);
+	if (e.allowed) {
+		failures++;
+		console.log(`FAIL [MGB-symlink] build-finish gh pr merge 8 — symlinked docs supplied a forged PASS, got ALLOW :: ${e.reason}`);
+	}
+	fs.rmSync(sCwd, { recursive: true, force: true });
 }
 
 fs.rmSync(CWD, { recursive: true, force: true });

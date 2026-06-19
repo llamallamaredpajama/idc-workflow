@@ -42,6 +42,7 @@ export interface BashMutation {
 	ghOp?: "tracker-write" | "pr-create" | "merge" | "dangerous";
 	ghPrNumber?: number;
 	ghAuto?: boolean;
+	ghAdmin?: boolean;
 }
 
 // git global options that consume the following token, so the subcommand finder
@@ -356,7 +357,135 @@ export function analyzeBashCommand(command: string): BashMutation[] {
 		mutations.push({ kind: "one-liner file writer", paths: [], unscoped: true });
 	}
 
+	// IDC-LOCAL (guard-bypass M-1): a command-substitution `$( … )` / backtick `` `…` `` /
+	// process-substitution `<( … )` `>( … )` body RUNS its inner command, but the segment
+	// splitter above only sees the `$(`/`` ` `` token, never the inner `rm`/`git`/`gh`. Recurse
+	// into each substitution body so its mutations are caught. Arithmetic `$(( … ))` and a bare
+	// `(( … ))` are NOT included — `rm` there is an arithmetic operand, not a command.
+	for (const body of extractCommandSubstitutions(command)) {
+		for (const inner of analyzeBashCommand(body)) mutations.push(inner);
+	}
+
 	return mutations;
+}
+
+// IDC-LOCAL (M-1): collect the inner command strings of command/process substitutions that
+// actually execute — quote-aware (a `$( … )` inside SINGLE quotes is literal and skipped),
+// arithmetic-aware (`$(( … ))` is skipped). Used to recurse the mutation analysis into them.
+function extractCommandSubstitutions(command: string): string[] {
+	const bodies: string[] = [];
+	let i = 0;
+	let single = false;
+	while (i < command.length) {
+		const ch = command[i];
+		if (single) {
+			if (ch === "'") single = false;
+			i++;
+			continue;
+		}
+		if (ch === "'") {
+			single = true;
+			i++;
+			continue;
+		}
+		if (ch === "\\") {
+			i += 2;
+			continue;
+		}
+		if (ch === "`") {
+			let j = i + 1;
+			let body = "";
+			while (j < command.length && command[j] !== "`") {
+				if (command[j] === "\\") {
+					body += command[j + 1] ?? "";
+					j += 2;
+				} else {
+					body += command[j];
+					j++;
+				}
+			}
+			bodies.push(body);
+			i = j + 1;
+			continue;
+		}
+		// $(( … )) arithmetic — skip the whole expansion (no command runs inside it).
+		if (ch === "$" && command[i + 1] === "(" && command[i + 2] === "(") {
+			const { end } = readBalancedParen(command, i + 2); // consume from the inner '('
+			i = end < command.length && command[end] === ")" ? end + 1 : end;
+			continue;
+		}
+		// $( … ) command substitution, or <( … ) / >( … ) process substitution.
+		if ((ch === "$" || ch === "<" || ch === ">") && command[i + 1] === "(") {
+			const { body, end } = readBalancedParen(command, i + 2);
+			bodies.push(body);
+			i = end;
+			continue;
+		}
+		i++;
+	}
+	return bodies;
+}
+
+// Read a parenthesized body starting just AFTER the opening `(`, returning the body text and the
+// index past the matching `)`. Quote- and nesting-aware so an inner `)` in a string or a nested
+// `( … )` does not close it early.
+function readBalancedParen(command: string, start: number): { body: string; end: number } {
+	let depth = 1;
+	let i = start;
+	let body = "";
+	let single = false;
+	let dbl = false;
+	while (i < command.length && depth > 0) {
+		const ch = command[i];
+		if (single) {
+			if (ch === "'") single = false;
+			body += ch;
+			i++;
+			continue;
+		}
+		if (dbl) {
+			if (ch === '"') dbl = false;
+			body += ch;
+			i++;
+			continue;
+		}
+		if (ch === "\\") {
+			body += ch + (command[i + 1] ?? "");
+			i += 2;
+			continue;
+		}
+		if (ch === "'") {
+			single = true;
+			body += ch;
+			i++;
+			continue;
+		}
+		if (ch === '"') {
+			dbl = true;
+			body += ch;
+			i++;
+			continue;
+		}
+		if (ch === "(") {
+			depth++;
+			body += ch;
+			i++;
+			continue;
+		}
+		if (ch === ")") {
+			depth--;
+			if (depth === 0) {
+				i++;
+				break;
+			}
+			body += ch;
+			i++;
+			continue;
+		}
+		body += ch;
+		i++;
+	}
+	return { body, end: i };
 }
 
 // IDC-LOCAL: classify a `gh <args…>` invocation for the per-role GitHub ACL. Returns a
@@ -385,7 +514,7 @@ export function classifyGhCommand(args: string[]): BashMutation | null {
 
 	if (a0 === "pr" && a1 === "merge") {
 		const pr = args.slice(2).find((x) => /^\d+$/.test(x));
-		return { kind: "gh pr merge", paths: [], unscoped: true, ghOp: "merge", ghPrNumber: pr ? Number(pr) : undefined, ghAuto: args.includes("--auto") };
+		return { kind: "gh pr merge", paths: [], unscoped: true, ghOp: "merge", ghPrNumber: pr ? Number(pr) : undefined, ghAuto: args.includes("--auto"), ghAdmin: args.includes("--admin") };
 	}
 	if (a0 === "pr" && a1 === "create") return { kind: "gh pr create", paths: [], unscoped: true, ghOp: "pr-create" };
 
@@ -402,9 +531,18 @@ export function classifyGhCommand(args: string[]): BashMutation | null {
 	if (a0 === "sub-issue" && ["add", "remove", "create"].includes(a1)) return { kind: `gh sub-issue ${a1}`, paths: [], unscoped: true, ghOp: "tracker-write" };
 	if (a0 === "pr" && ["edit", "close", "reopen", "ready", "lock", "unlock"].includes(a1)) return { kind: `gh pr ${a1}`, paths: [], unscoped: true, ghOp: "tracker-write" };
 	if (a0 === "api") {
-		const method = ghApiMethod(args);
-		if (method && method !== "GET" && method !== "HEAD") return { kind: `gh api ${method}`, paths: [], unscoped: true, ghOp: "tracker-write" };
-		return null; // default GET → read
+		// IDC-LOCAL (guard-bypass M-2): `gh api` defaults to GET, but it POSTs implicitly when a
+		// request body is supplied (`-f`/`-F`/`--field`/`--raw-field`/`--input`) and `gh api graphql`
+		// is ALWAYS a POST (its query may carry a `mutation { … }`). Treat those as writes UNLESS an
+		// explicit read method is given. Only an explicit `-X GET`/`--method GET` keeps it a read.
+		const { method, explicit } = ghApiMethodInfo(args);
+		if (explicit) {
+			return method === "GET" || method === "HEAD" ? null : { kind: `gh api ${method}`, paths: [], unscoped: true, ghOp: "tracker-write" };
+		}
+		const isGraphql = args.slice(1).includes("graphql");
+		const hasBody = args.some((a) => a === "-f" || a === "-F" || a === "--field" || a === "--raw-field" || a === "--input" || /^-[fF]./.test(a) || /^--(field|raw-field|input)=/.test(a));
+		if (isGraphql || hasBody) return { kind: `gh api ${isGraphql ? "graphql" : "POST"}`, paths: [], unscoped: true, ghOp: "tracker-write" };
+		return null; // genuine GET read
 	}
 
 	// Everything else (issue/pr comment, *-list, *-view, field-list, search, label, status,
@@ -412,16 +550,17 @@ export function classifyGhCommand(args: string[]): BashMutation | null {
 	return null;
 }
 
-// Parse the HTTP method of a `gh api` call: `--method X` / `-X X` / `--method=X` / `-XPOST`.
-// Defaults to GET (gh's default) when no method flag is present.
-function ghApiMethod(args: string[]): string {
+// Parse the EXPLICIT HTTP method of a `gh api` call: `--method X` / `-X X` / `--method=X` /
+// `-XPOST`. Returns whether a method flag was actually present so the caller can apply gh's
+// implicit-POST rule (body flags / graphql) only when the method is unspecified.
+function ghApiMethodInfo(args: string[]): { method: string; explicit: boolean } {
 	for (let i = 0; i < args.length; i++) {
 		const arg = args[i];
-		if ((arg === "--method" || arg === "-X") && i + 1 < args.length) return args[i + 1].toUpperCase();
-		if (arg.startsWith("--method=")) return arg.slice("--method=".length).toUpperCase();
-		if (arg.startsWith("-X") && arg.length > 2) return arg.slice(2).toUpperCase();
+		if ((arg === "--method" || arg === "-X") && i + 1 < args.length) return { method: args[i + 1].toUpperCase(), explicit: true };
+		if (arg.startsWith("--method=")) return { method: arg.slice("--method=".length).toUpperCase(), explicit: true };
+		if (arg.startsWith("-X") && arg.length > 2) return { method: arg.slice(2).toUpperCase(), explicit: true };
 	}
-	return "GET";
+	return { method: "GET", explicit: false };
 }
 
 // First non-assignment, non-wrapper word of a segment — the only token dispatched
@@ -522,16 +661,30 @@ export function isGitFinalizationMutation(mutation: BashMutation): boolean {
 export function isGitForcePush(mutation: BashMutation): boolean {
 	if (mutation.gitSubcommand !== "push") return false;
 	return (mutation.gitArgs ?? []).some(
-		(arg) => arg === "--force" || arg === "-f" || arg === "--force-with-lease" || arg.startsWith("--force-with-lease=") || arg.startsWith("+"),
+		(arg) =>
+			// force / lease rewrite
+			arg === "--force" ||
+			arg === "-f" ||
+			arg === "--force-with-lease" ||
+			arg.startsWith("--force-with-lease=") ||
+			arg.startsWith("+") ||
+			// IDC-LOCAL (guard-bypass m-1): remote-ref DESTRUCTION — `--delete`/`-d`, `--mirror`,
+			// `--prune`, and the `:dst` empty-source refspec all delete/overwrite remote refs.
+			arg === "--delete" ||
+			arg === "-d" ||
+			arg === "--mirror" ||
+			arg === "--prune" ||
+			arg.startsWith(":"),
 	);
 }
 
-// IDC-LOCAL (guard-bypass B2 fix): true when a git invocation's global `-C` / `--git-dir` /
-// `--work-tree` target resolves OUTSIDE the run repo (cwd), so a finalization can be confined
-// to the run repo. Relative targets resolve against cwd; an absolute target outside cwd trips it.
+// IDC-LOCAL (guard-bypass B2 + M-3 fix): true when a git invocation's global `-C` / `--git-dir` /
+// `--work-tree` target resolves OUTSIDE the run repo (cwd), OR carries an unexpandable shell
+// expansion (`$VAR` / backtick) the static guard cannot resolve — both are refused fail-closed so
+// a finalization is confined to the run repo. Relative literals resolve against cwd.
 export function gitGlobalPathOutsideCwd(mutation: BashMutation, cwd: string): boolean {
 	const base = path.resolve(cwd);
-	return (mutation.gitGlobalPaths ?? []).some((raw) => !isInsideOrEqual(base, normalizeToolPath(raw, cwd)));
+	return (mutation.gitGlobalPaths ?? []).some((raw) => /[$`]/.test(raw) || !isInsideOrEqual(base, normalizeToolPath(raw, cwd)));
 }
 
 export function collectMutationPaths(mutations: BashMutation[], cwd: string): string[] {

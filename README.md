@@ -1,5 +1,7 @@
+<h1 align="center">IDC Agentic Workflow: Idea in, Working Software Out.</h1>
+
 <p align="center">
-  <img src="docs/assets/idc-banner.svg" alt="IDC — Iterative Development Cycle · guardrails, not train tracks" width="100%">
+  <img src="docs/assets/pipeline-flow.png" alt="The IDC pipeline — an idea in: Think, the PRD gate, Plan, parallel Build waves (implementer, review, finisher), Ship, working software out, with a Recirculate return path from Ship back to the gate." width="100%">
 </p>
 
 <p align="center">
@@ -27,7 +29,7 @@ to ask you exactly **one** question, **once, at the top**: *do you approve these
 ## The whole system, in one picture
 
 <p align="center">
-  <img src="docs/assets/pipeline-flow.png" alt="The IDC pipeline — an idea in: Think, the PRD gate, Plan, parallel Build waves (implementer, review, finisher), Ship, working software out, with a Recirculate return path from Ship back to the gate." width="100%">
+  <img src="docs/assets/pipeline-hero.png" alt="The IDC pipeline as a labeled rig — the Think Tank, the PRD gate (locked PRD + TRD), the planning matrix and matrix analysis, the sequencer fanning into four parallel build waves (lamp, implementer, review, finisher), the ship-or-recirculate gate, the Autorun faucet into your repo, the recirculate return path, and a GitHub dashboard wiring sensors to every stage." width="100%">
 </p>
 
 An idea enters **Think**, which crystallizes it into a **PRD + TRD**. The **one gate** is a **Think PR**

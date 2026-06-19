@@ -1,4 +1,4 @@
-<h1 align="center">IDC Agentic Workflow: Idea in, Working Software Out.</h1>
+<h1 align="center">IDC Workflow: The Agentic Iterative Development Cycle</h1>
 
 <p align="center">
   <img src="docs/assets/pipeline-flow.png" alt="The IDC pipeline — an idea in: Think, the PRD gate, Plan, parallel Build waves (implementer, review, finisher), Ship, working software out, with a Recirculate return path from Ship back to the gate." width="100%">
@@ -32,12 +32,28 @@ to ask you exactly **one** question, **once, at the top**: *do you approve these
   <img src="docs/assets/pipeline-hero.png" alt="The IDC pipeline as a labeled rig — the Think Tank, the PRD gate (locked PRD + TRD), the planning matrix and matrix analysis, the sequencer fanning into four parallel build waves (lamp, implementer, review, finisher), the ship-or-recirculate gate, the Autorun faucet into your repo, the recirculate return path, and a GitHub dashboard wiring sensors to every stage." width="100%">
 </p>
 
-An idea enters **Think**, which crystallizes it into a **PRD + TRD**. The **one gate** is a **Think PR**
-you merge to admit it. Admitted work runs through **planning** — sliced into the **matrix**, screened by
-**matrix analysis**, fanned out by the **sequencer** into parallel **waves** — runs the build triplet
-(**implementer → review → finisher**), and reaches the **ship-or-return** decision: clean work merges and
-ships; anything not-good goes to the **Recirculator** — the one controlled way back, all the
-way to the gate.
+You drop an idea into the **Think Tank**, where a grill-me-style interview turns it into two gated
+artifacts: the **PRD**, defining what the product should do, and the **TRD**, defining how it should be
+built. Think carries both to the first **Diverter**: the single human gate, exposed as a reviewable
+**Think PR** that only you can merge. Once merged, the idea is admitted to the pipeline.
+
+From there, Plan breaks the work into a true **Matrix**: first sliced horizontally by domain, then
+vertically into phases and waves. The **matrix-analysis filter** screens those packets for overlap,
+dependency conflicts, and unsafe parallelism, while the **sequencer manifold** groups them into buildable
+waves. Those waves are tracked on the GitHub board, where each build triplet claims its issue, follows its
+contract, reports status, opens PRs, and closes completed work.
+
+Each wave runs the build triplet: **implementer → review filter → finisher**. The implementer uses
+`/goal`-style iterative build loops and `/workflow` fan-out to fulfill the plan contract; Codex performs
+adversarial review against the result; then the finisher loops on fixes until every review and test issue
+is resolved.
+
+The finisher is wired directly to the second **Diverter**. Work that passes review and testing flows
+through the **Faucet** for consumption. Work that fails after repeated iterations is diverted into the
+**Recirculator**, the only controlled return path. If the problem requires a PRD or TRD change, it travels
+all the way back to the first Diverter for approval; if the requirements stay valid, it routes back
+through the domain specialists to rework the plan and re-enter Build automatically. The whole system
+remains one-way, iterative, and observable through the dashboard.
 
 **→ The full mental model, part by part, lives in [`docs/mental-model.md`](docs/mental-model.md).**
 

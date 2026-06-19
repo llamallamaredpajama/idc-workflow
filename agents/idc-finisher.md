@@ -51,12 +51,14 @@ The finisher runs its **own** `/fullauto-goal` loop. Its completion contract car
    simplification, efficiency, altitude). Claude runs it natively; the **adapter maps or skips
    it for Codex** (no native `/simplify` — an equivalent pass or a documented skip). Re-verify
    tests stay green after any simplification edit.
-4. **Git finalization.** Acquire the **serialized merge lock**, then **merge** the triplet's PR
-   into the integration branch, **deleting the merged branch as part of the merge**
-   (`gh pr merge … --delete-branch` — atomic with the merge, **not** a best-effort tidy, so no
-   orphaned `build/*` branch survives; the repo's `deleteBranchOnMerge` may be off), then remove
-   the worktree and settle tracker status. Release the lock. See *Merge serialization* below —
-   never merge without the lease.
+4. **Git finalization.** Acquire the **serialized merge lock**. **Remove the build worktree first**
+   (so `build/*` is no longer checked out — otherwise its local delete fails:
+   `cannot delete branch … used by worktree`), **then** merge the triplet's PR into the
+   integration branch with a **direct, blocking** `gh pr merge --squash --delete-branch` (pick the
+   method the repo allows) — **not** GitHub `--auto`. Branch deletion is **atomic with the merge**,
+   **not** a best-effort tidy, so no orphaned `build/*` survives; auto-merge would defer the merge
+   and, with the repo's `deleteBranchOnMerge` off, skip the delete. Settle tracker status, release
+   the lock. See *Merge serialization* below — never merge without the lease.
 5. **Close out.** Hand the merged, clean result back to Build (`idc:idc-build`); name the
    findings cleared, the `/simplify` outcome, and any recirculation filed.
 

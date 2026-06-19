@@ -31,6 +31,9 @@ export interface BashMutation {
 	// command string or deriving data from the display label.
 	gitSubcommand?: string;
 	gitArgs?: string[];
+	// IDC-LOCAL (B-5): set when the git invocation carries an inline `-c`/`--config-env` config
+	// (which can define an alias that runs arbitrary shell) — the policy refuses it outright.
+	gitInlineConfig?: boolean;
 	// IDC-LOCAL: the global `-C <path>` / `--git-dir=` / `--work-tree=` targets parsed
 	// off a `git` invocation, so the policy layer can reject a finalization that points
 	// at a repo OUTSIDE the run repo (guard-bypass B2 fix).
@@ -48,6 +51,17 @@ export interface BashMutation {
 // git global options that consume the following token, so the subcommand finder
 // must skip both the flag and its value before reading the subcommand.
 const GIT_VALUE_OPTIONS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace"]);
+
+// IDC-LOCAL (guard-bypass B-5): git subcommands that NEVER write the worktree/refs — pure reads
+// or list views. The mutating variants of branch/tag/remote/stash/notes/worktree/reflog are caught
+// separately by gitMutation(); their LIST forms land here. Any git subcommand that is neither a
+// detected mutation NOR in this read set is treated as UNKNOWN and emitted for the policy to deny
+// fail-closed, so a brand-new/typo'd git verb can never reach ALLOW.
+const GIT_READONLY_SUBCOMMANDS = new Set([
+	"status", "log", "diff", "show", "blame", "grep", "branch", "tag", "remote", "stash", "reflog", "notes", "worktree",
+	"rev-parse", "rev-list", "describe", "ls-files", "ls-tree", "ls-remote", "cat-file", "show-ref", "for-each-ref",
+	"symbolic-ref", "merge-base", "shortlog", "name-rev", "whatchanged", "cherry", "var", "version", "help", "count-objects",
+]);
 
 const GIT_ALWAYS_MUTATING_SUBCOMMANDS = new Set([
 	"add",
@@ -339,9 +353,26 @@ export function analyzeBashCommand(command: string): BashMutation[] {
 		}
 
 		if (token === "git") {
-			const mutation = gitMutation(args);
-			if (mutation) {
-				mutations.push({ kind: `git ${mutation.subcommand}`, paths: [], unscoped: true, gitSubcommand: mutation.subcommand, gitArgs: mutation.args, gitGlobalPaths: mutation.globalPaths });
+			// IDC-LOCAL (B-5): emit a mutation for a detected mutating subcommand, for ANY inline
+			// `-c` config, OR for an UNKNOWN subcommand (not a recognized read) — so the policy
+			// safelist can deny everything that isn't an explicitly-known-safe op. Recognized pure
+			// reads with no inline config emit nothing (allowed for all roles).
+			const parsed = parseGitInvocation(args);
+			const known = gitMutation(args);
+			if (parsed) {
+				const sub = parsed.subcommand;
+				const isRead = !!sub && GIT_READONLY_SUBCOMMANDS.has(sub) && !parsed.inlineConfig;
+				if (known || !isRead) {
+					mutations.push({
+						kind: `git ${sub || "(inline-config)"}`,
+						paths: [],
+						unscoped: true,
+						gitSubcommand: sub,
+						gitArgs: known ? known.args : parsed.args,
+						gitGlobalPaths: parsed.globalPaths,
+						gitInlineConfig: parsed.inlineConfig,
+					});
+				}
 			}
 			continue;
 		}
@@ -540,11 +571,16 @@ export function classifyGhCommand(args: string[]): BashMutation | null {
 		// forces every merge through the gated `gh pr merge` surface and every board write through
 		// the structured `gh issue`/`gh project` surfaces the classifier CAN bound.
 		const { method, explicit } = ghApiMethodInfo(args);
-		const isGraphql = args.slice(1).includes("graphql");
+		const endpoint = ghApiEndpoint(args);
+		const isGraphql = endpoint === "graphql";
 		const hasBody = args.some((a) => a === "-f" || a === "-F" || a === "--field" || a === "--raw-field" || a === "--input" || /^-[fF]./.test(a) || /^--(field|raw-field|input)=/.test(a));
 		const isWrite = isGraphql || hasBody || (explicit && method !== "GET" && method !== "HEAD");
 		if (!isWrite) return null; // a GET read
-		const isBlockedByDependency = !isGraphql && args.slice(1).some((a) => /\bdependencies\/blocked_by\b/.test(a));
+		// IDC-LOCAL (guard-bypass B-7): the blocked-by exception is matched on the POSITIONAL
+		// endpoint with a fixed shape + POST/DELETE only — never "any arg contains the string", so a
+		// `-f x=…dependencies/blocked_by` value cannot smuggle a merge/release/delete past the gate.
+		const isBlockedByDependency =
+			/^(?:repos\/[^/]+\/[^/]+\/)?issues\/[0-9]+\/dependencies\/blocked_by$/.test(endpoint) && (!explicit || method === "POST" || method === "DELETE");
 		if (isBlockedByDependency) return { kind: "gh api dependencies/blocked_by", paths: [], unscoped: true, ghOp: "tracker-write" };
 		return { kind: `gh api ${isGraphql ? "graphql" : explicit ? method : "POST"}`, paths: [], unscoped: true, ghOp: "dangerous" };
 	}
@@ -552,6 +588,25 @@ export function classifyGhCommand(args: string[]): BashMutation | null {
 	// Everything else (issue/pr comment, *-list, *-view, field-list, search, label, status,
 	// browse, repo view/list, …) is a read or benign → no mutation, allowed for all roles.
 	return null;
+}
+
+// IDC-LOCAL (B-7): the POSITIONAL endpoint of a `gh api` call — the first non-flag operand after
+// `api` (skipping every flag and its value), or "graphql" for `gh api graphql`. Used so the
+// blocked-by safelist matches the real endpoint, not a value smuggled into a `-f`/header arg.
+const GH_API_VALUE_FLAGS = new Set([
+	"--method", "-X", "-f", "-F", "--field", "--raw-field", "--input", "-H", "--header", "-q", "--jq", "--template", "-t", "--cache", "--hostname", "-p", "--preview", "--paginate-delay",
+]);
+function ghApiEndpoint(args: string[]): string {
+	for (let i = 1; i < args.length; i++) {
+		const arg = args[i];
+		if (GH_API_VALUE_FLAGS.has(arg)) {
+			i++;
+			continue;
+		}
+		if (arg.startsWith("-")) continue; // attached value flag (e.g. -fkey=val) or boolean flag
+		return arg;
+	}
+	return "";
 }
 
 // Parse the EXPLICIT HTTP method of a `gh api` call: `--method X` / `-X X` / `--method=X` /
@@ -938,13 +993,20 @@ function fileOperands(args: string[], valueOptions: Set<string>): string[] {
 
 // Resolve a git subcommand, skipping global options (and any value they consume)
 // such as `-C <path>` or `-c <name=value>` so they cannot mask mutating verbs.
-function parseGitInvocation(args: string[]): { subcommand: string; args: string[]; globalPaths: string[] } | undefined {
-	// IDC-LOCAL (guard-bypass B2 fix): collect the global `-C <path>` / `--git-dir=` /
-	// `--work-tree=` targets so the policy can reject a git op pointed at a repo OUTSIDE
-	// the run repo. `-c <name=value>` / `--namespace=` carry no path and are skipped.
+function parseGitInvocation(args: string[]): { subcommand: string; args: string[]; globalPaths: string[]; inlineConfig: boolean } | undefined {
+	// IDC-LOCAL (guard-bypass B2/B-5): collect the global `-C <path>` / `--git-dir=` /
+	// `--work-tree=` targets so the policy can reject a git op pointed at a repo OUTSIDE the run
+	// repo, AND flag any inline `-c <name=value>` config — `git -c alias.x='!sh …' x` runs arbitrary
+	// shell, so any inline config is refused. `--namespace=` carries no path and is skipped.
 	const globalPaths: string[] = [];
+	let inlineConfig = false;
 	for (let i = 0; i < args.length; i++) {
 		const arg = args[i];
+		if (arg === "-c" || arg === "--config-env") {
+			inlineConfig = true;
+			i++;
+			continue;
+		}
 		if (GIT_VALUE_OPTIONS.has(arg)) {
 			if ((arg === "-C" || arg === "--git-dir" || arg === "--work-tree") && i + 1 < args.length) {
 				globalPaths.push(args[i + 1]);
@@ -956,7 +1018,10 @@ function parseGitInvocation(args: string[]): { subcommand: string; args: string[
 			globalPaths.push(arg.slice(2));
 			continue;
 		}
-		if (arg.startsWith("-c") && arg.length > 2) continue;
+		if (arg.startsWith("-c") && arg.length > 2) {
+			inlineConfig = true;
+			continue;
+		}
 		if (arg.startsWith("--git-dir=")) {
 			globalPaths.push(arg.slice("--git-dir=".length));
 			continue;
@@ -967,9 +1032,9 @@ function parseGitInvocation(args: string[]): { subcommand: string; args: string[
 		}
 		if (arg.startsWith("--namespace=")) continue;
 		if (arg.startsWith("-")) continue;
-		return { subcommand: arg, args: args.slice(i + 1), globalPaths };
+		return { subcommand: arg, args: args.slice(i + 1), globalPaths, inlineConfig };
 	}
-	return undefined;
+	return inlineConfig ? { subcommand: "", args: [], globalPaths, inlineConfig } : undefined;
 }
 
 // `git apply` flags that make the invocation a read-only inspection (dry run / diffstat).

@@ -165,6 +165,39 @@ const cases: Case[] = [
 	{ tag: "REG3", role: "build-impl", kind: "bash", input: "git restore src/x.ts", allow: true, note: "restore a source file (in authority)" },
 	{ tag: "REG3", role: "build-impl", kind: "bash", input: "git add src/x.ts", allow: true, note: "staging is safe + needed" },
 	{ tag: "REG3", role: "build-finish", kind: "bash", input: "git fetch origin", allow: true, note: "fetch updates refs, no worktree write" },
+
+	// ── [B5] inline `-c` config (alias→shell) + UNKNOWN subcommand denied fail-closed ────────
+	{ tag: "B5", role: "build-finish", kind: "bash", input: "git -c alias.pwn='!rm -rf docs' pwn", allow: false, note: "inline -c alias runs arbitrary shell" },
+	{ tag: "B5", role: "build-review", kind: "bash", input: "git -c alias.pwn='!rm -rf docs' pwn", allow: false, note: "inline -c blocked even for the read-only reviewer" },
+	{ tag: "B5", role: "build-finish", kind: "bash", input: "git -c alias.co=checkout co -- docs/specs/x.md", allow: false, note: "inline -c blocked regardless of payload" },
+	{ tag: "B5", role: "build-finish", kind: "bash", input: "git frobnicate --force", allow: false, note: "unknown subcommand denied fail-closed" },
+	{ tag: "B5", role: "build-review", kind: "bash", input: "git mergetool", allow: false, note: "unknown/unsafe subcommand for read-only role" },
+	{ tag: "B5", role: "build-finish", kind: "bash", input: "git status", allow: true, note: "a recognized read is still allowed" },
+	{ tag: "B5", role: "sequence", kind: "bash", input: "git log --oneline", allow: true, note: "reads are allowed for every role" },
+
+	// ── [B6] --pathspec-from-file reads an unbounded pathspec set → denied ───────────────────
+	{ tag: "B6", role: "build-finish", kind: "bash", input: "git rm --pathspec-from-file=/tmp/x.txt", allow: false, note: "pathspec-from-file is unbounded" },
+	{ tag: "B6", role: "build-finish", kind: "bash", input: "git restore --pathspec-from-file /tmp/x.txt", allow: false, note: "space form" },
+
+	// ── [M7] single-operand / no-`--` checkout + restore are path-checked ────────────────────
+	{ tag: "M7", role: "build-finish", kind: "bash", input: "git checkout docs/specs/x.md", allow: false, note: "1-operand checkout of a blocked path" },
+	{ tag: "M7", role: "build-finish", kind: "bash", input: "git checkout .", allow: false, note: "whole-tree discard hits a protected ancestor" },
+	{ tag: "M7", role: "build-finish", kind: "bash", input: "git restore docs/specs/x.md", allow: false, note: "1-operand restore of a blocked path" },
+
+	// ── [M6g] glob pathspec on a git op → refused ───────────────────────────────────────────
+	{ tag: "M6g", role: "build-finish", kind: "bash", input: "git rm -r 'docs/*'", allow: false, note: "glob pathspec" },
+	{ tag: "M6g", role: "build-finish", kind: "bash", input: "git checkout HEAD -- 'docs/*'", allow: false, note: "glob pathspec after --" },
+
+	// ── [B7] gh-api blocked-by exception matches the POSITIONAL endpoint only ────────────────
+	{ tag: "B7", role: "build-finish", kind: "bash", input: "gh api -X PUT repos/o/r/pulls/8/merge -f x=dependencies/blocked_by", allow: false, note: "marker smuggled in a -f value cannot unlock a merge" },
+	{ tag: "B7", role: "build-finish", kind: "bash", input: "gh api -X DELETE repos/o/r/releases/1 -f junk=dependencies/blocked_by", allow: false, note: "marker cannot unlock a release delete" },
+	{ tag: "B7", role: "build-review", kind: "bash", input: "gh api -X POST repos/o/r/issues/5/dependencies/blocked_by -f issue=1", allow: false, note: "even the blocked-by write is denied for the read-only reviewer" },
+
+	// ── [JUDGE] reset/pull/stash deliberately DENIED (loop unstages via `git restore --staged`) ─
+	{ tag: "JUDGE", role: "build-impl", kind: "bash", input: "git reset HEAD src/x.ts", allow: false, note: "reset not safelisted — unstage via restore --staged" },
+	{ tag: "JUDGE", role: "build-finish", kind: "bash", input: "git pull origin main", allow: false, note: "pull merges remote into the worktree — not in the IDC flow" },
+	{ tag: "JUDGE", role: "build-impl", kind: "bash", input: "git stash", allow: false, note: "stash not in the IDC flow" },
+	{ tag: "JUDGE", role: "build-impl", kind: "bash", input: "git restore --staged src/x.ts", allow: true, note: "the safelisted unstage path" },
 ];
 
 let failures = 0;

@@ -469,17 +469,28 @@ function evaluateGitForRole(role: IdcRole, mutation: BashMutation, cwd: string, 
 		blockedSurfaces: policy.blockedSurfaces,
 		attemptedPaths: collectMutationPaths([mutation], cwd),
 	});
+	// IDC-LOCAL (guard-bypass B-5): inline `-c`/`--config-env` can define an alias that runs
+	// arbitrary shell (`git -c alias.x='!rm -rf docs' x`) — total guard evasion — so it is refused
+	// for EVERY role (placed before the role gate so the read-only reviewer is covered too).
+	if (mutation.gitInlineConfig) return deny("git inline -c/--config-env is blocked (it can define an alias that runs arbitrary shell)");
 	if (isGitForcePush(mutation)) return deny(`force/destructive push is blocked for all roles (${mutation.kind})`);
 	if (gitGlobalPathOutsideCwd(mutation, cwd)) return deny(`${mutation.kind} targets a repo outside the run repo via -C/--git-dir/--work-tree (or an unresolvable $VAR)`);
 	if (!GIT_ROLES.has(role)) return deny(`${mutation.kind} is outside ${role} git authority`);
 	if (!GIT_SAFE_SUBCOMMANDS.has(mutation.gitSubcommand ?? "")) {
-		return deny(`git ${mutation.gitSubcommand} is not in the IDC git safelist (a worktree-rewriting/history op that could reach a protected surface)`);
+		return deny(`git ${mutation.gitSubcommand || "(unknown)"} is not in the IDC git safelist (a worktree-rewriting/history/unknown op that could reach a protected surface)`);
+	}
+	// IDC-LOCAL (guard-bypass B-6): `--pathspec-from-file` / `--pathspec-file-nul` read the
+	// pathspecs from a FILE the static guard cannot see → the touched set is unbounded → refuse.
+	if ((mutation.gitArgs ?? []).some((a) => a === "--pathspec-from-file" || a.startsWith("--pathspec-from-file=") || a === "--pathspec-file-nul")) {
+		return deny(`git ${mutation.gitSubcommand} --pathspec-from-file reads pathspecs from a file the guard cannot bound`);
 	}
 	// IDC-LOCAL (guard-bypass B-2): git must NOT widen the file-write ACL. A `git rm`/`checkout`/
 	// `restore`/`mv` that names a path overwrites/deletes that WORKING-TREE file, so each named
 	// pathspec is re-checked against the role's path authority — a blocked governance/canonical
 	// surface (PRD/spec/plans/CLAUDE.md/the review verdict) is DENIED exactly as a direct write is.
 	for (const touched of gitTouchedPaths(mutation)) {
+		// (M-6) a glob pathspec (`git rm 'docs/*'`) can expand across a protected surface → refuse.
+		if (/[*?[]/.test(touched)) return deny(`git ${mutation.gitSubcommand} pathspec '${touched}' uses a glob that cannot be statically bounded`);
 		const abs = normalizeToolPath(touched, cwd);
 		const pathEval = evaluatePathForRole(role, abs, cwd);
 		if (!pathEval.allowed) return deny(`git ${mutation.gitSubcommand} would touch ${abs}: ${pathEval.reason}`);
@@ -518,13 +529,13 @@ function gitTouchedPaths(mutation: BashMutation): string[] {
 	// rm/mv/restore are always pathspec-oriented — every bare operand is a file.
 	if (sub === "rm" || sub === "mv" || sub === "restore") return operands(args);
 
-	// checkout is BRANCH-vs-pathspec ambiguous without `--`:
-	//   `checkout -b/-B <branch>`     → branch creation, operand is a ref name → no file touched
-	//   `checkout <branch>`           → branch switch, single operand is a ref → no file touched
-	//   `checkout <ref> <path…>`      → the operands AFTER the leading ref are pathspecs → checked
+	// checkout: branch CREATION (`-b`/`-B`) names a ref, never a file → nothing to path-check.
+	// Otherwise path-check EVERY operand (M-7): a leading ref (HEAD~1/main) resolves to a benign
+	// in-repo path for the build roles, while a pathspec operand (`docs/specs/x.md`, `.`, a
+	// `<ref> <path>` form, or a bare `git checkout <path>`) that reaches a protected surface is
+	// caught — closing the single-operand and no-`--` checkout holes.
 	if (args.includes("-b") || args.includes("-B")) return [];
-	const ops = operands(args);
-	return ops.length >= 2 ? ops.slice(1) : [];
+	return operands(args);
 }
 
 // IDC-LOCAL: per-role GitHub-CLI ACL for the gated gh ops.

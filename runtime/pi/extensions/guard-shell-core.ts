@@ -40,10 +40,9 @@ export interface BashMutation {
 	gitGlobalPaths?: string[];
 	// IDC-LOCAL: gh-op classification for the per-role GitHub ACL (build-review
 	// read-only enforcement, dangerous-verb denylist, pr-create/merge role-scoping,
-	// and the MG-B merge-on-verdict interlock). Only ops that need gating are emitted
+	// and the --auto/--admin merge bounds). Only ops that need gating are emitted
 	// as mutations; gh reads + `issue/pr comment` emit nothing (allowed for all roles).
 	ghOp?: "tracker-write" | "pr-create" | "merge" | "dangerous";
-	ghPrNumber?: number;
 	ghAuto?: boolean;
 	ghAdmin?: boolean;
 }
@@ -527,7 +526,7 @@ function readBalancedParen(command: string, start: number): { body: string; end:
 //   - "tracker-write" issue/project/sub-issue/pr writes + a mutating `gh api` (POST/PATCH/
 //                     PUT/DELETE) — the board ops; allowed for every role EXCEPT build-review.
 //   - "pr-create"     `gh pr create` — role-scoped to the git-authoring roles.
-//   - "merge"         `gh pr merge` — role-scoped + `--auto` blocked + the MG-B verdict gate.
+//   - "merge"         `gh pr merge` — role-scoped + `--auto`/`--admin` blocked.
 // Best-effort, consistent with SECURITY.md: a brand-new gh subcommand falls through to null
 // (treated as a read) — the denylist names the known-dangerous verbs explicitly.
 export function classifyGhCommand(args: string[]): BashMutation | null {
@@ -544,8 +543,7 @@ export function classifyGhCommand(args: string[]): BashMutation | null {
 	}
 
 	if (a0 === "pr" && a1 === "merge") {
-		const pr = args.slice(2).find((x) => /^\d+$/.test(x));
-		return { kind: "gh pr merge", paths: [], unscoped: true, ghOp: "merge", ghPrNumber: pr ? Number(pr) : undefined, ghAuto: args.includes("--auto"), ghAdmin: args.includes("--admin") };
+		return { kind: "gh pr merge", paths: [], unscoped: true, ghOp: "merge", ghAuto: args.includes("--auto"), ghAdmin: args.includes("--admin") };
 	}
 	if (a0 === "pr" && a1 === "create") return { kind: "gh pr create", paths: [], unscoped: true, ghOp: "pr-create" };
 

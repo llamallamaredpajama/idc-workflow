@@ -8,7 +8,6 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import * as fs from "node:fs";
 import * as path from "node:path";
 import type { BashMutation } from "./guard-shell-core.ts";
 import {
@@ -121,26 +120,20 @@ const RECIRCULATOR_CANONICAL_ALLOWED = [
 	"**/CLAUDE.md",
 ];
 
-// IDC-LOCAL (MG-B): `docs/workflow/code-reviews/**` is DELIBERATELY excluded here — the
-// review verdict the merge gate reads must be authored ONLY by the read-only reviewer
-// (REVIEW_VERDICT_ALLOWED below), so the implementer/finisher cannot forge a PASS for their
-// own PR. Build keeps its operator-todos + build handoffs.
 const BUILD_ALLOWED_EXPLICIT = [
 	"docs/workflow/operator-todos/**",
+	"docs/workflow/code-reviews/**",
 	"docs/workflow/handoffs/builds/**",
 ];
-
-// IDC-LOCAL (MG-B): the review reviewer's SOLE write surface — the PR-keyed verdict the merge
-// gate consults. build-review writes only here; every other role is blocked from this tree.
-const REVIEW_VERDICT_ALLOWED = ["docs/workflow/code-reviews/**"];
 
 // IDC-LOCAL: roles granted the in-repo git lifecycle (branch/commit/push/`gh pr create`),
 // mirroring their Claude counterparts. force-push and cross-repo `-C` are blocked for ALL of
 // them; build-review + sequence get NO git authority.
 const GIT_ROLES = new Set<IdcRole>(["think", "plan", "build-impl", "build-finish", "recirculator"]);
-// Roles that may `gh pr merge`: build-finish (build PR, MG-B-gated), plan (its planning PR),
-// recirculator (its doc-sync PR). Plan/recirculator merge their own non-source PRs on the
-// role's behavioral green/gate decision; build-finish is hard-gated on the review verdict.
+// Roles that may `gh pr merge`: build-finish (the build PR), plan (its planning PR),
+// recirculator (its doc-sync PR). Each merges its own PR on the role's BEHAVIORAL green/PASS
+// decision (the prompt's /fullauto-goal contract), mirroring the Claude finisher/recirculator —
+// no hard interlock. force-push and cross-repo `-C` stay blocked for all roles.
 const MERGE_ROLES = new Set<IdcRole>(["build-finish", "plan", "recirculator"]);
 
 // IDC-LOCAL (guard-bypass B-4, class-level): the git subcommands an IDC git-role may run. A
@@ -172,10 +165,6 @@ const BUILD_BLOCKED = [
 	"docs/workflow/recirculator/**",
 	"docs/workflow/pillar-matrices/**",
 	"docs/workflow/pillar-conflicts/**",
-	// IDC-LOCAL (MG-B anti-forgery): the review verdict the merge gate reads is build-review's
-	// alone — the implementer/finisher (allowRepoImplementation roles) must NOT be able to write
-	// it, or build-finish could forge a PASS for its own PR.
-	"docs/workflow/code-reviews/**",
 	"TRACKER.md",
 	"TRACKER-archive.md",
 	".pi/agents/**",
@@ -315,7 +304,7 @@ export function evaluatePathForRole(
 		// IDC-LOCAL (guard-bypass B-1/M-4): deny operating on a PARENT directory of a protected
 		// surface (e.g. `rm -rf docs/workflow`, `ln -s scratch docs/workflow`). The blocked
 		// surfaces are leaf patterns, so without this a role could delete/redirect the ancestor
-		// dir and thereby destroy or forge the protected files (e.g. the MG-B review verdict).
+		// dir and thereby destroy or forge the protected files (e.g. the PRD or specs).
 		if (isAncestorOfBlockedSurface(absPath, cwd, policy.blockedSurfaces)) {
 			return {
 				allowed: false,
@@ -395,12 +384,12 @@ export function evaluateBashForRole(
 
 	for (const mutation of mutations) {
 		// IDC-LOCAL: GitHub-CLI ACL. gh WRITES are gated per role — build-review is read-only
-		// on the board, dangerous non-tracker verbs are denied for all, pr-create/merge are
-		// role-scoped, and build-finish's merge is hard-gated on the review verdict (MG-B). gh
+		// on the board, dangerous non-tracker verbs are denied for all, and pr-create/merge are
+		// role-scoped (the merge-on-green/PASS decision is behavioral, in the role prompt). gh
 		// reads + `issue/pr comment` never reach here (classifyGhCommand emits no mutation for
 		// them), so they stay allowed for every role.
 		if (mutation.ghOp) {
-			const ghEval = evaluateGhForRole(role, mutation, cwd, policy);
+			const ghEval = evaluateGhForRole(role, mutation, policy);
 			if (!ghEval.allowed) return ghEval;
 			continue;
 		}
@@ -487,7 +476,7 @@ function evaluateGitForRole(role: IdcRole, mutation: BashMutation, cwd: string, 
 	// IDC-LOCAL (guard-bypass B-2): git must NOT widen the file-write ACL. A `git rm`/`checkout`/
 	// `restore`/`mv` that names a path overwrites/deletes that WORKING-TREE file, so each named
 	// pathspec is re-checked against the role's path authority — a blocked governance/canonical
-	// surface (PRD/spec/plans/CLAUDE.md/the review verdict) is DENIED exactly as a direct write is.
+	// surface (PRD/spec/plans/CLAUDE.md) is DENIED exactly as a direct write is.
 	for (const touched of gitTouchedPaths(mutation)) {
 		// (M-6) a glob pathspec (`git rm 'docs/*'`) can expand across a protected surface → refuse.
 		if (/[*?[]/.test(touched)) return deny(`git ${mutation.gitSubcommand} pathspec '${touched}' uses a glob that cannot be statically bounded`);
@@ -539,7 +528,7 @@ function gitTouchedPaths(mutation: BashMutation): string[] {
 }
 
 // IDC-LOCAL: per-role GitHub-CLI ACL for the gated gh ops.
-function evaluateGhForRole(role: IdcRole, mutation: BashMutation, cwd: string, policy: PathPolicy): GuardEvaluation {
+function evaluateGhForRole(role: IdcRole, mutation: BashMutation, policy: PathPolicy): GuardEvaluation {
 	const deny = (reason: string): GuardEvaluation => ({ allowed: false, reason, allowedRoots: policy.allowedRoots, blockedSurfaces: policy.blockedSurfaces });
 	const allow = (reason: string): GuardEvaluation => ({ allowed: true, reason, allowedRoots: policy.allowedRoots, blockedSurfaces: policy.blockedSurfaces });
 	switch (mutation.ghOp) {
@@ -555,42 +544,13 @@ function evaluateGhForRole(role: IdcRole, mutation: BashMutation, cwd: string, p
 			if (!MERGE_ROLES.has(role)) return deny(`gh pr merge is outside ${role} authority`);
 			if (mutation.ghAuto) return deny("gh pr merge --auto is blocked; IDC uses a direct blocking merge");
 			if (mutation.ghAdmin) return deny("gh pr merge --admin is blocked; it bypasses branch protection / the green-gate");
-			// MG-B: build-finish's merge of the build PR is hard-gated on the review verdict
-			// authored by build-review. plan/recirculator merge their own non-source PRs on the
-			// role's behavioral green/gate decision (no review verdict exists for those PRs).
-			if (role === "build-finish") {
-				if (mutation.ghPrNumber === undefined) return deny("gh pr merge needs an explicit PR number for the review-verdict gate (MG-B)");
-				const verdict = readMergeVerdict(cwd, mutation.ghPrNumber);
-				if (verdict !== "PASS" && verdict !== "PASS-WITH-NITS") {
-					return deny(`merge gate (MG-B): PR #${mutation.ghPrNumber} review verdict is '${verdict ?? "absent"}', not PASS — merge blocked`);
-				}
-			}
+			// The merge-on-green + review-PASS decision is BEHAVIORAL — it lives in the role
+			// prompt's /fullauto-goal contract (mirroring the Claude finisher), not a hard guard
+			// interlock. The guard enforces only role-scope + the --auto/--admin/force-push bounds.
 			return allow(`gh pr merge is within ${role} authority`);
 		}
 		default:
 			return allow("gh op not gated");
-	}
-}
-
-// IDC-LOCAL (MG-B): fail-closed read of the PR-keyed review verdict that build-review authors
-// under docs/workflow/code-reviews/. Returns the verdict string, or null when the file is
-// absent/unreadable/malformed — null is treated as "not PASS", so the merge is blocked.
-function readMergeVerdict(cwd: string, prNumber: number): string | null {
-	try {
-		// IDC-LOCAL (guard-bypass B-1): realpath-resolve and reject any symlink redirect. A role
-		// that redirected `docs`/`docs/workflow` to an attacker tree (now also blocked by the
-		// ancestor check) could otherwise plant a forged PASS here; require the reviews dir AND the
-		// verdict file to resolve to their canonical in-cwd locations with no symlink in the path.
-		const realCwd = fs.realpathSync(path.resolve(cwd));
-		const expectedReviews = path.join(realCwd, "docs/workflow/code-reviews");
-		if (fs.realpathSync(expectedReviews) !== expectedReviews) return null;
-		const file = path.join(expectedReviews, `pr-${prNumber}.verdict.json`);
-		if (fs.realpathSync(file) !== file) return null;
-		const raw = fs.readFileSync(file, "utf8");
-		const match = raw.match(/"verdict"\s*:\s*"([^"]+)"/);
-		return match ? match[1] : null;
-	} catch {
-		return null; // missing / unreadable / unresolvable → fail-closed → not PASS → merge blocked
 	}
 }
 
@@ -695,13 +655,10 @@ function pathPolicyFor(role: IdcRole, options: GuardOptions): PathPolicy {
 				allowRepoImplementation: true,
 			};
 		case "build-review":
-			// IDC-LOCAL (MG-B): the reviewer is read-only on the code under review, but it is
-			// the SOLE author of the PR-keyed review verdict the merge gate consults. Its only
-			// write surface is the verdict dir; all git + all gh writes stay blocked (enforced
-			// in evaluateBashForRole), so it cannot touch source, the tracker, or branches.
 			return {
-				allowedRoots: REVIEW_VERDICT_ALLOWED,
-				blockedSurfaces: ["everything except docs/workflow/code-reviews/** (the review verdict)", "all git", "all gh tracker writes"],
+				allowedRoots: ["none (read-only role)"],
+				blockedSurfaces: ["all file writes", "all mutating bash"],
+				readOnly: true,
 			};
 	}
 }

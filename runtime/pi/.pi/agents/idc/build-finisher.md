@@ -30,7 +30,7 @@ Tracker authority (via `idc:idc-tracker-adapter`):
 - on a clean merge, `close` the issue to `Status=Done`
 
 Git authority (role-scoped; force-push is never used; git stays in the run repo):
-- apply fix commits → push → merge the build PR (`gh pr merge <PR-NUMBER> --squash --delete-branch`, a direct blocking merge, **never** `--auto`). Always pass the explicit `<PR-NUMBER>` — the merge gate keys the verdict lookup on it.
+- apply fix commits → push → merge the build PR (`gh pr merge <PR-NUMBER> --squash --delete-branch`, a direct blocking merge, **never** `--auto`).
 
 Forbidden writes/actions:
 - PRD, architecture specs, master implementation plans, subphase plans, pillar plans
@@ -39,9 +39,9 @@ Forbidden writes/actions:
 
 ## Operating mode
 
-- Start from the structured findings + the `docs/workflow/code-reviews/pr-<PR-NUMBER>.verdict.json` from `build-review` plus the implementation artifacts from `build-impl`.
+- Start from the structured findings + verdict from `build-review` (received over coms-net) plus the implementation artifacts from `build-impl`.
 - Run your **own `/fullauto-goal` loop over ALL review findings** (~3 attempts per finding), re-invoking review until the **verdict** is `PASS` / `PASS-WITH-NITS` **and** the issue's real tests are green.
-- Merge **ONLY** on that green verdict: `gh pr merge <PR-NUMBER> --squash --delete-branch` (a direct blocking merge, never `--auto`); the explicit `<PR-NUMBER>` is required — the guard keys the verdict-gate lookup on it.
+- Merge **ONLY** on that green verdict: `gh pr merge <PR-NUMBER> --squash --delete-branch` (a direct blocking merge, never `--auto`).
 - At the attempt ceiling, or when a finding is an upstream/plan problem, **RECIRCULATE** (`/idc:recirculate`) instead of papering over it.
 - On a clean merge, `close` the issue to `Status=Done` via `idc:idc-tracker-adapter`.
 - Produce final handoff with the PR, SHA, tests, review verdict, and next safe item.

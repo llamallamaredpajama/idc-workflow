@@ -3,23 +3,19 @@
 // pi-guard-fix branch adds + the fail-closed guarantees it must preserve. No GitHub, no agent
 // binary — pure function calls. Run via tests/smoke/phase8-pi-guard-acl.sh (exit 0 = pass).
 //
-// Red-when-broken: every assertion tagged [B1]/[B2]/[BR]/[M3]/[GIT]/[FORCE]/[MERGE]/[DANGER]/
-// [MGB] FAILS against the pre-fix guard (the guard-bypass review proved each bypass returns
-// allowed:true end-to-end); the [PRESERVE] cases must stay green before AND after.
+// Red-when-broken: every assertion tagged [B1]/[B2]/[BR]/[M3]/[GIT]/[FORCE]/[MERGE]/[DANGER]
+// FAILS against the pre-fix guard (the guard-bypass review proved each bypass returns
+// allowed:true end-to-end); the [PRESERVE] cases must stay green before AND after. The merge
+// gate is BEHAVIORAL (the role prompt) — the guard enforces only role-scope + --auto/--admin/
+// force-push bounds, not a hard verdict interlock.
 
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { evaluateBashForRole, evaluatePathForRole, type IdcRole } from "../../runtime/pi/extensions/idc-role-harness.ts";
 
-// A fake run repo on disk so the MG-B verdict reader has real files to consult.
+// A fake run repo on disk so path-relative cases resolve against a real cwd.
 const CWD = fs.mkdtempSync(path.join(os.tmpdir(), "pi-guard-acl-"));
-const reviews = path.join(CWD, "docs/workflow/code-reviews");
-fs.mkdirSync(reviews, { recursive: true });
-fs.writeFileSync(path.join(reviews, "pr-7.verdict.json"), JSON.stringify({ pr: 7, verdict: "PASS" }));
-fs.writeFileSync(path.join(reviews, "pr-9.verdict.json"), JSON.stringify({ pr: 9, verdict: "FAIL" }));
-fs.writeFileSync(path.join(reviews, "pr-13.verdict.json"), JSON.stringify({ pr: 13, verdict: "PASS-WITH-NITS" }));
-// (no pr-11.verdict.json — the "absent → fail-closed" case)
 
 const inRepo = (rel: string) => path.join(CWD, rel);
 
@@ -71,24 +67,17 @@ const cases: Case[] = [
 	{ tag: "FORCE", role: "build-finish", kind: "bash", input: "git push -f", allow: false, note: "-f blocked" },
 	{ tag: "FORCE", role: "build-finish", kind: "bash", input: "git push --force-with-lease origin x", allow: false, note: "--force-with-lease blocked" },
 
-	// ── [MERGE] gh pr merge is role-scoped + --auto blocked ─────────────────────────────
+	// ── [MERGE] gh pr merge is role-scoped; merge-on-green/PASS is BEHAVIORAL (the prompt) ──
 	{ tag: "MERGE", role: "think", kind: "bash", input: "gh pr merge 5", allow: false, note: "think never merges (admission is operator-merged)" },
 	{ tag: "MERGE", role: "build-impl", kind: "bash", input: "gh pr merge 7", allow: false, note: "implementer never merges" },
 	{ tag: "MERGE", role: "plan", kind: "bash", input: "gh pr merge 5 --squash", allow: true, note: "plan automerges its planning PR" },
 	{ tag: "MERGE", role: "recirculator", kind: "bash", input: "gh pr merge 5 --squash", allow: true, note: "recirculator automerges its sync PR" },
-	{ tag: "MERGE", role: "build-finish", kind: "bash", input: "gh pr merge 7 --auto", allow: false, note: "--auto blocked even with a PASS verdict" },
+	{ tag: "MERGE", role: "build-finish", kind: "bash", input: "gh pr merge 7 --squash --delete-branch", allow: true, note: "build-finish merges the build PR (green/PASS gate is behavioral, not guard-enforced)" },
+	{ tag: "MERGE", role: "build-finish", kind: "bash", input: "gh pr merge 7 --auto", allow: false, note: "--auto blocked for every merge role" },
 
-	// ── [MGB] build-finish merge is hard-gated on the PR-keyed review verdict ───────────
-	{ tag: "MGB", role: "build-finish", kind: "bash", input: "gh pr merge 7 --squash --delete-branch", allow: true, note: "PR #7 verdict = PASS → merge allowed" },
-	{ tag: "MGB", role: "build-finish", kind: "bash", input: "gh pr merge 13 --squash", allow: true, note: "PR #13 verdict = PASS-WITH-NITS → allowed" },
-	{ tag: "MGB", role: "build-finish", kind: "bash", input: "gh pr merge 9 --squash", allow: false, note: "PR #9 verdict = FAIL → blocked" },
-	{ tag: "MGB", role: "build-finish", kind: "bash", input: "gh pr merge 11 --squash", allow: false, note: "PR #11 verdict absent → fail-closed block" },
-
-	// ── [MGB] only build-review may author the verdict (anti-forgery) ───────────────────
-	{ tag: "MGB", role: "build-review", kind: "write", input: inRepo("docs/workflow/code-reviews/pr-7.verdict.json"), allow: true, note: "reviewer is the sole verdict author" },
-	{ tag: "MGB", role: "build-review", kind: "write", input: inRepo("src/x.ts"), allow: false, note: "reviewer cannot write source" },
-	{ tag: "MGB", role: "build-finish", kind: "write", input: inRepo("docs/workflow/code-reviews/pr-7.verdict.json"), allow: false, note: "finisher cannot forge a verdict" },
-	{ tag: "MGB", role: "build-impl", kind: "write", input: inRepo("docs/workflow/code-reviews/pr-7.verdict.json"), allow: false, note: "implementer cannot forge a verdict" },
+	// ── [READONLY] build-review writes no file (reverted from the MG-B verdict-dir grant) ───
+	{ tag: "READONLY", role: "build-review", kind: "write", input: inRepo("docs/workflow/code-reviews/pr-7.verdict.json"), allow: false, note: "reviewer is read-only — it authors no verdict file" },
+	{ tag: "READONLY", role: "build-review", kind: "write", input: inRepo("src/x.ts"), allow: false, note: "reviewer cannot write source" },
 
 	// ── [DANGER] non-tracker gh verbs denied for all roles ──────────────────────────────
 	{ tag: "DANGER", role: "think", kind: "bash", input: "gh release create v1", allow: false, note: "release blocked" },
@@ -119,13 +108,12 @@ const cases: Case[] = [
 	{ tag: "WIDEN", role: "build-finish", kind: "bash", input: "git rm docs/specs/x.md", allow: false, note: "git rm of a blocked spec" },
 	{ tag: "WIDEN", role: "build-finish", kind: "bash", input: "git checkout HEAD -- docs/prd/x.md", allow: false, note: "git checkout overwrites the PRD" },
 	{ tag: "WIDEN", role: "build-finish", kind: "bash", input: "git restore --source=HEAD CLAUDE.md", allow: false, note: "git restore overwrites CLAUDE.md" },
-	{ tag: "WIDEN", role: "build-finish", kind: "bash", input: "git checkout other -- docs/workflow/code-reviews/pr-7.verdict.json", allow: false, note: "git checkout forges the verdict" },
 	{ tag: "WIDEN", role: "build-finish", kind: "bash", input: "git rm src/old.test.ts", allow: true, note: "git rm of a source file is fine" },
 	{ tag: "WIDEN", role: "build-finish", kind: "bash", input: "git checkout -b build/wave1", allow: true, note: "branch creation is not a targeted file write" },
 
 	// ── [PARENT] cannot rm/redirect a dir that contains a protected surface (B-1/M-4) ────────
 	{ tag: "PARENT", role: "build-finish", kind: "bash", input: "rm -rf docs", allow: false, note: "rm of docs (contains prd/specs/…)" },
-	{ tag: "PARENT", role: "build-finish", kind: "bash", input: "rm -rf docs/workflow", allow: false, note: "rm of docs/workflow (contains code-reviews)" },
+	{ tag: "PARENT", role: "build-finish", kind: "bash", input: "rm -rf docs/workflow", allow: false, note: "rm of docs/workflow (contains recirculator/pillar-matrices)" },
 	{ tag: "PARENT", role: "build-finish", kind: "bash", input: "ln -s /tmp/pi-idc/build-finish/wf docs/workflow", allow: false, note: "redirect docs/workflow" },
 	{ tag: "PARENT", role: "build-finish", kind: "bash", input: "rm -rf src/legacy", allow: true, note: "rm of a source subdir is fine" },
 
@@ -134,8 +122,8 @@ const cases: Case[] = [
 	{ tag: "PUSH", role: "build-impl", kind: "bash", input: "git push origin --delete main", allow: false, note: "--delete remote ref" },
 	{ tag: "PUSH", role: "build-impl", kind: "bash", input: "git push --mirror origin", allow: false, note: "--mirror overwrites all refs" },
 
-	// ── [ADMIN] gh pr merge --admin bypasses branch protection — blocked even with PASS ──────
-	{ tag: "ADMIN", role: "build-finish", kind: "bash", input: "gh pr merge 7 --admin --squash", allow: false, note: "--admin blocked even with a PASS verdict" },
+	// ── [ADMIN] gh pr merge --admin bypasses branch protection — blocked for all merge roles ──
+	{ tag: "ADMIN", role: "build-finish", kind: "bash", input: "gh pr merge 7 --admin --squash", allow: false, note: "--admin blocked (bypasses branch protection / the green-gate)" },
 
 	// ── [SAFELIST] git is a SAFELIST — every non-listed worktree/history op is denied (B-4) ──
 	{ tag: "SAFELIST", role: "build-finish", kind: "bash", input: "git apply /tmp/evil.patch", allow: false, note: "git apply writes the worktree" },
@@ -148,10 +136,9 @@ const cases: Case[] = [
 	{ tag: "SAFELIST", role: "build-finish", kind: "bash", input: "git merge other", allow: false, note: "git merge (local) — merges go through gh pr merge" },
 	// the `<ref> <pathspec>` checkout form WITHOUT `--` is now path-checked
 	{ tag: "SAFELIST", role: "build-finish", kind: "bash", input: "git checkout HEAD~1 docs/prd/x.md", allow: false, note: "checkout <ref> <pathspec> overwrites the PRD" },
-	{ tag: "SAFELIST", role: "build-finish", kind: "bash", input: "git checkout other docs/workflow/code-reviews/pr-7.verdict.json", allow: false, note: "checkout <ref> <verdict> forges the verdict" },
 
 	// ── [APIMERGE] every merge goes through the gated `gh pr merge` — not via raw gh api (B-3) ─
-	{ tag: "APIMERGE", role: "build-finish", kind: "bash", input: "gh api -X PUT repos/o/r/pulls/8/merge", allow: false, note: "api REST merge bypasses MG-B" },
+	{ tag: "APIMERGE", role: "build-finish", kind: "bash", input: "gh api -X PUT repos/o/r/pulls/8/merge", allow: false, note: "api REST merge bypasses the gated gh pr merge" },
 	{ tag: "APIMERGE", role: "build-impl", kind: "bash", input: "gh api -X PUT repos/o/r/pulls/8/merge", allow: false, note: "api merge for a non-merge role" },
 	{ tag: "APIMERGE", role: "build-impl", kind: "bash", input: "gh api graphql -f query='mutation{ mergePullRequest(input:{pullRequestId:\"X\"}){clientMutationId} }'", allow: false, note: "graphql merge mutation" },
 
@@ -210,25 +197,10 @@ for (const c of cases) {
 	}
 }
 
-// ── [MGB-symlink] a docs→attacker symlink supplying a forged PASS must NOT unlock the merge ──
-{
-	const sCwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-guard-sym-"));
-	const fake = path.join(sCwd, "fakewf");
-	fs.mkdirSync(path.join(fake, "workflow/code-reviews"), { recursive: true });
-	fs.writeFileSync(path.join(fake, "workflow/code-reviews", "pr-8.verdict.json"), JSON.stringify({ pr: 8, verdict: "PASS" }));
-	fs.symlinkSync(fake, path.join(sCwd, "docs"), "dir"); // docs -> attacker tree holding a forged PASS
-	const e = evaluateBashForRole("build-finish", "gh pr merge 8 --squash", sCwd);
-	if (e.allowed) {
-		failures++;
-		console.log(`FAIL [MGB-symlink] build-finish gh pr merge 8 — symlinked docs supplied a forged PASS, got ALLOW :: ${e.reason}`);
-	}
-	fs.rmSync(sCwd, { recursive: true, force: true });
-}
-
 fs.rmSync(CWD, { recursive: true, force: true });
 
 if (failures === 0) {
-	console.log(`PASS: per-role guard ACL holds (${cases.length} cases: file-write fail-closed preserved; B1/B2/BR/M3 bypasses closed; git grant + force-push/merge scoping + MG-B verdict interlock enforced)`);
+	console.log(`PASS: per-role guard ACL holds (${cases.length} cases: file-write fail-closed preserved; B1/B2/BR/M3 bypasses closed; scoped git grant + force-push/merge role-scoping enforced; merge-on-green/PASS is behavioral)`);
 	process.exit(0);
 }
 console.log(`FAIL: ${failures}/${cases.length} guard ACL assertions failed`);

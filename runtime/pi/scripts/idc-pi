@@ -895,10 +895,9 @@ role_color() {
 
 role_tools() {
 	if [[ "$1" == "build-review" ]]; then
-		# build-review is read-only on the code under review, but it authors the PR-keyed
-		# review verdict the merge gate (MG-B) consults — the guard scopes its `write` to
-		# docs/workflow/code-reviews/** only (everything else, all git, all gh writes blocked).
-		printf 'read,write,bash,grep,find,ls,%s\n' "$COMS_TOOLS"
+		# build-review is read-only: it reviews the code, reports findings via coms-net, and
+		# writes no file (the guard also enforces this via readOnly). No write/edit tools.
+		printf 'read,bash,grep,find,ls,%s\n' "$COMS_TOOLS"
 	else
 		printf 'read,write,edit,bash,grep,find,ls,%s\n' "$COMS_TOOLS"
 	fi

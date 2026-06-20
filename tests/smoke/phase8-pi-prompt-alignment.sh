@@ -2,8 +2,9 @@
 # Phase 8 smoke — the vendored Pi role prompts match the CURRENT 5-field-board IDC contract:
 # they drive the board through the tracker adapter (not file-writes / TRACKER.md), Plan is
 # idempotent + sets the board fields + runs the matrix, Build claims before working, the finisher
-# merges on the review verdict + recirculates, the reviewer authors the PR-keyed verdict, and NO
-# prompt carries the RETIRED vocabulary (claim-state machine, bookend ceremony, the deleted
+# merges on the review verdict (behavioral) + recirculates, the reviewer is read-only and reports
+# findings over coms-net, and NO prompt carries the RETIRED vocabulary (claim-state machine,
+# bookend ceremony, the MG-B verdict-file authoring, the deleted
 # recirculator verdict taxonomy / change-order files).
 #
 # Red-when-broken: every must-have line below is ABSENT from the pre-fix prompts (they were
@@ -58,10 +59,12 @@ have "build-implementer.md" "blocked.?by" "checks blocked-by upstreams"
 have "build-implementer.md" "claim" "claims the issue before working"
 have "build-implementer.md" "In Progress" "flips Status to In Progress on claim"
 
-# ── Build reviewer: authors the PR-keyed verdict the merge gate reads ─────────────────────────
-have "build-reviewer.md" "docs/workflow/code-reviews" "writes the verdict dir"
+# ── Build reviewer: read-only; reaches a verdict + reports findings over coms-net ─────────────
+have "build-reviewer.md" "read-only" "states it is read-only"
+have "build-reviewer.md" "coms" "reports findings over coms-net"
 have "build-reviewer.md" "verdict" "emits a verdict"
 have "build-reviewer.md" "PASS" "uses the PASS/FAIL verdict ladder"
+absent "build-reviewer.md" "code-reviews|sole author" "no MG-B verdict-file authoring (read-only reviewer)"
 
 # ── Build finisher: merge-on-verdict + recirculate-on-persistent-fail + close→Done ───────────
 have "build-finisher.md" "verdict" "gates merge on the review verdict"
@@ -75,7 +78,7 @@ have "recirculator.md" "idc_recirculator_layers.py|gate:.?no|gate:.?yes|gated Th
 absent "recirculator.md" "NO_RECIRCULATION|MINOR_AUTONOMOUS|MAJOR_GATED" "deleted verdict taxonomy"
 
 if [ "$fails" -eq 0 ]; then
-  echo "PASS: Pi role prompts match the current 5-field-board IDC contract (tracker-adapter-driven; Plan idempotent+fielded+matrix; Build claims; finisher merges-on-verdict+recirculates; reviewer authors the verdict; no retired vocab)"
+  echo "PASS: Pi role prompts match the current 5-field-board IDC contract (tracker-adapter-driven; Plan idempotent+fielded+matrix; Build claims; finisher merges-on-verdict (behavioral)+recirculates; reviewer is read-only, findings via coms-net; no retired vocab)"
   exit 0
 fi
 echo "FAIL: $fails prompt-alignment invariant(s) unmet"

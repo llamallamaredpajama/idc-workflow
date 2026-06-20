@@ -45,6 +45,31 @@ trying to message upstream or impersonate a peer.
   `PI_COMS_NET_AUTH_TOKEN` (the launcher passes it through) and re-evaluate this model — it was
   designed for loopback.
 
+### The per-role command guard is best-effort (a static analyzer, not a sandbox)
+
+The per-role file-write/bash guard (`idc-role-harness.ts` + `guard-shell-core.ts`) is a **static
+command analyzer**. It reliably blocks the *detected* mutating surface — direct file writes outside a
+role's authority, the secret denylist, `git` worktree/history mutations (path-checked, force-push and
+cross-repo `-C`/`--git-dir`/`--work-tree` denied), `gh` tracker/PR writes by role, dangerous `gh`
+verbs, glob/`--pathspec-from-file` refusals, and the `git -c alias=…` arbitrary-shell evasion. But
+because it reasons over a *modeled* shell grammar, a sufficiently exotic construct is always
+conceivable, and two known residuals stand within this same best-effort envelope:
+
+- **Interpreter payloads.** A read-only role (e.g. `build-review`) can still write a file via an
+  interpreter whose body the static analyzer cannot enumerate — `python3 - <<EOF … open(…,"w") … EOF`,
+  `node -e`, perl/ruby writers. The guard sees no modeled mutation and allows the command.
+- **Read-only cross-repo git.** The cross-repo `-C`/`--git-dir`/`--work-tree` block fires on git
+  *mutations*; a pure read (`git -C /other status`) reaches another repo because reads skip the
+  mutation path.
+
+Both are consistent with the loopback / single-OS-user model: the resident already runs as a user who
+can do these things directly, so this guard is **prompt-injection / casual-misuse resistance, not a
+sandbox** — exactly as the coms-net controls above. Closing them would require interpreter-payload
+enumeration (an unbounded whack-a-mole the `git -c alias` case already proves a static analyzer cannot
+win) rather than a real OS sandbox; it is intentionally **not** chased. The merge gate is likewise
+**behavioral** (the finisher prompt's merge-only-on-green/PASS contract, mirroring the Claude runtime),
+not a hard guard interlock.
+
 ## Two launch modes (where the role-cap boundary actually holds)
 
 The role-cap boundary requires the master key `K` to reach the hub and each resident over a channel

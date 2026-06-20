@@ -9,12 +9,14 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import * as path from "node:path";
+import type { BashMutation } from "./guard-shell-core.ts";
 import {
 	analyzeBashCommand,
 	collectMutationPaths,
 	compactRoots,
+	gitGlobalPathOutsideCwd,
 	isAlwaysAllowedDevice,
-	isGitFinalizationMutation,
+	isGitForcePush,
 	isGitMutation,
 	isInsideOrEqual,
 	looksLikeLiveOperation,
@@ -123,6 +125,24 @@ const BUILD_ALLOWED_EXPLICIT = [
 	"docs/workflow/code-reviews/**",
 	"docs/workflow/handoffs/builds/**",
 ];
+
+// IDC-LOCAL: roles granted the in-repo git lifecycle (branch/commit/push/`gh pr create`),
+// mirroring their Claude counterparts. force-push and cross-repo `-C` are blocked for ALL of
+// them; build-review + sequence get NO git authority.
+const GIT_ROLES = new Set<IdcRole>(["think", "plan", "build-impl", "build-finish", "recirculator"]);
+// Roles that may `gh pr merge`: build-finish (the build PR), plan (its planning PR),
+// recirculator (its doc-sync PR). Each merges its own PR on the role's BEHAVIORAL green/PASS
+// decision (the prompt's /fullauto-goal contract), mirroring the Claude finisher/recirculator —
+// no hard interlock. force-push and cross-repo `-C` stay blocked for all roles.
+const MERGE_ROLES = new Set<IdcRole>(["build-finish", "plan", "recirculator"]);
+
+// IDC-LOCAL (guard-bypass B-4, class-level): the git subcommands an IDC git-role may run. A
+// SAFELIST, not a denylist — every OTHER worktree-rewriting/history subcommand (apply, am,
+// cherry-pick, revert, reset, merge, rebase, pull, stash, clean, …) is DENIED by default, so a
+// new dangerous subcommand can't slip through. The path-bearing members (rm/mv/restore/checkout)
+// are ADDITIONALLY path-checked via gitTouchedPaths; commit/add/push/fetch/switch/branch/tag carry
+// no targeted worktree-file write (push force/ref-delete is caught separately by isGitForcePush).
+const GIT_SAFE_SUBCOMMANDS = new Set(["commit", "add", "push", "fetch", "switch", "checkout", "restore", "rm", "mv", "branch", "tag"]);
 
 const BUILD_IMPL_ALLOWED = [
 	"repo source/tests/implementation files except blocked governance surfaces",
@@ -281,6 +301,20 @@ export function evaluatePathForRole(
 			};
 		}
 
+		// IDC-LOCAL (guard-bypass B-1/M-4): deny operating on a PARENT directory of a protected
+		// surface (e.g. `rm -rf docs/workflow`, `ln -s scratch docs/workflow`). The blocked
+		// surfaces are leaf patterns, so without this a role could delete/redirect the ancestor
+		// dir and thereby destroy or forge the protected files (e.g. the PRD or specs).
+		if (isAncestorOfBlockedSurface(absPath, cwd, policy.blockedSurfaces)) {
+			return {
+				allowed: false,
+				reason: `path is an ancestor of a blocked governance/canonical surface for ${role} (cannot rm/redirect a directory that contains protected files)`,
+				allowedRoots: policy.allowedRoots,
+				blockedSurfaces: policy.blockedSurfaces,
+				attemptedPaths: [absPath],
+			};
+		}
+
 		const explicitAllowed = policy.allowedRoots.filter((rule) => rule !== "repo source/tests/implementation files except blocked governance surfaces");
 		if (matchesAny(absPath, cwd, explicitAllowed) || isInsideOrEqual(path.resolve(cwd), absPath)) {
 			return {
@@ -348,26 +382,24 @@ export function evaluateBashForRole(
 		};
 	}
 
-	if (role === "build-review") {
-		return {
-			allowed: false,
-			reason: `build-review is read-only; mutating bash blocked (${mutations.map((m) => m.kind).join(", ")})`,
-			allowedRoots: policy.allowedRoots,
-			blockedSurfaces: policy.blockedSurfaces,
-			attemptedPaths: collectMutationPaths(mutations, cwd),
-		};
-	}
-
 	for (const mutation of mutations) {
+		// IDC-LOCAL: GitHub-CLI ACL. gh WRITES are gated per role — build-review is read-only
+		// on the board, dangerous non-tracker verbs are denied for all, and pr-create/merge are
+		// role-scoped (the merge-on-green/PASS decision is behavioral, in the role prompt). gh
+		// reads + `issue/pr comment` never reach here (classifyGhCommand emits no mutation for
+		// them), so they stay allowed for every role.
+		if (mutation.ghOp) {
+			const ghEval = evaluateGhForRole(role, mutation, policy);
+			if (!ghEval.allowed) return ghEval;
+			continue;
+		}
+
+		// IDC-LOCAL: git ACL. Role-scoped in-repo lifecycle; force-push and a cross-repo `-C`
+		// target are blocked for ALL roles (guard-bypass B2). build-review + sequence get no git.
 		if (isGitMutation(mutation)) {
-			if (role === "build-finish" && isGitFinalizationMutation(mutation)) continue;
-			return {
-				allowed: false,
-				reason: `${mutation.kind} is outside ${role} authority`,
-				allowedRoots: policy.allowedRoots,
-				blockedSurfaces: policy.blockedSurfaces,
-				attemptedPaths: collectMutationPaths([mutation], cwd),
-			};
+			const gitEval = evaluateGitForRole(role, mutation, cwd, policy);
+			if (!gitEval.allowed) return gitEval;
+			continue;
 		}
 
 		if (mutation.unscoped || mutation.paths.length === 0) {
@@ -381,6 +413,17 @@ export function evaluateBashForRole(
 
 		for (const rawPath of mutation.paths) {
 			if (isAlwaysAllowedDevice(rawPath)) continue;
+			// IDC-LOCAL (guard-bypass M-5): a glob operand (`rm -rf *`, `rm -rf docs/*`) can expand
+			// across a protected surface, which the static guard cannot enumerate — refuse it.
+			if (/[*?[]/.test(rawPath)) {
+				return {
+					allowed: false,
+					reason: `${mutation.kind} uses a glob (${rawPath}) that cannot be statically bounded against protected surfaces`,
+					allowedRoots: policy.allowedRoots,
+					blockedSurfaces: policy.blockedSurfaces,
+					attemptedPaths: [rawPath],
+				};
+			}
 			const normalized = normalizeToolPath(rawPath, cwd);
 			const pathEval = evaluatePathForRole(role, normalized, cwd, options);
 			if (!pathEval.allowed) {
@@ -402,6 +445,113 @@ export function evaluateBashForRole(
 		blockedSurfaces: policy.blockedSurfaces,
 		attemptedPaths: collectMutationPaths(mutations, cwd),
 	};
+}
+
+// IDC-LOCAL: per-role git ACL. The grant mirrors each role's Claude counterpart (GIT_ROLES);
+// force-push and a cross-repo `-C`/`--git-dir`/`--work-tree` target are blocked for ALL roles
+// (the latter is guard-bypass B2). build-review + sequence hold no git authority at all.
+function evaluateGitForRole(role: IdcRole, mutation: BashMutation, cwd: string, policy: PathPolicy): GuardEvaluation {
+	const deny = (reason: string): GuardEvaluation => ({
+		allowed: false,
+		reason,
+		allowedRoots: policy.allowedRoots,
+		blockedSurfaces: policy.blockedSurfaces,
+		attemptedPaths: collectMutationPaths([mutation], cwd),
+	});
+	// IDC-LOCAL (guard-bypass B-5): inline `-c`/`--config-env` can define an alias that runs
+	// arbitrary shell (`git -c alias.x='!rm -rf docs' x`) — total guard evasion — so it is refused
+	// for EVERY role (placed before the role gate so the read-only reviewer is covered too).
+	if (mutation.gitInlineConfig) return deny("git inline -c/--config-env is blocked (it can define an alias that runs arbitrary shell)");
+	if (isGitForcePush(mutation)) return deny(`force/destructive push is blocked for all roles (${mutation.kind})`);
+	if (gitGlobalPathOutsideCwd(mutation, cwd)) return deny(`${mutation.kind} targets a repo outside the run repo via -C/--git-dir/--work-tree (or an unresolvable $VAR)`);
+	if (!GIT_ROLES.has(role)) return deny(`${mutation.kind} is outside ${role} git authority`);
+	if (!GIT_SAFE_SUBCOMMANDS.has(mutation.gitSubcommand ?? "")) {
+		return deny(`git ${mutation.gitSubcommand || "(unknown)"} is not in the IDC git safelist (a worktree-rewriting/history/unknown op that could reach a protected surface)`);
+	}
+	// IDC-LOCAL (guard-bypass B-6): `--pathspec-from-file` / `--pathspec-file-nul` read the
+	// pathspecs from a FILE the static guard cannot see → the touched set is unbounded → refuse.
+	if ((mutation.gitArgs ?? []).some((a) => a === "--pathspec-from-file" || a.startsWith("--pathspec-from-file=") || a === "--pathspec-file-nul")) {
+		return deny(`git ${mutation.gitSubcommand} --pathspec-from-file reads pathspecs from a file the guard cannot bound`);
+	}
+	// IDC-LOCAL (guard-bypass B-2): git must NOT widen the file-write ACL. A `git rm`/`checkout`/
+	// `restore`/`mv` that names a path overwrites/deletes that WORKING-TREE file, so each named
+	// pathspec is re-checked against the role's path authority — a blocked governance/canonical
+	// surface (PRD/spec/plans/CLAUDE.md) is DENIED exactly as a direct write is.
+	for (const touched of gitTouchedPaths(mutation)) {
+		// (M-6) a glob pathspec (`git rm 'docs/*'`) can expand across a protected surface → refuse.
+		if (/[*?[]/.test(touched)) return deny(`git ${mutation.gitSubcommand} pathspec '${touched}' uses a glob that cannot be statically bounded`);
+		const abs = normalizeToolPath(touched, cwd);
+		const pathEval = evaluatePathForRole(role, abs, cwd);
+		if (!pathEval.allowed) return deny(`git ${mutation.gitSubcommand} would touch ${abs}: ${pathEval.reason}`);
+	}
+	return { allowed: true, reason: `${mutation.kind} is within ${role} git authority`, allowedRoots: policy.allowedRoots, blockedSurfaces: policy.blockedSurfaces };
+}
+
+// IDC-LOCAL (B-2): the working-tree file operands of a git subcommand that writes/deletes/moves
+// specific files. Operands after a `--` separator are always pathspecs; for rm/mv/restore the
+// bare non-flag operands are pathspecs too (skipping the `-s`/`--source` value). A bare `git
+// checkout <ref>` / `git checkout -b X` (no `--`) is a branch/ref op with no targeted file write,
+// so it contributes no pathspec — only the explicit `checkout … -- <paths>` form does.
+function gitTouchedPaths(mutation: BashMutation): string[] {
+	const sub = mutation.gitSubcommand ?? "";
+	if (!["rm", "mv", "restore", "checkout"].includes(sub)) return [];
+	const args = mutation.gitArgs ?? [];
+	const dd = args.indexOf("--");
+	// Everything after a `--` separator is an explicit pathspec, for every form.
+	if (dd >= 0) return args.slice(dd + 1).filter((a) => a.length > 0);
+
+	const valueFlags = new Set(["-s", "--source", "--pathspec-from-file"]);
+	const operands = (list: string[]): string[] => {
+		const out: string[] = [];
+		for (let i = 0; i < list.length; i++) {
+			const arg = list[i];
+			if (valueFlags.has(arg)) {
+				i++;
+				continue;
+			}
+			if (arg.startsWith("-")) continue;
+			out.push(arg);
+		}
+		return out;
+	};
+
+	// rm/mv/restore are always pathspec-oriented — every bare operand is a file.
+	if (sub === "rm" || sub === "mv" || sub === "restore") return operands(args);
+
+	// checkout: branch CREATION (`-b`/`-B`) names a ref, never a file → nothing to path-check.
+	// Otherwise path-check EVERY operand (M-7): a leading ref (HEAD~1/main) resolves to a benign
+	// in-repo path for the build roles, while a pathspec operand (`docs/specs/x.md`, `.`, a
+	// `<ref> <path>` form, or a bare `git checkout <path>`) that reaches a protected surface is
+	// caught — closing the single-operand and no-`--` checkout holes.
+	if (args.includes("-b") || args.includes("-B")) return [];
+	return operands(args);
+}
+
+// IDC-LOCAL: per-role GitHub-CLI ACL for the gated gh ops.
+function evaluateGhForRole(role: IdcRole, mutation: BashMutation, policy: PathPolicy): GuardEvaluation {
+	const deny = (reason: string): GuardEvaluation => ({ allowed: false, reason, allowedRoots: policy.allowedRoots, blockedSurfaces: policy.blockedSurfaces });
+	const allow = (reason: string): GuardEvaluation => ({ allowed: true, reason, allowedRoots: policy.allowedRoots, blockedSurfaces: policy.blockedSurfaces });
+	switch (mutation.ghOp) {
+		case "dangerous":
+			return deny(`${mutation.kind} is outside every IDC role authority (not a tracker op)`);
+		case "tracker-write":
+			if (role === "build-review") return deny(`build-review is read-only on the tracker; ${mutation.kind} blocked (reads + comment only)`);
+			return allow(`${mutation.kind} is within ${role} tracker authority`);
+		case "pr-create":
+			if (!GIT_ROLES.has(role)) return deny(`gh pr create is outside ${role} authority`);
+			return allow(`gh pr create is within ${role} authority`);
+		case "merge": {
+			if (!MERGE_ROLES.has(role)) return deny(`gh pr merge is outside ${role} authority`);
+			if (mutation.ghAuto) return deny("gh pr merge --auto is blocked; IDC uses a direct blocking merge");
+			if (mutation.ghAdmin) return deny("gh pr merge --admin is blocked; it bypasses branch protection / the green-gate");
+			// The merge-on-green + review-PASS decision is BEHAVIORAL — it lives in the role
+			// prompt's /fullauto-goal contract (mirroring the Claude finisher), not a hard guard
+			// interlock. The guard enforces only role-scope + the --auto/--admin/force-push bounds.
+			return allow(`gh pr merge is within ${role} authority`);
+		}
+		default:
+			return allow("gh op not gated");
+	}
 }
 
 export default async function (pi: ExtensionAPI) {
@@ -589,20 +739,40 @@ function matchesAny(absPath: string, cwd: string, rules: string[]): boolean {
 	return rules.some((rule) => matchesRule(absPath, cwd, rule));
 }
 
+// IDC-LOCAL (guard-bypass B-1/M-4): true when `absPath` is an ancestor-or-equal of the base
+// directory of any `…/**` blocked surface — i.e. operating on `absPath` (rm/ln/mv of a dir)
+// would reach into a protected surface. Case-folded to match the M3 host semantics.
+function isAncestorOfBlockedSurface(absPath: string, cwd: string, blockedSurfaces: string[]): boolean {
+	const lc = (value: string): string => value.toLowerCase();
+	const target = lc(path.normalize(absPath));
+	return blockedSurfaces.some((rule) => {
+		if (!rule.endsWith("/**")) return false;
+		const baseRule = rule.slice(0, -3);
+		const base = lc(path.isAbsolute(baseRule) ? path.normalize(baseRule) : path.resolve(cwd, baseRule));
+		return isInsideOrEqual(target, base);
+	});
+}
+
 function matchesRule(absPath: string, cwd: string, rule: string): boolean {
 	if (!rule || rule.includes("source/tests/implementation")) return false;
+	// IDC-LOCAL (guard-bypass M3 fix): compare case-INSENSITIVELY. The primary deployment
+	// host is case-insensitive APFS, where `.PI/agents`, `claude.md`, and `docs/PRD` resolve
+	// to the same protected files as their canonical-case rules — a case-sensitive compare
+	// let a case-variant path slip past the governance blocklist. Folding is safe-erring on a
+	// case-sensitive FS (it can only over-match a look-alike path, never under-match a real one).
+	const lc = (value: string): string => value.toLowerCase();
 	if (rule.startsWith("**/")) {
-		const suffix = rule.slice(3);
-		const rel = normalizeRelative(cwd, absPath);
+		const suffix = lc(rule.slice(3));
+		const rel = lc(normalizeRelative(cwd, absPath));
 		return rel === suffix || rel.endsWith(`/${suffix}`);
 	}
 
 	if (rule.endsWith("/**")) {
 		const baseRule = rule.slice(0, -3);
 		const base = path.isAbsolute(baseRule) ? path.normalize(baseRule) : path.resolve(cwd, baseRule);
-		return isInsideOrEqual(base, absPath);
+		return isInsideOrEqual(lc(base), lc(absPath));
 	}
 
 	const exact = path.isAbsolute(rule) ? path.normalize(rule) : path.resolve(cwd, rule);
-	return path.normalize(absPath) === exact;
+	return lc(path.normalize(absPath)) === lc(exact);
 }

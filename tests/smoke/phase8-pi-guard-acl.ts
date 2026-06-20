@@ -1,0 +1,207 @@
+// Phase 8 smoke — exercises the REAL per-role guard (`evaluatePathForRole` /
+// `evaluateBashForRole` from runtime/pi/extensions/idc-role-harness.ts) against the locks the
+// pi-guard-fix branch adds + the fail-closed guarantees it must preserve. No GitHub, no agent
+// binary — pure function calls. Run via tests/smoke/phase8-pi-guard-acl.sh (exit 0 = pass).
+//
+// Red-when-broken: every assertion tagged [B1]/[B2]/[BR]/[M3]/[GIT]/[FORCE]/[MERGE]/[DANGER]
+// FAILS against the pre-fix guard (the guard-bypass review proved each bypass returns
+// allowed:true end-to-end); the [PRESERVE] cases must stay green before AND after. The merge
+// gate is BEHAVIORAL (the role prompt) — the guard enforces only role-scope + --auto/--admin/
+// force-push bounds, not a hard verdict interlock.
+
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { evaluateBashForRole, evaluatePathForRole, type IdcRole } from "../../runtime/pi/extensions/idc-role-harness.ts";
+
+// A fake run repo on disk so path-relative cases resolve against a real cwd.
+const CWD = fs.mkdtempSync(path.join(os.tmpdir(), "pi-guard-acl-"));
+
+const inRepo = (rel: string) => path.join(CWD, rel);
+
+type Case = { tag: string; role: IdcRole; kind: "bash" | "write"; input: string; allow: boolean; note: string };
+
+const cases: Case[] = [
+	// ── [PRESERVE] file-write fail-closed — must be green before AND after ──────────────
+	{ tag: "PRESERVE", role: "think", kind: "write", input: inRepo("docs/considerations/x.md"), allow: true, note: "think writes its considerations" },
+	{ tag: "PRESERVE", role: "think", kind: "write", input: inRepo("src/x.ts"), allow: false, note: "think cannot write source" },
+	{ tag: "PRESERVE", role: "build-impl", kind: "write", input: inRepo("src/x.ts"), allow: true, note: "build-impl writes source" },
+	{ tag: "PRESERVE", role: "build-impl", kind: "write", input: inRepo("docs/prd/x.md"), allow: false, note: "build-impl cannot write the PRD" },
+	{ tag: "PRESERVE", role: "build-impl", kind: "write", input: inRepo("scripts/.env"), allow: false, note: "secret denylist inside a write root" },
+
+	// ── [B1] spaced subshell / brace group must not hide the inner command ──────────────
+	{ tag: "B1", role: "build-review", kind: "bash", input: `( rm -rf ${inRepo("src")} )`, allow: false, note: "subshell rm — read-only role" },
+	{ tag: "B1", role: "build-review", kind: "bash", input: `{ rm -rf ${inRepo("src")}; }`, allow: false, note: "brace-group rm — read-only role" },
+	{ tag: "B1", role: "sequence", kind: "bash", input: "( git checkout -b x )", allow: false, note: "subshell git — sequence has no git" },
+	{ tag: "B1", role: "think", kind: "bash", input: "( git push --force )", allow: false, note: "subshell force-push" },
+
+	// ── [B2] git -C / --git-dir / --work-tree pointing outside the run repo ─────────────
+	{ tag: "B2", role: "build-finish", kind: "bash", input: "git -C /other/repo commit -m x", allow: false, note: "commit into another repo" },
+	{ tag: "B2", role: "build-finish", kind: "bash", input: "git -C /other/repo merge evil", allow: false, note: "merge into another repo" },
+	{ tag: "B2", role: "build-finish", kind: "bash", input: "git --git-dir=/other/.git commit -m x", allow: false, note: "--git-dir escape" },
+	{ tag: "B2", role: "build-finish", kind: "bash", input: "git commit -m x", allow: true, note: "in-repo commit is fine" },
+
+	// ── [BR] build-review is read-only on the board (reads + comment only) ──────────────
+	{ tag: "BR", role: "build-review", kind: "bash", input: "gh issue create --title x", allow: false, note: "reviewer cannot create issues" },
+	{ tag: "BR", role: "build-review", kind: "bash", input: "gh project item-edit --id X --field-id F", allow: false, note: "reviewer cannot edit board fields" },
+	{ tag: "BR", role: "build-review", kind: "bash", input: "gh issue close 5", allow: false, note: "reviewer cannot close issues" },
+	{ tag: "BR", role: "build-review", kind: "bash", input: "gh project item-list --owner o", allow: true, note: "reviewer may read the board" },
+	{ tag: "BR", role: "build-review", kind: "bash", input: "gh issue comment 5 --body hi", allow: true, note: "reviewer may comment findings" },
+
+	// ── [M3] case-variant paths still hit the governance + secret denylists (APFS) ──────
+	{ tag: "M3", role: "build-impl", kind: "write", input: inRepo(".ENV"), allow: false, note: "case-variant secret file" },
+	{ tag: "M3", role: "build-impl", kind: "write", input: inRepo("claude.md"), allow: false, note: "case-variant CLAUDE.md" },
+	{ tag: "M3", role: "build-impl", kind: "write", input: inRepo(".PI/agents/x.md"), allow: false, note: "case-variant .pi/agents" },
+
+	// ── [GIT] scoped git-lifecycle grant (mirrors the Claude per-role surface) ──────────
+	{ tag: "GIT", role: "think", kind: "bash", input: "git checkout -b think/x", allow: true, note: "think branches the Think PR" },
+	{ tag: "GIT", role: "think", kind: "bash", input: "git commit -m x", allow: true, note: "think commits" },
+	{ tag: "GIT", role: "think", kind: "bash", input: "git push -u origin think/x", allow: true, note: "think pushes" },
+	{ tag: "GIT", role: "think", kind: "bash", input: "gh pr create --title x --body y", allow: true, note: "think opens its PR" },
+	{ tag: "GIT", role: "sequence", kind: "bash", input: "git checkout -b x", allow: false, note: "sequence stays git-less" },
+	{ tag: "GIT", role: "build-review", kind: "bash", input: "git checkout -b x", allow: false, note: "reviewer stays git-less" },
+	{ tag: "GIT", role: "build-impl", kind: "bash", input: "gh pr create --title x", allow: true, note: "implementer opens the build PR" },
+
+	// ── [FORCE] force-push blocked for every role (incl. the git-authoring ones) ────────
+	{ tag: "FORCE", role: "build-impl", kind: "bash", input: "git push --force origin x", allow: false, note: "--force blocked" },
+	{ tag: "FORCE", role: "build-finish", kind: "bash", input: "git push -f", allow: false, note: "-f blocked" },
+	{ tag: "FORCE", role: "build-finish", kind: "bash", input: "git push --force-with-lease origin x", allow: false, note: "--force-with-lease blocked" },
+
+	// ── [MERGE] gh pr merge is role-scoped; merge-on-green/PASS is BEHAVIORAL (the prompt) ──
+	{ tag: "MERGE", role: "think", kind: "bash", input: "gh pr merge 5", allow: false, note: "think never merges (admission is operator-merged)" },
+	{ tag: "MERGE", role: "build-impl", kind: "bash", input: "gh pr merge 7", allow: false, note: "implementer never merges" },
+	{ tag: "MERGE", role: "plan", kind: "bash", input: "gh pr merge 5 --squash", allow: true, note: "plan automerges its planning PR" },
+	{ tag: "MERGE", role: "recirculator", kind: "bash", input: "gh pr merge 5 --squash", allow: true, note: "recirculator automerges its sync PR" },
+	{ tag: "MERGE", role: "build-finish", kind: "bash", input: "gh pr merge 7 --squash --delete-branch", allow: true, note: "build-finish merges the build PR (green/PASS gate is behavioral, not guard-enforced)" },
+	{ tag: "MERGE", role: "build-finish", kind: "bash", input: "gh pr merge 7 --auto", allow: false, note: "--auto blocked for every merge role" },
+
+	// ── [READONLY] build-review writes no file (reverted from the MG-B verdict-dir grant) ───
+	{ tag: "READONLY", role: "build-review", kind: "write", input: inRepo("docs/workflow/code-reviews/pr-7.verdict.json"), allow: false, note: "reviewer is read-only — it authors no verdict file" },
+	{ tag: "READONLY", role: "build-review", kind: "write", input: inRepo("src/x.ts"), allow: false, note: "reviewer cannot write source" },
+
+	// ── [DANGER] non-tracker gh verbs denied for all roles ──────────────────────────────
+	{ tag: "DANGER", role: "think", kind: "bash", input: "gh release create v1", allow: false, note: "release blocked" },
+	{ tag: "DANGER", role: "build-finish", kind: "bash", input: "gh secret set X --body y", allow: false, note: "secret blocked" },
+	{ tag: "DANGER", role: "plan", kind: "bash", input: "gh repo delete owner/repo --yes", allow: false, note: "repo delete blocked" },
+	{ tag: "DANGER", role: "plan", kind: "bash", input: "gh repo view", allow: true, note: "repo view is a read" },
+
+	// ── [M1b] command-substitution / backtick bodies still see the inner command ────────────
+	{ tag: "M1b", role: "build-review", kind: "bash", input: `$( rm -rf ${inRepo("src")} )`, allow: false, note: "$( … ) cmdsubst rm" },
+	{ tag: "M1b", role: "build-review", kind: "bash", input: "`rm -rf " + inRepo("src") + "`", allow: false, note: "backtick rm" },
+	{ tag: "M1b", role: "build-review", kind: "bash", input: `>( rm -rf ${inRepo("src")} )`, allow: false, note: "process-subst rm" },
+
+	// ── [M2] gh api implicit-POST / graphql is a tracker write (build-review read-only) ──────
+	{ tag: "M2", role: "build-review", kind: "bash", input: "gh api graphql -f query='mutation{ x }'", allow: false, note: "graphql is always POST" },
+	{ tag: "M2", role: "build-review", kind: "bash", input: "gh api repos/o/r/issues -f title=pwn", allow: false, note: "-f implies POST" },
+	{ tag: "M2", role: "build-review", kind: "bash", input: "gh api repos/o/r/issues", allow: true, note: "bare gh api is a GET read" },
+	{ tag: "M2", role: "build-review", kind: "bash", input: "gh api repos/o/r/issues -X GET", allow: true, note: "explicit GET stays a read" },
+	{ tag: "M2", role: "plan", kind: "bash", input: "gh project item-edit --id X --field-id F --single-select-option-id O", allow: true, note: "plan does tracker writes via the bounded gh project surface" },
+	{ tag: "M2", role: "plan", kind: "bash", input: "gh api graphql -f query='mutation{ x }'", allow: false, note: "gh api graphql is an unbounded raw surface — denied for all" },
+	{ tag: "M2", role: "plan", kind: "bash", input: "gh api --method POST repos/o/r/issues/5/dependencies/blocked_by -F issue_id=9", allow: true, note: "the bounded blocked-by dependency endpoint is the one safelisted gh-api write" },
+
+	// ── [M3b] $VAR-bearing cross-repo target refused fail-closed ─────────────────────────────
+	{ tag: "M3b", role: "build-finish", kind: "bash", input: "git --git-dir=$PWD/../other/.git --work-tree=$PWD/../other commit -m x", allow: false, note: "$PWD indirection" },
+	{ tag: "M3b", role: "build-finish", kind: "bash", input: 'git -C "$HOME/victim" commit -m x', allow: false, note: "$HOME indirection" },
+	{ tag: "M3b", role: "build-finish", kind: "bash", input: "git -C ../../x commit -m x", allow: false, note: "literal ../../ escape" },
+
+	// ── [WIDEN] git must respect the path ACL (B-2: no widening file authority) ──────────────
+	{ tag: "WIDEN", role: "build-finish", kind: "bash", input: "git rm docs/specs/x.md", allow: false, note: "git rm of a blocked spec" },
+	{ tag: "WIDEN", role: "build-finish", kind: "bash", input: "git checkout HEAD -- docs/prd/x.md", allow: false, note: "git checkout overwrites the PRD" },
+	{ tag: "WIDEN", role: "build-finish", kind: "bash", input: "git restore --source=HEAD CLAUDE.md", allow: false, note: "git restore overwrites CLAUDE.md" },
+	{ tag: "WIDEN", role: "build-finish", kind: "bash", input: "git rm src/old.test.ts", allow: true, note: "git rm of a source file is fine" },
+	{ tag: "WIDEN", role: "build-finish", kind: "bash", input: "git checkout -b build/wave1", allow: true, note: "branch creation is not a targeted file write" },
+
+	// ── [PARENT] cannot rm/redirect a dir that contains a protected surface (B-1/M-4) ────────
+	{ tag: "PARENT", role: "build-finish", kind: "bash", input: "rm -rf docs", allow: false, note: "rm of docs (contains prd/specs/…)" },
+	{ tag: "PARENT", role: "build-finish", kind: "bash", input: "rm -rf docs/workflow", allow: false, note: "rm of docs/workflow (contains recirculator/pillar-matrices)" },
+	{ tag: "PARENT", role: "build-finish", kind: "bash", input: "ln -s /tmp/pi-idc/build-finish/wf docs/workflow", allow: false, note: "redirect docs/workflow" },
+	{ tag: "PARENT", role: "build-finish", kind: "bash", input: "rm -rf src/legacy", allow: true, note: "rm of a source subdir is fine" },
+
+	// ── [PUSH] remote-ref destruction is blocked for all (m-1) ──────────────────────────────
+	{ tag: "PUSH", role: "build-impl", kind: "bash", input: "git push origin :main", allow: false, note: "empty-source refspec deletes the ref" },
+	{ tag: "PUSH", role: "build-impl", kind: "bash", input: "git push origin --delete main", allow: false, note: "--delete remote ref" },
+	{ tag: "PUSH", role: "build-impl", kind: "bash", input: "git push --mirror origin", allow: false, note: "--mirror overwrites all refs" },
+
+	// ── [ADMIN] gh pr merge --admin bypasses branch protection — blocked for all merge roles ──
+	{ tag: "ADMIN", role: "build-finish", kind: "bash", input: "gh pr merge 7 --admin --squash", allow: false, note: "--admin blocked (bypasses branch protection / the green-gate)" },
+
+	// ── [SAFELIST] git is a SAFELIST — every non-listed worktree/history op is denied (B-4) ──
+	{ tag: "SAFELIST", role: "build-finish", kind: "bash", input: "git apply /tmp/evil.patch", allow: false, note: "git apply writes the worktree" },
+	{ tag: "SAFELIST", role: "build-finish", kind: "bash", input: "git am /tmp/x.patch", allow: false, note: "git am" },
+	{ tag: "SAFELIST", role: "build-finish", kind: "bash", input: "git reset --hard origin/main", allow: false, note: "git reset --hard overwrites the worktree" },
+	{ tag: "SAFELIST", role: "build-finish", kind: "bash", input: "git cherry-pick deadbeef", allow: false, note: "git cherry-pick" },
+	{ tag: "SAFELIST", role: "build-finish", kind: "bash", input: "git stash pop", allow: false, note: "git stash pop" },
+	{ tag: "SAFELIST", role: "build-finish", kind: "bash", input: "git revert HEAD", allow: false, note: "git revert" },
+	{ tag: "SAFELIST", role: "build-finish", kind: "bash", input: "git rebase main", allow: false, note: "git rebase" },
+	{ tag: "SAFELIST", role: "build-finish", kind: "bash", input: "git merge other", allow: false, note: "git merge (local) — merges go through gh pr merge" },
+	// the `<ref> <pathspec>` checkout form WITHOUT `--` is now path-checked
+	{ tag: "SAFELIST", role: "build-finish", kind: "bash", input: "git checkout HEAD~1 docs/prd/x.md", allow: false, note: "checkout <ref> <pathspec> overwrites the PRD" },
+
+	// ── [APIMERGE] every merge goes through the gated `gh pr merge` — not via raw gh api (B-3) ─
+	{ tag: "APIMERGE", role: "build-finish", kind: "bash", input: "gh api -X PUT repos/o/r/pulls/8/merge", allow: false, note: "api REST merge bypasses the gated gh pr merge" },
+	{ tag: "APIMERGE", role: "build-impl", kind: "bash", input: "gh api -X PUT repos/o/r/pulls/8/merge", allow: false, note: "api merge for a non-merge role" },
+	{ tag: "APIMERGE", role: "build-impl", kind: "bash", input: "gh api graphql -f query='mutation{ mergePullRequest(input:{pullRequestId:\"X\"}){clientMutationId} }'", allow: false, note: "graphql merge mutation" },
+
+	// ── [GLOB] glob destruction across a protected surface is refused (M-5) ──────────────────
+	{ tag: "GLOB", role: "build-finish", kind: "bash", input: "rm -rf *", allow: false, note: "rm -rf * unbounded" },
+	{ tag: "GLOB", role: "build-finish", kind: "bash", input: "rm -rf docs/*", allow: false, note: "rm -rf docs/* unbounded" },
+
+	// ── [REG3] class-level fixes must NOT over-block the legit git lifecycle ─────────────────
+	{ tag: "REG3", role: "think", kind: "bash", input: "git checkout -b think/x", allow: true, note: "branch creation (operand is a ref, not a pathspec)" },
+	{ tag: "REG3", role: "build-impl", kind: "bash", input: "git switch -c build/x", allow: true, note: "switch -c branch creation" },
+	{ tag: "REG3", role: "build-impl", kind: "bash", input: "git restore src/x.ts", allow: true, note: "restore a source file (in authority)" },
+	{ tag: "REG3", role: "build-impl", kind: "bash", input: "git add src/x.ts", allow: true, note: "staging is safe + needed" },
+	{ tag: "REG3", role: "build-finish", kind: "bash", input: "git fetch origin", allow: true, note: "fetch updates refs, no worktree write" },
+
+	// ── [B5] inline `-c` config (alias→shell) + UNKNOWN subcommand denied fail-closed ────────
+	{ tag: "B5", role: "build-finish", kind: "bash", input: "git -c alias.pwn='!rm -rf docs' pwn", allow: false, note: "inline -c alias runs arbitrary shell" },
+	{ tag: "B5", role: "build-review", kind: "bash", input: "git -c alias.pwn='!rm -rf docs' pwn", allow: false, note: "inline -c blocked even for the read-only reviewer" },
+	{ tag: "B5", role: "build-finish", kind: "bash", input: "git -c alias.co=checkout co -- docs/specs/x.md", allow: false, note: "inline -c blocked regardless of payload" },
+	{ tag: "B5", role: "build-finish", kind: "bash", input: "git frobnicate --force", allow: false, note: "unknown subcommand denied fail-closed" },
+	{ tag: "B5", role: "build-review", kind: "bash", input: "git mergetool", allow: false, note: "unknown/unsafe subcommand for read-only role" },
+	{ tag: "B5", role: "build-finish", kind: "bash", input: "git status", allow: true, note: "a recognized read is still allowed" },
+	{ tag: "B5", role: "sequence", kind: "bash", input: "git log --oneline", allow: true, note: "reads are allowed for every role" },
+
+	// ── [B6] --pathspec-from-file reads an unbounded pathspec set → denied ───────────────────
+	{ tag: "B6", role: "build-finish", kind: "bash", input: "git rm --pathspec-from-file=/tmp/x.txt", allow: false, note: "pathspec-from-file is unbounded" },
+	{ tag: "B6", role: "build-finish", kind: "bash", input: "git restore --pathspec-from-file /tmp/x.txt", allow: false, note: "space form" },
+
+	// ── [M7] single-operand / no-`--` checkout + restore are path-checked ────────────────────
+	{ tag: "M7", role: "build-finish", kind: "bash", input: "git checkout docs/specs/x.md", allow: false, note: "1-operand checkout of a blocked path" },
+	{ tag: "M7", role: "build-finish", kind: "bash", input: "git checkout .", allow: false, note: "whole-tree discard hits a protected ancestor" },
+	{ tag: "M7", role: "build-finish", kind: "bash", input: "git restore docs/specs/x.md", allow: false, note: "1-operand restore of a blocked path" },
+
+	// ── [M6g] glob pathspec on a git op → refused ───────────────────────────────────────────
+	{ tag: "M6g", role: "build-finish", kind: "bash", input: "git rm -r 'docs/*'", allow: false, note: "glob pathspec" },
+	{ tag: "M6g", role: "build-finish", kind: "bash", input: "git checkout HEAD -- 'docs/*'", allow: false, note: "glob pathspec after --" },
+
+	// ── [B7] gh-api blocked-by exception matches the POSITIONAL endpoint only ────────────────
+	{ tag: "B7", role: "build-finish", kind: "bash", input: "gh api -X PUT repos/o/r/pulls/8/merge -f x=dependencies/blocked_by", allow: false, note: "marker smuggled in a -f value cannot unlock a merge" },
+	{ tag: "B7", role: "build-finish", kind: "bash", input: "gh api -X DELETE repos/o/r/releases/1 -f junk=dependencies/blocked_by", allow: false, note: "marker cannot unlock a release delete" },
+	{ tag: "B7", role: "build-review", kind: "bash", input: "gh api -X POST repos/o/r/issues/5/dependencies/blocked_by -f issue=1", allow: false, note: "even the blocked-by write is denied for the read-only reviewer" },
+
+	// ── [JUDGE] reset/pull/stash deliberately DENIED (loop unstages via `git restore --staged`) ─
+	{ tag: "JUDGE", role: "build-impl", kind: "bash", input: "git reset HEAD src/x.ts", allow: false, note: "reset not safelisted — unstage via restore --staged" },
+	{ tag: "JUDGE", role: "build-finish", kind: "bash", input: "git pull origin main", allow: false, note: "pull merges remote into the worktree — not in the IDC flow" },
+	{ tag: "JUDGE", role: "build-impl", kind: "bash", input: "git stash", allow: false, note: "stash not in the IDC flow" },
+	{ tag: "JUDGE", role: "build-impl", kind: "bash", input: "git restore --staged src/x.ts", allow: true, note: "the safelisted unstage path" },
+];
+
+let failures = 0;
+for (const c of cases) {
+	const evaluation = c.kind === "bash" ? evaluateBashForRole(c.role, c.input, CWD) : evaluatePathForRole(c.role, c.input, CWD);
+	const ok = evaluation.allowed === c.allow;
+	if (!ok) {
+		failures++;
+		console.log(`FAIL [${c.tag}] ${c.role} ${c.kind} "${c.input}" — expected ${c.allow ? "ALLOW" : "BLOCK"}, got ${evaluation.allowed ? "ALLOW" : "BLOCK"} :: ${evaluation.reason}`);
+	}
+}
+
+fs.rmSync(CWD, { recursive: true, force: true });
+
+if (failures === 0) {
+	console.log(`PASS: per-role guard ACL holds (${cases.length} cases: file-write fail-closed preserved; B1/B2/BR/M3 bypasses closed; scoped git grant + force-push/merge role-scoping enforced; merge-on-green/PASS is behavioral)`);
+	process.exit(0);
+}
+console.log(`FAIL: ${failures}/${cases.length} guard ACL assertions failed`);
+process.exit(1);

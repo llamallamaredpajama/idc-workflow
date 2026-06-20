@@ -2,6 +2,43 @@
 
 All notable changes to the IDC Workflow plugin are documented in this file.
 
+## 3.0.2 — 2026-06-19
+
+Two post-3.0.1 fix passes: the **experimental Pi runtime's merge gate is brought into line with the
+production Claude standard**, and the leftover-issues backlog is cleared.
+
+- **Pi runtime — merge-on-green is now BEHAVIORAL, not a hard interlock (experimental runtime only).**
+  An earlier iteration built the Pi build-finisher's merge gate as a hard "MG-B" interlock: the
+  per-role bash guard blocked `gh pr merge <N>` unless an independent reviewer had authored a PR-keyed
+  `verdict.json` PASS, and the reviewer was granted scoped write to that file. That is **stricter than
+  the production Claude runtime**, where the finisher merges on green because its prompt's
+  `/fullauto-goal` contract says so — no hard lock, no GitHub branch protection. The Pi runtime now
+  **mirrors that behavioral gate**: the verdict-file interlock, the reviewer's verdict-dir write grant,
+  and the verdict-file reader are removed; `build-review` is **read-only** again (findings travel to
+  `build-finish` over coms-net); `build-finish` keeps merge-only-on-green+PASS **behaviorally**.
+  **Zero GitHub changes.** All of the PR's general guard hardening is retained (cross-repo `git -C`
+  denial, the `git -c alias=…` arbitrary-shell block, the role-scoped merge grant, force-push /
+  `--auto` / `--admin` denials, the governance file-write ACL, glob / `--pathspec-from-file`
+  refusals), as is the alignment of all 7 Pi role prompts to the 5-field board
+  (Status/Stage/Wave/Phase/Domain + blocked-by). The guard's best-effort residuals are now documented
+  in `runtime/pi/SECURITY.md`.
+- **Leftover-issues backlog cleared (#69).** Triage closed 12 stale/already-resolved issues; the real
+  work was **lint MIN-9 hardening** (+ test), the **codex command-mirror prune + a `/idc:doctor` drift
+  check** (+ test), and the **Pi model-doc truth** fix (the launcher hardcodes the per-role model
+  defaults; the docs now say so). `#66` (Pi self-driving runtime maturity) stays open.
+
+## 3.0.1 — 2026-06-19
+
+Overnight autorun / e2e hardening from two autonomous loops against the autorun sandbox.
+
+- **Silent-failure retirement.** A GraphQL retire step that could fail silently now surfaces the error,
+  and `/idc:uninstall` cleans up after it.
+- **Deterministic branch cleanup.** A non-deterministic post-drain branch cleanup is replaced with a
+  deterministic one.
+- **jq-injection hardening** in the GitHub tracker recipe, plus a `.gitignore` for review-report litter
+  under the scaffolded `code-reviews/` tree.
+- **Exit-report accuracy.** The Autorun exit report no longer overstates what a drain completed.
+
 ## 3.0.0 — 2026-06-16
 
 IDC v3 — **the gate moves to the top, requirements grow a second half, and Ripple becomes the

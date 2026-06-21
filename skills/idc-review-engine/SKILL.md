@@ -20,7 +20,9 @@ true adversarial independence, token-optimal — never durable workers):
 1. **Per-PR build review** — iterate on findings → reverify (real tests green) → the Build
    finisher automerges on `PASS`/`PASS-WITH-NITS`.
 2. **Phase-close delta review** — one pass over the phase delta; findings are filed as new
-   board issues (non-blocking; phase close does not drive them to zero).
+   board issues (non-blocking; phase close does not drive them to zero) — **except
+   acceptance-class findings** (a Done-but-inert increment / `acceptance: gap`), which are
+   **blocking**: driven to zero or auto-recirculated before the phase closes.
 
 ## Architecture
 

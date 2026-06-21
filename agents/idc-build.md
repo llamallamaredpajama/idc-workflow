@@ -77,8 +77,13 @@ touched and promote the next eligible wave. Autowave is the default behavior, no
 
 ## Phase 5 — Phase close
 
-At phase boundary, run one delta review over the phase via the review engine; file its
-findings as **new board issues** (non-blocking — phase close does not drive them to zero).
+At phase boundary, run one delta review over the phase via the review engine. Most findings are
+filed as **new board issues** (non-blocking — phase close does not drive them to zero). But
+**acceptance-class findings are blocking**: an `acceptance: gap` (a Done-but-inert increment — a
+declared runtime/infra dependency or a `blocks_goal:true` deferral unmet) is driven to zero or
+auto-recirculated before the phase closes, never filed as a passive follow-up. And because a run can
+pause mid-phase, the dependency-aware acceptance check (Phase 4) runs at **every wave-close**, not
+only at the phase boundary — so an inert Done is caught even if the phase never closes.
 
 ## Boundaries & halt
 

@@ -99,4 +99,10 @@ grep -qiE 'inert/acceptance-gapped' "$IMPL" \
 grep -qiE 'acceptance-gap' "$RECMD" \
   || fail "commands/recirculate.md must accept an acceptance-gap as a recirculation input (P2-1)"
 
-echo "PASS: acceptance check gates inert-Done (unmet blocks_goal deferral); wave-scoped; malformed->exit2; build Phase 4 wired; recirc trigger broadened"
+# ---- P3: phase-close is BLOCKING for acceptance-class findings (others stay non-blocking) -----
+grep -qiE 'acceptance-class findings are blocking' "$BUILD" \
+  || fail "idc-build.md Phase 5 must make acceptance-class findings BLOCKING at phase close (P3)"
+grep -qiE 'every wave-close' "$BUILD" \
+  || fail "idc-build.md must run the acceptance check at every wave-close, not only at phase boundary (P3, mid-phase pause)"
+
+echo "PASS: acceptance check gates inert-Done; wave-scoped; malformed->exit2; build Phase 4 wired; recirc trigger broadened; phase-5 blocks acceptance-class"

@@ -66,8 +66,14 @@ disjoint matrix should preclude) get a deconflict pass on demand.
 
 ## Phase 4 — Wave close (autowave default)
 
-When the wave's issues are all `Done`: run the full test suite once, clean up the board state
-it touched, and promote the next eligible wave. Autowave is the default behavior, not a flag.
+When the wave's issues are all `Done`: run the full test suite once, then run the
+**dependency-aware acceptance check** as a **blocking** gate —
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_acceptance_check.py" --tracker <TRACKER.md> --wave <N>`
+(or the github-backend equivalent via `idc:idc-tracker-adapter`). On `acceptance: gap` the wave does
+**not** close green: for each offending **Done-but-inert** issue, auto-file a recirculation
+(`/idc:recirculate`) — re-open/re-sequence the enabling obligation and link it `blocked-by` to its
+dependents — before doing anything else. Only on `acceptance: ok` clean up the board state it
+touched and promote the next eligible wave. Autowave is the default behavior, not a flag.
 
 ## Phase 5 — Phase close
 

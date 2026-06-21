@@ -148,6 +148,27 @@ JSON
 python3 "$VC" "$WORK/deferral-badbool.json" >/dev/null 2>&1 \
   && fail "a deferral with a non-bool blocks_goal (string \"true\") was accepted (must be a JSON boolean)"
 
+# a required STRING field that is PRESENT-but-null (not merely omitted) must be rejected — a
+# strip()-only guard only catches empty strings, so a null suggested_issue would slip through and
+# the acceptance gate would read a contentless obligation. Distinct from deferral-missing above,
+# which exercises only the absent-key branch.
+cat > "$WORK/deferral-null.json" <<'JSON'
+{"verdict":"PASS","dimensions_run":["security"],"findings":[],
+ "deferrals":[{"kind":"deferred","what":"x","blocks_goal":false,"suggested_issue":null}]}
+JSON
+python3 "$VC" "$WORK/deferral-null.json" >/dev/null 2>&1 \
+  && fail "a deferral with a present-but-null suggested_issue was accepted (must be a non-empty string)"
+
+# the same present-but-null hole on a FINDING string field (evidence) must also be rejected —
+# confidence stays numeric, so the string rule must not wrongly demand a string there.
+cat > "$WORK/finding-null.json" <<'JSON'
+{"verdict":"FAIL","dimensions_run":["security"],
+ "findings":[{"dimension":"security","severity":"major","confidence":0.9,
+   "evidence":null,"attack":"a","unblock":"u","fingerprint":"security:x:1"}]}
+JSON
+python3 "$VC" "$WORK/finding-null.json" >/dev/null 2>&1 \
+  && fail "a finding with a present-but-null evidence was accepted (must be a non-empty string)"
+
 # a non-object deferral element must produce a CLEAN error, not a Python traceback
 cat > "$WORK/deferral-nondict.json" <<'JSON'
 {"verdict":"PASS","dimensions_run":["security"],"findings":[],"deferrals":["not-an-object"]}

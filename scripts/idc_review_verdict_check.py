@@ -63,8 +63,13 @@ def check(doc):
             problems.append(f"finding[{i}] is not a JSON object")
             continue
         for k in REQUIRED_FINDING:
-            if k not in f or (isinstance(f.get(k), str) and not f[k].strip()):
-                problems.append(f"finding[{i}] missing/empty `{k}`")
+            # A required field that is present-but-null/[]/{}/0 (any non-string) must be rejected,
+            # not silently accepted — a strip()-only guard only catches empty *strings*. `confidence`
+            # is numeric and carries its own range check below, so it is exempt from the string rule.
+            if k not in f:
+                problems.append(f"finding[{i}] missing `{k}`")
+            elif k != "confidence" and (not isinstance(f.get(k), str) or not f[k].strip()):
+                problems.append(f"finding[{i}] `{k}` must be a non-empty string")
         if f.get("severity") not in SEVERITIES:
             problems.append(f"finding[{i}] severity must be one of {sorted(SEVERITIES)}")
         elif f.get("dimension") == TEST_GENUINENESS_DIM and f.get("severity") not in TEST_GENUINENESS_MIN:
@@ -87,8 +92,13 @@ def check(doc):
                 problems.append(f"deferral[{i}] is not a JSON object")
                 continue
             for k in REQUIRED_DEFERRAL:
-                if k not in d or (isinstance(d.get(k), str) and not d[k].strip()):
-                    problems.append(f"deferral[{i}] missing/empty `{k}`")
+                # As with findings: a present-but-null/non-string required field is rejected (a
+                # strip()-only guard misses it). `blocks_goal` is a boolean with its own type check
+                # below, so it is exempt from the non-empty-string rule.
+                if k not in d:
+                    problems.append(f"deferral[{i}] missing `{k}`")
+                elif k != "blocks_goal" and (not isinstance(d.get(k), str) or not d[k].strip()):
+                    problems.append(f"deferral[{i}] `{k}` must be a non-empty string")
             # blocks_goal gates the acceptance check; a strip()-only check would pass the string
             # "true", so the boolean type is enforced explicitly.
             if "blocks_goal" in d and not isinstance(d.get("blocks_goal"), bool):

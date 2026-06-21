@@ -6,18 +6,23 @@ so a merged-"Done" issue can never ship INERT (autorun audit Fix B). It reads th
 block — the same fenced-JSON the autorun drain predicate reads — and asserts that no Done issue
 carries an UNMET acceptance obligation.
 
-The obligation signal is the structured deferral `{kind, what, blocks_goal, suggested_issue}`
-(validated at review time by `idc_review_verdict_check.py`). A deferral is "met" when
-`blocks_goal` is false, OR its `suggested_issue` names a tracker issue (`#<number>`) that is
-itself `Done`. A `blocks_goal: true` deferral that resolves to no Done enabler — free text, or a
-sibling that isn't Done — is an ACCEPTANCE GAP: the increment is Done on the board but inert in
-reality (e.g. a DDL merged with no provisioned instance, #449). On a gap, the wave-close step
-auto-files a recirculation instead of reporting green.
+The obligation is a structured **deferral** the closeout serializes onto the issue as a comment
+marker (no dedicated tracker field, no seventh op — `comment` is one of the six core ops, and both
+backends carry comments; `WORKFLOW.md §3.3` holds):
+
+    <!-- idc-deferral: {"kind": "...", "what": "...", "blocks_goal": true, "suggested_issue": "#365"} -->
+
+A deferral is "met" when `blocks_goal` is false, OR its `suggested_issue` names a **distinct**
+tracker issue (`#<number>`) that is itself `Done`. A `blocks_goal: true` deferral that resolves to
+no Done enabler — free text, a non-Done sibling, or a self-reference — is an ACCEPTANCE GAP: the
+increment is Done on the board but inert in reality (e.g. a DDL merged with no provisioned
+instance, #449). On a gap, the wave-close step auto-files a recirculation instead of reporting
+green.
 
 Optional `--wave N` scopes the check to one wave (matched by the issue's `wave` field).
 
 Prints `acceptance: ok` (exit 0) or `acceptance: gap <issue#s>` (exit 1); exit 2 on a malformed
-tracker or corrupt issue/deferral.
+tracker, corrupt issue, or an unparseable deferral marker.
 
 Usage: idc_acceptance_check.py --tracker <TRACKER.md> [--wave N]   (exit 0 = ok, 1 = gap, 2 = error)
 """
@@ -28,6 +33,8 @@ import sys
 
 BEGIN = "<!-- idc-tracker-state:begin -->"
 END = "<!-- idc-tracker-state:end -->"
+# A closeout serializes each unresolved obligation as this hidden marker in an issue comment.
+DEFERRAL_MARKER = re.compile(r"<!--\s*idc-deferral:\s*(\{.*?\})\s*-->", re.S)
 
 
 def load(path):
@@ -55,6 +62,24 @@ def issue_ref(value):
     return int(m.group(1)) if m else None
 
 
+def deferrals_of(issue):
+    """Parse the structured deferral markers a closeout posted to an issue's comments.
+
+    The deferral object is validated at review time by idc_review_verdict_check.py; here the gate
+    only needs to re-read it from where the finisher landed it. A marker whose JSON is unparseable
+    is corruption, not "no deferral" — fail closed (exit 2), never silently skip a possible gap."""
+    out = []
+    for c in issue.get("comments", []):
+        for m in DEFERRAL_MARKER.finditer(str(c)):
+            try:
+                out.append(json.loads(m.group(1)))
+            except json.JSONDecodeError as e:
+                sys.stderr.write(f"idc-acceptance-check: issue {issue.get('number')} has an "
+                                 f"unparseable idc-deferral marker ({e})\n")
+                sys.exit(2)
+    return out
+
+
 def gaps(state, wave=None):
     """Sorted issue numbers that are Done-but-inert (an unmet blocks_goal:true deferral)."""
     issues = state.get("issues", [])
@@ -70,23 +95,21 @@ def gaps(state, wave=None):
             continue
         if want is not None and wave_num(it.get("wave")) != want:
             continue
-        deferrals = it.get("deferrals", [])
-        if not isinstance(deferrals, list):
-            sys.stderr.write(f"idc-acceptance-check: issue {it['number']} `deferrals` must be a list\n")
-            sys.exit(2)
-        for d in deferrals:
-            if not isinstance(d, dict):
-                sys.stderr.write(f"idc-acceptance-check: issue {it['number']} has a non-object deferral\n")
+        for d in deferrals_of(it):
+            bg = d.get("blocks_goal")
+            # blocks_goal gates everything; the validator rejects a non-bool upstream, but the gate
+            # fails closed on one that slipped through rather than mis-reading "true" as non-blocking.
+            if bg is not None and not isinstance(bg, bool):
+                sys.stderr.write(f"idc-acceptance-check: issue {it['number']} deferral `blocks_goal` "
+                                 f"must be a JSON boolean (got {type(bg).__name__})\n")
                 sys.exit(2)
-            # only a real boolean True blocks the GOAL; the verdict checker rejects a non-bool
-            # blocks_goal upstream, so anything else here is a non-blocking note.
-            if d.get("blocks_goal") is not True:
+            if bg is not True:
                 continue
             ref = issue_ref(d.get("suggested_issue", ""))
-            # "met" requires a DIFFERENT issue that carries the enabling work — a deferral that
-            # names its own issue is not resolved (it would let the exact inert-Done case slip).
+            # "met" requires a DISTINCT issue that carries the enabling work — free text, a non-Done
+            # sibling, or a self-reference all leave the obligation unmet.
             if ref is not None and ref != it["number"] and status_by_num.get(ref) == "Done":
-                continue  # the enabling obligation is a distinct Done issue — met
+                continue
             offending.append(it["number"])
             break
     return sorted(offending)

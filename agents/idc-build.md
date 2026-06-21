@@ -68,12 +68,18 @@ disjoint matrix should preclude) get a deconflict pass on demand.
 
 When the wave's issues are all `Done`: run the full test suite once, then run the
 **dependency-aware acceptance check** as a **blocking** gate —
-`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_acceptance_check.py" --tracker <TRACKER.md> --wave <N>`
-(or the github-backend equivalent via `idc:idc-tracker-adapter`). On `acceptance: gap` the wave does
-**not** close green: for each offending **Done-but-inert** issue, auto-file a recirculation
-(`/idc:recirculate`) — re-open/re-sequence the enabling obligation and link it `blocked-by` to its
-dependents — before doing anything else. Only on `acceptance: ok` clean up the board state it
-touched and promote the next eligible wave. Autowave is the default behavior, not a flag.
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_acceptance_check.py" --tracker <TRACKER.md> --wave <N>`.
+On the **github backend** there is no on-disk `TRACKER.md`, so feed the *same* script the same input
+rather than a model judgement call: via `idc:idc-tracker-adapter`, `query` the wave's `Status=Done`
+issues, read each one's comments (the `<!-- idc-deferral: {…} -->` markers the finisher posted via
+the `comment` op), materialize them into the gate's `<!-- idc-tracker-state:begin -->` JSON block
+(`{"issues":[{"number","status","wave","comments":[…]}]}`) in a temp file, and run
+`idc_acceptance_check.py --tracker <tempfile> --wave <N>` over it — identical logic, identical exit
+codes. On `acceptance: gap` the wave does **not** close green: for each offending **Done-but-inert**
+issue, auto-file a recirculation (`/idc:recirculate`) — re-open/re-sequence the enabling obligation
+and link it `blocked-by` to its dependents — before doing anything else. Only on `acceptance: ok`
+clean up the board state it touched and promote the next eligible wave. Autowave is the default
+behavior, not a flag.
 
 ## Phase 5 — Phase close
 
@@ -83,7 +89,10 @@ filed as **new board issues** (non-blocking — phase close does not drive them 
 declared runtime/infra dependency or a `blocks_goal:true` deferral unmet) is driven to zero or
 auto-recirculated before the phase closes, never filed as a passive follow-up. And because a run can
 pause mid-phase, the dependency-aware acceptance check (Phase 4) runs at **every wave-close**, not
-only at the phase boundary — so an inert Done is caught even if the phase never closes.
+only at the phase boundary — so an inert Done is caught even if the phase never closes. At the phase
+boundary itself the check also runs **unscoped** (no `--wave`, the whole board) as a backstop, so a
+Done-but-inert issue with no/odd wave value — or one whose enabling deferral landed after its own
+wave already closed — is still caught even though no single `--wave N` close would report it.
 
 ## Boundaries & halt
 

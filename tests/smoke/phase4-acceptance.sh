@@ -154,6 +154,11 @@ grep -qiE 'acceptance: gap' "$BUILD" \
   || fail "idc-build.md must act on an 'acceptance: gap' (auto-recirculate, do not close green) (P1-1)"
 grep -qiE 'Done-but-inert' "$BUILD" \
   || fail "idc-build.md wave-close must auto-file a recirculation for each Done-but-inert issue (P1-1)"
+# github parity: the github path must be CONCRETE — materialize query+comments into the gate's
+# state block and run the SAME script. Reverting to a vague "github-backend equivalent" drops the
+# idc-tracker-state materialization → red.
+grep -qiE 'idc-tracker-state' "$BUILD" \
+  || fail "idc-build.md Phase 4 must make the github path concrete: materialize query+comments into the gate's idc-tracker-state block and run the same script (P1-1 github parity)"
 
 # ---- producer: the finisher lands each unresolved deferral as an idc-deferral comment marker --
 FIN="$PLUGIN/agents/idc-finisher.md"
@@ -176,5 +181,7 @@ grep -qiE 'acceptance-class findings are blocking' "$BUILD" \
   || fail "idc-build.md Phase 5 must make acceptance-class findings BLOCKING at phase close (P3)"
 grep -qiE 'every wave-close' "$BUILD" \
   || fail "idc-build.md must run the acceptance check at every wave-close, not only at phase boundary (P3, mid-phase pause)"
+grep -qiE 'unscoped' "$BUILD" \
+  || fail "idc-build.md Phase 5 must also run the acceptance check UNSCOPED (whole board) as a backstop for a waveless/post-close inert Done (P3 backstop)"
 
 echo "PASS: acceptance gate (deferral comment markers) catches inert-Done; wave-scoped; bad marker/malformed->exit2; build wired; finisher produces; recirc trigger; phase-5 blocks acceptance-class"

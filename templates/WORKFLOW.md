@@ -69,6 +69,19 @@ TRD gates when `gating.trd: on` (greenfield off / brownfield on). **Nothing else
 asks for permission** — once the Think PR merges, planning and building free-flow. The
 Recirculator reuses this **same** gate for any backflow that needs a requirements change (§4.4).
 
+### 2.1 The strategic decision gate (the second gate type)
+
+The requirements gate above is the only gate that **admits** an idea, and the only thing that asks
+for *permission*. Separately, a run can hit a genuine **non-requirements** strategic GO/NO-GO — e.g.
+a proving-spike result — that changes no PRD/TRD. Rather than let the orchestrator **improvise** that
+prompt (the failure mode the no-ask invariant forbids, §4.3/§4.5), IDC models it as a board state: an
+**`operator-decision`** gate (`idc:idc-gate-issue`). It is **not** an admission gate — it never lands
+a PRD/TRD and never reuses the Think-PR merge signal. Its fail-closed approval is an **explicit
+positive act** (a `decision-approved` label, or a merged lightweight decision-PR); a
+closed-but-unapproved gate is **not** a GO. It pauses **only its dependents** and reuses the existing
+six tracker operations (§3.3) — no seventh op. The orchestrator **reports** a pending decision gate
+and keeps draining the rest of the pipe, exactly as it reports a pending Think PR.
+
 ## 3. Tracker substrate
 
 The tracker is the glass wall (§1.2). Its backend is selected by `backend:` in

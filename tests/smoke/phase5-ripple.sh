@@ -148,4 +148,19 @@ grep -qiE 'equivalent manual signal' "$GATE_SKILL" \
 grep -qiE 'closed-but-unmerged' "$GATE_SKILL" \
   || fail "gate-issue skill must state that a closed-but-unmerged gate does NOT unblock (Think-PR merge is the only admission)"
 
-echo "PASS: recirculation downstream-sync + requirements-only gate doctrine + Think-PR gate reuse green"
+# ---- P2-2: the strategic decision gate is a modeled board slot, fail-closed, no 7th op --------
+# A non-requirements GO/NO-GO (e.g. a proving-spike) gets a real board slot so the orchestrator
+# never IMPROVISES the prompt (autorun audit Fix D). It is a SECOND gate TYPE in idc-gate-issue —
+# NOT a second admission gate, and the requirements gate stays the only ADMISSION gate.
+grep -qiE 'operator-decision' "$GATE_SKILL" \
+  || fail "gate-issue skill must define the strategic operator-decision gate type (P2-2)"
+grep -qiE 'decision-approved' "$GATE_SKILL" \
+  || fail "the decision gate's approval must be an explicit positive signal (decision-approved / merged decision-PR), not a bare close (P2-2)"
+grep -qiE 'closed-but-unapproved' "$GATE_SKILL" \
+  || fail "the decision gate must state a closed-but-unapproved gate is NOT a GO (fail-closed) (P2-2)"
+grep -qiE 'only requirements-admission gate' "$GATE_SKILL" \
+  || fail "gate-issue skill must keep the requirements gate as the only ADMISSION gate (P2-2 doctrine preserved)"
+grep -qiE 'operator-decision' "$WORKFLOW" \
+  || fail "WORKFLOW.md must document the strategic operator-decision gate as a distinct board state (P2-2, append-only §2.1)"
+
+echo "PASS: recirculation downstream-sync + requirements-only gate doctrine + Think-PR gate reuse + strategic decision gate green"

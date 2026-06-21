@@ -13,16 +13,21 @@ backends carry comments; `WORKFLOW.md §3.3` holds):
     <!-- idc-deferral: {"kind": "...", "what": "...", "blocks_goal": true, "suggested_issue": "#365"} -->
 
 A deferral is "met" when `blocks_goal` is false, OR its `suggested_issue` names a **distinct**
-tracker issue (`#<number>`) that is itself `Done`. A `blocks_goal: true` deferral that resolves to
-no Done enabler — free text, a non-Done sibling, or a self-reference — is an ACCEPTANCE GAP: the
-increment is Done on the board but inert in reality (e.g. a DDL merged with no provisioned
-instance, #449). On a gap, the wave-close step auto-files a recirculation instead of reporting
-green.
+tracker issue (`#<number>`) that is itself `Done` **and not itself inert** (transitive — an enabler
+that is Done-but-inert does not satisfy the obligation). A `blocks_goal: true` deferral that
+resolves to no clean Done enabler — free text, a non-Done sibling, a self-reference, or a Done-but-
+inert enabler — is an ACCEPTANCE GAP: the increment is Done on the board but inert in reality (e.g.
+a DDL merged with no provisioned instance, #449). On a gap, the wave-close step auto-files a
+recirculation instead of reporting green. Inertness is evaluated over the **whole board**,
+independent of `--wave`, so an out-of-wave enabler is never assumed clean.
 
-Optional `--wave N` scopes the check to one wave (matched by the issue's `wave` field).
+Optional `--wave N` scopes which Done issues are *reported* to one wave (matched by the issue's
+`wave` field); it does not narrow the enabler-inertness evaluation. A `--wave` value carrying no
+wave number is a usage error (exit 2), never a silent whole-board fallback.
 
 Prints `acceptance: ok` (exit 0) or `acceptance: gap <issue#s>` (exit 1); exit 2 on a malformed
-tracker, corrupt issue, or an unparseable deferral marker.
+tracker, corrupt issue, an unparseable deferral marker, a `blocks_goal` that is not a real JSON
+boolean (null/missing/string/number all fail closed), or a `--wave` with no number.
 
 Usage: idc_acceptance_check.py --tracker <TRACKER.md> [--wave N]   (exit 0 = ok, 1 = gap, 2 = error)
 """
@@ -80,38 +85,72 @@ def deferrals_of(issue):
     return out
 
 
+def _has_unmet(num, status_by_num, done_deferrals, memo, stack):
+    """True if Done issue `num` carries a `blocks_goal:true` deferral that is NOT met.
+
+    "met" = the deferral names a DISTINCT issue (`#<n>`) that is itself `Done` AND not itself inert
+    (transitive). Memoized and cycle-safe: an issue currently on the resolution stack (a reference
+    cycle) resolves to inert — it cannot be cleanly enabled, so fail closed."""
+    if num in memo:
+        return memo[num]
+    if num in stack:
+        return True
+    stack.add(num)
+    unmet = False
+    for d in done_deferrals.get(num, []):
+        if d.get("blocks_goal") is not True:        # blocks_goal validated as bool in gaps()
+            continue
+        ref = issue_ref(d.get("suggested_issue", ""))
+        met = (ref is not None and ref != num and status_by_num.get(ref) == "Done"
+               and not _has_unmet(ref, status_by_num, done_deferrals, memo, stack))
+        if not met:
+            unmet = True
+            break
+    stack.discard(num)
+    memo[num] = unmet
+    return unmet
+
+
 def gaps(state, wave=None):
-    """Sorted issue numbers that are Done-but-inert (an unmet blocks_goal:true deferral)."""
+    """Sorted issue numbers that are Done-but-inert (an unmet blocks_goal:true deferral, transitively),
+    filtered to `--wave N` when given."""
     issues = state.get("issues", [])
     for it in issues:
         if "number" not in it:
             sys.stderr.write("idc-acceptance-check: corrupt tracker — an issue is missing `number`\n")
             sys.exit(2)
+    if wave is not None and wave_num(wave) is None:
+        sys.stderr.write(f"idc-acceptance-check: --wave {wave!r} carries no wave number\n")
+        sys.exit(2)
     status_by_num = {it["number"]: it.get("status") for it in issues}
+    # Parse + validate every Done issue's deferrals ONCE, whole-board — so transitivity and the
+    # fail-closed marker/blocks_goal checks are wave-independent: an out-of-wave enabler is never
+    # assumed clean, and a bad marker or non-boolean blocks_goal anywhere is caught.
+    done_deferrals = {}
+    for it in issues:
+        if it.get("status") != "Done":
+            continue
+        ds = deferrals_of(it)                        # exits 2 on an unparseable marker
+        for d in ds:
+            bg = d.get("blocks_goal")
+            # The validator (idc_review_verdict_check.py) requires a real JSON boolean upstream; the
+            # gate is the last-resort defense, so anything else — null, a missing key, the string
+            # "true", a number — fails closed (exit 2) rather than being mis-read as non-blocking.
+            if not isinstance(bg, bool):
+                sys.stderr.write(f"idc-acceptance-check: issue {it['number']} deferral `blocks_goal` "
+                                 f"must be a JSON boolean (got {type(bg).__name__})\n")
+                sys.exit(2)
+        done_deferrals[it["number"]] = ds
     want = wave_num(wave) if wave is not None else None
+    memo = {}
     offending = []
     for it in issues:
         if it.get("status") != "Done":
             continue
         if want is not None and wave_num(it.get("wave")) != want:
             continue
-        for d in deferrals_of(it):
-            bg = d.get("blocks_goal")
-            # blocks_goal gates everything; the validator rejects a non-bool upstream, but the gate
-            # fails closed on one that slipped through rather than mis-reading "true" as non-blocking.
-            if bg is not None and not isinstance(bg, bool):
-                sys.stderr.write(f"idc-acceptance-check: issue {it['number']} deferral `blocks_goal` "
-                                 f"must be a JSON boolean (got {type(bg).__name__})\n")
-                sys.exit(2)
-            if bg is not True:
-                continue
-            ref = issue_ref(d.get("suggested_issue", ""))
-            # "met" requires a DISTINCT issue that carries the enabling work — free text, a non-Done
-            # sibling, or a self-reference all leave the obligation unmet.
-            if ref is not None and ref != it["number"] and status_by_num.get(ref) == "Done":
-                continue
+        if _has_unmet(it["number"], status_by_num, done_deferrals, memo, set()):
             offending.append(it["number"])
-            break
     return sorted(offending)
 
 

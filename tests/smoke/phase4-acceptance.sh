@@ -57,8 +57,8 @@ emit "$WORK/gap-nondone.md" <<'JSON'
    "comments":["<!-- idc-deferral: {\"kind\":\"out-of-boundary\",\"what\":\"Spanner instance\",\"blocks_goal\":true,\"suggested_issue\":\"#365\"} -->"]}
 ]}
 JSON
-python3 "$SCRIPT" --tracker "$WORK/gap-nondone.md" >/dev/null 2>&1 \
-  && fail "a Done issue whose enabling sibling (#365) is not Done must be a gap (exit 1)"
+out="$(python3 "$SCRIPT" --tracker "$WORK/gap-nondone.md" 2>&1)"; rc=$?
+[ "$rc" -eq 1 ] || fail "a Done issue whose enabling sibling (#365) is not Done must be a gap (exit 1, not $rc): $out"
 
 # ---- gap: a self-referencing deferral (suggested_issue == its own #) is NOT resolved ----------
 emit "$WORK/gap-selfref.md" <<'JSON'
@@ -67,8 +67,8 @@ emit "$WORK/gap-selfref.md" <<'JSON'
    "comments":["<!-- idc-deferral: {\"kind\":\"out-of-boundary\",\"what\":\"Spanner instance\",\"blocks_goal\":true,\"suggested_issue\":\"#449\"} -->"]}
 ]}
 JSON
-python3 "$SCRIPT" --tracker "$WORK/gap-selfref.md" >/dev/null 2>&1 \
-  && fail "a deferral naming its OWN issue must NOT count as resolved (self-reference loophole)"
+out="$(python3 "$SCRIPT" --tracker "$WORK/gap-selfref.md" 2>&1)"; rc=$?
+[ "$rc" -eq 1 ] || fail "a deferral naming its OWN issue must be a gap (self-reference loophole) (exit 1, not $rc): $out"
 
 # ---- not a gap: a blocks_goal:FALSE deferral is a non-blocking note ---------------------------
 emit "$WORK/nonblocking.md" <<'JSON'
@@ -95,6 +95,40 @@ out="$(python3 "$SCRIPT" --tracker "$WORK/twowave.md" --wave 3 2>&1)"; rc=$?
 echo "$out" | grep -qE "(^| )300( |$)" || fail "--wave 3 must name #300 (got: $out)"
 python3 "$SCRIPT" --tracker "$WORK/twowave.md" --wave 4 >/dev/null \
   || fail "--wave 4 must report ok (the only Wave-4 issue is clean)"
+
+# ---- TRANSITIVE inertness: a --wave N close must catch a dependent whose enabler is itself inert
+#      and OUT of wave N (else a wave-scoped check assumes an out-of-wave Done enabler is clean and
+#      ships a transitively-inert increment — the cardinal silent-pass). #449 (Wave 4) -> #365, and
+#      #365 (Wave 3) is Done but carries its OWN unmet blocks_goal:true deferral. Gut the transitive
+#      check (status-only "met") and --wave 4 goes back to `ok` while shipping inert #449 -> red.
+emit "$WORK/transitive.md" <<'JSON'
+{"issues":[
+  {"number":365,"status":"Done","stage":"Buildable","title":"Provision Spanner instance","blocked_by":[],"wave":"Wave 3",
+   "comments":["<!-- idc-deferral: {\"kind\":\"out-of-boundary\",\"what\":\"IAM still missing\",\"blocks_goal\":true,\"suggested_issue\":\"do it later\"} -->"]},
+  {"number":449,"status":"Done","stage":"Buildable","title":"Two-store seed","blocked_by":[],"wave":"Wave 4",
+   "comments":["<!-- idc-deferral: {\"kind\":\"out-of-boundary\",\"what\":\"Spanner instance\",\"blocks_goal\":true,\"suggested_issue\":\"#365\"} -->"]}
+]}
+JSON
+out="$(python3 "$SCRIPT" --tracker "$WORK/transitive.md" --wave 4 2>&1)"; rc=$?
+[ "$rc" -eq 1 ] || fail "--wave 4 must catch #449 whose out-of-wave enabler #365 is itself inert (transitive) (exit 1, not $rc): $out"
+echo "$out" | grep -qE "(^| )449( |$)" || fail "the transitive gap must name #449 (got: $out)"
+
+# ---- a --wave value carrying NO wave number -> exit 2 (never a silent whole-board fallback) -----
+python3 "$SCRIPT" --tracker "$WORK/twowave.md" --wave four >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 2 ] || fail "a non-numeric --wave value (typo) must exit 2, not silently re-scope the whole board (got $rc)"
+
+# ---- blocks_goal:null / missing -> exit 2 (fail-closed; the gate is the last-resort defense) ----
+# The validator rejects a null/absent blocks_goal upstream, but the gate must not mis-read a null
+# (or a manually-edited tracker) as "non-blocking" and silently pass. Loosen the gate's bool check
+# back to `bg is not None and ...` and this goes green while a null deferral ships inert -> red.
+emit "$WORK/nullbg.md" <<'JSON'
+{"issues":[
+  {"number":449,"status":"Done","stage":"Buildable","title":"Two-store seed","blocked_by":[],"wave":"Wave 4",
+   "comments":["<!-- idc-deferral: {\"kind\":\"out-of-boundary\",\"what\":\"Spanner instance\",\"blocks_goal\":null,\"suggested_issue\":\"later\"} -->"]}
+]}
+JSON
+python3 "$SCRIPT" --tracker "$WORK/nullbg.md" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 2 ] || fail "a blocks_goal:null deferral must exit 2 (fail-closed), not be read as non-blocking (got $rc)"
 
 # ---- unparseable deferral marker -> exit 2 (fail-closed, never silently skip a possible gap) --
 emit "$WORK/badmarker.md" <<'JSON'

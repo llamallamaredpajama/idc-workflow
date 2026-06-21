@@ -70,12 +70,13 @@ When the wave's issues are all `Done`: run the full test suite once, then run th
 **dependency-aware acceptance check** as a **blocking** gate —
 `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_acceptance_check.py" --tracker <TRACKER.md> --wave <N>`.
 On the **github backend** there is no on-disk `TRACKER.md`, so feed the *same* script the same input
-rather than a model judgement call: via `idc:idc-tracker-adapter`, `query` the wave's `Status=Done`
-issues, read each one's comments (the `<!-- idc-deferral: {…} -->` markers the finisher posted via
-the `comment` op), materialize them into the gate's `<!-- idc-tracker-state:begin -->` JSON block
+rather than a model judgement call: via `idc:idc-tracker-adapter`, `query` **all** `Status=Done`
+issues (the whole board, not just wave N — the gate must see a cross-wave enabler to mark a deferral
+met), read each one's comments (the `<!-- idc-deferral: {…} -->` markers the finisher posted via the
+`comment` op), materialize them into the gate's `<!-- idc-tracker-state:begin -->` JSON block
 (`{"issues":[{"number","status","wave","comments":[…]}]}`) in a temp file, and run
-`idc_acceptance_check.py --tracker <tempfile> --wave <N>` over it — identical logic, identical exit
-codes. On `acceptance: gap` the wave does **not** close green: for each offending **Done-but-inert**
+`idc_acceptance_check.py --tracker <tempfile> --wave <N>` over it — `--wave` scopes only which Done
+issues are *reported*, never the enabler lookup. Identical logic, identical exit codes. On `acceptance: gap` the wave does **not** close green: for each offending **Done-but-inert**
 issue, auto-file a recirculation (`/idc:recirculate`) — re-open/re-sequence the enabling obligation
 and link it `blocked-by` to its dependents — before doing anything else. Only on `acceptance: ok`
 clean up the board state it touched and promote the next eligible wave. Autowave is the default

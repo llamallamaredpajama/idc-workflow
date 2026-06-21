@@ -38,8 +38,10 @@ import sys
 
 BEGIN = "<!-- idc-tracker-state:begin -->"
 END = "<!-- idc-tracker-state:end -->"
-# A closeout serializes each unresolved obligation as this hidden marker in an issue comment.
-DEFERRAL_MARKER = re.compile(r"<!--\s*idc-deferral:\s*(\{.*?\})\s*-->", re.S)
+# A closeout serializes each unresolved obligation as this hidden marker in an issue comment. The
+# sentinel is matched FIRST (the payload is captured up to the comment close), so a corrupt payload
+# fails closed rather than slipping past a `{…}`-anchored pattern as "no deferral".
+DEFERRAL_MARKER = re.compile(r"<!--\s*idc-deferral:\s*(.*?)\s*-->", re.S)
 
 
 def load(path):
@@ -49,7 +51,11 @@ def load(path):
     if not m:
         sys.stderr.write(f"idc-acceptance-check: no tracker state block in {path}\n")
         sys.exit(2)
-    return json.loads(m.group(1))
+    state = json.loads(m.group(1))
+    if not isinstance(state, dict):
+        sys.stderr.write(f"idc-acceptance-check: tracker state block is not a JSON object in {path}\n")
+        sys.exit(2)
+    return state
 
 
 def wave_num(value):
@@ -71,17 +77,23 @@ def deferrals_of(issue):
     """Parse the structured deferral markers a closeout posted to an issue's comments.
 
     The deferral object is validated at review time by idc_review_verdict_check.py; here the gate
-    only needs to re-read it from where the finisher landed it. A marker whose JSON is unparseable
-    is corruption, not "no deferral" — fail closed (exit 2), never silently skip a possible gap."""
+    only needs to re-read it from where the finisher landed it. A marker whose payload is unparseable
+    JSON — or is valid JSON that is not an object — is corruption, not "no deferral": fail closed
+    (exit 2), never silently skip a possible gap."""
     out = []
     for c in issue.get("comments", []):
-        for m in DEFERRAL_MARKER.finditer(str(c)):
+        for mk in DEFERRAL_MARKER.finditer(str(c)):
             try:
-                out.append(json.loads(m.group(1)))
+                obj = json.loads(mk.group(1))
             except json.JSONDecodeError as e:
                 sys.stderr.write(f"idc-acceptance-check: issue {issue.get('number')} has an "
                                  f"unparseable idc-deferral marker ({e})\n")
                 sys.exit(2)
+            if not isinstance(obj, dict):
+                sys.stderr.write(f"idc-acceptance-check: issue {issue.get('number')} idc-deferral "
+                                 f"marker is not a JSON object (got {type(obj).__name__})\n")
+                sys.exit(2)
+            out.append(obj)
     return out
 
 
@@ -115,7 +127,13 @@ def gaps(state, wave=None):
     """Sorted issue numbers that are Done-but-inert (an unmet blocks_goal:true deferral, transitively),
     filtered to `--wave N` when given."""
     issues = state.get("issues", [])
+    if not isinstance(issues, list):
+        sys.stderr.write("idc-acceptance-check: corrupt tracker — `issues` must be a list\n")
+        sys.exit(2)
     for it in issues:
+        if not isinstance(it, dict):
+            sys.stderr.write("idc-acceptance-check: corrupt tracker — an issue is not a JSON object\n")
+            sys.exit(2)
         if "number" not in it:
             sys.stderr.write("idc-acceptance-check: corrupt tracker — an issue is missing `number`\n")
             sys.exit(2)

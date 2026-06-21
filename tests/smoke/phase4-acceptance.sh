@@ -140,10 +140,48 @@ JSON
 python3 "$SCRIPT" --tracker "$WORK/badmarker.md" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 2 ] || fail "an unparseable idc-deferral marker must exit 2 (fail-closed), got $rc"
 
+# ---- a deferral SENTINEL with no parseable {…} payload -> exit 2 (not silently "no deferral") --
+# A `{…}`-anchored marker pattern would skip a corrupt sentinel (no braces) and the gate could then
+# print `acceptance: ok` over an inert Done. The sentinel is matched first, so a non-object payload
+# fails closed. Anchor the pattern back to `(\{.*?\})` and this goes green (silent pass) -> red.
+emit "$WORK/sentinel-noobj.md" <<'JSON'
+{"issues":[
+  {"number":449,"status":"Done","stage":"Buildable","title":"Two-store seed","blocked_by":[],"wave":"Wave 4",
+   "comments":["<!-- idc-deferral: TRUNCATED-no-json-object -->"]}
+]}
+JSON
+python3 "$SCRIPT" --tracker "$WORK/sentinel-noobj.md" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 2 ] || fail "an idc-deferral sentinel with no JSON-object payload must exit 2 (fail-closed), not be skipped as no-deferral (got $rc)"
+
+# ---- a deferral marker whose payload is valid JSON but NOT an object -> exit 2 ----------------
+emit "$WORK/marker-nonobj.md" <<'JSON'
+{"issues":[
+  {"number":449,"status":"Done","stage":"Buildable","title":"Two-store seed","blocked_by":[],"wave":"Wave 4",
+   "comments":["<!-- idc-deferral: [\"not\",\"an\",\"object\"] -->"]}
+]}
+JSON
+python3 "$SCRIPT" --tracker "$WORK/marker-nonobj.md" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 2 ] || fail "an idc-deferral marker whose payload is valid JSON but not an object must exit 2 (got $rc)"
+
 # ---- malformed tracker (no BEGIN/END state block) -> exit 2 ----------------------------------
 echo "not a tracker" > "$WORK/malformed.md"
 python3 "$SCRIPT" --tracker "$WORK/malformed.md" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 2 ] || fail "a malformed tracker (no state block) must exit 2 (got $rc)"
+
+# ---- a state block that is valid JSON but the WRONG SHAPE -> exit 2 (not exit 1 = a real gap) --
+# A top-level array (or a non-list `issues`) used to raise an unhandled exception -> CLI exit 1,
+# which the build wave-close reads as `acceptance: gap` and spuriously recirculates. It must fail
+# closed as exit 2 (a tracker error), distinct from a real gap.
+emit "$WORK/shape-array.md" <<'JSON'
+["not","a","state","object"]
+JSON
+python3 "$SCRIPT" --tracker "$WORK/shape-array.md" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 2 ] || fail "a state block that is a JSON array (wrong shape) must exit 2, never exit 1 (got $rc)"
+emit "$WORK/shape-issues.md" <<'JSON'
+{"issues":"not-a-list"}
+JSON
+python3 "$SCRIPT" --tracker "$WORK/shape-issues.md" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 2 ] || fail "a state block whose \`issues\` is not a list must exit 2 (got $rc)"
 
 # ---- wiring: idc-build.md Phase 4 runs the acceptance check as a BLOCKING, recirculating gate -
 BUILD="$PLUGIN/agents/idc-build.md"
@@ -159,6 +197,8 @@ grep -qiE 'Done-but-inert' "$BUILD" \
 # idc-tracker-state materialization → red.
 grep -qiE 'idc-tracker-state' "$BUILD" \
   || fail "idc-build.md Phase 4 must make the github path concrete: materialize query+comments into the gate's idc-tracker-state block and run the same script (P1-1 github parity)"
+grep -qiE 'whole board' "$BUILD" \
+  || fail "idc-build.md Phase 4 github path must materialize the WHOLE board (not just wave N) so a cross-wave enabler is visible — else the gate false-gaps a valid deferral (Codex review)"
 
 # ---- producer: the finisher lands each unresolved deferral as an idc-deferral comment marker --
 FIN="$PLUGIN/agents/idc-finisher.md"

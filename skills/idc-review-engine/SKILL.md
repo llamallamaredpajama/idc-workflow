@@ -76,6 +76,13 @@ Each finding carries: `dimension`, `severity ∈ {blocker, major, minor, nit}`, 
 (≥ 0.8), `evidence` (file:line + what), `attack` (the failure mode it enables), `unblock`
 (the concrete fix), and a stable `fingerprint` (`dimension:file:line:gist`) for dedup.
 
+The verdict may also carry a `deferrals[]` array — the structured obligations a closeout could
+not finish in-loop, each `{kind: deferred|out-of-boundary|pre-existing-breakage, what,
+blocks_goal: bool, suggested_issue}`. This replaces unparsed prose footnotes: the validator
+enforces the shape (notably a `blocks_goal` that is a real JSON boolean), and the wave-close
+acceptance check (`idc:idc-build` Phase 4) consumes `blocks_goal:true` deferrals to flag a
+Done-but-inert increment and auto-recirculate it.
+
 The verdict is fail-closed and derived from the worst severity present:
 
 | Worst severity | Verdict |

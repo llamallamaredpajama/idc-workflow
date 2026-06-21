@@ -16,6 +16,10 @@ the Build finisher can trust it for the automerge decision. It checks:
     nothing, mirrors the implementation, or stubs the thing under test) is a FAIL, never a
     nit: its severity must be `major` or `blocker`. A `minor`/`nit` test-genuineness finding
     is rejected so a fake-green suite can never merge as a nit (`WORKFLOW.md §4.3`).
+  * an optional `deferrals` list (default empty) is well-formed: every item carries kind,
+    what, suggested_issue (non-empty) and a `blocks_goal` that is a real JSON boolean — the
+    structured obligation a closeout emits instead of an unparsed prose footnote, consumed by
+    the wave-close acceptance check.
 
 Usage: idc_review_verdict_check.py <verdict.json>   (exit 0 = PASS, 1 = FAIL, 2 = usage)
 """
@@ -25,6 +29,10 @@ import sys
 VERDICTS = {"PASS", "PASS-WITH-NITS", "FAIL", "FAIL-BLOCKED"}
 SEVERITIES = {"blocker", "major", "minor", "nit"}
 REQUIRED_FINDING = ("dimension", "severity", "confidence", "evidence", "attack", "unblock", "fingerprint")
+# A deferral is a structured, validated obligation a closeout carries instead of an unparsed
+# prose footnote (autorun audit Defect 5). The acceptance check (idc_acceptance_check.py)
+# consumes `blocks_goal` to flag a Done-but-inert increment, so it must be a real JSON boolean.
+REQUIRED_DEFERRAL = ("kind", "what", "blocks_goal", "suggested_issue")
 CONFIDENCE_FLOOR = 0.8
 # Test genuineness is fail-closed: a shallow/placeholder test is a FAIL, not a nit.
 TEST_GENUINENESS_DIM = "test-genuineness"
@@ -70,6 +78,22 @@ def check(doc):
             problems.append(f"finding[{i}] duplicate fingerprint {fp!r} (coordinator must dedup)")
         elif fp:
             seen.add(fp)
+    deferrals = doc.get("deferrals", [])
+    if not isinstance(deferrals, list):
+        problems.append("`deferrals` must be a list")
+    else:
+        for i, d in enumerate(deferrals):
+            if not isinstance(d, dict):
+                problems.append(f"deferral[{i}] is not a JSON object")
+                continue
+            for k in REQUIRED_DEFERRAL:
+                if k not in d or (isinstance(d.get(k), str) and not d[k].strip()):
+                    problems.append(f"deferral[{i}] missing/empty `{k}`")
+            # blocks_goal gates the acceptance check; a strip()-only check would pass the string
+            # "true", so the boolean type is enforced explicitly.
+            if "blocks_goal" in d and not isinstance(d.get("blocks_goal"), bool):
+                problems.append(f"deferral[{i}] `blocks_goal` must be a JSON boolean "
+                                f"(got {type(d.get('blocks_goal')).__name__})")
     if verdict in VERDICTS:
         sevs = {f.get("severity") for f in findings if isinstance(f, dict) and f.get("severity") in SEVERITIES}
         exp = expected_verdict(sevs)

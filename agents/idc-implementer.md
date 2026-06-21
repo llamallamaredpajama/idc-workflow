@@ -29,7 +29,11 @@ triplet into one sequential session is the last-resort fallback only. Standard t
 4. **Hand off to review.** Stop at a green implementation and hand the PR to the reviewer (the
    independent combined review agent). The **finisher** (`idc:idc-finisher`), not the
    implementer, owns applying the review findings and merging — the implementer does not fix
-   review findings or merge.
+   review findings or merge. Any obligation it genuinely cannot finish in-loop (an out-of-boundary
+   surface, a pre-existing breakage) is handed off as a **structured deferral object**
+   `{kind: deferred|out-of-boundary|pre-existing-breakage, what, blocks_goal: bool, suggested_issue}`
+   — never an unparsed prose footnote — so the reviewer/finisher and the wave-close acceptance
+   check can route it.
 5. **Divergence → recirculation.** If the implementation diverges from the pillar, or the pillar
    diverges from upstream docs, file a recirculation (`/idc:recirculate`) and pause **only this issue** —
    never paper over the drift in source.

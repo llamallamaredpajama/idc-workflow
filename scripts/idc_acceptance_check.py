@@ -83,8 +83,10 @@ def gaps(state, wave=None):
             if d.get("blocks_goal") is not True:
                 continue
             ref = issue_ref(d.get("suggested_issue", ""))
-            if ref is not None and status_by_num.get(ref) == "Done":
-                continue  # the enabling obligation is itself Done — met
+            # "met" requires a DIFFERENT issue that carries the enabling work — a deferral that
+            # names its own issue is not resolved (it would let the exact inert-Done case slip).
+            if ref is not None and ref != it["number"] and status_by_num.get(ref) == "Done":
+                continue  # the enabling obligation is a distinct Done issue — met
             offending.append(it["number"])
             break
     return sorted(offending)

@@ -74,8 +74,9 @@ python3 "$TRK" --tracker "$T" close --num "$issue" >/dev/null
 # GOAL's end-state) as a major/FAIL under contract-drift / test-genuineness. Lock the prose.
 RE="$PLUGIN/skills/idc-review-engine/SKILL.md"
 [ -f "$RE" ] || fail "skills/idc-review-engine/SKILL.md missing"
-grep -qiE 'all-static verification surface' "$RE" \
-  || fail "idc-review-engine must FAIL an all-static verification surface (P0-2)"
+# tie the noun to its FAIL classification: a downgrade (FAIL -> nit) must go red, not just removal
+grep -qiE 'all-static verification surface\*\* is the same FAIL' "$RE" \
+  || fail "idc-review-engine must classify an all-static verification surface as the same FAIL (P0-2, severity tie)"
 grep -qiE 'inert deliverable' "$RE" \
   || fail "idc-review-engine must explain the all-static FAIL catches an inert deliverable (P0-2)"
 

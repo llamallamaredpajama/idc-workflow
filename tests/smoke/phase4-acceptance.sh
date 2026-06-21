@@ -58,6 +58,16 @@ JSON
 python3 "$SCRIPT" --tracker "$WORK/gap-nondone.md" >/dev/null 2>&1 \
   && fail "a Done issue whose enabling sibling (#365) is not Done must be a gap (exit 1)"
 
+# ---- gap: a self-referencing deferral (suggested_issue == its own #) is NOT resolved ----------
+emit "$WORK/gap-selfref.md" <<'JSON'
+{"issues":[
+  {"number":449,"status":"Done","stage":"Buildable","title":"Two-store seed","blocked_by":[],"wave":"Wave 4",
+   "deferrals":[{"kind":"out-of-boundary","what":"Spanner instance","blocks_goal":true,"suggested_issue":"#449"}]}
+]}
+JSON
+python3 "$SCRIPT" --tracker "$WORK/gap-selfref.md" >/dev/null 2>&1 \
+  && fail "a deferral naming its OWN issue must NOT count as resolved (self-reference loophole)"
+
 # ---- not a gap: a blocks_goal:FALSE deferral is a non-blocking note ---------------------------
 emit "$WORK/nonblocking.md" <<'JSON'
 {"issues":[
@@ -68,11 +78,21 @@ JSON
 python3 "$SCRIPT" --tracker "$WORK/nonblocking.md" >/dev/null \
   || fail "a blocks_goal:false deferral is a non-blocking note, not an acceptance gap"
 
-# ---- --wave filter: a Wave-4 gap is out of scope for --wave 3, in scope for --wave 4 ----------
-python3 "$SCRIPT" --tracker "$WORK/gap.md" --wave 3 >/dev/null \
-  || fail "--wave 3 must scope out a gap that lives in Wave 4 (acceptance: ok for wave 3)"
-python3 "$SCRIPT" --tracker "$WORK/gap.md" --wave 4 >/dev/null 2>&1 \
-  && fail "--wave 4 must still catch the Wave 4 gap (exit 1)"
+# ---- --wave filter: selects the RIGHT wave (gap in 3, clean in 4) -----------------------------
+# A two-wave fixture: the gap is in Wave 3, a clean Done issue is in Wave 4. This proves --wave
+# selects the named wave (not a no-op, not always-include, not always-exclude).
+emit "$WORK/twowave.md" <<'JSON'
+{"issues":[
+  {"number":300,"status":"Done","stage":"Buildable","title":"Wave-3 inert","blocked_by":[],"wave":"Wave 3",
+   "deferrals":[{"kind":"out-of-boundary","what":"unmet dep","blocks_goal":true,"suggested_issue":"do it later"}]},
+  {"number":400,"status":"Done","stage":"Buildable","title":"Wave-4 clean","blocked_by":[],"wave":"Wave 4","deferrals":[]}
+]}
+JSON
+out="$(python3 "$SCRIPT" --tracker "$WORK/twowave.md" --wave 3 2>&1)"; rc=$?
+[ "$rc" -eq 1 ] || fail "--wave 3 must catch the Wave-3 gap (got $rc): $out"
+echo "$out" | grep -qE "(^| )300( |$)" || fail "--wave 3 must name #300 (got: $out)"
+python3 "$SCRIPT" --tracker "$WORK/twowave.md" --wave 4 >/dev/null \
+  || fail "--wave 4 must report ok (the only Wave-4 issue is clean)"
 
 # ---- malformed tracker (no BEGIN/END state block) -> exit 2 ----------------------------------
 echo "not a tracker" > "$WORK/malformed.md"

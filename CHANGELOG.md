@@ -2,6 +2,49 @@
 
 All notable changes to the IDC Workflow plugin are documented in this file.
 
+## 3.0.3 — 2026-06-21
+
+Seven prioritized fixes from the first live-repo `/idc:autorun` audit
+(`docs/reviews/2026-06-21-autorun-session-audit.md`), which surfaced two structural failures: autorun
+**improvised four human gates** its playbook never sanctioned, and a wave **shipped inert work** (issue
+#449 merged "Done" carrying a Spanner DDL with no provisioned instance, the gap filed as a passive
+follow-up). The fixes make the plugin structurally incapable of both. **Hybrid posture (binding):**
+deterministic only where the signal is mechanical (the new acceptance check + the structured-deferral
+schema); behavioral where it's a judgment call (the no-ask invariant, the outcome-test requirement, the
+strategic gate). **No static-allowlist reject was added to `idc_schema_check.py`** — a documented,
+intentional divergence from the audit's literal "enforce at schema-check" wording.
+
+- **P0 — No-ask invariant (autorun + build).** The sanctioned stops are now explicitly *exhaustive* in
+  `agents/idc-autorun.md` and `agents/idc-build.md`: never ask the operator how-autonomous, never
+  re-confirm a chosen scope, never convert a deterministic `drain: continue` into a question, never call
+  `AskUserQuestion`. "Check in" means report progress and keep draining. Reinforced in
+  `docs/mental-model.md`.
+- **P0 — Outcome-level verification surface.** `idc-goal-contract` element 2 now requires at least one
+  command exercising the GOAL's observable end-state (run / apply / query / HTTP / e2e), not merely
+  static checks; `idc-review-engine` makes an **all-static** verification surface a `major`/FAIL
+  (contract-drift / test-genuineness) so an inert deliverable is caught at Build review.
+- **P1 — Structured, validated deferrals.** A deferral is now a structured object
+  `{kind, what, blocks_goal: bool, suggested_issue}` validated by `idc_review_verdict_check.py` (with an
+  explicit boolean check on `blocks_goal`), emitted by the implementer/finisher/review-engine closeouts;
+  the finisher ships **fail-closed** until each deferral is resolved in-loop or converted into a
+  dependency-linked board item that blocks the parent's Done.
+- **P1 — Dependency-aware acceptance gate.** New `scripts/idc_acceptance_check.py` flags any Done issue
+  with an unmet `blocks_goal:true` deferral (`acceptance: ok|gap`); `idc-build.md` Phase 4 wave-close
+  runs it as a **blocking** gate that auto-files a recirculation per Done-but-inert issue.
+- **P2 — Broadened recirculation trigger.** A third trigger — impl right *and* plan right but the
+  increment is inert/acceptance-gapped — is added to the finisher, implementer, and `/idc:recirculate`.
+- **P2 — Strategic decision gate.** A second gate type (`operator-decision`) in `idc-gate-issue` gives a
+  non-requirements GO/NO-GO a real board slot (fail-closed: an explicit `decision-approved` label or a
+  merged decision-PR; a closed-but-unapproved gate is not a GO), so the orchestrator never improvises
+  one. The requirements gate stays the only admission gate; reuses the six tracker ops (no 7th).
+  Documented in `WORKFLOW.md §2.1` (append-only).
+- **P3 — Phase-close blocks acceptance-class findings.** `idc-build.md` Phase 5 drives acceptance-class
+  findings to zero / recirculation (other delta findings stay non-blocking), and the acceptance check
+  runs at every wave-close, not only at the phase boundary.
+
+New smoke coverage: `tests/smoke/phase4-acceptance.sh` (registered in `run-all.sh`) plus deferral-schema
+and prose-invariant assertions across phases 3–6, each shown red-when-broken.
+
 ## 3.0.2 — 2026-06-19
 
 Two post-3.0.1 fix passes: the **experimental Pi runtime's merge gate is brought into line with the

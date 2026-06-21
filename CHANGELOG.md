@@ -25,12 +25,21 @@ intentional divergence from the audit's literal "enforce at schema-check" wordin
   (contract-drift / test-genuineness) so an inert deliverable is caught at Build review.
 - **P1 — Structured, validated deferrals.** A deferral is now a structured object
   `{kind, what, blocks_goal: bool, suggested_issue}` validated by `idc_review_verdict_check.py` (with an
-  explicit boolean check on `blocks_goal`), emitted by the implementer/finisher/review-engine closeouts;
-  the finisher ships **fail-closed** until each deferral is resolved in-loop or converted into a
-  dependency-linked board item that blocks the parent's Done.
-- **P1 — Dependency-aware acceptance gate.** New `scripts/idc_acceptance_check.py` flags any Done issue
-  with an unmet `blocks_goal:true` deferral (`acceptance: ok|gap`); `idc-build.md` Phase 4 wave-close
-  runs it as a **blocking** gate that auto-files a recirculation per Done-but-inert issue.
+  explicit boolean check on `blocks_goal` and a non-empty-string check on the other required fields),
+  emitted by the implementer/finisher/review-engine closeouts; the finisher ships **fail-closed** until
+  each deferral is resolved in-loop or converted into a dependency-linked board item that blocks the
+  parent's Done. Any deferral that survives the loop is **serialized onto its issue as a hidden
+  `<!-- idc-deferral: {…} -->` comment marker** (reusing the existing `comment` op — no 7th op, no new
+  tracker field); that marker is the producer the wave-close acceptance check parses (without it the
+  gate would be inert).
+- **P1 — Dependency-aware acceptance gate.** New `scripts/idc_acceptance_check.py` reads the deferral
+  comment markers and flags any Done issue with an unmet `blocks_goal:true` deferral
+  (`acceptance: ok|gap`) — a deferral is "met" only when its `suggested_issue` names a **distinct, Done,
+  and non-inert** enabler (transitive, evaluated whole-board), and the gate fails closed on a
+  non-boolean `blocks_goal`, an unparseable marker, or a numberless `--wave`. `idc-build.md` Phase 4
+  wave-close runs it as a **blocking** gate that auto-files a recirculation per Done-but-inert issue; on
+  the github backend the same script runs over a materialized `idc-tracker-state` block (no model
+  judgement), and phase-close also runs it unscoped (whole-board) as a backstop.
 - **P2 — Broadened recirculation trigger.** A third trigger — impl right *and* plan right but the
   increment is inert/acceptance-gapped — is added to the finisher, implementer, and `/idc:recirculate`.
 - **P2 — Strategic decision gate.** A second gate type (`operator-decision`) in `idc-gate-issue` gives a
@@ -41,6 +50,14 @@ intentional divergence from the audit's literal "enforce at schema-check" wordin
 - **P3 — Phase-close blocks acceptance-class findings.** `idc-build.md` Phase 5 drives acceptance-class
   findings to zero / recirculation (other delta findings stay non-blocking), and the acceptance check
   runs at every wave-close, not only at the phase boundary.
+
+**Post-review hardening (multi-lens adversarial review of this branch).** A `/simplify` pass and a
+cold multi-lens review closed several gate edge cases before release: the acceptance gate's
+self-reference loophole; transitive/whole-board inertness (an out-of-wave Done-but-inert enabler no
+longer reads as "met"); `blocks_goal: null`/missing now fails closed; present-but-null deferral and
+finding fields are rejected by the validator; the github acceptance path was made concrete; and two
+bypassable smoke greps (the all-static severity floor, the plan `--auto` polarity) were replaced with
+non-invertible ones.
 
 New smoke coverage: `tests/smoke/phase4-acceptance.sh` (registered in `run-all.sh`) plus deferral-schema
 and prose-invariant assertions across phases 3–6, each shown red-when-broken.

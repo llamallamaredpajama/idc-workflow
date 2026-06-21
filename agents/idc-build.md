@@ -82,3 +82,8 @@ findings as **new board issues** (non-blocking — phase close does not drive th
 - Writes source + tests (via the triplet's implementer + finisher), review reports under
   `docs/workflow/code-reviews/`, and tracker status (claim/close). Halts and surfaces
   evidence on a tracker/gh failure the adapter raises, or an implementer/finisher blocked-stop.
+- **No-ask invariant — the sanctioned stops above are exhaustive.** Build never asks the operator
+  *how autonomous to be*, never re-confirms a scope already chosen, and never converts a deterministic
+  `drain: continue` into a question. "Check in" means **report progress and keep building**, not
+  stop-and-re-ask. Build **never calls `AskUserQuestion`** — the only human gate is the Think-PR
+  (requirements admission), surfaced as a board state, never an improvised interactive prompt.

@@ -106,5 +106,6 @@ wave already closed — is still caught even though no single `--wave N` close w
 - **No-ask invariant — the sanctioned stops above are exhaustive.** Build never asks the operator
   *how autonomous to be*, never re-confirms a scope already chosen, and never converts a deterministic
   `drain: continue` into a question. "Check in" means **report progress and keep building**, not
-  stop-and-re-ask. Build **never calls `AskUserQuestion`** — the only human gate is the Think-PR
-  (requirements admission), surfaced as a board state, never an improvised interactive prompt.
+  stop-and-re-ask. Build **never calls `AskUserQuestion`** — the only human gates are the Think-PR
+  (requirements admission) and the rare `operator-decision` strategic gate (`idc:idc-gate-issue`),
+  each surfaced as a board state Build reports, never an improvised interactive prompt.

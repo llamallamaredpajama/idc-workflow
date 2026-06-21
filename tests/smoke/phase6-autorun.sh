@@ -75,6 +75,10 @@ for f in "$AUTORUN" "$BUILD"; do
     || fail "$bn no-ask invariant must forbid calling AskUserQuestion (P0-1)"
   grep -qiE 'how autonomous' "$f" \
     || fail "$bn no-ask invariant must forbid asking how-autonomous-to-be (P0-1)"
+  # the no-ask invariant must name the operator-decision strategic gate as a SANCTIONED board-state
+  # gate — else a model treats it as unsanctioned and may ignore it or improvise a prompt (Codex review)
+  grep -qiE 'operator-decision' "$f" \
+    || fail "$bn no-ask invariant must name the operator-decision strategic gate as sanctioned (else it reads as unsanctioned)"
 done
 
 # ---- L2-1: the exit report's working-tree claim is sourced from a FINAL post-build git status ---

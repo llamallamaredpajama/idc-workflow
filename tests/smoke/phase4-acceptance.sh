@@ -183,6 +183,19 @@ JSON
 python3 "$SCRIPT" --tracker "$WORK/shape-issues.md" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 2 ] || fail "a state block whose \`issues\` is not a list must exit 2 (got $rc)"
 
+# ---- a `comments` value that is a STRING (not a list) -> exit 2 -------------------------------
+# A string comments makes the marker loop iterate CHARACTERS, so an embedded blocks_goal:true marker
+# is never matched and the inert Done prints `acceptance: ok` (silent pass). Drop the comments-list
+# guard and this Done-with-unmet-deferral goes green -> red.
+emit "$WORK/comments-string.md" <<'JSON'
+{"issues":[
+  {"number":449,"status":"Done","stage":"Buildable","title":"Two-store seed","blocked_by":[],"wave":"Wave 4",
+   "comments":"<!-- idc-deferral: {\"kind\":\"x\",\"what\":\"y\",\"blocks_goal\":true,\"suggested_issue\":\"later\"} -->"}
+]}
+JSON
+python3 "$SCRIPT" --tracker "$WORK/comments-string.md" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 2 ] || fail "a string (non-list) comments must exit 2 (fail-closed), not silently char-iterate past an inert Done (got $rc)"
+
 # ---- wiring: idc-build.md Phase 4 runs the acceptance check as a BLOCKING, recirculating gate -
 BUILD="$PLUGIN/agents/idc-build.md"
 [ -f "$BUILD" ] || fail "agents/idc-build.md missing"

@@ -65,5 +65,6 @@ parent). Loopable via `/loop /idc:autorun` for standing operation.
   *how autonomous to be*, never re-confirms a scope already chosen (typing `/idc:autorun` **is** the
   authorization to drain the whole repo), and never converts a deterministic `drain: continue` into a
   question. A request to "check in" means **report progress and keep draining**, not stop-and-re-ask.
-  Autorun **never calls `AskUserQuestion`** — the one operator decision in the pipe is the Think-PR
-  gate above, surfaced as a board state, never an improvised interactive prompt.
+  Autorun **never calls `AskUserQuestion`** — the only operator decisions in the pipe are the
+  **Think-PR** gate and the rare **`operator-decision`** strategic gate above, each surfaced as a
+  board state autorun reports, never an improvised interactive prompt.

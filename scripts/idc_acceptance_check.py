@@ -81,7 +81,15 @@ def deferrals_of(issue):
     JSON — or is valid JSON that is not an object — is corruption, not "no deferral": fail closed
     (exit 2), never silently skip a possible gap."""
     out = []
-    for c in issue.get("comments", []):
+    comments = issue.get("comments", [])
+    # A string `comments` (a hand-edited tracker, or a sloppy github materialization) would make the
+    # loop iterate CHARACTERS, so an embedded marker is never matched and an inert Done could pass as
+    # `acceptance: ok`. Fail closed on any non-list shape rather than silently scan nothing.
+    if not isinstance(comments, list):
+        sys.stderr.write(f"idc-acceptance-check: issue {issue.get('number')} `comments` must be a "
+                         f"list (got {type(comments).__name__})\n")
+        sys.exit(2)
+    for c in comments:
         for mk in DEFERRAL_MARKER.finditer(str(c)):
             try:
                 obj = json.loads(mk.group(1))

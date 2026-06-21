@@ -89,4 +89,14 @@ grep -qiE 'acceptance: gap' "$BUILD" \
 grep -qiE 'Done-but-inert' "$BUILD" \
   || fail "idc-build.md wave-close must auto-file a recirculation for each Done-but-inert issue (P1-1)"
 
-echo "PASS: acceptance check gates inert-Done (unmet blocks_goal deferral); wave-scoped; malformed->exit2; build Phase 4 wired"
+# ---- P2-1: the inert/acceptance-gap recirculation trigger is named where work is filed --------
+FIN="$PLUGIN/agents/idc-finisher.md"; IMPL="$PLUGIN/agents/idc-implementer.md"; RECMD="$PLUGIN/commands/recirculate.md"
+for f in "$FIN" "$IMPL" "$RECMD"; do [ -f "$f" ] || fail "missing $f"; done
+grep -qiE 'inert/acceptance-gapped' "$FIN" \
+  || fail "idc-finisher.md must add the inert/acceptance-gap recirculation trigger (P2-1)"
+grep -qiE 'inert/acceptance-gapped' "$IMPL" \
+  || fail "idc-implementer.md must add the inert/acceptance-gap recirculation trigger (P2-1)"
+grep -qiE 'acceptance-gap' "$RECMD" \
+  || fail "commands/recirculate.md must accept an acceptance-gap as a recirculation input (P2-1)"
+
+echo "PASS: acceptance check gates inert-Done (unmet blocks_goal deferral); wave-scoped; malformed->exit2; build Phase 4 wired; recirc trigger broadened"

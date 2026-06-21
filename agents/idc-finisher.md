@@ -35,9 +35,11 @@ The finisher runs its **own** `/fullauto-goal` loop. Its completion contract car
 - **Iteration policy** — record-and-vary: log each finding, the fix applied, and the re-review
   delta; re-review after each pass until the verdict clears (attempt ceiling ~3 hypotheses per
   finding).
-- **Blocked-stop** — at the attempt ceiling, or on a finding that can only be resolved upstream
-  (the implementation is right but the *pillar/plan* is wrong), stop and file a recirculation — never
-  paper over it in source.
+- **Blocked-stop** — at the attempt ceiling, on a finding that can only be resolved upstream
+  (the implementation is right but the *pillar/plan* is wrong), **or when the increment is
+  inert/acceptance-gapped** (implementation right *and* plan right, but a declared runtime/infra
+  dependency or a `blocks_goal:true` deferral is unmet — an `acceptance: gap`), stop and file a
+  recirculation — never paper over it in source.
 - **Deferrals are fail-closed.** Every deferral the implementer/reviewer surfaced (and any the
   finisher itself discovers) is a **structured object** `{kind, what, blocks_goal: bool,
   suggested_issue}` (validated by `idc_review_verdict_check.py`), never a prose footnote. The

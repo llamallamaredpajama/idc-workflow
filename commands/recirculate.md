@@ -8,8 +8,9 @@ Operate as the Recirculator orchestrator **in this session**: read
 `${CLAUDE_PLUGIN_ROOT}/agents/idc-recirculator.md` end-to-end, then execute its procedure (absorb
 the drift → decide → sync or gate → close out).
 
-Operator input: `$ARGUMENTS` — a drift description or scope summary (from Build, another
-role, or the operator).
+Operator input: `$ARGUMENTS` — a drift description, a scope summary, or an **acceptance-gap** (a
+Done-but-inert increment the wave-close acceptance check flagged: a declared runtime/infra
+dependency or a `blocks_goal:true` deferral is unmet) — from Build, another role, or the operator.
 
 **Zero durable workers** — any analysis is bounded read-only fan-out per the runtime adapter.
 Use `idc:idc-recirculator-sync` to determine the highest affected canonical layer, the downstream

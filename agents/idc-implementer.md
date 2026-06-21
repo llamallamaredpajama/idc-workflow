@@ -34,9 +34,11 @@ triplet into one sequential session is the last-resort fallback only. Standard t
    `{kind: deferred|out-of-boundary|pre-existing-breakage, what, blocks_goal: bool, suggested_issue}`
    — never an unparsed prose footnote — so the reviewer/finisher and the wave-close acceptance
    check can route it.
-5. **Divergence → recirculation.** If the implementation diverges from the pillar, or the pillar
-   diverges from upstream docs, file a recirculation (`/idc:recirculate`) and pause **only this issue** —
-   never paper over the drift in source.
+5. **Divergence or inert increment → recirculation.** If the implementation diverges from the
+   pillar, or the pillar diverges from upstream docs, **or the increment would be
+   inert/acceptance-gapped** (a declared runtime/infra dependency or a `blocks_goal:true` deferral
+   can't be met within BOUNDARIES), file a recirculation (`/idc:recirculate`) and pause **only this
+   issue** — never paper over the drift in source.
 
 ## Authority boundaries
 

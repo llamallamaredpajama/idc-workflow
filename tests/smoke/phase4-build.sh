@@ -74,10 +74,14 @@ python3 "$TRK" --tracker "$T" close --num "$issue" >/dev/null
 # GOAL's end-state) as a major/FAIL under contract-drift / test-genuineness. Lock the prose.
 RE="$PLUGIN/skills/idc-review-engine/SKILL.md"
 [ -f "$RE" ] || fail "skills/idc-review-engine/SKILL.md missing"
-# tie the noun to its FAIL classification: a downgrade (FAIL -> nit) must go red, not just removal
+# The headline-string greps below catch REMOVAL/relabel of the rule. They do NOT catch a SEVERITY
+# DOWNGRADE (major -> nit) that keeps the headline phrase intact — so the operative-directive grep
+# that follows ties the rule to its `major` floor and goes red on a downgrade.
 grep -qiE 'all-static verification surface\*\* is the same FAIL' "$RE" \
   || fail "idc-review-engine must classify an all-static verification surface as the same FAIL (P0-2, severity tie)"
 grep -qiE 'inert deliverable' "$RE" \
   || fail "idc-review-engine must explain the all-static FAIL catches an inert deliverable (P0-2)"
+grep -qiE 'flag it at .{0,3}major.{0,3} under' "$RE" \
+  || fail "idc-review-engine must file the all-static finding at major ('Flag it at \`major\` under …') — a downgrade to minor/nit must go red (P0-2 severity floor)"
 
 echo "PASS: review-verdict structure/consistency + build claim->close lifecycle green; all-static surface is a review FAIL"

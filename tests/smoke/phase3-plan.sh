@@ -122,8 +122,14 @@ grep -qF -- '--delete-branch' "$PLAN" \
   || fail "agents/idc-plan.md must delete the merged plan branch (--delete-branch) — else orphaned plan/* branches survive (F2b)"
 # F2b (cont.): the merge must be a DIRECT, blocking merge — NOT GitHub --auto. Auto-merge defers the
 # merge server-side and, with deleteBranchOnMerge off, would skip --delete-branch → orphan plan/*.
-grep -qiE 'not[^.]*--auto|--auto[^.]*(defer|skip)' "$PLAN" \
-  || fail "agents/idc-plan.md must disambiguate the plan merge as a direct blocking merge, NOT GitHub --auto (else --delete-branch no-ops under deleteBranchOnMerge=off) (F2b)"
+# Polarity-sensitive: the old proximity grep ('not'..'--auto') also matched an INVERTED rule that
+# RECOMMENDS --auto ("do not avoid --auto"), so it could not tell "forbid" from "recommend". Anchor
+# to the forbidding directive ('not ... GitHub ... --auto') AND require the prescribed direct command,
+# so a rule that recommends GitHub --auto goes red.
+grep -qiE 'not.{0,4}github.{0,6}--auto' "$PLAN" \
+  || fail "agents/idc-plan.md must forbid GitHub --auto in that polarity ('not ... GitHub --auto') — a rule recommending --auto must go red (F2b)"
+grep -qF -- 'gh pr merge --squash --delete-branch' "$PLAN" \
+  || fail "agents/idc-plan.md must prescribe the direct blocking merge form 'gh pr merge --squash --delete-branch' (F2b)"
 
 # ---- (e) P0-2: the contract's VERIFICATION SURFACE must require an OUTCOME test ---------------
 # Autorun shipped #449 inert (a DDL that parses but was never applied to a provisioned store)

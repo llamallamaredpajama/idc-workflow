@@ -125,4 +125,18 @@ grep -qF -- '--delete-branch' "$PLAN" \
 grep -qiE 'not[^.]*--auto|--auto[^.]*(defer|skip)' "$PLAN" \
   || fail "agents/idc-plan.md must disambiguate the plan merge as a direct blocking merge, NOT GitHub --auto (else --delete-branch no-ops under deleteBranchOnMerge=off) (F2b)"
 
-echo "PASS: schema check + matrix deconfliction green; Plan is pure decomposition; plan PR direct-merges (not --auto) and deletes its branch"
+# ---- (e) P0-2: the contract's VERIFICATION SURFACE must require an OUTCOME test ---------------
+# Autorun shipped #449 inert (a DDL that parses but was never applied to a provisioned store)
+# because element 2 accepted an all-static surface. Lock the prose that requires at least one
+# command exercising the GOAL's observable end-state (behavioral, hybrid — NOT a schema-check
+# reject). Removing the clause fails this red.
+GC="$PLUGIN/skills/idc-goal-contract/SKILL.md"
+[ -f "$GC" ] || fail "skills/idc-goal-contract/SKILL.md missing"
+grep -qiE 'exercise the GOAL' "$GC" \
+  || fail "idc-goal-contract element 2 must require a command that exercises the GOAL's observable end-state (P0-2)"
+grep -qiE 'static checks' "$GC" \
+  || fail "idc-goal-contract element 2 must name the static-only checks an outcome test goes beyond (P0-2)"
+grep -qiE 'satisfiable without the outcome' "$GC" \
+  || fail "idc-goal-contract element 2 must mark an all-static surface a Build review FAIL (P0-2)"
+
+echo "PASS: schema check + matrix deconfliction green; Plan is pure decomposition; plan PR direct-merges (not --auto) and deletes its branch; contract requires an outcome test"

@@ -16,7 +16,13 @@ a complete contract, and make "done" runnable.
    isn't ready.
 2. **VERIFICATION SURFACE** — the exact runnable commands + what passing looks like.
    **Real functional tests that prove behavior** — never a placeholder or shallow suite
-   (that is a Build review FAIL). If the target behavior is untested, the surface says
+   (that is a Build review FAIL). **At least one command must exercise the GOAL's observable
+   end-state** (run / apply / query / HTTP / e2e), not merely static checks (file-exists, parse,
+   lint/typecheck, `terraform validate`/`fmt`, arch-fence `pytest -k arch`, import probes). A
+   surface satisfiable without the outcome being real is a Build review FAIL — an inert deliverable
+   passes an all-static surface (a DDL that *parses* but is never *applied* to a provisioned store
+   does not make the data live). If the GOAL has a runtime/infra dependency, the surface exercises
+   it against a real or emulated instance. If the target behavior is untested, the surface says
    *write the failing test first — done = new test passes AND existing suite green*.
 3. **CONSTRAINTS** — what must not regress (existing tests green, public API, no new deps,
    neighbor perf), plus the **no-punt rule**: incidental work needed for success is fixed in

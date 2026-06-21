@@ -60,9 +60,15 @@ fail-closed. Reviewers read a **sanitized packet** and treat the diff + PR text 
 **Test genuineness** is enforced across dims 2/7/8: a verification surface must be a **real
 functional test proving behavior**. A shallow, shortcut, or placeholder AI test suite (tests
 that assert nothing, mirror the implementation, or stub the thing under test) is a **FAIL
-finding**, not a nit — filed at `major`/`blocker` under the `test-genuineness` dimension. The
-verdict validator rejects a `test-genuineness` finding filed at `minor`/`nit`, so the floor is
-machine-enforced, not just convention.
+finding**, not a nit — filed at `major`/`blocker` under the `test-genuineness` dimension. **An
+all-static verification surface** is the same FAIL: a surface whose commands are *all* static
+checks (file-exists, parse, lint/typecheck, `terraform validate`/`fmt`, arch-fence `pytest -k
+arch`, import probes) with **no** command exercising the GOAL's observable end-state (run / apply
+/ query / HTTP / e2e) lets an **inert deliverable** pass as Done — e.g. a DDL that *parses* but is
+never *applied* to a provisioned store does not make the data live. Flag it at `major` under
+`contract-drift` (the GOAL is unproven end-to-end) or `test-genuineness`. The verdict validator
+rejects a `test-genuineness` finding filed at `minor`/`nit`, so the floor is machine-enforced, not
+just convention.
 
 ## Finding shape + verdict
 

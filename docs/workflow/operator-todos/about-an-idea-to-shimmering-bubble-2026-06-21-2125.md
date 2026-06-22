@@ -1,27 +1,34 @@
 # Operator TODOs — run about-an-idea-to-shimmering-bubble-2026-06-21-2125
 
-Non-blocking Minor/Nit findings from the **wave/1** adversarial review (codex `codex exec` +
-manual edge-case probes). The two Major findings were fixed under PR (healing branch
-`team-execute/sb-w1fix`); the items below were judged not worth blocking and are left for the
-operator to triage.
+Non-blocking findings left for the Finisher / operator. Two sources, kept consolidated here:
 
-## Minor
+1. **wave/1 adversarial review** (this file, below) — codex `codex exec` + manual edge-case probes
+   over the `1567f3e..3e62b0c` delta. All Blocker/Major findings were **fixed** on branch
+   `team-execute/sb-w1fix` (gate-green); only the Minor/Nit below remain.
+2. **writer sb-75 `/simplify` items** — three cosmetic items captured at
+   `~/.claude/team-execute-runs/about-an-idea-to-shimmering-bubble-2026-06-21-2125/operator-todos-sb-75.md`.
+   **Do NOT fix them now** — wave/2 #76 (ready-frontier-build) touches the same frontier/drain code,
+   so they are deferred to the final Finisher sweep to avoid a conflict. (Summarised here only so the
+   full picture lives in one place: (a) drop the redundant `ready-frontier:` output line, (b) rename
+   the `--frontier` flag → `--width`, (c) capture drain output once per board state in the smoke
+   test.)
+
+---
+
+## wave/1 review — Minor
 
 - **`tests/smoke/phase6-autorun-autonomy.sh` §B doctrine checks are prose-greps.** They enforce that
   the staffing-gate doctrine *phrases* are present (and parity across `agents/idc-autorun.md` +
-  `commands/autorun.md`), but they verify presence, not semantics — a grep for `scope down` would
-  still pass if the prose said the opposite. This matches the repo's existing doctrine-test style
-  (`phase6-autorun.sh`, `phase7-command-prose-invariants.sh`), so it is consistent, not a
-  regression. *If* you want stronger coverage, add a behavior-level fixture that drives the runnable
-  path (threshold compare → exactly-one-gate → no self-narrow). Deferred to avoid gold-plating one
-  test out of step with the rest of the suite.
+  `commands/autorun.md`) and are red-when-broken (delete a phrase → the test fails), but they verify
+  presence, not semantics. codex twice flagged this as higher severity and wanted an "executable
+  harness." Held as non-blocking: the doctrine under test is **agent instructions in markdown**, not
+  a runnable function, so there is no executable path to assert; and the prose-grep style matches the
+  repo's established doctrine tests (`phase6-autorun.sh`, `phase7-command-prose-invariants.sh`).
+  Strengthening just this one out of step with the suite would be gold-plating. If desired, the
+  Finisher could add a parser-level check that the threshold value and the "exactly one gate" wording
+  are internally consistent.
 
-## Nit
-
-- **`scripts/idc_dag.py` silently drops a self-edge** (`blocks_on: [<self>]`). `build_edges` skips
-  `x == y`, so a pillar that blocks on itself — an unschedulable authoring error — is treated as a
-  no-dependency pillar with no operator signal. Consider surfacing a self-edge as a matrix defect
-  (it is a trivial cycle). Low impact; current behavior is documented as intentional.
+## wave/1 review — Nit
 
 - **`scripts/idc_matrix_check.py` runs the DAG analysis twice on a PASS** — `check()` calls
   `idc_dag.analyze()` for the cycle test and `publish()` calls it again for the width/critical-path
@@ -30,6 +37,7 @@ operator to triage.
 - **Autorun doctrine wording nuance.** `agents/idc-autorun.md` / `commands/autorun.md` describe the
   staffing estimate as the frontier width "summed across the remaining buildable waves," but
   `idc_autorun_drain.py --frontier` reports only the *current* unblocked frontier (future-wave work
-  is still blocked and excluded). The prose is describing the operator's running mental estimate
-  across `/loop` iterations, not a single script call — accurate in spirit, but a reader could
-  expect one invocation to return the cross-wave sum. Consider a one-line clarification.
+  is still blocked and excluded). The prose describes the operator's running estimate across `/loop`
+  iterations, not a single script call — accurate in spirit, but a reader could expect one invocation
+  to return the cross-wave sum. A one-line clarification would remove the ambiguity. (Note: overlaps
+  the deferred sb-75 `--frontier`→`--width` rename — fold into that Finisher pass.)

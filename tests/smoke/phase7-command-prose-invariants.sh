@@ -88,4 +88,25 @@ D="$C/doctor.md"
 [ -f "$D" ] || fail "commands/doctor.md missing"
 has "$D" 'read-only' || fail "doctor.md must declare itself read-only"
 
+# --- build.md: dissolved-barrier coherence (#76) -------------------------------------------------
+# #76 dissolved the wave barrier: Build dispatches off the whole-board READY FRONTIER (not the active
+# wave), and the acceptance gate retriggers continuously (per-area finish + convergence + wave-close),
+# not only at wave-close. The operator-facing command summary must agree with agents/idc-build.md —
+# a future edit must not silently reintroduce the wave-barrier model. Red-when-broken: the positive
+# grep fails if 'ready frontier' is dropped; each negative grep fails if the stale barrier prose returns.
+B="$C/build.md"
+[ -f "$B" ] || fail "commands/build.md missing"
+has "$B" 'ready frontier' \
+  || fail "build.md must dispatch off the ready frontier (#76 dissolved the wave barrier)"
+# Negative asserts over WHITESPACE-NORMALIZED prose — markdown wraps unpredictably, so a stale phrase
+# could re-enter split across two lines and dodge a line-based grep; flatten newlines first so the
+# guard stays red-when-broken regardless of wrapping. (BSD/GNU-portable: tr only.)
+BFLAT="$(tr '\n' ' ' < "$B" | tr -s ' ')"
+printf '%s' "$BFLAT" | grep -qiE 'wave[ -]?close runs the full suite' \
+  && fail "build.md must not say 'wave close runs the full suite' — #76 retriggers the acceptance gate continuously (per-area finish + convergence + wave-close), not only at wave-close"
+printf '%s' "$BFLAT" | grep -qiE 'promotes the next wave' \
+  && fail "build.md must not say it 'promotes the next wave' — Wave no longer gates dispatch (#76); it survives only as the acceptance gate's reporting scope"
+printf '%s' "$BFLAT" | grep -qiE 'claim the active wave' \
+  && fail "build.md must not 'claim the active wave' — Build dispatches off the whole-board ready frontier (#76), not the active wave"
+
 echo "PASS: file-changing command markdown holds its must-never/must-say invariants"

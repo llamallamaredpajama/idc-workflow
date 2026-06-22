@@ -26,6 +26,32 @@ the process docs stay runtime-neutral and cannot drift per-runtime.
   the worktree (`git -C <path>` or `cd` first).
 - The Build orchestrator is the **single merge-queue** (finisher); parallel PRs never race.
 
+## Two-level fan-out + worktree topology
+
+The durable-worker and bounded-fan-out primitives **compose** into a **two-level fan-out**: the
+durable worker is a **sous-chef** that owns an area end-to-end (outer level — one Teams teammate per
+matrix-disjoint area), and inside that area it runs **bounded fan-out to line cooks** (inner level),
+each cook on a **disjoint** sub-surface so two cooks can never race on one file
+(`idc:idc-implementer` / `idc:idc-finisher`).
+
+- **Outer level (sous-chef).** A Claude Teams teammate in its own pre-created worktree, exactly as
+  the durable-worker row above — never the Agent-tool `isolation:"worktree"` param (it silently
+  runs on `main`).
+- **Inner level (line cooks).** The **`Workflow` tool** drives the cooks deterministically — a
+  `pipeline()` (implement → review → finish) **per cook** or a `parallel()` across cooks, **one cook
+  per `parallel()` thunk / per disjoint-surface item** (cooks parallelise across *surfaces*, not
+  across the pipeline's implement→review→finish *stages*), with **`isolation:'worktree'` per cook**.
+  This is the Workflow tool's *own* worktree isolation (a working code path), distinct from the
+  broken Agent-tool param above — so each cook gets an isolated worktree without the lead
+  pre-creating it.
+
+**Worktree topology — cook → area-staging → merge (worktree-per-cook).** Each line cook runs in its
+**own worktree** (worktree-per-cook); the cooks' disjoint sub-surfaces converge onto the
+**area-staging** branch the sous-chef owns; the sous-chef **merges** that staging branch (the
+finisher merges into the integration branch as the single Build orchestrator under the serialized
+merge lease — Teams' A2 row, `idc:idc-finisher`). Fan-out widens *who builds*, never *who judges*:
+the cooks build, an **independent** review issues the verdict, and only then does the finisher merge.
+
 ## Model-tier resolution
 
 Read `WORKFLOW-config.yaml::model_routing`. For a spawn at tier `<tier>`, resolve

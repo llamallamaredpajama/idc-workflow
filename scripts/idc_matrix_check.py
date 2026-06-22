@@ -69,6 +69,41 @@ def parse_matrix(text):
     return pillars
 
 
+def surface_areas(pillars):
+    """Carve pillars into disjoint AREAS: groups linked by shared file surfaces (union-find).
+
+    Two pillars are in the same area when their surface sets intersect (directly or transitively).
+    Pillars in DIFFERENT areas never touch the same file, so they are parallel-safe regardless of
+    wave — the run-time orchestrator can staff independent writers per area. Returns a list of
+    sorted id-lists, ordered by each area's smallest id."""
+    parent = {p["id"]: p["id"] for p in pillars if p.get("id")}
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    def union(a, b):
+        parent[find(a)] = find(b)
+
+    # first pillar to declare a surface owns it; later pillars touching it union into that area
+    owner = {}
+    for p in pillars:
+        pid = p.get("id")
+        if not pid:
+            continue
+        for s in p.get("surfaces", []):
+            if s in owner:
+                union(pid, owner[s])
+            else:
+                owner[s] = pid
+    groups = {}
+    for pid in parent:
+        groups.setdefault(find(pid), []).append(pid)
+    return sorted((sorted(g) for g in groups.values()), key=lambda g: g[0])
+
+
 def check(text):
     problems = []
     if not re.search(r"^pillars:\s*$", text, re.M):
@@ -95,7 +130,46 @@ def check(text):
                         f"wave {wave}: '{members[i]['id']}' and '{members[j]['id']}' "
                         f"share surface(s) {sorted(shared)} — not parallel-safe "
                         f"(sequence them into different waves)")
+    # blocks_on ref integrity: every dependency must name a DECLARED pillar. idc_dag (the analyzer)
+    # drops a dangling ref (it is not a DAG node), so the guardrail must catch it here, or a typo'd
+    # dependency silently vanishes (the pillar looks independent, inflating the parallel-width ceiling
+    # and possibly running before its true upstream). A SELF-ref is NOT checked here — idc_dag keeps
+    # the self-edge, so the cycle check below reports it as the trivial cycle it is (single owner).
+    declared = {p["id"] for p in pillars if p.get("id")}
+    for p in pillars:
+        pid = p.get("id")
+        if not pid:
+            continue
+        for b in p.get("blocks_on", []):
+            if b != pid and b not in declared:
+                problems.append(
+                    f"pillar '{pid}' blocks_on undeclared pillar '{b}' — dangling dependency "
+                    f"(fix the ref or declare the pillar; a silent drop inflates parallel width)")
+    # schedulability: the blocks_on edges must form a DAG. A cycle can never be waved (no
+    # assignment puts every upstream in an earlier wave), so it is a hard matrix FAIL. Imported
+    # lazily so idc_dag can reuse parse_matrix from this module without an import cycle.
+    import idc_dag
+    cyc = idc_dag.analyze(pillars).get("cycle")
+    if cyc:
+        problems.append(
+            f"blocks_on edges form a cycle among {cyc} — unschedulable "
+            f"(break the cycle before waving)")
     return problems
+
+
+def publish(text):
+    """The plan-time intelligence printed on a PASS: the parallel-width CEILING + critical-path
+    depth (from idc_dag) and the carved disjoint surface areas (the run-time orchestrator staffs
+    independent writers against these)."""
+    pillars = parse_matrix(text)
+    import idc_dag
+    a = idc_dag.analyze(pillars)
+    print(f"parallel-width ceiling: {a['max_parallel_width']} "
+          f"(critical path: {a['critical_path_length']})")
+    areas = surface_areas(pillars)
+    print(f"disjoint surface areas (never share a file surface): {len(areas)}")
+    for i, area in enumerate(areas, 1):
+        print(f"  area {i}: {', '.join(area)}")
 
 
 def main():
@@ -115,6 +189,7 @@ def main():
             print(f"  - {p}")
         sys.exit(1)
     print("matrix check: PASS")
+    publish(text)
     sys.exit(0)
 
 

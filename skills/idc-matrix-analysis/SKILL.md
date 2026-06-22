@@ -40,6 +40,21 @@ pillars:
 Assign waves so that **every pillar in a wave owns disjoint surfaces** and all `blocks_on`
 upstreams sit in earlier waves.
 
+## 2.5 DAG intelligence — the staffing ceiling (the head chef gets smart)
+
+Before re-sequencing, read the shape of the `blocks_on` graph so waves are staffed against real
+parallelism, not guesswork:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_dag.py" docs/workflow/pillar-matrices/<phase-tag>-matrix.yaml
+```
+
+It reports the **critical-path length** (longest `blocks_on` chain — how deep the run must
+serialize) and the **max-parallel width** (the widest antichain: the most pillars that are
+mutually independent, the parallel-width *ceiling* an ideal wave could ever staff). A cyclic
+`blocks_on` graph is unschedulable — it exits non-zero and names the cycle. This is plan-time
+intelligence the run-time orchestrator staffs against; it never sets wave fields itself.
+
 ## 3. Re-sequence against the live board (global)
 
 Re-sequencing happens ONLY here (`WORKFLOW.md §1.2`). Query the board through
@@ -53,9 +68,13 @@ matrix, so the board reflects one coherent ordering.
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_matrix_check.py" docs/workflow/pillar-matrices/<phase-tag>-matrix.yaml
 ```
 
-It rejects a matrix where same-wave pillars share a surface (not parallel-safe) or a pillar
-lacks an id/wave/surfaces. A clash that cannot be deconflicted into separate waves and is a
-genuine upstream contradiction is parked and surfaced for a recirculation — never papered over.
+It rejects a matrix where same-wave pillars share a surface (not parallel-safe), a pillar
+lacks an id/wave/surfaces, a `blocks_on` ref is dangling (names no declared pillar) or
+self-referential, or the `blocks_on` edges form a cycle. On PASS it also publishes the
+parallel-width **ceiling** (from the DAG analysis above) plus the carved disjoint **areas** —
+pillar groups that never share a file surface, so the orchestrator can staff an independent
+writer per area. A clash that cannot be deconflicted into separate waves and is a genuine
+upstream contradiction is parked and surfaced for a recirculation — never papered over.
 
 ## Authority boundaries
 

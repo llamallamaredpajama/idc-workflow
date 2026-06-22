@@ -20,7 +20,17 @@ Prints the eligible issue numbers and `drain: continue` (work remains) or `drain
 (exit). The planning lane (unplanned considerations) is scanned by the orchestrator from the
 filesystem; this helper covers the build lane / board-exit half.
 
-Usage: idc_autorun_drain.py --tracker <TRACKER.md>   (exit 0 = ok, 2 = error)
+With `--width`, one extra line reports the ready frontier's width:
+  width: <N>     (the cardinality of the `eligible:` set already printed above)
+Width is the max-useful parallelism the CURRENT ready frontier can staff — the size of the unblocked
+eligible antichain (Wave is never consulted, so different waves do not partition it; a blocked
+dependent and a glass-wall Consideration/Planning pointer are excluded by the same eligibility
+predicate). Autorun's parent reads it as the sous-chef count feeding the launch-time staffing
+estimate — one `--width` call reports the frontier right now; the cross-`/loop` estimate sums these
+across iterations, not a single invocation. The flag is opt-in so the default output stays
+byte-identical for existing callers (the ready set is always on the `eligible:` line, with or without it).
+
+Usage: idc_autorun_drain.py --tracker <TRACKER.md> [--width]   (exit 0 = ok, 2 = error)
 """
 import argparse
 import json
@@ -48,6 +58,8 @@ def load(path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tracker", required=True)
+    ap.add_argument("--width", action="store_true",
+                    help="also print the ready frontier's width (max-useful parallelism); the ready set is the `eligible:` line")
     args = ap.parse_args()
     try:
         state = load(args.tracker)
@@ -66,11 +78,28 @@ def main():
     if not isinstance(issues, list):
         sys.stderr.write("idc-autorun-drain: corrupt tracker — `issues` must be a list\n")
         sys.exit(2)
-    # eager guard: the dict-comp and sort key below subscript it["number"] unconditionally,
-    # so a corrupt issue must fail loudly here rather than KeyError mid-computation.
+    # eager guard: every entry must be a dict (membership tests, `.get()`, the sort key, and
+    # `.startswith()` below all assume it), the dict-comp and sort key subscript it["number"]
+    # unconditionally, and the eligibility loop ITERATES it["blocked_by"] — so a corrupt issue must
+    # fail loudly here rather than KeyError/TypeError mid-computation. A scalar entry (e.g.
+    # `issues: [5]`) or a non-list blocked_by (a github bug or a hand-edit dropping the brackets)
+    # would otherwise crash the loop (exit 1, traceback) or be silently misread; fail closed
+    # (exit 2) instead, like the sibling idc_acceptance_check.py guards its own dereferenced fields.
     for it in issues:
+        if not isinstance(it, dict):
+            sys.stderr.write("idc-autorun-drain: corrupt tracker — an issue is not an object\n")
+            sys.exit(2)
         if "number" not in it:
             sys.stderr.write("idc-autorun-drain: corrupt tracker — an issue is missing `number`\n")
+            sys.exit(2)
+        if not isinstance(it["number"], int):
+            # `number` is a dict key (status_by_num) AND a sort key — an unhashable/unsortable value
+            # crashes instead of exiting 2. The filesystem tracker always writes an int.
+            sys.stderr.write("idc-autorun-drain: corrupt tracker — an issue `number` must be an int\n")
+            sys.exit(2)
+        if not isinstance(it.get("blocked_by", []), list):
+            sys.stderr.write(
+                f"idc-autorun-drain: corrupt tracker — issue {it['number']} `blocked_by` must be a list\n")
             sys.exit(2)
     status_by_num = {it["number"]: it.get("status") for it in issues}
     eligible = []
@@ -86,6 +115,12 @@ def main():
 
     print("eligible: " + " ".join(str(n) for n in eligible))
     print("drain: " + ("continue" if eligible else "complete"))
+    if args.width:
+        # The ready frontier IS the `eligible:` set already printed above; width is its size = the
+        # unblocked eligible antichain that can be staffed in parallel right now (the sous-chef
+        # count; Wave is never consulted). No `ready-frontier:` line — it would byte-duplicate
+        # `eligible:`; consumers read the ready set from `eligible:` and the count from here.
+        print("width: " + str(len(eligible)))
 
 
 if __name__ == "__main__":

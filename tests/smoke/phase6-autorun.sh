@@ -62,6 +62,39 @@ RAW="$WORK/no-issues-key.md"
 python3 "$DRAIN" --tracker "$RAW" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 2 ] || fail "a state block missing the \`issues\` key must exit 2 (fail-closed), not drain: complete (got $rc)"
 
+# ---- a malformed `blocked_by` (not a list) -> exit 2 (fail-closed, never iterated/misread) ------
+# The eligibility loop iterates `it.get("blocked_by", [])`; a non-list value (a github bug or a
+# hand-edit dropping the brackets) would crash with a TypeError (exit 1, traceback) or be iterated
+# character-by-character and silently misread. The eager shape guard catches it BEFORE the loop and
+# exits 2 with a clean corrupt-tracker diagnostic — the same fail-closed contract as the `number`
+# and `issues`-key guards. Red-when-broken: drop the guard and this issue exits 1 (crash), not 2.
+RAWBB="$WORK/bad-blocked-by.md"
+{ echo "<!-- idc-tracker-state:begin -->"; echo '```json'
+  echo '{"issues":[{"number":1,"status":"Todo","blocked_by":5}]}'; echo '```'
+  echo "<!-- idc-tracker-state:end -->"; } > "$RAWBB"
+python3 "$DRAIN" --tracker "$RAWBB" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 2 ] || fail "a malformed \`blocked_by\` (non-list) must exit 2 (fail-closed), not crash/misread (got $rc)"
+
+# ---- a non-dict `issues[]` entry (e.g. issues:[5]) -> exit 2 (fail-closed, never a bare crash) ---
+# Every membership test / `.get()` / sort key / `.startswith()` below assumes each entry is a dict;
+# a scalar entry (corrupt tracker) would crash with a TypeError (exit 1, traceback). The eager shape
+# guard rejects a non-dict entry up front. Red-when-broken: drop the guard and this exits 1, not 2.
+RAWND="$WORK/non-dict-issue.md"
+{ echo "<!-- idc-tracker-state:begin -->"; echo '```json'; echo '{"issues":[5]}'; echo '```'
+  echo "<!-- idc-tracker-state:end -->"; } > "$RAWND"
+python3 "$DRAIN" --tracker "$RAWND" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 2 ] || fail "a non-dict \`issues[]\` entry must exit 2 (fail-closed), not crash (got $rc)"
+
+# ---- a non-int `number` (unhashable/wrong type) -> exit 2 (fail-closed, never a bare crash) ------
+# `number` is used as a dict key (status_by_num) and a sort key; an unhashable value (list/dict) or
+# a type that won't sort against the other ints crashes with a TypeError instead of the documented
+# exit 2. The eager guard requires an int. Red-when-broken: drop the guard and this exits 1, not 2.
+RAWNI="$WORK/non-int-number.md"
+{ echo "<!-- idc-tracker-state:begin -->"; echo '```json'; echo '{"issues":[{"number":[1],"status":"Todo"}]}'; echo '```'
+  echo "<!-- idc-tracker-state:end -->"; } > "$RAWNI"
+python3 "$DRAIN" --tracker "$RAWNI" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 2 ] || fail "a non-int \`number\` must exit 2 (fail-closed), not crash (got $rc)"
+
 # ---- an explicitly-present empty board (`issues: []`) stays a legitimate empty board -> complete -
 RAWEMPTY="$WORK/empty-board.md"
 { echo "<!-- idc-tracker-state:begin -->"; echo '```json'; echo '{"issues":[]}'; echo '```'

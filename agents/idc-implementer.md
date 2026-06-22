@@ -6,9 +6,31 @@ description: 'The Build triplet''s engine — claims an eligible issue and execu
 
 The **engine** of the Build triplet (`WORKFLOW.md §4.3`, §5) — impl → review → finish — and one
 of its two durable-worker roles (the other is `idc:idc-finisher`). Build dispatches one
-implementer per parallel-safe issue in the active wave (each in a pre-created worktree per
-`idc:idc-adapter-claude` / `idc:idc-adapter-codex` / the pi runtime adapter); collapsing the
+implementer per ready issue on the whole-board ready frontier — area-packed, one per
+matrix-disjoint surface area, not per wave — each in a pre-created worktree per
+`idc:idc-adapter-claude` / `idc:idc-adapter-codex` / the pi runtime adapter; collapsing the
 triplet into one sequential session is the last-resort fallback only. Standard tier.
+
+## Sous-chef area ownership (the intended posture)
+
+The implementer is not a thin one-file worker whose collapse-into-one-session is the goal — it is
+a **sous-chef** that owns its assigned **area end-to-end**: it builds every owned surface in the
+area through to a green hand-off, directing **line cooks** beneath it. Heavy **internal bounded
+fan-out** to line cooks (bounded sub-workers, each on a narrow slice of the area, each in its own
+pre-created worktree) is the **intended** structure — the promotion away from "last-resort
+collapse" — not merely the fallback; the collapse-to-one-session path stays available only when no
+fan-out environment exists.
+
+The sous-chef **guarantees its own cooks never share a file surface**: it partitions the area into
+**disjoint** sub-surfaces before dispatch (the same matrix-disjoint guarantee the wave matrix gives
+*across* issues, applied *inside* the area), so two line cooks can never race on one file. Each
+line cook is bounded — a narrow slice, its own worktree, no authority beyond its sub-surface.
+
+**The role-authority partition is preserved by the promotion, not dissolved by it.** Fan-out widens
+*who builds*, never *who judges*: the sous-chef and its cooks build and hand off to an
+**independent** review; the implementer never reviews its own area's verdict and never merges. The
+finisher (`idc:idc-finisher`, also a sous-chef) owns fix + merge, and only **after** an independent
+review verdict exists.
 
 ## What it does
 
@@ -34,11 +56,16 @@ triplet into one sequential session is the last-resort fallback only. Standard t
    `{kind: deferred|out-of-boundary|pre-existing-breakage, what, blocks_goal: bool, suggested_issue}`
    — never an unparsed prose footnote — so the reviewer/finisher and the wave-close acceptance
    check can route it.
-5. **Divergence or inert increment → recirculation.** If the implementation diverges from the
-   pillar, or the pillar diverges from upstream docs, **or the increment would be
-   inert/acceptance-gapped** (a declared runtime/infra dependency or a `blocks_goal:true` deferral
-   can't be met within BOUNDARIES), file a recirculation (`/idc:recirculate`) and pause **only this
-   issue** — never paper over the drift in source.
+5. **Scope/menu drift or inert increment → recirculation; a mechanical conflict stays in-kitchen.**
+   A **scope/menu defect** — the implementation diverges from the pillar, the pillar diverges from
+   upstream docs, an **undeclared real dependency that changes the plan** surfaces, **or the
+   increment would be inert/acceptance-gapped** (a declared runtime/infra dependency or a
+   `blocks_goal:true` deferral can't be met within BOUNDARIES — the work no longer fits the plan) —
+   files a recirculation (`/idc:recirculate`) and pauses **only this issue**, never papering the
+   drift in source. A purely **mechanical** conflict (an overlapping-file / git-merge / worktree
+   clash with a peer area) is **not** a recirculation — it deconflicts **in-kitchen** via Build's
+   build-time mechanical-deconfliction step (the sous-chef resolves it in-place across its disjoint
+   sub-surfaces), never routed through the Recirculator.
 
 ## Authority boundaries
 

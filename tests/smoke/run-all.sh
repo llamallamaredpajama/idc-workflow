@@ -20,13 +20,19 @@ for t in \
   phase1-codex-mirror-sync \
   phase2-think \
   phase3-plan \
+  phase3-dag-matrix \
   phase4-build \
   phase4-review-agent \
   phase4-triplet \
+  phase4-sous-chef-ownership \
   phase4-tracker-github-recipe \
   phase4-acceptance \
+  phase4-ready-frontier \
+  phase4-e2e-merge-train \
+  phase4-recirc-deconflict \
   phase5-ripple \
   phase6-autorun \
+  phase6-autorun-autonomy \
   phase7-lifecycle \
   phase7-update-preserves-data \
   phase7-update-template-mapping \
@@ -44,7 +50,8 @@ for t in \
   phase8-pi-governance-gate \
   phase8-pi-guard-acl \
   phase8-pi-prompt-alignment \
-  phase8-adapter-pi; do
+  phase8-adapter-pi \
+  phase8-adapter-fanout-docs; do
   if out="$(bash "$HERE/$t.sh" 2>&1)"; then
     echo "  PASS  $t"
   else

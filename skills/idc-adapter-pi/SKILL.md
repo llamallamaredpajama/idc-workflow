@@ -47,6 +47,29 @@ playbook per runtime.
   guarantees same-wave issues own **disjoint** file surfaces. Each durable worker runs in a
   **pre-created worktree** (never an isolation param).
 
+## Two-level fan-out + worktree topology
+
+The durable-worker and bounded-fan-out primitives **compose** into a **two-level fan-out**: the
+durable worker is a **sous-chef** that owns an area end-to-end (outer level — one standing resident
+per matrix-disjoint area), and inside that area it runs **bounded fan-out to line cooks** (inner
+level), each cook on a **disjoint** sub-surface so two cooks can never race on one file
+(`idc:idc-implementer` / `idc:idc-finisher`).
+
+- **Outer level (sous-chef).** A standing coms-net resident (the durable-worker row above), in its
+  own pre-created worktree — never an isolation param.
+- **Inner level (line cooks).** **Isolated child processes** spawned off the resident — short-lived,
+  outside the standing pool, deterministic — **one cook per child process**, each in its own
+  pre-created worktree. See the launcher caveat in the worked example below: the N-resident *pool* is
+  adapter wiring not yet emitted by `idc-pi run`, but the **child-process** cook fan-out is the
+  inner level either way.
+
+**Worktree topology — cook → area-staging → merge (worktree-per-cook).** Each line cook runs in its
+**own worktree** (worktree-per-cook); the cooks' disjoint sub-surfaces converge onto the
+**area-staging** branch the sous-chef owns; the sous-chef **merges** that staging branch under the
+**board-backed merge lease** (pi's A2 row — fail-closed, no lease → no merge). Fan-out widens *who
+builds*, never *who judges*: the cooks build, an **independent** child-process review issues the
+verdict, and only then does the finisher merge.
+
 ### The Build triplet as residents — worked example
 
 > **Launcher status (codex round-4 reconcile):** the coms-net hub *supports* a multi-resident pool

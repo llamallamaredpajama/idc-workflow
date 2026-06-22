@@ -50,6 +50,38 @@ parent). Loopable via `/loop /idc:autorun` for standing operation.
    uncommitted/untracked artifact), and anything waiting on the operator (the Think-PR requirements
    gate, incl. any open Think PR pending admission).
 
+## Staffing estimate, the launch gate & /loop resume
+
+Typing `/idc:autorun` authorizes draining the **whole** repo — every phase, every eligible wave,
+not one phase. Before the drain loop, size the work into a **staffing estimate**. The build lane's
+**current** parallelism is the ready-frontier **width** from
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --tracker <TRACKER.md> --width`
+(the unblocked eligible antichain — one **sous chef** per ready issue, Wave never consulted); one
+call reports the frontier **right now**, so the running estimate accrued across the `/loop` drain as
+later blockers clear is **~N sous chefs**, **~M subagents** (each sous chef's bounded fan-out),
+across **~K usage windows**. Read the ceiling from
+`WORKFLOW-config.yaml::autorun.staffing_gate_threshold` (default **10** sous chefs):
+
+- **At or below the threshold — no launch gate.** Drain fully autonomously, start to finish.
+- **Above the threshold — exactly one launch-time gate.** Surface a single pre-drain
+  `AskUserQuestion`: **"~N sous chefs / ~M subagents across K windows — go / scope down?"** It is a
+  one-time **cost/scale** confirmation — not a scope re-confirmation, not a *how-autonomous*
+  question. On **go**, autorun drains ALL phases to completion with no further asks. On **scope
+  down**, autorun **stands down** — it does *not* drain the repo; the operator instead runs an
+  explicit `/idc:build --phase N` to build a single phase. (Scope-down is the operator choosing a
+  narrower command, never autorun narrowing its own scope.)
+
+**Never self-narrow.** The estimate feeds the one gate; it never makes autorun shrink its own scope
+to a single phase. Phase-scoping is the **operator's** explicit `/idc:build --phase N` choice, never
+autorun's. The motivating bug was autorun stopping to ask *and* narrowing itself to one phase — both
+are now structurally forbidden.
+
+**/loop resume.** Run `/loop /idc:autorun` for standing operation: each iteration re-reads the
+**live board state**, so the drain **resumes across usage-window resets** — work already merged is
+gone from the frontier; a wave newly unblocked mid-run (a gate the operator approved from their
+phone) joins it. The launch gate is sized off the live board, so once the bulk has drained a resume
+iteration sees a width at or below the threshold and proceeds gate-free.
+
 ## Authority & halt
 
 - Owns no canonical writes of its own — every cognitive write happens inside the `idc:idc-plan`
@@ -65,6 +97,8 @@ parent). Loopable via `/loop /idc:autorun` for standing operation.
   *how autonomous to be*, never re-confirms a scope already chosen (typing `/idc:autorun` **is** the
   authorization to drain the whole repo), and never converts a deterministic `drain: continue` into a
   question. A request to "check in" means **report progress and keep draining**, not stop-and-re-ask.
-  Autorun **never calls `AskUserQuestion`** — the only operator decisions in the pipe are the
-  **Think-PR** gate and the rare **`operator-decision`** strategic gate above, each surfaced as a
-  board state autorun reports, never an improvised interactive prompt.
+  Autorun **never calls `AskUserQuestion` mid-drain** — once draining, the only operator decisions
+  are the **Think-PR** gate and the rare **`operator-decision`** strategic gate above, each surfaced
+  as a board state autorun reports, never an improvised interactive prompt. The **one** sanctioned
+  interactive ask is the **pre-drain launch-time staffing gate** (above): fired at most once and only
+  when the estimate is over threshold, a cost/scale confirmation — not a *how-autonomous* question.

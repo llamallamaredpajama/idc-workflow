@@ -49,6 +49,21 @@ def expected_verdict(severities):
     return "PASS"
 
 
+def require_strings(obj, keys, exempt, label, i, problems):
+    """Append a problem for each required key that is missing, or present-but-not-a-non-empty-string.
+
+    A required field that is present-but-null/[]/{}/0 (any non-string) must be rejected, not silently
+    accepted — a strip()-only guard only catches empty *strings*. `exempt` names the one key that is
+    numeric/boolean and carries its own range/type check at the call site, so it is checked for
+    presence here but not against the non-empty-string rule.
+    """
+    for k in keys:
+        if k not in obj:
+            problems.append(f"{label}[{i}] missing `{k}`")
+        elif k != exempt and (not isinstance(obj.get(k), str) or not obj[k].strip()):
+            problems.append(f"{label}[{i}] `{k}` must be a non-empty string")
+
+
 def check(doc):
     problems = []
     verdict = doc.get("verdict")
@@ -62,14 +77,8 @@ def check(doc):
         if not isinstance(f, dict):
             problems.append(f"finding[{i}] is not a JSON object")
             continue
-        for k in REQUIRED_FINDING:
-            # A required field that is present-but-null/[]/{}/0 (any non-string) must be rejected,
-            # not silently accepted — a strip()-only guard only catches empty *strings*. `confidence`
-            # is numeric and carries its own range check below, so it is exempt from the string rule.
-            if k not in f:
-                problems.append(f"finding[{i}] missing `{k}`")
-            elif k != "confidence" and (not isinstance(f.get(k), str) or not f[k].strip()):
-                problems.append(f"finding[{i}] `{k}` must be a non-empty string")
+        # `confidence` is numeric and carries its own range check below, so it is exempt here.
+        require_strings(f, REQUIRED_FINDING, "confidence", "finding", i, problems)
         if f.get("severity") not in SEVERITIES:
             problems.append(f"finding[{i}] severity must be one of {sorted(SEVERITIES)}")
         elif f.get("dimension") == TEST_GENUINENESS_DIM and f.get("severity") not in TEST_GENUINENESS_MIN:
@@ -91,14 +100,8 @@ def check(doc):
             if not isinstance(d, dict):
                 problems.append(f"deferral[{i}] is not a JSON object")
                 continue
-            for k in REQUIRED_DEFERRAL:
-                # As with findings: a present-but-null/non-string required field is rejected (a
-                # strip()-only guard misses it). `blocks_goal` is a boolean with its own type check
-                # below, so it is exempt from the non-empty-string rule.
-                if k not in d:
-                    problems.append(f"deferral[{i}] missing `{k}`")
-                elif k != "blocks_goal" and (not isinstance(d.get(k), str) or not d[k].strip()):
-                    problems.append(f"deferral[{i}] `{k}` must be a non-empty string")
+            # `blocks_goal` is a boolean with its own type check below, so it is exempt here.
+            require_strings(d, REQUIRED_DEFERRAL, "blocks_goal", "deferral", i, problems)
             # blocks_goal gates the acceptance check; a strip()-only check would pass the string
             # "true", so the boolean type is enforced explicitly.
             if "blocks_goal" in d and not isinstance(d.get("blocks_goal"), bool):

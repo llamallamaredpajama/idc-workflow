@@ -28,6 +28,13 @@ Non-blocking findings left for the Finisher / operator. Two sources, kept consol
   Finisher could add a parser-level check that the threshold value and the "exactly one gate" wording
   are internally consistent.
 
+- **`tests/smoke/phase6-autorun-autonomy.sh` frontier coverage gap (codex pass-3).** The `--frontier`
+  width assertions exercise the blocked-dependent and `Stage=Consideration` exclusions but not the
+  `Stage=Planning` exclusion, the `[operator-action]` title exclusion, or a "blocker becomes Done →
+  dependent becomes eligible" transition. (All three ARE covered in `phase6-autorun.sh` for the
+  default `drain:` output, so the predicate itself is guarded — this is only about widening the
+  `--frontier` width path's direct coverage.) Cheap fixtures to add when the Finisher touches this file.
+
 ## wave/1 review — Nit
 
 - **`scripts/idc_matrix_check.py` runs the DAG analysis twice on a PASS** — `check()` calls

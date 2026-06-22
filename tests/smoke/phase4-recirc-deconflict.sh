@@ -80,6 +80,32 @@ for f in "$IMPL" "$FIN"; do
     || fail "$name must reference Build's build-time mechanical-deconfliction step as the in-kitchen path"
 done
 
+# A7 — THE FAIL-SAFE ESCAPE HATCH must survive in idc-build.md. A7's negation (A5) only proves the
+#      step REFUSES to recirculate a mechanical clash; without A7 a writer could delete the whole
+#      "Only if deconfliction surfaces a scope/menu defect → escalate to the Recirculator" clause and
+#      the suite would stay green — the divergence-loss path the carve-out depends on for safety.
+#      RED if build.md drops the escalation chain (deconfliction surfaces → scope/menu defect →
+#      escalate → Recirculator) or the precise defect definition.
+hasflat "$BUILD" 'deconfliction surfaces[^.]*scope.menu defect[^.]*escalate[^.]*recirculator' \
+  || fail "idc-build.md must keep the escape hatch: a surfaced scope/menu defect ESCALATES to the Recirculator (the fail-safe)"
+hasflat "$BUILD" '(no longer fits the plan|undeclared real dependency that changes the plan)' \
+  || fail "idc-build.md must define the scope/menu defect (work no longer fits the plan / undeclared real dependency that changes the plan)"
+
+# A8 — THE FAIL-CLOSED CLASSIFICATION GATE: a clash is treated as mechanical ONLY when provably so;
+#      an ambiguous/unprovable clash recirculates as a scope/menu defect and is NEVER silently merged
+#      in-kitchen (closes the mis-route fail-open: a real undeclared dependency can surface as an
+#      overlapping-file clash). RED if the gate is removed.
+hasflat "$BUILD" 'classify fail.closed|cannot be established[^.]*scope.menu' \
+  || fail "idc-build.md must classify fail-closed — an unprovable clash is treated as a scope/menu defect, not assumed mechanical"
+hasflat "$BUILD" 'never silently merged' \
+  || fail "idc-build.md must state an ambiguous clash is NEVER silently merged in-kitchen (the fail-open guard)"
+
+# A9 — BOUNDED MEANS TERMINATING: the in-kitchen specialist is capped (attempt ceiling) and an
+#      unresolvable mechanical conflict halts with evidence — no infinite in-kitchen retry, no silent
+#      merge. RED if the terminal state is removed (closes the unbounded-retry gap).
+hasflat "$BUILD" 'attempt ceiling[^.]*(halt|blocked.stop)|halts with evidence|bounded means terminat' \
+  || fail "idc-build.md must give the bounded specialist a terminal state (attempt ceiling → halt with evidence, no infinite retry)"
+
 # ---- B. SCOPE/MENU defects STILL recirculate; mechanical conflicts do NOT reach the Recirculator ---
 # B1 — the implementer + finisher still route a SCOPE/MENU defect to a recirculation (the live half).
 for f in "$IMPL" "$FIN"; do

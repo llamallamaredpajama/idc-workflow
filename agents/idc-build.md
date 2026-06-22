@@ -105,12 +105,20 @@ recirculate).** A purely **mechanical** conflict — an overlapping-file edit, a
 a worktree conflict the disjoint matrix should preclude — is resolved **on the kitchen floor**,
 **in-place** by the area owner (the sous-chef) or its line cook, via a **bounded
 mechanical-deconfliction specialist** (a Deconflict pass dispatched on demand, not an upstream hop):
-rebase against staging, resolve the textual overlap, re-acquire the surface-keyed merge lease, and
-re-run the area's tests. A mechanical conflict **never** spawns a recirculation — recirculation is the
-retrograde doc-sync path, and a textual merge clash is not a docs/plan problem. Only if deconfliction
-surfaces a genuine **scope/menu defect** — the resolved work no longer fits the plan, or an
-**undeclared real dependency that changes the plan** — does it escalate upstream to the Recirculator
-(`/idc:recirculate`); the mechanical resolution itself stays in the kitchen.
+rebase/retarget against staging, resolve the textual overlap, re-acquire the surface-keyed merge
+lease, and re-run the area's tests. **Classify fail-closed first:** a clash counts as *purely
+mechanical* **only** when it is a provable textual overlap with **both sides inside their declared
+surfaces** and **no contract / acceptance / dependency / docs implication** — if that **cannot be
+established**, the ambiguity is itself treated as a **scope/menu defect** and recirculates; an
+ambiguous clash is **never silently merged** in-kitchen (a real undeclared dependency can *surface as*
+an overlapping-file clash, and must not be papered over as a textual merge). **Bounded means
+terminating:** the specialist is capped by the standard **attempt ceiling** (~3 failed hypotheses) and
+an unresolvable mechanical conflict **halts with evidence** (a blocked-stop) — never an unbounded
+in-kitchen retry, never a silent merge. A mechanical conflict **never** spawns a recirculation —
+recirculation is the retrograde doc-sync path, and a textual merge clash is not a docs/plan problem.
+Only if deconfliction surfaces a genuine **scope/menu defect** — the resolved work no longer fits the
+plan, or an **undeclared real dependency that changes the plan** — does it escalate upstream to the
+Recirculator (`/idc:recirculate`); the mechanical resolution itself stays in the kitchen.
 
 **e2e layering (staging-default).** The merge train lands area diffs on a **staging** branch, not
 straight to `main`. **By default only the staging branch runs the full observed e2e** — **once,

@@ -48,3 +48,33 @@ Non-blocking findings left for the Finisher / operator. Two sources, kept consol
   iterations, not a single script call — accurate in spirit, but a reader could expect one invocation
   to return the cross-wave sum. A one-line clarification would remove the ambiguity. (Note: overlaps
   the deferred sb-75 `--frontier`→`--width` rename — fold into that Finisher pass.)
+
+---
+
+## wave/2 review — Minor
+
+(WAVE/2 adversarial review of the `4199ce6..fc4ed75` delta — #76 ready-frontier-build + #77
+sous-chef-ownership. codex `codex exec` (ran clean both passes) + manual probing. **All Blocker/Major
+were FIXED** on branch `team-execute/sb-w2fix`, gate-green: the `commands/build.md` wave-barrier
+contradiction, the `idc-implementer.md` "active wave" prose, the `idc-finisher.md` stale "same-wave"
+merge-safety, the `idc-build.md` Phase 0 github-backend gap + fail-closed-on-helper-error +
+width-is-a-ceiling clarity, and two red-when-broken test weaknesses. Only the Minor/Nit below remain.)
+
+- **`tests/smoke/phase4-ready-frontier.sh` §B doctrine checks are prose-greps** (same accepted-standard
+  limitation as the wave/1 `phase6-autorun-autonomy.sh` note above). codex pass-1 flagged two as
+  "Major": (a) the `width: 2` §A assertion tests the *dependency* frontier (what the helper computes)
+  and therefore cannot go red on broken **area-packing**; (b) the "consume, don't duplicate" §B1 grep
+  is a token-presence check, not proof the agent consumes the helper rather than re-deriving the
+  frontier. Held non-blocking for the same reason: **area-packing and "the agent consumes vs
+  re-derives" are agent-markdown behaviors with no executable surface** — there is no runnable path to
+  assert them, and the prose-grep style matches the repo's established doctrine tests. (The behavioral
+  half the helper *does* own — wave-blind, blocked-aware width — IS genuinely red-when-broken in §A.)
+  An executable harness would be a suite-wide change, out of step with the current standard.
+
+## wave/2 review — Nit
+
+- **`idc_autorun_drain.py` docstring still frames width in wave terms.** Lines ~26/119 call `width:`
+  "the max-useful parallelism **the next wave** can staff" / "the **per-wave** sous-chef count" — mild
+  wave-thinking in a helper that #76 made wave-blind. Cosmetic doc wording (the code is wave-blind and
+  correct); fold into the deferred sb-75 `--frontier`→`--width` rename pass so the docstring is
+  retuned in one edit rather than twice.

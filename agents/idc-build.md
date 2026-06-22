@@ -18,17 +18,24 @@ Build dispatches off the **whole-board ready frontier**, not a wave. Read the bo
 `idc:idc-tracker-adapter` (`query`), then compute the ready set by **consuming** the wave-blind
 readiness helper (consume, don't duplicate the predicate):
 `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --tracker <TRACKER.md> --frontier`
-— it prints `ready-frontier:` (the eligible issue numbers) and `width:` (the max-useful
-parallelism). An issue is **ready** when every native `blocked_by` upstream is `Done` **and its
-file surface is free**, **independent of `Wave`**: a later-wave issue whose blockers are all `Done`
-enters the frontier in the same pass as an early-wave one. (PRD-gated items stay `Blocked` until the
-operator approves — never force them; a `Stage = Consideration`/`Planning` pointer is the glass wall
-and is never scooped as build work.) **Wave no longer gates dispatch** — it is retained only as the
-acceptance gate's reporting scope (`--wave N`, Phase 4).
+(or the github-backend equivalent via `idc:idc-tracker-adapter` — materialize the same tracker
+state to a tempfile and feed it the identical script, exactly as Phase 4 does for the acceptance
+gate). It prints `ready-frontier:` (the eligible issue numbers) and `width:` (the max-useful
+parallelism). The helper computes **dependency-readiness only** — an issue is eligible when every
+native `blocked_by` upstream is `Done`, **independent of `Wave`**: a later-wave issue whose blockers
+are all `Done` enters the frontier in the same pass as an early-wave one. `width:` is therefore a
+**ceiling**; the second half of "ready" — its **file surface is free** — is enforced on top by
+area-packing (Phase 1), never by this helper. If the helper exits non-zero (a corrupt/partial board
+— it fails **closed**, exit 2), **halt and surface it**; never hand-derive the frontier from the
+`query` dump (that reintroduces the very predicate this consumes away). (PRD-gated items stay
+`Blocked` until the operator approves — never force them; a `Stage = Consideration`/`Planning`
+pointer is the glass wall and is never scooped as build work.) **Wave no longer gates dispatch** —
+it is retained only as the acceptance gate's reporting scope (`--wave N`, Phase 4).
 
 ## Phase 1 — Dispatch the triplets (ready-frontier + area-packing)
 
-Dispatch one **triplet** per ready issue whose **file surface is free** — an implementer
+Dispatch one **triplet** per ready **area** — at most one in-flight worker per matrix-disjoint
+surface area, each a sous-chef owning a ready issue whose **file surface is free** — an implementer
 (`idc:idc-implementer`) feeding the reviewer feeding a finisher (`idc:idc-finisher`).
 **Area-packing:** the matrix (`idc:idc-matrix-analysis`, via `idc_matrix_check.py` / `idc_dag.py`)
 carves the whole board into disjoint surface **areas** (issue groups that never share a file

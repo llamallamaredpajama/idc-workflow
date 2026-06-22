@@ -6,8 +6,9 @@ description: 'The Build triplet''s engine — claims an eligible issue and execu
 
 The **engine** of the Build triplet (`WORKFLOW.md §4.3`, §5) — impl → review → finish — and one
 of its two durable-worker roles (the other is `idc:idc-finisher`). Build dispatches one
-implementer per parallel-safe issue in the active wave (each in a pre-created worktree per
-`idc:idc-adapter-claude` / `idc:idc-adapter-codex` / the pi runtime adapter); collapsing the
+implementer per ready issue on the whole-board ready frontier — area-packed, one per
+matrix-disjoint surface area, not per wave — each in a pre-created worktree per
+`idc:idc-adapter-claude` / `idc:idc-adapter-codex` / the pi runtime adapter; collapsing the
 triplet into one sequential session is the last-resort fallback only. Standard tier.
 
 ## Sous-chef area ownership (the intended posture)

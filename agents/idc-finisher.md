@@ -101,9 +101,10 @@ The finisher runs its **own** `/fullauto-goal` loop. Its completion contract car
 Parallel triplets each have their own finisher, so finishers must **never race on the merge**.
 Serialization is two layers — both required:
 
-1. **Matrix-disjoint surfaces.** The planning matrix already guarantees same-wave issues own
-   **disjoint file surfaces**, so two finishers' diffs cannot logically conflict — merges are
-   *commutative at the content level*. This is the primary defense.
+1. **Matrix-disjoint areas.** Area-packing dispatches at most one in-flight finisher per whole-board
+   matrix-disjoint surface **area** (**regardless of `Wave`**), so two finishers' diffs own
+   **disjoint file surfaces** and cannot logically conflict — merges are *commutative at the content
+   level*. This is the primary defense.
 2. **A single merge lock/queue.** Even with disjoint content, the integration-branch ref is one
    shared resource. Exactly **one** finisher fast-forwards/merges it at a time, holding a
    **single-holder merge lease**, **fail-closed** (no lease → no merge; never a silent race).

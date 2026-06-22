@@ -36,15 +36,26 @@ for f in "$IMPL" "$FIN"; do
 done
 
 # internal cooks own DISJOINT file surfaces — each sous-chef guarantees its OWN cooks never share a
-# surface (the matrix-disjoint guarantee, applied INSIDE the area, not only across waves).
-has "$IMPL" 'disjoint'                          || fail "implementer must guarantee its internal cooks own DISJOINT file surfaces"
-has "$IMPL" 'never share|share[^.]*surface'     || fail "implementer must state its OWN cooks NEVER share a file surface"
+# surface (the matrix-disjoint guarantee, applied INSIDE the area, not only across waves). Both
+# sous-chefs make this guarantee: the implementer for its build fan-out AND the finisher for its fix
+# fan-out — assert both so dropping the guarantee from either turns the test red.
+for f in "$IMPL" "$FIN"; do
+  name="$(basename "$f")"
+  has "$f" 'disjoint' || fail "$name must guarantee its internal cooks own DISJOINT file surfaces"
+  # Require a NEGATION governing share+surface — a bare 'share ... surface' alternation would pass on
+  # the POSITIVE wording ("cooks share a surface"), the opposite of the invariant. Red-when-broken:
+  # drop the never/no/not and the guard fires.
+  has "$f" '(never|no|not)[^.]*shar[a-z]*[^.]*surface' \
+    || fail "$name must state its OWN cooks NEVER share a file surface (negation required, not bare 'share ... surface')"
+done
 
 # ---- (B) role-authority partition — red-when-broken ----------------------------------------
 # Load-bearing invariant: the finisher must REFUSE to fix or merge an area that lacks an
 # INDEPENDENT review verdict. Deleting this guard from idc-finisher.md must turn this test red.
-has "$FIN" 'refuses? to (fix|merge)' \
-  || fail "finisher must REFUSE to fix/merge without an independent verdict (role-authority partition)"
+# Require BOTH verbs governed by the refusal (either canonical order) — an `(fix|merge)` alternation
+# would stay green if a future edit dropped the merge-refusal half, silently un-guarding merges.
+has "$FIN" 'refuse[sd]? to (fix or merge|merge or fix)' \
+  || fail "finisher must REFUSE to (both) fix AND merge without an independent verdict — matching only one verb would let the merge-refusal guard be silently dropped (role-authority partition)"
 has "$FIN" '(lack|lacking|without|no)[^.]*independent[^.]*verdict|independent[^.]*verdict[^.]*(before|first|exist)' \
   || fail "finisher must require an INDEPENDENT review verdict before it fixes or merges (red-when-broken)"
 # a sous-chef never self-reviews / self-approves its own area

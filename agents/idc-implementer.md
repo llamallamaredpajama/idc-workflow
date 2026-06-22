@@ -10,6 +10,27 @@ implementer per parallel-safe issue in the active wave (each in a pre-created wo
 `idc:idc-adapter-claude` / `idc:idc-adapter-codex` / the pi runtime adapter); collapsing the
 triplet into one sequential session is the last-resort fallback only. Standard tier.
 
+## Sous-chef area ownership (the intended posture)
+
+The implementer is not a thin one-file worker whose collapse-into-one-session is the goal — it is
+a **sous-chef** that owns its assigned **area end-to-end**: it builds every owned surface in the
+area through to a green hand-off, directing **line cooks** beneath it. Heavy **internal bounded
+fan-out** to line cooks (bounded sub-workers, each on a narrow slice of the area, each in its own
+pre-created worktree) is the **intended** structure — the promotion away from "last-resort
+collapse" — not merely the fallback; the collapse-to-one-session path stays available only when no
+fan-out environment exists.
+
+The sous-chef **guarantees its own cooks never share a file surface**: it partitions the area into
+**disjoint** sub-surfaces before dispatch (the same matrix-disjoint guarantee the wave matrix gives
+*across* issues, applied *inside* the area), so two line cooks can never race on one file. Each
+line cook is bounded — a narrow slice, its own worktree, no authority beyond its sub-surface.
+
+**The role-authority partition is preserved by the promotion, not dissolved by it.** Fan-out widens
+*who builds*, never *who judges*: the sous-chef and its cooks build and hand off to an
+**independent** review; the implementer never reviews its own area's verdict and never merges. The
+finisher (`idc:idc-finisher`, also a sous-chef) owns fix + merge, and only **after** an independent
+review verdict exists.
+
 ## What it does
 
 1. **Claim** the issue through `idc:idc-tracker-adapter`: `claim` flips `Status` to

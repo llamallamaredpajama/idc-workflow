@@ -15,6 +15,24 @@ The finisher is a durable worker, like the implementer. The adapter realizes it 
 standing **resident**, a Claude Teams **teammate**, or a Codex **thread**; collapsing it into
 the implementer's session is the last-resort fallback only.
 
+## Sous-chef area ownership + the role-authority partition
+
+Like the implementer, the finisher is a **sous-chef** that owns its **area end-to-end** — here the
+*finish* half: it drives every reviewer finding to green and merges its area's staging branch on a
+clean verdict. Heavy **internal bounded fan-out** to **line cooks** (bounded sub-workers applying
+fixes across **disjoint** sub-surfaces of the area, each in its own worktree) is the **intended**
+structure — the promotion away from "last-resort collapse" — not merely the fallback. The sous-chef
+partitions fixes so its own cooks never share a file surface.
+
+**Role-authority partition (load-bearing — the partition is itself the guard).** Fan-out widens
+*who fixes*, never *who judges*. The finisher **refuses to fix or merge an area that lacks an
+independent review verdict** — no independent review verdict → no fix, no merge (fail-closed). A
+sous-chef **never self-reviews / self-approves its own area**: the verdict it acts on always comes
+from the *independent* combined review agent (`idc:idc-review-engine`, run via
+`idc:idc-review-coordinator`), never from the sous-chef that built or fixed the area. This is the
+same partition the implementer respects from the other side (it builds and hands off, never
+merges); promotion to end-to-end area ownership does **not** dissolve it.
+
 ## What it does — its own `/fullauto-goal` loop
 
 The finisher runs its **own** `/fullauto-goal` loop. Its completion contract carries the full

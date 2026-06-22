@@ -59,19 +59,22 @@ hasflat "$BUILD" 'in.place[^.]*(area owner|sous.chef|line cook)|(area owner|sous
 hasflat "$BUILD" 'bounded[^.]*deconflict|deconflict[^.]*specialist|bounded[^.]*specialist' \
   || fail "idc-build.md must frame the in-kitchen deconfliction as a BOUNDED specialist (not an upstream recirculation)"
 
-# A5 — THE Done-When negation: a MECHANICAL conflict NEVER recirculates. Asserted in all three Build
-#      playbooks. RED against pre-#80 (none tie 'mechanical' to a negated 'recirculat'). The negation
-#      is REQUIRED — a bare 'mechanical ... recirculat' would pass on the opposite (wrong) routing.
+# A5 — THE Done-When negation: a MECHANICAL CONFLICT NEVER recirculates. Asserted in all three Build
+#      playbooks. RED against pre-#80 (none tie a 'mechanical conflict' to a negated 'recirculat').
+#      Hardened: anchored on 'mechanical ... conflict' (the conflict, not the step name) with the
+#      negation in the SAME sentence and punctuation-bounded close to 'recirculat' — so neither the
+#      step name 'mechanical-deconfliction' nor an incidental negation ('no longer ..., recirculates')
+#      can satisfy it. Drop the never/not and the guard fires.
 for f in "$BUILD" "$IMPL" "$FIN"; do
   name="$(basename "$f")"
-  hasflat "$f" 'mechanical[^.]*(never|not|no|without|rather than|instead of|don.t|do not)[^.]*recirculat' \
-    || fail "$name must state a MECHANICAL conflict NEVER recirculates (negation required, not bare 'mechanical ... recirculat')"
+  hasflat "$f" 'mechanical[^.]*conflict[^.]*(never|not)[^.,;]{0,30}recirculat' \
+    || fail "$name must state a MECHANICAL CONFLICT NEVER recirculates (negation required, bound to the conflict — not the step name or an incidental 'no longer')"
 done
 # A6 — and the implementer + finisher ROUTE a mechanical conflict in-kitchen (to the build-time step),
 #      not upstream. Each names the in-kitchen deconfliction path.
 for f in "$IMPL" "$FIN"; do
   name="$(basename "$f")"
-  hasflat "$f" 'mechanical[^.]*(in.kitchen|deconflict)|(in.kitchen|deconflict)[^.]*mechanical' \
+  hasflat "$f" 'mechanical[^.]*conflict[^.]*(in.kitchen|deconflict)' \
     || fail "$name must route a mechanical conflict IN-KITCHEN (the build-time mechanical-deconfliction step), not to the Recirculator"
   hasflat "$f" 'build.?time[^.]*deconflict|mechanical.deconflict' \
     || fail "$name must reference Build's build-time mechanical-deconfliction step as the in-kitchen path"
@@ -97,8 +100,8 @@ for f in "$RCMD" "$RECIRC"; do
   name="$(basename "$f")"
   has "$f" 'scope.menu' \
     || fail "$name must narrow the Recirculator trigger to SCOPE/MENU (requirements/plan) drift"
-  hasflat "$f" 'mechanical[^.]*(never|not|no|don.t|do not)[^.]*(reach|recirculat|here|come)|(never|not|no)[^.]*mechanical[^.]*(reach|recirculat)' \
-    || fail "$name must state a MECHANICAL conflict does NOT reach the Recirculator (negation required) — it deconflicts in-kitchen"
+  hasflat "$f" 'mechanical[^.]*conflict[^.]*(never|not)[^.,;]{0,40}(reach|recirculat|here|come)' \
+    || fail "$name must state a MECHANICAL CONFLICT does NOT reach the Recirculator (negation bound to the conflict, not an incidental one) — it deconflicts in-kitchen"
   hasflat "$f" 'build.?time[^.]*deconflict|mechanical.deconflict' \
     || fail "$name must point a mechanical conflict at Build's build-time mechanical-deconfliction step (the in-kitchen path)"
 done

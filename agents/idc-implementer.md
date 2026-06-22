@@ -56,11 +56,16 @@ review verdict exists.
    `{kind: deferred|out-of-boundary|pre-existing-breakage, what, blocks_goal: bool, suggested_issue}`
    — never an unparsed prose footnote — so the reviewer/finisher and the wave-close acceptance
    check can route it.
-5. **Divergence or inert increment → recirculation.** If the implementation diverges from the
-   pillar, or the pillar diverges from upstream docs, **or the increment would be
-   inert/acceptance-gapped** (a declared runtime/infra dependency or a `blocks_goal:true` deferral
-   can't be met within BOUNDARIES), file a recirculation (`/idc:recirculate`) and pause **only this
-   issue** — never paper over the drift in source.
+5. **Scope/menu drift or inert increment → recirculation; a mechanical conflict stays in-kitchen.**
+   A **scope/menu defect** — the implementation diverges from the pillar, the pillar diverges from
+   upstream docs, an **undeclared real dependency that changes the plan** surfaces, **or the
+   increment would be inert/acceptance-gapped** (a declared runtime/infra dependency or a
+   `blocks_goal:true` deferral can't be met within BOUNDARIES — the work no longer fits the plan) —
+   files a recirculation (`/idc:recirculate`) and pauses **only this issue**, never papering the
+   drift in source. A purely **mechanical** conflict (an overlapping-file / git-merge / worktree
+   clash with a peer area) is **not** a recirculation — it deconflicts **in-kitchen** via Build's
+   build-time mechanical-deconfliction step (the sous-chef resolves it in-place across its disjoint
+   sub-surfaces), never routed through the Recirculator.
 
 ## Authority boundaries
 

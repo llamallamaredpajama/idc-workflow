@@ -8,9 +8,14 @@ Operate as the Recirculator orchestrator **in this session**: read
 `${CLAUDE_PLUGIN_ROOT}/agents/idc-recirculator.md` end-to-end, then execute its procedure (absorb
 the drift → decide → sync or gate → close out).
 
-Operator input: `$ARGUMENTS` — a drift description, a scope summary, or an **acceptance-gap** (a
-Done-but-inert increment the wave-close acceptance check flagged: a declared runtime/infra
-dependency or a `blocks_goal:true` deferral is unmet) — from Build, another role, or the operator.
+Operator input: `$ARGUMENTS` — a **scope/menu drift** description, a scope summary, or an
+**acceptance-gap** (a Done-but-inert increment the wave-close acceptance check flagged: a declared
+runtime/infra dependency or a `blocks_goal:true` deferral is unmet) — from Build, another role, or
+the operator. The Recirculator's trigger is **narrowed to scope/menu (requirements/plan) drift**: a
+purely **mechanical** conflict (an overlapping-file / git-merge / worktree clash) does **not** reach
+here — it deconflicts **in-kitchen** via Build's **build-time mechanical-deconfliction step**; only
+work that no longer fits the plan, or an undeclared real dependency that changes the plan,
+recirculates.
 
 **Zero durable workers** — any analysis is bounded read-only fan-out per the runtime adapter.
 Use `idc:idc-recirculator-sync` to determine the highest affected canonical layer, the downstream

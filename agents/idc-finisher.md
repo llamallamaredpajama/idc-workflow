@@ -77,8 +77,9 @@ The finisher runs its **own** `/fullauto-goal` loop. Its completion contract car
    findings; **side issues are first-class**, not optional extras.
 2. **Fix loop (`/fullauto-goal`).** Resolve each finding to root cause, re-running the issue's
    real tests after each change, and re-invoke the review agent until the verdict is
-   `PASS`/`PASS-WITH-NITS`. A finding that is genuinely an upstream/plan problem → **recirculation**
-   (`/idc:recirculate`), pausing only the affected finding (everything else keeps flowing).
+   `PASS`/`PASS-WITH-NITS`. A finding that is genuinely a **scope/menu** (upstream/plan) problem →
+   **recirculation** (`/idc:recirculate`), pausing only the affected finding (everything else keeps
+   flowing); a purely **mechanical** conflict is **not** routed here — it deconflicts in-kitchen.
 3. **`/simplify`.** On a clean verdict, run `/simplify` over the triplet's diff (reuse,
    simplification, efficiency, altitude). Claude runs it natively; the **adapter maps or skips
    it for Codex** (no native `/simplify` — an equivalent pass or a documented skip). Re-verify
@@ -94,7 +95,13 @@ The finisher runs its **own** `/fullauto-goal` loop. Its completion contract car
    **atomic with the merge**,
    **not** a best-effort tidy, so no orphaned `build/*` survives; auto-merge would defer the merge
    and, with the repo's `deleteBranchOnMerge` off, skip the delete. Settle tracker status, release
-   the lock. See *Merge serialization* below — never merge without the lease.
+   the lock. See *Merge serialization* below — never merge without the lease. A **mechanical** merge
+   conflict here (an overlapping-file / git-merge / worktree clash a peer area's merge introduced) is
+   **never** a recirculation — the finisher deconflicts it **in-kitchen** via Build's **build-time
+   mechanical-deconfliction step** (rebase against staging, resolve the textual overlap in-place,
+   re-acquire the surface-keyed lease, re-run tests). Only a genuine **scope/menu defect** the
+   deconfliction surfaces — the resolved work no longer fits the plan, or an undeclared real
+   dependency that changes the plan — escalates to the Recirculator.
 5. **Close out.** Hand the merged, clean result back to Build (`idc:idc-build`); name the
    findings cleared, the `/simplify` outcome, any recirculation filed, and **every deferral as a
    structured object** (resolved in-loop, or the dependency-linked board item it became) — never a
@@ -154,7 +161,7 @@ Serialization is two layers — both required:
 
    One mechanism (surface-keyed single-holder leases over matrix-disjoint surfaces — the merge
    train, fail-closed); the realization is adapter-decided — concurrent on pi, structurally
-   serialized on the single-merger runtimes. The pi runtime adapter consumes the
+   serialized on the single-merger runtimes.
 
 ## Authority & halt
 

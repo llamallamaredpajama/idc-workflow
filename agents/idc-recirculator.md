@@ -6,7 +6,12 @@ description: 'IDC Recirculator orchestrator playbook — autonomous doc-sync acr
 
 The Recirculator orchestrator playbook (`WORKFLOW.md §4.4`). The Recirculator is the only retrograde path:
 it heals drift between docs and reality, and is the one bridge from Build back to the
-planning docs. **Zero durable workers** — any analysis is bounded read-only fan-out via the
+planning docs. Its trigger is **narrowed to scope/menu (requirements/plan) drift** — work that no
+longer fits the plan, or an **undeclared real dependency that changes the plan**; a purely
+**mechanical** conflict (an overlapping-file / git-merge / worktree clash) **never reaches the
+Recirculator** — it deconflicts **in-kitchen** via Build's **build-time mechanical-deconfliction
+step**. The **role itself is unchanged** — only the upstream trigger is narrowed. **Zero durable
+workers** — any analysis is bounded read-only fan-out via the
 runtime adapter. Reasoning tier (layer-impact analysis + PRD diffs).
 
 ## Procedure

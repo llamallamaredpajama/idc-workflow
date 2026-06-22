@@ -97,3 +97,33 @@ adapter-mechanic greps). Only the Nit below remains.)
   (`Workflow` tool, `parallel()`, `isolation:'worktree'` per cook), so this is cosmetic; reword to
   "one cook per `parallel()` thunk / per disjoint-surface item" when the finisher next touches the
   claude adapter, so the cook→surface mapping isn't read as cook→stage.
+
+## wave/4 review — Minor
+
+(WAVE/4 adversarial review of the `a389bc9..f6d3a1b` delta — #80 narrow-recirc-deconflict + build-time
+mechanical-deconfliction, PR #88. codex `codex exec` (read-only on the local diff) + manual probing +
+BSD-grep mutation testing. **All Blocker/Major were FIXED** on branch `team-execute/sb-w4fix`,
+gate-green: the mechanical-vs-scope **fail-OPEN** (a real undeclared dependency can surface as an
+overlapping-file clash and get silently deconflicted in-kitchen — closed with a fail-closed
+classification gate that reclassifies any not-provably-mechanical clash as a scope/menu defect), the
+"bounded" specialist with **no terminal state** (closed: attempt-ceiling → halt-with-evidence, no
+infinite retry / silent merge), and a **test-coverage gap** (the suite didn't protect build.md's
+scope/menu escape hatch — deleting the escalation clause passed green; closed with assertions A7/A8/A9,
+all proven red-when-broken under `/usr/bin/grep`). The dangling-sentence fix in `idc-finisher.md` was
+verified complete. Only the two Minor below remain.)
+
+- **`tests/smoke/phase4-recirc-deconflict.sh` A2 (mechanical-conflict-type enumeration) under-asserts.**
+  The §A2 regex `overlapping.file[^.]*git.merge|mechanical[^.]*(overlapping.file|git.merge|worktree)`
+  passes if **only one** of the three mechanical conflict types appears after "mechanical", not all
+  three. All three types ARE present in `idc-build.md` today, so this is fidelity-not-correctness:
+  splitting A2 into three independent assertions (`overlapping-file`, `git-merge`, `worktree`) would
+  remove the bypass. Held Minor — same accepted prose-grep-fidelity standard as the wave/1/wave/2
+  notes above; fold into any future tightening pass over the doctrine tests.
+
+- **`idc-finisher.md` step 4 places the mechanical-conflict branch after "Settle tracker status,
+  release the lock."** (line ~97). The exceptional in-kitchen-deconflict path reads *after* the
+  settle/release prose, so a careless reader could infer status is settled before deconfliction
+  succeeds. Meaning is recoverable (the branch is clearly exceptional) and the doctrine is correct —
+  purely a prose-ordering nit. Reword so the mechanical-conflict branch precedes settle/release (lock
+  released only after a successful merge, or deliberately before a bounded retry) when the finisher
+  next touches that step.

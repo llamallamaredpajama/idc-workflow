@@ -20,6 +20,7 @@ for t in \
   phase1-codex-mirror-sync \
   phase2-think \
   phase3-plan \
+  phase3-dag-matrix \
   phase4-build \
   phase4-review-agent \
   phase4-triplet \

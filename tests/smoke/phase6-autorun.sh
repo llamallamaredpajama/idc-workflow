@@ -53,6 +53,22 @@ python3 "$TRK" --tracker "$T" claim --num "$a" --agent idc-implementer >/dev/nul
 python3 "$TRK" --tracker "$T" close --num "$a" >/dev/null
 drain | grep -q "^drain: complete$" || fail "with only a gate + a Blocked dependent + a pending consideration left, autorun should exit (complete)"
 
+# ---- a state block MISSING the `issues` key entirely -> exit 2 (not a silent empty board) ------
+# A dropped `issues` key used to default to an empty board (state.get("issues", [])) -> a silent
+# `drain: complete`. A missing key is corruption, not an empty board: fail closed (exit 2).
+RAW="$WORK/no-issues-key.md"
+{ echo "<!-- idc-tracker-state:begin -->"; echo '```json'; echo '{"next_number":1}'; echo '```'
+  echo "<!-- idc-tracker-state:end -->"; } > "$RAW"
+python3 "$DRAIN" --tracker "$RAW" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 2 ] || fail "a state block missing the \`issues\` key must exit 2 (fail-closed), not drain: complete (got $rc)"
+
+# ---- an explicitly-present empty board (`issues: []`) stays a legitimate empty board -> complete -
+RAWEMPTY="$WORK/empty-board.md"
+{ echo "<!-- idc-tracker-state:begin -->"; echo '```json'; echo '{"issues":[]}'; echo '```'
+  echo "<!-- idc-tracker-state:end -->"; } > "$RAWEMPTY"
+python3 "$DRAIN" --tracker "$RAWEMPTY" 2>/dev/null | grep -q "^drain: complete$" \
+  || fail "an explicitly-present empty board (issues: []) must stay drain: complete exit 0"
+
 # ---- prose invariant: the planning lane only plans APPROVED considerations (v3) ---------------
 [ -f "$AUTORUN" ] || fail "agents/idc-autorun.md missing"
 grep -qiE 'Think PR' "$AUTORUN" \
@@ -98,4 +114,22 @@ grep -qiE 'post-build .*git status' "$CMD" \
 grep -qiE 'start-of-run snapshot' "$CMD" \
   || fail "commands/autorun.md must warn against a start-of-run working-tree snapshot in the exit report (L2-1 parity)"
 
-echo "PASS: autorun drain predicate green; exit report reconciles the working tree post-build, agent + command in parity (L2-1)"
+# ---- PR#72 follow-up: the human-gate skill is portable to the filesystem backend ---------------
+# A filesystem TRACKER.md repo has no PRs and no labels, so the github gate-approval signals can't
+# exist there; the skill must document the portable signal (flip the gate issue's Status to Done).
+# Each assertion's `fail` message carries the full rationale.
+GATE="$PLUGIN/skills/idc-gate-issue/SKILL.md"
+[ -f "$GATE" ] || fail "skills/idc-gate-issue/SKILL.md missing"
+grep -qiE 'Approval signal by backend' "$GATE" \
+  || fail "idc-gate-issue must document the per-backend approval signal (Approval signal by backend) — else a filesystem gate is silently un-approvable (PR#72 follow-up)"
+grep -qiE 'no PRs and no labels' "$GATE" \
+  || fail "idc-gate-issue must state the filesystem backend has no PRs and no labels (why the github merge/label signal can't apply) (PR#72 follow-up)"
+grep -qiE 'close --num <gate' "$GATE" \
+  || fail "idc-gate-issue must define the filesystem approval action: flip the gate issue's Status to Done via close --num <gate#> (PR#72 follow-up)"
+# WORKFLOW.md template carries the same backend-portable-approval note so the doctrine can't drift
+WF="$PLUGIN/templates/WORKFLOW.md"
+[ -f "$WF" ] || fail "templates/WORKFLOW.md missing"
+grep -qiE 'Backend-portable approval' "$WF" \
+  || fail "WORKFLOW.md §2 must note backend-portable gate approval (filesystem: gate issue Status -> Done) (PR#72 follow-up)"
+
+echo "PASS: autorun drain predicate green; exit report reconciles the working tree post-build (L2-1); human gate is filesystem-backend portable (PR#72 follow-up)"

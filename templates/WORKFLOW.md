@@ -69,6 +69,12 @@ TRD gates when `gating.trd: on` (greenfield off / brownfield on). **Nothing else
 asks for permission** — once the Think PR merges, planning and building free-flow. The
 Recirculator reuses this **same** gate for any backflow that needs a requirements change (§4.4).
 
+**Backend-portable approval.** The Think PR (and the §2.1 `decision-approved` label / decision-PR)
+are **github** signals. On the **filesystem** backend — no PRs, no labels — the operator's approval
+signal for *both* gates is the **gate issue's `Status` moved to `Done`** (`idc:idc-gate-issue` →
+*Approval signal by backend*); detection and the fail-closed posture are otherwise identical, so a
+non-GitHub repo's gates are never silently un-approvable.
+
 ### 2.1 The strategic decision gate (the second gate type)
 
 The requirements gate above is the only gate that **admits** an idea, and the only thing that asks

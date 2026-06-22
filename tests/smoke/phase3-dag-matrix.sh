@@ -146,4 +146,45 @@ cout="$(python3 "$MATRIX" "$WORK/board-cycle.yaml" 2>&1)" \
 printf '%s\n' "$cout" | grep -qi "cycle" \
   || fail "matrix_check must name the blocks_on cycle as the failure reason; got: $cout"
 
-echo "PASS: idc_dag critical-path + max-width + cycle detect green; wired into matrix_check (width ceiling + disjoint areas + cycle FAIL)"
+# ---- (d) a DANGLING blocks_on ref is a matrix FAIL (not a silently-dropped edge) -------------
+# A blocks_on ref to a pillar that is not declared used to be silently ignored — a dependency typo
+# then makes the pillar look independent and INFLATES the parallel-width ceiling (and could let the
+# orchestrator run it before its true upstream). The matrix guardrail must FAIL on it. Surfaces are
+# disjoint here, so the cycle/clash checks pass — the ONLY reason this can fail is the dangling ref.
+cat > "$WORK/board-dangling.yaml" <<'MD'
+phase: Phase 1
+pillars:
+  - id: real-a
+    wave: 1
+    domain: core
+    surfaces: [src/ra/]
+    blocks_on: [typo-nonexistent]
+  - id: real-b
+    wave: 1
+    domain: core
+    surfaces: [src/rb/]
+    blocks_on: []
+MD
+dout="$(python3 "$MATRIX" "$WORK/board-dangling.yaml" 2>&1)" \
+  && fail "matrix_check accepted a board with a dangling blocks_on ref (must FAIL — a typo'd dependency silently inflates parallel width)"
+printf '%s\n' "$dout" | grep -qiE 'dangling|undeclared|typo-nonexistent' \
+  || fail "matrix_check must name the dangling blocks_on ref as the failure reason; got: $dout"
+
+# ---- (e) a SELF blocks_on ref is a matrix FAIL (a self-dependency is unschedulable) ----------
+# `blocks_on: [self]` is a trivial cycle (a pillar can never precede itself). build_edges drops
+# self-edges, so idc_dag's cycle check alone never catches it; the matrix guardrail must.
+cat > "$WORK/board-selfref.yaml" <<'MD'
+phase: Phase 1
+pillars:
+  - id: solo
+    wave: 1
+    domain: core
+    surfaces: [src/solo/]
+    blocks_on: [solo]
+MD
+sout="$(python3 "$MATRIX" "$WORK/board-selfref.yaml" 2>&1)" \
+  && fail "matrix_check accepted a pillar that blocks_on itself (must FAIL — a self-dependency is unschedulable)"
+printf '%s\n' "$sout" | grep -qiE 'itself|self-depend' \
+  || fail "matrix_check must name the self-dependency as the failure reason; got: $sout"
+
+echo "PASS: idc_dag critical-path + max-width + cycle detect green; wired into matrix_check (width ceiling + disjoint areas + cycle/dangling/self-ref FAIL)"

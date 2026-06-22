@@ -75,6 +75,16 @@ RAWBB="$WORK/bad-blocked-by.md"
 python3 "$DRAIN" --tracker "$RAWBB" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 2 ] || fail "a malformed \`blocked_by\` (non-list) must exit 2 (fail-closed), not crash/misread (got $rc)"
 
+# ---- a non-dict `issues[]` entry (e.g. issues:[5]) -> exit 2 (fail-closed, never a bare crash) ---
+# Every membership test / `.get()` / sort key / `.startswith()` below assumes each entry is a dict;
+# a scalar entry (corrupt tracker) would crash with a TypeError (exit 1, traceback). The eager shape
+# guard rejects a non-dict entry up front. Red-when-broken: drop the guard and this exits 1, not 2.
+RAWND="$WORK/non-dict-issue.md"
+{ echo "<!-- idc-tracker-state:begin -->"; echo '```json'; echo '{"issues":[5]}'; echo '```'
+  echo "<!-- idc-tracker-state:end -->"; } > "$RAWND"
+python3 "$DRAIN" --tracker "$RAWND" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 2 ] || fail "a non-dict \`issues[]\` entry must exit 2 (fail-closed), not crash (got $rc)"
+
 # ---- an explicitly-present empty board (`issues: []`) stays a legitimate empty board -> complete -
 RAWEMPTY="$WORK/empty-board.md"
 { echo "<!-- idc-tracker-state:begin -->"; echo '```json'; echo '{"issues":[]}'; echo '```'

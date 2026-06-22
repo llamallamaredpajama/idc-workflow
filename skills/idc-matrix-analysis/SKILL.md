@@ -69,7 +69,8 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_matrix_check.py" docs/workflow/pillar
 ```
 
 It rejects a matrix where same-wave pillars share a surface (not parallel-safe), a pillar
-lacks an id/wave/surfaces, or the `blocks_on` edges form a cycle. On PASS it also publishes the
+lacks an id/wave/surfaces, a `blocks_on` ref is dangling (names no declared pillar) or
+self-referential, or the `blocks_on` edges form a cycle. On PASS it also publishes the
 parallel-width **ceiling** (from the DAG analysis above) plus the carved disjoint **areas** —
 pillar groups that never share a file surface, so the orchestrator can staff an independent
 writer per area. A clash that cannot be deconflicted into separate waves and is a genuine

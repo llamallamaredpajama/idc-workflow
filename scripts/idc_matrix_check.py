@@ -130,6 +130,25 @@ def check(text):
                         f"wave {wave}: '{members[i]['id']}' and '{members[j]['id']}' "
                         f"share surface(s) {sorted(shared)} — not parallel-safe "
                         f"(sequence them into different waves)")
+    # blocks_on ref integrity: every dependency must name a DECLARED pillar and not the pillar
+    # itself. idc_dag (the analyzer) deliberately ignores a dangling/self edge — so the guardrail
+    # must catch it here, or a typo'd dependency silently vanishes (the pillar looks independent,
+    # inflating the parallel-width ceiling and possibly running before its true upstream) and a
+    # self-dependency (an unschedulable trivial cycle) slips past the cycle check below.
+    declared = {p["id"] for p in pillars if p.get("id")}
+    for p in pillars:
+        pid = p.get("id")
+        if not pid:
+            continue
+        for b in p.get("blocks_on", []):
+            if b == pid:
+                problems.append(
+                    f"pillar '{pid}' blocks_on itself — a self-dependency is unschedulable "
+                    f"(remove the self-reference)")
+            elif b not in declared:
+                problems.append(
+                    f"pillar '{pid}' blocks_on undeclared pillar '{b}' — dangling dependency "
+                    f"(fix the ref or declare the pillar; a silent drop inflates parallel width)")
     # schedulability: the blocks_on edges must form a DAG. A cycle can never be waved (no
     # assignment puts every upstream in an earlier wave), so it is a hard matrix FAIL. Imported
     # lazily so idc_dag can reuse parse_matrix from this module without an import cycle.

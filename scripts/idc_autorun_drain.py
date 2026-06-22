@@ -77,13 +77,17 @@ def main():
     if not isinstance(issues, list):
         sys.stderr.write("idc-autorun-drain: corrupt tracker — `issues` must be a list\n")
         sys.exit(2)
-    # eager guard: the dict-comp and sort key below subscript it["number"] unconditionally, and the
-    # eligibility loop ITERATES it["blocked_by"] — so a corrupt issue must fail loudly here rather
-    # than KeyError/TypeError mid-computation. A non-list blocked_by (a github bug or a hand-edit
-    # dropping the brackets) would otherwise crash the loop (exit 1, traceback) or be iterated
-    # character-by-character and silently misread; fail closed (exit 2) instead, like the sibling
-    # idc_acceptance_check.py guards its own dereferenced fields.
+    # eager guard: every entry must be a dict (membership tests, `.get()`, the sort key, and
+    # `.startswith()` below all assume it), the dict-comp and sort key subscript it["number"]
+    # unconditionally, and the eligibility loop ITERATES it["blocked_by"] — so a corrupt issue must
+    # fail loudly here rather than KeyError/TypeError mid-computation. A scalar entry (e.g.
+    # `issues: [5]`) or a non-list blocked_by (a github bug or a hand-edit dropping the brackets)
+    # would otherwise crash the loop (exit 1, traceback) or be silently misread; fail closed
+    # (exit 2) instead, like the sibling idc_acceptance_check.py guards its own dereferenced fields.
     for it in issues:
+        if not isinstance(it, dict):
+            sys.stderr.write("idc-autorun-drain: corrupt tracker — an issue is not an object\n")
+            sys.exit(2)
         if "number" not in it:
             sys.stderr.write("idc-autorun-drain: corrupt tracker — an issue is missing `number`\n")
             sys.exit(2)

@@ -92,6 +92,44 @@ if python3 "$DAG" "$WORK/board-cycle.yaml" >/dev/null 2>&1; then
   fail "idc_dag.py accepted a cyclic board (must exit non-zero on a blocks_on cycle)"
 fi
 
+# ---- (b2) the cycle diagnostic names ONLY true cycle members, never acyclic downstream nodes -----
+# Graph: cyc-a -> cyc-b -> cyc-c -> cyc-a (a 3-cycle) plus cyc-tail (blocks_on cyc-b) hanging off it.
+# Kahn leaves a,b,c AND tail with positive residual indegree, but only a,b,c are ON the cycle; tail
+# is merely downstream of it. Red-when-broken: a raw residual-indegree dump names cyc-tail too,
+# misdirecting the operator to edit a pillar that is not part of the circular dependency.
+cat > "$WORK/board-cycle-tail.yaml" <<'MD'
+phase: Phase 1
+pillars:
+  - id: cyc-a
+    wave: 1
+    domain: core
+    surfaces: [src/ca/]
+    blocks_on: [cyc-c]
+  - id: cyc-b
+    wave: 1
+    domain: core
+    surfaces: [src/cb/]
+    blocks_on: [cyc-a]
+  - id: cyc-c
+    wave: 1
+    domain: core
+    surfaces: [src/cc/]
+    blocks_on: [cyc-b]
+  - id: cyc-tail
+    wave: 1
+    domain: core
+    surfaces: [src/ct/]
+    blocks_on: [cyc-b]
+MD
+ctout="$(python3 "$DAG" "$WORK/board-cycle-tail.yaml" 2>&1)" \
+  && fail "idc_dag.py must exit non-zero on the 3-cycle+tail board"
+for n in cyc-a cyc-b cyc-c; do
+  printf '%s\n' "$ctout" | grep -q "$n" \
+    || fail "cycle diagnostic must name the true cycle member $n; got: $ctout"
+done
+printf '%s\n' "$ctout" | grep -q "cyc-tail" \
+  && fail "cycle diagnostic must NOT name the acyclic downstream node cyc-tail (only true cycle members); got: $ctout"
+
 # ---- (c) matrix_check is wired to the DAG analysis ------------------------------------------
 # On PASS the matrix publishes the width ceiling (the 4 from above) and the carved areas;
 # a blocks_on cycle is now a matrix FAIL (the surfaces in board-cycle are disjoint, so the

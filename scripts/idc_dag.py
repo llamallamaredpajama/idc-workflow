@@ -56,7 +56,13 @@ def build_edges(pillars):
 
 
 def find_cycle(ids, succ, pred):
-    """Kahn's algorithm. Return the sorted nodes that remain inside a cycle, or [] if acyclic."""
+    """Kahn's algorithm. Return the sorted nodes that lie ON a cycle, or [] if acyclic.
+
+    Kahn leaves every node with positive residual indegree — but that residue is the cycle nodes
+    PLUS everything merely downstream of the cycle (an acyclic tail hanging off a cycle never reaches
+    indegree 0, because its upstream is stuck). Naming the whole residue would misdirect the operator
+    to a pillar that is not part of the circular dependency, so narrow it to the true members: a
+    residual node is ON a cycle iff it can reach itself through residual-internal edges."""
     indeg = {i: len(pred[i]) for i in ids}
     queue = [i for i in ids if indeg[i] == 0]
     seen = 0
@@ -69,7 +75,22 @@ def find_cycle(ids, succ, pred):
                 queue.append(m)
     if seen == len(ids):
         return []
-    return sorted(i for i in ids if indeg[i] > 0)
+    residual = {i for i in ids if indeg[i] > 0}
+
+    def on_cycle(start):
+        stack = [m for m in succ[start] if m in residual]
+        visited = set()
+        while stack:
+            n = stack.pop()
+            if n == start:
+                return True
+            if n in visited:
+                continue
+            visited.add(n)
+            stack.extend(m for m in succ[n] if m in residual)
+        return False
+
+    return sorted(i for i in residual if on_cycle(i))
 
 
 def topo_order(ids, succ, pred):

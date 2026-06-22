@@ -62,6 +62,19 @@ RAW="$WORK/no-issues-key.md"
 python3 "$DRAIN" --tracker "$RAW" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 2 ] || fail "a state block missing the \`issues\` key must exit 2 (fail-closed), not drain: complete (got $rc)"
 
+# ---- a malformed `blocked_by` (not a list) -> exit 2 (fail-closed, never iterated/misread) ------
+# The eligibility loop iterates `it.get("blocked_by", [])`; a non-list value (a github bug or a
+# hand-edit dropping the brackets) would crash with a TypeError (exit 1, traceback) or be iterated
+# character-by-character and silently misread. The eager shape guard catches it BEFORE the loop and
+# exits 2 with a clean corrupt-tracker diagnostic — the same fail-closed contract as the `number`
+# and `issues`-key guards. Red-when-broken: drop the guard and this issue exits 1 (crash), not 2.
+RAWBB="$WORK/bad-blocked-by.md"
+{ echo "<!-- idc-tracker-state:begin -->"; echo '```json'
+  echo '{"issues":[{"number":1,"status":"Todo","blocked_by":5}]}'; echo '```'
+  echo "<!-- idc-tracker-state:end -->"; } > "$RAWBB"
+python3 "$DRAIN" --tracker "$RAWBB" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 2 ] || fail "a malformed \`blocked_by\` (non-list) must exit 2 (fail-closed), not crash/misread (got $rc)"
+
 # ---- an explicitly-present empty board (`issues: []`) stays a legitimate empty board -> complete -
 RAWEMPTY="$WORK/empty-board.md"
 { echo "<!-- idc-tracker-state:begin -->"; echo '```json'; echo '{"issues":[]}'; echo '```'

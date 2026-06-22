@@ -77,11 +77,19 @@ def main():
     if not isinstance(issues, list):
         sys.stderr.write("idc-autorun-drain: corrupt tracker — `issues` must be a list\n")
         sys.exit(2)
-    # eager guard: the dict-comp and sort key below subscript it["number"] unconditionally,
-    # so a corrupt issue must fail loudly here rather than KeyError mid-computation.
+    # eager guard: the dict-comp and sort key below subscript it["number"] unconditionally, and the
+    # eligibility loop ITERATES it["blocked_by"] — so a corrupt issue must fail loudly here rather
+    # than KeyError/TypeError mid-computation. A non-list blocked_by (a github bug or a hand-edit
+    # dropping the brackets) would otherwise crash the loop (exit 1, traceback) or be iterated
+    # character-by-character and silently misread; fail closed (exit 2) instead, like the sibling
+    # idc_acceptance_check.py guards its own dereferenced fields.
     for it in issues:
         if "number" not in it:
             sys.stderr.write("idc-autorun-drain: corrupt tracker — an issue is missing `number`\n")
+            sys.exit(2)
+        if not isinstance(it.get("blocked_by", []), list):
+            sys.stderr.write(
+                f"idc-autorun-drain: corrupt tracker — issue {it['number']} `blocked_by` must be a list\n")
             sys.exit(2)
     status_by_num = {it["number"]: it.get("status") for it in issues}
     eligible = []

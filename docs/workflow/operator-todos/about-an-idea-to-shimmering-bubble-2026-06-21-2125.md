@@ -78,3 +78,22 @@ width-is-a-ceiling clarity, and two red-when-broken test weaknesses. Only the Mi
   wave-thinking in a helper that #76 made wave-blind. Cosmetic doc wording (the code is wave-blind and
   correct); fold into the deferred sb-75 `--frontier`→`--width` rename pass so the docstring is
   retuned in one edit rather than twice.
+
+## wave/3 review — Nit
+
+(WAVE/3 adversarial review of the `5bf6c9a..b4389a5` delta — #78 adapter-fanout-docs + #79
+e2e-merge-train. codex `codex exec` (read-only on the local diff) + manual probing. The merge-lease
+primitive `idc_tracker_fs.py` is **unchanged** — #79 only re-keys the lease NAME — so the findings
+were doctrine-coherence + docs-accuracy, not logic. **All Blocker/Major were FIXED** on branch
+`team-execute/sb-w3fix`, gate-green: the partial-overlap/surface-keying soundness gap, the
+concurrent-vs-single-merger contradiction, the shared-ref-advance overclaim, the Codex `spawn_agent`
+`--cd` over-statement, and two red-when-broken test weaknesses (bypassable e2e greps + file-wide
+adapter-mechanic greps). Only the Nit below remains.)
+
+- **`skills/idc-adapter-claude/SKILL.md` inner-fan-out wording "one cook per stage thunk"** (line ~41)
+  conflates the `pipeline()` **role** pipeline (implement → review → finish, sequential stages on one
+  surface) with the **disjoint-sub-surface** cook fan-out (cooks parallelise across *surfaces*, i.e.
+  `parallel()` thunks / pipeline *items*, not stages). The concrete mechanic is otherwise accurate
+  (`Workflow` tool, `parallel()`, `isolation:'worktree'` per cook), so this is cosmetic; reword to
+  "one cook per `parallel()` thunk / per disjoint-surface item" when the finisher next touches the
+  claude adapter, so the cook→surface mapping isn't read as cook→stage.

@@ -32,6 +32,17 @@ Traverse the pipe top-to-bottom and exit when nothing actionable remains:
    start-of-run snapshot — the build lane writes files mid-run, so a stale snapshot under-counts any
    uncommitted/untracked artifact), and anything waiting on the operator.
 
+**Drain everything; one launch gate, never self-narrow.** `/idc:autorun` drains the **whole** repo —
+every phase, every eligible wave. Before draining, size a **staffing estimate** from the
+ready-frontier width (`idc_autorun_drain.py --frontier`, one **sous chef** per ready issue) summed
+across the remaining waves: **~N sous chefs / ~M subagents across K usage windows**. Read
+`WORKFLOW-config.yaml::autorun.staffing_gate_threshold` (default **10**): at or below it, run
+**fully autonomous with no launch gate**; above it, surface **exactly one** pre-drain
+`AskUserQuestion` — **"~N sous chefs / ~M subagents across K windows — go / scope down?"** (a
+one-time cost confirmation) — then drain ALL phases. Autorun **never self-narrows** to a phase;
+phase-scoping is the operator's explicit `/idc:build --phase N` choice. Wrap the drain in `/loop`
+so each iteration re-reads the **live board** and **resumes across usage-window resets**.
+
 A pending Think-PR gate (incl. an open Think PR pending admission) is not a halt — autorun reports
 it and exits clean. Run
 `/loop /idc:autorun` for always-on operation. Autorun owns no direct canonical or source

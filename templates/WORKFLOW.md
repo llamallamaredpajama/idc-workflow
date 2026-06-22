@@ -210,6 +210,14 @@ considerations waiting on the operator). Loopable via `/loop`. Running it
 on a quiet repo just heals board hygiene and drains stragglers. `/idc:doctor` stays
 read-only.
 
+Autorun drains the **whole** repo — every phase, every eligible wave — never one phase. It sizes a
+**staffing estimate** first (the ready-frontier width per wave, one sous chef per ready issue,
+summed across waves into ~N sous chefs / ~M subagents / ~K usage windows). At or below
+`WORKFLOW-config.yaml::autorun.staffing_gate_threshold` (default 10) it runs fully autonomously; above
+it, it surfaces **exactly one** launch-time "go / scope down?" cost gate, then drains every phase.
+Autorun **never self-narrows** to a phase — phase-scoping is the operator's explicit `/idc:build
+--phase N` choice. The `/loop` wrapper resumes from live board state across usage-window resets.
+
 ## 5. Runtime primitives & concurrency budget
 
 The process is written against three abstract primitives; the runtime adapter for your

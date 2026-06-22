@@ -32,6 +32,15 @@ documents:
   pillar_matrices: docs/workflow/pillar-matrices/
   code_reviews: docs/workflow/code-reviews/
 
+# Autorun staffing gate. Autorun drains the whole repo autonomously with NO mid-drain asks. The
+# one launch-time exception: when the staffing estimate (the sous chefs the full drain will spawn)
+# EXCEEDS this threshold, Autorun surfaces exactly one "~N sous chefs / ~M subagents across K
+# windows — go / scope down?" cost confirmation before draining; at or below it there is no gate at
+# all. The estimate never makes Autorun self-narrow to a phase — phase-scoping is the operator's
+# explicit `/idc:build --phase N` choice. Read by the autorun parent (`agents/idc-autorun.md`).
+autorun:
+  staffing_gate_threshold: 10   # sous chefs; > this ⇒ one launch-time cost gate, else fully autonomous
+
 # Standing domains for this repo — config-seeded at `/idc:init` from codebase analysis,
 # pruned to touched domains and ad-hoc-extended by each `/idc:plan` run, maintained by
 # the Recirculator. Each entry: a single-select Domain value, a one-line brief, and primary

@@ -28,6 +28,7 @@ for t in \
   phase4-acceptance \
   phase5-ripple \
   phase6-autorun \
+  phase6-autorun-autonomy \
   phase7-lifecycle \
   phase7-update-preserves-data \
   phase7-update-template-mapping \

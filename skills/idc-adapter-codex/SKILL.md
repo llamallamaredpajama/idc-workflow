@@ -39,14 +39,20 @@ level), each cook on a **disjoint** sub-surface so two cooks can never race on o
   worktree.
 - **Inner level (line cooks).** Native `spawn_agent` / `wait_agent` (≤ 6 concurrent, depth 2), or
   `codex exec --ephemeral --json` process fan-out which escapes the concurrency cap — **one cook per
-  spawned agent / `--ephemeral` process**, each `--cd`'d into its own pre-created worktree.
+  spawned agent / `--ephemeral` process**. The two paths isolate differently: `spawn_agent`
+  sub-agents **inherit the parent thread's worktree** (there is no per-agent `--cd`), so the
+  **worktree-per-cook** topology is realized by the **`--ephemeral` process** path, each process
+  `--cd`'d into its own pre-created worktree. Use the process path when cooks must own distinct
+  worktrees; `spawn_agent` cooks share the thread's surface and must therefore stay on disjoint paths
+  within it.
 
-**Worktree topology — cook → area-staging → merge (worktree-per-cook).** Each line cook runs in its
-**own worktree** (worktree-per-cook), `--cd`'d in; the cooks' disjoint sub-surfaces converge onto
-the **area-staging** branch the sous-chef owns; the sous-chef **merges** that staging branch (the
-app-server serially merges finisher threads — Codex's A2 row). Fan-out widens *who builds*, never
-*who judges*: the cooks build, an **independent** `--ephemeral` review issues the verdict, and only
-then does the finisher merge.
+**Worktree topology — cook → area-staging → merge (worktree-per-cook).** Each `--ephemeral`-process
+line cook runs in its **own worktree** (worktree-per-cook), `--cd`'d in (the `spawn_agent` path shares
+the thread's worktree, so worktree-per-cook uses the process path); the cooks' disjoint sub-surfaces
+converge onto the **area-staging** branch the sous-chef owns; the sous-chef **merges** that staging
+branch (the app-server serially merges finisher threads — Codex's A2 row). Fan-out widens *who
+builds*, never *who judges*: the cooks build, an **independent** `--ephemeral` review issues the
+verdict, and only then does the finisher merge.
 
 ## Model selection — untiered
 

@@ -29,11 +29,27 @@ has() { grep -qiE "$2" "$1"; }
 # soft-wrap across lines and dodge a line-based grep. Flatten newlines to spaces first, then
 # match — so the guard stays red-when-broken regardless of wrapping. (BSD/GNU-portable: tr only.)
 hasflat() { tr '\n' ' ' < "$1" | tr -s ' ' | grep -qiE "$2"; }
+# section extractor: emit ONLY the "## Two-level fan-out …" section (heading exclusive, up to the next
+# markdown heading of any level). The per-adapter inner-mechanic checks must hit the NEW section, not
+# the pre-existing primitive-map row elsewhere in the file — otherwise dropping the new section's
+# concrete mechanic would stay green (the wave/3 "file-wide grep" bypass). (BSD/GNU awk: `#+` is ERE.)
+section() { awk '/^## [Tt]wo-level fan.out/{f=1;next} f&&/^#+ /{f=0} f' "$1"; }
+SECDIR="$(mktemp -d)"; trap 'rm -rf "$SECDIR"' EXIT
+has_sec()     { grep -qiE "$2" "$1"; }
+hasflat_sec() { tr '\n' ' ' < "$1" | tr -s ' ' | grep -qiE "$2"; }
 
 # ---- all three adapters exist -----------------------------------------------------------------
 for f in "$CLAUDE" "$CODEX" "$PI"; do
   [ -f "$f" ] || fail "adapter skill not found at $f"
 done
+# extract each adapter's two-level section to its own file; a section that fails to extract (empty)
+# fails closed below (the mechanic greps go red).
+section "$CLAUDE" > "$SECDIR/claude"; CLAUDE_SEC="$SECDIR/claude"
+section "$CODEX"  > "$SECDIR/codex";  CODEX_SEC="$SECDIR/codex"
+section "$PI"     > "$SECDIR/pi";     PI_SEC="$SECDIR/pi"
+[ -s "$CLAUDE_SEC" ] || fail "idc-adapter-claude two-level fan-out section missing/empty (extraction failed)"
+[ -s "$CODEX_SEC" ]  || fail "idc-adapter-codex two-level fan-out section missing/empty (extraction failed)"
+[ -s "$PI_SEC" ]     || fail "idc-adapter-pi two-level fan-out section missing/empty (extraction failed)"
 
 # ---- (1) the two-level fan-out primitive, documented the SAME way in ALL THREE ----------------
 for f in "$CLAUDE" "$CODEX" "$PI"; do
@@ -64,17 +80,26 @@ for f in "$CLAUDE" "$CODEX" "$PI"; do
 done
 
 # ---- per-adapter CONCRETE inner-fan-out mechanic (a section can't be empty boilerplate) --------
+# Scoped to the NEW two-level section (not the whole file): the pre-existing primitive-map row already
+# names these tokens, so a file-wide grep would stay green even if the new section lost its mechanic.
 # claude: the Workflow tool pipeline() with isolation:'worktree' per cook
-has "$CLAUDE" 'workflow'   || fail "claude adapter inner fan-out must name the Workflow tool"
-has "$CLAUDE" 'pipeline\(' || fail "claude adapter inner fan-out must name pipeline()"
-has "$CLAUDE" 'isolation'  || fail "claude adapter inner fan-out must name isolation:'worktree' per cook"
+has_sec "$CLAUDE_SEC" 'workflow'   || fail "claude adapter's two-level section must name the Workflow tool"
+has_sec "$CLAUDE_SEC" 'pipeline\(' || fail "claude adapter's two-level section must name pipeline()"
+has_sec "$CLAUDE_SEC" 'isolation'  || fail "claude adapter's two-level section must name isolation:'worktree' per cook"
 # codex: spawn_agent / codex exec --ephemeral process fan-out
-has "$CODEX" 'spawn_agent' || fail "codex adapter inner fan-out must name spawn_agent"
-has "$CODEX" 'ephemeral'   || fail "codex adapter inner fan-out must name --ephemeral process fan-out"
+has_sec "$CODEX_SEC" 'spawn_agent' || fail "codex adapter's two-level section must name spawn_agent"
+has_sec "$CODEX_SEC" 'ephemeral'   || fail "codex adapter's two-level section must name --ephemeral process fan-out"
+# codex DOCS ACCURACY: worktree-per-cook is realized by the --ephemeral PROCESS path; spawn_agent
+# sub-agents INHERIT the thread's worktree (no per-agent --cd). Red-when-broken: the original wording
+# applied "--cd'd into its own pre-created worktree" to BOTH paths, overstating spawn_agent isolation.
+hasflat_sec "$CODEX_SEC" 'spawn_agent[^.]*inherit[^.]*(thread|worktree)|inherit[^.]*(thread|worktree)[^.]*\(?no per-agent' \
+  || fail "codex adapter must state spawn_agent sub-agents INHERIT the thread's worktree (no per-agent --cd) — not their own worktree"
+hasflat_sec "$CODEX_SEC" 'worktree.per.cook[^.]*ephemeral|ephemeral[^.]*(process )?[^.]*worktree.per.cook|ephemeral[^.]*process[^.]*--cd' \
+  || fail "codex adapter must scope worktree-per-cook to the --ephemeral PROCESS path (not spawn_agent)"
 # pi: isolated child processes + the launcher caveat (N-resident pool not yet emitted by idc-pi run)
-has "$PI" 'child.process'  || fail "pi adapter inner fan-out must name isolated child processes"
-hasflat "$PI" 'idc-pi run' || fail "pi adapter must carry the launcher caveat naming idc-pi run"
-hasflat "$PI" 'not yet|adapter[^.]*wiring|adapter-driven' \
+has_sec "$PI_SEC" 'child.process'  || fail "pi adapter's two-level section must name isolated child processes"
+hasflat_sec "$PI_SEC" 'idc-pi run' || fail "pi adapter's two-level section must carry the launcher caveat naming idc-pi run"
+hasflat_sec "$PI_SEC" 'not yet|adapter[^.]*wiring|adapter-driven' \
   || fail "pi adapter caveat must state the N-resident pool is adapter wiring not yet emitted by idc-pi run"
 
 echo "PASS: all three adapters document the two-level fan-out + cook->area-staging->merge worktree topology"

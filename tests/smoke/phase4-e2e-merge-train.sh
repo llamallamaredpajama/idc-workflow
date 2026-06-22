@@ -34,6 +34,9 @@ fail() { echo "FAIL: $1"; exit 1; }
 lease() { python3 "$TRK" --tracker "$T" "$@"; }
 # case-insensitive extended-regex substring assertion (BSD/GNU grep safe — no \b, no PCRE)
 has() { grep -qiE "$2" "$1"; }
+# whitespace-flattened phrase check: markdown soft-wraps, so an ordered chain could span lines and
+# dodge a line-based grep. Flatten newlines to spaces first, then match (BSD/GNU-portable: tr only).
+hasflat() { tr '\n' ' ' < "$1" | tr -s ' ' | grep -qiE "$2"; }
 
 [ -f "$TRK" ]   || fail "tracker helper not found at $TRK"
 [ -f "$BUILD" ] || fail "agents/idc-build.md missing"
@@ -88,8 +91,8 @@ done
 # B2 — DEFAULT is staging-only e2e (run once, before main), NOT per-worktree by default.
 has "$BUILD" 'staging[^.]*e2e|e2e[^.]*staging' \
   || fail "idc-build.md must run the full e2e on the staging branch (staging-default e2e)"
-has "$BUILD" 'default[^.]*staging|staging[^.]*default|by default' \
-  || fail "idc-build.md must make staging-only e2e the DEFAULT"
+has "$BUILD" 'default[^.]*staging|staging[^.]*default' \
+  || fail "idc-build.md must make staging-only e2e the DEFAULT (anchored to staging, not a bare 'by default')"
 has "$BUILD" 'once[^.]*(before|prior)[^.]*main|before[^.]*main' \
   || fail "idc-build.md must run the staging e2e ONCE before main (not per-worktree by default)"
 # B3 — LARGE EFFORT adds per-teammate/worktree e2e BEFORE staging, THEN staging runs its own final e2e.
@@ -97,8 +100,8 @@ has "$FIN" 'large[ -]effort' \
   || fail "idc-finisher.md must gate per-worktree e2e behind LARGE EFFORT (not the default)"
 has "$FIN" 'worktree[^.]*e2e|e2e[^.]*worktree|per-teammate[^.]*e2e' \
   || fail "idc-finisher.md must run per-teammate-worktree e2e under large effort (before merging to staging)"
-has "$FIN" 'final e2e|staging[^.]*final|then staging' \
-  || fail "idc-finisher.md must have staging run its OWN final e2e after the large-effort per-worktree pass"
+has "$FIN" 'final e2e|staging[^.]*final|final[^.]*staging' \
+  || fail "idc-finisher.md must have staging run its OWN final e2e (staging-anchored, not a bare 'then staging')"
 # B4 — e2e is rate-limited -> the LONG POLE -> scheduled SERIALIZED (why default is staging-only).
 has "$BUILD" 'rate.?limit' \
   || fail "idc-build.md must explain e2e is GitHub rate-limited (the reason it is serialized)"
@@ -121,8 +124,38 @@ has "$BUILD" '(per-surface|per-area|surface-keyed|keyed[^.]*(surface|area))' \
 has "$BUILD" '(not|no|without|never|rather than|instead of)[^.]*(single |one )?global[^.]*lease' \
   || fail "idc-build.md must state disjoint areas merge WITHOUT one global lease (negation required, not bare 'global lease')"
 # B7 — ONLY conflicting/overlapping surfaces serialize (the precise commutative property).
-has "$BUILD" 'only[^.]*(conflict|overlap)[a-z]*[^.]*serial|serial[a-z]*[^.]*only[^.]*(conflict|overlap)' \
+#      hasflat: markdown soft-wraps 'only' away from 'serialize', so flatten before matching.
+hasflat "$BUILD" 'only[^.]*(conflict|overlap)[a-z]*[^.]*serial|serial[a-z]*[^.]*only[^.]*(conflict|overlap)' \
   || fail "idc-build.md must state ONLY conflicting/overlapping surfaces serialize (the merge train serializes only contended surfaces)"
+
+# B7b — the lease KEY is the diff's actual FILE SURFACE (the paths it touches), NOT an opaque area id.
+#       This is the precondition that makes "only overlapping surfaces serialize" sound: an area-id key
+#       would let two PARTIALLY-overlapping areas hold distinct names and race. Red-when-broken: the
+#       pre-fix wording ('keyed per surface area') does NOT mention the file surface / paths / area id.
+for f in "$BUILD" "$FIN"; do
+  name="$(basename "$f")"
+  hasflat "$f" 'file surface|surface[^.]*(the )?(path|file)|(path|file)[^.]*(it touches|the diff)' \
+    || fail "$name must key the merge lease by the diff's actual FILE SURFACE (paths), not an opaque area id"
+  hasflat "$f" 'area id' \
+    || fail "$name must contrast surface-keying against an opaque area id (the partial-overlap pitfall)"
+done
+# B7c — partial overlap IS handled: two diffs that SHARE a path collide on the SAME lease and serialize.
+hasflat "$FIN" 'shar[a-z]*[^.]*path[^.]*(same|one)[^.]*lease[^.]*serial|shar[a-z]*[^.]*path[^.]*collide[^.]*serial' \
+  || fail "idc-finisher.md must state two diffs sharing a path collide on the SAME lease and serialize (partial overlap handled, not raced)"
+# B7d — the shared-ref ADVANCE never silently races: serial on single-merger runtimes, and an atomic
+#       fast-forward that rejects/retries on a moved base under pi's concurrent residents (fail-closed
+#       at the git layer). The pre-fix wording claimed the lease 'serializes the integration-ref update' —
+#       which is FALSE once disjoint surfaces use distinct leases; this asserts the corrected reconciliation.
+hasflat "$BUILD" 'fast.forward|non.fast.forward|reject[a-z]*[^.]*(retr|moved base)|moved base' \
+  || fail "idc-build.md must reconcile the shared-ref advance (atomic fast-forward / reject-and-retry on a moved base — never a silent race)"
+# B7e — single-merger runtimes COLLAPSE the train to structural serialization; concurrency is realized on pi.
+for f in "$BUILD" "$FIN"; do
+  name="$(basename "$f")"
+  hasflat "$f" 'collapse[a-z]*[^.]*(structural |serial)|structural[ -]serial' \
+    || fail "$name must state the single-merger runtimes COLLAPSE the train to structural serialization (not literal concurrency)"
+  hasflat "$f" 'concurrent[a-z]*[^.]*pi|pi[^.]*(multi.resident|concurrent)' \
+    || fail "$name must state genuine concurrency is realized on pi's multi-resident pool"
+done
 
 # B8 — belt-and-suspenders: #79 ADDS the train; it must NOT drop the fail-closed lease or the
 #      matrix-disjoint primary defense (the pre-existing two-layer guarantee survives).

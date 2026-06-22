@@ -79,18 +79,27 @@ finishers must never race on the merge. Two layers guarantee it: (1) **matrix-di
 area-packing dispatches at most one worker per whole-board disjoint surface area, so diffs are
 content-commutative regardless of `Wave`; (2) **a per-surface merge lock/queue** — the merge lane
 no longer funnels every finisher through **one single global lease**; the lock/queue is **keyed by
-the area's file surface**, so each finisher acquires only the **single-holder merge lease(s)** for
-the surfaces *its* diff touches. Two **disjoint-surface** areas therefore hold **distinct** lease
-names and merge **concurrently** (the merge train) **without contending for one single global
-lease**, while **only conflicting (overlapping) surfaces serialize**. Every named lease is still
-**fail-closed** (no lease → no merge; never a silent race) and serializes only the integration-ref
-update, never content. The global `merge` lease survives only as the degenerate case (the collapsed
-fallback, or a genuinely shared infra surface that every area touches). The adapter realizes the
-per-surface lease: a **board-backed merge lease** (keyed per surface) in the flat **pi** standing
-pool (no master orchestrator — the authoritative board is the lock-holder); the single Build
-**orchestrator** as the sole merger under **Claude Teams** / the collapsed fallback (no
-teammate-finisher merges another's surface); the app-server's serial merge under **Codex**. Merge
-conflicts (which the disjoint matrix should preclude) get a deconflict pass on demand.
+the area's actual file surface** (the paths the diff touches, not an opaque area id), so each finisher
+acquires only the **single-holder merge lease(s)** for the surfaces *its* diff touches — and because
+the key *is* the file surface, **any two diffs that share even one path collide on the same lease and
+serialize**. Two **disjoint-surface** areas therefore hold **distinct** lease names and merge
+**concurrently** (the merge train) **without contending for one single global lease**, while **only
+conflicting (overlapping) surfaces serialize** (layer 1 already makes overlap the exception, so this
+is the second line, not the primary guarantee). Every named lease is still **fail-closed** (no lease
+→ no merge; never a silent race) and serializes the **content** merge per surface; the shared-ref
+*advance* never silently races either — one merger advances it serially on the single-merger
+runtimes, and under pi's concurrent residents it is an **atomic fast-forward that rejects-and-retries
+on a moved base** (git's non-fast-forward guard), so a stale-base merge fails closed and retries. The
+global `merge` lease survives only as the degenerate case (the collapsed fallback, or a genuinely
+shared infra surface that every area touches). The adapter realizes the per-surface lease — and the
+train runs **genuinely concurrently only on pi's multi-resident pool**, while the **single-merger**
+runtimes **collapse it to structural serialization** (disjoint areas merge back-to-back through one
+merger): a **board-backed merge lease** (keyed per surface) in the flat **pi** standing pool (no
+master orchestrator — the authoritative board is the lock-holder, where disjoint surfaces merge
+concurrently); the single Build **orchestrator** as the sole **serial** merger under **Claude Teams**
+/ the collapsed fallback (no teammate-finisher merges another's surface); the app-server's serial
+merge under **Codex**. Merge conflicts (which the disjoint matrix should preclude) get a deconflict
+pass on demand.
 
 **e2e layering (staging-default).** The merge train lands area diffs on a **staging** branch, not
 straight to `main`. **By default only the staging branch runs the full observed e2e** — **once,

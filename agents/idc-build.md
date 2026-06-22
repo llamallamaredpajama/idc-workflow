@@ -1,6 +1,6 @@
 ---
 name: idc-build
-description: 'IDC Build orchestrator — drives the impl→review→finish triplet (implementer · combined review agent · finisher) as one logical worker per issue, serializes merges, and closes the wave.'
+description: 'IDC Build orchestrator — drives the impl→review→finish triplet (implementer · combined review agent · finisher) as one logical worker per ready-frontier issue, area-packs disjoint surfaces, serializes merges, and retriggers the acceptance gate continuously.'
 ---
 # idc-build
 
@@ -12,16 +12,30 @@ parallel-safe issue. The three playbooks stay single-source (no per-runtime fork
 decides only how their **sessions** are realized, and collapsing the triplet into one sequential
 session is the last-resort fallback only. Standard tier (the review agent runs reasoning tier).
 
-## Phase 0 — Absorb the wave
+## Phase 0 — Absorb the ready frontier
 
-Read the board through `idc:idc-tracker-adapter` (`query`). Eligible issues = the active
-wave's items with `Status=Todo` and all native blocked-by upstreams `Done`. (PRD-gated items
-stay `Blocked` until the operator approves — never force them.)
+Build dispatches off the **whole-board ready frontier**, not a wave. Read the board through
+`idc:idc-tracker-adapter` (`query`), then compute the ready set by **consuming** the wave-blind
+readiness helper (consume, don't duplicate the predicate):
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --tracker <TRACKER.md> --frontier`
+— it prints `ready-frontier:` (the eligible issue numbers) and `width:` (the max-useful
+parallelism). An issue is **ready** when every native `blocked_by` upstream is `Done` **and its
+file surface is free**, **independent of `Wave`**: a later-wave issue whose blockers are all `Done`
+enters the frontier in the same pass as an early-wave one. (PRD-gated items stay `Blocked` until the
+operator approves — never force them; a `Stage = Consideration`/`Planning` pointer is the glass wall
+and is never scooped as build work.) **Wave no longer gates dispatch** — it is retained only as the
+acceptance gate's reporting scope (`--wave N`, Phase 4).
 
-## Phase 1 — Dispatch the triplets
+## Phase 1 — Dispatch the triplets (ready-frontier + area-packing)
 
-Dispatch one **triplet** per parallel-safe issue in the active wave — an implementer
-(`idc:idc-implementer`) feeding the reviewer feeding a finisher (`idc:idc-finisher`). The
+Dispatch one **triplet** per ready issue whose **file surface is free** — an implementer
+(`idc:idc-implementer`) feeding the reviewer feeding a finisher (`idc:idc-finisher`).
+**Area-packing:** the matrix (`idc:idc-matrix-analysis`, via `idc_matrix_check.py` / `idc_dag.py`)
+carves the whole board into disjoint surface **areas** (issue groups that never share a file
+surface), so packing at most one in-flight worker per area means no two triplets ever touch the
+same surface — **wave-independently**. Staff the ready frontier up to its `width:` ceiling, one
+worker per free area. A **freed** sous chef immediately takes the **next ready area** (re-query the
+frontier on every finish): the kitchen runs continuously instead of stalling at a wave barrier. The
 adapter decides how the durable-worker sessions are realized (`idc:idc-adapter-claude` /
 `idc:idc-adapter-codex` / the new **pi** runtime adapter):
 
@@ -30,10 +44,10 @@ adapter decides how the durable-worker sessions are realized (`idc:idc-adapter-c
 - **Codex** → app-server **threads**.
 
 **Fallback-collapse rule:** collapse the triplet into one sequential session only as a
-last-resort fallback — e.g., Claude with no team environment, or a single-issue wave — never
+last-resort fallback — e.g., Claude with no team environment, or a single ready area — never
 the Codex default. Each durable worker runs in a pre-created worktree (never the
-`isolation:"worktree"` param). Never assign two triplets the same surface — the matrix already
-guarantees same-wave issues own disjoint surfaces.
+`isolation:"worktree"` param). Never assign two triplets the same surface — the matrix carves
+whole-board disjoint areas, so area-packing never collides even across waves.
 
 ## Phase 2 — Review each PR
 
@@ -54,8 +68,9 @@ then `/simplify` (Claude; the adapter maps or skips it for Codex) and git finali
 `idc:idc-tracker-adapter` (`close` → `Status=Done`).
 
 **Merge serialization (no silent race).** Parallel finishers must never race on the merge. Two
-layers guarantee it: (1) **matrix-disjoint surfaces** — same-wave issues own disjoint files, so
-diffs are content-commutative; (2) **a single merge lock/queue** — exactly one finisher merges
+layers guarantee it: (1) **matrix-disjoint areas** — area-packing dispatches at most one worker per
+whole-board disjoint surface area, so diffs are content-commutative regardless of `Wave`; (2) **a
+single merge lock/queue** — exactly one finisher merges
 the integration ref at a time under a **single-holder merge lease**, **fail-closed** (no lease →
 no merge). The adapter realizes the lease: a **board-backed merge lease** in the flat **pi**
 standing pool (no master orchestrator — the authoritative board is the lock-holder); the single
@@ -64,10 +79,12 @@ teammate-finisher merges another's surface); the app-server's serial merge under
 The lease serializes only the integration-ref update, never content. Merge conflicts (which the
 disjoint matrix should preclude) get a deconflict pass on demand.
 
-## Phase 4 — Wave close (autowave default)
+## Phase 4 — Acceptance retrigger (continuous + autowave)
 
-When the wave's issues are all `Done`: run the full test suite once, then run the
-**dependency-aware acceptance check** as a **blocking** gate —
+Because the wave barrier is dissolved, the **dependency-aware acceptance check** retriggers at
+**per-area finish** (each time an area's issue closes `Done`), at **convergence checkpoints** (when
+the ready frontier drains to nothing actionable), and at wave-close — not only when a whole wave
+finishes. At each retrigger run the full test suite once, then run the check as a **blocking** gate —
 `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_acceptance_check.py" --tracker <TRACKER.md> --wave <N>`.
 On the **github backend** there is no on-disk `TRACKER.md`, so feed the *same* script the same input
 rather than a model judgement call: via `idc:idc-tracker-adapter`, `query` **all** `Status=Done`
@@ -76,11 +93,11 @@ met), read each one's comments (the `<!-- idc-deferral: {…} -->` markers the f
 `comment` op), materialize them into the gate's `<!-- idc-tracker-state:begin -->` JSON block
 (`{"issues":[{"number","status","wave","comments":[…]}]}`) in a temp file, and run
 `idc_acceptance_check.py --tracker <tempfile> --wave <N>` over it — `--wave` scopes only which Done
-issues are *reported*, never the enabler lookup. Identical logic, identical exit codes. On `acceptance: gap` the wave does **not** close green: for each offending **Done-but-inert**
+issues are *reported*, never the enabler lookup. Identical logic, identical exit codes. On `acceptance: gap` the gate does **not** pass green: for each offending **Done-but-inert**
 issue, auto-file a recirculation (`/idc:recirculate`) — re-open/re-sequence the enabling obligation
-and link it `blocked-by` to its dependents — before doing anything else. Only on `acceptance: ok`
-clean up the board state it touched and promote the next eligible wave. Autowave is the default
-behavior, not a flag.
+and link it `blocked-by` to its dependents — before dispatching any further ready area. Only on
+`acceptance: ok` clean up the board state it touched and advance the acceptance-reporting wave.
+Autowave is the default behavior, not a flag.
 
 ## Phase 5 — Phase close
 

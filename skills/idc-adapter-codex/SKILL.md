@@ -26,6 +26,28 @@ drift.
 - Threads are passive between turns — the parent is the only driver; there is no autonomous
   teammate loop.
 
+## Two-level fan-out + worktree topology
+
+The durable-worker and bounded-fan-out primitives **compose** into a **two-level fan-out**: the
+durable worker is a **sous-chef** that owns an area end-to-end (outer level — one app-server thread
+per matrix-disjoint area), and inside that area it runs **bounded fan-out to line cooks** (inner
+level), each cook on a **disjoint** sub-surface so two cooks can never race on one file
+(`idc:idc-implementer` / `idc:idc-finisher`).
+
+- **Outer level (sous-chef).** A named Codex thread driven via `codex app-server`, launched with
+  `--cd <worktree>` — Codex has **no worktree-isolation param**, so the parent pre-creates the
+  worktree.
+- **Inner level (line cooks).** Native `spawn_agent` / `wait_agent` (≤ 6 concurrent, depth 2), or
+  `codex exec --ephemeral --json` process fan-out which escapes the concurrency cap — **one cook per
+  spawned agent / `--ephemeral` process**, each `--cd`'d into its own pre-created worktree.
+
+**Worktree topology — cook → area-staging → merge (worktree-per-cook).** Each line cook runs in its
+**own worktree** (worktree-per-cook), `--cd`'d in; the cooks' disjoint sub-surfaces converge onto
+the **area-staging** branch the sous-chef owns; the sous-chef **merges** that staging branch (the
+app-server serially merges finisher threads — Codex's A2 row). Fan-out widens *who builds*, never
+*who judges*: the cooks build, an **independent** `--ephemeral` review issues the verdict, and only
+then does the finisher merge.
+
 ## Model selection — untiered
 
 The Codex runtime **ignores the tier table**. Use the **highest available Codex model at the

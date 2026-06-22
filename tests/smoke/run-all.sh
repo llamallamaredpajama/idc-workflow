@@ -29,6 +29,7 @@ for t in \
   phase4-acceptance \
   phase4-ready-frontier \
   phase4-e2e-merge-train \
+  phase4-recirc-deconflict \
   phase5-ripple \
   phase6-autorun \
   phase6-autorun-autonomy \

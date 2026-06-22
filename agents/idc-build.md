@@ -98,8 +98,19 @@ merger): a **board-backed merge lease** (keyed per surface) in the flat **pi** s
 master orchestrator — the authoritative board is the lock-holder, where disjoint surfaces merge
 concurrently); the single Build **orchestrator** as the sole **serial** merger under **Claude Teams**
 / the collapsed fallback (no teammate-finisher merges another's surface); the app-server's serial
-merge under **Codex**. Merge conflicts (which the disjoint matrix should preclude) get a deconflict
-pass on demand.
+merge under **Codex**.
+
+**Mechanical conflicts deconflict in-kitchen — the build-time mechanical-deconfliction step (never
+recirculate).** A purely **mechanical** conflict — an overlapping-file edit, a git-merge conflict, or
+a worktree conflict the disjoint matrix should preclude — is resolved **on the kitchen floor**,
+**in-place** by the area owner (the sous-chef) or its line cook, via a **bounded
+mechanical-deconfliction specialist** (a Deconflict pass dispatched on demand, not an upstream hop):
+rebase against staging, resolve the textual overlap, re-acquire the surface-keyed merge lease, and
+re-run the area's tests. A mechanical conflict **never** spawns a recirculation — recirculation is the
+retrograde doc-sync path, and a textual merge clash is not a docs/plan problem. Only if deconfliction
+surfaces a genuine **scope/menu defect** — the resolved work no longer fits the plan, or an
+**undeclared real dependency that changes the plan** — does it escalate upstream to the Recirculator
+(`/idc:recirculate`); the mechanical resolution itself stays in the kitchen.
 
 **e2e layering (staging-default).** The merge train lands area diffs on a **staging** branch, not
 straight to `main`. **By default only the staging branch runs the full observed e2e** — **once,

@@ -38,7 +38,11 @@ def load(path):
     if not m:
         sys.stderr.write(f"idc-autorun-drain: no tracker state block in {path}\n")
         sys.exit(2)
-    return json.loads(m.group(1))
+    state = json.loads(m.group(1))
+    if not isinstance(state, dict):
+        sys.stderr.write(f"idc-autorun-drain: tracker state block is not a JSON object in {path}\n")
+        sys.exit(2)
+    return state
 
 
 def main():
@@ -51,7 +55,17 @@ def main():
         sys.stderr.write(f"idc-autorun-drain: cannot read {args.tracker}: {e}\n")
         sys.exit(2)
 
-    issues = state.get("issues", [])
+    # A MISSING `issues` key is corruption (e.g. a github bug that drops it), not an empty board:
+    # fail closed rather than read it as zero issues and print `drain: complete`. An explicit
+    # `issues: []` is still a legitimate empty board. (The sibling idc_acceptance_check.py applies the
+    # identical guard, kept in lockstep by the smoke parity tests.)
+    if "issues" not in state:
+        sys.stderr.write("idc-autorun-drain: corrupt tracker — state block has no `issues` key\n")
+        sys.exit(2)
+    issues = state["issues"]
+    if not isinstance(issues, list):
+        sys.stderr.write("idc-autorun-drain: corrupt tracker — `issues` must be a list\n")
+        sys.exit(2)
     # eager guard: the dict-comp and sort key below subscript it["number"] unconditionally,
     # so a corrupt issue must fail loudly here rather than KeyError mid-computation.
     for it in issues:

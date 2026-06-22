@@ -134,7 +134,14 @@ def _has_unmet(num, status_by_num, done_deferrals, memo, stack):
 def gaps(state, wave=None):
     """Sorted issue numbers that are Done-but-inert (an unmet blocks_goal:true deferral, transitively),
     filtered to `--wave N` when given."""
-    issues = state.get("issues", [])
+    # A MISSING `issues` key is corruption (e.g. a github bug that drops it), not an empty board:
+    # fail closed rather than read it as zero issues and print `acceptance: ok`. An explicit
+    # `issues: []` is still a legitimate empty board. (The sibling idc_autorun_drain.py applies the
+    # identical guard, kept in lockstep by the smoke parity tests.)
+    if "issues" not in state:
+        sys.stderr.write("idc-acceptance-check: corrupt tracker — state block has no `issues` key\n")
+        sys.exit(2)
+    issues = state["issues"]
     if not isinstance(issues, list):
         sys.stderr.write("idc-acceptance-check: corrupt tracker — `issues` must be a list\n")
         sys.exit(2)

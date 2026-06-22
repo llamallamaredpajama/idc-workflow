@@ -2,6 +2,30 @@
 
 All notable changes to the IDC Workflow plugin are documented in this file.
 
+## 3.0.4 — 2026-06-21
+
+Two follow-ups logged on PR #72 (deliberately out of scope at merge), resolved together.
+
+- **Fail-closed on a missing `issues` key (both state-block readers).** `scripts/idc_acceptance_check.py`
+  and `scripts/idc_autorun_drain.py` both read the embedded `idc-tracker-state` JSON block, and both
+  defaulted a **missing** `issues` key to an empty board (`state.get("issues", [])`) — so a
+  github-materialization bug (or a hand-edit) that dropped the key would silently read as `acceptance: ok`
+  / `drain: complete`. Both readers now **fail closed (exit 2)** when the `issues` key is absent, while an
+  explicitly-present `issues: []` still reads as a legitimate empty board. The two readers are kept in
+  lockstep (identical guard) by new red-when-broken parity cases in `phase4-acceptance.sh` and
+  `phase6-autorun.sh`; `idc_autorun_drain.py`'s loader also gained the sibling's `isinstance(state, dict)`
+  guard so the require-present check is total.
+- **Filesystem-backend portability of the human gates.** The requirements gate (Think-PR merge) and the
+  strategic `operator-decision` gate (`decision-approved` label / decision-PR merge) detect approval via
+  github-only signals; on the `filesystem` backend (a `TRACKER.md` repo with no PRs and no labels) those
+  signals can't exist, so a gate's dependents would stay `Blocked` forever. `idc-gate-issue` now documents
+  the **backend-portable approval signal** — on filesystem the operator approves by moving the gate
+  issue's `Status` to `Done` (the existing `close`/`move` op; no seventh op), fail-closed the same way —
+  via a new *Approval signal by backend* section, a pointer note in `WORKFLOW.md §2`, and a
+  red-when-broken prose invariant in `phase6-autorun.sh`. No GitHub-backend behavior changes.
+
+Gates: `lint-references.sh` CLEAN · `tests/smoke/run-all.sh` ALL GREEN · every new guard shown red-when-broken.
+
 ## 3.0.3 — 2026-06-21
 
 Seven prioritized fixes from the first live-repo `/idc:autorun` audit

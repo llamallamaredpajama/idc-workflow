@@ -85,6 +85,10 @@ decompose; chained work builders claim on the next cycle. A gate whose Think PR 
 merged** (still open, even if the issue was closed) → leave the chain `Blocked` and move on; the
 run never waits on the operator.
 
+**Backend note.** The Think PR is a **github** artifact; on the **filesystem** backend the admission
+signal is instead the gate issue's `Status` moved to `Done` — see *Approval signal by backend* below
+(detection and the fail-closed posture are otherwise identical).
+
 ## The strategic decision gate (the second gate type — `operator-decision`)
 
 The requirements gate above is the only thing that **admits** an idea. But a run sometimes hits a
@@ -142,7 +146,37 @@ titles as non-build work) plus the `decision` marker that distinguishes it from 
    `Status=Todo`. On a `decision-rejected` (NO-GO): drop or re-sequence the dependents per the
    operator's note via the adapter — never silently proceed. `/idc:autorun`, `/idc:build`, and
    `/idc:plan` re-check open `operator-decision` gates at the start of a run via `query`, the same
-   way they re-check the requirements gate.
+   way they re-check the requirements gate. **Backend note:** the `decision-approved` label and the
+   decision-PR are **github** signals; on the **filesystem** backend the GO signal is the gate
+   issue's `Status` moved to `Done` (see *Approval signal by backend* below), fail-closed the same way.
+
+## Approval signal by backend (github vs filesystem)
+
+The four-step procedure is **identical on both backends** — only the *approval signal* the operator
+emits, and how step 4 detects it, is backend-specific, because the durable requirements artifact is
+backend-specific:
+
+| Backend | Requirements gate (admission) | Strategic `operator-decision` gate (GO) |
+|---|---|---|
+| `github` | the **Think PR merges** | the **`decision-approved` label** on the gate issue, or the attached **decision-PR merges** |
+| `filesystem` | the operator moves the **gate issue's `Status` to `Done`** | the operator moves the **gate issue's `Status` to `Done`** |
+
+On the **filesystem** backend a repo has **no PRs and no labels**, so the github merge/label signals
+cannot exist — without a portable signal a filesystem gate's dependents would stay `Blocked` forever.
+The portable signal is the operator flipping the gate issue to `Done` — e.g.
+`scripts/idc_tracker_fs.py --tracker TRACKER.md close --num <gate#>`, or hand-editing the issue's
+`Status` in `TRACKER.md`. This is the explicit, durable operator act that the Think-PR merge /
+`decision-approved` label is on github; step 4's **fail-closed posture is unchanged** — anything less
+than the gate issue being `Done` leaves the chained dependents `Blocked`, and the run **reports the
+pending gate and moves on, never waiting on the operator**.
+
+> **Why the divergence is intentional, not an inconsistency.** On github, *closing* the gate issue is
+> explicitly **not** admission — the PRD/TRD only land when the PR merges, so a closed-but-unmerged
+> gate must not unblock. On filesystem there is no separate PR to merge, so the gate issue reaching
+> `Done` **is** the admission (the drafted PRD/TRD are already committed in the working tree). Each
+> backend realizes the **same** contract — *an explicit, durable operator act, fail-closed until
+> present* — with the only signal that backend can represent, using **only the six existing tracker
+> ops** (`move`/`close`; no labels, no PRs, **no seventh op**; `WORKFLOW.md §3.3` holds).
 
 ## Push notification (graceful no-op fallback)
 

@@ -183,6 +183,22 @@ JSON
 python3 "$SCRIPT" --tracker "$WORK/shape-issues.md" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 2 ] || fail "a state block whose \`issues\` is not a list must exit 2 (got $rc)"
 
+# ---- a state block MISSING the `issues` key entirely -> exit 2 (not a silent empty board) ------
+# A dropped `issues` key used to default to an empty board (state.get("issues", [])) -> a silent
+# `acceptance: ok`. A missing key is corruption, not an empty board: fail closed (exit 2).
+emit "$WORK/no-issues-key.md" <<'JSON'
+{"next_number":1}
+JSON
+python3 "$SCRIPT" --tracker "$WORK/no-issues-key.md" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 2 ] || fail "a state block missing the \`issues\` key must exit 2 (fail-closed), not read as an empty board (got $rc)"
+
+# ---- an explicitly-present empty board (`issues: []`) stays a legitimate empty board -> ok ------
+emit "$WORK/empty-board.md" <<'JSON'
+{"issues":[]}
+JSON
+python3 "$SCRIPT" --tracker "$WORK/empty-board.md" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 0 ] || fail "an explicitly-present empty board (issues: []) must stay acceptance: ok exit 0 (got $rc)"
+
 # ---- a `comments` value that is a STRING (not a list) -> exit 2 -------------------------------
 # A string comments makes the marker loop iterate CHARACTERS, so an embedded blocks_goal:true marker
 # is never matched and the inert Done prints `acceptance: ok` (silent pass). Drop the comments-list

@@ -28,6 +28,7 @@ for t in \
   phase4-tracker-github-recipe \
   phase4-acceptance \
   phase4-ready-frontier \
+  phase4-e2e-merge-train \
   phase5-ripple \
   phase6-autorun \
   phase6-autorun-autonomy \

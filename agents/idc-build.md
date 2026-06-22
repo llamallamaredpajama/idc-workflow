@@ -17,10 +17,10 @@ session is the last-resort fallback only. Standard tier (the review agent runs r
 Build dispatches off the **whole-board ready frontier**, not a wave. Read the board through
 `idc:idc-tracker-adapter` (`query`), then compute the ready set by **consuming** the wave-blind
 readiness helper (consume, don't duplicate the predicate):
-`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --tracker <TRACKER.md> --frontier`
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --tracker <TRACKER.md> --width`
 (or the github-backend equivalent via `idc:idc-tracker-adapter` — materialize the same tracker
 state to a tempfile and feed it the identical script, exactly as Phase 4 does for the acceptance
-gate). It prints `ready-frontier:` (the eligible issue numbers) and `width:` (the max-useful
+gate). It prints `eligible:` (the ready issue numbers) and, with `--width`, `width:` (the max-useful
 parallelism). The helper computes **dependency-readiness only** — an issue is eligible when every
 native `blocked_by` upstream is `Done`, **independent of `Wave`**: a later-wave issue whose blockers
 are all `Done` enters the frontier in the same pass as an early-wave one. `width:` is therefore a

@@ -4,12 +4,13 @@
 # real `/idc:autorun` full-drain stopped to ask questions AND narrowed itself to a single phase.
 #
 # Two halves, both red-when-broken:
-#   A. BEHAVIOR — `idc_autorun_drain.py --frontier` reports the ready-frontier (the unblocked
-#      eligible set) and its `width:` (the max-useful parallelism = the sous chefs the next wave
-#      staffs). Width is the SAME eligibility predicate as `eligible:` (blocked_by-aware, Wave- and
-#      pointer-ignoring), just counted — so a blocked dependent, a glass-wall Consideration pointer,
-#      and a different Wave never inflate or partition it. Default (no --frontier) output stays
-#      byte-identical (existing consumers unaffected).
+#   A. BEHAVIOR — `idc_autorun_drain.py --width` adds a `width:` line (the max-useful parallelism =
+#      the sous chefs the current frontier staffs); the ready set itself is the always-printed
+#      `eligible:` line. Width is the SAME eligibility predicate as `eligible:` (blocked_by-aware,
+#      Wave- and pointer-ignoring), just counted — so a blocked dependent, a glass-wall
+#      Consideration/Planning pointer, and an [operator-action] gate issue never inflate it, and a
+#      different Wave never partitions it. Default (no --width) output stays byte-identical (existing
+#      consumers unaffected).
 #   B. DOCTRINE — agents/idc-autorun.md + commands/autorun.md compute a staffing estimate, run
 #      fully autonomous at/below the configurable threshold (WORKFLOW-config.yaml::
 #      autorun.staffing_gate_threshold, default 10 sous chefs), emit EXACTLY ONE launch-time
@@ -28,15 +29,17 @@ WC="$PLUGIN/templates/WORKFLOW-config.yaml"
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 T="$WORK/TRACKER.md"
 fail() { echo "FAIL: $1"; exit 1; }
-frontier() { python3 "$DRAIN" --tracker "$T" --frontier; }
+frontier() { python3 "$DRAIN" --tracker "$T" --width; }
 
 [ -f "$DRAIN" ] || fail "autorun drain helper not found at $DRAIN"
 [ -f "$TRK" ]   || fail "tracker helper not found at $TRK"
 
 # ---- A. ready-frontier width = the unblocked eligible cardinality --------------------------------
+# Each board state captures the drain output ONCE (consume, don't re-run the helper per assertion).
 # Empty board: zero ready -> width: 0.
 python3 "$TRK" --tracker "$T" init >/dev/null || fail "tracker init failed"
-frontier | grep -qx "width: 0" || fail "an empty board must report 'width: 0' (got: $(frontier | tr '\n' '|'))"
+out="$(frontier)"
+printf '%s\n' "$out" | grep -qx "width: 0" || fail "an empty board must report 'width: 0' (got: $(printf '%s' "$out" | tr '\n' '|'))"
 
 # Three INDEPENDENT buildable issues in THREE DIFFERENT waves. Width ignores Wave: all three are
 # ready in parallel, so width: 3 (not 1-per-wave). This is the anti-self-narrow signal at the
@@ -44,27 +47,43 @@ frontier | grep -qx "width: 0" || fail "an empty board must report 'width: 0' (g
 w1=$(python3 "$TRK" --tracker "$T" create --title "build one"   --wave "Wave 1")
 w2=$(python3 "$TRK" --tracker "$T" create --title "build two"   --wave "Wave 2")
 w3=$(python3 "$TRK" --tracker "$T" create --title "build three" --wave "Wave 3")
-frontier | grep -qx "width: 3" || fail "three independent ready issues across waves must report 'width: 3' (Wave-ignoring) (got: $(frontier | tr '\n' '|'))"
-# ready-frontier line lists every ready issue number
-rf="$(frontier | grep '^ready-frontier:')"
+out="$(frontier)"
+printf '%s\n' "$out" | grep -qx "width: 3" || fail "three independent ready issues across waves must report 'width: 3' (Wave-ignoring) (got: $(printf '%s' "$out" | tr '\n' '|'))"
+# the ready frontier (eligible: set) lists every ready issue number
+rf="$(printf '%s\n' "$out" | grep '^eligible:')"
 for n in "$w1" "$w2" "$w3"; do
-  printf '%s\n' "$rf" | grep -qwF "$n" || fail "ready-frontier must list ready issue $n (got: '$rf')"
+  printf '%s\n' "$rf" | grep -qwF "$n" || fail "ready frontier (eligible:) must list ready issue $n (got: '$rf')"
 done
 
 # A blocked DEPENDENT must NOT widen the frontier: width stays 3, not 4. (Red-when-broken: a width
 # that counts blocked work, or ignores blocked_by, prints 4 here.)
 b4=$(python3 "$TRK" --tracker "$T" create --title "depends on one")
 python3 "$TRK" --tracker "$T" block --num "$b4" --by "$w1" >/dev/null
-frontier | grep -qx "width: 3" || fail "a blocked dependent must NOT inflate the frontier width (must stay 3, got: $(frontier | tr '\n' '|'))"
+out="$(frontier)"
+printf '%s\n' "$out" | grep -qx "width: 3" || fail "a blocked dependent must NOT inflate the frontier width (must stay 3, got: $(printf '%s' "$out" | tr '\n' '|'))"
 
 # A glass-wall Consideration pointer (open Think PR / pending admission) must NOT inflate width.
 cptr=$(python3 "$TRK" --tracker "$T" create --title "pending consideration" --stage Consideration)
-frontier | grep -qx "width: 3" || fail "a Stage=Consideration pointer must NOT inflate the frontier width (glass wall; must stay 3, got: $(frontier | tr '\n' '|'))"
+out="$(frontier)"
+printf '%s\n' "$out" | grep -qx "width: 3" || fail "a Stage=Consideration pointer must NOT inflate the frontier width (glass wall; must stay 3, got: $(printf '%s' "$out" | tr '\n' '|'))"
 
-# Back-compat: the DEFAULT invocation (no --frontier) must NOT print the width/ready-frontier lines,
-# so the existing drain consumers see byte-identical output. (Locks the flag-gating.)
-python3 "$DRAIN" --tracker "$T" | grep -qE '^(width:|ready-frontier:)' \
-  && fail "default drain output (no --frontier) must NOT emit width/ready-frontier (back-compat with existing consumers)"
+# A glass-wall Planning pointer (a consideration being planned, not yet buildable) must NOT inflate
+# width either — same upstream-pointer exclusion as Consideration. (Red-when-broken: drop the
+# Planning arm of the stage filter and width prints 4.)
+pptr=$(python3 "$TRK" --tracker "$T" create --title "in planning" --stage Planning)
+out="$(frontier)"
+printf '%s\n' "$out" | grep -qx "width: 3" || fail "a Stage=Planning pointer must NOT inflate the frontier width (glass wall; must stay 3, got: $(printf '%s' "$out" | tr '\n' '|'))"
+
+# An [operator-action] gate issue is the operator's own todo, not build work — it must NOT inflate
+# width. (Red-when-broken: drop the title-prefix exclusion and width prints 4.)
+gate=$(python3 "$TRK" --tracker "$T" create --title "[operator-action] approve the thing")
+out="$(frontier)"
+printf '%s\n' "$out" | grep -qx "width: 3" || fail "an [operator-action] gate issue must NOT inflate the frontier width (operator's todo, not build work; must stay 3, got: $(printf '%s' "$out" | tr '\n' '|'))"
+
+# Back-compat: the DEFAULT invocation (no --width) must NOT print the width: line, so the existing
+# drain consumers see byte-identical output. (Locks the flag-gating; ready-frontier: never existed.)
+python3 "$DRAIN" --tracker "$T" | grep -qE '^width:' \
+  && fail "default drain output (no --width) must NOT emit the width: line (back-compat with existing consumers)"
 python3 "$DRAIN" --tracker "$T" | grep -q '^drain: continue$' \
   || fail "default drain output must still report drain: continue while ready work exists"
 

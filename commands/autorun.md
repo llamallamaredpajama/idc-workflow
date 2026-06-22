@@ -34,8 +34,9 @@ Traverse the pipe top-to-bottom and exit when nothing actionable remains:
 
 **Drain everything; one launch gate, never self-narrow.** `/idc:autorun` drains the **whole** repo —
 every phase, every eligible wave. Before draining, size a **staffing estimate** from the
-ready-frontier width (`idc_autorun_drain.py --frontier`, one **sous chef** per ready issue) summed
-across the remaining waves: **~N sous chefs / ~M subagents across K usage windows**. Read
+ready-frontier width (`idc_autorun_drain.py --width`, one **sous chef** per ready issue — one call
+reports the current frontier) accrued across the `/loop` drain: **~N sous chefs / ~M subagents across
+K usage windows**. Read
 `WORKFLOW-config.yaml::autorun.staffing_gate_threshold` (default **10**): at or below it, run
 **fully autonomous with no launch gate**; above it, surface **exactly one** pre-drain
 `AskUserQuestion` — **"~N sous chefs / ~M subagents across K windows — go / scope down?"** (a

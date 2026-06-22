@@ -47,9 +47,19 @@ done
 # A1 — idc-build.md adds a BUILD-TIME MECHANICAL-DECONFLICTION step (the formal in-kitchen specialist).
 hasflat "$BUILD" 'build.?time[^.]*mechanical.deconflict|mechanical.deconflict[^.]*(step|specialist)' \
   || fail "idc-build.md must add a BUILD-TIME mechanical-deconfliction step (the in-kitchen specialist)"
-# A2 — it enumerates the MECHANICAL conflict types (overlapping-file / git-merge / worktree).
-hasflat "$BUILD" 'overlapping.file[^.]*git.merge|mechanical[^.]*(overlapping.file|git.merge|worktree)' \
-  || fail "idc-build.md must enumerate the mechanical conflict types (overlapping-file / git-merge / worktree)"
+# A2 — it enumerates ALL THREE mechanical conflict types as INDEPENDENT assertions (overlapping-file
+#      / git-merge / worktree). Three separate greps, NOT one alternation: the prior single grep
+#      ('overlapping.file[^.]*git.merge|mechanical[^.]*(overlapping.file|git.merge|worktree)') passed
+#      if only ONE of the three appeared after "mechanical", so dropping a type from the enumeration
+#      could not turn it red. Each phrase is anchored to its conflict-type wording ("<type> edit/
+#      conflict") so a stray 'worktree' (the durable-worker topology mentions it often) cannot
+#      false-satisfy it; removing any one type from idc-build.md's enumeration now fails its assertion.
+hasflat "$BUILD" 'overlapping.file edit' \
+  || fail "idc-build.md must enumerate the OVERLAPPING-FILE mechanical conflict type ('overlapping-file edit')"
+hasflat "$BUILD" 'git.merge conflict' \
+  || fail "idc-build.md must enumerate the GIT-MERGE mechanical conflict type ('git-merge conflict')"
+hasflat "$BUILD" 'worktree conflict' \
+  || fail "idc-build.md must enumerate the WORKTREE mechanical conflict type ('worktree conflict')"
 # A3 — the conflict resolves IN-KITCHEN / ON THE KITCHEN FLOOR, IN-PLACE by the area owner / line cook.
 has "$BUILD" 'in.kitchen|kitchen floor' \
   || fail "idc-build.md must resolve the mechanical conflict IN-KITCHEN (on the kitchen floor)"

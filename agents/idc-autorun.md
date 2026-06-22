@@ -54,11 +54,12 @@ parent). Loopable via `/loop /idc:autorun` for standing operation.
 
 Typing `/idc:autorun` authorizes draining the **whole** repo — every phase, every eligible wave,
 not one phase. Before the drain loop, size the work into a **staffing estimate**. The build lane's
-per-wave parallelism is the ready-frontier **width** from
-`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --tracker <TRACKER.md> --frontier`
-(the unblocked eligible antichain — one **sous chef** per ready issue, Wave never consulted);
-summed across the remaining buildable waves that is **~N sous chefs**, **~M subagents** (each sous
-chef's bounded fan-out), across **~K usage windows**. Read the ceiling from
+**current** parallelism is the ready-frontier **width** from
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --tracker <TRACKER.md> --width`
+(the unblocked eligible antichain — one **sous chef** per ready issue, Wave never consulted); one
+call reports the frontier **right now**, so the running estimate accrued across the `/loop` drain as
+later blockers clear is **~N sous chefs**, **~M subagents** (each sous chef's bounded fan-out),
+across **~K usage windows**. Read the ceiling from
 `WORKFLOW-config.yaml::autorun.staffing_gate_threshold` (default **10** sous chefs):
 
 - **At or below the threshold — no launch gate.** Drain fully autonomously, start to finish.

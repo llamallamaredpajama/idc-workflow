@@ -38,10 +38,12 @@ each cook on a **disjoint** sub-surface so two cooks can never race on one file
   the durable-worker row above — never the Agent-tool `isolation:"worktree"` param (it silently
   runs on `main`).
 - **Inner level (line cooks).** The **`Workflow` tool** drives the cooks deterministically — a
-  `pipeline()` (implement → review → finish) or `parallel()`, **one cook per stage thunk**, with
-  **`isolation:'worktree'` per cook**. This is the Workflow tool's *own* worktree isolation (a
-  working code path), distinct from the broken Agent-tool param above — so each cook gets an
-  isolated worktree without the lead pre-creating it.
+  `pipeline()` (implement → review → finish) **per cook** or a `parallel()` across cooks, **one cook
+  per `parallel()` thunk / per disjoint-surface item** (cooks parallelise across *surfaces*, not
+  across the pipeline's implement→review→finish *stages*), with **`isolation:'worktree'` per cook**.
+  This is the Workflow tool's *own* worktree isolation (a working code path), distinct from the
+  broken Agent-tool param above — so each cook gets an isolated worktree without the lead
+  pre-creating it.
 
 **Worktree topology — cook → area-staging → merge (worktree-per-cook).** Each line cook runs in its
 **own worktree** (worktree-per-cook); the cooks' disjoint sub-surfaces converge onto the

@@ -196,4 +196,45 @@ printf '%s\n' "$sout" | grep -qi "solo" \
 printf '%s\n' "$sout" | grep -qiE 'cycle|unschedulable|itself|self-depend' \
   || fail "matrix_check must explain the self-dep failure (cycle/unschedulable); got: $sout"
 
-echo "PASS: idc_dag critical-path + max-width + cycle detect green; wired into matrix_check (width ceiling + disjoint areas + cycle/dangling/self-ref FAIL)"
+# ---- (f) the carved disjoint surface AREAS reflect the union-find, not just the word "area" -------
+# §(c) only proves the word "area" prints, and board-good has all-disjoint surfaces, so every pillar
+# is its own area — the union is NEVER exercised. This fixture forces a UNION: two pillars in
+# DIFFERENT waves SHARE a file surface, so the same-wave-disjoint invariant still PASSes (they are not
+# in one wave) but surface_areas() must merge them into ONE area across waves; a third pillar with a
+# disjoint surface stays separate. Red-when-broken: a never-unions union-find prints 3 areas (and
+# splits shareA/shareB); a unions-everything one prints 1 (and pulls solo in). This is the executable
+# guard for area CARVING; the area-packing DISPATCH wiring (one worker per area) is doctrine-grepped
+# in agents/idc-build.md by phase4-ready-frontier.sh §B.
+cat > "$WORK/board-areas.yaml" <<'MD'
+phase: Phase 1
+pillars:
+  - id: pillar-shareA
+    wave: 1
+    domain: core
+    surfaces: [src/shared/]
+    blocks_on: []
+  - id: pillar-shareB
+    wave: 2
+    domain: core
+    surfaces: [src/shared/]
+    blocks_on: []
+  - id: pillar-solo
+    wave: 1
+    domain: core
+    surfaces: [src/solo/]
+    blocks_on: []
+MD
+aout="$(python3 "$MATRIX" "$WORK/board-areas.yaml")" \
+  || fail "matrix_check rejected a valid board (a shared surface across DIFFERENT waves is wave-parallel-safe, area-merged by surface); got: $aout"
+acount=$(printf '%s\n' "$aout" | sed -n 's/^disjoint surface areas.*: //p')
+[ "$acount" = "2" ] \
+  || fail "surface_areas must carve 2 areas (shareA+shareB share src/shared/ -> one area; solo disjoint -> separate); got count '$acount' in: $aout"
+# the two surface-sharing pillars land in the SAME area line ...
+shareline="$(printf '%s\n' "$aout" | grep -E '^[[:space:]]*area [0-9]+:' | grep 'pillar-shareA')"
+printf '%s\n' "$shareline" | grep -q 'pillar-shareB' \
+  || fail "surface-sharing pillars shareA+shareB must be carved into ONE area (union-find merge across waves); got area line: '$shareline'"
+# ... and the disjoint pillar is NOT in that area
+printf '%s\n' "$shareline" | grep -q 'pillar-solo' \
+  && fail "disjoint pillar-solo must NOT share shareA/shareB's area (it owns a separate surface); got area line: '$shareline'"
+
+echo "PASS: idc_dag critical-path + max-width + cycle detect green; wired into matrix_check (width ceiling + disjoint-area CARVING [union-find, red-when-broken] + cycle/dangling/self-ref FAIL)"

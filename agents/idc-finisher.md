@@ -94,14 +94,16 @@ The finisher runs its **own** `/fullauto-goal` loop. Its completion contract car
    --delete-branch` (pick the method the repo allows) — **not** GitHub `--auto`. Branch deletion is
    **atomic with the merge**,
    **not** a best-effort tidy, so no orphaned `build/*` survives; auto-merge would defer the merge
-   and, with the repo's `deleteBranchOnMerge` off, skip the delete. Settle tracker status, release
-   the lock. See *Merge serialization* below — never merge without the lease. A **mechanical** merge
+   and, with the repo's `deleteBranchOnMerge` off, skip the delete. A **mechanical** merge
    conflict here (an overlapping-file / git-merge / worktree clash a peer area's merge introduced) is
    **never** a recirculation — the finisher deconflicts it **in-kitchen** via Build's **build-time
    mechanical-deconfliction step** (rebase against staging, resolve the textual overlap in-place,
    re-acquire the surface-keyed lease, re-run tests). Only a genuine **scope/menu defect** the
    deconfliction surfaces — the resolved work no longer fits the plan, or an undeclared real
-   dependency that changes the plan — escalates to the Recirculator.
+   dependency that changes the plan — escalates to the Recirculator. **Only on a successful merge**
+   do you then settle tracker status and release the lock (the lease is held across a bounded
+   in-kitchen retry, or released deliberately before escalating a scope/menu defect — never left
+   holding a half-merged surface). See *Merge serialization* below — never merge without the lease.
 5. **Close out.** Hand the merged, clean result back to Build (`idc:idc-build`); name the
    findings cleared, the `/simplify` outcome, any recirculation filed, and **every deferral as a
    structured object** (resolved in-loop, or the dependency-linked board item it became) — never a

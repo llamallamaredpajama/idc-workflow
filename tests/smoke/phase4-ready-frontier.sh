@@ -1,26 +1,33 @@
 #!/bin/bash
-# Phase 4 smoke — Build's READY-FRONTIER + AREA-PACKING dispatch (#76: dissolve the wave barriers).
+# Phase 4 smoke — Build's READY-FRONTIER dispatch + AREA-PACKING doctrine (#76: dissolve the wave
+# barriers).
 #
 # The kitchen runs continuously. Build dispatches off the whole-board READY FRONTIER — an issue is
-# ready when every blocked_by is Done AND its file surface is free — instead of marching wave-by-wave
-# behind a barrier. Wave survives ONLY as the acceptance gate's reporting scope. Two halves, both
-# red-when-broken:
+# ready when every blocked_by is Done (the DEPENDENCY half, computed by the helper) AND its file
+# surface is free (the AREA-PACKING half, carved by the matrix) — instead of marching wave-by-wave
+# behind a barrier. Wave survives ONLY as the acceptance gate's reporting scope.
 #
-#   A. BEHAVIOR — the dispatch INPUT contract. The build loop consumes the SAME wave-blind readiness
-#      helper autorun does (`idc_autorun_drain.py --frontier`; "consume, don't duplicate"). Over a
-#      multi-wave board, a LATER-wave issue whose blocked_by are all Done lands in the ready frontier
-#      in the SAME pass as an early-wave ready issue; a still-blocked issue does not. Red-when-broken
-#      by construction: reintroduce a Wave partition into the frontier and the later-wave issue drops
-#      out of the pass (assertion on `late`); drop the blocked_by check and the blocked issue / the
-#      width inflate. (Distinct from phase6-autorun-autonomy.sh, which uses INDEPENDENT cross-wave
-#      issues — here the proof is a cross-wave DEPENDENT whose upstream just went Done, the exact
-#      case a wave barrier would wrongly hold back.)
-#   B. DOCTRINE — agents/idc-build.md dispatches off the ready frontier with area-packing (one worker
-#      per matrix-carved disjoint surface area), a freed sous chef immediately pulls the next ready
-#      area, Wave is retained only as acceptance-gate reporting scope, and the acceptance gate
-#      retriggers at per-area finish + convergence checkpoints (not only at wave-close). The existing
-#      acceptance-gate prose locks (phase4-acceptance.sh) stay green — #76 ADDS retrigger points; it
-#      does not change the gate logic (the B9 belt-and-suspenders pair re-asserts the gate survived).
+# What each half PROVES (stated precisely so this file does not over-claim its coverage):
+#   A. BEHAVIOR (executable) — the DEPENDENCY frontier ONLY. The build loop consumes the SAME
+#      wave-blind readiness helper autorun does (`idc_autorun_drain.py --width`; "consume, don't
+#      duplicate"). Over a multi-wave board, a LATER-wave issue whose blocked_by are all Done lands in
+#      the ready frontier in the SAME pass as an early-wave ready issue; a still-blocked issue does
+#      not. Red-when-broken by construction: reintroduce a Wave partition and the later-wave issue
+#      drops out (assertion on `late`); drop the blocked_by check and the blocked issue / the width
+#      inflate. The helper computes dependency-readiness ONLY — it never reads `surfaces`, so the
+#      surface-free / AREA-PACKING half is NOT asserted here. The area CARVING itself (the union-find
+#      that groups surface-sharing pillars into one area) is the executable guard in
+#      phase3-dag-matrix.sh §(f). (Distinct from phase6-autorun-autonomy.sh, which uses INDEPENDENT
+#      cross-wave issues — here the proof is a cross-wave DEPENDENT whose upstream just went Done, the
+#      exact case a wave barrier would wrongly hold back.)
+#   B. DOCTRINE (prose-grep) — the area-packing DISPATCH wiring is agent-markdown with no executable
+#      surface, so it is guarded by greps over agents/idc-build.md: dispatch off the ready frontier
+#      with area-packing (one worker per matrix-carved disjoint surface area), a freed sous chef
+#      immediately pulls the next ready area, Wave retained only as acceptance-gate reporting scope,
+#      and the acceptance gate retriggers at per-area finish + convergence checkpoints (not only at
+#      wave-close). The existing acceptance-gate prose locks (phase4-acceptance.sh) stay green — #76
+#      ADDS retrigger points; it does not change the gate logic (the B9 belt-and-suspenders pair
+#      re-asserts the gate survived).
 #
 # Usage: bash tests/smoke/phase4-ready-frontier.sh   (exit 0 = pass)
 set -uo pipefail
@@ -31,7 +38,7 @@ BUILD="$PLUGIN/agents/idc-build.md"
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 T="$WORK/TRACKER.md"
 fail() { echo "FAIL: $1"; exit 1; }
-frontier() { python3 "$DRAIN" --tracker "$T" --frontier; }
+frontier() { python3 "$DRAIN" --tracker "$T" --width; }
 
 [ -f "$DRAIN" ] || fail "autorun drain/frontier helper not found at $DRAIN"
 [ -f "$TRK" ]   || fail "tracker helper not found at $TRK"
@@ -53,28 +60,31 @@ gate=$(python3 "$TRK"    --tracker "$T" create --title "live blocker"         --
 python3 "$TRK" --tracker "$T" block --num "$gate" >/dev/null   # status -> Blocked (not Todo)
 blocked=$(python3 "$TRK" --tracker "$T" create --title "still blocked"        --wave "Wave 1" --blocked-by "$gate")
 
-rf="$(frontier | grep '^ready-frontier:')"
+# Capture the drain output ONCE for this board state (consume, don't re-run the helper per assertion).
+out="$(frontier)"
+# The ready frontier IS the `eligible:` set (the `--width` flag adds only the `width:` count line).
+rf="$(printf '%s\n' "$out" | grep '^eligible:')"
 # THE Done-When: early (Wave 1) AND late (Wave 3) ready in the SAME pass — Wave never partitions.
 printf '%s\n' "$rf" | grep -qwF "$early" \
-  || fail "ready-frontier must list the early-wave ready issue $early (got: '$rf')"
+  || fail "ready frontier (eligible:) must list the early-wave ready issue $early (got: '$rf')"
 printf '%s\n' "$rf" | grep -qwF "$late" \
-  || fail "ready-frontier must list the LATER-wave issue $late whose blocked_by are all Done, in the SAME pass as the early-wave issue — Wave must not partition the frontier (got: '$rf')"
+  || fail "ready frontier must list the LATER-wave issue $late whose blocked_by are all Done, in the SAME pass as the early-wave issue — Wave must not partition the frontier (got: '$rf')"
 # the still-blocked issue and the Blocked-status gate must NOT appear
 printf '%s\n' "$rf" | grep -qwF "$blocked" \
-  && fail "ready-frontier must NOT list $blocked — its blocked_by ($gate) is not Done (got: '$rf')"
+  && fail "ready frontier must NOT list $blocked — its blocked_by ($gate) is not Done (got: '$rf')"
 printf '%s\n' "$rf" | grep -qwF "$gate" \
-  && fail "ready-frontier must NOT list the Blocked-status issue $gate (got: '$rf')"
+  && fail "ready frontier must NOT list the Blocked-status issue $gate (got: '$rf')"
 # width counts exactly the two ready issues (early, late) — wave-blind, blocked-aware
-frontier | grep -qx "width: 2" \
-  || fail "ready frontier width must be 2 (early + later-wave dependent), wave-blind & blocked-aware (got: $(frontier | tr '\n' '|'))"
+printf '%s\n' "$out" | grep -qx "width: 2" \
+  || fail "ready frontier width must be 2 (early + later-wave dependent), wave-blind & blocked-aware (got: $(printf '%s' "$out" | tr '\n' '|'))"
 
 # ---- B. DOCTRINE: agents/idc-build.md dispatches off the ready frontier with area-packing ---------
 # Each grep ties to a load-bearing #76 directive and is RED against the pre-#76 (wave-barrier) playbook.
-# B1/B2 — Build CONSUMES the wave-blind readiness helper (consume, don't duplicate) and reads --frontier.
+# B1/B2 — Build CONSUMES the wave-blind readiness helper (consume, don't duplicate) and reads --width.
 grep -qiE 'idc_autorun_drain\.py' "$BUILD" \
   || fail "idc-build.md must consume the wave-blind ready-frontier helper idc_autorun_drain.py (consume, don't duplicate the readiness predicate)"
-grep -qiE '\-\-frontier' "$BUILD" \
-  || fail "idc-build.md must read the --frontier output (the ready set + width) to drive dispatch"
+grep -qiE '\-\-width' "$BUILD" \
+  || fail "idc-build.md must read the --width output (the ready set in eligible: + the width count) to drive dispatch"
 # B3 — dispatch is off the READY FRONTIER, not a wave.
 grep -qiE 'ready.?frontier' "$BUILD" \
   || fail "idc-build.md must dispatch off the ready frontier (not the active wave)"

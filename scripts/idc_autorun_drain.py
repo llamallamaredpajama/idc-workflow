@@ -20,16 +20,17 @@ Prints the eligible issue numbers and `drain: continue` (work remains) or `drain
 (exit). The planning lane (unplanned considerations) is scanned by the orchestrator from the
 filesystem; this helper covers the build lane / board-exit half.
 
-With `--frontier`, two extra lines report the ready frontier and its width:
-  ready-frontier: <eligible numbers>   (== the `eligible:` set, named explicitly)
-  width: <N>                           (its cardinality)
-Width is the max-useful parallelism the next wave can staff — the size of the unblocked eligible
-antichain (Wave is never consulted, so different waves do not partition it; a blocked dependent and
-a glass-wall Consideration pointer are excluded by the same eligibility predicate). Autorun's
-parent reads it as the per-wave sous-chef count feeding the launch-time staffing estimate. The flag
-is opt-in so the default output stays byte-identical for existing callers.
+With `--width`, one extra line reports the ready frontier's width:
+  width: <N>     (the cardinality of the `eligible:` set already printed above)
+Width is the max-useful parallelism the CURRENT ready frontier can staff — the size of the unblocked
+eligible antichain (Wave is never consulted, so different waves do not partition it; a blocked
+dependent and a glass-wall Consideration/Planning pointer are excluded by the same eligibility
+predicate). Autorun's parent reads it as the sous-chef count feeding the launch-time staffing
+estimate — one `--width` call reports the frontier right now; the cross-`/loop` estimate sums these
+across iterations, not a single invocation. The flag is opt-in so the default output stays
+byte-identical for existing callers (the ready set is always on the `eligible:` line, with or without it).
 
-Usage: idc_autorun_drain.py --tracker <TRACKER.md> [--frontier]   (exit 0 = ok, 2 = error)
+Usage: idc_autorun_drain.py --tracker <TRACKER.md> [--width]   (exit 0 = ok, 2 = error)
 """
 import argparse
 import json
@@ -57,8 +58,8 @@ def load(path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tracker", required=True)
-    ap.add_argument("--frontier", action="store_true",
-                    help="also print the ready frontier and its width (max-useful parallelism)")
+    ap.add_argument("--width", action="store_true",
+                    help="also print the ready frontier's width (max-useful parallelism); the ready set is the `eligible:` line")
     args = ap.parse_args()
     try:
         state = load(args.tracker)
@@ -114,10 +115,11 @@ def main():
 
     print("eligible: " + " ".join(str(n) for n in eligible))
     print("drain: " + ("continue" if eligible else "complete"))
-    if args.frontier:
-        # The ready frontier IS the eligible set; width is its size = the unblocked eligible
-        # antichain the next wave can staff in parallel (the per-wave sous-chef count).
-        print("ready-frontier: " + " ".join(str(n) for n in eligible))
+    if args.width:
+        # The ready frontier IS the `eligible:` set already printed above; width is its size = the
+        # unblocked eligible antichain that can be staffed in parallel right now (the sous-chef
+        # count; Wave is never consulted). No `ready-frontier:` line — it would byte-duplicate
+        # `eligible:`; consumers read the ready set from `eligible:` and the count from here.
         print("width: " + str(len(eligible)))
 
 

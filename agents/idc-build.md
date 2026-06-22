@@ -74,17 +74,32 @@ then `/simplify` (Claude; the adapter maps or skips it for Codex) and git finali
 (`/idc:recirculate`). On a clean verdict the finisher merges, then closes the issue through
 `idc:idc-tracker-adapter` (`close` → `Status=Done`).
 
-**Merge serialization (no silent race).** Parallel finishers must never race on the merge. Two
-layers guarantee it: (1) **matrix-disjoint areas** — area-packing dispatches at most one worker per
-whole-board disjoint surface area, so diffs are content-commutative regardless of `Wave`; (2) **a
-single merge lock/queue** — exactly one finisher merges
-the integration ref at a time under a **single-holder merge lease**, **fail-closed** (no lease →
-no merge). The adapter realizes the lease: a **board-backed merge lease** in the flat **pi**
-standing pool (no master orchestrator — the authoritative board is the lock-holder); the single
-Build **orchestrator** as the sole merger under **Claude Teams** / the collapsed fallback (no
-teammate-finisher merges another's surface); the app-server's serial merge under **Codex**.
-The lease serializes only the integration-ref update, never content. Merge conflicts (which the
-disjoint matrix should preclude) get a deconflict pass on demand.
+**Merge serialization (no silent race) — the commutative disjoint-surface merge train.** Parallel
+finishers must never race on the merge. Two layers guarantee it: (1) **matrix-disjoint areas** —
+area-packing dispatches at most one worker per whole-board disjoint surface area, so diffs are
+content-commutative regardless of `Wave`; (2) **a per-surface merge lock/queue** — the merge lane
+no longer funnels every finisher through **one single global lease**; the lock/queue is **keyed by
+the area's file surface**, so each finisher acquires only the **single-holder merge lease(s)** for
+the surfaces *its* diff touches. Two **disjoint-surface** areas therefore hold **distinct** lease
+names and merge **concurrently** (the merge train) **without contending for one single global
+lease**, while **only conflicting (overlapping) surfaces serialize**. Every named lease is still
+**fail-closed** (no lease → no merge; never a silent race) and serializes only the integration-ref
+update, never content. The global `merge` lease survives only as the degenerate case (the collapsed
+fallback, or a genuinely shared infra surface that every area touches). The adapter realizes the
+per-surface lease: a **board-backed merge lease** (keyed per surface) in the flat **pi** standing
+pool (no master orchestrator — the authoritative board is the lock-holder); the single Build
+**orchestrator** as the sole merger under **Claude Teams** / the collapsed fallback (no
+teammate-finisher merges another's surface); the app-server's serial merge under **Codex**. Merge
+conflicts (which the disjoint matrix should preclude) get a deconflict pass on demand.
+
+**e2e layering (staging-default).** The merge train lands area diffs on a **staging** branch, not
+straight to `main`. **By default only the staging branch runs the full observed e2e** — **once,
+before `main`** — never one e2e per teammate worktree. e2e is the **long pole**: it is GitHub
+**rate-limited** (~1000–5000 calls/hr), so parallelizing it across worktrees would multiply the
+rate-limited cost; it is therefore **scheduled serialized** (one observed e2e at a time), which is
+*why* the default is staging-only. Only under **large effort** does each teammate worktree run e2e
+before merging to staging, after which staging deconflicts the merged areas and runs its **own final
+e2e** before promotion to `main` (the per-worktree/staging split lives in `idc:idc-finisher`).
 
 ## Phase 4 — Acceptance retrigger (continuous + autowave)
 

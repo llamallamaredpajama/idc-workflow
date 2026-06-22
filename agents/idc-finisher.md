@@ -83,11 +83,15 @@ The finisher runs its **own** `/fullauto-goal` loop. Its completion contract car
    simplification, efficiency, altitude). Claude runs it natively; the **adapter maps or skips
    it for Codex** (no native `/simplify` — an equivalent pass or a documented skip). Re-verify
    tests stay green after any simplification edit.
-4. **Git finalization.** Acquire the **serialized merge lock**. **Remove the build worktree first**
+4. **Git finalization.** Acquire the area's **surface-keyed merge-train lease** (the serialized
+   merge lock for *this area's* file surface — disjoint areas hold distinct leases and merge
+   concurrently; see *Merge serialization*). **Remove the build worktree first**
    (so `build/*` is no longer checked out — otherwise its local delete fails:
    `cannot delete branch … used by worktree`), **then** merge the triplet's PR into the
-   integration branch with a **direct, blocking** `gh pr merge --squash --delete-branch` (pick the
-   method the repo allows) — **not** GitHub `--auto`. Branch deletion is **atomic with the merge**,
+   **staging** branch (the merge train's shared integration ref, promoted to `main` only after the
+   staging e2e — see *e2e layering*) with a **direct, blocking** `gh pr merge --squash
+   --delete-branch` (pick the method the repo allows) — **not** GitHub `--auto`. Branch deletion is
+   **atomic with the merge**,
    **not** a best-effort tidy, so no orphaned `build/*` survives; auto-merge would defer the merge
    and, with the repo's `deleteBranchOnMerge` off, skip the delete. Settle tracker status, release
    the lock. See *Merge serialization* below — never merge without the lease.
@@ -95,6 +99,18 @@ The finisher runs its **own** `/fullauto-goal` loop. Its completion contract car
    findings cleared, the `/simplify` outcome, any recirculation filed, and **every deferral as a
    structured object** (resolved in-loop, or the dependency-linked board item it became) — never a
    loose prose footnote that nobody parses.
+
+## e2e layering (staging-default)
+
+The observed end-to-end run is **layered onto the merge train**, not run once per teammate worktree.
+**By default only the staging branch runs the full observed e2e** — once, before promotion to
+`main` — because e2e is the **long pole**: GitHub **rate-limited**, so it is scheduled **serialized**
+(one at a time), and running it per worktree would multiply that rate-limited cost. Under **large
+effort** each teammate **worktree runs e2e before merging to staging** (defense in depth across the
+fan-out), and **then staging** deconflicts the merged areas and runs its **own final e2e** before
+`main`. The default keeps the rate-limited long pole single (staging-only); large effort trades
+extra serialized e2e for earlier per-area signal. Build (`idc:idc-build` Phase 4) owns the
+staging→`main` promotion gate; the finisher merges its area onto staging under the merge-train lease.
 
 ## Merge serialization (load-bearing — the A2↔B2 contract)
 
@@ -105,11 +121,15 @@ Serialization is two layers — both required:
    matrix-disjoint surface **area** (**regardless of `Wave`**), so two finishers' diffs own
    **disjoint file surfaces** and cannot logically conflict — merges are *commutative at the content
    level*. This is the primary defense.
-2. **A single merge lock/queue.** Even with disjoint content, the integration-branch ref is one
-   shared resource. Exactly **one** finisher fast-forwards/merges it at a time, holding a
-   **single-holder merge lease**, **fail-closed** (no lease → no merge; never a silent race).
-   The lease only serializes the integration-ref update, never the content. The adapter decides
-   how the lease is realized:
+2. **A commutative disjoint-surface merge train.** Even with disjoint content, the integration-branch
+   ref is one shared resource — but the merge lock/queue is **keyed per surface area**, not one
+   single global lease. Each finisher holds only the **single-holder merge lease(s)** for the
+   surfaces *its* diff touches, **fail-closed** (no lease → no merge; never a silent race). Two
+   **disjoint-surface** areas therefore hold **distinct** lease names and merge **concurrently** (the
+   merge train) **without contending for one single global lease**; **only conflicting (overlapping)
+   surfaces serialize**. The lease only serializes the integration-ref update, never the content; the
+   global `merge` lease remains the degenerate case (collapsed fallback, or a shared infra surface).
+   The adapter decides how the per-surface lease is realized:
    - **pi** (flat standing pool, **no master orchestrator**) → a **board-backed merge lease**:
      the authoritative GitHub Projects board is the lock-holder; whichever finisher resident
      holds the lease merges, then releases it; coms-net carries only the liveness/notification.
@@ -117,8 +137,9 @@ Serialization is two layers — both required:
      merger (no teammate-finisher merges another's surface); the lease is structural.
    - **Codex** → the app-server's serial merge of finisher **threads** holds the lease.
 
-   One mechanism (single-holder lease over matrix-disjoint surfaces, fail-closed); the
-   realization is adapter-decided. The pi runtime adapter consumes the **pi** row above.
+   One mechanism (surface-keyed single-holder leases over matrix-disjoint surfaces — the merge
+   train, fail-closed); the realization is adapter-decided. The pi runtime adapter consumes the
+   **pi** row above.
 
 ## Authority & halt
 

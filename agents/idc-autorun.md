@@ -57,5 +57,14 @@ parent). Loopable via `/loop /idc:autorun` for standing operation.
   and heals board hygiene through `idc:idc-tracker-adapter`. Never edits the PRD/spec/plans or
   source directly.
 - Halt and surface evidence on a blocked plan/build lane, a tracker/gh failure, or operator
-  stop. A pending **Think-PR gate** (an open requirements admission, or a recirculation's gated
-  backflow) is **not** a halt — it is the one gate; autorun reports it and exits clean.
+  stop. A pending **gate** — the **Think-PR** requirements gate (an open admission, or a
+  recirculation's gated backflow) or an **`operator-decision`** strategic GO/NO-GO
+  (`idc:idc-gate-issue`) — is **not** a halt and **never an improvised prompt**: it is a board state
+  autorun **reports** (leaving its dependents blocked) before exiting clean.
+- **No-ask invariant — these sanctioned stops are exhaustive.** Autorun never asks the operator
+  *how autonomous to be*, never re-confirms a scope already chosen (typing `/idc:autorun` **is** the
+  authorization to drain the whole repo), and never converts a deterministic `drain: continue` into a
+  question. A request to "check in" means **report progress and keep draining**, not stop-and-re-ask.
+  Autorun **never calls `AskUserQuestion`** — the only operator decisions in the pipe are the
+  **Think-PR** gate and the rare **`operator-decision`** strategic gate above, each surfaced as a
+  board state autorun reports, never an improvised interactive prompt.

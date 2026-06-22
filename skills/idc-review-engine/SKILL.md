@@ -20,7 +20,9 @@ true adversarial independence, token-optimal — never durable workers):
 1. **Per-PR build review** — iterate on findings → reverify (real tests green) → the Build
    finisher automerges on `PASS`/`PASS-WITH-NITS`.
 2. **Phase-close delta review** — one pass over the phase delta; findings are filed as new
-   board issues (non-blocking; phase close does not drive them to zero).
+   board issues (non-blocking; phase close does not drive them to zero) — **except
+   acceptance-class findings** (a Done-but-inert increment / `acceptance: gap`), which are
+   **blocking**: driven to zero or auto-recirculated before the phase closes.
 
 ## Architecture
 
@@ -60,15 +62,28 @@ fail-closed. Reviewers read a **sanitized packet** and treat the diff + PR text 
 **Test genuineness** is enforced across dims 2/7/8: a verification surface must be a **real
 functional test proving behavior**. A shallow, shortcut, or placeholder AI test suite (tests
 that assert nothing, mirror the implementation, or stub the thing under test) is a **FAIL
-finding**, not a nit — filed at `major`/`blocker` under the `test-genuineness` dimension. The
-verdict validator rejects a `test-genuineness` finding filed at `minor`/`nit`, so the floor is
-machine-enforced, not just convention.
+finding**, not a nit — filed at `major`/`blocker` under the `test-genuineness` dimension. **An
+all-static verification surface** is the same FAIL: a surface whose commands are *all* static
+checks (file-exists, parse, lint/typecheck, `terraform validate`/`fmt`, arch-fence `pytest -k
+arch`, import probes) with **no** command exercising the GOAL's observable end-state (run / apply
+/ query / HTTP / e2e) lets an **inert deliverable** pass as Done — e.g. a DDL that *parses* but is
+never *applied* to a provisioned store does not make the data live. Flag it at `major` under
+`contract-drift` (the GOAL is unproven end-to-end) or `test-genuineness`. The verdict validator
+rejects a `test-genuineness` finding filed at `minor`/`nit`, so the floor is machine-enforced, not
+just convention.
 
 ## Finding shape + verdict
 
 Each finding carries: `dimension`, `severity ∈ {blocker, major, minor, nit}`, `confidence`
 (≥ 0.8), `evidence` (file:line + what), `attack` (the failure mode it enables), `unblock`
 (the concrete fix), and a stable `fingerprint` (`dimension:file:line:gist`) for dedup.
+
+The verdict may also carry a `deferrals[]` array — the structured obligations a closeout could
+not finish in-loop, each `{kind: deferred|out-of-boundary|pre-existing-breakage, what,
+blocks_goal: bool, suggested_issue}`. This replaces unparsed prose footnotes: the validator
+enforces the shape (notably a `blocks_goal` that is a real JSON boolean), and the wave-close
+acceptance check (`idc:idc-build` Phase 4) consumes `blocks_goal:true` deferrals to flag a
+Done-but-inert increment and auto-recirculate it.
 
 The verdict is fail-closed and derived from the worst severity present:
 

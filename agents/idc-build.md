@@ -66,13 +66,34 @@ disjoint matrix should preclude) get a deconflict pass on demand.
 
 ## Phase 4 — Wave close (autowave default)
 
-When the wave's issues are all `Done`: run the full test suite once, clean up the board state
-it touched, and promote the next eligible wave. Autowave is the default behavior, not a flag.
+When the wave's issues are all `Done`: run the full test suite once, then run the
+**dependency-aware acceptance check** as a **blocking** gate —
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_acceptance_check.py" --tracker <TRACKER.md> --wave <N>`.
+On the **github backend** there is no on-disk `TRACKER.md`, so feed the *same* script the same input
+rather than a model judgement call: via `idc:idc-tracker-adapter`, `query` **all** `Status=Done`
+issues (the whole board, not just wave N — the gate must see a cross-wave enabler to mark a deferral
+met), read each one's comments (the `<!-- idc-deferral: {…} -->` markers the finisher posted via the
+`comment` op), materialize them into the gate's `<!-- idc-tracker-state:begin -->` JSON block
+(`{"issues":[{"number","status","wave","comments":[…]}]}`) in a temp file, and run
+`idc_acceptance_check.py --tracker <tempfile> --wave <N>` over it — `--wave` scopes only which Done
+issues are *reported*, never the enabler lookup. Identical logic, identical exit codes. On `acceptance: gap` the wave does **not** close green: for each offending **Done-but-inert**
+issue, auto-file a recirculation (`/idc:recirculate`) — re-open/re-sequence the enabling obligation
+and link it `blocked-by` to its dependents — before doing anything else. Only on `acceptance: ok`
+clean up the board state it touched and promote the next eligible wave. Autowave is the default
+behavior, not a flag.
 
 ## Phase 5 — Phase close
 
-At phase boundary, run one delta review over the phase via the review engine; file its
-findings as **new board issues** (non-blocking — phase close does not drive them to zero).
+At phase boundary, run one delta review over the phase via the review engine. Most findings are
+filed as **new board issues** (non-blocking — phase close does not drive them to zero). But
+**acceptance-class findings are blocking**: an `acceptance: gap` (a Done-but-inert increment — a
+declared runtime/infra dependency or a `blocks_goal:true` deferral unmet) is driven to zero or
+auto-recirculated before the phase closes, never filed as a passive follow-up. And because a run can
+pause mid-phase, the dependency-aware acceptance check (Phase 4) runs at **every wave-close**, not
+only at the phase boundary — so an inert Done is caught even if the phase never closes. At the phase
+boundary itself the check also runs **unscoped** (no `--wave`, the whole board) as a backstop, so a
+Done-but-inert issue with no/odd wave value — or one whose enabling deferral landed after its own
+wave already closed — is still caught even though no single `--wave N` close would report it.
 
 ## Boundaries & halt
 
@@ -82,3 +103,9 @@ findings as **new board issues** (non-blocking — phase close does not drive th
 - Writes source + tests (via the triplet's implementer + finisher), review reports under
   `docs/workflow/code-reviews/`, and tracker status (claim/close). Halts and surfaces
   evidence on a tracker/gh failure the adapter raises, or an implementer/finisher blocked-stop.
+- **No-ask invariant — the sanctioned stops above are exhaustive.** Build never asks the operator
+  *how autonomous to be*, never re-confirms a scope already chosen, and never converts a deterministic
+  `drain: continue` into a question. "Check in" means **report progress and keep building**, not
+  stop-and-re-ask. Build **never calls `AskUserQuestion`** — the only human gates are the Think-PR
+  (requirements admission) and the rare `operator-decision` strategic gate (`idc:idc-gate-issue`),
+  each surfaced as a board state Build reports, never an improvised interactive prompt.

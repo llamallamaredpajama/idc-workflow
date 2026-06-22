@@ -1,11 +1,12 @@
 ---
 name: idc-gate-issue
-description: 'Use to fire IDC''s one human gate — requirements admission. Think uses it at the end of Think to gate a new PRD+TRD on the Think PR; the Recirculator reuses it when backflow needs a requirements change. Supports sync-or-async approval and draft-until-merge.'
+description: 'Use to fire IDC''s human gates — the one requirements-admission gate (Think''s end-of-Think Think PR; the Recirculator reuses it for a requirements-changing backflow; draft-until-merge), and the rare strategic operator-decision gate: a non-requirements GO/NO-GO modeled as a board state so the orchestrator never improvises one.'
 ---
 # idc-gate-issue
 
-The requirements gate. This is the **only** gate in IDC — everything else flows autonomously and
-automerges when green (`WORKFLOW.md §2`). It fires when an idea's **requirements** are admitted: a
+The requirements gate. This is the **only requirements-admission gate** in IDC — everything else
+flows autonomously and automerges when green (`WORKFLOW.md §2`). It fires when an idea's
+**requirements** are admitted: a
 **PRD** change (user-facing *what*, always gated while `gating.prd: on`) and/or a **TRD** change
 (the technical *how* — the `spec` layer — gated when `gating.trd: on`). **Think** fires it at the
 **end of Think** on the **Think PR**; the **Recirculator** reuses this **identical** mechanism when
@@ -84,6 +85,65 @@ decompose; chained work builders claim on the next cycle. A gate whose Think PR 
 merged** (still open, even if the issue was closed) → leave the chain `Blocked` and move on; the
 run never waits on the operator.
 
+## The strategic decision gate (the second gate type — `operator-decision`)
+
+The requirements gate above is the only thing that **admits** an idea. But a run sometimes hits a
+genuine **non-requirements** strategic GO/NO-GO — e.g. a proving-spike result that decides whether
+to commit to an approach — that changes **no** PRD/TRD and so fits neither the requirements gate
+nor any blocked-by structure. With no modeled slot the orchestrator **improvises** the prompt (the
+autorun audit's Stops 1/2), and "an unmodeled-but-real gate is a gateway drug to improvised gates
+everywhere." The `operator-decision` gate gives that decision a **real board slot** so the
+orchestrator never has to invent one — it reports a board state, exactly as it reports a pending
+Think PR (the no-ask invariant in `idc:idc-autorun` / `idc:idc-build`).
+
+It is **not** an admission gate: it never lands a PRD/TRD, and it does **not** reuse the Think-PR
+merge signal (there is no requirements diff to land). It reuses **only the existing tracker
+operations** (`createTicket`, `setField`, `link`, `query`, `comment` — no seventh op; `WORKFLOW.md
+§3.3` holds).
+
+**What it carries.** A plain-terms GO/NO-GO an operator can decide from a phone:
+
+```
+TITLE: [operator-action] Decision — <one plain phrase: the GO/NO-GO being asked>
+
+THE DECISION
+<2–4 plain sentences: what is being decided and what each choice means downstream. No code, no
+ jargon. e.g. "The two-store proving spike passed all 5 criteria. GO commits the campaign to the
+ two-store rework; NO-GO keeps the single-store path.">
+
+TO APPROVE (GO): add the `decision-approved` label to this issue (from the GitHub web UI on your
+phone), or merge the linked decision-PR if one is attached. To reject (NO-GO): add
+`decision-rejected` (or comment what to change). Adding the label / merging the decision-PR is the
+admission signal — nothing else proceeds until then.
+
+Decides: <the dependent issue ids this GO/NO-GO gates>
+```
+
+Label it `operator-action` (findable, and the autorun drain already skips `[operator-action]`
+titles as non-build work) plus the `decision` marker that distinguishes it from a requirements gate.
+
+**Procedure** (mirrors the requirements gate, different approval signal):
+
+1. **Open the gate.** `createTicket` the decision issue with the body above; `setField`
+   `Status=Todo` + the `operator-action` label. Optionally open a lightweight **decision-PR** (a
+   one-line entry in a decisions log) when a durable artifact is wanted — its **merge** is then a
+   second valid GO signal, identical in spirit to the Think-PR merge.
+2. **Chain only its dependents.** For each issue this decision gates, `setField` `Status=Blocked` +
+   `link kind=blocks` from the gate issue. Everything the decision does **not** gate is left alone
+   and keeps flowing — the gate pauses *only its dependents*, never the whole pipe.
+3. **Notify** the operator once (the push fallback below), with a "Decision needed" message. Never
+   block the run on delivery.
+4. **Detect the decision (fail-closed) + unblock.** The admission signal is an **explicit positive
+   act**: the `decision-approved` label present on the gate issue, **or** the attached decision-PR
+   merged. A **closed-but-unapproved** gate is **not** a GO — a bare close or a stray comment never
+   unblocks (just as a closed-but-unmerged requirements gate never admits); absence of the explicit
+   signal leaves the dependents `Blocked`, and the run **reports the pending decision and moves on,
+   never waiting**. On a detected GO, for each gated dependent: remove the blocks link and `setField`
+   `Status=Todo`. On a `decision-rejected` (NO-GO): drop or re-sequence the dependents per the
+   operator's note via the adapter — never silently proceed. `/idc:autorun`, `/idc:build`, and
+   `/idc:plan` re-check open `operator-decision` gates at the start of a run via `query`, the same
+   way they re-check the requirements gate.
+
 ## Push notification (graceful no-op fallback)
 
 Use whatever notification surface the environment provides, in this order, and **degrade
@@ -102,13 +162,14 @@ push is only a convenience nudge.
 
 ## Authority boundaries
 
-- Creates **exactly one** gate issue per admission and chains what is pending admission behind it
-  (the consideration pointer at Think; the requirements-affected work at the Recirculator). It does
-  not create or modify any other issue.
+- Creates **exactly one** gate issue per gated event — one **requirements** gate per admission
+  (chaining what is pending admission: the consideration pointer at Think; the requirements-affected
+  work at the Recirculator), or one **`operator-decision`** gate per strategic GO/NO-GO (chaining
+  only that decision's dependents). It does not create or modify any other issue.
 - **Never edits canonical docs.** The PRD/TRD diff is authored upstream (by `/idc:think` or
   `/idc:recirculate`) and only referenced here; this skill writes the gate issue, not the PRD/TRD.
-- **Never approves on the operator's behalf** and never merges the Think PR / closes the gate
-  itself — approval is the operator's act. This skill only *detects* an approval and clears the
-  resulting block.
+- **Never approves on the operator's behalf** — never merges the Think PR, never adds the
+  `decision-approved` label or merges a decision-PR, never closes the gate itself. Approval is the
+  operator's act; this skill only *detects* it and clears the resulting block.
 - All tracker mutation goes through `idc:idc-tracker-adapter`; this skill holds no
   backend-specific logic.

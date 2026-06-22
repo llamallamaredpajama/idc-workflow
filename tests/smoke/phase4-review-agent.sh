@@ -119,4 +119,62 @@ JSON
 python3 "$VC" "$WORK/genuineness-major.json" >/dev/null \
   || fail "a shallow/placeholder test filed at major (FAIL) was wrongly rejected"
 
-echo "PASS: review-agent interface + verdict ladder + test-genuineness=FAIL green"
+# ---- (d) P1-2: structured deferral objects validate; malformed ones are rejected -------------
+# Teammate closeouts must emit deferrals as a STRUCTURED, validated object
+# {kind, what, blocks_goal: bool, suggested_issue} — not unparsed prose footnotes (autorun
+# Defect 5). A well-formed deferrals[] validates; a malformed one (missing/empty field, a
+# non-bool blocks_goal, or a non-object element) is rejected fail-closed.
+cat > "$WORK/deferral-good.json" <<'JSON'
+{"verdict":"PASS","dimensions_run":["security"],"findings":[],
+ "deferrals":[{"kind":"out-of-boundary","what":"Spanner instance/db/IAM Terraform",
+   "blocks_goal":true,"suggested_issue":"provision the Spanner instance for the two-store seed"}]}
+JSON
+python3 "$VC" "$WORK/deferral-good.json" >/dev/null \
+  || fail "a well-formed deferrals[] object was wrongly rejected"
+
+# missing a required field (suggested_issue)
+cat > "$WORK/deferral-missing.json" <<'JSON'
+{"verdict":"PASS","dimensions_run":["security"],"findings":[],
+ "deferrals":[{"kind":"deferred","what":"x","blocks_goal":false}]}
+JSON
+python3 "$VC" "$WORK/deferral-missing.json" >/dev/null 2>&1 \
+  && fail "a deferral missing suggested_issue was accepted (must reject)"
+
+# non-bool blocks_goal — the string "true" passes a strip()-only check, but must be a JSON boolean
+cat > "$WORK/deferral-badbool.json" <<'JSON'
+{"verdict":"PASS","dimensions_run":["security"],"findings":[],
+ "deferrals":[{"kind":"deferred","what":"x","blocks_goal":"true","suggested_issue":"y"}]}
+JSON
+python3 "$VC" "$WORK/deferral-badbool.json" >/dev/null 2>&1 \
+  && fail "a deferral with a non-bool blocks_goal (string \"true\") was accepted (must be a JSON boolean)"
+
+# a required STRING field that is PRESENT-but-null (not merely omitted) must be rejected — a
+# strip()-only guard only catches empty strings, so a null suggested_issue would slip through and
+# the acceptance gate would read a contentless obligation. Distinct from deferral-missing above,
+# which exercises only the absent-key branch.
+cat > "$WORK/deferral-null.json" <<'JSON'
+{"verdict":"PASS","dimensions_run":["security"],"findings":[],
+ "deferrals":[{"kind":"deferred","what":"x","blocks_goal":false,"suggested_issue":null}]}
+JSON
+python3 "$VC" "$WORK/deferral-null.json" >/dev/null 2>&1 \
+  && fail "a deferral with a present-but-null suggested_issue was accepted (must be a non-empty string)"
+
+# the same present-but-null hole on a FINDING string field (evidence) must also be rejected —
+# confidence stays numeric, so the string rule must not wrongly demand a string there.
+cat > "$WORK/finding-null.json" <<'JSON'
+{"verdict":"FAIL","dimensions_run":["security"],
+ "findings":[{"dimension":"security","severity":"major","confidence":0.9,
+   "evidence":null,"attack":"a","unblock":"u","fingerprint":"security:x:1"}]}
+JSON
+python3 "$VC" "$WORK/finding-null.json" >/dev/null 2>&1 \
+  && fail "a finding with a present-but-null evidence was accepted (must be a non-empty string)"
+
+# a non-object deferral element must produce a CLEAN error, not a Python traceback
+cat > "$WORK/deferral-nondict.json" <<'JSON'
+{"verdict":"PASS","dimensions_run":["security"],"findings":[],"deferrals":["not-an-object"]}
+JSON
+out="$(python3 "$VC" "$WORK/deferral-nondict.json" 2>&1)" && fail "a non-object deferral was accepted"
+echo "$out" | grep -qi "traceback" && fail "non-object deferral produced a Python traceback: $out"
+echo "$out" | grep -qi "not a JSON object" || fail "non-object deferral should report a clean 'not a JSON object' problem (got: $out)"
+
+echo "PASS: review-agent interface + verdict ladder + test-genuineness=FAIL + deferral schema green"

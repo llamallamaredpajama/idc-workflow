@@ -35,9 +35,23 @@ The finisher runs its **own** `/fullauto-goal` loop. Its completion contract car
 - **Iteration policy** — record-and-vary: log each finding, the fix applied, and the re-review
   delta; re-review after each pass until the verdict clears (attempt ceiling ~3 hypotheses per
   finding).
-- **Blocked-stop** — at the attempt ceiling, or on a finding that can only be resolved upstream
-  (the implementation is right but the *pillar/plan* is wrong), stop and file a recirculation — never
-  paper over it in source.
+- **Blocked-stop** — at the attempt ceiling, on a finding that can only be resolved upstream
+  (the implementation is right but the *pillar/plan* is wrong), **or when the increment is
+  inert/acceptance-gapped** (implementation right *and* plan right, but a declared runtime/infra
+  dependency or a `blocks_goal:true` deferral is unmet — an `acceptance: gap`), stop and file a
+  recirculation — never paper over it in source.
+- **Deferrals are fail-closed.** Every deferral the implementer/reviewer surfaced (and any the
+  finisher itself discovers) is a **structured object** `{kind, what, blocks_goal: bool,
+  suggested_issue}` (validated by `idc_review_verdict_check.py`), never a prose footnote. The
+  finisher **does not ship** while an unrouted deferral exists: each is either **resolved in-loop**
+  (no-punt) or **converted into a tracked, dependency-linked board item that blocks the parent
+  feature's Done** (so a `blocks_goal:true` obligation cannot leave a Done issue inert). For any
+  deferral that survives the loop, the finisher **serializes it onto the issue** as a structured
+  comment marker — `<!-- idc-deferral: {"kind":…,"what":…,"blocks_goal":…,"suggested_issue":"#<n>"} -->`
+  via the tracker adapter's `comment` op (both backends; no dedicated field, no 7th op), rewriting
+  `suggested_issue` to the **`#<n>`** of the board item it created. That marker is the producer the
+  deterministic wave-close acceptance check (`idc:idc-build` Phase 4 / `scripts/idc_acceptance_check.py`)
+  reads — without it the gate is inert.
 
 ### Steps
 
@@ -60,7 +74,9 @@ The finisher runs its **own** `/fullauto-goal` loop. Its completion contract car
    and, with the repo's `deleteBranchOnMerge` off, skip the delete. Settle tracker status, release
    the lock. See *Merge serialization* below — never merge without the lease.
 5. **Close out.** Hand the merged, clean result back to Build (`idc:idc-build`); name the
-   findings cleared, the `/simplify` outcome, and any recirculation filed.
+   findings cleared, the `/simplify` outcome, any recirculation filed, and **every deferral as a
+   structured object** (resolved in-loop, or the dependency-linked board item it became) — never a
+   loose prose footnote that nobody parses.
 
 ## Merge serialization (load-bearing — the A2↔B2 contract)
 

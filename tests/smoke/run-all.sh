@@ -24,6 +24,7 @@ for t in \
   phase4-review-agent \
   phase4-triplet \
   phase4-tracker-github-recipe \
+  phase4-acceptance \
   phase5-ripple \
   phase6-autorun \
   phase7-lifecycle \

@@ -60,6 +60,27 @@ grep -qiE 'Think PR' "$AUTORUN" \
 grep -qiE 'approved consideration' "$AUTORUN" \
   || fail "idc-autorun.md must state Autorun only decomposes/builds approved considerations"
 
+# ---- P0-1: no-ask invariant — the sanctioned stops are exhaustive (autorun audit Defect 1) ------
+# Autorun's first live run improvised four AskUserQuestion gates its playbook never sanctioned. The
+# fix is an explicit enumerated invariant in BOTH the autorun and build agent playbooks: never ask
+# how-autonomous, never re-confirm chosen scope, never turn a deterministic drain:continue into a
+# question, never call AskUserQuestion. Removing the clause from EITHER agent file fails this red.
+BUILD="$PLUGIN/agents/idc-build.md"
+[ -f "$BUILD" ] || fail "agents/idc-build.md missing"
+for f in "$AUTORUN" "$BUILD"; do
+  bn="$(basename "$f")"
+  grep -qiE 'no-ask invariant' "$f" \
+    || fail "$bn must carry the enumerated no-ask invariant (P0-1)"
+  grep -qiE 'never[[:space:]]+calls?[[:space:]]+.?AskUserQuestion' "$f" \
+    || fail "$bn no-ask invariant must forbid calling AskUserQuestion (P0-1)"
+  grep -qiE 'how autonomous' "$f" \
+    || fail "$bn no-ask invariant must forbid asking how-autonomous-to-be (P0-1)"
+  # the no-ask invariant must name the operator-decision strategic gate as a SANCTIONED board-state
+  # gate — else a model treats it as unsanctioned and may ignore it or improvise a prompt (Codex review)
+  grep -qiE 'operator-decision' "$f" \
+    || fail "$bn no-ask invariant must name the operator-decision strategic gate as sanctioned (else it reads as unsanctioned)"
+done
+
 # ---- L2-1: the exit report's working-tree claim is sourced from a FINAL post-build git status ---
 # The L2 e2e exit report under-counted untracked artifacts (claimed 2, actual 10) because the
 # working-tree view was a session-START snapshot taken before the build lane wrote files. The exit

@@ -170,9 +170,11 @@ dout="$(python3 "$MATRIX" "$WORK/board-dangling.yaml" 2>&1)" \
 printf '%s\n' "$dout" | grep -qiE 'dangling|undeclared|typo-nonexistent' \
   || fail "matrix_check must name the dangling blocks_on ref as the failure reason; got: $dout"
 
-# ---- (e) a SELF blocks_on ref is a matrix FAIL (a self-dependency is unschedulable) ----------
-# `blocks_on: [self]` is a trivial cycle (a pillar can never precede itself). build_edges drops
-# self-edges, so idc_dag's cycle check alone never catches it; the matrix guardrail must.
+# ---- (e) a SELF blocks_on ref is unschedulable: BOTH idc_dag standalone AND matrix_check FAIL --
+# `blocks_on: [self]` is a trivial cycle (a pillar can never precede itself). idc_dag KEEPS the
+# self-edge so its own cycle detection reports it (standalone analysis is correct, not just the
+# guardrail), and the matrix check FAILs via that same cycle path. Red-when-broken: drop the
+# self-edge and idc_dag reports the board as schedulable (exit 0), hiding an unschedulable input.
 cat > "$WORK/board-selfref.yaml" <<'MD'
 phase: Phase 1
 pillars:
@@ -182,9 +184,16 @@ pillars:
     surfaces: [src/solo/]
     blocks_on: [solo]
 MD
+if dsout="$(python3 "$DAG" "$WORK/board-selfref.yaml" 2>&1)"; then
+  fail "idc_dag.py accepted a self-dependency board (must exit non-zero — a self-edge is a trivial cycle); got: $dsout"
+fi
+printf '%s\n' "$dsout" | grep -qi "solo" \
+  || fail "idc_dag.py must name the self-referencing node 'solo'; got: $dsout"
 sout="$(python3 "$MATRIX" "$WORK/board-selfref.yaml" 2>&1)" \
   && fail "matrix_check accepted a pillar that blocks_on itself (must FAIL — a self-dependency is unschedulable)"
-printf '%s\n' "$sout" | grep -qiE 'itself|self-depend' \
-  || fail "matrix_check must name the self-dependency as the failure reason; got: $sout"
+printf '%s\n' "$sout" | grep -qi "solo" \
+  || fail "matrix_check must name the self-dependency 'solo' as the failure reason; got: $sout"
+printf '%s\n' "$sout" | grep -qiE 'cycle|unschedulable|itself|self-depend' \
+  || fail "matrix_check must explain the self-dep failure (cycle/unschedulable); got: $sout"
 
 echo "PASS: idc_dag critical-path + max-width + cycle detect green; wired into matrix_check (width ceiling + disjoint areas + cycle/dangling/self-ref FAIL)"

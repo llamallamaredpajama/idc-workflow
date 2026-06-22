@@ -38,8 +38,10 @@ def build_edges(pillars):
 
     `blocks_on: [X]` on Y means X must precede Y, i.e. the edge X -> Y, so X is a predecessor
     (upstream) of Y and Y a successor (downstream) of X. A `blocks_on` ref to an id that is not a
-    declared pillar is ignored here (a dangling edge is a matrix defect surfaced elsewhere, not a
-    DAG node), as is a self-edge."""
+    declared pillar is ignored here (a dangling edge is not a DAG node — the matrix check surfaces
+    it as a defect). A SELF-edge (X blocks_on X) IS kept: it is a trivial cycle (a pillar can never
+    precede itself), so the cycle check reports it rather than silently passing an unschedulable
+    board."""
     ids = [p["id"] for p in pillars if p.get("id")]
     idset = set(ids)
     succ = {i: set() for i in ids}
@@ -49,7 +51,7 @@ def build_edges(pillars):
         if not y or y not in idset:
             continue
         for x in p.get("blocks_on", []):
-            if x in idset and x != y:
+            if x in idset:
                 succ[x].add(y)
                 pred[y].add(x)
     return ids, succ, pred

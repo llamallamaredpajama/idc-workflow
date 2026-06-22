@@ -91,6 +91,11 @@ def main():
         if "number" not in it:
             sys.stderr.write("idc-autorun-drain: corrupt tracker — an issue is missing `number`\n")
             sys.exit(2)
+        if not isinstance(it["number"], int):
+            # `number` is a dict key (status_by_num) AND a sort key — an unhashable/unsortable value
+            # crashes instead of exiting 2. The filesystem tracker always writes an int.
+            sys.stderr.write("idc-autorun-drain: corrupt tracker — an issue `number` must be an int\n")
+            sys.exit(2)
         if not isinstance(it.get("blocked_by", []), list):
             sys.stderr.write(
                 f"idc-autorun-drain: corrupt tracker — issue {it['number']} `blocked_by` must be a list\n")

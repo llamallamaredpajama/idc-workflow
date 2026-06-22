@@ -65,8 +65,10 @@ chef's bounded fan-out), across **~K usage windows**. Read the ceiling from
 - **Above the threshold — exactly one launch-time gate.** Surface a single pre-drain
   `AskUserQuestion`: **"~N sous chefs / ~M subagents across K windows — go / scope down?"** It is a
   one-time **cost/scale** confirmation — not a scope re-confirmation, not a *how-autonomous*
-  question. On **go**, drain ALL phases to completion; **scope down** is the operator voluntarily
-  passing `/idc:build --phase N`. Either answer, autorun then runs to completion with no further asks.
+  question. On **go**, autorun drains ALL phases to completion with no further asks. On **scope
+  down**, autorun **stands down** — it does *not* drain the repo; the operator instead runs an
+  explicit `/idc:build --phase N` to build a single phase. (Scope-down is the operator choosing a
+  narrower command, never autorun narrowing its own scope.)
 
 **Never self-narrow.** The estimate feeds the one gate; it never makes autorun shrink its own scope
 to a single phase. Phase-scoping is the **operator's** explicit `/idc:build --phase N` choice, never

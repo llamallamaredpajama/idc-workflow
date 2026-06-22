@@ -100,6 +100,13 @@ for f in "$AUTORUN" "$CMD"; do
     || fail "$bn must state EXACTLY ONE launch-time gate above the threshold"
   grep -qiE 'scope down' "$f" \
     || fail "$bn launch-time gate must offer 'go / scope down' (the >threshold cost confirmation)"
+  # the two gate answers must NOT be conflated: 'scope down' means autorun STANDS DOWN (the operator
+  # then runs an explicit /idc:build --phase N), it does NOT keep draining the whole repo. Guards the
+  # contradiction "scope down ... Either answer, autorun then runs to completion".
+  grep -qiE 'stands? down|does not drain|hand(s)? off' "$f" \
+    || fail "$bn scope-down branch must state autorun STANDS DOWN / does not drain (not 'runs to completion either way')"
+  grep -qiE 'either answer.{0,60}runs? to completion' "$f" \
+    && fail "$bn must not claim autorun runs to completion regardless of the answer (contradicts 'scope down')"
 
   # never self-narrow; phase-scoping is the operator's explicit flag
   grep -qiE 'never self-narrow|not autorun.{0,40}self-narrow|never narrows? (itself )?to a (single )?phase' "$f" \

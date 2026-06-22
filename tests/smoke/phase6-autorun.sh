@@ -85,6 +85,16 @@ RAWND="$WORK/non-dict-issue.md"
 python3 "$DRAIN" --tracker "$RAWND" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 2 ] || fail "a non-dict \`issues[]\` entry must exit 2 (fail-closed), not crash (got $rc)"
 
+# ---- a non-int `number` (unhashable/wrong type) -> exit 2 (fail-closed, never a bare crash) ------
+# `number` is used as a dict key (status_by_num) and a sort key; an unhashable value (list/dict) or
+# a type that won't sort against the other ints crashes with a TypeError instead of the documented
+# exit 2. The eager guard requires an int. Red-when-broken: drop the guard and this exits 1, not 2.
+RAWNI="$WORK/non-int-number.md"
+{ echo "<!-- idc-tracker-state:begin -->"; echo '```json'; echo '{"issues":[{"number":[1],"status":"Todo"}]}'; echo '```'
+  echo "<!-- idc-tracker-state:end -->"; } > "$RAWNI"
+python3 "$DRAIN" --tracker "$RAWNI" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 2 ] || fail "a non-int \`number\` must exit 2 (fail-closed), not crash (got $rc)"
+
 # ---- an explicitly-present empty board (`issues: []`) stays a legitimate empty board -> complete -
 RAWEMPTY="$WORK/empty-board.md"
 { echo "<!-- idc-tracker-state:begin -->"; echo '```json'; echo '{"issues":[]}'; echo '```'

@@ -14,6 +14,7 @@ for t in \
   phase1-tracker-stage \
   phase1-tracker-lease \
   phase1-init-doctor \
+  phase1-doctor-board-lint \
   phase1-brownfield-scan \
   phase1-settings-json \
   phase1-lint-rules \

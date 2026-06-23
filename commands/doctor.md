@@ -158,10 +158,49 @@ echo "running ${run_ver:-unknown}; marketplace ${clone_ver:-absent}"
 - **SKIP** — `run_ver` unreadable (a managed / `--plugin-dir` load with no manifest on the cache
   path). This row is **advisory and is never FAIL.**
 
+**9 — Build-lane hygiene (advisory; never FAIL).** Build and Autorun consume the board on
+*trust*: the mechanical issue-body schema check (`scripts/idc_schema_check.py`) runs only **inside
+Plan, once, at issue creation**. An issue that bypassed Plan — hand-filed, or a captured
+review-residual — can sit build-eligible (`Status = Todo`, `Stage = Buildable`) while **malformed**
+(fails the schema check) and/or carrying a **prose-only dependency** ("blocked on X" in the body
+with no native *blocked-by* link), and Autorun's drain (which keys on native `blocked_by` only)
+would claim and execute it cold. This row re-runs the existing schema check over that lane and
+flags prose dependencies with no recorded link. It is a **read-only `⚠` heads-up — never a hard
+FAIL** (Build still trusts the board; the schema check stays Plan's gate). Branch on
+`docs/workflow/tracker-config.yaml::backend`:
+
+- **`filesystem` → SKIP**, note: "filesystem board carries no issue bodies — the body-schema /
+  prose-dependency re-scan is github-only; the schema check runs at Plan authoring."
+- **`github` → run the lint** (read-only). List the Buildable+Todo lane, emit one JSONL object per
+  issue, and pipe to the shipped helper:
+  ```bash
+  num=$(grep -E '^project_number:' docs/workflow/tracker-config.yaml | grep -oE '[0-9]+')
+  owner=$(gh repo view --json owner -q .owner.login)
+  # Build-eligible lane (canonical predicate: scripts/idc_autorun_drain.py): Status=Todo +
+  # Stage=Buildable (legacy null → Buildable). The [operator-action] skip is applied downstream
+  # in the helper; the drain's "all blocked-by Done" clause is intentionally not this row's concern.
+  nums=$(gh project item-list "$num" --owner "$owner" --format json --jq \
+    '.items[] | select(.status=="Todo") | select((.stage // "Buildable")=="Buildable") | .content.number')
+  for n in $nums; do
+    bb=$(gh api "repos/{owner}/{repo}/issues/$n/dependencies/blocked_by" --jq '[.[].number]' 2>/dev/null); [ -n "$bb" ] || bb='[]'
+    gh issue view "$n" --json number,title,body --jq "{number:.number,title:.title,body:.body,blocked_by:$bb}"
+  done | python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_board_lint.py"
+  ```
+  (`dependencies/blocked_by` GET is the read counterpart of the documented write endpoint;
+  `gh issue view --jq` emits control-char-safe escaped JSON, so no external `jq` slurp is needed.)
+  - `board-lint: clean …` → **PASS** (note "N scanned, clean").
+  - findings → **PASS with ⚠**: list the flagged issue numbers + counts; fix hint: "re-run the
+    item through `/idc:plan`, or record the missing native blocked-by link (`gh … link … blocks`)."
+  - helper exit 2 or a `gh` error → **SKIP** ("could not determine"), **never FAIL**.
+
+Row 9 only *reads* the board (`gh project item-list`, `gh issue view`, `gh api … GET`), preserving
+doctor's strictly-read-only contract (guarded by `phase7-command-prose-invariants.sh`).
+
 ## Output
 
-Emit a single table, then a one-line verdict. Tally PASS / FAIL / SKIP across the eight rows
-(row 8, plugin cache freshness, is advisory — it is only ever PASS or SKIP, never FAIL):
+Emit a single table, then a one-line verdict. Tally PASS / FAIL / SKIP across the nine rows (rows
+8 and 9 — plugin cache freshness and build-lane hygiene — are **advisory**: each is only ever PASS
+or SKIP, never FAIL):
 
 ```
 | # | Check | Result | Fix hint |
@@ -174,6 +213,7 @@ Emit a single table, then a one-line verdict. Tally PASS / FAIL / SKIP across th
 | 6 | Pi runtime (optional) | SKIP | Pi runtime not installed — optional |
 | 7 | Codex skill-mirror (optional) | SKIP | Codex mirror not installed — optional |
 | 8 | Plugin cache freshness | PASS | running 2.1.0 |
+| 9 | Build-lane hygiene (advisory) | PASS | 4 scanned, clean |
 
 IDC doctor: N passed, M failed, K skipped
 ```

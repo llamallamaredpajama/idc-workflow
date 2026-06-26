@@ -187,7 +187,8 @@ FAIL** (Build still trusts the board; the schema check stays Plan's gate). Branc
     '.items[] | select(.status=="Todo") | select((.stage // "Buildable")=="Buildable") | .content.number' \
   | while IFS= read -r n; do
       [ -n "$n" ] || continue
-      bb=$(gh api "repos/{owner}/{repo}/issues/$n/dependencies/blocked_by" --jq '[.[].number]' 2>/dev/null); [ -n "$bb" ] || bb='[]'
+      bb=$(gh api "repos/{owner}/{repo}/issues/$n/dependencies/blocked_by" --jq '[.[].number]' 2>/dev/null) || bb=''
+      [ -n "$bb" ] || bb='null'   # empty stdout = the API call FAILED → UNKNOWN (not "no link"); a real no-dep result is the 200 '[]'. Tri-state lets the helper never false-flag a prose dep it couldn't disprove.
       gh issue view "$n" --json number,title,body --jq "{number:.number,title:.title,body:.body,blocked_by:$bb}"
     done | python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_board_lint.py"
   ```

@@ -17,8 +17,11 @@ structured metadata), so there is no body to re-scan and a dependency can only e
 `blocked_by` link — `/idc:doctor` skips this row for the filesystem backend.
 
 Input (stdin): a JSON array, OR newline-delimited JSON objects (one per line), each:
-    {"number": <int>, "title": <str>, "body": <str>, "blocked_by": [<int>, ...]}
-`blocked_by` is the issue's native GitHub blocked-by links (numbers), as read by the caller.
+    {"number": <int>, "title": <str>, "body": <str>, "blocked_by": [<int>, ...] | null}
+`blocked_by` is the issue's native GitHub blocked-by links (numbers), as read by the caller, and is
+**tri-state**: `[n, ...]` = linked, `[]` = confirmed no link, `null` = UNKNOWN (the caller's lookup
+FAILED — e.g. the `gh api` dependencies call errored). UNKNOWN ≠ "no link": a prose dependency on an
+issue we could not disprove is never flagged.
 
 Output (stdout): one line per flagged issue, then a summary line:
     board-lint: clean (<M> scanned)
@@ -83,9 +86,14 @@ def read_issues(raw):
 def prose_dependency_evidence(body, blocked_by):
     """Return a short evidence string if the body states a dependency with no recorded link, else ''.
 
-    A recorded link is a native blocked-by (`blocked_by` non-empty) OR the documented `blocks-on:#N`
-    fallback line. With either present, a prose mention is just commentary on a real link — not a gap.
+    `blocked_by` is tri-state: a list of numbers = linked, `[]` = confirmed no link, `None` = UNKNOWN
+    (the caller's native-link lookup FAILED). A recorded link is a native blocked-by (`blocked_by`
+    non-empty) OR the documented `blocks-on:#N` fallback line. With either present, a prose mention is
+    just commentary on a real link — not a gap. When `blocked_by is None` we could not disprove a
+    native link, so a prose mention is never flagged (no false positive on a degraded API lookup).
     """
+    if blocked_by is None:
+        return ""  # UNKNOWN — lookup failed; never flag a prose dep we could not disprove
     if blocked_by or FALLBACK_LINK.search(body):
         return ""
     # Claim via the Dependencies field naming a real upstream issue (#N, N != 0).
@@ -112,7 +120,7 @@ def lint(issues):
         scanned += 1
         num = it.get("number", "?")
         body = it.get("body") or ""
-        blocked_by = it.get("blocked_by") or []
+        blocked_by = it.get("blocked_by")  # tri-state: list | [] | None(=UNKNOWN); do NOT coerce None→[]
 
         findings = []
         # These are the Buildable lane by construction (the caller filtered Stage=Buildable), so

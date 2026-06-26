@@ -56,15 +56,46 @@ run_lint '[{"number":482,"title":"repro","body":"'"$PROSE"'","blocked_by":[99]}]
 [ "$RC" -eq 0 ] || fail "linked prose-dep: helper exit $RC (want 0)"
 assert_clean "prose dep WITH native blocked_by must NOT be flagged (red-when-broken)"
 
-# --- 4b. degraded mode: prose-dep body + blocked_by null (lookup FAILED) -> NOT flagged ---------
+# --- 4b. degraded mode: prose-dep body + blocked_by null (lookup FAILED) -> NOT prose-flagged ----
 # FINDING 3: a FAILED `gh api …/dependencies/blocked_by` lookup must arrive as null (UNKNOWN), never
 # coerced to [] — the helper can't tell [] (confirmed no link) from a failed call, and a prose dep we
 # could not disprove must NOT be flagged. Load-bearing red-when-broken assertion: it FAILs if the
 # helper regresses to treating null as "no link" (drops the `if blocked_by is None` guard / re-adds
-# the `or []` coercion), which would falsely flag this exactly like test #3.
+# the `or []` coercion), which would falsely flag this exactly like test #3. (The summary itself now
+# carries the M1 degraded-mode clause — asserted in section 4c — so this guards the not-flagged half.)
 run_lint '[{"number":482,"title":"repro","body":"'"$PROSE"'","blocked_by":null}]'
 [ "$RC" -eq 0 ] || fail "null blocked_by: helper exit $RC (want 0)"
-assert_clean "prose dep with blocked_by=null (lookup FAILED, UNKNOWN) must NOT be flagged (red-when-broken, FINDING 3)"
+refute_out '#482' "prose dep with blocked_by=null (lookup FAILED, UNKNOWN) must NOT be prose-flagged (red-when-broken, FINDING 3)"
+
+# --- 4c. M1 degraded-mode visibility: blocked_by=null surfaces the indeterminate count ----------
+# A FAILED dependencies lookup arrives as null (UNKNOWN). Pre-M1 the helper printed a bare
+# `clean (N scanned)`, so a board-wide dependencies-API outage (every issue → null → nothing
+# flagged) masqueraded as a true all-clear. M1: the summary appends `; <U> dependency lookups
+# indeterminate` *inside* the parens whenever U>0, making the degraded state visible. Each assert
+# below goes RED if that clause is dropped (red-when-broken).
+
+# (a) single null issue -> the clean summary now carries '1 dependency lookup indeterminate' (singular).
+run_lint '[{"number":482,"title":"repro","body":"'"$PROSE"'","blocked_by":null}]'
+[ "$RC" -eq 0 ] || fail "single null: helper exit $RC (want 0)"
+assert_out '^board-lint: clean \(1 scanned; 1 dependency lookup indeterminate\)$' \
+  "single blocked_by=null must surface '1 dependency lookup indeterminate' (M1 degraded-mode visibility)"
+
+# (b) board-wide outage: EVERY issue null -> clean, but the count exposes the degradation (no silent all-clear).
+run_lint '[{"number":1,"title":"a","body":"'"$C"'","blocked_by":null},{"number":2,"title":"b","body":"'"$C"'","blocked_by":null}]'
+[ "$RC" -eq 0 ] || fail "board-wide null: helper exit $RC (want 0)"
+assert_out '^board-lint: clean \(2 scanned; 2 dependency lookups indeterminate\)$' \
+  "board-wide degraded lookup must surface '2 dependency lookups indeterminate' (no silent all-clear)"
+
+# (c) flagged AND degraded: the clause rides inside the flagged summary's parens too (not just clean).
+run_lint '[{"number":3,"title":"bad","body":"GOAL: do\njust prose","blocked_by":null}]'
+[ "$RC" -eq 0 ] || fail "flagged+null: helper exit $RC (want 0)"
+assert_out '^board-lint: 1 flagged of 1 scanned \(1 schema, 0 prose-dep; 1 dependency lookup indeterminate\)$' \
+  "a flagged summary must also carry the indeterminate clause when U>0"
+
+# (d) back-compat: with zero null issues the summary is byte-for-byte the pre-M1 form (no clause).
+run_lint '[{"number":1,"title":"clean","body":"'"$C"'","blocked_by":[]}]'
+assert_out '^board-lint: clean \(1 scanned\)$' "U==0 must leave the clean summary unchanged (no indeterminate clause)"
+refute_out 'indeterminate' "U==0 summary must NOT carry the indeterminate clause"
 
 # --- 5. blocks-on:#N fallback line present, empty blocked_by -> NOT flagged ---------------------
 FB="$C"'\n\nblocks-on:#200'
@@ -101,6 +132,12 @@ printf '%s' "$DFLAT" | grep -qiE 'filesystem' \
 # coercing a failed lookup to an empty list (the degraded-mode false-flag).
 grep -qE "bb='null'" "$DOCTOR" \
   || fail "doctor.md Row 9 must set bb='null' (UNKNOWN) on gh-api failure, not '[]' (FINDING 3)"
+# M1: Row 9 must map the helper's degraded-mode summary clause to a PASS-with-⚠ note (still PASS,
+# never FAIL) so a board-wide dependencies-API outage can't read as a silent all-clear. Goes RED if
+# the indeterminate handling is dropped from doctor.md.
+printf '%s' "$DFLAT" | grep -qiE 'dependency lookups indeterminate' \
+  || fail "doctor.md Row 9 must handle the 'dependency lookups indeterminate' degraded-mode summary (M1)"
+
 # doctor stays read-only (also guarded by phase7-command-prose-invariants.sh; assert here too).
 grep -qi 'read-only' "$DOCTOR" || fail "doctor.md must remain declared read-only"
 

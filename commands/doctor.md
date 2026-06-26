@@ -197,6 +197,12 @@ FAIL** (Build still trusts the board; the schema check stays Plan's gate). Branc
   - `board-lint: clean …` → **PASS** (note "N scanned, clean").
   - findings → **PASS with ⚠**: list the flagged issue numbers + counts; fix hint: "re-run the
     item through `/idc:plan`, or record the missing native blocked-by link (`gh … link … blocks`)."
+  - summary contains `dependency lookups indeterminate` → annotate the row **PASS with ⚠** (still
+    **PASS, never FAIL**), independent of clean/flagged: note "the GitHub dependencies API looked
+    degraded — the native blocked-by lookup failed for N issue(s), so prose-dependency detection
+    was skipped for them; re-run `/idc:doctor` once the API recovers." (Guards against a board-wide
+    outage turning every issue UNKNOWN → nothing flagged → a `clean` summary masquerading as a true
+    all-clear.)
   - helper exit 2 or a `gh` error → **SKIP** ("could not determine"), **never FAIL**.
 
 Row 9 only *reads* the board (`gh project item-list`, `gh issue view`, `gh api … GET`), preserving

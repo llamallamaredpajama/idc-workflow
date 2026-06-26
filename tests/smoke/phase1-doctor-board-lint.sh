@@ -56,6 +56,16 @@ run_lint '[{"number":482,"title":"repro","body":"'"$PROSE"'","blocked_by":[99]}]
 [ "$RC" -eq 0 ] || fail "linked prose-dep: helper exit $RC (want 0)"
 assert_clean "prose dep WITH native blocked_by must NOT be flagged (red-when-broken)"
 
+# --- 4b. degraded mode: prose-dep body + blocked_by null (lookup FAILED) -> NOT flagged ---------
+# FINDING 3: a FAILED `gh api …/dependencies/blocked_by` lookup must arrive as null (UNKNOWN), never
+# coerced to [] — the helper can't tell [] (confirmed no link) from a failed call, and a prose dep we
+# could not disprove must NOT be flagged. Load-bearing red-when-broken assertion: it FAILs if the
+# helper regresses to treating null as "no link" (drops the `if blocked_by is None` guard / re-adds
+# the `or []` coercion), which would falsely flag this exactly like test #3.
+run_lint '[{"number":482,"title":"repro","body":"'"$PROSE"'","blocked_by":null}]'
+[ "$RC" -eq 0 ] || fail "null blocked_by: helper exit $RC (want 0)"
+assert_clean "prose dep with blocked_by=null (lookup FAILED, UNKNOWN) must NOT be flagged (red-when-broken, FINDING 3)"
+
 # --- 5. blocks-on:#N fallback line present, empty blocked_by -> NOT flagged ---------------------
 FB="$C"'\n\nblocks-on:#200'
 run_lint '[{"number":5,"title":"fallback","body":"'"$FB"'","blocked_by":[]}]'
@@ -86,6 +96,11 @@ printf '%s' "$DFLAT" | grep -qiE 'never FAIL' \
 # github-only / filesystem-SKIP scope is the load-bearing backend finding from the plan.
 printf '%s' "$DFLAT" | grep -qiE 'filesystem' \
   || fail "doctor.md Row 9 must note the filesystem backend SKIP (github-only scan)"
+# FINDING 3: Row 9 must distinguish an API failure from confirmed-no-link — on empty `gh api` stdout
+# it sets the UNKNOWN sentinel (bb='null'), never unconditionally '[]'. Goes RED if it regresses to
+# coercing a failed lookup to an empty list (the degraded-mode false-flag).
+grep -qE "bb='null'" "$DOCTOR" \
+  || fail "doctor.md Row 9 must set bb='null' (UNKNOWN) on gh-api failure, not '[]' (FINDING 3)"
 # doctor stays read-only (also guarded by phase7-command-prose-invariants.sh; assert here too).
 grep -qi 'read-only' "$DOCTOR" || fail "doctor.md must remain declared read-only"
 

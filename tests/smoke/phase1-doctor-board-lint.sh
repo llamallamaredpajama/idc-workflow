@@ -89,4 +89,38 @@ printf '%s' "$DFLAT" | grep -qiE 'filesystem' \
 # doctor stays read-only (also guarded by phase7-command-prose-invariants.sh; assert here too).
 grep -qi 'read-only' "$DOCTOR" || fail "doctor.md must remain declared read-only"
 
-echo "PASS: board-lint helper classifies schema/prose-dep/link/operator/skip + doctor Row 9 advisory guards hold"
+# --- 9. Row 9 loop is shell-agnostic (zsh word-split hardening; the doctor.md plumbing) ----------
+# FINDING 1: the real /idc:doctor Bash-tool shell is zsh (repo CLAUDE.md), where an unquoted
+# `$nums` is NOT word-split — so a `nums=$(…); for n in $nums` loop runs ONCE over the whole
+# newline blob, the helper gets `108\n109\n111` as one token, and Row 9 falsely reports
+# `clean (0 scanned)`. Section #8 proves the helper directly; this section proves the doctor.md
+# SHELL SNIPPET that builds the helper's input iterates per-issue under zsh too.
+
+# (a) static guard, tied to commands/doctor.md — goes RED if Row 9 regresses to the word-split form.
+grep -q '| while IFS= read -r n' "$DOCTOR" \
+  || fail "doctor.md Row 9 must pipe the issue-number list into a 'while IFS= read -r n' loop (shell-agnostic)"
+# Anchor to a real loop line (leading whitespace then `for`), so a prose/comment mention of the
+# pattern can't trip it — this tests the CODE, not the surrounding text.
+if grep -qE '^[[:space:]]*for n in \$nums' "$DOCTOR"; then
+  fail "doctor.md Row 9 must NOT use 'for n in \$nums' — unquoted word-split is a no-op under zsh (FINDING 1)"
+fi
+
+# (b) functional guard — encode the contrast under zsh. The fixed pipe-into-while-read form iterates
+# per line (3); the legacy `for n in $nums` form collapses (zsh does not word-split an unquoted
+# newline blob). Hermetic (no live GitHub); `printf '%s\n'` mirrors jq's trailing newline so `read`
+# sees all three lines. zsh-absent → SKIP (not FAIL): static guard 9a is the always-on protection, so
+# this functional cross-check is best-effort and must not break the suite on a bash-only host.
+if command -v zsh >/dev/null 2>&1; then
+  wc_while="$(zsh -c 'printf "%s\n" 108 109 111 | while IFS= read -r n; do [ -n "$n" ] && echo x; done | wc -l | tr -d " "')"
+  [ "$wc_while" = "3" ] \
+    || fail "the while-read form must iterate 3x under zsh over a 3-issue list — got '$wc_while' (Row 9 fix ineffective)"
+  # The buggy `for n in $nums` form must NOT iterate per line under zsh (it collapses the blob).
+  # Assert "not 3" rather than "exactly 1" so an exotic SH_WORD_SPLIT-enabled zsh can't false-FAIL.
+  wc_for="$(zsh -c 'nums=$(printf "%s\n" 108 109 111); c=0; for n in $nums; do c=$((c+1)); done; echo $c')"
+  [ "$wc_for" != "3" ] \
+    || fail "the legacy 'for n in \$nums' form iterated 3x under zsh — the word-split bug this guards appears absent (got '$wc_for')"
+else
+  echo "SKIP: zsh absent — Row 9 functional shell-contrast skipped (static guard 9a still enforced)"
+fi
+
+echo "PASS: board-lint helper classifies schema/prose-dep/link/operator/skip + doctor Row 9 advisory + shell-agnostic guards hold"

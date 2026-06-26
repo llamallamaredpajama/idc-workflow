@@ -26,6 +26,11 @@ issue we could not disprove is never flagged.
 Output (stdout): one line per flagged issue, then a summary line:
     board-lint: clean (<M> scanned)
     board-lint: <N> flagged of <M> scanned (<S> schema, <P> prose-dep)
+When one or more scanned issues carry `blocked_by == null` (UNKNOWN — the caller's native
+blocked-by lookup FAILED), the summary appends `; <U> dependency lookups indeterminate` *inside*
+the parentheses of whichever form prints, so a board-wide dependencies-API outage — every issue →
+UNKNOWN → nothing flagged — cannot masquerade as a clean all-clear. The clause is omitted entirely
+when <U> == 0, leaving the summary byte-for-byte unchanged.
 
 Usage: idc_board_lint.py < issues.json   (exit 0 = ran OK; 2 = unreadable/un-parseable input)
 """
@@ -110,9 +115,9 @@ def prose_dependency_evidence(body, blocked_by):
 
 
 def lint(issues):
-    """Return (lines, scanned, schema_count, prose_count)."""
+    """Return (lines, scanned, schema_count, prose_count, unknown_count)."""
     lines = []
-    scanned = schema_count = prose_count = 0
+    scanned = schema_count = prose_count = unknown_count = 0
     for it in issues:
         title = str(it.get("title", "")).strip()
         if title.startswith(OPERATOR_GATE_PREFIX):
@@ -121,6 +126,8 @@ def lint(issues):
         num = it.get("number", "?")
         body = it.get("body") or ""
         blocked_by = it.get("blocked_by")  # tri-state: list | [] | None(=UNKNOWN); do NOT coerce None→[]
+        if blocked_by is None:
+            unknown_count += 1  # caller's native blocked-by lookup FAILED — surfaced in the summary so a board-wide outage can't masquerade as clean
 
         findings = []
         # These are the Buildable lane by construction (the caller filtered Stage=Buildable), so
@@ -139,7 +146,7 @@ def lint(issues):
             label = f'#{num} "{title}"' if title else f"#{num}"
             for f in findings:
                 lines.append(f"{label}: {f}")
-    return lines, scanned, schema_count, prose_count
+    return lines, scanned, schema_count, prose_count, unknown_count
 
 
 def main():
@@ -153,15 +160,18 @@ def main():
             sys.stderr.write("idc-board-lint: each issue must be a JSON object\n")
             sys.exit(2)
 
-    lines, scanned, schema_count, prose_count = lint(issues)
+    lines, scanned, schema_count, prose_count, unknown_count = lint(issues)
     for ln in lines:
         print(ln)
     flagged = schema_count + prose_count
+    # Append the degraded-lookup clause ONLY when >0 — when 0 the summary is byte-for-byte unchanged.
+    _noun = "lookup" if unknown_count == 1 else "lookups"
+    unknown_clause = f"; {unknown_count} dependency {_noun} indeterminate" if unknown_count else ""
     if flagged:
         print(f"board-lint: {flagged} flagged of {scanned} scanned "
-              f"({schema_count} schema, {prose_count} prose-dep)")
+              f"({schema_count} schema, {prose_count} prose-dep{unknown_clause})")
     else:
-        print(f"board-lint: clean ({scanned} scanned)")
+        print(f"board-lint: clean ({scanned} scanned{unknown_clause})")
     sys.exit(0)
 
 

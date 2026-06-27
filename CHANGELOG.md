@@ -2,6 +2,40 @@
 
 All notable changes to the IDC Workflow plugin are documented in this file.
 
+## 3.0.5 — 2026-06-26
+
+An advisory build-lane hygiene check for `/idc:doctor` (#91), hardened by three
+follow-ups (#92–#94) that closed false-clean / false-flag holes found during e2e.
+
+- **New advisory Row 9 in `/idc:doctor` (`scripts/idc_board_lint.py`).** Re-runs the
+  existing Plan-time schema check over the build-eligible lane (`Status=Todo`,
+  `Stage=Buildable`) and flags prose-only dependencies — a dependency stated in prose
+  with no native `blocked-by` link. Closes the gap where an issue that bypassed Plan
+  could sit build-eligible while malformed, and Autorun would claim it cold (live
+  repro: #482). The helper is pure stdlib and reuses `idc_schema_check` (no schema
+  duplication); github-only by construction; strictly read-only and **advisory — it
+  never FAILs doctor** (exit 0 on valid input, SKIP on unparseable, SKIP on the
+  filesystem backend).
+- **Shell-agnostic Row 9 loop (#92).** The build-eligible list was iterated with an
+  unquoted `for n in $nums`; under zsh (doctor's real Bash-tool shell) a newline blob
+  is not word-split, so the loop ran once over the whole blob and Row 9 falsely
+  reported `board-lint: clean (0 scanned)`. Now piped through `while IFS= read -r n`,
+  which iterates per line in both bash and zsh.
+- **Tri-state `blocked_by` so a failed dep lookup never false-flags (#93).** A failed
+  `gh api .../dependencies/blocked_by` call coerced to `[]`, indistinguishable from a
+  confirmed no-link, so an issue stating a dep in prose got falsely flagged.
+  `blocked_by` is now tri-state: `null` = UNKNOWN (lookup failed → never flag),
+  `[]` = confirmed none (still flags), `[n,…]` = linked.
+- **Surface degraded dependency-lookup state — no silent all-clear (#94).** A
+  board-wide dependencies-API outage made every issue UNKNOWN → nothing flagged → a
+  silent "clean." The summary now counts indeterminate issues and appends
+  `; N dependency lookup(s) indeterminate`, which Row 9 maps to PASS-with-warn
+  (never FAIL).
+
+Each fix added a red-when-broken smoke case (`tests/smoke/phase1-doctor-board-lint.sh`).
+
+Gates: `lint-references.sh` CLEAN · `tests/smoke/run-all.sh` ALL GREEN · every new guard shown red-when-broken.
+
 ## 3.0.4 — 2026-06-21
 
 Two follow-ups logged on PR #72 (deliberately out of scope at merge), resolved together.

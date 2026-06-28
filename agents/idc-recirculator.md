@@ -1,6 +1,6 @@
 ---
 name: idc-recirculator
-description: 'IDC Recirculator orchestrator playbook — autonomous doc-sync across the canonical chain in one PR; a requirements change reuses the one gate (a new gated Think PR).'
+description: 'IDC Recirculator orchestrator playbook — drain the Recirculation inbox or absorb a drift; autonomous doc-sync across the canonical chain in one PR; a requirements change reuses the one gate (a new gated Think PR).'
 ---
 # idc-recirculator
 
@@ -14,35 +14,69 @@ step**. The **role itself is unchanged** — only the upstream trigger is narrow
 workers** — any analysis is bounded read-only fan-out via the
 runtime adapter. Reasoning tier (layer-impact analysis + PRD diffs).
 
+## Two intake modes (additive)
+
+Both modes funnel each item through the **identical** decision flow in the Procedure below — the
+mode only changes what gets fed in:
+
+1. **Drift intake (operator/role-passed).** A single drift description / scope summary /
+   acceptance-gap arrives from Build, another role, or the operator. Process that one drift.
+2. **Board-scan inbox-drain (no drift argument).** **Enumerate every open `Stage=Recirculation`
+   inbox ticket** (`Status=Todo`) via `idc:idc-tracker-adapter` `query` — the inbox of scope
+   **discovered mid-build** (the non-Buildable `Stage=Recirculation` tickets). Drain **each** ticket
+   through the decision flow; its five scope fields (`Discovered / Area / Suggested-scope /
+   Provenance / PRD-TRD-impact`) are the discovered scope you feed to `idc:idc-recirculator-sync`.
+   Items already behind a gate (`Blocked`) or retired (`Done`) are skipped, so a re-run is
+   idempotent. Draining the inbox admits discovered scope to the front of the pipeline so **Plan**
+   (unchanged) later decomposes the resulting admitted considerations. Autorun runs this mode at the
+   top of the pipeline, before the Buildable wave.
+
 ## Procedure
 
-1. **Absorb the drift.** Take the drift evidence (from Build, another role, or the operator)
-   and read the relevant canonical docs + current reality. Determine the **highest affected
-   layer** with `idc:idc-recirculator-sync`.
+1. **Absorb the drift.** Take the drift evidence (from Build, another role, the operator, or a
+   `Stage=Recirculation` inbox ticket) and read the relevant canonical docs + current reality.
+   Determine the **highest affected layer** with `idc:idc-recirculator-sync`.
 2. **Decide (binary).** Run
    `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_recirculator_layers.py" <layer> --config WORKFLOW-config.yaml`
    for the downstream sync set and the gate decision. The helper reads the `gating:` toggle from
    the repo's `WORKFLOW-config.yaml`: the PRD always gates (`gating.prd`), and the TRD — the `spec`
    layer — gates only when the repo opts in with `gating.trd: on`.
-   - **gate: no** → edit that layer and every layer below it (arch spec, master plan,
-     subphases, pillars, the CLAUDE.md tree, affected open issues) **synchronized in one
-     PR**, automerge. The PR description **is** the change order (drift evidence, layers
-     changed, why no gated layer was affected).
-   - **gate: yes** (the highest affected layer is the PRD, or the TRD/`spec` layer when
-     `gating.trd: on`) → **reuse the one gate** (`WORKFLOW.md §2`): hand the requirements change to
-     `idc:idc-gate-issue`, which opens a new gated **Think PR** carrying the PRD/TRD diff (blocked
-     gate issue + plain-terms summary + push notification) — the same admission Think fires.
-     Pause only the affected work; everything else keeps flowing.
-3. **Close out.** Name the affected layers, the sync PR (or the gate issue), and any open
-   issues re-synced.
+   - **gate: no — not gate-worthy.**
+     - *Drift intake:* edit that layer and every layer below it (arch spec, master plan,
+       subphases, pillars, the CLAUDE.md tree, affected open issues) **synchronized in one
+       PR**, automerge. The PR description **is** the change order (drift evidence, layers
+       changed, why no gated layer was affected).
+     - *Inbox-drain:* the discovered scope fits within today's requirements, so **admit it
+       directly**. Author a function-first **ADMITTED consideration** per
+       `idc:idc-consideration-schema` (`docs/considerations/<YYYY-MM-DD>-<slug>-considerations.md`,
+       carrying the discovered scope), validate it with `idc_consideration_check.py`, and write its
+       board pointer via `idc:idc-tracker-adapter` `createTicket` as `Stage=Consideration`,
+       `Status=Todo` — **admitted (Todo)**, distinct from Think's pending-admission-behind-a-gate
+       pointer which rides `Blocked`. Then **RETIRE the Recirculation ticket** (`move Status=Done`).
+       **Preserve provenance**: a `discovered-scope` label on the consideration pointer (github),
+       an "originated as discovered scope (recirculation ticket #<n> — <Provenance>)" line in the
+       consideration doc body, and a closing `comment` on the retired ticket naming the
+       consideration it became. The admitted consideration is now Plan's to decompose.
+   - **gate: yes — PRD/TRD-worthy** (the highest affected layer is the PRD, or the TRD/`spec` layer
+     when `gating.trd: on`) → run the doc-sync to draft the requirements diff and **reuse the one
+     gate** (`WORKFLOW.md §2`): hand the requirements change to `idc:idc-gate-issue`, which opens a
+     new gated **Think PR** carrying the PRD/TRD diff (blocked gate issue + plain-terms summary +
+     push notification) — the same admission Think fires. In **inbox-drain**, the
+     `Stage=Recirculation` ticket **rides `Status=Blocked` behind that gate and PAUSES there** (it
+     is **not** retired); admission clears it the same way Think's gate clears. Pause only the
+     affected work; everything else keeps flowing.
+3. **Close out.** Name the affected layers, the sync PR (or the gate issue), any open
+   issues re-synced, and — in inbox-drain — each Recirculation ticket's disposition (admitted as a
+   consideration + retired, or paused behind a gate).
 
 No verdict taxonomy, no `docs/workflow/recirculator/` change-order files — those are deleted. The
 PR body carries the full record.
 
 ## Authority & halt
 
-- Writes every affected canonical doc down the chain (synchronized in one PR) and the
-  affected open issues via `idc:idc-tracker-adapter`. Never writes source or tests; never admits a
+- Writes every affected canonical doc down the chain (synchronized in one PR), the admitted
+  considerations it authors (inbox-drain, not-gate-worthy path), and the affected open issues via
+  `idc:idc-tracker-adapter`. Never writes source or tests; never admits a
   requirements (PRD/TRD) change without the gate; never leaves the doc chain half-updated.
 - Halt and surface evidence on an undeterminable highest-affected-layer, a tracker/gh
   failure, or a requirements change the operator must decide (the gate handles that — it is not a

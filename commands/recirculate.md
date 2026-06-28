@@ -1,6 +1,6 @@
 ---
-description: IDC Recirculator — autonomous doc-sync across the canonical chain; one PR, or reuse the one gate (a new gated Think PR) when requirements change
-argument-hint: '<drift-description | "scope summary">'
+description: IDC Recirculator — drain the Recirculation inbox or absorb a drift; autonomous doc-sync across the canonical chain (one PR), or reuse the one gate (a new gated Think PR) when requirements change
+argument-hint: '[<drift-description | "scope summary">]   # omit to drain the Recirculation inbox'
 ---
 
 You are running `/idc:recirculate`, the only retrograde path from Build back to the planning docs.
@@ -8,17 +8,35 @@ Operate as the Recirculator orchestrator **in this session**: read
 `${CLAUDE_PLUGIN_ROOT}/agents/idc-recirculator.md` end-to-end, then execute its procedure (absorb
 the drift → decide → sync or gate → close out).
 
-Operator input: `$ARGUMENTS` — a **scope/menu drift** description, a scope summary, or an
-**acceptance-gap** (a Done-but-inert increment the wave-close acceptance check flagged: a declared
-runtime/infra dependency or a `blocks_goal:true` deferral is unmet) — from Build, another role, or
-the operator. The Recirculator's trigger is **narrowed to scope/menu (requirements/plan) drift**: a
-purely **mechanical** conflict (an overlapping-file / git-merge / worktree clash) does **not** reach
+## Two intake modes (additive — pick by `$ARGUMENTS`)
+
+`/idc:recirculate` has two ways in; **both funnel each item through the identical decision flow**
+below (`idc:idc-recirculator-sync` → `idc_recirculator_layers.py`). Mode is chosen by `$ARGUMENTS`:
+
+- **Drift intake (operator/role-passed).** `$ARGUMENTS` carries a **scope/menu drift** description,
+  a scope summary, or an **acceptance-gap** (a Done-but-inert increment the wave-close acceptance
+  check flagged: a declared runtime/infra dependency or a `blocks_goal:true` deferral is unmet) —
+  from Build, another role, or the operator. Process that one drift.
+- **Board-scan inbox-drain (no `$ARGUMENTS`, or `--drain`).** **Enumerate every open
+  `Stage=Recirculation` inbox ticket** on the board (`Status=Todo` — items already behind a gate or
+  retired are skipped, so a re-run is idempotent) via `idc:idc-tracker-adapter` (`query`), then
+  **drain each ticket** through the decision flow below. This is the inbox of scope **discovered
+  mid-build** (filed as `Stage=Recirculation` tickets, the non-Buildable inbox); draining it admits
+  that scope to the front of the pipeline so **Plan** (unchanged) later decomposes it. Autorun runs
+  this mode at the top of the pipeline before the Buildable wave.
+
+The Recirculator's trigger is **narrowed to scope/menu (requirements/plan) drift**: a purely
+**mechanical** conflict (an overlapping-file / git-merge / worktree clash) does **not** reach
 here — it deconflicts **in-kitchen** via Build's **build-time mechanical-deconfliction step**; only
 work that no longer fits the plan, or an undeclared real dependency that changes the plan,
 recirculates.
 
+## The decision flow (shared by both modes — do NOT duplicate it)
+
 **Zero durable workers** — any analysis is bounded read-only fan-out per the runtime adapter.
-Use `idc:idc-recirculator-sync` to determine the highest affected canonical layer, the downstream
+For the drift, or for each enumerated `Stage=Recirculation` ticket (its five scope fields —
+`Discovered / Area / Suggested-scope / Provenance / PRD-TRD-impact` — are the discovered scope),
+use `idc:idc-recirculator-sync` to determine the highest affected canonical layer, the downstream
 sync set, and the gate decision:
 
 ```bash
@@ -26,13 +44,26 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_recirculator_layers.py" <prd|spec|mas
 ```
 
 The helper reads the `gating:` toggle from `WORKFLOW-config.yaml`: the PRD always gates, and the
-TRD (the `spec` layer) gates only when `gating.trd: on`. If no gated layer changes, update that
-layer and every layer below it — arch spec, master plan, subphases, pillars, affected open
-issues — **synchronized in one PR**, automerged, with the **PR body as the change order**. If a
-gated requirements layer changes (the PRD, or the TRD/`spec` layer when `gating.trd: on`), **reuse
-the one gate** (`WORKFLOW.md §2`) via `idc:idc-gate-issue` — it opens a new gated **Think PR**
-carrying the requirements diff (blocked gate issue + plain-terms summary + push notification), the
-same admission Think fires; pause only the affected work.
+TRD (the `spec` layer) gates only when `gating.trd: on`. Two outcomes:
+
+- **gate: no — not gate-worthy.** *Drift intake:* if no gated layer changes, update that layer and
+  every layer below it — arch spec, master plan, subphases, pillars, affected open issues —
+  **synchronized in one PR**, automerged, with the **PR body as the change order**. *Inbox-drain:*
+  the discovered scope fits within today's requirements, so **admit it directly** — author a
+  function-first **ADMITTED consideration** per `idc:idc-consideration-schema` (carrying the
+  discovered scope), write its board pointer as `Stage=Consideration`, `Status=Todo` (admitted —
+  *Todo*, distinct from Think's pending-admission-behind-a-gate pointer which rides `Blocked`), then
+  **RETIRE the Recirculation ticket** (`move Status=Done` / close it). **Preserve provenance**: a
+  `discovered-scope` label on the consideration pointer (github) and an "originated as discovered
+  scope (recirculation ticket #<n> — <Provenance>)" line in the consideration doc body, plus a
+  closing comment on the retired ticket naming the consideration it became.
+- **gate: yes — PRD/TRD-worthy.** A gated requirements layer changes (the PRD, or the TRD/`spec`
+  layer when `gating.trd: on`): run the existing doc-sync to draft the requirements diff and
+  **reuse the one gate** (`WORKFLOW.md §2`) via `idc:idc-gate-issue` — it opens a new gated **Think
+  PR** carrying the requirements diff (blocked gate issue + plain-terms summary + push
+  notification), the same admission Think fires. *Inbox-drain:* the `Stage=Recirculation` ticket
+  **rides `Status=Blocked` behind that gate and PAUSES there** (it is not retired); admission clears
+  the gate the same way Think's does. Pause only the affected work; everything else keeps flowing.
 
 No verdict taxonomy, no change-order files — they are deleted; the PR body is the record. Do
 not write source or tests; never admit a requirements (PRD/TRD) change without the gate; never

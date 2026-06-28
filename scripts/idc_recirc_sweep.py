@@ -53,6 +53,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import idc_matrix_check  # noqa: E402  — parse_matrix (constrained-YAML pillar scanner)
 import idc_tracker_fs    # noqa: E402  — load/save/find + atomic TRACKER.md writer
+import idc_gh_board      # noqa: E402  — shared paginating board reader (TRUE cursor pagination)
 
 # ── markers ──────────────────────────────────────────────────────────────────
 # Plan stamps provenance; the finisher posts discovery/deferral. The sentinel is matched first and
@@ -301,21 +302,17 @@ def gh_owner(repo):
 
 
 def scan_github(repo, matrices, project_number, log):
-    """Build (findings, ctx) for the github backend. Reads the Stage=Buildable lane once (item-list),
-    then each issue's body+comments. Fail-soft: any gh failure logs + yields an empty sweep."""
+    """Build (findings, ctx) for the github backend. Reads the WHOLE board once (paginated — gh's own
+    item-list truncates at 30 items, blinding a grown board's Buildable lane), then each issue's
+    body+comments. Fail-soft: any board-read failure logs + yields an empty sweep."""
     owner = gh_owner(repo)
     if not owner or not project_number:
         log("github: could not resolve owner/project_number — skipping sweep")
         return [], None
-    ok, out, err = gh(["project", "item-list", project_number, "--owner", owner,
-                       "--format", "json"], repo)
-    if not ok:
-        log(f"github: project item-list failed — skipping sweep ({err.strip()[:120]})")
-        return [], None
     try:
-        items = json.loads(out).get("items", [])
-    except json.JSONDecodeError:
-        log("github: unparseable item-list json — skipping sweep")
+        items = idc_gh_board.fetch_items(owner, project_number, repo)
+    except idc_gh_board.BoardReadError as e:
+        log(f"github: board read failed — skipping sweep ({str(e)[:120]})")
         return [], None
 
     # Resolve the project node id once (needed by every item-edit --project-id).
@@ -369,15 +366,13 @@ def scan_github(repo, matrices, project_number, log):
 
 def github_existing_sources(repo, ctx):
     """The {(origin, what)} already covered by an existing Recirculation ticket's hidden source
-    marker — the stateless dedupe set that makes ticket-filing idempotent across runs."""
+    marker — the stateless dedupe set that makes ticket-filing idempotent across runs. Reads the
+    WHOLE board (paginated) so a Recirculation ticket past the first 30 items is not missed (which
+    would re-file a duplicate)."""
     seen = set()
-    ok, out, _ = gh(["project", "item-list", ctx["project_number"], "--owner", ctx["owner"],
-                     "--format", "json"], repo)
-    if not ok:
-        return seen
     try:
-        items = json.loads(out).get("items", [])
-    except json.JSONDecodeError:
+        items = idc_gh_board.fetch_items(ctx["owner"], ctx["project_number"], repo)
+    except idc_gh_board.BoardReadError:
         return seen
     for it in items:
         if (it.get("stage") or "") != RECIRC_STAGE:
@@ -449,16 +444,15 @@ def apply_github(findings, repo, ctx, log):
                 log(f"github: ticket for {c['origin']} failed ({errc.strip()[:120]})")
                 continue
             url = url_out.strip().splitlines()[-1] if url_out.strip() else ""
-            num = re.search(r"(\d+)$", url)
-            gh(["project", "item-add", project_number, "--owner", owner, "--url", url], repo)
-            if num and project_node and stage_fid and recirc_oid:
-                _, iid_out, _ = gh(["project", "item-list", project_number, "--owner", owner,
-                                    "--format", "json", "--jq",
-                                    f".items[]|select(.content.number=={num.group(1)})|.id"], repo)
-                iid = iid_out.strip()
-                if iid:
-                    gh(["project", "item-edit", "--id", iid, "--project-id", project_node,
-                        "--field-id", stage_fid, "--single-select-option-id", recirc_oid], repo)
+            # Capture the new item's node id straight from item-add (`--jq .id`) — no board re-read.
+            # (The old path paginated the WHOLE board per filed ticket just to recover an id the add
+            # call already returns.)
+            ok_add, iid_out, _ = gh(["project", "item-add", project_number, "--owner", owner,
+                                     "--url", url, "--format", "json", "--jq", ".id"], repo)
+            iid = iid_out.strip() if ok_add else ""
+            if iid and project_node and stage_fid and recirc_oid:
+                gh(["project", "item-edit", "--id", iid, "--project-id", project_node,
+                    "--field-id", stage_fid, "--single-select-option-id", recirc_oid], repo)
             log(f"github: filed Recirculation ticket for {c['origin']} ({c['what'][:60]})")
             changed += 1
     return changed

@@ -179,12 +179,16 @@ FAIL** (Build still trusts the board; the schema check stays Plan's gate). Branc
   # Build-eligible lane (canonical predicate: scripts/idc_autorun_drain.py): Status=Todo +
   # Stage=Buildable (legacy null → Buildable). The [operator-action] skip is applied downstream
   # in the helper; the drain's "all blocked-by Done" clause is intentionally not this row's concern.
+  # Read the WHOLE board via the shared paginating reader — `gh project item-list` returns only its
+  # 30-item first page (and --limit just moves the ceiling), so a grown board truncates and Row 9
+  # under-scans the very lane it audits; idc_gh_board.py pages to completion and emits ASCII-escaped
+  # JSON, so the downstream jq is control-char-safe.
   # Pipe the number list straight into `while read`, never a for-loop over an unquoted capture: an
   # unquoted newline blob is NOT word-split under zsh — the real /idc:doctor Bash-tool shell — so a
   # for-loop would run once over the whole blob and falsely report "clean". `while read` iterates
   # per line in both bash and zsh.
-  gh project item-list "$num" --owner "$owner" --format json --jq \
-    '.items[] | select(.status=="Todo") | select((.stage // "Buildable")=="Buildable") | .content.number' \
+  python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gh_board.py" --owner "$owner" --project "$num" \
+  | jq -r '.items[] | select(.status=="Todo") | select((.stage // "Buildable")=="Buildable") | .content.number' \
   | while IFS= read -r n; do
       [ -n "$n" ] || continue
       bb=$(gh api "repos/{owner}/{repo}/issues/$n/dependencies/blocked_by" --jq '[.[].number]' 2>/dev/null) || bb=''
@@ -247,9 +251,9 @@ gh project field-list "$num" --owner "$owner" --format json --jq \
   the `Stage` field absent entirely — a legacy 4-field board — note that instead; `Stage` is additive
   and its absence is never a FAIL.)
 
-Row 9 only *reads* the board (`gh project item-list`, `gh issue view`, `gh api … GET`,
-`gh project field-list`, and the helpers' read-only `--report` mode), preserving doctor's
-strictly-read-only contract (guarded by `phase7-command-prose-invariants.sh`).
+Row 9 only *reads* the board (the paginating reader `idc_gh_board.py`, `gh issue view`,
+`gh api … GET`, `gh project field-list`, and the helpers' read-only `--report` mode), preserving
+doctor's strictly-read-only contract (guarded by `phase7-command-prose-invariants.sh`).
 
 ## Output
 

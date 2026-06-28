@@ -59,10 +59,16 @@ loop below). Then the two lanes:
    (this is the auto `--fix`; `/idc:doctor` stays read-only).
 4. **Build eligible waves.** Eligible build work is `Stage = Buildable` issues only — an upstream
    `Consideration`/`Planning`/`Recirculation` ticket is never scooped (the glass wall). Check the
-   build lane's exit condition with
-   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --tracker <TRACKER.md>`
-   (or the github-backend equivalent via `idc:idc-tracker-adapter`). While it reports
-   `drain: continue`, run `idc:idc-build` on the eligible waves; re-check after each.
+   build lane's exit condition with the **same deterministic drain helper, by backend** — never
+   improvise the predicate or read the board ad-hoc:
+   - **filesystem:** `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --tracker <TRACKER.md>`
+   - **github:** `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --backend github --project <n> --owner <o>`
+   Both apply the **identical** eligibility predicate (`Status = Todo` AND `(stage or "Buildable") ==
+   "Buildable"` AND the title is not `[operator-action]` AND every native blocked-by is `Done`) over
+   the **whole board** — the github mode pages **every** item, so **never** substitute a bare
+   `gh project item-list` (it returns only its 30-item first page → a grown board truncates and the
+   lane goes blind). An empty/missing `Stage` reads as `Buildable` (the legacy 4-field default). While
+   it reports `drain: continue`, run `idc:idc-build` on the eligible waves; re-check after each.
 5. **Exit** when no `Stage = Recirculation` tickets remain, no approved considerations remain
    unplanned, AND the drain predicate reports `drain: complete` — i.e. only Done items,
    requirements-gated Blocked items, the operator's gate issues, un-admitted considerations (open
@@ -77,9 +83,9 @@ loop below). Then the two lanes:
 
 Typing `/idc:autorun` authorizes draining the **whole** repo — every phase, every eligible wave,
 not one phase. Before the drain loop, size the work into a **staffing estimate**. The build lane's
-**current** parallelism is the ready-frontier **width** from
-`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --tracker <TRACKER.md> --width`
-(the unblocked eligible antichain — one **sous chef** per ready issue, Wave never consulted); one
+**current** parallelism is the ready-frontier **width** from the same drain helper with `--width`
+(`--tracker <TRACKER.md> --width` on filesystem; `--backend github --project <n> --owner <o> --width`
+on github) (the unblocked eligible antichain — one **sous chef** per ready issue, Wave never consulted); one
 call reports the frontier **right now**, so the running estimate accrued across the `/loop` drain as
 later blockers clear is **~N sous chefs**, **~M subagents** (each sous chef's bounded fan-out),
 across **~K usage windows**. Read the ceiling from

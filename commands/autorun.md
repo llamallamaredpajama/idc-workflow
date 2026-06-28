@@ -38,11 +38,18 @@ Traverse the pipe top-to-bottom and exit when nothing actionable remains:
 4. **Build lane** — while eligible build work exists, run `idc:idc-build` on the eligible waves,
    claiming **only `Stage = Buildable`** issues (a `Consideration`/`Planning`/`Recirculation` ticket
    is never scooped — the glass wall), including waves unblocked mid-run from the operator's phone.
-   Check the exit condition with:
+   Check the exit condition with the **same deterministic drain helper, by backend** — never
+   improvise the predicate or read the board with a bare `gh project item-list` (it truncates at its
+   30-item first page → a grown board blinds the lane):
    ```bash
+   # filesystem
    python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --tracker <TRACKER.md>
+   # github — pages the WHOLE board, same predicate
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --backend github --project <n> --owner <o>
    ```
-   (or the github-backend equivalent via `idc:idc-tracker-adapter`).
+   Both apply the identical eligibility predicate (`Status = Todo` AND `(stage or "Buildable") ==
+   "Buildable"` AND title not `[operator-action]` AND every native blocked-by `Done`); an
+   empty/missing `Stage` reads as `Buildable` (the legacy 4-field default).
 5. **Exit** when no `Stage = Recirculation` tickets remain, no approved considerations remain
    unplanned, and the drain predicate reports `drain: complete` (only Done + requirements-gated
    Blocked + operator gate issues + un-admitted considerations + gated recirculation backflow left).

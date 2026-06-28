@@ -42,21 +42,30 @@ PROJ=$(grep -E '^project_number:' "$CFG" | grep -oE '[0-9]+')   # integer
 OWNER=$(gh repo view --json owner -q .owner.login)              # project owner (user/org)
 fid()  { grep -E "^[[:space:]]+$1:" "$CFG" | head -1 \
            | sed -E 's/^[^:]*:[[:space:]]*"?([A-Za-z0-9_]+)"?.*/\1/'; }   # cached field node id, by name
-# All board reads use gh's BUILT-IN `--jq` (never `gh … --format json | jq` to an external jq):
-# gh applies the filter to its in-memory data, so an issue body carrying a raw control char
-# (U+0000–U+001F) is never round-tripped through a strict external jq, which would reject it
-# (`parse error: control characters … must be escaped`) and silently yield an EMPTY id.
-# Precondition (controlled inputs only): these resolvers interpolate their args into the jq program,
-# so callers pass ONLY plugin-controlled values — issue numbers IDC resolved and the five fixed v2
-# field/enum names — never board-derived free text. `itemid` additionally hard-guards its number
-# argument, so the one bare-interpolated value can never carry a raw jq fragment.
+# Read the WHOLE board — EVERY item, EVERY page — via the shared paginating reader. `gh project
+# item-list` returns only its 30-item FIRST PAGE (and `--limit N` merely moves the ceiling — the same
+# truncation bug at a larger N), so a board grown past 30 items truncates and the build lane,
+# considerations, and `itemid` all go blind. `idc_gh_board.py` pages the GraphQL items() connection
+# to completion and emits gh's flattened {"items":[...]} shape as ASCII-escaped JSON — so it returns
+# ALL items AND a downstream `jq` stays control-char-SAFE (a raw issue-body control char U+0000–U+001F
+# arrives over the GraphQL transport already escaped, and is re-emitted escaped, never round-tripped
+# through a strict external jq that would reject it — `parse error: control characters … must be
+# escaped` — and silently yield an EMPTY id). die_gh fires if the read fails (capture-then-jq, so a
+# non-zero read is caught before the filter, never masked by the pipe).
+board_json() { python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gh_board.py" --owner "$OWNER" --project "$PROJ"; }
+# `optid` reads the field/option set — NOT paginated (a project has a handful of fields) — via gh's
+# BUILT-IN `--jq`, same control-char robustness. Precondition (controlled inputs only): these
+# resolvers interpolate their args into the jq program, so callers pass ONLY plugin-controlled values
+# — issue numbers IDC resolved and the five fixed v2 field/enum names — never board-derived free text.
+# `itemid` additionally hard-guards its number argument, so the one bare-interpolated value can never
+# carry a raw jq fragment.
 # Resolve a single-select option id BY NAME at call time (never cached):
 optid() { gh project field-list "$PROJ" --owner "$OWNER" --format json \
   --jq ".fields[] | select(.name==\"$1\") | .options[] | select(.name==\"$2\") | .id"; }
-# Map an issue number -> its project item id (board membership):
+# Map an issue number -> its project item id (board membership), over the WHOLE board:
 itemid() { case "$1" in ''|*[!0-9]*) die_gh ;; esac   # $1 is interpolated BARE into the jq below
-  gh project item-list "$PROJ" --owner "$OWNER" --format json \
-  --jq ".items[] | select(.content.number==$1) | .id"; }
+  IJ="$(board_json)" || die_gh
+  printf '%s' "$IJ" | jq -r ".items[] | select(.content.number==$1) | .id"; }
 ```
 
 `PROJ` is the project node id (`PVT_…`) where GraphQL is used; `gh project` subcommands
@@ -96,18 +105,21 @@ gh project item-edit --id "$IID" --project-id "$PROJ" \
 **move(ticket, status)** — convenience over `setField` for `Status`:
 `setField "$NUM" Status "$STATUS"` (status must be one of the four).
 
-**query(filter) -> [#...]** — list board items and filter by field value(s). Uses gh's
-built-in `--jq` (same control-char robustness as the preamble helpers); the controlled filter
-values interpolate as jq string literals.
+**query(filter) -> [#...]** — list board items and filter by field value(s). Reads the WHOLE board
+via the paginating `board_json` helper (so a board past 30 items is never truncated — the exact
+defect that blinded the build lane); the controlled filter values interpolate as jq string literals
+over `board_json`'s ASCII-escaped output (control-char-safe). Capture-then-`jq` so a failed read
+`die_gh`s before the filter rather than being masked by the pipe.
 ```bash
-gh project item-list "$PROJ" --owner "$OWNER" --format json --jq "
+IJ="$(board_json)" || die_gh
+printf '%s' "$IJ" | jq -r "
     .items[]
     | select(\"${STATUS:-}\"==\"\" or .status==\"${STATUS:-}\")
     | select(\"${STAGE:-}\"==\"\" or (.stage // \"Buildable\")==\"${STAGE:-}\")
     | select(\"${WAVE:-}\"==\"\" or .wave==\"${WAVE:-}\")
     | select(\"${PHASE:-}\"==\"\" or .phase==\"${PHASE:-}\")
     | select(\"${DOMAIN:-}\"==\"\" or .domain==\"${DOMAIN:-}\")
-    | .content.number" || die_gh
+    | .content.number"
 ```
 A legacy 4-field board has no `Stage` set, so `.stage` is null; `(.stage // "Buildable")`
 reads an absent Stage as `Buildable` — matching the filesystem backend and the additive promise

@@ -29,6 +29,7 @@ for t in \
   phase4-triplet \
   phase4-sous-chef-ownership \
   phase4-tracker-github-recipe \
+  phase4-github-pagination \
   phase4-acceptance \
   phase4-ready-frontier \
   phase4-e2e-merge-train \

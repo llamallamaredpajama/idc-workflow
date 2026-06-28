@@ -32,11 +32,22 @@ estimate — one `--width` call reports the frontier right now; the cross-`/loop
 across iterations, not a single invocation. The flag is opt-in so the default output stays
 byte-identical for existing callers (the ready set is always on the `eligible:` line, with or without it).
 
-Usage: idc_autorun_drain.py --tracker <TRACKER.md> [--width]   (exit 0 = ok, 2 = error)
+Backends (the SAME pure predicate over either source — `compute_eligible`):
+  * filesystem — `--tracker <TRACKER.md>` (the default): the issues ride the tracker state block.
+  * github     — `--backend github --project <n> --owner <o> [--repo <dir>]`: ALL board items via
+    the shared paginating reader (`idc_gh_board`), with native blocked_by resolved per build
+    candidate. The github build lane has no other executable exit condition — agents MUST consume
+    this helper instead of improvising a (truncation-prone) `gh project item-list`.
+
+Usage: idc_autorun_drain.py --tracker <TRACKER.md> [--width]                       (filesystem)
+       idc_autorun_drain.py --backend github --project <n> --owner <o> [--width]   (github)
+       (exit 0 = ok, 2 = error)
 """
 import argparse
 import json
+import os
 import re
+import subprocess
 import sys
 
 BEGIN = "<!-- idc-tracker-state:begin -->"
@@ -57,22 +68,22 @@ def load(path):
     return state
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--tracker", required=True)
-    ap.add_argument("--width", action="store_true",
-                    help="also print the ready frontier's width (max-useful parallelism); the ready set is the `eligible:` line")
-    args = ap.parse_args()
-    try:
-        state = load(args.tracker)
-    except (OSError, json.JSONDecodeError) as e:
-        sys.stderr.write(f"idc-autorun-drain: cannot read {args.tracker}: {e}\n")
-        sys.exit(2)
+def load_filesystem(path):
+    """Load + validate the filesystem TRACKER.md, returning the (guarded) issues list.
 
-    # A MISSING `issues` key is corruption (e.g. a github bug that drops it), not an empty board:
-    # fail closed rather than read it as zero issues and print `drain: complete`. An explicit
-    # `issues: []` is still a legitimate empty board. (The sibling idc_acceptance_check.py applies the
-    # identical guard, kept in lockstep by the smoke parity tests.)
+    Keeps the fail-closed corruption guards verbatim — a MISSING `issues` key is corruption (e.g. a
+    github bug that drops it), not an empty board, so fail closed rather than read it as zero issues
+    and print `drain: complete`; an explicit `issues: []` is still a legitimate empty board. Every
+    entry must be a dict (membership tests, `.get()`, the sort key, and `.startswith()` all assume
+    it), `number` must be an int (it is a dict key AND a sort key — an unhashable/unsortable value
+    would crash instead of exiting 2), and `blocked_by` must be a list (the predicate iterates it).
+    A scalar entry, a non-int number, or a non-list blocked_by exits 2 with a clean diagnostic — the
+    same fail-closed contract the sibling idc_acceptance_check.py applies to its own fields."""
+    try:
+        state = load(path)
+    except (OSError, json.JSONDecodeError) as e:
+        sys.stderr.write(f"idc-autorun-drain: cannot read {path}: {e}\n")
+        sys.exit(2)
     if "issues" not in state:
         sys.stderr.write("idc-autorun-drain: corrupt tracker — state block has no `issues` key\n")
         sys.exit(2)
@@ -80,13 +91,6 @@ def main():
     if not isinstance(issues, list):
         sys.stderr.write("idc-autorun-drain: corrupt tracker — `issues` must be a list\n")
         sys.exit(2)
-    # eager guard: every entry must be a dict (membership tests, `.get()`, the sort key, and
-    # `.startswith()` below all assume it), the dict-comp and sort key subscript it["number"]
-    # unconditionally, and the eligibility loop ITERATES it["blocked_by"] — so a corrupt issue must
-    # fail loudly here rather than KeyError/TypeError mid-computation. A scalar entry (e.g.
-    # `issues: [5]`) or a non-list blocked_by (a github bug or a hand-edit dropping the brackets)
-    # would otherwise crash the loop (exit 1, traceback) or be silently misread; fail closed
-    # (exit 2) instead, like the sibling idc_acceptance_check.py guards its own dereferenced fields.
     for it in issues:
         if not isinstance(it, dict):
             sys.stderr.write("idc-autorun-drain: corrupt tracker — an issue is not an object\n")
@@ -95,28 +99,138 @@ def main():
             sys.stderr.write("idc-autorun-drain: corrupt tracker — an issue is missing `number`\n")
             sys.exit(2)
         if not isinstance(it["number"], int):
-            # `number` is a dict key (status_by_num) AND a sort key — an unhashable/unsortable value
-            # crashes instead of exiting 2. The filesystem tracker always writes an int.
             sys.stderr.write("idc-autorun-drain: corrupt tracker — an issue `number` must be an int\n")
             sys.exit(2)
         if not isinstance(it.get("blocked_by", []), list):
             sys.stderr.write(
                 f"idc-autorun-drain: corrupt tracker — issue {it['number']} `blocked_by` must be a list\n")
             sys.exit(2)
+    return issues
+
+
+def _is_build_candidate(it):
+    """The status/stage/title half of the drain predicate — an issue that COULD be eligible build
+    work before the blocked-by check:
+      * Status == Todo,
+      * (stage or "Buildable") == "Buildable" — claim ONLY Buildable; any non-Buildable stage
+        (Consideration/Planning, or a Recirculation inbox item) is build-excluded by construction
+        (the glass wall). An empty/missing Stage reads as Buildable (the legacy 4-field default),
+      * title does not start with "[operator-action]" (the operator's gate issue, not build work).
+    Shared by `compute_eligible` and the github loader's candidate pre-filter so the two can't drift."""
+    return (it.get("status") == "Todo"
+            and (it.get("stage") or "Buildable") == "Buildable"
+            and not str(it.get("title", "")).strip().startswith("[operator-action]"))
+
+
+def compute_eligible(issues):
+    """PURE drain predicate — the deterministic exit condition, IDENTICAL across both backends.
+
+    `issues` is a list of dicts with keys number/status/stage/title/blocked_by. An issue is eligible
+    build work iff it is a build candidate (`_is_build_candidate`) AND every native blocked_by upstream
+    is Done. Returns the eligible issue numbers sorted ascending. Kept side-effect-free so a hermetic
+    unit test pins it over a >30-item fixture whose ready frontier sits past the old 30-item page."""
     status_by_num = {it["number"]: it.get("status") for it in issues}
     eligible = []
     for it in sorted(issues, key=lambda x: x["number"]):
-        if it.get("status") != "Todo":
+        if not _is_build_candidate(it):
             continue
-        if (it.get("stage") or "Buildable") != "Buildable":
-            # Claim ONLY Stage=Buildable. Any non-Buildable stage (Consideration/Planning, or a
-            # Recirculation inbox item) is build-excluded by construction — the glass wall. An
-            # empty/missing Stage still reads as Buildable (the legacy 4-field default, preserved).
-            continue
-        if str(it.get("title", "")).strip().startswith("[operator-action]"):
-            continue  # the operator's gate issue, not build work
         if all(status_by_num.get(b) == "Done" for b in it.get("blocked_by", [])):
             eligible.append(it["number"])
+    return eligible
+
+
+def _blocked_by_numbers(repo, number):
+    """The native blocked-by issue numbers for one issue, via the GitHub dependencies API.
+
+    Uses gh's literal `{owner}/{repo}` placeholders (resolved from the repo in `cwd`), the same read
+    counterpart of the documented write endpoint that doctor Row 9 uses. Returns (numbers, ok). On
+    any gh failure ok is False — the caller fail-CLOSES (treats the issue as still-blocked this pass)
+    so the drain never claims work whose blockers it could not verify; the next /loop iteration
+    re-checks. Mirrors doctor Row 9's tri-state (a failed lookup ≠ no link)."""
+    try:
+        p = subprocess.run(
+            ["gh", "api", f"repos/{{owner}}/{{repo}}/issues/{number}/dependencies/blocked_by",
+             "--jq", "[.[].number]"],
+            cwd=repo, capture_output=True, text=True)
+    except (OSError, ValueError):
+        return [], False
+    if p.returncode != 0:
+        return [], False
+    try:
+        nums = json.loads(p.stdout or "[]")
+    except json.JSONDecodeError:
+        return [], False
+    return [n for n in nums if isinstance(n, int)], True
+
+
+def load_github(owner, project_number, repo):
+    """Build the predicate's issues list from the github board (ALL pages via idc_gh_board).
+
+    Normalizes each issue-backed item to number/status/stage/title, then resolves native blocked_by
+    ONLY for the build-candidate lane (Todo + Buildable + non-operator-action) — the only issues
+    whose blocker state can change eligibility, so non-candidates skip the per-issue API call. A
+    blocked_by lookup failure fail-closes the candidate (an unresolvable sentinel blocker) so it is
+    excluded this pass, never claimed unverified. Exits 2 on an unreadable board (fail-closed, never
+    a hollow empty drain)."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import idc_gh_board  # noqa: E402 — github-only dependency, imported lazily
+    try:
+        items = idc_gh_board.fetch_items(owner, project_number, repo)
+    except idc_gh_board.BoardReadError as e:
+        sys.stderr.write(f"idc-autorun-drain: could not read the github board: {e}\n")
+        sys.exit(2)
+    issues = []
+    for it in items:
+        content = it.get("content") or {}
+        number = content.get("number")
+        if number is None:                  # a draft item carries no issue number
+            continue
+        issues.append({
+            "number": number,
+            "status": it.get("status"),
+            "stage": it.get("stage"),
+            "title": content.get("title") or "",
+        })
+    for it in issues:
+        if not _is_build_candidate(it):
+            it["blocked_by"] = []
+            continue
+        nums, ok = _blocked_by_numbers(repo, it["number"])
+        if not ok:
+            sys.stderr.write(
+                f"idc-autorun-drain: blocked_by lookup failed for #{it['number']} — "
+                "excluded this pass (will retry next /loop)\n")
+            it["blocked_by"] = [0]          # 0 is never a real issue number → never Done → excluded
+        else:
+            it["blocked_by"] = nums
+    return issues
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--backend", choices=("filesystem", "github"), default="filesystem",
+                    help="tracker backend (default: filesystem)")
+    ap.add_argument("--tracker", help="TRACKER.md path (filesystem backend)")
+    ap.add_argument("--project", help="integer project number (github backend)")
+    ap.add_argument("--owner", help="project owner login (github backend)")
+    ap.add_argument("--repo", default=".",
+                    help="repo dir to run gh in (github backend; default cwd)")
+    ap.add_argument("--width", action="store_true",
+                    help="also print the ready frontier's width (max-useful parallelism); the ready set is the `eligible:` line")
+    args = ap.parse_args()
+
+    if args.backend == "github":
+        if not args.project or not args.owner:
+            sys.stderr.write("idc-autorun-drain: --project and --owner are required for the github backend\n")
+            sys.exit(2)
+        issues = load_github(args.owner, args.project, os.path.abspath(args.repo))
+    else:
+        if not args.tracker:
+            sys.stderr.write("idc-autorun-drain: --tracker is required for the filesystem backend\n")
+            sys.exit(2)
+        issues = load_filesystem(args.tracker)
+
+    eligible = compute_eligible(issues)
 
     print("eligible: " + " ".join(str(n) for n in eligible))
     print("drain: " + ("continue" if eligible else "complete"))

@@ -197,4 +197,52 @@ assert hooks == "./hooks/hooks.json", f"plugin.json hooks key is {hooks!r} (want
 assert os.path.isfile(os.path.join(sys.argv[2], "hooks", "hooks.json")), "hooks.json target missing"
 PY
 
-echo "PASS: decide() classifies all cases (red-when-broken) + filesystem re-stage/Wave-clear/idempotency + no-matrix skip + hook wiring resolves"
+# ── 4. e2e-caught regressions: project_number inline-comment parse + degraded-≠-clean ────────────
+# (4a) read_config must STRIP an inline `# comment` on project_number — the template ships
+#      `project_number: 10  # integer; from gh project create`. Red-when-broken: the pre-fix regex
+#      returns "10  # integer…", gh rejects it as an invalid number, and the WHOLE github sweep
+#      silently no-ops (this is the defect the sandbox e2e caught).
+pn="$(python3 - "$SCRIPTS" <<'PY'
+import sys, os, tempfile
+sys.path.insert(0, sys.argv[1])
+import idc_recirc_sweep as m
+d = tempfile.mkdtemp()
+os.makedirs(os.path.join(d, "docs", "workflow"))
+open(os.path.join(d, "docs", "workflow", "tracker-config.yaml"), "w").write(
+    'backend: github\nproject_number: 10     # integer; from `gh project create`\n'
+    'field_ids:\n  Stage: "PVTF_x"\n')
+pn, _ = m.read_config(d)
+print(pn)
+PY
+)"
+[ "$pn" = "10" ] \
+  || fail "read_config must strip the inline comment on project_number (got '$pn', want '10') — else gh rejects it and the github sweep silently no-ops"
+
+# (4b) a github board that cannot be scanned must report a DEGRADED SKIP (exit 2), never a hollow
+#      'clean (0 scanned)' all-clear (the 3.0.5 no-silent-all-clear discipline). A temp dir is not a
+#      github repo, so gh cannot resolve the owner ⇒ the scan is degraded, not empty.
+REPO4="$WORK/repo4"; mkdir -p "$REPO4/docs/workflow/pillar-matrices"
+cat > "$REPO4/docs/workflow/tracker-config.yaml" <<'YAML'
+backend: github
+project_number: 10     # integer; from `gh project create`
+field_ids:
+  Stage: "PVTF_x"
+YAML
+cat > "$REPO4/docs/workflow/pillar-matrices/m.yaml" <<'YAML'
+phase: Phase 1
+pillars:
+  - id: p1
+    wave: 1
+    domain: x
+    surfaces: [a/]
+YAML
+out4="$(python3 "$SWEEP" --repo "$REPO4" --report 2>&1)"; code4=$?
+echo "$out4" | grep -qiE 'could not scan|SKIP' \
+  || fail "an unscannable github board must SURFACE a degraded SKIP, not a hollow all-clear (got: '$out4')"
+if echo "$out4" | grep -qiE 'clean \(0'; then
+  fail "a degraded (unscannable) github board must NOT report a hollow 'clean (0 scanned)' all-clear"
+fi
+[ "$code4" = "2" ] \
+  || fail "a degraded github --report must exit 2 (→ doctor Row 9b SKIP), not 0 (got exit $code4)"
+
+echo "PASS: decide() classifies all cases (red-when-broken) + filesystem re-stage/Wave-clear/idempotency + no-matrix skip + hook wiring resolves + project_number comment-strip + degraded-github-scan surfaces (not a hollow clean)"

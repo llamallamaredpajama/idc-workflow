@@ -205,7 +205,10 @@ def read_config(repo):
     try:
         with open(cfg, encoding="utf-8") as fh:
             for line in fh:
-                m = re.match(r"^project_number:\s*\"?([^\"\n]*)\"?", line)
+                # Strip an inline `# comment` (the template ships `project_number: 10  # …`) — the
+                # `#`-exclusion mirrors the field_ids parse below; without it `gh` gets "10  # …"
+                # and rejects it as an invalid number, silently disabling the whole github sweep.
+                m = re.match(r'^project_number:\s*"?([^"#\n]*)"?', line)
                 if m:
                     project_number = m.group(1).strip()
                 if re.match(r"^field_ids:\s*$", line):
@@ -558,6 +561,14 @@ def run(repo, mode, tracker, matrices_dir):
         if mode == "auto-correct":
             apply_github(findings, repo, ctx, log)
             return 0, out
+        if ctx is None:
+            # The board could not be scanned (owner/project unresolved, or a gh failure already
+            # logged above). Report a degraded SKIP, NOT a clean all-clear — a hollow "0 scanned"
+            # would read as healthy when the scan never ran (the silent-all-clear anti-pattern).
+            # exit 2 → doctor Row 9b classifies this as SKIP ("could not determine"), never PASS.
+            out.append("recirc-sweep: SKIP — could not scan the github board (see above); "
+                       "NOT a clean all-clear")
+            return 2, out
         out.extend(render_report(findings, backend, matrices))
         return 0, out
 

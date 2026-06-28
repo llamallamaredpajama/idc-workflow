@@ -176,6 +176,20 @@ if [ -d runtime ]; then
   done < <(grep -rnE -- "($PERSONAL_PATH_RE)" runtime 2>/dev/null | grep -v 'lint-allow' || true)
 fi
 
+# Rule L — plugin manifest must not re-declare the auto-discovered standard hooks file. Claude Code
+# auto-loads a plugin's standard-path hooks/hooks.json; a manifest `hooks` value pointing at that
+# same file makes the loader abort with "Duplicate hooks file detected … manifest.hooks should only
+# reference additional hook files". manifest.hooks is ONLY for ADDITIONAL hook files at non-standard
+# paths, so a reference to hooks/hooks.json (with or without a ./ or / prefix) is always the
+# duplicate. (Regression guard for the 3.1.0 → 3.1.1 plugin-load fix.) An additional-file reference
+# like ./hooks/extra.json is deliberately NOT matched and stays legal.
+if [ -f .claude-plugin/plugin.json ]; then
+  while IFS= read -r hit; do
+    [ -z "$hit" ] && continue
+    report ".claude-plugin/plugin.json:${hit%%:*}: [duplicate-hooks-manifest] manifest hooks points at the auto-discovered hooks/hooks.json — remove the \"hooks\" key (manifest.hooks is only for additional non-standard hook files)"
+  done < <(grep -nE '"hooks"[[:space:]]*:[[:space:]]*"\.?/?hooks/hooks\.json"' .claude-plugin/plugin.json 2>/dev/null || true)
+fi
+
 # Rule A — dangling namespaced references (ignores lint-allow by design).
 ALL_REFS=$(grep -hoE 'idc:[a-z0-9][a-z0-9-]*' $MD_FILES 2>/dev/null | sort -u)
 for ref in $ALL_REFS; do

@@ -1,9 +1,8 @@
 {
   "name": "idc",
-  "version": "3.1.0",
+  "version": "3.1.1",
   "description": "IDC workflow (Think → Plan → Build → Recirculator, drained by Autorun) — a guardrail-framed, tracker-driven, goal-contract development pipeline as an installable Claude Code plugin",
   "author": {
     "name": "llamallamaredpajama"
-  },
-  "hooks": "./hooks/hooks.json"
+  }
 }

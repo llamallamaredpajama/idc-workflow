@@ -187,13 +187,23 @@ for c in cmds:
         assert os.path.isfile(os.path.join(root, tok)), f"hook command path {tok} does not resolve"
 PY
 
-# plugin.json: valid JSON, declares the hooks key pointing at ./hooks/hooks.json, and that file exists.
+# plugin.json: valid JSON, and it must NOT re-declare the auto-discovered standard hooks file.
+# Claude Code auto-loads a plugin's standard-path hooks/hooks.json; a manifest `hooks` reference to
+# that same file makes the loader abort with "Duplicate hooks file detected" (the 3.1.0 → 3.1.1
+# plugin-load fix). The SessionEnd hook still ships at the standard path and loads via auto-discovery.
 [ -f "$PLUGIN_JSON" ] || fail ".claude-plugin/plugin.json missing"
-python3 - "$PLUGIN_JSON" "$PLUGIN" <<'PY' || fail "plugin.json must declare \"hooks\": \"./hooks/hooks.json\" resolving to a real file"
+python3 - "$PLUGIN_JSON" "$PLUGIN" <<'PY' || fail "plugin.json must NOT declare a hooks key pointing at the auto-discovered hooks/hooks.json"
 import json, os, sys
 cfg = json.load(open(sys.argv[1], encoding="utf-8"))
 hooks = cfg.get("hooks")
-assert hooks == "./hooks/hooks.json", f"plugin.json hooks key is {hooks!r} (want ./hooks/hooks.json)"
+# manifest.hooks is only for ADDITIONAL hook files at non-standard paths; the standard
+# hooks/hooks.json is auto-discovered, so referencing it here is the duplicate-load bug.
+norm = (hooks or "").lstrip("./")
+assert norm != "hooks/hooks.json", (
+    f"plugin.json declares hooks={hooks!r} pointing at the auto-discovered standard file; "
+    "remove the key (manifest.hooks is only for additional non-standard hook files)"
+)
+# the SessionEnd hook still ships at the auto-discovered standard path
 assert os.path.isfile(os.path.join(sys.argv[2], "hooks", "hooks.json")), "hooks.json target missing"
 PY
 

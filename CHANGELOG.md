@@ -2,6 +2,22 @@
 
 All notable changes to the IDC Workflow plugin are documented in this file.
 
+## 3.1.1 — 2026-06-28
+
+Patch: fixes a fatal plugin-load error introduced in 3.1.0.
+
+- **Removed the redundant `hooks` key from `plugin.json`.** 3.1.0 shipped the new SessionEnd
+  recirculation-sweep hook at the standard `hooks/hooks.json` path *and* also declared
+  `"hooks": "./hooks/hooks.json"` in the manifest. Claude Code auto-discovers the standard-path
+  file, so the manifest reference resolved to an already-loaded file and the loader aborted with
+  `Duplicate hooks file detected … manifest.hooks should only reference additional hook files`,
+  preventing the hook from loading. The `manifest.hooks` field is only for *additional* hook files
+  at non-standard paths; since `hooks/` holds only the standard `hooks.json`, the reference was
+  pure redundancy. Removing it restores a clean load — the SessionEnd hook still registers via
+  auto-discovery (its behavior is unchanged).
+- **Regression guard in `scripts/lint-references.sh`.** Lint now fails if `plugin.json`'s `hooks`
+  field points at the standard `hooks/hooks.json` path, so this duplicate can't recur.
+
 ## 3.1.0 — 2026-06-28
 
 Scope discovered mid-build now has a sanctioned home: a new **`Recirculation`** intake instead of

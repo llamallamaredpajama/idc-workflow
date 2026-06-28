@@ -1,0 +1,15 @@
+{
+  "description": "IDC recirculation-intake safety net — a SessionEnd detective that re-stages rogue Buildables (issues that bypassed Plan, with no idc-provenance marker) to Recirculation and captures untickered discovery/deferral markers. Fail-soft; no-ops outside an IDC-governed repo.",
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/idc_recirc_sweep_hook.sh\" \"${CLAUDE_PLUGIN_ROOT}\""
+          }
+        ]
+      }
+    ]
+  }
+}

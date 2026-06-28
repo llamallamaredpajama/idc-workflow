@@ -205,8 +205,50 @@ FAIL** (Build still trusts the board; the schema check stays Plan's gate). Branc
     all-clear.)
   - helper exit 2 or a `gh` error → **SKIP** ("could not determine"), **never FAIL**.
 
-Row 9 only *reads* the board (`gh project item-list`, `gh issue view`, `gh api … GET`), preserving
-doctor's strictly-read-only contract (guarded by `phase7-command-prose-invariants.sh`).
+**9b — Recirculation-intake sweep (advisory; never FAIL; read-only `--report`).** The SessionEnd hook
+(`scripts/idc_recirc_sweep_hook.sh` → `idc_recirc_sweep.py --auto-correct`) is the primary detective
+that re-stages **rogue Buildables** — issues that bypassed Plan (a raw `gh issue create … Stage =
+Buildable`, or a captured review-residual) and so carry no `idc-provenance` marker — into
+`Recirculation`, and captures untickered discovery/deferral markers. It won't fire on a `SIGKILL`,
+so doctor re-runs the SAME helper in **read-only `--report`** mode as defense-in-depth — it mutates
+nothing:
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_recirc_sweep.py" --repo "$PWD" --report
+```
+- `recirc-sweep: skipped — no pillar matrix …` → **PASS** (note "no pillar matrix — the provenance
+  regime is not established here, so there is nothing to re-stage"). Mirrors the no-matrix skip baked
+  into the helper (a legacy board is never flagged).
+- `recirc-sweep: clean (N buildable scanned)` → **PASS** (note "N buildable scanned, clean").
+- one or more `rogue` / `ambiguous` / `capture:` lines → **PASS with ⚠**: list them; fix hint: "the
+  SessionEnd hook auto-corrects rogues on the next session exit; to act now run `/idc:recirculate`
+  (drain the discovered scope) or `/idc:plan` (re-mint the issue with provenance)." Like the
+  `filesystem` board-lint branch above, the helper's marker/ticket capture is **github-only** (a
+  filesystem board stores fields, not issue bodies); the report says so and re-stage-by-Stage still
+  works.
+- helper exit 2 or error → **SKIP** ("could not determine"), **never FAIL**.
+
+**9c — `Stage` carries the `Recirculation` option (github only; read-only detection + offer).** The
+sweep can only re-stage a rogue if the board's `Stage` single-select actually has a `Recirculation`
+option. This is a `github`-backend check (the `filesystem` backend's `Stage` is enum-validated in
+code, so it always accepts `Recirculation`); **SKIP** for `filesystem`. Probe read-only (reuses
+`$num` / `$owner` from check 3):
+```bash
+gh project field-list "$num" --owner "$owner" --format json --jq \
+  '.fields[] | select(.name=="Stage") | .options[].name' | grep -qx "Recirculation" \
+  && echo stage-recirc-ok || echo stage-recirc-missing
+```
+- `stage-recirc-ok` → **PASS**, no note.
+- `stage-recirc-missing` (the `Stage` field exists but has no `Recirculation` option) → **PASS with
+  ⚠**, note: "the board's `Stage` field has no `Recirculation` option, so the recirculation sweep
+  cannot re-stage rogue Buildables — **OFFER** to add it as an **add-one-option migration** (append
+  the new option; existing options keep their node ids, so item values are preserved — never replace
+  the option set), or run `/idc:init`." **doctor only detects and offers — it never mutates the
+  board.** (If check 3 already flagged the `Stage` field absent entirely — a legacy 4-field board —
+  note that instead; `Stage` is additive and its absence is never a FAIL.)
+
+Row 9 only *reads* the board (`gh project item-list`, `gh issue view`, `gh api … GET`,
+`gh project field-list`, and the helpers' read-only `--report` mode), preserving doctor's
+strictly-read-only contract (guarded by `phase7-command-prose-invariants.sh`).
 
 ## Output
 

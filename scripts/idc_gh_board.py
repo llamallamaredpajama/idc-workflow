@@ -145,8 +145,14 @@ def fetch_items(owner, project_number, repo="."):
         for n in (conn.get("nodes") or []):
             items.append(_flatten(n))
         page = conn.get("pageInfo") or {}
-        if page.get("hasNextPage") and page.get("endCursor"):
-            cursor = page["endCursor"]
+        if page.get("hasNextPage"):
+            cursor = page.get("endCursor")
+            if not cursor:
+                # hasNextPage=true with no endCursor is anomalous (GitHub always pairs them); fail
+                # CLOSED rather than silently return a PARTIAL board — a partial board is the very
+                # truncation this reader exists to kill.
+                raise BoardReadError(
+                    "paginated board read: hasNextPage=true but no endCursor — refusing a partial board")
             continue
         break
     return items

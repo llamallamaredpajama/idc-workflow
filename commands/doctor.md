@@ -183,11 +183,18 @@ FAIL** (Build still trusts the board; the schema check stays Plan's gate). Branc
   # 30-item first page (and --limit just moves the ceiling), so a grown board truncates and Row 9
   # under-scans the very lane it audits; idc_gh_board.py pages to completion and emits ASCII-escaped
   # JSON, so the downstream jq is control-char-safe.
+  # CAPTURE the board first so a board-read FAILURE is detectable: piped straight into the lint, a
+  # failed/empty read yields a hollow `board-lint: clean (0 scanned)` (exit 0) that reads as a PASS —
+  # the silent-all-clear masking the exact outage this row should SKIP on. On a non-zero read, SKIP
+  # (could not determine), never a clean PASS.
   # Pipe the number list straight into `while read`, never a for-loop over an unquoted capture: an
   # unquoted newline blob is NOT word-split under zsh — the real /idc:doctor Bash-tool shell — so a
   # for-loop would run once over the whole blob and falsely report "clean". `while read` iterates
   # per line in both bash and zsh.
-  python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gh_board.py" --owner "$owner" --project "$num" \
+  if ! board=$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gh_board.py" --owner "$owner" --project "$num"); then
+    : # board unreadable (idc_gh_board exit ≠ 0) → Row 9 SKIP ("could not determine"), NOT a clean PASS
+  else
+  printf '%s\n' "$board" \
   | jq -r '.items[] | select(.status=="Todo") | select((.stage // "Buildable")=="Buildable") | .content.number' \
   | while IFS= read -r n; do
       [ -n "$n" ] || continue
@@ -195,6 +202,7 @@ FAIL** (Build still trusts the board; the schema check stays Plan's gate). Branc
       [ -n "$bb" ] || bb='null'   # empty stdout = the API call FAILED → UNKNOWN (not "no link"); a real no-dep result is the 200 '[]'. Tri-state lets the helper never false-flag a prose dep it couldn't disprove.
       gh issue view "$n" --json number,title,body --jq "{number:.number,title:.title,body:.body,blocked_by:$bb}"
     done | python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_board_lint.py"
+  fi
   ```
   (`dependencies/blocked_by` GET is the read counterpart of the documented write endpoint;
   `gh issue view --jq` emits control-char-safe escaped JSON, so no external `jq` slurp is needed.)
@@ -207,7 +215,9 @@ FAIL** (Build still trusts the board; the schema check stays Plan's gate). Branc
     was skipped for them; re-run `/idc:doctor` once the API recovers." (Guards against a board-wide
     outage turning every issue UNKNOWN → nothing flagged → a `clean` summary masquerading as a true
     all-clear.)
-  - helper exit 2 or a `gh` error → **SKIP** ("could not determine"), **never FAIL**.
+  - the board read (`idc_gh_board.py`) exited non-zero, OR the lint helper exit 2 / a `gh` error →
+    **SKIP** ("could not determine"), **never FAIL** — and a board-read failure must SKIP, never be
+    read as the hollow `clean (0 scanned)` it would otherwise pipe (no silent all-clear).
 
 **9b — Recirculation-intake sweep (advisory; never FAIL; read-only `--report`).** The SessionEnd hook
 (`scripts/idc_recirc_sweep_hook.sh` → `idc_recirc_sweep.py --auto-correct`) is the primary detective

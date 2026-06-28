@@ -141,6 +141,17 @@ printf '%s' "$DFLAT" | grep -qiE 'dependency lookups indeterminate' \
 # doctor stays read-only (also guarded by phase7-command-prose-invariants.sh; assert here too).
 grep -qi 'read-only' "$DOCTOR" || fail "doctor.md must remain declared read-only"
 
+# Board-read failure must SKIP, never a hollow clean: Row 9 reads the board via the paginating
+# idc_gh_board.py and must CAPTURE it + guard the exit, so a failed/empty read can't pipe straight
+# into a `board-lint: clean (0 scanned)` PASS (the silent-all-clear masking a board outage). Goes RED
+# if Row 9 regresses to piping the unguarded read into the lint.
+grep -q 'idc_gh_board\.py' "$DOCTOR" \
+  || fail "doctor.md Row 9 must read the board via the paginating idc_gh_board.py (gh project item-list truncates at 30)"
+grep -qE 'if ! board=\$\(python3 "\$\{CLAUDE_PLUGIN_ROOT\}/scripts/idc_gh_board\.py"' "$DOCTOR" \
+  || fail "doctor.md Row 9 must CAPTURE the idc_gh_board read + guard its exit — a failed read must SKIP, not a hollow 'clean (0 scanned)' PASS (no silent all-clear)"
+printf '%s' "$DFLAT" | grep -qiE 'no silent all-clear' \
+  || fail "doctor.md Row 9 must state a board-read failure SKIPs (no silent all-clear)"
+
 # --- 9. Row 9 loop is shell-agnostic (zsh word-split hardening; the doctor.md plumbing) ----------
 # FINDING 1: the real /idc:doctor Bash-tool shell is zsh (repo CLAUDE.md), where an unquoted
 # `$nums` is NOT word-split — so a `nums=$(…); for n in $nums` loop runs ONCE over the whole

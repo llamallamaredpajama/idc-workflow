@@ -57,8 +57,10 @@ page2 = [
     node(205, status="Todo", stage="Buildable", title="[operator-action] approve"),# operator gate -> not eligible
     node(206, status="Todo", stage="Recirculation"),                               # recirc inbox -> not eligible
     node(207, status="Todo", stage="Buildable", title="ctrlchar"),           # ELIGIBLE + a control char in the title (escaping)
+    node(209, status="Todo"),                                                      # NO Stage (legacy 4-field) -> Buildable via (.stage // "Buildable") -> ELIGIBLE
+    node(210, status="Todo", stage="Buildable"),                                   # blocked_by lookup FAILS -> fail-closed -> excluded from the drain
 ]
-page2 += [node(n, status="Done", stage="Buildable") for n in range(208, 236)]      # Done filler -> 35 items total
+page2 += [node(n, status="Done", stage="Buildable") for n in range(211, 237)]      # Done filler (26) -> 35 page-2 items, 135 total
 
 def page(nodes, has_next, end):
     return {"data": {"node": {"items": {
@@ -88,6 +90,7 @@ if [ "$sub" = "api" ]; then
   for a in "$@"; do case "$a" in */dependencies/blocked_by) path="$a" ;; esac; done
   if [ -n "$path" ]; then
     n="$(printf '%s' "$path" | sed -E 's#.*/issues/([0-9]+)/dependencies/blocked_by#\1#')"
+    if [ "$n" = "210" ]; then echo "dependencies API boom" >&2; exit 1; fi   # simulate a FAILED lookup
     jq -c --arg n "$n" '.[$n] // []' "$FIX/blocked_by.json"
     exit 0
   fi
@@ -120,16 +123,22 @@ printf '%s' "$ALL" | jq -e '.items[] | select(.content.number==204 and .stage=="
 # a page-2 eligible Buildable/Todo is visible
 printf '%s' "$ALL" | jq -e '.items[] | select(.content.number==201 and .status=="Todo" and .stage=="Buildable")' >/dev/null \
   || fail "the page-2 eligible Buildable/Todo (#201) must be visible in the paginated read"
+# LEGACY 4-field default (red-when-broken): an item with no Stage must OMIT the stage key (not emit
+# ""), so the shared (.stage // "Buildable") default reads it as Buildable. jq's // only defaults on
+# null — if _flatten emitted stage="" a legacy board would surface ZERO Buildable items (silent blind).
+printf '%s' "$ALL" | jq -e '.items[] | select(.content.number==209) | has("stage") | not' >/dev/null \
+  || fail "an absent-Stage item (#209) must OMIT the stage key, not emit '' — else (.stage // \"Buildable\") can't default it (legacy 4-field blind)"
 
 # ============================================================================================
 # 2. the skill's read patterns (capture-then-jq over the helper output) see cross-page items
 # ============================================================================================
-# build-lane query: Status=Todo AND (stage // "Buildable")=="Buildable" -> #201,#202,#203,#205,#207.
+# build-lane query: Status=Todo AND (stage // "Buildable")=="Buildable" -> 201,202,203,205,207,209,210.
 # #205 ([operator-action]) IS Buildable/Todo so the raw query returns it — the operator-action and
-# blocked-by exclusions happen in the DRAIN predicate (section 3), not in the skill's query op.
+# blocked-by exclusions happen in the DRAIN predicate (section 3), not in the skill's query op. #209
+# (no Stage) is included via the legacy (.stage // "Buildable") default — red if _flatten emits stage="".
 buildable_todo="$(printf '%s' "$ALL" | jq -r '.items[] | select(.status=="Todo") | select((.stage // "Buildable")=="Buildable") | .content.number' | sort -n | tr '\n' ' ')"
-[ "$buildable_todo" = "201 202 203 205 207 " ] \
-  || fail "the build-lane query must see ALL Buildable/Todo across pages (got '$buildable_todo')"
+[ "$buildable_todo" = "201 202 203 205 207 209 210 " ] \
+  || fail "the build-lane query must see ALL Buildable/Todo across pages incl. the legacy-default #209 (got '$buildable_todo')"
 # considerations query
 cons="$(printf '%s' "$ALL" | jq -r '.items[] | select((.stage // "Buildable")=="Consideration") | .content.number')"
 [ "$cons" = "204" ] \
@@ -149,17 +158,25 @@ printf '%s' "$ALL" | jq -e '.items[] | select(.content.number==207)' >/dev/null 
 DR="$(PATH="$WORK/bin:$PATH" python3 "$DRAIN" --backend github --project 7 --owner tester --repo "$WORK" --width 2>/dev/null)" \
   || fail "github drain exited non-zero against the multi-page stub"
 elig="$(printf '%s' "$DR" | grep '^eligible:' | sed 's/^eligible: //')"
-[ "$elig" = "201 203 207" ] \
-  || fail "github drain eligible set must be the full cross-page frontier '201 203 207' (got '$elig')"
+[ "$elig" = "201 203 207 209" ] \
+  || fail "github drain eligible set must be the full cross-page frontier '201 203 207 209' (got '$elig')"
 printf '%s' "$DR" | grep -qx "drain: continue" \
   || fail "github drain must report 'continue' (the ready frontier sits on page 2)"
-printf '%s' "$DR" | grep -qx "width: 3" \
-  || fail "github drain width must be 3 (got: $(printf '%s' "$DR" | tr '\n' '|'))"
+printf '%s' "$DR" | grep -qx "width: 4" \
+  || fail "github drain width must be 4 (got: $(printf '%s' "$DR" | tr '\n' '|'))"
 # blocked-aware (red-when-broken): #202 (blocker #300 NOT Done) excluded; #203 (blocker #101 Done) included
 printf '%s' "$DR" | grep -qE '(^| )202( |$)' \
   && fail "#202 must NOT be eligible — its blocker #300 is not Done (blocked-aware predicate)"
 printf '%s' "$DR" | grep -qE '(^| )203( |$)' \
   || fail "#203 MUST be eligible — its only blocker #101 is Done on page 1 (cross-page resolution)"
+# legacy default (red-when-broken on the python side): #209 (no Stage) MUST be eligible via (stage or "Buildable")
+printf '%s' "$DR" | grep -qE '(^| )209( |$)' \
+  || fail "#209 MUST be eligible — an absent Stage reads as Buildable (legacy 4-field default)"
+# per-issue FAIL-CLOSED (red-when-broken): #210's blocked_by lookup FAILED → fail-closed [0] sentinel
+# excludes it (never claim work whose blockers we couldn't verify). Flip [0]→[] (fail-open) and #210
+# wrongly becomes eligible — this assertion catches it.
+printf '%s' "$DR" | grep -qE '(^| )210( |$)' \
+  && fail "#210 must NOT be eligible — its blocked_by lookup FAILED, so the fail-closed [0] sentinel must exclude it"
 
 # ============================================================================================
 # 4. the PURE predicate over a >30-item fixture whose frontier sits past index 30
@@ -190,4 +207,4 @@ PATH="$WORK/binfail:$PATH" python3 "$BOARD" --owner tester --project 7 --repo "$
 PATH="$WORK/binfail:$PATH" python3 "$DRAIN" --backend github --project 7 --owner tester --repo "$WORK" >/dev/null 2>&1; rc=$?
 [ "$rc" = "2" ] || fail "an unreadable github board must exit 2 fail-closed (got $rc), never a hollow drain: complete"
 
-echo "PASS: idc_gh_board.py paginates the whole board (135/135 across 2 pages); skill read patterns + github drain see the cross-page frontier (201 203 207, blocked-aware, control-char safe); pure predicate green past index 30; fail-closed on unreadable board"
+echo "PASS: idc_gh_board.py paginates the whole board (135/135 across 2 pages); skill read patterns + github drain see the cross-page frontier (201 203 207 209, blocked-aware, control-char safe, legacy absent-Stage default, per-issue fail-closed on #210); pure predicate green past index 30; fail-closed on unreadable board"

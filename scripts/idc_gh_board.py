@@ -155,7 +155,12 @@ def fetch_items(owner, project_number, repo="."):
             raise BoardReadError("graphql response missing items.nodes — refusing a partial board")
         for n in nodes:
             items.append(_flatten(n))
-        page = conn.get("pageInfo") or {}
+        page = conn.get("pageInfo")
+        if not isinstance(page, dict):
+            # A connection always returns pageInfo when requested; a missing/non-dict one means we
+            # can't tell whether more pages remain → fail CLOSED rather than treat this as the final
+            # page (which could silently truncate). Completes the malformed-shape closure.
+            raise BoardReadError("graphql response missing items.pageInfo — refusing a partial board")
         if page.get("hasNextPage"):
             cursor = page.get("endCursor")
             if not cursor:

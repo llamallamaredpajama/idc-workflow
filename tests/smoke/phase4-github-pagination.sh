@@ -250,7 +250,7 @@ PATH="$WORK/binfail:$PATH" python3 "$DRAIN" --backend github --project 7 --owner
 [ "$rc" = "2" ] || fail "an unreadable github board must exit 2 fail-closed (got $rc), never a hollow drain: complete"
 # MALFORMED/anomalous graphql (gh exits 0 but the board shape is absent / carries errors) MUST
 # fail-closed exit 2 — never coerce to an empty board, the silent "blind drain" this reader kills.
-for bad in '{"errors":[{"message":"boom"}]}' '{"data":{"node":null}}' '{"data":{"node":{"items":{"pageInfo":{"hasNextPage":false}}}}}'; do
+for bad in '{"errors":[{"message":"boom"}]}' '{"data":{"node":null}}' '{"data":{"node":{"items":{"pageInfo":{"hasNextPage":false}}}}}' '{"data":{"node":{"items":{"nodes":[]}}}}'; do
   BADGQL="$bad" PATH="$WORK/binbad:$PATH" python3 "$BOARD" --owner tester --project 7 --repo "$WORK" >/dev/null 2>&1; rc=$?
   [ "$rc" = "2" ] || fail "a malformed graphql response must fail-closed exit 2, never an empty board: $bad (got $rc)"
 done

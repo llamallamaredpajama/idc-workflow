@@ -43,6 +43,7 @@ Forbidden writes/actions:
 - Run your **own `/fullauto-goal` loop over ALL review findings** (~3 attempts per finding), re-invoking review until the **verdict** is `PASS` / `PASS-WITH-NITS` **and** the issue's real tests are green.
 - Merge **ONLY** on that green verdict: `gh pr merge <PR-NUMBER> --squash --delete-branch` (a direct blocking merge, never `--auto`).
 - At the attempt ceiling, or when a finding is an upstream/plan problem, **RECIRCULATE** (`/idc:recirculate`) instead of papering over it.
+- **Deferrals are fail-closed.** Any `blocks_goal` deferral that survives the loop is **converted into a tracked, dependency-linked `Stage=Recirculation` ticket** (the five-field discovered-scope body — `Discovered`/`Area`/`Suggested-scope`/`Provenance`/`PRD-TRD-impact`, **non-Buildable** so it is never scooped as build work) that **blocks the parent feature's Done**, and serialized onto the issue as an `<!-- idc-deferral: {"kind":…,"what":…,"blocks_goal":…,"suggested_issue":"#<n>"} -->` comment marker via `idc:idc-tracker-adapter` (`comment`) — **never** an unstaged or `Stage=Buildable` item, never a prose footnote. The marker feeds the deterministic wave-close acceptance check.
 - On a clean merge, `close` the issue to `Status=Done` via `idc:idc-tracker-adapter`.
 - Produce final handoff with the PR, SHA, tests, review verdict, and next safe item.
 

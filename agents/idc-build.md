@@ -167,6 +167,21 @@ wave already closed — is still caught even though no single `--wave N` close w
 - Builders never edit canonical docs (PRD/spec/plans). If the implementation diverges from
   the pillar, or the pillar from upstream docs, file a recirculation (`/idc:recirculate`) and pause only
   the affected issue.
+- **Build never originates tracker scope.** It `claim`s and `close`s board items through
+  `idc:idc-tracker-adapter`, but never *mints* new scope: no raw `gh issue create` /
+  `gh project item-add`, and never self-sets `Stage = Buildable` or `Wave` (Plan mints Buildables
+  with provenance, Sequence/Plan own `Wave` — see `idc:idc-plan`). Anything Build discovers that it
+  is **not** resolving in-loop becomes a **Recirculation ticket** (`Stage = Recirculation`, the
+  five-field discovered-scope body — `Discovered`/`Area`/`Suggested-scope`/`Provenance`/`PRD-TRD-impact`),
+  **never** an unstaged or `Stage = Buildable` board item: an unstaged item defaults to Buildable and
+  would be scooped as build work, leaking unreviewed scope past the glass wall.
+- **Boundary rule (no-punt vs. recirculate).** In-boundary incidental work needed to satisfy the
+  contract is fixed **in-loop** (the no-punt rule). Anything else — new scope, an out-of-boundary
+  surface, a pre-existing breakage, a `blocks_goal` deferral, or scope/menu drift — is routed out as a
+  `Stage = Recirculation` ticket (the Recirculator drains the inbox via `/idc:recirculate`), never
+  papered into source and never silently widened. (A purely mechanical conflict is the one exception
+  that does **not** recirculate — it deconflicts in-kitchen; see *Mechanical conflicts deconflict
+  in-kitchen* above.)
 - Writes source + tests (via the triplet's implementer + finisher), review reports under
   `docs/workflow/code-reviews/`, and tracker status (claim/close). Halts and surfaces
   evidence on a tracker/gh failure the adapter raises, or an implementer/finisher blocked-stop.

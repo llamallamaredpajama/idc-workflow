@@ -55,7 +55,12 @@ review verdict exists.
    surface, a pre-existing breakage) is handed off as a **structured deferral object**
    `{kind: deferred|out-of-boundary|pre-existing-breakage, what, blocks_goal: bool, suggested_issue}`
    — never an unparsed prose footnote — so the reviewer/finisher and the wave-close acceptance
-   check can route it.
+   check can route it. For a fix it **recommends but is not doing in-loop** (an adjacent improvement,
+   a non-blocking discovery), it emits a deterministic **discovery marker** —
+   `<!-- idc-discovery: {"what":"...","area":"...","suggested_scope":"...","origin":"#<n>|<role>"} -->`
+   (modeled on the `<!-- idc-deferral: {…} -->` marker) — so the SessionEnd recirculation sweep files
+   it as a `Stage = Recirculation` ticket rather than letting the recommendation evaporate or leak as
+   silently-widened scope.
 5. **Scope/menu drift or inert increment → recirculation; a mechanical conflict stays in-kitchen.**
    A **scope/menu defect** — the implementation diverges from the pillar, the pillar diverges from
    upstream docs, an **undeclared real dependency that changes the plan** surfaces, **or the
@@ -65,11 +70,21 @@ review verdict exists.
    drift in source. A purely **mechanical** conflict (an overlapping-file / git-merge / worktree
    clash with a peer area) is **not** a recirculation — it deconflicts **in-kitchen** via Build's
    build-time mechanical-deconfliction step (the sous-chef resolves it in-place across its disjoint
-   sub-surfaces), never routed through the Recirculator.
+   sub-surfaces), never routed through the Recirculator. **Boundary rule:** only **in-boundary**
+   incidental work is fixed in-loop (the no-punt rule, step 2); the recirculation it files for
+   everything else — new scope, an out-of-boundary surface, a pre-existing breakage, a
+   `blocks_goal:true` deferral, or scope/menu drift — is always a **`Stage = Recirculation` ticket**
+   (the five-field discovered-scope body: `Discovered`/`Area`/`Suggested-scope`/`Provenance`/`PRD-TRD-impact`),
+   **never** a raw `gh issue create` and **never** an unstaged or `Stage = Buildable` board item (an
+   unstaged item defaults to Buildable and would be scooped as build work, leaking unreviewed scope
+   past the glass wall).
 
 ## Authority boundaries
 
 - Writes source + tests within the issue's BOUNDARIES, and the issue's tracker status via
   the adapter. Never edits the PRD/spec/plans (canonical docs), never reorders the board,
-  never applies review fixes and never merges (the finisher does both). Halts and surfaces
+  never applies review fixes and never merges (the finisher does both). **Never originates
+  tracker scope** — no raw `gh issue create` / `gh project item-add`, and never self-sets
+  `Stage = Buildable` or `Wave` (Plan/Sequence own scope; discovered scope rides a
+  `Stage = Recirculation` ticket via the adapter). Halts and surfaces
   evidence at the attempt ceiling or on a genuine blocker named in the contract's BLOCKED-STOP.

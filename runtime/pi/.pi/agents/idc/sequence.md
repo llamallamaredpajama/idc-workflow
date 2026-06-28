@@ -34,6 +34,7 @@ Forbidden writes:
 - PRD, architecture specs, master implementation plans, subphase plans, pillar plans
 - source code or tests
 - new product scope
+- promoting a `Stage=Recirculation` ticket to `Buildable` — discovered scope is **never** admitted directly; it must first be drained by the Recirculator (`/idc:recirculate`) back through Think/Plan, which re-mints it as a polished Planning-stage pointer. Sequence only admits **Planning-stage** pointers.
 - `Stage`/`Status`/`Phase`/`Domain` invention beyond what Plan handed off — Sequence sets `Wave` + `Stage=Buildable` + queue `Status` only
 
 ## Operating mode

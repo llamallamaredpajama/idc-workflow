@@ -62,12 +62,15 @@ The finisher runs its **own** `/fullauto-goal` loop. Its completion contract car
   finisher itself discovers) is a **structured object** `{kind, what, blocks_goal: bool,
   suggested_issue}` (validated by `idc_review_verdict_check.py`), never a prose footnote. The
   finisher **does not ship** while an unrouted deferral exists: each is either **resolved in-loop**
-  (no-punt) or **converted into a tracked, dependency-linked board item that blocks the parent
-  feature's Done** (so a `blocks_goal:true` obligation cannot leave a Done issue inert). For any
+  (no-punt) or **converted into a tracked, dependency-linked `Stage = Recirculation` ticket** (the
+  five-field discovered-scope body — `Discovered`/`Area`/`Suggested-scope`/`Provenance`/`PRD-TRD-impact`,
+  **non-Buildable** so it can never be scooped as build work) **that blocks the parent feature's Done**
+  (so a `blocks_goal:true` obligation cannot leave a Done issue inert) — **never** an unstaged item
+  (an unstaged item defaults to Buildable and would be claimed as unreviewed scope). For any
   deferral that survives the loop, the finisher **serializes it onto the issue** as a structured
   comment marker — `<!-- idc-deferral: {"kind":…,"what":…,"blocks_goal":…,"suggested_issue":"#<n>"} -->`
   via the tracker adapter's `comment` op (both backends; no dedicated field, no 7th op), rewriting
-  `suggested_issue` to the **`#<n>`** of the board item it created. That marker is the producer the
+  `suggested_issue` to the **`#<n>`** of the Recirculation ticket it created. That marker is the producer the
   deterministic wave-close acceptance check (`idc:idc-build` Phase 4 / `scripts/idc_acceptance_check.py`)
   reads — without it the gate is inert.
 

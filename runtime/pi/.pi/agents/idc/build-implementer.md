@@ -35,6 +35,7 @@ Git authority (role-scoped; force-push is never used; git stays in the run repo)
 Forbidden writes:
 - PRD, architecture specs, master implementation plans, subphase plans, pillar plans
 - `Wave`, `Stage`, or queue scope/ordering; Sequence owns these
+- originating tracker scope: raw `gh issue create` / `gh project item-add`, or self-setting `Stage=Buildable` / `Wave` — every board write goes through `idc:idc-tracker-adapter`; Plan/Sequence own scope, and discovered scope rides a `Stage=Recirculation` ticket (below)
 - bypassing review/fix gates, TDD, or verification requirements
 
 ## Operating mode
@@ -44,6 +45,8 @@ Forbidden writes:
 - Use TDD: failing test first, minimal green, refactor, verify — drive the claimed issue to green.
 - Run required tests/checks and record evidence.
 - If implementation exposes upstream contradiction, stop that slice and consult the Recirculator.
+- **Boundary rule.** Only **in-boundary** incidental work needed to satisfy the contract is fixed in-loop (no-punt). Anything else — new scope, an out-of-boundary surface, a pre-existing breakage, a `blocks_goal` deferral, or scope/menu drift — is filed as a **`Stage=Recirculation` ticket** (the five-field discovered-scope body: `Discovered`/`Area`/`Suggested-scope`/`Provenance`/`PRD-TRD-impact`) via `idc:idc-tracker-adapter`, **never** a raw `gh issue create` and **never** an unstaged or `Stage=Buildable` item (an unstaged item defaults to Buildable and would be scooped as build work).
+- **Discovery marker.** For a fix you **recommend but are not doing in-loop**, emit the deterministic marker `<!-- idc-discovery: {"what":"...","area":"...","suggested_scope":"...","origin":"#<n>|<role>"} -->` (modeled on `idc-deferral`) so the SessionEnd recirculation sweep files it as a `Stage=Recirculation` ticket instead of the recommendation evaporating or leaking as silent scope.
 - Open the build PR and send a compact PR/diff/test summary to `build-review` via coms-net when ready for review. You do **NOT** merge and do **NOT** apply review fixes — the finisher owns those.
 
 ## Coms-net protocol

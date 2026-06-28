@@ -2,6 +2,49 @@
 
 All notable changes to the IDC Workflow plugin are documented in this file.
 
+## 3.1.4 — 2026-06-28
+
+Fix: the GitHub backend read the project board with `gh project item-list` **without `--limit`**, so
+it silently truncated to gh's 30-item default. On a board with more than 30 items whose front had
+filled with `Done` work, `/idc:autorun` saw a non-representative slice and falsely reported the pipe
+drained ("Nothing pending") while dozens of `Stage = Buildable, Status = Todo` issues sat past item
+30. A latent pagination bug exposed by board growth, not a regression in any one release. This
+release makes **every** GitHub board read paginate the whole board, and hardens the read / drain /
+write paths against the silent-failure class the bug belonged to.
+
+- **True cursor pagination for every GitHub board read.** A shared `idc_gh_board.py` reader pages
+  `items(first:100, after:cursor)` until `hasNextPage` is false and returns the complete board
+  (ASCII-escaped, control-char-safe). Every reader — the tracker-github `query`/`itemid` ops, the
+  recirculation sweep's three reads, `/idc:doctor` Row 9, and `/idc:uninstall`'s in-flight count —
+  routes through it. No `--limit N` ceiling remains anywhere (a fixed limit would just move the
+  truncation threshold).
+- **Deterministic GitHub drain predicate.** `idc_autorun_drain.py --backend github` computes
+  build-lane eligibility from the fully-paged board using the **same** predicate as the filesystem
+  backend (`Status = Todo`, empty/`Buildable` Stage, not `[operator-action]`, all `blocked_by` Done).
+  Autorun no longer improvises a board query in prose; `agents/idc-autorun.md` + `commands/autorun.md`
+  mandate the helper.
+- **Fail-closed wherever a partial / blind read could masquerade as "done".** The paginator raises on
+  a GraphQL `errors` payload, a missing `node.items`/`nodes`/`pageInfo`, a non-bool/missing
+  `hasNextPage`, `hasNextPage=true` with no `endCursor`, and `MAX_PAGES` exhaustion. The drain verdict
+  emits `drain: unknown` (exit 2) — never a hollow `drain: complete` — when no work is eligible but any
+  candidate's `blocked_by` could not be verified. `/idc:doctor` Row 9 emits an explicit `SKIP` on an
+  unreadable board, and `/idc:uninstall` reports the in-flight count as `unknown` (requiring explicit
+  confirmation) rather than a misleading `0`.
+- **GitHub `setField` `--project-id` bug fixed (separate, pre-existing).** The tracker-github
+  `setField` op — and everything that wraps it (claim / move / block / close / retire) — passed the
+  integer `project_number` to `gh project item-edit --project-id`, which current `gh` rejects (it
+  requires the project **node id**). The op now resolves and passes the `PVT_…` node id, mirroring the
+  recirculation sweep. (Agents had been silently working around this at runtime; the skill is now
+  correct as written.)
+- **The recirculation sweep reports success honestly.** Filing a Recirculation ticket counts/logs as
+  "filed" only on actual `gh` success; a board-read failure surfaces a degraded state instead of
+  silently risking a duplicate; a failed Wave clear is surfaced rather than logged as cleared.
+- Regression coverage: a hermetic smoke fixture (a 135-item, multi-page board with the eligible
+  frontier past item 30) proves the read returns the whole board and goes red if pagination is
+  removed; the GitHub drain, each fail-closed paginator branch, and the recirculation success-gating
+  carry red-when-broken tests. Verified end-to-end against a seeded 48-item GitHub sandbox board (42
+  eligible seen vs ≤25 from a truncated read) and a live `setField` round-trip via the node id.
+
 ## 3.1.3 — 2026-06-28
 
 Patch: `/idc:update` now *applies* the `Recirculation` Stage-option fix itself, instead of only

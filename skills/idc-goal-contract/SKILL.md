@@ -38,6 +38,22 @@ a complete contract, and make "done" runnable.
 Then the glass-wall footer: `Dependencies:` (native blocked-by) and `Trace:` (pillar file ·
 consideration · PRD section).
 
+## Provenance marker (github backend only)
+
+On the **github** backend, the minted issue body ends with a machine-readable **provenance
+marker** — an HTML comment carrying the exact pillar `id` Plan just wrote into the phase matrix,
+so a downstream sweep matches the issue to its matrix entry by **exact key** (no fuzzy `Trace:`
+matching):
+
+```
+<!-- idc-provenance: {"matrix":"<phase-tag>-matrix.yaml","pillar":"<id>"} -->
+```
+
+`<id>` is the same `pillars[].id` value Plan authored in
+`docs/workflow/pillar-matrices/<phase-tag>-matrix.yaml` — written into both places in the same
+run, so the link is identical by construction. Modeled on the `<!-- idc-deferral: {…} -->`
+marker. Filesystem-backed trackers have no issue bodies, so the marker is **github-only**.
+
 ## Complexity-adaptive
 
 Scale the contract to the pillar. A trivial pillar gets a tight one-screen contract; a

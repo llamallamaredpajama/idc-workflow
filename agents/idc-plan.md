@@ -59,7 +59,13 @@ contradiction that can't be deconflicted is parked and surfaced for a recirculat
    (`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_schema_check.py" <body>`); fix until PASS.
 2. Create issues and set `Status`/`Wave`/`Phase`/`Domain` + native blocked-by through
    `idc:idc-tracker-adapter`. All issues flow as `Todo` — **there is no gate in Plan**; the
-   requirements were already admitted at the end of Think.
+   requirements were already admitted at the end of Think. On the **github** backend, stamp each
+   Buildable issue body with the provenance marker
+   `<!-- idc-provenance: {"matrix":"<phase-tag>-matrix.yaml","pillar":"<id>"} -->`
+   (`idc:idc-goal-contract`), carrying the **exact** `pillars[].id` from the matrix entry just
+   authored in Phase 4 (the same value written to the matrix YAML, so the link is deterministic at
+   source — no fuzzy `Trace:` matching downstream). Filesystem trackers have no issue bodies, so
+   the stamp is github-only.
 3. Advance the consideration pointer (`Consideration → Planning`, retired as buildable issues
    land); open the planning PR whose **body is the audit trail** (what was planned, the matrix,
    the trace) and **automerge when green, deleting the merged branch as part of the merge**:

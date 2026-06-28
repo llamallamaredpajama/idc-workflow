@@ -59,6 +59,23 @@ buildables_legacy="$(run query --stage Buildable)"
 echo "$buildables_legacy" | grep -qw "$legacy" \
   || fail "Stage=Buildable query must INCLUDE a legacy empty-Stage issue $legacy (empty Stage reads as buildable) (got: '$buildables_legacy')"
 
+# ---- (a4) Recirculation Stage — the inbox is BUILD-EXCLUDED: a Stage=Recirculation item (scope
+#          discovered mid-build, drained by /idc:recirculate) is never returned by --stage Buildable
+#          and is never eligible build work (the glass wall) --------------------------------------
+recirc="$(run create --title 'recirc: discovered mid-build scope' \
+            --stage Recirculation --phase 'Phase 1' --domain ui)" \
+  || fail "create Stage=Recirculation item failed (no Recirculation stage support yet?)"
+[ "$(run show --num "$recirc" --field Stage)" = "Recirculation" ] \
+  || fail "recirc item Stage should be Recirculation, got '$(run show --num "$recirc" --field Stage)'"
+buildables_recirc="$(run query --stage Buildable)"
+echo "$buildables_recirc" | grep -qw "$recirc" \
+  && fail "Stage=Buildable query must EXCLUDE the Recirculation inbox item $recirc (got: '$buildables_recirc')"
+if [ -f "$DRAIN" ]; then
+  elig_recirc="$(python3 "$DRAIN" --tracker "$T")" || fail "drain helper errored"
+  echo "$elig_recirc" | grep -qE "(^| )$recirc( |$)" \
+    && fail "a Stage=Recirculation item $recirc must NEVER be eligible build work — the glass wall (got: '$elig_recirc')"
+fi
+
 # ---- (b) schema check: a pointer's shape is DISTINCT from a full buildable goal-contract ------
 # A valid pointer: repo-file reference + Stage/Phase/Domain, with NO duplicated canonical content.
 cat > "$WORK/pointer.md" <<'MD'
@@ -104,4 +121,40 @@ Domain: ui
 MD
 python3 "$SCHEMA" "$WORK/pointer-bad.md" >/dev/null 2>&1 && fail "a pointer with no repo-file reference must be rejected"
 
-echo "PASS: Stage field (4->5) query excludes pointers + schema-check pointer-shape distinctness green"
+# ---- (c) Recirculation ticket schema (C2): the inbox shape is DISTINCT from pointer + contract --
+# A valid Recirculation ticket carries the five required scope fields and NO goal-contract.
+cat > "$WORK/recirc.md" <<'MD'
+Stage: Recirculation
+Discovered: build needs a shared rate-limit middleware the contract did not scope
+Area: src/api/middleware
+Suggested-scope: extract a reusable limiter + wire the two new routes through it
+Provenance: discovered mid-build by idc-finisher on #42
+PRD-TRD-impact: unknown
+MD
+python3 "$SCHEMA" "$WORK/recirc.md" >/dev/null || fail "a valid Recirculation ticket was rejected"
+
+# A Recirculation ticket MISSING a required field (no Provenance) is REJECTED.
+cat > "$WORK/recirc-missing.md" <<'MD'
+Stage: Recirculation
+Discovered: build needs a shared rate-limit middleware the contract did not scope
+Area: src/api/middleware
+Suggested-scope: extract a reusable limiter + wire the two new routes through it
+PRD-TRD-impact: unknown
+MD
+python3 "$SCHEMA" "$WORK/recirc-missing.md" >/dev/null 2>&1 \
+  && fail "a Recirculation ticket missing a required field (Provenance) must be rejected"
+
+# A Recirculation ticket carrying a goal-contract marker (GOAL:) is REJECTED (anti-goal-contract).
+cat > "$WORK/recirc-goal.md" <<'MD'
+Stage: Recirculation
+Discovered: build needs a shared rate-limit middleware the contract did not scope
+Area: src/api/middleware
+Suggested-scope: extract a reusable limiter + wire the two new routes through it
+Provenance: discovered mid-build by idc-finisher on #42
+PRD-TRD-impact: unknown
+GOAL: add a rate limiter
+MD
+python3 "$SCHEMA" "$WORK/recirc-goal.md" >/dev/null 2>&1 \
+  && fail "a Recirculation ticket carrying a GOAL: goal-contract marker must be rejected (anti-goal-contract)"
+
+echo "PASS: Stage field (4->5) query excludes pointers + Recirculation inbox build-excluded + schema-check pointer/recirculation distinctness green"

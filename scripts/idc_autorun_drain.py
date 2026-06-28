@@ -9,8 +9,10 @@ condition.
 
 Eligible build work = an issue that is:
   * `Status = Todo`,
-  * `Stage = Buildable` (or no Stage on a legacy 4-field repo) — an upstream pointer item
-    (`Stage = Consideration`/`Planning`) is never scooped as build work (the glass wall). A
+  * `Stage = Buildable` (or no Stage on a legacy 4-field repo) — claim ONLY Buildable; any
+    non-Buildable stage is build-excluded by construction (the glass wall). An upstream pointer
+    item (`Stage = Consideration`/`Planning`) and a `Stage = Recirculation` inbox item (scope
+    discovered mid-build, drained by `/idc:recirculate`) are never scooped as build work. A
     `Stage = Consideration` pointer is a consideration **pending admission behind its Think PR**
     (the one gate), so it must never be built past until the operator merges that PR,
   * NOT an operator-action gate issue (title starting with `[operator-action]`), and
@@ -106,8 +108,11 @@ def main():
     for it in sorted(issues, key=lambda x: x["number"]):
         if it.get("status") != "Todo":
             continue
-        if it.get("stage") in ("Consideration", "Planning"):
-            continue  # an upstream pointer item, not build work (the glass wall)
+        if (it.get("stage") or "Buildable") != "Buildable":
+            # Claim ONLY Stage=Buildable. Any non-Buildable stage (Consideration/Planning, or a
+            # Recirculation inbox item) is build-excluded by construction — the glass wall. An
+            # empty/missing Stage still reads as Buildable (the legacy 4-field default, preserved).
+            continue
         if str(it.get("title", "")).strip().startswith("[operator-action]"):
             continue  # the operator's gate issue, not build work
         if all(status_by_num.get(b) == "Done" for b in it.get("blocked_by", [])):

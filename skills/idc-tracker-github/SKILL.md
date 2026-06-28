@@ -12,7 +12,7 @@ and never decides routing. Its op surface mirrors the sibling filesystem backend
 
 The board carries exactly **five** custom fields and nothing else: `Status` (single-select:
 `Blocked | Todo | In Progress | Done`), `Stage` (single-select:
-`Consideration | Planning | Buildable` — the column-grouping field), `Wave` (single-select
+`Consideration | Planning | Buildable | Recirculation` — the column-grouping field), `Wave` (single-select
 `Wave N`), `Phase` (single-select `Phase N`), `Domain` (single-select). Field **node IDs**
 are cached in `tracker-config.yaml::field_ids`; option values are resolved **by name at call
 time** (never cached). Plus: native blocked-by dependency links, one `attempt:<n>` label
@@ -23,9 +23,15 @@ any outside agent from its body + the plain GitHub API.
 Upstream artifacts (considerations, in-flight plans, pillars) ride the board as lightweight
 **pointer items**: an issue carrying `Stage = Consideration`/`Planning`, a repo-file
 reference, and Phase/Domain — never a copy of canonical content (files stay the source of
-truth). Buildable issues carry `Stage = Buildable`, and Build queries `Stage = Buildable`, so
-an upstream pointer is never scooped (the glass wall). `Stage` is **additive** — existing
-4-field boards keep working until `/idc:init` (or `/idc:doctor`) provisions the field.
+truth). Scope discovered mid-build rides as a `Stage = Recirculation` inbox item (drained by
+`/idc:recirculate`). Buildable issues carry `Stage = Buildable`, and Build queries
+`Stage = Buildable`, so neither an upstream pointer nor a Recirculation item is ever scooped
+(the glass wall). `Stage` is **additive** — existing 4-field boards keep working until
+`/idc:init` (or `/idc:doctor`) provisions the field. Adding `Recirculation` to a board that
+already has a `Stage` field is an **add-one-option migration**: append the new option to the
+existing single-select option set (existing options keep their node ids, GitHub appends the
+new one) — **never replace the option set**, which re-IDs every option and wipes existing item
+values (see the provisioning caveat below).
 
 ## Preamble — resolve config once per op
 

@@ -30,12 +30,18 @@ matrix check parses:
 ```yaml
 phase: Phase <N>
 pillars:
-  - id: <pillar-trace-key>
+  - id: <pillar-trace-key>          # github backend: stamped VERBATIM onto the matching Buildable
+                                    #   issue at mint as <!-- idc-provenance {"matrix":…,"pillar":<id>} -->
+                                    #   so a downstream sweep matches issue↔matrix by EXACT key
     wave: <N>
     domain: <domain>
     surfaces: [<owned path>, ...]   # becomes the issue BOUNDARIES touch-set
     blocks_on: [<other-id>, ...]    # becomes native blocked-by links
 ```
+
+Each pillar's `id` is the durable provenance key: Plan carries the **exact same** `id` to the
+issue-mint step (`idc:idc-goal-contract` stamps it as the github-only `idc-provenance` marker),
+so the issue↔matrix link is identical by construction — no fuzzy `Trace:` matching.
 
 Assign waves so that **every pillar in a wave owns disjoint surfaces** and all `blocks_on`
 upstreams sit in earlier waves.

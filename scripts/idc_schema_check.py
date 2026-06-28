@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 """idc_schema_check.py — the mechanical issue-body schema check (`WORKFLOW.md §3.2`).
 
-Plan runs this on every issue body before board admission. The board carries two shapes,
+Plan runs this on every issue body before board admission. The board carries three shapes,
 told apart by the `Stage:` field:
 
 * a **buildable goal-contract** (`Stage: Buildable`, or no Stage on a legacy 4-field repo) —
   the glass-wall contract a builder works cold, so it must carry the full 6-element goal
-  contract plus declared boundaries, dependencies, and trace; and
+  contract plus declared boundaries, dependencies, and trace;
 * an upstream **pointer item** (`Stage: Consideration` or `Stage: Planning`) — a lightweight
   reference to a repo file (consideration / in-flight plan / pillar) carrying only a
   repo-file reference + Stage/Phase/Domain. A pointer MUST NOT duplicate canonical file
-  content — it is a reference + labels, never a goal-contract.
+  content — it is a reference + labels, never a goal-contract; and
+* a **recirculation ticket** (`Stage: Recirculation`) — the non-Buildable inbox for scope
+  discovered mid-build (drained by /idc:recirculate). It carries five required scope fields
+  (Discovered / Area / Suggested-scope / Provenance / PRD-TRD-impact) and, like a pointer,
+  MUST NOT carry a goal-contract.
 
 This is a lean guardrail — it checks structure and non-emptiness, not prose quality.
 
@@ -35,11 +39,18 @@ CONTRACT_REQUIRED = [
 
 POINTER_STAGES = ("Consideration", "Planning")
 BUILDABLE_STAGE = "Buildable"
-STAGES = POINTER_STAGES + (BUILDABLE_STAGE,)
+# Recirculation is pointer-class (non-Buildable, never a goal-contract) but has its OWN required
+# fields, so it is NOT in POINTER_STAGES — it dispatches to check_recirculation, not check_pointer.
+RECIRC_STAGE = "Recirculation"
+STAGES = POINTER_STAGES + (BUILDABLE_STAGE, RECIRC_STAGE)
 
-# The load-bearing goal-contract markers. Their presence on a pointer means it is duplicating
-# canonical file content — a pointer is a reference + labels only.
+# The load-bearing goal-contract markers. Their presence on a pointer or a recirculation ticket
+# means it is duplicating canonical content — both are references/scope notes, never a contract.
 POINTER_FORBIDDEN = ("GOAL", "VERIFICATION SURFACE")
+
+# A Recirculation ticket records scope discovered mid-build (the non-Buildable inbox drained by
+# /idc:recirculate). Each field must be present AND non-empty; it carries no goal-contract.
+RECIRC_REQUIRED = ("Discovered", "Area", "Suggested-scope", "Provenance", "PRD-TRD-impact")
 
 
 def value_after(text, label):
@@ -54,6 +65,8 @@ def check(text):
         return [f"unknown `Stage:` value '{stage}' (one of {', '.join(STAGES)})"]
     if stage in POINTER_STAGES:
         return check_pointer(text)
+    if stage == RECIRC_STAGE:
+        return check_recirculation(text)
     return check_contract(text)
 
 
@@ -70,6 +83,25 @@ def check_pointer(text):
             problems.append(
                 f"pointer must not carry `{label}:` — a pointer is a reference + labels only, "
                 "never a full goal-contract (that would duplicate canonical file content)")
+    return problems
+
+
+def check_recirculation(text):
+    """A Recirculation ticket records scope discovered mid-build — never a goal-contract.
+
+    It is pointer-class (non-Buildable, drained by /idc:recirculate) but carries its own five
+    scope fields, each required AND non-empty; like a pointer it is REJECTED if it duplicates a
+    goal-contract (GOAL / VERIFICATION SURFACE)."""
+    problems = []
+    for label in RECIRC_REQUIRED:
+        if not value_after(text, label):
+            problems.append(
+                f"recirculation ticket missing or empty `{label}:` (a non-empty value is required)")
+    for label in POINTER_FORBIDDEN:
+        if re.search(rf"^{re.escape(label)}:", text, re.M):
+            problems.append(
+                f"recirculation ticket must not carry `{label}:` — it records discovered scope, "
+                "never a full goal-contract (Plan authors the contract once the scope is admitted)")
     return problems
 
 

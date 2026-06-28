@@ -13,9 +13,11 @@ re-rendered beneath it on every write for humans. Standard library only.
 Six core ops (createTicket/setField/link/move/query/comment) + convenience
 (init/claim/block/close/show). Five fields: Status, Wave, Phase, Domain, Stage. Status is
 one of Blocked | Todo | In Progress | Done; Stage is the column-grouping field, one of
-Consideration | Planning | Buildable (upstream pointer items ride Consideration/Planning,
-buildable issues ride Buildable). Dependencies are native blocked-by; claims are a Status
-flip + a comment naming the agent; per-issue fix attempts live on `attempt`.
+Consideration | Planning | Buildable | Recirculation (upstream pointer items ride
+Consideration/Planning, buildable issues ride Buildable, and Recirculation is the non-Buildable
+inbox for scope discovered mid-build — drained by /idc:recirculate, never claimed as build work).
+Dependencies are native blocked-by; claims are a Status flip + a comment naming the agent;
+per-issue fix attempts live on `attempt`.
 """
 import argparse
 import fcntl
@@ -29,7 +31,7 @@ import uuid
 from contextlib import contextmanager
 
 STATUSES = ("Blocked", "Todo", "In Progress", "Done")
-STAGES = ("Consideration", "Planning", "Buildable")
+STAGES = ("Consideration", "Planning", "Buildable", "Recirculation")
 FIELDS = ("Status", "Wave", "Phase", "Domain", "Stage")
 BEGIN = "<!-- idc-tracker-state:begin -->"
 END = "<!-- idc-tracker-state:end -->"

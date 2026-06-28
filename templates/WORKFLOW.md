@@ -100,7 +100,7 @@ v2 board; first-class) and `filesystem` (a root `TRACKER.md`; zero external setu
 | Field | Values | Meaning |
 |---|---|---|
 | `Status` | `Blocked` / `Todo` / `In Progress` / `Done` | Where the issue sits in the queue. |
-| `Stage` | `Consideration` / `Planning` / `Buildable` | Pipeline column: `Consideration` = an open Think PR / **pending admission** at the end-of-Think gate (§2); `Planning` = an admitted idea being decomposed; `Buildable` = a workable issue. Upstream `Consideration`/`Planning` items are pointers; the board's one-stop to-do index. |
+| `Stage` | `Consideration` / `Planning` / `Buildable` / `Recirculation` | Pipeline column: `Consideration` = an open Think PR / **pending admission** at the end-of-Think gate (§2); `Planning` = an admitted idea being decomposed; `Buildable` = a workable issue; `Recirculation` = the non-Buildable inbox for scope **discovered mid-build** (drained by `/idc:recirculate`, never claimed as build work). Upstream `Consideration`/`Planning` and `Recirculation` items are pointers; the board's one-stop to-do index. |
 | `Wave` | `Wave N` | Parallel-execution wave (matrix-assigned by Plan). |
 | `Phase` | `Phase N` | Master-plan phase trace. |
 | `Domain` | single-select | Master-plan domain trace. |
@@ -117,7 +117,10 @@ item is workable cold by any outside agent from its body + the plain GitHub API.
 `Stage` is the column-grouping field and is **additive**: a repo provisioned before it
 existed keeps working as a 4-field board (an empty `Stage` reads as buildable) until
 `/idc:init` provisions the field (`/idc:doctor` is read-only — it only *flags* a missing
-`Stage`, never provisions it) — no migration step, no data rewrite.
+`Stage`, never provisions it) — no migration step, no data rewrite. The values are likewise
+additive: adding `Recirculation` to a board that already has a `Stage` field **appends one
+option** to the existing single-select set (existing options keep their ids) — never a replace
+of the option set, which would re-ID every option and wipe item values.
 
 ### 3.2 The issue is a self-sufficient goal contract
 
@@ -140,17 +143,26 @@ Trace: pillar file · consideration · PRD section
 A **buildable** issue (`Stage = Buildable`) carries the full contract above. An upstream
 **pointer item** (`Stage = Consideration`/`Planning`) carries only a repo-file reference plus
 `Phase`/`Domain` — it indexes a consideration, in-flight plan, or pillar on the board without
-copying its content (files stay the source of truth). A pointer is **reference + labels
-only**: it never carries a goal-contract, and Build only ever claims `Stage = Buildable`
-issues — so a staged-upstream pointer is never scooped (the glass wall, §1.2). The schema
-check (`idc:idc-schema-check`) validates the two shapes apart.
+copying its content (files stay the source of truth). A **recirculation ticket**
+(`Stage = Recirculation`) carries scope discovered mid-build as five fields (`Discovered`,
+`Area`, `Suggested-scope`, `Provenance`, `PRD-TRD-impact`) — also reference-class, never a
+goal-contract. None of the three pointer/recirculation shapes carries a goal-contract, and Build
+only ever claims `Stage = Buildable` issues — so neither a staged-upstream pointer nor a
+Recirculation item is ever scooped (the glass wall, §1.2). The schema check
+(`idc:idc-schema-check`) validates the shapes apart.
 
 **Pointer-write authority** (additive to §4): a pointer is written by the stage that produces
 the artifact — **Think** writes the consideration pointer (`Stage = Consideration`), held
 **Blocked** behind its gate issue while the Think PR is open (pending admission); merging the
 Think PR (approval) unblocks it. **Plan** then decomposes the admitted consideration, advancing
 it (`Consideration → Planning`) and writing plan/pillar pointers, retiring them as buildable
-issues land (`Stage = Buildable`). No role writes a pointer for a stage it does not own.
+issues land (`Stage = Buildable`). **Build** (the implementer/finisher) writes the
+**Recirculation** ticket (`Stage = Recirculation`) when it discovers scope mid-build that is
+out of the current contract's bounds — it files the discovery as a non-Buildable inbox item and
+keeps going, never silently widening its own scope. The **Recirculator** (`/idc:recirculate`)
+drains that inbox: it triages each Recirculation ticket back through the gate (re-think /
+re-plan) and the ticket is **build-excluded** the whole time it sits in the inbox. No role
+writes a pointer for a stage it does not own.
 
 ### 3.3 Six operations
 

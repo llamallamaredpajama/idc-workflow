@@ -18,10 +18,12 @@ plus a re-rendered markdown **Board** table for humans. Every issue is `{number,
 stage, wave, phase, domain, blocked_by[], attempt, comments[]}` — the five v2 fields plus native
 blocked-by, the attempt counter, and claim comments. No other state exists.
 
-`Status ∈ { Blocked, Todo, In Progress, Done }`. `Stage ∈ { Consideration, Planning, Buildable }`
-is the column-grouping field: upstream pointer items ride `Consideration`/`Planning`, buildable
-issues ride `Buildable` (a legacy 4-field tracker leaves it empty — additive). There is no
-claim-state machine, lane, track, or bookend ceremony (v1, removed).
+`Status ∈ { Blocked, Todo, In Progress, Done }`.
+`Stage ∈ { Consideration, Planning, Buildable, Recirculation }` is the column-grouping field:
+upstream pointer items ride `Consideration`/`Planning`, buildable issues ride `Buildable`, and
+`Recirculation` is the non-Buildable inbox for scope discovered mid-build (drained by
+`/idc:recirculate`, never claimed as build work). A legacy 4-field tracker leaves Stage empty —
+additive. There is no claim-state machine, lane, track, or bookend ceremony (v1, removed).
 
 ## Executable helper
 

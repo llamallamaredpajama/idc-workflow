@@ -15,6 +15,7 @@ for t in \
   phase1-tracker-lease \
   phase1-init-doctor \
   phase1-doctor-board-lint \
+  phase1-recirc-sweep \
   phase1-brownfield-scan \
   phase1-settings-json \
   phase1-lint-rules \
@@ -31,6 +32,7 @@ for t in \
   phase4-ready-frontier \
   phase4-e2e-merge-train \
   phase4-recirc-deconflict \
+  phase4-recirc-inbox-drain \
   phase5-ripple \
   phase6-autorun \
   phase6-autorun-autonomy \

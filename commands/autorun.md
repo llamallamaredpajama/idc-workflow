@@ -15,8 +15,13 @@ It drains the pipe in one fixed top-to-bottom order — **recirculate** the Reci
 
 Traverse the pipe top-to-bottom and exit when nothing actionable remains:
 
-1. **Recirculation intake** — the top of the pipe. If any `Stage = Recirculation` inbox tickets
-   exist (scope discovered mid-build, filed back into the non-Buildable inbox), run
+1. **Recirculation intake** — the top of the pipe. **First run the rogue-sweep backstop:**
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_recirc_sweep.py" --repo "$PWD" --auto-correct` — the
+   same detective the SessionEnd hook runs, re-run here because a headless `-p` / `/loop` / crashed
+   session may not have fired SessionEnd (it is **cancelled** in headless `-p`); it re-stages any
+   rogue Buildable (bypassed Plan → no `idc-provenance` marker) into the Recirculation inbox and
+   clears its Wave, so the Build drain below can never claim it. Then, if any `Stage = Recirculation`
+   inbox tickets exist (scope discovered mid-build, filed back into the non-Buildable inbox), run
    `/idc:recirculate` with **no arguments** (its **board-scan inbox-drain** mode) to absorb each back
    into the canonical chain *before* any new build work. Not-gate-worthy scope is admitted as a
    `Stage = Consideration` item (which the Planning lane then decomposes this same run); a ticket

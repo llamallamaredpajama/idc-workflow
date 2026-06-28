@@ -33,6 +33,11 @@ loop below). Then the two lanes:
 ## The drain loop
 
 1. **Recirculation intake** — drain the `Stage = Recirculation` inbox first (the top of the pipe).
+   **First run the rogue-sweep backstop** `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_recirc_sweep.py" --repo "$PWD" --auto-correct`
+   — the same detective the SessionEnd hook runs, re-run here because a headless `-p` / `/loop` /
+   crashed session may not have fired SessionEnd (it is **cancelled** in headless `-p`); it re-stages
+   any rogue Buildable (bypassed Plan → no `idc-provenance` marker) into the Recirculation inbox and
+   clears its Wave so the Build lane can never claim it.
    Query the board for `Stage = Recirculation`, `Status = Todo` inbox tickets (scope discovered
    mid-build, filed as the non-Buildable inbox). If any exist, run `/idc:recirculate` with **no
    arguments** — its **board-scan inbox-drain** mode — to drain each through the recirculator's

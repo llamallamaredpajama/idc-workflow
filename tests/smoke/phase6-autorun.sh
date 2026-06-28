@@ -215,6 +215,13 @@ for f in "$AUTORUN" "$CMD"; do
     || fail "$bn Recirculation intake must run /idc:recirculate (Lane 5)"
   grep -qiE 'inbox-drain' "$f" \
     || fail "$bn Recirculation intake must invoke the board-scan inbox-drain mode (Lane 5)"
+  # (5b) rogue-sweep backstop: autorun must re-stage rogues ITSELF via idc_recirc_sweep.py
+  #      --auto-correct before draining — the SessionEnd hook is cancelled in headless -p / /loop, so
+  #      autorun cannot rely on it (e2e-caught). Red-when-broken: drop the sweep call from the intake.
+  grep -qE 'idc_recirc_sweep\.py' "$f" \
+    || fail "$bn Recirculation intake must run the idc_recirc_sweep.py rogue-sweep backstop — SessionEnd is unreliable headless (Lane 5/e2e)"
+  grep -qE -- '--auto-correct' "$f" \
+    || fail "$bn rogue-sweep backstop must run --auto-correct (re-stage rogues), not report-only (Lane 5/e2e)"
   # (6) drain allowlist alignment: Consideration/Planning/Recirculation are build-excluded (claims only Buildable)
   grep -qiE 'Consideration.*Planning.*Recirculation' "$f" \
     || fail "$bn build-exclusion must name Consideration/Planning/Recirculation as build-excluded — claims only Buildable (Lane 5 / C5)"

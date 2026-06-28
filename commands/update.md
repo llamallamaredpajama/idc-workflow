@@ -1,5 +1,5 @@
 ---
-description: IDC Update — resync a repo's stamped scaffold to the installed plugin after a plugin update (receipt-driven; customized files are diff-and-asked; the board is report-only, never mutated)
+description: IDC Update — resync a repo's stamped scaffold to the installed plugin after a plugin update (receipt-driven; customized files are diff-and-asked; the only board change is a non-destructive append of a missing required Stage option — never a destructive/structural board change)
 argument-hint: (no arguments)
 ---
 
@@ -11,9 +11,13 @@ the phases in order, from the target repo root (`ROOT="$(git rev-parse --show-to
 
 **The compare is safety-critical and fails toward asking.** A file is silently re-stamped *only*
 when the receipt proves it untouched; anything else is shown as a diff and the operator decides.
-Update **never mutates the GitHub board** — it reports board drift and stops there. Idempotent: a
-re-run with nothing stale reports `skipped-already-current`. The receipt is rewritten **only at the
-very end of a fully successful run**, so a half-finished update can never masquerade as complete.
+Update makes **one, and only one, non-destructive** board change — appending a missing *required*
+`Stage` option (additive: existing options keep their node ids, so item values survive) — and
+**reports** every other kind of board drift without touching it. It never performs a destructive or
+structural board mutation (no option-set replace, no field rename/delete) and never touches the
+data-bearing configs. Idempotent: a re-run with nothing stale reports `skipped-already-current` and
+the option append is a no-op. The receipt is rewritten **only at the very end of a fully successful
+run**, so a half-finished update can never masquerade as complete.
 
 ## Phase 0 — Preconditions
 
@@ -132,28 +136,50 @@ templates dir itself). If the resolver exits non-zero for a path, **STOP** — d
 guessed template.
 
 Files the operator chose to keep are left exactly as-is. Update touches **only** stamped scaffold
-files — never source, never tests, never the board.
+files — never source, never tests. Its sole board action is the non-destructive `Stage`-option
+append in Phase 3.
 
-## Phase 3 — Board-drift detection (report-only; NEVER mutate)
+## Phase 3 — Board reconcile (one safe additive migration; everything else report-only)
 
-Compare the live tracker against the installed version's expectation and **report** — take no
-action on the board:
-- `github` backend: read the board's fields read-only (`gh project field-list <num> --owner
-  <owner> --format json`) and compare against the v2 contract — five fields `Status`
-  (`Blocked|Todo|In Progress|Done`), `Stage` (`Consideration|Planning|Buildable|Recirculation`),
-  `Wave`, `Phase`, `Domain`. Report any drift explicitly (missing field, unexpected `Status` option
-  set, etc.). `Stage` is **additive** on two axes: (a) a board with **no `Stage` field** predates it
-  — note its absence as informational drift, not a failure (an absent `Stage` reads as `Buildable`);
-  (b) a board whose `Stage` field exists but **lacks the `Recirculation` option** predates 3.1.0 —
-  report it explicitly (`stage-recirc-missing`: `/idc:recirculate` has no stage to file into until
-  it is added). Do **not** add, rename, or re-option any field here — update is report-only.
-  Remediation: the missing `Recirculation` option is added by **`/idc:init`**, which appends that one
-  option non-destructively (re-sends existing options by node id, so item values are preserved); any
-  other drift (a renamed/extra field) is surfaced for the operator to resolve via
-  `idc:idc-tracker-github`. Board migration is never performed here — it risks live issues and
-  in-flight waves.
-- If the drift check **cannot run** (board unreachable, or `filesystem` backend), report a distinct
-  third outcome — "board drift: could not verify (reason)" — never silently report "no drift".
+Compare the live tracker against the installed version's expectation. Update performs exactly **one**
+board mutation — appending a missing *required* `Stage` option, which is **non-destructive** — and
+**reports** all other drift without touching it.
+- `github` backend: read the board's fields (`gh project field-list <num> --owner <owner> --format
+  json`) and compare against the v2 contract — five fields `Status` (`Blocked|Todo|In Progress|Done`),
+  `Stage` (`Consideration|Planning|Buildable|Recirculation`), `Wave`, `Phase`, `Domain`. `Stage` is
+  **additive** on two axes:
+  - **(a) no `Stage` field at all** — a legacy 4-field board predates Stage. Report as informational
+    drift, not a failure (an absent `Stage` reads as `Buildable`). Do **not** create the field here —
+    creating a field from scratch is full provisioning, which is `/idc:init`'s job; point there.
+  - **(b) a `Stage` field that exists but lacks the `Recirculation` option** — the board predates
+    3.1.0, and this is the post-upgrade gap a user hits by running `/idc:update`. Update **fixes it in
+    place** by appending the option **non-destructively** via the shared helper (the same recipe
+    `/idc:init` uses): it re-sends every existing option *by node id* so GitHub preserves them and
+    **item values are never touched**, and appends only the new option — it never replaces the option
+    set (a replace re-IDs every option and wipes values). Idempotent + fail-closed; report
+    `stage-recirc-appended` (or `stage-recirc-already-present` on a re-run).
+    ```bash
+    PID=$(gh project view <num> --owner "$OWNER" --format json --jq '.id')   # PVT_… project node id
+    # GraphQL read (not field-list): the non-destructive append must re-send each existing option's
+    # color + description, which `gh project field-list` omits (it returns only id+name).
+    STAGE_FIELD=$(gh api graphql -f query='query($p:ID!){node(id:$p){... on ProjectV2{field(name:"Stage"){... on ProjectV2SingleSelectField{id options{id name color description}}}}}}' -f p="$PID" --jq '.data.node.field')
+    if [ -n "$STAGE_FIELD" ]; then
+      MUT=$(printf '%s' "$STAGE_FIELD" | python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_stage_options.py" append --ensure-option Recirculation --options-json -); RC=$?
+      case "$RC" in
+        0) gh api graphql -f query="$MUT" >/dev/null ;;   # stage-recirc-appended (existing ids + item values preserved)
+        3) : ;;                                            # stage-recirc-already-present (idempotent no-op)
+        *) echo "stage reconcile: could not assemble the append (fail-closed) — record an operator action" ;;
+      esac
+    fi
+    ```
+- **Everything else is report-only.** Any *other* board drift — a missing/renamed/extra field, an
+  unexpected `Status` option set, or anything that would need a **destructive** option-set replace —
+  update **reports** and leaves for the operator to resolve via `/idc:init` (provisioning) or
+  `idc:idc-tracker-github`. Update never performs a destructive or structural board mutation.
+- If the board read **cannot run** (board unreachable, or `filesystem` backend — whose `Stage` is
+  enum-validated in code, so it always accepts `Recirculation` and needs no append), report a
+  distinct outcome — "board reconcile: could not verify (reason)" / "n/a (filesystem)" — never
+  silently report "no drift".
 
 ## Phase 4 — Rewrite the receipt (end of a successful run only)
 
@@ -179,7 +205,8 @@ If a receipt already existed and nothing changed this run, leave it untouched an
 
 Print one table of every stamped file (`refreshed` / `preserved — config current` / `preserved — N
 new optional key(s)` / `restored` / `skipped-already-current`), then:
-- the board-drift outcome (one of: no drift / drift details / could not verify),
+- the board-reconcile outcome (one of: no drift / `stage-recirc-appended` /
+  `stage-recirc-already-present` / other drift reported / could not verify),
 - the receipt status (`rewritten` / `graduated` / `skipped-already-current`),
 - and the cache-refresh reminder if any newly-shipped command/skill files arrived with this update.
 

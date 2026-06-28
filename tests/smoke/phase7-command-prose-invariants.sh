@@ -26,12 +26,19 @@ has "$U" 'idc_template_for\.py' \
   || fail "update.md must resolve templates via the shared idc_template_for.py resolver"
 has "$U" 'idc_plugin_freshness\.py' \
   || fail "update.md must run the stale-session freshness guard"
-# Board-drift contract must know the 3.1.0 4th Stage option and report a present-but-stale Stage
-# field — the regression that shipped a Recirculation feature with no board option to file into.
+# Board reconcile must know the 3.1.0 4th Stage option and, on a pre-3.1.0 board, APPLY the
+# non-destructive append itself (update is the natural post-upgrade command) — not just report it.
 has "$U" 'Consideration\|Planning\|Buildable\|Recirculation' \
-  || fail "update.md board-drift contract must list the Stage field's FOUR options incl. Recirculation"
-has "$U" 'stage-recirc-missing' \
-  || fail "update.md must report a present-but-incomplete Stage field (stage-recirc-missing) and point at /idc:init"
+  || fail "update.md board contract must list the Stage field's FOUR options incl. Recirculation"
+has "$U" 'idc_stage_options\.py' \
+  || fail "update.md must APPLY the non-destructive Recirculation append via the idc_stage_options.py helper (not just report it)"
+has "$U" 'ensure-option Recirculation' \
+  || fail "update.md must append the Recirculation option to a pre-3.1.0 board"
+has "$U" 'stage-recirc-appended' \
+  || fail "update.md must report stage-recirc-appended when it adds the option"
+# But update must STILL forbid destructive board mutations (the safety line the append must not erode).
+has "$U" 'never (performs?|does)( a)? destructive' \
+  || fail "update.md must still forbid destructive/structural board mutations (only the additive append is allowed)"
 # It must NOT tell the agent to do anything destructive to a data-bearing config. The 2.1.3 footgun
 # was a keep/replace OFFER over operator data; a future edit could reintroduce it with any wording.
 # A plain ordered grep ('overwrite .* WORKFLOW-config') is brittle — it misses the generic "data

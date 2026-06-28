@@ -240,11 +240,12 @@ gh project field-list "$num" --owner "$owner" --format json --jq \
 - `stage-recirc-ok` → **PASS**, no note.
 - `stage-recirc-missing` (the `Stage` field exists but has no `Recirculation` option) → **PASS with
   ⚠**, note: "the board's `Stage` field has no `Recirculation` option, so the recirculation sweep
-  cannot re-stage rogue Buildables — **OFFER** to add it as an **add-one-option migration** (append
-  the new option; existing options keep their node ids, so item values are preserved — never replace
-  the option set), or run `/idc:init`." **doctor only detects and offers — it never mutates the
-  board.** (If check 3 already flagged the `Stage` field absent entirely — a legacy 4-field board —
-  note that instead; `Stage` is additive and its absence is never a FAIL.)
+  cannot re-stage rogue Buildables — fix it by running **`/idc:update`** (the natural post-upgrade
+  command; it appends the option) or `/idc:init`. The append is an **add-one-option migration**:
+  existing options keep their node ids, so item values are preserved — never a replace of the option
+  set." **doctor only detects and points — it never mutates the board.** (If check 3 already flagged
+  the `Stage` field absent entirely — a legacy 4-field board — note that instead; `Stage` is additive
+  and its absence is never a FAIL.)
 
 Row 9 only *reads* the board (`gh project item-list`, `gh issue view`, `gh api … GET`,
 `gh project field-list`, and the helpers' read-only `--report` mode), preserving doctor's

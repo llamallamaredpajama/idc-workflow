@@ -2,6 +2,25 @@
 
 All notable changes to the IDC Workflow plugin are documented in this file.
 
+## 3.1.3 — 2026-06-28
+
+Patch: `/idc:update` now *applies* the `Recirculation` Stage-option fix itself, instead of only
+reporting it. 3.1.2 made update detect the missing option and point the operator at `/idc:init`; but
+the command a user naturally runs after a plugin update is `/idc:update`, so routing the fix through a
+separate command recreated the very friction it was meant to remove.
+
+- **`/idc:update` appends the missing `Recirculation` option in place (non-destructively).** Its Phase
+  3 board reconcile now performs exactly one board mutation — appending a missing *required* `Stage`
+  option via the shared `idc_stage_options.py` helper (re-sends existing options by node id so item
+  values survive; appends only the new option; never replaces the option set). It is idempotent
+  (`stage-recirc-already-present` on a re-run) and fail-closed. Every *other* kind of board drift
+  stays strictly report-only, and update never performs a destructive or structural board mutation
+  and never touches the data-bearing configs.
+- **`/idc:doctor` 9c** now points the operator at `/idc:update` (the natural post-upgrade command) as
+  the primary remediation; doctor itself stays strictly read-only.
+- Verified by a full update-sandbox E2E: on a pre-3.1.0 3-option board, `/idc:update` appended
+  `Recirculation` and the existing items' Stage values were preserved on the live board.
+
 ## 3.1.2 — 2026-06-28
 
 Patch: makes the 3.1.0 `Recirculation` Stage actually provisionable on a real GitHub board. 3.1.0

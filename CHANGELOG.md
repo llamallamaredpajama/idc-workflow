@@ -2,6 +2,51 @@
 
 All notable changes to the IDC Workflow plugin are documented in this file.
 
+## 3.1.0 — 2026-06-28
+
+Scope discovered mid-build now has a sanctioned home: a new **`Recirculation`** intake instead of
+leaking onto the board as a claimable `Buildable` issue. Discovered scope must recirculate — be
+triaged for a PRD/TRD change, planned, and sequenced — before it can become buildable, and every
+other door is closed so the leak can't recur.
+
+- **New `Recirculation` Stage (the non-Buildable inbox).** A 4th Stage across the schema surface
+  (`idc_tracker_fs`, `idc_schema_check` with a dedicated `check_recirculation` body shape, both
+  tracker skills, `tracker-config`, `WORKFLOW.md`). The autorun drain flips from a denylist to a
+  **Buildable-only allowlist** — claim only `Stage=Buildable` (the empty→Buildable legacy default
+  preserved), so any non-Buildable stage is build-excluded by construction (closes the empty-Stage
+  footgun).
+- **Deterministic provenance.** Plan writes the same pillar `id` into the matrix YAML and stamps it
+  onto the issue (`<!-- idc-provenance: {matrix,pillar} -->`, github-only), so a planned Buildable is
+  provably linked to its matrix pillar — the downstream sweep matches exactly, never fuzzily.
+- **Scope-origination guardrails.** `idc-build` / `idc-implementer` / `idc-finisher` (+ the Pi
+  mirror) may no longer originate tracker scope (no raw `gh issue create`, no self-set
+  `Stage=Buildable`/`Wave`); in-boundary work is fixed in-loop, everything else files a
+  `Stage=Recirculation` ticket. The finisher's `blocks_goal` deferral now mints a Recirculation
+  ticket; the implementer emits a structured `idc-discovery` marker for recommend-but-not-doing fixes.
+- **Deterministic detective (`scripts/idc_recirc_sweep.py`) + SessionEnd hook.** Re-stages rogue
+  Buildables (bypassed Plan → no provenance) and captures untickered discovery/deferral markers.
+  Regime-gated so a legacy/unstamped board is never destructively re-staged; no-matrix and filesystem
+  skips mirror board-lint. A project-scoped `SessionEnd` hook runs it `--auto-correct` (fail-soft);
+  `/idc:doctor` Row 9b runs it `--report` (read-only, defense-in-depth) and Row 9c offers the
+  add-one-option `Stage` migration (detect + offer, never mutates).
+- **`/idc:recirculate` inbox-drain.** A board-scan mode drains every `Stage=Recirculation` ticket
+  through the existing recirculator decision flow: PRD/TRD-worthy → the one gate (ticket rides
+  Blocked); not-gate-worthy → an admitted consideration + the ticket retired (provenance preserved).
+- **Autorun starts at the top of the pipeline** — recirculate → plan → drain, pausing only at human
+  gates. Its Recirculation intake first runs the rogue-sweep `--auto-correct` itself (the `SessionEnd`
+  hook is cancelled in a headless `-p`/`/loop` session, so autorun can't rely on it) before draining.
+- **Plan batch dedup/deconflict (quality layer).** One Plan run scoops all admitted considerations
+  and runs a read-only pre-pass comparing each against every other pending consideration, the open
+  Buildable/in-flight lane, and the codebase — yielding one de-duplicated, deconflicted plan (reusing
+  the matrix clash fan-out, not a new mechanism).
+
+Sandbox e2e against the github autorun board caught three real defects (all fixed + regression-tested):
+the sweep's `project_number` parse ate its inline comment (silently disabling the github sweep); that
+failure reported a hollow "clean" all-clear (now a degraded SKIP); and the `SessionEnd` hook is
+cancelled in a headless `-p` run (now backstopped by the autorun preflight sweep).
+
+Gates: `lint-references.sh` CLEAN · `tests/smoke/run-all.sh` ALL GREEN (45 tests; 4 new/extended) · every new guard shown red-when-broken · autorun-sandbox e2e validated (board unmutated).
+
 ## 3.0.5 — 2026-06-26
 
 An advisory build-lane hygiene check for `/idc:doctor` (#91), hardened by three

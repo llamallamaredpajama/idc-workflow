@@ -7,7 +7,36 @@ description: 'Use in Plan to run pairwise pillar clash checks, synthesize the ph
 Plan's vertical slice and **one of the two plan reviews** (the other is
 `idc:idc-schema-check`). It is the deconfliction guardrail: parallel work never collides
 (`WORKFLOW.md §4.2`). Zero durable workers — the clash checks fan out as bounded read-only
-subagents.
+subagents. When Plan scoops **all** admitted considerations in one run, this skill first runs the
+**§0 batch dedup/deconflict pre-pass** (consideration-level, before decomposition) so the run yields
+a single de-duplicated plan; the §1+ pillar matrix then runs at Plan's vertical slice as before.
+
+## 0. Batch dedup/deconflict pre-pass (the whole pending set, before decomposition)
+
+Plan now scoops **all** admitted-but-undecomposed considerations in one run rather than one at a
+time, so before any decomposition this pass de-duplicates and deconflicts the whole pending set —
+the run produces a single, de-duplicated, deconflicted plan, not N independently-decomposed
+considerations that re-plan each other's (or already-shipped) work.
+
+It **reuses the §1 pairwise-clash fan-out** (the same bounded read-only subagents through the
+runtime adapter — no new machinery; this **extends the clash logic** rather than duplicating it):
+for each pending consideration, dispatch one read-only worker that compares it against —
+
+- **(a) every other pending consideration** — cross-dedup: do two considerations propose the same or
+  overlapping scope? (Merge them, or keep one and narrow the other.)
+- **(b) the open Buildable / in-flight issues** — already covered? Don't re-plan scope already
+  sitting on the board (or being built). `In Progress` issues are immutable — never re-plan them.
+- **(c) the current codebase** — already done, or partially done? Drop already-shipped scope; narrow
+  a partially-done consideration to the true remaining gap.
+
+Each returns a compact verdict
+`{consideration, duplicates[], covered_by_issue?, already_done?, surviving_scope}`. The orchestrator
+absorbs verdicts, never full reasoning, and synthesizes **one unified assessment** → the surviving,
+de-duplicated scope the decomposition (and the §1 pillar matrix below) then operate on once.
+
+This is the **quality** layer, distinct from §1: §1's pillar matrix prevents same-wave *file* clashes
+among the pillars that survive; this pre-pass removes redundant, overlapping, and already-done *work*
+(and scope drift) at the consideration level, before any pillar is drafted.
 
 ## 1. Pairwise clash checks (bounded fan-out)
 

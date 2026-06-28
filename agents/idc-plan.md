@@ -4,31 +4,55 @@ description: 'IDC Plan orchestrator playbook — consideration → goal-contract
 ---
 # idc-plan
 
-The Plan orchestrator playbook (`WORKFLOW.md §4.2`). Plan is **pure decomposition**: one run turns
-an **admitted** consideration — its PRD + TRD already authored and gated at the end of Think — into
-goal-contract issues on the board. Plan **never authors the PRD/TRD and never gates**; that happened
-on the Think PR. **Zero durable workers** — every fan-out is bounded read-only work through the
-runtime adapter (`idc:idc-adapter-claude` / `idc:idc-adapter-codex`). Plan authors contracts (issue
-bodies); Build only executes them. The two plan reviews are matrix deconfliction + the schema check
-— nothing else.
+The Plan orchestrator playbook (`WORKFLOW.md §4.2`). Plan is **pure decomposition**: one run
+scoops all admitted considerations — their PRD + TRD already authored and gated at the end of
+Think — and produces **one** de-duplicated, deconflicted set of goal-contract issues on the board. Plan
+**never authors the PRD/TRD and never gates**; that happened on the Think PR. **Zero durable
+workers** — every fan-out is bounded read-only work through the runtime adapter
+(`idc:idc-adapter-claude` / `idc:idc-adapter-codex`). Plan authors contracts (issue bodies); Build
+only executes them. The two plan reviews are matrix deconfliction + the schema check — nothing else.
 
 Run the phases in order; each phase's evidence gates the next.
 
-## Phase 0 — Absorb
+## Phase 0 — Absorb (the whole pending set, not one)
 
-- Read the consideration; validate its shape with `idc:idc-consideration-schema`. Confirm it is
-  **admitted** (its Think PR merged); an un-admitted consideration is not yet Plan's to decompose.
-- Read the admitted requirements (the PRD + TRD) and the master plan, plus the live board through
-  `idc:idc-tracker-adapter` (`query`). Note which issues are `In Progress` — they are
-  immutable for the rest of the run.
-- Resolve the repo's standing domains from `WORKFLOW-config.yaml::domains`; prune to the
-  domains this consideration touches, adding ad-hoc ones as needed.
+- Scoop **every** admitted-but-undecomposed consideration — the full pending set, in one run, not
+  one consideration at a time. Validate each one's shape with `idc:idc-consideration-schema`, and
+  confirm each is **admitted** (its Think PR merged); an un-admitted consideration is not yet Plan's
+  to decompose.
+- Read each admitted consideration's requirements (the PRD + TRD) and the master plan, plus the live
+  board through `idc:idc-tracker-adapter` (`query`) — including the open Buildable / in-flight
+  issues. Note which issues are `In Progress` — they are immutable for the rest of the run.
+- Resolve the repo's standing domains from `WORKFLOW-config.yaml::domains`; prune to the union of
+  domains the pending considerations touch, adding ad-hoc ones as needed.
+
+## Phase 0.5 — Batch dedup/deconflict assessment (one unified pass)
+
+Before decomposing, run **one** read-only dedup/deconflict pass over the whole pending set so the run
+yields a single, de-duplicated, deconflicted plan — not N independently-decomposed considerations
+that re-plan each other's (or already-shipped) work. Hand the set to `idc:idc-matrix-analysis`'s
+**batch dedup/deconflict pre-pass** (§0), which **fans out read-only workers** (the same bounded
+fan-out the pairwise pillar clash uses — not a new mechanism) that compare each pending consideration
+against:
+
+- **(a) every other pending consideration** — cross-dedup: two considerations proposing the same or
+  overlapping scope (merge them, or keep one and narrow the other).
+- **(b) the open Buildable / in-flight issues** — already covered? Don't re-plan scope already on the
+  board (or being built).
+- **(c) the current codebase** — already done, or partially done? Drop already-shipped scope; narrow
+  a partially-done consideration to the true remaining gap.
+
+Absorb the digests, synthesize **one unified assessment**, and carry forward only the surviving,
+de-duplicated scope (merges and drops recorded with their reason). This is a **quality** layer —
+Phase 4's matrix already prevents same-wave *file* clashes; this pass removes the redundant,
+overlapping, and already-done *work* (and scope drift) before a single line is decomposed.
 
 ## Phase 1 — Horizontal slice (domain experts)
 
-Bounded fan-out of one read-only domain-expert per touched domain (reasoning tier). Each
-returns, for its slice: what the consideration requires, what already exists, the gap,
-risks, and goal-shaped work items. The orchestrator absorbs the digests, not full reasoning.
+Bounded fan-out of one read-only domain-expert per touched domain (reasoning tier), over the
+surviving, de-duplicated considerations from Phase 0.5. Each returns, for its slice: what the
+considerations require, what already exists, the gap, risks, and goal-shaped work items. The
+orchestrator absorbs the digests, not full reasoning.
 
 ## Phase 2 — Draft the plan chain (decomposition)
 
@@ -52,6 +76,8 @@ Run `idc:idc-matrix-analysis`: pairwise clash fan-out → synthesize the phase m
 against it (all not-`In Progress` items), assigning parallel-safe waves. Validate with
 `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_matrix_check.py" <matrix>`. A genuine upstream
 contradiction that can't be deconflicted is parked and surfaced for a recirculation — never papered.
+The consideration-level dedup/deconflict already ran in Phase 0.5; here the matrix handles
+pillar-level *file* clashes among the surviving, de-duplicated pillars.
 
 ## Phase 5 — Validate + admit
 

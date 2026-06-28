@@ -145,4 +145,59 @@ grep -qiE 'static checks' "$GC" \
 grep -qiE 'satisfiable without the outcome' "$GC" \
   || fail "idc-goal-contract element 2 must mark an all-static surface a Build review FAIL (P0-2)"
 
-echo "PASS: schema check + matrix deconfliction green; Plan is pure decomposition; plan PR direct-merges (not --auto) and deletes its branch; contract requires an outcome test"
+# ---- (f) P2: Plan's BATCH dedup/deconflict assessment (quality layer) -------------------------
+# Phase 2 fast-follow: ONE Plan run scoops EVERY admitted consideration and produces a single,
+# de-duplicated, deconflicted plan — instead of decomposing one consideration at a time. Before
+# decomposition it fans out read-only workers for THREE comparisons (cross-consideration dedup /
+# vs open Buildable+in-flight issues / vs the current codebase), then synthesizes ONE unified
+# deconflicted decomposition. This is a QUALITY layer (the matrix already prevents same-wave file
+# clashes; this removes redundant/overlapping/already-done work and drift). The fan-out MECHANICS
+# live in idc-matrix-analysis (reused, not a duplicated clash mechanism). Each grep below is
+# red-when-broken: deleting/altering the guarded prose fails it. Portable ERE only (no \b / PCRE —
+# this machine's default grep is ugrep; the suite also runs under /usr/bin/grep).
+MX="$PLUGIN/skills/idc-matrix-analysis/SKILL.md"
+[ -f "$MX" ] || fail "skills/idc-matrix-analysis/SKILL.md missing"
+
+# (f1) Plan scoops ALL admitted considerations in one run — batch, not one at a time
+grep -qiE 'scoops? all .*admitted.*consideration' "$PLAN" \
+  || fail "agents/idc-plan.md must scoop ALL admitted considerations in one run (P2 batch) — not one at a time"
+grep -qiE 'the whole pending set' "$PLAN" \
+  || fail "agents/idc-plan.md must run the batch pass over the whole pending set (P2)"
+
+# (f2) a batch dedup/deconflict pass is documented and fans out READ-ONLY workers for it
+grep -qiE 'batch dedup/deconflict' "$PLAN" \
+  || fail "agents/idc-plan.md must document the batch dedup/deconflict pass (P2)"
+grep -qiE 'fans? out read-only workers' "$PLAN" \
+  || fail "agents/idc-plan.md must fan out read-only workers for the batch dedup/deconflict pass (P2)"
+
+# (f3) the THREE read-only comparisons are spelled out (cross-dedup / vs open issues / vs codebase)
+grep -qiE 'every other pending consideration' "$PLAN" \
+  || fail "agents/idc-plan.md batch pass must compare each consideration vs every OTHER pending consideration — cross-dedup (P2-a)"
+grep -qiE 'open buildable' "$PLAN" \
+  || fail "agents/idc-plan.md batch pass must compare each consideration vs open Buildable / in-flight issues — already covered? (P2-b)"
+grep -qiE 'current codebase' "$PLAN" \
+  || fail "agents/idc-plan.md batch pass must compare each consideration vs the current codebase — already done? (P2-c)"
+
+# (f4) it synthesizes ONE unified assessment -> a single de-duplicated, deconflicted plan
+grep -qiE 'one unified assessment' "$PLAN" \
+  || fail "agents/idc-plan.md must synthesize ONE unified assessment from the batch pass (P2)"
+grep -qiE 'de-?duplicated, deconflicted' "$PLAN" \
+  || fail "agents/idc-plan.md must produce a single de-duplicated, deconflicted plan (P2)"
+
+# (f5) explicitly a QUALITY layer atop the matrix (which prevents same-wave file clashes)
+grep -qiE 'quality.{0,8}layer' "$PLAN" \
+  || fail "agents/idc-plan.md must mark the batch dedup/deconflict pass a QUALITY layer (P2)"
+
+# ---- (f6) the fan-out MECHANICS live in idc-matrix-analysis, reused — not a duplicated clash -----
+grep -qiE 'batch dedup/deconflict pre-pass' "$MX" \
+  || fail "idc-matrix-analysis must document the batch dedup/deconflict pre-pass (P2)"
+grep -qiE 'reuses? the .*pairwise-clash fan-out' "$MX" \
+  || fail "idc-matrix-analysis pre-pass must REUSE the existing pairwise-clash fan-out — not a new mechanism (P2)"
+grep -qiE 'extends the clash logic' "$MX" \
+  || fail "idc-matrix-analysis pre-pass must EXTEND the clash logic (not duplicate it) (P2)"
+grep -qiE 'every other pending consideration' "$MX" \
+  || fail "idc-matrix-analysis pre-pass must compare vs every OTHER pending consideration — cross-dedup (P2-a)"
+grep -qiE 'one unified assessment' "$MX" \
+  || fail "idc-matrix-analysis pre-pass must synthesize ONE unified assessment (P2)"
+
+echo "PASS: schema check + matrix deconfliction green; Plan is pure decomposition; plan PR direct-merges (not --auto) and deletes its branch; contract requires an outcome test; Plan batch dedup/deconflict (scoop-all -> 3 read-only comparisons -> one unified deconflicted plan, quality layer)"

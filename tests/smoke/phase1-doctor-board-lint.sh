@@ -149,6 +149,10 @@ grep -q 'idc_gh_board\.py' "$DOCTOR" \
   || fail "doctor.md Row 9 must read the board via the paginating idc_gh_board.py (gh project item-list truncates at 30)"
 grep -qE 'if ! board=\$\(python3 "\$\{CLAUDE_PLUGIN_ROOT\}/scripts/idc_gh_board\.py"' "$DOCTOR" \
   || fail "doctor.md Row 9 must CAPTURE the idc_gh_board read + guard its exit — a failed read must SKIP, not a hollow 'clean (0 scanned)' PASS (no silent all-clear)"
+# The failure branch must EMIT an explicit SKIP marker — a bare `:` no-op emits nothing and still
+# reads as a silent all-clear (codex MAJOR). Goes RED if the marker echo is dropped/regressed.
+grep -qE 'echo "board-lint: SKIP — github board unreadable' "$DOCTOR" \
+  || fail "doctor.md Row 9 failure branch must EMIT an explicit 'board-lint: SKIP — github board unreadable' marker (not a silent ':' no-op)"
 printf '%s' "$DFLAT" | grep -qiE 'no silent all-clear' \
   || fail "doctor.md Row 9 must state a board-read failure SKIPs (no silent all-clear)"
 

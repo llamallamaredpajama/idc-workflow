@@ -141,20 +141,35 @@ def fetch_items(owner, project_number, repo="."):
             data = json.loads(out)
         except json.JSONDecodeError as e:
             raise BoardReadError(f"unparseable graphql response: {e}")
-        conn = (((data.get("data") or {}).get("node")) or {}).get("items") or {}
-        for n in (conn.get("nodes") or []):
+        # Fail CLOSED on any anomalous response rather than coerce a missing shape to an empty board —
+        # an empty/partial board recreates the silent "blind drain: complete" this reader exists to
+        # kill. (gh usually exits non-zero on a GraphQL `errors` response; double-guard here.)
+        if data.get("errors"):
+            raise BoardReadError(f"graphql errors: {str(data['errors'])[:200]}")
+        node = (data.get("data") or {}).get("node")
+        if not isinstance(node, dict) or not isinstance(node.get("items"), dict):
+            raise BoardReadError("graphql response missing node.items — refusing a partial/empty board")
+        conn = node["items"]
+        nodes = conn.get("nodes")
+        if not isinstance(nodes, list):
+            raise BoardReadError("graphql response missing items.nodes — refusing a partial board")
+        for n in nodes:
             items.append(_flatten(n))
         page = conn.get("pageInfo") or {}
         if page.get("hasNextPage"):
             cursor = page.get("endCursor")
             if not cursor:
                 # hasNextPage=true with no endCursor is anomalous (GitHub always pairs them); fail
-                # CLOSED rather than silently return a PARTIAL board — a partial board is the very
-                # truncation this reader exists to kill.
+                # CLOSED rather than silently return a PARTIAL board.
                 raise BoardReadError(
                     "paginated board read: hasNextPage=true but no endCursor — refusing a partial board")
             continue
         break
+    else:
+        # The loop exhausted MAX_PAGES without ever seeing hasNextPage=false — anomalous (a real board
+        # is far smaller). Refuse a possibly-partial board rather than return what we happened to get.
+        raise BoardReadError(
+            f"paginated board read exceeded {MAX_PAGES} pages — refusing a possibly-partial board")
     return items
 
 

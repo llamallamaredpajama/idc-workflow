@@ -79,8 +79,11 @@ cat > "$WORK/bin/gh" <<'STUB'
 sub="$1"
 if [ "$sub" = "project" ] && [ "$2" = "view" ]; then echo "PVT_test"; exit 0; fi
 if [ "$sub" = "api" ] && [ "$2" = "graphql" ]; then
-  has_cursor=0
-  for a in "$@"; do case "$a" in cursor=*) has_cursor=1 ;; esac; done
+  has_cursor=0; has_pid=0
+  for a in "$@"; do case "$a" in cursor=*) has_cursor=1 ;; pid=PVT_test) has_pid=1 ;; esac; done
+  # the resolved project NODE id must be wired through as `-f pid=PVT_test` — red if the node-id
+  # resolution (gh project view) or the `-f pid=` variable wiring regresses.
+  [ "$has_pid" = 1 ] || { echo "stub: graphql missing pid=PVT_test (broken pid resolution / -f wiring)" >&2; exit 7; }
   if [ "$has_cursor" = 1 ]; then echo "graphql page2" >> "$FIX/gh.log"; cat "$FIX/page2.json"
   else echo "graphql page1" >> "$FIX/gh.log"; cat "$FIX/page1.json"; fi
   exit 0
@@ -103,6 +106,18 @@ chmod +x "$WORK/bin/gh"
 mkdir -p "$WORK/binfail"
 printf '#!/bin/bash\necho "boom" >&2; exit 1\n' > "$WORK/binfail/gh"
 chmod +x "$WORK/binfail/gh"
+
+# a THIRD stub: project view OK, but graphql returns a MALFORMED/error response ($BADGQL) at exit 0.
+# Models the anomalous case codex flagged — a 200 with errors / no board shape that must NOT coerce
+# to an empty board (which would recreate the silent "blind drain: complete").
+mkdir -p "$WORK/binbad"
+cat > "$WORK/binbad/gh" <<'STUB'
+#!/bin/bash
+[ "$1" = "project" ] && [ "$2" = "view" ] && { echo "PVT_test"; exit 0; }
+[ "$1" = "api" ] && [ "$2" = "graphql" ] && { printf '%s' "$BADGQL"; exit 0; }
+echo "binbad: unhandled $*" >&2; exit 99
+STUB
+chmod +x "$WORK/binbad/gh"
 
 # ============================================================================================
 # 1. idc_gh_board.py returns ALL items across BOTH pages (no 30/100 truncation)
@@ -150,6 +165,33 @@ iid="$(printf '%s' "$ALL" | jq -r '.items[] | select(.content.number==207) | .id
 # control-char title survives as valid escaped JSON (external jq never choked above; assert explicitly)
 printf '%s' "$ALL" | jq -e '.items[] | select(.content.number==207)' >/dev/null \
   || fail "the control-char-title item (#207) must survive as valid escaped JSON (downstream jq safe)"
+
+# --- 2b. the SHIPPED query(filter) op block, EXTRACTED from SKILL.md and run end-to-end over the
+#         paginated stub — proves the real recipe (not a replica) reads the WHOLE board, incl. the
+#         legacy (.stage // "Buildable") default for #209. Couples the test to the shipped file.
+SKILL="$PLUGIN/skills/idc-tracker-github/SKILL.md"
+query_src="$(awk '
+  /\*\*query\(filter\)/ { found=1 }
+  found && /^```bash/ { grab=1; next }
+  found && grab && /^```/ { exit }
+  found && grab { print }
+' "$SKILL")"
+bj_src="$(awk '/^board_json\(\) \{/{print; exit}' "$SKILL")"
+[ -n "$query_src" ] || fail "could not extract the query(filter) op block from SKILL.md (recipe shape changed?)"
+[ -n "$bj_src" ]    || fail "could not extract board_json() from SKILL.md"
+printf '%s\n' "$query_src" | grep -q 'board_json' || fail "the query op must read the board via the paginated board_json"
+qharness="$WORK/qharness.sh"
+{
+  echo 'set -uo pipefail'
+  echo 'OWNER=tester; PROJ=7'
+  echo 'die_gh() { echo "die_gh: query read failed" >&2; exit 1; }'
+  printf '%s\n' "$bj_src"
+  echo 'STATUS=Todo; STAGE=Buildable; WAVE=""; PHASE=""; DOMAIN=""'
+  printf '%s\n' "$query_src"
+} > "$qharness"
+qout="$( ( export PATH="$WORK/bin:$PATH" CLAUDE_PLUGIN_ROOT="$PLUGIN" FIX="$WORK"; bash "$qharness" ) | sort -n | tr '\n' ' ')"
+[ "$qout" = "201 202 203 205 207 209 210 " ] \
+  || fail "the SHIPPED query op (Stage=Buildable,Status=Todo) must return the cross-page Buildable/Todo set incl. legacy-default #209 (got '$qout')"
 
 # ============================================================================================
 # 3. github drain predicate over the >30 board -> the FULL cross-page eligible set + continue
@@ -206,5 +248,15 @@ PATH="$WORK/binfail:$PATH" python3 "$BOARD" --owner tester --project 7 --repo "$
 [ "$rc" = "2" ] || fail "idc_gh_board.py must exit 2 on a gh failure (got $rc)"
 PATH="$WORK/binfail:$PATH" python3 "$DRAIN" --backend github --project 7 --owner tester --repo "$WORK" >/dev/null 2>&1; rc=$?
 [ "$rc" = "2" ] || fail "an unreadable github board must exit 2 fail-closed (got $rc), never a hollow drain: complete"
+# MALFORMED/anomalous graphql (gh exits 0 but the board shape is absent / carries errors) MUST
+# fail-closed exit 2 — never coerce to an empty board, the silent "blind drain" this reader kills.
+for bad in '{"errors":[{"message":"boom"}]}' '{"data":{"node":null}}' '{"data":{"node":{"items":{"pageInfo":{"hasNextPage":false}}}}}'; do
+  BADGQL="$bad" PATH="$WORK/binbad:$PATH" python3 "$BOARD" --owner tester --project 7 --repo "$WORK" >/dev/null 2>&1; rc=$?
+  [ "$rc" = "2" ] || fail "a malformed graphql response must fail-closed exit 2, never an empty board: $bad (got $rc)"
+done
+# positive control (not over-strict): a LEGIT empty board (nodes: []) is NOT an error → exit 0, 0 items.
+emptyout="$(BADGQL='{"data":{"node":{"items":{"pageInfo":{"hasNextPage":false},"nodes":[]}}}}' PATH="$WORK/binbad:$PATH" python3 "$BOARD" --owner tester --project 7 --repo "$WORK" 2>/dev/null)"; rc=$?
+[ "$rc" = "0" ] || fail "a legit empty board (nodes: []) must exit 0, not fail-closed (over-strict parse)"
+[ "$(printf '%s' "$emptyout" | jq '.items | length')" = "0" ] || fail "a legit empty board must yield 0 items"
 
 echo "PASS: idc_gh_board.py paginates the whole board (135/135 across 2 pages); skill read patterns + github drain see the cross-page frontier (201 203 207 209, blocked-aware, control-char safe, legacy absent-Stage default, per-issue fail-closed on #210); pure predicate green past index 30; fail-closed on unreadable board"

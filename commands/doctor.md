@@ -192,7 +192,10 @@ FAIL** (Build still trusts the board; the schema check stays Plan's gate). Branc
   # for-loop would run once over the whole blob and falsely report "clean". `while read` iterates
   # per line in both bash and zsh.
   if ! board=$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gh_board.py" --owner "$owner" --project "$num"); then
-    : # board unreadable (idc_gh_board exit ≠ 0) → Row 9 SKIP ("could not determine"), NOT a clean PASS
+    # board unreadable (idc_gh_board exit ≠ 0) → emit an EXPLICIT SKIP marker so a mechanical run
+    # classifies Row 9 as SKIP ("could not determine"), never the hollow `clean (0 scanned)` an empty
+    # pipe would print. (A bare no-op here would emit nothing and still read as a silent all-clear.)
+    echo "board-lint: SKIP — github board unreadable (idc_gh_board.py exit ≠ 0); could not determine"
   else
   printf '%s\n' "$board" \
   | jq -r '.items[] | select(.status=="Todo") | select((.stage // "Buildable")=="Buildable") | .content.number' \
@@ -215,9 +218,10 @@ FAIL** (Build still trusts the board; the schema check stays Plan's gate). Branc
     was skipped for them; re-run `/idc:doctor` once the API recovers." (Guards against a board-wide
     outage turning every issue UNKNOWN → nothing flagged → a `clean` summary masquerading as a true
     all-clear.)
-  - the board read (`idc_gh_board.py`) exited non-zero, OR the lint helper exit 2 / a `gh` error →
-    **SKIP** ("could not determine"), **never FAIL** — and a board-read failure must SKIP, never be
-    read as the hollow `clean (0 scanned)` it would otherwise pipe (no silent all-clear).
+  - an explicit `board-lint: SKIP — github board unreadable …` line (the board read exited non-zero),
+    OR the lint helper exit 2 / a `gh` error → **SKIP** ("could not determine"), **never FAIL** — a
+    board-read failure must SKIP on that explicit marker, never be read as the hollow `clean
+    (0 scanned)` an empty pipe would otherwise print (no silent all-clear).
 
 **9b — Recirculation-intake sweep (advisory; never FAIL; read-only `--report`).** The SessionEnd hook
 (`scripts/idc_recirc_sweep_hook.sh` → `idc_recirc_sweep.py --auto-correct`) is the primary detective

@@ -292,11 +292,21 @@ PATH="$WORK/binfail:$PATH" python3 "$DRAIN" --backend github --project 7 --owner
 [ "$rc" = "2" ] || fail "an unreadable github board must exit 2 fail-closed (got $rc), never a hollow drain: complete"
 # MALFORMED/anomalous graphql (gh exits 0 but the board shape is absent / carries errors) MUST
 # fail-closed exit 2 — never coerce to an empty board, the silent "blind drain" this reader kills.
-# The LAST fixture (pageInfo present but hasNextPage MISSING) guards the non-bool branch: a bare
-# `if page.get("hasNextPage")` reads a missing/null hasNextPage as falsy → "last page" → a silently
-# TRUNCATED board exit 0; the isinstance(...bool) guard fail-closes it. Red-when-broken: drop that
-# guard and this fixture returns 0 items exit 0 instead of exit 2.
-for bad in '{"errors":[{"message":"boom"}]}' '{"data":{"node":null}}' '{"data":{"node":{"items":{"pageInfo":{"hasNextPage":false}}}}}' '{"data":{"node":{"items":{"nodes":[]}}}}' '{"data":{"node":{"items":{"pageInfo":{"endCursor":"x"},"nodes":[]}}}}'; do
+# The fixtures, in order, exercise every fail-closed branch in fetch_items():
+#   1. graphql `errors` payload            → errors branch
+#   2. node == null                        → missing node.items branch
+#   3. items.nodes absent                  → missing items.nodes branch
+#   4. pageInfo absent                     → missing items.pageInfo branch
+#   5. pageInfo present, hasNextPage MISSING→ non-bool branch: a bare `if page.get("hasNextPage")`
+#      reads a missing/null hasNextPage as falsy → "last page" → a silently TRUNCATED board exit 0;
+#      the isinstance(...bool) guard fail-closes it.
+#   6. hasNextPage=true but endCursor=null → null-endCursor branch: GitHub always pairs a true
+#      hasNextPage with an endCursor, so a true-but-null cursor is anomalous → fail-closed rather
+#      than silently return the PARTIAL first page (the `if not cursor:` raise).
+# Each is red-when-broken: drop the matching guard and that fixture returns 0 items exit 0 instead of
+# exit 2. (MAX_PAGES exhaustion is the one branch left unstubbed — correct-by-inspection, needs 1000+
+# valid pages each advancing the cursor.)
+for bad in '{"errors":[{"message":"boom"}]}' '{"data":{"node":null}}' '{"data":{"node":{"items":{"pageInfo":{"hasNextPage":false}}}}}' '{"data":{"node":{"items":{"nodes":[]}}}}' '{"data":{"node":{"items":{"pageInfo":{"endCursor":"x"},"nodes":[]}}}}' '{"data":{"node":{"items":{"pageInfo":{"hasNextPage":true,"endCursor":null},"nodes":[]}}}}'; do
   BADGQL="$bad" PATH="$WORK/binbad:$PATH" python3 "$BOARD" --owner tester --project 7 --repo "$WORK" >/dev/null 2>&1; rc=$?
   [ "$rc" = "2" ] || fail "a malformed graphql response must fail-closed exit 2, never an empty board: $bad (got $rc)"
 done

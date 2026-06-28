@@ -433,10 +433,18 @@ def apply_github(findings, repo, ctx, log):
         if not ok1:
             log(f"github: #{f.number} re-stage failed ({err1.strip()[:120]})")
             continue
+        # The re-stage succeeded (the rogue is out of the Buildable lane — the load-bearing
+        # correction, so it counts as a board change). The Wave clear is best-effort residue cleanup;
+        # CHECK its return so a FAILED clear is surfaced, never silently reported as "Wave cleared"
+        # (the same success-only honesty as the ticket-filing path below).
         if f.wave and wave_fid:          # clear Wave (only if it carries one)
-            gh(["project", "item-edit", "--id", f.item_id, "--project-id", project_node,
-                "--field-id", wave_fid, "--clear"], repo)
-        log(f"github: #{f.number} re-staged → {RECIRC_STAGE} + Wave cleared ({f.reason})")
+            okw, _, errw = gh(["project", "item-edit", "--id", f.item_id, "--project-id", project_node,
+                               "--field-id", wave_fid, "--clear"], repo)
+            tail = "+ Wave cleared" if okw else \
+                f"but Wave clear FAILED ({errw.strip()[:120]}) — stale Wave remains"
+        else:
+            tail = "(no Wave to clear)"
+        log(f"github: #{f.number} re-staged → {RECIRC_STAGE} {tail} ({f.reason})")
         changed += 1
 
     # Ticket capture (idempotent): file one Recirculation ticket per untickered (origin, what).

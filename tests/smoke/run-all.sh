@@ -17,6 +17,7 @@ for t in \
   phase1-init-doctor \
   phase1-doctor-board-lint \
   phase1-recirc-sweep \
+  phase1-recirc-sweep-github \
   phase1-brownfield-scan \
   phase1-settings-json \
   phase1-lint-rules \

@@ -41,12 +41,21 @@ out of scope — Phase 5 names the separate operator commands for those.
      ```bash
      owner=$(gh repo view --json owner -q .owner.login)
      num=$(grep -E '^project_number:' docs/workflow/tracker-config.yaml | grep -oE '[0-9]+')
-     inflight=$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gh_board.py" --owner "$owner" --project "$num" | jq '[.items[] | select(.status=="In Progress")] | length')
+     # CAPTURE the board first, THEN count — never pipe idc_gh_board.py straight into jq. On a
+     # board-read FAILURE the helper exits 2 with EMPTY stdout, and `… | jq … | length` over empty
+     # input prints `0` at exit 0 — indistinguishable from a real "0 in progress" on this DESTRUCTIVE
+     # command. Capture-then-check (mirrors doctor Row 9) makes the failure detectable so the prose
+     # below can require an explicit confirmation instead of silently reading the outage as "0 in flight".
+     if board=$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gh_board.py" --owner "$owner" --project "$num"); then
+       inflight=$(printf '%s\n' "$board" | jq '[.items[] | select(.status=="In Progress")] | length')
+     else
+       inflight="unknown"   # board read failed (exit ≠ 0) → cannot verify → require confirmation
+     fi
      ```
-     If `$inflight` ≥1, report plainly ("N issues still in progress — uninstalling orphans them on
-     the board") and require an explicit `yes` to proceed. If the board read **fails**, do not
-     skip silently: report "could not verify in-flight items (board unreachable)" and require an
-     explicit confirmation to proceed anyway.
+     If `$inflight` is a number ≥1, report plainly ("N issues still in progress — uninstalling
+     orphans them on the board") and require an explicit `yes` to proceed. If `$inflight` is
+     `unknown` (the board read **failed**), do not skip silently: report "could not verify in-flight
+     items (board unreachable)" and require an explicit confirmation to proceed anyway.
    - `filesystem` → the same count over `TRACKER.md` (in-progress entries); warn-and-confirm.
 
 ## Phase 1 — Build the removal manifest (receipt-driven, hardcoded fallback)

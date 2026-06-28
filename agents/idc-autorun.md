@@ -1,6 +1,6 @@
 ---
 name: idc-autorun
-description: 'IDC Autorun orchestrator playbook — the one-shot two-lane drainer: plan every unplanned consideration, heal the board, build eligible waves, exit when nothing actionable remains.'
+description: 'IDC Autorun orchestrator playbook — the one-shot full-pipe drainer: drain the Recirculation inbox, plan every approved consideration, heal the board, build eligible Buildable waves, exit when nothing actionable remains.'
 ---
 # idc-autorun
 
@@ -9,7 +9,14 @@ top-to-bottom and exits when nothing actionable remains. It is the janitor — r
 quiet repo just heals board hygiene and drains stragglers. Standard tier (the autorun
 parent). Loopable via `/loop /idc:autorun` for standing operation.
 
-## Two lanes
+Autorun is **full-pipeline autonomy that pauses only at human gates**: it **never forces** a gate — a gate-worthy item just **pauses behind its gate** (reported + skipped), exactly like an `[operator-action]` gate issue.
+It drains the pipe in one fixed top-to-bottom order — **recirculate** the Recirculation inbox, then **plan** approved considerations, then **drain** the Buildable waves — starting at the top of the pipe with the Recirculation inbox.
+
+## Recirculation intake, then two lanes
+
+**Recirculation intake** runs first (the top of the pipe): drain the `Stage = Recirculation` inbox
+so scope discovered mid-build re-enters the canonical chain before any new build work (see the drain
+loop below). Then the two lanes:
 
 - **Planning lane.** One plan-run durable worker per **approved, unplanned consideration**
   (parallel analysis/drafting via the runtime adapter), each running `idc:idc-plan` — which itself
@@ -18,13 +25,23 @@ parent). Loopable via `/loop /idc:autorun` for standing operation.
   gate — **report + skip, never stall or bypass**. **Board admission is serialized through this
   parent** — only one consideration sequences against the live board at a time, so the global
   re-wave stays coherent.
-- **Build lane.** Activates as soon as eligible issues exist and keeps claiming waves via
-  `idc:idc-build`, including ones unblocked mid-run from the operator's phone (a requirements gate /
-  Think PR approved during the run).
+- **Build lane.** Activates as soon as eligible **`Stage = Buildable`** issues exist and keeps
+  claiming Buildable waves via `idc:idc-build` (a `Consideration`/`Planning`/`Recirculation` ticket
+  is never scooped — the glass wall), including ones unblocked mid-run from the operator's phone (a
+  requirements gate / Think PR approved during the run).
 
 ## The drain loop
 
-1. **Find approved, unplanned considerations** by querying the board for `Stage = Consideration`
+1. **Recirculation intake** — drain the `Stage = Recirculation` inbox first (the top of the pipe).
+   Query the board for `Stage = Recirculation`, `Status = Todo` inbox tickets (scope discovered
+   mid-build, filed as the non-Buildable inbox). If any exist, run `/idc:recirculate` with **no
+   arguments** — its **board-scan inbox-drain** mode — to drain each through the recirculator's
+   decision flow: not-gate-worthy scope is **admitted** as a `Stage = Consideration` item (which the
+   Planning lane decomposes later this same run); a ticket whose backflow changes a gated
+   requirements layer opens a **gated Think PR** and **pauses behind its gate** — a **human gate**
+   autorun **reports and skips**, never forces (exactly the `[operator-action]` skip/surface
+   behavior). Skip this stage when there are none.
+2. **Find approved, unplanned considerations** by querying the board for `Stage = Consideration`
    pointer items (the one-stop index — no filesystem scan; the files under
    `docs/considerations/` stay the source of truth). Re-check open gates first (per
    `idc:idc-gate-issue`) in case the operator merged a Think PR mid-run. A pointer still
@@ -33,19 +50,20 @@ parent). Loopable via `/loop /idc:autorun` for standing operation.
    worker; admit its issues one consideration at a time, and advance the pointer
    (`Consideration → Planning` while in flight, retired as buildable issues land). Skip this
    stage when there are none.
-2. **Heal board hygiene in passing** — fix obvious board inconsistencies as you traverse
+3. **Heal board hygiene in passing** — fix obvious board inconsistencies as you traverse
    (this is the auto `--fix`; `/idc:doctor` stays read-only).
-3. **Build eligible waves.** Eligible build work is `Stage = Buildable` issues only — an
-   upstream `Consideration`/`Planning` pointer is never scooped (the glass wall). Check the
+4. **Build eligible waves.** Eligible build work is `Stage = Buildable` issues only — an upstream
+   `Consideration`/`Planning`/`Recirculation` ticket is never scooped (the glass wall). Check the
    build lane's exit condition with
    `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --tracker <TRACKER.md>`
    (or the github-backend equivalent via `idc:idc-tracker-adapter`). While it reports
    `drain: continue`, run `idc:idc-build` on the eligible waves; re-check after each.
-4. **Exit** when no approved considerations remain unplanned AND the drain predicate reports
-   `drain: complete` — i.e. only Done items, requirements-gated Blocked items, the operator's gate
-   issues, and un-admitted considerations (open Think PRs) are left. Emit the exit report:
-   considerations planned, issues admitted, waves built/merged, board state, the **final
-   working-tree state from a post-build `git status --porcelain`** (captured at exit, never a
+5. **Exit** when no `Stage = Recirculation` tickets remain, no approved considerations remain
+   unplanned, AND the drain predicate reports `drain: complete` — i.e. only Done items,
+   requirements-gated Blocked items, the operator's gate issues, un-admitted considerations (open
+   Think PRs), and any gated recirculation backflow are left. Emit the exit report: recirculation
+   tickets drained, considerations planned, issues admitted, waves built/merged, board state, the
+   **final working-tree state from a post-build `git status --porcelain`** (captured at exit, never a
    start-of-run snapshot — the build lane writes files mid-run, so a stale snapshot under-counts any
    uncommitted/untracked artifact), and anything waiting on the operator (the Think-PR requirements
    gate, incl. any open Think PR pending admission).

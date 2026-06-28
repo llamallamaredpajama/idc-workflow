@@ -53,6 +53,15 @@ python3 "$TRK" --tracker "$T" claim --num "$a" --agent idc-implementer >/dev/nul
 python3 "$TRK" --tracker "$T" close --num "$a" >/dev/null
 drain | grep -q "^drain: complete$" || fail "with only a gate + a Blocked dependent + a pending consideration left, autorun should exit (complete)"
 
+# ---- C5 allowlist: a Stage=Recirculation inbox ticket is NOT eligible build work ----------------
+# Autorun claims ONLY Stage=Buildable. A Recirculation ticket (scope discovered mid-build, the
+# non-Buildable inbox) is drained at the TOP of the pipe via /idc:recirculate — never scooped into a
+# Buildable wave. Red-when-broken: widen the drain allowlist to admit Recirculation and this ticket
+# goes eligible / the board stops draining complete.
+rec=$(python3 "$TRK" --tracker "$T" create --title "Discovered mid-build (recirculation inbox)" --stage Recirculation)
+drain | grep -qE "(^| )$rec( |$)" && fail "a Stage=Recirculation inbox ticket must not be eligible build work (claims only Buildable; Recirculation is build-excluded)"
+drain | grep -q "^drain: complete$" || fail "a non-eligible Stage=Recirculation ticket must not flip drain back to continue (drained at the top of the pipe, not built)"
+
 # ---- a state block MISSING the `issues` key entirely -> exit 2 (not a silent empty board) ------
 # A dropped `issues` key used to default to an empty board (state.get("issues", [])) -> a silent
 # `drain: complete`. A missing key is corruption, not an empty board: fail closed (exit 2).
@@ -165,4 +174,59 @@ WF="$PLUGIN/templates/WORKFLOW.md"
 grep -qiE 'Backend-portable approval' "$WF" \
   || fail "WORKFLOW.md §2 must note backend-portable gate approval (filesystem: gate issue Status -> Done) (PR#72 follow-up)"
 
-echo "PASS: autorun drain predicate green; exit report reconciles the working tree post-build (L2-1); human gate is filesystem-backend portable (PR#72 follow-up)"
+# ============================================================================================
+# Lane 5 — Autorun top-of-pipeline ordering + human-gate preservation (Recirculation intake)
+# ============================================================================================
+# Autorun now STARTS at the top of the pipe: drain the Recirculation inbox via /idc:recirculate,
+# THEN plan approved considerations, THEN drain Buildable waves. It is full-pipeline autonomy that
+# pauses ONLY at human gates — a gate-worthy recirculation ticket pauses behind its gate (reported +
+# skipped, reusing the existing [operator-action] skip/surface behavior), never forced. Both the
+# command entry and the agent playbook must carry this consistently. Every assertion below is
+# red-when-broken: break the ordering/guard text and the matching check fails.
+
+# line number of the first case-insensitive match of $2 in file $1 ("" if none; -m1 avoids SIGPIPE)
+lineof() { grep -n -m1 -iE "$2" "$1" 2>/dev/null | cut -d: -f1; }
+# assert the Recirculation-intake anchor ($2) precedes the plan anchor ($3) precedes the build
+# anchor ($4) by physical line position in file $1 (top-of-pipeline order)
+ord() {
+  local f="$1" r p d
+  r=$(lineof "$f" "$2"); p=$(lineof "$f" "$3"); d=$(lineof "$f" "$4")
+  [ -n "$r" ] && [ -n "$p" ] && [ -n "$d" ] && [ "$r" -lt "$p" ] && [ "$p" -lt "$d" ]
+}
+
+for f in "$AUTORUN" "$CMD"; do
+  bn="$(basename "$f")"
+  # (1) the fixed top-of-pipeline order is documented on one line: recirculate -> plan -> drain
+  grep -qiE 'recirculate.*plan.*drain' "$f" \
+    || fail "$bn must document the fixed top-of-pipeline order (recirculate -> plan -> drain) on one line (Lane 5 ordering)"
+  # (2) full-pipeline autonomy that pauses ONLY at human gates
+  grep -qiE 'only at human gates' "$f" \
+    || fail "$bn must state autorun is full-pipeline autonomy that pauses only at human gates (Lane 5)"
+  # (3) autorun NEVER forces a gate
+  grep -qiE 'never forc' "$f" \
+    || fail "$bn must state autorun never forces a gate (Lane 5)"
+  # (4) a gate-worthy item pauses behind its gate, reusing the existing [operator-action] skip/surface
+  grep -qiE 'pauses behind its gate' "$f" \
+    || fail "$bn must state a gate-worthy item pauses behind its gate (reported + skipped), not forced (Lane 5)"
+  grep -qiE 'operator-action' "$f" \
+    || fail "$bn must reuse the existing [operator-action] gate skip/surface behavior — autorun doesn't force gates (Lane 5)"
+  # (5) the Recirculation intake runs /idc:recirculate in its board-scan inbox-drain mode
+  grep -qiE '/idc:recirculate' "$f" \
+    || fail "$bn Recirculation intake must run /idc:recirculate (Lane 5)"
+  grep -qiE 'inbox-drain' "$f" \
+    || fail "$bn Recirculation intake must invoke the board-scan inbox-drain mode (Lane 5)"
+  # (6) drain allowlist alignment: Consideration/Planning/Recirculation are build-excluded (claims only Buildable)
+  grep -qiE 'Consideration.*Planning.*Recirculation' "$f" \
+    || fail "$bn build-exclusion must name Consideration/Planning/Recirculation as build-excluded — claims only Buildable (Lane 5 / C5)"
+done
+
+# (7) structural ordering — the Recirculation-intake step physically precedes the plan step which
+# precedes the build/drain step in each file (red-when-broken: move the intake below the build step).
+# Agent anchors are scoped to the DRAIN-LOOP step prose (the `inbox first` phrase appears only in the
+# step-1 body, not the section heading/lead) so the guard tests true execution order, not doc layout.
+ord "$AUTORUN" 'inbox first' 'Find approved' 'Build eligible waves' \
+  || fail "agents/idc-autorun.md drain loop must order Recirculation-intake -> plan -> build (top-of-pipeline) (Lane 5)"
+ord "$CMD" 'Recirculation intake' 'Planning lane' 'Build lane' \
+  || fail "commands/autorun.md must order Recirculation-intake -> Planning lane -> Build lane (top-of-pipeline) (Lane 5)"
+
+echo "PASS: autorun drain predicate green; exit report reconciles the working tree post-build (L2-1); human gate is filesystem-backend portable (PR#72 follow-up); top-of-pipeline order recirculate->plan->drain + human-gate skip/surface preserved (Lane 5)"

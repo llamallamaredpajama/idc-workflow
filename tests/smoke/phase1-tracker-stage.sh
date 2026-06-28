@@ -1,7 +1,7 @@
 #!/bin/bash
 # Phase 1 smoke — board Stage field (4->5) + pointer items vs buildable goal-contracts.
 #
-# Grows the board schema to a 5th single-select `Stage` (Consideration | Planning | Buildable),
+# Grows the board schema to a 5th single-select `Stage` (Consideration | Planning | Buildable | Recirculation),
 # the column-grouping field. Upstream artifacts (considerations, in-flight plans, pillars) ride
 # the board as lightweight POINTER items (repo-file reference + Stage/Phase/Domain, never a copy
 # of canonical content); buildable issues carry Stage=Buildable. Build queries the board by

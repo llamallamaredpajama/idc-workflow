@@ -12,6 +12,7 @@ fails=0
 for t in \
   phase1-tracker-fs \
   phase1-tracker-stage \
+  phase1-stage-recirc-append \
   phase1-tracker-lease \
   phase1-init-doctor \
   phase1-doctor-board-lint \

@@ -26,6 +26,12 @@ has "$U" 'idc_template_for\.py' \
   || fail "update.md must resolve templates via the shared idc_template_for.py resolver"
 has "$U" 'idc_plugin_freshness\.py' \
   || fail "update.md must run the stale-session freshness guard"
+# Board-drift contract must know the 3.1.0 4th Stage option and report a present-but-stale Stage
+# field — the regression that shipped a Recirculation feature with no board option to file into.
+has "$U" 'Consideration\|Planning\|Buildable\|Recirculation' \
+  || fail "update.md board-drift contract must list the Stage field's FOUR options incl. Recirculation"
+has "$U" 'stage-recirc-missing' \
+  || fail "update.md must report a present-but-incomplete Stage field (stage-recirc-missing) and point at /idc:init"
 # It must NOT tell the agent to do anything destructive to a data-bearing config. The 2.1.3 footgun
 # was a keep/replace OFFER over operator data; a future edit could reintroduce it with any wording.
 # A plain ordered grep ('overwrite .* WORKFLOW-config') is brittle — it misses the generic "data
@@ -67,6 +73,15 @@ has "$I" 'customized .*WORKFLOW-config\.yaml|--customized WORKFLOW-config\.yaml'
   || fail "init.md must stamp WORKFLOW-config.yaml --customized"
 has "$I" 'customized .*tracker-config\.yaml|--customized docs/workflow/tracker-config\.yaml' \
   || fail "init.md must stamp docs/workflow/tracker-config.yaml --customized"
+# Board provisioning must carry the 3.1.0 4th Stage option on a fresh create AND reconcile an
+# existing pre-3.1.0 board by appending it non-destructively (the regression: init seeded only 3
+# options and skipped an existing field, so /idc:recirculate had no stage to file into).
+has "$I" 'single-select-options "Consideration,Planning,Buildable,Recirculation"' \
+  || fail "init.md must create the Stage field with all FOUR options incl. Recirculation"
+has "$I" 'idc_stage_options\.py' \
+  || fail "init.md must reconcile an existing Stage field via the idc_stage_options.py append helper"
+has "$I" 'ensure-option Recirculation' \
+  || fail "init.md must append the Recirculation option to a pre-3.1.0 board (the on-existing migration)"
 
 # --- uninstall.md: deletion is receipt-driven (only delete what IDC created) --------------------
 UN="$C/uninstall.md"

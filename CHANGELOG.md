@@ -2,6 +2,33 @@
 
 All notable changes to the IDC Workflow plugin are documented in this file.
 
+## 3.1.2 — 2026-06-28
+
+Patch: makes the 3.1.0 `Recirculation` Stage actually provisionable on a real GitHub board. 3.1.0
+added the `Recirculation` Stage value across the schema, both tracker skills, `WORKFLOW.md`, doctor
+9c, and `/idc:recirculate` — but never updated the two surfaces that **provision or validate** the
+board's `Stage` options, so on a real board `/idc:recirculate` had no stage to file into (fresh
+installs *and* upgrades).
+
+- **`/idc:init` now provisions all four `Stage` options and reconciles an existing board.** Phase 4
+  creates the `Stage` field with `Consideration, Planning, Buildable, Recirculation` on a fresh board,
+  and on a board that predates 3.1.0 (a 3-option `Stage`) **appends `Recirculation` non-destructively**
+  — it re-sends every existing option *with its node id* (so GitHub preserves them and item values
+  survive) and appends only the new option, never replacing the option set (a replace re-IDs every
+  option and wipes item values). Previously init created only the 3 options and skipped an existing
+  `Stage` field entirely, so doctor 9c's "run `/idc:init`" remediation was a dead loop.
+- **New `scripts/idc_stage_options.py` helper** assembles that exact non-destructive
+  `updateProjectV2Field` mutation (idempotent: a no-op when the option already exists; fail-closed on
+  bad input). The GitHub-API mechanism it relies on (append by preserving existing option node ids)
+  is verified by a hermetic regression test plus a full update-sandbox E2E.
+- **`/idc:update` now reports the gap instead of being blind to it.** Its Phase 3 board-drift contract
+  includes the 4th option and reports `stage-recirc-missing` for a present-but-stale `Stage` field,
+  pointing the operator at `/idc:init` for the non-destructive fix. Update remains report-only — it
+  never mutates the board.
+- **Regression coverage.** `tests/smoke/phase1-stage-recirc-append.sh` (red-when-broken) pins the
+  non-destructive append, and `phase7-command-prose-invariants.sh` locks the init/update provisioning
+  invariants so this can't silently regress.
+
 ## 3.1.1 — 2026-06-28
 
 Patch: fixes a fatal plugin-load error introduced in 3.1.0.

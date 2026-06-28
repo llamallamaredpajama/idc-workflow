@@ -140,13 +140,18 @@ Compare the live tracker against the installed version's expectation and **repor
 action on the board:
 - `github` backend: read the board's fields read-only (`gh project field-list <num> --owner
   <owner> --format json`) and compare against the v2 contract — five fields `Status`
-  (`Blocked|Todo|In Progress|Done`), `Stage` (`Consideration|Planning|Buildable`), `Wave`,
-  `Phase`, `Domain`. Report any drift explicitly (missing field, unexpected `Status` option
-  set, etc.). `Stage` is **additive**: a board with no `Stage` field predates it — note its
-  absence as informational drift, not a failure (an absent `Stage` reads as `Buildable`). Do
-  **not** add, rename, or re-option any field — board migration is out of scope (it risks live
-  issues and in-flight waves); surface the drift and let the operator decide via
-  `idc:idc-tracker-github`.
+  (`Blocked|Todo|In Progress|Done`), `Stage` (`Consideration|Planning|Buildable|Recirculation`),
+  `Wave`, `Phase`, `Domain`. Report any drift explicitly (missing field, unexpected `Status` option
+  set, etc.). `Stage` is **additive** on two axes: (a) a board with **no `Stage` field** predates it
+  — note its absence as informational drift, not a failure (an absent `Stage` reads as `Buildable`);
+  (b) a board whose `Stage` field exists but **lacks the `Recirculation` option** predates 3.1.0 —
+  report it explicitly (`stage-recirc-missing`: `/idc:recirculate` has no stage to file into until
+  it is added). Do **not** add, rename, or re-option any field here — update is report-only.
+  Remediation: the missing `Recirculation` option is added by **`/idc:init`**, which appends that one
+  option non-destructively (re-sends existing options by node id, so item values are preserved); any
+  other drift (a renamed/extra field) is surfaced for the operator to resolve via
+  `idc:idc-tracker-github`. Board migration is never performed here — it risks live issues and
+  in-flight waves.
 - If the drift check **cannot run** (board unreachable, or `filesystem` backend), report a distinct
   third outcome — "board drift: could not verify (reason)" — never silently report "no drift".
 

@@ -119,7 +119,7 @@ found — no fields added, not linked. Single-selects need ≥1 option at creati
 | Field | Type | Options |
 |-------|------|---------|
 | `Status` | SINGLE_SELECT (reconcile built-in) | `Blocked`, `Todo`, `In Progress`, `Done` |
-| `Stage` | SINGLE_SELECT (create) | `Consideration`, `Planning`, `Buildable` |
+| `Stage` | SINGLE_SELECT (create) | `Consideration`, `Planning`, `Buildable`, `Recirculation` |
 | `Wave` | SINGLE_SELECT (create) | seed `Wave 1` |
 | `Phase` | SINGLE_SELECT (create) | seed `Phase 1` |
 | `Domain` | SINGLE_SELECT (create) | seed with the Phase-1 derived domain names |
@@ -149,10 +149,36 @@ and skip names that already exist:
 ```bash
 existing=$(gh project field-list <n> --owner "$OWNER" --format json --limit 50 --jq '.fields[].name')
 have() { printf '%s\n' "$existing" | grep -qx "$1"; }
-have Stage  || gh project field-create <n> --owner "$OWNER" --name "Stage"  --data-type SINGLE_SELECT --single-select-options "Consideration,Planning,Buildable"
+have Stage  || gh project field-create <n> --owner "$OWNER" --name "Stage"  --data-type SINGLE_SELECT --single-select-options "Consideration,Planning,Buildable,Recirculation"
 have Wave   || gh project field-create <n> --owner "$OWNER" --name "Wave"   --data-type SINGLE_SELECT --single-select-options "Wave 1"
 have Phase  || gh project field-create <n> --owner "$OWNER" --name "Phase"  --data-type SINGLE_SELECT --single-select-options "Phase 1"
 have Domain || gh project field-create <n> --owner "$OWNER" --name "Domain" --data-type SINGLE_SELECT --single-select-options "<domain1>,<domain2>,..."
+```
+
+**Reconcile the `Stage` options — append `Recirculation` to a pre-3.1.0 board (additive,
+non-destructive).** `field-create` above seeds a *new* `Stage` field with all four options, but a
+board that predates 3.1.0 already has a `Stage` field carrying only the old three — `have Stage`
+short-circuited the create, so its option set stays stale and `/idc:recirculate` has nowhere to
+file (this is what makes `/idc:doctor` 9c's "run `/idc:init`" remediation real). Append the 4th
+option by **re-sending every existing option by node id** plus the new one — **never replace the
+option set** (a replace re-IDs every option and wipes existing item values; see
+`idc:idc-tracker-github`). The shared helper assembles that exact mutation; it is idempotent
+(exit 3 = already present → skip) and fail-closed (exit 2 → leave the board as-is, record an
+operator action):
+```bash
+PID=$(gh project view <n> --owner "$OWNER" --format json --jq '.id')   # PVT_… project node id
+# Read the Stage field via GraphQL (not `field-list`): the non-destructive append must re-send each
+# existing option's color + description, which `gh project field-list` omits (it returns only id+name).
+STAGE_FIELD=$(gh api graphql -f query='query($p:ID!){node(id:$p){... on ProjectV2{field(name:"Stage"){... on ProjectV2SingleSelectField{id options{id name color description}}}}}}' -f p="$PID" --jq '.data.node.field')
+if [ -n "$STAGE_FIELD" ]; then
+  # The helper reads the field id straight out of $STAGE_FIELD; no separate extraction needed.
+  MUT=$(printf '%s' "$STAGE_FIELD" | python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_stage_options.py" append --ensure-option Recirculation --options-json -); RC=$?
+  case "$RC" in
+    0) gh api graphql -f query="$MUT" >/dev/null ;;   # appended → existing option ids + item values preserved
+    3) : ;;                                            # already present → idempotent no-op
+    *) echo "Stage reconcile: could not assemble the append (fail-closed) — record an operator action to add the Recirculation option" ;;
+  esac
+fi
 ```
 
 **Link the board to this repo** (both paths) so it surfaces on the repo's **Projects tab** and

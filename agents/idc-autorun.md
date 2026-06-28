@@ -68,11 +68,16 @@ loop below). Then the two lanes:
    the **whole board** — the github mode pages **every** item, so **never** substitute a bare
    `gh project item-list` (it returns only its 30-item first page → a grown board truncates and the
    lane goes blind). An empty/missing `Stage` reads as `Buildable` (the legacy 4-field default). While
-   it reports `drain: continue`, run `idc:idc-build` on the eligible waves; re-check after each.
+   it reports `drain: continue`, run `idc:idc-build` on the eligible waves; re-check after each. Any
+   non-zero drain exit is **neither** `continue` **nor** `complete` — that covers `drain: unknown` (the
+   board read succeeded but a build candidate's blocked-by lookup could not be verified) and a hard
+   board-read failure (exit 2, no `drain:` line). Do not exit on it; treat the lane as possibly-unfinished
+   and let the next `/loop` iteration re-check.
 5. **Exit** when no `Stage = Recirculation` tickets remain, no approved considerations remain
    unplanned, AND the drain predicate reports `drain: complete` — i.e. only Done items,
    requirements-gated Blocked items, the operator's gate issues, un-admitted considerations (open
-   Think PRs), and any gated recirculation backflow are left. Emit the exit report: recirculation
+   Think PRs), and any gated recirculation backflow are left. Never report the run drained on a
+   non-zero drain exit (`drain: unknown`, or a hard board-read failure). Emit the exit report: recirculation
    tickets drained, considerations planned, issues admitted, waves built/merged, board state, the
    **final working-tree state from a post-build `git status --porcelain`** (captured at exit, never a
    start-of-run snapshot — the build lane writes files mid-run, so a stale snapshot under-counts any

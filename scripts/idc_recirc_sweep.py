@@ -364,16 +364,23 @@ def scan_github(repo, matrices, project_number, log):
     return findings, ctx
 
 
-def github_existing_sources(repo, ctx):
+def github_existing_sources(repo, ctx, log):
     """The {(origin, what)} already covered by an existing Recirculation ticket's hidden source
     marker — the stateless dedupe set that makes ticket-filing idempotent across runs. Reads the
     WHOLE board (paginated) so a Recirculation ticket past the first 30 items is not missed (which
-    would re-file a duplicate)."""
+    would re-file a duplicate).
+
+    Returns the dedupe set, or None when the board read FAILS — a VISIBLE degraded state (logged) that
+    the caller treats as "cannot dedupe → do not file". Returning an empty set here instead would
+    SILENTLY risk re-filing a duplicate Recirculation ticket (the dedupe can't see the existing one),
+    so fail-closed against duplicates rather than file blind."""
     seen = set()
     try:
         items = idc_gh_board.fetch_items(ctx["owner"], ctx["project_number"], repo)
-    except idc_gh_board.BoardReadError:
-        return seen
+    except idc_gh_board.BoardReadError as e:
+        log(f"github: existing-ticket dedupe read FAILED ({str(e)[:120]}) — skipping ticket-filing "
+            "this sweep to avoid duplicates (will retry next run)")
+        return None
     for it in items:
         if (it.get("stage") or "") != RECIRC_STAGE:
             continue
@@ -409,6 +416,12 @@ def apply_github(findings, repo, ctx, log):
     recirc_oid = recirc_oid.strip() if ok else ""
     changed = 0
 
+    def stage_recirc(item_id):
+        """Set one board item's Stage → Recirculation (shared by the re-stage loop + ticket-filing).
+        Returns gh()'s (ok, stdout, stderr)."""
+        return gh(["project", "item-edit", "--id", item_id, "--project-id", project_node,
+                   "--field-id", stage_fid, "--single-select-option-id", recirc_oid], repo)
+
     for f in findings:
         if f.action != RESTAGE or not f.item_id:
             continue
@@ -416,9 +429,7 @@ def apply_github(findings, repo, ctx, log):
             log(f"github: #{f.number} re-stage skipped — Stage field/option id unresolved "
                 "(provision the Recirculation option via /idc:init)")
             continue
-        ok1, _, err1 = gh(["project", "item-edit", "--id", f.item_id,
-                           "--project-id", project_node, "--field-id", stage_fid,
-                           "--single-select-option-id", recirc_oid], repo)
+        ok1, _, err1 = stage_recirc(f.item_id)
         if not ok1:
             log(f"github: #{f.number} re-stage failed ({err1.strip()[:120]})")
             continue
@@ -431,7 +442,10 @@ def apply_github(findings, repo, ctx, log):
     # Ticket capture (idempotent): file one Recirculation ticket per untickered (origin, what).
     captures = [c for f in findings for c in f.captures]
     if captures:
-        already = github_existing_sources(repo, ctx)
+        already = github_existing_sources(repo, ctx, log)
+        if already is None:
+            # The dedupe board read failed (logged above) — do NOT file blind (would risk duplicates).
+            return changed
         for c in captures:
             key = (c["origin"], c["what"])
             if key in already:
@@ -444,15 +458,26 @@ def apply_github(findings, repo, ctx, log):
                 log(f"github: ticket for {c['origin']} failed ({errc.strip()[:120]})")
                 continue
             url = url_out.strip().splitlines()[-1] if url_out.strip() else ""
-            # Capture the new item's node id straight from item-add (`--jq .id`) — no board re-read.
-            # (The old path paginated the WHOLE board per filed ticket just to recover an id the add
-            # call already returns.)
+            # The issue now EXISTS, so an item-add / item-edit failure is a PARTIAL: surface it and do
+            # NOT report it as a clean "filed" (the old path logged "filed" + counted it even when the
+            # add/edit failed, hiding an off-board or un-staged orphan). Capture the new item's node id
+            # straight from item-add (`--jq .id`) — no board re-read.
             ok_add, iid_out, _ = gh(["project", "item-add", project_number, "--owner", owner,
                                      "--url", url, "--format", "json", "--jq", ".id"], repo)
             iid = iid_out.strip() if ok_add else ""
-            if iid and project_node and stage_fid and recirc_oid:
-                gh(["project", "item-edit", "--id", iid, "--project-id", project_node,
-                    "--field-id", stage_fid, "--single-select-option-id", recirc_oid], repo)
+            if not iid:
+                log(f"github: ticket {url or c['origin']} created but NOT added to the board "
+                    "(item-add failed) — surfaced, not counted as filed")
+                continue
+            if not (project_node and stage_fid and recirc_oid):
+                log(f"github: ticket {url} added but NOT staged {RECIRC_STAGE} "
+                    "(Stage field/option id unresolved — provision via /idc:init) — not counted as filed")
+                continue
+            ok_edit, _, erre = stage_recirc(iid)
+            if not ok_edit:
+                log(f"github: ticket {url} added but Stage→{RECIRC_STAGE} FAILED "
+                    f"({erre.strip()[:120]}) — surfaced, not counted as filed")
+                continue
             log(f"github: filed Recirculation ticket for {c['origin']} ({c['what'][:60]})")
             changed += 1
     return changed

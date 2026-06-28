@@ -53,6 +53,10 @@ Traverse the pipe top-to-bottom and exit when nothing actionable remains:
 5. **Exit** when no `Stage = Recirculation` tickets remain, no approved considerations remain
    unplanned, and the drain predicate reports `drain: complete` (only Done + requirements-gated
    Blocked + operator gate issues + un-admitted considerations + gated recirculation backflow left).
+   **Any non-zero drain exit is NOT `complete` — do not exit on it.** That covers both `drain: unknown`
+   (the board read succeeded but a build candidate's blocked-by lookup could not be verified) and a
+   hard board-read failure (exit 2, no `drain:` line). Treat the lane as possibly-unfinished and let the
+   next `/loop` iteration re-check; never report the run drained on a non-zero drain exit.
    Emit the exit report: recirculated, planned, admitted, built/merged, board state, the
    **final working-tree state from a post-build `git status --porcelain`** (run it at exit, never a
    start-of-run snapshot — the build lane writes files mid-run, so a stale snapshot under-counts any

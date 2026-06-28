@@ -67,12 +67,13 @@ cat > "$WORK/bin/gh" <<'STUB'
 sub="$1"
 if [ "$sub" = "project" ] && [ "$2" = "view" ]; then echo "PVT_test"; exit 0; fi
 if [ "$sub" = "api" ] && [ "$2" = "graphql" ]; then cat "$FIX/graphql.json"; exit 0; fi
-has_jq=0; jqexpr=""; editid="__UNSET__"
+has_jq=0; jqexpr=""; editid="__UNSET__"; projid="__UNSET__"
 args=("$@")
 for ((i=0;i<${#args[@]};i++)); do
   case "${args[$i]}" in
     --jq) has_jq=1; jqexpr="${args[$((i+1))]}" ;;
     --id) editid="${args[$((i+1))]}" ;;
+    --project-id) projid="${args[$((i+1))]}" ;;
   esac
 done
 case "$sub" in
@@ -85,7 +86,15 @@ case "$sub" in
           echo "GraphQL: Could not resolve to a node with the global id of '' (updateProjectV2ItemFieldValue)" >&2
           echo "ITEM_EDIT_EMPTY_ID" >> "$GH_LOG"; exit 1
         fi
-        echo "ITEM_EDIT_OK $editid" >> "$GH_LOG"; echo "edited $editid"; exit 0 ;;
+        # Real gh (2.93) REJECTS an integer project_number on --project-id — it requires the project
+        # NODE id (PVT_…). Model that: a non-PVT_ --project-id (e.g. the integer "$PROJ") fails exactly
+        # like the live API, so a setField that passes the integer is caught red-when-broken here.
+        case "$projid" in
+          PVT_*) : ;;   # a real project NODE id — accepted
+          *) echo "GraphQL: Could not resolve to a node with the global id of '$projid' (updateProjectV2ItemFieldValue)" >&2
+             echo "ITEM_EDIT_BAD_PROJID $projid" >> "$GH_LOG"; exit 1 ;;
+        esac
+        echo "ITEM_EDIT_OK $editid PROJID=$projid" >> "$GH_LOG"; echo "edited $editid"; exit 0 ;;
       *) echo "gh stub: unhandled project '$2'" >&2; exit 99 ;;
     esac ;;
   *) echo "gh stub: unhandled '$sub'" >&2; exit 99 ;;
@@ -114,10 +123,12 @@ extract_setfield() {
 BOARD_JSON_SRC="$(extract_fn board_json)"
 ITEMID_SRC="$(extract_fn itemid)"
 OPTID_SRC="$(extract_fn optid)"
+PROJNODE_SRC="$(extract_fn projnode)"
 SETFIELD_SRC="$(extract_setfield)"
 [ -n "$BOARD_JSON_SRC" ] || fail "could not extract board_json() from SKILL.md (paginating reader not wired?)"
 [ -n "$ITEMID_SRC" ]     || fail "could not extract itemid() from SKILL.md (recipe shape changed?)"
 [ -n "$OPTID_SRC" ]      || fail "could not extract optid() from SKILL.md (recipe shape changed?)"
+[ -n "$PROJNODE_SRC" ]   || fail "could not extract projnode() from SKILL.md (the project NODE-id resolver — item-edit --project-id would get the integer)"
 [ -n "$SETFIELD_SRC" ]   || fail "could not extract the setField guard block from SKILL.md"
 
 # Sanity: the WHOLE-BOARD reads go through the paginating helper, never a bare unpaginated item-list.
@@ -130,6 +141,14 @@ grep -qE '^[[:space:]]*gh project item-list' "$SKILL" \
 # Sanity: setField must guard BOTH resolved ids before mutating.
 printf '%s\n' "$SETFIELD_SRC" | grep -q '\[ -n "\$IID" \] || die_gh' || fail "setField is missing the empty item-id guard"
 printf '%s\n' "$SETFIELD_SRC" | grep -q '\[ -n "\$OID" \] || die_gh' || fail "setField is missing the empty option-id guard"
+# Sanity: setField must pass the project NODE id to item-edit, NOT the integer $PROJ (gh rejects the
+# integer). Red-when-broken: revert to `--project-id "$PROJ"` and these greps fail.
+printf '%s\n' "$SETFIELD_SRC" | grep -q '\[ -n "\$PNODE" \] || die_gh' \
+  || fail "setField must resolve + guard the project NODE id (PNODE via projnode) before mutating"
+printf '%s\n' "$SETFIELD_SRC" | grep -q 'item-edit .*--project-id "\$PNODE"' \
+  || fail "setField item-edit must pass --project-id \"\$PNODE\" (the node id), NOT the integer \$PROJ (gh rejects the integer)"
+printf '%s\n' "$SETFIELD_SRC" | grep -q -- '--project-id "\$PROJ"' \
+  && fail "setField still passes the integer \$PROJ to item-edit --project-id (gh: Could not resolve to a node with the global id of '<n>')"
 # Sanity: NO board read pipes gh's --format json text to an external jq (the store-and-reparse bug).
 grep -E 'gh project (item-list|field-list)[^|]*--format json[^|]*\| *jq' "$SKILL" \
   && fail "a board read still pipes gh --format json to external jq (store-and-reparse — the F1 fragility)"
@@ -149,6 +168,7 @@ HARNESS="$WORK/harness.sh"
   printf '%s\n' "$BOARD_JSON_SRC"
   printf '%s\n' "$ITEMID_SRC"
   printf '%s\n' "$OPTID_SRC"
+  printf '%s\n' "$PROJNODE_SRC"
   echo 'setField() { local NUM="$1" FIELD="$2" VALUE="$3"'
   printf '%s\n' "$SETFIELD_SRC"
   echo '}'
@@ -162,8 +182,11 @@ run_itemid()   { ( export PATH="$WORK/bin:$PATH" CLAUDE_PLUGIN_ROOT="$PLUGIN"; s
 if ! errA="$(run_setfield 31 Status Done 2>&1 >/dev/null)"; then
   fail "case A: setField for an on-board issue should succeed (got error: $errA) — is the paginating read resolving the id?"
 fi
-grep -q '^ITEM_EDIT_OK PVTI_aaa$' "$GH_LOG" || fail "case A: item-edit was not called with the resolved id PVTI_aaa (log: $(cat "$GH_LOG"))"
+grep -q '^ITEM_EDIT_OK PVTI_aaa PROJID=PVT_test$' "$GH_LOG" \
+  || fail "case A: item-edit must be called with item id PVTI_aaa AND the project NODE id PVT_test (not the integer \$PROJ) (log: $(cat "$GH_LOG"))"
 grep -q 'ITEM_EDIT_EMPTY_ID' "$GH_LOG" && fail "case A: item-edit was somehow called with a blank id"
+grep -q 'ITEM_EDIT_BAD_PROJID' "$GH_LOG" \
+  && fail "case A: item-edit got a non-node project-id (the integer \$PROJ bug — must pass the PVT_ node id)"
 
 # ---- Case B: issue NOT on the board → empty id → guard fires, item-edit NEVER called ----------
 : > "$GH_LOG"

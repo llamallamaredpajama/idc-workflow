@@ -32,12 +32,16 @@ out of scope — Phase 5 names the separate operator commands for those.
 3. **In-flight check (warn-and-confirm).** Read the backend from
    `docs/workflow/tracker-config.yaml`.
    - `github` → probe the board read-only (same shape as `idc:doctor`), count items still in
-     `In Progress` **via gh's built-in `--jq`** (never pipe `--format json` to an external `jq`:
-     a raw control char in any issue body crashes external jq → a wrong/empty count):
+     `In Progress`. Read the WHOLE board via the shared paginating reader — `gh project item-list`
+     returns only its 30-item first page (and `--limit N` merely moves the ceiling — the same
+     truncation bug at a larger N), so a grown board would UNDER-count in-flight work and silently
+     orphan items past the cut on uninstall. `idc_gh_board.py` pages to completion and emits
+     ASCII-escaped JSON, so the downstream `jq` is control-char-safe (a raw control char U+0000–U+001F
+     in any issue body arrives already escaped, never crashing `jq`):
      ```bash
      owner=$(gh repo view --json owner -q .owner.login)
      num=$(grep -E '^project_number:' docs/workflow/tracker-config.yaml | grep -oE '[0-9]+')
-     inflight=$(gh project item-list "$num" --owner "$owner" --format json --limit 500 --jq '[.items[] | select(.status=="In Progress")] | length')
+     inflight=$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gh_board.py" --owner "$owner" --project "$num" | jq '[.items[] | select(.status=="In Progress")] | length')
      ```
      If `$inflight` ≥1, report plainly ("N issues still in progress — uninstalling orphans them on
      the board") and require an explicit `yes` to proceed. If the board read **fails**, do not

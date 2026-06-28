@@ -66,10 +66,19 @@ optid() { gh project field-list "$PROJ" --owner "$OWNER" --format json \
 itemid() { case "$1" in ''|*[!0-9]*) die_gh ;; esac   # $1 is interpolated BARE into the jq below
   IJ="$(board_json)" || die_gh
   printf '%s' "$IJ" | jq -r ".items[] | select(.content.number==$1) | .id"; }
+# Resolve the project NODE id (`PVT_…`) — `gh project item-edit --project-id` requires the project's
+# GraphQL NODE id, NOT the integer `project_number` (`$PROJ`): passing the integer fails with
+# `Could not resolve to a node with the global id of '<n>'`. (item-add / item-list / field-list
+# correctly take the integer `$PROJ` + `--owner`; ONLY item-edit's `--project-id` wants the node id.)
+projnode() { gh project view "$PROJ" --owner "$OWNER" --format json --jq ".id"; }
 ```
 
-`PROJ` is the project node id (`PVT_…`) where GraphQL is used; `gh project` subcommands
-take the integer `project_number` + `--owner`. Resolve both from config; never hardcode.
+`PROJ` is the integer `project_number` (resolved at the `PROJ=` line above): `gh project item-add`,
+`item-list`, and `field-list` take it together with `--owner`. **`item-edit --project-id` is the
+exception** — it needs the project **node id** (`PVT_…`), resolved by `projnode`, NOT the integer
+`PROJ` (passing the integer fails with `Could not resolve to a node with the global id of '<n>'`).
+The GraphQL board read resolves the same node id internally inside `idc_gh_board.py`. Resolve `PROJ`
+and `OWNER` from config; never hardcode.
 
 ## Six core ops (the portable interface)
 
@@ -83,16 +92,18 @@ gh project item-add "$PROJ" --owner "$OWNER" --url "$URL" || die_gh
 printf '%s\n' "$NUM"
 ```
 
-**setField(ticket, field, value)** — resolve the cached field node id + the option id (by
-name) and write the single-select value. Pre-seed the option first if it is new (see
-provisioning caveat). **Guard the resolved ids before the mutation** — an empty item or option
-id (issue not on the board, or no such option) would otherwise reach
+**setField(ticket, field, value)** — resolve the cached field node id, the option id (by name),
+and the project **node id** (`item-edit --project-id` needs the node id, NOT the integer `$PROJ`),
+then write the single-select value. Pre-seed the option first if it is new (see provisioning
+caveat). **Guard every resolved id before the mutation** — an empty item, option, or project-node
+id (issue not on the board, no such option, or an unresolvable project) would otherwise reach
 `updateProjectV2ItemFieldValue` as `''` (`Could not resolve to a node with the global id of ''`),
 so `die_gh` first rather than mutating with a blank id:
 ```bash
-IID="$(itemid "$NUM")";           [ -n "$IID" ] || die_gh   # #NUM not on the board → never mutate with ''
-OID="$(optid "$FIELD" "$VALUE")";  [ -n "$OID" ] || die_gh   # no such option for $FIELD=$VALUE → never mutate with ''
-gh project item-edit --id "$IID" --project-id "$PROJ" \
+IID="$(itemid "$NUM")";            [ -n "$IID" ] || die_gh     # #NUM not on the board → never mutate with ''
+OID="$(optid "$FIELD" "$VALUE")";  [ -n "$OID" ] || die_gh     # no such option for $FIELD=$VALUE → never mutate with ''
+PNODE="$(projnode)";               [ -n "$PNODE" ] || die_gh   # project NODE id (PVT_…) — item-edit --project-id needs it, NOT the integer $PROJ
+gh project item-edit --id "$IID" --project-id "$PNODE" \
   --field-id "$(fid "$FIELD")" --single-select-option-id "$OID" || die_gh
 ```
 

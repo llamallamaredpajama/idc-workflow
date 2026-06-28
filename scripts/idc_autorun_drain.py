@@ -18,9 +18,12 @@ Eligible build work = an issue that is:
   * NOT an operator-action gate issue (title starting with `[operator-action]`), and
   * has every native blocked-by upstream `Done`.
 
-Prints the eligible issue numbers and `drain: continue` (work remains) or `drain: complete`
-(exit). The planning lane (unplanned considerations) is scanned by the orchestrator from the
-filesystem; this helper covers the build lane / board-exit half.
+Prints the eligible issue numbers and a verdict: `drain: continue` (work remains), `drain: complete`
+(nothing actionable left — exit), or `drain: unknown` + exit 2 (the github board read SUCCEEDED but
+NO eligible work remains AND ≥1 build candidate's blocked-by lookup was unverifiable, so the lane
+cannot be proven drained — autorun must NOT treat this as `complete`/terminal, the silent blind-drain
+this guards; it retries next `/loop`). The planning lane (unplanned considerations) is scanned by the
+orchestrator from the filesystem; this helper covers the build lane / board-exit half.
 
 With `--width`, one extra line reports the ready frontier's width:
   width: <N>     (the cardinality of the `eligible:` set already printed above)
@@ -166,12 +169,15 @@ def _blocked_by_numbers(repo, number):
 def load_github(owner, project_number, repo):
     """Build the predicate's issues list from the github board (ALL pages via idc_gh_board).
 
-    Normalizes each issue-backed item to number/status/stage/title, then resolves native blocked_by
-    ONLY for the build-candidate lane (Todo + Buildable + non-operator-action) — the only issues
-    whose blocker state can change eligibility, so non-candidates skip the per-issue API call. A
-    blocked_by lookup failure fail-closes the candidate (an unresolvable sentinel blocker) so it is
-    excluded this pass, never claimed unverified. Exits 2 on an unreadable board (fail-closed, never
-    a hollow empty drain)."""
+    Returns `(issues, unverified)` where `unverified` is the count of build candidates whose native
+    blocked_by lookup FAILED this pass. Normalizes each issue-backed item to number/status/stage/title,
+    then resolves native blocked_by ONLY for the build-candidate lane (Todo + Buildable +
+    non-operator-action) — the only issues whose blocker state can change eligibility, so
+    non-candidates skip the per-issue API call. A blocked_by lookup failure fail-closes the candidate
+    (an unresolvable sentinel blocker) so it is excluded this pass, never claimed unverified — AND is
+    tallied into `unverified` so the AGGREGATE verdict (main) can refuse a false `drain: complete` when
+    nothing is eligible only because every candidate's blockers were unverifiable. Exits 2 on an
+    unreadable board (fail-closed, never a hollow empty drain)."""
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import idc_gh_board  # noqa: E402 — github-only dependency, imported lazily
     try:
@@ -191,19 +197,21 @@ def load_github(owner, project_number, repo):
             "stage": it.get("stage"),
             "title": content.get("title") or "",
         })
+    unverified = 0
     for it in issues:
         if not _is_build_candidate(it):
             it["blocked_by"] = []
             continue
         nums, ok = _blocked_by_numbers(repo, it["number"])
         if not ok:
+            unverified += 1
             sys.stderr.write(
                 f"idc-autorun-drain: blocked_by lookup failed for #{it['number']} — "
                 "excluded this pass (will retry next /loop)\n")
             it["blocked_by"] = [0]          # 0 is never a real issue number → never Done → excluded
         else:
             it["blocked_by"] = nums
-    return issues
+    return issues, unverified
 
 
 def main():
@@ -219,11 +227,12 @@ def main():
                     help="also print the ready frontier's width (max-useful parallelism); the ready set is the `eligible:` line")
     args = ap.parse_args()
 
+    unverified = 0
     if args.backend == "github":
         if not args.project or not args.owner:
             sys.stderr.write("idc-autorun-drain: --project and --owner are required for the github backend\n")
             sys.exit(2)
-        issues = load_github(args.owner, args.project, os.path.abspath(args.repo))
+        issues, unverified = load_github(args.owner, args.project, os.path.abspath(args.repo))
     else:
         if not args.tracker:
             sys.stderr.write("idc-autorun-drain: --tracker is required for the filesystem backend\n")
@@ -233,6 +242,16 @@ def main():
     eligible = compute_eligible(issues)
 
     print("eligible: " + " ".join(str(n) for n in eligible))
+    # AGGREGATE fail-closed verdict (the github blind-drain guard): NO eligible work remains AND at
+    # least one build candidate's blocked_by lookup was unverifiable — so we CANNOT prove the build
+    # lane is drained. Emitting `drain: complete` here would recreate the silent false-clean this whole
+    # fix repudiates (autorun treats `complete` as TERMINAL and stops). Report `drain: unknown` + exit 2
+    # so autorun retries next `/loop` instead, and skip the width line (the frontier is unknowable). (A
+    # NON-EMPTY eligible set is safe to `continue` on — the unverifiable candidates simply retry next
+    # loop. The filesystem path never sets `unverified`, so its verdict is unchanged.)
+    if not eligible and unverified:
+        print("drain: unknown")
+        sys.exit(2)
     print("drain: " + ("continue" if eligible else "complete"))
     if args.width:
         # The ready frontier IS the `eligible:` set already printed above; width is its size = the

@@ -96,14 +96,17 @@ UN="$C/uninstall.md"
 has "$UN" 'receipt' || fail "uninstall.md must drive removal from the install receipt"
 has "$UN" 'only delete what IDC' \
   || fail "uninstall.md must state it only deletes what IDC created"
-# F1 completeness (overnight-e2e-hardening): the in-flight board count must use gh's BUILT-IN
-# --jq — never pipe `gh project item-list … --format json` to an EXTERNAL jq. A raw control char
-# (U+0000–U+001F) in any issue body crashes external jq → a wrong/empty count silently mis-reports
-# in-flight work and can orphan board items on uninstall (the same class as the F1 skill bug).
-has "$UN" 'item-list .*--format json .*--jq' \
-  || fail "uninstall.md in-flight count must use gh's built-in --jq (control-char-robust), not an external-jq reparse (F1 completeness)"
-grep -E 'gh project item-list[^|]*--format json[^|]*\| *jq' "$UN" \
-  && fail "uninstall.md still pipes item-list --format json to an external jq (the F1 control-char fragility)"
+# F1 + pagination (overnight-e2e-hardening + the 30-item-truncation fix): the in-flight board count
+# must read the WHOLE board via the shared paginating reader (idc_gh_board.py), NEVER a truncating
+# `gh project item-list` (it returns only its 30-item first page; `--limit` just moves the ceiling),
+# which would under-count in-flight work and orphan board items past the cut on uninstall. The reader
+# emits ASCII-escaped JSON, so piping ITS output to an external jq stays control-char-safe — a raw
+# control char (U+0000–U+001F) in any issue body would otherwise crash a strict external jq → a
+# wrong/empty count (the F1 class). No `--limit N` ceiling left in any github board read.
+has "$UN" 'idc_gh_board\.py' \
+  || fail "uninstall.md in-flight count must read the whole board via the paginating idc_gh_board.py (not a truncating gh item-list)"
+grep -E 'gh project item-list.*--format json' "$UN" \
+  && fail "uninstall.md must not read the board with a truncating gh project item-list --format json (use the paginating idc_gh_board.py)"
 
 # --- doctor.md: read-only (it must never mutate the repo or board) ------------------------------
 D="$C/doctor.md"

@@ -161,7 +161,15 @@ def fetch_items(owner, project_number, repo="."):
             # can't tell whether more pages remain → fail CLOSED rather than treat this as the final
             # page (which could silently truncate). Completes the malformed-shape closure.
             raise BoardReadError("graphql response missing items.pageInfo — refusing a partial board")
-        if page.get("hasNextPage"):
+        has_next = page.get("hasNextPage")
+        if not isinstance(has_next, bool):
+            # pageInfo present but hasNextPage missing/non-bool: a bare `if page.get("hasNextPage")`
+            # would read a missing/null/non-bool as falsy → treat THIS as the last page → silently
+            # truncate a board that may have more. A connection's hasNextPage is always a bool when
+            # requested, so anything else is anomalous → fail CLOSED (same posture as the branches above).
+            raise BoardReadError(
+                "graphql response pageInfo.hasNextPage missing or non-bool — refusing a partial board")
+        if has_next:
             cursor = page.get("endCursor")
             if not cursor:
                 # hasNextPage=true with no endCursor is anomalous (GitHub always pairs them); fail

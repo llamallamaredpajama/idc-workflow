@@ -79,12 +79,18 @@ cat > "$WORK/bin/gh" <<'STUB'
 sub="$1"
 if [ "$sub" = "project" ] && [ "$2" = "view" ]; then echo "PVT_test"; exit 0; fi
 if [ "$sub" = "api" ] && [ "$2" = "graphql" ]; then
-  has_cursor=0; has_pid=0
-  for a in "$@"; do case "$a" in cursor=*) has_cursor=1 ;; pid=PVT_test) has_pid=1 ;; esac; done
+  cursor_val=""; has_pid=0
+  for a in "$@"; do case "$a" in cursor=*) cursor_val="${a#cursor=}" ;; pid=PVT_test) has_pid=1 ;; esac; done
   # the resolved project NODE id must be wired through as `-f pid=PVT_test` — red if the node-id
   # resolution (gh project view) or the `-f pid=` variable wiring regresses.
   [ "$has_pid" = 1 ] || { echo "stub: graphql missing pid=PVT_test (broken pid resolution / -f wiring)" >&2; exit 7; }
-  if [ "$has_cursor" = 1 ]; then echo "graphql page2" >> "$FIX/gh.log"; cat "$FIX/page2.json"
+  if [ -n "$cursor_val" ]; then
+    # the reader must thread page 1's endCursor (CUR1) VERBATIM into the next page request — a
+    # wrong/empty cursor (e.g. reusing an old cursor, or dropping endCursor) is a pagination
+    # regression. Demanding the exact value proves the loop wires the correct endCursor, not just
+    # "some cursor".
+    [ "$cursor_val" = "CUR1" ] || { echo "stub: graphql cursor='$cursor_val' != CUR1 (reader did not thread page 1's endCursor)" >&2; exit 8; }
+    echo "graphql page2" >> "$FIX/gh.log"; cat "$FIX/page2.json"
   else echo "graphql page1" >> "$FIX/gh.log"; cat "$FIX/page1.json"; fi
   exit 0
 fi
@@ -221,6 +227,42 @@ printf '%s' "$DR" | grep -qE '(^| )210( |$)' \
   && fail "#210 must NOT be eligible — its blocked_by lookup FAILED, so the fail-closed [0] sentinel must exclude it"
 
 # ============================================================================================
+# 3b. AGGREGATE fail-closed (the Blocker): the board read SUCCEEDS but EVERY Buildable/Todo
+#     candidate's blocked_by lookup FAILS (a board-wide dependencies API outage) → every candidate is
+#     fail-closed-excluded → eligible empties. The verdict must be `drain: unknown` + a NON-ZERO exit,
+#     NEVER `drain: complete` exit 0 — that hollow "complete" is the silent blind-drain autorun treats
+#     as TERMINAL (it stops on a board still full of work). Remove the aggregate guard in
+#     idc_autorun_drain.main() and this flips to `drain: complete` exit 0, so the asserts are
+#     red-when-broken by construction.
+# ============================================================================================
+mkdir -p "$WORK/binunverif"
+cat > "$WORK/binunverif/gh" <<'STUB'
+#!/bin/bash
+sub="$1"
+if [ "$sub" = "project" ] && [ "$2" = "view" ]; then echo "PVT_test"; exit 0; fi
+if [ "$sub" = "api" ] && [ "$2" = "graphql" ]; then
+  has_cursor=0
+  for a in "$@"; do case "$a" in cursor=*) has_cursor=1 ;; esac; done
+  if [ "$has_cursor" = 1 ]; then cat "$FIX/page2.json"; else cat "$FIX/page1.json"; fi
+  exit 0
+fi
+# every native blocked_by lookup FAILS (a board-wide dependencies API outage)
+if [ "$sub" = "api" ]; then
+  for a in "$@"; do case "$a" in */dependencies/blocked_by) echo "dependencies API down" >&2; exit 1 ;; esac; done
+fi
+echo "binunverif: unhandled $*" >&2; exit 99
+STUB
+chmod +x "$WORK/binunverif/gh"
+
+DRU="$(PATH="$WORK/binunverif:$PATH" python3 "$DRAIN" --backend github --project 7 --owner tester --repo "$WORK" 2>/dev/null)"; rcu=$?
+[ "$rcu" = "2" ] \
+  || fail "all-candidates-unverifiable drain must exit 2 (got $rcu), never exit 0 — the silent blind-drain"
+printf '%s' "$DRU" | grep -qx "drain: unknown" \
+  || fail "all-candidates-unverifiable drain must report 'drain: unknown' (got: $(printf '%s' "$DRU" | tr '\n' '|'))"
+printf '%s' "$DRU" | grep -qx "drain: complete" \
+  && fail "all-candidates-unverifiable drain must NEVER report 'drain: complete' (the false-clean Blocker this guards)"
+
+# ============================================================================================
 # 4. the PURE predicate over a >30-item fixture whose frontier sits past index 30
 # ============================================================================================
 elig_pure="$(python3 - "$SCRIPTS" <<'PY'
@@ -250,7 +292,11 @@ PATH="$WORK/binfail:$PATH" python3 "$DRAIN" --backend github --project 7 --owner
 [ "$rc" = "2" ] || fail "an unreadable github board must exit 2 fail-closed (got $rc), never a hollow drain: complete"
 # MALFORMED/anomalous graphql (gh exits 0 but the board shape is absent / carries errors) MUST
 # fail-closed exit 2 — never coerce to an empty board, the silent "blind drain" this reader kills.
-for bad in '{"errors":[{"message":"boom"}]}' '{"data":{"node":null}}' '{"data":{"node":{"items":{"pageInfo":{"hasNextPage":false}}}}}' '{"data":{"node":{"items":{"nodes":[]}}}}'; do
+# The LAST fixture (pageInfo present but hasNextPage MISSING) guards the non-bool branch: a bare
+# `if page.get("hasNextPage")` reads a missing/null hasNextPage as falsy → "last page" → a silently
+# TRUNCATED board exit 0; the isinstance(...bool) guard fail-closes it. Red-when-broken: drop that
+# guard and this fixture returns 0 items exit 0 instead of exit 2.
+for bad in '{"errors":[{"message":"boom"}]}' '{"data":{"node":null}}' '{"data":{"node":{"items":{"pageInfo":{"hasNextPage":false}}}}}' '{"data":{"node":{"items":{"nodes":[]}}}}' '{"data":{"node":{"items":{"pageInfo":{"endCursor":"x"},"nodes":[]}}}}'; do
   BADGQL="$bad" PATH="$WORK/binbad:$PATH" python3 "$BOARD" --owner tester --project 7 --repo "$WORK" >/dev/null 2>&1; rc=$?
   [ "$rc" = "2" ] || fail "a malformed graphql response must fail-closed exit 2, never an empty board: $bad (got $rc)"
 done

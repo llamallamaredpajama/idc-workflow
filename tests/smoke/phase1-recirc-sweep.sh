@@ -255,4 +255,64 @@ fi
 [ "$code4" = "2" ] \
   || fail "a degraded github --report must exit 2 (→ doctor Row 9b SKIP), not 0 (got exit $code4)"
 
-echo "PASS: decide() classifies all cases (red-when-broken) + filesystem re-stage/Wave-clear/idempotency + no-matrix skip + hook wiring resolves + project_number comment-strip + degraded-github-scan surfaces (not a hollow clean)"
+# ── 5. dropped larger-loop handoff: an admitted Consideration with no decomposition is SURFACE-only ─
+# Plan advances a consideration pointer (Consideration -> Planning, retired as buildables land). An
+# admitted consideration still at Stage=Consideration/Status=Todo with NO decomposition — no
+# Stage=Buildable child issue and no in-flight Stage=Planning pointer — is a DROPPED larger-loop
+# handoff (Plan never ran on it). The sweep SURFACES it (advisory, defense-in-depth) and NEVER mutates
+# it. The pure brain (dropped_handoff_numbers) is exercised directly; the filesystem --report
+# integration proves the surface + the no-mutation guarantee. Every case is red-when-broken.
+
+# dropped <items-json> -> space-joined surfaced consideration numbers ("" if none)
+dropped() {
+python3 - "$SCRIPTS" "$1" <<'PY'
+import sys, json
+sys.path.insert(0, sys.argv[1])
+import idc_recirc_sweep as m
+print(" ".join(str(n) for n in m.dropped_handoff_numbers(json.loads(sys.argv[2]))))
+PY
+}
+
+# (a) a lone admitted Consideration/Todo -> surfaced (its number). Contrasts (b)/(c) add decomposition
+#     activity and must flip it to NOT surfaced.
+[ "$(dropped '[{"number":5,"stage":"Consideration","status":"Todo"}]')" = "5" ] \
+  || fail "dropped-handoff: an admitted Consideration/Todo with no decomposition must be surfaced"
+# (b) red-when-broken: a child Buildable means decomposition is active -> NOT surfaced.
+[ "$(dropped '[{"number":5,"stage":"Consideration","status":"Todo"},{"number":6,"stage":"Buildable","status":"Todo"}]')" = "" ] \
+  || fail "a Consideration WITH a child Buildable (decomposition active) must NOT be surfaced (red-when-broken)"
+# (c) red-when-broken: an in-flight Planning pointer also means decomposition started -> NOT surfaced.
+[ "$(dropped '[{"number":5,"stage":"Consideration","status":"Todo"},{"number":7,"stage":"Planning","status":"Todo"}]')" = "" ] \
+  || fail "a Consideration WITH an in-flight Planning pointer must NOT be surfaced (in-flight plan)"
+# (d) a non-Todo (e.g. already-retired) Consideration is not an admitted-but-dropped handoff.
+[ "$(dropped '[{"number":5,"stage":"Consideration","status":"Done"}]')" = "" ] \
+  || fail "a non-Todo Consideration must NOT be surfaced (only admitted/Todo considerations)"
+
+# filesystem --report integration: a real Consideration/Todo board with NO buildables surfaces the
+# dropped handoff (and a matrix need NOT exist — Plan, which writes the matrix, never ran), and the
+# surface is read-only: neither --report nor --auto-correct mutates the consideration.
+REPO5="$WORK/repo5"; mkdir -p "$REPO5/docs/workflow/pillar-matrices"; T5="$REPO5/TRACKER.md"
+cat > "$REPO5/docs/workflow/tracker-config.yaml" <<'YAML'
+backend: filesystem
+YAML
+python3 "$TRK" --tracker "$T5" init >/dev/null || fail "repo5 tracker init failed"
+cons="$(python3 "$TRK" --tracker "$T5" create --title 'admitted consideration' --stage Consideration)" \
+  || fail "create consideration failed"
+out5="$(python3 "$SWEEP" --repo "$REPO5" --report 2>&1)"
+echo "$out5" | grep -qE "^#$cons: dropped larger-loop handoff" \
+  || fail "an admitted Consideration with no decomposition must surface '#$cons: dropped larger-loop handoff' in --report (got: $out5)"
+# SURFACE-only: --report mutates nothing.
+[ "$(python3 "$TRK" --tracker "$T5" show --num "$cons" --field Stage)" = "Consideration" ] \
+  || fail "dropped-handoff is SURFACE-only: --report must not mutate the consideration's Stage"
+# defense-in-depth: --auto-correct never auto-mutates a consideration either.
+python3 "$SWEEP" --repo "$REPO5" --auto-correct || fail "auto-correct must be fail-soft (exit 0)"
+[ "$(python3 "$TRK" --tracker "$T5" show --num "$cons" --field Stage)" = "Consideration" ] \
+  || fail "dropped-handoff is never auto-mutated: --auto-correct must leave the consideration at Consideration"
+
+# control: add a child Buildable -> decomposition active -> the surface disappears (red-when-broken).
+python3 "$TRK" --tracker "$T5" create --title 'child buildable' --stage Buildable >/dev/null \
+  || fail "create child buildable failed"
+out5b="$(python3 "$SWEEP" --repo "$REPO5" --report 2>&1)"
+echo "$out5b" | grep -qiE 'dropped larger-loop handoff' \
+  && fail "a Consideration WITH a child Buildable must NOT surface a dropped handoff (red-when-broken control)"
+
+echo "PASS: decide() classifies all cases (red-when-broken) + filesystem re-stage/Wave-clear/idempotency + no-matrix skip + hook wiring resolves + project_number comment-strip + degraded-github-scan surfaces (not a hollow clean) + dropped larger-loop handoff surfaced (Consideration, surface-only)"

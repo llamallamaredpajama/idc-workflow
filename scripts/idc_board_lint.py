@@ -17,11 +17,25 @@ structured metadata), so there is no body to re-scan and a dependency can only e
 `blocked_by` link — `/idc:doctor` skips this row for the filesystem backend.
 
 Input (stdin): a JSON array, OR newline-delimited JSON objects (one per line), each:
-    {"number": <int>, "title": <str>, "body": <str>, "blocked_by": [<int>, ...] | null}
+    {"number": <int>, "title": <str>, "body": <str>, "blocked_by": [<int>, ...] | null,
+     "stage": <str>?, "status": <str>?}
 `blocked_by` is the issue's native GitHub blocked-by links (numbers), as read by the caller, and is
 **tri-state**: `[n, ...]` = linked, `[]` = confirmed no link, `null` = UNKNOWN (the caller's lookup
 FAILED — e.g. the `gh api` dependencies call errored). UNKNOWN ≠ "no link": a prose dependency on an
 issue we could not disprove is never flagged.
+`stage`/`status` are **optional** and **backward-compatible**: a caller that supplies the whole board
+(each issue's `stage`/`status`) enables the **retired-recirc** rule; the legacy thin shape (no
+`stage`/`status`) leaves that rule silent. Two roles per object — an object IN the build-eligible lane
+(`stage` absent or `Buildable`, `status` absent or `Todo`) is **scanned**; an object explicitly
+outside it (e.g. a Done `Recirculation` ticket a paused issue is `blocked_by`) is **index-only**: it
+is never schema-scanned (its non-contract body would false-flag) and never counted in `scanned`, it
+only resolves a blocker's lane for the retired-recirc rule.
+
+The **retired-recirc** rule fail-closes on the premature-eligibility / infinite-recirc trap: a
+build-eligible issue whose only remaining blocker is a **retired (Done) `Stage = Recirculation`
+ticket** is spuriously eligible — Plan's paused-issue re-link (idc-plan Phase 4) should have
+re-pointed it off that retired ticket onto the real new unblockers. It fires only when the blocker's
+`stage`/`status` are present and resolve to a Done Recirculation ticket.
 
 Output (stdout): one line per flagged issue, then a summary line:
     board-lint: clean (<M> scanned)
@@ -31,6 +45,9 @@ blocked-by lookup FAILED), the summary appends `; <U> dependency lookups indeter
 the parentheses of whichever form prints, so a board-wide dependencies-API outage — every issue →
 UNKNOWN → nothing flagged — cannot masquerade as a clean all-clear. The clause is omitted entirely
 when <U> == 0, leaving the summary byte-for-byte unchanged.
+When one or more issues are flagged retired-recirc, the flagged summary appends `, <R> retired-recirc`
+*inside* the parentheses; the clause is omitted when <R> == 0 (same byte-identical-when-zero discipline
+as the degraded clause), so the existing `(<S> schema, <P> prose-dep)` form is preserved.
 
 Usage: idc_board_lint.py < issues.json   (exit 0 = ran OK; 2 = unreadable/un-parseable input)
 """
@@ -47,6 +64,20 @@ import idc_schema_check  # noqa: E402
 # Autorun's drain already excludes it from build work, and it would always "fail" the contract
 # schema. Skip it here so it is never a false positive.
 OPERATOR_GATE_PREFIX = "[operator-action]"
+
+# The retired-recirc rule resolves each native blocked-by to its board lane. A blocker that resolves
+# to a `Stage = Recirculation` ticket already `Status = Done` is a RETIRED recirculation ticket — its
+# scope was admitted as a consideration, so Plan's paused-issue re-link (idc-plan Phase 4) should have
+# re-pointed this issue OFF it onto the real new unblockers. If that link is the issue's last blocker,
+# the issue is spuriously eligible (the premature-eligibility / infinite-recirc trap).
+RECIRC_STAGE = "Recirculation"
+DONE_STATUS = "Done"
+# Build-eligible-lane sentinels: an input object IS scanned (schema/prose/retired) only when it is in
+# this lane; an object explicitly outside it (e.g. the Done Recirculation blocker) rides in INDEX-ONLY
+# to supply a blocker's stage/status and is never schema-scanned (its non-contract body would
+# false-flag) nor counted as `scanned`.
+BUILDABLE_STAGE = "Buildable"
+TODO_STATUS = "Todo"
 
 # Prose dependency phrases — the SPACE/free-text forms a human writes in a body, deliberately NOT
 # the hyphenated structured tokens `blocked-by` / `blocks-on:` (those ARE recorded links / the
@@ -114,14 +145,63 @@ def prose_dependency_evidence(body, blocked_by):
     return ""
 
 
+def retired_recirc_evidence(blocked_by, stage_status):
+    """Return a short evidence string if a native blocker resolves to a retired (Done) Recirculation
+    ticket, else ''.
+
+    The paused-issue re-link (idc-plan Phase 4) re-points a paused origin issue OFF its retired recirc
+    ticket and onto the real new unblocker issues. If that step was skipped, the paused issue stays
+    `blocked_by` a `Stage = Recirculation` ticket that has since gone `Done` — so that blocker is
+    satisfied and the issue is **spuriously eligible** (the premature-eligibility / infinite-recirc
+    trap this rule fail-closes on).
+
+    `blocked_by` is tri-state (`[n,…]` = linked, `[]` = no link, `None` = UNKNOWN — nothing to
+    resolve in any case but the first). `stage_status` is `{number: (stage, status)}` over the full
+    input list. The rule fires ONLY when a blocker is present in that index AND resolves to a Done
+    Recirculation ticket; an absent blocker (thin legacy input — no stage/status) resolves to
+    `(None, None)` and leaves the rule silent (backward compatible)."""
+    if not blocked_by:
+        return ""
+    for b in blocked_by:
+        stage, status = stage_status.get(b, (None, None))
+        if stage == RECIRC_STAGE and status == DONE_STATUS:
+            return (f"eligible only because retired (Done) {RECIRC_STAGE} ticket #{b} is a blocker — "
+                    "paused-issue re-link skipped (idc-plan Phase 4); re-point onto real unblockers")
+    return ""
+
+
+def in_scan_lane(it):
+    """Whether an input object is a build-eligible-lane issue to SCAN (schema/prose/retired), versus
+    an index-only entry that only supplies a blocker's stage/status.
+
+    The legacy thin shape (no `stage`/`status` keys) is ALWAYS scanned — the caller pre-filtered to
+    `Status = Todo` + `Stage = Buildable`, exactly as before. An object that carries an explicit
+    `stage` ≠ Buildable or `status` ≠ Todo (e.g. the Done Recirculation ticket a paused issue is
+    `blocked_by`) is index-only: scanning it would schema-flag its non-contract body and inflate the
+    `scanned` tally, so it is excluded from the scan and contributes only to the resolution index."""
+    stage = it.get("stage")
+    status = it.get("status")
+    if stage is not None and stage != BUILDABLE_STAGE:
+        return False
+    if status is not None and status != TODO_STATUS:
+        return False
+    return True
+
+
 def lint(issues):
-    """Return (lines, scanned, schema_count, prose_count, unknown_count)."""
+    """Return (lines, scanned, schema_count, prose_count, retired_count, unknown_count)."""
     lines = []
-    scanned = schema_count = prose_count = unknown_count = 0
+    scanned = schema_count = prose_count = retired_count = unknown_count = 0
+    # Blocker-resolution index: {number: (stage, status)} over the WHOLE input, so the retired-recirc
+    # rule can resolve each native blocked-by to its board lane. Index-only entries (a Done
+    # Recirculation ticket) ride in solely to populate this — see in_scan_lane().
+    stage_status = {it.get("number"): (it.get("stage"), it.get("status")) for it in issues}
     for it in issues:
         title = str(it.get("title", "")).strip()
         if title.startswith(OPERATOR_GATE_PREFIX):
             continue  # the operator's gate issue — not a goal-contract, never built cold
+        if not in_scan_lane(it):
+            continue  # index-only entry (supplies a blocker's stage/status); not a scanned lane issue
         scanned += 1
         num = it.get("number", "?")
         body = it.get("body") or ""
@@ -141,12 +221,16 @@ def lint(issues):
         if evidence:
             prose_count += 1
             findings.append("prose-dep — " + evidence)
+        retired_ev = retired_recirc_evidence(blocked_by, stage_status)
+        if retired_ev:
+            retired_count += 1
+            findings.append("retired-recirc — " + retired_ev)
 
         if findings:
             label = f'#{num} "{title}"' if title else f"#{num}"
             for f in findings:
                 lines.append(f"{label}: {f}")
-    return lines, scanned, schema_count, prose_count, unknown_count
+    return lines, scanned, schema_count, prose_count, retired_count, unknown_count
 
 
 def main():
@@ -160,16 +244,20 @@ def main():
             sys.stderr.write("idc-board-lint: each issue must be a JSON object\n")
             sys.exit(2)
 
-    lines, scanned, schema_count, prose_count, unknown_count = lint(issues)
+    lines, scanned, schema_count, prose_count, retired_count, unknown_count = lint(issues)
     for ln in lines:
         print(ln)
-    flagged = schema_count + prose_count
+    flagged = schema_count + prose_count + retired_count
     # Append the degraded-lookup clause ONLY when >0 — when 0 the summary is byte-for-byte unchanged.
     _noun = "lookup" if unknown_count == 1 else "lookups"
     unknown_clause = f"; {unknown_count} dependency {_noun} indeterminate" if unknown_count else ""
+    # The retired-recirc tally rides the flagged parens as a conditional clause (like the degraded
+    # clause), so a board with zero retired-recirc findings keeps the pre-existing summary byte-for-
+    # byte (the existing schema/prose-dep assertions stay green).
+    retired_clause = f", {retired_count} retired-recirc" if retired_count else ""
     if flagged:
         print(f"board-lint: {flagged} flagged of {scanned} scanned "
-              f"({schema_count} schema, {prose_count} prose-dep{unknown_clause})")
+              f"({schema_count} schema, {prose_count} prose-dep{retired_clause}{unknown_clause})")
     else:
         print(f"board-lint: clean ({scanned} scanned{unknown_clause})")
     sys.exit(0)

@@ -107,6 +107,45 @@ run_lint '[{"number":1,"title":"clean","body":"'"$C"'","blocked_by":[]},{"number
 assert_clean "[operator-action] issue must be skipped (scanned count excludes it)"
 refute_out '#9' "[operator-action] issue #9 must not be flagged"
 
+# --- 6b. retired-recirc rule: a Buildable eligible ONLY via a retired (Done) Recirculation ticket -
+# The paused-issue re-link (idc-plan Phase 4) re-points a paused origin issue OFF its retired recirc
+# ticket onto the real new unblockers. If that step is skipped, the paused issue stays blocked_by a
+# Stage=Recirculation ticket that has since gone Done — its last blocker satisfied, so it goes
+# SPURIOUSLY eligible (the premature-eligibility / infinite-recirc trap). The rule needs each
+# blocker's stage+status, supplied by OPTIONAL "stage"/"status" fields on the (index-only) blocker
+# object; absent → the rule stays silent (the thin-shape fixtures #1–#6 above prove back-compat).
+
+# (a) positive: a clean Buildable (#700) blocked_by a Done Recirculation ticket (#701) -> flagged.
+#     #701 carries stage=Recirculation/status=Done so it is INDEX-ONLY (supplies the blocker's lane,
+#     never scanned as a contract — its non-contract body must not false-flag, nor inflate `scanned`).
+run_lint '[{"number":700,"title":"paused origin","body":"'"$C"'","blocked_by":[701]},{"number":701,"title":"retired recirc ticket","stage":"Recirculation","status":"Done","blocked_by":[]}]'
+[ "$RC" -eq 0 ] || fail "retired-recirc: helper exit $RC (want 0 — advisory)"
+assert_out '#700 .*: retired-recirc —' "a Buildable eligible only via a retired Done Recirculation ticket must be flagged retired-recirc"
+assert_out '^board-lint: 1 flagged of 1 scanned \(0 schema, 0 prose-dep, 1 retired-recirc\)$' \
+  "retired-recirc must tally (… 1 retired-recirc) and NOT scan the index-only ticket (1 scanned, not 2)"
+
+# (b) red-when-broken control: SAME shape but the blocker (#702) is a Done NORMAL issue (Stage=
+#     Buildable), not a Recirculation ticket -> NOT flagged. Flips RED if the rule fires on any Done
+#     blocker instead of specifically a retired Recirculation ticket.
+run_lint '[{"number":700,"title":"paused origin","body":"'"$C"'","blocked_by":[702]},{"number":702,"title":"normal done dep","stage":"Buildable","status":"Done","blocked_by":[]}]'
+[ "$RC" -eq 0 ] || fail "retired-recirc control (Done normal): helper exit $RC (want 0)"
+assert_clean "a Buildable blocked_by a Done NORMAL issue must NOT be flagged retired-recirc (red-when-broken)"
+refute_out '#700' "#700 must not be flagged when its blocker is a Done normal issue (not a Recirculation ticket)"
+
+# (c) red-when-broken control: re-linked onto a LIVE unblocker (#703 Stage=Buildable/Status=Todo —
+#     the post-re-link desired state) -> NOT flagged. Both #700 and #703 are valid contracts, so the
+#     clean count is 2. Flips RED if the rule fires whenever ANY blocker is present.
+run_lint '[{"number":700,"title":"paused origin","body":"'"$C"'","blocked_by":[703]},{"number":703,"title":"live unblocker","body":"'"$C"'","stage":"Buildable","status":"Todo","blocked_by":[]}]'
+[ "$RC" -eq 0 ] || fail "retired-recirc control (live unblocker): helper exit $RC (want 0)"
+assert_out '^board-lint: clean \(2 scanned\)$' "a paused issue re-linked onto a live Todo unblocker must NOT be flagged (post-re-link desired state)"
+refute_out '#700' "#700 must not be flagged once re-linked onto a live unblocker"
+
+# (d) back-compat: a thin blocker (#701, no stage/status) can't resolve to a Done Recirculation
+#     ticket -> rule silent. Proves the rule fires ONLY when the blocker's stage/status are present.
+run_lint '[{"number":700,"title":"paused origin","body":"'"$C"'","blocked_by":[701]},{"number":701,"title":"thin blocker","body":"'"$C"'","blocked_by":[]}]'
+[ "$RC" -eq 0 ] || fail "retired-recirc back-compat (thin blocker): helper exit $RC (want 0)"
+assert_out '^board-lint: clean \(2 scanned\)$' "a thin blocker (no stage/status) must leave the retired-recirc rule silent (optional-fields back-compat)"
+
 # --- 7. unparseable stdin -> exit 2 (doctor reads this as 'could not determine' -> SKIP) --------
 printf '%s' 'not json {{' | python3 "$LINT" >/dev/null 2>&1
 [ "$?" -eq 2 ] || fail "unparseable stdin must exit 2 so doctor SKIPs (never FAIL)"
@@ -190,4 +229,4 @@ else
   echo "SKIP: zsh absent — Row 9 functional shell-contrast skipped (static guard 9a still enforced)"
 fi
 
-echo "PASS: board-lint helper classifies schema/prose-dep/link/operator/skip + doctor Row 9 advisory + shell-agnostic guards hold"
+echo "PASS: board-lint helper classifies schema/prose-dep/retired-recirc/link/operator/skip + doctor Row 9 advisory + shell-agnostic guards hold"

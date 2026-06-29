@@ -14,9 +14,22 @@ the process docs stay runtime-neutral and cannot drift per-runtime.
 
 | Primitive | Claude Code mechanic | Fallback |
 |---|---|---|
-| **Durable worker** (Build implementer, autorun lane) | A Claude Teams teammate in its own cmux pane: the lead pre-creates a worktree, `TeamCreate`s, then spawns the teammate with `Agent({team_name, …})` pointed at that worktree (NOT the `isolation:"worktree"` param, which silently runs on `main`); coordinate via `SendMessage`; tear down with `TeamDelete`. | No teams environment → run the work **serially in the main session**, one unit at a time. |
+| **Durable worker** (Build implementer, autorun lane, **recirc consultant + Plan worker** of the larger loop) | A Claude Teams teammate in its own cmux pane: the lead pre-creates a worktree, `TeamCreate`s, then spawns the teammate with `Agent({team_name, …})` pointed at that worktree (NOT the `isolation:"worktree"` param, which silently runs on `main`); coordinate via `SendMessage`; tear down with `TeamDelete`. | No durable-worker runtime → degrade to a **Task subagent** for a single bounded unit (the proven #393 recirc-as-subagent path) or an **inline serial pass** in the main session, one unit at a time. The loop still closes; only the realization differs. |
 | **Bounded fan-out** (domain experts, drafters, clash pairs, reviewers) | The `Workflow` tool for deterministic fan-out/pipeline, or parallel `Agent` (Task) subagents for independent reads. Review fan-out is always **fresh-context subagents** (cold read = adversarial independence, token-optimal). | Subagents are available in every Claude environment; no fallback needed. |
 | **Goal loop** (issue execution) | The native `/goal` loop with auto-goal discipline: render-before-run, record-and-vary iteration, evidence-before-assertion, the attempt ceiling, and the no-punt rule. The issue body IS the contract. | — |
+
+### The larger loop's workers (recirc consultant + Plan)
+
+Build's larger loop (`idc:idc-build` Phase 1b) spawns a **recirc consultant per recirc event** and a
+**batched Plan worker** as **durable workers** — realized exactly like the Build triplet by the map
+above: teammate (Teams) → resident (pi) → thread (Codex) → **Task subagent / inline serial pass** where
+no durable-worker runtime exists, so the loop closes in **every** runtime; only the realization differs.
+Both roles are **zero-teammate**: a teammate **cannot spawn its own teammates**, so each does its
+internal fan-out through the **bounded-fan-out** primitive — the `Workflow` tool (deterministic
+`pipeline()`/`parallel()`, "ultracode") or parallel Task subagents under Claude, app-server threads
+under Codex, the resident pool under pi — **never** by spawning teammates. So a Plan worker realized as
+a teammate still fans its domain experts / clash pairs out as Workflow/subagents, and a recirc
+consultant fans its layer-impact reads out the same way.
 
 ### Durable-worker rules (load-bearing)
 

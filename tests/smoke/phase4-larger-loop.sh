@@ -138,4 +138,13 @@ hasflat "$PLAN" 're-?point[^.]*(paused|unblocker)|paused[^.]*re-?point[^.]*unblo
 hasflat "$PLAN" 'report[^.]*buildable[^.]*(orchestrator|frontier|re-?quer)|newly-created buildable[^.]*(report|signal|frontier)' \
   || fail "agents/idc-plan.md must report newly-created buildable issues on completion (the parent's re-query nudge)"
 
-echo "PASS: closeout validator fail-closes on every malformed handoff (red-when-broken) + emits distinct pass-through/gated/trivial dispatches; build spawns+routes the consultant per event; recirculator documents the structured closeout, trivial grant-Build outcome (separate doc PR via staging), gated cmux ping, and the paused origin-issue record; Plan re-links the paused issue off the retired ticket onto new unblockers + nudges the parent on completion"
+# ── D. STRUCTURAL: the adapter realizes recirc/plan workers in EVERY runtime (no-team fallback) ──
+ADAPTER="$PLUGIN/skills/idc-adapter-claude/SKILL.md"
+hasflat "$ADAPTER" 'recirc consultant[^.]*plan worker|larger loop[^.]*durable worker|recirc consultant.{0,60}durable worker' \
+  || fail "idc-adapter-claude must realize the larger loop's recirc consultant + Plan worker as durable workers"
+hasflat "$ADAPTER" 'task subagent[^.]*(inline|serial|no |fallback)|(inline|serial) (pass|session)[^.]*(no |where no )durable' \
+  || fail "idc-adapter-claude must give the no-durable-worker fallback (Task subagent / inline serial pass)"
+hasflat "$ADAPTER" "(can'?t|cannot|never) spawn[^.]*teammate" \
+  || fail "idc-adapter-claude must note recirc/plan workers can't spawn teammates -> bounded fan-out (Workflow/subagents)"
+
+echo "PASS: closeout validator fail-closes on every malformed handoff (red-when-broken) + emits distinct pass-through/gated/trivial dispatches; build spawns+routes the consultant per event; recirculator documents the structured closeout, trivial grant-Build outcome (separate doc PR via staging), gated cmux ping, and the paused origin-issue record; Plan re-links the paused issue off the retired ticket onto new unblockers + nudges the parent on completion; the adapter realizes recirc/plan workers in every runtime with a no-team subagent/inline fallback"

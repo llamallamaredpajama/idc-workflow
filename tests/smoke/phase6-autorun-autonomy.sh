@@ -138,6 +138,29 @@ for f in "$AUTORUN" "$CMD"; do
     || fail "$bn must wrap the drain in /loop"
   grep -qiE 'usage.window|across (usage )?windows|resume[s]? from (the )?(live )?board' "$f" \
     || fail "$bn must state the /loop drain resumes from live board state across usage windows"
+
+  # --- pipe-ORDER doctrine: full-pipe, never a build-only loop -------------------------------------
+  # The asserts above lock the AUTONOMY doctrine (no-ask / self-narrow / staffing) but nothing pinned
+  # that the file still tells the executing agent (any runtime — incl. a cold Codex thread reading
+  # only this prose) to drain the Recirculation inbox and plan approved considerations BEFORE
+  # building. If a future edit quietly dropped those upstream stages, autorun would silently degrade
+  # to a build-only drain (the build-lane helper is build-only by construction — scripts/
+  # idc_autorun_drain.py:24) and no test would catch it. Flatten newlines first (markdown wraps),
+  # then assert the canonical ordering sentence — "recirculate ... then plan ... then ... Buildable"
+  # — survives IN ORDER. The [^.]* arms keep all three stages inside ONE sentence so scattered,
+  # out-of-order mentions can't satisfy it. Red-when-broken: drop the recirculate or plan stage and
+  # the ordered match fails.
+  flat="$(tr '\n' ' ' < "$f" | tr -s ' ')"
+  printf '%s' "$flat" | grep -qiE 'recirculate[^.]*recirculation inbox[^.]*then[^.]*plan[^.]*consideration[^.]*then[^.]*(drain|build)[^.]*buildable' \
+    || fail "$bn must state the full-pipe ORDER (recirculate the inbox, THEN plan approved considerations, THEN build the Buildable waves) — the build-only-regression guard"
+  # the two upstream stages must each survive as named lanes/steps (the half a build-only drain skips)
+  grep -qiE 'recirculation intake' "$f" \
+    || fail "$bn must carry a Recirculation-intake stage (top of the pipe, before any build work)"
+  grep -qiE 'planning lane' "$f" \
+    || fail "$bn must carry a Planning lane that decomposes approved considerations before the build lane"
+  # the drain helper must be framed as the BUILD lane's EXIT CONDITION — never the whole autorun loop
+  printf '%s' "$flat" | grep -qiE 'exit condition[^.]*(deterministic )?drain helper' \
+    || fail "$bn must frame the drain helper as the build lane's exit condition, not the whole autorun loop"
 done
 
 # The launch gate is the ONE sanctioned PRE-drain ask; the no-ask invariant still forbids MID-drain
@@ -147,4 +170,12 @@ grep -qiE 'no-ask invariant' "$AUTORUN" \
 grep -qiE 'mid-?drain' "$AUTORUN" \
   || fail "agents/idc-autorun.md must scope the AskUserQuestion prohibition to mid-drain (the launch gate is the one pre-drain exception)"
 
-echo "PASS: autorun drains everything — frontier width is the eligible antichain (Wave/pointer/blocked-aware); staffing gate is one pre-drain ask above a configurable threshold; never self-narrows; /loop-resumable"
+# --- the drain helper's OWN docstring must scope it to the build lane, not the whole autorun -------
+# Defense for the other reader: an agent that reads scripts/idc_autorun_drain.py directly (a cold
+# Codex thread, a new contributor) must not mistake the build-lane exit predicate for the full
+# autorun loop and wire it as the top-level drain. The docstring explicitly disclaims the planning
+# lane ("this helper covers the build lane / board-exit half"); pin that so an edit can't erase it.
+grep -qiE 'this helper covers the build lane' "$DRAIN" \
+  || fail "scripts/idc_autorun_drain.py docstring must scope itself to the build lane / board-exit (not the whole autorun loop)"
+
+echo "PASS: autorun drains everything — full-pipe ORDER (recirculate→plan→build) locked in both the command and the playbook; the drain helper is the build-lane exit only; frontier width is the eligible antichain (Wave/pointer/blocked-aware); staffing gate is one pre-drain ask above a configurable threshold; never self-narrows; /loop-resumable"

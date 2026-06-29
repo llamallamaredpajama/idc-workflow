@@ -171,8 +171,10 @@ FAIL** (Build still trusts the board; the schema check stays Plan's gate). Branc
 
 - **`filesystem` → SKIP**, note: "filesystem board carries no issue bodies — the body-schema /
   prose-dependency re-scan is github-only; the schema check runs at Plan authoring."
-- **`github` → run the lint** (read-only). List the Buildable+Todo lane, emit one JSONL object per
-  issue, and pipe to the shipped helper:
+- **`github` → run the lint** (read-only). Emit one JSONL object per issue and pipe to the shipped
+  helper: the Buildable+Todo lane as rich `{number,title,body,blocked_by}` objects (the scanned
+  lane), **plus** the rest of the board as index-only `{number,stage,status}` objects so the
+  retired-recirc rule can resolve a blocker to a Done Recirculation ticket:
   ```bash
   num=$(grep -E '^project_number:' docs/workflow/tracker-config.yaml | grep -oE '[0-9]+')
   owner=$(gh repo view --json owner -q .owner.login)
@@ -197,21 +199,38 @@ FAIL** (Build still trusts the board; the schema check stays Plan's gate). Branc
     # pipe would print. (A bare no-op here would emit nothing and still read as a silent all-clear.)
     echo "board-lint: SKIP — github board unreadable (idc_gh_board.py exit ≠ 0); could not determine"
   else
-  printf '%s\n' "$board" \
-  | jq -r '.items[] | select(.status=="Todo") | select((.stage // "Buildable")=="Buildable") | .content.number' \
-  | while IFS= read -r n; do
-      [ -n "$n" ] || continue
-      bb=$(gh api "repos/{owner}/{repo}/issues/$n/dependencies/blocked_by" --jq '[.[].number]' 2>/dev/null) || bb=''
-      [ -n "$bb" ] || bb='null'   # empty stdout = the API call FAILED → UNKNOWN (not "no link"); a real no-dep result is the 200 '[]'. Tri-state lets the helper never false-flag a prose dep it couldn't disprove.
-      gh issue view "$n" --json number,title,body --jq "{number:.number,title:.title,body:.body,blocked_by:$bb}"
-    done | python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_board_lint.py"
+  {
+    # (i) the build-eligible lane → rich {number,title,body,blocked_by} objects (the SCANNED lane).
+    printf '%s\n' "$board" \
+    | jq -r '.items[] | select(.status=="Todo") | select((.stage // "Buildable")=="Buildable") | .content.number' \
+    | while IFS= read -r n; do
+        [ -n "$n" ] || continue
+        bb=$(gh api "repos/{owner}/{repo}/issues/$n/dependencies/blocked_by" --jq '[.[].number]' 2>/dev/null) || bb=''
+        [ -n "$bb" ] || bb='null'   # empty stdout = the API call FAILED → UNKNOWN (not "no link"); a real no-dep result is the 200 '[]'. Tri-state lets the helper never false-flag a prose dep it couldn't disprove.
+        gh issue view "$n" --json number,title,body --jq "{number:.number,title:.title,body:.body,blocked_by:$bb}"
+      done
+    # (ii) the REST of the board → INDEX-ONLY {number,stage,status} objects, so the retired-recirc
+    #      rule can resolve a blocker number → "Done Recirculation ticket" (a paused issue eligible
+    #      ONLY behind a retired recirc ticket — the premature-eligibility trap). A SECOND jq over the
+    #      already-captured $board (NOT a second board read); EXCLUDES the Buildable+Todo lane already
+    #      emitted as rich objects in (i), so nothing is double-scanned (the helper's in_scan_lane()
+    #      treats a stage≠Buildable / status≠Todo object as index-only — never schema-scanned/counted).
+    printf '%s\n' "$board" \
+    | jq -c '.items[] | select(.content.number != null)
+             | select((.status=="Todo" and (.stage // "Buildable")=="Buildable") | not)
+             | {number: .content.number, stage: (.stage // "Buildable"), status: .status}'
+  } | python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_board_lint.py"
   fi
   ```
   (`dependencies/blocked_by` GET is the read counterpart of the documented write endpoint;
-  `gh issue view --jq` emits control-char-safe escaped JSON, so no external `jq` slurp is needed.)
+  `gh issue view --jq` / `jq -c` both emit control-char-safe escaped JSON, so no external slurp is
+  needed. The two passes share the one captured `$board` — the board is read exactly once.)
   - `board-lint: clean …` → **PASS** (note "N scanned, clean").
   - findings → **PASS with ⚠**: list the flagged issue numbers + counts; fix hint: "re-run the
     item through `/idc:plan`, or record the missing native blocked-by link (`gh … link … blocks`)."
+    A `retired-recirc` finding means a paused issue is eligible only behind a **retired (Done)
+    `Recirculation` ticket** (Plan's paused-issue re-link was skipped) — fix hint: "re-point it off
+    the retired ticket onto its real new unblockers (re-run `/idc:plan` over the admitted scope)."
   - summary contains `dependency lookups indeterminate` → annotate the row **PASS with ⚠** (still
     **PASS, never FAIL**), independent of clean/flagged: note "the GitHub dependencies API looked
     degraded — the native blocked-by lookup failed for N issue(s), so prose-dependency detection

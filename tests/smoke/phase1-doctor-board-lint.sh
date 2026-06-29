@@ -195,6 +195,23 @@ grep -qE 'echo "board-lint: SKIP — github board unreadable' "$DOCTOR" \
 printf '%s' "$DFLAT" | grep -qiE 'no silent all-clear' \
   || fail "doctor.md Row 9 must state a board-read failure SKIPs (no silent all-clear)"
 
+# --- 8b. LIVE wiring (5b): Row 9 feeds board-lint the whole-board {number,stage,status} INDEX -------
+# The retired-recirc rule (helper sections 6b above) needs each blocker's lane to resolve a blocker
+# number -> "Done Recirculation ticket". Section 6b proves board-lint FIRES on the index shape; this
+# proves doctor EMITS it — without the index emission the rule is tested-but-dormant in production.
+# Red-when-broken: delete the index-emission jq pass (or its non-Buildable exclusion) and these flip
+# RED. The index pass is a SECOND jq over the already-captured $board (not a second board read), and
+# it EXCLUDES the Buildable+Todo lane already emitted as rich objects so nothing is double-scanned
+# (in_scan_lane() treats a stage≠Buildable / status≠Todo object as index-only).
+grep -qE 'stage:[[:space:]]*\(\.stage[[:space:]]*//[[:space:]]*"Buildable"\),[[:space:]]*status:[[:space:]]*\.status' "$DOCTOR" \
+  || fail "doctor.md Row 9 must emit whole-board {number,stage,status} INDEX objects so the retired-recirc rule can resolve a blocker (5b live wiring; the rule is dormant without it)"
+printf '%s' "$DFLAT" | grep -qE 'and \(\.stage[[:space:]]*//[[:space:]]*"Buildable"\)=="Buildable"\)[[:space:]]*\|[[:space:]]*not\)' \
+  || fail "doctor.md Row 9 index pass must EXCLUDE the Buildable+Todo lane already emitted as rich objects (| not) — no double-scan (5b)"
+# the index pass must read the ALREADY-CAPTURED \$board, never a SECOND board read (no extra paginated
+# fetch): the idc_gh_board.py INVOCATION appears exactly once (both jq passes share the one capture).
+[ "$(grep -cE 'python3 "\$\{CLAUDE_PLUGIN_ROOT\}/scripts/idc_gh_board\.py"' "$DOCTOR")" = "1" ] \
+  || fail "doctor.md Row 9 must read the board ONCE — the index pass reuses the captured \$board, not a second idc_gh_board.py fetch (5b)"
+
 # --- 9. Row 9 loop is shell-agnostic (zsh word-split hardening; the doctor.md plumbing) ----------
 # FINDING 1: the real /idc:doctor Bash-tool shell is zsh (repo CLAUDE.md), where an unquoted
 # `$nums` is NOT word-split — so a `nums=$(…); for n in $nums` loop runs ONCE over the whole

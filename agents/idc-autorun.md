@@ -73,10 +73,23 @@ loop below). Then the two lanes:
    board read succeeded but a build candidate's blocked-by lookup could not be verified) and a hard
    board-read failure (exit 2, no `drain:` line). Do not exit on it; treat the lane as possibly-unfinished
    and let the next `/loop` iteration re-check.
-5. **Exit** when no `Stage = Recirculation` tickets remain, no approved considerations remain
-   unplanned, AND the drain predicate reports `drain: complete` — i.e. only Done items,
+5. **Re-loop to a fixpoint, then exit.** The pipe is **not one-shot**: a build triplet can surface a
+   recirc event and file a **new `Stage = Recirculation` ticket mid-drain** (Build's larger loop,
+   `idc:idc-build` Phase 1b), which sits *upstream* of the build lane. So after the build lane
+   drains, **loop back to the top of the pipe** and re-run recirculate → plan → build; repeat until a
+   **full pass** is a fixpoint — no `Stage = Recirculation` ticket remained, no approved
+   consideration was unplanned, AND the drain predicate reported `drain: complete` (only Done items,
    requirements-gated Blocked items, the operator's gate issues, un-admitted considerations (open
-   Think PRs), and any gated recirculation backflow are left. Never report the run drained on a
+   Think PRs), and any gated recirculation backflow left). The re-loop **reuses the SAME machinery as
+   Build's larger loop** — the consultant's structured closeout (`idc_recirc_closeout.py`), the
+   per-issue recirc ceiling + cascade-depth cap (`idc_recirc_caps.py`), and the board-lint
+   retired-recirc guard (`idc_board_lint.py`, doctor Row 9) — so it **parks, never churns**: the caps
+   park a chronically-recirculating issue or a deep recirc→build→recirc cascade (Blocked +
+   operator-action) instead of re-looping it, and the board-lint guard keeps a paused issue from going
+   spuriously eligible behind a **retired** recirc ticket (the premature-eligibility trap that would
+   otherwise re-trigger the loop forever). **Termination is guaranteed** by natural drain (closed
+   issues leave the frontier) **plus** those caps.
+   Never report the run drained on a
    non-zero drain exit (`drain: unknown`, or a hard board-read failure). Emit the exit report: recirculation
    tickets drained, considerations planned, issues admitted, waves built/merged, board state, the
    **final working-tree state from a post-build `git status --porcelain`** (captured at exit, never a

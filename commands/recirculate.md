@@ -65,6 +65,19 @@ TRD (the `spec` layer) gates only when `gating.trd: on`. Two outcomes:
   **rides `Status=Blocked` behind that gate and PAUSES there** (it is not retired); admission clears
   the gate the same way Think's does. Pause only the affected work; everything else keeps flowing.
 
+- **Trivial subordinate-artifact drift (Build-triggered).** When the only lagging layer is a
+  subordinate machine-readable artifact whose authority is **already merged** (e.g. a stale enum
+  mirror) and a running Build worker surfaced it, the consultant **grants Build permission** for that
+  one specific change (a **separate tiny doc PR through staging**) instead of authoring its own PR —
+  the glass wall holds because only the consultant authorizes the canonical-doc edit.
+
+**Spawned by Build's larger loop?** Build spawns one fresh recirc-consultant **per** recirc event and
+routes on its **structured closeout** — `pass-through` (admitted consideration → launch a batched
+Plan worker), `gated` (Think PR opened → **cmux/push ping** + park, no Plan), or `trivial`
+(grant-Build). The parent validates it **fail-closed** with
+`${CLAUDE_PLUGIN_ROOT}/scripts/idc_recirc_closeout.py` (a malformed/absent closeout halts rather than
+stranding the ticket); the mandatory `provenance` stamp rides every closeout.
+
 No verdict taxonomy, no change-order files — they are deleted; the PR body is the record. Do
 not write source or tests; never admit a requirements (PRD/TRD) change without the gate; never
 leave the doc chain half-updated (`WORKFLOW.md §4.4`).

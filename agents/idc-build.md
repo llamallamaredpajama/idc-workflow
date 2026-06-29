@@ -56,6 +56,54 @@ the Codex default. Each durable worker runs in a pre-created worktree (never the
 `isolation:"worktree"` param). Never assign two triplets the same surface — the matrix carves
 whole-board disjoint areas, so area-packing never collides even across waves.
 
+## Phase 1b — Recirc events spawn the larger loop (per event, consultant-routed)
+
+A triplet that surfaces a **recirc event** — out-of-boundary scope, a substrate gap, scope/menu
+drift, or a `blocks_goal` deferral: anything Build is **not** resolving in-loop (see *Boundaries*) —
+files the `Stage = Recirculation` ticket **and Build immediately hands it off.** Build spawns **one
+fresh specialist recirc-consultant per recirc event**, realized through the runtime adapter
+(`idc:idc-adapter-claude` / `idc:idc-adapter-codex` / **pi** — teammate / thread / resident, degrading
+to a Task subagent or an inline pass where no durable worker exists), each running the Recirculator
+playbook (`idc:idc-recirculator`) over its one ticket. The freed sous-chef does **not** block on it —
+it pulls the next ready area, so the consultant runs **concurrently** with the still-flowing kitchen:
+recirc is **immediate** (per event), the Plan re-sequence it may trigger is **batched** (below). Build
+never performs the recirc analysis itself — the glass wall holds, the consultant is the authority that
+reads PRD/TRD/codebase and touches docs; Build only **spawns** it and **routes** its result.
+
+**The orchestrator is a dumb router: it dispatches on the consultant's validated closeout, it does
+not re-derive the gate.** When the consultant finishes it returns a small machine-readable **closeout**
+naming the next action. Build validates it **fail-closed** with
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_recirc_closeout.py" --closeout <closeout.json>` and acts on
+the single `dispatch:` line it prints — reasoning about nothing:
+
+- `dispatch: launch-plan consideration=<ref>` — the consultant **admitted a `Stage = Consideration`**
+  (not gate-worthy). Build queues it; when consultants quiesce it launches **one batched Plan worker**
+  (`idc:idc-plan`, via the adapter) over **all** pending admitted considerations — a single coherent
+  global re-sequence, not one Plan run per consideration. Plan is unchanged — it only ever scans
+  Considerations, never Recirculation tickets — and its global matrix re-sequence (`idc:idc-matrix-analysis`,
+  `In Progress` immutable) re-points the original paused issue onto its real new unblockers, so the
+  still-running kitchen picks the newly-buildable issues up on its normal freed-worker frontier
+  re-query (Phase 1).
+- `dispatch: notify-gated think_pr=<ref>` — the consultant opened a **gated Think PR** (a PRD/TRD
+  change). Build fires the **cmux/push ping** the consultant requested and **parks** that work — **no**
+  Plan worker; the ticket rides `Blocked` behind the gate until the operator approves. Build keeps
+  building everything else; gated items are the only thing that needs the human.
+- `dispatch: grant-build issue=<n> paths=<…>` — the event was **trivial** (a no-gate, no-replan
+  drift-heal of a subordinate artifact whose authority is already merged). The consultant grants Build
+  permission for that **one specific** canonical-doc change; the triplet makes it as a **separate tiny
+  doc PR through staging** (never folded into the code PR — clean provenance, same merge-train path),
+  then resumes. A recirc event that turns out *trivial* is a **smell** — usually the triplet's context
+  was filling and it escalated something a fresh consultant sees through instantly; note it, don't
+  suppress it.
+
+If the helper exits non-zero (a malformed or **missing** closeout), **halt and surface it** — a
+dropped handoff must never silently strand the ticket, the exact failure this loop exists to prevent.
+The loop is **bounded**: a per-issue recirc ceiling parks a chronically-recirculating issue for the
+operator, and a cascade-depth cap parks-and-reports a deep recirc→build→recirc cascade — so it always
+**drains or parks, never churns** (the deterministic caps live in the drain / board-lint helpers under
+`${CLAUDE_PLUGIN_ROOT}/scripts/`). The whole loop adds **no orchestrator monitoring** — Build's existing freed-worker frontier
+re-query (Phase 1) is the only poll; the consultant's closeout is the only nudge.
+
 ## Phase 2 — Review each PR
 
 Each implementer's PR goes to the **reviewer**: the independent combined review agent

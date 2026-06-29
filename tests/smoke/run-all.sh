@@ -36,6 +36,7 @@ for t in \
   phase4-e2e-merge-train \
   phase4-recirc-deconflict \
   phase4-recirc-inbox-drain \
+  phase4-larger-loop \
   phase5-ripple \
   phase6-autorun \
   phase6-autorun-autonomy \

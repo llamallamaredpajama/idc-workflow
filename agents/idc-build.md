@@ -102,8 +102,9 @@ The loop is **bounded** by the deterministic guard
 `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_recirc_caps.py" --recirc-count <n> --cascade-depth <d>`,
 consulted **before** spawning a consultant on an issue: a **per-issue recirc ceiling** (default 2) parks
 a chronically-recirculating issue, and a **cascade-depth cap** (default 3) parks-and-reports a deep
-recirc→build→recirc cascade. The caps only **decide** given counts; the **recirc consultant is the
-deterministic owner** that supplies them — it bumps the issue's `recirc:N` each time it processes a
+recirc→build→recirc cascade. The caps only **decide** given counts (that decision is deterministic);
+the **recirc consultant is the designated owner** that supplies them — it bumps the issue's `recirc:N`
+each time it processes a
 recirc event for that issue, and stamps the `cascade-depth:D` a recirc-originated consideration carries
 (inherited by its decomposed issues) — so the bound holds **as long as that count is maintained** (a
 future hardening can derive `recirc:N` from board state — counting the issue's `Stage = Recirculation`

@@ -85,10 +85,12 @@ BUILDABLE_STAGE = "Buildable"
 CONSIDERATION_STAGE = "Consideration"
 PLANNING_STAGE = "Planning"
 TODO_STATUS = "Todo"
-IN_PROGRESS_STATUS = "In Progress"
-# Decomposition is "active" only while a Buildable/Planning item is LIVE — a long-since Done Buildable
-# is finished work, not in-flight decomposition, so it must NOT silence the dropped-handoff surface.
-LIVE_STATUSES = (TODO_STATUS, IN_PROGRESS_STATUS)
+DONE_STATUS = "Done"
+# A Buildable/Planning item is in-flight decomposition unless it is DONE. Only Done is excluded: Done
+# items accumulate on every mature board, so counting them would permanently silence the surface (the
+# bug this guards). Every NON-Done status — Todo, In Progress, AND Blocked (the caps' park-a-runaway
+# state: Stage=Buildable + Status=Blocked) — is decomposition that DID happen, so it silences the
+# surface; excluding Blocked would falsely re-surface a consideration whose child was merely parked.
 
 
 # ── pure marker / decision logic (unit-testable without any IO) ───────────────
@@ -157,15 +159,16 @@ def dropped_handoff_numbers(items):
     it). PURE, IO-free (unit-testable like decide()).
 
     `items` is a list of `{"number","stage","status"}` board-meta dicts (the stage/status both
-    backends already read). Conservative by construction: any LIVE (Todo / In Progress) Buildable or
-    Planning item is decomposition activity and silences EVERY surface — we cannot attribute a specific
-    buildable to a specific consideration, so a live Plan/Build lane is never second-guessed (no false
-    surface). The match is STATUS-aware: a Done Buildable is finished work, not in-flight decomposition,
-    so it does NOT silence the surface — without this, every board past day-1 (which always carries Done
-    Buildables) would mask a genuinely dropped handoff. The matched converse — admitted considerations
-    with NO live Plan/Build work — is the unmistakable dropped handoff this catches. An empty/missing
-    `stage` defaults to Buildable (the legacy 4-field default), so a bare live todo issue counts as
-    decomposition activity too."""
+    backends already read). Conservative by construction: any NON-Done Buildable or Planning item is
+    decomposition activity and silences EVERY surface — we cannot attribute a specific buildable to a
+    specific consideration, so a live Plan/Build lane is never second-guessed (no false surface). The
+    match is STATUS-aware on exactly ONE boundary — Done: a Done Buildable is finished work, and Done
+    items accumulate on every board past day-1, so counting them would permanently mask a genuinely
+    dropped handoff. Every other status counts as decomposition that DID happen — including **Blocked**,
+    the caps' park-a-runaway state (Stage=Buildable + Status=Blocked), so a consideration whose child was
+    merely parked is not falsely re-surfaced. The matched converse — admitted considerations with NO
+    non-Done Plan/Build work — is the unmistakable dropped handoff this catches. An empty/missing `stage`
+    defaults to Buildable (the legacy 4-field default), so a bare todo issue counts as activity too."""
     considerations = [it.get("number") for it in items
                       if (it.get("stage") or "") == CONSIDERATION_STAGE
                       and it.get("status") == TODO_STATUS]
@@ -173,7 +176,7 @@ def dropped_handoff_numbers(items):
         return []
     decomposition_active = any(
         (it.get("stage") or BUILDABLE_STAGE) in (BUILDABLE_STAGE, PLANNING_STAGE)
-        and it.get("status") in LIVE_STATUSES for it in items)
+        and it.get("status") != DONE_STATUS for it in items)
     return [] if decomposition_active else considerations
 
 

@@ -200,15 +200,16 @@ for f in "$AUTORUN" "$CMD"; do
     || fail "$bn re-loop must reuse the board-lint retired-recirc guard (idc_board_lint) — no premature-eligibility re-trigger"
   # (5) termination: parks (never churns), BOUNDED (not unconditionally "guaranteed"). The caps only
   # park a runaway WHILE the recirc:N / cascade-depth:D counts they read are maintained (the recirc
-  # consultant is the deterministic owner — idc-build Phase 1b), backstopped by natural drain + the
-  # outer /loop. Pin the honest framing red-when-broken: (a) BOUNDED termination, (b) the
-  # maintained-counts caveat, (c) NO regression back to the over-claim "termination is guaranteed".
+  # consultant is the designated owner — idc-build Phase 1b; the count-bump is an LLM step, not
+  # mechanically deterministic), backstopped by natural drain + the outer /loop. Pin the honest framing
+  # red-when-broken: (a) BOUNDED termination, (b) the maintained-counts caveat, (c) NO regression back
+  # to the over-claim "termination is guaranteed".
   grep -qiE 'parks?, never churn|never churns?|park-not-churn' "$f" \
     || fail "$bn re-loop must PARK a chronically-recirculating issue, never churn (the caps bound it)"
   printf '%s' "$flat" | grep -qiE 'terminat[^.]*bounded|bounded[^.]*terminat' \
     || fail "$bn must frame re-loop termination as BOUNDED (not unconditionally guaranteed)"
   printf '%s' "$flat" | grep -qiE 'counts?[^.]*maintain|maintain[^.]*counts?' \
-    || fail "$bn must state the caps bound the loop only while the recirc:N/cascade-depth counts are maintained (the deterministic-owner caveat)"
+    || fail "$bn must state the caps bound the loop only while the recirc:N/cascade-depth counts are maintained (the designated-owner caveat)"
   grep -qiE 'termination is guaranteed' "$f" \
     && fail "$bn must NOT over-claim 'termination is guaranteed' (the caps bound the loop only when the counts are maintained)"
 done

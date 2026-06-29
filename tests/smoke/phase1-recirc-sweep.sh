@@ -294,6 +294,14 @@ PY
 #     (ignoring status) flips this RED (the Done Buildable would wrongly silence #5).
 [ "$(dropped '[{"number":5,"stage":"Consideration","status":"Todo"},{"number":8,"stage":"Buildable","status":"Done"}]')" = "5" ] \
   || fail "a live dropped Consideration with ONLY a Done Buildable (no LIVE decomposition) must STILL surface (status-aware, M2)"
+# (f) ALTITUDE: a PARKED (Blocked) Buildable child is decomposition that EXISTS — the larger loop's caps
+#     park a runaway to Status=Blocked while leaving Stage=Buildable, so a Blocked child proves Plan DID
+#     decompose this consideration. The boundary is "not Done", so Blocked SILENCES the surface (no false
+#     dropped-handoff). Red-when-broken pair with (e): a Done child (finished, accumulates) still
+#     surfaces; a Blocked child (parked, live) does not. Narrowing the predicate back to (Todo, In
+#     Progress) — dropping Blocked — would falsely re-surface #5 here.
+[ "$(dropped '[{"number":5,"stage":"Consideration","status":"Todo"},{"number":8,"stage":"Buildable","status":"Blocked"}]')" = "" ] \
+  || fail "a Consideration whose only child Buildable is PARKED (Blocked) must NOT surface — a parked child is decomposition that exists, not a dropped handoff (altitude)"
 
 # filesystem --report integration: a real Consideration/Todo board with NO buildables surfaces the
 # dropped handoff (and a matrix need NOT exist — Plan, which writes the matrix, never ran), and the

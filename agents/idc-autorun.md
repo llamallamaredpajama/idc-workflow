@@ -89,7 +89,7 @@ loop below). Then the two lanes:
    spuriously eligible behind a **retired** recirc ticket (the premature-eligibility trap that would
    otherwise re-trigger the loop forever). Termination is **bounded** (not unconditionally guaranteed):
    the caps park a runaway **only while the per-issue `recirc:N` / `cascade-depth:D` counts they read
-   are maintained** — the recirc consultant is the deterministic owner that bumps them
+   are maintained** — the recirc consultant is the designated owner that bumps them
    (`idc:idc-build` Phase 1b) — backstopped by **natural drain** (closed issues leave the frontier) and
    the **outer /loop** that re-checks live board state each pass.
    Never report the run drained on a

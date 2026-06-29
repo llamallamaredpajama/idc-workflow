@@ -122,4 +122,20 @@ vp="$(run_co "$WORK/pass.json")"; vg="$(run_co "$WORK/gated.json")"; vt="$(run_c
 [ "$vp" != "$vg" ] && [ "$vg" != "$vt" ] && [ "$vp" != "$vt" ] \
   || fail "the three outcomes must produce DISTINCT dispatch lines (a collapsed router is red)"
 
-echo "PASS: closeout validator fail-closes on every malformed handoff (red-when-broken) + emits distinct pass-through/gated/trivial dispatches; build spawns+routes the consultant per event; recirculator documents the structured closeout, trivial grant-Build outcome (separate doc PR via staging), and gated cmux ping"
+# ── C. STRUCTURAL: the loop CLOSES — Plan re-links the paused issue + nudges the parent ──────
+PLAN="$PLUGIN/agents/idc-plan.md"
+# the consultant records the paused ORIGIN issue on the admitted consideration, so the link survives
+# the recirc ticket's retirement (otherwise Plan has no provenance to re-link from).
+hasflat "$RECIRC" 'paused origin issue|origin issue[^.]*consideration|consideration[^.]*paused origin' \
+  || fail "agents/idc-recirculator.md must record the paused origin issue on the admitted consideration"
+# Plan re-points the paused issue off its RETIRED recirc ticket onto the new unblockers — never
+# leaving it eligible-via-a-retired-ticket (the b985c1e7 premature-eligibility / infinite-loop trap).
+hasflat "$PLAN" 'eligible[^.]*(behind|via)[^.]*retired[^.]*recirc|retired[^.]*recirc[^.]*eligible' \
+  || fail "agents/idc-plan.md must keep a paused issue from going eligible behind a retired recirc ticket"
+hasflat "$PLAN" 're-?point[^.]*(paused|unblocker)|paused[^.]*re-?point[^.]*unblocker|re-?point[^.]*paused[^.]*unblocker' \
+  || fail "agents/idc-plan.md must re-point the paused issue onto its real new unblocker issues"
+# Plan reports the newly-created buildable issues on completion so the spawning orchestrator re-queries.
+hasflat "$PLAN" 'report[^.]*buildable[^.]*(orchestrator|frontier|re-?quer)|newly-created buildable[^.]*(report|signal|frontier)' \
+  || fail "agents/idc-plan.md must report newly-created buildable issues on completion (the parent's re-query nudge)"
+
+echo "PASS: closeout validator fail-closes on every malformed handoff (red-when-broken) + emits distinct pass-through/gated/trivial dispatches; build spawns+routes the consultant per event; recirculator documents the structured closeout, trivial grant-Build outcome (separate doc PR via staging), gated cmux ping, and the paused origin-issue record; Plan re-links the paused issue off the retired ticket onto new unblockers + nudges the parent on completion"

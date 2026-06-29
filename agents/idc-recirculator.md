@@ -56,7 +56,12 @@ mode only changes what gets fed in:
        **Preserve provenance**: a `discovered-scope` label on the consideration pointer (github),
        an "originated as discovered scope (recirculation ticket #<n> — <Provenance>)" line in the
        consideration doc body, and a closing `comment` on the retired ticket naming the
-       consideration it became. The admitted consideration is now Plan's to decompose.
+       consideration it became. When the event was surfaced by a **running Build issue** (the larger
+       loop), **also record that paused origin issue** on the admitted consideration — a native
+       dependency / an `unblocks #<origin>` note — so the link **survives the ticket's retirement**
+       and Plan can re-point the origin onto the consideration's decomposed unblockers (the
+       provenance Plan needs; without it a retired ticket would let the origin go eligible with
+       nothing built). The admitted consideration is now Plan's to decompose.
      - *Trivial subordinate-artifact drift (Build-triggered):* when the **only** lagging layer is a
        **subordinate machine-readable artifact whose authoritative layer is already merged** (e.g. a
        stale enum mirror of an already-consolidated spec) **and** the event was surfaced by a running

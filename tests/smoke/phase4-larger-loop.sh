@@ -21,7 +21,6 @@ PLUGIN="$(cd "$(dirname "$0")/../.." && pwd)"
 SCRIPTS="$PLUGIN/scripts"
 CLOSEOUT="$SCRIPTS/idc_recirc_closeout.py"
 BUILD="$PLUGIN/agents/idc-build.md"
-BUILD_CMD="$PLUGIN/commands/build.md"
 RECIRC="$PLUGIN/agents/idc-recirculator.md"
 RECIRC_CMD="$PLUGIN/commands/recirculate.md"
 WORK="$(mktemp -d)"
@@ -86,6 +85,20 @@ echo '{"ticket": 1, "outcome": "gated", "provenance": "x"}' > "$WORK/gated-no-pr
 # trivial with empty paths (an unscoped permission grant is unsafe)
 echo '{"ticket": 1, "outcome": "trivial", "provenance": "x", "grant": {"issue": 1, "paths": [], "change": "y"}}' > "$WORK/triv-empty.json"
 [ "$(co_rc "$WORK/triv-empty.json")" = "2" ] || fail "trivial with empty grant.paths must fail-closed (exit 2)"
+# trivial grant.paths SCOPE: each path must be a repo-relative canonical doc — the trivial outcome
+# grants Build write permission for the named paths, so an unconstrained path (a source dir, an
+# absolute path, a `..` escape) is a fail-OPEN. Red-when-broken: each must exit 2; the canonical-doc
+# control just below must stay exit 0, so a regression to "any non-empty string" flips one of the pair.
+triv() { printf '{"ticket":1,"outcome":"trivial","provenance":"x","grant":{"issue":1,"paths":["%s"],"change":"y"}}' "$1"; }
+echo "$(triv 'src/app.py')"   > "$WORK/triv-src.json"
+[ "$(co_rc "$WORK/triv-src.json")" = "2" ]  || fail "trivial grant.paths naming a SOURCE file (src/app.py) must fail-closed (exit 2) — not a canonical doc"
+echo "$(triv '/etc/passwd')"  > "$WORK/triv-abs.json"
+[ "$(co_rc "$WORK/triv-abs.json")" = "2" ]  || fail "trivial grant.paths with an ABSOLUTE path must fail-closed (exit 2) — repo escape"
+echo "$(triv '../escape.md')" > "$WORK/triv-esc.json"
+[ "$(co_rc "$WORK/triv-esc.json")" = "2" ]  || fail "trivial grant.paths with a '..' segment must fail-closed (exit 2) — parent-dir escape"
+# canonical-doc control (red-when-broken pair): a repo-relative doc under docs/ must STILL exit 0.
+echo "$(triv 'docs/specs/x.json')" > "$WORK/triv-doc.json"
+[ "$(co_rc "$WORK/triv-doc.json")" = "0" ] || fail "trivial grant.paths naming a canonical doc (docs/specs/x.json) must still exit 0 (scope check must not over-reject)"
 # malformed JSON
 printf '{not json' > "$WORK/bad.json"
 [ "$(co_rc "$WORK/bad.json")" = "2" ] || fail "malformed JSON must fail-closed (exit 2)"
@@ -93,15 +106,19 @@ printf '{not json' > "$WORK/bad.json"
 [ "$(co_rc "$WORK/does-not-exist.json")" = "2" ] || fail "missing closeout file must fail-closed (exit 2)"
 
 # ── B. STRUCTURAL: the orchestration prose ───────────────────────────────────────────────────
-# build spawns a consultant PER recirc event (not just files-and-defers) and routes on the closeout
-hasflat "$BUILD" 'recirc(ulation)?[^.]*(spawn|dispatch|consultant)|(spawn|dispatch)[^.]*recirc' \
-  || fail "agents/idc-build.md must spawn a recirc consultant on a recirc event (not just file a ticket)"
+# build spawns ONE fresh consultant PER recirc event (not just files-and-defers) and routes on the
+# closeout. Pinned to the SPECIFIC load-bearing instruction ("one fresh … recirc-consultant per recirc
+# event") rather than a loose recirc+spawn co-occurrence, so removing the per-event spawn flips it RED
+# (the looser form could match incidental pre-feature prose).
+hasflat "$BUILD" 'one fresh[^.]*recirc-consultant per recirc event' \
+  || fail "agents/idc-build.md must spawn ONE fresh recirc-consultant PER recirc event (not batch-and-defer)"
 has "$BUILD" 'idc_recirc_closeout' \
   || fail "agents/idc-build.md must consume the fail-closed closeout validator (idc_recirc_closeout)"
 hasflat "$BUILD" 'closeout[^.]*(dispatch|act|route)|(dispatch|act|route)[^.]*closeout' \
   || fail "agents/idc-build.md must act on the consultant's structured closeout as a router"
-has "$BUILD_CMD" 'recirc' \
-  || fail "commands/build.md must reference the recirc-consultant spawn behavior"
+# (commands/build.md is NOT modified by this feature — a `has commands/build.md 'recirc'` grep would be
+# a tautology matching pre-existing text, never red-when-broken. The build-side behavior is pinned via
+# the agents/idc-build.md closeout/router greps above + the recirculator prose below.)
 
 # recirculator emits the structured closeout + the THIRD trivial outcome + the gated cmux ping
 has "$RECIRC" 'idc_recirc_closeout|structured closeout|closeout (object|protocol)' \
@@ -110,8 +127,12 @@ hasflat "$RECIRC" 'trivial[^.]*(grant|permission|build)|grant[^.]*build' \
   || fail "agents/idc-recirculator.md must document the trivial -> grant-Build-permission outcome"
 hasflat "$RECIRC" 'tiny|separate doc pr|doc pr[^.]*stag|stag[^.]*doc pr' \
   || fail "agents/idc-recirculator.md must route the trivial doc change as a separate doc PR via staging"
-has "$RECIRC" 'cmux|push notif' \
-  || fail "agents/idc-recirculator.md must fire a cmux/push ping on the gated outcome"
+# tie the ping to the GATED outcome specifically (flattened): the recirculator already carried a
+# "push notification" for the gate-pause ADMISSION on `main`, so a bare `cmux|push notif` grep passed
+# pre-feature (tautology). `gated[^.]*(cmux|push)[^.]*ping` pins the NEW gated-CLOSEOUT ping — "ping" is
+# the distinguishing token (the admission says "notification") — so dropping it flips RED.
+hasflat "$RECIRC" 'gated[^.]*(cmux|push)[^.]*ping' \
+  || fail "agents/idc-recirculator.md must fire a cmux/push PING on the GATED closeout outcome (distinct from the admission push notification)"
 has "$RECIRC_CMD" 'closeout|trivial' \
   || fail "commands/recirculate.md must reference the structured closeout / trivial outcome"
 

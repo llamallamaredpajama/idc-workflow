@@ -87,8 +87,11 @@ loop below). Then the two lanes:
    park a chronically-recirculating issue or a deep recirc→build→recirc cascade (Blocked +
    operator-action) instead of re-looping it, and the board-lint guard keeps a paused issue from going
    spuriously eligible behind a **retired** recirc ticket (the premature-eligibility trap that would
-   otherwise re-trigger the loop forever). **Termination is guaranteed** by natural drain (closed
-   issues leave the frontier) **plus** those caps.
+   otherwise re-trigger the loop forever). Termination is **bounded** (not unconditionally guaranteed):
+   the caps park a runaway **only while the per-issue `recirc:N` / `cascade-depth:D` counts they read
+   are maintained** — the recirc consultant is the deterministic owner that bumps them
+   (`idc:idc-build` Phase 1b) — backstopped by **natural drain** (closed issues leave the frontier) and
+   the **outer /loop** that re-checks live board state each pass.
    Never report the run drained on a
    non-zero drain exit (`drain: unknown`, or a hard board-read failure). Emit the exit report: recirculation
    tickets drained, considerations planned, issues admitted, waves built/merged, board state, the

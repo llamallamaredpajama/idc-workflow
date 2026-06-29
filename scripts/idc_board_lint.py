@@ -165,7 +165,10 @@ def retired_recirc_evidence(blocked_by, stage_status):
     for b in blocked_by:
         stage, status = stage_status.get(b, (None, None))
         if stage == RECIRC_STAGE and status == DONE_STATUS:
-            return (f"eligible only because retired (Done) {RECIRC_STAGE} ticket #{b} is a blocker — "
+            # NB: the rule fires on ANY blocker that resolves to a retired (Done) recirc ticket; it does
+            # not verify that ticket is the SOLE remaining blocker, so the evidence avoids claiming
+            # "eligible only because" (which would over-state when other live blockers also exist).
+            return (f"carries retired (Done) {RECIRC_STAGE} ticket #{b} as a (satisfied) blocker — "
                     "paused-issue re-link skipped (idc-plan Phase 4); re-point onto real unblockers")
     return ""
 
@@ -174,18 +177,22 @@ def in_scan_lane(it):
     """Whether an input object is a build-eligible-lane issue to SCAN (schema/prose/retired), versus
     an index-only entry that only supplies a blocker's stage/status.
 
-    The legacy thin shape (no `stage`/`status` keys) is ALWAYS scanned — the caller pre-filtered to
-    `Status = Todo` + `Stage = Buildable`, exactly as before. An object that carries an explicit
-    `stage` ≠ Buildable or `status` ≠ Todo (e.g. the Done Recirculation ticket a paused issue is
-    `blocked_by`) is index-only: scanning it would schema-flag its non-contract body and inflate the
-    `scanned` tally, so it is excluded from the scan and contributes only to the resolution index."""
+    The legacy thin shape (NEITHER `stage` nor `status` present) is ALWAYS scanned — the caller
+    pre-filtered to `Status = Todo` + `Stage = Buildable`, exactly as before. ANY object that carries
+    at least one of `stage`/`status` is a board-index object and is scanned ONLY when it sits squarely
+    in the build-eligible lane: `stage == Buildable` AND `status == Todo`. Anything else is index-only
+    (it only supplies a blocker's stage/status to the resolution index) — scanning it would schema-flag
+    its non-contract body and inflate the `scanned` tally.
+
+    The load-bearing case is a PRESENT stage with an ABSENT/null status: `idc_gh_board.py` OMITS absent
+    fields, so an issue carrying no Status re-materializes (via doctor's index pass) as `{stage:
+    "Buildable", status: null}`. That is an index object, NOT a thin legacy issue, so it must be
+    index-only — never scanned with an empty body (the false-schema-flag this guards)."""
     stage = it.get("stage")
     status = it.get("status")
-    if stage is not None and stage != BUILDABLE_STAGE:
-        return False
-    if status is not None and status != TODO_STATUS:
-        return False
-    return True
+    if stage is None and status is None:
+        return True                                   # legacy thin shape — pre-filtered by the caller
+    return stage == BUILDABLE_STAGE and status == TODO_STATUS
 
 
 def lint(issues):

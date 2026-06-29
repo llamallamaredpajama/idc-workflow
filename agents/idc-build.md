@@ -100,13 +100,17 @@ If the helper exits non-zero (a malformed or **missing** closeout), **halt and s
 dropped handoff must never silently strand the ticket, the exact failure this loop exists to prevent.
 The loop is **bounded** by the deterministic guard
 `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_recirc_caps.py" --recirc-count <n> --cascade-depth <d>`,
-consulted **before** spawning a consultant on an issue: a **per-issue recirc ceiling** (default 2 —
-tracked by a `recirc:N` count bumped each time an issue recirculates) parks a chronically-recirculating
-issue, and a **cascade-depth cap** (default 3 — the `cascade-depth:D` a recirc-originated consideration
-carries, inherited by its decomposed issues) parks-and-reports a deep recirc→build→recirc cascade. On a
-`verdict: park` — or any non-zero/uncomputable result, **fail-closed** — Build does **not** re-spawn the
-loop on that issue: it sets it `Blocked` + an operator-action marker + a cmux/push ping and moves on, so
-the loop always **drains or parks for the operator, never churns**. The whole loop adds **no orchestrator monitoring** — Build's existing freed-worker frontier
+consulted **before** spawning a consultant on an issue: a **per-issue recirc ceiling** (default 2) parks
+a chronically-recirculating issue, and a **cascade-depth cap** (default 3) parks-and-reports a deep
+recirc→build→recirc cascade. The caps only **decide** given counts; the **recirc consultant is the
+deterministic owner** that supplies them — it bumps the issue's `recirc:N` each time it processes a
+recirc event for that issue, and stamps the `cascade-depth:D` a recirc-originated consideration carries
+(inherited by its decomposed issues) — so the bound holds **as long as that count is maintained** (a
+future hardening can derive `recirc:N` from board state — counting the issue's `Stage = Recirculation`
+tickets, incl. retired — to drop the dependence on the bump). On a `verdict: park` — or any
+non-zero/uncomputable result, **fail-closed** — Build does **not** re-spawn the loop on that issue: it
+sets it `Blocked` + an operator-action marker + a cmux/push ping and moves on, so the loop always
+**drains or parks for the operator, never churns**. The whole loop adds **no orchestrator monitoring** — Build's existing freed-worker frontier
 re-query (Phase 1) is the only poll; the consultant's closeout is the only nudge.
 
 ## Phase 2 — Review each PR

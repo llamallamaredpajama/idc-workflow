@@ -17,10 +17,15 @@ Closeout schema (JSON object on stdin or a file):
   outcome-specific:
     pass-through  consideration (required, non-empty)  -> launch a (batched) Plan worker
     gated         think_pr      (required, non-empty)  -> cmux/push ping; NO Plan; ticket parks
-    trivial       grant: {issue:int, paths:[non-empty], change:str(non-empty)}
+    trivial       grant: {issue:int, paths:[repo-relative canonical-doc], change:str(non-empty)}
                                                        -> grant Build permission for that exact
                                                           canonical-doc change as a SEPARATE tiny doc
-                                                          PR through staging; NO Plan, NO re-sequence
+                                                          PR through staging; NO Plan, NO re-sequence.
+                                                          Each path is SCOPE-CHECKED: repo-relative
+                                                          (no leading '/', no '..' segment) AND a
+                                                          canonical doc (under docs/, or *.md /
+                                                          *.schema.json) — a source path or repo
+                                                          escape fails closed.
 
 On a valid closeout, prints ONE deterministic dispatch line and exits 0:
     dispatch: launch-plan  consideration=<ref> ticket=<n>
@@ -46,6 +51,26 @@ def _die(msg):
 
 def _nonempty_str(v):
     return isinstance(v, str) and v.strip() != ""
+
+
+def _is_canonical_doc_path(p):
+    """A trivial grant path must be a repo-relative CANONICAL-DOC file. The `trivial` outcome grants
+    Build write permission for the named paths, so an unconstrained path (a source dir, an absolute
+    path, a `..` escape) would let a "tiny doc PR" touch code or write outside the repo — a fail-OPEN
+    in a fail-closed gate. A path passes only when it is:
+      * NOT absolute (no leading '/'), and
+      * carries no `..` path segment (no parent-dir escape), and
+      * looks like a canonical doc — under `docs/`, OR a Markdown / JSON-schema file (`*.md` /
+        `*.schema.json`, which also covers a root `CLAUDE.md` / `AGENTS.md`, the recirculator's
+        canonical-doc layer list)."""
+    if not _nonempty_str(p):
+        return False
+    s = p.strip()
+    if s.startswith("/"):
+        return False                                  # absolute path — outside the repo
+    if ".." in s.split("/"):
+        return False                                  # parent-dir escape
+    return s.startswith("docs/") or s.endswith(".md") or s.endswith(".schema.json")
 
 
 def _load(path):
@@ -90,8 +115,12 @@ def _validate(co):
     if not isinstance(grant.get("issue"), int):
         _die("trivial grant missing integer 'issue'")
     paths = grant.get("paths")
-    if not isinstance(paths, list) or not paths or not all(_nonempty_str(p) for p in paths):
+    if not isinstance(paths, list) or not paths:
         _die("trivial grant must carry a non-empty 'paths' list (an unscoped permission grant is unsafe)")
+    if not all(_is_canonical_doc_path(p) for p in paths):
+        _die("trivial grant 'paths' must each be a repo-relative canonical-doc file "
+             "(under docs/, or *.md / *.schema.json; no absolute path, no '..' escape) — "
+             "the trivial outcome must not grant Build write permission outside the doc layer")
     if not _nonempty_str(grant.get("change")):
         _die("trivial grant missing non-empty 'change' description")
     return f"dispatch: grant-build issue={grant['issue']} paths={','.join(paths)} ticket={ticket}"

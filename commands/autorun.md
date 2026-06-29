@@ -64,8 +64,11 @@ only when a full pass leaves nothing actionable:
    and the new board-lint retired-recirc guard (`idc_board_lint.py`) — so it **parks, never churns**:
    the caps park a chronically-recirculating issue or a deep recirc→build→recirc cascade (Blocked +
    operator-action) instead of re-looping it, and the board-lint guard keeps a paused issue from going
-   spuriously eligible behind a **retired** recirc ticket. **Termination is guaranteed** by natural
-   drain (closed issues leave the frontier) **plus** those caps.
+   spuriously eligible behind a **retired** recirc ticket. Termination is **bounded** (not
+   unconditionally guaranteed): the caps park a runaway **only while the per-issue `recirc:N` /
+   `cascade-depth:D` counts they read are maintained** — the recirc consultant is the deterministic
+   owner that bumps them (`idc:idc-build` Phase 1b) — backstopped by **natural drain** (closed issues
+   leave the frontier) and the **outer /loop** that re-checks live board state each pass.
    **Any non-zero drain exit is NOT `complete` — do not exit on it.** That covers both `drain: unknown`
    (the board read succeeded but a build candidate's blocked-by lookup could not be verified) and a
    hard board-read failure (exit 2, no `drain:` line). Treat the lane as possibly-unfinished and let the

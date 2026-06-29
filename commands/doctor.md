@@ -218,7 +218,7 @@ FAIL** (Build still trusts the board; the schema check stays Plan's gate). Branc
     printf '%s\n' "$board" \
     | jq -c '.items[] | select(.content.number != null)
              | select((.status=="Todo" and (.stage // "Buildable")=="Buildable") | not)
-             | {number: .content.number, stage: (.stage // "Buildable"), status: .status}'
+             | {number: .content.number, stage: (.stage // "Buildable"), status: (.status // "none")}'
   } | python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_board_lint.py"
   fi
   ```

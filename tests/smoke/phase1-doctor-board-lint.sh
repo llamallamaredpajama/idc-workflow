@@ -146,6 +146,23 @@ run_lint '[{"number":700,"title":"paused origin","body":"'"$C"'","blocked_by":[7
 [ "$RC" -eq 0 ] || fail "retired-recirc back-compat (thin blocker): helper exit $RC (want 0)"
 assert_out '^board-lint: clean \(2 scanned\)$' "a thin blocker (no stage/status) must leave the retired-recirc rule silent (optional-fields back-compat)"
 
+# --- 6c. M1 ROOT FIX: a PRESENT stage with an ABSENT/null status is INDEX-ONLY (never schema-scanned) -
+# idc_gh_board.py OMITS absent fields, so an issue carrying no Status re-materializes (via doctor's
+# index pass) as {stage:"Buildable", status:null}. Pre-fix in_scan_lane treated a null status as
+# "in lane" (its `if status is not None` guard skipped) and SCANNED the bodyless index object → a
+# spurious `1 schema` flag. Root fix: ONLY the fully-thin no-stage/no-status legacy shape is scanned;
+# any object carrying a stage is scanned ONLY when stage==Buildable AND status==Todo. A Buildable +
+# null status is index-only. Red-when-broken: revert in_scan_lane → this flips RED (1 schema flagged).
+run_lint '[{"number":950,"stage":"Buildable","status":null,"blocked_by":[]}]'
+[ "$RC" -eq 0 ] || fail "null-status index object: helper exit $RC (want 0)"
+assert_out '^board-lint: clean \(0 scanned\)$' "a Buildable + null/absent status object must be INDEX-ONLY (0 scanned), never schema-scanned (M1 root fix)"
+refute_out '#950' "a Buildable + null/absent status object must NOT be schema-flagged (M1 root fix)"
+# defense-in-depth control: the doctor sentinel re-materializes a missing status as the string "none"
+# (not null) — likewise non-Todo, so the same object stays index-only (proves the sentinel + root fix
+# agree). NB this control passes pre- AND post-root-fix (it documents the sentinel, not the root fix).
+run_lint '[{"number":951,"stage":"Buildable","status":"none","blocked_by":[]}]'
+assert_out '^board-lint: clean \(0 scanned\)$' "a Buildable + status=\"none\" (doctor sentinel) object must also be INDEX-ONLY (0 scanned)"
+
 # --- 7. unparseable stdin -> exit 2 (doctor reads this as 'could not determine' -> SKIP) --------
 printf '%s' 'not json {{' | python3 "$LINT" >/dev/null 2>&1
 [ "$?" -eq 2 ] || fail "unparseable stdin must exit 2 so doctor SKIPs (never FAIL)"
@@ -203,8 +220,12 @@ printf '%s' "$DFLAT" | grep -qiE 'no silent all-clear' \
 # RED. The index pass is a SECOND jq over the already-captured $board (not a second board read), and
 # it EXCLUDES the Buildable+Todo lane already emitted as rich objects so nothing is double-scanned
 # (in_scan_lane() treats a stage≠Buildable / status≠Todo object as index-only).
-grep -qE 'stage:[[:space:]]*\(\.stage[[:space:]]*//[[:space:]]*"Buildable"\),[[:space:]]*status:[[:space:]]*\.status' "$DOCTOR" \
-  || fail "doctor.md Row 9 must emit whole-board {number,stage,status} INDEX objects so the retired-recirc rule can resolve a blocker (5b live wiring; the rule is dormant without it)"
+# The status field carries the M1 sentinel `(.status // "none")`: idc_gh_board.py OMITS an absent
+# Status, so a raw `.status` would re-materialize as literal null and (pre-root-fix) get SCANNED with an
+# empty body. The `// "none"` sentinel makes a missing status a non-Todo string so in_scan_lane reads it
+# index-only (defense-in-depth atop the helper's root fix). Red-when-broken: revert to `.status`.
+grep -qE 'stage:[[:space:]]*\(\.stage[[:space:]]*//[[:space:]]*"Buildable"\),[[:space:]]*status:[[:space:]]*\(\.status[[:space:]]*//[[:space:]]*"none"\)' "$DOCTOR" \
+  || fail "doctor.md Row 9 must emit whole-board {number,stage,status} INDEX objects with the status sentinel (.status // \"none\") so an absent Status reads index-only, not schema-scanned (5b live wiring + M1 sentinel)"
 printf '%s' "$DFLAT" | grep -qE 'and \(\.stage[[:space:]]*//[[:space:]]*"Buildable"\)=="Buildable"\)[[:space:]]*\|[[:space:]]*not\)' \
   || fail "doctor.md Row 9 index pass must EXCLUDE the Buildable+Todo lane already emitted as rich objects (| not) — no double-scan (5b)"
 # the index pass must read the ALREADY-CAPTURED \$board, never a SECOND board read (no extra paginated

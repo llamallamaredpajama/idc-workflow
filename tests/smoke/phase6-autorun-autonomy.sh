@@ -180,7 +180,10 @@ for f in "$AUTORUN" "$CMD"; do
     || fail "$bn must state autorun re-loops the pipe to a fixpoint (not one-shot)"
   grep -qiE 'not one-shot|never one-shot' "$f" \
     || fail "$bn must state the pipe is NOT one-shot (a build triplet files new recirc tickets mid-drain)"
-  # (2) the reason: a build triplet files a NEW Recirculation ticket MID-DRAIN, upstream of build
+  # (2) the reason: a build triplet files a NEW Recirculation ticket MID-DRAIN, upstream of build.
+  # The bare `mid-drain` grep is a COARSE presence gate (a cheap early signal) — its red-when-broken
+  # PIN is the ordered flat grep on the next line, which requires "new … recirculation … ticket …
+  # mid-drain" IN ORDER, so dropping the actual re-loop trigger flips that one RED.
   grep -qiE 'mid-drain' "$f" \
     || fail "$bn must explain a build triplet can file a new Recirculation ticket mid-drain (why re-loop)"
   printf '%s' "$flat" | grep -qiE 'new[^.]*recirculation[^.]*ticket[^.]*mid-drain|mid-drain[^.]*new[^.]*recirculation[^.]*ticket' \
@@ -195,11 +198,19 @@ for f in "$AUTORUN" "$CMD"; do
     || fail "$bn re-loop must reuse the per-issue/cascade caps (idc_recirc_caps) — park-not-churn"
   grep -qE 'idc_board_lint' "$f" \
     || fail "$bn re-loop must reuse the board-lint retired-recirc guard (idc_board_lint) — no premature-eligibility re-trigger"
-  # (5) termination: parks (never churns), bounded by natural drain + caps
+  # (5) termination: parks (never churns), BOUNDED (not unconditionally "guaranteed"). The caps only
+  # park a runaway WHILE the recirc:N / cascade-depth:D counts they read are maintained (the recirc
+  # consultant is the deterministic owner — idc-build Phase 1b), backstopped by natural drain + the
+  # outer /loop. Pin the honest framing red-when-broken: (a) BOUNDED termination, (b) the
+  # maintained-counts caveat, (c) NO regression back to the over-claim "termination is guaranteed".
   grep -qiE 'parks?, never churn|never churns?|park-not-churn' "$f" \
     || fail "$bn re-loop must PARK a chronically-recirculating issue, never churn (the caps bound it)"
-  grep -qiE 'termination is guaranteed|terminat' "$f" \
-    || fail "$bn must state the re-loop terminates (natural drain + caps), bounded"
+  printf '%s' "$flat" | grep -qiE 'terminat[^.]*bounded|bounded[^.]*terminat' \
+    || fail "$bn must frame re-loop termination as BOUNDED (not unconditionally guaranteed)"
+  printf '%s' "$flat" | grep -qiE 'counts?[^.]*maintain|maintain[^.]*counts?' \
+    || fail "$bn must state the caps bound the loop only while the recirc:N/cascade-depth counts are maintained (the deterministic-owner caveat)"
+  grep -qiE 'termination is guaranteed' "$f" \
+    && fail "$bn must NOT over-claim 'termination is guaranteed' (the caps bound the loop only when the counts are maintained)"
 done
 
 # The launch gate is the ONE sanctioned PRE-drain ask; the no-ask invariant still forbids MID-drain

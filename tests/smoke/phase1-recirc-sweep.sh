@@ -286,6 +286,14 @@ PY
 # (d) a non-Todo (e.g. already-retired) Consideration is not an admitted-but-dropped handoff.
 [ "$(dropped '[{"number":5,"stage":"Consideration","status":"Done"}]')" = "" ] \
   || fail "a non-Todo Consideration must NOT be surfaced (only admitted/Todo considerations)"
+# (e) STATUS-AWARE decomposition (M2): a DONE Buildable is FINISHED work, not in-flight decomposition,
+#     so it must NOT silence the surface — otherwise every board past day-1 (which always carries Done
+#     Buildables) masks a genuinely dropped handoff. A Done Buildable + a live dropped Consideration
+#     must STILL surface. Red-when-broken pair with (b): (b) has a LIVE (Todo) Buildable → silenced;
+#     here the only Buildable is Done → still surfaced. A regression to STAGE-only decomposition_active
+#     (ignoring status) flips this RED (the Done Buildable would wrongly silence #5).
+[ "$(dropped '[{"number":5,"stage":"Consideration","status":"Todo"},{"number":8,"stage":"Buildable","status":"Done"}]')" = "5" ] \
+  || fail "a live dropped Consideration with ONLY a Done Buildable (no LIVE decomposition) must STILL surface (status-aware, M2)"
 
 # filesystem --report integration: a real Consideration/Todo board with NO buildables surfaces the
 # dropped handoff (and a matrix need NOT exist — Plan, which writes the matrix, never ran), and the

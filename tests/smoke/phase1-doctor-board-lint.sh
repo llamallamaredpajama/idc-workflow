@@ -212,6 +212,19 @@ printf '%s' "$DFLAT" | grep -qE 'and \(\.stage[[:space:]]*//[[:space:]]*"Buildab
 [ "$(grep -cE 'python3 "\$\{CLAUDE_PLUGIN_ROOT\}/scripts/idc_gh_board\.py"' "$DOCTOR")" = "1" ] \
   || fail "doctor.md Row 9 must read the board ONCE — the index pass reuses the captured \$board, not a second idc_gh_board.py fetch (5b)"
 
+# --- 8c. pass (i) guards draft project items (content:null) — symmetric with pass (ii) (5c) -------
+# A *draft* project item has content:null, so `.content.number` yields the string "null"; pass (i)'s
+# `[ -n "$n" ]` guard catches empty but NOT the literal "null", so without this guard Row 9 would run
+# `gh issue view null`. Pass (ii) (the index pass) already carries `select(.content.number != null)`;
+# pass (i) (the rich Buildable+Todo scan) must carry it too. Assert it on the SINGLE rich-pass jq line
+# — the one carrying BOTH `select(.status=="Todo")` AND `select((.stage // "Buildable")=="Buildable")`
+# — so the guard is proven present on PASS (I) specifically, not merely somewhere in the file.
+# Red-when-broken: delete the guard from pass (i) and this flips RED. A global
+# `grep -c 'select(.content.number != null)'` would NOT (the string also appears in pass (ii) + this
+# comment), which is exactly why the assertion is anchored to the three-select rich-pass line.
+grep -qE 'select\(\.status=="Todo"\).*select\(\(\.stage // "Buildable"\)=="Buildable"\).*select\(\.content\.number != null\)' "$DOCTOR" \
+  || fail "doctor.md Row 9 pass (i) must guard draft items: its rich-pass jq line (status==Todo + stage==Buildable) must ALSO carry select(.content.number != null) (5c)"
+
 # --- 9. Row 9 loop is shell-agnostic (zsh word-split hardening; the doctor.md plumbing) ----------
 # FINDING 1: the real /idc:doctor Bash-tool shell is zsh (repo CLAUDE.md), where an unquoted
 # `$nums` is NOT word-split — so a `nums=$(…); for n in $nums` loop runs ONCE over the whole

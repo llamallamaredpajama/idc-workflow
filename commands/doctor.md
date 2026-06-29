@@ -202,7 +202,7 @@ FAIL** (Build still trusts the board; the schema check stays Plan's gate). Branc
   {
     # (i) the build-eligible lane → rich {number,title,body,blocked_by} objects (the SCANNED lane).
     printf '%s\n' "$board" \
-    | jq -r '.items[] | select(.status=="Todo") | select((.stage // "Buildable")=="Buildable") | .content.number' \
+    | jq -r '.items[] | select(.status=="Todo") | select((.stage // "Buildable")=="Buildable") | select(.content.number != null) | .content.number' \
     | while IFS= read -r n; do
         [ -n "$n" ] || continue
         bb=$(gh api "repos/{owner}/{repo}/issues/$n/dependencies/blocked_by" --jq '[.[].number]' 2>/dev/null) || bb=''

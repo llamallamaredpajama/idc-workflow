@@ -70,12 +70,18 @@ runnable from here:
   + install-receipt, not this repo's). So you spawn that session from the shell:
   ```bash
   # one-time setup: printf '{"mcpServers":{}}' > /tmp/empty-mcp.json
-  ( unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN; \
+  (
+    # Inherit auth by default: this machine runs the nested claude via a VALID
+    # ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL, so the old `unset` strips a working
+    # credential and falls back to a stale OAuth cache → 401. Set IDC_STRIP_AUTH=1 ONLY
+    # if the nested session dies with "Invalid API key" (a stale rotated key) — then it
+    # falls back to your claude.ai OAuth login.
+    [ "${IDC_STRIP_AUTH:-0}" = "1" ] && unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
     cd /Users/jeremy/dev/sandbox/ke-idc-test-repo-update && \
     claude --plugin-dir /Users/jeremy/dev/proj/idc-workflow-2.1.1 \
            --strict-mcp-config --mcp-config /tmp/empty-mcp.json \
-           --permission-mode bypassPermissions -p "/idc:update" < /dev/null ) \
-    > /Users/jeremy/dev/sandbox/_idc-observability/run-<label>.txt 2>&1
+           --permission-mode bypassPermissions -p "/idc:update" < /dev/null
+  ) > /Users/jeremy/dev/sandbox/_idc-observability/run-<label>.txt 2>&1
   ```
   - `--plugin-dir <checkout>` selects **which code version runs** (it bypasses the version-keyed
     cache). For a version-accurate **update** test, keep two checkouts side by side via a `git

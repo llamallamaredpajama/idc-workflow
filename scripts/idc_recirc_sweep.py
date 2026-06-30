@@ -61,6 +61,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import idc_matrix_check  # noqa: E402  — parse_matrix (constrained-YAML pillar scanner)
 import idc_tracker_fs    # noqa: E402  — load/save/find + atomic TRACKER.md writer
 import idc_gh_board      # noqa: E402  — shared paginating board reader (TRUE cursor pagination)
+import idc_board_lint    # noqa: E402  — OPERATOR_GATE_PREFIX (single-sourced marker)
 
 # ── markers ──────────────────────────────────────────────────────────────────
 # Plan stamps provenance; the finisher posts discovery/deferral. The sentinel is matched first and
@@ -150,6 +151,16 @@ def decide(issue, matrices, regime_active):
     if regime_active:
         return RESTAGE
     return SURFACE
+
+
+def is_operator_gate(title):
+    """True if this issue is an `[operator-action]` gate — the human requirements gate, NOT build work.
+
+    Uses the single-sourced `idc_board_lint.OPERATOR_GATE_PREFIX` marker so the sweep, the drain
+    (`idc_autorun_drain._is_build_candidate`'s title subclause), and board-lint can't drift on the
+    prefix string. Excluded at the candidate layer so a gate (empty `Stage` → reads Buildable, no
+    provenance) isn't swept and re-staged to Recirculation every fixpoint pass. PURE (unit-testable)."""
+    return str(title or "").strip().startswith(idc_board_lint.OPERATOR_GATE_PREFIX)
 
 
 def dropped_handoff_numbers(items):
@@ -304,6 +315,8 @@ def scan_filesystem(tracker_path, matrices):
             continue
         if (it.get("stage") or BUILDABLE_STAGE) != BUILDABLE_STAGE:
             continue
+        if is_operator_gate(it.get("title")):
+            continue  # an [operator-action] gate is a human gate, not rogue build work (drain parity)
         text = "\n".join(str(c) for c in it.get("comments", []) if c is not None)
         disc = parse_markers(text, DISCOVERY_MARKER)
         defr = parse_markers(text, DEFERRAL_MARKER)
@@ -383,6 +396,8 @@ def scan_github(repo, matrices, project_number, log):
         number = content.get("number")
         if number is None:               # a draft item carries no issue number
             continue
+        if is_operator_gate(content.get("title")):
+            continue  # an [operator-action] gate is a human gate, not rogue build work (drain parity)
         if (it.get("stage") or BUILDABLE_STAGE) != BUILDABLE_STAGE:
             continue
         okb, body_out, _ = gh(["issue", "view", str(number), "--json", "body,comments"], repo)

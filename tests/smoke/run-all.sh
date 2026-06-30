@@ -8,6 +8,25 @@
 # Usage: bash tests/smoke/run-all.sh   (exit 0 = all green)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
+
+# Preflight: fail once, clearly, if TMPDIR is unwritable — otherwise every phase's `WORK="$(mktemp -d)"`
+# comes back empty, writes fall through to bogus root paths, and the cascade looks like N broken tests
+# (not one blocked environment). A read-only TMPDIR in a sandboxed/managed cell is the trigger.
+#
+# Probe with an explicit template pinned INSIDE TMPDIR: a bare `mktemp -d` silently
+# falls back to the system temp on some implementations (notably GNU coreutils) when
+# TMPDIR is unwritable, which would hide exactly the failure we want to catch. An
+# explicit template forces creation at that path, so a bad TMPDIR fails here instead.
+_tdir="${TMPDIR:-/tmp}"
+if ! _probe="$(mktemp -d "$_tdir/smoke-preflight.XXXXXX" 2>&1)"; then
+  echo "idc smoke: BLOCKED — TMPDIR ($_tdir) is not writable." >&2
+  echo "            mktemp said: $_probe" >&2
+  echo "            Smoke needs a writable TMPDIR; point TMPDIR at a writable dir and retry." >&2
+  exit 2
+fi
+rmdir "$_probe" 2>/dev/null || true
+unset _tdir _probe
+
 fails=0
 for t in \
   phase1-tracker-fs \

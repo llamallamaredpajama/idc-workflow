@@ -79,6 +79,23 @@ M='{"p1-matrix.yaml":["p1","p2"]}'   # a matrix present, ids p1/p2 (provenance r
 [ "$(dec "$M" 1 '{"matrix":"other-matrix.yaml","pillar":"p1"}' 0)" = "restage" ] \
   || fail "provenance validity must be strict to the NAMED matrix (p1 in p1-matrix.yaml ≠ other-matrix.yaml)"
 
+# (f) operator-gate exclusion (PURE): an [operator-action]-titled issue is a human gate, not build
+#     work — the sweep must never re-stage it (parity with idc_autorun_drain._is_build_candidate).
+#     Red-when-broken contrasts: a plain title is NOT a gate (flips RED if the prefix check matches
+#     all); a gate title IS a gate (flips RED if it matches none); None/empty are safe (not gates).
+python3 - "$SCRIPTS" <<'PY' || fail "is_operator_gate misclassified a title (drain-parity exclusion broken)"
+import sys
+sys.path.insert(0, sys.argv[1])
+import idc_recirc_sweep as m
+assert m.is_operator_gate("[operator-action] approve telemetry opt-in") is True
+assert m.is_operator_gate("  [operator-action] approve telemetry  ") is True   # whitespace-tolerant
+assert m.is_operator_gate("scratch/self-sha.sh") is False                       # plain build work
+assert m.is_operator_gate("[operator-action]") is True                          # bare marker is still a gate
+assert m.is_operator_gate(None) is False                                        # missing title
+assert m.is_operator_gate("") is False                                          # empty title
+print("ok")
+PY
+
 # ── 2. filesystem mechanical: re-stage rogue Buildable → Recirculation + clear Wave + idempotency ──
 REPO="$WORK/repo"
 mkdir -p "$REPO/docs/workflow/pillar-matrices"
@@ -108,6 +125,14 @@ run_trk comment --num "$rogue" \
 # filesystem board (no provenance markers exist there), this must be SURFACED, never re-staged.
 clean="$(run_trk create --title 'clean buildable' --stage Buildable --wave 'Wave 2')" \
   || fail "create clean failed"
+# An [operator-action] gate WITH a discovery marker: decide() WOULD restage it (marker ⇒ rogue), so
+# only the title exclusion keeps it out of the sweep. Red-when-broken at the exact defect site: a
+# live autorun drain re-staged the telemetry gate to Recirculation because the sweep lacked this guard.
+gate="$(run_trk create --title '[operator-action] approve telemetry opt-in' --stage Buildable --wave 'Wave 1')" \
+  || fail "create gate failed"
+run_trk comment --num "$gate" \
+  --body '<!-- idc-discovery: {"what":"gate","area":"x","suggested_scope":"y","origin":"#gate"} -->' \
+  >/dev/null || fail "gate comment (discovery marker) failed"
 
 python3 "$SWEEP" --repo "$REPO" --auto-correct || fail "auto-correct exited non-zero (must be fail-soft, exit 0)"
 
@@ -121,6 +146,12 @@ python3 "$SWEEP" --repo "$REPO" --auto-correct || fail "auto-correct exited non-
   || fail "an unmarked Buildable must NOT be re-staged on a regime-inactive filesystem board (over-fire)"
 [ "$(run_trk show --num "$clean" --field Wave)" = "Wave 2" ] \
   || fail "an unmarked Buildable's Wave must be preserved (got '$(run_trk show --num "$clean" --field Wave)')"
+# operator-gate exclusion (mechanical): the gate stays Buildable + Wave preserved despite the
+# discovery marker (⇒ a rogue by decide()) — the title filter excludes it. Regresses RED if the guard drops.
+[ "$(run_trk show --num "$gate" --field Stage)" = "Buildable" ] \
+  || fail "an [operator-action] gate must NOT be re-staged (got '$(run_trk show --num "$gate" --field Stage)')"
+[ "$(run_trk show --num "$gate" --field Wave)" = "Wave 1" ] \
+  || fail "an [operator-action] gate's Wave must be preserved (got '$(run_trk show --num "$gate" --field Wave)')"
 
 # idempotent re-run: re-staging again changes nothing, and creates no duplicate issues.
 before_count="$(python3 - "$T" <<'PY'

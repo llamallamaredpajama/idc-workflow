@@ -197,19 +197,24 @@ claude --plugin-dir /Users/jeremy/dev/proj/idc-workflow      # load THIS dev che
 > a session rooted in this plugin repo, or a teammate/Codex):
 > ```bash
 > # one-time: printf '{"mcpServers":{}}' > /tmp/empty-mcp.json
-> ( unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN; \
+> (
+>   # Inherit auth by default: this machine runs the nested claude via a VALID
+>   # ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL, so stripping it forces a fallback to a stale
+>   # OAuth cache → 401. Set IDC_STRIP_AUTH=1 ONLY on a stale-key "Invalid API key" death.
+>   [ "${IDC_STRIP_AUTH:-0}" = "1" ] && unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
 >   cd /Users/jeremy/dev/sandbox/ke-idc-test-repo-install && \
 >   claude --plugin-dir /Users/jeremy/dev/proj/idc-workflow \
 >          --strict-mcp-config --mcp-config /tmp/empty-mcp.json \
->          --permission-mode bypassPermissions -p "/idc:doctor" < /dev/null ) \
->   > /Users/jeremy/dev/sandbox/_idc-observability/run-<label>.txt 2>&1
+>          --permission-mode bypassPermissions -p "/idc:doctor" < /dev/null
+> ) > /Users/jeremy/dev/sandbox/_idc-observability/run-<label>.txt 2>&1
 > ```
-> **Two spawn traps** (handled in the command above): a stale or rotated
-> `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` left in the env makes the nested session die instantly
-> with `Invalid API key` (→ `unset` both so it falls back to your subscription OAuth login); and it
-> otherwise hangs ~6 min booting your full global MCP set (→ `--strict-mcp-config --mcp-config
-> /tmp/empty-mcp.json` — IDC never uses MCP). Capture with `> file 2>&1` and check `wc -c` > 0; `tee`
-> buffers until the session exits, so a live capture reads 0 bytes mid-run.
+> **Two spawn traps** (handled in the command above): **(1) auth** — which credential is valid flips
+> over time (rotations vs OAuth refresh), so the nested session inherits auth by default; set
+> `IDC_STRIP_AUTH=1` to opt back into the old strip-to-OAuth fallback ONLY on a stale-key `Invalid API
+> key` death (the inline comment in the block above explains why a blanket `unset` *causes* the 401 on
+> this machine). **(2) MCP** — without `--strict-mcp-config --mcp-config /tmp/empty-mcp.json` it hangs
+> ~6 min booting your full global MCP set (IDC never uses MCP). Capture with `> file 2>&1` and check
+> `wc -c` > 0; `tee` buffers until the session exits, so a live capture reads 0 bytes mid-run.
 >
 > Each `-p` run is a fresh session (edited markdown loads automatically; put interactive choices in
 > the prompt). See the root `CLAUDE.md` "Local end-to-end testing" section for the full loop.

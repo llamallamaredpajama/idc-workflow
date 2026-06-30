@@ -17,6 +17,8 @@ Before finishing IDC Build work, load/use:
 
 Follow those skills when they are stricter than this prompt.
 
+**Pi runtime note:** `idc:*` skill names (for example `idc:idc-tracker-adapter`) are local procedures, not coms-net peers or targets. Never call `coms_net_send` with any `idc:` target; use coms-net only for IDC role peers (`build-review`, `recirculator`, etc.). When a tracker operation is required, execute the tracker-adapter procedure for the repo's configured backend directly.
+
 ## Authority boundary
 
 The **GitHub Projects v2 board is the source of truth**; all board reads/writes go through `idc:idc-tracker-adapter` (never hand-rolled `gh`). The board has exactly five fields: `Status`, `Stage`, `Wave`, `Phase`, `Domain`.
@@ -27,7 +29,7 @@ Allowed file writes:
 - scratch under `/tmp/pi-idc/build-finish/`
 
 Tracker authority (via `idc:idc-tracker-adapter`):
-- on a clean merge, `close` the issue to `Status=Done`
+- on a clean merge, tracker close/`close(issue)`: set `Status=Done` and close the issue
 
 Git authority (role-scoped; force-push is never used; git stays in the run repo):
 - apply fix commits → push → merge the build PR (`gh pr merge <PR-NUMBER> --squash --delete-branch`, a direct blocking merge, **never** `--auto`).
@@ -48,7 +50,7 @@ Forbidden writes/actions:
 - Merge **ONLY** after both gates are real: the durable verdict is `PASS` / `PASS-WITH-NITS` and tests/verification are green/passed. Then run `gh pr merge <PR-NUMBER> --squash --delete-branch` (a direct blocking merge, never `--auto`).
 - At the attempt ceiling, or when a finding is an upstream/plan problem, **RECIRCULATE** (`/idc:recirculate`) instead of papering over it.
 - **Deferrals are fail-closed.** Any `blocks_goal` deferral that survives the loop is **converted into a tracked, dependency-linked `Stage=Recirculation` ticket** (the five-field discovered-scope body — `Discovered`/`Area`/`Suggested-scope`/`Provenance`/`PRD-TRD-impact`, **non-Buildable** so it is never scooped as build work) that **blocks the parent feature's Done**, and serialized onto the issue as an `<!-- idc-deferral: {"kind":…,"what":…,"blocks_goal":…,"suggested_issue":"#<n>"} -->` comment marker via `idc:idc-tracker-adapter` (`comment`) — **never** an unstaged or `Stage=Buildable` item, never a prose footnote. The marker feeds the deterministic wave-close acceptance check.
-- On a clean merge, `close` the issue to `Status=Done` via `idc:idc-tracker-adapter`.
+- On a clean merge, `close` the issue to `Status=Done` via `idc:idc-tracker-adapter` executed as a local procedure, not a coms-net send. For the github backend, close means `setField <issue> Status Done` (guarding any missing, empty, or unresolved item/field/option/project id; do NOT mutate and blocked-stop/fail-closed on a blank id) and then `gh issue close <issue> --reason completed`. For the filesystem backend, use `python3 <plugin-root>/scripts/idc_tracker_fs.py --tracker TRACKER.md close --num <issue>` (resolve `<plugin-root>` to the installed/runtime plugin root; it is not a shell variable).
 - Produce final handoff with the PR, SHA, tests, review verdict, and next safe item.
 
 ## Coms-net protocol

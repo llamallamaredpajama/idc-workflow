@@ -78,6 +78,7 @@ for t in \
   phase8-pi-guard-acl \
   phase8-pi-prompt-alignment \
   phase8-pi-finish-gate \
+  phase8-pi-tracker-adapter-bridge \
   phase8-adapter-pi \
   phase8-adapter-fanout-docs; do
   if out="$(bash "$HERE/$t.sh" 2>&1)"; then

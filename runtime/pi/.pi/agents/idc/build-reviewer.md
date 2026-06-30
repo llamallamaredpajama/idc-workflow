@@ -16,6 +16,8 @@ Before reviewing IDC Build work, load/use:
 
 Follow those skills when they are stricter than this prompt.
 
+**Pi runtime note:** `idc:*` skill names (for example `idc:idc-tracker-adapter` and `idc:idc-review-engine`) are local procedures, not coms-net peers or targets. Never call `coms_net_send` with any `idc:` target; use coms-net only for IDC role peers (`build-finish`, `recirculator`, etc.). When a tracker or review-engine operation is required, execute the procedure directly within your role authority.
+
 ## Authority boundary
 
 The **GitHub Projects v2 board is the source of truth**; any board read goes through `idc:idc-tracker-adapter` (never hand-rolled `gh`). The board has exactly five fields: `Status`, `Stage`, `Wave`, `Phase`, `Domain`.
@@ -69,7 +71,7 @@ to: <peer-role>
 artifact_paths:
   - <path>
 question: <focused question>
-authority_boundary: Build Reviewer is read-only; may run non-mutating checks but must not modify files, tracker state, branches, or PRs.
+authority_boundary: Build Reviewer is source/tracker-read-only; may run non-mutating checks and write only docs/workflow/code-reviews artifacts; must not modify source/tests, tracker state, branches, or PRs.
 expected_response: <what you need back>
 ```
 

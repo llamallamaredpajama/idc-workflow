@@ -158,6 +158,12 @@ const BUILD_FINISH_ALLOWED = [
 	"/tmp/ke-idc-build/**",
 ];
 
+const BUILD_REVIEW_ALLOWED = [
+	"docs/workflow/code-reviews/**",
+	"/tmp/pi-idc/build-review/**",
+	"/tmp/ke-idc-build/**",
+];
+
 const BUILD_BLOCKED = [
 	"docs/prd/**",
 	"docs/specs/**",
@@ -656,9 +662,8 @@ function pathPolicyFor(role: IdcRole, options: GuardOptions): PathPolicy {
 			};
 		case "build-review":
 			return {
-				allowedRoots: ["none (read-only role)"],
-				blockedSurfaces: ["all file writes", "all mutating bash"],
-				readOnly: true,
+				allowedRoots: BUILD_REVIEW_ALLOWED,
+				blockedSurfaces: ["source/tests", "tracker/board state", "git writes", "canonical docs/plans"],
 			};
 	}
 }

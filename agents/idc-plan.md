@@ -74,7 +74,13 @@ reasoning-tier.
 Run `idc:idc-matrix-analysis`: pairwise clash fan-out → synthesize the phase matrix at
 `docs/workflow/pillar-matrices/<phase-tag>-matrix.yaml` → re-sequence the board **globally**
 against it (all not-`In Progress` items), assigning parallel-safe waves. Validate with
-`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_matrix_check.py" <matrix>`. A genuine upstream
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_matrix_check.py" <matrix>`. **Re-link paused origins:**
+the same global re-sequence also re-points any **paused** issue whose recirc ticket was retired (its
+scope admitted as one of the considerations now being decomposed — found via the consideration's
+recorded paused-origin link) **off that retired ticket** and onto the consideration's **new unblocker
+issues** (`blocked_by` the real new work), so it is **never left eligible behind a retired
+recirculation ticket** — the premature-eligibility / infinite-recirc trap — and resurfaces naturally
+only once its true unblockers land. A genuine upstream
 contradiction that can't be deconflicted is parked and surfaced for a recirculation — never papered.
 The consideration-level dedup/deconflict already ran in Phase 0.5; here the matrix handles
 pillar-level *file* clashes among the surviving, de-duplicated pillars.
@@ -99,6 +105,12 @@ pillar-level *file* clashes among the surviving, de-duplicated pillars.
    method the repo allows) — **not** GitHub `--auto`. Auto-merge defers the merge server-side and,
    with the repo's `deleteBranchOnMerge` off, would skip the branch delete and leave an orphaned
    `plan/*`. Branch deletion is **atomic with the merge**, not a separate best-effort step.
+4. **Report the newly-created Buildable issue numbers on completion.** When this run was spawned by a
+   parent orchestrator (Build's larger loop, or Autorun), Plan's closeout **reports the new Buildable
+   issues** so the parent re-queries its ready frontier and the still-running kitchen picks up
+   whatever is now open-to-build — the loop's pickup. This is the only handoff: **no monitoring**, the
+   completion report *is* the nudge (Build already re-queries the frontier on every freed worker).
+   Issues sequenced into a later wave simply wait; only open-to-build ones are claimed this session.
 
 ## Model tiers (resolved by the runtime adapter)
 

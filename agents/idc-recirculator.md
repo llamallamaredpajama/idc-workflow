@@ -56,7 +56,23 @@ mode only changes what gets fed in:
        **Preserve provenance**: a `discovered-scope` label on the consideration pointer (github),
        an "originated as discovered scope (recirculation ticket #<n> — <Provenance>)" line in the
        consideration doc body, and a closing `comment` on the retired ticket naming the
-       consideration it became. The admitted consideration is now Plan's to decompose.
+       consideration it became. When the event was surfaced by a **running Build issue** (the larger
+       loop), **also record that paused origin issue** on the admitted consideration — a native
+       dependency / an `unblocks #<origin>` note — so the link **survives the ticket's retirement**
+       and Plan can re-point the origin onto the consideration's decomposed unblockers (the
+       provenance Plan needs; without it a retired ticket would let the origin go eligible with
+       nothing built). The admitted consideration is now Plan's to decompose.
+     - *Trivial subordinate-artifact drift (Build-triggered):* when the **only** lagging layer is a
+       **subordinate machine-readable artifact whose authoritative layer is already merged** (e.g. a
+       stale enum mirror of an already-consolidated spec) **and** the event was surfaced by a running
+       Build worker, the consultant need not author its own PR. It instead **grants Build permission**
+       for that **one specific** change — naming the exact `paths` and `change` — to be made as a
+       **separate tiny doc PR through staging** (Build's merge train), and emits the `trivial`
+       closeout. The glass wall holds (only the consultant *authorizes* a canonical-doc edit), while
+       the already-in-context Build worker lands the 1-line sync without spinning up a separate
+       Recirculator PR. A non-trivial or multi-layer drift still takes the synchronized one-PR
+       drift-heal above. A *trivial* verdict is also a smell worth noting — it usually means the
+       triplet's context was filling and it escalated something a fresh consultant sees through at once.
    - **gate: yes — PRD/TRD-worthy** (the highest affected layer is the PRD, or the TRD/`spec` layer
      when `gating.trd: on`) → run the doc-sync to draft the requirements diff and **reuse the one
      gate** (`WORKFLOW.md §2`): hand the requirements change to `idc:idc-gate-issue`, which opens a
@@ -65,9 +81,36 @@ mode only changes what gets fed in:
      `Stage=Recirculation` ticket **rides `Status=Blocked` behind that gate and PAUSES there** (it
      is **not** retired); admission clears it the same way Think's gate clears. Pause only the
      affected work; everything else keeps flowing.
-3. **Close out.** Name the affected layers, the sync PR (or the gate issue), any open
-   issues re-synced, and — in inbox-drain — each Recirculation ticket's disposition (admitted as a
-   consideration + retired, or paused behind a gate).
+3. **Close out — and emit the structured closeout.** Name the affected layers, the sync PR (or the
+   gate issue), any open issues re-synced, and — in inbox-drain — each Recirculation ticket's
+   disposition (admitted as a consideration + retired, or paused behind a gate). When spawned by a
+   parent orchestrator (Build's larger loop, or Autorun), **also emit a machine-readable closeout
+   object** that the parent validates **fail-closed** via
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_recirc_closeout.py" --closeout <closeout.json>` and
+   routes on the single JSON dispatch line it prints — one of:
+   - **pass-through** `{ticket, outcome:"pass-through", provenance, recirc_count, cascade_depth, consideration}`
+     — a consideration was admitted; the parent launches a (batched) Plan worker over it.
+   - **gated** `{ticket, outcome:"gated", provenance, recirc_count, cascade_depth, think_pr}` — a gated
+     Think PR was opened; the parent fires a **cmux/push ping** and parks the ticket behind the gate
+     (no Plan worker).
+   - **trivial** `{ticket, outcome:"trivial", provenance, recirc_count, cascade_depth, grant:{issue, paths, change}}`
+     — a Build-permission grant for one specific subordinate-doc change (a separate tiny doc PR via
+     staging; no Plan, no re-sequence). Each `paths` entry is a **repo-relative subordinate
+     canonical-doc file** under `docs/` (`.md`/`.json`/`.schema.json`) — **never** a governing
+     instruction surface (`docs/workflow/`, `docs/plans/`, a root or governing `WORKFLOW.md`/
+     `AGENTS.md`/`CLAUDE.md`, …), never a directory, never an absolute/`..` path; the validator
+     rejects those fail-closed so the trivial path can never authorize a gate-disciplined or non-doc
+     surface.
+   `ticket` is a positive integer and `recirc_count`/`cascade_depth` are non-negative integers — the
+   consultant is the **designated owner** of the runaway-cap counts: it bumps `recirc_count` each time
+   it processes a recirc event for the issue and stamps the `cascade_depth` a recirc-originated
+   consideration carries, so the parent's `idc_recirc_caps.py` bound reads a single authoritative
+   handoff (never invents or skips the counts). The `provenance` stamp is **mandatory** — the
+   consultant never emits a closeout without it, and a malformed or absent closeout (or a missing
+   count) fails the validator closed, so the parent **halts rather than stranding** the ticket. In
+   Autorun's in-session inbox-drain the closeout is the same record the drain loop reads; the
+   structured form makes the Build-triggered handoff routable without the orchestrator re-deriving the
+   gate.
 
 No verdict taxonomy, no `docs/workflow/recirculator/` change-order files — those are deleted. The
 PR body carries the full record.

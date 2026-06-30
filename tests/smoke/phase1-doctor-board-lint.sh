@@ -107,6 +107,84 @@ run_lint '[{"number":1,"title":"clean","body":"'"$C"'","blocked_by":[]},{"number
 assert_clean "[operator-action] issue must be skipped (scanned count excludes it)"
 refute_out '#9' "[operator-action] issue #9 must not be flagged"
 
+# --- 6b. retired-recirc rule: a Buildable eligible ONLY via a retired (Done) Recirculation ticket -
+# The paused-issue re-link (idc-plan Phase 4) re-points a paused origin issue OFF its retired recirc
+# ticket onto the real new unblockers. If that step is skipped, the paused issue stays blocked_by a
+# Stage=Recirculation ticket that has since gone Done — its last blocker satisfied, so it goes
+# SPURIOUSLY eligible (the premature-eligibility / infinite-recirc trap). The rule needs each
+# blocker's stage+status, supplied by OPTIONAL "stage"/"status" fields on the (index-only) blocker
+# object; absent → the rule stays silent (the thin-shape fixtures #1–#6 above prove back-compat).
+
+# (a) positive: a clean Buildable (#700) blocked_by a Done Recirculation ticket (#701) -> flagged.
+#     #701 carries stage=Recirculation/status=Done so it is INDEX-ONLY (supplies the blocker's lane,
+#     never scanned as a contract — its non-contract body must not false-flag, nor inflate `scanned`).
+run_lint '[{"number":700,"title":"paused origin","body":"'"$C"'","blocked_by":[701]},{"number":701,"title":"retired recirc ticket","stage":"Recirculation","status":"Done","blocked_by":[]}]'
+[ "$RC" -eq 0 ] || fail "retired-recirc: helper exit $RC (want 0 — advisory)"
+assert_out '#700 .*: retired-recirc —' "a Buildable eligible only via a retired Done Recirculation ticket must be flagged retired-recirc"
+assert_out '^board-lint: 1 flagged of 1 scanned \(0 schema, 0 prose-dep, 1 retired-recirc\)$' \
+  "retired-recirc must tally (… 1 retired-recirc) and NOT scan the index-only ticket (1 scanned, not 2)"
+
+# (b) red-when-broken control: SAME shape but the blocker (#702) is a Done NORMAL issue (Stage=
+#     Buildable), not a Recirculation ticket -> NOT flagged. Flips RED if the rule fires on any Done
+#     blocker instead of specifically a retired Recirculation ticket.
+run_lint '[{"number":700,"title":"paused origin","body":"'"$C"'","blocked_by":[702]},{"number":702,"title":"normal done dep","stage":"Buildable","status":"Done","blocked_by":[]}]'
+[ "$RC" -eq 0 ] || fail "retired-recirc control (Done normal): helper exit $RC (want 0)"
+assert_clean "a Buildable blocked_by a Done NORMAL issue must NOT be flagged retired-recirc (red-when-broken)"
+refute_out '#700' "#700 must not be flagged when its blocker is a Done normal issue (not a Recirculation ticket)"
+
+# (c) red-when-broken control: re-linked onto a LIVE unblocker (#703 Stage=Buildable/Status=Todo —
+#     the post-re-link desired state) -> NOT flagged. Both #700 and #703 are valid contracts, so the
+#     clean count is 2. Flips RED if the rule fires whenever ANY blocker is present.
+run_lint '[{"number":700,"title":"paused origin","body":"'"$C"'","blocked_by":[703]},{"number":703,"title":"live unblocker","body":"'"$C"'","stage":"Buildable","status":"Todo","blocked_by":[]}]'
+[ "$RC" -eq 0 ] || fail "retired-recirc control (live unblocker): helper exit $RC (want 0)"
+assert_out '^board-lint: clean \(2 scanned\)$' "a paused issue re-linked onto a live Todo unblocker must NOT be flagged (post-re-link desired state)"
+refute_out '#700' "#700 must not be flagged once re-linked onto a live unblocker"
+
+# (d) back-compat: a thin blocker (#701, no stage/status) can't resolve to a Done Recirculation
+#     ticket -> rule silent. Proves the rule fires ONLY when the blocker's stage/status are present.
+run_lint '[{"number":700,"title":"paused origin","body":"'"$C"'","blocked_by":[701]},{"number":701,"title":"thin blocker","body":"'"$C"'","blocked_by":[]}]'
+[ "$RC" -eq 0 ] || fail "retired-recirc back-compat (thin blocker): helper exit $RC (want 0)"
+assert_out '^board-lint: clean \(2 scanned\)$' "a thin blocker (no stage/status) must leave the retired-recirc rule silent (optional-fields back-compat)"
+
+# --- 6e. MIXED BLOCKER (Minor 1 sole/satisfied semantics): retired-recirc must NOT fire while a LIVE
+# blocker still stands. A Buildable whose blockers include BOTH a retired Done Recirculation ticket
+# AND a still-LIVE (Todo) blocker is NOT spuriously eligible — the live blocker genuinely holds it, so
+# flagging it would over-report (tell the operator to re-point an issue that is still real-blocked).
+# The rule fires only when the retired-recirc blocker is the LAST remaining (all blockers satisfied).
+# Red-when-broken: revert retired_recirc_evidence to fire on any retired-recirc blocker and this flips
+# RED (the over-report the review flagged). NB #701 + #704 both resolve via the index; #704 is a valid
+# contract (Buildable+Todo), so it is scanned (2 scanned) and clean.
+run_lint '[{"number":700,"title":"paused origin","body":"'"$C"'","blocked_by":[701,704]},{"number":701,"title":"retired recirc","stage":"Recirculation","status":"Done","blocked_by":[]},{"number":704,"title":"live blocker","body":"'"$C"'","stage":"Buildable","status":"Todo","blocked_by":[]}]'
+[ "$RC" -eq 0 ] || fail "mixed-blocker: helper exit $RC (want 0 — advisory)"
+refute_out '#700' "a Buildable with BOTH a retired-recirc AND a live (Todo) blocker must NOT be flagged (Minor 1 sole/satisfied-blocker)"
+assert_out '^board-lint: clean \(2 scanned\)$' "mixed-blocker: #700 + live #704 both scanned clean, nothing flagged"
+
+# --- 6e2. SOLE/SATISFIED control: ALL blockers Done (incl. a recirc ticket) -> STILL flagged. Proves
+# the sole-blocker fix does NOT under-report: when no live blocker remains AND a retired recirc ticket
+# is among the satisfied blockers, the issue IS spuriously eligible and must fire. (#705 is Buildable+
+# Done → index-only, so still 1 scanned.)
+run_lint '[{"number":700,"title":"paused origin","body":"'"$C"'","blocked_by":[701,705]},{"number":701,"title":"retired recirc","stage":"Recirculation","status":"Done","blocked_by":[]},{"number":705,"title":"done normal dep","stage":"Buildable","status":"Done","blocked_by":[]}]'
+[ "$RC" -eq 0 ] || fail "sole/satisfied control: helper exit $RC (want 0 — advisory)"
+assert_out '#700 .*: retired-recirc —' "ALL blockers Done incl. a recirc ticket -> STILL flagged (sole/satisfied; no live blocker remains)"
+refute_out 'clean \(' "the sole/satisfied case must FLAG (not read clean) — guards against under-reporting from the sole-blocker fix"
+
+# --- 6c. M1 ROOT FIX: a PRESENT stage with an ABSENT/null status is INDEX-ONLY (never schema-scanned) -
+# idc_gh_board.py OMITS absent fields, so an issue carrying no Status re-materializes (via doctor's
+# index pass) as {stage:"Buildable", status:null}. Pre-fix in_scan_lane treated a null status as
+# "in lane" (its `if status is not None` guard skipped) and SCANNED the bodyless index object → a
+# spurious `1 schema` flag. Root fix: ONLY the fully-thin no-stage/no-status legacy shape is scanned;
+# any object carrying a stage is scanned ONLY when stage==Buildable AND status==Todo. A Buildable +
+# null status is index-only. Red-when-broken: revert in_scan_lane → this flips RED (1 schema flagged).
+run_lint '[{"number":950,"stage":"Buildable","status":null,"blocked_by":[]}]'
+[ "$RC" -eq 0 ] || fail "null-status index object: helper exit $RC (want 0)"
+assert_out '^board-lint: clean \(0 scanned\)$' "a Buildable + null/absent status object must be INDEX-ONLY (0 scanned), never schema-scanned (M1 root fix)"
+refute_out '#950' "a Buildable + null/absent status object must NOT be schema-flagged (M1 root fix)"
+# defense-in-depth control: the doctor sentinel re-materializes a missing status as the string "none"
+# (not null) — likewise non-Todo, so the same object stays index-only (proves the sentinel + root fix
+# agree). NB this control passes pre- AND post-root-fix (it documents the sentinel, not the root fix).
+run_lint '[{"number":951,"stage":"Buildable","status":"none","blocked_by":[]}]'
+assert_out '^board-lint: clean \(0 scanned\)$' "a Buildable + status=\"none\" (doctor sentinel) object must also be INDEX-ONLY (0 scanned)"
+
 # --- 7. unparseable stdin -> exit 2 (doctor reads this as 'could not determine' -> SKIP) --------
 printf '%s' 'not json {{' | python3 "$LINT" >/dev/null 2>&1
 [ "$?" -eq 2 ] || fail "unparseable stdin must exit 2 so doctor SKIPs (never FAIL)"
@@ -156,6 +234,40 @@ grep -qE 'echo "board-lint: SKIP — github board unreadable' "$DOCTOR" \
 printf '%s' "$DFLAT" | grep -qiE 'no silent all-clear' \
   || fail "doctor.md Row 9 must state a board-read failure SKIPs (no silent all-clear)"
 
+# --- 8b. LIVE wiring (5b): Row 9 feeds board-lint the whole-board {number,stage,status} INDEX -------
+# The retired-recirc rule (helper sections 6b above) needs each blocker's lane to resolve a blocker
+# number -> "Done Recirculation ticket". Section 6b proves board-lint FIRES on the index shape; this
+# proves doctor EMITS it — without the index emission the rule is tested-but-dormant in production.
+# Red-when-broken: delete the index-emission jq pass (or its non-Buildable exclusion) and these flip
+# RED. The index pass is a SECOND jq over the already-captured $board (not a second board read), and
+# it EXCLUDES the Buildable+Todo lane already emitted as rich objects so nothing is double-scanned
+# (in_scan_lane() treats a stage≠Buildable / status≠Todo object as index-only).
+# The status field carries the M1 sentinel `(.status // "none")`: idc_gh_board.py OMITS an absent
+# Status, so a raw `.status` would re-materialize as literal null and (pre-root-fix) get SCANNED with an
+# empty body. The `// "none"` sentinel makes a missing status a non-Todo string so in_scan_lane reads it
+# index-only (defense-in-depth atop the helper's root fix). Red-when-broken: revert to `.status`.
+grep -qE 'stage:[[:space:]]*\(\.stage[[:space:]]*//[[:space:]]*"Buildable"\),[[:space:]]*status:[[:space:]]*\(\.status[[:space:]]*//[[:space:]]*"none"\)' "$DOCTOR" \
+  || fail "doctor.md Row 9 must emit whole-board {number,stage,status} INDEX objects with the status sentinel (.status // \"none\") so an absent Status reads index-only, not schema-scanned (5b live wiring + M1 sentinel)"
+printf '%s' "$DFLAT" | grep -qE 'and \(\.stage[[:space:]]*//[[:space:]]*"Buildable"\)=="Buildable"\)[[:space:]]*\|[[:space:]]*not\)' \
+  || fail "doctor.md Row 9 index pass must EXCLUDE the Buildable+Todo lane already emitted as rich objects (| not) — no double-scan (5b)"
+# the index pass must read the ALREADY-CAPTURED \$board, never a SECOND board read (no extra paginated
+# fetch): the idc_gh_board.py INVOCATION appears exactly once (both jq passes share the one capture).
+[ "$(grep -cE 'python3 "\$\{CLAUDE_PLUGIN_ROOT\}/scripts/idc_gh_board\.py"' "$DOCTOR")" = "1" ] \
+  || fail "doctor.md Row 9 must read the board ONCE — the index pass reuses the captured \$board, not a second idc_gh_board.py fetch (5b)"
+
+# --- 8c. pass (i) guards draft project items (content:null) — symmetric with pass (ii) (5c) -------
+# A *draft* project item has content:null, so `.content.number` yields the string "null"; pass (i)'s
+# `[ -n "$n" ]` guard catches empty but NOT the literal "null", so without this guard Row 9 would run
+# `gh issue view null`. Pass (ii) (the index pass) already carries `select(.content.number != null)`;
+# pass (i) (the rich Buildable+Todo scan) must carry it too. Assert it on the SINGLE rich-pass jq line
+# — the one carrying BOTH `select(.status=="Todo")` AND `select((.stage // "Buildable")=="Buildable")`
+# — so the guard is proven present on PASS (I) specifically, not merely somewhere in the file.
+# Red-when-broken: delete the guard from pass (i) and this flips RED. A global
+# `grep -c 'select(.content.number != null)'` would NOT (the string also appears in pass (ii) + this
+# comment), which is exactly why the assertion is anchored to the three-select rich-pass line.
+grep -qE 'select\(\.status=="Todo"\).*select\(\(\.stage // "Buildable"\)=="Buildable"\).*select\(\.content\.number != null\)' "$DOCTOR" \
+  || fail "doctor.md Row 9 pass (i) must guard draft items: its rich-pass jq line (status==Todo + stage==Buildable) must ALSO carry select(.content.number != null) (5c)"
+
 # --- 9. Row 9 loop is shell-agnostic (zsh word-split hardening; the doctor.md plumbing) ----------
 # FINDING 1: the real /idc:doctor Bash-tool shell is zsh (repo CLAUDE.md), where an unquoted
 # `$nums` is NOT word-split — so a `nums=$(…); for n in $nums` loop runs ONCE over the whole
@@ -190,4 +302,4 @@ else
   echo "SKIP: zsh absent — Row 9 functional shell-contrast skipped (static guard 9a still enforced)"
 fi
 
-echo "PASS: board-lint helper classifies schema/prose-dep/link/operator/skip + doctor Row 9 advisory + shell-agnostic guards hold"
+echo "PASS: board-lint helper classifies schema/prose-dep/retired-recirc/link/operator/skip + doctor Row 9 advisory + shell-agnostic guards hold"

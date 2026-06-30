@@ -163,6 +163,57 @@ for f in "$AUTORUN" "$CMD"; do
     || fail "$bn must frame the drain helper as the build lane's exit condition, not the whole autorun loop"
 done
 
+# ---- B3. re-loop to a fixpoint: the pipe is NOT one-shot -----------------------------------------
+# A build triplet can file a NEW Stage=Recirculation ticket mid-drain (Build's larger loop), upstream
+# of the build lane — so after the build lane drains, autorun must RE-LOOP recirculate->plan->build
+# until a full pass leaves nothing actionable (a fixpoint), never exit one-shot. The re-loop reuses
+# the SAME machinery as Build's larger loop — the structured closeout (idc_recirc_closeout), the caps
+# (idc_recirc_caps), and the new board-lint retired-recirc guard (idc_board_lint) — so it PARKS (never
+# churns) and terminates. Both the agent playbook AND the command entry must carry this (parity).
+# Every assert is red-when-broken: drop the re-loop prose and the matching grep fails.
+for f in "$AUTORUN" "$CMD"; do
+  bn="$(basename "$f")"
+  flat="$(tr '\n' ' ' < "$f" | tr -s ' ')"
+
+  # (1) the pipe re-loops to a FIXPOINT and is explicitly NOT one-shot
+  grep -qiE 'fixpoint' "$f" \
+    || fail "$bn must state autorun re-loops the pipe to a fixpoint (not one-shot)"
+  grep -qiE 'not one-shot|never one-shot' "$f" \
+    || fail "$bn must state the pipe is NOT one-shot (a build triplet files new recirc tickets mid-drain)"
+  # (2) the reason: a build triplet files a NEW Recirculation ticket MID-DRAIN, upstream of build.
+  # The bare `mid-drain` grep is a COARSE presence gate (a cheap early signal) — its red-when-broken
+  # PIN is the ordered flat grep on the next line, which requires "new … recirculation … ticket …
+  # mid-drain" IN ORDER, so dropping the actual re-loop trigger flips that one RED.
+  grep -qiE 'mid-drain' "$f" \
+    || fail "$bn must explain a build triplet can file a new Recirculation ticket mid-drain (why re-loop)"
+  printf '%s' "$flat" | grep -qiE 'new[^.]*recirculation[^.]*ticket[^.]*mid-drain|mid-drain[^.]*new[^.]*recirculation[^.]*ticket' \
+    || fail "$bn must state a build triplet files a NEW Recirculation ticket mid-drain (the re-loop trigger)"
+  # (3) the loop-back re-runs the FULL pipe in order (recirculate -> plan -> build), not build-only
+  printf '%s' "$flat" | grep -qiE 'loop back[^.]*recirculate[^.]*plan[^.]*build' \
+    || fail "$bn must loop back and re-run recirculate -> plan -> build (the full pipe, in order, not build-only)"
+  # (4) reuse the SAME machinery as Build's larger loop — closeout + caps + board-lint (bounded, no churn)
+  grep -qE 'idc_recirc_closeout' "$f" \
+    || fail "$bn re-loop must reuse the structured closeout semantics (idc_recirc_closeout)"
+  grep -qE 'idc_recirc_caps' "$f" \
+    || fail "$bn re-loop must reuse the per-issue/cascade caps (idc_recirc_caps) — park-not-churn"
+  grep -qE 'idc_board_lint' "$f" \
+    || fail "$bn re-loop must reuse the board-lint retired-recirc guard (idc_board_lint) — no premature-eligibility re-trigger"
+  # (5) termination: parks (never churns), BOUNDED (not unconditionally "guaranteed"). The caps only
+  # park a runaway WHILE the recirc:N / cascade-depth:D counts they read are maintained (the recirc
+  # consultant is the designated owner — idc-build Phase 1b; the count-bump is an LLM step, not
+  # mechanically deterministic), backstopped by natural drain + the outer /loop. Pin the honest framing
+  # red-when-broken: (a) BOUNDED termination, (b) the maintained-counts caveat, (c) NO regression back
+  # to the over-claim "termination is guaranteed".
+  grep -qiE 'parks?, never churn|never churns?|park-not-churn' "$f" \
+    || fail "$bn re-loop must PARK a chronically-recirculating issue, never churn (the caps bound it)"
+  printf '%s' "$flat" | grep -qiE 'terminat[^.]*bounded|bounded[^.]*terminat' \
+    || fail "$bn must frame re-loop termination as BOUNDED (not unconditionally guaranteed)"
+  printf '%s' "$flat" | grep -qiE 'counts?[^.]*maintain|maintain[^.]*counts?' \
+    || fail "$bn must state the caps bound the loop only while the recirc:N/cascade-depth counts are maintained (the designated-owner caveat)"
+  grep -qiE 'termination is guaranteed' "$f" \
+    && fail "$bn must NOT over-claim 'termination is guaranteed' (the caps bound the loop only when the counts are maintained)"
+done
+
 # The launch gate is the ONE sanctioned PRE-drain ask; the no-ask invariant still forbids MID-drain
 # asks. Both must coexist in the agent playbook (the bug was mid-drain asks + self-narrowing).
 grep -qiE 'no-ask invariant' "$AUTORUN" \
@@ -178,4 +229,4 @@ grep -qiE 'mid-?drain' "$AUTORUN" \
 grep -qiE 'this helper covers the build lane' "$DRAIN" \
   || fail "scripts/idc_autorun_drain.py docstring must scope itself to the build lane / board-exit (not the whole autorun loop)"
 
-echo "PASS: autorun drains everything — full-pipe ORDER (recirculate→plan→build) locked in both the command and the playbook; the drain helper is the build-lane exit only; frontier width is the eligible antichain (Wave/pointer/blocked-aware); staffing gate is one pre-drain ask above a configurable threshold; never self-narrows; /loop-resumable"
+echo "PASS: autorun drains everything — full-pipe ORDER (recirculate→plan→build) locked in both the command and the playbook; re-loops to a fixpoint (not one-shot) reusing closeout+caps+board-lint, parks-not-churns + terminates; the drain helper is the build-lane exit only; frontier width is the eligible antichain (Wave/pointer/blocked-aware); staffing gate is one pre-drain ask above a configurable threshold; never self-narrows; /loop-resumable"

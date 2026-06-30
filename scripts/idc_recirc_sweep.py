@@ -22,6 +22,13 @@ This helper is the detective that re-reads the Buildable lane and corrects that 
 It also captures untickered `idc-discovery`/`idc-deferral` markers into Recirculation tickets (the
 C2 five-field body), idempotently (dedupe key = origin issue + marker `what`).
 
+A third, **surface-only** dimension catches a **dropped larger-loop handoff**: an admitted
+`Stage = Consideration` / `Status = Todo` item left with NO decomposition — no `Stage = Buildable`
+child issue and no in-flight `Stage = Planning` pointer anywhere on the board (Plan never ran on it).
+It is **never auto-mutated** (defense-in-depth — re-staging a consideration could erase an operator's
+admission); it is reported by `--report` only. Conservative: any live Buildable/Planning item silences
+every surface, so a healthy Plan/Build lane is never second-guessed.
+
 Two modes:
   * `--auto-correct` — the SessionEnd hook. Mutates the board through the active backend; fail-soft
     (never raises, always exits 0) so it can never block session exit.
@@ -71,10 +78,19 @@ LEAVE = "leave"                  # valid provenance — planned, untouched
 RESTAGE = "restage"              # rogue — re-stage to Recirculation + clear Wave
 SURFACE = "surface"             # ambiguous, regime inactive — report only, never mutate
 SKIP_NO_MATRIX = "skip-no-matrix"  # no matrix yaml — provenance regime not established
+SURFACE_DROPPED = "surface-dropped"  # admitted Consideration, no decomposition — surface-only, never mutated
 
 RECIRC_STAGE = "Recirculation"
 BUILDABLE_STAGE = "Buildable"
+CONSIDERATION_STAGE = "Consideration"
+PLANNING_STAGE = "Planning"
 TODO_STATUS = "Todo"
+DONE_STATUS = "Done"
+# A Buildable/Planning item is in-flight decomposition unless it is DONE. Only Done is excluded: Done
+# items accumulate on every mature board, so counting them would permanently silence the surface (the
+# bug this guards). Every NON-Done status — Todo, In Progress, AND Blocked (the caps' park-a-runaway
+# state: Stage=Buildable + Status=Blocked) — is decomposition that DID happen, so it silences the
+# surface; excluding Blocked would falsely re-surface a consideration whose child was merely parked.
 
 
 # ── pure marker / decision logic (unit-testable without any IO) ───────────────
@@ -134,6 +150,41 @@ def decide(issue, matrices, regime_active):
     if regime_active:
         return RESTAGE
     return SURFACE
+
+
+def dropped_handoff_numbers(items):
+    """The admitted `Stage = Consideration` / `Status = Todo` issue numbers that show a DROPPED
+    larger-loop handoff — admitted (Think PR merged) yet never decomposed: NO `Stage = Buildable`
+    child issue and NO in-flight `Stage = Planning` pointer anywhere on the board (Plan never ran on
+    it). PURE, IO-free (unit-testable like decide()).
+
+    `items` is a list of `{"number","stage","status"}` board-meta dicts (the stage/status both
+    backends already read). Conservative by construction: any NON-Done Buildable or Planning item is
+    decomposition activity and silences EVERY surface — we cannot attribute a specific buildable to a
+    specific consideration, so a live Plan/Build lane is never second-guessed (no false surface). The
+    match is STATUS-aware on exactly ONE boundary — Done: a Done Buildable is finished work, and Done
+    items accumulate on every board past day-1, so counting them would permanently mask a genuinely
+    dropped handoff. Every other status counts as decomposition that DID happen — including **Blocked**,
+    the caps' park-a-runaway state (Stage=Buildable + Status=Blocked), so a consideration whose child was
+    merely parked is not falsely re-surfaced. The matched converse — admitted considerations with NO
+    non-Done Plan/Build work — is the unmistakable dropped handoff this catches. An empty/missing `stage`
+    defaults to Buildable (the legacy 4-field default), so a bare todo issue counts as activity too."""
+    considerations = [it.get("number") for it in items
+                      if (it.get("stage") or "") == CONSIDERATION_STAGE
+                      and it.get("status") == TODO_STATUS]
+    if not considerations:
+        return []
+    decomposition_active = any(
+        (it.get("stage") or BUILDABLE_STAGE) in (BUILDABLE_STAGE, PLANNING_STAGE)
+        and it.get("status") != DONE_STATUS for it in items)
+    return [] if decomposition_active else considerations
+
+
+def dropped_handoff_findings(items):
+    """SURFACE_DROPPED Findings (surface-only — never mutated) for each dropped handoff in `items`."""
+    return [Finding(num, SURFACE_DROPPED,
+                    "admitted consideration, no Buildable child / no in-flight plan")
+            for num in dropped_handoff_numbers(items) if num is not None]
 
 
 def discovery_source(marker, host_number):
@@ -265,6 +316,11 @@ def scan_filesystem(tracker_path, matrices):
         })
     regime_active = any(provenance_is_valid(s["provenance"], matrices) for s in scanned)
     findings = [build_finding(s, matrices, regime_active) for s in scanned]
+    # Dropped larger-loop handoff (surface-only): an admitted Consideration with no decomposition.
+    # Matrix-independent (Plan, which writes the matrix, never ran), so it rides the full issue list.
+    meta = [{"number": it.get("number"), "stage": it.get("stage"), "status": it.get("status")}
+            for it in issues if isinstance(it, dict)]
+    findings += dropped_handoff_findings(meta)
     return findings, state
 
 
@@ -361,6 +417,11 @@ def scan_github(repo, matrices, project_number, log):
             attach_captures(f, s)
         f.item_id = s["item_id"]
         findings.append(f)
+    # Dropped larger-loop handoff (surface-only): an admitted Consideration with no decomposition,
+    # read straight off the board meta (the whole-board stage/status both lanes already carry).
+    meta = [{"number": (it.get("content") or {}).get("number"),
+             "stage": it.get("stage"), "status": it.get("status")} for it in items]
+    findings += dropped_handoff_findings(meta)
     return findings, ctx
 
 
@@ -526,8 +587,19 @@ def build_finding(scanned, matrices, regime_active):
 # ── report rendering ─────────────────────────────────────────────────────────
 def render_report(findings, backend, matrices):
     lines = []
+    # A dropped larger-loop handoff is matrix-INDEPENDENT (an admitted consideration that was never
+    # decomposed usually has no matrix yet — Plan, which writes the matrix, never ran), so it surfaces
+    # even when the provenance sweep is skipped for want of a matrix.
+    dropped = [f for f in findings if f.action == SURFACE_DROPPED]
+    for f in dropped:
+        lines.append(f"#{f.number}: dropped larger-loop handoff — admitted consideration not "
+                     f"decomposed (no Buildable child / no in-flight plan); surface only")
     if matrices is None:
-        lines.append("recirc-sweep: skipped — no pillar matrix (provenance regime not established)")
+        if dropped:
+            lines.append(f"recirc-sweep: {len(dropped)} dropped handoff(s) surfaced; provenance "
+                         "sweep skipped — no pillar matrix")
+        else:
+            lines.append("recirc-sweep: skipped — no pillar matrix (provenance regime not established)")
         return lines
     rogue = [f for f in findings if f.action == RESTAGE]
     ambiguous = [f for f in findings if f.action == SURFACE]
@@ -539,13 +611,18 @@ def render_report(findings, backend, matrices):
     for c in captures:
         lines.append(f"capture: untickered marker from {c['origin']} — file Recirculation ticket "
                      f"(\"{c['what'][:60]}\")")
-    scanned = len(findings)
-    if not rogue and not ambiguous and not captures:
+    # `scanned` is the buildable-lane count only — SURFACE_DROPPED findings are considerations, not
+    # scanned Buildables, so they never inflate it.
+    scanned = sum(1 for f in findings if f.action != SURFACE_DROPPED)
+    if not rogue and not ambiguous and not captures and not dropped:
         lines.append(f"recirc-sweep: clean ({scanned} buildable scanned)")
     else:
         note = "" if backend != "filesystem" else " — filesystem: ticket-capture is github-only"
+        # The dropped clause is conditional (omitted when 0) so the existing rogue/ambiguous/capture
+        # summary stays byte-identical for boards with no dropped handoff.
+        dropped_clause = f", {len(dropped)} dropped handoff(s)" if dropped else ""
         lines.append(f"recirc-sweep: {len(rogue)} rogue, {len(ambiguous)} ambiguous, "
-                     f"{len(captures)} untickered marker(s) of {scanned} buildable scanned{note}")
+                     f"{len(captures)} untickered marker(s){dropped_clause} of {scanned} buildable scanned{note}")
     return lines
 
 

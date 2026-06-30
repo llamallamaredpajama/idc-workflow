@@ -1,5 +1,5 @@
 ---
-description: IDC Autorun — one-shot full-pipe drainer (drain the Recirculation inbox, plan unplanned considerations, heal the board, build eligible Buildable waves)
+description: IDC Autorun — fixpoint full-pipe loop drainer (drain the Recirculation inbox, plan unplanned considerations, heal the board, build eligible Buildable waves; re-loop to a fixpoint, not one-shot)
 argument-hint: '[--consideration <path>...] [free-form notes]'
 ---
 
@@ -13,7 +13,9 @@ whole repo.
 Autorun is **full-pipeline autonomy that pauses only at human gates**: it **never forces** a gate — a gate-worthy item just **pauses behind its gate** (reported + skipped), exactly like an `[operator-action]` gate issue.
 It drains the pipe in one fixed top-to-bottom order — **recirculate** the Recirculation inbox, then **plan** approved considerations, then **drain** the Buildable waves — and exits when nothing actionable remains.
 
-Traverse the pipe top-to-bottom and exit when nothing actionable remains:
+Traverse the pipe top-to-bottom and **re-loop to a fixpoint** — because a build triplet can file a
+new Recirculation ticket mid-drain, re-run the whole pipe after the Buildable waves drain and exit
+only when a full pass leaves nothing actionable:
 
 1. **Recirculation intake** — the top of the pipe. **First run the rogue-sweep backstop:**
    `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_recirc_sweep.py" --repo "$PWD" --auto-correct` — the
@@ -50,9 +52,23 @@ Traverse the pipe top-to-bottom and exit when nothing actionable remains:
    Both apply the identical eligibility predicate (`Status = Todo` AND `(stage or "Buildable") ==
    "Buildable"` AND title not `[operator-action]` AND every native blocked-by `Done`); an
    empty/missing `Stage` reads as `Buildable` (the legacy 4-field default).
-5. **Exit** when no `Stage = Recirculation` tickets remain, no approved considerations remain
-   unplanned, and the drain predicate reports `drain: complete` (only Done + requirements-gated
-   Blocked + operator gate issues + un-admitted considerations + gated recirculation backflow left).
+5. **Re-loop to a fixpoint, then exit.** The pipe is **not one-shot** — a build triplet can surface a
+   recirc event and file a **new `Stage = Recirculation` ticket mid-drain** (Build's larger loop,
+   `idc:idc-build` Phase 1b), which is *upstream* of the build lane. So after the build lane drains,
+   **loop back to step 1** and re-run recirculate → plan → build; repeat until a **full pass** is a
+   fixpoint: no `Stage = Recirculation` ticket remained, no approved consideration was unplanned, and
+   the drain predicate reported `drain: complete` (only Done + requirements-gated Blocked + operator
+   gate issues + un-admitted considerations + gated recirculation backflow left). The re-loop
+   **reuses the SAME machinery as Build's larger loop** — the consultant's structured closeout
+   (`idc_recirc_closeout.py`), the per-issue recirc ceiling + cascade-depth cap (`idc_recirc_caps.py`),
+   and the new board-lint retired-recirc guard (`idc_board_lint.py`) — so it **parks, never churns**:
+   the caps park a chronically-recirculating issue or a deep recirc→build→recirc cascade (Blocked +
+   operator-action) instead of re-looping it, and the board-lint guard keeps a paused issue from going
+   spuriously eligible behind a **retired** recirc ticket. Termination is **bounded** (not
+   unconditionally guaranteed): the caps park a runaway **only while the per-issue `recirc:N` /
+   `cascade-depth:D` counts they read are maintained** — the recirc consultant is the designated
+   owner that bumps them (`idc:idc-build` Phase 1b) — backstopped by **natural drain** (closed issues
+   leave the frontier) and the **outer /loop** that re-checks live board state each pass.
    **Any non-zero drain exit is NOT `complete` — do not exit on it.** That covers both `drain: unknown`
    (the board read succeeded but a build candidate's blocked-by lookup could not be verified) and a
    hard board-read failure (exit 2, no `drain:` line). Treat the lane as possibly-unfinished and let the

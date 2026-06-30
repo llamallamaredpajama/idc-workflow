@@ -1,5 +1,5 @@
 ---
-description: IDC Autorun — one-shot full-pipe drainer (drain the Recirculation inbox, plan unplanned considerations, heal the board, build eligible Buildable waves)
+description: IDC Autorun — fixpoint full-pipe loop drainer (drain the Recirculation inbox, plan unplanned considerations, heal the board, build eligible Buildable waves; re-loop to a fixpoint, not one-shot)
 argument-hint: '[--consideration <path>...] [free-form notes]'
 ---
 

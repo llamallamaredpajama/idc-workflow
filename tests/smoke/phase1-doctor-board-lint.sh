@@ -146,6 +146,28 @@ run_lint '[{"number":700,"title":"paused origin","body":"'"$C"'","blocked_by":[7
 [ "$RC" -eq 0 ] || fail "retired-recirc back-compat (thin blocker): helper exit $RC (want 0)"
 assert_out '^board-lint: clean \(2 scanned\)$' "a thin blocker (no stage/status) must leave the retired-recirc rule silent (optional-fields back-compat)"
 
+# --- 6e. MIXED BLOCKER (Minor 1 sole/satisfied semantics): retired-recirc must NOT fire while a LIVE
+# blocker still stands. A Buildable whose blockers include BOTH a retired Done Recirculation ticket
+# AND a still-LIVE (Todo) blocker is NOT spuriously eligible — the live blocker genuinely holds it, so
+# flagging it would over-report (tell the operator to re-point an issue that is still real-blocked).
+# The rule fires only when the retired-recirc blocker is the LAST remaining (all blockers satisfied).
+# Red-when-broken: revert retired_recirc_evidence to fire on any retired-recirc blocker and this flips
+# RED (the over-report the review flagged). NB #701 + #704 both resolve via the index; #704 is a valid
+# contract (Buildable+Todo), so it is scanned (2 scanned) and clean.
+run_lint '[{"number":700,"title":"paused origin","body":"'"$C"'","blocked_by":[701,704]},{"number":701,"title":"retired recirc","stage":"Recirculation","status":"Done","blocked_by":[]},{"number":704,"title":"live blocker","body":"'"$C"'","stage":"Buildable","status":"Todo","blocked_by":[]}]'
+[ "$RC" -eq 0 ] || fail "mixed-blocker: helper exit $RC (want 0 — advisory)"
+refute_out '#700' "a Buildable with BOTH a retired-recirc AND a live (Todo) blocker must NOT be flagged (Minor 1 sole/satisfied-blocker)"
+assert_out '^board-lint: clean \(2 scanned\)$' "mixed-blocker: #700 + live #704 both scanned clean, nothing flagged"
+
+# --- 6e2. SOLE/SATISFIED control: ALL blockers Done (incl. a recirc ticket) -> STILL flagged. Proves
+# the sole-blocker fix does NOT under-report: when no live blocker remains AND a retired recirc ticket
+# is among the satisfied blockers, the issue IS spuriously eligible and must fire. (#705 is Buildable+
+# Done → index-only, so still 1 scanned.)
+run_lint '[{"number":700,"title":"paused origin","body":"'"$C"'","blocked_by":[701,705]},{"number":701,"title":"retired recirc","stage":"Recirculation","status":"Done","blocked_by":[]},{"number":705,"title":"done normal dep","stage":"Buildable","status":"Done","blocked_by":[]}]'
+[ "$RC" -eq 0 ] || fail "sole/satisfied control: helper exit $RC (want 0 — advisory)"
+assert_out '#700 .*: retired-recirc —' "ALL blockers Done incl. a recirc ticket -> STILL flagged (sole/satisfied; no live blocker remains)"
+refute_out 'clean \(' "the sole/satisfied case must FLAG (not read clean) — guards against under-reporting from the sole-blocker fix"
+
 # --- 6c. M1 ROOT FIX: a PRESENT stage with an ABSENT/null status is INDEX-ONLY (never schema-scanned) -
 # idc_gh_board.py OMITS absent fields, so an issue carrying no Status re-materializes (via doctor's
 # index pass) as {stage:"Buildable", status:null}. Pre-fix in_scan_lane treated a null status as

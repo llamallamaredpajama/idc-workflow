@@ -87,19 +87,30 @@ mode only changes what gets fed in:
    parent orchestrator (Build's larger loop, or Autorun), **also emit a machine-readable closeout
    object** that the parent validates **fail-closed** via
    `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_recirc_closeout.py" --closeout <closeout.json>` and
-   routes on — one of:
-   - **pass-through** `{ticket, outcome:"pass-through", provenance, consideration}` — a consideration
-     was admitted; the parent launches a (batched) Plan worker over it.
-   - **gated** `{ticket, outcome:"gated", provenance, think_pr}` — a gated Think PR was opened; the
-     parent fires a **cmux/push ping** and parks the ticket behind the gate (no Plan worker).
-   - **trivial** `{ticket, outcome:"trivial", provenance, grant:{issue, paths, change}}` — a
-     Build-permission grant for one specific subordinate-doc change (a separate tiny doc PR via
-     staging; no Plan, no re-sequence).
-   The `provenance` stamp is **mandatory** — the consultant never emits a closeout without it, and a
-   malformed or absent closeout fails the validator closed, so the parent **halts rather than
-   stranding** the ticket. In Autorun's in-session inbox-drain the closeout is the same record the
-   drain loop reads; the structured form makes the Build-triggered handoff routable without the
-   orchestrator re-deriving the gate.
+   routes on the single JSON dispatch line it prints — one of:
+   - **pass-through** `{ticket, outcome:"pass-through", provenance, recirc_count, cascade_depth, consideration}`
+     — a consideration was admitted; the parent launches a (batched) Plan worker over it.
+   - **gated** `{ticket, outcome:"gated", provenance, recirc_count, cascade_depth, think_pr}` — a gated
+     Think PR was opened; the parent fires a **cmux/push ping** and parks the ticket behind the gate
+     (no Plan worker).
+   - **trivial** `{ticket, outcome:"trivial", provenance, recirc_count, cascade_depth, grant:{issue, paths, change}}`
+     — a Build-permission grant for one specific subordinate-doc change (a separate tiny doc PR via
+     staging; no Plan, no re-sequence). Each `paths` entry is a **repo-relative subordinate
+     canonical-doc file** under `docs/` (`.md`/`.json`/`.schema.json`) — **never** a governing
+     instruction surface (`docs/workflow/`, `docs/plans/`, a root or governing `WORKFLOW.md`/
+     `AGENTS.md`/`CLAUDE.md`, …), never a directory, never an absolute/`..` path; the validator
+     rejects those fail-closed so the trivial path can never authorize a gate-disciplined or non-doc
+     surface.
+   `ticket` is a positive integer and `recirc_count`/`cascade_depth` are non-negative integers — the
+   consultant is the **designated owner** of the runaway-cap counts: it bumps `recirc_count` each time
+   it processes a recirc event for the issue and stamps the `cascade_depth` a recirc-originated
+   consideration carries, so the parent's `idc_recirc_caps.py` bound reads a single authoritative
+   handoff (never invents or skips the counts). The `provenance` stamp is **mandatory** — the
+   consultant never emits a closeout without it, and a malformed or absent closeout (or a missing
+   count) fails the validator closed, so the parent **halts rather than stranding** the ticket. In
+   Autorun's in-session inbox-drain the closeout is the same record the drain loop reads; the
+   structured form makes the Build-triggered handoff routable without the orchestrator re-deriving the
+   gate.
 
 No verdict taxonomy, no `docs/workflow/recirculator/` change-order files — those are deleted. The
 PR body carries the full record.

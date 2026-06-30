@@ -146,8 +146,8 @@ def prose_dependency_evidence(body, blocked_by):
 
 
 def retired_recirc_evidence(blocked_by, stage_status):
-    """Return a short evidence string if a native blocker resolves to a retired (Done) Recirculation
-    ticket, else ''.
+    """Return a short evidence string if a paused issue is spuriously eligible behind a retired
+    (Done) Recirculation ticket, else ''.
 
     The paused-issue re-link (idc-plan Phase 4) re-points a paused origin issue OFF its retired recirc
     ticket and onto the real new unblocker issues. If that step was skipped, the paused issue stays
@@ -155,19 +155,27 @@ def retired_recirc_evidence(blocked_by, stage_status):
     satisfied and the issue is **spuriously eligible** (the premature-eligibility / infinite-recirc
     trap this rule fail-closes on).
 
+    SOLE/SATISFIED semantics: the issue is spuriously eligible ONLY when **every** blocker is
+    satisfied (Done) AND at least one of them is a retired Recirculation ticket. A blocker that is
+    still LIVE (status ≠ Done), or UNKNOWN (absent from the index — a thin legacy object, or a
+    degraded lookup), counts as **remaining**: it genuinely holds the issue, so the issue is NOT
+    eligible and the rule stays silent (never over-reports a still-blocked issue — Minor 1).
+
     `blocked_by` is tri-state (`[n,…]` = linked, `[]` = no link, `None` = UNKNOWN — nothing to
     resolve in any case but the first). `stage_status` is `{number: (stage, status)}` over the full
-    input list. The rule fires ONLY when a blocker is present in that index AND resolves to a Done
-    Recirculation ticket; an absent blocker (thin legacy input — no stage/status) resolves to
-    `(None, None)` and leaves the rule silent (backward compatible)."""
+    input list."""
     if not blocked_by:
         return ""
+
+    def _entry(num):
+        return stage_status.get(num, (None, None))
+
+    # A live or unknown blocker still holds the issue -> NOT spuriously eligible.
+    if not all(_entry(b)[1] == DONE_STATUS for b in blocked_by):
+        return ""
+    # Every blocker is satisfied (Done). Flag iff at least one is a retired Recirculation ticket.
     for b in blocked_by:
-        stage, status = stage_status.get(b, (None, None))
-        if stage == RECIRC_STAGE and status == DONE_STATUS:
-            # NB: the rule fires on ANY blocker that resolves to a retired (Done) recirc ticket; it does
-            # not verify that ticket is the SOLE remaining blocker, so the evidence avoids claiming
-            # "eligible only because" (which would over-state when other live blockers also exist).
+        if _entry(b)[0] == RECIRC_STAGE:
             return (f"carries retired (Done) {RECIRC_STAGE} ticket #{b} as a (satisfied) blocker — "
                     "paused-issue re-link skipped (idc-plan Phase 4); re-point onto real unblockers")
     return ""

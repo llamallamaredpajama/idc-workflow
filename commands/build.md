@@ -35,5 +35,12 @@ Wave survives only as that gate's reporting scope. Phase close files a delta rev
 non-blocking issues.
 
 Builders never edit canonical docs — divergence files a recirculation (`/idc:recirculate`) and pauses
-only the affected issue. Halt only on the conditions in the playbook. The retrograde path is
+only the affected issue. The **one precise exception** is the consultant-authorized **`grant-build`
+trivial** path: when a fresh recirc-consultant's validated closeout returns
+`{"verb":"grant-build",…,"issue":N,"paths":[…subordinate canonical-doc…],"change":…}`, Build may make
+that **one specific** named change (and only it) to the named subordinate canonical-doc file(s) as a
+**separate tiny doc PR through staging** — never folded into the code PR, never broadened beyond the
+authorized `paths`/`change`, and the paths are scope-checked by `idc_recirc_closeout.py` (a subordinate
+doc under `docs/`, never a governing instruction surface). Every other canonical-doc divergence still
+takes the recirculation path. Halt only on the conditions in the playbook. The retrograde path is
 `/idc:recirculate`; the full-pipe drainer is `/idc:autorun`.

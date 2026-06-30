@@ -262,6 +262,11 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_recirc_sweep.py" --repo "$PWD" --repo
   `filesystem` board-lint branch above, the helper's marker/ticket capture is **github-only** (a
   filesystem board stores fields, not issue bodies); the report says so and re-stage-by-Stage still
   works.
+- a `dropped larger-loop handoff` line (or a `, N dropped handoff(s)` clause in the summary) →
+  **PASS with ⚠** (advisory; the sweep is **surface-only** here and mutates nothing): an admitted
+  `Stage = Consideration` was never decomposed into Buildable work (no child and no in-flight Plan).
+  List them; fix hint: "run `/idc:plan` over the admitted consideration to decompose it into
+  Buildables (or the next `/idc:autorun` planning lane will)."
 - helper exit 2 or error → **SKIP** ("could not determine"), **never FAIL**.
 
 **9c — `Stage` carries the `Recirculation` option (github only; read-only detection + offer).** The

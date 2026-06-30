@@ -74,9 +74,11 @@ reads PRD/TRD/codebase and touches docs; Build only **spawns** it and **routes**
 not re-derive the gate.** When the consultant finishes it returns a small machine-readable **closeout**
 naming the next action. Build validates it **fail-closed** with
 `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_recirc_closeout.py" --closeout <closeout.json>` and acts on
-the single `dispatch:` line it prints — reasoning about nothing:
+the single **structured JSON dispatch line** it prints — a JSON object routed on its `verb`, so a
+control character / delimiter inside a scalar is JSON-escaped and can never spoof a token (no
+whitespace line-protocol parsing). Build reasons about nothing:
 
-- `dispatch: launch-plan consideration=<ref>` — the consultant **admitted a `Stage = Consideration`**
+- `{"verb":"launch-plan",…,"consideration":<ref>}` — the consultant **admitted a `Stage = Consideration`**
   (not gate-worthy). Build queues it; when consultants quiesce it launches **one batched Plan worker**
   (`idc:idc-plan`, via the adapter) over **all** pending admitted considerations — a single coherent
   global re-sequence, not one Plan run per consideration. Plan is unchanged — it only ever scans
@@ -84,17 +86,21 @@ the single `dispatch:` line it prints — reasoning about nothing:
   `In Progress` immutable) re-points the original paused issue onto its real new unblockers, so the
   still-running kitchen picks the newly-buildable issues up on its normal freed-worker frontier
   re-query (Phase 1).
-- `dispatch: notify-gated think_pr=<ref>` — the consultant opened a **gated Think PR** (a PRD/TRD
+- `{"verb":"notify-gated",…,"think_pr":<ref>}` — the consultant opened a **gated Think PR** (a PRD/TRD
   change). Build fires the **cmux/push ping** the consultant requested and **parks** that work — **no**
   Plan worker; the ticket rides `Blocked` behind the gate until the operator approves. Build keeps
   building everything else; gated items are the only thing that needs the human.
-- `dispatch: grant-build issue=<n> paths=<…>` — the event was **trivial** (a no-gate, no-replan
-  drift-heal of a subordinate artifact whose authority is already merged). The consultant grants Build
-  permission for that **one specific** canonical-doc change; the triplet makes it as a **separate tiny
-  doc PR through staging** (never folded into the code PR — clean provenance, same merge-train path),
-  then resumes. A recirc event that turns out *trivial* is a **smell** — usually the triplet's context
-  was filling and it escalated something a fresh consultant sees through instantly; note it, don't
-  suppress it.
+- `{"verb":"grant-build",…,"issue":<n>,"paths":[<subordinate canonical-doc>],"change":<str>}` — the
+  event was **trivial** (a no-gate, no-replan drift-heal of a subordinate artifact whose authority is
+  already merged). The consultant grants Build permission for that **one specific** canonical-doc
+  change — naming the exact `paths` **and** `change`; the triplet makes **only** that named change to
+  those named paths as a **separate tiny doc PR through staging** (never folded into the code PR —
+  clean provenance, same merge-train path), then resumes. At write time the granted paths are
+  **realpath-resolved under the repo root** and the write confined to them (a path whose realpath
+  escapes the repo, is a symlink to a non-doc, or falls outside the grant is rejected — the validator's
+  scope check is the contract; Build's write is the enforcement). A recirc event that turns out
+  *trivial* is a **smell** — usually the triplet's context was filling and it escalated something a
+  fresh consultant sees through instantly; note it, don't suppress it.
 
 If the helper exits non-zero (a malformed or **missing** closeout), **halt and surface it** — a
 dropped handoff must never silently strand the ticket, the exact failure this loop exists to prevent.
@@ -102,12 +108,15 @@ The loop is **bounded** by the deterministic guard
 `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_recirc_caps.py" --recirc-count <n> --cascade-depth <d>`,
 consulted **before** spawning a consultant on an issue: a **per-issue recirc ceiling** (default 2) parks
 a chronically-recirculating issue, and a **cascade-depth cap** (default 3) parks-and-reports a deep
-recirc→build→recirc cascade. The caps only **decide** given counts (that decision is deterministic);
-the **recirc consultant is the designated owner** that supplies them — it bumps the issue's `recirc:N`
-each time it processes a
-recirc event for that issue, and stamps the `cascade-depth:D` a recirc-originated consideration carries
-(inherited by its decomposed issues) — so the bound holds **as long as that count is maintained** (a
-future hardening can derive `recirc:N` from board state — counting the issue's `Stage = Recirculation`
+recirc→build→recirc cascade. The caps only **decide** given counts (that decision is deterministic),
+and the **closeout is the authoritative source of those counts** — every closeout carries validated
+non-negative-integer `recirc_count` and `cascade_depth`, because the **recirc consultant is the
+designated owner** that supplies them: it bumps the issue's `recirc_count` each time it processes a
+recirc event for that issue, and stamps the `cascade-depth` a recirc-originated consideration carries
+(inherited by its decomposed issues). For the **first** recirc on an issue (no prior closeout) the
+counts read `0`/`0`; thereafter Build uses the most recent closeout's counts and stamps them on the
+issue, so it never invents or skips them. So the bound holds **as long as that count is maintained** (a
+future hardening can derive `recirc_count` from board state — counting the issue's `Stage = Recirculation`
 tickets, incl. retired — to drop the dependence on the bump). On a `verdict: park` — or any
 non-zero/uncomputable result, **fail-closed** — Build does **not** re-spawn the loop on that issue: it
 sets it `Blocked` + an operator-action marker + a cmux/push ping and moves on, so the loop always

@@ -17,6 +17,8 @@ Before doing IDC Build implementation work, load/use:
 
 Follow those skills when they are stricter than this prompt.
 
+**Pi runtime note:** `idc:*` skill names (for example `idc:idc-tracker-adapter`) are local procedures, not coms-net peers or targets. Never call `coms_net_send` with any `idc:` target; use coms-net only for IDC role peers (`build-review`, `build-finish`, `recirculator`, etc.). When a tracker operation is required, execute the tracker-adapter procedure for the repo's configured backend directly.
+
 ## Authority boundary
 
 The **GitHub Projects v2 board is the source of truth**; all board reads/writes go through `idc:idc-tracker-adapter` (never hand-rolled `gh`). The board has exactly five fields: `Status`, `Stage`, `Wave`, `Phase`, `Domain`.

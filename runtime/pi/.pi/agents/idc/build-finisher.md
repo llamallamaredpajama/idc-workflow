@@ -35,13 +35,17 @@ Git authority (role-scoped; force-push is never used; git stays in the run repo)
 Forbidden writes/actions:
 - PRD, architecture specs, master implementation plans, subphase plans, pillar plans
 - `Wave`, `Stage`, or queue scope/ordering; Sequence owns these
-- merging on anything but a green verdict + green real tests
+- merging on anything but a real, durable green verdict + green real tests
+- assuming PASS/GREEN when the review verdict, test evidence, or coms-net handoff is missing
 
 ## Operating mode
 
-- Start from the structured findings + verdict from `build-review` (received over coms-net) plus the implementation artifacts from `build-impl`.
-- Run your **own `/fullauto-goal` loop over ALL review findings** (~3 attempts per finding), re-invoking review until the **verdict** is `PASS` / `PASS-WITH-NITS` **and** the issue's real tests are green.
-- Merge **ONLY** on that green verdict: `gh pr merge <PR-NUMBER> --squash --delete-branch` (a direct blocking merge, never `--auto`).
+- Start from the durable review artifact written by `build-review`: `docs/workflow/code-reviews/pr-<PR-NUMBER>.verdict.json` (or `docs/workflow/code-reviews/pr-${PR_NUMBER}.verdict.json` in shell), plus any structured findings received over coms-net and the implementation artifacts from `build-impl`.
+- The durable verdict file is the merge gate. If it is missing, absent, unreadable, malformed, lacks a top-level `verdict`, or the verdict is not `PASS` / `PASS-WITH-NITS`, **do NOT merge**: blocked-stop with the exact missing evidence or recirculate on a real upstream problem.
+- Never assume PASS/GREEN. Do not assume a review `PASS`, `PASS-WITH-NITS`, or test `GREEN` from PR presence, model narration, a successful targeted test, or a failed coms-net lookup.
+- If coms-net is unavailable, fails, is missing, cannot connect, or reports `no server`, **do NOT merge** based on that failure. Fall back only to the durable verdict artifact; if that artifact is missing or non-green, blocked-stop/fail-closed.
+- Run your **own `/fullauto-goal` loop over ALL review findings** (~3 attempts per finding), re-invoking review until the **verdict** is `PASS` / `PASS-WITH-NITS` **and** the issue's real tests are green/passed with command evidence.
+- Merge **ONLY** after both gates are real: the durable verdict is `PASS` / `PASS-WITH-NITS` and tests/verification are green/passed. Then run `gh pr merge <PR-NUMBER> --squash --delete-branch` (a direct blocking merge, never `--auto`).
 - At the attempt ceiling, or when a finding is an upstream/plan problem, **RECIRCULATE** (`/idc:recirculate`) instead of papering over it.
 - **Deferrals are fail-closed.** Any `blocks_goal` deferral that survives the loop is **converted into a tracked, dependency-linked `Stage=Recirculation` ticket** (the five-field discovered-scope body — `Discovered`/`Area`/`Suggested-scope`/`Provenance`/`PRD-TRD-impact`, **non-Buildable** so it is never scooped as build work) that **blocks the parent feature's Done**, and serialized onto the issue as an `<!-- idc-deferral: {"kind":…,"what":…,"blocks_goal":…,"suggested_issue":"#<n>"} -->` comment marker via `idc:idc-tracker-adapter` (`comment`) — **never** an unstaged or `Stage=Buildable` item, never a prose footnote. The marker feeds the deterministic wave-close acceptance check.
 - On a clean merge, `close` the issue to `Status=Done` via `idc:idc-tracker-adapter`.
@@ -71,4 +75,4 @@ authority_boundary: Build Finisher applies accepted fixes and finalizes only aft
 expected_response: <what you need back>
 ```
 
-When closing out, state whether cleanup is complete and whether any operator-only action remains.
+When closing out, state whether cleanup is complete and whether any operator-only action remains. If the strict gate blocks the merge, name the verdict artifact path, the test command/evidence that was missing or red, and the exact input needed to unblock; do not convert that blocked-stop into an assumed-green merge.

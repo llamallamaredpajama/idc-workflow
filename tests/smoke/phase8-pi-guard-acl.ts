@@ -75,9 +75,9 @@ const cases: Case[] = [
 	{ tag: "MERGE", role: "build-finish", kind: "bash", input: "gh pr merge 7 --squash --delete-branch", allow: true, note: "build-finish merges the build PR (green/PASS gate is behavioral, not guard-enforced)" },
 	{ tag: "MERGE", role: "build-finish", kind: "bash", input: "gh pr merge 7 --auto", allow: false, note: "--auto blocked for every merge role" },
 
-	// ── [READONLY] build-review writes no file (reverted from the MG-B verdict-dir grant) ───
-	{ tag: "READONLY", role: "build-review", kind: "write", input: inRepo("docs/workflow/code-reviews/pr-7.verdict.json"), allow: false, note: "reviewer is read-only — it authors no verdict file" },
-	{ tag: "READONLY", role: "build-review", kind: "write", input: inRepo("src/x.ts"), allow: false, note: "reviewer cannot write source" },
+	// ── [REVIEW-ARTIFACT] build-review may write ONLY durable review artifacts ─────────────
+	{ tag: "REVIEW-ARTIFACT", role: "build-review", kind: "write", input: inRepo("docs/workflow/code-reviews/pr-7.verdict.json"), allow: true, note: "reviewer may write its durable verdict artifact" },
+	{ tag: "REVIEW-ARTIFACT", role: "build-review", kind: "write", input: inRepo("src/x.ts"), allow: false, note: "reviewer cannot write source" },
 
 	// ── [DANGER] non-tracker gh verbs denied for all roles ──────────────────────────────
 	{ tag: "DANGER", role: "think", kind: "bash", input: "gh release create v1", allow: false, note: "release blocked" },
@@ -200,7 +200,7 @@ for (const c of cases) {
 fs.rmSync(CWD, { recursive: true, force: true });
 
 if (failures === 0) {
-	console.log(`PASS: per-role guard ACL holds (${cases.length} cases: file-write fail-closed preserved; B1/B2/BR/M3 bypasses closed; scoped git grant + force-push/merge role-scoping enforced; merge-on-green/PASS is behavioral)`);
+	console.log(`PASS: per-role guard ACL holds (${cases.length} cases: file-write fail-closed preserved; B1/B2/BR/M3 bypasses closed; build-review durable artifact lane scoped; scoped git grant + force-push/merge role-scoping enforced; merge-on-green/PASS is behavioral)`);
 	process.exit(0);
 }
 console.log(`FAIL: ${failures}/${cases.length} guard ACL assertions failed`);

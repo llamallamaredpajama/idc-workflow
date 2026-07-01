@@ -78,6 +78,12 @@ handoff substrate between stages. The pipeline:
 4. `run plan` **decomposes** the admitted consideration into a buildable goal-contract issue (native `gh issue`/`gh project`); **HARNESS-NORMALIZE** dedupes to one.
 5. `run build-impl` **authors** the `scratch/` file + its test; **HARNESS-BRIDGE** opens the build PR; the operator merges it → the artifact lands on `main` → drain complete.
 
+> **build-impl's language choice is stochastic** (~2:1 Python:shell vs the goal contract's POSIX
+> shell). The `build-implementer.md` "Implement the goal contract's EXACT artifact" directive
+> (shipped 3.2.0) improved it — the shell script landed in both green drains — but didn't determinize
+> it; it still paired the shell script with a Python test in the dogfood (review passed on real
+> verification).
+
 ### The harness scripts (operator-local, in `_idc-observability/bin/`)
 
 - **`seed-pi-board.sh`** — repo-locked reset to clean Think-start: wipe board/PRs/branches + `git
@@ -91,6 +97,19 @@ handoff substrate between stages. The pipeline:
 - **`verify-pi-drain.sh`** — read-only github-native assertions: Think PR **merged** (admission), build
   PR merged + `scratch/` file on `main`, build + planning lanes drained, gate closed, no orphan branches.
 
+> **3.2.0 one-pin config — `PI_IDC_MODEL` umbrella + `PI_E2E_UMBRELLA=1`.** The launcher now takes a
+> single `PI_IDC_MODEL` umbrella var (one provider-qualified string fills every role; precedence is
+> per-role `PI_IDC_<ROLE>_MODEL` > umbrella > stock default), and `run-pi-e2e.sh` exposes a
+> `PI_E2E_UMBRELLA=1` toggle that `unset`s the 7 per-role vars and sets only `PI_IDC_MODEL` — the
+> dogfood proving a one-pin config boots the whole drain. Run it:
+> `PI_E2E_UMBRELLA=1 PI_E2E_MODEL=google/gemini-2.5-pro bash …/run-pi-e2e.sh pi-umbrella full`.
+>
+> **Per-role-override gotcha.** The umbrella only fills a role if **no** per-role
+> `PI_IDC_<ROLE>_MODEL` is set. Operator shells often carry `PI_IDC_THINK_MODEL` (etc.) → it
+> overrides the umbrella → that role boots on a provider with no key → fails. That's why
+> `PI_E2E_UMBRELLA=1` unsets them (and why `phase8-pi-model-umbrella.sh` uses
+> `env -u PI_IDC_THINK_MODEL`). Real users hit this only if they already pin a per-role model.
+
 ### Why the env pins are mandatory (each verified 2026-06-19)
 
 The launcher runs every resident under `env -i` + a `SAFE_ENV` allow-list (a role-cap isolation
@@ -101,11 +120,18 @@ reaches the resident `pi`. The pins handle this:
 |-----|-----|
 | `PI_CODING_AGENT_DIR=<obs>/…/_pi-agent` | **The auth fix.** This var *is* allow-listed, so it survives `env -i`. `run-pi-e2e.sh` seeds `<dir>/auth.json` = `{"google":{"type":"api_key","key":"<GEMINI_API_KEY>"}}` (value-blind, mode 0600) and the resident reads its credential from there. The user's **global `~/.pi/agent/auth.json` is never touched**; the dir is deleted at teardown. |
 | `PI_IDC_<ROLE>_MODEL` (all 7 roles) | **Provider-QUALIFY the string** (`google/gemini-2.5-flash`): a *bare* `gemini-2.5-pro` mis-resolves to the `github-copilot` provider and fails-closed. The launcher hardcodes claude/openai/deepseek defaults — not google — so pin every role (`THINK`/`PLAN`/`SEQUENCE`/`RECIRCULATOR`/`BUILD_IMPL`/`BUILD_REVIEW`/`BUILD_FINISH`). |
-| `PI_E2E_PLAN_MODEL=google/gemini-2.5-pro` | **Plan is the unreliable run-mode stage** (below); pin it to a stronger model while think/build stay on cheap flash. |
+| `PI_E2E_PLAN_MODEL=google/gemini-2.5-pro` | **Plan is the unreliable run-mode stage** (below); pin it to a stronger model while think stays on cheap flash. |
 | `PI_IDC_BUILD_REVIEW_PROVIDER=google` | `build-review` is the only role that gets a `--provider` flag and it defaults to `openai`; without this it would route a gemini model to the wrong provider. |
 | `PI_IDC_GUARD_MODE` (default `block`) | Keep the **production** guard (faithful); the harness bridges the git finalization it reserves for the operator. (`PI_E2E_GUARD_MODE` overrides.) |
 | `PI_IDC_HARNESS_REPO=<idc>/runtime/pi` | Test the **vendored** runtime (extensions/prompts/server), not the installed `~/dev/proj/pi-harnesses` symlink. |
 | `PI_IDC_SESSION_DIR=<obs>/…/_pi-sessions/<label>` | Capture per-resident transcripts into the snapshot tree. |
+
+> **flash is unreliable for build-impl — pin the build roles to pro.** `gemini-2.5-flash` repeatedly
+> returns `stopReason=error` / `output=0` ("An unknown error occurred") at build-impl's claim step
+> (~20k ctx); plan/sequence/think ran fine on flash, but build did not. Set
+> `PI_E2E_MODEL=google/gemini-2.5-pro` — `run-pi-e2e.sh` uses it as `DRAIN_MODEL`, which fills every
+> role, build included (`run-pi-e2e.sh:47`). This is exactly the friction the `PI_IDC_MODEL` umbrella
+> (3.2.0) smooths.
 
 > The adapter skill (`skills/idc-adapter-pi/SKILL.md`) is now truthful about this: `idc-pi`'s
 > `role_model()` (`runtime/pi/scripts/idc-pi:899-907`) **hardcodes a per-role stock default,
@@ -139,15 +165,31 @@ the `fleet` topology wires a git-capable finalizer is a separate question (the `
 
 ### The captured green drain
 
-`run-pi-e2e.sh pi-full2 full` (plan=`google/gemini-2.5-pro`, think/build=flash) produced one captured
-green drain: un-admitted idea → pi-drafted, harness-opened Think PR → merged (admission) → pro-Plan
-created the buildable issue → flash build-impl authored `scratch/print_repo_name.sh` + its test →
-harness-opened build PR → merged → `verify-pi-drain.sh` **PASS (7/7)**; the artifact runs and prints
-`ke-idc-test-repo-pi` (exit 0). Audited the full capture + per-resident transcripts + live git/board
-(no hidden failures, no orphans). The audit also caught + fixed three real harness bugs (untracked-draft
-cleanup in the seed; a `verify` orphan-count `grep -vc … || echo 0` that emitted `0\n0` and false-FAILed
-a clean drain; a field-id regex that truncated hyphenated node ids and silently dropped board
-field-writes) — a reminder to keep harness assertions red-when-broken.
+3.2.0 produced **two captured green drains, both on `google/gemini-2.5-pro`**:
+
+- **`pi-base6`** — `run-pi-e2e.sh pi-base6 build` (the **build** rung, pro): build-impl + build-review
+  against an already-admitted consideration → harness-opened build PR → merged →
+  `verify-pi-drain.sh` **PASS (7/7)**; the `scratch/` artifact runs and prints `ke-idc-test-repo-pi`
+  (exit 0).
+- **`pi-umbrella2`** — `PI_E2E_UMBRELLA=1 PI_E2E_MODEL=google/gemini-2.5-pro run-pi-e2e.sh
+  pi-umbrella2 full` (the **full** drain, one-pin umbrella config): un-admitted idea → pi-drafted,
+  harness-opened Think PR → merged (admission) → pro-Plan created the buildable issue → pro build-impl
+  authored `scratch/print_repo_name.sh` + its test → harness-opened build PR → merged →
+  `verify-pi-drain.sh` **PASS (7/7)**.
+
+Both audited against the full capture + per-resident transcripts + live git/board (no hidden failures,
+no orphans). The audit also caught + fixed three real harness bugs (untracked-draft cleanup in the
+seed; a `verify` orphan-count `grep -vc … || echo 0` that emitted `0\n0` and false-FAILed a clean
+drain; a field-id regex that truncated hyphenated node ids and silently dropped board field-writes) —
+a reminder to keep harness assertions red-when-broken.
+
+> **Audit verdict logs — build-review can confabulate.** `build-review` may narrate `git mv` / `edit`
+> / test-runs in its verdict `verification_log` that it never ran (it's read-only on source/tests and
+> can't). On a good artifact the PASS was still correct, but a confabulated log can yield a **false
+> PASS on a bad artifact** → a bad merge through the MG-B gate. The `build-reviewer.md` "Verification
+> evidence must be REAL — never confabulate" directive (shipped 3.2.0) forbids it (validated: the
+> dogfood's review actually ran `uv run pytest`); still, **audit verdict logs against the transcript**
+> — don't trust them blind.
 
 ### Fleet teardown + the headless-fleet limitation (mode B, the stretch)
 

@@ -81,4 +81,12 @@ for marker in 'gh project field-create' 'gh project link "$TRACKER_PROJECT_NUMBE
     || fail "init.md: '$marker' (line $mut_ln) must run AFTER the Status **STOP** gate (line $stop_ln)"
 done
 
-echo "PASS: init scaffolds the v2 tree (filesystem backend) + doctor checks satisfied + board-mutation ordering guarded"
+# --- static guard: /idc:init --pi is wired (parity with --codex) ---
+# Track 3 (pi-first-class): --pi must appear in the argument-hint AND a Phase 6b Pi-adapter
+# section must invoke install-pi.sh, mirroring the --codex wiring (Phase 6 -> install-codex.sh).
+# Hermetic (no live install) — a shape assertion on commands/init.md.
+grep -qF '[--pi]' "$INIT_MD"        || fail "init.md: --pi missing from the argument-hint"
+grep -qF 'Phase 6b' "$INIT_MD"      || fail "init.md: Phase 6b Pi-adapter section missing"
+grep -qF 'install-pi.sh' "$INIT_MD" || fail "init.md: Phase 6b must invoke scripts/install-pi.sh"
+
+echo "PASS: init scaffolds the v2 tree (filesystem backend) + doctor checks satisfied + board-mutation ordering guarded + --pi wired"

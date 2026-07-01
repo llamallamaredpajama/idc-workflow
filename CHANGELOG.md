@@ -1,6 +1,42 @@
 # Changelog
 
-All notable changes to the IDC Workflow plugin are documented in this file.
+All notable changes for the IDC Workflow plugin are documented in this file.
+
+## 3.2.0 — 2026-06-30
+
+Pi becomes a first-class, smooth runtime: a real-LLM end-to-end drain now goes green (Think→Plan→
+Build, build-finish self-merging on PASS), one `PI_IDC_MODEL` var boots every role (no 7-per-role-pin
+ceremony), and `/idc:init --pi` wires the adapter. The release also fixes a real drain blocker —
+build-review could not persist its verdict — and tightens two role-contract fidelity gaps the
+real-LLM e2e surfaced.
+
+- **fix(pi): build-review can now persist its verdict (the drain blocker).** An earlier change added
+  the `write` tool to `build-reviewer.md` + the `BUILD_REVIEW_ALLOWED` guard lane but missed the
+  launcher's `role_tools()`, which still stripped it — so every verdict write died at "Tool write
+  not found" and build-finish's MG-B gate blocked every drain. `role_tools()` now grants build-review
+  `write` (the guard still restricts writes to `docs/workflow/code-reviews/**` — tool available +
+  path-guarded, defense-in-depth).
+- **feat(pi): `PI_IDC_MODEL` umbrella.** One provider-qualified var (e.g. `google/gemini-2.5-pro`)
+  fills every role. Precedence: per-role `PI_IDC_<ROLE>_MODEL` > umbrella > stock default. The stock
+  defaults span three providers (Anthropic/DeepSeek/OpenAI) no single install has keys for, so a
+  fresh `idc-pi run` previously failed closed on every role unless an operator set 7 per-role vars.
+- **feat(pi): `/idc:init --pi`.** Mirrors `--codex` (Phase 6b → `install-pi.sh`); the adapter skill
+  ships with the plugin.
+- **fix(pi): role-contract fidelity.** `build-implementer.md` now directs implementing the goal
+  contract's EXACT artifact (no language/framework substitution — build-impl was freelancing Python
+  vs the contract's POSIX shell, which review FAIL-BLOCKs); `build-reviewer.md` now forbids
+  confabulated verification (record only commands actually run — a fabricated log could yield a
+  false PASS that lands a broken build through the merge gate).
+- **Docs:** the umbrella + a "Pi runtime (optional)" section in `docs/installing.md`; honest status
+  in `README.md`/`docs/architecture.md` (Pi runs end-to-end; still "Experimental" — parallel build
+  pool + autorun drain pending, #66 L1/L4).
+- **New red-when-broken smokes:** `phase8-pi-review-write-tool.sh` (role_tools grants build-review
+  write), `phase8-pi-model-umbrella.sh` (umbrella + per-role precedence), plus `--pi` and fidelity
+  assertions in `phase1-init-doctor.sh` / `phase8-pi-prompt-alignment.sh`.
+
+**Verified:** `tests/smoke/run-all.sh` ALL GREEN; `scripts/lint-references.sh` clean; real-LLM Pi e2e
+green end-to-end — the build-review write fix validated in fresh drains, and the umbrella dogfood
+drained 7/7 with every role booted on one `PI_IDC_MODEL` var.
 
 ## 3.1.4 — 2026-06-28
 

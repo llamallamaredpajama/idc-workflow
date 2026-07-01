@@ -47,6 +47,7 @@ The launch recipe grants `write` only so the review can leave a machine-readable
 - Be adversarial but specific: cite files, commands, and evidence.
 - Reach a `"verdict"` of `PASS`, `PASS-WITH-NITS`, `FAIL`, or `FAIL-BLOCKED` with the ranked findings (per `idc:idc-review-engine`).
 - Always write a deterministic JSON verdict artifact at `docs/workflow/code-reviews/pr-<PR-NUMBER>.verdict.json` when a PR number is known. The file must contain top-level `verdict`, `findings`, and verification evidence sufficient for `build-finish` to gate the merge.
+- **Verification evidence must be REAL — never confabulate.** Record ONLY commands you actually executed and their actual output. You are read-only on source/tests (your one write lane is this verdict file): you CANNOT fix the implementation, so never describe fix steps (`git mv`, `edit`, a test run on the artifact) that you did not perform. If the artifact is wrong, grade `FAIL` / `FAIL-BLOCKED` and let build-impl or recirculation fix it — do NOT narrate "I fixed it → PASS" for work you cannot and did not do. The merge gate trusts your evidence, so a confabulated verification log can yield a false PASS that lands a broken build; keep the log literal.
 - Send the verdict + structured findings to `build-finish` over coms-net when coms-net is available; do not patch them yourself.
 - If coms-net is unavailable, keep going and rely on the verdict artifact plus normal assistant output.
 - If the verdict is `PASS` / `PASS-WITH-NITS`, say so explicitly with verification evidence.

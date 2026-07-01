@@ -895,23 +895,30 @@ role_color() {
 
 role_tools() {
 	if [[ "$1" == "build-review" ]]; then
-		# build-review is read-only: it reviews the code, reports findings via coms-net, and
-		# writes no file (the guard also enforces this via readOnly). No write/edit tools.
-		printf 'read,bash,grep,find,ls,%s\n' "$COMS_TOOLS"
+		# build-review is source/tracker-read-only but writes ONE artifact: the merge-gating
+		# verdict JSON to docs/workflow/code-reviews/**. The harness guard (BUILD_REVIEW_ALLOWED)
+		# enforces that lane — every other write path is denied — so granting `write` is safe
+		# (tool available + path-guarded = defense-in-depth). `write` only, not `edit`: the
+		# verdict is created fresh per PR, never edited in place. Matches build-reviewer.md.
+		printf 'read,write,bash,grep,find,ls,%s\n' "$COMS_TOOLS"
 	else
 		printf 'read,write,edit,bash,grep,find,ls,%s\n' "$COMS_TOOLS"
 	fi
 }
 
 role_model() {
+	# Precedence: per-role PI_IDC_<ROLE>_MODEL > umbrella PI_IDC_MODEL > stock default. The
+	# umbrella lets a single-provider install (e.g. PI_IDC_MODEL=google/gemini-2.5-pro) boot
+	# every role without setting 7 per-role vars — the stock defaults otherwise span three
+	# providers (Anthropic/DeepSeek/OpenAI) no single install has keys for.
 	case "$1" in
-		think) echo "${PI_IDC_THINK_MODEL:-claude-opus-4-7}" ;;
-		plan) echo "${PI_IDC_PLAN_MODEL:-claude-opus-4-7}" ;;
-		sequence) echo "${PI_IDC_SEQUENCE_MODEL:-deepseek/deepseek-v4-pro}" ;;
-		recirculator) echo "${PI_IDC_RECIRCULATOR_MODEL:-deepseek/deepseek-v4-pro}" ;;
-		build-impl) echo "${PI_IDC_BUILD_IMPL_MODEL:-claude-opus-4-7}" ;;
-		build-review) echo "${PI_IDC_BUILD_REVIEW_MODEL:-gpt-5.5}" ;;
-		build-finish) echo "${PI_IDC_BUILD_FINISH_MODEL:-claude-opus-4-7}" ;;
+		think) echo "${PI_IDC_THINK_MODEL:-${PI_IDC_MODEL:-claude-opus-4-7}}" ;;
+		plan) echo "${PI_IDC_PLAN_MODEL:-${PI_IDC_MODEL:-claude-opus-4-7}}" ;;
+		sequence) echo "${PI_IDC_SEQUENCE_MODEL:-${PI_IDC_MODEL:-deepseek/deepseek-v4-pro}}" ;;
+		recirculator) echo "${PI_IDC_RECIRCULATOR_MODEL:-${PI_IDC_MODEL:-deepseek/deepseek-v4-pro}}" ;;
+		build-impl) echo "${PI_IDC_BUILD_IMPL_MODEL:-${PI_IDC_MODEL:-claude-opus-4-7}}" ;;
+		build-review) echo "${PI_IDC_BUILD_REVIEW_MODEL:-${PI_IDC_MODEL:-gpt-5.5}}" ;;
+		build-finish) echo "${PI_IDC_BUILD_FINISH_MODEL:-${PI_IDC_MODEL:-claude-opus-4-7}}" ;;
 	esac
 }
 

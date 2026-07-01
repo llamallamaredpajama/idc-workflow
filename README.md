@@ -292,7 +292,7 @@ every supported runtime.
 |---------|--------|----------------------|--------|
 | **Claude Code** | Default · first-class | Durable workers are Claude Teams teammates in pre-created git worktrees; fan-out is the `Agent` / `Workflow` tools; the goal loop is `/goal`. | Built in. |
 | **Codex** | Supported | Durable workers are `codex app-server` threads (JSON-RPC) or `codex exec resume`; fan-out is native `spawn_agent` / `wait_agent` (≤6 concurrent) or `codex exec --ephemeral`; the goal loop is the same contract as instruction text. | `/idc:init --codex` — needs the **Codex CLI**. |
-| **Pi** | **Experimental** | Durable workers are standing **residents** on a local **coms-net** hub (a Bun server) driven by the vendored `idc-pi` launcher over the Pi coding agent — flat peers, no master orchestrator, the board is the source of truth. | `scripts/install-pi.sh` (`--check` probes, `--revert` undoes) — needs **Bun** + the **Pi coding agent**. |
+| **Pi** | **Experimental** | Durable workers are standing **residents** on a local **coms-net** hub (a Bun server) driven by the vendored `idc-pi` launcher over the Pi coding agent — flat peers, no master orchestrator, the board is the source of truth. | `/idc:init --pi` (or `scripts/install-pi.sh`; `--check` probes, `--revert` undoes) — needs **Bun** + the **Pi coding agent**; set `PI_IDC_MODEL` to boot every role on one provider. |
 
 **Parallel, multi-agent throughput — where available.** Each runtime can work a whole wave at once, one
 agent per parallel-safe issue, for real concurrent build throughput:

@@ -1,13 +1,13 @@
 ---
 description: IDC Init — scaffold a repo for the v2 IDC pipeline (WORKFLOW.md, config with codebase-derived domains, 5-field board, install receipts)
-argument-hint: "[PROJECT_NAME] [--codex]"
+argument-hint: "[PROJECT_NAME] [--codex] [--pi]"
 ---
 
 You are running `/idc:init`. Install the IDC v2 workflow into the **current repository**:
 scaffold the governance contract from the plugin templates, derive the repo's standing
 domains, provision (or link) a GitHub Projects v2 board matching the **five-field** v2
 contract, enable the plugin for the project, write an install receipt, and — with
-`--codex` — wire the Codex adapter.
+`--codex` — wire the Codex adapter; with `--pi` — wire the Pi runtime adapter.
 
 **Idempotent.** Anything already present is left untouched and reported `skipped-existing`;
 never overwrite an operator's `WORKFLOW.md`, `WORKFLOW-config.yaml`, `docs/workflow/`, or
@@ -227,6 +227,13 @@ manages only the `enabledPlugins["idc@idc-workflow"]` key.
 If `$ARGUMENTS` contains `--codex`, wire the single v2 Codex runtime adapter:
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/install-codex.sh" "${CLAUDE_PLUGIN_ROOT}"
+```
+
+## Phase 6b — Pi adapter (only with `--pi`)
+If `$ARGUMENTS` contains `--pi`, wire the Pi runtime adapter — the launcher symlink (the
+adapter skill ships with the plugin, so this is the only install action):
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/install-pi.sh" "${CLAUDE_PLUGIN_ROOT}"
 ```
 
 ## Phase 7 — Write the install receipt

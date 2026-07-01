@@ -58,6 +58,7 @@ have "build-implementer.md" "Buildable" "queries Stage=Buildable"
 have "build-implementer.md" "blocked.?by" "checks blocked-by upstreams"
 have "build-implementer.md" "claim" "claims the issue before working"
 have "build-implementer.md" "In Progress" "flips Status to In Progress on claim"
+have "build-implementer.md" "EXACT artifact" "enforces the goal contract's exact artifact (no language/framework substitution — review FAIL-BLOCKs substitutes)"
 
 # ── Build reviewer: source/tracker-read-only; writes a durable verdict + may report over coms-net ─
 have "build-reviewer.md" "source/tracker-read-only|read-only on source and tracker" "states it is read-only on source/tracker"
@@ -66,6 +67,7 @@ have "build-reviewer.md" "pr-<PR-NUMBER>\\.verdict\\.json|pr-\\$\\{PR_NUMBER\\}\
 have "build-reviewer.md" "coms" "reports findings over coms-net when available"
 have "build-reviewer.md" "verdict" "emits a verdict"
 have "build-reviewer.md" "PASS" "uses the PASS/FAIL verdict ladder"
+have "build-reviewer.md" "confabulate" "forbids confabulated verification (read-only; no narrated fixes that could yield a false PASS)"
 
 # ── Build finisher: merge-on-verdict + recirculate-on-persistent-fail + close→Done ───────────
 have "build-finisher.md" "verdict" "gates merge on the review verdict"

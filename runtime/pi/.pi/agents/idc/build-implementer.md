@@ -44,6 +44,8 @@ Forbidden writes:
 
 **Claim before work.** `query` the board (via `idc:idc-tracker-adapter`) for an eligible issue — `Status=Todo`, `Stage=Buildable`, all native `blocked-by` upstreams `Done`, in the active `Wave` — then **claim** it (`move` to `In Progress` + claim comment + `attempt:<n>` label) **BEFORE** implementing.
 
+**Implement the goal contract's EXACT artifact — do not substitute the language or framework.** The admitted issue's goal contract (its body, read via `idc:idc-goal-contract`) names the precise deliverable — the exact filename, language, and test framework. Implement THAT, not an equivalent you happen to prefer: if it specifies a POSIX shell script (e.g. `scratch/foo.sh`) verified with `shellspec`, author that shell script + its shellspec test — not a Python `foo.py` + pytest. A language/framework substitution is an out-of-contract deviation that review will (correctly) FAIL-BLOCK, wasting the whole cycle. Match the contract's named artifact exactly; diverge only when the contract is genuinely language-agnostic.
+
 - Use TDD: failing test first, minimal green, refactor, verify — drive the claimed issue to green.
 - Run required tests/checks and record evidence.
 - If implementation exposes upstream contradiction, stop that slice and consult the Recirculator.

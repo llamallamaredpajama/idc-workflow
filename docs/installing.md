@@ -84,7 +84,37 @@ so Codex can run the IDC pipeline without the skills leaking into your other Cla
 Re-running refreshes the links; `bash "<plugin-root>/scripts/install-codex.sh" --revert`
 restores the original state (the installer records the prior state first).
 
-## 4. Set up a second machine
+## 4. Enable the Pi runtime (optional)
+
+Pi (the third runtime adapter, alongside Claude and Codex) runs long-lived IDC role *residents* on
+a local coms-net hub under **Bun** + the **Pi coding agent**, driven by the vendored `idc-pi`
+launcher. It is **experimental** — the full Think→Plan→Build lifecycle runs end-to-end on a real
+LLM, but a parallel Build pool and a Pi-side autorun drain are still pending. Wire it with:
+
+```
+/idc:init --pi
+```
+
+This runs `scripts/install-pi.sh`, which symlinks the vendored `idc-pi` launcher onto your `PATH`
+(needs **Bun** + the **Pi coding agent** on the host; `bash scripts/install-pi.sh --check` verifies
+the vendored runtime is complete, `--revert` undoes the symlink). The adapter skill ships with the
+plugin, so the symlink is the only install action.
+
+**One env var away from working.** The launcher's stock model defaults span three providers
+(Anthropic / DeepSeek / OpenAI) — no single install has API keys for all of — so set the
+**`PI_IDC_MODEL`** umbrella (provider-qualified) to boot every role on one provider:
+
+```
+export PI_IDC_MODEL=google/gemini-2.5-pro     # one var fills every role
+# a per-role PI_IDC_<ROLE>_MODEL still wins over the umbrella when you need to diverge
+```
+
+Pi auth rides in via `PI_CODING_AGENT_DIR` pointing at a directory holding an `auth.json`
+(e.g. `{"google":{"type":"api_key","key":"…"}}`) — the launcher runs each resident under a stripped
+`env -i`, so a provider key exported in your shell never reaches the resident. The full real-LLM
+e2e harness (sandbox + driver scripts) is documented in `docs/dev/local-e2e-testing.md`.
+
+## 5. Set up a second machine
 
 1. Register the marketplace (step 1).
 2. `git clone` and `cd` into each governed repo. Per-project enablement lives in the repo's

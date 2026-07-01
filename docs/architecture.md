@@ -106,6 +106,10 @@ is untiered.
 decomposition that authors no requirements and runs no gate. In the optional, **experimental Pi
 runtime** this is enforced structurally — the role-harness write-authority gives Think (not Plan)
 `docs/prd` + `docs/specs`, and the `think`/`plan` personas encode author-at-Think / pure-decompose.
+The full Think→Plan→Build lifecycle runs end-to-end on Pi against a real LLM — one `PI_IDC_MODEL`
+umbrella (provider-qualified) boots every role, no per-role pinning required — but a parallel Build
+pool and a Pi-side autorun drain remain pending (#66 L1/L4), which is why the runtime stays
+experimental.
 
 ## Composition + naming
 

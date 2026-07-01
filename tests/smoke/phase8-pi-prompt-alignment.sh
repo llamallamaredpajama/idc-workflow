@@ -58,6 +58,7 @@ have "build-implementer.md" "Buildable" "queries Stage=Buildable"
 have "build-implementer.md" "blocked.?by" "checks blocked-by upstreams"
 have "build-implementer.md" "claim" "claims the issue before working"
 have "build-implementer.md" "In Progress" "flips Status to In Progress on claim"
+have "build-implementer.md" "EXACT artifact" "enforces the goal contract's exact artifact (no language/framework substitution — review FAIL-BLOCKs substitutes)"
 
 # ── Build reviewer: source/tracker-read-only; writes a durable verdict + may report over coms-net ─
 have "build-reviewer.md" "source/tracker-read-only|read-only on source and tracker" "states it is read-only on source/tracker"

@@ -122,7 +122,12 @@ yet wired**: the `idc-pi` launcher picks each role's model from `role_model()`
 (`runtime/pi/scripts/idc-pi`) — a per-role **hardcoded stock default** (an Anthropic Opus tier for
 think / plan / build-impl / build-finish, a DeepSeek tier for sequence / recirculator, an OpenAI tier
 for build-review; see `role_model()` for the exact ids), each overridable per role via a
-`PI_IDC_<ROLE>_MODEL` environment variable. It does **not** read
+`PI_IDC_<ROLE>_MODEL` environment variable, or for **all roles at once** via a single
+`PI_IDC_MODEL` umbrella (provider-qualified, e.g. `google/gemini-2.5-pro`). Precedence:
+**per-role > umbrella > stock default** — the umbrella is the smooth path for a single-provider
+install (the stock defaults otherwise span three providers — Anthropic / DeepSeek / OpenAI — no
+one install has API keys for all of, so a fresh `idc-pi run` fails closed on every role without
+either the umbrella or a per-role pin). It does **not** read
 `WORKFLOW-config.yaml::model_routing`, so the governed repo's tier table is bypassed on Pi — unlike
 `idc:idc-adapter-claude`, which is tier-resolved. Wiring `role_model()` to read `model_routing` is a
 known experimental-runtime maturity gap; until then this launcher is the documented carve-out. The

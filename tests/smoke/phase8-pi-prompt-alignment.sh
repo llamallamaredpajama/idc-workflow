@@ -67,6 +67,7 @@ have "build-reviewer.md" "pr-<PR-NUMBER>\\.verdict\\.json|pr-\\$\\{PR_NUMBER\\}\
 have "build-reviewer.md" "coms" "reports findings over coms-net when available"
 have "build-reviewer.md" "verdict" "emits a verdict"
 have "build-reviewer.md" "PASS" "uses the PASS/FAIL verdict ladder"
+have "build-reviewer.md" "confabulate" "forbids confabulated verification (read-only; no narrated fixes that could yield a false PASS)"
 
 # ── Build finisher: merge-on-verdict + recirculate-on-persistent-fail + close→Done ───────────
 have "build-finisher.md" "verdict" "gates merge on the review verdict"

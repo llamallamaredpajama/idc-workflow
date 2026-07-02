@@ -14,6 +14,8 @@
 #     coherence check fires ONLY on incoherence).
 #   * a dirty IDC worktree → RISKY; an unmerged IDC branch → RISKY.
 #   * a foreign (non-IDC) branch, EVEN IF merged → REPORT-ONLY, never SAFE-FIX.
+#   * a PHANTOM remote tracking ref (a branch deleted on the server but lingering in an un-pruned clone)
+#     → NOT reported as a live remote branch, and --apply-safe never tries to `git push --delete` it.
 #   * `--apply-safe` clears ONLY the SAFE-FIX tier (worktree removed, local+remote branch deleted, board
 #     closed) and re-scan reports the delta; the dirty worktree + unmerged branch + foreign branch are
 #     NOT touched (the (b) red-when-broken: an apply that reached RISKY/REPORT-ONLY flips these).
@@ -80,6 +82,18 @@ gitc worktree add -q "$WORK/wt-dirty" -b worktree-build-dirty main   # dirty wor
 gitc push -q origin worktree-build-legacy   # a merged branch surviving on origin → SAFE-FIX (remote)
 gitc push -q origin main
 
+# STALE-TRACKING-REF (phantom) fixture — truthfulness on an un-pruned clone. A merged branch pushed to
+# origin, then deleted ON THE SERVER (the bare origin) and locally, leaving ONLY a stale
+# `origin/worktree-build-phantom` tracking ref in the clone (no `git fetch --prune`). The janitor must
+# NOT report a phantom tracking ref as a live remote branch, and --apply-safe must never `git push
+# --delete` it (doomed — it is already gone from the server).
+mkbranch worktree-build-phantom
+gitc push -q origin worktree-build-phantom                    # clone now has origin/worktree-build-phantom
+gitc branch -D worktree-build-phantom                         # drop the LOCAL branch (isolate the REMOTE phantom)
+git -C "$O" update-ref -d refs/heads/worktree-build-phantom   # delete on the SERVER only → tracking ref goes stale
+gitc show-ref --verify --quiet refs/remotes/origin/worktree-build-phantom \
+  || fail "test setup: expected a stale origin/worktree-build-phantom tracking ref (un-pruned clone)"
+
 # ---- REPORT: assert each tier (red-when-broken contrast structure) --------------------------------
 rep="$(python3 "$JAN" --repo "$R" --tracker "$R/TRACKER.md")"; rc=$?
 [ "$rc" -eq 1 ] || fail "a repo with debris must exit 1 (got $rc)" "$rep"
@@ -90,6 +104,10 @@ hasnt(){ printf '%s\n' "$rep" | grep -qE "$1" && fail "report should NOT contain
 has  'SAFE-FIX branch worktree-build-legacy'          # merged local branch
 has  'SAFE-FIX (branch|remote-branch) worktree-build-legacy .*(remote|surviving)'  # both dims present
 has  'SAFE-FIX remote-branch worktree-build-legacy'   # merged remote branch surviving (RC2)
+# PHANTOM REFS — a stale tracking ref for a branch already deleted on the server must NOT appear at all
+# (not as a live remote branch, not anywhere). Red-when-broken: without the ls-remote intersection, the
+# phantom origin/worktree-build-phantom is classified SAFE-FIX remote-branch (its tip is an ancestor of main).
+hasnt 'worktree-build-phantom'
 has  'SAFE-FIX worktree .*wt-clean'                   # clean merged worktree
 has  'SAFE-FIX board #1'                              # Done-but-open analog (Todo + merged branch)
 has  'RISKY worktree .*wt-dirty'                      # dirty worktree
@@ -124,6 +142,8 @@ gitc show-ref --verify --quiet refs/heads/worktree-build-legacy && fail "SAFE-FI
 gitc show-ref --verify --quiet refs/heads/worktree-build-1       && fail "SAFE-FIX local branch worktree-build-1 survived" "$app"
 gitc show-ref --verify --quiet refs/remotes/origin/worktree-build-legacy && fail "SAFE-FIX remote branch worktree-build-legacy survived on origin" "$app"
 [ "$(python3 "$TRK" --tracker "$R/TRACKER.md" show --num 1 --field Status)" = "Done" ] || fail "SAFE-FIX board #1 was not set to Done" "$app"
+# apply-safe must never have TOUCHED the phantom remote branch (no doomed `git push --delete`).
+printf '%s\n' "$app" | grep -q 'worktree-build-phantom' && fail "apply-safe touched the phantom remote branch (should be filtered by ls-remote)" "$app"
 
 # (b) RED-WHEN-BROKEN: RISKY + REPORT-ONLY were NOT touched. If apply-safe ever reaches those tiers,
 # these assertions flip.
@@ -196,4 +216,4 @@ except SystemExit as e:
 print("github-only unit tests: all pass")
 PY
 
-echo "PASS: idc_git_janitor reconciles board↔git over a real hermetic repo — clean repo exits 0; merged branches (local+remote) + clean merged worktree + Status≠Done-with-merged-branch classified SAFE-FIX; dirty worktree + unmerged branch RISKY; foreign branch REPORT-ONLY even when merged; 'buildbot' (no build[-/] separator) + foreign 'xbuild-3' are non-IDC and never drive a fix or a board mutation; --apply-safe clears ONLY SAFE-FIX (RISKY/REPORT-ONLY untouched) + reports the delta; unreadable/corrupt board + non-git dir fail-closed to exit 2; github-only predicates unit-tested (pr_signal_ok tip-match guard, board_coherence_verdict not-planned gate, read_at_cap, unexpected-board-read-crash → exit 2)"
+echo "PASS: idc_git_janitor reconciles board↔git over a real hermetic repo — clean repo exits 0; merged branches (local+remote) + clean merged worktree + Status≠Done-with-merged-branch classified SAFE-FIX; dirty worktree + unmerged branch RISKY; foreign branch REPORT-ONLY even when merged; 'buildbot' (no build[-/] separator) + foreign 'xbuild-3' are non-IDC and never drive a fix or a board mutation; a phantom (server-deleted) remote tracking ref on an un-pruned clone is filtered by ls-remote — never reported live, never push --delete'd; --apply-safe clears ONLY SAFE-FIX (RISKY/REPORT-ONLY untouched) + reports the delta; unreadable/corrupt board + non-git dir fail-closed to exit 2; github-only predicates unit-tested (pr_signal_ok tip-match guard, board_coherence_verdict not-planned gate, read_at_cap, unexpected-board-read-crash → exit 2)"

@@ -64,21 +64,38 @@ lint_expect_clean "bare skeleton with no injected pattern" "$R"
 
 echo "PASS (a): Rule M flags every backtick-wrapped closing keyword and leaves the unbackticked form alone"
 
-# ---- (b) the PR-authoring agent instructs an UNBACKTICKED closing keyword ----------------------
-IMPL="$PLUGIN/agents/idc-implementer.md"
-[ -f "$IMPL" ] || fail "agents/idc-implementer.md missing"
-grep -qiE 'backtick' "$IMPL" \
-  || fail "agents/idc-implementer.md must instruct the closing keyword be written unbackticked"
-grep -qiE "closes #|fixes #|resolves #" "$IMPL" \
-  || fail "agents/idc-implementer.md must name the closing-keyword form (Closes/Fixes/Resolves #<N>)"
-grep -qiE "auto-close|closingIssuesReferences" "$IMPL" \
-  || fail "agents/idc-implementer.md must explain WHY (GitHub's auto-close parser / closingIssuesReferences)"
-# Eat our own dogfood: the instruction text itself must not contain a backtick-wrapped closing
-# keyword (that would be the exact defect it's warning against, sitting right there in the prose).
-grep -qE '`([Cc]lose[sd]?|[Ff]ix(e[sd])?|[Rr]esolve[sd]?)[[:space:]]+#[0-9]+`' "$IMPL" \
-  && fail "agents/idc-implementer.md must not itself contain a backtick-wrapped closing keyword"
+# ---- (b) every PR-authoring agent instructs an UNBACKTICKED closing keyword --------------------
+# assert_unbackticked_closes_instruction FILE LABEL — the same four checks against any
+# PR-authoring role prompt: names the file, states the unbackticked rule, names the keyword form,
+# explains why (auto-close parser), and eats its own dogfood (no backtick-wrapped example inline).
+assert_unbackticked_closes_instruction() {
+  local f="$1" label="$2"
+  [ -f "$f" ] || fail "$label missing at $f"
+  grep -qiE 'backtick' "$f" \
+    || fail "$label must instruct the closing keyword be written unbackticked"
+  grep -qiE "closes #|fixes #|resolves #" "$f" \
+    || fail "$label must name the closing-keyword form (Closes/Fixes/Resolves #<N>)"
+  grep -qiE "auto-close|closingIssuesReferences" "$f" \
+    || fail "$label must explain WHY (GitHub's auto-close parser / closingIssuesReferences)"
+  # Eat our own dogfood: the instruction text itself must not contain a backtick-wrapped closing
+  # keyword (that would be the exact defect it's warning against, sitting right there in the prose).
+  grep -qE '`([Cc]lose[sd]?|[Ff]ix(e[sd])?|[Rr]esolve[sd]?)[[:space:]]+#[0-9]+`' "$f" \
+    && fail "$label must not itself contain a backtick-wrapped closing keyword"
+}
 
-echo "PASS (b): agents/idc-implementer.md instructs an unbackticked PR closing keyword"
+assert_unbackticked_closes_instruction \
+  "$PLUGIN/agents/idc-implementer.md" "agents/idc-implementer.md"
+echo "PASS (b1): agents/idc-implementer.md (Claude runtime) instructs an unbackticked PR closing keyword"
+
+# Pi runtime parity: build-impl opens the build PR the same way the Claude implementer does (see
+# runtime/pi/.pi/agents/idc/build-implementer.md's "Open the build PR..." operating-mode step) —
+# runtime/ isn't in scripts/lint-references.sh's scanned surface (agents/skills/commands/templates
+# only), so this is the only guard against the two runtimes drifting apart on this instruction.
+# build-finisher.md is deliberately NOT checked here: it only merges (`gh pr merge`), it never
+# authors the PR body, so it has nothing to instruct — same asymmetry as the Claude finisher.
+assert_unbackticked_closes_instruction \
+  "$PLUGIN/runtime/pi/.pi/agents/idc/build-implementer.md" "runtime/pi build-implementer.md"
+echo "PASS (b2): runtime/pi/.pi/agents/idc/build-implementer.md (Pi runtime) instructs an unbackticked PR closing keyword"
 
 # ---- (c) init.md / update.md describe the consent-gated deleteBranchOnMerge offer --------------
 for f in "$PLUGIN/commands/init.md" "$PLUGIN/commands/update.md"; do

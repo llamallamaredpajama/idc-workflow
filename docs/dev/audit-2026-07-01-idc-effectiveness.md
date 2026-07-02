@@ -114,9 +114,14 @@ as the board fills (now 132 items). A 20-issue wave ≈ hundreds of calls on boa
 (`graphql-cost.md` sink #1). The plugin has **no rate-limit handling anywhere** — no retry, no
 backoff, no preflight, no resume checkpoint (verified by grep). The finisher sequence puts the
 board-status sync **last**, after the merge — so when the pool empties mid-wave, merged code keeps
-its stale status and downstream cleanup is skipped. Production evidence: 3 sessions hit the literal
-GraphQL rate-limit error; one landed mid-merge on PR #504 (the same merge command appears twice,
-~40 calls apart — a silent fail-then-retry at the highest-risk seam). Sizing: rate limiting is a
+its stale status and downstream cleanup is skipped. Production evidence: 4 sessions hit the literal
+GraphQL rate-limit error — **100% of hits were the GraphQL points pool** (zero REST 403s, zero
+secondary-rate hits in 161 transcripts), exactly the pool the itemid() sink drains; one hit landed
+mid-merge on PR #504 (the same merge command appears twice, ~40 calls apart — a silent
+fail-then-retry at the highest-risk seam). The wasteful idiom was also caught live: the common
+close-out sequence runs `gh project view` + `field-list` + a full 200-item `item-list` +
+`item-edit` for **each single status write**, no caching (`ke-transcript-sweep.md` addendum).
+Sizing: rate limiting is a
 **real accelerant** but the debris' primary cause is RC1/RC2; the *"wait an hour"* pain you felt is
 RC4's cost bug.
 
@@ -127,7 +132,11 @@ fail-closed, solid. Every git-side effect (worktree create/remove, branch delete
 close-after-merge) plus the github merge lease: **prose-only, fail-open, no reconciler**. The
 filesystem backend has a real flock+TTL merge lease; the github backend — the one production uses —
 has **no lease op at all** ("board-backed lease" = trust one orchestrator). `/idc:doctor` never
-inspects git. This is the single architectural gap the entire fix package targets.
+inspects git. This is the single architectural gap the entire fix package targets. A corollary
+caught in production: the acceptance-gate's board→state materialization (a prose-driven step) was
+found actually *invoked* in only one of 161 sessions — hand-scaffolded through `/tmp` scripts on a
+stale 3.0.4 fallback path — i.e. prose-only steps don't just fail under load, they get quietly
+improvised or skipped as routine (`ke-transcript-sweep.md` addendum §b).
 
 ### RC6 — The tests verify sentences, not behavior (why everything stayed green)
 

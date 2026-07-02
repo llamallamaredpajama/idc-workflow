@@ -181,6 +181,22 @@ board mutation — appending a missing *required* `Stage` option, which is **non
   distinct outcome — "board reconcile: could not verify (reason)" / "n/a (filesystem)" — never
   silently report "no drift".
 
+## Phase 3b — Offer: enable delete-branch-on-merge (operator consent, surfaced not silent)
+
+The same platform-level backstop `/idc:init` offers (belt-and-suspenders for the finisher's own
+branch cleanup — see `idc:idc-finisher`'s git-finalization tail). Check, then **ask — never flip
+it silently**:
+```bash
+gh repo view --json deleteBranchOnMerge --jq .deleteBranchOnMerge 2>/dev/null
+```
+- Already `true` → `skipped-existing`, no prompt.
+- `false` → ask the operator's consent, the same question `/idc:init` does; on explicit **yes**
+  run `gh repo edit --delete-branch-on-merge` → `enabled`; on **no** → leave it untouched →
+  `declined`.
+- The probe errors (no GitHub remote, or `gh` lacks repo-admin scope) → nothing to offer consent
+  over, so **do not prompt**; leave it untouched and report `n/a (probe failed: <reason>)` — a
+  distinct outcome from `declined`, never silently folded into it.
+
 ## Phase 4 — Rewrite the receipt (end of a successful run only)
 
 Once every approved refresh is applied, write a fresh receipt over the stamped set so the next
@@ -207,6 +223,7 @@ Print one table of every stamped file (`refreshed` / `preserved — config curre
 new optional key(s)` / `restored` / `skipped-already-current`), then:
 - the board-reconcile outcome (one of: no drift / `stage-recirc-appended` /
   `stage-recirc-already-present` / other drift reported / could not verify),
+- the `deleteBranchOnMerge` outcome (`enabled` / `declined` / `skipped-existing` / `n/a`),
 - the receipt status (`rewritten` / `graduated` / `skipped-already-current`),
 - and the cache-refresh reminder if any newly-shipped command/skill files arrived with this update.
 

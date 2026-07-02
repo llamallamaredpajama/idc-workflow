@@ -57,7 +57,11 @@ API sink). No cache path in the brief → tracker ops fall back to a live board 
 3. **Stay inside BOUNDARIES.** Touch only the issue's owned surfaces; never the off-limits
    set, never canonical docs.
 4. **Hand off to review.** Stop at a green implementation and hand the PR to the reviewer (the
-   independent combined review agent). The **finisher** (`idc:idc-finisher`), not the
+   independent combined review agent). **Write the PR body's closing keyword as plain,
+   unbackticked text** — `Closes #<N>` (or `Fixes #<N>` / `Resolves #<N>`), with no surrounding
+   backticks. A backtick-fenced closing keyword defeats GitHub's auto-close parser —
+   `closingIssuesReferences` never populates, so merging the PR never closes the issue (the audit
+   found this on every checked PR). The **finisher** (`idc:idc-finisher`), not the
    implementer, owns applying the review findings and merging — the implementer does not fix
    review findings or merge. Any obligation it genuinely cannot finish in-loop (an out-of-boundary
    surface, a pre-existing breakage) is handed off as a **structured deferral object**

@@ -33,21 +33,26 @@ fail() { printf 'FAIL: %s\n' "$1"; exit 1; }
 . "$PLUGIN/tests/smoke/lib/lint-fixture.sh"
 
 # ---- (a1) every backtick-wrapped GitHub closing keyword is flagged, in one lint pass -----------
-# Four variants (Closes/Fixes/Resolves, plus the lowercase "closed" tense) in one probe file, one
-# repo, one lint run — each must independently trip Rule M, so assert the exact finding COUNT
-# rather than just exit 1 (a count of 1 would mean three of the four silently slipped through).
+# Six variants — Closes/Fixes/Resolves, the lowercase "closed" tense, and ALL-CAPS / mixed-case
+# ("CLOSES" / "cLoSeS") proving Rule M matches case-insensitively (GitHub's own keyword match is
+# fully case-insensitive; a rule that only varied the first letter's case would let a shouted or
+# mixed-case keyword slip through) — in one probe file, one repo, one lint run. Each must
+# independently trip Rule M, so assert the exact finding COUNT rather than just exit 1 (a count of
+# 1 would mean five of the six silently slipped through).
 R="$(lint_mk_repo backticked-variants)"
 cat > "$R/templates/probe.md" <<'EOF'
 On merge this PR carries `Closes #5` in its body.
 The body reads `Fixes #12` for the linked issue.
 Write `Resolves #7` so the issue auto-closes.
 History note: `closed #9` previously.
+Shouted: `CLOSES #3` still defeats the parser.
+Mixed case: `cLoSeS #4` too.
 EOF
 out="$(lint_run "$R")"; rc=$?
 [ "$rc" -eq 1 ] || fail "backtick-wrapped closing keywords: expected exit 1, got $rc. Output:
 $out"
 count=$(printf '%s' "$out" | grep -cF '[backticked-closing-keyword]')
-[ "$count" -eq 4 ] || fail "backtick-wrapped closing keywords: expected 4 [backticked-closing-keyword] findings (Closes/Fixes/Resolves/closed), got $count. Output:
+[ "$count" -eq 6 ] || fail "backtick-wrapped closing keywords: expected 6 [backticked-closing-keyword] findings (Closes/Fixes/Resolves/closed/CLOSES/cLoSeS), got $count. Output:
 $out"
 
 # ---- (a2) control: the UNBACKTICKED (correct) form must NOT be flagged -------------------------
@@ -78,8 +83,9 @@ assert_unbackticked_closes_instruction() {
   grep -qiE "auto-close|closingIssuesReferences" "$f" \
     || fail "$label must explain WHY (GitHub's auto-close parser / closingIssuesReferences)"
   # Eat our own dogfood: the instruction text itself must not contain a backtick-wrapped closing
-  # keyword (that would be the exact defect it's warning against, sitting right there in the prose).
-  grep -qE '`([Cc]lose[sd]?|[Ff]ix(e[sd])?|[Rr]esolve[sd]?)[[:space:]]+#[0-9]+`' "$f" \
+  # keyword (that would be the exact defect it's warning against, sitting right there in the
+  # prose). Case-insensitive, matching Rule M's own match (GitHub's keyword match is case-blind).
+  grep -qiE '`(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]+#[0-9]+`' "$f" \
     && fail "$label must not itself contain a backtick-wrapped closing keyword"
 }
 

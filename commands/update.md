@@ -191,8 +191,8 @@ gh repo view --json deleteBranchOnMerge --jq .deleteBranchOnMerge 2>/dev/null
 ```
 - Already `true` → `skipped-existing`, no prompt.
 - `false` → ask the operator's consent, the same question `/idc:init` does; on explicit **yes**
-  run `gh repo edit --delete-branch-on-merge` → `enabled`; on **no** → leave it untouched →
-  `declined`.
+  run `gh repo edit --delete-branch-on-merge` → `enabled`; on **no**, or with no operator to ask (a
+  headless/non-interactive run) → leave it untouched → `declined`; never auto-enable.
 - The probe errors (no GitHub remote, or `gh` lacks repo-admin scope) → nothing to offer consent
   over, so **do not prompt**; leave it untouched and report `n/a (probe failed: <reason>)` — a
   distinct outcome from `declined`, never silently folded into it.

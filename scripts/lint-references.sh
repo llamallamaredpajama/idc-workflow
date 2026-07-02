@@ -63,6 +63,10 @@ filtered_grep() { # pattern, file — grep -n minus lint-allow lines
   grep -nE -- "$1" "$2" 2>/dev/null | grep -v 'lint-allow' || true
 }
 
+filtered_grep_i() { # pattern, file — CASE-INSENSITIVE grep -n minus lint-allow lines
+  grep -inE -- "$1" "$2" 2>/dev/null | grep -v 'lint-allow' || true
+}
+
 # Real component names, for Rule G bare-ref detection.
 COMPONENTS=$( { ls -d skills/*/ 2>/dev/null | sed 's|skills/||; s|/$||'; \
                 ls agents/*.md 2>/dev/null | sed 's|agents/||; s|\.md$||'; \
@@ -174,10 +178,12 @@ for f in $MD_FILES; do
   # recognizes) defeats GitHub's auto-close parser: closingIssuesReferences never populates, so
   # merging the PR never closes the issue (the audit found this on every checked PR). Only the
   # backtick-fenced form is a violation — plain unbackticked text is the correct, working form.
+  # GitHub's own keyword match is fully case-INsensitive (CLOSES / cLoSeS #5 both auto-close), so
+  # this uses filtered_grep_i rather than hand-bracketing every letter's case.
   while IFS= read -r hit; do
     [ -z "$hit" ] && continue
     report "$f:${hit%%:*}: [backticked-closing-keyword] ${hit#*:}"
-  done < <(filtered_grep '`([Cc]lose[sd]?|[Ff]ix(e[sd])?|[Rr]esolve[sd]?)[[:space:]]+#[0-9]+`' "$f")
+  done < <(filtered_grep_i '`(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]+#[0-9]+`' "$f")
 done
 
 # Rule C (runtime/) — the vendored runtime tree ships to users but is not markdown and sits

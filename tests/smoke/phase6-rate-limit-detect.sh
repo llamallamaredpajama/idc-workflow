@@ -16,6 +16,7 @@
 #   secondary  — quota OK, board read fails "secondary rate limit"        → reactive detect → exit 3
 #   primary403 — quota OK, board read fails "403 API rate limit exceeded" → reactive detect → exit 3
 #   hard       — quota OK, board read fails "HTTP 500"                     → NOT a rate-limit → exit 2 (negative control)
+#   perm403    — quota OK, board read fails "403 Resource not accessible"  → a PERMISSION 403, NOT a rate-limit → exit 2
 #   preflight  — quota EXHAUSTED (remaining 0)                            → up-front pause, board read NEVER runs → exit 3
 # Every assertion is red-when-broken (reverts noted inline). Also pins the RateLimitError shape for U4.
 #
@@ -49,6 +50,7 @@ if [ "\$sub" = "api" ] && [ "\$2" = "graphql" ]; then
   case "\$mode" in
     secondary)  echo "HTTP 403: You have exceeded a secondary rate limit. Please wait a few minutes before you try again." >&2; exit 1 ;;
     primary403) echo "HTTP 403: API rate limit exceeded for user ID 123." >&2; exit 1 ;;
+    perm403)    echo "HTTP 403: Resource not accessible by integration" >&2; exit 1 ;;
     hard)       echo "HTTP 500: Internal Server Error" >&2; exit 1 ;;
     *)          cat "\$FIX/board.json"; exit 0 ;;
   esac
@@ -115,4 +117,17 @@ out="$(runb preflight 2>/dev/null)"; rc=$?
 grep -q 'GRAPHQL' "$WORK/gh.log" \
   && fail "case 5: the preflight must short-circuit BEFORE the board read (a graphql fetch happened)"
 
-echo "PASS: _gh preflights an exhausted quota (exit 3, no board read), detects secondary/403 rate limits on a failing read (exit 3, 'rate-limited until <reset>'), keeps a hard error at exit 2, and passes a healthy read (exit 0); RateLimitError subclasses BoardReadError with .reset"
+# ============================================================================================
+# 6. PERMISSION 403 ('Resource not accessible') → exit 2, NOT 3. The false-positive invariant: a plain
+#    permission/auth 403 must NOT be misread as a resumable rate-limit (else a real access failure gets
+#    silently paused-and-retried forever instead of surfacing). Detection keys on rate-limit WORDING,
+#    never a bare "403". RED-WHEN-BROKEN: add "403" or "not accessible" to _RATE_LIMIT_MARKERS → this
+#    flips to exit 3 and the assertion fails.
+# ============================================================================================
+out="$(runb perm403 2>/dev/null)"; rc=$?
+[ "$rc" = "2" ] \
+  || fail "case 6: a permission 403 ('Resource not accessible') must exit 2 (hard error), NOT the rate-limit path (got $rc)"
+printf '%s' "$out" | grep -q 'rate-limited' \
+  && fail "case 6: a permission 403 must NOT emit a 'rate-limited' verdict (false positive — detection over-broad)"
+
+echo "PASS: _gh preflights an exhausted quota (exit 3, no board read), detects secondary/403-rate limits on a failing read (exit 3, 'rate-limited until <reset>'), keeps a hard error AND a permission 403 at exit 2, and passes a healthy read (exit 0); RateLimitError subclasses BoardReadError with .reset"

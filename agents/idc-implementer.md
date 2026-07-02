@@ -34,6 +34,14 @@ review verdict exists.
 
 ## What it does
 
+**Item-id cache (github backend).** If your dispatch brief carries an item-id cache path — a line
+`IDC_ITEMID_CACHE=<absolute path>`, minted once per wave by the Build orchestrator (`idc:idc-build`,
+Phase 1) — `export IDC_ITEMID_CACHE=<that path>` **before** you claim. A runtime `export` from the
+orchestrator's shell does **not** cross into this worker session, so the path rides in the brief text;
+exporting it here makes `claim` (and every later `idc:idc-tracker-adapter` op) resolve the board item id
+from the cached map instead of re-downloading the whole board per call (design §C.1 — the O(waves×board)
+API sink). No cache path in the brief → tracker ops fall back to a live board read (unchanged, correct).
+
 1. **Claim** the issue through `idc:idc-tracker-adapter`: `claim` flips `Status` to
    `In Progress` and posts a claim comment naming this agent. Set the `attempt:<n>` label.
 2. **Execute the issue's goal contract as a `/fullauto-goal` loop** with full auto-goal discipline:

@@ -35,6 +35,15 @@ merges); promotion to end-to-end area ownership does **not** dissolve it.
 
 ## What it does — its own `/fullauto-goal` loop
 
+**Item-id cache (github backend).** If your dispatch brief carries an item-id cache path — a line
+`IDC_ITEMID_CACHE=<absolute path>`, minted once per wave by the Build orchestrator (`idc:idc-build`,
+Phase 1) — `export IDC_ITEMID_CACHE=<that path>` **before** any tracker op (`setField`/`close` via
+`idc:idc-tracker-adapter`). A runtime `export` from the orchestrator's shell does **not** cross into
+this worker session, so the path rides in the brief text; exporting it here makes board-item-id
+resolution read the cached map instead of re-downloading the whole board per call (design §C.1 — the
+O(waves×board) API sink). No cache path in the brief → tracker ops fall back to a live board read
+(unchanged, correct).
+
 The finisher runs its **own** `/fullauto-goal` loop. Its completion contract carries the full
 **6-element** posture:
 

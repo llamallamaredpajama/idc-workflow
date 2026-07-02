@@ -159,4 +159,64 @@ run_itemid "$CACHE" '201 or true' >/dev/null 2>&1 \
 run_itemid "$CACHE" '' >/dev/null 2>&1 \
   && fail "case 6: itemid must still reject an empty arg"
 
-echo "PASS: --emit-idmap emits the whole-board id map from one read; itemid() resolves a cache HIT with zero board reads, falls back on miss/unset/empty, and keeps its integer guard"
+# ============================================================================================
+# CROSS-SESSION hand-off (the r1 Major): itemid()'s real consumers — `claim` (implementer),
+# `close`/`setField` (finisher) — run in SEPARATE durable-worker sessions (own shell, own worktree)
+# that do NOT inherit the orchestrator's `export`. The cache only engages if the ABSOLUTE path rides in
+# the worker's BRIEF (text crosses the boundary; env does not) and the worker exports it itself.
+# Simulate a worker: a fresh subshell in a DIFFERENT cwd, cache var initially unset, path handed as text.
+# ============================================================================================
+WORKER_CWD="$WORK/worker"; mkdir -p "$WORKER_CWD"
+run_worker() {  # $1 = path handed via the brief ("" = brief carried no path); $2 = issue number
+  ( cd "$WORKER_CWD"; export PATH="$WORK/bin:$PATH" CLAUDE_PLUGIN_ROOT="$PLUGIN" FIX="$WORK"
+    unset IDC_ITEMID_CACHE                        # a fresh worker session does NOT inherit the orchestrator export
+    [ -n "$1" ] && export IDC_ITEMID_CACHE="$1"   # the consuming instruction: export the brief's path
+    source "$HARNESS"; itemid "$2" )
+}
+case "$CACHE" in /*) : ;; *) fail "test bug: \$CACHE must be an absolute path for the cross-session case" ;; esac
+
+# 7. MECHANISM WORKS: absolute path handed via brief + the worker exports it → cache HIT, 0 board reads,
+#    from a different cwd. Proves the #98 fix engages the cache ACROSS the session boundary.
+: > "$WORK/gh.log"
+cid="$(run_worker "$CACHE" 201)" || fail "case 7: cross-session worker itemid should succeed"
+[ "$cid" = "PVTI_201" ] || fail "case 7: worker must resolve PVTI_201 from the brief-handed cache (got '$cid')"
+gq="$(gq_count)"
+[ "$gq" = "0" ] \
+  || fail "case 7: a worker given the absolute cache path via its brief must do NO board read (got $gq) — the cross-session #98 fix"
+
+# 8. LOAD-BEARING CONTROL: with NO brief path (consuming instruction absent, or Build never handed it)
+#    the var stays unset → itemid live-reads the board. This is the exact production bug r1 caught — the
+#    cache inert in the worker session. The 0-vs-read gap vs case 7 proves the export-from-brief is
+#    load-bearing, not decorative.
+: > "$WORK/gh.log"
+cid="$(run_worker "" 201)" || fail "case 8: worker with no brief path should still resolve via a live read"
+[ "$cid" = "PVTI_201" ] || fail "case 8: worker fallback must still resolve PVTI_201 (got '$cid')"
+gq="$(gq_count)"
+[ "$gq" -ge 1 ] \
+  || fail "case 8: a worker with NO brief-handed cache must live-read (got 0) — proves export-from-brief is what engages the cache (the r1 cross-session Major)"
+
+# 9. ABSOLUTE-path necessity: a RELATIVE path handed to a worker in a different cwd cannot be found →
+#    itemid live-reads. Proves the orchestrator must emit an ABSOLUTE path (mktemp "$TMPDIR/…"), not a
+#    cwd-relative one — red-when-broken against a build.md regression to a relative idmap path.
+: > "$WORK/gh.log"
+run_worker "idmap.tsv" 201 >/dev/null 2>&1 || true
+gq="$(gq_count)"
+[ "$gq" -ge 1 ] \
+  || fail "case 9: a relative cache path unreachable from the worker's cwd must fall back to a live read (got 0) — the path must be ABSOLUTE"
+
+# ============================================================================================
+# doc: the SHIPPED agents wire the cross-session hand-off (couples this test to the real markdown).
+#   RED-WHEN-BROKEN: drop the brief hand-off from idc-build.md, or the export-from-brief instruction
+#   from a worker agent, and the matching grep fails.
+# ============================================================================================
+BUILD_MD="$PLUGIN/agents/idc-build.md"; IMPL_MD="$PLUGIN/agents/idc-implementer.md"; FIN_MD="$PLUGIN/agents/idc-finisher.md"
+grep -q 'Item-id cache: IDC_ITEMID_CACHE=' "$BUILD_MD" \
+  || fail "doc: idc-build.md must hand the cache path in each worker brief (a line 'Item-id cache: IDC_ITEMID_CACHE=…') — else the cache is inert in worker sessions (the r1 Major)"
+grep -qi 'absolute' "$BUILD_MD" \
+  || fail "doc: idc-build.md must emit the idmap to an ABSOLUTE path (readable from any worker worktree)"
+for md in "$IMPL_MD" "$FIN_MD"; do
+  grep -q 'export IDC_ITEMID_CACHE' "$md" \
+    || fail "doc: $(basename "$md") must carry the consuming instruction (export IDC_ITEMID_CACHE from the brief before tracker ops) — else itemid() live-reads in the worker (the r1 Major)"
+done
+
+echo "PASS: --emit-idmap emits the whole-board id map from one read; itemid() resolves a cache HIT with zero board reads, falls back on miss/unset/empty, keeps its integer guard; and the cross-session hand-off engages the cache in a fresh worker shell/cwd via the brief-handed absolute path (0 reads), while the shipped agents wire the hand-off + export-from-brief"

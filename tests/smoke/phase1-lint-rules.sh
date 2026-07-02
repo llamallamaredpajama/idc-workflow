@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 1 (lint rules) smoke — the MIN-9 residual blind-spot rules in scripts/lint-references.sh
 # (issue #5). The linter implemented Rules A–E,G,H but none of these six gap-classes; this test
 # pins each one red-when-broken.

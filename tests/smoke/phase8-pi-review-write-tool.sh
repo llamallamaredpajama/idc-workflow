@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 8 smoke — the launcher's role_tools() grants build-review the `write` tool (its one
 # write lane: the merge-gating verdict JSON under docs/workflow/code-reviews/**), while every
 # other authoring role keeps write+edit. Regression guard for the incomplete fix that added

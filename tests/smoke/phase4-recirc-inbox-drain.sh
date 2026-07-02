@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: mixed
 # Phase 4 smoke — /idc:recirculate BOARD-SCAN INBOX-DRAIN mode (Lane 4).
 #
 # The Recirculator gains an ADDITIVE second intake: besides today's operator/role-passed drift

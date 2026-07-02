@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 8 smoke (F1) — the VENDORED Pi runtime is self-complete: every harness file that
 # `idc-pi run <role>` actually loads (the `-e` extensions and the `--append-system-prompt`
 # role prompt) exists under the vendored runtime/pi tree, so a fresh clone can boot.

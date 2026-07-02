@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: mixed
 # Phase 1 smoke — init scaffolds the v2 tree + doctor's deterministic checks pass, on a
 # throwaway filesystem-backend repo (no live GitHub). REAL artifacts + assertions:
 # exercises the shipped scaffold helper, then asserts exactly what /idc:doctor checks.

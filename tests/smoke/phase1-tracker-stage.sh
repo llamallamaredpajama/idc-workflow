@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 1 smoke — board Stage field (4->5) + pointer items vs buildable goal-contracts.
 #
 # Grows the board schema to a 5th single-select `Stage` (Consideration | Planning | Buildable | Recirculation),

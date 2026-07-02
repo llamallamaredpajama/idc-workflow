@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 1 smoke — the recirculation-intake safety net (scripts/idc_recirc_sweep.py) + its SessionEnd
 # hook wiring. Hermetic: the pure decide() brain is exercised directly, the re-stage mutation against
 # a throwaway filesystem tracker. NO live GitHub (the github write path is validated in the sandbox

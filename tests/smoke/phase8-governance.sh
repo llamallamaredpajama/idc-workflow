@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 8 smoke — the governance compiler that long-lived pi residents consume instead of
 # re-reading WORKFLOW.md prose. REAL round-trip of the two helpers in a throwaway governed-repo
 # sandbox (no live GitHub):

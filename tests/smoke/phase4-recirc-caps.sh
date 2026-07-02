@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 4 smoke — the larger loop's RUNAWAY GUARD: a per-issue recirc ceiling + a cascade-depth cap.
 # A recirc fix can surface a deeper recirc event; unbounded that churns recirc->plan->build->recirc
 # all night. scripts/idc_recirc_caps.py is the deterministic verdict: PARK (for the operator) once an

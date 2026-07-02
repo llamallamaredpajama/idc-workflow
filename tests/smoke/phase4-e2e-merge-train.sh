@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: mixed
 # Phase 4 smoke — e2e LAYERING (staging-default) + the COMMUTATIVE DISJOINT-SURFACE MERGE TRAIN
 # (issue sb-79). Builds on #76 (ready-frontier/area-packing) + #77 (sous-chef area ownership).
 #

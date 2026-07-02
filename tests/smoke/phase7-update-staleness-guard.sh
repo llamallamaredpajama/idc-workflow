@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 7 (update staleness guard) smoke — fix/update-data-config-preserve.
 #
 # /idc:update Phase 0 must halt when the running command body is OLDER than the newest plugin

@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 8 smoke — the PI_IDC_MODEL umbrella: one provider-qualified model var fills every role
 # unless a per-role PI_IDC_<ROLE>_MODEL overrides it (precedence: per-role > umbrella > stock).
 # This kills the 7-pin ceremony — the stock defaults otherwise span three providers

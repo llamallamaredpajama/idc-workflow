@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: doc
 # Phase 8 smoke — the vendored Pi role prompts match the CURRENT 5-field-board IDC contract:
 # they drive the board through the tracker adapter (not TRACKER.md), Plan is idempotent + sets
 # the board fields + runs the matrix, Build claims before working, the finisher merges on a

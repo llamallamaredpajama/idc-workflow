@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 4 (git-finish) smoke — scripts/idc_git_finish.py is the finisher's deterministic
 # git-finalization tail (design §B.1, RC1/RC2/RC3): remove worktree -> merge --delete-branch ->
 # verify the remote branch is ACTUALLY gone (git ls-remote) -> delete local branch -> tracker close

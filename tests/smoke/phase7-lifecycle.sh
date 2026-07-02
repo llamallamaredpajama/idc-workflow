@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 7 smoke — the install-receipt helper that /idc:uninstall and /idc:update consume.
 # REAL round-trip of scripts/idc_receipt_check.py in a throwaway sandbox (no live GitHub):
 # stamp writes an init.md-compatible receipt; verify classifies on-disk drift; an invalid

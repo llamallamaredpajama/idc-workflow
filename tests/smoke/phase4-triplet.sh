@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: doc
 # Phase 4 triplet smoke — Build is the explicit impl->review->finish triplet:
 #   (a) agents/idc-finisher.md exists and names the /simplify + git-finalization steps, its
 #       OWN /fullauto-goal fix loop, the recirculation-on-unsolvable, and the 6-element posture

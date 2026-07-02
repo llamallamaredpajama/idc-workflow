@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: doc
 # Phase 8 smoke — Pi roles must not confuse IDC skills with coms-net peers.
 #
 # Live Pi e2e exposed build-finish trying to `coms_net_send` to `idc:idc-tracker-adapter`.

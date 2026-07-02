@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 8 smoke (codex round-6 F2) — the fleet supervisor is FAIL-CLOSED: a hub that never becomes
 # healthy, or a resident that crashes, must surface as a NON-ZERO `idc-pi fleet` exit (not a clean
 # one that hides a fleet that isn't actually running).

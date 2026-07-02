@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: mixed
 # Phase 7 (update config-structure check) smoke — fix/update-data-config-preserve.
 #
 # The two data-bearing configs (WORKFLOW-config.yaml, docs/workflow/tracker-config.yaml) are

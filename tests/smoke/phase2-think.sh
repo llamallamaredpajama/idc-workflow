@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: mixed
 # Phase 2 smoke — Think is the requirements admission seat (v3): it crystallizes the
 # consideration into a PRD+TRD draft and fires the one gate at the END of Think on the Think PR.
 # Two real surfaces are checked:

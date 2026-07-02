@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: doc
 # Phase 8 adapter smoke — skills/idc-adapter-pi maps the three abstract runtime primitives
 # (WORKFLOW.md §5) onto the pi / coms-net flat-peer runtime in the SAME shape as the other two
 # adapters, so callers stay runtime-blind (issue #29, te-B2):

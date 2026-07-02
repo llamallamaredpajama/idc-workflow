@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: mixed
 # Phase 7 (closing keywords) smoke — issue #100 (design doc §B.3).
 #
 # The audit (docs/dev/audit-2026-07-01-idc-effectiveness.md §3, RC3) found all 16 checked PRs wrote

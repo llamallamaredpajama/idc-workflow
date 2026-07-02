@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: mixed
 # Phase 3 smoke — Plan's deterministic guardrails are real and enforced, and (v3) Plan is now
 # PURE DECOMPOSITION — it no longer authors the PRD/TRD or fires the gate (that moved to Think):
 #   (a) the issue-body schema check accepts a complete 6-element contract, rejects a partial one;

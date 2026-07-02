@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 7 (update legacy-receipt guard) smoke — fix/update-template-mapping Finding A hardening.
 #
 # init.md Phase 7 now stamps the two data-bearing configs --customized, so a CURRENT install is

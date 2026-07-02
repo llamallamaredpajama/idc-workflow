@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 1 smoke — filesystem tracker backend round-trip (create / claim / block / close).
 # This is a REAL functional test: it drives the shipped filesystem-tracker helper against a
 # throwaway TRACKER.md and asserts the resulting state. Failing-test-first: it fails until

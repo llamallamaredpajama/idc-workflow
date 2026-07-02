@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: doc
 # Phase 8 adapter fan-out docs smoke — the TWO-LEVEL fan-out + worktree topology is documented
 # cross-adapter, not Claude-only (issue sb-78). Each of the three runtime adapters
 # (idc-adapter-claude / idc-adapter-codex / idc-adapter-pi) must document, in the SAME shape:

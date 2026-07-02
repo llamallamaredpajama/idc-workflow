@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 7 (update data-loss guard) smoke — audit F8.
 #
 # /idc:init writes real operator/board data into two scaffold files AFTER copying the template:

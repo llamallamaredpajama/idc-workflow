@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 4 (marker-emit) smoke — scripts/idc_emit_marker.py serializes the idc-discovery /
 # idc-deferral HTML-comment JSON markers the implementer/finisher hand-write today (design §B.5,
 # T1b), so a malformed hand-typed marker can no longer silently drop out of the recirculation net.

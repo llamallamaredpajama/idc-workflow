@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 3 smoke — the "head chef" gets smart: plan-time dependency-DAG intelligence.
 #
 #   (a) scripts/idc_dag.py builds the DAG from each pillar's blocks_on edges and reports the

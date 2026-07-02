@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 8 smoke (F6) — the VENDORED Pi review core emits the IDC verdict ladder.
 #
 # The Pi review-orchestrator core (runtime/pi/extensions/review-orchestrator-core.ts) is an

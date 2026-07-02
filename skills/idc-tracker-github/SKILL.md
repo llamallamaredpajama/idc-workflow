@@ -62,8 +62,18 @@ board_json() { python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gh_board.py" --owner "
 # Resolve a single-select option id BY NAME at call time (never cached):
 optid() { gh project field-list "$PROJ" --owner "$OWNER" --format json \
   --jq ".fields[] | select(.name==\"$1\") | .options[] | select(.name==\"$2\") | .id"; }
-# Map an issue number -> its project item id (board membership), over the WHOLE board:
-itemid() { case "$1" in ''|*[!0-9]*) die_gh ;; esac   # $1 is interpolated BARE into the jq below
+# Map an issue number -> its project item id (board membership). Item-id cache (design §C.1, RC4a):
+# when the orchestrator has exported IDC_ITEMID_CACHE — a `NUM<TAB>item_id` table emitted once per wave
+# by `idc_gh_board.py --emit-idmap` (ONE board read) — resolve from THAT file with NO board read, killing
+# the O(waves×board) re-download this function used to do on every field mutation. A cache MISS (number
+# not in the table), an unset cache, or an empty cache FILE falls through to the live whole-board read
+# below — so a caller that never populated the cache still works, and a stale cache never mutates with a
+# blank id (the empty-id die_gh guard in setField still holds on the fallback path):
+itemid() { case "$1" in ''|*[!0-9]*) die_gh ;; esac   # $1 is interpolated BARE into the jq / awk below
+  if [ -n "${IDC_ITEMID_CACHE:-}" ] && [ -s "${IDC_ITEMID_CACHE:-}" ]; then
+    CID="$(awk -F'\t' -v n="$1" '$1==n {print $2; exit}' "$IDC_ITEMID_CACHE")"
+    if [ -n "$CID" ]; then printf '%s\n' "$CID"; return; fi   # cache HIT — no board read
+  fi
   IJ="$(board_json)" || die_gh
   printf '%s' "$IJ" | jq -r ".items[] | select(.content.number==$1) | .id"; }
 # Resolve the project NODE id (`PVT_…`) — `gh project item-edit --project-id` requires the project's
@@ -160,8 +170,21 @@ degradation of the *link representation only* — it never silently drops the de
 - **claim(issue, agent)** — `move "$NUM" "In Progress"` + `comment "$NUM" "claimed by $AGENT"`.
   No lock; the Build merge-queue serializes merges.
 - **block(issue, by)** — `move "$NUM" Blocked` + `link "$BY" "$NUM" blocks` (native blocked-by).
-- **close(issue)** — `move "$NUM" Done` + `gh issue close "$NUM"`. Idempotent: a re-close is a
-  no-op (already-`Done` / already-closed exits 0).
+- **close(issue)** — the **atomic**, read-back-verified close (design §B.2, RC3). Replaces the old
+  two-non-atomic-call recipe (`move "$NUM" Done` + `gh issue close`), which could leave a
+  **Done-but-open** issue when the second call silently no-op'd or a step failed between them (the live
+  board carried 10 such stragglers). Resolve + guard the item id (cache-aware via `itemid`), then hand
+  off to the helper — it sets Status→Done, closes the issue, and **reads back** the state, refusing
+  success unless it is `CLOSED`:
+  ```bash
+  IID="$(itemid "$NUM")"; [ -n "$IID" ] || die_gh      # #NUM not on the board → never "close" a ghost
+  python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gh_close.py" \
+    --owner "$OWNER" --project "$PROJ" --issue "$NUM" --item-id "$IID" || die_gh
+  ```
+  Fail-closed: any unverified step exits non-zero with a machine-readable `close: <step> failed` line,
+  so the caller never records a close that did not land; a rate-limit exits 3 (resumable —
+  `rate-limited until <reset>`). Idempotent: re-closing an already-`Done`/closed issue re-verifies and
+  exits 0. Passing `--item-id` (the cache-aware `itemid` result) lets the helper skip its own board read.
 - **retire(pointer, reason)** — retire a consideration pointer that is fully decomposed +
   built: `setField "$NUM" Status Done` then `gh issue close "$NUM" --reason completed --comment
   "$REASON" || die_gh`. Use this op (or `setField`/`close` above) — **never hand-roll the

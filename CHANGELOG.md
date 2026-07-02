@@ -2,7 +2,55 @@
 
 All notable changes for the IDC Workflow plugin are documented in this file.
 
-## 3.2.0 — 2026-06-30
+## 3.3.0 — 2026-07-02
+
+The 2026-07 effectiveness-audit fix package (umbrella #110): the pipeline now cleans up after
+itself deterministically, closes issues atomically, stops re-reading the whole board per write,
+and ships a test suite that proves all of it against real git.
+
+- **`/idc:janitor` (#97)** — a deterministic board↔git reconciler, report-first with four tiers
+  (SAFE-FIX / REPORT-ONLY / RISKY / COHERENT); `--apply-safe` applies only the SAFE-FIX tier
+  (IDC-attributable **and** merged **and** clean). Triple-wired: the command, an autorun preflight,
+  and doctor Row 10 — and reusable as a deterministic e2e post-condition gate
+  (`docs/dev/e2e-postcondition-gate.sh`). Hardened by adversarial review: tip-SHA guard before any
+  branch delete (name-reuse never force-deleted, local **or** server-side re-creation), `build[-/]`
+  attribution anchor (a foreign `buildbot` can't be IDC-attributed), closed-as-not-planned never
+  stamped Done, fail-closed exit 2 on any degraded/capped/unqueryable read, and remote-branch truth
+  from one read-only `git ls-remote` (stale tracking refs can't produce phantom findings).
+- **Deterministic finish tail (#107)** — `idc_git_finish.py`: the build finisher's close-out is now
+  verified end-state (tracker close both halves + `git ls-remote` proves the remote branch is gone),
+  backend-blind via the tracker adapter. Fixes the worktree-collision race and omitted
+  `--delete-branch` (audit RC1+RC2).
+- **Atomic issue close (#96)** — `idc_gh_close.py`: Status→Done + close + live read-back verify as
+  one operation; a Done-but-open item is now exit-2, never silent (RC3).
+- **Item-id cache (#98)** — `idc_gh_board.py --emit-idmap` reads the board once per wave; `itemid()`
+  consumes the cache via `IDC_ITEMID_CACHE`, and the orchestrator hands the cache path to every
+  durable worker **in the brief** (the only thing that crosses the session boundary). Kills the
+  quadratic per-write board re-read (RC4a): measured 0 GraphQL calls per status-write with the cache
+  on vs a full board read each without.
+- **Rate-limit pause/resume (#99)** — `_gh` preflight + 403/secondary-limit detection emits a
+  machine-readable `rate-limited until <reset>` verdict (exit 3, never a false positive on plain
+  permission 403s); the autorun drain consumes it as pause-and-resume — a rate-limited wave is
+  surfaced and resumable, never silently dropped (RC4b).
+- **Closing keywords + deleteBranchOnMerge offer (#100)** — the PR-authoring agents (Claude + Pi
+  runtime, in parity) write closing keywords as plain unbackticked text so GitHub actually
+  auto-closes; new lint Rule M (case-insensitive) catches backticked closing-keyword instructions in
+  shipped files; `/idc:init` + `/idc:update` now *offer* enabling `deleteBranchOnMerge`
+  (consent-gated, headless default = declined, never silent).
+- **Provenance gate (#101) + marker helper (#102)** — `idc_provenance_check.py` post-condition gate
+  and `idc_emit_marker.py` deterministic marker emission (fail-closed: a field value that would
+  break the HTML-comment sentinel is rejected, round-trip-verified against the sweep's own parser).
+- **Model-escalation ladder (#105)** — `model_routing` tiers annotated in the config template and
+  encoded across all three runtime adapters (Claude · Codex · Pi) in parity; new commented
+  `janitor: auto-safe` knob documented (defaults off, report-only).
+- **e2e rebuild (#103)** — `run-all.sh` now runs 67 phases, all green: every fix-package test wired,
+  a real-git lifecycle phase (bare-origin remote, real merges, janitor certifies the end-state) and
+  a multi-wave accumulation phase (no cross-wave debris or stale-id leaks), plus an honest
+  assert-class rollup (`35 behavior · 22 mixed · 10 doc`, fail-closed on untagged phases). Every new
+  test proven red-when-broken.
+
+P2 items deliberately left open with status comments: #104 (github merge lease), #106 (force-update
+gate), #108 (derive recirc_count), #109 (sweep/drain read batching).
 
 Pi becomes a first-class, smooth runtime: a real-LLM end-to-end drain now goes green (Think→Plan→
 Build, build-finish self-merging on PASS), one `PI_IDC_MODEL` var boots every role (no 7-per-role-pin

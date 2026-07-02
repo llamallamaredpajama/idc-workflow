@@ -5,9 +5,9 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-3.0.2-e8e7df?style=flat-square&labelColor=1a1a1a" alt="version 3.0.2">
+  <img src="https://img.shields.io/badge/version-3.3.0-e8e7df?style=flat-square&labelColor=1a1a1a" alt="version 3.3.0">
   <img src="https://img.shields.io/badge/Claude%20Code-plugin-e8e7df?style=flat-square&labelColor=1a1a1a" alt="Claude Code plugin">
-  <img src="https://img.shields.io/badge/commands-9-e8e7df?style=flat-square&labelColor=1a1a1a" alt="9 commands">
+  <img src="https://img.shields.io/badge/commands-10-e8e7df?style=flat-square&labelColor=1a1a1a" alt="10 commands">
   <img src="https://img.shields.io/badge/runtime-Claude%20%C2%B7%20Codex%20%C2%B7%20Pi-e8e7df?style=flat-square&labelColor=1a1a1a" alt="runtimes">
   <img src="https://img.shields.io/badge/guardrails-5-c8dc00?style=flat-square&labelColor=1a1a1a" alt="5 guardrails">
   <img src="https://img.shields.io/badge/license-MIT-e8e7df?style=flat-square&labelColor=1a1a1a" alt="MIT license">
@@ -179,7 +179,7 @@ install receipt. `/idc:doctor`'s first check fails loudly if IDC is ever enabled
 
 ## The commands
 
-Nine slash entry points:
+Ten slash entry points:
 
 | Command | What it is |
 |---------|------|
@@ -188,6 +188,7 @@ Nine slash entry points:
 | `/idc:build` | the build triplet — implementer → review → finisher; issues → merged, reviewed code |
 | `/idc:recirculate` | Recirculator — the controlled return path; heal doc/reality drift in one PR |
 | `/idc:autorun` | Autorun — run the whole pipeline hands-off |
+| `/idc:janitor` | Janitor — deterministic board↔git reconciler (report-first; `--apply-safe` for the SAFE-FIX tier) |
 | `/idc:init` | install IDC (idempotent) |
 | `/idc:doctor` | health-check IDC (read-only) |
 | `/idc:update` | upgrade the scaffold after a plugin bump |
@@ -321,8 +322,8 @@ wires Pi.
 
 This repo is the plugin **and** its own marketplace:
 
-- **9 commands** — the pipeline (`think · plan · build · recirculate · autorun`) plus `init`,
-  `doctor`, and the lifecycle pair `update` / `uninstall`.
+- **10 commands** — the pipeline (`think · plan · build · recirculate · autorun`) plus the
+  `janitor` reconciler, `init`, `doctor`, and the lifecycle pair `update` / `uninstall`.
 - **8 agents** — the per-stage orchestrator playbooks, the durable-worker implementer + finisher,
   and the review coordinator + review agent.
 - **13 skills** — the runtime adapters (Claude · Codex · Pi), the tracker adapter + its two
@@ -354,7 +355,7 @@ bash tests/smoke/run-all.sh
 .claude-plugin/   plugin.json (manifest) + marketplace.json (self-hosted marketplace)
 agents/           8 agents — stage playbooks + implementer + finisher + review coordinator/agent
 skills/           13 reusable procedures (runtime adapters, tracker, review engine, …)
-commands/         9 slash commands (think|plan|build|recirculate|autorun|init|doctor|update|uninstall)
+commands/         10 slash commands (think|plan|build|recirculate|autorun|janitor|init|doctor|update|uninstall)
 templates/        per-project scaffold copied by /idc:init
 scripts/          lint-references.sh, release check, the filesystem tracker + stage helpers,
                   install-codex.sh / install-pi.sh, run-evals.sh

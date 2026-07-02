@@ -22,12 +22,12 @@ Live-loading the EDITED plugin against a sandbox is the e2e loop below.
 | Path | What |
 |------|------|
 | `.claude-plugin/` | `plugin.json` (manifest) + `marketplace.json` (self-hosted marketplace) |
-| `commands/*.md` | 9 slash entry points (`think · plan · build · recirculate · autorun · init · doctor · update · uninstall`) |
+| `commands/*.md` | 10 slash entry points (`think · plan · build · recirculate · autorun · janitor · init · doctor · update · uninstall`) |
 | `agents/*.md` | stage orchestrators + the durable-worker implementer + finisher + review coordinator/agent |
 | `skills/<name>/SKILL.md` | reusable procedures — runtime adapters (claude/codex/pi), tracker adapter + backends, review engine, gate-issue, goal-contract, matrix, schema, recirculator-sync |
 | `templates/` | per-project scaffold `/idc:init` copies into a governed repo |
 | `scripts/` | `lint-references.sh`, filesystem tracker + plan/review/recirculator/autorun helpers, installers |
-| `tests/smoke/` | the phase1–8 functional verification suite (`run-all.sh` drives it) |
+| `tests/smoke/` | the phase1–9 functional verification suite (`run-all.sh` drives it) |
 | `docs/` | `architecture.md`, `installing.md`, PRD/specs/plans, `dev/` notes |
 
 ## Conventions (read before editing shipped files)

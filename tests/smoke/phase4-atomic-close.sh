@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 4 (atomic issue-close) smoke — the Done-but-open fix (issue #96, design §B.2, RC3).
 #
 # ROOT CAUSE this guards: the old github `close` recipe was TWO non-atomic gh calls — set Status=Done,

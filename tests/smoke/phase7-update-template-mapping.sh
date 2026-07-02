@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 7 (update template-path mapping) smoke — fix/update-template-mapping Finding B.
 #
 # /idc:update must resolve each governed file's TEMPLATE SOURCE through the single shared resolver

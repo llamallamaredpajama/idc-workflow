@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 3 (provenance-gate) smoke — scripts/idc_provenance_check.py is Plan's post-condition
 # (design §B.4, T1a): a Buildable minted this run must carry a valid idc-provenance marker on its
 # LIVE github body before Plan can report done. Converts enforcement-map row 14 from PROSE-ONLY to

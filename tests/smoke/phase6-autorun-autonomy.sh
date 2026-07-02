@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: mixed
 # Phase 6 smoke — Autorun AUTONOMY: drain EVERYTHING, no mid-drain asks, one staffing gate only
 # when the estimate is large, and never self-narrow to a phase. Fixes the motivating live bug: a
 # real `/idc:autorun` full-drain stopped to ask questions AND narrowed itself to a single phase.

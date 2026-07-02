@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: mixed
 # Phase 6 smoke — Autorun's drain predicate (the one-shot exit condition) and its v3 autonomy
 # boundary: with the gate at the END of Think, Autorun only decomposes/builds APPROVED
 # considerations and treats an OPEN Think PR exactly like an open requirements gate (report + skip).

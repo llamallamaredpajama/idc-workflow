@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 8 smoke (codex round-4 Layer 2) — the `idc-pi fleet` supervisor distributes role-cap
 # secrets correctly: each resident receives ONLY its own role's cap = HMAC(K, role), and the master
 # key K is NEVER leaked to any resident. This is the property the cmux/pane mode CANNOT provide (a

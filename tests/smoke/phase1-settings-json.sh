@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 1 smoke — project settings mutation preserves operator-owned keys and never
 # truncates invalid JSON. REAL functional test of the shipped settings helper used by
 # /idc:init for .claude/settings.json. Failing-test-first: fails until

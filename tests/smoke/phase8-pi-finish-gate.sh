@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: doc
 # Phase 8 smoke — Pi build-finish must be a strict merge gate.
 #
 # Live Pi e2e exposed a dangerous fail-open: when coms-net was unavailable and no review verdict

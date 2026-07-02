@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: mixed
 # Phase 4 smoke — the BUILD-TRIGGERED "larger loop": a recirc event mid-build spawns a fresh
 # specialist recirc-consultant (via the adapter), the consultant returns a STRUCTURED, FAIL-CLOSED
 # closeout, and the orchestrator dispatches on it as a dumb router (no gate reasoning of its own).

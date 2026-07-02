@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 6 (rate-limit RESUME) smoke — the resumable-pause CONSUMER (issue #99 RESPONSE half, §C.3).
 #
 # ROOT CAUSE this guards: Unit 1's `idc_gh_board.py` already detects an exhausted GraphQL quota and

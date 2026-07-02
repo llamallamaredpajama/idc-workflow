@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 4 (github board pagination) smoke — the 30-item truncation fix (release 3.1.4).
 #
 # ROOT CAUSE this guards: every github board read called `gh project item-list … --format json`

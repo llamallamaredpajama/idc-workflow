@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: doc
 # Phase 7 (command prose invariants) smoke — testing-suite-overhaul.
 #
 # A cheap backstop for the prose that REMAINS in the file-changing command markdown after decisions

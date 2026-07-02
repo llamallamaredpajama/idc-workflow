@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: mixed
 # Phase 4 (item-id cache) smoke — the O(waves×board) API-cost fix (issue #98, design §C.1).
 #
 # ROOT CAUSE this guards: SKILL.md::itemid() re-downloaded the WHOLE board (board_json) on EVERY field

@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 8 smoke (F4) — the launcher gates role-resident startup on the governance sidecar,
 # fail-closed. A long-lived resident consults the compiled sidecar
 # (docs/workflow/idc-governance-contract.yaml) instead of re-reading WORKFLOW.md, so idc-pi must

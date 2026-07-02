@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: doc
 # Phase 1 (janitor autorun preflight) smoke — design §A "Triple wiring" (2): `/idc:autorun` runs the
 # janitor scanner (Unit 2's `idc_git_janitor.py`, already shipped) as a PREFLIGHT report near the top
 # of the pipe, so board<->git debris left by a dead/interrupted session is surfaced every drain — not

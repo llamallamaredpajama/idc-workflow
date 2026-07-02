@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 4 (github tracker recipe robustness) smoke.
 #
 # Guards the SHIPPED github recipe (skills/idc-tracker-github/SKILL.md), extracted and run against a

@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 4 smoke — Build's deterministic guardrails:
 #   (a) the merged review engine emits a STRUCTURED verdict that validates, and verdict
 #       severity is consistent with the taxonomy (blocker->FAIL-BLOCKED, major->FAIL,

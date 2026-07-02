@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: mixed
 # Phase 8 model-ladder smoke — the model-escalation ladder (design doc §D / issue #105): the
 # user's standing principle is deterministic wherever possible; then latest Sonnet for easy/
 # mechanical work; Opus when something looks risky or questionable; Fable only when truly stuck;

@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 4 smoke — Build's READY-FRONTIER dispatch + AREA-PACKING doctrine (#76: dissolve the wave
 # barriers).
 #

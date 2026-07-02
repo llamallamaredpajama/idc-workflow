@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 7 (file-command quiet/no-op default) smoke — testing-suite-overhaul.
 #
 # THE 2.1.3 CATCH. The bad update UX shipped because tests used BLANK inputs and only checked "no

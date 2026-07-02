@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 6 (rate-limit detection) smoke — the resumable-pause SIGNAL (issue #99 DETECTION half, §C.3).
 #
 # ROOT CAUSE this guards: a github board read that hit GitHub's rate limit died as an opaque non-zero

@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 1 smoke — the github backend of the recirculation-intake safety net
 # (scripts/idc_recirc_sweep.py), success-only/no-blind-refile discipline. Companion to
 # phase1-recirc-sweep.sh (which covers the pure decide() brain + the filesystem re-stage).

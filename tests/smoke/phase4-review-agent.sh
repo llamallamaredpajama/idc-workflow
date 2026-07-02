@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: mixed
 # Phase 4 smoke — the combined review AGENT (idc:idc-review-agent), the standing/queryable
 # review service that promotes the 13-dimension engine to first class. Deterministic checks
 # (no live LLM): we assert the agent's INTERFACE contract is wired, then run a fixture review

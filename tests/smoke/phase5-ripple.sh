@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 5 smoke — the Recirculator's deterministic doctrine:
 #   (a) downstream sync set: changing layer N requires syncing N + every layer below it in
 #       ONE PR (PRD->spec->master->subphase->pillar); and the gate fires ONLY on a requirements

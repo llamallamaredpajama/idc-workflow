@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 1 (brownfield) smoke — /idc:init's requirements-doc scan SCANS + CONFIRMS, never INVENTS.
 # Two real surfaces are checked:
 #   (a) the shipped scan helper (scripts/idc_brownfield_scan.py) against throwaway repos:

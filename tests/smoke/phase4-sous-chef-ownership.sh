@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: doc
 # Phase 4 sous-chef-ownership smoke — the durable-worker pair (idc-implementer + idc-finisher)
 # is promoted from a "last-resort collapse" to the INTENDED sous-chef structure (issue sb-77):
 #   (A) each sous-chef owns its AREA END-TO-END with heavy INTERNAL BOUNDED FAN-OUT (line cooks)

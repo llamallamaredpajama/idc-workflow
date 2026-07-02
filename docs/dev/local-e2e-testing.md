@@ -360,6 +360,37 @@ bash "$PLUGIN/tests/smoke/run-all.sh"                 # hermetic filesystem-back
    path for detail.
 6. On a mid-run error: `ke-snap . failure`, then read the transcript.
 
+## The e2e post-condition gate (janitor scan + API-cost delta)
+
+Every spawned e2e wave should end with a **post-condition gate** so "the drain finished" also means
+"the finished board↔git state is coherent" and "the API cost was in budget" — the two guarantees the
+pre-#103 loop lacked (design §E.3, audit RC6). The dev helper
+[`docs/dev/e2e-postcondition-gate.sh`](e2e-postcondition-gate.sh) wraps any wave:
+
+```bash
+# github-backend sandbox (drives the wave, then gates it):
+bash docs/dev/e2e-postcondition-gate.sh \
+  --repo /Users/jeremy/dev/sandbox/ke-idc-test-repo-autorun \
+  --backend github --owner llamallamaredpajama --project 10 \
+  --report /Users/jeremy/dev/sandbox/_idc-observability/run-<label>-gate.json --label <label> \
+  -- bash /Users/jeremy/dev/sandbox/_idc-observability/bin/run-autorun-e2e.sh <label>
+
+# bare post-condition check on the CURRENT state (no wave) — omit everything after `--`.
+```
+
+It snapshots `gh api rate_limit` (graphql + core) before and after, runs the shipped
+`scripts/idc_git_janitor.py` (the same reconciler `/idc:janitor` uses) as the coherence oracle,
+`git fetch --prune`s first so the scan sees **live** remote reality (an un-pruned clone carries stale
+`origin/*` tracking refs for branches already deleted on the remote — those would otherwise show as
+phantom remote-branch findings), writes a combined JSON report, and **exits non-zero on incoherence or
+a wave failure** — so a bad drain fails the run instead of looking green. The `graphql_delta` in the
+report is the per-run API cost (regression-catches the §C item-id-cache / rate-limit fixes; a healthy
+drain's per-status-write board-read cost is ~0 with the item-id cache on — see
+`run-u6-e2e-rebuild-summary.md`).
+
+> **GraphQL-budget caveat still applies:** the gate itself is cheap (~5 graphql/scan), but the *wave*
+> it wraps is not — budget one full `/idc:autorun` drain per GitHub API hour (§ the autorun sandbox).
+
 ## Teardown / reset
 
 Disposable. Reset a repo with `/idc:uninstall --delete-board` inside its session (reverses init +

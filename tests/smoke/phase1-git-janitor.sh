@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 1 smoke — the deterministic board↔git reconciler `scripts/idc_git_janitor.py` (#97, design §A).
 #
 # The FIRST real-git lifecycle smoke phase: a hermetic repo with a `git init` + a bare "origin" — real

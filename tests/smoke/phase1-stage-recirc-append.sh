@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 1 smoke — non-destructive `Recirculation` Stage-option append (github board migration).
 #
 # 3.1.0 added `Stage = Recirculation` to the schema/skills/WORKFLOW/recirculate, but the board

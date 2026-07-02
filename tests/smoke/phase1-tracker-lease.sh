@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 1 smoke (F3) — the board-backed merge lease primitive (filesystem backend).
 #
 # The pi adapter's merge-serialization promises a "single-holder merge lease" but the tracker

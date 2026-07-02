@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 8 smoke — drives tests/smoke/phase8-pi-guard-acl.ts under Bun: the per-role guard ACL
 # (evaluatePathForRole / evaluateBashForRole) holds the fail-closed file-write guarantee AND the
 # pi-guard-fix locks (B1 subshell/brace, B2 git -C, BR build-review board read-only, M3 case-fold,

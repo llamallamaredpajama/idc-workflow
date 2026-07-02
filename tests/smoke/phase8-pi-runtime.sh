@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 8 smoke — boots the VENDORED coms-net runtime under Bun and asserts the directional
 # glass-wall ACL on the coms_net_send seam (issue #27, te-B1). REAL round-trip: a throwaway
 # loopback hub (isolated $HOME, ephemeral port, env-supplied token — no secret file), the

@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: doc
 # Phase 4 smoke — NARROW the recirculation trigger + add build-time MECHANICAL DECONFLICTION
 # (issue sb-80). Builds on #76 (ready-frontier/area-packing), #77 (sous-chef area ownership),
 # #79 (commutative disjoint-surface merge train).

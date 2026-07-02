@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: behavior
 # Phase 1 smoke (issue #6 / MIN-14) — install-codex.sh re-sync prunes STALE mirror links.
 #
 # install-codex.sh converts ~/.agents/skills into a real directory that mirrors every

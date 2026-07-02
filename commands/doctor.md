@@ -293,11 +293,36 @@ Row 9 only *reads* the board (the paginating reader `idc_gh_board.py`, `gh issue
 `gh api … GET`, `gh project field-list`, and the helpers' read-only `--report` mode), preserving
 doctor's strictly-read-only contract (guarded by `phase7-command-prose-invariants.sh`).
 
+**10 — Board↔git reconciliation (advisory; never FAIL; read-only report).** Run the janitor scanner
+(`idc_git_janitor.py`) in its **default report mode** — read-only, it mutates nothing — to surface
+debris that a dead/interrupted session left outside the guard rail: orphan worktrees,
+merged-but-surviving branches (local + remote), and board↔issue drift, tiered SAFE-FIX / REPORT-ONLY
+/ RISKY / COHERENT. This is the same scanner `/idc:janitor` drives; doctor only ever *reports* it
+(**never** `--apply-safe`), so the strictly-read-only contract holds. Reuses `$num` / `$owner` from
+check 3 on github:
+```bash
+backend=$(grep -E '^backend:' docs/workflow/tracker-config.yaml | awk '{print $2}')
+if [ "$backend" = "github" ]; then
+  python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_janitor.py" \
+    --repo "$PWD" --backend github --owner "$owner" --project "$num"
+else
+  python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_janitor.py" --repo "$PWD" --tracker "$PWD/TRACKER.md"
+fi
+```
+Read the scanner's exit code + its `janitor: N safe-fix, M risky, K report-only` summary:
+- exit **0** (`COHERENT`) → **PASS** (note "board↔git coherent").
+- exit **1** (findings) → **PASS with ⚠** (advisory, **never FAIL**): quote the summary counts; fix
+  hint: "run `/idc:janitor` for the full report, then `/idc:janitor --apply-safe` to clear the
+  SAFE-FIX tier (RISKY + REPORT-ONLY are reviewed by hand, never auto-applied)."
+- exit **2** (fail-closed: not a git repo, unresolved default branch, unreadable board, or an
+  indeterminate dimension) → **SKIP** ("could not determine"), **never FAIL** — surface the stderr
+  diagnostic. Like Rows 8/9, Row 10 is never a hollow clean and never a FAIL.
+
 ## Output
 
-Emit a single table, then a one-line verdict. Tally PASS / FAIL / SKIP across the nine rows (rows
-8 and 9 — plugin cache freshness and build-lane hygiene — are **advisory**: each is only ever PASS
-or SKIP, never FAIL):
+Emit a single table, then a one-line verdict. Tally PASS / FAIL / SKIP across the ten rows (rows
+8, 9, and 10 — plugin cache freshness, build-lane hygiene, and board↔git reconciliation — are
+**advisory**: each is only ever PASS or SKIP, never FAIL):
 
 ```
 | # | Check | Result | Fix hint |
@@ -311,6 +336,7 @@ or SKIP, never FAIL):
 | 7 | Codex skill-mirror (optional) | SKIP | Codex mirror not installed — optional |
 | 8 | Plugin cache freshness | PASS | running 2.1.0 |
 | 9 | Build-lane hygiene (advisory) | PASS | 4 scanned, clean |
+| 10 | Board↔git reconciliation (advisory) | PASS | board↔git coherent |
 
 IDC doctor: N passed, M failed, K skipped
 ```

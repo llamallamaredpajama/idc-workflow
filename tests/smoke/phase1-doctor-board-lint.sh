@@ -1,5 +1,5 @@
 #!/bin/bash
-# idc-assert-class: behavior
+# idc-assert-class: mixed
 # Phase 1 smoke — /idc:doctor's advisory board-lane lint (Row 9) + the shipped helper
 # scripts/idc_board_lint.py. Hermetic: real round-trips feed JSON on stdin, no live GitHub.
 #

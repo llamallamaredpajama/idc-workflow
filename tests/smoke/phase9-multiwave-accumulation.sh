@@ -13,10 +13,11 @@
 #   a leaked worktree injected between the waves makes wave-2's count exceed wave-1's → the zero-growth
 #   assertion fails (demonstrated in the phase's own negative control below).
 # PART B — item-id cache freshness across waves (github idmap): `idc_gh_board.py --emit-idmap` is
-#   regenerated per wave against a GROWING board; assert each wave's map reflects that wave's board
-#   (wave 2 sees a new issue wave 1 did not) AND that a given issue's item id is STABLE across waves —
-#   the invariant that makes a stale cache at worst a miss (safe live-read fallback), never a WRONG-id
-#   write. (The resolve-path miss/blank guards are exhaustively covered by phase4-itemid-cache.)
+#   regenerated per wave against a GROWING board; assert each wave re-reads the board and its map
+#   reflects that wave's board (wave 2 sees a new issue wave 1 did not). That fresh-per-wave
+#   regeneration is the real "no stale-id write" guarantee — a write always resolves against the
+#   current board, never a carried-over wave-1 map. (The resolve-path miss/blank-id guards are
+#   exhaustively covered by phase4-itemid-cache.)
 #
 # Usage: bash tests/smoke/phase9-multiwave-accumulation.sh   (exit 0 = pass)
 set -uo pipefail
@@ -188,12 +189,13 @@ MAP2="$(emit)" || fail "wave-2 --emit-idmap failed"
 printf '%s\n' "$MAP2" | grep -qE '^301[[:space:]]' \
   || fail "wave-2 map must contain the new #301 (fresh cache per wave — the multi-wave invariant)"
 
-# ID STABILITY across waves — the invariant that makes a stale cache at worst a MISS (safe fallback),
-# never a WRONG-id write: #101's id is IDENTICAL in wave 1 and wave 2.
-id101_w2="$(printf '%s\n' "$MAP2" | awk -F'\t' '$1==101{print $2}')"
-[ "$id101_w1" = "$id101_w2" ] \
-  || fail "an issue's item id must be STABLE across waves ('$id101_w1' vs '$id101_w2') — else a stale cache could write a wrong id"
+# No cross-wave id-equality assertion here: the hermetic fixture mints each id as PVTI_<number>, so
+# "#101's id is identical in both waves" is guaranteed by the fixture, not by the code under test — a
+# vacuous (always-green) check. The load-bearing "no stale-id write" guarantee is the fresh-read-per-
+# wave property proven above (each emit re-reads the board; wave 2's map reflects the grown board), so a
+# write always resolves against the current board. The resolve-path miss/blank-id guards are covered by
+# phase4-itemid-cache.
 
 echo "PART A: two consecutive real-git build waves finish clean with ZERO debris growth ($w1 → $w2); a leaked worktree between waves raises the count (negative control) and its removal restores zero."
-echo "PART B: --emit-idmap regenerates a FRESH board-reflecting map per wave (#301 appears only in wave 2) with STABLE ids across waves (#101 constant) — fresh cache per wave, no stale-id writes."
-echo "PASS: multi-wave accumulation — zero debris growth across waves + item-id cache freshness/id-stability across waves"
+echo "PART B: --emit-idmap regenerates a FRESH board-reflecting map per wave (each emit re-reads; #301 appears only in wave 2's map) — the cache reflects the current board every wave, so no write resolves against a stale wave-1 map."
+echo "PASS: multi-wave accumulation — zero debris growth across waves + fresh-per-wave item-id cache regeneration"

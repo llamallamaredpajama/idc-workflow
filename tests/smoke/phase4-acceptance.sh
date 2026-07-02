@@ -1,5 +1,5 @@
 #!/bin/bash
-# idc-assert-class: behavior
+# idc-assert-class: mixed
 # Phase 4 smoke — the dependency-aware ACCEPTANCE check (idc_acceptance_check.py): the wave-close
 # gate that catches a merged-"Done" issue shipping INERT (autorun audit Defect 4 / Fix B). A Done
 # issue carrying a structured deferral with blocks_goal:true whose enabling target isn't itself

@@ -215,19 +215,21 @@ def remote_branches(repo):
 
 
 def ls_remote_heads(repo):
-    """The set of branch short names that ACTUALLY exist on `origin` right now — authoritative and
-    READ-ONLY (`git ls-remote` queries the server, never mutating a local ref, so it is safe in the
-    default report mode). ONE network call, not per-branch. Returns None if the remote can't be queried
-    (offline / no `origin`), so the caller fail-closes the remote-branch dimension rather than trust
-    possibly-stale local tracking refs."""
+    """`{branch name → server tip SHA}` for every branch that ACTUALLY exists on `origin` right now —
+    authoritative and READ-ONLY (`git ls-remote` queries the server, never mutating a local ref, so it
+    is safe in the default report mode). ONE network call, not per-branch. Returns None if the remote
+    can't be queried (offline / no `origin`), so the caller fail-closes the remote-branch dimension
+    rather than trust possibly-stale local tracking refs. The SHA (not just the name) is load-bearing:
+    a server-side RE-CREATED branch reuses a name at a NEW commit the un-pruned clone hasn't fetched, so
+    the tip-match/ancestry checks must run against the SERVER tip, not the clone's stale tracking ref."""
     out, rc = git(["ls-remote", "--heads", "origin"], repo)
     if rc != 0:
         return None
-    heads = set()
+    heads = {}
     for line in out.splitlines():
         parts = line.split("\trefs/heads/", 1)   # each line: "<sha>\trefs/heads/<name>"
         if len(parts) == 2 and parts[1].strip():
-            heads.add(parts[1].strip())
+            heads[parts[1].strip()] = parts[0].strip()
     return heads
 
 
@@ -388,6 +390,7 @@ def scan(ctx):
     indeterminate = ctx.get("board_indeterminate", False)
     locals_ = local_branches(repo)          # each git-shell-out done ONCE per scan; reused below
     remotes_ = remote_branches(repo)
+    live = None   # {name → server-tip sha} once resolved; stays None if there are no remote refs to verify
     # Truthfulness on an un-pruned clone: local origin/* tracking refs go stale, so intersect them with
     # the AUTHORITATIVE server state (one read-only `git ls-remote`) before classifying/acting. Without
     # this, a branch already deleted on the server shows as a phantom remote finding, and --apply-safe's
@@ -417,19 +420,36 @@ def scan(ctx):
         key = (short, remote)
         if key in _merged_cache:
             return _merged_cache[key]
-        ref = ("refs/remotes/origin/" + short) if remote else ("refs/heads/" + short)
-        # The merged-PR head-ref set is the authoritative github signal — but ONLY if the branch's tip
-        # STILL equals the PR's merged head commit (pr_signal_ok). A name reused for divergent new work
-        # must NOT read as merged (else --apply-safe force-deletes live commits); it falls through to
-        # ancestry, which a divergent tip fails → RISKY, never force-deleted. Off github merged_refs is
-        # empty, so this is skipped and we go straight to ancestry.
-        if short in merged_refs and pr_signal_ok(merged_oids.get(short), tip_sha(repo, ref)):
-            res = (True, "pr")
+        if remote:
+            # A remote branch's ONLY authoritative tip is the SERVER's (from ls-remote), NEVER the clone's
+            # possibly-stale local tracking ref: a server-side RE-CREATED branch reuses the name at a NEW
+            # commit the un-pruned clone hasn't fetched. Run BOTH the PR-head-oid match AND ancestry
+            # against that server tip — a re-created (or unfetched) tip fails the oid match and fails
+            # ancestry (an unknown/newer commit is not an ancestor of the default) → RISKY, never a
+            # --apply-safe delete of live re-created work. (remotes_ is already filtered to names present
+            # in `live`, so the server tip is available here.)
+            server_tip = live.get(short) if live else None
+            if short in merged_refs and pr_signal_ok(merged_oids.get(short), server_tip):
+                res = (True, "pr")
+            elif server_tip and (is_ancestor(repo, server_tip, default)
+                                 or (origin_default_ref and is_ancestor(repo, server_tip, origin_default_ref))):
+                res = (True, "ancestry")
+            else:
+                res = (False, "")
         else:
-            anc = is_ancestor(repo, ref, default)               # local default contains it?
-            if not anc and origin_default_ref:
-                anc = is_ancestor(repo, ref, origin_default_ref)  # …or origin/default does
-            res = (anc, "ancestry") if anc else (False, "")
+            ref = "refs/heads/" + short
+            # The merged-PR head-ref set is the authoritative github signal — but ONLY if the branch's tip
+            # STILL equals the PR's merged head commit (pr_signal_ok). A name reused for divergent new work
+            # must NOT read as merged (else --apply-safe force-deletes live commits); it falls through to
+            # ancestry, which a divergent tip fails → RISKY. Off github merged_refs is empty → straight to
+            # ancestry.
+            if short in merged_refs and pr_signal_ok(merged_oids.get(short), tip_sha(repo, ref)):
+                res = (True, "pr")
+            else:
+                anc = is_ancestor(repo, ref, default)               # local default contains it?
+                if not anc and origin_default_ref:
+                    anc = is_ancestor(repo, ref, origin_default_ref)  # …or origin/default does
+                res = (anc, "ancestry") if anc else (False, "")
         _merged_cache[key] = res
         return res
 
@@ -659,6 +679,10 @@ def counts(findings):
 # from it, so the process exit that gates the e2e post-condition can never disagree with the report:
 # findings win → non-zero; else an indeterminate dimension refuses a clean result; else coherent.
 _VERDICT_EXIT = {"findings": 1, "coherent": 0, "indeterminate": 2}
+# The human banner for each verdict. Kept in lockstep with _VERDICT_EXIT so the printed line NEVER
+# disagrees with the exit code (the nit this closes: an indeterminate scan — exit 2 — used to print
+# "COHERENT").
+_VERDICT_BANNER = {"coherent": "COHERENT", "findings": "findings", "indeterminate": "INDETERMINATE"}
 
 
 def verdict(findings, indeterminate):
@@ -770,7 +794,7 @@ def main():
             emit_json(findings, ctx, indeterminate)
         else:
             print_report(findings, ctx)
-            print("janitor: " + ("COHERENT" if not findings else "findings"))
+            print("janitor: " + _VERDICT_BANNER[verdict(findings, indeterminate)])
         sys.exit(_exit_code(findings, indeterminate))
 
     # --apply-safe: execute SAFE-FIX, re-scan, report the delta.
@@ -789,7 +813,9 @@ def main():
         applied_ok = sum(1 for (_f, ok, _n) in applied if ok)
         print(f"janitor: delta — {applied_ok} SAFE-FIX applied; {len(findings2)} findings remain")
         print_report(findings2, ctx2)
-        print("janitor: " + ("COHERENT" if not findings2 else "findings remain (RISKY/REPORT-ONLY need review)"))
+        v2 = verdict(findings2, indeterminate2)
+        print("janitor: " + ("findings remain (RISKY/REPORT-ONLY need review)"
+                             if v2 == "findings" else _VERDICT_BANNER[v2]))
     sys.exit(_exit_code(findings2, indeterminate2))
 
 

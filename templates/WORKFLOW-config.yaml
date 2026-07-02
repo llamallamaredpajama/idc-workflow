@@ -91,7 +91,7 @@ model_routing:
   codex:
     untiered: true
     note: highest available Codex model at highest reasoning effort for every role
-  overrides: {}
+  overrides:
     # Per-role tier pin for a single repo/role, mirroring the pi runtime's
     # PI_IDC_<ROLE>_MODEL / PI_IDC_MODEL precedence (per-role > umbrella > stock default;
     # skills/idc-adapter-pi/SKILL.md). Empty by default. Example:

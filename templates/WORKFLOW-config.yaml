@@ -41,6 +41,14 @@ documents:
 autorun:
   staffing_gate_threshold: 10   # sous chefs; > this ⇒ one launch-time cost gate, else fully autonomous
 
+# Janitor auto-safe knob — the ONE opt-in exception to autorun's report-only janitor preflight
+# (`agents/idc-autorun.md`, `commands/autorun.md`): absent by default (report-only; a misspelled
+# or malformed value also fails safe to report-only, never a silent auto-apply). When set exactly
+# to `auto-safe`, autorun's one-time janitor preflight passes `--apply-safe` to idc_git_janitor.py
+# instead of `--report` — SAFE-FIX tier only; RISKY and REPORT-ONLY are never auto-applied even
+# with this set. Absent (commented out) by default:
+# janitor: auto-safe
+
 # Standing domains for this repo — config-seeded at `/idc:init` from codebase analysis,
 # pruned to touched domains and ad-hoc-extended by each `/idc:plan` run, maintained by
 # the Recirculator. Each entry: a single-select Domain value, a one-line brief, and primary

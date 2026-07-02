@@ -57,22 +57,42 @@ domains: []
 # tier name; the runtime adapter resolves a tier to a concrete model HERE at spawn time.
 # The Recirculator updates this table when models change. The Codex runtime ignores tiers entirely
 # (untiered: highest available model at highest reasoning effort for every role).
+#
+# Model-escalation ladder (user's standing principle): deterministic wherever possible (rung 0 —
+# no model at all; the mechanical plumbing itself — atomic close, idc_git_finish.py's end-state
+# verify, idc_provenance_check.py, idc_emit_marker.py's serialization, an idc_gh_board.py board
+# read — runs as a script call, never a tier lookup) -> latest Sonnet for easy/mechanical work ->
+# Opus when something looks risky or questionable -> Fable only when truly stuck -> the human
+# last, as an information source ("what do you know that the board doesn't"), never a
+# rubber-stamp judge. Per-role overrides (`overrides:` below) mirror the pi runtime's
+# PI_IDC_<ROLE>_MODEL / PI_IDC_MODEL per-role-then-umbrella precedence
+# (skills/idc-adapter-pi/SKILL.md) so all three runtimes stay in parity.
 model_routing:
-  reasoning:
-    claude: { model: "claude-fable-5", thinking: max }
-    use: >-
-      planning cognition; the review coordinator/verdict + all judgment review dimensions;
-      recirculator layer-impact analysis + PRD diffs; clash/matrix + sequencing; merge deconfliction
-  standard:
-    claude: { model: "claude-opus-4-8", effort: extra-high }
-    use: >-
-      think/interview; build implementers (goal loops); the finisher/orchestrator; the
-      autorun parent
   utility:
     claude: { model: "claude-sonnet-4-6" }
     use: >-
       execute-never-decide: research digestion, repo reconnaissance, templated emission from
-      up-tier content, board mechanics, the schema check, the inventory review dimensions
+      up-tier content, board mechanics, the schema check, the inventory review dimensions.
+      The default for the LLM roles that orchestrate the deterministic plumbing above: tracker
+      ops, janitor triage, marker emission, board reads.
+  standard:
+    claude: { model: "claude-opus-4-8", effort: extra-high }
+    use: >-
+      think/interview; build implementers (goal loops); the finisher/orchestrator; the
+      autorun parent. Also the risk-flagged escalation target: a RISKY janitor-tier finding, a
+      recirc consultant on a cascade, and review escalations route here.
+  reasoning:
+    claude: { model: "claude-fable-5", thinking: max }
+    use: >-
+      planning cognition; the review coordinator/verdict + all judgment review dimensions;
+      recirculator layer-impact analysis + PRD diffs; clash/matrix + sequencing; merge
+      deconfliction. Reserved for genuinely stuck-state escalation (e.g. a recirc consultant
+      whose cascade analysis stalls at the Opus tier), never a blanket default.
   codex:
     untiered: true
     note: highest available Codex model at highest reasoning effort for every role
+  overrides: {}
+    # Per-role tier pin for a single repo/role, mirroring the pi runtime's
+    # PI_IDC_<ROLE>_MODEL / PI_IDC_MODEL precedence (per-role > umbrella > stock default;
+    # skills/idc-adapter-pi/SKILL.md). Empty by default. Example:
+    #   janitor_triage: standard   # escalate this repo's janitor triage to Opus

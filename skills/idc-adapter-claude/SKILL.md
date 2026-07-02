@@ -67,19 +67,25 @@ the cooks build, an **independent** review issues the verdict, and only then doe
 
 ## Model-tier resolution
 
-Read `WORKFLOW-config.yaml::model_routing`. For a spawn at tier `<tier>`, resolve
-`model_routing.<tier>.claude.model` and apply its `thinking` / `effort` hint. Process docs
-name only the tier; this skill resolves the concrete model. The Recirculator maintains the table when
-models change — never hardcode a model id in a command, agent, or non-adapter skill.
-`WORKFLOW-config.yaml` also carries the `gating:` requirements-gate toggle (`gating.prd` /
-`gating.trd`), but that is read by the gate predicate (`scripts/idc_recirculator_layers.py`) for
-Plan and the Recirculator — not by tier resolution.
+Read `WORKFLOW-config.yaml::model_routing`. Before resolving a role's default tier below, check
+`model_routing.overrides.<role>` for a per-role pin — mirrors the pi runtime's
+`PI_IDC_<ROLE>_MODEL` / `PI_IDC_MODEL` per-role-then-umbrella precedence (`idc:idc-adapter-pi`).
+Otherwise, for a spawn at tier `<tier>`, resolve `model_routing.<tier>.claude.model` and apply its
+`thinking` / `effort` hint. Process docs name only the tier; this skill resolves the concrete
+model. The Recirculator maintains the table when models change — never hardcode a model id in a
+command, agent, or non-adapter skill. `WORKFLOW-config.yaml` also carries the `gating:`
+requirements-gate toggle (`gating.prd` / `gating.trd`), but that is read by the gate predicate
+(`scripts/idc_recirculator_layers.py`) for Plan and the Recirculator — not by tier resolution.
+
+**Model-escalation ladder** — see `model_routing`'s header comment in `WORKFLOW-config.yaml` for
+the full principle (deterministic → Sonnet → Opus → Fable → human); the table below is this
+runtime's resolution of the three model-bearing rungs.
 
 | Tier | Resolves to (per config) | Applied to |
 |---|---|---|
-| `reasoning` | `model_routing.reasoning.claude` | planning cognition; review coordinator/verdict + judgment dimensions; recirculation analysis + PRD diffs; clash/matrix + sequencing; merge deconfliction |
-| `standard` | `model_routing.standard.claude` | think/interview; build implementers; finisher/orchestrator; autorun parent |
-| `utility` | `model_routing.utility.claude` | execute-never-decide: research digestion, recon, templated emission, board mechanics, the schema check, inventory review dimensions |
+| `utility` | `model_routing.utility.claude` | Sonnet, the mechanical default (tracker ops, janitor triage, marker emission, board reads) — execute-never-decide: research digestion, recon, templated emission, board mechanics, the schema check, inventory review dimensions |
+| `standard` | `model_routing.standard.claude` | Opus, incl. risk-flagged escalation (RISKY janitor findings, a recirc consultant on a cascade, review escalations) — think/interview; build implementers; finisher/orchestrator; autorun parent |
+| `reasoning` | `model_routing.reasoning.claude` | Fable, stuck-state escalation only — never a blanket default — planning cognition; review coordinator/verdict + judgment dimensions; recirculation analysis + PRD diffs; clash/matrix + sequencing; merge deconfliction |
 
 ## Authority boundaries
 

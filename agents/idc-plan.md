@@ -97,7 +97,16 @@ pillar-level *file* clashes among the surviving, de-duplicated pillars.
    (`idc:idc-goal-contract`), carrying the **exact** `pillars[].id` from the matrix entry just
    authored in Phase 4 (the same value written to the matrix YAML, so the link is deterministic at
    source — no fuzzy `Trace:` matching downstream). Filesystem trackers have no issue bodies, so
-   the stamp is github-only.
+   the stamp is github-only. **Provenance post-condition (github, DET-VERIFY):** once this run's
+   Buildables are minted, run
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_provenance_check.py" --matrix <phase-tag>-matrix.yaml --issues <n1,n2,...>`
+   — it re-reads each issue's LIVE body (not Plan's own belief of what it wrote) and confirms a
+   valid marker naming a pillar actually in the matrix just authored. **Exit 0** confirms every
+   minted Buildable is stamped; **exit 2 halts Plan** — it prints the offending issue numbers,
+   which Plan re-stamps (`comment`/body edit through the adapter) and re-checks before continuing
+   to step 3. Plan **cannot report Phase 5 done while this check fails** — a dropped stamp used to
+   silently disarm the Recirculator's provenance regime (`idc_recirc_sweep.py`); this converts that
+   gap from PROSE-ONLY to a verified post-condition.
 3. Advance the consideration pointer (`Consideration → Planning`, retired as buildable issues
    land); open the planning PR whose **body is the audit trail** (what was planned, the matrix,
    the trace) and **automerge when green, deleting the merged branch as part of the merge**:

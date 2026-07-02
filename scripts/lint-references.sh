@@ -21,9 +21,13 @@
 #   G. A bare `idc-<component>` mention that resolves to a real component must be namespaced
 #      `idc:idc-<component>` (catches un-namespaced skill/agent references in body text).
 #   I. No doubled namespace prefix `idc:idc:<x>` (the correct form is `idc:idc-<name>`).
-#   J. Every `/idc:<token>` slash command names one of the 9 real commands (typos and a slash
-#      pointed at a skill/agent — which Rule A's resolution check passes — are caught here).
+#   J. Every `/idc:<token>` slash command names one of the real commands, derived from
+#      commands/*.md so the count can't go stale as commands are added (typos and a slash pointed
+#      at a skill/agent — which Rule A's resolution check passes — are caught here).
 #   K. No `idc-` reference broken across a line break (Rule G is line-based and misses it).
+#   M. No closing keyword (Closes/Fixes/Resolves #N) wrapped in backticks — GitHub's auto-close
+#      parser only recognizes plain, unbackticked text, so a backtick-fenced keyword never
+#      populates `closingIssuesReferences` and merging the PR never closes the issue.
 #
 # Exit 0 = clean. Exit 1 = findings printed as <file>:<line>: <rule> <excerpt>.
 # Lines containing "lint-allow" are exempt for Rules B–K (use sparingly, with a reason);
@@ -57,6 +61,10 @@ PERSONAL_PATH_RE='~/\.claude/(agents|skills|commands|plugins)[A-Za-z0-9._/-]|/Us
 
 filtered_grep() { # pattern, file — grep -n minus lint-allow lines
   grep -nE -- "$1" "$2" 2>/dev/null | grep -v 'lint-allow' || true
+}
+
+filtered_grep_i() { # pattern, file — CASE-INSENSITIVE grep -n minus lint-allow lines
+  grep -inE -- "$1" "$2" 2>/dev/null | grep -v 'lint-allow' || true
 }
 
 # Real component names, for Rule G bare-ref detection.
@@ -142,9 +150,11 @@ for f in $MD_FILES; do
     report "$f:${hit%%:*}: [doubled-namespace] ${hit#*:}"
   done < <(filtered_grep 'idc:idc:' "$f")
 
-  # Rule J — a /idc:<token> slash command must name one of the 9 real commands. The [a-z]-anchored
-  # token deliberately skips placeholders (/idc:* , /idc:<cmd>); a surviving token that is not a
-  # command is a typo or a slash mistakenly pointed at a skill/agent.
+  # Rule J — a /idc:<token> slash command must name one of the real commands. `is_command()` checks
+  # against $COMMANDS, derived from `ls commands/*.md` above — never a hardcoded count, so this
+  # can't go stale as commands are added. The [a-z]-anchored token deliberately skips placeholders
+  # (/idc:* , /idc:<cmd>); a surviving token that is not a command is a typo or a slash mistakenly
+  # pointed at a skill/agent.
   while IFS= read -r hit; do
     [ -z "$hit" ] && continue
     lineno="${hit%%:*}"; line_txt="${hit#*:}"
@@ -163,6 +173,17 @@ for f in $MD_FILES; do
   done < <(awk '
     NR>1 && prev ~ /idc-[ \t]*$/ && prev !~ /lint-allow/ && $0 ~ /^[ \t]*[a-z0-9]/ { print prevno }
     { prev=$0; prevno=NR }' "$f")
+
+  # Rule M — a backtick-wrapped closing keyword (Closes/Fixes/Resolves #N, any tense GitHub
+  # recognizes) defeats GitHub's auto-close parser: closingIssuesReferences never populates, so
+  # merging the PR never closes the issue (the audit found this on every checked PR). Only the
+  # backtick-fenced form is a violation — plain unbackticked text is the correct, working form.
+  # GitHub's own keyword match is fully case-INsensitive (CLOSES / cLoSeS #5 both auto-close), so
+  # this uses filtered_grep_i rather than hand-bracketing every letter's case.
+  while IFS= read -r hit; do
+    [ -z "$hit" ] && continue
+    report "$f:${hit%%:*}: [backticked-closing-keyword] ${hit#*:}"
+  done < <(filtered_grep_i '`(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]+#[0-9]+`' "$f")
 done
 
 # Rule C (runtime/) — the vendored runtime tree ships to users but is not markdown and sits

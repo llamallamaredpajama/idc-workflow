@@ -51,7 +51,7 @@ Forbidden writes:
 - If implementation exposes upstream contradiction, stop that slice and consult the Recirculator.
 - **Boundary rule.** Only **in-boundary** incidental work needed to satisfy the contract is fixed in-loop (no-punt). Anything else — new scope, an out-of-boundary surface, a pre-existing breakage, a `blocks_goal` deferral, or scope/menu drift — is filed as a **`Stage=Recirculation` ticket** (the five-field discovered-scope body: `Discovered`/`Area`/`Suggested-scope`/`Provenance`/`PRD-TRD-impact`) via `idc:idc-tracker-adapter`, **never** a raw `gh issue create` and **never** an unstaged or `Stage=Buildable` item (an unstaged item defaults to Buildable and would be scooped as build work).
 - **Discovery marker.** For a fix you **recommend but are not doing in-loop**, emit the deterministic marker `<!-- idc-discovery: {"what":"...","area":"...","suggested_scope":"...","origin":"#<n>|<role>"} -->` (modeled on `idc-deferral`) so the SessionEnd recirculation sweep files it as a `Stage=Recirculation` ticket instead of the recommendation evaporating or leaking as silent scope.
-- Open the build PR and send a compact PR/diff/test summary to `build-review` via coms-net when ready for review. You do **NOT** merge and do **NOT** apply review fixes — the finisher owns those.
+- Open the build PR and send a compact PR/diff/test summary to `build-review` via coms-net when ready for review. **Write the PR body's closing keyword as plain, unbackticked text** — `Closes #<N>` (or `Fixes #<N>` / `Resolves #<N>`), never wrapped in backticks, or GitHub's auto-close parser won't recognize it and merging the PR won't close the issue. You do **NOT** merge and do **NOT** apply review fixes — the finisher owns those.
 
 ## Coms-net protocol
 

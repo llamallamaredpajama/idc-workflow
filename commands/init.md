@@ -236,6 +236,33 @@ adapter skill ships with the plugin, so this is the only install action):
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/install-pi.sh" "${CLAUDE_PLUGIN_ROOT}"
 ```
 
+## Phase 6c — Offer: enable delete-branch-on-merge (operator consent, surfaced not silent)
+The finisher merges each triplet's PR directly (`gh pr merge --squash --delete-branch`) and its
+own deterministic finish tail verifies the branch is actually gone — but if a session dies
+mid-finish before that tail runs, the branch can survive as debris for the janitor
+(`/idc:janitor`) to sweep up later. GitHub's own `deleteBranchOnMerge` repo setting is a
+platform-level backstop for that same case: it deletes a PR's source branch on **any** merge,
+including one done outside IDC entirely (e.g. a human merging in the web UI). Check the current
+setting and, if off, **offer** to flip it — **never flip it silently**:
+```bash
+gh repo view --json deleteBranchOnMerge --jq .deleteBranchOnMerge 2>/dev/null
+```
+- Already `true` → `skipped-existing`, no prompt.
+- `false` → **ask the operator's consent**: "Enable `deleteBranchOnMerge` on this repo? It
+  auto-deletes a PR's branch on any merge — a platform-level backstop for orphaned branches, on
+  top of IDC's own cleanup." On explicit **yes**:
+  ```bash
+  gh repo edit --delete-branch-on-merge
+  ```
+  → `enabled`. On **no**, or with no operator to ask (a headless/non-interactive run) → leave the
+  setting untouched → `declined`; never auto-enable.
+- The probe errors (no GitHub remote, or `gh` lacks repo-admin scope) → there is nothing to offer
+  consent over, so **do not prompt**; leave the setting untouched and report `n/a (probe failed:
+  <reason>)` — a distinct outcome from `declined`, never silently folded into it.
+
+This is the **only** repo-setting mutation `/idc:init` performs, and it never runs without that
+consent.
+
 ## Phase 7 — Write the install receipt
 After Phases 2–6 complete successfully, write `docs/workflow/install-receipt.yaml` — the
 manifest that `/idc:doctor` checks and a future uninstall/update consumes. Don't hand-roll the
@@ -280,8 +307,9 @@ receipt is byte-identical — report `skipped-existing`.
 ## Phase 8 — Summary
 Print a table of every target (`created` / `skipped-existing`), the receipt status, the
 board number + URL with the repo-link outcome (`linked` / `skipped-existing`) for github, or
-`TRACKER.md` (filesystem), and whether the Codex adapter was installed. End by suggesting
-`/idc:doctor`, and — if any scope/probe was skipped — name exactly what remains.
+`TRACKER.md` (filesystem), whether the Codex adapter was installed, and the
+`deleteBranchOnMerge` outcome (`enabled` / `declined` / `skipped-existing` / `n/a`). End by
+suggesting `/idc:doctor`, and — if any scope/probe was skipped — name exactly what remains.
 
 | Item | Status |
 |------|--------|

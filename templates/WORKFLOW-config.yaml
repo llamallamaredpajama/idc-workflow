@@ -46,6 +46,8 @@ autorun:
 # the Recirculator. Each entry: a single-select Domain value, a one-line brief, and primary
 # surfaces. Empty until `/idc:init` populates it.
 domains: []
+  # Manual population (skipping /idc:init's derivation): delete the `[]` above first, then
+  # uncomment — a list can't follow a same-line empty `[]`.
   # - name: api
   #   brief: HTTP surface + request handlers
   #   surfaces: [src/api/, src/handlers/]

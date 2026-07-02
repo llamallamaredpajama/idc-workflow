@@ -22,7 +22,8 @@ downstream external jq over this helper's stdout is safe too.
 Stdlib only (subprocess shells out to `gh`, like the sibling helpers).
 
 CLI:  idc_gh_board.py --owner <o> --project <n> [--repo <dir>]   → prints {"items":[...]} to stdout
-      (exit 0 = ok; exit 2 = any gh / parse failure, with a stderr diagnostic).
+      idc_gh_board.py --owner <o> --project <n> --emit-idmap      → prints the item-id map (below)
+      (exit 0 = ok; exit 2 = any gh / parse failure; exit 3 = rate-limited, with a stdout verdict).
 API:  fetch_items(owner, project_number, repo=".") -> list[dict]  (raises BoardReadError on failure).
 """
 import argparse
@@ -75,13 +76,101 @@ class BoardReadError(Exception):
     Callers that must fail-closed catch this; the CLI maps it to exit 2 with a stderr diagnostic."""
 
 
+class RateLimitError(BoardReadError):
+    """GitHub rate-limit exhaustion (GraphQL points / primary REST / secondary-abuse / 403-rate).
+
+    A SUBCLASS of BoardReadError on purpose: an unaware caller's `except BoardReadError` still
+    fail-closes (treats it as a hard error), while a rate-limit-aware caller (the autorun drain, Unit 4)
+    catches RateLimitError specifically and reads `.reset` to pause-and-resume instead of dropping work.
+    `reset` is the reset epoch from `gh api rate_limit` (or the literal 'unknown' if unreadable). The CLI
+    maps this to exit 3 + the machine-readable `rate-limited until <reset>` verdict (distinct from the
+    exit-2 hard-error path) — do NOT change that string/exit convention; downstream consumers pin it."""
+
+    def __init__(self, reset=None):
+        # Coerce a missing reset to 'unknown' HERE, once, so every caller just passes the raw value.
+        self.reset = reset if reset is not None else "unknown"
+        super().__init__(f"rate-limited until {self.reset}")
+
+
+# Rate-limit signatures in `gh` stderr (#99, design §C.3). Lowercased substring match — covers the
+# primary REST/GraphQL limit ("API rate limit exceeded"), the secondary/abuse limit ("secondary rate
+# limit"), the GraphQL error type (RATE_LIMITED), and older abuse-detection wording. A bare "403" is
+# deliberately NOT a marker: a 403 is only a rate-limit when paired with this wording (else it is a
+# permissions error → a hard failure). Detection must be SPECIFIC, not "any failure is a rate-limit".
+_RATE_LIMIT_MARKERS = (
+    "rate limit exceeded",
+    "secondary rate limit",
+    "exceeded a secondary rate",
+    "rate_limited",
+    "retry your request again later",
+)
+
+# Once-per-process latch for the preflight (below). Module-scoped so it runs a single free rate_limit
+# check per board-read process, not per `_gh` call.
+_PREFLIGHT_DONE = False
+
+
+def _is_rate_limit_stderr(text):
+    low = (text or "").lower()
+    return any(m in low for m in _RATE_LIMIT_MARKERS)
+
+
+def _rate_limit_info(repo):
+    """Best-effort `(remaining, reset)` for the relevant quota from `gh api rate_limit`.
+
+    RAW subprocess (NOT `_gh`) so it never re-enters the preflight / detection below. Returns None if gh
+    is missing, exits non-zero, or the payload is unparseable — the caller then does NOT block (fail-open
+    on an unknowable quota; reactive detection still guards the real call). Prefers the GraphQL resource
+    (IDC's heavy path) and falls back to core. `gh api rate_limit` does not itself consume quota."""
+    try:
+        p = subprocess.run(["gh", "api", "rate_limit"], cwd=repo, capture_output=True, text=True)
+    except (OSError, ValueError):
+        return None
+    if p.returncode != 0:
+        return None
+    try:
+        resources = (json.loads(p.stdout) or {}).get("resources") or {}
+    except json.JSONDecodeError:
+        return None
+    r = resources.get("graphql") or resources.get("core") or {}
+    remaining, reset = r.get("remaining"), r.get("reset")
+    if remaining is None and reset is None:
+        return None
+    return remaining, reset
+
+
+def _preflight_rate_limit(repo):
+    """Once per process, before the first real gh call: if the relevant quota is ALREADY exhausted, raise
+    RateLimitError up-front (a clean resumable pause) rather than fire a doomed query. Free (`gh api
+    rate_limit` consumes no quota) and best-effort — an unknowable quota never blocks."""
+    global _PREFLIGHT_DONE
+    if _PREFLIGHT_DONE:
+        return
+    _PREFLIGHT_DONE = True
+    info = _rate_limit_info(repo)
+    if info is None:
+        return
+    remaining, reset = info
+    if isinstance(remaining, int) and remaining <= 0:
+        raise RateLimitError(reset)
+
+
 def _gh(args, repo):
-    """Run `gh <args>` in `repo`; return stdout. Raise BoardReadError on missing gh or non-zero."""
+    """Run `gh <args>` in `repo`; return stdout. Raise on failure.
+
+    Rate-limit aware (#99, design §C.3): a once-per-process preflight fail-closes up-front on an already
+    exhausted quota, and a 403 / secondary-rate / RATE_LIMITED failure on the call becomes a
+    RateLimitError carrying the reset from `gh api rate_limit` — so a caller can pause-and-resume instead
+    of treating a resumable throttle as a hard error. Any OTHER non-zero exit is a hard BoardReadError."""
+    _preflight_rate_limit(repo)
     try:
         p = subprocess.run(["gh"] + args, cwd=repo, capture_output=True, text=True)
     except (OSError, ValueError) as e:
         raise BoardReadError(f"gh invocation failed: {e}")
     if p.returncode != 0:
+        if _is_rate_limit_stderr(p.stderr):
+            info = _rate_limit_info(repo)
+            raise RateLimitError(info[1] if info else None)
         raise BoardReadError(f"gh {' '.join(args[:2])} failed: {p.stderr.strip()[:200]}")
     return p.stdout
 
@@ -186,18 +275,51 @@ def fetch_items(owner, project_number, repo="."):
     return items
 
 
+def idmap_lines(items):
+    """Return `issue#<TAB>item_id` lines for every issue-backed item on the board.
+
+    The item-id cache the tracker recipe consumes via $IDC_ITEMID_CACHE (design §C.1, RC4a): ONE
+    wave-scoped board read feeds every later id lookup, replacing itemid()'s per-mutation whole-board
+    re-download (graphql-cost.md sink #1: ~120 board reads/wave → ~2). Draft items (no issue number)
+    are skipped; the item id (`PVTI_…`) is control-char-free, so a bare TAB-delimited table is safe and
+    trivially parsed by the recipe's `awk -F'\\t'` lookup. Emitted in board order (lookup is by key)."""
+    lines = []
+    for it in items:
+        num = (it.get("content") or {}).get("number")
+        iid = it.get("id")
+        if num is not None and iid:
+            lines.append(f"{num}\t{iid}")
+    return lines
+
+
+def emit_rate_limit_verdict(err):
+    """Print the pinned `rate-limited until <reset>` verdict and exit 3 (the resumable-pause convention
+    shared by every CLI that reads the board — do NOT change the string or the exit code; downstream
+    consumers, e.g. the autorun drain, pin them). Owned here so the two `main()`s never drift."""
+    sys.stdout.write(f"rate-limited until {err.reset}\n")
+    sys.exit(3)
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Read ALL items of a GitHub Projects v2 board (true cursor pagination).")
     ap.add_argument("--owner", required=True, help="project owner login (user or org)")
     ap.add_argument("--project", required=True, help="integer project number")
     ap.add_argument("--repo", default=".", help="repo dir to run gh in (default: cwd)")
+    ap.add_argument("--emit-idmap", action="store_true",
+                    help="emit a NUM<TAB>item_id table (one line per issue-backed item) from the single "
+                         "paginated read, for $IDC_ITEMID_CACHE — instead of the full {\"items\":[…]} JSON")
     args = ap.parse_args()
     try:
         items = fetch_items(args.owner, args.project, os.path.abspath(args.repo))
+    except RateLimitError as e:
+        emit_rate_limit_verdict(e)   # distinct resumable exit 3 + pinned verdict (see the helper)
     except BoardReadError as e:
         sys.stderr.write(f"idc-gh-board: {e}\n")
         sys.exit(2)
+    if args.emit_idmap:
+        sys.stdout.write("".join(f"{ln}\n" for ln in idmap_lines(items)))
+        sys.exit(0)
     json.dump({"items": items}, sys.stdout)
     sys.stdout.write("\n")
     sys.exit(0)

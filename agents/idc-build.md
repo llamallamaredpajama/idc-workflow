@@ -34,6 +34,25 @@ it is retained only as the acceptance gate's reporting scope (`--wave N`, Phase 
 
 ## Phase 1 — Dispatch the triplets (ready-frontier + area-packing)
 
+**Item-id cache (github backend, once per wave).** Before staffing the wave's triplets, on the github
+backend populate the wave-scoped item-id cache so every triplet's tracker mutation
+(`claim`/`setField`/`close` via `idc:idc-tracker-adapter`) resolves the board item id from **one** board
+read instead of re-downloading the whole board per mutation (design §C.1, RC4a — the O(waves×board) API
+sink). Resolve `OWNER`/`PROJ` as the `idc:idc-tracker-github` preamble does, emit the map to an
+orchestrator-scoped tempfile, and export it:
+
+```bash
+IDC_ITEMID_CACHE="$(mktemp -t idc-idmap.XXXXXX)"
+if python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gh_board.py" --owner "$OWNER" --project "$PROJ" \
+     --emit-idmap > "$IDC_ITEMID_CACHE"; then export IDC_ITEMID_CACHE
+else rm -f "$IDC_ITEMID_CACHE"; unset IDC_ITEMID_CACHE; fi   # read failed → fall back to live itemid reads
+```
+
+`itemid()` reads the cache when it is set; a cache **miss** (issue not in the table), an unset cache, or
+an empty file falls back to a live board read, so a stale or unpopulated cache never mutates with a blank
+id. Re-emit at the **top of each wave** (a fresh Plan mint changes the board). Filesystem-backend runs
+skip this — it is a github-only optimization, transparent to the backend-blind adapter.
+
 Dispatch one **triplet** per ready **area** — at most one in-flight worker per matrix-disjoint
 surface area, each a sous-chef owning a ready issue whose **file surface is free** — an implementer
 (`idc:idc-implementer`) feeding the reviewer feeding a finisher (`idc:idc-finisher`).

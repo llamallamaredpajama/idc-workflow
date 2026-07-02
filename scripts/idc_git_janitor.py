@@ -195,7 +195,12 @@ def local_branches(repo):
 
 
 def remote_branches(repo):
-    """origin/* short names (the trailing part after 'origin/'), skipping origin/HEAD."""
+    """origin/* short names (the trailing part after 'origin/'), skipping origin/HEAD.
+
+    NOTE these are the clone's LOCAL remote-tracking refs, which go STALE on an un-pruned clone: a
+    branch deleted on the server still shows here until `git fetch --prune`. Callers that act on remote
+    branches must intersect this with `ls_remote_heads` (the authoritative server state) so a phantom
+    tracking ref is never reported as live nor targeted by `git push --delete`."""
     out, rc = git(["for-each-ref", "--format=%(refname:short)", "refs/remotes/origin/"], repo)
     if rc != 0:
         return []
@@ -207,6 +212,23 @@ def remote_branches(repo):
         if ref.startswith("origin/"):
             names.append(ref[len("origin/"):])
     return names
+
+
+def ls_remote_heads(repo):
+    """The set of branch short names that ACTUALLY exist on `origin` right now — authoritative and
+    READ-ONLY (`git ls-remote` queries the server, never mutating a local ref, so it is safe in the
+    default report mode). ONE network call, not per-branch. Returns None if the remote can't be queried
+    (offline / no `origin`), so the caller fail-closes the remote-branch dimension rather than trust
+    possibly-stale local tracking refs."""
+    out, rc = git(["ls-remote", "--heads", "origin"], repo)
+    if rc != 0:
+        return None
+    heads = set()
+    for line in out.splitlines():
+        parts = line.split("\trefs/heads/", 1)   # each line: "<sha>\trefs/heads/<name>"
+        if len(parts) == 2 and parts[1].strip():
+            heads.add(parts[1].strip())
+    return heads
 
 
 # --- merged-PR + issue-state maps (github) ---------------------------------------------------------
@@ -366,6 +388,21 @@ def scan(ctx):
     indeterminate = ctx.get("board_indeterminate", False)
     locals_ = local_branches(repo)          # each git-shell-out done ONCE per scan; reused below
     remotes_ = remote_branches(repo)
+    # Truthfulness on an un-pruned clone: local origin/* tracking refs go stale, so intersect them with
+    # the AUTHORITATIVE server state (one read-only `git ls-remote`) before classifying/acting. Without
+    # this, a branch already deleted on the server shows as a phantom remote finding, and --apply-safe's
+    # `git push --delete` then fails on it. If the remote can't be queried (offline), we cannot verify
+    # remote truth → drop the remote-branch dimension for this pass AND mark indeterminate (never report
+    # an unverifiable phantom as live debris, and never a hollow clean).
+    if remotes_:
+        live = ls_remote_heads(repo)
+        if live is not None:
+            remotes_ = [b for b in remotes_ if b in live]
+        else:
+            sys.stderr.write("idc-git-janitor: `git ls-remote` failed — remote-branch state "
+                             "unverifiable this pass; skipping that dimension (indeterminate)\n")
+            remotes_ = []
+            indeterminate = True
 
     # merged-branch predicate, backend-appropriate. Memoized on (short, remote): the branch scans and
     # the filesystem coherence loop query the same branches, so a cache collapses the repeats to zero

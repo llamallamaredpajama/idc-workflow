@@ -16,6 +16,9 @@
 #   * a foreign (non-IDC) branch, EVEN IF merged → REPORT-ONLY, never SAFE-FIX.
 #   * a PHANTOM remote tracking ref (a branch deleted on the server but lingering in an un-pruned clone)
 #     → NOT reported as a live remote branch, and --apply-safe never tries to `git push --delete` it.
+#   * a SERVER-RECREATED remote branch (name reused at a NEW live commit; clone tracking ref stale @old)
+#     → classified off the SERVER tip → RISKY, never SAFE-FIX; --apply-safe never deletes the live branch.
+#   * an INDETERMINATE scan (exit 2) prints "INDETERMINATE", never "COHERENT".
 #   * `--apply-safe` clears ONLY the SAFE-FIX tier (worktree removed, local+remote branch deleted, board
 #     closed) and re-scan reports the delta; the dirty worktree + unmerged branch + foreign branch are
 #     NOT touched (the (b) red-when-broken: an apply that reached RISKY/REPORT-ONLY flips these).
@@ -94,6 +97,23 @@ git -C "$O" update-ref -d refs/heads/worktree-build-phantom   # delete on the SE
 gitc show-ref --verify --quiet refs/remotes/origin/worktree-build-phantom \
   || fail "test setup: expected a stale origin/worktree-build-phantom tracking ref (un-pruned clone)"
 
+# SERVER-RECREATED (reused name, NEW live commits) fixture — the deletion-safety corner. A merged branch
+# pushed to origin, then on the SERVER the name is deleted and RE-CREATED at a NEW live commit, while the
+# clone's tracking ref stays at the OLD (merged) tip (un-pruned). Name-only + stale-local-tip logic would
+# call it SAFE-FIX (old tip is merged) and --apply-safe would `git push --delete` the LIVE branch. The
+# SERVER tip is the truth → it must be RISKY, never SAFE-FIX, never deleted.
+mkbranch worktree-build-recreated                              # OLD commit, merged into main
+old_recreated=$(gitc rev-parse worktree-build-recreated)
+gitc push -q origin worktree-build-recreated                  # origin@OLD; clone tracking ref @OLD
+gitc branch -D worktree-build-recreated                       # drop the LOCAL branch (isolate the remote)
+gitc checkout -q -b recreate-src main                         # a NEW, UNMERGED commit (live work)
+printf newlive > "$R/recreated.txt"; gitc add -A; gitc commit -qm "recreated live work"
+gitc push -qf origin recreate-src:worktree-build-recreated    # server ref now @NEW (force: not a fast-forward)
+gitc checkout -q main; gitc branch -D recreate-src            # drop the local side branch (no extra findings)
+gitc update-ref refs/remotes/origin/worktree-build-recreated "$old_recreated"  # SIMULATE the stale clone tracking ref (@OLD)
+[ "$(gitc rev-parse refs/remotes/origin/worktree-build-recreated)" = "$old_recreated" ] \
+  || fail "test setup: expected stale origin/worktree-build-recreated @OLD (server is @NEW)"
+
 # ---- REPORT: assert each tier (red-when-broken contrast structure) --------------------------------
 rep="$(python3 "$JAN" --repo "$R" --tracker "$R/TRACKER.md")"; rc=$?
 [ "$rc" -eq 1 ] || fail "a repo with debris must exit 1 (got $rc)" "$rep"
@@ -108,6 +128,11 @@ has  'SAFE-FIX remote-branch worktree-build-legacy'   # merged remote branch sur
 # (not as a live remote branch, not anywhere). Red-when-broken: without the ls-remote intersection, the
 # phantom origin/worktree-build-phantom is classified SAFE-FIX remote-branch (its tip is an ancestor of main).
 hasnt 'worktree-build-phantom'
+# SERVER-RECREATED — the tip-match must run against the SERVER tip (@NEW), not the stale clone tracking
+# ref (@OLD). @NEW is not merged → RISKY, never SAFE-FIX. Red-when-broken: using the stale local tip
+# (@OLD, merged) classifies it SAFE-FIX remote-branch → the two assertions below flip.
+has  'RISKY remote-branch worktree-build-recreated'
+hasnt 'SAFE-FIX (branch|remote-branch) worktree-build-recreated'
 has  'SAFE-FIX worktree .*wt-clean'                   # clean merged worktree
 has  'SAFE-FIX board #1'                              # Done-but-open analog (Todo + merged branch)
 has  'RISKY worktree .*wt-dirty'                      # dirty worktree
@@ -144,6 +169,10 @@ gitc show-ref --verify --quiet refs/remotes/origin/worktree-build-legacy && fail
 [ "$(python3 "$TRK" --tracker "$R/TRACKER.md" show --num 1 --field Status)" = "Done" ] || fail "SAFE-FIX board #1 was not set to Done" "$app"
 # apply-safe must never have TOUCHED the phantom remote branch (no doomed `git push --delete`).
 printf '%s\n' "$app" | grep -q 'worktree-build-phantom' && fail "apply-safe touched the phantom remote branch (should be filtered by ls-remote)" "$app"
+# SERVER-RECREATED: the LIVE re-created branch must SURVIVE on the server — apply-safe classified it RISKY,
+# so it was never `git push --delete`d. Red-when-broken (stale-local-tip logic): it'd be SAFE-FIX and deleted.
+git -C "$O" show-ref --verify --quiet refs/heads/worktree-build-recreated \
+  || fail "apply-safe DELETED the live server-recreated branch (deletion-safety regression)" "$app"
 
 # (b) RED-WHEN-BROKEN: RISKY + REPORT-ONLY were NOT touched. If apply-safe ever reaches those tiers,
 # these assertions flip.
@@ -169,6 +198,23 @@ python3 "$JAN" --repo "$R" --tracker "$WORK/corrupt.md" >/dev/null 2>&1
 # a non-git directory → exit 2 (cannot establish git ground truth).
 python3 "$JAN" --repo "$WORK" --tracker "$R/TRACKER.md" >/dev/null 2>&1
 [ $? -eq 2 ] || fail "a non-git repo must exit 2 (cannot establish ground truth)"
+
+# ---- BANNER NIT: an INDETERMINATE scan (exit 2) must print INDETERMINATE, never COHERENT -----------
+# A clean repo whose remote can't be queried (ls-remote fails) has NO findings but IS indeterminate →
+# exit 2. The stdout banner must say INDETERMINATE (the nit: it used to say COHERENT). Fresh clean repo,
+# a tracking ref present, then the origin removed so ls-remote fails.
+R2="$WORK/repo2"; O2="$WORK/origin2.git"
+git init -q -b main "$O2" --bare && git init -q -b main "$R2"
+git -C "$R2" config user.email t@t.t; git -C "$R2" config user.name t
+git -C "$R2" remote add origin "$O2"
+printf base > "$R2/b.txt"; git -C "$R2" add -A; git -C "$R2" commit -qm base
+git -C "$R2" push -q -u origin main                # creates the origin/main tracking ref
+python3 "$TRK" --tracker "$R2/TRACKER.md" init >/dev/null
+rm -rf "$O2"                                        # break the remote → ls-remote now FAILS
+bnr="$(python3 "$JAN" --repo "$R2" --tracker "$R2/TRACKER.md")"; brc=$?
+[ "$brc" -eq 2 ] || fail "an unverifiable remote with no findings must exit 2 (fail-closed), got $brc" "$bnr"
+printf '%s\n' "$bnr" | grep -qE '^janitor: INDETERMINATE$' || fail "indeterminate banner must say INDETERMINATE (the nit)" "$bnr"
+printf '%s\n' "$bnr" | grep -qE 'COHERENT' && fail "an indeterminate scan must NOT print COHERENT (the nit)" "$bnr"
 
 # ---- github-only fixes: pure decision predicates + a fail-closed board-read (unit-tested here because
 #      the hermetic repo is filesystem-backed — no live gh). Each case is red-when-broken. ----------------
@@ -216,4 +262,4 @@ except SystemExit as e:
 print("github-only unit tests: all pass")
 PY
 
-echo "PASS: idc_git_janitor reconciles board↔git over a real hermetic repo — clean repo exits 0; merged branches (local+remote) + clean merged worktree + Status≠Done-with-merged-branch classified SAFE-FIX; dirty worktree + unmerged branch RISKY; foreign branch REPORT-ONLY even when merged; 'buildbot' (no build[-/] separator) + foreign 'xbuild-3' are non-IDC and never drive a fix or a board mutation; a phantom (server-deleted) remote tracking ref on an un-pruned clone is filtered by ls-remote — never reported live, never push --delete'd; --apply-safe clears ONLY SAFE-FIX (RISKY/REPORT-ONLY untouched) + reports the delta; unreadable/corrupt board + non-git dir fail-closed to exit 2; github-only predicates unit-tested (pr_signal_ok tip-match guard, board_coherence_verdict not-planned gate, read_at_cap, unexpected-board-read-crash → exit 2)"
+echo "PASS: idc_git_janitor reconciles board↔git over a real hermetic repo — clean repo exits 0; merged branches (local+remote) + clean merged worktree + Status≠Done-with-merged-branch classified SAFE-FIX; dirty worktree + unmerged branch RISKY; foreign branch REPORT-ONLY even when merged; 'buildbot' (no build[-/] separator) + foreign 'xbuild-3' are non-IDC and never drive a fix or a board mutation; a phantom (server-deleted) remote tracking ref on an un-pruned clone is filtered by ls-remote — never reported live, never push --delete'd; a server-recreated branch (name reused at a NEW live commit) is judged off the SERVER tip → RISKY, never deleted; an indeterminate scan prints INDETERMINATE (not COHERENT); --apply-safe clears ONLY SAFE-FIX (RISKY/REPORT-ONLY untouched) + reports the delta; unreadable/corrupt board + non-git dir fail-closed to exit 2; github-only predicates unit-tested (pr_signal_ok tip-match guard, board_coherence_verdict not-planned gate, read_at_cap, unexpected-board-read-crash → exit 2)"

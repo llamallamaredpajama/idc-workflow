@@ -13,6 +13,34 @@ whole repo.
 Autorun is **full-pipeline autonomy that pauses only at human gates**: it **never forces** a gate — a gate-worthy item just **pauses behind its gate** (reported + skipped), exactly like an `[operator-action]` gate issue.
 It drains the pipe in one fixed top-to-bottom order — **recirculate** the Recirculation inbox, then **plan** approved considerations, then **drain** the Buildable waves — and exits when nothing actionable remains.
 
+**Janitor preflight** — run ONCE, before the drain loop below begins (not on every re-loop pass:
+board↔git debris left by a dead or interrupted **prior** session doesn't regenerate mid-run just
+because the pipe loops back, unlike the rogue-sweep backstop below, which specifically catches a
+**new** rogue item a build triplet can create *during this run* — and a fresh full board read on
+every pass would double the GraphQL cost the rate-limit handling below exists to respect). The
+deterministic board↔git reconciler (`idc_git_janitor.py`, `/idc:janitor`'s scanner) surfaces debris
+up front, before any new build work — not only when the operator remembers to run `/idc:janitor` by
+hand:
+```bash
+# filesystem
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_janitor.py" --repo "$PWD" --tracker "$PWD/TRACKER.md" --report
+# github
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_janitor.py" --repo "$PWD" --backend github --owner <o> --project <n> --report
+```
+**Report-only by default** — autorun never applies a fix on its own initiative. The **one** opt-in
+exception is the operator-set `janitor: auto-safe` knob in `WORKFLOW-config.yaml`: when present,
+add `--apply-safe` to the SAME call above instead of `--report` — never a silent auto-apply, always
+traceable to an explicit operator setting. `--apply-safe` only ever touches the **SAFE-FIX** tier
+(the scanner's own contract). Relay every finding in the exit report as **advisory** — **RISKY and
+REPORT-ONLY stay so even with the knob set**, never auto-applied — never a halt, never a reason to
+self-narrow the drain.
+**Read the scanner's exit code, not just its findings list.** Exit 0 (COHERENT) or 1 (findings) both
+report normally. Exit **2** means the scanner could not establish ground truth — an unreadable board,
+a failed git op, **or a capped/possibly-partial read that hit its own `--limit` ceiling** — and is
+**indeterminate**, never a hollow clean: surface it as such in the exit report and do **not** proceed
+as if the repo were COHERENT (a capped read with findings still exits 1, carrying its own stderr
+caveat — only a capped read that would otherwise report zero findings forces exit 2).
+
 Traverse the pipe top-to-bottom and **re-loop to a fixpoint** — because a build triplet can file a
 new Recirculation ticket mid-drain, re-run the whole pipe after the Buildable waves drain and exit
 only when a full pass leaves nothing actionable:
@@ -51,7 +79,11 @@ only when a full pass leaves nothing actionable:
    ```
    Both apply the identical eligibility predicate (`Status = Todo` AND `(stage or "Buildable") ==
    "Buildable"` AND title not `[operator-action]` AND every native blocked-by `Done`); an
-   empty/missing `Stage` reads as `Buildable` (the legacy 4-field default).
+   empty/missing `Stage` reads as `Buildable` (the legacy 4-field default). On the github backend,
+   `idc:idc-build`'s own dispatch (Phase 1) mints + hands off the `IDC_ITEMID_CACHE` item-id cache
+   once per wave for every tracker mutation that wave's triplets perform (design §C.1, RC4a, #98) —
+   the drain this loop dispatches into benefits from that cost fix automatically; nothing further to
+   wire here.
 5. **Re-loop to a fixpoint, then exit.** The pipe is **not one-shot** — a build triplet can surface a
    recirc event and file a **new `Stage = Recirculation` ticket mid-drain** (Build's larger loop,
    `idc:idc-build` Phase 1b), which is *upstream* of the build lane. So after the build lane drains,
@@ -69,10 +101,21 @@ only when a full pass leaves nothing actionable:
    `cascade-depth:D` counts they read are maintained** — the recirc consultant is the designated
    owner that bumps them (`idc:idc-build` Phase 1b) — backstopped by **natural drain** (closed issues
    leave the frontier) and the **outer /loop** that re-checks live board state each pass.
-   **Any non-zero drain exit is NOT `complete` — do not exit on it.** That covers both `drain: unknown`
-   (the board read succeeded but a build candidate's blocked-by lookup could not be verified) and a
-   hard board-read failure (exit 2, no `drain:` line). Treat the lane as possibly-unfinished and let the
-   next `/loop` iteration re-check; never report the run drained on a non-zero drain exit.
+   **Any non-zero drain exit is NOT `complete` — do not exit on it.** That covers `drain: unknown`
+   (the board read succeeded but a build candidate's blocked-by lookup could not be verified), a
+   hard board-read failure (exit 2, no `drain:` line), and `drain: rate-limited until <reset>` (exit
+   3, github only, #99 §C.3). Treat the lane as possibly-unfinished and let the next `/loop`
+   iteration re-check; never report the run drained on a non-zero drain exit.
+   A **`rate-limited until <reset>` verdict is a THIRD, distinct case** — not a hard error, not
+   nothing-actionable: GitHub's GraphQL quota is exhausted and will reset on its own. Treat it as a
+   **deliberate, resumable pause**: never silently drop the tail wave, never report the run drained,
+   never busy-retry before `<reset>`. `/loop` re-checks next `/loop` iteration — once past
+   `<reset>` the same drain call succeeds again and the lane resumes exactly where it left off (the
+   board is the source of truth; nothing is lost by waiting). Any triplet that was mid-finish when
+   the quota ran out is not orphaned either: before treating it as still in flight, the next `/loop`
+   iteration's `idc:idc-build` re-verifies its **end-state** via `idc_git_finish.py` (PR merged,
+   branches gone, worktree gone, Status=Done) — so a finish that actually completed during the
+   outage is never re-attempted.
    Emit the exit report: recirculated, planned, admitted, built/merged, board state, the
    **final working-tree state from a post-build `git status --porcelain`** (run it at exit, never a
    start-of-run snapshot — the build lane writes files mid-run, so a stale snapshot under-counts any

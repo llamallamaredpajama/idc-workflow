@@ -19,11 +19,16 @@ Eligible build work = an issue that is:
   * has every native blocked-by upstream `Done`.
 
 Prints the eligible issue numbers and a verdict: `drain: continue` (work remains), `drain: complete`
-(nothing actionable left — exit), or `drain: unknown` + exit 2 (the github board read SUCCEEDED but
+(nothing actionable left — exit), `drain: unknown` + exit 2 (the github board read SUCCEEDED but
 NO eligible work remains AND ≥1 build candidate's blocked-by lookup was unverifiable, so the lane
 cannot be proven drained — autorun must NOT treat this as `complete`/terminal, the silent blind-drain
-this guards; it retries next `/loop`). The planning lane (unplanned considerations) is scanned by the
-orchestrator from the filesystem; this helper covers the build lane / board-exit half.
+this guards; it retries next `/loop`), or `drain: rate-limited until <reset>` + exit 3 (github only,
+#99 §C.3 — the board read hit `idc_gh_board`'s `RateLimitError`: GitHub's GraphQL quota is exhausted,
+NOT a hard failure and NOT nothing-actionable. A DISTINCT signal from both `drain: unknown` and a
+hard board-read failure so autorun treats it as a deliberate, resumable pause — never a silent drop,
+never `complete` — and re-checks the SAME still-actionable lane next `/loop`, once past `<reset>`).
+The planning lane (unplanned considerations) is scanned by the orchestrator from the filesystem;
+this helper covers the build lane / board-exit half.
 
 With `--width`, one extra line reports the ready frontier's width:
   width: <N>     (the cardinality of the `eligible:` set already printed above)
@@ -44,7 +49,7 @@ Backends (the SAME pure predicate over either source — `compute_eligible`):
 
 Usage: idc_autorun_drain.py --tracker <TRACKER.md> [--width]                       (filesystem)
        idc_autorun_drain.py --backend github --project <n> --owner <o> [--width]   (github)
-       (exit 0 = ok, 2 = error)
+       (exit 0 = ok, 2 = error/unknown, 3 = rate-limited — resumable pause, github only)
 """
 import argparse
 import json
@@ -177,11 +182,24 @@ def load_github(owner, project_number, repo):
     (an unresolvable sentinel blocker) so it is excluded this pass, never claimed unverified — AND is
     tallied into `unverified` so the AGGREGATE verdict (main) can refuse a false `drain: complete` when
     nothing is eligible only because every candidate's blockers were unverifiable. Exits 2 on an
-    unreadable board (fail-closed, never a hollow empty drain)."""
+    unreadable board (fail-closed, never a hollow empty drain), or 3 on a RATE-LIMITED board read (see
+    below) — never a hollow empty drain, and never conflated with a hard failure either."""
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import idc_gh_board  # noqa: E402 — github-only dependency, imported lazily
     try:
         items = idc_gh_board.fetch_items(owner, project_number, repo)
+    except idc_gh_board.RateLimitError as e:
+        # Resumable pause (#99, design §C.3) — CAUGHT BEFORE the generic BoardReadError branch below
+        # (RateLimitError is a subclass; order matters). A DISTINCT verdict from both `drain: unknown`
+        # and a hard board-read failure: GitHub's GraphQL quota is exhausted, not broken, so autorun's
+        # `/loop` must pause and re-check the SAME lane next iteration rather than silently drop the
+        # tail wave or report the run drained. Exit 3 mirrors idc_gh_board's own rate-limit exit code
+        # (0 ok / 2 hard-error-or-unknown / 3 rate-limited) so the convention stays consistent across
+        # every github-backend helper. NOT `idc_gh_board.emit_rate_limit_verdict` — that verdict is the
+        # bare 'rate-limited until <reset>' with no `drain:` prefix; this predicate's other verdicts
+        # (`drain: continue`/`complete`/`unknown`) all carry one, and downstream `/loop` parsing pins it.
+        print(f"drain: rate-limited until {e.reset}")
+        sys.exit(3)
     except idc_gh_board.BoardReadError as e:
         sys.stderr.write(f"idc-autorun-drain: could not read the github board: {e}\n")
         sys.exit(2)

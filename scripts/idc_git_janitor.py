@@ -59,9 +59,11 @@ import subprocess
 import sys
 
 # --- attribution -----------------------------------------------------------------------------------
-# IDC-attributable branch/worktree naming (the design's exact list). Anchored: a foreign name that
-# merely CONTAINS one of these tokens (e.g. `my-build`) is not IDC. `build` covers build/ build- build.
-IDC_NAME_RE = re.compile(r"^(idc-|build|plan/|recirculate/|worktree-)")
+# IDC-attributable branch/worktree naming (the design's exact list). Anchored at the START, and `build`
+# REQUIRES a `-`/`/` separator (`build-*`/`build/*`) so a foreign name that merely starts with the
+# letters "build" — buildbot, buildkite, builder-x — is NOT misread as IDC. (`worktree-build-*` is still
+# covered by the `worktree-` alternative.)
+IDC_NAME_RE = re.compile(r"^(idc-|build[-/]|plan/|recirculate/|worktree-)")
 # Known non-IDC tooling, labelled for a readable REPORT-ONLY line (the tier is binary IDC/not — this
 # only annotates WHICH foreign tool, so the operator can route it; an unmatched foreign name is "unknown").
 FOREIGN_TOOLS = (
@@ -136,6 +138,20 @@ def is_ancestor(repo, ref, base):
     return rc == 0
 
 
+def tip_sha(repo, ref):
+    """The full commit SHA `ref` points at, or "" if the ref does not resolve."""
+    out, rc = git(["rev-parse", "--verify", "--quiet", ref], repo)
+    return out.strip() if rc == 0 else ""
+
+
+def pr_signal_ok(pr_oid, tip):
+    """Is the merged-PR name signal SAFE to treat as merged? ONLY when the branch's tip STILL equals
+    the PR's merged head commit (`pr_oid`). A reused name pointing at DIVERGENT commits — or an
+    unresolvable oid/tip — is NOT a safe merge signal (else --apply-safe would force-delete live work);
+    the caller then falls back to ancestry, and a divergent tip fails that too → the branch is RISKY."""
+    return bool(pr_oid and tip and pr_oid == tip)
+
+
 def list_worktrees(repo):
     """Parse `git worktree list --porcelain` into ordered blocks. The FIRST block is always the main
     worktree (git guarantees this regardless of cwd); callers skip it."""
@@ -208,31 +224,82 @@ def gh_json(args, repo):
         return None, False
 
 
+# `gh <list> --limit N` is a hard CEILING, not a "fetch all" — a read that returns exactly N items may
+# be TRUNCATED. So a result AT the cap makes that dimension possibly-partial → indeterminate (fail-closed).
+PR_LIST_LIMIT = 1000
+ISSUE_LIST_LIMIT = 2000
+
+
+def read_at_cap(n, limit):
+    """True iff a list read returned >= its --limit — so it may be truncated (partial) and the caller
+    must treat the derived maps as indeterminate rather than silently trust a possibly-partial board."""
+    return n >= limit
+
+
+def board_coherence_verdict(status, state, reason, closed_by_pr):
+    """PURE github board↔issue coherence decision (unit-tested). Returns (tier, op, detail) or None.
+
+    A Done-stamping fix requires the issue to be genuinely COMPLETED — a merged PR closed it, OR it was
+    closed with stateReason COMPLETED. An issue closed as NOT_PLANNED (abandoned/won't-do) must NEVER be
+    stamped Status=Done — that is a RISKY manual reconcile, not a SAFE-FIX. `state`/`reason` are
+    upper-cased ("OPEN"/"CLOSED", "COMPLETED"/"NOT_PLANNED"/""); `closed_by_pr` = a merged PR closed it."""
+    if status == "Done" and state == "OPEN":
+        return (SAFE_FIX, "close-issue", "Status=Done but the issue is still OPEN")
+    if status != "Done":
+        if closed_by_pr:
+            return (SAFE_FIX, "set-done", f"Status={status or 'unset'} but a merged PR closed it")
+        if state == "CLOSED":
+            if reason == "COMPLETED":
+                return (SAFE_FIX, "set-done", f"Status={status or 'unset'} but the issue is CLOSED as completed")
+            return (RISKY, "reconcile",
+                    f"Status={status or 'unset'} but the issue is CLOSED as "
+                    f"{reason.lower() or 'unspecified'} (not completed)")
+    return None
+
+
 def github_merge_maps(repo):
-    """(merged_head_refs, closed_issue_nums, issue_state, ok). merged_head_refs = branch names of
-    merged PRs; closed_issue_nums = issues those merged PRs close; issue_state = {n: OPEN/CLOSED}.
-    ok is False if EITHER read failed (→ the coherence + github-merged dimensions are indeterminate)."""
+    """Build the github merge/issue maps in TWO bulk reads. Returns a dict:
+      merged_refs   {branch name of a merged PR}
+      merged_oids   {head ref name → the PR's merged head commit SHA} (the tip-match guard)
+      closed_issues {issue# a merged PR closes}
+      issue_state   {issue# → OPEN/CLOSED}
+      issue_reason  {issue# → COMPLETED/NOT_PLANNED/…} (the Done-stamping gate)
+      ok            both reads succeeded
+      capped        a read hit its --limit ceiling (possibly partial)
+      indeterminate a read failed OR was capped → the coherence/github-merged dimensions can't be fully
+                    established this pass (the caller refuses a clean verdict — never a hollow clean)."""
     prs, ok1 = gh_json(
-        ["pr", "list", "--state", "merged", "--limit", "1000",
-         "--json", "number,headRefName,closingIssuesReferences"], repo)
+        ["pr", "list", "--state", "merged", "--limit", str(PR_LIST_LIMIT),
+         "--json", "number,headRefName,headRefOid,closingIssuesReferences"], repo)
     issues, ok2 = gh_json(
-        ["issue", "list", "--state", "all", "--limit", "2000", "--json", "number,state"], repo)
-    merged_refs, closed_issues, states = set(), set(), {}
+        ["issue", "list", "--state", "all", "--limit", str(ISSUE_LIST_LIMIT),
+         "--json", "number,state,stateReason"], repo)
+    merged_refs, merged_oids, closed_issues, states, reasons = set(), {}, set(), {}, {}
+    capped = False
     if ok1 and isinstance(prs, list):
+        capped = capped or read_at_cap(len(prs), PR_LIST_LIMIT)
         for pr in prs:
             ref = pr.get("headRefName")
             if ref:
                 merged_refs.add(ref)
+                oid = pr.get("headRefOid")
+                if oid:
+                    merged_oids[ref] = oid
             for c in (pr.get("closingIssuesReferences") or []):
                 n = c.get("number")
                 if isinstance(n, int):
                     closed_issues.add(n)
     if ok2 and isinstance(issues, list):
+        capped = capped or read_at_cap(len(issues), ISSUE_LIST_LIMIT)
         for it in issues:
             n = it.get("number")
             if isinstance(n, int):
                 states[n] = (it.get("state") or "").upper()
-    return merged_refs, closed_issues, states, (ok1 and ok2)
+                reasons[n] = (it.get("stateReason") or "").upper()
+    ok = ok1 and ok2
+    return {"merged_refs": merged_refs, "merged_oids": merged_oids, "closed_issues": closed_issues,
+            "issue_state": states, "issue_reason": reasons, "ok": ok, "capped": capped,
+            "indeterminate": (not ok) or capped}
 
 
 # --- board loaders ---------------------------------------------------------------------------------
@@ -245,6 +312,11 @@ def load_board_github(owner, project, repo):
         items = idc_gh_board.fetch_items(owner, project, repo)
     except idc_gh_board.BoardReadError as e:
         sys.stderr.write(f"idc-git-janitor: could not read the github board: {e}\n")
+        sys.exit(2)
+    except Exception as e:  # noqa: BLE001 — ANY unexpected board-read failure fail-CLOSES to exit 2
+        # An uncaught exception would exit 1 (== our "findings" code) with a traceback, masquerading a
+        # crash as a clean-ish result. Fail-closed: exit 2, never a hollow clean or a false "findings".
+        sys.stderr.write(f"idc-git-janitor: unexpected error reading the github board: {e}\n")
         sys.exit(2)
     board = []
     for it in items:
@@ -300,6 +372,7 @@ def scan(ctx):
     # extra git calls. `origin_default_ref` is the origin/<default> ref (or None) resolved ONCE in
     # build_ctx — hoisted out so its `git rev-parse --verify` doesn't re-run per call.
     merged_refs = ctx.get("merged_refs", set())
+    merged_oids = ctx.get("merged_oids", {})
     origin_default_ref = ctx.get("origin_default_ref")
     _merged_cache = {}
 
@@ -307,13 +380,15 @@ def scan(ctx):
         key = (short, remote)
         if key in _merged_cache:
             return _merged_cache[key]
-        # The merged-PR head-ref set is the authoritative, zero-cost github signal — check it BEFORE any
-        # git subprocess (merged branches are exactly the debris this tool targets, so this is the common
-        # path). Off github `merged_refs` is empty, so this simply falls through to ancestry.
-        if short in merged_refs:
+        ref = ("refs/remotes/origin/" + short) if remote else ("refs/heads/" + short)
+        # The merged-PR head-ref set is the authoritative github signal — but ONLY if the branch's tip
+        # STILL equals the PR's merged head commit (pr_signal_ok). A name reused for divergent new work
+        # must NOT read as merged (else --apply-safe force-deletes live commits); it falls through to
+        # ancestry, which a divergent tip fails → RISKY, never force-deleted. Off github merged_refs is
+        # empty, so this is skipped and we go straight to ancestry.
+        if short in merged_refs and pr_signal_ok(merged_oids.get(short), tip_sha(repo, ref)):
             res = (True, "pr")
         else:
-            ref = ("refs/remotes/origin/" + short) if remote else ("refs/heads/" + short)
             anc = is_ancestor(repo, ref, default)               # local default contains it?
             if not anc and origin_default_ref:
                 anc = is_ancestor(repo, ref, origin_default_ref)  # …or origin/default does
@@ -395,19 +470,25 @@ def scan(ctx):
     if backend == "github":
         closed_issues = ctx.get("closed_issues", set())
         issue_state = ctx.get("issue_state", {})
+        issue_reason = ctx.get("issue_reason", {})
         stages_present = any(bi.get("stage") for bi in board)
         for bi in board:
             n, status, stage = bi["number"], bi.get("status"), bi.get("stage")
-            state = issue_state.get(n)
-            if status == "Done" and state == "OPEN":
-                findings.append(finding(
-                    SAFE_FIX, "board", f"#{n}", "Status=Done but the issue is still OPEN",
-                    "close the issue (gh issue close)", number=n, op="close-issue"))
-            elif status != "Done" and (state == "CLOSED" or n in closed_issues):
-                why = "issue is CLOSED" if state == "CLOSED" else "a merged PR closed it"
-                findings.append(finding(
-                    SAFE_FIX, "board", f"#{n}", f"Status={status or 'unset'} but {why}",
-                    "set Status=Done", number=n, op="set-done", item_id=bi.get("item_id")))
+            v = board_coherence_verdict(status, issue_state.get(n), issue_reason.get(n, ""),
+                                        n in closed_issues)
+            if v:
+                tier, op, detail = v
+                if op == "close-issue":
+                    findings.append(finding(tier, "board", f"#{n}", detail,
+                                            "close the issue (gh issue close)", number=n, op=op))
+                elif op == "set-done":
+                    findings.append(finding(tier, "board", f"#{n}", detail,
+                                            "set Status=Done", number=n, op=op, item_id=bi.get("item_id")))
+                else:  # "reconcile": closed as not-planned/abandoned → RISKY, NEVER auto-set Done
+                    findings.append(finding(
+                        tier, "board", f"#{n}", detail,
+                        "reconcile the board manually — the issue was abandoned (not-planned), not "
+                        "completed; do NOT auto-set Done", number=n))
             if stages_present and not stage:
                 findings.append(finding(
                     RISKY, "board", f"#{n}", "board carries a Stage field but this item has none",
@@ -419,7 +500,9 @@ def scan(ctx):
         merged_issue_nums = set()
         locals_set = set(locals_)
         for b in locals_ + remotes_:                     # the already-fetched lists (no re-shell)
-            m = BUILD_ISSUE_RE.search(b)
+            if not is_idc(b):                            # a non-IDC branch must NEVER drive a board
+                continue                                 # mutation (attribution guard) — even if its
+            m = BUILD_ISSUE_RE.search(b)                 # name happens to contain a `build-<n>` token
             if not m:
                 continue
             mgd, _ = branch_merged(b, remote=(b not in locals_set))  # cached from the branch scan
@@ -602,14 +685,22 @@ def build_ctx(args):
             sys.exit(2)
         ctx["owner"], ctx["project"] = args.owner, args.project
         ctx["board"] = load_board_github(args.owner, args.project, repo)
-        merged_refs, closed_issues, issue_state, ok = github_merge_maps(repo)
-        ctx.update(merged_refs=merged_refs, closed_issues=closed_issues, issue_state=issue_state)
-        if not ok:
-            # merged-PR / issue-state read degraded: github merged-branch + coherence dimensions are
-            # not fully establishable this pass → mark indeterminate (never a hollow clean).
+        maps = github_merge_maps(repo)
+        ctx.update(merged_refs=maps["merged_refs"], merged_oids=maps["merged_oids"],
+                   closed_issues=maps["closed_issues"], issue_state=maps["issue_state"],
+                   issue_reason=maps["issue_reason"])
+        if maps["indeterminate"]:
+            # A degraded OR capped read → the github merged-branch + board-coherence dimensions can't be
+            # fully established this pass → mark indeterminate (the verdict then refuses a clean result,
+            # never a hollow/partial clean).
             ctx["board_indeterminate"] = True
-            sys.stderr.write("idc-git-janitor: gh pr/issue list degraded — branch/board coherence "
-                             "indeterminate this pass\n")
+            if maps["capped"]:
+                sys.stderr.write(
+                    "idc-git-janitor: a gh list hit its --limit ceiling — the board read may be PARTIAL, "
+                    "so results are INDETERMINATE this pass (do not trust a clean verdict; re-run)\n")
+            else:
+                sys.stderr.write("idc-git-janitor: gh pr/issue list degraded — branch/board coherence "
+                                 "indeterminate this pass\n")
     elif args.tracker:
         # filesystem backend (args.backend already defaults to "filesystem").
         ctx["tracker"] = os.path.abspath(args.tracker)
@@ -631,7 +722,6 @@ def main():
     ap.add_argument("--project", help="integer project number (github backend)")
     ap.add_argument("--apply-safe", action="store_true",
                     help="execute ONLY the SAFE-FIX tier, then re-scan and report the delta")
-    ap.add_argument("--report", action="store_true", help="(default) read-only report; no changes")
     ap.add_argument("--json", action="store_true", help="emit the machine-readable JSON report")
     args = ap.parse_args()
 

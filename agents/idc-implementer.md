@@ -56,11 +56,16 @@ review verdict exists.
    `{kind: deferred|out-of-boundary|pre-existing-breakage, what, blocks_goal: bool, suggested_issue}`
    — never an unparsed prose footnote — so the reviewer/finisher and the wave-close acceptance
    check can route it. For a fix it **recommends but is not doing in-loop** (an adjacent improvement,
-   a non-blocking discovery), it emits a deterministic **discovery marker** —
+   a non-blocking discovery), it serializes a deterministic **discovery marker** through the helper
+   — never hand-typed —
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_emit_marker.py" discovery --what "<...>" --area "<...>" --suggested-scope "<...>" --origin "#<n>|<role>"`,
+   which emits
    `<!-- idc-discovery: {"what":"...","area":"...","suggested_scope":"...","origin":"#<n>|<role>"} -->`
-   (modeled on the `<!-- idc-deferral: {…} -->` marker) — so the SessionEnd recirculation sweep files
-   it as a `Stage = Recirculation` ticket rather than letting the recommendation evaporate or leak as
-   silently-widened scope.
+   (modeled on the `<!-- idc-deferral: {…} -->` marker) and is posted onto the issue via the
+   adapter's `comment` op — the *decision* to mark stays here, only the write is mechanized, so a
+   malformed hand-typed marker can no longer let the recommendation evaporate or leak as
+   silently-widened scope before the SessionEnd recirculation sweep files it as a
+   `Stage = Recirculation` ticket.
 5. **Scope/menu drift or inert increment → recirculation; a mechanical conflict stays in-kitchen.**
    A **scope/menu defect** — the implementation diverges from the pillar, the pillar diverges from
    upstream docs, an **undeclared real dependency that changes the plan** surfaces, **or the

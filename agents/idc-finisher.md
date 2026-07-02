@@ -67,12 +67,18 @@ The finisher runs its **own** `/fullauto-goal` loop. Its completion contract car
   **non-Buildable** so it can never be scooped as build work) **that blocks the parent feature's Done**
   (so a `blocks_goal:true` obligation cannot leave a Done issue inert) — **never** an unstaged item
   (an unstaged item defaults to Buildable and would be claimed as unreviewed scope). For any
-  deferral that survives the loop, the finisher **serializes it onto the issue** as a structured
-  comment marker — `<!-- idc-deferral: {"kind":…,"what":…,"blocks_goal":…,"suggested_issue":"#<n>"} -->`
-  via the tracker adapter's `comment` op (both backends; no dedicated field, no 7th op), rewriting
-  `suggested_issue` to the **`#<n>`** of the Recirculation ticket it created. That marker is the producer the
-  deterministic wave-close acceptance check (`idc:idc-build` Phase 4 / `scripts/idc_acceptance_check.py`)
-  reads — without it the gate is inert.
+  deferral that survives the loop, the finisher **serializes it onto the issue** — never hand-typed —
+  through
+  `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_emit_marker.py" deferral --kind <kind> --what "<...>" --blocks-goal <true|false> --suggested-issue "#<n>"`
+  (rewriting `--suggested-issue` to the **`#<n>`** of the Recirculation ticket it created), which
+  emits the structured comment marker
+  `<!-- idc-deferral: {"kind":…,"what":…,"blocks_goal":…,"suggested_issue":"#<n>"} -->` — posted via
+  the tracker adapter's `comment` op (both backends; no dedicated field, no 7th op). The helper is a
+  serializer only (the *decision* which deferral to file stays here); it schema-checks every field
+  non-empty and `blocks_goal` a real JSON boolean before it ever prints, so a malformed marker can
+  never reach an issue comment. That marker is the producer the deterministic wave-close acceptance
+  check (`idc:idc-build` Phase 4 / `scripts/idc_acceptance_check.py`) reads — without it the gate is
+  inert.
 
 ### Steps
 
@@ -89,24 +95,31 @@ The finisher runs its **own** `/fullauto-goal` loop. Its completion contract car
    tests stay green after any simplification edit.
 4. **Git finalization.** Acquire the area's **surface-keyed merge-train lease** (the serialized
    merge lock for *this area's* file surface — disjoint areas hold distinct leases and merge
-   concurrently; see *Merge serialization*). **Remove the build worktree first**
-   (so `build/*` is no longer checked out — otherwise its local delete fails:
-   `cannot delete branch … used by worktree`), **then** merge the triplet's PR into the
-   **staging** branch (the merge train's shared integration ref, promoted to `main` only after the
-   staging e2e — see *e2e layering*) with a **direct, blocking** `gh pr merge --squash
-   --delete-branch` (pick the method the repo allows) — **not** GitHub `--auto`. Branch deletion is
-   **atomic with the merge**,
-   **not** a best-effort tidy, so no orphaned `build/*` survives; auto-merge would defer the merge
-   and, with the repo's `deleteBranchOnMerge` off, skip the delete. A **mechanical** merge
-   conflict here (an overlapping-file / git-merge / worktree clash a peer area's merge introduced) is
-   **never** a recirculation — the finisher deconflicts it **in-kitchen** via Build's **build-time
-   mechanical-deconfliction step** (rebase against staging, resolve the textual overlap in-place,
-   re-acquire the surface-keyed lease, re-run tests). Only a genuine **scope/menu defect** the
-   deconfliction surfaces — the resolved work no longer fits the plan, or an undeclared real
-   dependency that changes the plan — escalates to the Recirculator. **Only on a successful merge**
-   do you then settle tracker status and release the lock (the lease is held across a bounded
-   in-kitchen retry, or released deliberately before escalating a scope/menu defect — never left
-   holding a half-merged surface). See *Merge serialization* below — never merge without the lease.
+   concurrently; see *Merge serialization*). Then run the deterministic tail —
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_finish.py" --pr <N> --issue <M> --worktree <path>`
+   (full rationale per step lives in the script's own docstring, tracing to audit RC1/RC2/RC3 —
+   not repeated here). It **removes the build worktree first** (so `build/*` is no longer checked
+   out — otherwise its local delete fails: `cannot delete branch … used by worktree`), **then
+   merges** the triplet's PR into the **staging** branch (the merge train's shared integration ref,
+   promoted to `main` only after the staging e2e — see *e2e layering*) with a **direct, blocking**
+   `gh pr merge --squash --delete-branch` (default method; pass `--merge-method` for the method the
+   repo allows) — **not** GitHub `--auto` (auto-merge would defer the merge and, with the repo's
+   `deleteBranchOnMerge` off, skip the delete). It then verifies the remote branch is actually gone
+   (`git ls-remote`), deletes the local branch, closes the tracker (both halves) through the
+   adapter's `close` op, and re-verifies the end state (PR merged, branches gone, worktree gone,
+   Status=Done, issue closed) before ever exiting 0. **Fail-closed:** any unverified step prints a
+   machine-readable `finish: <step> failed` line and exits non-zero — never a silent drop; the
+   janitor is the reconciler for whatever a dead session leaves behind anyway. A **mechanical**
+   merge conflict the helper's merge call surfaces (an overlapping-file / git-merge / worktree
+   clash a peer area's merge introduced) is **never** a recirculation — the finisher deconflicts it
+   **in-kitchen** via Build's **build-time mechanical-deconfliction step** (rebase against staging,
+   resolve the textual overlap in-place, re-acquire the surface-keyed lease, re-run tests,
+   re-invoke the helper). Only a genuine **scope/menu defect** the deconfliction surfaces — the
+   resolved work no longer fits the plan, or an undeclared real dependency that changes the plan —
+   escalates to the Recirculator. **Only on the helper's exit 0** do you release the lock (tracker
+   status is already closed by the helper; the lease is held across a bounded in-kitchen retry, or
+   released deliberately before escalating a scope/menu defect — never left holding a half-merged
+   surface). See *Merge serialization* below — never merge without the lease.
 5. **Close out.** Hand the merged, clean result back to Build (`idc:idc-build`); name the
    findings cleared, the `/simplify` outcome, any recirculation filed, and **every deferral as a
    structured object** (resolved in-loop, or the dependency-linked board item it became) — never a

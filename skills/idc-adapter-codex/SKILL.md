@@ -60,6 +60,12 @@ The Codex runtime **ignores the tier table**. Use the **highest available Codex 
 highest reasoning effort for every role** (operator-directed carve-out, `WORKFLOW.md §6`).
 Do not read `model_routing` tiers; do not down-tier any lane.
 
+The model-escalation ladder (`WORKFLOW-config.yaml::model_routing` — deterministic → Sonnet →
+Opus → Fable → human) does not change this. Codex's parity with the ladder is keeping this
+untiered posture **explicit and documented identically** here, not adopting the ladder or reading
+`model_routing.overrides` — parity is the contract expressed the same way, never Codex's model
+policy changing to match.
+
 ## Authority boundaries
 
 - Maps primitives to Codex mechanics only — never authors contracts, makes judgment calls,

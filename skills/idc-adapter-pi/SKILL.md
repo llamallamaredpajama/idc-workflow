@@ -130,8 +130,17 @@ one install has API keys for all of, so a fresh `idc-pi run` fails closed on eve
 either the umbrella or a per-role pin). It does **not** read
 `WORKFLOW-config.yaml::model_routing`, so the governed repo's tier table is bypassed on Pi — unlike
 `idc:idc-adapter-claude`, which is tier-resolved. Wiring `role_model()` to read `model_routing` is a
-known experimental-runtime maturity gap; until then this launcher is the documented carve-out. The
-general rule still holds everywhere else: never hardcode a model id in a command, agent, or
+known experimental-runtime maturity gap; until then this launcher is the documented carve-out.
+
+The **model-escalation ladder** (`model_routing`'s header comment in `WORKFLOW-config.yaml` —
+deterministic → Sonnet → Opus → Fable → human) is expressed in the tier rungs
+(`utility` / `standard` / `reasoning`) plus a per-role `overrides` map. Pi's own
+`PI_IDC_<ROLE>_MODEL` / `PI_IDC_MODEL` precedence (per-role > umbrella > stock default, above) is
+the pattern `overrides` mirrors — when the maturity gap above closes, `role_model()` should
+consult `model_routing.overrides.<role>` first, then the role's ladder-assigned tier, exactly as
+per-role already wins over the umbrella today.
+
+The general rule still holds everywhere else: never hardcode a model id in a command, agent, or
 non-adapter skill; the Recirculator maintains the tier table when models change. `WORKFLOW-config.yaml`
 also carries the `gating:` requirements-gate toggle (`gating.prd` / `gating.trd`), read by the gate
 predicate (`scripts/idc_recirculator_layers.py`) for Plan and the Recirculator — not by tier resolution.

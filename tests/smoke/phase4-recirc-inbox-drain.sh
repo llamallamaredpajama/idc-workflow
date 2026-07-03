@@ -177,10 +177,19 @@ echo "$open_inbox_after" | grep -qw "$recirc" \
 #      consideration pointer is ever build-eligible — Plan decomposes the consideration, no builder
 #      ever claims either.
 if [ -f "$DRAIN" ]; then
-  elig="$(python3 "$DRAIN" --tracker "$T")" || fail "drain helper errored"
-  echo "$elig" | grep -qE "(^| )$cons( |$)" \
+  # The board here is build-drained (no eligible work) but the admitted Consideration pointer sits
+  # Stage=Consideration ∧ Status=Todo — a whole-pipe fixpoint conjunct — so the drain DETERMINISTICALLY
+  # reports recirc-pending exit 4 (NOT terminal). Assert exit 4 EXACTLY: a regression that reverted the
+  # recirc-pending branch (returning terminal `complete`/0) must FAIL here, not slip through a `0||4`
+  # tolerance. The glass-wall assertion below is on the `eligible:` line.
+  elig="$(python3 "$DRAIN" --tracker "$T" 2>/dev/null)"; erc=$?
+  [ "$erc" -eq 4 ] || fail "an admitted Consideration ∧ Todo pointer with the build lane drained must exit 4 (recirc-pending), got $erc (out: '$elig')"
+  # Match the `eligible:` LINE only — the drain also prints recirc_inbox:/unplanned_considerations:
+  # count lines whose bare numbers would false-match a whole-output number grep.
+  eligln="$(printf '%s\n' "$elig" | grep '^eligible:')"
+  echo "$eligln" | grep -qE "(^| )$cons( |$)" \
     && fail "the admitted Consideration pointer $cons must NEVER be build-eligible — the glass wall (got: '$elig')"
-  echo "$elig" | grep -qE "(^| )$recirc( |$)" \
+  echo "$eligln" | grep -qE "(^| )$recirc( |$)" \
     && fail "the retired Recirculation ticket $recirc must NEVER be build-eligible — the glass wall (got: '$elig')"
 fi
 

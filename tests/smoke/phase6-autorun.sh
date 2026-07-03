@@ -41,27 +41,38 @@ drain | grep -q "^drain: continue$" || fail "still actionable while issue a is T
 drain | grep -qE "(^| )$gate( |$)" && fail "the operator-action gate must not be eligible build work"
 drain | grep -qE "(^| )$b( |$)" && fail "a Blocked PRD-dependent issue must not be eligible"
 
-# add a consideration pointer that is Todo but NOT YET ADMITTED (an open Think PR / pending the
-# end-of-Think gate). Build must NEVER scoop it — Autorun only builds APPROVED considerations.
-# This is the guard that fails red if the drain predicate stops skipping a Stage=Consideration
-# pointer (i.e. lets Autorun proceed past an open Think PR).
-c=$(python3 "$TRK" --tracker "$T" create --title "Pending consideration (open Think PR)" --stage Consideration)
-drain | grep -qE "(^| )$c( |$)" && fail "a Stage=Consideration pointer (open Think PR / pending admission) must not be eligible build work"
+# add a consideration pointer that is Stage=Consideration ∧ Status=Todo — ADMITTED but not yet
+# planned (per spec the Think PR is merged; it now awaits a Plan pass). Build must NEVER scoop a
+# Consideration pointer regardless — Autorun only claims Stage=Buildable work. This is the guard that
+# fails red if the drain predicate stops skipping a Stage=Consideration pointer.
+c=$(python3 "$TRK" --tracker "$T" create --title "Admitted-but-unplanned consideration (awaiting Plan)" --stage Consideration)
+drain | grep -qE "(^| )$c( |$)" && fail "a Stage=Consideration pointer must not be eligible build work"
 
-# build issue a to Done -> only the gate (operator) + Blocked b + the un-admitted consideration
-# remain -> drain complete (nothing the autorun may build without operator admission)
+# build issue a to Done -> only the gate (operator) + Blocked b + the admitted-but-unplanned
+# consideration remain. The build lane IS drained (nothing eligible), but the Stage=Consideration ∧
+# Status=Todo pointer is a whole-pipe fixpoint conjunct (unplanned_considerations>0), so the drain is
+# NOT a terminal `complete` — it is `drain: recirc-pending` exit 4 (the pointer still owes a planning
+# pass). The pointer is STILL never eligible build work (asserted at $c above). Exit 4 is NOT
+# `complete`, so autorun does not stop — it plans the consideration next /loop. drainrc() runs the
+# drain capturing its exit code (exit 4 would trip a bare `drain |` pipe under set -uo pipefail otherwise).
+drainrc() { DOUT="$(python3 "$DRAIN" --tracker "$T" 2>/dev/null)"; DRC=$?; }
 python3 "$TRK" --tracker "$T" claim --num "$a" --agent idc-implementer >/dev/null
 python3 "$TRK" --tracker "$T" close --num "$a" >/dev/null
-drain | grep -q "^drain: complete$" || fail "with only a gate + a Blocked dependent + a pending consideration left, autorun should exit (complete)"
+drainrc
+[ "$DRC" -eq 4 ] || fail "with the build lane drained but an un-admitted Consideration pointer left, autorun must report recirc-pending exit 4 (not terminal), got $DRC"
+printf '%s\n' "$DOUT" | grep -qx "drain: recirc-pending" || fail "a leftover Consideration ∧ Todo pointer must drive drain: recirc-pending (unplanned_considerations conjunct)"
 
 # ---- C5 allowlist: a Stage=Recirculation inbox ticket is NOT eligible build work ----------------
 # Autorun claims ONLY Stage=Buildable. A Recirculation ticket (scope discovered mid-build, the
 # non-Buildable inbox) is drained at the TOP of the pipe via /idc:recirculate — never scooped into a
-# Buildable wave. Red-when-broken: widen the drain allowlist to admit Recirculation and this ticket
-# goes eligible / the board stops draining complete.
+# Buildable wave. It is ALSO a whole-pipe fixpoint conjunct (recirc_inbox>0): the drain stays
+# recirc-pending exit 4, never a terminal `complete`. Red-when-broken: widen the drain allowlist to
+# admit Recirculation and this ticket goes eligible (drain would flip to continue).
 rec=$(python3 "$TRK" --tracker "$T" create --title "Discovered mid-build (recirculation inbox)" --stage Recirculation)
-drain | grep -qE "(^| )$rec( |$)" && fail "a Stage=Recirculation inbox ticket must not be eligible build work (claims only Buildable; Recirculation is build-excluded)"
-drain | grep -q "^drain: complete$" || fail "a non-eligible Stage=Recirculation ticket must not flip drain back to continue (drained at the top of the pipe, not built)"
+drainrc
+printf '%s\n' "$DOUT" | grep -qE "^eligible:.*(^| )$rec( |$)" && fail "a Stage=Recirculation inbox ticket must not be eligible build work (claims only Buildable; Recirculation is build-excluded)"
+[ "$DRC" -eq 4 ] || fail "a non-eligible Stage=Recirculation ticket must keep the drain at recirc-pending exit 4 (drained at the top of the pipe, not built), got $DRC"
+printf '%s\n' "$DOUT" | grep -qx "drain: recirc-pending" || fail "a Stage=Recirculation ∧ Todo inbox ticket must drive drain: recirc-pending (recirc_inbox conjunct)"
 
 # ---- a state block MISSING the `issues` key entirely -> exit 2 (not a silent empty board) ------
 # A dropped `issues` key used to default to an empty board (state.get("issues", [])) -> a silent

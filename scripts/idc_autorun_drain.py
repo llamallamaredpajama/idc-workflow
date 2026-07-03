@@ -18,17 +18,28 @@ Eligible build work = an issue that is:
   * NOT an operator-action gate issue (title starting with `[operator-action]`), and
   * has every native blocked-by upstream `Done`.
 
-Prints the eligible issue numbers and a verdict: `drain: continue` (work remains), `drain: complete`
-(nothing actionable left — exit), `drain: unknown` + exit 2 (the github board read SUCCEEDED but
-NO eligible work remains AND ≥1 build candidate's blocked-by lookup was unverifiable, so the lane
-cannot be proven drained — autorun must NOT treat this as `complete`/terminal, the silent blind-drain
-this guards; it retries next `/loop`), or `drain: rate-limited until <reset>` + exit 3 (github only,
+Prints the eligible issue numbers, two whole-pipe fixpoint counts (`recirc_inbox: N` = open
+`Stage=Recirculation ∧ Status=Todo` inbox tickets; `unplanned_considerations: M` = admitted-but-
+unplanned `Stage=Consideration ∧ Status=Todo` pointers — both always printed), and a verdict:
+`drain: continue` (build work remains), `drain: complete` (nothing actionable left anywhere — exit),
+`drain: recirc-pending` + exit 4 (the build lane IS drained — nothing eligible — but N>0 or M>0, so
+the pipe is NOT at a whole-pipe fixpoint: the top-of-pipe inbox still owes a `/idc:recirculate` drain
+or a planning pass. A DISTINCT non-zero verdict so autorun does NOT treat it as terminal `complete`;
+it drains the inbox / plans the consideration next `/loop`, then re-checks), `drain: unknown` + exit 2
+(the github board read SUCCEEDED but NO eligible work remains AND ≥1 build candidate's blocked-by
+lookup was unverifiable, so the lane cannot be proven drained — autorun must NOT treat this as
+`complete`/terminal, the silent blind-drain this guards; it retries next `/loop`; this precedes the
+recirc-pending branch — an unprovable build lane is the stronger signal), or
+`drain: rate-limited until <reset>` + exit 3 (github only,
 #99 §C.3 — the board read hit `idc_gh_board`'s `RateLimitError`: GitHub's GraphQL quota is exhausted,
 NOT a hard failure and NOT nothing-actionable. A DISTINCT signal from both `drain: unknown` and a
 hard board-read failure so autorun treats it as a deliberate, resumable pause — never a silent drop,
 never `complete` — and re-checks the SAME still-actionable lane next `/loop`, once past `<reset>`).
-The planning lane (unplanned considerations) is scanned by the orchestrator from the filesystem;
-this helper covers the build lane / board-exit half.
+For build ELIGIBILITY (`drain: continue`/`complete`) this helper covers the build lane / board-exit
+half — the planning lane's actual DRAINING (turning admitted considerations into buildable waves) is
+still the orchestrator's job. The helper only COUNTS the top-of-pipe inbox (`recirc_inbox` /
+`unplanned_considerations`) to gate the whole-pipe fixpoint verdict (`drain: recirc-pending`); it
+never itself recirculates or plans.
 
 With `--width`, one extra line reports the ready frontier's width:
   width: <N>     (the cardinality of the `eligible:` set already printed above)
@@ -49,7 +60,9 @@ Backends (the SAME pure predicate over either source — `compute_eligible`):
 
 Usage: idc_autorun_drain.py --tracker <TRACKER.md> [--width]                       (filesystem)
        idc_autorun_drain.py --backend github --project <n> --owner <o> [--width]   (github)
-       (exit 0 = ok, 2 = error/unknown, 3 = rate-limited — resumable pause, github only)
+       (exit 0 = ok/complete/continue, 2 = error/unknown, 3 = rate-limited — resumable pause,
+        github only, 4 = recirc-pending — build lane drained but the Recirculation/Consideration
+        inbox is non-empty, NOT terminal)
 """
 import argparse
 import json
@@ -128,6 +141,18 @@ def _is_build_candidate(it):
     return (it.get("status") == "Todo"
             and (it.get("stage") or "Buildable") == "Buildable"
             and not str(it.get("title", "")).strip().startswith("[operator-action]"))
+
+
+def _inbox_count(issues, stage):
+    """Count the `Stage == <stage> ∧ Status == Todo` items — a whole-pipe fixpoint conjunct.
+
+    Two callers: `recirc_inbox` (stage="Recirculation" — scope discovered mid-build, awaiting
+    /idc:recirculate) and `unplanned_considerations` (stage="Consideration" — an admitted pointer
+    the planning lane still owes a decomposition). Both compute from the ALREADY-LOADED `issues`
+    list (no second board read — the GraphQL-budget constraint), symmetric with
+    `_is_build_candidate` so the build-lane and inbox predicates read the same source of truth."""
+    return sum(1 for it in issues
+               if it.get("stage") == stage and it.get("status") == "Todo")
 
 
 def compute_eligible(issues):
@@ -258,18 +283,34 @@ def main():
         issues = load_filesystem(args.tracker)
 
     eligible = compute_eligible(issues)
+    recirc_inbox = _inbox_count(issues, "Recirculation")
+    unplanned = _inbox_count(issues, "Consideration")
 
     print("eligible: " + " ".join(str(n) for n in eligible))
+    # The two whole-pipe fixpoint counts, ALWAYS printed (like `eligible:`) so the signal is visible
+    # on every run — build eligibility (`eligible:`) is only one of the three drain conjuncts.
+    print("recirc_inbox: " + str(recirc_inbox))
+    print("unplanned_considerations: " + str(unplanned))
     # AGGREGATE fail-closed verdict (the github blind-drain guard): NO eligible work remains AND at
     # least one build candidate's blocked_by lookup was unverifiable — so we CANNOT prove the build
     # lane is drained. Emitting `drain: complete` here would recreate the silent false-clean this whole
     # fix repudiates (autorun treats `complete` as TERMINAL and stops). Report `drain: unknown` + exit 2
     # so autorun retries next `/loop` instead, and skip the width line (the frontier is unknowable). (A
     # NON-EMPTY eligible set is safe to `continue` on — the unverifiable candidates simply retry next
-    # loop. The filesystem path never sets `unverified`, so its verdict is unchanged.)
+    # loop. The filesystem path never sets `unverified`, so its verdict is unchanged.) This precedes the
+    # recirc-pending branch: an unprovable build lane is a stronger signal than a non-empty inbox.
     if not eligible and unverified:
         print("drain: unknown")
         sys.exit(2)
+    # WHOLE-PIPE fixpoint (the second/third conjuncts): the build lane is drained (nothing eligible)
+    # but the Recirculation inbox or the admitted-but-unplanned consideration lane still owes upstream
+    # work — the pipe is NOT at a fixpoint. A DISTINCT non-zero verdict (`drain: recirc-pending` + exit
+    # 4) so autorun does not treat this as terminal `complete`: the next /loop drains the inbox
+    # (/idc:recirculate) / plans the consideration, then re-checks. Both backends share it (the counts
+    # come from the same already-loaded `issues`). Skip the width line — the build frontier is empty here.
+    if not eligible and (recirc_inbox or unplanned):
+        print("drain: recirc-pending")
+        sys.exit(4)
     print("drain: " + ("continue" if eligible else "complete"))
     if args.width:
         # The ready frontier IS the `eligible:` set already printed above; width is its size = the

@@ -705,6 +705,12 @@ def main():
         result = run(op, ctx, **kw)
     except idc_gh_board.RateLimitError as e:
         idc_gh_board.emit_rate_limit_verdict(e)  # exit 3 (resumable), pinned verdict
+    except (idc_gh_board.BoardReadError, GC.CloseError) as e:
+        # A github board read/write/close-verify failure on the now-wired github path (BoardReadError
+        # covers BoardWriteError too). Fail-closed and RESUMABLE — never a Python traceback / exit 1,
+        # which would break the drain's 0-applied / 2-denied / 3-resumable exit-code contract.
+        sys.stderr.write(f"idc-transition: github board error: {e}\n")
+        sys.exit(3)
     except TransitionError as e:
         sys.stderr.write(f"idc-transition: {e}\n")
         sys.exit(2)

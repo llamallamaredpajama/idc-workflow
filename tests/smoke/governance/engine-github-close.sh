@@ -32,6 +32,10 @@ other  = w("v-other.json", {"verdict": "PASS", "pr": 9, "issue": 888, "findings"
 failv  = w("v-fail.json", {"verdict": "FAIL", "pr": 9, "issue": 5,
            "findings": [{"dimension": "correctness", "severity": "major", "confidence": 0.95,
                          "evidence": "e", "attack": "a", "unblock": "u", "fingerprint": "fp"}]})
+# NO `pr` field — so the mandatory-`--pr` guard is the SOLE thing denying case (4). (With a verdict
+# that carries pr:9, the separate verdict.pr!=pr check masks the mandatory-pr guard, and neutering
+# it leaves case (4) green — the test would prove less than it claims. See PR #134 review NIT-1.)
+nopr   = w("v-nopr.json", {"verdict": "PASS", "issue": 5, "findings": []})
 
 def is_denied(fn):
     try: fn(); return False
@@ -55,11 +59,11 @@ assert is_denied(lambda: E.run("close", ctx, num=5, verdict=failv, pr=9)), "FAIL
 assert closed == [], f"denied FAIL close still called close_issue: {closed}"
 print("  ok (3) a FAIL verdict is DENIED and performs no gh close")
 
-# (4) missing --pr → DENIED; no gh close.
+# (4) no --pr AND a verdict with no pr field → DENIED by the mandatory-pr guard alone; no gh close.
 closed.clear()
-assert is_denied(lambda: E.run("close", ctx, num=5, verdict=owning, pr=None)), "unbound (no --pr) github close allowed"
+assert is_denied(lambda: E.run("close", ctx, num=5, verdict=nopr, pr=None)), "unbound (no --pr, no verdict.pr) github close allowed"
 assert closed == [], f"denied no-pr close still called close_issue: {closed}"
-print("  ok (4) a close with no --pr is DENIED and performs no gh close")
+print("  ok (4) a close with no --pr (and no verdict.pr) is DENIED and performs no gh close")
 PY
 
 echo "PASS: github close reaches Done only via a valid+passing+item-owning+pr-bound verdict; non-owning/FAIL/unbound are denied with no gh close"

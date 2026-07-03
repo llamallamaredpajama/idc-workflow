@@ -58,7 +58,8 @@ non-contract bodies are never schema-scanned) and are NOT counted toward `scanne
 build-eligible-only), so a flagged count can exceed the scanned count in a pure empty-Status board.
 
 `--fix` EMITS the repair (this stdin tool has no live board handle, so it never mutates a board): one
-`fixed: #<n> Status=Todo` line per empty-Status item, printed after the summary, for a caller to apply.
+`would-fix: #<n> Status=Todo` line per empty-Status item, printed after the summary, for a caller to
+apply (future-tense token — the tool proposes the repair, it does not perform it).
 
 Usage: idc_board_lint.py [--fix] < issues.json   (exit 0 = ran OK; 2 = unreadable/un-parseable input)
 """
@@ -352,10 +353,12 @@ def main():
     else:
         print(f"board-lint: clean ({scanned} scanned{unknown_clause})")
     # --fix: EMIT the repair (this stdin tool has no board handle, so it can't write back) — one
-    # `fixed: #<n> Status=Todo` line per empty-Status item, which a caller applies to the live board.
+    # `would-fix: #<n> Status=Todo` line per empty-Status item, which a caller applies to the live
+    # board. The token is future-tense on purpose: this tool never mutates, so a past-tense "fixed:"
+    # would be a dishonest signal (the exact failure class this governance work exists to remove).
     if opts.fix:
         for num in fixes:
-            print(f"fixed: #{num} Status={FIX_STATUS}")
+            print(f"would-fix: #{num} Status={FIX_STATUS}")
     sys.exit(0)
 
 

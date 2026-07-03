@@ -54,7 +54,7 @@ assert_out '#313 .*: empty-status —' 'the doctor "none" sentinel Status must b
 # repair. Assert the --fix output names the seeded item with Status=Todo (proven hermetically).
 run_lint '[{"number":310,"title":"recovery pointer","stage":"Recirculation","status":null,"blocked_by":[]}]' --fix
 [ "$RC" -eq 0 ] || fail "--fix: helper exit $RC (want 0)"
-assert_out '^fixed: #310 Status=Todo$' "--fix must emit the repaired record 'fixed: #310 Status=Todo'"
+assert_out '^would-fix: #310 Status=Todo$' "--fix must emit the proposed repair 'would-fix: #310 Status=Todo' (future-tense: it proposes, never mutates)"
 # --fix still surfaces the finding + summary (advisory report is not suppressed by the repair emit).
 assert_out '#310 .*: empty-status —' "--fix must still report the empty-status finding"
 

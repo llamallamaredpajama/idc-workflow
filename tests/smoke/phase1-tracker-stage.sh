@@ -45,8 +45,11 @@ echo "$buildables" | grep -qw "$ptr" && fail "Stage=Buildable query must EXCLUDE
 # ---- (a2) glass wall: autorun's build-lane drain must never scoop an upstream pointer --------
 if [ -f "$DRAIN" ]; then
   elig="$(python3 "$DRAIN" --tracker "$T")" || fail "drain helper errored"
-  echo "$elig" | grep -qE "(^| )$bld( |$)" || fail "buildable issue $bld should be eligible build work (got: '$elig')"
-  echo "$elig" | grep -qE "(^| )$ptr( |$)" && fail "a Consideration pointer $ptr must NEVER be eligible build work — the glass wall (got: '$elig')"
+  # Match the `eligible:` LINE only — the drain also prints recirc_inbox:/unplanned_considerations:
+  # count lines whose bare numbers would false-match a whole-output number grep.
+  eligln="$(printf '%s\n' "$elig" | grep '^eligible:')"
+  echo "$eligln" | grep -qE "(^| )$bld( |$)" || fail "buildable issue $bld should be eligible build work (got: '$elig')"
+  echo "$eligln" | grep -qE "(^| )$ptr( |$)" && fail "a Consideration pointer $ptr must NEVER be eligible build work — the glass wall (got: '$elig')"
 fi
 
 # ---- (a3) F5: legacy 4-field board — an issue with EMPTY/missing Stage reads as Buildable -----
@@ -73,7 +76,9 @@ echo "$buildables_recirc" | grep -qw "$recirc" \
   && fail "Stage=Buildable query must EXCLUDE the Recirculation inbox item $recirc (got: '$buildables_recirc')"
 if [ -f "$DRAIN" ]; then
   elig_recirc="$(python3 "$DRAIN" --tracker "$T")" || fail "drain helper errored"
-  echo "$elig_recirc" | grep -qE "(^| )$recirc( |$)" \
+  # Anchor on the `eligible:` line only (the count lines carry bare numbers that would false-match).
+  elig_recirc_ln="$(printf '%s\n' "$elig_recirc" | grep '^eligible:')"
+  echo "$elig_recirc_ln" | grep -qE "(^| )$recirc( |$)" \
     && fail "a Stage=Recirculation item $recirc must NEVER be eligible build work — the glass wall (got: '$elig_recirc')"
 fi
 

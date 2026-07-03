@@ -73,11 +73,31 @@ def _mini_yaml(text):
     ships no PyYAML). Handles: `key: scalar`, nested `key:` block maps by 2-space indent, inline flow
     lists `[a, b, c]` and inline flow maps `{k: v, k: v}` of flat scalars, `#` comments, blanks.
     Deliberately NOT a general YAML parser — it round-trips exactly the machine table's shape."""
+    def coerce(s):
+        """Coerce a bare scalar token to the SAME Python type PyYAML's safe_load produces, so the
+        stdlib fallback and PyYAML parse the machine table IDENTICALLY (engine-machine-table.sh C2).
+        Minimal + safe: bool / null / bare-int only; every other unquoted token (Done, "In Progress",
+        stage/status names) stays a string, and explicit quotes force a string. (No yes/no/on/off —
+        over-coercion could turn a legit string into a bool.)"""
+        s = s.strip()
+        if len(s) >= 2 and s[0] in "\"'" and s[-1] == s[0]:
+            return s[1:-1]                                   # explicit quotes → always a string
+        if s in ("true", "True", "TRUE"):
+            return True
+        if s in ("false", "False", "FALSE"):
+            return False
+        if s in ("null", "Null", "NULL", "~"):
+            return None
+        body = s[1:] if s[:1] == "-" else s                  # bare integer (PyYAML → int)
+        if body.isdigit() and body != "":
+            return int(s)
+        return s
+
     def parse_scalar(s):
         s = s.strip()
         if s.startswith("[") and s.endswith("]"):
             inner = s[1:-1].strip()
-            return [p.strip() for p in inner.split(",")] if inner else []
+            return [parse_scalar(p) for p in inner.split(",")] if inner else []
         if s.startswith("{") and s.endswith("}"):
             inner = s[1:-1].strip()
             out = {}
@@ -86,7 +106,7 @@ def _mini_yaml(text):
                     k, _, v = pair.partition(":")
                     out[k.strip()] = parse_scalar(v)
             return out
-        return s
+        return coerce(s)
 
     # (indent, key, inline-value-or-None) for every non-blank, non-comment line. Unsupported YAML
     # shapes are REJECTED LOUDLY (not silently misparsed) — the machine table is operator-visible and

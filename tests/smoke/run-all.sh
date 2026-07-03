@@ -96,7 +96,8 @@ for t in \
   phase8-adapter-fanout-docs \
   phase8-model-ladder \
   phase9-realgit-lifecycle \
-  phase9-multiwave-accumulation; do
+  phase9-multiwave-accumulation \
+  phase-governance; do
   # Assertion-class rollup (design §E.4 / audit RC6): tally each phase by WHAT its green proves, so
   # "all green" can never be silently over-read as end-to-end behavioral proof. The class is declared
   # co-located in each phase file as a `# idc-assert-class: <behavior|doc|mixed>` header tag:

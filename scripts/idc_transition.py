@@ -54,6 +54,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import idc_review_verdict_check as VC  # noqa: E402 — the verdict validator (close guard)
 import idc_tracker_fs                  # noqa: E402 — filesystem backend (read-back seam)
 import idc_gh_board                    # noqa: E402 — github backend (referenced by attribute so tests monkeypatch)
+import idc_gh_close as GC              # noqa: E402 — atomic github close (Status=Done + close + verify)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BUNDLED_MACHINE = os.path.join(HERE, "..", "templates", "workflow-machine.yaml")
@@ -420,6 +421,85 @@ def _gh_create(machine, op, owner, project, repo, spec, title, body, stage_over,
     return idc_gh_board.create_item(owner, project, repo, title, body, stage, status)
 
 
+def _gh_item_id(ctx, num):
+    """The project-item node id for issue `num`, from the shared item-id cache (GraphQL-budget: a
+    cache hit costs ZERO board reads). Only on a cache MISS does it fall back to a single whole-board
+    resolve — the pagination the cache exists to avoid, so that path is the exception, not the norm."""
+    iid = (ctx.get("itemid_cache") or {}).get(int(num))
+    if iid:
+        return iid
+    return GC._resolve_item_id(ctx["owner"], ctx["project"], int(num), ctx["repo"])
+
+
+def _gh_get_item(ctx, num):
+    """One item's current {stage, status} via a single node(id:) read (fetch_item) — the github
+    analogue of fs_get_item. Item id from the cache; no pagination."""
+    it = idc_gh_board.fetch_item(_gh_item_id(ctx, num), ctx["repo"])
+    return {"stage": it.get("stage") or "", "status": it.get("status") or ""}
+
+
+def _gh_set_status(ctx, machine, num, status):
+    """Set Status on github, then READ BACK and verify it landed (extends fs read-back to github)."""
+    check_status_legal(machine, status)
+    iid = _gh_item_id(ctx, num)
+    idc_gh_board.set_status(ctx["owner"], ctx["project"], ctx["repo"], iid, status)
+    obs = idc_gh_board.fetch_item(iid, ctx["repo"])
+    verify_readback(num, None, status, obs.get("stage") or "", obs.get("status") or "")
+
+
+def _gh_close(ctx, num):
+    """Drive a github item to Done via idc_gh_close.close_issue — itself ATOMIC + read-back verified
+    (Status=Done + `gh issue close` + refuse success unless the issue reads back CLOSED). Item id from
+    the cache. The close GUARDS (valid + passing + item-owning + pr-bound verdict) run in the
+    dispatcher BEFORE this, so no unguarded terminal write exists on github."""
+    GC.close_issue(ctx["owner"], ctx["project"], int(num), ctx["repo"], item_id=_gh_item_id(ctx, num))
+
+
+def _gh_link(ctx, parent, child, kind):
+    """Record a dependency on github durably as a parseable comment marker on the CHILD (github has no
+    first-class blocks field on the project board; this mirrors the filer's Blocks-parent body line
+    and is read by the recirculator/acceptance). A native GitHub issue-dependency edge is a further
+    enhancement — the dependency IS recorded today."""
+    marker = json.dumps({"child": int(child), "parent": int(parent), "kind": kind}, ensure_ascii=False)
+    idc_gh_board.add_comment(int(child), f"Blocked-by: #{int(parent)} ({kind})\n"
+                             f"<!-- idc-blocked-by: {marker} -->", ctx["repo"])
+
+
+# ── backend-agnostic dispatch (the guard path is SHARED; only the read/write primitives differ) ──
+def get_item(ctx, num):
+    if ctx["backend"] == "github":
+        return _gh_get_item(ctx, num)
+    return fs_get_item(ctx["tracker"], num)
+
+
+def set_status(ctx, machine, num, status):
+    if ctx["backend"] == "github":
+        _gh_set_status(ctx, machine, num, status)
+    else:
+        _fs_set_status(machine, ctx["tracker"], num, status)
+
+
+def record_owner(ctx, num, agent):
+    if ctx["backend"] == "github":
+        idc_gh_board.add_comment(int(num), f"claimed by {agent}", ctx["repo"])
+    else:
+        _fs_comment(ctx["tracker"], num, f"claimed by {agent}")
+
+
+def do_link(ctx, parent, child, kind):
+    if ctx["backend"] == "github":
+        _gh_link(ctx, parent, child, kind)
+    else:
+        _fs_link(ctx["tracker"], parent, child, kind)
+
+
+def close_terminal(ctx, machine, num, to_status):
+    if ctx["backend"] == "github":
+        _gh_close(ctx, num)
+    else:
+        _fs_set_status(machine, ctx["tracker"], num, to_status)
+
+
 # ── the op dispatcher ──────────────────────────────────────────────────────────────────────────
 def run(op, ctx, **kw):
     """Execute one typed op end-to-end (validate → mutate → read-back → normalize → journal).
@@ -441,16 +521,15 @@ def run(op, ctx, **kw):
                                 kw.get("stage"), kw.get("status"))
 
     elif kind == "transition":
+        # Backend-agnostic: the guard path (terminal-source, from_status, refuse_terminal,
+        # worked-state) is the SAME code for fs and github — only get_item/set_status differ.
         num = kw["num"]
         to_status = spec.get("to_status")
         if to_status == "any":
             to_status = kw.get("to_status")
             if not to_status:
                 raise TransitionError(f"{op}: --to-status is required")
-        if backend == "github":
-            raise TransitionError(f"{op}: github transition ops are not wired in this stage "
-                                  "(filesystem-proven first; github move/claim land with the interlocks)")
-        cur = fs_get_item(ctx["tracker"], num)
+        cur = get_item(ctx, num)
         # Done is terminal — no transition resurrects it (kills the unblock/move-out-of-Done class).
         if cur["status"] == machine.get("terminal_status"):
             raise TransitionError(
@@ -465,14 +544,12 @@ def run(op, ctx, **kw):
         # non-build item into the worked Status — both checked ENGINE-wide, same as the create gate.
         refuse_terminal(machine, op, to_status)
         check_worked_state(machine, op, cur["stage"], to_status)
-        _fs_set_status(machine, ctx["tracker"], num, to_status)
+        set_status(ctx, machine, num, to_status)
         if spec.get("records_agent") and kw.get("agent"):  # ownership recording is DATA-driven, not op==claim
-            _fs_comment(ctx["tracker"], num, f"claimed by {kw['agent']}")
+            record_owner(ctx, num, kw["agent"])
 
     elif kind == "terminal":
         num = kw["num"]
-        if backend == "github":
-            raise TransitionError(f"{op}: github terminal ops route through idc_gh_close in this stage")
         guards = spec.get("guards") or []
         if not guards:
             # A guard-free terminal op would be a verdict-free path to Done — forbidden. The ONLY path
@@ -483,14 +560,12 @@ def run(op, ctx, **kw):
             raise TransitionError(
                 f"{op}: refused — a verdict-free terminal op cannot reach the terminal Status "
                 "(only a guarded `close` may). Awaiting a non-Done terminal disposition (Phase 4).")
-        fs_get_item(ctx["tracker"], num)  # read-back existence before guarded close (fails closed if absent)
+        get_item(ctx, num)  # existence read-back before a guarded close (fails closed if absent) — both backends
         check_close_guards(spec, num, kw.get("verdict"), kw.get("pr"))  # valid + passing + item-owning verdict
-        _fs_set_status(machine, ctx["tracker"], num, spec.get("to_status"))
+        close_terminal(ctx, machine, num, spec.get("to_status"))
 
     elif kind == "link":
-        if backend == "github":
-            raise TransitionError("link: github native links are not wired in this stage")
-        _fs_link(ctx["tracker"], kw["parent"], kw["child"], kw.get("kind", "blocks"))
+        do_link(ctx, kw["parent"], kw["child"], kw.get("kind", "blocks"))
 
     else:
         raise TransitionError(f"machine table declares unknown kind {kind!r} for op {op!r}")
@@ -518,11 +593,32 @@ def fs_ctx(repo, tracker, machine=None):
             "owner": None, "project": None, "machine": machine}
 
 
-def github_ctx(repo, owner, project, machine=None):
+def load_itemid_cache(path=None):
+    """The issue# -> project-item-id map (`NUM<TAB>item_id` lines) the tracker recipe maintains in
+    $IDC_ITEMID_CACHE (idc_gh_board.idmap_lines). Loaded ONCE per ctx so every github op resolves an
+    item id with zero board reads — the GraphQL-budget contract (no per-op re-pagination). Absent /
+    unreadable cache → empty map (each op then falls back to a single resolve; see _gh_item_id)."""
+    cache = {}
+    path = path if path is not None else os.environ.get("IDC_ITEMID_CACHE")
+    if path and os.path.isfile(path):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                for line in fh:
+                    parts = line.rstrip("\n").split("\t")
+                    if len(parts) == 2 and parts[0].isdigit() and parts[1]:
+                        cache[int(parts[0])] = parts[1]
+        except OSError:
+            pass
+    return cache
+
+
+def github_ctx(repo, owner, project, machine=None, itemid_cache=None):
     if machine is None:
         machine = load_machine(machine_path_for(repo))
+    if itemid_cache is None:
+        itemid_cache = load_itemid_cache()
     return {"backend": "github", "repo": repo, "tracker": None,
-            "owner": owner, "project": project, "machine": machine}
+            "owner": owner, "project": project, "machine": machine, "itemid_cache": itemid_cache}
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────────────────────────

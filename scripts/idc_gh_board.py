@@ -76,6 +76,14 @@ class BoardReadError(Exception):
     Callers that must fail-closed catch this; the CLI maps it to exit 2 with a stderr diagnostic."""
 
 
+class BoardWriteError(BoardReadError):
+    """A board WRITE (create/mutate) failed — raised by create_item() on any unrecoverable failure,
+    AFTER a best-effort discard of any partial item.
+
+    A SUBCLASS of BoardReadError so a fail-closed `except BoardReadError` still catches it (the same
+    posture the read path relies on): a caller can never mistake a failed atomic create for success."""
+
+
 class RateLimitError(BoardReadError):
     """GitHub rate-limit exhaustion (GraphQL points / primary REST / secondary-abuse / 403-rate).
 
@@ -184,6 +192,108 @@ def _resolve_project_node_id(owner, project_number, repo):
         raise BoardReadError(
             f"could not resolve project node id for {owner}/#{project_number}")
     return pid
+
+
+def _field_and_option(fields, field_name, option_name):
+    """(field node id, option id) for a single-select field's named option, from a `field-list` payload.
+    Returns (None, None) if the field or the option is absent — the caller fails closed on that."""
+    for f in fields:
+        if f.get("name") == field_name:
+            fid = f.get("id")
+            oid = next((o.get("id") for o in (f.get("options") or [])
+                        if o.get("name") == option_name), None)
+            return fid, oid
+    return None, None
+
+
+def create_item(owner, project, repo, title, body, stage, status):
+    """Create a board item with Stage AND Status set together — ATOMICALLY.
+
+    Creates the backing issue, adds it to project #<project>, then sets Stage and Status as one
+    logical unit. If ANY step after issue creation fails, DISCARDS the partial item (deletes the
+    board item AND closes the backing issue), so a create can NEVER leave a Stage-without-Status
+    item on the board — the empty-Status shape that blinds a downstream detector (#255/#256).
+
+    Returns the new item node id (PVTI_…) on success. Raises BoardWriteError (a BoardReadError
+    subclass, so fail-closed callers still catch it) on any failure. Fail-closed BEFORE creating
+    anything: an unresolvable project id / Stage / Status leaves no dangling issue.
+
+    Every gh call routes through `_gh` — the single seam a unit test monkeypatches to simulate a
+    partial (Status-set) failure and assert the discard fires. NOTE: this is the sanctioned atomic
+    github create primitive; re-pointing the shipped `idc_recirc_sweep.py` create path at it is
+    deferred to a later phase (that module is intentionally not touched here)."""
+    # Resolve the project node id + Stage/Status field+option ids up front (item-edit needs the PVT_
+    # node id, not the integer project number — the documented gotcha). Any unresolved id → refuse to
+    # create, so we never leave a dangling issue behind.
+    pnode = _resolve_project_node_id(owner, project, repo)
+    fields_out = _gh(["project", "field-list", str(project), "--owner", owner, "--format", "json"], repo)
+    try:
+        fields = (json.loads(fields_out) or {}).get("fields") or []
+    except json.JSONDecodeError as e:
+        raise BoardWriteError(f"unparseable field list ({e}) — refusing to create")
+    stage_fid, stage_oid = _field_and_option(fields, "Stage", stage)
+    status_fid, status_oid = _field_and_option(fields, "Status", status)
+    if not (stage_fid and stage_oid):
+        raise BoardWriteError(f"Stage field or option {stage!r} not on the board — refusing to create")
+    if not (status_fid and status_oid):
+        raise BoardWriteError(f"Status field or option {status!r} not on the board — refusing to create")
+
+    # 1. Create the backing issue. Nothing to discard yet, so a failure here just propagates.
+    url = _gh(["issue", "create", "--title", title, "--body", body], repo).strip()
+    url = url.splitlines()[-1] if url else ""
+    if not url:
+        raise BoardWriteError("issue create returned no URL — refusing to continue")
+    issue_num = url.rstrip("/").split("/")[-1]
+
+    def _discard(item_id):
+        # Best-effort teardown so no half-created (Stage-without-Status) item survives. Each step is
+        # guarded independently (a partly-failing discard still tries the rest). Returns None on a
+        # CLEAN teardown, or a string naming the step(s) that themselves failed — so the caller reports
+        # the discard TRUTHFULLY ("discard INCOMPLETE …") instead of asserting a rollback that never
+        # happened. `item-delete` takes the project number positionally + --owner + --id (there is NO
+        # --project-id flag on item-delete — only item-edit has one).
+        problems = []
+        if item_id:
+            try:
+                _gh(["project", "item-delete", str(project), "--owner", owner, "--id", item_id], repo)
+            except BoardReadError as e:
+                problems.append(f"item-delete failed ({e})")
+        else:
+            # item-add gave us no id, yet it may have created the board item server-side — we have no
+            # handle to delete it. Surface the possible orphan rather than silently claim it was cleaned.
+            problems.append("no board-item id captured — a possibly-orphaned board item could survive")
+        try:
+            _gh(["issue", "close", str(issue_num)], repo)
+        except BoardReadError as e:
+            problems.append(f"issue close failed ({e})")
+        return "; ".join(problems) if problems else None
+
+    item_id = None
+    try:
+        # 2. Add the issue to the board.
+        item_id = _gh(["project", "item-add", str(project), "--owner", owner, "--url", url,
+                       "--format", "json", "--jq", ".id"], repo).strip()
+        if not item_id:
+            raise BoardReadError("item-add returned no item id")
+        # 3. Set Stage, then Status — the two fields that MUST land together. If the Status-set fails
+        #    here, we have a Stage-without-Status item (the bug), so the discard below undoes it.
+        _gh(["project", "item-edit", "--id", item_id, "--project-id", pnode,
+             "--field-id", stage_fid, "--single-select-option-id", stage_oid], repo)
+        _gh(["project", "item-edit", "--id", item_id, "--project-id", pnode,
+             "--field-id", status_fid, "--single-select-option-id", status_oid], repo)
+    except RateLimitError:
+        # A throttle mid-create is RESUMABLE: re-raise it UNCHANGED so the rate-limit-aware drain reads
+        # `.reset` and pauses/resumes, instead of flattening it to a hard BoardWriteError and dropping
+        # the work. We do NOT attempt a discard here — every teardown gh call would hit the same live
+        # limit and fail; pause-and-resume is the recovery path, not a best-effort rollback under throttle.
+        raise
+    except BoardReadError as e:                   # any OTHER gh failure after add → discard + fail closed
+        incomplete = _discard(item_id)            # None if teardown was clean, else what still failed
+        why = f"create step failed ({e})"
+        if incomplete:
+            raise BoardWriteError(f"{why} — discard INCOMPLETE: {incomplete} (#{issue_num})")
+        raise BoardWriteError(f"{why} — discarded the partial item (#{issue_num})")
+    return item_id
 
 
 def _flatten(node):

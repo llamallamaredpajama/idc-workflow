@@ -37,4 +37,7 @@ so a fake-green suite can never slip through as a nit.
 ## Authority boundaries
 
 - Read-only. Emits the verdict + report only; never edits source, tests, or canonical docs,
-  never merges, never mutates the tracker. The finisher (`idc:idc-build`) acts on the verdict.
+  never merges, never mutates the tracker. The verdict is the coordinator's sole output —
+  surviving nits/deferrals are routed to the board deterministically by the filer
+  (`scripts/idc_file_findings.py`), never by this agent. The finisher (`idc:idc-build`) acts on
+  the verdict.

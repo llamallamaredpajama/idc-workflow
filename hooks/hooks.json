@@ -1,5 +1,5 @@
 {
-  "description": "IDC recirculation-intake safety net — a SessionEnd detective that re-stages rogue Buildables (issues that bypassed Plan, with no idc-provenance marker) to Recirculation and captures untickered discovery/deferral markers. Fail-soft; no-ops outside an IDC-governed repo.",
+  "description": "IDC deterministic-core hooks (v4). SessionEnd: the recirculation-intake safety-net sweep (re-stages rogue Buildables, captures untickered discovery/deferral markers). SubagentStop: the verdict gate — a review agent cannot stop without a validated verdict JSON at docs/workflow/code-reviews/ (bounded N=3, then loud-fail). Both are repo-gated (no-op outside an IDC-governed repo) and fail-soft; auto-discovered, so NEVER also listed in plugin.json (the 3.1.1 duplicate-hooks regression).",
   "hooks": {
     "SessionEnd": [
       {
@@ -7,6 +7,16 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/idc_recirc_sweep_hook.sh\" \"${CLAUDE_PLUGIN_ROOT}\""
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/hooks/idc_verdict_gate_hook.sh\" \"${CLAUDE_PLUGIN_ROOT}\""
           }
         ]
       }

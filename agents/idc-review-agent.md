@@ -63,7 +63,12 @@ validated verdict.
    `docs/workflow/code-reviews/`, then validate before returning:
    `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_review_verdict_check.py" <verdict.json>`. The
    validator enforces the finding shape, the 0.8 floor, ladder consistency, and the
-   test-genuineness severity floor.
+   test-genuineness severity floor. This validated verdict is the review's **sole** output
+   contract: a review agent cannot stop without one at this path — the SubagentStop verdict gate
+   blocks the stop otherwise — and the deterministic filer (`scripts/idc_file_findings.py`, fired
+   by that gate) routes every surviving minor/nit finding and every `deferrals[]` entry to the
+   board as a non-blocking `Stage=Recirculation` item. The reviewer never files tickets, emits
+   markers, or mutates the tracker itself; it emits only the verdict.
 
 ## Invocation sites
 
@@ -72,8 +77,9 @@ validated verdict.
   the findings to the implementer to reverify real tests green and re-review. The verdict
   JSON schema is the stable automerge interface — this service preserves it unchanged.
 - **Operator (direct).** An operator queries the standing service on any diff, branch, or
-  phase delta and reads the same validated verdict + durable report; phase-delta findings
-  are filed as new board issues (non-blocking).
+  phase delta and reads the same validated verdict + durable report. Its surviving minor/nit
+  findings and deferrals are routed to the board (non-blocking `Stage=Recirculation` items)
+  deterministically by the same verdict gate + filer — not by hand.
 
 ## Authority boundaries
 

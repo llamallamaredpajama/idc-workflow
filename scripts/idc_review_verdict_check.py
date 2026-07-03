@@ -113,6 +113,13 @@ def check(doc):
         if verdict != exp:
             problems.append(f"verdict {verdict!r} inconsistent with findings — worst severity "
                             f"present implies {exp!r}")
+    # Optional `pr` / `issue` (the reviewed PR and the board issue it implements): when present they
+    # must be positive integers — the filer (idc_file_findings.py) reads `issue` as the blocks_goal
+    # parent-link target, so a garbage value must surface here, not fail silently downstream. Absent
+    # is fine (backward-compatible; the filer degrades to no parent link).
+    for k in ("pr", "issue"):
+        if k in doc and not (isinstance(doc[k], int) and not isinstance(doc[k], bool) and doc[k] > 0):
+            problems.append(f"`{k}` must be a positive integer when present (got {doc[k]!r})")
     return problems
 
 

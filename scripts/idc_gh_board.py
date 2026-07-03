@@ -65,6 +65,34 @@ query($pid: ID!, $cursor: String) {
 }
 """
 
+# Single-item field read by project-item node id — the budget-friendly way for the transition engine
+# to read ONE item's current (Stage, Status) for a guard/read-back WITHOUT re-paginating the whole
+# board. The item id comes from the shared item-id cache; this is exactly one gh GraphQL call.
+ITEM_QUERY = """
+query($id: ID!) {
+  node(id: $id) {
+    ... on ProjectV2Item {
+      id
+      fieldValues(first: 50) {
+        nodes {
+          __typename
+          ... on ProjectV2ItemFieldSingleSelectValue {
+            name
+            field { ... on ProjectV2FieldCommon { name } }
+          }
+        }
+      }
+      content {
+        __typename
+        ... on Issue       { number title }
+        ... on PullRequest { number title }
+        ... on DraftIssue  { title }
+      }
+    }
+  }
+}
+"""
+
 # A hard backstop on the page loop so a malformed `hasNextPage:true` / unchanging cursor can never
 # spin forever. GitHub Projects v2 caps far below this (100 items/page × this many pages).
 MAX_PAGES = 1000
@@ -383,6 +411,50 @@ def fetch_items(owner, project_number, repo="."):
         raise BoardReadError(
             f"paginated board read exceeded {MAX_PAGES} pages — refusing a possibly-partial board")
     return items
+
+
+def fetch_item(item_id, repo="."):
+    """Return ONE project item's flattened fields ({status, stage, …, id, content}) via a single
+    node(id:) GraphQL query — the transition engine's read-back / current-state read for a github op.
+    The item id comes from the shared item-id cache, so this costs one gh call and NO pagination.
+
+    Raises BoardReadError on any gh / parse / anomalous-shape failure — fail-closed (never a silent
+    empty item, which would let a guard read a wrong current state)."""
+    out = _gh(["api", "graphql", "-f", f"query={ITEM_QUERY}", "-f", f"id={item_id}"], repo)
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError as e:
+        raise BoardReadError(f"unparseable graphql response for item {item_id}: {e}")
+    if data.get("errors"):
+        raise BoardReadError(f"graphql errors reading item {item_id}: {str(data['errors'])[:200]}")
+    node = (data.get("data") or {}).get("node")
+    if not isinstance(node, dict) or not node:
+        raise BoardReadError(f"item {item_id} not found (graphql node missing) — refusing a blind read")
+    return _flatten(node)
+
+
+def set_status(owner, project, repo, item_id, status):
+    """Set a project item's Status single-select field to `status` (by name) — the github `move`/
+    terminal write primitive. Resolves the project node id + the Status field/option by name (like
+    idc_gh_close), then one item-edit. Raises BoardWriteError if the option is absent, BoardReadError/
+    RateLimitError on gh failure. Read-back is the caller's job (the engine re-reads via fetch_item)."""
+    pnode = _resolve_project_node_id(owner, project, repo)
+    fields_out = _gh(["project", "field-list", str(project), "--owner", owner, "--format", "json"], repo)
+    try:
+        fields = (json.loads(fields_out) or {}).get("fields") or []
+    except json.JSONDecodeError as e:
+        raise BoardWriteError(f"unparseable field list ({e}) — refusing to set Status")
+    fid, oid = _field_and_option(fields, "Status", status)
+    if not (fid and oid):
+        raise BoardWriteError(f"Status field or option {status!r} not on the board — refusing to set Status")
+    _gh(["project", "item-edit", "--id", item_id, "--project-id", pnode,
+         "--field-id", fid, "--single-select-option-id", oid], repo)
+
+
+def add_comment(issue_num, body, repo="."):
+    """Post a comment on an issue — the github `link` / ownership-recording write. A real, durable
+    mutation (raises BoardReadError/RateLimitError on failure), monkeypatchable by attribute in tests."""
+    _gh(["issue", "comment", str(issue_num), "--body", body], repo)
 
 
 def idmap_lines(items):

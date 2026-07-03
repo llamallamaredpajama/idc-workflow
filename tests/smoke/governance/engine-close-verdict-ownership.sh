@@ -22,6 +22,13 @@ cat > "$REPO/v-for-A.json" <<JSON
 {"verdict":"PASS","pr":9,"issue":$a,"findings":[]}
 JSON
 
+# A valid PASS verdict for A with NO pr field — so the mandatory-`--pr` guard is the SOLE thing
+# denying case (2). (v-for-A carries pr:9, so the verdict.pr!=pr check masks the mandatory-pr guard;
+# neutering it would leave case (2) green — the test would prove less than it claims. PR #134 NIT-1.)
+cat > "$REPO/v-nopr.json" <<JSON
+{"verdict":"PASS","issue":$a,"findings":[]}
+JSON
+
 # (1) using A's verdict to close B ⇒ denied (verdict.issue != B).
 if eng close --num "$b" --verdict "$REPO/v-for-A.json" --pr 9 2>/dev/null; then
   fail "(1) a verdict for item #$a closed item #$b (unbound verdict — ownership not enforced)"
@@ -29,10 +36,11 @@ fi
 [ "$(gov_field "$T" "$b" Status)" != "Done" ] || fail "(1) cross-item close still drove #$b to Done"
 echo "  ok (1) a verdict for another item cannot close this one"
 
-# (2) --pr omitted ⇒ denied (the verdict must be bound to a closing PR).
-if eng close --num "$a" --verdict "$REPO/v-for-A.json" 2>/dev/null; then
-  fail "(2) close succeeded with no --pr (unbound close)"
+# (2) --pr omitted, with a verdict that ALSO has no pr field ⇒ denied by the mandatory-pr guard alone.
+if eng close --num "$a" --verdict "$REPO/v-nopr.json" 2>/dev/null; then
+  fail "(2) close succeeded with no --pr and no verdict.pr (unbound close)"
 fi
+[ "$(gov_field "$T" "$a" Status)" != "Done" ] || fail "(2) unbound close still drove #$a to Done"
 echo "  ok (2) close without --pr is denied (PR binding is mandatory)"
 
 # (3) --pr mismatched against the verdict ⇒ denied.

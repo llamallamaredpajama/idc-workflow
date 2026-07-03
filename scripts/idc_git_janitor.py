@@ -573,6 +573,29 @@ def scan(ctx):
                     f"Status={status or 'unset'} but its IDC build branch merged",
                     "set Status=Done (close)", number=n, op="close-fs"))
 
+    # ---- RESUME-RECIRC: a recirculator killed mid-drain (both backends) ----
+    # The signature of a truncated recirc drain: an OPEN recirc branch/PR still coexists with an OPEN
+    # recirculation inbox. This ADDITIVE correlation finding (the unmerged `recirculate/*` branch is
+    # ALREADY reported RISKY on its own) tells the next session to resume `/idc:recirculate`. It
+    # composes from data already in hand — the loaded board + the branch scans' cached merge verdicts —
+    # so it adds NO board read or gh call (the single-board-read promise).
+    #   OPEN inbox  = a board item with stage == "Recirculation" and status != "Done".
+    #   OPEN branch = a `recirculate/*` branch (local or remote) that is NOT merged (an open-PR proxy on
+    #                 the filesystem backend). Judged via branch_merged (server tip for remotes).
+    open_inbox = [bi for bi in board
+                  if bi.get("stage") == "Recirculation" and bi.get("status") != "Done"]
+    open_recirc = [b for b in locals_
+                   if b.startswith("recirculate/") and not branch_merged(b, remote=False)[0]]
+    open_recirc += [b for b in remotes_
+                    if b.startswith("recirculate/") and not branch_merged(b, remote=True)[0]]
+    if open_inbox and open_recirc:
+        b0 = sorted(open_recirc)[0]
+        n_inbox = len(open_inbox)
+        findings.append(finding(
+            RISKY, "recirc", "RESUME-RECIRC",
+            f"open recirc branch {b0} + {n_inbox} open Stage=Recirculation ticket(s) — a mid-drain "
+            f"truncation; resume /idc:recirculate", action="resume the recirc drain"))
+
     return findings, indeterminate
 
 

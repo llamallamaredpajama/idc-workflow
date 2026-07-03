@@ -38,8 +38,8 @@ import idc_review_verdict_check as VC  # noqa: E402
 import idc_recirc_sweep as SW          # noqa: E402  — read_backend/read_config/gh_owner/parse_markers/RECIRC_SOURCE_MARKER
 import idc_tracker_fs                  # noqa: E402  — the filesystem state reader (DRY with the backend)
 import idc_gh_board                    # noqa: E402  — referenced by attribute so tests can monkeypatch
+import idc_transition as TE            # noqa: E402  — the single write door: tickets are created THROUGH the engine
 
-TRK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "idc_tracker_fs.py")
 MINOR_NIT = {"minor", "nit"}
 RECIRC_STAGE = "Recirculation"
 TODO = "Todo"
@@ -134,19 +134,17 @@ def _fs_existing_keys(tracker_path):
     return keys
 
 
-def _trk(tracker_path, *args):
-    import subprocess
-    return subprocess.run([sys.executable, TRK, "--tracker", tracker_path, *args],
-                          capture_output=True, text=True)
-
-
-def run_filesystem(verdict, tracker_path, parent_issue, dry_run):
+def run_filesystem(verdict, repo, tracker_path, parent_issue, dry_run):
     if not os.path.isfile(tracker_path):
         warn(f"filesystem backend: no TRACKER.md at {tracker_path} — nothing filed")
         return 3
     items = work_items(verdict)
     existing = _fs_existing_keys(tracker_path)
     existing_numbers = {it.get("number") for it in _fs_state(tracker_path).get("issues", [])}
+    # Tickets are created THROUGH the transition engine (the single write door) — no direct backend
+    # mutation here. The engine's recirculate-intake op creates a normalized, read-back-verified
+    # Recirculation/Todo item + writes the dedupe-marker body; link_blocks adds the parent edge.
+    ctx = TE.fs_ctx(repo, tracker_path)
     filed = skipped = failed = 0
     for it in items:
         if it["key"] in existing:
@@ -160,22 +158,12 @@ def run_filesystem(verdict, tracker_path, parent_issue, dry_run):
             existing.add(it["key"])
             filed += 1
             continue
-        r = _trk(tracker_path, "create", "--title", ticket_title(it),
-                 "--stage", RECIRC_STAGE, "--status", TODO)
-        if r.returncode != 0:
-            warn(f"filesystem: create failed for {it['key']} ({r.stderr.strip()[:120]})")
-            failed += 1
-            continue
-        num = r.stdout.strip()
-        if it["blocks_goal"] and parent_issue:
-            lk = _trk(tracker_path, "link", "--parent", num, "--child", str(parent_issue), "--kind", "blocks")
-            if lk.returncode != 0:
-                warn(f"filesystem: parent-block link #{num}->{parent_issue} failed ({lk.stderr.strip()[:120]})")
-                failed += 1
-                continue
-        cm = _trk(tracker_path, "comment", "--num", num, "--body", ticket_body(it, parent_issue))
-        if cm.returncode != 0:
-            warn(f"filesystem: comment/marker failed for #{num} ({cm.stderr.strip()[:120]})")
+        try:
+            num = TE.recirculate_intake(ctx, ticket_title(it), ticket_body(it, parent_issue))
+            if it["blocks_goal"] and parent_issue:
+                TE.link_blocks(ctx, parent=num, child=parent_issue)
+        except TE.TransitionError as e:
+            warn(f"filesystem: engine refused {it['key']} ({str(e)[:120]})")
             failed += 1
             continue
         existing.add(it["key"])
@@ -213,9 +201,12 @@ def _github_existing_keys(repo, owner, project):
 
 
 def file_github(verdict, repo, owner, project, existing_keys, parent_issue, dry_run):
-    """Create one atomic Recirculation/Todo item per un-filed nit/deferral. Returns the count filed.
-    `existing_keys` is the caller-supplied dedupe set (fail-closed to build it before calling)."""
+    """Create one atomic Recirculation/Todo item per un-filed nit/deferral, THROUGH the transition
+    engine (the single write door — the engine's recirculate-intake wraps idc_gh_board.create_item's
+    atomic Stage+Status primitive). Returns the count filed. `existing_keys` is the caller-supplied
+    dedupe set (fail-closed to build it before calling)."""
     items = work_items(verdict)
+    ctx = TE.github_ctx(repo, owner, project)
     filed = 0
     for it in items:
         if it["key"] in existing_keys:
@@ -225,9 +216,10 @@ def file_github(verdict, repo, owner, project, existing_keys, parent_issue, dry_
             filed += 1
             continue
         try:
-            idc_gh_board.create_item(owner, project, repo, ticket_title(it),
-                                     ticket_body(it, parent_issue), RECIRC_STAGE, TODO)
-        except idc_gh_board.BoardReadError as e:
+            TE.recirculate_intake(ctx, ticket_title(it), ticket_body(it, parent_issue))
+        except (idc_gh_board.BoardReadError, TE.TransitionError) as e:
+            # BoardReadError covers RateLimitError (its subclass) — preserves the filer's prior
+            # per-item fail-soft posture (surface + continue; never counted as filed).
             warn(f"github: create failed for {it['key']} ({str(e)[:120]}) — surfaced, not counted")
             continue
         filed += 1
@@ -285,7 +277,7 @@ def main():
         project_number, _ = SW.read_config(a.repo)
         sys.exit(run_github(verdict, a.repo, owner, project_number, parent, a.dry_run))
     tracker = a.tracker or os.path.join(a.repo, "TRACKER.md")
-    sys.exit(run_filesystem(verdict, tracker, parent, a.dry_run))
+    sys.exit(run_filesystem(verdict, a.repo, tracker, parent, a.dry_run))
 
 
 if __name__ == "__main__":

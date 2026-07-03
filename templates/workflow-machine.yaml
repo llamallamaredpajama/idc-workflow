@@ -1,0 +1,111 @@
+# workflow-machine.yaml — the IDC workflow state machine, AS DATA (v4 Phase 2, plan §3.1).
+#
+# This file is the legal-transition table the transition engine (scripts/idc_transition.py)
+# enforces. It is scaffolded into a governed repo at docs/workflow/workflow-machine.yaml (that
+# wiring is a later Phase-2 stage); until then the engine falls back to this bundled copy. Editing
+# a workflow rule = editing THIS data, not the engine code — the engine is a generic interpreter.
+#
+# Model:
+#   * A board item's state is a (Stage x Status) pair. Both fields are ALWAYS set together — an
+#     item with a Stage but no Status is illegal (the #255/#256 bug class); the engine normalizes
+#     every op so that shape can never be written.
+#   * `ops:` is the full set of typed operations the engine's single write door accepts. Any op
+#     not listed here is refused (an "illegal transition"). Each op declares:
+#       kind        — create | transition | terminal | link
+#       target      — {stage, status} for create ops (the initial legal state)
+#       to_status   — the Status a transition/terminal op moves an item to ("any" = any legal Status)
+#       from_status — a transition is refused unless the item's CURRENT Status is one of these
+#                     (e.g. `unblock` only lifts a Blocked item — it can never resurrect a Done one).
+#       records_agent — true if a --agent passed to this op is recorded as an ownership comment
+#                     (never silently dropped). DATA-driven, so the engine has no op-name special case.
+#       guards      — for a TERMINAL op: the receipts the engine verifies (against on-disk artifacts,
+#                     not prose) before Done. An EMPTY guard list on a terminal op is FAIL-CLOSED —
+#                     see the terminal invariant below (a verdict-free path to Done is forbidden).
+#                     Non-terminal ops declare no guards (they are bounded by validate_target instead).
+#
+# THE terminal invariant (the crown-jewel rule the engine enforces):
+#   The ONLY path to `terminal_status` (Done) is a guarded terminal `close` whose verdict is VALID,
+#   PASSING, and OWNS the item (verdict.issue == the closing item, verdict.pr == the mandatory --pr).
+#   NOTHING else reaches Done — create/move/claim/unblock/recirculate-intake are refused from minting
+#   it, and a guard-free terminal op (e.g. `retire` here) is fail-closed. Every other write is bounded
+#   by the declared domains via one `validate_target` gate.
+#
+# Two more machine-level invariants the engine enforces for EVERY write (create AND transition), so
+# there is no second path around a per-op rule:
+#   worked_status + worked_forbidden_stages — the "worked" Status (an item actively being built) is
+#     ILLEGAL on the listed non-build Stages (pointers/inbox are never worked). ANY op that would
+#     drive OR mint an item at worked_status on one of those Stages is refused — `claim`, `move`, AND
+#     a direct `create --stage Recirculation --status "In Progress"`, uniformly.
+#   terminal_status (transition side) — a terminal (Done) item is NOT transitionable: no op resurrects it.
+#
+# Guards (evaluated by the engine, each names an on-disk/board artifact it checks):
+#   verdict-validated     — a review verdict JSON that passes idc_review_verdict_check.py exists, is
+#                           PASSING, and OWNS the item/PR (the close receipt; #394ec6fe drop A/B/C).
+#   merge-conditions-met  — every entry in that verdict's merge_conditions[] is marked met (closes
+#                           the silently-downgraded pre-merge-condition failure, #246 -> #248).
+
+version: 1
+
+# The canonical field domains — mirror scripts/idc_tracker_fs.py STATUSES/STAGES. The engine
+# cross-checks these against the backend at load time (idc_transition.validate_machine) and REFUSES
+# to run on a drift, so the two can never silently diverge.
+statuses: [Blocked, Todo, In Progress, Done]
+stages: [Consideration, Planning, Buildable, Recirculation]
+terminal_status: Done
+
+# The "worked" Status is illegal on these non-build Stages (a Recirculation inbox item is drained by
+# /idc:recirculate, a Consideration pointer is decomposed by Plan — neither is ever built). Enforced
+# for EVERY transition op, so `move` cannot reach a worked state that `claim` forbids.
+worked_status: In Progress
+worked_forbidden_stages: [Recirculation, Consideration]
+
+ops:
+  # ── create ops: mint a new item at a legal initial (Stage x Status) ──────────────────────────
+  # (a --status/--stage override is bounded by validate_target: within the declared domains,
+  #  normalized, NON-terminal — create can never mint Done — and not a forbidden worked state.)
+  create-ticket:
+    kind: create
+    target: {stage: Buildable, status: Todo}
+  create-pointer:
+    kind: create
+    target: {stage: Consideration, status: Todo}
+  recirculate-intake:
+    kind: create
+    target: {stage: Recirculation, status: Todo}
+
+  # ── transition ops: move an existing item's Status ───────────────────────────────────────────
+  # (no transition may mint Done or reach a worked state on a non-build Stage, and none touches a
+  #  terminal Done item — all enforced engine-wide, not per-op.)
+  claim:
+    kind: transition
+    to_status: In Progress
+    records_agent: true
+  move:
+    kind: transition
+    to_status: any
+  unblock:
+    kind: transition
+    to_status: Todo
+    from_status: [Blocked]
+
+  # ── terminal ops: the ONLY path to Done ──────────────────────────────────────────────────────
+  # `close` is the sole guarded path to a terminal Status — its verdict must be valid, PASSING, and
+  # OWN the item/PR (see the terminal invariant above).
+  close:
+    kind: terminal
+    to_status: Done
+    guards: [verdict-validated, merge-conditions-met]
+  # `retire` would administratively close a NON-build item (a decomposed Consideration, a drained
+  # Recirculation inbox item), but the board Status enum has only ONE terminal value (Done), and a
+  # verdict-free path to Done is forbidden. So retire declares NO guards and is FAIL-CLOSED here (the
+  # engine refuses a guard-free terminal op). TODO(Phase 4): a distinct non-Done "closed-not-planned"
+  # disposition (a board-schema change) would let retire terminalize a non-build item without minting
+  # an unaccepted Done — then this op gets a real guard/target and is enabled.
+  retire:
+    kind: terminal
+    to_status: Done
+    guards: []
+
+  # ── structural ops ───────────────────────────────────────────────────────────────────────────
+  link:
+    kind: link

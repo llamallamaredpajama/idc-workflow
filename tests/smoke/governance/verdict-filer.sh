@@ -88,7 +88,11 @@ fi
 echo "  ok (A4) filesystem: missing blocks_goal parent surfaces non-zero"
 
 # ── (B) GITHUB unit (monkeypatched) ────────────────────────────────────────────────────────────────
-python3 - "$PLUGIN/scripts" "$FILER" <<'PY' || fail "(B) github filer unit tests failed (see assertion above)"
+# Run in $WORK: the filer now creates THROUGH the transition engine, which appends a best-effort
+# journal line to <repo>/docs/workflow/. This unit passes repo="." (the fake backend is
+# monkeypatched), so cwd=$WORK keeps that journal in the throwaway dir — never dirtying the plugin
+# tree. Imports use the absolute $PLUGIN/scripts path, so cwd is otherwise irrelevant.
+( cd "$WORK" && python3 - "$PLUGIN/scripts" "$FILER" <<'PY'
 import json,sys,os
 scripts=sys.argv[1]; sys.path.insert(0, scripts)
 import idc_gh_board as B
@@ -152,5 +156,6 @@ try:
 finally:
     B.fetch_items=orig_fetch; F.SW.gh=orig_gh; B.create_item=orig_ci
 PY
+) || fail "(B) github filer unit tests failed (see assertion above)"
 
 echo "PASS: verdict filer — minor/nit findings + deferrals become Stage=Recirculation/Status=Todo items (both backends), idempotent via idc-recirc-source, blocks_goal:true blocks the parent, major/blocker not filed, github dedupe fails closed"

@@ -25,6 +25,25 @@
 # THIS file's location so a scenario need not compute $PLUGIN itself.
 GOV_PLUGIN="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 GOV_TRK="$GOV_PLUGIN/scripts/idc_tracker_fs.py"
+GOV_ENGINE="$GOV_PLUGIN/scripts/idc_transition.py"
+
+# gov_fail <msg> — the shared failure exit every scenario uses (was redefined identically in each).
+gov_fail() { echo "FAIL: $1"; exit 1; }
+
+# gov_engine_env — the one-line preamble for a transition-engine scenario. Verifies the engine
+# exists, mints a fresh throwaway repo (TRACKER.md + its dir as the --repo root), installs the
+# cleanup trap, and defines `eng` (the engine CLI pinned to that repo/tracker on the filesystem
+# backend). After sourcing lib.sh, a scenario just calls `gov_engine_env` and then uses `eng …`,
+# `$T`, `$REPO`. Sets globals: ENGINE, T, REPO, and the `eng`/`fail` functions.
+gov_engine_env() {
+  ENGINE="$GOV_ENGINE"
+  [ -f "$ENGINE" ] || { echo "FAIL: transition engine not found at $ENGINE (not implemented yet)"; exit 1; }
+  T="$(gov_new_tracker)" || { echo "FAIL: gov_new_tracker could not init a throwaway TRACKER.md"; exit 1; }
+  REPO="$(dirname "$T")"
+  trap 'rm -rf "$REPO"' EXIT
+  eng() { python3 "$ENGINE" --repo "$REPO" --backend filesystem --tracker "$T" "$@"; }
+  fail() { echo "FAIL: $1"; exit 1; }
+}
 
 # gov_new_tracker -> echoes the path to a freshly-init'd TRACKER.md inside a NEW temp dir.
 # The caller owns cleanup of that dir (e.g. `trap 'rm -rf "$(dirname "$T")"' EXIT`).

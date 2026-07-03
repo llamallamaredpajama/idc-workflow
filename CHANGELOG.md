@@ -2,6 +2,39 @@
 
 All notable changes for the IDC Workflow plugin are documented in this file.
 
+## Unreleased — deterministic-core refactor, Phase 0: truthful signals
+
+Script-only hardening so IDC's deterministic signals are **truthful and complete** — the drain can no
+longer report "done" while the top of the pipe still owes work, and the board invariants that prevent
+silent-stuck items are now machine-checked. Each new check ships with a red-when-broken governance eval
+in the new auto-discovered `tests/smoke/governance/` lane (no version bump — release wiring is a later
+phase).
+
+- **Three-conjunct drain fixpoint (#128)** — `idc_autorun_drain.py` now verifies all three whole-pipe
+  conjuncts before declaring the pipeline drained: build lane drained **and** the
+  `Stage=Recirculation ∧ Status=Todo` inbox empty **and** no admitted-but-unplanned
+  (`Stage=Consideration ∧ Status=Todo`) considerations. It always prints `recirc_inbox: N` /
+  `unplanned_considerations: M`, and when the build lane is drained but either count is non-zero it exits
+  with a new distinct code **4** + `drain: recirc-pending` (0/2/3 unchanged and byte-identical; only
+  admitted — `Status=Todo` — considerations count, so a `Blocked` consideration correctly stays
+  `complete`). Both backends share the verdict logic with no extra board read; `commands/autorun.md`'s
+  existing "any non-zero drain exit is not complete" binding consumes exit 4 unchanged.
+- **Board-lint empty-Status invariant (#127)** — `idc_board_lint.py` flags any
+  `Stage∈{Consideration,Recirculation}` item with a missing/blank Status (the #255/#256 silent-stuck
+  class), on a separate path from the scan lane (never counted toward `scanned`, zero-count summary
+  byte-identical → no doctor regression). New `--fix` emits the proposed repair as a future-tense
+  `would-fix: #<n> Status=Todo` line — the stdin tool has no board handle and never mutates, so a
+  past-tense token would itself be a dishonest signal.
+- **Atomic Stage+Status create (#126)** — `idc_gh_board.py` gains a sanctioned `create_item()` that sets
+  Stage **and** Status as one unit and discards the partial artifact (delete item + close issue) on any
+  post-create failure, fail-closed before create when ids don't resolve, rate-limit-aware, and honest
+  about an incomplete discard rather than falsely claiming a clean rollback. `idc_tracker_fs.py`
+  `op_create` audited already-atomic. (Re-pointing `idc_recirc_sweep.py` at the new primitive is deferred
+  to a later phase.)
+- **Janitor RESUME-RECIRC (#125)** — `idc_git_janitor.py` emits a RISKY `recirc RESUME-RECIRC` finding
+  when an unmerged `recirculate/*` branch coexists with an open recirc inbox — additive, both backends,
+  no extra git/gh/board read.
+
 ## 3.3.0 — 2026-07-02
 
 The 2026-07 effectiveness-audit fix package (umbrella #110): the pipeline now cleans up after

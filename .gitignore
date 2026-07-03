@@ -9,3 +9,4 @@ __pycache__/
 # scratch diagram exports + playwright-mcp browser artifacts (kept on disk, out of git)
 /idc-*.png
 .playwright-mcp/
+.auto-goal-teams/

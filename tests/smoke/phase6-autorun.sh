@@ -41,20 +41,20 @@ drain | grep -q "^drain: continue$" || fail "still actionable while issue a is T
 drain | grep -qE "(^| )$gate( |$)" && fail "the operator-action gate must not be eligible build work"
 drain | grep -qE "(^| )$b( |$)" && fail "a Blocked PRD-dependent issue must not be eligible"
 
-# add a consideration pointer that is Todo but NOT YET ADMITTED (an open Think PR / pending the
-# end-of-Think gate). Build must NEVER scoop it — Autorun only builds APPROVED considerations.
-# This is the guard that fails red if the drain predicate stops skipping a Stage=Consideration
-# pointer (i.e. lets Autorun proceed past an open Think PR).
-c=$(python3 "$TRK" --tracker "$T" create --title "Pending consideration (open Think PR)" --stage Consideration)
-drain | grep -qE "(^| )$c( |$)" && fail "a Stage=Consideration pointer (open Think PR / pending admission) must not be eligible build work"
+# add a consideration pointer that is Stage=Consideration ∧ Status=Todo — ADMITTED but not yet
+# planned (per spec the Think PR is merged; it now awaits a Plan pass). Build must NEVER scoop a
+# Consideration pointer regardless — Autorun only claims Stage=Buildable work. This is the guard that
+# fails red if the drain predicate stops skipping a Stage=Consideration pointer.
+c=$(python3 "$TRK" --tracker "$T" create --title "Admitted-but-unplanned consideration (awaiting Plan)" --stage Consideration)
+drain | grep -qE "(^| )$c( |$)" && fail "a Stage=Consideration pointer must not be eligible build work"
 
-# build issue a to Done -> only the gate (operator) + Blocked b + the un-admitted consideration
-# remain. The build lane IS drained (nothing eligible), but the Stage=Consideration ∧ Status=Todo
-# pointer is a whole-pipe fixpoint conjunct (unplanned_considerations>0), so the drain is NOT a
-# terminal `complete` — it is `drain: recirc-pending` exit 4 (the pointer still owes an operator gate
-# / planning pass). The pointer is STILL never eligible build work (asserted at $c above). Exit 4 is
-# NOT `complete`, so autorun does not stop — it drains the inbox next /loop. drainrc() runs the drain
-# capturing its exit code (exit 4 would trip a bare `drain |` pipe under set -uo pipefail otherwise).
+# build issue a to Done -> only the gate (operator) + Blocked b + the admitted-but-unplanned
+# consideration remain. The build lane IS drained (nothing eligible), but the Stage=Consideration ∧
+# Status=Todo pointer is a whole-pipe fixpoint conjunct (unplanned_considerations>0), so the drain is
+# NOT a terminal `complete` — it is `drain: recirc-pending` exit 4 (the pointer still owes a planning
+# pass). The pointer is STILL never eligible build work (asserted at $c above). Exit 4 is NOT
+# `complete`, so autorun does not stop — it plans the consideration next /loop. drainrc() runs the
+# drain capturing its exit code (exit 4 would trip a bare `drain |` pipe under set -uo pipefail otherwise).
 drainrc() { DOUT="$(python3 "$DRAIN" --tracker "$T" 2>/dev/null)"; DRC=$?; }
 python3 "$TRK" --tracker "$T" claim --num "$a" --agent idc-implementer >/dev/null
 python3 "$TRK" --tracker "$T" close --num "$a" >/dev/null

@@ -245,20 +245,28 @@ def create_item(owner, project, repo, title, body, stage, status):
         raise BoardWriteError("issue create returned no URL — refusing to continue")
     issue_num = url.rstrip("/").split("/")[-1]
 
-    def _discard(item_id, why):
+    def _discard(item_id):
         # Best-effort teardown so no half-created (Stage-without-Status) item survives. Each step is
-        # guarded independently (a partly-failing discard still tries the rest); the caller always
-        # sees the ORIGINAL failure via the BoardWriteError raised here.
+        # guarded independently (a partly-failing discard still tries the rest). Returns None on a
+        # CLEAN teardown, or a string naming the step(s) that themselves failed — so the caller reports
+        # the discard TRUTHFULLY ("discard INCOMPLETE …") instead of asserting a rollback that never
+        # happened. `item-delete` takes the project number positionally + --owner + --id (there is NO
+        # --project-id flag on item-delete — only item-edit has one).
+        problems = []
         if item_id:
             try:
-                _gh(["project", "item-delete", "--id", item_id, "--project-id", pnode], repo)
-            except BoardReadError:
-                pass
+                _gh(["project", "item-delete", str(project), "--owner", owner, "--id", item_id], repo)
+            except BoardReadError as e:
+                problems.append(f"item-delete failed ({e})")
+        else:
+            # item-add gave us no id, yet it may have created the board item server-side — we have no
+            # handle to delete it. Surface the possible orphan rather than silently claim it was cleaned.
+            problems.append("no board-item id captured — a possibly-orphaned board item could survive")
         try:
             _gh(["issue", "close", str(issue_num)], repo)
-        except BoardReadError:
-            pass
-        raise BoardWriteError(f"{why} — discarded the partial item (#{issue_num})")
+        except BoardReadError as e:
+            problems.append(f"issue close failed ({e})")
+        return "; ".join(problems) if problems else None
 
     item_id = None
     try:
@@ -266,17 +274,25 @@ def create_item(owner, project, repo, title, body, stage, status):
         item_id = _gh(["project", "item-add", str(project), "--owner", owner, "--url", url,
                        "--format", "json", "--jq", ".id"], repo).strip()
         if not item_id:
-            _discard(None, "item-add returned no item id")
+            raise BoardReadError("item-add returned no item id")
         # 3. Set Stage, then Status — the two fields that MUST land together. If the Status-set fails
         #    here, we have a Stage-without-Status item (the bug), so the discard below undoes it.
         _gh(["project", "item-edit", "--id", item_id, "--project-id", pnode,
              "--field-id", stage_fid, "--single-select-option-id", stage_oid], repo)
         _gh(["project", "item-edit", "--id", item_id, "--project-id", pnode,
              "--field-id", status_fid, "--single-select-option-id", status_oid], repo)
-    except BoardWriteError:
-        raise                                     # already discarded (the no-item-id branch)
-    except BoardReadError as e:                   # any gh failure (incl. a rate-limit) after add
-        _discard(item_id, f"create step failed ({e})")
+    except RateLimitError:
+        # A throttle mid-create is RESUMABLE: re-raise it UNCHANGED so the rate-limit-aware drain reads
+        # `.reset` and pauses/resumes, instead of flattening it to a hard BoardWriteError and dropping
+        # the work. We do NOT attempt a discard here — every teardown gh call would hit the same live
+        # limit and fail; pause-and-resume is the recovery path, not a best-effort rollback under throttle.
+        raise
+    except BoardReadError as e:                   # any OTHER gh failure after add → discard + fail closed
+        incomplete = _discard(item_id)            # None if teardown was clean, else what still failed
+        why = f"create step failed ({e})"
+        if incomplete:
+            raise BoardWriteError(f"{why} — discard INCOMPLETE: {incomplete} (#{issue_num})")
+        raise BoardWriteError(f"{why} — discarded the partial item (#{issue_num})")
     return item_id
 
 

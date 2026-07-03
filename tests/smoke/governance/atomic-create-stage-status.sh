@@ -65,9 +65,16 @@ FIELDS = {"fields": [
 URL = "https://github.com/o/r/issues/42"
 
 
-def make_stub(fail_status):
-    """Build a _gh replacement + a call log. If fail_status, the item-edit that sets the Status field
-    raises (a partial failure AFTER Stage was set) — the #255/#256 shape create_item must discard."""
+def make_stub(mode="ok"):
+    """Build a _gh replacement + a call log, driving one of several partial-failure `mode`s:
+      ok                     — every step succeeds.
+      status_fail            — the item-edit that sets Status raises (a partial AFTER Stage was set).
+      status_ratelimit       — the Status-set raises a RateLimitError (a mid-create throttle).
+      empty_item_id          — item-add returns an empty id (no board-item handle to delete).
+      status_fail_delete_fail — Status-set fails AND the discard's own item-delete then fails too.
+    The item-delete branch asserts the EXACT gh argv: `project item-delete <number> --owner <o> --id
+    <item>` — there is NO --project-id flag on item-delete (only item-edit). A wrong invocation raises
+    AssertionError (NOT a BoardReadError), so create_item cannot swallow it → the scenario FAILs."""
     calls = []
 
     def stub(args, repo):
@@ -80,13 +87,23 @@ def make_stub(fail_status):
         if verb == ("issue", "create"):
             return URL + "\n"
         if verb == ("project", "item-add"):
-            return "PVTI_item\n"
+            return "\n" if mode == "empty_item_id" else "PVTI_item\n"
         if verb == ("project", "item-edit"):
             fid = args[args.index("--field-id") + 1]
-            if fid == "FID_status" and fail_status:
-                raise B.BoardReadError("simulated Status-set failure")
+            if fid == "FID_status":
+                if mode in ("status_fail", "status_fail_delete_fail"):
+                    raise B.BoardReadError("simulated Status-set failure")
+                if mode == "status_ratelimit":
+                    raise B.RateLimitError("1999999999")
             return ""
         if verb == ("project", "item-delete"):
+            if "--project-id" in args:
+                raise AssertionError(f"item-delete has NO --project-id flag: {args}")
+            expected = ["project", "item-delete", "1", "--owner", "o", "--id", "PVTI_item"]
+            if list(args) != expected:
+                raise AssertionError(f"item-delete argv {args} != expected {expected}")
+            if mode == "status_fail_delete_fail":
+                raise B.BoardReadError("simulated item-delete failure")
             return ""
         if verb == ("issue", "close"):
             return ""
@@ -108,7 +125,7 @@ def called(calls, verb):
 orig = B._gh
 try:
     # ---- SUCCESS path: every step ok → returns the item id, and BOTH Stage and Status were set. ----
-    stub, calls = make_stub(fail_status=False)
+    stub, calls = make_stub("ok")
     B._gh = stub
     iid = B.create_item("o", "1", ".", "t", "b", "Consideration", "Todo")
     if iid != "PVTI_item":
@@ -121,7 +138,9 @@ try:
         print("FAIL: success path wrongly discarded the item"); sys.exit(1)
 
     # ---- PARTIAL FAILURE: Stage set, Status-set FAILS → helper must DISCARD and RAISE. ----
-    stub, calls = make_stub(fail_status=True)
+    # The stub asserts the EXACT item-delete argv, so a wrong `gh` invocation (e.g. the non-existent
+    # --project-id flag) raises AssertionError here and FAILs the scenario (B1 red-when-broken).
+    stub, calls = make_stub("status_fail")
     B._gh = stub
     try:
         B.create_item("o", "1", ".", "t", "b", "Consideration", "Todo")
@@ -134,6 +153,47 @@ try:
         print("FAIL: partial failure did not delete the half-created board item"); sys.exit(1)
     if not called(calls, ("issue", "close")):
         print("FAIL: partial failure did not close the backing issue"); sys.exit(1)
+
+    # ---- M2: a RATE-LIMIT mid-create must propagate as RateLimitError (type + .reset), NOT be
+    #      flattened to a hard BoardWriteError, and must NOT fire a doomed discard under the throttle. ----
+    stub, calls = make_stub("status_ratelimit")
+    B._gh = stub
+    try:
+        B.create_item("o", "1", ".", "t", "b", "Consideration", "Todo")
+        print("FAIL: create_item did not raise on a mid-create rate-limit"); sys.exit(1)
+    except B.RateLimitError as e:
+        if e.reset != "1999999999":
+            print(f"FAIL: rate-limit reset was {e.reset!r}, expected '1999999999' (resume info lost)"); sys.exit(1)
+    except B.BoardReadError:
+        print("FAIL: mid-create rate-limit was flattened to a hard error (pause/resume lost)"); sys.exit(1)
+    if called(calls, ("project", "item-delete")) or called(calls, ("issue", "close")):
+        print("FAIL: rate-limit path attempted a discard under the live throttle"); sys.exit(1)
+
+    # ---- M3: item-add returns an EMPTY id → no board-item handle to delete. Must fail closed, close
+    #      the backing issue, NOT call item-delete, and report the discard as INCOMPLETE (honest). ----
+    stub, calls = make_stub("empty_item_id")
+    B._gh = stub
+    try:
+        B.create_item("o", "1", ".", "t", "b", "Consideration", "Todo")
+        print("FAIL: create_item did not raise on an empty item-add id"); sys.exit(1)
+    except B.BoardReadError as e:
+        if "INCOMPLETE" not in str(e):
+            print(f"FAIL: empty-item-id discard not reported as INCOMPLETE: {e}"); sys.exit(1)
+    if called(calls, ("project", "item-delete")):
+        print("FAIL: empty-item-id path called item-delete with no id"); sys.exit(1)
+    if not called(calls, ("issue", "close")):
+        print("FAIL: empty-item-id path did not close the backing issue"); sys.exit(1)
+
+    # ---- M1: when the discard's OWN item-delete fails, the raised error must say so (INCOMPLETE),
+    #      not falsely claim a clean rollback. ----
+    stub, calls = make_stub("status_fail_delete_fail")
+    B._gh = stub
+    try:
+        B.create_item("o", "1", ".", "t", "b", "Consideration", "Todo")
+        print("FAIL: create_item did not raise when discard's item-delete failed"); sys.exit(1)
+    except B.BoardReadError as e:
+        if "INCOMPLETE" not in str(e) or "item-delete failed" not in str(e):
+            print(f"FAIL: failed teardown not surfaced honestly: {e}"); sys.exit(1)
 finally:
     B._gh = orig
 

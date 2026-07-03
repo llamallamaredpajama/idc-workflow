@@ -49,7 +49,19 @@ When one or more issues are flagged retired-recirc, the flagged summary appends 
 *inside* the parentheses; the clause is omitted when <R> == 0 (same byte-identical-when-zero discipline
 as the degraded clause), so the existing `(<S> schema, <P> prose-dep)` form is preserved.
 
-Usage: idc_board_lint.py < issues.json   (exit 0 = ran OK; 2 = unreadable/un-parseable input)
+The **empty-Status** rule enforces the `Stage∈{Consideration,Recirculation}` invariant (#255/#256): a
+pointer/ticket in either stage that carries an empty/missing Status (`null`, `""`, or the doctor
+`"none"` sentinel) is invisible to the dropped-handoff detector and silently never drains. It is
+flagged `empty-status`; the tally rides the flagged parens as a conditional `, <E> empty-status`
+clause (omitted when <E> == 0, same byte-identical discipline). These items ride index-only (their
+non-contract bodies are never schema-scanned) and are NOT counted toward `scanned` (which stays
+build-eligible-only), so a flagged count can exceed the scanned count in a pure empty-Status board.
+
+`--fix` EMITS the repair (this stdin tool has no live board handle, so it never mutates a board): one
+`would-fix: #<n> Status=Todo` line per empty-Status item, printed after the summary, for a caller to
+apply (future-tense token — the tool proposes the repair, it does not perform it).
+
+Usage: idc_board_lint.py [--fix] < issues.json   (exit 0 = ran OK; 2 = unreadable/un-parseable input)
 """
 import json
 import os
@@ -71,7 +83,16 @@ OPERATOR_GATE_PREFIX = "[operator-action]"
 # re-pointed this issue OFF it onto the real new unblockers. If that link is the issue's last blocker,
 # the issue is spuriously eligible (the premature-eligibility / infinite-recirc trap).
 RECIRC_STAGE = "Recirculation"
+CONSIDERATION_STAGE = "Consideration"
 DONE_STATUS = "Done"
+# The empty-Status invariant stages (#255/#256): a pointer/ticket in EITHER of these stages MUST
+# carry a Status — a Stage-without-Status pointer is invisible to the dropped-handoff detector, so it
+# silently never drains. board-lint flags such an item `empty-status`; `--fix` repairs it to
+# `Status=Todo`. These items ride INDEX-ONLY (not build-eligible), so the rule evaluates them on a
+# SEPARATE path from in_scan_lane (never schema-scanning their non-contract bodies).
+INVARIANT_STAGES = (RECIRC_STAGE, CONSIDERATION_STAGE)
+# The repair target: a well-formed pointer is picked up by the drain at Status=Todo.
+FIX_STATUS = "Todo"
 # Build-eligible-lane sentinels: an input object IS scanned (schema/prose/retired) only when it is in
 # this lane; an object explicitly outside it (e.g. the Done Recirculation blocker) rides in INDEX-ONLY
 # to supply a blocker's stage/status and is never schema-scanned (its non-contract body would
@@ -181,6 +202,33 @@ def retired_recirc_evidence(blocked_by, stage_status):
     return ""
 
 
+def is_empty_status(status):
+    """Whether a Status counts as EMPTY for the invariant rule.
+
+    `idc_gh_board.py` OMITS an absent field, and doctor's index pass re-materializes a missing Status
+    as the sentinel string `"none"` — so "no Status" arrives as `None`, `""`, or `"none"`. All three
+    mean the pointer carries no real Status and must flag. `Status=Todo` (or any other real status) is
+    the valid, non-flagged state."""
+    if status is None:
+        return True
+    s = str(status).strip()
+    return s == "" or s.lower() == "none"
+
+
+def empty_status_evidence(stage, status):
+    """Return a short evidence string if a Stage∈{Consideration,Recirculation} item carries an
+    empty/missing Status (the #255/#256 detector-blinding bug), else ''.
+
+    A pointer created with a Stage but no Status is invisible to the dropped-handoff detector, so it
+    silently never drains. This enforces the Stage∈{Consideration,Recirculation} invariant: those
+    stages MUST carry a Status. Evaluated on a SEPARATE path from in_scan_lane so the item's
+    non-contract body is never schema-scanned."""
+    if stage not in INVARIANT_STAGES or not is_empty_status(status):
+        return ""
+    return (f"Stage={stage} carries an empty/missing Status — invisible to the dropped-handoff "
+            f"detector (#255/#256); --fix sets Status={FIX_STATUS}")
+
+
 def in_scan_lane(it):
     """Whether an input object is a build-eligible-lane issue to SCAN (schema/prose/retired), versus
     an index-only entry that only supplies a blocker's stage/status.
@@ -204,9 +252,14 @@ def in_scan_lane(it):
 
 
 def lint(issues):
-    """Return (lines, scanned, schema_count, prose_count, retired_count, unknown_count)."""
+    """Return (lines, scanned, schema_count, prose_count, retired_count, unknown_count,
+    empty_status_count, fixes).
+
+    `fixes` is the list of item numbers flagged empty-status (the records `--fix` repairs to
+    Status=Todo)."""
     lines = []
-    scanned = schema_count = prose_count = retired_count = unknown_count = 0
+    scanned = schema_count = prose_count = retired_count = unknown_count = empty_status_count = 0
+    fixes = []
     # Blocker-resolution index: {number: (stage, status)} over the WHOLE input, so the retired-recirc
     # rule can resolve each native blocked-by to its board lane. Index-only entries (a Done
     # Recirculation ticket) ride in solely to populate this — see in_scan_lane().
@@ -215,6 +268,16 @@ def lint(issues):
         title = str(it.get("title", "")).strip()
         if title.startswith(OPERATOR_GATE_PREFIX):
             continue  # the operator's gate issue — not a goal-contract, never built cold
+        # Empty-Status invariant (Consideration/Recirculation): a SEPARATE path from the build-eligible
+        # scan — these items ride index-only (in_scan_lane is False), so their non-contract bodies are
+        # never schema-scanned; they are NOT counted toward `scanned` (that stays build-eligible-only).
+        empty_ev = empty_status_evidence(it.get("stage"), it.get("status"))
+        if empty_ev:
+            empty_status_count += 1
+            num = it.get("number", "?")
+            fixes.append(num)
+            label = f'#{num} "{title}"' if title else f"#{num}"
+            lines.append(f"{label}: empty-status — {empty_ev}")
         if not in_scan_lane(it):
             continue  # index-only entry (supplies a blocker's stage/status); not a scanned lane issue
         scanned += 1
@@ -245,10 +308,21 @@ def lint(issues):
             label = f'#{num} "{title}"' if title else f"#{num}"
             for f in findings:
                 lines.append(f"{label}: {f}")
-    return lines, scanned, schema_count, prose_count, retired_count, unknown_count
+    return (lines, scanned, schema_count, prose_count, retired_count, unknown_count,
+            empty_status_count, fixes)
 
 
 def main():
+    import argparse
+    # argparse with a single optional flag; a bare `python3 idc_board_lint.py` (no args) is unchanged.
+    ap = argparse.ArgumentParser(
+        prog="idc_board_lint.py",
+        description="Advisory board-lane lint (reads issue JSON on stdin).")
+    ap.add_argument("--fix", action="store_true",
+                    help="emit the repaired record (Status=Todo) for each empty-Status item a caller "
+                         "applies to the live board (board-lint has no board handle; it never mutates)")
+    opts = ap.parse_args()
+
     try:
         issues = read_issues(sys.stdin.read())
     except (json.JSONDecodeError, ValueError) as e:
@@ -259,22 +333,32 @@ def main():
             sys.stderr.write("idc-board-lint: each issue must be a JSON object\n")
             sys.exit(2)
 
-    lines, scanned, schema_count, prose_count, retired_count, unknown_count = lint(issues)
+    (lines, scanned, schema_count, prose_count, retired_count, unknown_count,
+     empty_status_count, fixes) = lint(issues)
     for ln in lines:
         print(ln)
-    flagged = schema_count + prose_count + retired_count
+    flagged = schema_count + prose_count + retired_count + empty_status_count
     # Append the degraded-lookup clause ONLY when >0 — when 0 the summary is byte-for-byte unchanged.
     _noun = "lookup" if unknown_count == 1 else "lookups"
     unknown_clause = f"; {unknown_count} dependency {_noun} indeterminate" if unknown_count else ""
-    # The retired-recirc tally rides the flagged parens as a conditional clause (like the degraded
-    # clause), so a board with zero retired-recirc findings keeps the pre-existing summary byte-for-
-    # byte (the existing schema/prose-dep assertions stay green).
+    # The retired-recirc + empty-status tallies ride the flagged parens as conditional clauses (like
+    # the degraded clause), so a board with zero of either keeps the pre-existing summary byte-for-byte
+    # (the existing schema/prose-dep assertions stay green).
     retired_clause = f", {retired_count} retired-recirc" if retired_count else ""
+    empty_status_clause = f", {empty_status_count} empty-status" if empty_status_count else ""
     if flagged:
         print(f"board-lint: {flagged} flagged of {scanned} scanned "
-              f"({schema_count} schema, {prose_count} prose-dep{retired_clause}{unknown_clause})")
+              f"({schema_count} schema, {prose_count} prose-dep"
+              f"{retired_clause}{empty_status_clause}{unknown_clause})")
     else:
         print(f"board-lint: clean ({scanned} scanned{unknown_clause})")
+    # --fix: EMIT the repair (this stdin tool has no board handle, so it can't write back) — one
+    # `would-fix: #<n> Status=Todo` line per empty-Status item, which a caller applies to the live
+    # board. The token is future-tense on purpose: this tool never mutates, so a past-tense "fixed:"
+    # would be a dishonest signal (the exact failure class this governance work exists to remove).
+    if opts.fix:
+        for num in fixes:
+            print(f"would-fix: #{num} Status={FIX_STATUS}")
     sys.exit(0)
 
 

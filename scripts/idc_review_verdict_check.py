@@ -32,6 +32,9 @@ import json
 import sys
 
 VERDICTS = {"PASS", "PASS-WITH-NITS", "FAIL", "FAIL-BLOCKED"}
+# The PASSING dispositions — a verdict that may permit a merge/close. FAIL/FAIL-BLOCKED must be fixed,
+# never closed. The transition engine's close guard reads this so the pass/fail split has ONE owner.
+PASSING = {"PASS", "PASS-WITH-NITS"}
 SEVERITIES = {"blocker", "major", "minor", "nit"}
 REQUIRED_FINDING = ("dimension", "severity", "confidence", "evidence", "attack", "unblock", "fingerprint")
 # A deferral is a structured, validated obligation a closeout carries instead of an unparsed

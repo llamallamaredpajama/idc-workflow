@@ -125,11 +125,15 @@ def op_create(path, args):
         die(f"invalid stage '{args.stage}' (one of {STAGES})")
     num = state["next_number"]
     blocked_by = [int(x) for x in args.blocked_by.split(",")] if args.blocked_by else []
+    # An optional initial --comment lands in the SAME atomic save as the issue, so a caller that needs
+    # a marker on the new item (e.g. the transition engine's recirculate-intake dedupe marker) never
+    # has a create-then-comment window that could strand an unmarked item.
     state["issues"].append({
         "number": num, "title": args.title, "status": args.status,
         "stage": args.stage or "",
         "wave": args.wave or "", "phase": args.phase or "", "domain": args.domain or "",
-        "blocked_by": blocked_by, "attempt": 0, "comments": [],
+        "blocked_by": blocked_by, "attempt": 0,
+        "comments": [args.comment] if args.comment else [],
     })
     state["next_number"] = num + 1
     save(path, state)
@@ -369,6 +373,7 @@ def main():
     c.add_argument("--phase", default="")
     c.add_argument("--domain", default="")
     c.add_argument("--blocked-by", dest="blocked_by", default="")
+    c.add_argument("--comment", default="", help="an initial comment stored atomically with the new issue")
 
     s = sub.add_parser("set")
     s.add_argument("--num", type=int, required=True)

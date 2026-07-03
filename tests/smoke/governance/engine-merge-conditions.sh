@@ -14,15 +14,8 @@
 # Usage: bash tests/smoke/governance/engine-merge-conditions.sh   (exit 0 = pass)
 set -uo pipefail
 . "$(dirname "$0")/lib.sh"
-fail() { echo "FAIL: $1"; exit 1; }
-ENGINE="$GOV_PLUGIN/scripts/idc_transition.py"
+gov_engine_env
 CHECK="$GOV_PLUGIN/scripts/idc_review_verdict_check.py"
-[ -f "$ENGINE" ] || fail "transition engine not found at $ENGINE (not implemented yet)"
-
-T="$(gov_new_tracker)" || fail "gov_new_tracker could not init a throwaway TRACKER.md"
-REPO="$(dirname "$T")"
-trap 'rm -rf "$REPO"' EXIT
-eng() { python3 "$ENGINE" --repo "$REPO" --backend filesystem --tracker "$T" "$@"; }
 
 # Backward-compat first: a verdict WITHOUT merge_conditions still validates (absent ⇒ no conditions).
 cat > "$REPO/v-plain.json" <<JSON
@@ -35,7 +28,7 @@ echo "  ok (compat) verdict without merge_conditions still validates"
 # (1) verdict with an UNMET merge_condition ⇒ close denied.
 n1="$(gov_seed_item "$T" --title 'build1' --stage Buildable --status 'In Progress')" || fail "seed failed"
 cat > "$REPO/v-unmet.json" <<JSON
-{"verdict":"PASS-WITH-NITS","pr":10,
+{"verdict":"PASS-WITH-NITS","pr":10,"issue":$n1,
  "findings":[{"dimension":"style","severity":"nit","confidence":0.9,"evidence":"e","attack":"a","unblock":"u","fingerprint":"fp1"}],
  "merge_conditions":[{"id":"ci-green","description":"CI must be green before merge","met":false}]}
 JSON
@@ -49,7 +42,7 @@ echo "  ok (1) close is blocked while a merge_condition is unmet"
 # (2) same verdict with the condition MET ⇒ close allowed.
 n2="$(gov_seed_item "$T" --title 'build2' --stage Buildable --status 'In Progress')" || fail "seed failed"
 cat > "$REPO/v-met.json" <<JSON
-{"verdict":"PASS-WITH-NITS","pr":10,
+{"verdict":"PASS-WITH-NITS","pr":10,"issue":$n2,
  "findings":[{"dimension":"style","severity":"nit","confidence":0.9,"evidence":"e","attack":"a","unblock":"u","fingerprint":"fp1"}],
  "merge_conditions":[{"id":"ci-green","description":"CI must be green before merge","met":true}]}
 JSON

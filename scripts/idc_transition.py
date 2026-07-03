@@ -21,7 +21,13 @@ Three load-bearing invariants, every op:
   * NORMALIZED — an op can NEVER leave a Stage set without a Status (the #255/#256 bug class). Create
     targets are checked before the write; the read-back re-checks after.
 
-Guards (close): a `close` requires a validated review verdict for the linked PR
+THE terminal invariant: the ONLY path to a terminal Status (Done) is a guarded terminal `close`
+whose verdict is VALID, PASSING (PASS/PASS-WITH-NITS), and OWNS the item (verdict.issue == the item
+being closed, verdict.pr == the mandatory --pr). Every OTHER op — create, move, claim, unblock,
+recirculate-intake, retire — is refused from minting a terminal Status. Everything else that touches
+Status/Stage is bounded by the machine table's declared domains (a single `validate_target` gate).
+
+Guards (close): a `close` requires a validated, passing, item-owning review verdict for the linked PR
 (idc_review_verdict_check passes) AND every merge_conditions[] entry in that verdict marked met.
 Guards read artifacts on disk, not prose claims.
 
@@ -82,13 +88,25 @@ def _mini_yaml(text):
             return out
         return s
 
-    # (indent, key, inline-value-or-None) for every non-blank, non-comment line.
+    # (indent, key, inline-value-or-None) for every non-blank, non-comment line. Unsupported YAML
+    # shapes are REJECTED LOUDLY (not silently misparsed) — the machine table is operator-visible and
+    # hand-editable, so a block-style list or a keyless line must fail with a clear message rather
+    # than silently collapse to a dict that denies every op.
     lines = []
     for raw in text.splitlines():
-        if not raw.strip() or raw.lstrip().startswith("#"):
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
             continue
+        if stripped.startswith("- "):
+            raise TransitionError(
+                f"machine table: block-style list ('{stripped}') is unsupported by the stdlib "
+                "fallback parser — use an inline flow list [a, b, c] (or install PyYAML)")
+        if ":" not in stripped:
+            raise TransitionError(
+                f"machine table: unsupported line {stripped!r} — the stdlib fallback parser expects "
+                "`key: value` (or install PyYAML)")
         indent = len(raw) - len(raw.lstrip(" "))
-        key, _, val = raw.strip().partition(":")
+        key, _, val = stripped.partition(":")
         lines.append((indent, key.strip(), val.strip()))
 
     def build(idx, indent):
@@ -114,6 +132,20 @@ def _mini_yaml(text):
     return doc
 
 
+def validate_machine(machine, path):
+    """Cross-check the table's Status/Stage domains against the filesystem backend's canonical enums
+    (idc_tracker_fs) and REFUSE on any drift — so an operator edit that adds a Status the backend
+    rejects (or vice-versa) fails loudly at load, not mid-op. This is the check the header comment
+    promises; keep them in lockstep."""
+    for field, want, key in (("Status", set(idc_tracker_fs.STATUSES), "statuses"),
+                             ("Stage", set(idc_tracker_fs.STAGES), "stages")):
+        got = set(machine.get(key) or [])
+        if got != want:
+            raise TransitionError(
+                f"machine table {path}: `{key}` {sorted(got)} != backend {field} enum {sorted(want)} "
+                "— the machine table and idc_tracker_fs have drifted (fix one)")
+
+
 def load_machine(path):
     with open(path, encoding="utf-8") as fh:
         text = fh.read()
@@ -124,6 +156,7 @@ def load_machine(path):
         doc = _mini_yaml(text)
     if not isinstance(doc, dict) or "ops" not in doc:
         raise TransitionError(f"machine table {path} is malformed (no `ops:`)")
+    validate_machine(doc, path)
     return doc
 
 
@@ -172,6 +205,45 @@ def check_status_legal(machine, status):
         raise TransitionError(f"illegal transition: Status {status!r} is not a legal state")
 
 
+def check_stage_legal(machine, stage):
+    """A --stage must be within the machine's declared `stages:` domain — enforced ENGINE-side on BOTH
+    backends, so github create no longer relies on the fs backend's incidental validation."""
+    if stage and stage not in (machine.get("stages") or []):
+        raise TransitionError(f"illegal transition: Stage {stage!r} is not a legal state")
+
+
+def refuse_terminal(machine, op, status):
+    """THE invariant: the terminal Status (Done) is reachable ONLY through a guarded terminal `close`
+    (valid, PASSING, item-owning verdict). Every OTHER op — create/move/claim/unblock/recirculate —
+    is refused from minting it. Applies to both backends."""
+    if status == machine.get("terminal_status"):
+        raise TransitionError(
+            f"illegal transition: {op} may not set the terminal Status {status!r} — only a guarded "
+            "`close` (with a valid, passing, item-owning verdict) may reach it")
+
+
+def check_worked_state(machine, op, stage, status):
+    """The engine-wide worked-state invariant: the worked Status (In Progress) is illegal on the
+    non-build Stages, so NO op (create, claim, move, …) may drive OR mint an item there. Closes every
+    path — a transition AND a direct `create --stage Recirculation --status "In Progress"`."""
+    if status == machine.get("worked_status") and stage in (machine.get("worked_forbidden_stages") or []):
+        raise TransitionError(
+            f"illegal transition: {op} would set Status={status!r} on a Stage={stage!r} item "
+            "— a non-build item is never worked (drain/decompose it, don't claim it)")
+
+
+def validate_target(machine, op, stage, status):
+    """The single pre-write gate every write's target (stage, status) passes, on BOTH backends: within
+    the declared Stage/Status domains, normalized (never Stage-without-Status), non-terminal (only a
+    guarded close reaches Done), and not a forbidden worked state. One choke point — no op can slip a
+    target past it."""
+    check_stage_legal(machine, stage)
+    check_status_legal(machine, status)
+    assert_normalized(stage, status)
+    refuse_terminal(machine, op, status)
+    check_worked_state(machine, op, stage, status)
+
+
 # ── close guard ────────────────────────────────────────────────────────────────────────────────
 def load_verdict(verdict_path):
     if not verdict_path:
@@ -197,13 +269,31 @@ def unmet_merge_conditions(verdict):
             if not (isinstance(c, dict) and c.get("met") is True)]
 
 
-def check_close_guards(spec, verdict_path, pr):
-    """Evaluate a terminal op's declared guards against the verdict receipt on disk."""
+def check_close_guards(spec, num, verdict_path, pr):
+    """Evaluate a terminal op's declared guards against the verdict receipt on disk. THE close
+    invariant: the verdict must be valid, PASSING, and OWN the item being closed — so no unbound or
+    failing verdict can ever close anything (nor a verdict for a different item/PR)."""
     guards = spec.get("guards") or []
     if not guards:
-        return  # e.g. `retire` — no verdict required
+        return  # a terminal op with no verdict guard (none ship in this stage — retire is fail-closed)
+    if pr is None:
+        raise TransitionError(
+            "close denied: --pr is required — the verdict must be bound to the closing PR (no unbound close)")
     verdict = load_verdict(verdict_path)  # guard: verdict-validated (raises if missing/invalid)
-    if pr is not None and verdict.get("pr") not in (None, pr):
+    # "Validated" means PASSING, not merely schema-valid: a well-formed FAIL / FAIL-BLOCKED verdict is
+    # a review that must be FIXED, never closed to Done.
+    disposition = verdict.get("verdict")
+    if disposition not in VC.PASSING:
+        raise TransitionError(
+            f"close denied: verdict disposition is {disposition!r} — only {sorted(VC.PASSING)} may "
+            "close (a FAIL/FAIL-BLOCKED must be fixed, not closed) (guard verdict-validated)")
+    # OWNERSHIP: the verdict must be FOR this item and this PR — a verdict for #888/PR-999 can never
+    # close #2 (the unbound-verdict class). Both bindings are mandatory for a close.
+    if verdict.get("issue") != num:
+        raise TransitionError(
+            f"close denied: verdict is for issue #{verdict.get('issue')}, not the closing item #{num} "
+            "— a verdict must OWN the item it closes (unbound verdict)")
+    if verdict.get("pr") != pr:
         raise TransitionError(
             f"close denied: verdict is for PR #{verdict.get('pr')}, not the closing PR #{pr}")
     if "merge-conditions-met" in guards:
@@ -250,22 +340,28 @@ def fs_get_item(tracker, num):
     return {"stage": it.get("stage") or "", "status": it.get("status") or ""}
 
 
-def _fs_create(machine, tracker, spec, title, body, stage_over, status_over):
+def _fs_create(machine, op, tracker, spec, title, body, stage_over, status_over):
     target = spec.get("target") or {}
     stage = stage_over or target.get("stage") or ""
     status = status_over or target.get("status") or ""
-    check_status_legal(machine, status)
-    assert_normalized(stage, status)                       # pre-write normalization
-    r = _trk(tracker, "create", "--title", title, "--stage", stage, "--status", status)
+    validate_target(machine, op, stage, status)            # one pre-write gate (domains/normalized/terminal/worked)
+    # ATOMIC: the item AND its marker comment land in ONE idc_tracker_fs save (fsync+os.replace) via
+    # --comment — no create-then-comment window that could strand an UNMARKED item (filer dedupe risk).
+    args = ["create", "--title", title, "--stage", stage, "--status", status]
+    if body:
+        args += ["--comment", body]
+    r = _trk(tracker, *args)
     if r.returncode != 0:
         raise TransitionError(f"create failed: {r.stderr.strip()[:160]}")
     num = r.stdout.strip()
-    if body:
-        cm = _trk(tracker, "comment", "--num", num, "--body", body)
-        if cm.returncode != 0:
-            raise TransitionError(f"create: body/marker comment failed for #{num}: {cm.stderr.strip()[:160]}")
-    obs = fs_get_item(tracker, num)
-    verify_readback(num, stage, status, obs["stage"], obs["status"])  # read-back verify
+    # Read back the FINAL state — Stage+Status match the target AND (if any) the marker durably landed.
+    state = idc_tracker_fs.load(tracker)
+    it = next((i for i in state.get("issues", []) if str(i.get("number")) == str(num)), None)
+    if it is None:
+        raise TransitionError(f"read-back: created #{num} not found after write")
+    verify_readback(num, stage, status, it.get("stage") or "", it.get("status") or "")
+    if body and body not in (it.get("comments") or []):
+        raise TransitionError(f"read-back: created #{num} is missing its marker comment (strand risk)")
     return num
 
 
@@ -278,8 +374,10 @@ def _fs_set_status(machine, tracker, num, status):
     verify_readback(num, None, status, obs["stage"], obs["status"])   # Stage untouched; verify Status landed
 
 
-def _fs_current_stage(tracker, num):
-    return fs_get_item(tracker, num)["stage"]
+def _fs_comment(tracker, num, body):
+    r = _trk(tracker, "comment", "--num", str(num), "--body", body)
+    if r.returncode != 0:
+        raise TransitionError(f"comment on #{num} failed: {r.stderr.strip()[:160]}")
 
 
 def _fs_link(tracker, parent, child, kind):
@@ -289,12 +387,11 @@ def _fs_link(tracker, parent, child, kind):
 
 
 # ── github backend ─────────────────────────────────────────────────────────────────────────────
-def _gh_create(machine, owner, project, repo, spec, title, body, stage_over, status_over):
+def _gh_create(machine, op, owner, project, repo, spec, title, body, stage_over, status_over):
     target = spec.get("target") or {}
     stage = stage_over or target.get("stage") or ""
     status = status_over or target.get("status") or ""
-    check_status_legal(machine, status)
-    assert_normalized(stage, status)
+    validate_target(machine, op, stage, status)  # SAME gate as fs — github stage/terminal/worked checks too
     # create_item is the ATOMIC github primitive: it sets Stage AND Status together and DISCARDS a
     # partial (Stage-without-Status) create, returning the item id only once both landed. That
     # atomic-verified return IS the create read-back for github — no extra whole-board fetch (which
@@ -317,10 +414,10 @@ def run(op, ctx, **kw):
     result = None
     if kind == "create":
         if backend == "github":
-            result = _gh_create(machine, ctx["owner"], ctx["project"], ctx["repo"], spec,
+            result = _gh_create(machine, op, ctx["owner"], ctx["project"], ctx["repo"], spec,
                                  kw["title"], kw.get("body", ""), kw.get("stage"), kw.get("status"))
         else:
-            result = _fs_create(machine, ctx["tracker"], spec, kw["title"], kw.get("body", ""),
+            result = _fs_create(machine, op, ctx["tracker"], spec, kw["title"], kw.get("body", ""),
                                 kw.get("stage"), kw.get("status"))
 
     elif kind == "transition":
@@ -330,22 +427,44 @@ def run(op, ctx, **kw):
             to_status = kw.get("to_status")
             if not to_status:
                 raise TransitionError(f"{op}: --to-status is required")
-        if to_status in (spec.get("forbidden_to") or []):
-            raise TransitionError(f"illegal transition: {op} may not move #{num} to {to_status!r}")
         if backend == "github":
             raise TransitionError(f"{op}: github transition ops are not wired in this stage "
                                   "(filesystem-proven first; github move/claim land with the interlocks)")
-        cur_stage = _fs_current_stage(ctx["tracker"], num)
-        if cur_stage in (spec.get("forbidden_stages") or []):
+        cur = fs_get_item(ctx["tracker"], num)
+        # Done is terminal — no transition resurrects it (kills the unblock/move-out-of-Done class).
+        if cur["status"] == machine.get("terminal_status"):
             raise TransitionError(
-                f"illegal transition: {op} is forbidden on a Stage={cur_stage!r} item (#{num})")
+                f"illegal transition: #{num} is {cur['status']!r} (terminal) — {op} cannot resurrect it")
+        # Op-specific source-Status constraint (e.g. unblock only lifts a Blocked item).
+        allowed_from = spec.get("from_status")
+        if allowed_from and cur["status"] not in allowed_from:
+            raise TransitionError(
+                f"illegal transition: {op} requires source Status in {allowed_from}, "
+                f"but #{num} is {cur['status']!r}")
+        # No transition may MINT the terminal Status (only a guarded close reaches Done) nor drive a
+        # non-build item into the worked Status — both checked ENGINE-wide, same as the create gate.
+        refuse_terminal(machine, op, to_status)
+        check_worked_state(machine, op, cur["stage"], to_status)
         _fs_set_status(machine, ctx["tracker"], num, to_status)
+        if spec.get("records_agent") and kw.get("agent"):  # ownership recording is DATA-driven, not op==claim
+            _fs_comment(ctx["tracker"], num, f"claimed by {kw['agent']}")
 
     elif kind == "terminal":
         num = kw["num"]
-        check_close_guards(spec, kw.get("verdict"), kw.get("pr"))   # denies close on unmet guards
         if backend == "github":
             raise TransitionError(f"{op}: github terminal ops route through idc_gh_close in this stage")
+        guards = spec.get("guards") or []
+        if not guards:
+            # A guard-free terminal op would be a verdict-free path to Done — forbidden. The ONLY path
+            # to a terminal Status is a guarded `close` (valid, passing, item-owning verdict). `retire`
+            # has no verdict, and the board has just one terminal Status (Done), so it is fail-closed
+            # here. TODO(Phase 4): a distinct non-Done "closed-not-planned" disposition (board-schema
+            # change) would let retire terminalize a non-build item without minting an unaccepted Done.
+            raise TransitionError(
+                f"{op}: refused — a verdict-free terminal op cannot reach the terminal Status "
+                "(only a guarded `close` may). Awaiting a non-Done terminal disposition (Phase 4).")
+        fs_get_item(ctx["tracker"], num)  # read-back existence before guarded close (fails closed if absent)
+        check_close_guards(spec, num, kw.get("verdict"), kw.get("pr"))  # valid + passing + item-owning verdict
         _fs_set_status(machine, ctx["tracker"], num, spec.get("to_status"))
 
     elif kind == "link":

@@ -10,21 +10,14 @@
 #   (1) claim a Recirculation item — the recirc inbox is drained by /idc:recirculate, never claimed
 #       as build work (machine: claim.forbidden_stages includes Recirculation).
 #   (2) claim a Consideration pointer — decomposed by Plan, never claimed (forbidden_stages).
-#   (3) move an item to Done — a terminal Done must go through `close`/`retire` so its guards run
-#       (machine: move.forbidden_to includes Done).
+#   (3) move an item to Done — only a guarded `close` reaches the terminal Status; a plain `move`
+#       may not mint it (engine: refuse_terminal, THE terminal invariant).
 # Break the corresponding check in idc_transition.py::run → the forbidden op SUCCEEDS → this FAILs.
 #
 # Usage: bash tests/smoke/governance/engine-illegal-transition.sh   (exit 0 = pass)
 set -uo pipefail
 . "$(dirname "$0")/lib.sh"
-fail() { echo "FAIL: $1"; exit 1; }
-ENGINE="$GOV_PLUGIN/scripts/idc_transition.py"
-[ -f "$ENGINE" ] || fail "transition engine not found at $ENGINE (not implemented yet)"
-
-T="$(gov_new_tracker)" || fail "gov_new_tracker could not init a throwaway TRACKER.md"
-REPO="$(dirname "$T")"
-trap 'rm -rf "$REPO"' EXIT
-eng() { python3 "$ENGINE" --repo "$REPO" --backend filesystem --tracker "$T" "$@"; }
+gov_engine_env
 
 # Seed one item per forbidden stage + a buildable one to move.
 recirc="$(gov_seed_item "$T" --title 'inbox nit' --stage Recirculation --status Todo)" || fail "seed recirc failed"
@@ -51,9 +44,12 @@ fi
 [ "$(gov_field "$T" "$build" Status)" = "Todo" ] || fail "(3) denied move-to-Done still mutated Status"
 echo "  ok (3) move-to-Done is refused (terminal Done is guarded via close/retire)"
 
-# Sanity: a LEGAL transition (claim a Buildable) still succeeds — the engine is not just denying all.
-eng claim --num "$build" >/dev/null 2>&1 || fail "(sanity) engine denied a LEGAL claim on a Buildable item"
+# Sanity: a LEGAL transition (claim a Buildable) still succeeds AND records ownership — the engine is
+# not just denying all, and `--agent` is never silently dropped (PR #133 review MINOR-7).
+eng claim --num "$build" --agent alice >/dev/null 2>&1 || fail "(sanity) engine denied a LEGAL claim on a Buildable item"
 [ "$(gov_field "$T" "$build" Status)" = "In Progress" ] || fail "(sanity) legal claim did not set In Progress"
-echo "  ok (sanity) a legal claim on a Buildable item still succeeds"
+python3 "$GOV_TRK" --tracker "$T" show --num "$build" --comments | grep -q 'claimed by alice' \
+  || fail "(sanity) claim --agent was silently dropped (no 'claimed by alice' ownership comment)"
+echo "  ok (sanity) a legal claim on a Buildable item succeeds and records ownership (--agent honored)"
 
-echo "PASS: transition engine refuses illegal transitions (claim on Recirculation/Consideration; move-to-Done) while allowing legal ones"
+echo "PASS: transition engine refuses illegal transitions (claim on Recirculation/Consideration; move-to-Done) while allowing legal ones and recording claim ownership"

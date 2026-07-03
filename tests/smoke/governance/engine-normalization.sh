@@ -14,9 +14,7 @@
 # Usage: bash tests/smoke/governance/engine-normalization.sh   (exit 0 = pass)
 set -uo pipefail
 . "$(dirname "$0")/lib.sh"
-fail() { echo "FAIL: $1"; exit 1; }
-ENGINE="$GOV_PLUGIN/scripts/idc_transition.py"
-[ -f "$ENGINE" ] || fail "transition engine not found at $ENGINE (not implemented yet)"
+gov_engine_env   # sets ENGINE, mints T + REPO, installs cleanup + eng()
 
 # ── (A) UNIT: assert_normalized ────────────────────────────────────────────────────────────────
 python3 - "$GOV_PLUGIN/scripts" <<'PY' || fail "(A) assert_normalized unit assertions failed"
@@ -38,12 +36,7 @@ print("  ok (A) assert_normalized rejects Stage-without-Status, accepts both-set
 PY
 
 # ── (B) END-TO-END: a create op always reads back a non-empty Status ────────────────────────────
-T="$(gov_new_tracker)" || fail "gov_new_tracker could not init a throwaway TRACKER.md"
-REPO="$(dirname "$T")"
-trap 'rm -rf "$REPO"' EXIT
-
-n="$(python3 "$ENGINE" --repo "$REPO" --backend filesystem --tracker "$T" \
-       recirculate-intake --title 'nit' --body 'Stage: Recirculation')" \
+n="$(eng recirculate-intake --title 'nit' --body 'Stage: Recirculation')" \
   || fail "(B) recirculate-intake op failed"
 [ -n "$n" ] || fail "(B) create returned an empty issue number"
 [ "$(gov_field "$T" "$n" Stage)" = "Recirculation" ] || fail "(B) Stage did not round-trip to Recirculation"

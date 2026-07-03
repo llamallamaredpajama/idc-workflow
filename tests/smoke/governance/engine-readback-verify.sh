@@ -18,13 +18,7 @@
 # Usage: bash tests/smoke/governance/engine-readback-verify.sh   (exit 0 = pass)
 set -uo pipefail
 . "$(dirname "$0")/lib.sh"
-fail() { echo "FAIL: $1"; exit 1; }
-ENGINE="$GOV_PLUGIN/scripts/idc_transition.py"
-[ -f "$ENGINE" ] || fail "transition engine not found at $ENGINE (not implemented yet)"
-
-T="$(gov_new_tracker)" || fail "gov_new_tracker could not init a throwaway TRACKER.md"
-REPO="$(dirname "$T")"
-trap 'rm -rf "$REPO"' EXIT
+gov_engine_env
 n="$(gov_seed_item "$T" --title 'build' --stage Buildable --status Todo)" || fail "seed failed"
 
 python3 - "$GOV_PLUGIN/scripts" "$REPO" "$T" "$n" <<'PY' || fail "read-back assertions failed (see above)"

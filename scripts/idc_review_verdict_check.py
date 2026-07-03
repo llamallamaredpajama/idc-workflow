@@ -20,6 +20,11 @@ the Build finisher can trust it for the automerge decision. It checks:
     what, suggested_issue (non-empty) and a `blocks_goal` that is a real JSON boolean — the
     structured obligation a closeout emits instead of an unparsed prose footnote, consumed by
     the wave-close acceptance check.
+  * an optional `merge_conditions` list (default empty; backward-compatible — absent ⇒ no
+    conditions) is well-formed: every item carries id + description (non-empty strings) and a
+    `met` that is a real JSON boolean. These are the pre-merge conditions a PASS-WITH-NITS review
+    attaches; the transition engine's `close` guard blocks Done while any entry is unmet, closing
+    the silently-downgraded pre-merge-condition failure (#246 -> #248).
 
 Usage: idc_review_verdict_check.py <verdict.json>   (exit 0 = PASS, 1 = FAIL, 2 = usage)
 """
@@ -33,6 +38,10 @@ REQUIRED_FINDING = ("dimension", "severity", "confidence", "evidence", "attack",
 # prose footnote (autorun audit Defect 5). The acceptance check (idc_acceptance_check.py)
 # consumes `blocks_goal` to flag a Done-but-inert increment, so it must be a real JSON boolean.
 REQUIRED_DEFERRAL = ("kind", "what", "blocks_goal", "suggested_issue")
+# A merge_condition is a structured pre-merge gate a PASS-WITH-NITS review attaches; the transition
+# engine's close guard blocks Done while any entry's `met` is not True. `met` must be a real JSON
+# boolean so a stringy "false" can never read as satisfied.
+REQUIRED_MERGE_CONDITION = ("id", "description", "met")
 CONFIDENCE_FLOOR = 0.8
 # Test genuineness is fail-closed: a shallow/placeholder test is a FAIL, not a nit.
 TEST_GENUINENESS_DIM = "test-genuineness"
@@ -107,6 +116,25 @@ def check(doc):
             if "blocks_goal" in d and not isinstance(d.get("blocks_goal"), bool):
                 problems.append(f"deferral[{i}] `blocks_goal` must be a JSON boolean "
                                 f"(got {type(d.get('blocks_goal')).__name__})")
+    merge_conditions = doc.get("merge_conditions", [])
+    if not isinstance(merge_conditions, list):
+        problems.append("`merge_conditions` must be a list")
+    else:
+        seen_ids = set()
+        for i, c in enumerate(merge_conditions):
+            if not isinstance(c, dict):
+                problems.append(f"merge_condition[{i}] is not a JSON object")
+                continue
+            # `met` is a boolean with its own type check below, so it is exempt from the string rule.
+            require_strings(c, REQUIRED_MERGE_CONDITION, "met", "merge_condition", i, problems)
+            if "met" in c and not isinstance(c.get("met"), bool):
+                problems.append(f"merge_condition[{i}] `met` must be a JSON boolean "
+                                f"(got {type(c.get('met')).__name__})")
+            cid = c.get("id")
+            if isinstance(cid, str) and cid in seen_ids:
+                problems.append(f"merge_condition[{i}] duplicate id {cid!r}")
+            elif isinstance(cid, str):
+                seen_ids.add(cid)
     if verdict in VERDICTS:
         sevs = {f.get("severity") for f in findings if isinstance(f, dict) and f.get("severity") in SEVERITIES}
         exp = expected_verdict(sevs)

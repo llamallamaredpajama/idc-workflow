@@ -1,0 +1,83 @@
+# workflow-machine.yaml — the IDC workflow state machine, AS DATA (v4 Phase 2, plan §3.1).
+#
+# This file is the legal-transition table the transition engine (scripts/idc_transition.py)
+# enforces. It is scaffolded into a governed repo at docs/workflow/workflow-machine.yaml (that
+# wiring is a later Phase-2 stage); until then the engine falls back to this bundled copy. Editing
+# a workflow rule = editing THIS data, not the engine code — the engine is a generic interpreter.
+#
+# Model:
+#   * A board item's state is a (Stage x Status) pair. Both fields are ALWAYS set together — an
+#     item with a Stage but no Status is illegal (the #255/#256 bug class); the engine normalizes
+#     every op so that shape can never be written.
+#   * `ops:` is the full set of typed operations the engine's single write door accepts. Any op
+#     not listed here is refused (an "illegal transition"). Each op declares:
+#       kind        — create | transition | terminal | link
+#       target      — {stage, status} for create ops (the initial legal state)
+#       to_status   — the Status a transition/terminal op moves an item to ("any" = any legal Status)
+#       forbidden_stages — a transition is refused when the item currently sits on one of these
+#                          Stages (e.g. a Recirculation inbox item is drained, never claimed as build
+#                          work; a Consideration pointer is decomposed by Plan, never claimed).
+#       forbidden_to     — Status values this op may NOT move to (e.g. `move` cannot reach Done — a
+#                          terminal Done goes through `close`/`retire` so its guards always run).
+#       guards      — receipts the engine must verify against artifacts on disk/board (NOT prose
+#                     claims) before the op is allowed. An unmet guard denies the op.
+#
+# Guards (evaluated by the engine, each names an on-disk/board artifact it checks):
+#   verdict-validated     — a review verdict JSON that passes idc_review_verdict_check.py exists for
+#                           the linked PR (the close receipt; #394ec6fe drop points A/B/C).
+#   merge-conditions-met  — every entry in that verdict's merge_conditions[] is marked met (closes
+#                           the silently-downgraded pre-merge-condition failure, #246 -> #248).
+
+version: 1
+
+# The canonical field domains — mirror scripts/idc_tracker_fs.py STATUSES/STAGES (the engine
+# cross-checks these against the backend so the two can never silently drift).
+statuses: [Blocked, Todo, In Progress, Done]
+stages: [Consideration, Planning, Buildable, Recirculation]
+terminal_status: Done
+
+ops:
+  # ── create ops: mint a new item at a legal initial (Stage x Status) ──────────────────────────
+  create-ticket:
+    kind: create
+    target: {stage: Buildable, status: Todo}
+    guards: []
+  create-pointer:
+    kind: create
+    target: {stage: Consideration, status: Todo}
+    guards: []
+  recirculate-intake:
+    kind: create
+    target: {stage: Recirculation, status: Todo}
+    guards: []
+
+  # ── transition ops: move an existing item's Status ───────────────────────────────────────────
+  claim:
+    kind: transition
+    to_status: In Progress
+    forbidden_stages: [Recirculation, Consideration]
+    guards: []
+  move:
+    kind: transition
+    to_status: any
+    forbidden_to: [Done]
+    guards: []
+  unblock:
+    kind: transition
+    to_status: Todo
+    guards: []
+
+  # ── terminal ops: drive an item to Done (guards always run) ──────────────────────────────────
+  close:
+    kind: terminal
+    to_status: Done
+    guards: [verdict-validated, merge-conditions-met]
+  retire:
+    kind: terminal
+    to_status: Done
+    guards: []
+
+  # ── structural ops ───────────────────────────────────────────────────────────────────────────
+  link:
+    kind: link
+    guards: []

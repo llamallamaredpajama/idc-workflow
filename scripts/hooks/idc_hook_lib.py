@@ -233,3 +233,62 @@ def guard_pre_action(fn):
         sys.exit(0)
     # fn should have called allow()/block(); default-allow if it returned.
     sys.exit(0)
+
+
+# ── PostToolUse family (fail-OPEN, ALWAYS — v4 Phase 3 Stage D, first consumer) ───────────────────
+# A PostToolUse hook reacts to a tool call that ALREADY RAN — there is nothing left to deny, only to
+# repair or remind. Per the P4 fail-mode contract (module docstring): a post-hoc observer is fail-OPEN
+# ALWAYS, unlike guard_pre_tool/guard_pre_action which fail closed under IDC_HOOKS_STRICT=1. STRICT
+# still surfaces an internal error LOUDLY on stderr here (so a real bug in the observer is visible in
+# CI/e2e), but it NEVER changes the exit code or emits a block decision — a PostToolUse hook must never
+# break the user's command, full stop.
+#
+# Output contract (verified against the Claude Code hooks reference, docs/en/hooks.md, 2026-07-05):
+#   * post_tool_allow()      — say nothing, exit 0. The hot path (no drift found / nothing to check).
+#   * post_tool_inject(ctx)  — emit {"hookSpecificOutput": {"hookEventName": "PostToolUse",
+#                              "additionalContext": ctx}} on stdout, exit 0. This is model-visible
+#                              context injected next to the tool result — NEVER `{"decision":"block"}`
+#                              (PostToolUse DOES support decision:"block", but that halts further
+#                              processing after a command already ran — exactly the "breaks the user's
+#                              command" outcome a fail-open observer must never cause, so no helper
+#                              here ever emits it).
+def post_tool_allow():
+    """Nothing to report: emit nothing, exit 0. The tool result is untouched."""
+    sys.exit(0)
+
+
+def post_tool_inject(context):
+    """Inject `context` as model-visible additionalContext next to the tool result. Fail-open by
+    construction: this NEVER emits a decision/block — a post-hoc observer only ever informs, never
+    breaks the command that already ran."""
+    sys.stdout.write(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PostToolUse",
+            "additionalContext": context,
+        }
+    }))
+    sys.exit(0)
+
+
+def guard_post_observer(fn):
+    """Run a PostToolUse observer `fn(payload, plugin_root)`. `fn` reports via
+    post_tool_inject()/post_tool_allow() (or simply `return`s, which is the same as post_tool_allow()).
+    ALWAYS fails open — an unexpected exception here warns and exits 0, EVEN UNDER IDC_HOOKS_STRICT=1
+    (unlike guard_pre_tool/guard_pre_action): a post-hoc observer has nothing left to protect by
+    blocking, since the tool call it is reacting to already completed. STRICT only makes the warning
+    louder (surfaced distinctly on stderr) so a real observer bug is not silently invisible in CI/e2e —
+    it never flips this to a block or a non-zero exit."""
+    plugin_root = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("CLAUDE_PLUGIN_ROOT", "")
+    payload = read_payload()
+    try:
+        fn(payload, plugin_root)
+    except SystemExit:
+        raise
+    except Exception as e:  # noqa: BLE001 — infra bug, never a reason to touch the command's outcome
+        if strict():
+            warn(f"post-observer errored (STRICT — surfaced, still fail-open/allow): {e}")
+        else:
+            warn(f"post-observer errored, failing open (allow, no context injected): {e}")
+        sys.exit(0)
+    # fn should have called post_tool_inject()/post_tool_allow(), or simply returned (== allow).
+    sys.exit(0)

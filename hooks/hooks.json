@@ -1,5 +1,5 @@
 {
-  "description": "IDC deterministic-core hooks (v4). SessionEnd: the recirculation-intake safety-net sweep (re-stages rogue Buildables, captures untickered discovery/deferral markers). Stop: the fixpoint gate — an autorun/build orchestrator DRAIN session (self-gated via the ledger's session-scoped orchestrator_drain marker) cannot stop while `idc_autorun_drain.py` reports `drain: recirc-pending` (exit 4) AND the ledger agrees work remains; the ledger alone never blocks a clean board (drain: complete wins), bounded N=3 then loud-fail + a one-time board annotation. SubagentStop: (1) the verdict gate — a review agent cannot stop without a validated verdict JSON at docs/workflow/code-reviews/ (bounded N=3, then loud-fail); (2) the recirculator closeout-or-checkpoint detective — when the recirculator subagent stops mid-drain WITHOUT a valid idc_recirc_closeout.py closeout, every still-open Stage=Recirculation ∧ Status=Todo inbox ticket gets a resume-checkpoint comment {branch, PR#, dispositions} reconstructed deterministically from the agent transcript + a recirc_checkpoint:<ticket> ledger taint (drop F); a valid closeout allows + clears the taints. Post-hoc detective — fail-OPEN, never blocks the stop; records under observe-only. PreToolUse (Bash): the terminal-action interlocks — a raw `gh pr merge` / `gh issue close` / state-closing `gh api` / raw board mutation (`gh project item-edit|item-add|item-delete`, GraphQL board writes) that bypasses the transition engine / finisher tail is warn-injected with the exact door command (deny-capable via IDC_HOOKS_INTERLOCK_ENFORCE=1; IDC_HOOKS_OBSERVE_ONLY=1 downgrades). All repo-gated (no-op outside an IDC-governed repo) and fail-soft; auto-discovered, so NEVER also listed in plugin.json (the 3.1.1 duplicate-hooks regression).",
+  "description": "IDC deterministic-core hooks (v4). SessionEnd: the recirculation-intake safety-net sweep (re-stages rogue Buildables, captures untickered discovery/deferral markers). Stop: the fixpoint gate — an autorun/build orchestrator DRAIN session (self-gated via the ledger's session-scoped orchestrator_drain marker) cannot stop while `idc_autorun_drain.py` reports `drain: recirc-pending` (exit 4) AND the ledger agrees work remains; the ledger alone never blocks a clean board (drain: complete wins), bounded N=3 then loud-fail + a one-time board annotation. SubagentStop: (1) the verdict gate — a review agent cannot stop without a validated verdict JSON at docs/workflow/code-reviews/ (bounded N=3, then loud-fail); (2) the recirculator closeout-or-checkpoint detective — when the recirculator subagent stops mid-drain WITHOUT a valid idc_recirc_closeout.py closeout, every still-open Stage=Recirculation ∧ Status=Todo inbox ticket gets a resume-checkpoint comment {branch, PR#, dispositions} reconstructed deterministically from the agent transcript + a recirc_checkpoint:<ticket> ledger taint (drop F); a valid closeout allows + clears the taints. Post-hoc detective — fail-OPEN, never blocks the stop; records under observe-only. PreToolUse (Bash): the terminal-action interlocks — a raw `gh pr merge` / `gh issue close` / state-closing `gh api` / raw board mutation (`gh project item-edit|item-add|item-delete`, GraphQL board writes) that bypasses the transition engine / finisher tail is warn-injected with the exact door command (deny-capable via IDC_HOOKS_INTERLOCK_ENFORCE=1; IDC_HOOKS_OBSERVE_ONLY=1 downgrades). PostToolUse (Bash): two fail-OPEN, ALWAYS board-coherence self-repair observers (v4 Phase 3 Stage D) — (1) commit-sync: after a successful `git commit`, if the commit's linked board item (derived from the commit message / branch name — no board GraphQL) isn't In Progress, auto-repairs it via `idc_transition.py claim` or injects the exact remediation; (2) issue-create-add: after a successful `gh issue create`, if the same command didn't also add the new issue to the board with Stage+Status, injects the exact remediation. Both never block (additionalContext injection only, never decision:block) and never fire a live board scan. All repo-gated (no-op outside an IDC-governed repo) and fail-soft; auto-discovered, so NEVER also listed in plugin.json (the 3.1.1 duplicate-hooks regression).",
   "hooks": {
     "PreToolUse": [
       {
@@ -8,6 +8,21 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/hooks/idc_interlock_gate_hook.sh\" \"${CLAUDE_PLUGIN_ROOT}\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/hooks/idc_post_commit_sync_hook.sh\" \"${CLAUDE_PLUGIN_ROOT}\""
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/hooks/idc_post_issue_create_hook.sh\" \"${CLAUDE_PLUGIN_ROOT}\""
           }
         ]
       }

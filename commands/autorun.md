@@ -13,6 +13,22 @@ whole repo.
 Autorun is **full-pipeline autonomy that pauses only at human gates**: it **never forces** a gate — a gate-worthy item just **pauses behind its gate** (reported + skipped), exactly like an `[operator-action]` gate issue.
 It drains the pipe in one fixed top-to-bottom order — **recirculate** the Recirculation inbox, then **plan** approved considerations, then **drain** the Buildable waves — and exits when nothing actionable remains.
 
+**Mark this session as a drain orchestrator (deterministic liveness — run ONCE, at drain start).**
+Before the loop below, record in the obligations ledger that THIS session is an active autorun drain,
+so the deterministic **Stop fixpoint gate** (`hooks/hooks.json` → `idc_stop_fixpoint_gate.py`) knows to
+hold a dishonest exit: a session that tries to stop while `idc_autorun_drain.py` still reports
+`drain: recirc-pending` (the Buildable waves are drained but the Recirculation/Consideration inbox is
+non-empty) is blocked with the remediation, bounded N=3 then a loud-fail. The marker is **session-scoped**
+(keyed to this session's id), so it gates only this drain and never an unrelated session in the same repo:
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/idc_ledger.py" --cwd "$PWD" set \
+  --kind orchestrator_drain --session "$CLAUDE_CODE_SESSION_ID"
+```
+The gate **never blocks a clean board** — a `drain: complete` always wins over the ledger hint, so it
+only ever catches a stop that abandons a non-empty inbox. On a clean `drain: complete` exit you may
+clear the marker (same command with `clear --kind orchestrator_drain`); it is optional hygiene, not
+required for correctness (a drained board is allowed to stop regardless).
+
 **Janitor preflight** — run ONCE, before the drain loop below begins (not on every re-loop pass:
 board↔git debris left by a dead or interrupted **prior** session doesn't regenerate mid-run just
 because the pipe loops back, unlike the rogue-sweep backstop below, which specifically catches a
@@ -72,9 +88,10 @@ only when a full pass leaves nothing actionable:
    improvise the predicate or read the board with a bare `gh project item-list` (it truncates at its
    30-item first page → a grown board blinds the lane):
    ```bash
-   # filesystem
-   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --tracker <TRACKER.md>
-   # github — pages the WHOLE board, same predicate
+   # filesystem — `--acceptance` also runs the wave-close acceptance check when the build lane is
+   # drained (surfaces a Done-but-inert increment as `acceptance: gap <#s>`; file a recirculation on a gap)
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --tracker <TRACKER.md> --acceptance
+   # github — pages the WHOLE board, same predicate (github wave-close acceptance runs in idc:idc-build Phase 4)
    python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --backend github --project <n> --owner <o>
    ```
    Both apply the identical eligibility predicate (`Status = Todo` AND `(stage or "Buildable") ==
@@ -105,7 +122,10 @@ only when a full pass leaves nothing actionable:
    (the board read succeeded but a build candidate's blocked-by lookup could not be verified), a
    hard board-read failure (exit 2, no `drain:` line), and `drain: rate-limited until <reset>` (exit
    3, github only, #99 §C.3). Treat the lane as possibly-unfinished and let the next `/loop`
-   iteration re-check; never report the run drained on a non-zero drain exit.
+   iteration re-check; never report the run drained on a non-zero drain exit. The **Stop fixpoint gate**
+   (set up at drain start above) is the deterministic backstop for this rule on the filesystem backend:
+   if you try to stop while the drain still reports `drain: recirc-pending` (exit 4), the gate refuses
+   the stop and hands back the exact remediation — a `drain: complete` is the only honest terminal state.
    A **`rate-limited until <reset>` verdict is a THIRD, distinct case** — not a hard error, not
    nothing-actionable: GitHub's GraphQL quota is exhausted and will reset on its own. Treat it as a
    **deliberate, resumable pause**: never silently drop the tail wave, never report the run drained,

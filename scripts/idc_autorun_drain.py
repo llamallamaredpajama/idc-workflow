@@ -257,6 +257,27 @@ def load_github(owner, project_number, repo):
     return issues, unverified
 
 
+def _run_wave_close_acceptance(tracker):
+    """Invoke the EXISTING idc_acceptance_check.py (sibling in scripts/) over `tracker` at wave close
+    and return its `acceptance: <ok|gap …>` line. Reuses that script as the single source of inertness
+    truth — never reimplements it. Best-effort: a runner failure returns a diagnostic `acceptance:`
+    line rather than raising, so the drain's own verdict + exit-code contract is untouched. The check's
+    own exit code (0 ok / 1 gap) is NOT propagated to the drain's exit — only its verdict line is
+    surfaced, for the orchestrator to act on."""
+    checker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "idc_acceptance_check.py")
+    if not os.path.isfile(checker):
+        return None
+    try:
+        r = subprocess.run([sys.executable, checker, "--tracker", tracker],
+                           capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"acceptance: error ({e})"
+    for ln in (r.stdout or "").splitlines():
+        if ln.startswith("acceptance:"):
+            return ln.strip()
+    return "acceptance: error (no verdict)"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--backend", choices=("filesystem", "github"), default="filesystem",
@@ -268,6 +289,11 @@ def main():
                     help="repo dir to run gh in (github backend; default cwd)")
     ap.add_argument("--width", action="store_true",
                     help="also print the ready frontier's width (max-useful parallelism); the ready set is the `eligible:` line")
+    ap.add_argument("--acceptance", action="store_true",
+                    help="at wave close (the build lane is drained), also invoke idc_acceptance_check.py over "
+                         "the same tracker and print its `acceptance: <ok|gap …>` line (filesystem backend; the "
+                         "github wave-close acceptance runs in idc:idc-build Phase 4 via a materialized tracker). "
+                         "Opt-in so default output stays byte-identical; never changes the drain verdict/exit code.")
     args = ap.parse_args()
 
     unverified = 0
@@ -291,6 +317,18 @@ def main():
     # on every run — build eligibility (`eligible:`) is only one of the three drain conjuncts.
     print("recirc_inbox: " + str(recirc_inbox))
     print("unplanned_considerations: " + str(unplanned))
+    # WAVE-CLOSE ACCEPTANCE (opt-in, v4 Phase 3 Stage B): when the build lane is drained (`not
+    # eligible`) — the point the drain loop finishes a wave — invoke the EXISTING sibling
+    # idc_acceptance_check.py over the same tracker so a merged-"Done" issue can never ship INERT
+    # (autorun audit Fix B). Deterministic + reuses that script (never reimplements inertness); prints
+    # ONE extra `acceptance: <ok|gap …>` line, and NEVER touches the fixpoint math or the drain
+    # verdict/exit-code contract (Phase 0). Filesystem only — the github lane materializes a tracker in
+    # idc:idc-build Phase 4; the drain holds no TRACKER.md for a github board. The orchestrator reads
+    # the line and files a recirculation on a gap (its job — the drain never recirculates).
+    if args.acceptance and not eligible and args.tracker:
+        accept_line = _run_wave_close_acceptance(args.tracker)
+        if accept_line:
+            print(accept_line)
     # AGGREGATE fail-closed verdict (the github blind-drain guard): NO eligible work remains AND at
     # least one build candidate's blocked_by lookup was unverifiable — so we CANNOT prove the build
     # lane is drained. Emitting `drain: complete` here would recreate the silent false-clean this whole

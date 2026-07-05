@@ -77,7 +77,8 @@ Decide the file set deterministically, then classify it:
 - **No receipt** (pre-receipt install): use the hardcoded fallback footprint — exactly what
   `/idc:init` scaffolds:
   `WORKFLOW.md`, `WORKFLOW-config.yaml`, `docs/workflow/tracker-config.yaml`,
-  `docs/workflow/pillar-matrices/`, `docs/workflow/code-reviews/`, and the
+  `docs/workflow/workflow-machine.yaml`, `docs/workflow/pillar-matrices/`,
+  `docs/workflow/code-reviews/`, and the
   `docs/workflow/` README. Anything absent → `skipped-absent`. (Keep this list in sync with the
   scaffold under `${CLAUDE_PLUGIN_ROOT}/templates/`: a pre-receipt repo can only be cleaned by
   this fallback, so a scaffold file added there must be added here too. Receipt-driven installs

@@ -37,6 +37,13 @@ got="$(resolve docs/workflow/README.md)" || fail "resolver exited non-zero for d
   || fail "WORKFLOW-config.yaml must map to templates/WORKFLOW-config.yaml"
 [ "$(resolve docs/workflow/tracker-config.yaml)" = "$PLUGIN/templates/tracker-config.yaml" ] \
   || fail "docs/workflow/tracker-config.yaml must map to templates/tracker-config.yaml (top-level, NOT docs-tree/)"
+# The transition engine's machine table (v4 Phase 2) is a top-level special case too: its dest
+# docs/workflow/workflow-machine.yaml must map to templates/workflow-machine.yaml (which doubles as
+# the engine's bundled fallback), NOT templates/docs-tree/workflow-machine.yaml — so /idc:update
+# refreshes it from the right source. (Red-when-broken: drop it from TOP_LEVEL_MAP → resolver returns
+# nothing → this FAILs.)
+[ "$(resolve docs/workflow/workflow-machine.yaml)" = "$PLUGIN/templates/workflow-machine.yaml" ] \
+  || fail "docs/workflow/workflow-machine.yaml must map to templates/workflow-machine.yaml (top-level, NOT docs-tree/)"
 
 # 3. Nested docs-tree entries map under docs-tree/.
 [ "$(resolve docs/workflow/code-reviews/.gitkeep)" = "$PLUGIN/templates/docs-tree/code-reviews/.gitkeep" ] \

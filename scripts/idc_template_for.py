@@ -34,12 +34,16 @@ import os
 import posixpath
 import sys
 
-# The three files the scaffold copies to non-docs-tree destinations. Everything else under
-# docs/workflow/ comes from templates/docs-tree/<same-relative-path>.
+# The scaffold copies these to non-docs-tree destinations. Everything else under docs/workflow/
+# comes from templates/docs-tree/<same-relative-path>. workflow-machine.yaml is the transition
+# engine's legal-transition table (v4 Phase 2): the template lives at templates/workflow-machine.yaml
+# (top-level, so it doubles as the engine's bundled fallback — idc_transition.BUNDLED_MACHINE), and
+# the governed copy lands at docs/workflow/workflow-machine.yaml (where machine_path_for() prefers it).
 TOP_LEVEL_MAP = {
     "WORKFLOW.md": "WORKFLOW.md",
     "WORKFLOW-config.yaml": "WORKFLOW-config.yaml",
     "docs/workflow/tracker-config.yaml": "tracker-config.yaml",
+    "docs/workflow/workflow-machine.yaml": "workflow-machine.yaml",
 }
 DOCS_WORKFLOW_PREFIX = "docs/workflow/"
 

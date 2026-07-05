@@ -1,9 +1,10 @@
 # workflow-machine.yaml — the IDC workflow state machine, AS DATA (v4 Phase 2, plan §3.1).
 #
 # This file is the legal-transition table the transition engine (scripts/idc_transition.py)
-# enforces. It is scaffolded into a governed repo at docs/workflow/workflow-machine.yaml (that
-# wiring is a later Phase-2 stage); until then the engine falls back to this bundled copy. Editing
-# a workflow rule = editing THIS data, not the engine code — the engine is a generic interpreter.
+# enforces. /idc:init and /idc:update scaffold it into a governed repo at
+# docs/workflow/workflow-machine.yaml (where the engine's machine_path_for prefers it); this bundled
+# copy is the pre-scaffold fallback. Editing a workflow rule = editing THIS data, not the engine
+# code — the engine is a generic interpreter.
 #
 # Model:
 #   * A board item's state is a (Stage x Status) pair. Both fields are ALWAYS set together — an

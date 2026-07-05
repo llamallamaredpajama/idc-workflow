@@ -135,4 +135,45 @@ printf '%s' "$BFLAT" | grep -qiE 'promotes the next wave' \
 printf '%s' "$BFLAT" | grep -qiE 'claim the active wave' \
   && fail "build.md must not 'claim the active wave' — Build dispatches off the whole-board ready frontier (#76), not the active wave"
 
+# --- autorun fs drain carries --acceptance in the REAL playbook (v4 Phase 3 Stage B, MAJOR-2) -----
+# /idc:autorun tells the session to read agents/idc-autorun.md and run ITS steps, so the wave-close
+# acceptance check (Stage B deliverable #2) is only LIVE if the PLAYBOOK's own filesystem drain call
+# carries --acceptance — the command markdown having it is not enough. Lock BOTH the agent playbook and
+# the command: the FILESYSTEM idc_autorun_drain.py drain (the --tracker exit-condition call, NOT the
+# --width staffing call) must carry --acceptance, and the --backend github drain must NOT (github
+# wave-close acceptance runs in idc:idc-build Phase 4). Red-when-broken: drop --acceptance from the
+# playbook's fs drain ⇒ the (fs) assert goes RED; add it to the github drain ⇒ the (gh) assert goes RED.
+for f in "$PLUGIN/agents/idc-autorun.md" "$PLUGIN/commands/autorun.md"; do
+  [ -f "$f" ] || fail "$(basename "$f") missing"
+  python3 - "$f" <<'PY' || fail "$(basename "$f"): the filesystem idc_autorun_drain.py exit-condition drain must carry --acceptance and the github drain must not (else the wave-close acceptance check is DEAD in a real autorun run)"
+import sys
+fs_drain, gh_bad = [], False
+for ln in open(sys.argv[1], encoding="utf-8"):
+    if "idc_autorun_drain.py" not in ln:
+        continue
+    if "--backend github" in ln:
+        if "--acceptance" in ln:
+            gh_bad = True          # github wave-close acceptance belongs in idc:idc-build Phase 4
+        continue
+    if "--width" in ln:
+        continue                    # the staffing-estimate frontier-width call, not the wave-close drain
+    if "--tracker" in ln:
+        fs_drain.append(ln)
+ok = bool(fs_drain) and all("--acceptance" in ln for ln in fs_drain) and not gh_bad
+sys.exit(0 if ok else 2)
+PY
+done
+
+# --- autorun marker-set fails VISIBLY on an empty session id (v4 Phase 3 Stage B, m4) --------------
+# If $CLAUDE_CODE_SESSION_ID is empty, storing the orchestrator_drain marker keyed to "" silently
+# disables the Stop fixpoint gate (the real payload id never matches ""). The command must GUARD the
+# marker-set with an empty-id check that skips + warns loudly (fail-open, but VISIBLE) rather than
+# store an unkeyable marker. Red-when-broken: drop the `[ -z "$CLAUDE_CODE_SESSION_ID" ]` guard ⇒ RED.
+AR="$C/autorun.md"
+[ -f "$AR" ] || fail "commands/autorun.md missing"
+has "$AR" '\[ -z "\$CLAUDE_CODE_SESSION_ID" \]' \
+  || fail "autorun.md must guard the orchestrator_drain marker-set with an empty-id check ([ -z \"\$CLAUDE_CODE_SESSION_ID\" ]) so an empty session id fails VISIBLY, not by silently disabling the gate"
+has "$AR" 'will NOT fire this run|NOT setting the orchestrator_drain marker' \
+  || fail "autorun.md must WARN loudly (stderr) when it skips the marker-set on an empty session id — the disabling must be visible"
+
 echo "PASS: file-changing command markdown holds its must-never/must-say invariants"

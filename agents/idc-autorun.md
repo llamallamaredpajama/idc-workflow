@@ -61,8 +61,11 @@ loop below). Then the two lanes:
    `Consideration`/`Planning`/`Recirculation` ticket is never scooped (the glass wall). Check the
    build lane's exit condition with the **same deterministic drain helper, by backend** — never
    improvise the predicate or read the board ad-hoc:
-   - **filesystem:** `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --tracker <TRACKER.md>`
+   - **filesystem:** `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --tracker <TRACKER.md> --acceptance`
+     — `--acceptance` also runs the wave-close acceptance check when the build lane is drained (surfaces
+     a Done-but-inert increment as `acceptance: gap <#s>`; file a recirculation on a gap).
    - **github:** `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --backend github --project <n> --owner <o>`
+     (github wave-close acceptance runs in `idc:idc-build` Phase 4 — no `--acceptance` here).
    Both apply the **identical** eligibility predicate (`Status = Todo` AND `(stage or "Buildable") ==
    "Buildable"` AND the title is not `[operator-action]` AND every native blocked-by is `Done`) over
    the **whole board** — the github mode pages **every** item, so **never** substitute a bare

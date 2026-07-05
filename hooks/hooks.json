@@ -1,5 +1,5 @@
 {
-  "description": "IDC deterministic-core hooks (v4). SessionEnd: the recirculation-intake safety-net sweep (re-stages rogue Buildables, captures untickered discovery/deferral markers). SubagentStop: the verdict gate — a review agent cannot stop without a validated verdict JSON at docs/workflow/code-reviews/ (bounded N=3, then loud-fail). PreToolUse (Bash): the terminal-action interlocks — a raw `gh pr merge` / `gh issue close` / state-closing `gh api` / raw board mutation (`gh project item-edit|item-add|item-delete`, GraphQL board writes) that bypasses the transition engine / finisher tail is warn-injected with the exact door command (deny-capable via IDC_HOOKS_INTERLOCK_ENFORCE=1; IDC_HOOKS_OBSERVE_ONLY=1 downgrades). All repo-gated (no-op outside an IDC-governed repo) and fail-soft; auto-discovered, so NEVER also listed in plugin.json (the 3.1.1 duplicate-hooks regression).",
+  "description": "IDC deterministic-core hooks (v4). SessionEnd: the recirculation-intake safety-net sweep (re-stages rogue Buildables, captures untickered discovery/deferral markers). Stop: the fixpoint gate — an autorun/build orchestrator DRAIN session (self-gated via the ledger's session-scoped orchestrator_drain marker) cannot stop while `idc_autorun_drain.py` reports `drain: recirc-pending` (exit 4) AND the ledger agrees work remains; the ledger alone never blocks a clean board (drain: complete wins), bounded N=3 then loud-fail + a one-time board annotation. SubagentStop: the verdict gate — a review agent cannot stop without a validated verdict JSON at docs/workflow/code-reviews/ (bounded N=3, then loud-fail). PreToolUse (Bash): the terminal-action interlocks — a raw `gh pr merge` / `gh issue close` / state-closing `gh api` / raw board mutation (`gh project item-edit|item-add|item-delete`, GraphQL board writes) that bypasses the transition engine / finisher tail is warn-injected with the exact door command (deny-capable via IDC_HOOKS_INTERLOCK_ENFORCE=1; IDC_HOOKS_OBSERVE_ONLY=1 downgrades). All repo-gated (no-op outside an IDC-governed repo) and fail-soft; auto-discovered, so NEVER also listed in plugin.json (the 3.1.1 duplicate-hooks regression).",
   "hooks": {
     "PreToolUse": [
       {
@@ -18,6 +18,16 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/idc_recirc_sweep_hook.sh\" \"${CLAUDE_PLUGIN_ROOT}\""
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/hooks/idc_stop_fixpoint_gate_hook.sh\" \"${CLAUDE_PLUGIN_ROOT}\""
           }
         ]
       }

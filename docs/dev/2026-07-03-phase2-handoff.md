@@ -1,17 +1,27 @@
 # Handoff — IDC v4 Phase 2 ("the single door + terminal interlocks") — 2026-07-03
 
-**Status:** ACTIVE · **Branch:** `main` @ `c730837` · **Run:** `/auto-goal-teams` (sequential team relay).
-**Stage 2 (PR #135) was independently reviewed + MERGED 2026-07-05** (`c730837`) — the earlier weekly-limit
-pause is resolved. **Next up: Stage 3** (PreToolUse interlocks). A fresh session continues from "Pick up
-here" step 2.
+**Status:** ✅ **PHASE 2 COMPLETE** (2026-07-05) · **Branch:** `main` @ `c9258e9` · all stages MERGED + accepted.
+The earlier weekly-limit pause is fully resolved. Everything under "Pick up here" is DONE; the only remaining
+Phase-2-board line is **task #7 (chronic CI red — pre-existing, a separate CI-infra decision)**. Next real work
+is **Phase 3** (loop & liveness: Stop-hook fixpoint gate + obligations ledger + TeammateIdle) — a new contract.
 
-> **2026-07-05 update — Stage 2 CLOSED.** PR #135 got the cut-off independent review: a fresh adversarial
-> reviewer returned **MERGE-OK** with its own red-when-broken proof (two independent mutations —
-> `enforce_receipt_gate`→early-return and `routing_gap`→`[]` — each turned `governance/finish-receipt-gate.sh`
-> RED, then restored). Confirmed no-bypass (gate before any mutation), genuine reuse of the filer + engine
-> fns, type-parity with the engine close guard, github fail-closed, and consistent `project_number` shape.
-> Local gate green on BOTH parser paths + full `run-all.sh` ALL GREEN on merged main. Worktrees cleaned
-> (`p2-finish` + orphan `wt-s2` removed; branch deleted). **Step 1 below is DONE — start at step 2.**
+> **2026-07-05 — PHASE 2 CLOSED via `/fullauto-goal`.** All five stages merged, each fresh-adversarial +
+> mutation reviewed (MERGE-OK):
+> - **Stage 2** #135 `c730837` — finish receipt gate (review was the cut-off one; re-run clean).
+> - **Stage 3** #136 `2b84c39` — PreToolUse terminal-action interlocks (`idc_interlock_gate.py`) shipping
+>   warn-inject, `IDC_HOOKS_INTERLOCK_ENFORCE=1`→hard deny, `IDC_HOOKS_OBSERVE_ONLY=1` downgrade; lint Rule N
+>   bans raw board-mutation prose. Review fix: state-close regex now also matches the JSON-body form.
+> - **Stage 4** #137 `c9258e9` — scaffold `docs/workflow/workflow-machine.yaml` into governed repos + update-drift.
+> - **Stage 5 acceptance** (this session): full `run-all.sh` ALL GREEN · governance ALL GREEN both parser paths
+>   (25 scenarios) · **LIVE install-sandbox e2e** (spawned `claude -p` with `ENFORCE=1`: a raw `gh pr merge`
+>   was DENIED by the loaded PreToolUse hook naming `idc_git_finish.py`; a raw `gh project item-edit` DENIED
+>   naming `idc_transition.py` — proving hooks.json's PreToolUse actually loads + fires headless) · **LIVE
+>   update-sandbox e2e** (`/idc:update` restored `workflow-machine.yaml` byte-identical + into the receipt via
+>   the restore-missing path, operator data preserved). Captures in `_idc-observability/run-stage5-*.txt`.
+> - **Deliberately NOT re-run:** a full live think→plan→build GitHub lifecycle drain — the engine's transitions
+>   are exhaustively covered by 25 red-when-broken governance scenarios + merged Stages 1/1b/2 (each e2e'd), and
+>   a live drain costs ~5000 GraphQL and can't self-complete headless (would risk the weekly limit). Proportionate
+>   omission, not a gap. **Everything below is historical.**
 
 > Ephemeral run artifacts (a scratchpad LEDGER + per-stage briefs) do **not** survive the session —
 > everything needed to resume is captured below. The authoritative design is
@@ -166,6 +176,10 @@ thrash). Each stage: build → dual review (standard + **adversarial/mutation-ba
 
 1. ✅ Stage 1 — transition engine + machine table + merge_conditions + re-point filer (MERGED #133)
 2. ✅ Stage 2 — idc_git_finish --require-routed-findings + merge_conditions (MERGED #135 @ `c730837`, reviewed 2026-07-05)
+3. ✅ Stage 3 — PreToolUse interlocks + hooks.json + new lint rule (MERGED #136 @ `2b84c39`)
+4. ✅ Stage 4 — scaffold wiring for workflow-machine.yaml (MERGED #137 @ `c9258e9`)
+5. ✅ Stage 5 — integration + sandbox e2e acceptance (PASSED 2026-07-05; captures in _idc-observability/run-stage5-*)
+   ⇒ **PHASE 2 COMPLETE.** (Original rows 3-6 below are historical.)
 3. ⬜ Stage 3 — PreToolUse interlocks + hooks.json + new lint rule
 4. ⬜ Stage 4 — scaffold wiring for workflow-machine.yaml
 5. ⬜ Stage 5 — integration + sandbox e2e (top-level acceptance)

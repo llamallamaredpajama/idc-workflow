@@ -102,4 +102,27 @@ OUT_OO="$(mk_payload "$REPO" "$SID_OO" | IDC_HOOKS_OBSERVE_ONLY=1 python3 "$GATE
 blocks "$OUT_OO" && fail "(observe-only) IDC_HOOKS_OBSERVE_ONLY=1 must NOT emit a block decision (downgrade to warn)"
 echo "  ok (observe-only) IDC_HOOKS_OBSERVE_ONLY=1 ⇒ warn, never block"
 
-echo "PASS: the Stop fixpoint gate refuses a drain-orchestrator exit with a non-empty inbox (drain: recirc-pending), names the /idc:recirculate remediation, is bounded at N=3 then loud-fails once (never an infinite nag) with a single board annotation, and honors observe-only"
+# ── (fail-closed) a CRASHING drain (exit OUTSIDE the {0,2,3,4} contract) ⇒ the gate fails CLOSED ────
+# P4: once a session is CONFIRMED an orchestrator drain, an UNTRUSTWORTHY drain verdict must fail CLOSED
+# — the gate cannot prove the pipe is drained, so it BLOCKS (bounded) rather than let a possibly-
+# dishonest exit through. Point the REAL gate at a FAKE plugin root whose idc_autorun_drain.py is a
+# crashing stub (exit 1 — an uncaught traceback, OUTSIDE the Phase-0 {0,2,3,4} contract) for a marked
+# orchestrator session. The gate still imports the real idc_hook_lib/idc_ledger from its own dir; only
+# the drain it spawns is the stub. Red-when-broken: revert the exit-contract raise in _board_says_pending
+# (return board_pending=False instead of raising on a non-contract exit) ⇒ the gate ALLOWS ⇒ this RED.
+FAKE="$WORK/fakeplugin"; mkdir -p "$FAKE/scripts"
+cat > "$FAKE/scripts/idc_autorun_drain.py" <<'PY'
+import sys
+sys.stderr.write("boom: simulated drain crash\n")
+sys.exit(1)   # OUTSIDE the Phase-0 exit-code contract {0,2,3,4} — an untrustworthy verdict
+PY
+SID_FC="stopsess-fc-$$-$(basename "$WORK")"
+led set --kind orchestrator_drain --session "$SID_FC" >/dev/null || fail "fail-closed: could not set the orchestrator marker"
+OUT_FC="$(mk_payload "$REPO" "$SID_FC" | python3 "$GATE" "$FAKE" 2>/dev/null)"; RC_FC=$?
+blocks "$OUT_FC" \
+  || fail "(fail-closed) a crashing drain (exit outside {0,2,3,4}) for a confirmed orchestrator MUST fail closed and BLOCK — got no block (RC=$RC_FC, out=$OUT_FC) [revert the exit-contract raise ⇒ RED]"
+printf '%s' "$OUT_FC" | grep -qi 'could not verify' \
+  || fail "(fail-closed) the block reason must say it could not verify the drain state (got: $OUT_FC)"
+echo "  ok (fail-closed) a crashing drain (exit outside the {0,2,3,4} contract) ⇒ the gate fails CLOSED and blocks"
+
+echo "PASS: the Stop fixpoint gate refuses a drain-orchestrator exit with a non-empty inbox (drain: recirc-pending), names the /idc:recirculate remediation, is bounded at N=3 then loud-fails once (never an infinite nag) with a single board annotation, honors observe-only, and fails CLOSED on a crashing drain"

@@ -49,6 +49,14 @@ print(json.dumps({"hook_event_name":"Stop","cwd":cwd,"session_id":sid,
  "transcript_path":"","stop_hook_active":False}))
 PY
 }
+# A Stop payload with NO session_id key at all (an unattributable session) — used by the (absent-sid) case.
+mk_payload_nosid() { python3 - "$1" <<'PY'
+import json,sys
+cwd=sys.argv[1]
+print(json.dumps({"hook_event_name":"Stop","cwd":cwd,
+ "transcript_path":"","stop_hook_active":False}))
+PY
+}
 blocks() { printf '%s' "$1" | python3 -c 'import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get("decision")=="block" else 1)' 2>/dev/null; }
 
 # ── (crux) a stale mid_finish obligation + a clean board (drain: complete) ⇒ NO block ──────────────
@@ -89,4 +97,19 @@ blocks "$OUT3" && fail "self-gate broken: a session with no orchestrator_drain m
 [ "$RC3" -eq 0 ] || fail "an un-marked (non-orchestrator) session must allow exit 0, got $RC3"
 echo "  ok (self-gate) an un-marked session (with a taint but no marker) is never blocked — only the marker gates"
 
-echo "PASS: the ledger is a HINT, the board is GROUND TRUTH — a stale taint never blocks a clean board (drain: complete wins), the board conjunct is live (recirc-pending blocks the same session), and the self-gate spares un-marked sessions"
+# ── (absent-sid) a Stop payload with NO session_id ⇒ ALLOW, even with a stale dead-session marker ────
+# The board is STILL recirc-pending here. A payload with no session_id cannot be attributed to THIS
+# session; pending_taints(cwd, session_id=None) returns the UNSCOPED taint set, so a stale
+# orchestrator_drain marker left by a DIFFERENT (dead) session would misclassify this unattributable
+# stop as an orchestrator drain → false BLOCK over the recirc-pending board. A session we cannot
+# attribute is not provably an orchestrator: the gate must ALLOW it (fail-open-before-classify).
+# Red-when-broken: drop the `if not sid: allow` guard in _gate and this stop BLOCKS (the dead-session
+# marker classifies it as an orchestrator over the live recirc-pending board).
+led set --kind orchestrator_drain --session "deadsess-$$-$(basename "$WORK")" >/dev/null \
+  || fail "could not seed the dead-session stale orchestrator marker"
+OUT4="$(mk_payload_nosid "$REPO" | python3 "$GATE" "$GOV_PLUGIN" 2>/dev/null)"; RC4=$?
+blocks "$OUT4" && fail "absent-sid broken: a Stop payload with no session_id must ALLOW even with a stale orchestrator_drain marker from a dead session over a recirc-pending board [drop the absent-sid guard ⇒ RED]"
+[ "$RC4" -eq 0 ] || fail "an unattributable (no session_id) stop must allow exit 0, got $RC4"
+echo "  ok (absent-sid) a stop with no session_id is allowed even with a stale dead-session marker over a recirc-pending board"
+
+echo "PASS: the ledger is a HINT, the board is GROUND TRUTH — a stale taint never blocks a clean board (drain: complete wins), the board conjunct is live (recirc-pending blocks the same session), the self-gate spares un-marked sessions, and an unattributable (no-session_id) stop is allowed even against a stale dead-session marker"

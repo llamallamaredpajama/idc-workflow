@@ -48,12 +48,16 @@ see the telegram). The block is therefore delivered where it is free and correct
 doubles the GraphQL cost of a github drain.
 
 FAIL MODES (P4). This is a PRE-ACTION honesty gate. Once a session is CONFIRMED an orchestrator drain,
-a gate-internal failure to determine drain state (the drain helper cannot be spawned) fails CLOSED — a
-bounded block with a clear message — rather than let a possibly-dishonest exit through; the N=3 bound
-+ Claude Code's own `stop_hook_active` backstop guarantee it can never loop forever. BEFORE the
-self-gate is resolved (we don't yet know if it's an orchestrator session), an unexpected error fails
-OPEN via idc_hook_lib.guard_pre_action — we must never block a session we could not even classify.
-`IDC_HOOKS_OBSERVE_ONLY=1` downgrades the block to a stderr warning (allow). Repo-gated: an instant
+a gate-internal failure to determine drain state (the drain helper cannot be spawned, times out, or
+CRASHES — exits OUTSIDE its documented {0,2,3,4} exit-code contract, e.g. an uncaught traceback = exit
+1) fails CLOSED — a bounded block with a clear message — rather than let a possibly-dishonest exit
+through; the N=3 bound + Claude Code's own `stop_hook_active` backstop guarantee it can never loop
+forever. BEFORE the self-gate is resolved (we don't yet know if it's an orchestrator session) an
+unexpected error fails OPEN via idc_hook_lib.guard_pre_action — we must never block a session we could
+not even classify — and, in the same spirit, a Stop payload with NO `session_id` (an unattributable
+session) is allowed BEFORE the marker lookup: a session we cannot attribute is not provably an
+orchestrator, and the unscoped taint set could otherwise let a DEAD session's stale marker misclassify
+it. `IDC_HOOKS_OBSERVE_ONLY=1` downgrades the block to a stderr warning (allow). Repo-gated: an instant
 no-op outside an IDC-governed repo.
 
 Invocation: idc_stop_fixpoint_gate.py <PLUGIN_ROOT>   (Stop payload on stdin).
@@ -74,6 +78,14 @@ ORCHESTRATOR_MARKER = "orchestrator_drain"
 DRAIN = "idc_autorun_drain.py"
 ACCEPT = "idc_acceptance_check.py"  # referenced only in prose here; the drain loop invokes it (--acceptance)
 _RECIRC_PENDING_EXIT = 4  # idc_autorun_drain.py's `drain: recirc-pending` exit code (Phase 0 contract)
+# The FULL Phase-0 drain exit-code contract: 0 complete/continue · 2 unknown · 3 rate-limited · 4
+# recirc-pending. Any OTHER code means the drain itself CRASHED (an uncaught traceback exits 1) — the
+# verdict is untrustworthy, so a confirmed-orchestrator caller must fail CLOSED (see _board_says_pending).
+_DRAIN_CONTRACT_EXITS = (0, 2, 3, _RECIRC_PENDING_EXIT)
+# The anti-nag bound this gate uses — the SINGLE source of truth threaded through BOTH the
+# `bounded_block` calls AND the one-time forced-exit annotation trigger, so they can never desync if the
+# bound is ever customized (a hardcoded DEFAULT_BOUND at one site would silently drift from the other).
+_STOP_GATE_BOUND = H.DEFAULT_BOUND
 
 
 def _read_backend(cwd):
@@ -83,7 +95,10 @@ def _read_backend(cwd):
     try:
         with open(cfg, encoding="utf-8") as fh:
             for line in fh:
-                m = re.match(r"^\s*backend:\s*([A-Za-z0-9_-]+)", line)
+                # Tolerate an optional quote on the value (`backend: "github"` / `backend: 'github'`) —
+                # a bare `[A-Za-z0-9_-]+` class would fail to match a quoted value and misread the
+                # backend as absent (→ treated as filesystem, a wrong-backend misclassification).
+                m = re.match(r"""^\s*backend:\s*["']?([A-Za-z0-9_-]+)""", line)
                 if m:
                     return m.group(1).strip()
     except OSError:
@@ -113,7 +128,9 @@ def _board_says_pending(cwd, plugin_root):
     (`idc_autorun_drain.py` exit 4 / `drain: recirc-pending`). complete/continue/unknown/rate-limited
     → False (clean, or a resumable pause — never fight /loop or a rate-limit pause). GITHUB → False +
     warn (no board GraphQL on the stop path — the constraint). RAISES on a gate-internal failure (the
-    drain helper is missing / cannot be spawned / times out) so the caller fails CLOSED."""
+    drain helper is missing / cannot be spawned / times out) OR when the drain exits OUTSIDE its
+    documented {0,2,3,4} contract (a crash = exit 1 — the verdict is untrustworthy) so the caller fails
+    CLOSED."""
     backend = _read_backend(cwd)
     if backend == "github":
         H.warn("stop-fixpoint: github backend — deferring to the /loop re-check "
@@ -130,6 +147,15 @@ def _board_says_pending(cwd, plugin_root):
         raise RuntimeError(f"drain helper not found at {drain}")
     r = subprocess.run([sys.executable, drain, "--tracker", tracker],
                        cwd=cwd, capture_output=True, text=True, timeout=30)
+    # The drain's exit code is a CONTRACT (Phase 0): 0 complete/continue · 2 unknown · 3 rate-limited
+    # · 4 recirc-pending. A code OUTSIDE that set means the drain itself CRASHED (an uncaught traceback
+    # exits 1) — we did NOT get a trustworthy verdict, so we cannot prove the pipe is drained. RAISE so
+    # the confirmed-orchestrator caller fails CLOSED (a bounded block) rather than silently returning
+    # board_pending=False and letting a possibly-dishonest exit through (the fail-OPEN bug this closes).
+    if r.returncode not in _DRAIN_CONTRACT_EXITS:
+        raise RuntimeError(
+            f"drain exited {r.returncode} (outside the Phase-0 contract {{0,2,3,4}}); "
+            f"stderr: {(r.stderr or '').strip()[:200]!r}")
     return (r.returncode == _RECIRC_PENDING_EXIT), _drain_detail(r.stdout)
 
 
@@ -176,7 +202,7 @@ def _annotate_forced_exit_once(cwd, plugin_root, sid, detail):
     if num is None:
         return
     body = (f"[idc-stop-gate] forced exit: an autorun/build drain session stopped with a non-empty "
-            f"inbox after {H.DEFAULT_BOUND} reminders ({detail}). The pipe is NOT at a whole-pipe "
+            f"inbox after {_STOP_GATE_BOUND} reminders ({detail}). The pipe is NOT at a whole-pipe "
             f"fixpoint — run /idc:recirculate and plan admitted considerations, then re-drain.")
     try:
         subprocess.run([sys.executable, trk, "--tracker", tracker, "comment",
@@ -211,6 +237,15 @@ def _gate(payload, plugin_root):
     if not H.is_governed_repo(cwd):
         H.allow()
 
+    # Attribution gate (fail-open-before-classify): a Stop payload with NO session_id cannot be
+    # attributed to THIS session. `pending_taints(cwd, session_id=None)` returns the UNSCOPED taint set
+    # (the ledger's documented full-hint mode), so a stale `orchestrator_drain` marker left by a
+    # DIFFERENT, dead session would otherwise misclassify this unattributable stop as an orchestrator
+    # drain and false-BLOCK it. A session we cannot attribute is not provably an orchestrator, so allow —
+    # BEFORE the marker lookup. (We must never block a session we could not even classify.)
+    if not sid:
+        H.allow()
+
     # Self-gate: only an autorun/build orchestrator DRAIN session is considered — identified by the
     # session-scoped `orchestrator_drain` marker the orchestrator set at drain start. A random session
     # (no marker for THIS session_id) is never blocked. `pending_taints(session_id=sid)` is scoped, so
@@ -229,7 +264,8 @@ def _gate(payload, plugin_root):
             "IDC stop-fixpoint gate: could not verify the drain state of this autorun/build session "
             f"({e}). Failing closed (an honest stop must be provable): re-run "
             "`${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py` and confirm `drain: complete`. "
-            "(Bounded — this will not block indefinitely.)")
+            "(Bounded — this will not block indefinitely.)",
+            bound=_STOP_GATE_BOUND)
         return  # unreachable (bounded_block exits); defensive
 
     # THE CRUX (invariant #1 defense 2): block ONLY when the board (ground truth) AND the ledger (hint)
@@ -244,11 +280,13 @@ def _gate(payload, plugin_root):
             H.warn(f"OBSERVE-ONLY (would block stop): {reason}")
             H.allow()
         # One-time board annotation AT the bound (before bounded_block loud-fails + clears the counter).
-        if H.counter_get(key) >= H.DEFAULT_BOUND:
+        # Keyed on the SAME `_STOP_GATE_BOUND` the block below uses, so the annotate-trigger and the
+        # loud-fail can never desync (a hardcoded DEFAULT_BOUND here would drift if the bound changed).
+        if H.counter_get(key) >= _STOP_GATE_BOUND:
             _annotate_forced_exit_once(cwd, plugin_root, sid, detail)
         # bounded_block: block for the first N=3 stops, then loud-fail-ALLOW (never an infinite nag;
         # Claude Code's `stop_hook_active` is the second backstop). Reuses the shared counter + bound.
-        H.bounded_block(key, reason)
+        H.bounded_block(key, reason, bound=_STOP_GATE_BOUND)
         return  # unreachable (bounded_block exits); defensive
 
     # Clean board, a resumable pause, or github-deferred → allow, and reset the anti-nag counter so a

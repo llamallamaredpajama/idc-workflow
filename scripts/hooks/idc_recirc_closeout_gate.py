@@ -28,21 +28,23 @@ not have landed yet — a re-drain is idempotent), so T is left alone; a ticket 
 un-dispositioned and gets checkpointed. "A valid closeout ⇒ allow + clear taints" therefore means
 "every still-open ticket is covered by a valid closeout" (the uncovered set is empty).
 
-SCOPED TO THIS SUBAGENT'S OWN TICKET(S) (the second correctness decision). This SubagentStop hook
-fires **only** for the recirculator dispatched as a Task **subagent** — the Build larger-loop
-"recirc-consultant per event" (`agents/idc-build.md`), a sous-chef spawned over the ONE recirc ticket
-its triplet surfaced (the main-session `/idc:recirculate` drain and the Teams-teammate consultant do
-NOT fire SubagentStop). So the gate must checkpoint only the ticket(s) **this** subagent was actually
-handling — NOT the whole `Stage=Recirculation ∧ Status=Todo` inbox. A sous-chef that processed #1 must
-never stamp #1's branch/PR breadcrumb onto #2/#3 it never touched (false, misleading resume state on
-strangers' tickets). The subagent's SCOPE is reconstructed deterministically from its own transcript:
-the ticket(s) named in its **dispatch prompt** (the first user turn — "process recirc ticket #N") ∪ the
-ticket(s) its **closeout candidates** reference (valid OR invalid — a disposition it *attempted*). A
-still-open ticket is checkpointed **iff** it is in scope AND uncovered. An open inbox ticket outside
-this subagent's scope is left entirely alone. If the scope is genuinely undeterminable (an unparseable
-dispatch and no closeout emitted), the gate falls back conservatively — it WARNS and checkpoints
-NOTHING, never blanket-checkpoints the inbox (a false breadcrumb on a stranger's ticket is worse than
-a rare missed one; the board + a later drain still re-do the work).
+SCOPE — WIDE BY DEFAULT, NARROWED ONLY BY AN EXPLICIT DISPATCH (the second correctness decision, and
+an ASYMMETRIC one). This SubagentStop hook fires for the recirculator dispatched as a Task subagent in
+TWO shapes: the Build larger-loop "recirc-consultant per event" (`agents/idc-build.md`, a sous-chef
+spawned over ONE explicitly-named ticket) AND a board-scan inbox-drainer (a generic "drain the
+recirculation inbox" dispatch that enumerates no ticket #s). The safe bias is ASYMMETRIC (invariant #1
+/ drop-F): UNDER-checkpointing a ticket the subagent owned IS the state loss this hook exists to
+prevent, whereas OVER-checkpointing is only a recoverable spurious breadcrumb (the board is ground
+truth; a re-drain is idempotent). So the default is WIDE, and only an EXPLICIT dispatch narrows it:
+  * an EXPLICIT dispatch (its user-turn text names specific `#N`/`ticket N`) NARROWS scope to exactly
+    those ticket(s) ∪ the tickets its closeout candidates reference — a single-ticket sous-chef never
+    stamps #1's branch/PR breadcrumb onto a stranger's open #2/#3 it never touched (P2-1);
+  * a GENERIC dispatch (no enumerated #s — the board-scan drainer) OR an otherwise-undeterminable one
+    DEFAULTS to the WHOLE still-open `Stage=Recirculation ∧ Status=Todo` inbox — a board-scan drainer
+    owns every open ticket, so a death before it reaches #2/#3 CHECKPOINTS them, never silently drops
+    them (defaulting to nothing is the exact drop-F loss this hook prevents).
+Either way `covered` (a ticket with a valid closeout) is subtracted, so a ticket the subagent actually
+finished is never checkpointed.
 
 THE BOARD IS GROUND TRUTH (invariant #1). "Still-open" is read from the board (the sanctioned tracker
 helper: `query --stage Recirculation --status Todo`), never inferred from the ledger. The
@@ -547,32 +549,35 @@ def _gate(payload, plugin_root):
         _clear_session_checkpoints(cwd, sid)
         H.allow()
 
-    # This subagent's SCOPE — the ticket(s) it was actually handling: the dispatch prompt's ticket(s) ∪
-    # the tickets its closeout candidates reference. The gate only ever checkpoints WITHIN this scope, so
-    # a sous-chef that processed #1 never stamps a false breadcrumb on a stranger's open #2/#3 (P2-1).
+    # This subagent's SCOPE — the ticket(s) it is responsible for checkpointing. The rule is ASYMMETRIC
+    # by design (invariant #1 / drop-F): UNDER-checkpointing a ticket the subagent owned IS the state
+    # loss this hook prevents, while OVER-checkpointing is only a recoverable spurious breadcrumb (the
+    # board is ground truth; a re-drain is idempotent). So the default is WIDE, and only an EXPLICIT
+    # dispatch narrows it.
     branch, prs, candidates, dispatch_tickets = _scan_transcript(
         payload.get("agent_transcript_path", ""), cwd)
     covered = _covered_tickets(plugin_root, candidates)
-    scope = dispatch_tickets | _candidate_tickets(candidates)
-    # Uncovered = the still-open tickets THIS subagent handled (in scope) that hold NO valid closeout.
-    # NEUTERING the `t in scope` filter (whole-inbox scope) checkpoints strangers' open tickets;
-    # NEUTERING the `t not in covered` filter checkpoints a validly-closed-out ticket — both red-when-broken.
-    uncovered = [t for t in still_open if t in scope and t not in covered]
-
-    if not scope and still_open:
-        # Conservative fallback: the subagent's scope is undeterminable (an unparseable dispatch AND no
-        # closeout emitted) while the inbox is non-empty. We CANNOT attribute any open ticket to this
-        # subagent, so we checkpoint NOTHING (never blanket-checkpoint the inbox — a false resume
-        # breadcrumb on a stranger's ticket is worse than a rare missed one; the board + a later
-        # /idc:recirculate re-drain remain the safety net) and WARN so the gap stays visible.
-        H.warn(f"recirc-checkpoint: could not determine which ticket(s) this recirculator subagent was "
-               f"handling (empty dispatch scope; {len(still_open)} open inbox ticket(s)) — checkpointing "
-               f"nothing (conservative; a later /idc:recirculate re-drains)")
+    if dispatch_tickets:
+        # EXPLICIT enumeration → the Build larger-loop sous-chef dispatched over specific ticket(s).
+        # Narrow to exactly those ∪ the tickets it produced a closeout candidate for, so it never stamps
+        # a false breadcrumb on a stranger's open ticket (P2-1). NEUTERING the `t in scope` filter here
+        # widens it back to the whole inbox — the P2-1 red-when-broken.
+        scope = dispatch_tickets | _candidate_tickets(candidates)
+        uncovered = [t for t in still_open if t in scope and t not in covered]
+    else:
+        # GENERIC inbox-drain dispatch (no enumerated #s — the board-scan drainer) OR an undeterminable
+        # dispatch → the drop-F-SAFE default is the WHOLE still-open inbox: a board-scan drainer owns
+        # every open ticket, so a mid-drain death before it reaches #2/#3 must CHECKPOINT them, not skip
+        # them. Defaulting to nothing here silently loses their state — the exact drop-F failure.
+        # NEUTERING this to `[]` / scope-only is the P1 (whole-inbox-default) red-when-broken.
+        scope = None   # None == the whole still-open inbox (see _clear_session_checkpoints)
+        uncovered = [t for t in still_open if t not in covered]
 
     if not uncovered:
-        # Every still-open ticket IN THIS SUBAGENT'S SCOPE is covered by a valid closeout ⇒ its drain is
-        # complete ⇒ allow + clear its scope's checkpoint taints (scope-narrowed so a sibling
-        # consultant's taint is never wiped). An empty scope clears nothing (nothing to attribute).
+        # Every still-open ticket in this subagent's scope is covered by a valid closeout ⇒ its drain is
+        # complete ⇒ allow + clear its checkpoint taints. Scope-narrowed in the explicit case so a
+        # sibling consultant's taint is never wiped; the whole-inbox default (scope=None) clears all —
+        # the board is fully drained.
         _clear_session_checkpoints(cwd, sid, scope=scope)
         H.allow()
 

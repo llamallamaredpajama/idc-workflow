@@ -22,12 +22,18 @@
 #   * neuter the closeout-valid SHORT-CIRCUIT (force `covered` empty / drop the `t not in covered`
 #     filter) ⇒ a validly-closed-out open ticket is WRONGLY checkpointed ⇒ the "covered ticket NOT
 #     checkpointed" asserts (case A T1, and case B) go RED;
-#   * [P2-1] neuter the SCOPE filter (revert `uncovered` to the whole-inbox `[t for t in still_open if
-#     t not in covered]`) ⇒ an untouched out-of-scope open ticket is WRONGLY checkpointed ⇒ case H's
-#     "Th2 NOT checkpointed" assert goes RED;
+#   * [P2-1] neuter the EXPLICIT-dispatch SCOPE filter (revert its `uncovered` to whole-inbox) ⇒ an
+#     untouched out-of-scope open ticket is WRONGLY checkpointed ⇒ case H's "Th2 NOT checkpointed" RED;
 #   * [P2-2] neuter the FILE-based closeout harvest (drop the `--closeout <path>` read in
 #     _scan_transcript) ⇒ a ticket closed out via a closeout FILE is not recognized covered and is
-#     WRONGLY checkpointed ⇒ case I's "Ti NOT checkpointed" assert goes RED.
+#     WRONGLY checkpointed ⇒ case I's "Ti NOT checkpointed" assert goes RED;
+#   * [P1] neuter the GENERIC-dispatch whole-inbox DEFAULT (make an undeterminable/generic dispatch
+#     checkpoint nothing) ⇒ a board-scan drainer that dies before any closeout silently loses every
+#     open ticket's state ⇒ case J's "whole inbox checkpointed" asserts go RED.
+#
+# The scope rule is ASYMMETRIC (drop-F-safe): an EXPLICIT `#N` dispatch narrows (case H); a GENERIC or
+# undeterminable dispatch defaults to the WHOLE still-open inbox (case J). Under-checkpointing is state
+# loss; over-checkpointing is a recoverable breadcrumb.
 #
 # Filesystem-backed (hermetic, no gh). Auto-discovered by the governance lane (phase-governance.sh);
 # runnable standalone under BOTH python3 and `uv run --with pyyaml`.
@@ -323,4 +329,31 @@ led "$Ii" pending --session "$SIDI" | grep -qx "recirc_checkpoint:$TI" \
   && fail "(I) a file-closed-out ticket #$TI must carry NO recirc_checkpoint taint"
 echo "  ok (I) a documented file-based closeout (--closeout <path>) is harvested as covered — the ticket is left alone [P2-2]"
 
-echo "PASS: the SubagentStop recirculator closeout-or-checkpoint detective — a mid-drain stop checkpoints every UNCOVERED open inbox ticket IN THIS SUBAGENT'S SCOPE (branch/PR/dispositions, via the sanctioned comment helper) + sets a recirc_checkpoint taint; a validly-closed-out ticket is left alone (per-ticket); an UNTOUCHED out-of-scope open ticket is NEVER checkpointed (scope = dispatch ∪ closeout-candidate tickets); a file-based (--closeout <path>) closeout is harvested as covered; a fully-valid run clears its scope's taints and stamps nothing; an UNREADABLE inbox PRESERVES checkpoints (never wiped); an EXAMPLE closeout that was only read/quoted does NOT mark a ticket covered; self-gated to the recirculator + repo-gated; fail-OPEN (never blocks); observe-only records without mutating the board"
+# ══ Case J — a GENERIC board-scan dispatch that dies BEFORE any closeout ⇒ the WHOLE inbox is ════════
+# checkpointed (drop-F-SAFE default), NEVER silently skipped [codex P1].
+# A board-scan recirculator drains the WHOLE Stage=Recirculation∧Todo inbox; its dispatch enumerates NO
+# ticket #s ("drain the recirculation inbox"). If it dies mid-drain BEFORE emitting a single closeout,
+# scope is undeterminable — and the safe bias is ASYMMETRIC: UNDER-checkpointing a ticket it owned IS
+# the drop-F state loss, while over-checkpointing is only a recoverable breadcrumb (board is ground
+# truth, re-drain idempotent). So an undeterminable/generic dispatch must default to the WHOLE inbox and
+# checkpoint every un-reached open ticket — NOT nothing.
+# Red-when-broken: revert the generic-branch whole-inbox default to "undeterminable ⇒ nothing" (make
+# the else-branch `uncovered` empty / scope-only) ⇒ NONE of the open tickets are checkpointed ⇒ RED.
+J="$(new_repo)" || fail "new_repo J failed"; REPOS+=("$J")
+TJ1="$(seed "$J" Recirculation Todo 'recirc: board-scan drain, ticket 1 (never reached)')" || fail "seed TJ1"
+TJ2="$(seed "$J" Recirculation Todo 'recirc: board-scan drain, ticket 2 (never reached)')" || fail "seed TJ2"
+TJ3="$(seed "$J" Recirculation Todo 'recirc: board-scan drain, ticket 3 (never reached)')" || fail "seed TJ3"
+SIDJ="sidJ-$$-$(basename "$WORK")"
+# GENERIC dispatch (mk_transcript's default first user turn "drain the recirculation inbox" — NO
+# enumerated #s) + a branch + PR, and NO closeout (died mid-drain before disposing anything).
+mk_transcript "$WORK/tr_J.jsonl" "$BRANCH" "$PR_URL"
+run_gate "$J" "$RECIRC_AGENT" "$SIDJ" "$WORK/tr_J.jsonl"
+[ "$GATE_RC" -eq 0 ] || fail "(J) gate exit $GATE_RC"
+for t in "$TJ1" "$TJ2" "$TJ3"; do
+  has_ckpt "$J" "$t" \
+    || fail "(J) a GENERIC-dispatch board-scan drainer died mid-drain but open ticket #$t was NOT checkpointed — drop-F state loss [revert the whole-inbox default to nothing ⇒ RED]"
+  led "$J" pending --session "$SIDJ" | grep -qx "recirc_checkpoint:$t" || fail "(J) no checkpoint taint for open ticket #$t"
+done
+echo "  ok (J) a generic inbox-drain dispatch that dies before any closeout checkpoints the WHOLE still-open inbox (drop-F-safe default) [codex P1]"
+
+echo "PASS: the SubagentStop recirculator closeout-or-checkpoint detective — a mid-drain stop checkpoints every UNCOVERED open inbox ticket in scope (branch/PR/dispositions, via the sanctioned comment helper) + sets a recirc_checkpoint taint; scope is ASYMMETRIC — an EXPLICIT #N dispatch NARROWS to that ticket (an untouched stranger is never checkpointed), a GENERIC/undeterminable dispatch DEFAULTS to the WHOLE still-open inbox so a board-scan drainer that dies loses nothing (drop-F-safe); a validly-closed-out ticket (incl. a file-based --closeout <path> closeout) is left alone; a fully-valid run clears its scope's taints and stamps nothing; an UNREADABLE inbox PRESERVES checkpoints (never wiped); an EXAMPLE closeout that was only read/quoted does NOT mark a ticket covered; self-gated to the recirculator + repo-gated; fail-OPEN (never blocks); observe-only records without mutating the board"

@@ -36,6 +36,12 @@ import subprocess
 import sys
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, SCRIPT_DIR)
+import idc_review_verdict_check as VC   # noqa: E402 — the verdict validator + PASSING set (reuse)
+import idc_transition as TE             # noqa: E402 — load_verdict + unmet_merge_conditions (reuse)
+import idc_file_findings as FF          # noqa: E402 — work_items + existing-keys readers (reuse)
+import idc_gh_board                     # noqa: E402 — BoardReadError for fail-closed github routing
+
 REMOTE = "origin"
 MERGE_METHODS = ("squash", "merge", "rebase")
 
@@ -298,6 +304,72 @@ def verify_tracker_closed(backend, repo, issue, tracker_path, project_number, ow
         verify_github_closed(repo, issue, project_number, owner, name)
 
 
+# ── receipt gate: routed findings + merge_conditions (v4 Phase 2, plan §3.3) ─────────────────────
+# The finish tail is the SECOND write door that closes an item (the transition engine's guarded
+# `close` op is the first). So it must enforce the SAME receipt invariant the engine does, or it is a
+# hole: a PR whose review left nits stranded as prose, or one carrying an unmet pre-merge condition
+# (the silently-downgraded #246->#248 class), could still be merged+closed here. This gate runs
+# BEFORE any mutation (worktree remove / merge / tracker close); the FIRST unmet check refuses the
+# whole finish. Every check REUSES an existing function — the verdict validator, the filer's
+# key/existing-keys readers, and the engine's unmet_merge_conditions — no second implementation.
+def routing_gap(verdict, backend, repo, tracker_path, owner, project):
+    """The routable findings (each minor/nit finding + every deferral — exactly what the filer's
+    idc_file_findings.work_items derives) whose stable dedupe `key` is NOT yet among the board's filed
+    idc-recirc-source keys. [] ⇒ every routable finding is already routed to the board. Raises
+    idc_gh_board.BoardReadError (github, unreadable board) so the caller fails CLOSED — never confirm
+    routing (and merge) on an unverifiable board state."""
+    items = FF.work_items(verdict)
+    if not items:
+        return []  # a clean PASS (no nits/deferrals) has nothing to route
+    if backend == "filesystem":
+        existing = FF._fs_existing_keys(tracker_path)
+    else:
+        existing = FF._github_existing_keys(repo, owner, project)  # raises BoardReadError → fail-closed
+    return [it for it in items if it["key"] not in existing]
+
+
+def enforce_receipt_gate(args, backend, repo, tracker_path, owner, project_number):
+    """Refuse the finish unless the review verdict for this PR/issue is valid, passing, owns the item,
+    has every routable finding routed to the board (unless --no-require-routed-findings), and has no
+    unmet merge_conditions. Fail-closed: the first unmet check prints `finish: <step> failed` and
+    exits 1, BEFORE any worktree/merge/tracker mutation."""
+    if not args.verdict:
+        _fail("verdict", "the finish is a receipt gate: --verdict <path> (the review verdict for this "
+                         "PR/issue) is required — refusing to merge/close without the review receipt")
+    try:
+        verdict = TE.load_verdict(args.verdict)  # reuse: validates via idc_review_verdict_check.check
+    except TE.TransitionError as e:
+        _fail("verdict", str(e).replace("close denied: ", ""))
+    disposition = verdict.get("verdict")
+    if disposition not in VC.PASSING:
+        _fail("verdict", f"disposition {disposition!r} is not passing — only {sorted(VC.PASSING)} may "
+                         "finish (a FAIL/FAIL-BLOCKED must be fixed, not merged)")
+    if verdict.get("issue") != args.issue:
+        _fail("verdict", f"verdict is for issue #{verdict.get('issue')}, not the finishing item "
+                         f"#{args.issue} — the receipt must own the item it closes")
+    if verdict.get("pr") != args.pr:
+        _fail("verdict", f"verdict is for PR #{verdict.get('pr')}, not the finishing PR #{args.pr}")
+    if args.require_routed:
+        try:
+            gap = routing_gap(verdict, backend, repo, tracker_path, owner, project_number)
+        except idc_gh_board.BoardReadError as e:
+            _fail("require-routed-findings",
+                  f"cannot read the board to confirm finding routing ({str(e)[:160]}) — refusing to "
+                  "merge on an unverifiable routing state (re-run once the board is readable)")
+        if gap:
+            keys = ", ".join(it["key"] for it in gap)
+            _fail("require-routed-findings",
+                  f"{len(gap)} review finding(s) not yet routed to the board [{keys}] — run "
+                  f"`idc_file_findings.py --repo {repo} --verdict {args.verdict}` to file them as "
+                  "Recirculation items, then retry (never merge with findings stranded as reviewer prose)")
+    unmet = TE.unmet_merge_conditions(verdict)  # reuse: the engine's close-guard helper
+    if unmet:
+        ids = ", ".join(str(c.get("id", "?")) for c in unmet)
+        _fail("merge-conditions-met",
+              f"{len(unmet)} merge_condition(s) unmet [{ids}] — the reviewer set a pre-merge condition "
+              "that is not satisfied; refusing to merge (resolve it, re-review, retry)")
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="The finisher's deterministic git-finalization tail: remove the worktree, "
@@ -311,6 +383,14 @@ def main():
                      help="filesystem TRACKER.md path (default: <repo>/TRACKER.md; ignored on github)")
     ap.add_argument("--merge-method", dest="merge_method", default="squash", choices=MERGE_METHODS,
                      help="gh pr merge method (default: squash) — pick the method the repo allows")
+    ap.add_argument("--verdict", default=None,
+                     help="path to the review verdict JSON (the finish RECEIPT) — validated + its "
+                          "findings must be routed to the board + its merge_conditions met before any "
+                          "merge/close. Required: the finish is a receipt gate.")
+    ap.add_argument("--no-require-routed-findings", dest="require_routed", action="store_false",
+                     help="escape hatch (debug only): skip the routed-findings sub-check; the verdict "
+                          "is still validated, must own the item, and its merge_conditions still enforced")
+    ap.set_defaults(require_routed=True)
     args = ap.parse_args()
 
     repo = os.path.abspath(args.repo)
@@ -322,6 +402,10 @@ def main():
         _fail("resolve-backend", f"unknown or unset backend {backend!r} in tracker-config.yaml", code=2)
     project_number, field_ids = read_config(repo) if backend == "github" else ("", {})
     owner, name = gh_owner_name(repo) if backend == "github" else (None, None)
+
+    # RECEIPT GATE — refuse before ANY mutation if the review verdict isn't a clean, routed, condition-
+    # met receipt for THIS PR/issue (the finish is a P5 receipt gate; mirrors the engine's close guard).
+    enforce_receipt_gate(args, backend, repo, tracker_path, owner, project_number)
 
     branch = resolve_branch(repo, args.pr)
     worktree_remove(repo, worktree_abs)

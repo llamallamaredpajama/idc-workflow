@@ -92,13 +92,17 @@ setup_repo() {
   python3 "$TRK" --tracker "$TRACKER" init >/dev/null
   python3 "$TRK" --tracker "$TRACKER" create --title "Test issue" >/dev/null
   python3 "$TRK" --tracker "$TRACKER" claim --num 1 --agent tester >/dev/null
+  # The finish tail is a receipt gate: a clean PASS verdict owning PR #501 / issue #1, no nits (so
+  # nothing to route) and no merge_conditions — the git-mechanics scenarios exercise the tail past it.
+  printf '{"verdict":"PASS","pr":501,"issue":1,"findings":[]}\n' > "$REPO/verdict.json"
 }
 
 run_finish() {
   local extra_env="$1"
   ( cd "$REPO" && \
     env PATH="$WORK/bin:$PATH" WORK="$WORK" ORIGIN="$ORIGIN" BRANCH="$BRANCH" $extra_env \
-      python3 "$SCRIPT" --pr 501 --issue 1 --worktree "$WT" --repo "$REPO" --tracker "$TRACKER" )
+      python3 "$SCRIPT" --pr 501 --issue 1 --worktree "$WT" --repo "$REPO" --tracker "$TRACKER" \
+        --verdict "$REPO/verdict.json" )
 }
 
 # ============ Scenario A (green): the full tail succeeds end to end =============================

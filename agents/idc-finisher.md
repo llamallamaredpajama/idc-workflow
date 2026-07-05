@@ -105,7 +105,12 @@ The finisher runs its **own** `/fullauto-goal` loop. Its completion contract car
 4. **Git finalization.** Acquire the area's **surface-keyed merge-train lease** (the serialized
    merge lock for *this area's* file surface — disjoint areas hold distinct leases and merge
    concurrently; see *Merge serialization*). Then run the deterministic tail —
-   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_finish.py" --pr <N> --issue <M> --worktree <path>`
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_finish.py" --pr <N> --issue <M> --worktree <path> --verdict <verdict.json>`
+   — **`--verdict` is mandatory**: the tail is a P5 **receipt gate** that refuses to merge/close unless
+   the review verdict for this PR/issue validates, is passing, **owns** the item, has every routable
+   finding (each `minor`/`nit` + every deferral) **already routed to the board** by the filer, and has
+   **no unmet `merge_conditions[]`** — so a nit can never merge as stranded prose, and an unmet
+   pre-merge condition can never be silently downgraded past the merge (the #246→#248 class)
    (full rationale per step lives in the script's own docstring, tracing to audit RC1/RC2/RC3 —
    not repeated here). It **removes the build worktree first** (so `build/*` is no longer checked
    out — otherwise its local delete fails: `cannot delete branch … used by worktree`), **then

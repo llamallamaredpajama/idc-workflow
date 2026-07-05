@@ -100,8 +100,12 @@ BUILD_TIP="$(git -C "$WT" rev-parse HEAD)"
 git -C "$WT" push -q origin "$BRANCH"                                        || fail "push of build branch failed"
 
 # ---- run the finisher's deterministic git-finalization tail ---------------------------------------
+# Receipt gate: a clean PASS verdict owning PR #1 / issue #1 (no nits to route, no merge_conditions),
+# so the tail runs its real git mechanics — this phase certifies the git/janitor end-state, not the gate.
+printf '{"verdict":"PASS","pr":1,"issue":1,"findings":[]}\n' > "$REPO/verdict.json"
 finish_out="$( cd "$REPO" && env PATH="$WORK/bin:$PATH" WORK="$WORK" ORIGIN="$ORIGIN" BRANCH="$BRANCH" \
-  python3 "$FIN" --pr 1 --issue 1 --worktree "$WT" --repo "$REPO" --tracker "$TRACKER" 2>&1 )"; rc=$?
+  python3 "$FIN" --pr 1 --issue 1 --worktree "$WT" --repo "$REPO" --tracker "$TRACKER" \
+    --verdict "$REPO/verdict.json" 2>&1 )"; rc=$?
 [ "$rc" -eq 0 ] || fail "the finish tail must succeed on a real lifecycle (got exit $rc)" "$finish_out"
 printf '%s\n' "$finish_out" | grep -qx 'finish: ok' || fail "finish must print 'finish: ok'" "$finish_out"
 

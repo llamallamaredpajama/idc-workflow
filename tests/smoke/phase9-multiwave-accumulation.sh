@@ -92,8 +92,12 @@ run_issue() {  # $1 = issue/PR number
   printf 'work %s\n' "$n" > "$wt/feature-$n.txt"
   git -C "$wt" add -A; git -C "$wt" commit -qm "implement $n"
   git -C "$wt" push -q origin "$br" || fail "push $br failed"
+  # Receipt gate: a clean PASS verdict owning PR/issue #n (no nits, no merge_conditions) so the tail
+  # runs its git mechanics — this phase exercises debris accumulation, not the gate itself.
+  printf '{"verdict":"PASS","pr":%s,"issue":%s,"findings":[]}\n' "$n" "$n" > "$REPO/verdict-$n.json"
   local out; out="$( cd "$REPO" && env PATH="$WORK/bin:$PATH" WORK="$WORK" ORIGIN="$ORIGIN" BRANCH="$br" \
-    python3 "$FIN" --pr "$n" --issue "$n" --worktree "$wt" --repo "$REPO" --tracker "$TRACKER" 2>&1 )"
+    python3 "$FIN" --pr "$n" --issue "$n" --worktree "$wt" --repo "$REPO" --tracker "$TRACKER" \
+      --verdict "$REPO/verdict-$n.json" 2>&1 )"
   printf '%s\n' "$out" | grep -qx 'finish: ok' || fail "finish of #$n did not report ok" "$out"
   gitc fetch -q --prune origin
 }

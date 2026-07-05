@@ -144,6 +144,20 @@ Files the operator chose to keep are left exactly as-is. Update touches **only**
 files — never source, never tests. Its sole board action is the non-destructive `Stage`-option
 append in Phase 3.
 
+### §C — Ensure the obligations ledger is gitignored (additive, idempotent)
+
+The per-session obligations ledger (`.idc-session-state.json`, v4 Phase 3) is transient working
+state written only by hooks — never committed. A repo scaffolded before Phase 3 has no ignore for
+it, so ensure it now (the ledger module owns the filename + the ignore rule; the step is
+append-only and **never rewrites the operator's `.gitignore` lines**):
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/idc_ledger.py" --cwd "$ROOT" ensure-gitignore
+```
+Idempotent: a no-op if the line is already present (report `ledger-gitignore-already-present`),
+otherwise appends it (`ledger-gitignore-added`). This is not a stamped/receipt-tracked file, so it
+never appears in the Phase 1 drift classification — it is a standing additive the same way the
+Phase 3 `Stage`-option append is.
+
 ## Phase 3 — Board reconcile (one safe additive migration; everything else report-only)
 
 Compare the live tracker against the installed version's expectation. Update performs exactly **one**
@@ -228,6 +242,7 @@ Print one table of every stamped file (`refreshed` / `preserved — config curre
 new optional key(s)` / `restored` / `skipped-already-current`), then:
 - the board-reconcile outcome (one of: no drift / `stage-recirc-appended` /
   `stage-recirc-already-present` / other drift reported / could not verify),
+- the ledger-gitignore outcome (`ledger-gitignore-added` / `ledger-gitignore-already-present`),
 - the `deleteBranchOnMerge` outcome (`enabled` / `declined` / `skipped-existing` / `n/a`),
 - the receipt status (`rewritten` / `graduated` / `skipped-already-current`),
 - and the cache-refresh reminder if any newly-shipped command/skill files arrived with this update.

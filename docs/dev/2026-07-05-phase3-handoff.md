@@ -22,6 +22,18 @@ adversarial review [codex + a teammate] → fix → merge). Authoritative design
 
 Full smoke green on each merge (lint 0 · run-all ALL GREEN · governance both `python3` and `uv run --with pyyaml`).
 
+**Stage C — accepted residuals (all SAFE over-act; never lose a ticket — the board is ground truth,
+re-drain idempotent; candidates for a future hardening pass, not merge-blockers).** Enumerated by the
+Fable audit + a corroborating codex pass:
+- A file-based closeout invoked with QUOTED/defensive shell forms (`--closeout "$tmp"`,
+  `$(… --closeout x)`) isn't harvested — only the bareword `--closeout <path>` (the documented flow).
+  Effect: a ticket closed out in the board-move window gets a spurious (harmless) checkpoint.
+- A resumed drain that validly closes out only PART of its scope before stopping again does not clear
+  the now-covered tickets' `recirc_checkpoint` taints (the clear branch is skipped while `uncovered` is
+  non-empty) — stale hint taints linger (the Stop gate cross-checks the board, so they never falsely block).
+- A resumed subagent stopping twice can duplicate a checkpoint comment.
+- github backend remains best-effort / not hermetically tested (its hard path is Stage E).
+
 ## PENDING
 
 - **Stage D — PostToolUse board-coherence self-repair** (plan §3.2). Two PostToolUse hooks, **fail-OPEN

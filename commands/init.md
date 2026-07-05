@@ -277,9 +277,13 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_receipt_check.py" stamp \
   --out docs/workflow/install-receipt.yaml \
   --customized WORKFLOW-config.yaml --customized docs/workflow/tracker-config.yaml \
   WORKFLOW.md WORKFLOW-config.yaml \
-  docs/workflow/tracker-config.yaml docs/workflow/README.md \
+  docs/workflow/tracker-config.yaml docs/workflow/workflow-machine.yaml docs/workflow/README.md \
   docs/workflow/pillar-matrices/.gitkeep docs/workflow/code-reviews/.gitkeep
 ```
+`docs/workflow/workflow-machine.yaml` is the transition engine's legal-transition table (v4 Phase 2),
+scaffolded so it is operator-visible + update-managed. It is **pristine** (no operator data written
+into it — unlike the two `--customized` files below), so it is stamped plain and `/idc:update`
+silently refreshes it from the template like any other pristine scaffold file.
 Never add a receipt to `templates/`. The helper omits the receipt itself, `TRACKER.md`
 (runtime footprint), and `.claude/settings.json` (operator-owned — IDC manages only its one
 enablement key) even if those paths are passed.

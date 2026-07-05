@@ -27,6 +27,14 @@ bash "$SCAFFOLD" "$PLUGIN" "$SBX" "Test Project" filesystem >/dev/null || fail "
 [ -f "$SBX/WORKFLOW.md" ]                         || fail "WORKFLOW.md not scaffolded"
 [ -f "$SBX/WORKFLOW-config.yaml" ]                || fail "WORKFLOW-config.yaml not scaffolded"
 [ -f "$SBX/docs/workflow/tracker-config.yaml" ]  || fail "tracker-config.yaml not scaffolded"
+# The transition engine's legal-transition table (v4 Phase 2) is scaffolded operator-visibly, byte-
+# identical to the template, and the engine then loads the REPO-LOCAL copy (machine_path_for prefers
+# it over the bundled fallback). Red-when-broken: drop the copy line from idc_init_scaffold.sh → absent.
+[ -f "$SBX/docs/workflow/workflow-machine.yaml" ] || fail "workflow-machine.yaml not scaffolded (engine falls back to the bundled template, but the governed copy must exist for operator-visibility + /idc:update)"
+diff -q "$PLUGIN/templates/workflow-machine.yaml" "$SBX/docs/workflow/workflow-machine.yaml" >/dev/null \
+  || fail "scaffolded workflow-machine.yaml is not byte-identical to the template"
+PYTHONPATH="$PLUGIN/scripts" python3 -c "import idc_transition as T,os,sys; p=T.machine_path_for(sys.argv[1]); sys.exit(0 if p==os.path.join(sys.argv[1],'docs','workflow','workflow-machine.yaml') else 1)" "$SBX" \
+  || fail "the engine did not load the scaffolded repo-local workflow-machine.yaml (machine_path_for should prefer it over the bundled fallback)"
 # token substitution happened (no leftover {{PROJECT_NAME}}; name present)
 grep -q "Test Project" "$SBX/WORKFLOW.md"        || fail "PROJECT_NAME not substituted in WORKFLOW.md"
 ! grep -q "{{PROJECT_NAME}}" "$SBX/WORKFLOW.md" "$SBX/WORKFLOW-config.yaml" "$SBX/docs/workflow/tracker-config.yaml" \

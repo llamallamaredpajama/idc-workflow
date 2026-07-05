@@ -32,6 +32,11 @@ resolve() { python3 "$PLUGIN_ROOT/scripts/idc_template_for.py" --plugin-root "$P
 [ -f WORKFLOW.md ]                        || cp "$(resolve WORKFLOW.md)" WORKFLOW.md
 [ -f WORKFLOW-config.yaml ]               || cp "$(resolve WORKFLOW-config.yaml)" WORKFLOW-config.yaml
 [ -f docs/workflow/tracker-config.yaml ]  || cp "$(resolve docs/workflow/tracker-config.yaml)" docs/workflow/tracker-config.yaml
+# The transition engine's legal-transition table (v4 Phase 2). Scaffolded into the governed repo so
+# it is operator-visible + update-managed; the engine (idc_transition.machine_path_for) prefers this
+# copy and falls back to the bundled template pre-scaffold. No {{PROJECT_NAME}} substitution (it is a
+# repo-agnostic state machine).
+[ -f docs/workflow/workflow-machine.yaml ] || cp "$(resolve docs/workflow/workflow-machine.yaml)" docs/workflow/workflow-machine.yaml
 
 # docs/workflow tree from docs-tree/ (visible entries only; each absent entry resolved + copied).
 shopt -s nullglob

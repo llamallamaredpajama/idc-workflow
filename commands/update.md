@@ -128,12 +128,17 @@ mapping can't drift between scaffold and resync. It encodes exactly:
 | `WORKFLOW.md` | `templates/WORKFLOW.md` |
 | `WORKFLOW-config.yaml` | `templates/WORKFLOW-config.yaml` |
 | `docs/workflow/tracker-config.yaml` | `templates/tracker-config.yaml` |
+| `docs/workflow/workflow-machine.yaml` | `templates/workflow-machine.yaml` |
 | `docs/workflow/<rest>` (e.g. `README.md`, `code-reviews/…`, `pillar-matrices/…`) | `templates/docs-tree/<rest>` |
 
 This closes the docs-tree ambiguity: `docs/workflow/README.md` resolves to
 `templates/docs-tree/README.md`, **never** the unrelated `templates/README.md` (which documents the
-templates dir itself). If the resolver exits non-zero for a path, **STOP** — do not fall back to a
-guessed template.
+templates dir itself). `docs/workflow/workflow-machine.yaml` (the transition engine's legal-transition
+table, v4 Phase 2) resolves to the top-level `templates/workflow-machine.yaml` (checked before the
+docs-tree branch), **not** `templates/docs-tree/workflow-machine.yaml`. It is a **pristine** governed
+file (no operator data), so it refreshes silently like `WORKFLOW.md` — a repo whose engine table
+predates a plugin bump is brought current here, and a missing copy is restored. If the resolver exits
+non-zero for a path, **STOP** — do not fall back to a guessed template.
 
 Files the operator chose to keep are left exactly as-is. Update touches **only** stamped scaffold
 files — never source, never tests. Its sole board action is the non-destructive `Stage`-option

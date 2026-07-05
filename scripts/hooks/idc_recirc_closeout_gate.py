@@ -114,15 +114,55 @@ def _iter_json_objects(s):
         i += 1
 
 
+def _iter_tool_uses(evt):
+    """Yield (tool_name, input_dict) for each assistant `tool_use` block in a transcript event — the
+    ACTIONS the agent itself took, as opposed to a tool_result it READ or prose it wrote. Closeout
+    harvesting anchors here (never on arbitrary strings) so an EXAMPLE closeout the recirculator merely
+    read, quoted, or embedded in a doc is never mistaken for a real disposition (MAJOR-2)."""
+    msg = evt.get("message")
+    blocks = msg.get("content") if isinstance(msg, dict) else None
+    if not isinstance(blocks, list):
+        return
+    for b in blocks:
+        if isinstance(b, dict) and b.get("type") == "tool_use":
+            inp = b.get("input")
+            yield (b.get("name") or ""), (inp if isinstance(inp, dict) else {})
+
+
+def _is_closeout_shape(obj):
+    """A closeout object at minimum carries BOTH `ticket` and `outcome` (the validator enforces the
+    rest). This is only a SHAPE prefilter — `_covered_tickets` still runs the fail-closed validator."""
+    return isinstance(obj, dict) and "ticket" in obj and "outcome" in obj
+
+
 def _scan_transcript(transcript_path):
     """One pass over the recirculator transcript → (branch, prs, closeout_candidates).
 
-    branch: the first git branch it created/pushed (or None). prs: the sorted PR numbers referenced
-    (pull/<n> URLs). closeout_candidates: every JSON object shaped like a closeout (has BOTH `ticket`
-    and `outcome`) — later fed to the fail-closed validator to decide which tickets are covered."""
-    branch, prs, candidates = None, set(), []
-    seen_candidate = set()
+    branch / prs are reconstruction HINTS for the checkpoint comment, harvested BROADLY (any string in
+    the event — a `gh pr create` URL living in a tool_result is fair game, and over-broad here is
+    harmless).
+
+    closeout_candidates are harvested NARROWLY — ONLY from a REAL closeout ACTION the agent authored,
+    NOT mere JSON presence anywhere (MAJOR-2):
+      * a `Write`/`Edit` whose WHOLE (stripped) content parses as a closeout object — the closeout
+        ARTIFACT the recirculator emitted (a doc that merely *contains* an example won't parse whole); or
+      * a `Bash` command that RUNS `idc_recirc_closeout.py` with an inline closeout — the recirculator
+        actually validating one.
+    A closeout-shaped JSON in a tool_result (a doc it Read), in a text/prose block, or buried in a
+    larger file is IGNORED, so a quoted EXAMPLE can never suppress a needed checkpoint. The bias is
+    SAFE: an un-anchored real closeout at worst yields a harmless extra (idempotent) checkpoint, never a
+    lost one."""
+    branch, prs, candidates, seen = None, set(), [], set()
+
+    def _add(obj):
+        if _is_closeout_shape(obj):
+            key = json.dumps(obj, sort_keys=True)
+            if key not in seen:
+                seen.add(key)
+                candidates.append(obj)
+
     for evt in H.iter_transcript_events(transcript_path):
+        # HINTS (broad): branch + PR from any string in the event.
         for s in _walk_strings(evt):
             if branch is None:
                 for rgx in _BRANCH_RES:
@@ -132,13 +172,20 @@ def _scan_transcript(transcript_path):
                         break
             for m in _PR_RE.finditer(s):
                 prs.add(int(m.group(1)))
-            if "ticket" in s and "outcome" in s:  # cheap prefilter before the raw_decode scan
-                for obj in _iter_json_objects(s):
-                    if "ticket" in obj and "outcome" in obj:
-                        key = json.dumps(obj, sort_keys=True)
-                        if key not in seen_candidate:
-                            seen_candidate.add(key)
-                            candidates.append(obj)
+        # COVERED closeouts (narrow): only from a real closeout action the agent authored.
+        for name, inp in _iter_tool_uses(evt):
+            if name in ("Write", "Edit"):
+                content = inp.get("content") if name == "Write" else inp.get("new_string")
+                if isinstance(content, str):
+                    try:
+                        _add(json.loads(content.strip()))   # the WHOLE file content must BE the closeout
+                    except ValueError:
+                        pass
+            elif name == "Bash":
+                cmd = inp.get("command")
+                if isinstance(cmd, str) and CLOSEOUT_VALIDATOR in cmd:
+                    for obj in _iter_json_objects(cmd):
+                        _add(obj)
     return branch, sorted(prs), candidates
 
 
@@ -149,6 +196,11 @@ def _covered_tickets(plugin_root, candidates):
     so an invalid/truncated closeout can never mark a ticket covered (that would strand it)."""
     checker = os.path.join(plugin_root or "", "scripts", CLOSEOUT_VALIDATOR)
     if not os.path.isfile(checker):
+        # No validator ⇒ we cannot prove ANY ticket is covered ⇒ every open ticket is treated as
+        # uncovered (checkpointed) — the SAFE bias. Warn so the missing helper is visible (MINOR-3).
+        if candidates:
+            H.warn(f"recirc-checkpoint: closeout validator not found at {checker} — treating all open "
+                   f"tickets as uncovered (safe bias; will checkpoint)")
         return set()
     covered = set()
     for obj in candidates:
@@ -159,10 +211,12 @@ def _covered_tickets(plugin_root, candidates):
             continue
         if r.returncode != 0:
             continue
+        # The validator's dispatch line is a JSON OBJECT carrying `ticket`; guard the degenerate cases
+        # (non-JSON / non-object stdout → AttributeError on .get) so one bad line never sinks the loop (NIT-5).
         try:
             covered.add(int(json.loads(r.stdout).get("ticket")))
-        except (ValueError, TypeError):
-            pass
+        except (ValueError, TypeError, AttributeError):
+            continue
     return covered
 
 
@@ -184,39 +238,64 @@ def _read_backend(cwd):
 
 # ── filesystem backend (the hermetically-tested, load-bearing path) ──────────────────────────────
 def _fs_query(trk, tracker, stage, status):
-    """Issue numbers at (stage, status) via the sanctioned tracker helper. [] on any failure."""
+    """Issue numbers at (stage, status) via the sanctioned tracker helper, or **None on ANY failure**
+    (spawn error / timeout / non-zero exit — a corrupt/locked/half-written TRACKER.md makes the helper
+    `die` rc=1). None is NOT the same as `[]` (MAJOR-1): a FAILED read is UNKNOWN inbox state, which
+    the caller must be able to tell apart from a genuinely empty inbox — else a read failure would look
+    like 'nothing owed' and the gate would clear the checkpoint ledger, silently WIPING state (the very
+    drop-F loss this hook exists to prevent). Warns on the degraded path (observability-first)."""
     try:
         r = subprocess.run([sys.executable, trk, "--tracker", tracker, "query",
                             "--stage", stage, "--status", status],
                            capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        return []
+    except (OSError, subprocess.SubprocessError) as e:
+        H.warn(f"recirc-checkpoint: tracker query ({stage}/{status}) could not run: {e}")
+        return None
+    if r.returncode != 0:
+        H.warn(f"recirc-checkpoint: tracker query ({stage}/{status}) failed (rc={r.returncode}): "
+               f"{(r.stderr or '').strip()[:200]}")
+        return None
     return [int(x) for x in r.stdout.split() if x.strip().isdigit()]
 
 
 def _fs_comment(trk, tracker, cwd, num, body):
     """Stamp `body` on ticket <num> through the sanctioned filesystem comment op (NEVER a raw board
-    mutation — the Phase-2 interlock flags those). Best-effort: a failure warns, never raises."""
+    mutation — the Phase-2 interlock flags those). Best-effort (never raises), but a DROPPED comment is
+    a lost checkpoint, so a non-zero exit or spawn error WARNS loudly (MINOR-4) rather than silently
+    vanishing — the taint still records the obligation so the loss stays visible."""
     try:
-        subprocess.run([sys.executable, trk, "--tracker", tracker, "comment",
-                        "--num", str(num), "--body", body],
-                       cwd=cwd, capture_output=True, text=True, timeout=30)
+        r = subprocess.run([sys.executable, trk, "--tracker", tracker, "comment",
+                            "--num", str(num), "--body", body],
+                           cwd=cwd, capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError) as e:
         H.warn(f"recirc-checkpoint: could not stamp checkpoint on #{num}: {e}")
+        return
+    if r.returncode != 0:
+        H.warn(f"recirc-checkpoint: checkpoint comment on #{num} failed (rc={r.returncode}): "
+               f"{(r.stderr or '').strip()[:200]}")
 
 
 def _fs_still_open_and_handled(plugin_root, cwd):
     """(still_open, handled) for the filesystem backend. still_open = Stage=Recirculation ∧
     Status=Todo (the tickets whose state is at risk). handled = the Stage=Recirculation tickets
     already moved off Todo this drain (Done = admitted/retired, Blocked = parked behind a gate) —
-    enriches the checkpoint's "dispositions so far". Returns (None, []) if the tracker is absent."""
+    enriches the checkpoint's "dispositions so far".
+
+    still_open is **None** when the inbox cannot be determined (the tracker helper/file is missing, or
+    the Todo query FAILED — see _fs_query) so the caller PRESERVES the checkpoint ledger instead of
+    wiping it (MAJOR-1). The Done/Blocked enrichment queries are best-effort — a None there degrades to
+    an empty disposition list, never to a lost checkpoint."""
     trk = os.path.join(plugin_root or "", "scripts", TRACKER_FS)
     tracker = os.path.join(cwd, "TRACKER.md")
     if not (os.path.isfile(trk) and os.path.isfile(tracker)):
+        H.warn(f"recirc-checkpoint: tracker helper/file missing (trk={os.path.isfile(trk)}, "
+               f"TRACKER.md={os.path.isfile(tracker)}) — inbox undeterminable; preserving checkpoints")
         return None, []
     still_open = _fs_query(trk, tracker, "Recirculation", "Todo")
-    handled = [(n, "done") for n in _fs_query(trk, tracker, "Recirculation", "Done")]
-    handled += [(n, "blocked") for n in _fs_query(trk, tracker, "Recirculation", "Blocked")]
+    if still_open is None:
+        return None, []   # UNKNOWN inbox (failed/corrupt read) — the caller must NOT clear taints
+    handled = [(n, "done") for n in (_fs_query(trk, tracker, "Recirculation", "Done") or [])]
+    handled += [(n, "blocked") for n in (_fs_query(trk, tracker, "Recirculation", "Blocked") or [])]
     return still_open, handled
 
 
@@ -236,6 +315,8 @@ def _gh_still_open_and_handled_and_commenter(cwd):
     project_number = _read_project_number(cwd)
     owner = _gh_owner(cwd)
     if not (owner and project_number):
+        H.warn(f"recirc-checkpoint: github owner/project undeterminable (owner={owner!r}, "
+               f"project={project_number!r}) — inbox undeterminable; preserving checkpoints")
         return None, [], None
     try:
         items = idc_gh_board.fetch_items(owner, project_number, cwd)
@@ -341,11 +422,18 @@ def _gate(payload, plugin_root):
         tracker = os.path.join(cwd, "TRACKER.md")
         commenter = lambda n, body: _fs_comment(trk, tracker, cwd, n, body)  # noqa: E731
 
+    if still_open is None:
+        # UNKNOWN inbox — the tracker/board could not be read (missing/corrupt/locked/timed-out). We
+        # CANNOT prove the inbox is empty, so we must NOT clear the checkpoint obligations: clearing on
+        # an unproven-empty inbox is the exact drop-F state loss (MAJOR-1). Preserve every existing
+        # taint, stamp nothing new (we don't know which tickets), warn, and allow (fail-open detective).
+        H.warn("recirc-checkpoint: could not determine the recirculation inbox (tracker/board "
+               "unreadable) — preserving existing checkpoint taints, stamping nothing (state NOT wiped)")
+        H.allow()
     if not still_open:
-        # No open inbox tickets (a clean/complete drain, or the board is unreadable) → nothing to
-        # checkpoint. Treat a proven-empty inbox as the obligation satisfied and clear the taints.
-        if still_open is not None:
-            _clear_session_checkpoints(cwd, sid)
+        # PROVEN-empty inbox (a clean, complete drain — the board really has no open Recirculation ∧
+        # Todo ticket) → the obligation is satisfied → clear this session's checkpoint taints.
+        _clear_session_checkpoints(cwd, sid)
         H.allow()
 
     # Which of the still-open tickets already have a VALID closeout in the transcript (covered) — those
@@ -384,12 +472,11 @@ def _gate(payload, plugin_root):
 
 if __name__ == "__main__":
     # FAIL-OPEN top-level guard (this is a post-hoc detective — a hook-internal error must NEVER break
-    # the stop, even under IDC_HOOKS_STRICT, unlike the pre-action gates). _gate exits via H.allow()
-    # (SystemExit) on every path; any OTHER exception warns and allows.
-    _payload = H.read_payload()
-    _root = _plugin_root_from_argv()
+    # the stop, even under IDC_HOOKS_STRICT, unlike the pre-action gates). Everything — even reading the
+    # payload / argv (NIT-6) — runs inside the guard; _gate exits via H.allow() (SystemExit) on every
+    # path, and any OTHER exception warns and allows.
     try:
-        _gate(_payload, _root)
+        _gate(H.read_payload(), _plugin_root_from_argv())
     except SystemExit:
         raise
     except Exception as _e:  # noqa: BLE001 — infra bug, never a reason to break a stop

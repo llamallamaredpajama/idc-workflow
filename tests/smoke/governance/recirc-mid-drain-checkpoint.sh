@@ -191,4 +191,55 @@ led "$E" pending --session "$SIDE" | grep -qx "recirc_checkpoint:$T5" \
 grep -qi 'OBSERVE-ONLY' "$ERRLOG" || fail "(E) observe-only must warn on stderr about the withheld checkpoint"
 echo "  ok (E) observe-only: taint recorded (state-loss made visible), board comment withheld"
 
-echo "PASS: the SubagentStop recirculator closeout-or-checkpoint detective — a mid-drain stop checkpoints every UNCOVERED open inbox ticket (branch/PR/dispositions, via the sanctioned comment helper) + sets a recirc_checkpoint taint; a validly-closed-out ticket is left alone (per-ticket); a fully-valid run clears its taints and stamps nothing; self-gated to the recirculator + repo-gated; fail-OPEN (never blocks); observe-only records without mutating the board"
+# ══ Case F — a FAILING/corrupt tracker read must PRESERVE checkpoints, never WIPE them (MAJOR-1) ════
+# An unreadable inbox (a corrupt/locked/half-written TRACKER.md → the query helper dies rc=1) is UNKNOWN
+# state, NOT a proven-empty inbox. The gate must NOT clear the checkpoint ledger (clearing on an
+# unproven-empty inbox is the exact drop-F state loss). Corrupt the tracker AFTER a pre-existing
+# checkpoint taint is on the ledger, then assert the taint SURVIVES + the gate warns.
+# Red-when-broken: revert _fs_query to `[]`-on-failure ⇒ still_open==[] looks proven-empty ⇒ the taint
+# is WIPED ⇒ the "taint survives" assert goes RED.
+F="$(new_repo)" || fail "new_repo F failed"; REPOS+=("$F")
+SIDF="sidF-$$-$(basename "$WORK")"
+led "$F" set --kind recirc_checkpoint --key 99 --session "$SIDF" >/dev/null || fail "(F) pre-seed taint failed"
+led "$F" pending --session "$SIDF" | grep -qx "recirc_checkpoint:99" || fail "(F) pre-seeded taint did not take"
+printf 'corrupt tracker — no idc-tracker-state JSON block, the query helper dies rc=1\n' > "$F/TRACKER.md"
+python3 "$TRK" --tracker "$F/TRACKER.md" query --stage Recirculation --status Todo >/dev/null 2>&1 \
+  && fail "(F) precondition: the corrupt TRACKER.md must make the query FAIL (rc!=0)"
+mk_transcript "$WORK/tr_F.jsonl" "$BRANCH" "$PR_URL"
+run_gate "$F" "$RECIRC_AGENT" "$SIDF" "$WORK/tr_F.jsonl"
+[ "$GATE_RC" -eq 0 ] || fail "(F) gate exit $GATE_RC (fail-open detective must still allow)"
+led "$F" pending --session "$SIDF" | grep -qx "recirc_checkpoint:99" \
+  || fail "(F) an UNREADABLE inbox WIPED the checkpoint taint — state loss [revert _fs_query to []-on-failure ⇒ RED]"
+grep -qi 'could not determine the recirculation inbox' "$ERRLOG" \
+  || fail "(F) the degraded (unreadable-inbox) path must WARN (observability-first)"
+echo "  ok (F) an unreadable/corrupt tracker read PRESERVES checkpoints (never wiped) + warns [MAJOR-1]"
+
+# ══ Case G — an EXAMPLE closeout (read/quoted, not a real action) must NOT mark a ticket covered ════
+# A valid-closeout-shaped JSON that merely appears in a tool_result (a doc the recirculator READ) is
+# NOT a disposition. It must NOT suppress the checkpoint — the ticket is still open and un-closed-out.
+# Red-when-broken: revert _scan_transcript to harvest closeouts from ANY string (not just authored
+# Write/Bash actions) ⇒ the example is treated as covered ⇒ the ticket is NOT checkpointed ⇒ RED.
+G="$(new_repo)" || fail "new_repo G failed"; REPOS+=("$G")
+T6="$(seed "$G" Recirculation Todo 'recirc: open; an EXAMPLE closeout for it was only READ')" || fail "seed T6"
+SIDG="sidG-$$-$(basename "$WORK")"
+# a transcript whose ONLY closeout for T6 is inside a tool_result (a Read) + a text quote — never a
+# Write/Edit artifact and never an idc_recirc_closeout.py Bash run.
+python3 - "$WORK/tr_G.jsonl" "$(valid_co "$T6")" <<'PY'
+import json,sys
+out,example=sys.argv[1],sys.argv[2]
+L=[{"type":"assistant","timestamp":"2020-01-01T00:00:01.000Z","message":{"role":"assistant",
+    "content":[{"type":"tool_use","name":"Read","input":{"file_path":"docs/considerations/EXAMPLES.md"}}]}},
+   {"type":"user","timestamp":"2020-01-01T00:00:02.000Z","message":{"role":"user",
+    "content":[{"type":"tool_result","tool_use_id":"t1","content":"here is an example closeout: "+example}]}},
+   {"type":"assistant","timestamp":"2020-01-01T00:00:03.000Z","message":{"role":"assistant",
+    "content":[{"type":"text","text":"for reference the schema looks like "+example}]}}]
+open(out,"w").write("".join(json.dumps(x)+"\n" for x in L))
+PY
+run_gate "$G" "$RECIRC_AGENT" "$SIDG" "$WORK/tr_G.jsonl"
+[ "$GATE_RC" -eq 0 ] || fail "(G) gate exit $GATE_RC"
+has_ckpt "$G" "$T6" \
+  || fail "(G) an EXAMPLE closeout (only READ/quoted) wrongly marked ticket #$T6 covered — it must still be checkpointed [revert to broad harvest ⇒ RED]"
+led "$G" pending --session "$SIDG" | grep -qx "recirc_checkpoint:$T6" || fail "(G) missing checkpoint taint for #$T6"
+echo "  ok (G) an example closeout that was only read/quoted does NOT mark a ticket covered — it is still checkpointed [MAJOR-2]"
+
+echo "PASS: the SubagentStop recirculator closeout-or-checkpoint detective — a mid-drain stop checkpoints every UNCOVERED open inbox ticket (branch/PR/dispositions, via the sanctioned comment helper) + sets a recirc_checkpoint taint; a validly-closed-out ticket is left alone (per-ticket); a fully-valid run clears its taints and stamps nothing; an UNREADABLE inbox PRESERVES checkpoints (never wiped); an EXAMPLE closeout that was only read/quoted does NOT mark a ticket covered; self-gated to the recirculator + repo-gated; fail-OPEN (never blocks); observe-only records without mutating the board"

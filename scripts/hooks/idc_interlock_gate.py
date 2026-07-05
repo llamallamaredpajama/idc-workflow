@@ -16,6 +16,21 @@ remediation); IDC_HOOKS_OBSERVE_ONLY=1 universally downgrades any deny back to w
 debug escape). Hard-deny promotion is a later operator decision — the deny path exists + is
 e2e-exercised via the switch now.
 
+  What "warn-inject" reaches: the shipped warn posture writes the remediation to STDERR at exit 0.
+  Per the PreToolUse hook contract that is transcript/telemetry ONLY — it is NOT injected into the
+  model's context, so the agent that typed the raw command is NOT self-healed during the warn phase.
+  That is intended: warn-inject is the OBSERVE-FIRST rollout phase (surface + measure improvisation
+  without blocking). The model-visible SELF-HEAL is the DENY posture (its reason is fed back to the
+  model) — the enforcement teeth that promotion turns on. PreToolUse has no channel that both leaves
+  the action unblocked AND injects into the model (deny/ask both block or prompt), so this split is
+  inherent, not a gap.
+
+Known classifier limitation (acceptable under warn-first): a pure command-string match with no shell
+parse, so an ECHOED/quoted occurrence (`echo 'gh pr merge'`, a commit message carrying the substring)
+also matches. Harmless under the shipped warn posture (nothing is blocked); under the promoted ENFORCE
+posture it would over-deny such a benign line — exactly what the observe-first warn phase surfaces
+before promotion. A shell-aware parse is deferred.
+
 Why this NEVER fires on the sanctioned path: the engine + finisher run `gh` via python subprocess,
 NOT via the Bash tool, so PreToolUse never sees them; and a `python3 …/idc_git_finish.py …` Bash call
 does not match any pattern here. Only a RAW terminal command typed into Bash matches. The gate is a
@@ -69,8 +84,10 @@ def _has(command, *word_seqs):
 def classify(command):
     """(subject, remediation) for a raw terminal/board command that bypasses the door, or None."""
     c = command
-    # state-closing gh api (REST `-f/-F state=closed` or a raw `state=closed`) — a hand issue close.
-    if _has(c, "gh api") and re.search(r"state\s*[=:]\s*[\"']?closed", c):
+    # state-closing gh api — a hand issue close. Matches the REST field forms `-f/-F state=closed`,
+    # `state: closed`, AND the JSON-body form `"state":"closed"` / `"state": "closed"` (an optional
+    # quote may sit on either side of the key and the value).
+    if _has(c, "gh api") and re.search(r"state[\"']?\s*[=:]\s*[\"']?\s*closed", c):
         return ("a state-closing `gh api` call", _CLOSE)
     # GraphQL board mutations (field value / add / delete) — raw board writes.
     if _has(c, "gh api") and re.search(r"updateProjectV2ItemFieldValue|addProjectV2ItemById|"

@@ -75,10 +75,12 @@ grep -q 'IDC interlock' "$ERR" || gov_fail "(B) raw gh project item-edit did not
 grep -q 'idc_transition.py' "$ERR" || gov_fail "(B) board-mutation warning did not name idc_transition.py: $(cat "$ERR")"
 echo "  ok (B) raw gh project item-edit ⇒ interlock fires naming idc_transition.py"
 
-# ── (C) state-closing gh api ⇒ interlock fires ──────────────────────────────────────────────────────
+# ── (C) state-closing gh api ⇒ interlock fires (REST field form AND JSON-body form) ─────────────────
 gate "$REPO" Bash 'gh api repos/o/r/issues/5 -X PATCH -f state=closed'
-grep -q 'IDC interlock' "$ERR" || gov_fail "(C) state-closing gh api did not fire the interlock: $(cat "$ERR")"
-echo "  ok (C) state-closing gh api ⇒ interlock fires (close remediation)"
+grep -q 'IDC interlock' "$ERR" || gov_fail "(C) state-closing gh api (-f state=closed) did not fire: $(cat "$ERR")"
+gate "$REPO" Bash 'gh api repos/o/r/issues/5 -X PATCH --input - <<< '\''{"state":"closed"}'\'''
+grep -q 'IDC interlock' "$ERR" || gov_fail "(C) state-closing gh api (JSON body \"state\":\"closed\") did not fire: $(cat "$ERR")"
+echo "  ok (C) state-closing gh api (REST -f state=closed AND JSON body) ⇒ interlock fires (close remediation)"
 
 # ── (A) allow the sanctioned path + reads (no false positives) ──────────────────────────────────────
 allow_case() {  # $1 = command that must NOT fire the interlock

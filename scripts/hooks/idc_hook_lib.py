@@ -128,7 +128,9 @@ def pre_tool_allow():
 
 def pre_tool_warn(reason):
     """Warn-inject: surface the remediation (stderr) but make NO permission decision, so the action
-    still proceeds. The shipped, non-bricking rollout posture."""
+    still proceeds. The shipped, non-bricking rollout posture. NOTE: exit-0 stderr is transcript/
+    telemetry only — it is NOT injected into the model context (the observe-first phase); the
+    model-visible self-heal is pre_tool_deny()."""
     warn(reason)
     sys.exit(0)
 

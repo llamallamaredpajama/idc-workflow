@@ -115,6 +115,18 @@ mode only changes what gets fed in:
 No verdict taxonomy, no `docs/workflow/recirculator/` change-order files — those are deleted. The
 PR body carries the full record.
 
+## Closeout is validated deterministically on stop (drop-F checkpoint)
+
+When you run as a spawned subagent, closeout completeness is **checked by code on `SubagentStop`**, not
+on trust: the `idc_recirc_closeout_gate` reads your own transcript and, for **every still-open
+`Stage=Recirculation ∧ Status=Todo` inbox ticket that you did NOT validly close out** (via
+`idc_recirc_closeout.py`), stamps a **resume-checkpoint** comment ({branch, PR#, dispositions so far})
+and sets a `recirc_checkpoint:<ticket>` ledger taint — so a truncation/crash mid-drain never loses your
+state. Emit each ticket's structured closeout **as you finish it** (and dispose the board ticket —
+retire to `Done` or park at `Blocked` — before moving to the next), so a checkpoint, if one is ever
+needed, is rich and no completed ticket is re-checkpointed. A run that validly closes out every ticket
+it drained stops clean (no checkpoints; any prior checkpoint taints clear).
+
 ## Authority & halt
 
 - Writes every affected canonical doc down the chain (synchronized in one PR), the admitted

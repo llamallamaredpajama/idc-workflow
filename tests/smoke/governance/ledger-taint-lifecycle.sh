@@ -124,8 +124,8 @@ GREPO="$WORK/scaffolded"; mkdir -p "$GREPO"
 printf '# operator rules\nnode_modules/\n*.log\n' > "$GREPO/.gitignore"
 bash "$SCAFFOLD" "$GOV_PLUGIN" "$GREPO" "proj-x" filesystem >/dev/null 2>&1 \
   || fail "(I) idc_init_scaffold.sh failed"
-grep -qx '.idc-session-state.json' "$GREPO/.gitignore" \
-  || fail "(I) the scaffold must add '.idc-session-state.json' to the repo-root .gitignore"
+grep -qxF '.idc-session-state.json*' "$GREPO/.gitignore" \
+  || fail "(I) the scaffold must add the '.idc-session-state.json*' ignore glob to the repo-root .gitignore"
 grep -qx 'node_modules/' "$GREPO/.gitignore" \
   || fail "(I) the scaffold must PRESERVE the operator's existing .gitignore lines (non-destructive)"
 grep -qx '\*.log' "$GREPO/.gitignore" \
@@ -133,9 +133,25 @@ grep -qx '\*.log' "$GREPO/.gitignore" \
 # idempotent: a second scaffold must not duplicate the line.
 bash "$SCAFFOLD" "$GOV_PLUGIN" "$GREPO" "proj-x" filesystem >/dev/null 2>&1 \
   || fail "(I) second idc_init_scaffold.sh run failed"
-n="$(grep -cx '.idc-session-state.json' "$GREPO/.gitignore")"
+n="$(grep -cxF '.idc-session-state.json*' "$GREPO/.gitignore")"
 [ "$n" -eq 1 ] \
-  || fail "(I) the gitignore ensure must be idempotent — expected exactly 1 '.idc-session-state.json' line, got $n"
-echo "  ok (I) scaffold gitignores .idc-session-state.json idempotently + non-destructively"
+  || fail "(I) the gitignore ensure must be idempotent — expected exactly 1 '.idc-session-state.json*' line, got $n"
+echo "  ok (I) scaffold gitignores .idc-session-state.json* idempotently + non-destructively"
+
+# ── (K) concurrent writers — no lost updates (the ledger serializes its read-modify-write) ─────────
+# Two+ hook/script processes recording DIFFERENT taints at once must not clobber each other: each does
+# read → modify → atomic-replace, so without serialization the last replace wins and silently drops
+# the rest (a dropped taint = a dropped obligation, the exact failure Phase 3 prevents). Launch KN
+# concurrent sets; require ALL KN to survive.
+# Red-when-broken: make idc_ledger._write_lock a bare `yield` (no lock) ⇒ the race drops taints ⇒ got < KN.
+KREPO="$WORK/concurrent"; mkdir -p "$KREPO/docs/workflow"
+printf 'backend: filesystem\n' > "$KREPO/docs/workflow/tracker-config.yaml"
+KN=30
+for i in $(seq 1 "$KN"); do led "$KREPO" set --kind mid_finish --key "$i" --session S1 & done
+wait
+got="$(led "$KREPO" pending --session S1 | grep -c '^mid_finish:')"
+[ "$got" -eq "$KN" ] \
+  || fail "(K) concurrent writers lost taints — expected $KN mid_finish taints, got $got [drop _write_lock ⇒ RED]"
+echo "  ok (K) $KN concurrent writers all recorded — no lost updates (ledger serializes writes)"
 
 echo "PASS: idc_ledger obligations ledger — path/roundtrip/mid_finish/stale-safety/corrupt-tolerance/repo-gate hold; the scaffold gitignores the state file idempotently & non-destructively; clear_taint is the red-when-broken headline"

@@ -36,9 +36,10 @@ verdict + its exit code) are GROUND TRUTH. Two independent defenses enforce this
 
 FAIL MODES. Reads are TOLERANT: a missing or corrupt ledger reads as EMPTY and never throws — a
 corrupt ledger must not brick a gate (`read_taints` / `pending_taints`). Writes are ATOMIC
-(temp-file + os.replace, so a concurrent reader never sees a half-written file) and BEST-EFFORT: a
-write that fails warns on stderr and returns rather than raising, so recording a taint can never
-break the user's command (a post-hoc observer never fails-closed). Writes are REPO-GATED — a no-op
+(temp-file + os.replace, so a concurrent reader never sees a half-written file), SERIALIZED across
+concurrent writers by an advisory lock (`_write_lock`) so no taint is lost to a read-modify-write
+race, and BEST-EFFORT: a write (or a lock) that fails warns/degrades rather than raising, so
+recording a taint can never break the user's command (a post-hoc observer never fails-closed). Writes are REPO-GATED — a no-op
 outside an IDC-governed repo (reuse `idc_hook_lib.is_governed_repo`) so a non-IDC repo on the
 machine is never littered with a state file.
 
@@ -71,6 +72,7 @@ USAGE (CLI — for the scaffold's gitignore step, and the governance test):
     python3 idc_ledger.py --cwd <repo> ensure-gitignore         # additive, idempotent
 """
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -82,8 +84,57 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import idc_hook_lib  # noqa: E402  (is_governed_repo — the ONE repo-gate, defined once, shared)
 
 LEDGER_FILENAME = ".idc-session-state.json"
-GITIGNORE_LINE = LEDGER_FILENAME  # the exact whole-line entry the scaffold ensures
+# The scaffold ignores the state file AND its sidecar write-lock (`.idc-session-state.json.lock`)
+# with ONE glob line — in gitignore `*` matches the empty string, so it still ignores the file itself.
+GITIGNORE_LINE = LEDGER_FILENAME + "*"
 _LEDGER_VERSION = 1
+
+try:
+    import fcntl  # POSIX advisory file locks (macOS/Linux — IDC's platforms)
+except ImportError:  # pragma: no cover - non-POSIX fallback
+    fcntl = None
+
+
+@contextlib.contextmanager
+def _write_lock(cwd):
+    """Serialize the ledger's read-modify-write across concurrent hook/script processes.
+
+    set_taint/clear_taint READ the whole ledger, MODIFY it, then atomically REPLACE the file. Two
+    processes recording DIFFERENT taints at the same time would each read the same old snapshot and
+    the last os.replace would win — silently dropping the other's taint. A dropped taint is a dropped
+    obligation, exactly the "loop lies about being done" failure Phase 3 exists to prevent. An
+    exclusive advisory lock on a STABLE sidecar `.idc-session-state.json.lock` (we lock a sidecar,
+    not the ledger itself, because os.replace orphans a lock held on the renamed inode) makes the
+    read-modify-write atomic with respect to other writers.
+
+    BEST-EFFORT (a post-hoc observer must never fail-closed): if fcntl is unavailable or the lock
+    cannot be taken, proceed UNLOCKED rather than break the caller's command."""
+    if fcntl is None:
+        yield
+        return
+    fh = None
+    try:
+        fh = open(ledger_path(cwd) + ".lock", "w", encoding="utf-8")
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+    except OSError:
+        if fh is not None:
+            try:
+                fh.close()
+            except OSError:
+                pass
+            fh = None
+    try:
+        yield
+    finally:
+        if fh is not None:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                fh.close()
+            except OSError:
+                pass
 
 
 # ── paths ──────────────────────────────────────────────────────────────────────────────────────────
@@ -160,9 +211,10 @@ def set_taint(cwd, kind, key=None, session_id=None, **fields):
     key = None if key is None else str(key)
     if session_id is None:
         session_id = os.environ.get("IDC_SESSION_ID") or None
-    taints = [t for t in read_taints(cwd) if not (t.get("kind") == kind and t.get("key") == key)]
-    taints.append({"kind": kind, "key": key, "session_id": session_id, "fields": dict(fields)})
-    _atomic_write(cwd, taints)
+    with _write_lock(cwd):  # read-modify-write must be atomic vs concurrent writers (no lost taints)
+        taints = [t for t in read_taints(cwd) if not (t.get("kind") == kind and t.get("key") == key)]
+        taints.append({"kind": kind, "key": key, "session_id": session_id, "fields": dict(fields)})
+        _atomic_write(cwd, taints)
 
 
 def clear_taint(cwd, kind, key=None):
@@ -171,10 +223,11 @@ def clear_taint(cwd, kind, key=None):
     if not idc_hook_lib.is_governed_repo(cwd):
         return
     key = None if key is None else str(key)
-    before = read_taints(cwd)
-    after = [t for t in before if not (t.get("kind") == kind and t.get("key") == key)]
-    if len(after) != len(before):
-        _atomic_write(cwd, after)
+    with _write_lock(cwd):  # read-modify-write must be atomic vs concurrent writers (no lost taints)
+        before = read_taints(cwd)
+        after = [t for t in before if not (t.get("kind") == kind and t.get("key") == key)]
+        if len(after) != len(before):
+            _atomic_write(cwd, after)
 
 
 # ── the gitignore scaffold hook (idempotent, non-destructive) ────────────────────────────────────

@@ -38,6 +38,14 @@ loop below). Then the two lanes:
    crashed session may not have fired SessionEnd (it is **cancelled** in headless `-p`); it re-stages
    any rogue Buildable (bypassed Plan → no `idc-provenance` marker) into the Recirculation inbox and
    clears its Wave so the Build lane can never claim it.
+   **Then reconcile the recirculation checkpoint ledger (kill-safe — every pass):** a main-session
+   `/idc:recirculate` drain fires no `SubagentStop` and a hard kill fires no hook, so a prior pass
+   that died mid-drain left still-open inbox tickets with no resume-checkpoint; the next pass is the
+   only recovery path. `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_recirc_reconcile.py" --repo "$PWD" --session-id "$CLAUDE_CODE_SESSION_ID"`
+   (backend auto-detected) checkpoints every un-checkpointed open `Stage = Recirculation ∧ Todo` ticket
+   and clears a taint once its ticket leaves the inbox. On github it is one cheap board read per pass in
+   the drain loop (not the stop path). It is **fail-soft** (never halts the drain) and **repo-gated**;
+   surface a `reconcile: unknown` (unreadable board) as such, never as clean.
    Query the board for `Stage = Recirculation`, `Status = Todo` inbox tickets (scope discovered
    mid-build, filed as the non-Buildable inbox). If any exist, run `/idc:recirculate` with **no
    arguments** — its **board-scan inbox-drain** mode — to drain each through the recirculator's

@@ -78,6 +78,24 @@ Plan worker), `gated` (Think PR opened → **cmux/push ping** + park, no Plan), 
 `${CLAUDE_PLUGIN_ROOT}/scripts/idc_recirc_closeout.py` (a malformed/absent closeout halts rather than
 stranding the ticket); the mandatory `provenance` stamp rides every closeout.
 
+## Kill-safe closeout — reconcile the checkpoint ledger when the drain finishes
+
+The **board-scan inbox-drain** runs **in this (main) session**, so — unlike a Build-spawned
+consultant — **no `SubagentStop` fires** and Stage C's closeout gate never sees it; a hard kill
+fires no hook at all. So when the inbox-drain ends (or you finish this run), run the deterministic
+reconciliation as the backstop — it checkpoints every still-open `Stage = Recirculation ∧ Todo`
+ticket the drain did not dispose (a resume comment + a `recirc_checkpoint:<ticket>` taint) and clears
+the taint for every ticket that left the inbox:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_recirc_reconcile.py" --repo "$PWD" --session-id "$CLAUDE_CODE_SESSION_ID"
+# backend auto-detected from tracker-config.yaml; on github this is one cheap board read (best-effort)
+```
+
+It is **idempotent** (the taint is the latch — a re-run never duplicates a comment), **fail-soft**
+(never breaks this command), and **repo-gated**. Autorun re-runs the same reconciliation at the top
+of every pass, so a hard-killed drain is recovered on the next pass regardless.
+
 No verdict taxonomy, no change-order files — they are deleted; the PR body is the record. Do
 not write source or tests; never admit a requirements (PRD/TRD) change without the gate; never
 leave the doc chain half-updated (`WORKFLOW.md §4.4`).

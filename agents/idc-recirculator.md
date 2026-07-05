@@ -127,6 +127,15 @@ retire to `Done` or park at `Blocked` — before moving to the next), so a check
 needed, is rich and no completed ticket is re-checkpointed. A run that validly closes out every ticket
 it drained stops clean (no checkpoints; any prior checkpoint taints clear).
 
+**Main-session drain has no `SubagentStop` backstop — the reconciliation is.** When the inbox-drain
+runs **in the main session** (Autorun's no-args board-scan; `/idc:recirculate` with no arguments), no
+`SubagentStop` fires and a hard kill fires no hook at all, so the gate above never runs. The
+deterministic reconciliation (`scripts/idc_recirc_reconcile.py`, invoked at the end of
+`/idc:recirculate` and at the top of every Autorun pass) is the kill-safe backstop for that path: it
+checkpoints every un-disposed open inbox ticket and clears the taint once a ticket leaves the inbox,
+transcript-less (the board is ground truth). Disposing each ticket before the next still matters —
+a disposed ticket has left the inbox, so the reconciliation never checkpoints it.
+
 ## Authority & halt
 
 - Writes every affected canonical doc down the chain (synchronized in one PR), the admitted

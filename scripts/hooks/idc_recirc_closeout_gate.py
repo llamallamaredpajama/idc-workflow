@@ -439,12 +439,17 @@ def _fs_still_open_and_handled(plugin_root, cwd):
 
 
 # ── github backend (sanctioned helpers; best-effort, not hermetically tested) ────────────────────
-def _gh_still_open_and_handled_and_commenter(cwd):
+def _gh_still_open_and_handled_and_commenter(cwd, plugin_root=None):
     """(still_open, handled, commenter) for the github backend via the SANCTIONED helpers
     (idc_gh_board.fetch_items to enumerate, idc_gh_board.add_comment — `gh issue comment`, NOT a raw
     board mutation — to stamp). Reads owner via `gh repo view` and project_number from the config.
-    Fail-OPEN: any failure returns (None, [], None) so the caller warns and never crashes the stop."""
-    scripts = os.path.join(_plugin_root_from_argv(), "scripts")
+    Fail-OPEN: any failure returns (None, [], None) so the caller warns and never crashes the stop.
+
+    `plugin_root` locates the `scripts/` dir the lazy `idc_gh_board` import needs. It defaults to
+    `_plugin_root_from_argv()` (this hook's argv/env contract) so the SubagentStop gate keeps working
+    unchanged; a caller that controls its own argv (idc_recirc_reconcile.py, whose sys.argv[1] is a
+    flag, not the plugin root) passes it EXPLICITLY."""
+    scripts = os.path.join(plugin_root or _plugin_root_from_argv(), "scripts")
     if os.path.isdir(scripts):
         sys.path.insert(0, scripts)
     try:
@@ -513,19 +518,29 @@ def _plugin_root_from_argv():
 
 
 # ── the checkpoint comment ───────────────────────────────────────────────────────────────────────
-def _checkpoint_body(ticket, branch, prs, handled):
+def _checkpoint_body(ticket, branch, prs, handled, origin="subagent"):
+    """Resume-checkpoint comment body. `origin` selects the truthful cause clause:
+    "subagent" (default — the Stage C SubagentStop path, reconstructed from the agent transcript) or
+    "main-session" (the Stage E1 main-session / kill-recovery path, which is transcript-LESS — it must
+    NOT claim a subagent stopped or that state came from a transcript, which would be false recovery
+    evidence)."""
     br = branch or "unknown"
     pr = ", ".join(f"#{n}" for n in prs) if prs else "none"
     if handled:
         disp = "handled " + str(len(handled)) + " (" + ", ".join(f"#{n}->{d}" for n, d in handled) + ")"
     else:
         disp = "none recorded"
+    if origin == "main-session":
+        cause = ("a main-session /idc:recirculate drain ended (or was hard-killed) WITHOUT disposing "
+                 "this ticket — the in-session drain fires no stop hook; reconciled transcript-less "
+                 "from the board (the board is ground truth)")
+    else:
+        cause = ("the recirculator subagent stopped mid-drain WITHOUT a valid closeout for this "
+                 "ticket; its state was reconstructed deterministically from the agent transcript")
     return (
-        f"{CHECKPOINT_MARKER} RESUME — the recirculator subagent stopped mid-drain WITHOUT a valid "
-        f"closeout for this ticket; its state was reconstructed deterministically from the agent "
-        f"transcript. branch={br} pr={pr} dispositions-so-far={disp}. This ticket #{ticket} is "
-        f"UNFINISHED (Stage=Recirculation ∧ Status=Todo) — re-run /idc:recirculate to resume the "
-        f"drain (idempotent; already-dispositioned tickets are skipped)."
+        f"{CHECKPOINT_MARKER} RESUME — {cause}. branch={br} pr={pr} dispositions-so-far={disp}. This "
+        f"ticket #{ticket} is UNFINISHED (Stage=Recirculation ∧ Status=Todo) — re-run /idc:recirculate "
+        f"to resume the drain (idempotent; already-dispositioned tickets are skipped)."
     )
 
 
@@ -566,7 +581,7 @@ def _gate(payload, plugin_root):
     backend = _read_backend(cwd) or "filesystem"
     commenter = None
     if backend == "github":
-        still_open, handled, commenter = _gh_still_open_and_handled_and_commenter(cwd)
+        still_open, handled, commenter = _gh_still_open_and_handled_and_commenter(cwd, plugin_root)
     else:
         still_open, handled = _fs_still_open_and_handled(plugin_root, cwd)
         trk = os.path.join(plugin_root or "", "scripts", TRACKER_FS)

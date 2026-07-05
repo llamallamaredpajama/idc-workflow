@@ -75,7 +75,22 @@ only when a full pass leaves nothing actionable:
    same detective the SessionEnd hook runs, re-run here because a headless `-p` / `/loop` / crashed
    session may not have fired SessionEnd (it is **cancelled** in headless `-p`); it re-stages any
    rogue Buildable (bypassed Plan → no `idc-provenance` marker) into the Recirculation inbox and
-   clears its Wave, so the Build drain below can never claim it. Then, if any `Stage = Recirculation`
+   clears its Wave, so the Build drain below can never claim it.
+   **Then reconcile the recirculation checkpoint ledger (kill-safe — run at the top of EVERY pass).**
+   A main-session `/idc:recirculate` drain fires no `SubagentStop`, and a hard kill fires no hook at
+   all, so a prior pass that died mid-drain leaves still-open inbox tickets with **no resume
+   checkpoint** — the next pass is the only path that can recover it. Run the deterministic
+   reconciliation to checkpoint every un-checkpointed open `Stage = Recirculation ∧ Todo` ticket (and
+   clear a checkpoint taint once its ticket has left the inbox):
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_recirc_reconcile.py" --repo "$PWD" --session-id "$CLAUDE_CODE_SESSION_ID"
+   ```
+   The backend is auto-detected from `docs/workflow/tracker-config.yaml` (no `--backend` flag needed).
+   On the **github** backend this performs **one cheap board read per pass inside the drain loop** —
+   NOT on the stop path, so the Stop gate's 0-GraphQL guarantee is unaffected. It is **fail-soft** (a
+   reconciliation error never halts the drain) and **repo-gated**; its `reconcile:` verdict is advisory
+   — surface a `reconcile: unknown` (an unreadable board) in the exit report, never as a clean state.
+   Then, if any `Stage = Recirculation`
    inbox tickets exist (scope discovered mid-build, filed back into the non-Buildable inbox), run
    `/idc:recirculate` with **no arguments** (its **board-scan inbox-drain** mode) to absorb each back
    into the canonical chain *before* any new build work. Not-gate-worthy scope is admitted as a

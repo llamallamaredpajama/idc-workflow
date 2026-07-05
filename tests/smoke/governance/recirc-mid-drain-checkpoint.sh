@@ -29,11 +29,19 @@
 #     WRONGLY checkpointed ⇒ case I's "Ti NOT checkpointed" assert goes RED;
 #   * [P1] neuter the GENERIC-dispatch whole-inbox DEFAULT (make an undeterminable/generic dispatch
 #     checkpoint nothing) ⇒ a board-scan drainer that dies before any closeout silently loses every
-#     open ticket's state ⇒ case J's "whole inbox checkpointed" asserts go RED.
+#     open ticket's state ⇒ case J's "whole inbox checkpointed" asserts go RED;
+#   * [fable audit] neuter GENERIC-LANGUAGE DOMINANCE (drop the `not generic_dispatch` term of the
+#     explicit trigger) ⇒ an inbox-drain dispatch that name-drops an open ticket # narrows to just it
+#     ⇒ case K1's "whole inbox checkpointed" asserts go RED;
+#   * [fable audit] neuter the CORROBORATION term (drop `& recirc_real`) ⇒ a dispatch whose only #s
+#     are noise (a PR#/project#) is treated explicit with a nothing-scope ⇒ case K2 RED;
+#   * [fable audit] neuter FIRST-TURN anchoring (parse dispatch #s from EVERY user turn) ⇒ an injected
+#     mid-run reminder's `#N` narrows a generic drainer's scope ⇒ case L's skipped-ticket assert RED.
 #
-# The scope rule is ASYMMETRIC (drop-F-safe): an EXPLICIT `#N` dispatch narrows (case H); a GENERIC or
-# undeterminable dispatch defaults to the WHOLE still-open inbox (case J). Under-checkpointing is state
-# loss; over-checkpointing is a recoverable breadcrumb.
+# The scope rule is ASYMMETRIC (drop-F-safe): a corroborated EXPLICIT first-turn `#N` dispatch narrows
+# (case H); a GENERIC (inbox-language, K1) or undeterminable (noise-#s K2 / no-#s J) dispatch defaults
+# to the WHOLE still-open inbox; later user turns never narrow (L). Under-checkpointing is state loss;
+# over-checkpointing is a recoverable breadcrumb.
 #
 # Filesystem-backed (hermetic, no gh). Auto-discovered by the governance lane (phase-governance.sh);
 # runnable standalone under BOTH python3 and `uv run --with pyyaml`.
@@ -356,4 +364,92 @@ for t in "$TJ1" "$TJ2" "$TJ3"; do
 done
 echo "  ok (J) a generic inbox-drain dispatch that dies before any closeout checkpoints the WHOLE still-open inbox (drop-F-safe default) [codex P1]"
 
-echo "PASS: the SubagentStop recirculator closeout-or-checkpoint detective — a mid-drain stop checkpoints every UNCOVERED open inbox ticket in scope (branch/PR/dispositions, via the sanctioned comment helper) + sets a recirc_checkpoint taint; scope is ASYMMETRIC — an EXPLICIT #N dispatch NARROWS to that ticket (an untouched stranger is never checkpointed), a GENERIC/undeterminable dispatch DEFAULTS to the WHOLE still-open inbox so a board-scan drainer that dies loses nothing (drop-F-safe); a validly-closed-out ticket (incl. a file-based --closeout <path> closeout) is left alone; a fully-valid run clears its scope's taints and stamps nothing; an UNREADABLE inbox PRESERVES checkpoints (never wiped); an EXAMPLE closeout that was only read/quoted does NOT mark a ticket covered; self-gated to the recirculator + repo-gated; fail-OPEN (never blocks); observe-only records without mutating the board"
+# ══ Case K1 — GENERIC LANGUAGE DOMINATES a name-dropped open-ticket # ═══════════════════════════════
+# A board-scan drainer dispatch that says it owns the INBOX but also name-drops one open ticket
+# ("drain the recirculation inbox; start with ticket #N") owns EVERY open ticket — the `#N` must not
+# narrow scope to just #N. Dies before any closeout ⇒ the WHOLE inbox is checkpointed.
+# Red-when-broken: drop the `not generic_dispatch` term of the explicit trigger ⇒ the dispatch
+# corroborates against the open #TK1 and narrows to {TK1} ⇒ TK2/TK3 NOT checkpointed ⇒ RED.
+K1="$(new_repo)" || fail "new_repo K1 failed"; REPOS+=("$K1")
+TK1="$(seed "$K1" Recirculation Todo 'recirc: name-dropped in the inbox-drain dispatch')" || fail "seed TK1"
+TK2="$(seed "$K1" Recirculation Todo 'recirc: inbox ticket 2 (never reached)')" || fail "seed TK2"
+TK3="$(seed "$K1" Recirculation Todo 'recirc: inbox ticket 3 (never reached)')" || fail "seed TK3"
+SIDK1="sidK1-$$-$(basename "$WORK")"
+python3 - "$WORK/tr_K1.jsonl" "$TK1" "$BRANCH" <<'PY'
+import json,sys
+out,tk1,branch=sys.argv[1:4]
+L=[{"type":"user","timestamp":"2020-01-01T00:00:00.000Z","message":{"role":"user",
+    "content":[{"type":"text","text":"Drain the recirculation inbox top-of-pipe; start with ticket #%s (the oldest)."%tk1}]}},
+   {"type":"assistant","timestamp":"2020-01-01T00:00:01.000Z","message":{"role":"assistant",
+    "content":[{"type":"tool_use","name":"Bash","input":{"command":"git checkout -b "+branch}}]}}]
+open(out,"w").write("".join(json.dumps(x)+"\n" for x in L))
+PY
+run_gate "$K1" "$RECIRC_AGENT" "$SIDK1" "$WORK/tr_K1.jsonl"
+[ "$GATE_RC" -eq 0 ] || fail "(K1) gate exit $GATE_RC"
+for t in "$TK1" "$TK2" "$TK3"; do
+  has_ckpt "$K1" "$t" \
+    || fail "(K1) an INBOX-drain dispatch name-dropping #$TK1 narrowed scope — open ticket #$t NOT checkpointed (generic language must dominate) [drop 'not generic_dispatch' ⇒ RED]"
+  led "$K1" pending --session "$SIDK1" | grep -qx "recirc_checkpoint:$t" || fail "(K1) no checkpoint taint for open ticket #$t"
+done
+echo "  ok (K1) inbox-wide drainer language DOMINATES a name-dropped ticket # — the whole inbox is checkpointed [fable audit]"
+
+# ══ Case K2 — a NOISE-#-only dispatch (no inbox language, #s corroborate nothing) defaults WIDE ═════
+# Dispatch text is LLM-composed English: a drainer dispatch may name-drop a PR#/project#/run# that is
+# NOT an inbox ticket ("context: build PR #512"). Such noise #s must NOT make the dispatch 'explicit'
+# — an explicit trigger needs at least one # that is recirc-REAL (open ∪ closeout-candidate ∪ handled).
+# Otherwise scope narrows to {512}, uncovered = ∅, and the WHOLE inbox is silently skipped — the exact
+# eac5104 defect this case pins. (No inbox-wide phrase here, so generic-dominance can't mask the
+# corroboration guard.)
+# Red-when-broken: drop the `& recirc_real` corroboration term ⇒ NOTHING is checkpointed ⇒ RED.
+K2="$(new_repo)" || fail "new_repo K2 failed"; REPOS+=("$K2")
+TK4="$(seed "$K2" Recirculation Todo 'recirc: open ticket A (dispatch names only a stray PR#)')" || fail "seed TK4"
+TK5="$(seed "$K2" Recirculation Todo 'recirc: open ticket B (dispatch names only a stray PR#)')" || fail "seed TK5"
+SIDK2="sidK2-$$-$(basename "$WORK")"
+python3 - "$WORK/tr_K2.jsonl" "$BRANCH" <<'PY'
+import json,sys
+out,branch=sys.argv[1:3]
+L=[{"type":"user","timestamp":"2020-01-01T00:00:00.000Z","message":{"role":"user",
+    "content":[{"type":"text","text":"Recirculate the stranded scope per autorun pass 2; context: this run was spawned from build PR #512."}]}},
+   {"type":"assistant","timestamp":"2020-01-01T00:00:01.000Z","message":{"role":"assistant",
+    "content":[{"type":"tool_use","name":"Bash","input":{"command":"git checkout -b "+branch}}]}}]
+open(out,"w").write("".join(json.dumps(x)+"\n" for x in L))
+PY
+run_gate "$K2" "$RECIRC_AGENT" "$SIDK2" "$WORK/tr_K2.jsonl"
+[ "$GATE_RC" -eq 0 ] || fail "(K2) gate exit $GATE_RC"
+for t in "$TK4" "$TK5"; do
+  has_ckpt "$K2" "$t" \
+    || fail "(K2) a dispatch whose only # is a stray PR# (#512, not recirc-real) narrowed scope to nothing — open ticket #$t NOT checkpointed [drop '& recirc_real' ⇒ RED]"
+  led "$K2" pending --session "$SIDK2" | grep -qx "recirc_checkpoint:$t" || fail "(K2) no checkpoint taint for open ticket #$t"
+done
+echo "  ok (K2) noise #s that corroborate against nothing recirc-real do NOT make a dispatch explicit — whole-inbox default holds [fable audit]"
+
+# ══ Case L — a mid-run INJECTED user-role text block never narrows scope (first-turn anchoring) ═════
+# A subagent's later user-role events are tool_results or INJECTED text (system-reminders, task lists
+# — which carry `#N.`-shaped noise). Only the FIRST user event is the dispatch. First turn here is
+# undeterminable (no #s, no inbox phrase) ⇒ WIDE; the injected reminder names #TL1 (recirc-REAL, so
+# corroboration alone would NOT catch this — only first-turn anchoring does) and must not narrow.
+# Red-when-broken: parse dispatch #s from EVERY user turn ⇒ scope narrows to {TL1} ⇒ TL2 skipped ⇒ RED.
+Ll="$(new_repo)" || fail "new_repo L failed"; REPOS+=("$Ll")
+TL1="$(seed "$Ll" Recirculation Todo 'recirc: named by an injected mid-run reminder')" || fail "seed TL1"
+TL2="$(seed "$Ll" Recirculation Todo 'recirc: never mentioned anywhere (must still checkpoint)')" || fail "seed TL2"
+SIDL="sidL-$$-$(basename "$WORK")"
+python3 - "$WORK/tr_L.jsonl" "$TL1" "$BRANCH" <<'PY'
+import json,sys
+out,tl1,branch=sys.argv[1:4]
+L=[{"type":"user","timestamp":"2020-01-01T00:00:00.000Z","message":{"role":"user",
+    "content":[{"type":"text","text":"Resume the recirc drain from the prior checkpoint."}]}},
+   {"type":"assistant","timestamp":"2020-01-01T00:00:01.000Z","message":{"role":"assistant",
+    "content":[{"type":"tool_use","name":"Bash","input":{"command":"git checkout -b "+branch}}]}},
+   {"type":"user","timestamp":"2020-01-01T00:00:02.000Z","message":{"role":"user",
+    "content":[{"type":"text","text":"<system-reminder>Existing tasks: #%s. [in_progress] recirc heal</system-reminder>"%tl1}]}}]
+open(out,"w").write("".join(json.dumps(x)+"\n" for x in L))
+PY
+run_gate "$Ll" "$RECIRC_AGENT" "$SIDL" "$WORK/tr_L.jsonl"
+[ "$GATE_RC" -eq 0 ] || fail "(L) gate exit $GATE_RC"
+has_ckpt "$Ll" "$TL1" || fail "(L) open ticket #$TL1 not checkpointed (wide default broken)"
+has_ckpt "$Ll" "$TL2" \
+  || fail "(L) an INJECTED mid-run reminder naming #$TL1 narrowed scope — untouched open ticket #$TL2 NOT checkpointed [parse all user turns ⇒ RED]"
+led "$Ll" pending --session "$SIDL" | grep -qx "recirc_checkpoint:$TL2" || fail "(L) no checkpoint taint for open ticket #$TL2"
+echo "  ok (L) dispatch scope is FIRST-TURN anchored — an injected mid-run reminder's #N never narrows a drainer's scope [fable audit]"
+
+echo "PASS: the SubagentStop recirculator closeout-or-checkpoint detective — a mid-drain stop checkpoints every UNCOVERED open inbox ticket in scope (branch/PR/dispositions, via the sanctioned comment helper) + sets a recirc_checkpoint taint; scope is ASYMMETRIC — a corroborated EXPLICIT first-turn #N dispatch NARROWS to that ticket (an untouched stranger is never checkpointed), while a GENERIC (inbox-language, even with a name-dropped #) or undeterminable (noise-#s or no-#s) dispatch DEFAULTS to the WHOLE still-open inbox and a mid-run injected user turn never narrows — so a board-scan drainer that dies loses nothing (drop-F-safe); a validly-closed-out ticket (incl. a file-based --closeout <path> closeout) is left alone; a fully-valid run clears its scope's taints and stamps nothing; an UNREADABLE inbox PRESERVES checkpoints (never wiped); an EXAMPLE closeout that was only read/quoted does NOT mark a ticket covered; self-gated to the recirculator + repo-gated; fail-OPEN (never blocks); observe-only records without mutating the board"

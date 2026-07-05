@@ -35,16 +35,28 @@ spawned over ONE explicitly-named ticket) AND a board-scan inbox-drainer (a gene
 recirculation inbox" dispatch that enumerates no ticket #s). The safe bias is ASYMMETRIC (invariant #1
 / drop-F): UNDER-checkpointing a ticket the subagent owned IS the state loss this hook exists to
 prevent, whereas OVER-checkpointing is only a recoverable spurious breadcrumb (the board is ground
-truth; a re-drain is idempotent). So the default is WIDE, and only an EXPLICIT dispatch narrows it:
-  * an EXPLICIT dispatch (its user-turn text names specific `#N`/`ticket N`) NARROWS scope to exactly
-    those ticket(s) ∪ the tickets its closeout candidates reference — a single-ticket sous-chef never
-    stamps #1's branch/PR breadcrumb onto a stranger's open #2/#3 it never touched (P2-1);
-  * a GENERIC dispatch (no enumerated #s — the board-scan drainer) OR an otherwise-undeterminable one
-    DEFAULTS to the WHOLE still-open `Stage=Recirculation ∧ Status=Todo` inbox — a board-scan drainer
-    owns every open ticket, so a death before it reaches #2/#3 CHECKPOINTS them, never silently drops
-    them (defaulting to nothing is the exact drop-F loss this hook prevents).
-Either way `covered` (a ticket with a valid closeout) is subtracted, so a ticket the subagent actually
-finished is never checkpointed.
+truth; a re-drain is idempotent). So the default is WIDE, and NARROW needs an explicit dispatch to
+pass a THREE-PART trigger — dispatch text is LLM-composed English, so a bare "any `#N` anywhere"
+parse is NOT a safe narrow signal (a stray PR#/project# reference, or an injected mid-run reminder
+containing `#1.`, must never flip a whole-inbox drainer into a scope that checkpoints nothing):
+  * FIRST-TURN ONLY — dispatch scope is parsed from the FIRST user event of the transcript (the
+    dispatch prompt the parent handed the subagent). Later user-role text (injected system-reminders,
+    task lists, teammate messages) is NOT the dispatch and never narrows scope;
+  * GENERIC LANGUAGE DOMINATES — a dispatch whose text carries inbox-wide drainer language (the
+    shipped phrasing: "recirculation inbox", "inbox-drain", "board-scan", "drain the inbox",
+    "every open …") is GENERIC even if it also name-drops a `#N` ("drain the inbox; #5 is oldest"
+    owns the whole inbox, not just #5);
+  * CORROBORATION — a numbered, non-generic dispatch is EXPLICIT only if at least one parsed number
+    is recirc-REAL (an open inbox ticket ∪ a closeout-candidate ticket ∪ a just-handled Done/Blocked
+    recirc ticket). A dispatch whose only numbers are noise (a PR#, a board/project#, an unrelated
+    issue) is UNDETERMINABLE, not explicit.
+An EXPLICIT dispatch NARROWS scope to exactly its ticket(s) ∪ the tickets its closeout candidates
+reference — a single-ticket sous-chef never stamps #1's branch/PR breadcrumb onto a stranger's open
+#2/#3 it never touched (P2-1). A GENERIC or undeterminable dispatch DEFAULTS to the WHOLE still-open
+`Stage=Recirculation ∧ Status=Todo` inbox — a board-scan drainer owns every open ticket, so a death
+before it reaches #2/#3 CHECKPOINTS them, never silently drops them (defaulting to nothing is the
+exact drop-F loss this hook prevents). Either way `covered` (a ticket with a valid closeout) is
+subtracted, so a ticket the subagent actually finished is never checkpointed.
 
 THE BOARD IS GROUND TRUTH (invariant #1). "Still-open" is read from the board (the sanctioned tracker
 helper: `query --stage Recirculation --status Todo`), never inferred from the ledger. The
@@ -96,13 +108,23 @@ _BRANCH_RES = (
 # A PR number: a `.../pull/<n>` URL (gh pr create output / a closeout think_pr) — the robust anchor
 # (a bare `#<n>` is ambiguous with ticket numbers, so it is NOT used).
 _PR_RE = re.compile(r"/pull/(\d+)\b")
-# The ticket(s) named in the DISPATCH PROMPT (the first user turn Build handed the sous-chef). Here a
-# bare `#<n>` IS used (unlike the PR anchor above): the dispatch is a constrained context naming the
-# ticket, and the SCOPE it produces is always intersected with the still-open Recirculation∧Todo inbox,
-# so a stray number that isn't an open recirc ticket is harmlessly filtered.
+# The ticket(s) named in the DISPATCH PROMPT — parsed from the FIRST user event ONLY (the dispatch
+# the parent handed the subagent; a later user-role text block is an injected reminder/tool_result,
+# never the dispatch). Here a bare `#<n>` IS used (unlike the PR anchor above), but a match alone
+# never narrows scope: the numbers must also pass the three-part explicit-dispatch trigger in _gate
+# (no generic drainer language + at least one number is recirc-REAL), because a stray PR#/project#
+# in LLM-composed dispatch English must not flip a whole-inbox drainer into a nothing-scope.
 _DISPATCH_TICKET_RES = (
     re.compile(r"#(\d+)\b"),
     re.compile(r"\b(?:ticket|issue)\s+#?(\d+)\b", re.I),
+)
+# Inbox-wide drainer language (grounded in the shipped dispatch phrasing: commands/autorun.md +
+# commands/recirculate.md "drain the Recirculation inbox" / "Board-scan inbox-drain" / "Enumerate
+# every open Stage=Recirculation inbox ticket"). When the dispatch says it owns the INBOX, it owns
+# every open ticket — a name-dropped `#N` alongside it must not narrow scope (wide = the safe bias).
+_GENERIC_DISPATCH_RE = re.compile(
+    r"recirculation\s+inbox|inbox[-\s]+drain|board[-\s]+scan|drain\s+the\s+inbox|\bevery\s+open\b",
+    re.I,
 )
 # A `--closeout <path>` argument to idc_recirc_closeout.py — the DOCUMENTED closeout flow (the agent
 # writes the closeout to a FILE, then validates it with `--closeout <path>`), as opposed to an inline
@@ -215,16 +237,21 @@ def _candidate_tickets(candidates):
 
 
 def _scan_transcript(transcript_path, cwd):
-    """One pass over the recirculator transcript → (branch, prs, closeout_candidates, dispatch_tickets).
+    """One pass over the recirculator transcript →
+    (branch, prs, closeout_candidates, dispatch_tickets, generic_dispatch).
 
     branch / prs are reconstruction HINTS for the checkpoint comment, harvested BROADLY (any string in
     the event — a `gh pr create` URL living in a tool_result is fair game, and over-broad here is
     harmless).
 
-    dispatch_tickets are the ticket number(s) named in the sous-chef's DISPATCH PROMPT — every
-    user-role TEXT block (the first user turn is Build's handoff; a subagent's later user events are
-    tool_results, not text, so they contribute nothing). One HALF of this subagent's SCOPE (the tickets
-    it was dispatched over); the other half is the tickets its closeout candidates reference.
+    dispatch_tickets / generic_dispatch come from the FIRST user event ONLY — the dispatch prompt the
+    parent handed the subagent. A subagent's later user-role events are tool_results OR injected text
+    (system-reminders, task lists — which DO carry `#N`-shaped noise), never the dispatch, so parsing
+    them would let a mid-run reminder silently NARROW a whole-inbox drainer's scope (the drop-F
+    under-checkpoint; the case-L red-when-broken). dispatch_tickets is one HALF of the explicit
+    scope (the tickets it was dispatched over); the other half is the tickets its closeout candidates
+    reference. generic_dispatch is True when the dispatch text carries inbox-wide drainer language
+    (_GENERIC_DISPATCH_RE) — it dominates any name-dropped `#N` (the case-K1 red-when-broken).
 
     closeout_candidates are harvested NARROWLY — ONLY from a REAL closeout ACTION the agent authored,
     NOT mere JSON presence anywhere (MAJOR-2):
@@ -238,7 +265,8 @@ def _scan_transcript(transcript_path, cwd):
     larger file is IGNORED, so a quoted EXAMPLE can never suppress a needed checkpoint. The bias is
     SAFE: an un-anchored real closeout at worst yields a harmless extra (idempotent) checkpoint, never a
     lost one."""
-    branch, prs, candidates, seen, dispatch_tickets = None, set(), [], set(), set()
+    branch, prs, candidates, seen = None, set(), [], set()
+    dispatch_tickets, generic_dispatch, dispatch_seen = set(), False, False
 
     def _add(obj):
         if _is_closeout_shape(obj):
@@ -258,17 +286,27 @@ def _scan_transcript(transcript_path, cwd):
                         break
             for m in _PR_RE.finditer(s):
                 prs.add(int(m.group(1)))
-        # DISPATCH SCOPE (narrow): tickets named in a user-role TEXT block (the dispatch prompt).
-        if (evt.get("type") == "user") or (isinstance(evt.get("message"), dict)
-                                           and evt["message"].get("role") == "user"):
+        # DISPATCH SCOPE (narrow): the FIRST user event is the dispatch prompt — and ONLY it. A later
+        # user-role event is a tool_result or injected text (a system-reminder's `#1.` task list),
+        # which must never narrow a drainer's scope (case L). If the first user event carries no text,
+        # the dispatch is undeterminable → dispatch_tickets stays empty → the caller defaults WIDE.
+        if not dispatch_seen and ((evt.get("type") == "user")
+                                  or (isinstance(evt.get("message"), dict)
+                                      and evt["message"].get("role") == "user")):
+            dispatch_seen = True
             msg = evt.get("message")
             blocks = msg.get("content") if isinstance(msg, dict) else None
+            texts = []
             if isinstance(blocks, str):
-                dispatch_tickets |= _dispatch_tickets_from_text(blocks)
+                texts.append(blocks)
             elif isinstance(blocks, list):
-                for b in blocks:
-                    if isinstance(b, dict) and b.get("type") == "text":
-                        dispatch_tickets |= _dispatch_tickets_from_text(b.get("text"))
+                texts.extend(b.get("text") for b in blocks
+                             if isinstance(b, dict) and b.get("type") == "text"
+                             and isinstance(b.get("text"), str))
+            for text in texts:
+                dispatch_tickets |= _dispatch_tickets_from_text(text)
+                if _GENERIC_DISPATCH_RE.search(text):
+                    generic_dispatch = True
         # COVERED closeouts (narrow): only from a real closeout action the agent authored.
         for name, inp in _iter_tool_uses(evt):
             if name in ("Write", "Edit"):
@@ -287,7 +325,7 @@ def _scan_transcript(transcript_path, cwd):
                         obj = _read_closeout_file(cwd, m.group(1))
                         if obj is not None:
                             _add(obj)
-    return branch, sorted(prs), candidates, dispatch_tickets
+    return branch, sorted(prs), candidates, dispatch_tickets, generic_dispatch
 
 
 def _covered_tickets(plugin_root, candidates):
@@ -552,24 +590,35 @@ def _gate(payload, plugin_root):
     # This subagent's SCOPE — the ticket(s) it is responsible for checkpointing. The rule is ASYMMETRIC
     # by design (invariant #1 / drop-F): UNDER-checkpointing a ticket the subagent owned IS the state
     # loss this hook prevents, while OVER-checkpointing is only a recoverable spurious breadcrumb (the
-    # board is ground truth; a re-drain is idempotent). So the default is WIDE, and only an EXPLICIT
-    # dispatch narrows it.
-    branch, prs, candidates, dispatch_tickets = _scan_transcript(
+    # board is ground truth; a re-drain is idempotent). So the default is WIDE, and NARROW requires the
+    # dispatch to pass the three-part EXPLICIT trigger (header §SCOPE): first-turn ticket #s, AND no
+    # inbox-wide drainer language, AND at least one # that is recirc-REAL. Dispatch text is LLM-composed
+    # English — a stray PR#/project# or an injected reminder's `#1.` must never flip a whole-inbox
+    # drainer into a nothing-scope (the fable-audit under-checkpoint fix; cases K1/K2/L).
+    branch, prs, candidates, dispatch_tickets, generic_dispatch = _scan_transcript(
         payload.get("agent_transcript_path", ""), cwd)
     covered = _covered_tickets(plugin_root, candidates)
-    if dispatch_tickets:
+    cand_tickets = _candidate_tickets(candidates)
+    # Recirc-REAL numbers this stop can corroborate a narrow dispatch against: the open inbox, the
+    # tickets the subagent attempted a closeout for, and the recirc tickets already moved off Todo
+    # (a completed sous-chef's ticket lives HERE when its board move landed before the stop).
+    recirc_real = set(still_open) | cand_tickets | {n for n, _ in handled}
+    if dispatch_tickets and not generic_dispatch and (dispatch_tickets & recirc_real):
         # EXPLICIT enumeration → the Build larger-loop sous-chef dispatched over specific ticket(s).
         # Narrow to exactly those ∪ the tickets it produced a closeout candidate for, so it never stamps
         # a false breadcrumb on a stranger's open ticket (P2-1). NEUTERING the `t in scope` filter here
-        # widens it back to the whole inbox — the P2-1 red-when-broken.
-        scope = dispatch_tickets | _candidate_tickets(candidates)
+        # widens it back to the whole inbox — the P2-1 red-when-broken (case H). NEUTERING the
+        # `not generic_dispatch` term ⇒ case K1 RED; NEUTERING the `& recirc_real` corroboration ⇒
+        # case K2 RED; parsing dispatch #s from ALL user turns instead of the first ⇒ case L RED.
+        scope = dispatch_tickets | cand_tickets
         uncovered = [t for t in still_open if t in scope and t not in covered]
     else:
-        # GENERIC inbox-drain dispatch (no enumerated #s — the board-scan drainer) OR an undeterminable
-        # dispatch → the drop-F-SAFE default is the WHOLE still-open inbox: a board-scan drainer owns
-        # every open ticket, so a mid-drain death before it reaches #2/#3 must CHECKPOINT them, not skip
-        # them. Defaulting to nothing here silently loses their state — the exact drop-F failure.
-        # NEUTERING this to `[]` / scope-only is the P1 (whole-inbox-default) red-when-broken.
+        # GENERIC inbox-drain dispatch (inbox-wide language, or no enumerated #s — the board-scan
+        # drainer) OR an undeterminable one (only noise #s that corroborate against nothing recirc-real)
+        # → the drop-F-SAFE default is the WHOLE still-open inbox: a board-scan drainer owns every open
+        # ticket, so a mid-drain death before it reaches #2/#3 must CHECKPOINT them, not skip them.
+        # Defaulting to nothing here silently loses their state — the exact drop-F failure.
+        # NEUTERING this to `[]` / scope-only is the P1 (whole-inbox-default) red-when-broken (case J).
         scope = None   # None == the whole still-open inbox (see _clear_session_checkpoints)
         uncovered = [t for t in still_open if t not in covered]
 

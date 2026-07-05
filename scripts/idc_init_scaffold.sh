@@ -62,4 +62,11 @@ if [ "$BACKEND" = "filesystem" ]; then
   python3 "$PLUGIN_ROOT/scripts/idc_tracker_fs.py" --tracker "$REPO_ROOT/TRACKER.md" init
 fi
 
+# Gitignore the per-session obligations ledger (.idc-session-state.json, v4 Phase 3): transient
+# working state written only by hooks/scripts, never committed. The ledger module owns the filename
+# + the ignore rule (single source of truth); the ensure step is idempotent + non-destructive
+# (append-only, never clobbers the operator's .gitignore). Runs after tracker-config exists so the
+# module's repo-gate sees a governed repo.
+python3 "$PLUGIN_ROOT/scripts/hooks/idc_ledger.py" --cwd "$REPO_ROOT" ensure-gitignore
+
 echo "idc-init scaffold complete (backend=$BACKEND, project=$PROJECT_NAME)"

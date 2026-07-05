@@ -21,7 +21,13 @@
 #     a checkpoint comment" assert (case A, T2) goes RED;
 #   * neuter the closeout-valid SHORT-CIRCUIT (force `covered` empty / drop the `t not in covered`
 #     filter) ⇒ a validly-closed-out open ticket is WRONGLY checkpointed ⇒ the "covered ticket NOT
-#     checkpointed" asserts (case A T1, and case B) go RED.
+#     checkpointed" asserts (case A T1, and case B) go RED;
+#   * [P2-1] neuter the SCOPE filter (revert `uncovered` to the whole-inbox `[t for t in still_open if
+#     t not in covered]`) ⇒ an untouched out-of-scope open ticket is WRONGLY checkpointed ⇒ case H's
+#     "Th2 NOT checkpointed" assert goes RED;
+#   * [P2-2] neuter the FILE-based closeout harvest (drop the `--closeout <path>` read in
+#     _scan_transcript) ⇒ a ticket closed out via a closeout FILE is not recognized covered and is
+#     WRONGLY checkpointed ⇒ case I's "Ti NOT checkpointed" assert goes RED.
 #
 # Filesystem-backed (hermetic, no gh). Auto-discovered by the governance lane (phase-governance.sh);
 # runnable standalone under BOTH python3 and `uv run --with pyyaml`.
@@ -217,17 +223,22 @@ echo "  ok (F) an unreadable/corrupt tracker read PRESERVES checkpoints (never w
 # ══ Case G — an EXAMPLE closeout (read/quoted, not a real action) must NOT mark a ticket covered ════
 # A valid-closeout-shaped JSON that merely appears in a tool_result (a doc the recirculator READ) is
 # NOT a disposition. It must NOT suppress the checkpoint — the ticket is still open and un-closed-out.
+# The subagent WAS dispatched over T6 (that is why it read T6's example), so T6 is in its scope; the
+# example just never marks it covered.
 # Red-when-broken: revert _scan_transcript to harvest closeouts from ANY string (not just authored
 # Write/Bash actions) ⇒ the example is treated as covered ⇒ the ticket is NOT checkpointed ⇒ RED.
 G="$(new_repo)" || fail "new_repo G failed"; REPOS+=("$G")
 T6="$(seed "$G" Recirculation Todo 'recirc: open; an EXAMPLE closeout for it was only READ')" || fail "seed T6"
 SIDG="sidG-$$-$(basename "$WORK")"
 # a transcript whose ONLY closeout for T6 is inside a tool_result (a Read) + a text quote — never a
-# Write/Edit artifact and never an idc_recirc_closeout.py Bash run.
-python3 - "$WORK/tr_G.jsonl" "$(valid_co "$T6")" <<'PY'
+# Write/Edit artifact and never an idc_recirc_closeout.py Bash run. The dispatch prompt names T6 (the
+# ticket this sous-chef was handed) so T6 is IN scope.
+python3 - "$WORK/tr_G.jsonl" "$(valid_co "$T6")" "$T6" <<'PY'
 import json,sys
-out,example=sys.argv[1],sys.argv[2]
-L=[{"type":"assistant","timestamp":"2020-01-01T00:00:01.000Z","message":{"role":"assistant",
+out,example,t6=sys.argv[1],sys.argv[2],sys.argv[3]
+L=[{"type":"user","timestamp":"2020-01-01T00:00:00.000Z","message":{"role":"user",
+    "content":[{"type":"text","text":"Process the Stage=Recirculation ticket #%s (a recirc event surfaced mid-build); drain it via the Recirculator playbook."%t6}]}},
+   {"type":"assistant","timestamp":"2020-01-01T00:00:01.000Z","message":{"role":"assistant",
     "content":[{"type":"tool_use","name":"Read","input":{"file_path":"docs/considerations/EXAMPLES.md"}}]}},
    {"type":"user","timestamp":"2020-01-01T00:00:02.000Z","message":{"role":"user",
     "content":[{"type":"tool_result","tool_use_id":"t1","content":"here is an example closeout: "+example}]}},
@@ -242,4 +253,74 @@ has_ckpt "$G" "$T6" \
 led "$G" pending --session "$SIDG" | grep -qx "recirc_checkpoint:$T6" || fail "(G) missing checkpoint taint for #$T6"
 echo "  ok (G) an example closeout that was only read/quoted does NOT mark a ticket covered — it is still checkpointed [MAJOR-2]"
 
-echo "PASS: the SubagentStop recirculator closeout-or-checkpoint detective — a mid-drain stop checkpoints every UNCOVERED open inbox ticket (branch/PR/dispositions, via the sanctioned comment helper) + sets a recirc_checkpoint taint; a validly-closed-out ticket is left alone (per-ticket); a fully-valid run clears its taints and stamps nothing; an UNREADABLE inbox PRESERVES checkpoints (never wiped); an EXAMPLE closeout that was only read/quoted does NOT mark a ticket covered; self-gated to the recirculator + repo-gated; fail-OPEN (never blocks); observe-only records without mutating the board"
+# ══ Case H — SCOPE: an untouched open inbox ticket the subagent NEVER handled is NOT checkpointed ════
+# The SubagentStop hook fires only for the Build larger-loop recirc-consultant — a sous-chef spawned
+# over the ONE ticket its triplet surfaced. It must checkpoint only THAT ticket's state, never stamp
+# its branch/PR breadcrumb onto a stranger's open ticket. Board: Th1 + Th2 both Recirc∧Todo, but the
+# transcript shows the subagent was dispatched over Th1 ONLY (dispatch prompt names #Th1; a branch +
+# PR but it died before emitting any closeout) — Th2 is another consultant's / untouched ticket.
+# Th1 (in scope, uncovered) IS checkpointed; Th2 (out of scope) is left ENTIRELY alone.
+# Red-when-broken: revert `uncovered = [t for t in still_open if t in scope and t not in covered]` to
+# the whole-inbox `[t for t in still_open if t not in covered]` ⇒ Th2 is WRONGLY checkpointed ⇒ the
+# "untouched Th2 NOT checkpointed" assert goes RED.
+Hh="$(new_repo)" || fail "new_repo H failed"; REPOS+=("$Hh")
+TH1="$(seed "$Hh" Recirculation Todo 'recirc: the ONE ticket this sous-chef was dispatched over')" || fail "seed TH1"
+TH2="$(seed "$Hh" Recirculation Todo 'recirc: a DIFFERENT open ticket this subagent never touched')" || fail "seed TH2"
+SIDH="sidH-$$-$(basename "$WORK")"
+# dispatch names ONLY TH1; a branch + PR (state to preserve); NO closeout (died mid-drain) — so TH1's
+# scope comes purely from the dispatch prompt (exercises the dispatch-scope reconstruction path).
+python3 - "$WORK/tr_H.jsonl" "$TH1" "$BRANCH" "$PR_URL" <<'PY'
+import json,sys
+out,th1,branch,pr=sys.argv[1:5]
+L=[{"type":"user","timestamp":"2020-01-01T00:00:00.000Z","message":{"role":"user",
+    "content":[{"type":"text","text":"Drain Stage=Recirculation ticket #%s: heal the scope drift and emit a closeout."%th1}]}},
+   {"type":"assistant","timestamp":"2020-01-01T00:00:01.000Z","message":{"role":"assistant",
+    "content":[{"type":"tool_use","name":"Bash","input":{"command":"git checkout -b "+branch}}]}},
+   {"type":"assistant","timestamp":"2020-01-01T00:00:02.000Z","message":{"role":"assistant",
+    "content":[{"type":"text","text":"opened PR "+pr}]}}]
+open(out,"w").write("".join(json.dumps(x)+"\n" for x in L))
+PY
+run_gate "$Hh" "$RECIRC_AGENT" "$SIDH" "$WORK/tr_H.jsonl"
+[ "$GATE_RC" -eq 0 ] || fail "(H) gate exit $GATE_RC"
+has_ckpt "$Hh" "$TH1" || fail "(H) the dispatched ticket #$TH1 was not checkpointed (dispatch-scope reconstruction broken)"
+comments "$Hh" "$TH1" | grep -q "branch=$BRANCH" || fail "(H) #$TH1 checkpoint omits the reconstructed branch"
+led "$Hh" pending --session "$SIDH" | grep -qx "recirc_checkpoint:$TH1" || fail "(H) no taint for the dispatched ticket #$TH1"
+has_ckpt "$Hh" "$TH2" \
+  && fail "(H) an UNTOUCHED open ticket #$TH2 (out of this subagent's scope) was WRONGLY checkpointed [revert to whole-inbox scope ⇒ RED]"
+led "$Hh" pending --session "$SIDH" | grep -qx "recirc_checkpoint:$TH2" \
+  && fail "(H) an untouched out-of-scope ticket #$TH2 must carry NO recirc_checkpoint taint"
+echo "  ok (H) scope: only the dispatched ticket is checkpointed; an untouched open inbox ticket is left entirely alone [P2-1]"
+
+# ══ Case I — a FILE-based closeout (idc_recirc_closeout.py --closeout <path>) is harvested as covered ═
+# The documented closeout flow writes the closeout to a FILE, then validates it with `--closeout
+# <path>` (not an inline here-string). The gate must read that file so a legitimately-closed-out ticket
+# is recognized covered and NOT wrongly checkpointed. Ti is dispatched (in scope); its ONLY closeout is
+# a real on-disk file the agent ran the validator on.
+# Red-when-broken: revert the `--closeout <path>` file-harvest ⇒ Ti has no covered closeout ⇒ Ti is
+# WRONGLY checkpointed ⇒ the "file-closed-out ticket NOT checkpointed" assert goes RED.
+Ii="$(new_repo)" || fail "new_repo I failed"; REPOS+=("$Ii")
+TI="$(seed "$Ii" Recirculation Todo 'recirc: closed out via a --closeout FILE, not an inline heredoc')" || fail "seed TI"
+SIDI="sidI-$$-$(basename "$WORK")"
+# the real closeout artifact on disk, at a repo-relative path the Bash command references (resolved
+# against the subagent cwd = the repo root by the gate).
+printf '%s' "$(valid_co "$TI")" > "$Ii/closeout-ti.json" || fail "(I) could not write the closeout file"
+# dispatch names TI (scope); a Bash tool_use that RUNS the validator on the FILE — no Write artifact,
+# no inline JSON in the command, so the ONLY way to recognize it covered is the file-harvest path.
+python3 - "$WORK/tr_I.jsonl" "$TI" "$CLOSEOUT" <<'PY'
+import json,sys
+out,ti,closeout=sys.argv[1:4]
+L=[{"type":"user","timestamp":"2020-01-01T00:00:00.000Z","message":{"role":"user",
+    "content":[{"type":"text","text":"Drain Stage=Recirculation ticket #%s and validate the closeout."%ti}]}},
+   {"type":"assistant","timestamp":"2020-01-01T00:00:01.000Z","message":{"role":"assistant",
+    "content":[{"type":"tool_use","name":"Bash","input":{"command":"python3 %s --closeout closeout-ti.json"%closeout}}]}}]
+open(out,"w").write("".join(json.dumps(x)+"\n" for x in L))
+PY
+run_gate "$Ii" "$RECIRC_AGENT" "$SIDI" "$WORK/tr_I.jsonl"
+[ "$GATE_RC" -eq 0 ] || fail "(I) gate exit $GATE_RC"
+has_ckpt "$Ii" "$TI" \
+  && fail "(I) a ticket #$TI closed out via a --closeout FILE was WRONGLY checkpointed — the file-based closeout was not harvested [revert the --closeout <path> file-harvest ⇒ RED]"
+led "$Ii" pending --session "$SIDI" | grep -qx "recirc_checkpoint:$TI" \
+  && fail "(I) a file-closed-out ticket #$TI must carry NO recirc_checkpoint taint"
+echo "  ok (I) a documented file-based closeout (--closeout <path>) is harvested as covered — the ticket is left alone [P2-2]"
+
+echo "PASS: the SubagentStop recirculator closeout-or-checkpoint detective — a mid-drain stop checkpoints every UNCOVERED open inbox ticket IN THIS SUBAGENT'S SCOPE (branch/PR/dispositions, via the sanctioned comment helper) + sets a recirc_checkpoint taint; a validly-closed-out ticket is left alone (per-ticket); an UNTOUCHED out-of-scope open ticket is NEVER checkpointed (scope = dispatch ∪ closeout-candidate tickets); a file-based (--closeout <path>) closeout is harvested as covered; a fully-valid run clears its scope's taints and stamps nothing; an UNREADABLE inbox PRESERVES checkpoints (never wiped); an EXAMPLE closeout that was only read/quoted does NOT mark a ticket covered; self-gated to the recirculator + repo-gated; fail-OPEN (never blocks); observe-only records without mutating the board"

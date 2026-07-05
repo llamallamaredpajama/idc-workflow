@@ -28,6 +28,22 @@ not have landed yet — a re-drain is idempotent), so T is left alone; a ticket 
 un-dispositioned and gets checkpointed. "A valid closeout ⇒ allow + clear taints" therefore means
 "every still-open ticket is covered by a valid closeout" (the uncovered set is empty).
 
+SCOPED TO THIS SUBAGENT'S OWN TICKET(S) (the second correctness decision). This SubagentStop hook
+fires **only** for the recirculator dispatched as a Task **subagent** — the Build larger-loop
+"recirc-consultant per event" (`agents/idc-build.md`), a sous-chef spawned over the ONE recirc ticket
+its triplet surfaced (the main-session `/idc:recirculate` drain and the Teams-teammate consultant do
+NOT fire SubagentStop). So the gate must checkpoint only the ticket(s) **this** subagent was actually
+handling — NOT the whole `Stage=Recirculation ∧ Status=Todo` inbox. A sous-chef that processed #1 must
+never stamp #1's branch/PR breadcrumb onto #2/#3 it never touched (false, misleading resume state on
+strangers' tickets). The subagent's SCOPE is reconstructed deterministically from its own transcript:
+the ticket(s) named in its **dispatch prompt** (the first user turn — "process recirc ticket #N") ∪ the
+ticket(s) its **closeout candidates** reference (valid OR invalid — a disposition it *attempted*). A
+still-open ticket is checkpointed **iff** it is in scope AND uncovered. An open inbox ticket outside
+this subagent's scope is left entirely alone. If the scope is genuinely undeterminable (an unparseable
+dispatch and no closeout emitted), the gate falls back conservatively — it WARNS and checkpoints
+NOTHING, never blanket-checkpoints the inbox (a false breadcrumb on a stranger's ticket is worse than
+a rare missed one; the board + a later drain still re-do the work).
+
 THE BOARD IS GROUND TRUTH (invariant #1). "Still-open" is read from the board (the sanctioned tracker
 helper: `query --stage Recirculation --status Todo`), never inferred from the ledger. The
 transcript-derived valid-closeout set and the reconstructed branch/PR/dispositions are HINTS used only
@@ -78,6 +94,18 @@ _BRANCH_RES = (
 # A PR number: a `.../pull/<n>` URL (gh pr create output / a closeout think_pr) — the robust anchor
 # (a bare `#<n>` is ambiguous with ticket numbers, so it is NOT used).
 _PR_RE = re.compile(r"/pull/(\d+)\b")
+# The ticket(s) named in the DISPATCH PROMPT (the first user turn Build handed the sous-chef). Here a
+# bare `#<n>` IS used (unlike the PR anchor above): the dispatch is a constrained context naming the
+# ticket, and the SCOPE it produces is always intersected with the still-open Recirculation∧Todo inbox,
+# so a stray number that isn't an open recirc ticket is harmlessly filtered.
+_DISPATCH_TICKET_RES = (
+    re.compile(r"#(\d+)\b"),
+    re.compile(r"\b(?:ticket|issue)\s+#?(\d+)\b", re.I),
+)
+# A `--closeout <path>` argument to idc_recirc_closeout.py — the DOCUMENTED closeout flow (the agent
+# writes the closeout to a FILE, then validates it with `--closeout <path>`), as opposed to an inline
+# `--closeout -` here-string. Captures the path so the harvester can read that file (best-effort).
+_CLOSEOUT_PATH_RE = re.compile(r"--closeout(?:=|\s+)([^\s;&|'\"]+)")
 
 
 def _walk_strings(obj):
@@ -135,24 +163,80 @@ def _is_closeout_shape(obj):
     return isinstance(obj, dict) and "ticket" in obj and "outcome" in obj
 
 
-def _scan_transcript(transcript_path):
-    """One pass over the recirculator transcript → (branch, prs, closeout_candidates).
+def _positive_int(v):
+    """v as a positive int, or None (bool excluded — bool is an int subclass)."""
+    if isinstance(v, bool) or not isinstance(v, int) or v <= 0:
+        return None
+    return v
+
+
+def _dispatch_tickets_from_text(text):
+    """Ticket number(s) named in a dispatch-prompt text block (bare `#<n>` + `ticket/issue <n>`). Used
+    only against the first user turn; the SCOPE it feeds is intersected with the still-open inbox, so
+    over-broad here is harmless."""
+    out = set()
+    if not isinstance(text, str):
+        return out
+    for rgx in _DISPATCH_TICKET_RES:
+        for m in rgx.finditer(text):
+            out.add(int(m.group(1)))
+    return out
+
+
+def _read_closeout_file(cwd, path):
+    """A closeout object read from a `--closeout <path>` FILE the agent validated, or None. The path is
+    resolved relative to the subagent's cwd (best-effort — an absolute path is used as-is). BEST-EFFORT
+    on every failure (`-`/stdin, a path gone at hook time, unreadable, non-JSON, non-object → None): a
+    missing closeout file is a DOCUMENTED limitation of post-hoc reconstruction, never a crash. Anchored
+    on a REAL `idc_recirc_closeout.py --closeout <path>` invocation (see `_scan_transcript`), so this
+    reads only a file the agent actually ran the validator on — NOT an example it merely quoted (MAJOR-2)."""
+    if not path or path == "-":
+        return None
+    fp = path if os.path.isabs(path) else os.path.join(cwd or ".", path)
+    try:
+        with open(fp, encoding="utf-8") as fh:
+            obj = json.loads(fh.read().strip())
+    except (OSError, ValueError):
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _candidate_tickets(candidates):
+    """The ticket number(s) any closeout candidate references (valid OR invalid — a disposition the
+    subagent ATTEMPTED). The other half of this subagent's SCOPE, alongside its dispatch tickets."""
+    out = set()
+    for co in candidates:
+        t = _positive_int(co.get("ticket"))
+        if t is not None:
+            out.add(t)
+    return out
+
+
+def _scan_transcript(transcript_path, cwd):
+    """One pass over the recirculator transcript → (branch, prs, closeout_candidates, dispatch_tickets).
 
     branch / prs are reconstruction HINTS for the checkpoint comment, harvested BROADLY (any string in
     the event — a `gh pr create` URL living in a tool_result is fair game, and over-broad here is
     harmless).
 
+    dispatch_tickets are the ticket number(s) named in the sous-chef's DISPATCH PROMPT — every
+    user-role TEXT block (the first user turn is Build's handoff; a subagent's later user events are
+    tool_results, not text, so they contribute nothing). One HALF of this subagent's SCOPE (the tickets
+    it was dispatched over); the other half is the tickets its closeout candidates reference.
+
     closeout_candidates are harvested NARROWLY — ONLY from a REAL closeout ACTION the agent authored,
     NOT mere JSON presence anywhere (MAJOR-2):
       * a `Write`/`Edit` whose WHOLE (stripped) content parses as a closeout object — the closeout
         ARTIFACT the recirculator emitted (a doc that merely *contains* an example won't parse whole); or
-      * a `Bash` command that RUNS `idc_recirc_closeout.py` with an inline closeout — the recirculator
-        actually validating one.
+      * a `Bash` command that RUNS `idc_recirc_closeout.py` with an inline (`--closeout -`) closeout — the
+        recirculator actually validating one; or
+      * a `Bash` command that RUNS `idc_recirc_closeout.py --closeout <path>` — the DOCUMENTED file-based
+        flow (write the closeout to a file, then validate it): the referenced FILE is read (best-effort).
     A closeout-shaped JSON in a tool_result (a doc it Read), in a text/prose block, or buried in a
     larger file is IGNORED, so a quoted EXAMPLE can never suppress a needed checkpoint. The bias is
     SAFE: an un-anchored real closeout at worst yields a harmless extra (idempotent) checkpoint, never a
     lost one."""
-    branch, prs, candidates, seen = None, set(), [], set()
+    branch, prs, candidates, seen, dispatch_tickets = None, set(), [], set(), set()
 
     def _add(obj):
         if _is_closeout_shape(obj):
@@ -172,6 +256,17 @@ def _scan_transcript(transcript_path):
                         break
             for m in _PR_RE.finditer(s):
                 prs.add(int(m.group(1)))
+        # DISPATCH SCOPE (narrow): tickets named in a user-role TEXT block (the dispatch prompt).
+        if (evt.get("type") == "user") or (isinstance(evt.get("message"), dict)
+                                           and evt["message"].get("role") == "user"):
+            msg = evt.get("message")
+            blocks = msg.get("content") if isinstance(msg, dict) else None
+            if isinstance(blocks, str):
+                dispatch_tickets |= _dispatch_tickets_from_text(blocks)
+            elif isinstance(blocks, list):
+                for b in blocks:
+                    if isinstance(b, dict) and b.get("type") == "text":
+                        dispatch_tickets |= _dispatch_tickets_from_text(b.get("text"))
         # COVERED closeouts (narrow): only from a real closeout action the agent authored.
         for name, inp in _iter_tool_uses(evt):
             if name in ("Write", "Edit"):
@@ -184,9 +279,13 @@ def _scan_transcript(transcript_path):
             elif name == "Bash":
                 cmd = inp.get("command")
                 if isinstance(cmd, str) and CLOSEOUT_VALIDATOR in cmd:
-                    for obj in _iter_json_objects(cmd):
+                    for obj in _iter_json_objects(cmd):   # inline (`--closeout -`) closeout JSON
                         _add(obj)
-    return branch, sorted(prs), candidates
+                    for m in _CLOSEOUT_PATH_RE.finditer(cmd):   # file-based (`--closeout <path>`) closeout
+                        obj = _read_closeout_file(cwd, m.group(1))
+                        if obj is not None:
+                            _add(obj)
+    return branch, sorted(prs), candidates, dispatch_tickets
 
 
 def _covered_tickets(plugin_root, candidates):
@@ -390,14 +489,26 @@ def _checkpoint_body(ticket, branch, prs, handled):
     )
 
 
-def _clear_session_checkpoints(cwd, sid):
-    """Clear this session's `recirc_checkpoint` taints — the obligation is satisfied (every still-open
-    ticket is covered by a valid closeout). Scoped to what pending_taints(sid) surfaces (this session's
-    + unattributed), so a DIFFERENT live session's checkpoint obligation is never cleared out from
-    under it."""
+def _clear_session_checkpoints(cwd, sid, scope=None):
+    """Clear this session's `recirc_checkpoint` taints — the obligation is satisfied. Scoped to what
+    pending_taints(sid) surfaces (this session's + unattributed), so a DIFFERENT live session's
+    checkpoint obligation is never cleared out from under it.
+
+    `scope` narrows this further to the tickets THIS subagent actually handled: when a value is passed,
+    only checkpoints whose ticket is IN scope are cleared, so a sous-chef that completed ITS ticket #1
+    never clears a *sibling* consultant's #2 taint (they can share the parent session_id). `scope=None`
+    is the whole-board-drained signal (a PROVEN-empty inbox — every open recirc ticket is gone, so every
+    checkpoint is stale) and clears all of this session's checkpoints."""
     for t in idc_ledger.pending_taints(cwd, session_id=sid):
-        if t.get("kind") == CHECKPOINT_TAINT:
-            idc_ledger.clear_taint(cwd, CHECKPOINT_TAINT, key=t.get("key"))
+        if t.get("kind") != CHECKPOINT_TAINT:
+            continue
+        if scope is not None:
+            try:
+                if int(t.get("key")) not in scope:
+                    continue
+            except (TypeError, ValueError):
+                continue   # a non-numeric key can't be matched to a numeric scope — leave it
+        idc_ledger.clear_taint(cwd, CHECKPOINT_TAINT, key=t.get("key"))
 
 
 def _gate(payload, plugin_root):
@@ -436,18 +547,33 @@ def _gate(payload, plugin_root):
         _clear_session_checkpoints(cwd, sid)
         H.allow()
 
-    # Which of the still-open tickets already have a VALID closeout in the transcript (covered) — those
-    # are authoritatively closed out and must NOT be checkpointed; the rest are un-dispositioned.
-    branch, prs, candidates = _scan_transcript(payload.get("agent_transcript_path", ""))
+    # This subagent's SCOPE — the ticket(s) it was actually handling: the dispatch prompt's ticket(s) ∪
+    # the tickets its closeout candidates reference. The gate only ever checkpoints WITHIN this scope, so
+    # a sous-chef that processed #1 never stamps a false breadcrumb on a stranger's open #2/#3 (P2-1).
+    branch, prs, candidates, dispatch_tickets = _scan_transcript(
+        payload.get("agent_transcript_path", ""), cwd)
     covered = _covered_tickets(plugin_root, candidates)
-    uncovered = [t for t in still_open if t not in covered]
+    scope = dispatch_tickets | _candidate_tickets(candidates)
+    # Uncovered = the still-open tickets THIS subagent handled (in scope) that hold NO valid closeout.
+    # NEUTERING the `t in scope` filter (whole-inbox scope) checkpoints strangers' open tickets;
+    # NEUTERING the `t not in covered` filter checkpoints a validly-closed-out ticket — both red-when-broken.
+    uncovered = [t for t in still_open if t in scope and t not in covered]
+
+    if not scope and still_open:
+        # Conservative fallback: the subagent's scope is undeterminable (an unparseable dispatch AND no
+        # closeout emitted) while the inbox is non-empty. We CANNOT attribute any open ticket to this
+        # subagent, so we checkpoint NOTHING (never blanket-checkpoint the inbox — a false resume
+        # breadcrumb on a stranger's ticket is worse than a rare missed one; the board + a later
+        # /idc:recirculate re-drain remain the safety net) and WARN so the gap stays visible.
+        H.warn(f"recirc-checkpoint: could not determine which ticket(s) this recirculator subagent was "
+               f"handling (empty dispatch scope; {len(still_open)} open inbox ticket(s)) — checkpointing "
+               f"nothing (conservative; a later /idc:recirculate re-drains)")
 
     if not uncovered:
-        # Every still-open ticket is covered by a valid closeout ⇒ the drain's handoff is complete ⇒
-        # allow + clear this session's checkpoint taints. NEUTERING the `t not in covered` filter (or
-        # forcing covered empty) makes uncovered == still_open, so a clean valid-closeout run WRONGLY
-        # checkpoints every open ticket — the closeout-valid short-circuit's red-when-broken proof.
-        _clear_session_checkpoints(cwd, sid)
+        # Every still-open ticket IN THIS SUBAGENT'S SCOPE is covered by a valid closeout ⇒ its drain is
+        # complete ⇒ allow + clear its scope's checkpoint taints (scope-narrowed so a sibling
+        # consultant's taint is never wiped). An empty scope clears nothing (nothing to attribute).
+        _clear_session_checkpoints(cwd, sid, scope=scope)
         H.allow()
 
     # CHECKPOINT: for each un-dispositioned still-open ticket, stamp the resume comment (sanctioned

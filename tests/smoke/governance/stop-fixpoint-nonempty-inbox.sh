@@ -123,6 +123,13 @@ blocks "$OUT_FC" \
   || fail "(fail-closed) a crashing drain (exit outside {0,2,3,4}) for a confirmed orchestrator MUST fail closed and BLOCK — got no block (RC=$RC_FC, out=$OUT_FC) [revert the exit-contract raise ⇒ RED]"
 printf '%s' "$OUT_FC" | grep -qi 'could not verify' \
   || fail "(fail-closed) the block reason must say it could not verify the drain state (got: $OUT_FC)"
-echo "  ok (fail-closed) a crashing drain (exit outside the {0,2,3,4} contract) ⇒ the gate fails CLOSED and blocks"
+# The orchestrator_drain marker MUST SURVIVE an unverifiable (fail-closed) stop — the obligation is NOT
+# satisfied (the pipe was never proven drained), so the m5 gate-side clear must fire ONLY on a proven
+# `drain: complete`, never here. If m5 cleared the marker on a fail-closed stop the obligation would be
+# silently lost (a later stop would fast-path through the self-gate). Directly pins "clear on clean-
+# complete ONLY, never on fail-closed/unknown/rate-limited".
+led pending --session "$SID_FC" | grep -qx 'orchestrator_drain' \
+  || fail "(fail-closed) the orchestrator_drain marker MUST survive an unverifiable (fail-closed) stop — m5 must clear ONLY on a proven drain: complete, never on a fail-closed/pending stop"
+echo "  ok (fail-closed) a crashing drain (exit outside the {0,2,3,4} contract) ⇒ the gate fails CLOSED and blocks (and the marker survives — m5 clears on clean-complete only)"
 
 echo "PASS: the Stop fixpoint gate refuses a drain-orchestrator exit with a non-empty inbox (drain: recirc-pending), names the /idc:recirculate remediation, is bounded at N=3 then loud-fails once (never an infinite nag) with a single board annotation, honors observe-only, and fails CLOSED on a crashing drain"

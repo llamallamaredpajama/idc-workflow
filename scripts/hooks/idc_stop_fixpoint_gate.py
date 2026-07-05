@@ -122,7 +122,7 @@ def _drain_detail(stdout):
 
 
 def _board_says_pending(cwd, plugin_root):
-    """(board_pending, detail).
+    """(board_pending, board_complete, detail).
 
     board_pending is True ONLY when the drain PROVES a non-empty inbox with the build lane drained
     (`idc_autorun_drain.py` exit 4 / `drain: recirc-pending`). complete/continue/unknown/rate-limited
@@ -130,18 +130,23 @@ def _board_says_pending(cwd, plugin_root):
     warn (no board GraphQL on the stop path — the constraint). RAISES on a gate-internal failure (the
     drain helper is missing / cannot be spawned / times out) OR when the drain exits OUTSIDE its
     documented {0,2,3,4} contract (a crash = exit 1 — the verdict is untrustworthy) so the caller fails
-    CLOSED."""
+    CLOSED.
+
+    board_complete is True ONLY when the drain PROVES a whole-pipe fixpoint (`drain: complete`, exit 0)
+    — NOT `drain: continue` (build work remains), NOT a resumable pause, NOT github-deferred. It is the
+    single trustworthy "obligation satisfied" signal the caller uses to clear the orchestrator marker;
+    every not-proven-complete state leaves it False so the marker is never dropped prematurely."""
     backend = _read_backend(cwd)
     if backend == "github":
         H.warn("stop-fixpoint: github backend — deferring to the /loop re-check "
                "(no board GraphQL on the stop path)")
-        return False, "github (deferred)"
+        return False, False, "github (deferred)"
     tracker = os.path.join(cwd, "TRACKER.md")
     if not os.path.isfile(tracker):
         # A governed filesystem repo with no TRACKER.md is a transient/misconfig state, not a proven
         # non-empty inbox: allow (don't nag on infra absence) rather than fail closed.
         H.warn(f"stop-fixpoint: no TRACKER.md under {cwd} — cannot determine drain state; allowing")
-        return False, "no tracker"
+        return False, False, "no tracker"
     drain = os.path.join(plugin_root or "", "scripts", DRAIN)
     if not os.path.isfile(drain):
         raise RuntimeError(f"drain helper not found at {drain}")
@@ -156,7 +161,11 @@ def _board_says_pending(cwd, plugin_root):
         raise RuntimeError(
             f"drain exited {r.returncode} (outside the Phase-0 contract {{0,2,3,4}}); "
             f"stderr: {(r.stderr or '').strip()[:200]!r}")
-    return (r.returncode == _RECIRC_PENDING_EXIT), _drain_detail(r.stdout)
+    board_pending = (r.returncode == _RECIRC_PENDING_EXIT)
+    # `drain: complete` (exit 0, whole-pipe fixpoint) — distinct from `drain: continue` (also exit 0,
+    # but build work still eligible), which must NOT clear the marker (the orchestrator has more to do).
+    board_complete = bool(re.search(r"^drain:\s*complete\b", r.stdout or "", re.M))
+    return board_pending, board_complete, _drain_detail(r.stdout)
 
 
 def _obligation_labels(pending_taints):
@@ -257,7 +266,7 @@ def _gate(payload, plugin_root):
     # From here we KNOW this is an orchestrator drain session → fail CLOSED on an internal error.
     key = f"stop-fixpoint.{sid}"
     try:
-        board_pending, detail = _board_says_pending(cwd, plugin_root)
+        board_pending, board_complete, detail = _board_says_pending(cwd, plugin_root)
     except Exception as e:  # noqa: BLE001 — cannot verify the pipe is drained → prefer a clear block
         H.bounded_block(
             key,
@@ -273,6 +282,14 @@ def _gate(payload, plugin_root):
     # marker, and any mid_finish/unfiled_findings obligations). A clean `drain: complete` makes
     # `board_pending` False → the ledger alone can NEVER block. Neutering this to `if ledger_pending:`
     # (dropping the board conjunct) is exactly what the crux governance scenario proves red-when-broken.
+    #
+    # NOTE (m2 — do not "strengthen" this into an independent ledger check): past the self-gate above,
+    # `ledger_pending` is ALWAYS True — the very marker that let us reach here guarantees ≥1 taint — so
+    # the EFFECTIVE block predicate is purely `board_pending` (the drain reporting recirc-pending / exit
+    # 4). This is by design: the marker is the session's MINIMAL obligation, and the board/drain is the
+    # real gate. A `mid_finish` / `unfiled_findings` taint ALONE can never gate a stop — only a proven
+    # non-empty inbox (the board) can. Do not assume otherwise: the ledger conjunct is a design guard
+    # (it documents "block needs the board"), not a second, independent must-pass condition.
     ledger_pending = bool(pending_taints)
     if board_pending and ledger_pending:
         reason = _block_reason(detail, pending_taints)
@@ -288,6 +305,19 @@ def _gate(payload, plugin_root):
         # Claude Code's `stop_hook_active` is the second backstop). Reuses the shared counter + bound.
         H.bounded_block(key, reason, bound=_STOP_GATE_BOUND)
         return  # unreachable (bounded_block exits); defensive
+
+    # OBLIGATION SATISFIED (m5 — clear the marker on a PROVEN-complete pipe). When this confirmed
+    # orchestrator stops with `drain: complete` (a whole-pipe fixpoint), the drain obligation is met, so
+    # clear the session's `orchestrator_drain` marker: a completed run then leaves NO stale marker to
+    # falsely classify a LATER, unrelated stop (it complements the absent-session_id guard above — one
+    # fewer piece of misclassify fuel). Guarded on `board_complete` (proven `drain: complete`, exit 0)
+    # ONLY — never on `drain: continue` (build work remains — the orchestrator has more to do), never on
+    # a resumable pause / unknown / github-deferred (not proven done). We clear ONLY the marker; other
+    # obligations (mid_finish / unfiled_findings) are cleared by their own deterministic completion
+    # points (Stage C/D), consistent with invariant #1 (a taint clears only when its action completes).
+    # Best-effort by construction: clear_taint is repo-gated + tolerant and never raises on the stop path.
+    if board_complete:
+        idc_ledger.clear_taint(cwd, ORCHESTRATOR_MARKER)
 
     # Clean board, a resumable pause, or github-deferred → allow, and reset the anti-nag counter so a
     # later genuine recirc-pending episode starts its N=3 budget fresh.

@@ -21,8 +21,17 @@ hold a dishonest exit: a session that tries to stop while `idc_autorun_drain.py`
 non-empty) is blocked with the remediation, bounded N=3 then a loud-fail. The marker is **session-scoped**
 (keyed to this session's id), so it gates only this drain and never an unrelated session in the same repo:
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/idc_ledger.py" --cwd "$PWD" set \
-  --kind orchestrator_drain --session "$CLAUDE_CODE_SESSION_ID"
+# Guard the marker on a NON-EMPTY session id. If $CLAUDE_CODE_SESSION_ID is empty the marker would be
+# stored keyed to "" — which the real Stop payload's true id never matches, so the gate would silently
+# NEVER fire (a fail-open protection gap). Skip + WARN LOUDLY instead of storing an unkeyable marker
+# (do NOT normalize ""→None: an unattributed marker would gate EVERY session in the repo — the exact
+# MAJOR-3 false-block). A skipped marker disables the liveness gate for this run, VISIBLY, by design.
+if [ -z "$CLAUDE_CODE_SESSION_ID" ]; then
+  echo "[idc-liveness] WARNING: CLAUDE_CODE_SESSION_ID is empty — NOT setting the orchestrator_drain marker; the Stop fixpoint gate will NOT fire this run (fail-open, visible). Continuing the drain." >&2
+else
+  python3 "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/idc_ledger.py" --cwd "$PWD" set \
+    --kind orchestrator_drain --session "$CLAUDE_CODE_SESSION_ID"
+fi
 ```
 The gate **never blocks a clean board** — a `drain: complete` always wins over the ledger hint, so it
 only ever catches a stop that abandons a non-empty inbox. On a clean `drain: complete` exit you may

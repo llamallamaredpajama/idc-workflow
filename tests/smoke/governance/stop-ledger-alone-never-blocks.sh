@@ -71,6 +71,19 @@ blocks "$OUT" && fail "THE CRUX FAILED: the gate BLOCKED a clean board on a stal
 [ "$RC" -eq 0 ] || fail "a clean-board stop must exit 0 (allow), got $RC"
 echo "  ok (crux) a stale mid_finish taint + drain: complete ⇒ the gate does NOT block (ground truth wins)"
 
+# ── (m5) the clean-complete stop CLEARS the orchestrator_drain marker (obligation satisfied) ────────
+# A confirmed orchestrator stopping on a PROVEN-complete pipe (drain: complete) has met its drain
+# obligation, so the gate clears its orchestrator_drain marker — a completed run then leaves NO stale
+# marker to misclassify a LATER unrelated stop (removes MAJOR-3's fuel). It clears ONLY the marker: the
+# session's other obligations (the stale mid_finish:42) must survive, cleared by their own completion
+# points. Red-when-broken: neuter the `if board_complete: clear_taint(...)` in _gate ⇒ the marker
+# persists ⇒ the "must be cleared" assert goes RED.
+led pending --session "$SID" | grep -qx 'orchestrator_drain' \
+  && fail "(m5) after a clean-complete stop the orchestrator_drain marker must be CLEARED (obligation satisfied) [neuter the board_complete clear ⇒ RED]"
+led pending --session "$SID" | grep -qx 'mid_finish:42' \
+  || fail "(m5) the clean-stop clear must remove ONLY the orchestrator marker — the mid_finish:42 obligation must remain (its own completion point clears it, not the stop gate)"
+echo "  ok (m5) a clean-complete stop clears ONLY the orchestrator_drain marker (mid_finish:42 survives) — one fewer misclassify fuel"
+
 # ── (control) flip the board to recirc-pending: the SAME kind of session now BLOCKS ────────────────
 # Proves the board conjunct is LIVE — the crux ALLOW above is the board (drain: complete), not a dead
 # gate. Fresh session id so the anti-nag counter is clean.
@@ -112,4 +125,23 @@ blocks "$OUT4" && fail "absent-sid broken: a Stop payload with no session_id mus
 [ "$RC4" -eq 0 ] || fail "an unattributable (no session_id) stop must allow exit 0, got $RC4"
 echo "  ok (absent-sid) a stop with no session_id is allowed even with a stale dead-session marker over a recirc-pending board"
 
-echo "PASS: the ledger is a HINT, the board is GROUND TRUTH — a stale taint never blocks a clean board (drain: complete wins), the board conjunct is live (recirc-pending blocks the same session), the self-gate spares un-marked sessions, and an unattributable (no-session_id) stop is allowed even against a stale dead-session marker"
+# ── (m5-continue) a CONFIRMED orchestrator stop on a NON-complete clean board (drain: continue) ALLOWS
+#    but does NOT clear the marker — m5 clears on `drain: complete` (whole-pipe fixpoint) ONLY, never on
+#    `continue` (eligible build work remains — the obligation is NOT satisfied; /loop iterates on it).
+#    This pins the exact boundary: clean-COMPLETE clears (crux above), clean-CONTINUE does not.
+#    Red-when-broken: drop the `board_complete` guard on the m5 clear (clear on ANY clean allow) ⇒ the
+#    marker is dropped here on a still-pending pipe ⇒ the "must survive" assert goes RED.
+python3 "$TRK" --tracker "$T" create --title 'build: eligible' --stage Buildable --status Todo >/dev/null \
+  || fail "(m5-continue) could not seed a Buildable item to force drain: continue"
+python3 "$DRAIN" --tracker "$T" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 0 ] || fail "(m5-continue) precondition: an eligible Buildable item must make the board drain: continue exit 0 (got $rc)"
+SID5="stopsess5-$$-$(basename "$WORK")"
+led set --kind orchestrator_drain --session "$SID5" >/dev/null || fail "(m5-continue) marker set failed"
+OUT5="$(mk_payload "$REPO" "$SID5" | python3 "$GATE" "$GOV_PLUGIN" 2>/dev/null)"; RC5=$?
+blocks "$OUT5" && fail "(m5-continue) a drain: continue stop must ALLOW — build work is exactly what /loop iterates on — not block"
+[ "$RC5" -eq 0 ] || fail "(m5-continue) a drain: continue stop for a confirmed orchestrator must allow exit 0, got $RC5"
+led pending --session "$SID5" | grep -qx 'orchestrator_drain' \
+  || fail "(m5-continue) the orchestrator_drain marker MUST survive a drain: continue stop — m5 clears on drain: complete ONLY, not on continue [drop the board_complete guard ⇒ RED]"
+echo "  ok (m5-continue) a confirmed-orchestrator stop on a drain: continue board allows AND keeps the marker (m5 clears on complete only)"
+
+echo "PASS: the ledger is a HINT, the board is GROUND TRUTH — a stale taint never blocks a clean board (drain: complete wins), the board conjunct is live (recirc-pending blocks the same session), the self-gate spares un-marked sessions, an unattributable (no-session_id) stop is allowed even against a stale dead-session marker, and m5 clears the marker on a proven drain: complete ONLY (survives continue)"

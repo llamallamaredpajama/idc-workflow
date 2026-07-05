@@ -28,6 +28,14 @@
 #   M. No closing keyword (Closes/Fixes/Resolves #N) wrapped in backticks — GitHub's auto-close
 #      parser only recognizes plain, unbackticked text, so a backtick-fenced keyword never
 #      populates `closingIssuesReferences` and merging the PR never closes the issue.
+#   N. No raw board-mutation DIRECTIVE in shipped orchestrator prose — the transition engine
+#      (idc_transition.py) is the single write door (v4 Phase 2), so a shipped agent/command that
+#      tells the reader to run `gh project item-edit|item-add|item-delete` or a GraphQL board write
+#      (updateProjectV2ItemFieldValue / addProjectV2ItemById / deleteProjectV2Item) routes AROUND
+#      the door (the improvisation class Stage 3's PreToolUse interlock catches at runtime). The
+#      backend adapter skill idc-tracker-github IS the sanctioned low-level implementation the engine
+#      wraps, so it is exempt; a PROHIBITION ("no raw …", "never …") naming the snippet to forbid it
+#      is exempt (negation cue on the line); an explicit `lint-allow` marker is exempt.
 #
 # Exit 0 = clean. Exit 1 = findings printed as <file>:<line>: <rule> <excerpt>.
 # Lines containing "lint-allow" are exempt for Rules B–K (use sparingly, with a reason);
@@ -184,6 +192,23 @@ for f in $MD_FILES; do
     [ -z "$hit" ] && continue
     report "$f:${hit%%:*}: [backticked-closing-keyword] ${hit#*:}"
   done < <(filtered_grep_i '`(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]+#[0-9]+`' "$f")
+
+  # Rule N — no raw board-mutation DIRECTIVE in shipped orchestrator prose (route through the single
+  # write door idc_transition.py). The adapter skill idc-tracker-github is THE sanctioned home for the
+  # raw primitive the engine wraps → exempt the whole file. A prohibition ("no raw …", "never …")
+  # naming the snippet to forbid it carries a negation cue on the line → exempt. `lint-allow` (via
+  # filtered_grep) exempts an explicit future exception. A bare directive with none of these fails.
+  case "$f" in
+    skills/idc-tracker-github/SKILL.md) : ;;   # sanctioned board-mutation implementation
+    *)
+      while IFS= read -r hit; do
+        [ -z "$hit" ] && continue
+        lineno="${hit%%:*}"; line_txt="${hit#*:}"
+        printf '%s\n' "$line_txt" | grep -qiE '\b(no|never|not|without|dont|don.t|instead|rather)\b' && continue
+        report "$f:$lineno: [raw-board-mutation-prose] route board writes through idc_transition.py (the single write door), not a raw gh project/GraphQL call: ${line_txt}"
+      done < <(filtered_grep 'gh project item-(edit|add|delete)|updateProjectV2ItemFieldValue|addProjectV2ItemById|deleteProjectV2Item' "$f")
+      ;;
+  esac
 done
 
 # Rule C (runtime/) — the vendored runtime tree ships to users but is not markdown and sits

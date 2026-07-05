@@ -99,14 +99,72 @@ def block(reason):
     escape hatch (downgrades to a warning + allow).
 
     NOTE: this emits the Stop/SubagentStop-family schema (`{"decision":"block", ...}`). PreToolUse
-    interlocks (a later phase) deny via a different shape (`hookSpecificOutput.permissionDecision`),
-    so this primitive is shared across the STOP-FAMILY gates today; the interlock phase makes it
-    event-aware rather than retrofitting the Stop shape onto PreToolUse.
+    interlocks (§3.2) deny via a DIFFERENT shape (`hookSpecificOutput.permissionDecision`) — see
+    pre_tool_deny() below. This primitive stays the STOP-FAMILY deny; the interlock gate uses the
+    PreToolUse-family functions so no gate retrofits the wrong schema onto the wrong event.
     """
     if observe_only():
         warn(f"OBSERVE-ONLY (would block): {reason}")
         sys.exit(0)
     sys.stdout.write(json.dumps({"decision": "block", "reason": reason}))
+    sys.exit(0)
+
+
+# ── PreToolUse family (the terminal-action interlocks, v4 Phase 2 §3.2) ───────────────────────────
+# A PreToolUse gate decides on a tool call BEFORE it runs. Three postures, all exit 0 (a hook signals
+# via its JSON, not its exit code):
+#   * pre_tool_allow()        — say nothing; the normal permission flow proceeds (the hot path).
+#   * pre_tool_warn(reason)   — WARN-INJECT: surface the remediation on stderr but DO NOT decide, so
+#                               the action still proceeds through the normal flow. This is the SHIPPED
+#                               rollout posture — it can never brick a real workflow (§6 over-blocking).
+#   * pre_tool_deny(reason)   — HARD DENY: emit permissionDecision=deny with the remediation as the
+#                               reason (Claude Code feeds it back to the model → self-healing denial).
+#                               Honors IDC_HOOKS_OBSERVE_ONLY=1 → downgrade to warn-inject (§6).
+# Deny is the PROMOTED posture (a later operator decision, §6 decision 1); warn-inject ships first.
+def pre_tool_allow():
+    """Proceed: emit nothing, exit 0. The normal permission flow is untouched."""
+    sys.exit(0)
+
+
+def pre_tool_warn(reason):
+    """Warn-inject: surface the remediation (stderr) but make NO permission decision, so the action
+    still proceeds. The shipped, non-bricking rollout posture."""
+    warn(reason)
+    sys.exit(0)
+
+
+def pre_tool_deny(reason):
+    """Hard-deny the PreToolUse tool call with a remediation `reason`. Downgrades to warn-inject when
+    IDC_HOOKS_OBSERVE_ONLY=1 (the operator debug escape)."""
+    if observe_only():
+        warn(f"OBSERVE-ONLY (would deny): {reason}")
+        sys.exit(0)
+    sys.stdout.write(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }))
+    sys.exit(0)
+
+
+def guard_pre_tool(fn):
+    """Run a PreToolUse gate `fn(payload, plugin_root)`. Policy decisions happen inside `fn` via
+    pre_tool_warn()/pre_tool_deny()/pre_tool_allow(); an UNEXPECTED exception fails OPEN (allow) —
+    a gate bug must never block a tool call — unless IDC_HOOKS_STRICT=1 (then it denies, to surface
+    the bug hard in CI/e2e). Mirrors guard_pre_action's fail mode for the PreToolUse family."""
+    plugin_root = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("CLAUDE_PLUGIN_ROOT", "")
+    payload = read_payload()
+    try:
+        fn(payload, plugin_root)
+    except SystemExit:
+        raise
+    except Exception as e:  # noqa: BLE001 — infra bug, not a policy decision
+        if strict():
+            pre_tool_deny(f"idc interlock gate errored (STRICT): {e}")
+        warn(f"interlock gate errored, failing open (allow): {e}")
+        sys.exit(0)
     sys.exit(0)
 
 

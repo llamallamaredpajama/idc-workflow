@@ -1,9 +1,17 @@
 # Handoff — IDC v4 Phase 2 ("the single door + terminal interlocks") — 2026-07-03
 
-**Status:** ACTIVE / paused mid-execution · **Branch:** `main` @ `6613508` · **Run:** `/auto-goal-teams`
-(sequential team relay) · **Paused because:** the shared Claude account hit its **weekly usage limit**
-(teammates `engine` and `reviewer1` both died on it; **resets Jul 9 ~7am America/Chicago**). A fresh
-session (or one after the reset) continues from here.
+**Status:** ACTIVE · **Branch:** `main` @ `c730837` · **Run:** `/auto-goal-teams` (sequential team relay).
+**Stage 2 (PR #135) was independently reviewed + MERGED 2026-07-05** (`c730837`) — the earlier weekly-limit
+pause is resolved. **Next up: Stage 3** (PreToolUse interlocks). A fresh session continues from "Pick up
+here" step 2.
+
+> **2026-07-05 update — Stage 2 CLOSED.** PR #135 got the cut-off independent review: a fresh adversarial
+> reviewer returned **MERGE-OK** with its own red-when-broken proof (two independent mutations —
+> `enforce_receipt_gate`→early-return and `routing_gap`→`[]` — each turned `governance/finish-receipt-gate.sh`
+> RED, then restored). Confirmed no-bypass (gate before any mutation), genuine reuse of the filer + engine
+> fns, type-parity with the engine close guard, github fail-closed, and consistent `project_number` shape.
+> Local gate green on BOTH parser paths + full `run-all.sh` ALL GREEN on merged main. Worktrees cleaned
+> (`p2-finish` + orphan `wt-s2` removed; branch deleted). **Step 1 below is DONE — start at step 2.**
 
 > Ephemeral run artifacts (a scratchpad LEDGER + per-stage briefs) do **not** survive the session —
 > everything needed to resume is captured below. The authoritative design is
@@ -157,7 +165,7 @@ thrash). Each stage: build → dual review (standard + **adversarial/mutation-ba
 ## Task board snapshot (this run)
 
 1. ✅ Stage 1 — transition engine + machine table + merge_conditions + re-point filer (MERGED #133)
-2. 🔶 Stage 2 — idc_git_finish --require-routed-findings + merge_conditions (PR #135 OPEN — needs review+merge)
+2. ✅ Stage 2 — idc_git_finish --require-routed-findings + merge_conditions (MERGED #135 @ `c730837`, reviewed 2026-07-05)
 3. ⬜ Stage 3 — PreToolUse interlocks + hooks.json + new lint rule
 4. ⬜ Stage 4 — scaffold wiring for workflow-machine.yaml
 5. ⬜ Stage 5 — integration + sandbox e2e (top-level acceptance)

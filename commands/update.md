@@ -152,11 +152,15 @@ it, so ensure it now (the ledger module owns the filename + the ignore rule; the
 append-only and **never rewrites the operator's `.gitignore` lines**):
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/idc_ledger.py" --cwd "$ROOT" ensure-gitignore
+# The persisted drain verdict (.idc-drain-verdict.json, v4 Phase 3 Stage E2) — the same transient
+# per-session sidecar (the drain writes it so the Stop gate reads the github board conjunct locally,
+# zero GraphQL on the stop path). Ensure it is ignored too, identically additive + idempotent:
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/idc_drain_verdict.py" --cwd "$ROOT" ensure-gitignore
 ```
-Idempotent: a no-op if the line is already present (report `ledger-gitignore-already-present`),
-otherwise appends it (`ledger-gitignore-added`). This is not a stamped/receipt-tracked file, so it
-never appears in the Phase 1 drift classification — it is a standing additive the same way the
-Phase 3 `Stage`-option append is.
+Idempotent: a no-op if the line is already present (report `ledger-gitignore-already-present` /
+`drain-verdict-gitignore-already-present`), otherwise appends it (`…-added`). Neither is a
+stamped/receipt-tracked file, so they never appear in the Phase 1 drift classification — they are
+standing additives the same way the Phase 3 `Stage`-option append is.
 
 ## Phase 3 — Board reconcile (one safe additive migration; everything else report-only)
 

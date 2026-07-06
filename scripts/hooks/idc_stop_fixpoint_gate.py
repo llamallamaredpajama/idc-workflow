@@ -42,10 +42,16 @@ The gate blocks on PROVEN pending, not on inability-to-prove; the latter is a re
 NO NEW BOARD GraphQL ON THE STOP PATH (the constraint). For the FILESYSTEM backend the drain is a pure
 local read (zero GraphQL) — the common lightweight case and what the governance lane exercises — so the
 gate re-runs it live. For the GITHUB backend a live drain is a board read; to honor the constraint the
-gate does NOT scan the board on the stop path — it defers (warn + allow), leaving github stop-gating to
-the /loop re-check + autorun's own prose contract (a persisted-verdict read is the clean future path;
-see the telegram). The block is therefore delivered where it is free and correct (filesystem) and never
-doubles the GraphQL cost of a github drain.
+gate does NOT scan the board on the stop path — it reads the LOCAL persisted verdict instead (v4 Phase 3
+Stage E2, `_github_says_pending` → `idc_drain_verdict.current_verdict`). The drain writes
+`{verdict, exit, session_id}` to a gitignored `.idc-drain-verdict.json` at the workspace root on every
+pass of the drain LOOP — where a board read is already paid for — so the stop path only ever reads that
+file (ZERO new GraphQL). The verdict is SESSION-SCOPED: only THIS session's own persisted verdict gates
+its own stop; a foreign/dead session's verdict is invisible, and NO fresh same-session verdict → DEFER
+(warn + allow), the pre-Stage-E2 behavior (gate on data you have, never a guess). Last-write-wins means
+the final `complete` supersedes any earlier `recirc-pending`, so a stale pending can't outlive a real
+completion. The block is therefore delivered on BOTH backends now, always free (a local read), never
+doubling the GraphQL cost of a github drain.
 
 FAIL MODES (P4). This is a PRE-ACTION honesty gate. Once a session is CONFIRMED an orchestrator drain,
 a gate-internal failure to determine drain state (the drain helper cannot be spawned, times out, or
@@ -70,6 +76,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import idc_hook_lib as H  # noqa: E402
 import idc_ledger  # noqa: E402  (import, never edit — Stage A)
+import idc_drain_verdict  # noqa: E402  (the persisted-verdict sidecar — Stage E2)
 
 # The self-gate marker the orchestrator (commands/autorun.md) sets at drain start. It is BOTH the
 # "who to gate" signal AND the ledger's minimal obligation for a live drain ("this session owes a
@@ -121,16 +128,43 @@ def _drain_detail(stdout):
     return ", ".join(parts) or "the pipe is not at a whole-pipe fixpoint"
 
 
-def _board_says_pending(cwd, plugin_root):
+def _github_says_pending(cwd, sid):
+    """The GITHUB branch of `_board_says_pending` — (board_pending, board_complete, detail), read from
+    the LOCAL persisted verdict (`idc_drain_verdict.current_verdict`), NEVER a board scan (v4 Phase 3
+    Stage E2). ZERO new GraphQL on the stop path: the drain persists `{verdict, exit, session_id}` each
+    pass of the drain LOOP (where a board read is already paid for); this reads only that local file.
+
+    Session-scoped: `current_verdict(cwd, sid)` returns the verdict ONLY when it was written by THIS
+    session — a foreign/dead session's verdict is invisible here, so it can never gate this stop. No
+    persisted verdict for THIS session (absent, foreign, or clearly-stale) → DEFER (warn + allow),
+    exactly the pre-Stage-E2 behavior: you can only gate on data you have, never a guess.
+
+    When a fresh same-session verdict IS present, its exit code maps to the SAME semantics the live
+    filesystem drain yields: exit 4 (`recirc-pending`) → board_pending; `complete` → board_complete;
+    everything else (continue / unknown / rate-limited / board-read-error) → allow, don't clear (a
+    resumable pause or eligible build work — never fight /loop, never a stale block)."""
+    v = idc_drain_verdict.current_verdict(cwd, sid)
+    if v is None:
+        H.warn("stop-fixpoint: github backend — no persisted drain verdict for this session; "
+               "deferring to the /loop re-check (no board GraphQL on the stop path)")
+        return False, False, "github (no persisted verdict — deferred)"
+    verdict = v.get("verdict")
+    board_pending = (v.get("exit") == _RECIRC_PENDING_EXIT)
+    board_complete = (verdict == "complete")
+    return board_pending, board_complete, f"github (persisted: drain: {verdict}, exit {v.get('exit')})"
+
+
+def _board_says_pending(cwd, plugin_root, sid):
     """(board_pending, board_complete, detail).
 
     board_pending is True ONLY when the drain PROVES a non-empty inbox with the build lane drained
     (`idc_autorun_drain.py` exit 4 / `drain: recirc-pending`). complete/continue/unknown/rate-limited
-    → False (clean, or a resumable pause — never fight /loop or a rate-limit pause). GITHUB → False +
-    warn (no board GraphQL on the stop path — the constraint). RAISES on a gate-internal failure (the
-    drain helper is missing / cannot be spawned / times out) OR when the drain exits OUTSIDE its
-    documented {0,2,3,4} contract (a crash = exit 1 — the verdict is untrustworthy) so the caller fails
-    CLOSED.
+    → False (clean, or a resumable pause — never fight /loop or a rate-limit pause). GITHUB reads the
+    LOCAL persisted verdict for THIS session (`_github_says_pending`) — zero board GraphQL on the stop
+    path (the constraint) — and DEFERS (False + warn) when it has no fresh same-session verdict.
+    FILESYSTEM RAISES on a gate-internal failure (the drain helper is missing / cannot be spawned /
+    times out) OR when the drain exits OUTSIDE its documented {0,2,3,4} contract (a crash = exit 1 — the
+    verdict is untrustworthy) so the caller fails CLOSED.
 
     board_complete is True ONLY when the drain PROVES a whole-pipe fixpoint (`drain: complete`, exit 0)
     — NOT `drain: continue` (build work remains), NOT a resumable pause, NOT github-deferred. It is the
@@ -138,9 +172,7 @@ def _board_says_pending(cwd, plugin_root):
     every not-proven-complete state leaves it False so the marker is never dropped prematurely."""
     backend = _read_backend(cwd)
     if backend == "github":
-        H.warn("stop-fixpoint: github backend — deferring to the /loop re-check "
-               "(no board GraphQL on the stop path)")
-        return False, False, "github (deferred)"
+        return _github_says_pending(cwd, sid)
     tracker = os.path.join(cwd, "TRACKER.md")
     if not os.path.isfile(tracker):
         # A governed filesystem repo with no TRACKER.md is a transient/misconfig state, not a proven
@@ -199,7 +231,9 @@ def _annotate_forced_exit_once(cwd, plugin_root, sid, detail):
     make it operator-visible, P8). A single deterministic write via the sanctioned filesystem tracker
     helper (never a raw gh/GraphQL call), guarded one-time PER SESSION so it is written at the bound,
     not per stop. Best-effort: a failed annotation must not itself break the (already loud-failing)
-    allow. Filesystem only — the github stop path defers before it can reach here (no board GraphQL)."""
+    allow. Filesystem-only writer: on the github backend (which now CAN reach the block via the
+    persisted verdict — Stage E2) there is no local TRACKER.md, so the `os.path.isfile` guard below
+    makes this a graceful no-op (no board GraphQL is ever issued on the stop path)."""
     annot_key = f"stop-fixpoint-annotated.{sid}"
     if H.counter_get(annot_key) >= 1:
         return
@@ -266,7 +300,7 @@ def _gate(payload, plugin_root):
     # From here we KNOW this is an orchestrator drain session → fail CLOSED on an internal error.
     key = f"stop-fixpoint.{sid}"
     try:
-        board_pending, board_complete, detail = _board_says_pending(cwd, plugin_root)
+        board_pending, board_complete, detail = _board_says_pending(cwd, plugin_root, sid)
     except Exception as e:  # noqa: BLE001 — cannot verify the pipe is drained → prefer a clear block
         H.bounded_block(
             key,

@@ -72,8 +72,10 @@ loop below). Then the two lanes:
    - **filesystem:** `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --tracker <TRACKER.md> --acceptance`
      — `--acceptance` also runs the wave-close acceptance check when the build lane is drained (surfaces
      a Done-but-inert increment as `acceptance: gap <#s>`; file a recirculation on a gap).
-   - **github:** `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --backend github --project <n> --owner <o>`
-     (github wave-close acceptance runs in `idc:idc-build` Phase 4 — no `--acceptance` here).
+   - **github:** `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --backend github --project <n> --owner <o> --session-id "$CLAUDE_CODE_SESSION_ID"`
+     (github wave-close acceptance runs in `idc:idc-build` Phase 4 — no `--acceptance` here). `--session-id`
+     attributes the persisted drain verdict so the Stop fixpoint gate reads the github board conjunct
+     locally (0 GraphQL on the stop path, v4 Phase 3 Stage E2; env `$CLAUDE_CODE_SESSION_ID` is the fallback).
    Both apply the **identical** eligibility predicate (`Status = Todo` AND `(stage or "Buildable") ==
    "Buildable"` AND the title is not `[operator-action]` AND every native blocked-by is `Done`) over
    the **whole board** — the github mode pages **every** item, so **never** substitute a bare

@@ -75,6 +75,44 @@ BEGIN = "<!-- idc-tracker-state:begin -->"
 END = "<!-- idc-tracker-state:end -->"
 
 
+def _persist_verdict(root, sid, verdict, exit_code):
+    """Record THIS drain pass's `{verdict, exit, session_id}` to the local, gitignored
+    `.idc-drain-verdict.json` at the workspace root (v4 Phase 3 Stage E2) so the Stop fixpoint gate's
+    GITHUB branch can read it instead of re-running the drain live (zero new GraphQL on the stop path).
+
+    ADDITIVE + BEST-EFFORT: this NEVER touches the drain's exit-code contract or stdout verdict lines
+    (Stage B + Phase 0 depend on them) and NEVER raises — a persist failure (import error, repo not
+    governed, write error) degrades silently to a stderr note so it can't break the drain. Backend-
+    agnostic: written on both backends (the filesystem gate ignores it and keeps re-draining live; only
+    the github gate consumes it). Last-write-wins: every pass overwrites, so the final `complete`
+    supersedes any earlier `recirc-pending`."""
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "hooks"))
+        import idc_drain_verdict  # noqa: E402 — sidecar in scripts/hooks/, imported lazily
+        idc_drain_verdict.write_verdict(root, verdict, exit_code, session_id=sid)
+    except Exception as e:  # noqa: BLE001 — persistence is additive; it must never break the drain
+        sys.stderr.write(f"idc-autorun-drain: verdict-persist skipped ({e})\n")
+
+
+def _workspace_root(args):
+    """The governed workspace root the verdict file lives at — the SAME dir the Stop gate reads as the
+    Stop payload's `cwd`. github: the --repo dir; filesystem: the TRACKER.md's dir (repo-root/TRACKER.md
+    in a governed repo). Absolute so the persist target is stable regardless of the drain's own cwd.
+
+    LOAD-BEARING INVARIANT (MINOR-3, reviewer-E2): this root MUST equal the governed repo root the Stop
+    fixpoint gate sees as its payload `cwd` — the drain persists here, the gate reads there, and they
+    coincide only when the drain is invoked from / pointed at that same root. The shipped wiring
+    guarantees it: autorun runs `idc_autorun_drain.py --repo "$PWD"` from the repo root and the Stop
+    payload `cwd` is that same `$PWD`. A future caller that points `--repo` (or a filesystem `--tracker`)
+    at a DIFFERENT tree than the gate's repo would silently strand the verdict where the gate never reads
+    it → a permanent, error-free github false-defer. Keep the drain and the Stop gate rooted together."""
+    if args.backend == "github":
+        return os.path.abspath(args.repo)
+    if args.tracker:
+        return os.path.dirname(os.path.abspath(args.tracker))
+    return os.getcwd()
+
+
 def load(path):
     with open(path, encoding="utf-8") as fh:
         text = fh.read()
@@ -196,7 +234,7 @@ def _blocked_by_numbers(repo, number):
     return [n for n in nums if isinstance(n, int)], True
 
 
-def load_github(owner, project_number, repo):
+def load_github(owner, project_number, repo, root=None, sid=None):
     """Build the predicate's issues list from the github board (ALL pages via idc_gh_board).
 
     Returns `(issues, unverified)` where `unverified` is the count of build candidates whose native
@@ -223,9 +261,14 @@ def load_github(owner, project_number, repo):
         # every github-backend helper. NOT `idc_gh_board.emit_rate_limit_verdict` — that verdict is the
         # bare 'rate-limited until <reset>' with no `drain:` prefix; this predicate's other verdicts
         # (`drain: continue`/`complete`/`unknown`) all carry one, and downstream `/loop` parsing pins it.
+        # Persist the resumable-pause verdict (last-write-wins): overwriting a prior recirc-pending so
+        # a stop during a rate-limit reads `rate-limited` (exit 3 → the gate allows), never a stale
+        # block on a board we could no longer prove pending.
+        _persist_verdict(root, sid, "rate-limited", 3)
         print(f"drain: rate-limited until {e.reset}")
         sys.exit(3)
     except idc_gh_board.BoardReadError as e:
+        _persist_verdict(root, sid, "board-read-error", 2)
         sys.stderr.write(f"idc-autorun-drain: could not read the github board: {e}\n")
         sys.exit(2)
     issues = []
@@ -287,6 +330,11 @@ def main():
     ap.add_argument("--owner", help="project owner login (github backend)")
     ap.add_argument("--repo", default=".",
                     help="repo dir to run gh in (github backend; default cwd)")
+    ap.add_argument("--session-id", dest="session_id", default=None,
+                    help="drain session id for the persisted verdict (v4 Phase 3 Stage E2; "
+                         "default: $CLAUDE_CODE_SESSION_ID). Attributes .idc-drain-verdict.json so the "
+                         "Stop fixpoint gate gates only THIS session's own stop. Purely additive — never "
+                         "changes the drain verdict/exit-code contract.")
     ap.add_argument("--width", action="store_true",
                     help="also print the ready frontier's width (max-useful parallelism); the ready set is the `eligible:` line")
     ap.add_argument("--acceptance", action="store_true",
@@ -296,12 +344,18 @@ def main():
                          "Opt-in so default output stays byte-identical; never changes the drain verdict/exit code.")
     args = ap.parse_args()
 
+    # Resolve the persisted-verdict target ONCE (Stage E2): the session id (explicit flag or the env
+    # the orchestrator exports) and the workspace root the Stop gate reads. Purely additive.
+    sid = args.session_id or os.environ.get("CLAUDE_CODE_SESSION_ID") or None
+    root = _workspace_root(args)
+
     unverified = 0
     if args.backend == "github":
         if not args.project or not args.owner:
             sys.stderr.write("idc-autorun-drain: --project and --owner are required for the github backend\n")
             sys.exit(2)
-        issues, unverified = load_github(args.owner, args.project, os.path.abspath(args.repo))
+        issues, unverified = load_github(args.owner, args.project, os.path.abspath(args.repo),
+                                         root=root, sid=sid)
     else:
         if not args.tracker:
             sys.stderr.write("idc-autorun-drain: --tracker is required for the filesystem backend\n")
@@ -338,6 +392,7 @@ def main():
     # loop. The filesystem path never sets `unverified`, so its verdict is unchanged.) This precedes the
     # recirc-pending branch: an unprovable build lane is a stronger signal than a non-empty inbox.
     if not eligible and unverified:
+        _persist_verdict(root, sid, "unknown", 2)
         print("drain: unknown")
         sys.exit(2)
     # WHOLE-PIPE fixpoint (the second/third conjuncts): the build lane is drained (nothing eligible)
@@ -347,9 +402,12 @@ def main():
     # (/idc:recirculate) / plans the consideration, then re-checks. Both backends share it (the counts
     # come from the same already-loaded `issues`). Skip the width line — the build frontier is empty here.
     if not eligible and (recirc_inbox or unplanned):
+        _persist_verdict(root, sid, "recirc-pending", 4)
         print("drain: recirc-pending")
         sys.exit(4)
-    print("drain: " + ("continue" if eligible else "complete"))
+    _final = "continue" if eligible else "complete"
+    _persist_verdict(root, sid, _final, 0)
+    print("drain: " + _final)
     if args.width:
         # The ready frontier IS the `eligible:` set already printed above; width is its size = the
         # unblocked eligible antichain that can be staffed in parallel right now (the sous-chef

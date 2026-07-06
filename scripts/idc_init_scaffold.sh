@@ -69,4 +69,10 @@ fi
 # module's repo-gate sees a governed repo.
 python3 "$PLUGIN_ROOT/scripts/hooks/idc_ledger.py" --cwd "$REPO_ROOT" ensure-gitignore
 
+# Gitignore the persisted drain verdict (.idc-drain-verdict.json, v4 Phase 3 Stage E2): the same
+# transient per-session sidecar treatment as the ledger. The drain writes it each pass so the Stop
+# fixpoint gate can read the github board conjunct locally (zero GraphQL on the stop path); it is
+# working state, never committed. Module owns the filename + ignore rule; idempotent + append-only.
+python3 "$PLUGIN_ROOT/scripts/hooks/idc_drain_verdict.py" --cwd "$REPO_ROOT" ensure-gitignore
+
 echo "idc-init scaffold complete (backend=$BACKEND, project=$PROJECT_NAME)"

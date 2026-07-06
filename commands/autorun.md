@@ -115,8 +115,11 @@ only when a full pass leaves nothing actionable:
    # filesystem — `--acceptance` also runs the wave-close acceptance check when the build lane is
    # drained (surfaces a Done-but-inert increment as `acceptance: gap <#s>`; file a recirculation on a gap)
    python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --tracker <TRACKER.md> --acceptance
-   # github — pages the WHOLE board, same predicate (github wave-close acceptance runs in idc:idc-build Phase 4)
-   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --backend github --project <n> --owner <o>
+   # github — pages the WHOLE board, same predicate (github wave-close acceptance runs in idc:idc-build Phase 4).
+   # `--session-id` attributes the persisted drain verdict (.idc-drain-verdict.json) to THIS session so the
+   # Stop fixpoint gate can read the github board conjunct locally (0 GraphQL on the stop path, v4 Phase 3
+   # Stage E2); the drain also falls back to $CLAUDE_CODE_SESSION_ID if the flag is omitted.
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --backend github --project <n> --owner <o> --session-id "$CLAUDE_CODE_SESSION_ID"
    ```
    Both apply the identical eligibility predicate (`Status = Todo` AND `(stage or "Buildable") ==
    "Buildable"` AND title not `[operator-action]` AND every native blocked-by `Done`); an

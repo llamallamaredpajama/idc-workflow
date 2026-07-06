@@ -1,10 +1,13 @@
 # Handoff — IDC v4 Phase 3 ("loop & liveness enforcement") — 2026-07-05
 
-**Status:** 🟡 **IN PROGRESS** · **Branch:** `main` @ `5d6f0ee` · Stages **A, B, C MERGED**; **D, E pending.**
-Driven via `/auto-goal-teams` as a **sequential relay** (one enforcement point per stage: build → 2-lens
-adversarial review [codex + a teammate] → fix → merge). Authoritative design:
+**Status:** 🟡 **IN PROGRESS** · **Branch:** `main` @ `440bb6d` · Stages **A, B, C, D, E1, E2 MERGED**;
+**E3 = UNVERIFIED WIP; E4, E5 pending.** Driven via `/auto-goal-teams` as a **sequential relay** (one
+enforcement point per stage: build → 2-lens adversarial review [codex + a teammate] → fix → merge).
+Authoritative design:
 [`2026-07-03-deterministic-core-refactor-plan.md`](2026-07-03-deterministic-core-refactor-plan.md) §3.2/§3.4
-+ §5 Phase 3. **NEXT = Stage D.**
++ §5 Phase 3. **NEXT = verify + finish Stage E3, then E4, E5.** ⚠ **Run halted 2026-07-06 on a monthly
+spend-limit block** (a teammate died `failureReason: monthly spend limit`) — see the RESUME 2026-07-06
+section at the bottom; the account spend cap must be raised before dispatching more teammates.
 
 > The run's scratch briefs (`shared-context.md`, `stage-*-brief.md`) lived in a session scratchpad and do
 > **not** survive `/clear`. Everything needed to resume is below or in the plan; re-derive per-stage briefs
@@ -97,3 +100,62 @@ Fable audit + a corroborating codex pass:
    running `auto-goal`, then the 2-lens review → fix → merge cycle. Repeat for Stage E's increments.
 4. Keep the lead context-lean: route from teammate telegrams; delegate heavy reads/mutation to teammates;
    watch for the idle-without-commit pattern and take over when it happens.
+
+---
+
+## RESUME 2026-07-06 — D/E1/E2 MERGED · E3 UNVERIFIED WIP · E4/E5 pending · HALTED on spend limit
+
+**main @ `440bb6d`.** The relay ran through three more stages cleanly; the 4th was interrupted by an
+account **monthly spend-limit** block (a Writer teammate died `failureReason: You've hit your monthly
+spend limit`). **Raise the cap at claude.ai/settings/usage before dispatching any more teammates** —
+every new teammate will fail the same way until it's raised.
+
+### MERGED this run (all local-verified: lint 0 · run-all ALL GREEN · governance both python3 + no-pyyaml · red-when-broken)
+| Stage | squash | Delivers |
+|-------|--------|----------|
+| **D — PostToolUse board-coherence self-repair** | `2b7d81f` | 2 fail-OPEN PostToolUse observers: `idc_post_commit_sync.py` (git-commit → linked item In-Progress or repair/inject) + `idc_post_issue_create.py` (gh-issue-create → board-add or inject); new `guard_post_observer`/`post_tool_inject` in `idc_hook_lib.py`. **2-lens caught a BLOCKER: Bash PostToolUse `tool_response` has NO `exit_code` field** (both hooks were dead-in-prod; now infer success from stdout/stderr text) + 5 more, all fixed + RWB-proven. |
+| **E1 — main-session drop-F reconciliation** | `61dd645` | `scripts/idc_recirc_reconcile.py` — kill-safe closeout-or-checkpoint reconciliation run from the drain loop (top of every autorun pass + end of `/idc:recirculate`), since the main-session drain fires no SubagentStop. Transcript-less (board=ground truth), taint=idempotence latch, SAFE-bias (unreadable inbox → verdict `unknown`, never a false empty). Reuses Stage C's factored helpers (+`origin=` param on `_checkpoint_body`, +`plugin_root` on the gh helper). |
+| **E2 — github persisted-verdict (0-GraphQL stop path)** | `440bb6d` | New `scripts/hooks/idc_drain_verdict.py` (atomic write, tolerant read, session-scoped `current_verdict`, 24h staleness, self-heals its gitignore). `idc_autorun_drain.py` persists `{verdict,exit,session_id,ts}` each pass; `idc_stop_fixpoint_gate.py`'s github branch (`_github_says_pending`) reads it instead of a live drain → **0 new GraphQL on the stop path**. codex found NO issues; reviewer 3 minors (all fixed/deferred). |
+
+### E3 — UNVERIFIED WIP (do NOT trust or merge as-is)
+- **Branch `p3e3-accepterr` @ `ac69bf3`** (local only, NOT pushed, NOT merged). writer-E3 hit the spend
+  limit mid-build **before committing or self-verifying**; the lead committed its partial work as WIP.
+- **Goal:** an acceptance error/gap at wave close must propagate a NON-terminal drain signal instead of
+  being swallowed into `drain: complete`/exit 0. The bug: `idc_autorun_drain.py:382-410` runs the
+  wave-close acceptance check, prints its `acceptance:` line, then emits `drain: complete`/0 regardless.
+  Intended fix (per `stage-e3-brief.md`, re-derivable from the plan): in the would-be-`complete` path,
+  gate on the acceptance result — **ERROR** (corrupt/exit-2/unrunnable) → `drain: unknown`/exit 2;
+  **GAP** (inert Done item) → new verdict token `drain: acceptance-gap`/exit 4 (existing non-terminal
+  code); **OK** → `complete` unchanged. Persist the new verdicts via `_persist_verdict` (E2). Keep the
+  Phase-0 exit-code CONTRACT {0,2,3,4} and the no-`--acceptance` default output byte-identical.
+- **WIP touches** (262 lines, unverified): `scripts/idc_autorun_drain.py` (+80), `commands/autorun.md`,
+  `agents/idc-autorun.md`, new `tests/smoke/governance/drain-acceptance-nonterminal.sh` (179 lines).
+- **To resume E3:** verify the WIP FROM SCRATCH — `bash scripts/lint-references.sh`; run the new
+  scenario under python3 AND a no-pyyaml venv and **prove it red-when-broken** (revert the gate → gap/
+  error print `complete` instead); `bash tests/smoke/run-all.sh` (Stage B `drain-wave-close-acceptance`
+  must not regress). Then 2-lens review (codex `codex review --base main` + a fresh reviewer) → fix →
+  squash-merge. If the WIP is unsound, discard the branch and rebuild from the brief.
+
+### E4, E5 — pending (not started)
+- **E4 — TeammateIdle synthesis (drop H).** `TeammateIdle` is NOT a real Claude Code hook event → build
+  it as a **drain-loop-invoked deterministic check** that synthesizes an idle teammate's completion from
+  worktree/branch/PR state. New `scripts/hooks/` module wired into the drain loop; governance scenario
+  red-when-broken. (Plan §3.2 drop H.)
+- **E5 — TOP-LEVEL ACCEPTANCE (the final gate).** Full `run-all` + governance both parsers + an
+  **autorun-sandbox e2e** (Stop gate + ledger end-to-end) captured to `_idc-observability/` via a spawned
+  sandbox-rooted `claude -p` (CLAUDE.md local-e2e playbook — never touch live repos). **E5 MUST assert
+  the github persisted-verdict gating end-to-end** (reviewer-E2's MINOR-2: the real env→drain→gate
+  `session_id` equality is only CLI-seeded in E2's unit test, never exercised live — E5 closes that).
+
+### Relay operating notes carried this run (all confirmed)
+- Merges go **direct-to-main via git squash + push** (NOT `gh pr merge`): GitHub's GraphQL PR API is
+  rate-limited this account; the work is verified LOCAL (this repo's authoritative signal), and
+  direct-to-main is the repo's release norm. Iteration policy authorized the per-stage squash-merge.
+- **opus Writers self-committed and needed no Fable escalation** (unlike Stage-D's sonnet writer, which
+  went idle uncommitted → lead took over). Use opus for the remaining hard units.
+- **codex catches a real bug nearly every stage** (D: the exit_code Blocker; E1: the misleading
+  checkpoint body; E2: clean) — never skip it; it's one of the two review lenses.
+- Run artifacts (briefs, per-stage findings, codex outputs) live OUTSIDE the repo at
+  `/Users/jeremy/dev/sandbox/_idc-observability/phase3-de-relay/` — reusable to resume.
+- Verify LOCAL not CI (CI chronically red on 2 pre-existing non-hermetic phase9 tests); run-all needs
+  `export PATH="$HOME/.bun/bin:/opt/homebrew/bin:$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"` (phase8 Pi/bun).

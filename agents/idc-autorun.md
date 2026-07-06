@@ -46,6 +46,24 @@ loop below). Then the two lanes:
    and clears a taint once its ticket leaves the inbox. On github it is one cheap board read per pass in
    the drain loop (not the stop path). It is **fail-soft** (never halts the drain) and **repo-gated**;
    surface a `reconcile: unknown` (unreadable board) as such, never as clean.
+   **Then synthesize any phantom-idle implementer (drop H — every pass, beside the reconcile above):**
+   an implementer teammate can go idle without reporting, leaving its item `Stage = Buildable ∧
+   Status = In Progress` (claimed) but never advanced; the drain is blind to it (counts only `Todo` /
+   merged-`Done`), so the wave would close `drain: complete` with it **stranded**.
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_teammate_idle_synth.py" --repo "$PWD" --session-id "$CLAUDE_CODE_SESSION_ID"`
+   (backend auto-detected) reconstructs each In-Progress item's real state from **local git evidence**
+   (one item read, no per-item PR lookup), stamps ONE idempotent breadcrumb per `(item, class)`, and
+   prints a `teammate-idle:` line per item. Act on each through the SANCTIONED path — the synth never
+   moves the board: `synthesized-complete` (its branch is merged into base — incl. a **squash-merge**,
+   which the synth detects by patch-equivalence — but the board never advanced) → recover with the
+   **CLOSE-ONLY finisher** `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_finish.py" --close-only --pr <pr> --issue <n>` (it SKIPS the merge —
+   already done, so the plain finisher would hard-fail at `gh pr merge` — verifies the merged state as
+   its receipt, then runs the normal cleanup + tracker-close tail; idempotent); `in-flight` → **resume
+   / re-dispatch** from the named branch (never restart); `no-evidence` → no local ref, but a
+   squash-merge that DELETED its branch leaves none, so **check for a merged PR / base commit
+   referencing `#<n>` before reclaiming** (recover close-only if found, else **reclaim / re-dispatch**).
+   It is **fail-soft** (never halts the drain) and **repo-gated**; a `teammate-idle: unknown`
+   (unreadable board) is advisory — surface it, never as clean.
    Query the board for `Stage = Recirculation`, `Status = Todo` inbox tickets (scope discovered
    mid-build, filed as the non-Buildable inbox). If any exist, run `/idc:recirculate` with **no
    arguments** — its **board-scan inbox-drain** mode — to drain each through the recirculator's

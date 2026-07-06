@@ -90,6 +90,31 @@ only when a full pass leaves nothing actionable:
    NOT on the stop path, so the Stop gate's 0-GraphQL guarantee is unaffected. It is **fail-soft** (a
    reconciliation error never halts the drain) and **repo-gated**; its `reconcile:` verdict is advisory
    — surface a `reconcile: unknown` (an unreadable board) in the exit report, never as a clean state.
+   **Then synthesize any phantom-idle implementer (drop H — run at the top of EVERY pass, beside the
+   reconcile above).** An implementer teammate can go IDLE without reporting: its item sits
+   `Stage = Buildable ∧ Status = In Progress` (claimed) but is never advanced, and the drain is BLIND
+   to it (it counts only `Todo` / merged-`Done`) — so the wave would close `drain: complete` with the
+   item **stranded**. Run the deterministic synthesizer to reconstruct each such item's real state
+   from **local git evidence** (no board GraphQL beyond the one item read, no per-item `gh pr view`):
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_teammate_idle_synth.py" --repo "$PWD" --session-id "$CLAUDE_CODE_SESSION_ID"
+   ```
+   It stamps ONE idempotent breadcrumb per `(item, class)` and prints one `teammate-idle:` line per
+   In-Progress item. Act on each class through the SANCTIONED path — the synth never moves the board:
+   - `teammate-idle: <n> synthesized-complete branch <b>` — the work LANDED (its branch is merged into
+     base, incl. a **squash-merge** the synth detects by patch-equivalence) but the board never
+     advanced → recover with the **CLOSE-ONLY finisher**:
+     `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_finish.py" --close-only --pr <pr> --issue <n> --repo "$PWD"`. It **skips** the merge
+     (which already happened — the plain finisher would hard-fail at `gh pr merge`), verifies the
+     merged state as its receipt, then runs the normal cleanup + tracker-close tail; it is idempotent.
+   - `teammate-idle: <n> in-flight branch <b> ahead <k>` — the teammate went idle mid-work with `<k>`
+     genuinely-unmerged commits → **re-dispatch / resume** from branch `<b>` (do NOT restart).
+   - `teammate-idle: <n> no-evidence` — no local branch/commits — BUT a squash-merge that **deleted**
+     its branch leaves no local ref, so this can be an already-landed item. **Before reclaiming**,
+     check for a merged PR / a base-history commit referencing `#<n>`; if found, recover close-only as
+     above — otherwise **reclaim / re-dispatch** the item.
+   It is **fail-soft** (never halts the drain), **repo-gated**, and honors `IDC_HOOKS_OBSERVE_ONLY=1`
+   as a dry run; a `teammate-idle: unknown` (unreadable board) is advisory — surface it, never as clean.
    Then, if any `Stage = Recirculation`
    inbox tickets exist (scope discovered mid-build, filed back into the non-Buildable inbox), run
    `/idc:recirculate` with **no arguments** (its **board-scan inbox-drain** mode) to absorb each back

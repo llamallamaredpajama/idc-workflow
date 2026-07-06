@@ -27,6 +27,13 @@ leaves behind; this helper is prevention, not the safety net.
 Usage: idc_git_finish.py --pr N --issue M --worktree PATH [--repo DIR] [--tracker PATH]
   exit 0  every step verified — prints `finish: ok`.
   exit 1  the first unverifiable step — prints `finish: <step> failed: <detail>` to stderr.
+
+CLOSE-ONLY recovery (`--close-only`): an ALREADY-MERGED PR whose board was never advanced — the
+phantom-idle `synthesized-complete` shape (v4 Phase 3 Stage E4). The normal `gh pr merge` step would
+hard-fail on a merged PR, so this mode SKIPS the merge (and the verdict receipt gate); the proven
+MERGED state (`verify_pr_merged`) IS the receipt, then the SAME fail-closed cleanup + tracker-close
+tail runs. Idempotent — safe to re-run when the item is already Done / branch already gone. Prints
+`finish: ok (close-only)`.
 """
 import argparse
 import json
@@ -44,6 +51,34 @@ import idc_gh_board                     # noqa: E402 — BoardReadError for fail
 
 REMOTE = "origin"
 MERGE_METHODS = ("squash", "merge", "rebase")
+
+# Branch → item resolution for the close-only OWNERSHIP accident-guard (reviewer P2-1 + P2-A). An
+# INDEPENDENT copy of idc_teammate_idle_synth._resolve_ref_item, kept local per this helper's
+# established doctrine of owning its parsers with no cross-unit import dependency (see read_backend/
+# read_config below). IDC build branches (`worktree-build-<n>` / `impl-<n>` / `<n>-slug`) put the item
+# number as a standalone token that Stage D's STRICT leading-segment regex would miss. Resolve
+# UNAMBIGUOUSLY (P2-A — an ambiguous head must not close some unrelated item): a supported SHAPE wins,
+# else exactly ONE standalone number, else None (fail closed). The proven MERGED PR state is the real
+# receipt; this is only a cheap guard against a mis-aimed --issue.
+_STRICT_ITEM_RE = re.compile(r"(?:^|/)(?:issue-)?(\d+)(?:[-_]|$)")     # Stage D strict leading-segment
+_ADAPTER_ITEM_RE = re.compile(r"(?:^|/)(?:worktree-)?(?:build|impl|unit|fix|issue)-(\d+)$")  # adapter shape
+_ITEM_TOKEN_RE = re.compile(r"(?:^|[-_/])(\d+)(?=$|[-_/])")            # any standalone numeric token
+
+
+def _resolve_branch_item(branch):
+    """(item_number_or_None, all_standalone_numbers) — unambiguous linkage only (see the header). The
+    ADAPTER shape is consulted FIRST (round-8 micro-fix): consulting the strict leading-segment regex
+    first let a date/parent PREFIX win via the `or` short-circuit (`2026-07/worktree-build-42` → 2026),
+    which could accept a WRONG item. The end-anchored adapter unit shape is authoritative → its number
+    wins over a strict prefix; a --issue that is not that unit is refused (no wrong close)."""
+    branch = branch or ""
+    nums = sorted({int(m.group(1)) for m in _ITEM_TOKEN_RE.finditer(branch)})
+    m = _ADAPTER_ITEM_RE.search(branch) or _STRICT_ITEM_RE.search(branch)
+    if m:
+        return int(m.group(1)), nums
+    if len(nums) == 1:
+        return nums[0], nums
+    return None, nums
 
 # Resolves ONE issue's project-item id + board Status + open/closed state in a single GraphQL call —
 # O(1) per issue via the issue's own `projectItems` field, never a whole-board read (the exact
@@ -74,6 +109,12 @@ def _fail(step, detail, code=1):
     code=2: a usage/config error caught before any mutation was attempted."""
     sys.stderr.write(f"finish: {step} failed: {detail}\n")
     sys.exit(code)
+
+
+def _warn(msg):
+    """A NON-fatal note to stderr (does not exit) — used by the close-only live-remote-tip guard to
+    record a SKIPPED (never destroyed) remote branch while the close continues."""
+    sys.stderr.write(f"finish: {msg}\n")
 
 
 def _run(cmd, cwd):
@@ -139,12 +180,176 @@ def pr_merge(repo, pr, merge_method):
         _fail("merge", f"gh pr merge --{merge_method} --delete-branch #{pr} failed: {err.strip()[:300]}")
 
 
+def push_delete_remote_best_effort(repo, branch):
+    """Best-effort delete of the remote branch (close-only recovery only). A normal finish deletes it
+    via `gh pr merge --delete-branch`; in close-only that merge already happened out-of-band, so if the
+    branch LINGERS (merged without the flag) we delete it here so the recovery is idempotent. NEVER
+    fails: an already-gone ref is the success case — `verify_remote_branch_gone` is the real check."""
+    _run(["git", "push", REMOTE, "--delete", branch], repo)
+
+
 def verify_pr_merged(repo, pr):
     rc, out, err = _run(["gh", "pr", "view", str(pr), "--json", "state", "-q", ".state"], repo)
     if rc != 0:
         _fail("verify-pr-merged", f"could not read PR #{pr} state: {err.strip()[:200]}")
     if out.strip() != "MERGED":
         _fail("verify-pr-merged", f"PR #{pr} state is {out.strip()!r}, expected MERGED")
+
+
+# ── head-branch containment (close-only P1): a MERGED PR state only proves the OLD tip merged; a
+#    branch ADVANCED or REUSED since carries NEW unmerged commits that a delete would drop. Before ANY
+#    destructive step, require the head ref's CURRENT tip to still be contained in base. Small local
+#    git primitives per this helper's own no-cross-unit doctrine (mirrors idc_teammate_idle_synth). ──
+def _git_out(repo, *args):
+    rc, out, err = _run(["git", *args], repo)
+    return out.strip() if rc == 0 and out.strip() else None
+
+
+def _resolve_committish(repo, ref):
+    """<ref>'s commit sha, or None if the ref does not resolve (absent/deleted)."""
+    return _git_out(repo, "rev-parse", "--verify", "--quiet", ref + "^{commit}")
+
+
+def _is_ancestor(repo, commit, base):
+    rc, _o, _e = _run(["git", "merge-base", "--is-ancestor", commit, base], repo)
+    return rc == 0
+
+
+def _patch_id(repo, diff_argv):
+    """Stable patch-id of a diff, or None (empty diff / failure)."""
+    try:
+        d = subprocess.run(["git", *diff_argv], cwd=repo, capture_output=True, text=True, timeout=15)
+        if d.returncode != 0 or not d.stdout:
+            return None
+        p = subprocess.run(["git", "patch-id", "--stable"], cwd=repo,
+                           input=d.stdout, capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if p.returncode != 0:
+        return None
+    toks = p.stdout.split()
+    return toks[0] if toks else None
+
+
+def _aggregate_landed(repo, ref, base, cap=200):
+    """True iff the ref's AGGREGATE diff (all commits since the merge-base, as one patch) is
+    patch-equivalent to a single commit already in base — the multi-commit-squash containment case."""
+    mb = _git_out(repo, "merge-base", base, ref)
+    if not mb:
+        return False
+    branch_pid = _patch_id(repo, ["diff", mb, ref])
+    if not branch_pid:
+        return False
+    log = _git_out(repo, "log", "--format=%H", mb + ".." + base)
+    if not log:
+        return False
+    for i, commit in enumerate(log.splitlines()):
+        if i >= cap:
+            break
+        if _patch_id(repo, ["diff-tree", "-p", commit]) == branch_pid:
+            return True
+    return False
+
+
+def _cherry_all_landed(repo, ref, base):
+    """True iff EVERY commit the ref is ahead of base is patch-equivalent to a commit already in base
+    (`git cherry <base> <ref>` reports only `-` lines) — the per-commit rebase / cherry-pick landing.
+    Mirrors the synth's per-commit `git cherry` completeness (codex P2-1) so the containment gate never
+    refuses a rebase-landed branch the synth already steered as synthesized-complete."""
+    out = _git_out(repo, "cherry", base, ref)
+    if out is None:
+        return False
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    return bool(lines) and not any(ln.startswith("+") for ln in lines)
+
+
+def pr_base_ref(repo, pr):
+    """The PR's base branch name via gh (best-effort — None if unavailable, callers fall back)."""
+    rc, out, err = _run(["gh", "pr", "view", str(pr), "--json", "baseRefName", "-q", ".baseRefName"], repo)
+    return out.strip() if rc == 0 and out.strip() else None
+
+
+def _containment_bases(repo, pr):
+    """Ordered, deduped base committishes to verify head containment against: the PR's baseRefName (+
+    its remote-tracking form), then origin/HEAD's target and local/remote main/master — every one that
+    resolves. Mirrors the synth's base-candidate list so a fetch-no-ff / unpushed-merge shape is safe."""
+    prbase = pr_base_ref(repo, pr)
+    raw = [prbase, f"{REMOTE}/{prbase}" if prbase else None, "main", "master"]
+    sym = _git_out(repo, "symbolic-ref", "refs/remotes/origin/HEAD")
+    if sym and sym.startswith("refs/remotes/"):
+        raw.append(sym[len("refs/remotes/"):])
+    raw += [f"{REMOTE}/main", f"{REMOTE}/master"]
+    seen, out = set(), []
+    for cand in raw:
+        if not cand or cand in seen:
+            continue
+        seen.add(cand)
+        if _resolve_committish(repo, cand):
+            out.append(cand)
+    return out
+
+
+def _contained_in_any_base(repo, ref_or_sha, bases):
+    """True iff <ref_or_sha> is fully landed in SOME base candidate — ancestor of, all-commits
+    patch-equivalent to (per-commit rebase/cherry-pick), or aggregate patch-equivalent to (squash) a
+    commit in, that base. The single containment predicate shared by the local-tip refuse gate and the
+    live-remote-tip delete guard (git accepts a raw sha as a committish for merge-base/cherry/diff)."""
+    return any(_is_ancestor(repo, ref_or_sha, b) or _cherry_all_landed(repo, ref_or_sha, b)
+               or _aggregate_landed(repo, ref_or_sha, b) for b in bases)
+
+
+def refuse_if_head_advanced(repo, branch, pr):
+    """Fail closed if the head branch's CURRENT tip (local `branch` OR remote-tracking `origin/branch`)
+    still EXISTS and is NOT contained in base — ancestor of, or aggregate patch-equivalent to a commit
+    in, some base candidate (codex P1). A MERGED PR only proves the OLD tip merged; deleting an advanced
+    /reused branch drops its new unmerged commits. A deleted/absent ref has nothing to drop → skipped."""
+    bases = _containment_bases(repo, pr)
+    for ref in (branch, f"{REMOTE}/{branch}"):
+        tip = _resolve_committish(repo, ref)
+        if tip is None:
+            continue  # this ref is gone — nothing to delete for it
+        if not bases:
+            _fail("close-only-advanced",
+                  f"head branch '{ref}' still exists but no base ref could be resolved to verify it is "
+                  "merged — refusing to delete/close (resolve base / re-finish)")
+        if _contained_in_any_base(repo, tip, bases):
+            continue  # tip fully landed in some authoritative base (ff / per-commit / squash) — safe
+        n = _git_out(repo, "rev-list", "--count", bases[0] + ".." + ref)
+        ahead = int(n) if (n and n.isdigit()) else 0
+        _fail("close-only-advanced",
+              f"head branch '{ref}' has advanced past the merged PR #{pr} ({ahead} unmerged "
+              "commit(s)) — refusing to delete/close; resume or re-finish the new work")
+
+
+def live_remote_tip_deletable(repo, branch, pr):
+    """True iff the LIVE remote tip of <branch> is SAFE to delete — its exact sha is locally KNOWN and
+    CONTAINED in base (codex round-8 P1, DATA-SAFETY). The remote-tracking ref that refuse_if_head_advanced
+    checked can be STALE (someone pushed since the last fetch), so a destructive `push --delete` must
+    verify the LIVE tip via `git ls-remote`, not origin/<branch>. Absent on the remote ⇒ nothing to
+    delete ⇒ True. ls-remote failure / a live tip unknown locally / an advanced (uncontained) live tip
+    ⇒ False + warn: SKIP the delete, leave the branch (it resurfaces as in-flight on a later synth pass
+    once fetched) — never silently destroy live advanced work. The close still completes (the merged-PR
+    receipt holds); only the remote delete is skipped."""
+    rc, out, err = _run(["git", "ls-remote", REMOTE, "refs/heads/" + branch], repo)
+    if rc != 0:
+        _warn(f"close-only: live remote tip of '{branch}' unreadable (git ls-remote rc={rc}) — leaving "
+              "the remote branch (it resurfaces via the idle synth after a fetch)")
+        return False
+    line = out.strip()
+    if not line:
+        return True  # not present on the remote — nothing to delete
+    live = line.split()[0]
+    if _resolve_committish(repo, live) is None:
+        _warn(f"close-only: live remote tip {live[:12]} of '{branch}' is unknown locally (the remote "
+              "advanced since the last fetch) — leaving the remote branch (it resurfaces via the idle "
+              "synth after a fetch)")
+        return False
+    bases = _containment_bases(repo, pr)
+    if bases and _contained_in_any_base(repo, live, bases):
+        return True
+    _warn(f"close-only: live remote tip {live[:12]} of '{branch}' is not proven contained in base — "
+          "leaving the remote branch (it resurfaces via the idle synth after a fetch)")
+    return False
 
 
 def verify_remote_branch_gone(repo, branch):
@@ -177,6 +382,26 @@ def git_worktree_list(repo):
     if rc != 0:
         _fail("worktree-remove", f"git worktree list --porcelain failed: {err.strip()[:200]}")
     return [line[len("worktree "):].strip() for line in out.splitlines() if line.startswith("worktree ")]
+
+
+def worktree_for_branch(repo, branch):
+    """The path of the worktree that currently has <branch> checked out, or None. Parses
+    `git worktree list --porcelain` (worktree/branch record pairs). Used by close-only recovery: a
+    branch still checked out in the idle teammate's worktree would make `git branch -D` fail, so the
+    finisher removes that worktree first (codex P2b). Best-effort: a list failure returns None."""
+    rc, out, err = _run(["git", "worktree", "list", "--porcelain"], repo)
+    if rc != 0:
+        return None
+    cur = None
+    for line in out.splitlines():
+        if line.startswith("worktree "):
+            cur = line[len("worktree "):].strip()
+        elif line.startswith("branch "):
+            ref = line[len("branch "):].strip()
+            name = ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref
+            if name == branch:
+                return cur
+    return None
 
 
 def worktree_remove(repo, worktree_abs):
@@ -370,6 +595,71 @@ def enforce_receipt_gate(args, backend, repo, tracker_path, owner, project_numbe
               "that is not satisfied; refusing to merge (resolve it, re-review, retry)")
 
 
+def close_only_recover(args, repo, worktree_abs, tracker_path, backend, project_number, field_ids, owner, name):
+    """CLOSE-ONLY recovery for an ALREADY-MERGED PR whose board was never advanced — the phantom-idle
+    `synthesized-complete` shape (v4 Phase 3 Stage E4 / codex P2). The normal finish runs `gh pr merge`,
+    which HARD-FAILS on an already-merged PR, so this mode SKIPS the merge. Its RECEIPT is the provable
+    MERGED STATE itself (`verify_pr_merged` — the merge already happened out-of-band, so re-gating it
+    with the review verdict is both meaningless and impossible for a teammate that went idle; the merged
+    state is a STRONGER receipt than a verdict — the code is demonstrably in base). It then runs the
+    SAME fail-closed cleanup + tracker-close tail as the normal path, and is IDEMPOTENT: safe to re-run
+    when the item is already Done / the branch already deleted / the worktree already gone.
+
+    NOTE this deliberately does NOT run `enforce_receipt_gate` (the verdict receipt) — that gate exists
+    to authorize a MERGE, and there is no merge here. It is a new, narrow RECOVERY door; the default
+    finish path and its receipt gate are untouched. But it MUST still PROVE OWNERSHIP before mutating
+    the board (codex P1b): the merged PR's head branch must link to --issue via Stage D's
+    branch-number convention — else a merged PR for a DIFFERENT item could close the wrong board item."""
+    branch = resolve_branch(repo, args.pr)
+    verify_pr_merged(repo, args.pr)   # THE RECEIPT: the PR must actually be MERGED (else refuse)
+
+    # OWNERSHIP ACCIDENT-GUARD (P1b + P2-1 + P2-A): the proven MERGED PR state is the real receipt;
+    # this is a cheap guard against a mis-aimed --issue. The head branch must resolve UNAMBIGUOUSLY to
+    # --issue (a supported shape, else a single standalone number); an ambiguous or mismatched head
+    # fails closed — never close a stranger's item on an unrelated / ambiguous merged PR.
+    linked, nums = _resolve_branch_item(branch)
+    if linked != args.issue:
+        _fail("close-only-ownership",
+              f"PR #{args.pr} head {branch!r} resolves to item {linked} (standalone numbers "
+              f"{nums or 'none'}) not --issue {args.issue} — refusing to close (close-only requires "
+              "the merged PR to own the item it closes)")
+
+    # CONTAINMENT GATE (P1): a MERGED PR only proves the OLD tip merged. If the head branch still exists
+    # and has ADVANCED / been REUSED since (new commits not in base), deleting it drops unmerged work —
+    # fail closed BEFORE any worktree/branch deletion.
+    refuse_if_head_advanced(repo, branch, args.pr)
+
+    # Explicit --worktree override first (idempotent), THEN auto-detect a worktree still on this branch
+    # (the idle teammate's) so `git branch -D` won't fail on a checked-out branch (P2b). Safe to remove:
+    # the branch is PROVEN merged + ownership-verified.
+    if worktree_abs is not None:
+        worktree_remove(repo, worktree_abs)
+    auto_wt = worktree_for_branch(repo, branch)
+    if auto_wt is not None:
+        worktree_remove(repo, auto_wt)
+        verify_worktree_gone(repo, auto_wt)
+
+    # LIVE-REMOTE-TIP data-safety (round-8 P1): only delete the remote branch when its LIVE tip (not the
+    # possibly-stale remote-tracking ref) is proven contained in base. Otherwise SKIP the delete + warn
+    # and continue — an advanced remote branch resurfaces as in-flight on a later synth pass, never
+    # silently destroyed. Local deletion stays under refuse_if_head_advanced's local containment rule.
+    if live_remote_tip_deletable(repo, branch, args.pr):
+        push_delete_remote_best_effort(repo, branch)   # idempotent — a squash-merge may have left it
+        verify_remote_branch_gone(repo, branch)
+    branch_delete_local(repo, branch)
+    tracker_close(backend, repo, args.issue, tracker_path, project_number, field_ids, owner, name)
+
+    # Final end-state verify (same belt-and-suspenders as the normal path).
+    verify_pr_merged(repo, args.pr)
+    verify_local_branch_gone(repo, branch)
+    if worktree_abs is not None:
+        verify_worktree_gone(repo, worktree_abs)
+    verify_tracker_closed(backend, repo, args.issue, tracker_path, project_number, owner, name)
+
+    print("finish: ok (close-only)")
+    sys.exit(0)
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="The finisher's deterministic git-finalization tail: remove the worktree, "
@@ -377,7 +667,14 @@ def main():
                     "branch, close the tracker (backend-blind), and re-verify the full end state.")
     ap.add_argument("--pr", type=int, required=True, help="the merged triplet's PR number")
     ap.add_argument("--issue", type=int, required=True, help="the tracker issue number to close")
-    ap.add_argument("--worktree", required=True, help="path to the build worktree to remove")
+    ap.add_argument("--worktree", default=None,
+                     help="path to the build worktree to remove (required for a normal finish; optional "
+                          "in --close-only, where a phantom-idle item's worktree may already be gone)")
+    ap.add_argument("--close-only", dest="close_only", action="store_true",
+                     help="RECOVERY mode for an ALREADY-MERGED PR whose board was never advanced (the "
+                          "phantom-idle synthesized-complete shape). SKIPS the merge (and the verdict "
+                          "receipt gate — the merged PR state IS the receipt), VERIFIES the PR is really "
+                          "MERGED, then runs the normal cleanup + tracker-close tail. Idempotent.")
     ap.add_argument("--repo", default=".", help="repo root (default: cwd)")
     ap.add_argument("--tracker", default=None,
                      help="filesystem TRACKER.md path (default: <repo>/TRACKER.md; ignored on github)")
@@ -393,8 +690,13 @@ def main():
     ap.set_defaults(require_routed=True)
     args = ap.parse_args()
 
+    if not args.close_only and not args.worktree:
+        ap.error("--worktree is required for a normal finish (optional only in --close-only mode)")
+
     repo = os.path.abspath(args.repo)
-    worktree_abs = args.worktree if os.path.isabs(args.worktree) else os.path.join(repo, args.worktree)
+    worktree_abs = None
+    if args.worktree:
+        worktree_abs = args.worktree if os.path.isabs(args.worktree) else os.path.join(repo, args.worktree)
     tracker_path = args.tracker or os.path.join(repo, "TRACKER.md")
 
     backend = read_backend(repo)
@@ -402,6 +704,12 @@ def main():
         _fail("resolve-backend", f"unknown or unset backend {backend!r} in tracker-config.yaml", code=2)
     project_number, field_ids = read_config(repo) if backend == "github" else ("", {})
     owner, name = gh_owner_name(repo) if backend == "github" else (None, None)
+
+    # CLOSE-ONLY recovery (already-merged PR, board never advanced) branches BEFORE the merge-authorizing
+    # receipt gate: its receipt is the proven merged state, not the verdict — see close_only_recover.
+    if args.close_only:
+        close_only_recover(args, repo, worktree_abs, tracker_path, backend,
+                           project_number, field_ids, owner, name)
 
     # RECEIPT GATE — refuse before ANY mutation if the review verdict isn't a clean, routed, condition-
     # met receipt for THIS PR/issue (the finish is a P5 receipt gate; mirrors the engine's close guard).

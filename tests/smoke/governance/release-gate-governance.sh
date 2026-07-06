@@ -19,6 +19,9 @@ trap 'rm -rf "$WORK"' EXIT
 ISOLATED_LANE="$WORK/governance"
 mkdir -p "$ISOLATED_LANE"
 cp "$HERE/lib.sh" "$ISOLATED_LANE/"
+# The python script requires the self-check to exist. A simple passing one is enough for this test.
+printf '#!/bin/bash\nexit 0\n' > "$ISOLATED_LANE/_lane-selfcheck.sh"
+chmod +x "$ISOLATED_LANE/_lane-selfcheck.sh"
 
 PY_SCRIPT="$REPO_ROOT/scripts/idc_release_check.py"
 

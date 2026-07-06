@@ -211,6 +211,17 @@ for f in $MD_FILES; do
   esac
 done
 
+# Rule O — workflow-machine.yaml cross-check.
+# Every workflow state/transition NAME referenced in shipped prose must exist in
+# templates/workflow-machine.yaml (stages, statuses, op names).
+if [ -f scripts/idc_lint_machine_yaml_refs.py ]; then
+  # The python script prints its own file:line: error reports, so here we just need to
+  # capture the failure and set the global FAIL flag so the linter exits non-zero.
+  if ! python3 scripts/idc_lint_machine_yaml_refs.py --machine-yaml templates/workflow-machine.yaml $MD_FILES; then
+    FAIL=1
+  fi
+fi
+
 # Rule C (runtime/) — the vendored runtime tree ships to users but is not markdown and sits
 # outside the surfaces globbed above. Scan every regular file under runtime/ for machine-local
 # paths so a personal-path leak (e.g. /Users/<user> in the launcher) cannot hide there.

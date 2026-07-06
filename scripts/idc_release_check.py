@@ -14,18 +14,76 @@ checks (stdlib only — the plugin ships to repos without PyYAML):
      changes were never given a new version. FAIL: convert `## Unreleased` to a dated
      release heading and bump `plugin.json` (+ `marketplace.json`) in lockstep.
 
+An optional `--governance` flag runs the `tests/smoke/governance` lane, asserting that
+all deterministic behavioral guards are green. This is used as a final release gate.
+
 Exit 0 = clean. Exit 1 = one finding per line on stderr (lint-references.sh surfaces them).
 """
 from __future__ import annotations
 
+import argparse
+import glob
 import json
 import os
+import subprocess
 import sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PLUGIN_JSON = os.path.join(ROOT, ".claude-plugin", "plugin.json")
 MARKETPLACE_JSON = os.path.join(ROOT, ".claude-plugin", "marketplace.json")
 CHANGELOG = os.path.join(ROOT, "CHANGELOG.md")
+
+
+def run_governance_lane() -> int:
+    """Discover and run the governance smoke tests."""
+    gov_lane_dir = os.environ.get(
+        "IDC_OVERRIDE_GOVERNANCE_LANE_DIR", os.path.join(ROOT, "tests", "smoke", "governance")
+    )
+    if not os.path.isdir(gov_lane_dir):
+        print(f"FAIL: governance lane directory not found: {gov_lane_dir}", file=sys.stderr)
+        return 1
+
+    findings = []
+    print(f"--- Running governance lane from: {gov_lane_dir} ---", file=sys.stderr)
+
+    # 1. Self-check is mandatory
+    self_check_path = os.path.join(gov_lane_dir, "_lane-selfcheck.sh")
+    if not os.path.isfile(self_check_path):
+        findings.append("governance/_lane-selfcheck.sh (MISSING)")
+    else:
+        res = subprocess.run(
+            ["bash", self_check_path], capture_output=True, text=True, check=False
+        )
+        if res.returncode == 0:
+            print("  PASS  governance/_lane-selfcheck.sh", file=sys.stderr)
+        else:
+            findings.append(f"governance/_lane-selfcheck.sh\n        {res.stdout}{res.stderr}".strip())
+
+    # 2. Discover and run scenarios
+    scenarios = sorted(glob.glob(os.path.join(gov_lane_dir, "*.sh")))
+    real_scenarios = 0
+    for s_path in scenarios:
+        base = os.path.basename(s_path)
+        if base == "lib.sh" or base.startswith("_"):
+            continue
+        real_scenarios += 1
+        res = subprocess.run(
+            ["bash", s_path], capture_output=True, text=True, check=False
+        )
+        if res.returncode == 0:
+            print(f"  PASS  governance/{base}", file=sys.stderr)
+        else:
+            findings.append(f"governance/{base}\n        {res.stdout}{res.stderr}".strip())
+
+    print("------------------------------------------------", file=sys.stderr)
+    if findings:
+        print(f"governance lane: {len(findings)} FAILED", file=sys.stderr)
+        for f in findings:
+            print(f"  FAIL  {f}", file=sys.stderr)
+        return 1
+
+    print(f"governance lane: ALL GREEN ({real_scenarios} real scenario(s) + self-check)", file=sys.stderr)
+    return 0
 
 
 def load_json(path: str) -> dict:
@@ -61,6 +119,19 @@ def parse_changelog(path: str) -> tuple[bool, str | None]:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Release-discipline guard for the IDC plugin."
+    )
+    parser.add_argument(
+        "--governance",
+        action="store_true",
+        help="Run the governance test lane as a release gate.",
+    )
+    args = parser.parse_args()
+
+    if args.governance:
+        return run_governance_lane()
+
     findings: list[str] = []
 
     plugin_version = str(load_json(PLUGIN_JSON).get("version", "")).strip()

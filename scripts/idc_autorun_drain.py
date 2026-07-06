@@ -61,8 +61,16 @@ Backends (the SAME pure predicate over either source — `compute_eligible`):
 Usage: idc_autorun_drain.py --tracker <TRACKER.md> [--width]                       (filesystem)
        idc_autorun_drain.py --backend github --project <n> --owner <o> [--width]   (github)
        (exit 0 = ok/complete/continue, 2 = error/unknown, 3 = rate-limited — resumable pause,
-        github only, 4 = recirc-pending — build lane drained but the Recirculation/Consideration
-        inbox is non-empty, NOT terminal)
+        github only, 4 = recirc-pending / acceptance-gap — build lane drained but NOT terminal)
+
+With `--acceptance` (opt-in, filesystem) the wave-close acceptance result GATES a would-be-`complete`
+verdict (v4 Phase 3 Stage E3): a GAP (a merged-Done item is inert) becomes `drain: acceptance-gap` +
+exit 4 (a new VERDICT TOKEN on the existing non-terminal exit 4 — the orchestrator recirculates the
+inert items), and an ERROR (the check errored / exited 2 / was unrunnable — e.g. a corrupt tracker)
+becomes `drain: unknown` + exit 2 (we cannot prove the wave clean → autorun retries next `/loop`). So a
+corrupt or inert wave close can never masquerade as a clean, TERMINAL `complete`. The gate fires ONLY on
+the would-be-`complete` path — an already-non-terminal verdict (unverified/unknown, recirc-pending)
+still wins — and the Phase-0 exit-code SET {0,2,3,4} is unchanged.
 """
 import argparse
 import json
@@ -302,23 +310,43 @@ def load_github(owner, project_number, repo, root=None, sid=None):
 
 def _run_wave_close_acceptance(tracker):
     """Invoke the EXISTING idc_acceptance_check.py (sibling in scripts/) over `tracker` at wave close
-    and return its `acceptance: <ok|gap …>` line. Reuses that script as the single source of inertness
-    truth — never reimplements it. Best-effort: a runner failure returns a diagnostic `acceptance:`
-    line rather than raising, so the drain's own verdict + exit-code contract is untouched. The check's
-    own exit code (0 ok / 1 gap) is NOT propagated to the drain's exit — only its verdict line is
-    surfaced, for the orchestrator to act on."""
+    and CLASSIFY its result. Reuses that script as the single source of inertness truth — never
+    reimplements it. Returns `(cls, line)` where `line` is the checker's `acceptance: <ok|gap …>` line
+    (or a diagnostic one) and `cls` is one of:
+      * None  — the check DID NOT RUN (the sibling script is absent). Treated as a clean wave close by
+                the caller (the acceptance gate never fires), so a repo without the checker is unchanged.
+      * "ok"  — the checker exited 0 AND printed `acceptance: ok`.
+      * "gap" — the checker exited 1 AND printed `acceptance: gap …` (a merged-Done item is inert).
+      * "error" — ANYTHING else: a non-zero exit that is not a clean gap, a subprocess failure, a
+                missing/unexpected verdict line, or an exit/line disagreement (e.g. a corrupt tracker
+                that exits 2). Classified off BOTH the exit code AND the stdout token so a corrupt input
+                lands in "error", never masquerading as a silent "ok" (Stage E3 — load-bearing).
+    Best-effort: a runner failure classifies as "error" with a diagnostic line rather than raising, so
+    the drain's own verdict + exit-code contract is never broken by the check itself. The caller (main)
+    is what maps the classification onto the drain verdict/exit — this function only observes the check.
+    idc_acceptance_check.py's contract: exit 0 = `acceptance: ok`, 1 = `acceptance: gap <n…>`, 2 = error
+    (malformed tracker / corrupt issue / unparseable deferral marker — NO acceptance line on stdout)."""
     checker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "idc_acceptance_check.py")
     if not os.path.isfile(checker):
-        return None
+        return None, None
     try:
         r = subprocess.run([sys.executable, checker, "--tracker", tracker],
                            capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError) as e:
-        return f"acceptance: error ({e})"
+        return "error", f"acceptance: error ({e})"
+    line = None
     for ln in (r.stdout or "").splitlines():
         if ln.startswith("acceptance:"):
-            return ln.strip()
-    return "acceptance: error (no verdict)"
+            line = ln.strip()
+            break
+    # Classify off BOTH the exit code and the token — a clean OK is exit 0 + `acceptance: ok`; a clean
+    # GAP is exit 1 + `acceptance: gap …`. Anything else (a corrupt tracker's exit 2 with no line, an
+    # exit/line disagreement, an unexpected token) is an ERROR the drain must not swallow as complete.
+    if r.returncode == 0 and line == "acceptance: ok":
+        return "ok", line
+    if r.returncode == 1 and line is not None and line.startswith("acceptance: gap"):
+        return "gap", line
+    return "error", line or "acceptance: error (no verdict)"
 
 
 def main():
@@ -341,7 +369,10 @@ def main():
                     help="at wave close (the build lane is drained), also invoke idc_acceptance_check.py over "
                          "the same tracker and print its `acceptance: <ok|gap …>` line (filesystem backend; the "
                          "github wave-close acceptance runs in idc:idc-build Phase 4 via a materialized tracker). "
-                         "Opt-in so default output stays byte-identical; never changes the drain verdict/exit code.")
+                         "Opt-in so DEFAULT output stays byte-identical. Under --acceptance the result GATES a "
+                         "would-be-`complete` wave close (Stage E3): a GAP ⇒ `drain: acceptance-gap` exit 4, an "
+                         "ERROR/corrupt check ⇒ `drain: unknown` exit 2 (both NON-TERMINAL); ok ⇒ complete exit 0. "
+                         "The Phase-0 exit-code set {0,2,3,4} is unchanged (acceptance-gap is a new TOKEN on exit 4).")
     args = ap.parse_args()
 
     # Resolve the persisted-verdict target ONCE (Stage E2): the session id (explicit flag or the env
@@ -379,8 +410,9 @@ def main():
     # verdict/exit-code contract (Phase 0). Filesystem only — the github lane materializes a tracker in
     # idc:idc-build Phase 4; the drain holds no TRACKER.md for a github board. The orchestrator reads
     # the line and files a recirculation on a gap (its job — the drain never recirculates).
+    accept_cls = None
     if args.acceptance and not eligible and args.tracker:
-        accept_line = _run_wave_close_acceptance(args.tracker)
+        accept_cls, accept_line = _run_wave_close_acceptance(args.tracker)
         if accept_line:
             print(accept_line)
     # AGGREGATE fail-closed verdict (the github blind-drain guard): NO eligible work remains AND at
@@ -404,6 +436,28 @@ def main():
     if not eligible and (recirc_inbox or unplanned):
         _persist_verdict(root, sid, "recirc-pending", 4)
         print("drain: recirc-pending")
+        sys.exit(4)
+    # WAVE-CLOSE ACCEPTANCE GATE (v4 Phase 3 Stage E3): the build lane is drained and no stronger
+    # non-terminal signal (unverified/recirc-pending) fired — so the drain WOULD print terminal
+    # `drain: complete`. But if the wave-close acceptance check (opt-in, filesystem) could not prove the
+    # wave clean, `complete` would let a corrupt/inert close masquerade as a terminal fixpoint and stop
+    # autorun. GATE the would-be-`complete` verdict on the acceptance classification:
+    #   * ERROR (checker errored / exited 2 / unrunnable / no verdict — e.g. a corrupt tracker) ⇒ we
+    #     CANNOT prove the wave clean → `drain: unknown` + exit 2 (same non-terminal signal as the github
+    #     blind-drain guard above; autorun retries next /loop).
+    #   * GAP (a merged-Done item is inert) ⇒ `drain: acceptance-gap` + exit 4 (a NON-TERMINAL verdict on
+    #     the EXISTING exit-4 code — a new TOKEN, not a new exit code; the `acceptance: gap …` line above
+    #     names the inert items so the orchestrator recirculates them, per autorun.md).
+    #   * ok / None (clean, or --acceptance not passed / not filesystem / checker absent) ⇒ falls through
+    #     to `drain: complete` exit 0, byte-identical to before. Persist the new verdicts (Stage E2) so
+    #     the github Stop gate reads them, mirroring the branches above.
+    if not eligible and accept_cls == "error":
+        _persist_verdict(root, sid, "unknown", 2)
+        print("drain: unknown")
+        sys.exit(2)
+    if not eligible and accept_cls == "gap":
+        _persist_verdict(root, sid, "acceptance-gap", 4)
+        print("drain: acceptance-gap")
         sys.exit(4)
     _final = "continue" if eligible else "complete"
     _persist_verdict(root, sid, _final, 0)

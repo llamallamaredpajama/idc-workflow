@@ -113,7 +113,9 @@ only when a full pass leaves nothing actionable:
    30-item first page → a grown board blinds the lane):
    ```bash
    # filesystem — `--acceptance` also runs the wave-close acceptance check when the build lane is
-   # drained (surfaces a Done-but-inert increment as `acceptance: gap <#s>`; file a recirculation on a gap)
+   # drained (surfaces a Done-but-inert increment as `acceptance: gap <#s>`; file a recirculation on a gap).
+   # A gap/error GATES the would-be-`complete` wave close (Stage E3): gap ⇒ `drain: acceptance-gap` exit 4
+   # (recirculate the inert items), a corrupt/unrunnable check ⇒ `drain: unknown` exit 2 — both NON-terminal.
    python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --tracker <TRACKER.md> --acceptance
    # github — pages the WHOLE board, same predicate (github wave-close acceptance runs in idc:idc-build Phase 4).
    # `--session-id` attributes the persisted drain verdict (.idc-drain-verdict.json) to THIS session so the
@@ -146,9 +148,11 @@ only when a full pass leaves nothing actionable:
    owner that bumps them (`idc:idc-build` Phase 1b) — backstopped by **natural drain** (closed issues
    leave the frontier) and the **outer /loop** that re-checks live board state each pass.
    **Any non-zero drain exit is NOT `complete` — do not exit on it.** That covers `drain: unknown`
-   (the board read succeeded but a build candidate's blocked-by lookup could not be verified), a
-   hard board-read failure (exit 2, no `drain:` line), and `drain: rate-limited until <reset>` (exit
-   3, github only, #99 §C.3). Treat the lane as possibly-unfinished and let the next `/loop`
+   (the board read succeeded but a build candidate's blocked-by lookup could not be verified — or, under
+   `--acceptance`, the wave-close acceptance check was corrupt/unrunnable so the wave could not be proven
+   clean), `drain: acceptance-gap` (exit 4, filesystem `--acceptance` — a merged-Done item is inert;
+   recirculate it, do not stop), a hard board-read failure (exit 2, no `drain:` line), and
+   `drain: rate-limited until <reset>` (exit 3, github only, #99 §C.3). Treat the lane as possibly-unfinished and let the next `/loop`
    iteration re-check; never report the run drained on a non-zero drain exit. The **Stop fixpoint gate**
    (set up at drain start above) is the deterministic backstop for this rule on the filesystem backend:
    if you try to stop while the drain still reports `drain: recirc-pending` (exit 4), the gate refuses

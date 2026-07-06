@@ -132,4 +132,35 @@ led pending --session "$SID_FC" | grep -qx 'orchestrator_drain' \
   || fail "(fail-closed) the orchestrator_drain marker MUST survive an unverifiable (fail-closed) stop — m5 must clear ONLY on a proven drain: complete, never on a fail-closed/pending stop"
 echo "  ok (fail-closed) a crashing drain (exit outside the {0,2,3,4} contract) ⇒ the gate fails CLOSED and blocks (and the marker survives — m5 clears on clean-complete only)"
 
-echo "PASS: the Stop fixpoint gate refuses a drain-orchestrator exit with a non-empty inbox (drain: recirc-pending), names the /idc:recirculate remediation, is bounded at N=3 then loud-fails once (never an infinite nag) with a single board annotation, honors observe-only, and fails CLOSED on a crashing drain"
+# ── (acceptance-gap) an INERT wave close is board-pending at the stop too (Stage E3) ───────────────
+# A SECOND governed repo whose board is would-be-complete (build lane drained, EMPTY inbox) but holds
+# an inert merged-Done item (unmet blocks_goal:true deferral). The gate's filesystem re-run passes
+# `--acceptance` (Stage E3), so the drain reports `drain: acceptance-gap` exit 4 → the stop BLOCKS.
+# Red-when-broken: drop `--acceptance` from the gate's drain invocation (_board_says_pending) ⇒ the
+# same board reads `drain: complete` ⇒ the gate ALLOWS (and clears the marker) ⇒ this asserts RED.
+REPO_AG="$WORK/repo-ag"; mkdir -p "$REPO_AG/docs/workflow"
+printf 'backend: filesystem\n' > "$REPO_AG/docs/workflow/tracker-config.yaml"
+TAG_T="$REPO_AG/TRACKER.md"
+python3 "$TRK" --tracker "$TAG_T" init >/dev/null || fail "(acceptance-gap) tracker init failed"
+DONE_AG="$(python3 "$TRK" --tracker "$TAG_T" create --title 'ddl merged, instance not provisioned' --stage Buildable --status Done)" \
+  || fail "(acceptance-gap) seed of the inert Done failed"
+python3 "$TRK" --tracker "$TAG_T" comment --num "$DONE_AG" \
+  --body '<!-- idc-deferral: {"kind":"infra","what":"provision the instance","blocks_goal":true,"suggested_issue":"none"} -->' \
+  >/dev/null || fail "(acceptance-gap) could not attach the blocks_goal deferral marker"
+# precondition: WITHOUT --acceptance this board drains complete/0 — only the E3 gate makes it pending.
+python3 "$DRAIN" --tracker "$TAG_T" >/dev/null 2>&1; [ $? -eq 0 ] \
+  || fail "(acceptance-gap) precondition: the inert board must drain complete/0 without --acceptance"
+SID_AG="stopsess-ag-$$-$(basename "$WORK")"
+python3 "$LEDGER" --cwd "$REPO_AG" set --kind orchestrator_drain --session "$SID_AG" >/dev/null \
+  || fail "(acceptance-gap) could not set the orchestrator marker"
+OUT_AG="$(mk_payload "$REPO_AG" "$SID_AG" | python3 "$GATE" "$GOV_PLUGIN" 2>/dev/null)"
+blocks "$OUT_AG" \
+  || fail "(acceptance-gap) an orchestrator stop on an INERT wave close (drain: acceptance-gap) must BLOCK — got: ${OUT_AG:-<allow>} [drop --acceptance from the gate's drain re-run ⇒ RED]"
+printf '%s' "$OUT_AG" | grep -qi 'inert' \
+  || fail "(acceptance-gap) the block reason must name the INERT merged-Done diagnosis (got: $OUT_AG)"
+# the marker must SURVIVE the blocked stop (the obligation is unmet — no false clear on acceptance-gap)
+python3 "$LEDGER" --cwd "$REPO_AG" pending --session "$SID_AG" | grep -qx 'orchestrator_drain' \
+  || fail "(acceptance-gap) the orchestrator_drain marker must survive an acceptance-gap block (clear fires on proven complete only)"
+echo "  ok (acceptance-gap) an inert wave close (Stage E3) blocks the stop via the gate's --acceptance re-run (marker survives)"
+
+echo "PASS: the Stop fixpoint gate refuses a drain-orchestrator exit with a non-empty inbox (drain: recirc-pending) OR an inert wave close (drain: acceptance-gap, Stage E3), names the /idc:recirculate remediation, is bounded at N=3 then loud-fails once (never an infinite nag) with a single board annotation, honors observe-only, and fails CLOSED on a crashing drain"

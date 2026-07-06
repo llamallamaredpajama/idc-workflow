@@ -71,7 +71,9 @@ loop below). Then the two lanes:
    improvise the predicate or read the board ad-hoc:
    - **filesystem:** `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --tracker <TRACKER.md> --acceptance`
      — `--acceptance` also runs the wave-close acceptance check when the build lane is drained (surfaces
-     a Done-but-inert increment as `acceptance: gap <#s>`; file a recirculation on a gap).
+     a Done-but-inert increment as `acceptance: gap <#s>`; file a recirculation on a gap). A gap/error
+     GATES the would-be-`complete` wave close (Stage E3): gap ⇒ `drain: acceptance-gap` exit 4, a
+     corrupt/unrunnable check ⇒ `drain: unknown` exit 2 — both NON-terminal, so autorun re-loops.
    - **github:** `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --backend github --project <n> --owner <o> --session-id "$CLAUDE_CODE_SESSION_ID"`
      (github wave-close acceptance runs in `idc:idc-build` Phase 4 — no `--acceptance` here). `--session-id`
      attributes the persisted drain verdict so the Stop fixpoint gate reads the github board conjunct
@@ -83,9 +85,11 @@ loop below). Then the two lanes:
    lane goes blind). An empty/missing `Stage` reads as `Buildable` (the legacy 4-field default). While
    it reports `drain: continue`, run `idc:idc-build` on the eligible waves; re-check after each. Any
    non-zero drain exit is **neither** `continue` **nor** `complete` — that covers `drain: unknown` (the
-   board read succeeded but a build candidate's blocked-by lookup could not be verified) and a hard
-   board-read failure (exit 2, no `drain:` line). Do not exit on it; treat the lane as possibly-unfinished
-   and let the next `/loop` iteration re-check.
+   board read succeeded but a build candidate's blocked-by lookup could not be verified, or, under
+   filesystem `--acceptance`, the wave-close acceptance check was corrupt/unrunnable), `drain:
+   acceptance-gap` (exit 4, filesystem `--acceptance` — a merged-Done item is inert; recirculate it),
+   and a hard board-read failure (exit 2, no `drain:` line). Do not exit on it; treat the lane as
+   possibly-unfinished and let the next `/loop` iteration re-check.
 5. **Re-loop to a fixpoint, then exit.** The pipe is **not one-shot**: a build triplet can surface a
    recirc event and file a **new `Stage = Recirculation` ticket mid-drain** (Build's larger loop,
    `idc:idc-build` Phase 1b), which sits *upstream* of the build lane. So after the build lane

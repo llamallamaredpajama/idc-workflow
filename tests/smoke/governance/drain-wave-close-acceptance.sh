@@ -6,9 +6,10 @@
 # The invariant: when `idc_autorun_drain.py --acceptance` finds the build lane drained (`not eligible`
 # — the point the drain loop finishes a wave), it runs the EXISTING sibling idc_acceptance_check.py
 # over the same tracker and surfaces its `acceptance: <ok|gap …>` verdict, so a merged-"Done" issue can
-# never ship INERT (autorun audit Fix B). It reuses that script (never reimplements inertness) and never
-# changes the drain's own verdict / exit-code contract (Phase 0). The line is opt-in (--acceptance) so
-# default output stays byte-identical.
+# never ship INERT (autorun audit Fix B). It reuses that script (never reimplements inertness). Since
+# Stage E3 the result also GATES the would-be-`complete` verdict (gap ⇒ `drain: acceptance-gap` exit 4;
+# see drain-acceptance-nonterminal.sh for the full gating matrix) — the Phase-0 exit-code SET {0,2,3,4}
+# is unchanged. The line is opt-in (--acceptance) so default output stays byte-identical.
 #
 # Red-when-broken (MANDATORY, reviewed): remove the wave-close invocation (the `if args.acceptance and
 # not eligible …` block in idc_autorun_drain.py) ⇒ the SPY marker is never written and the (SPY)/(GAP)
@@ -66,11 +67,14 @@ python3 "$TRK" --tracker "$TG" comment --num "$DONE" \
 out="$(python3 "$DRAIN" --tracker "$TG" --acceptance 2>/dev/null)"
 printf '%s\n' "$out" | grep -qx "acceptance: gap $DONE" \
   || fail "(GAP) the drain must surface the real acceptance gap 'acceptance: gap $DONE' at wave close (got: $(printf '%s' "$out" | tr '\n' '|')) [remove the invocation ⇒ RED]"
-# and the drain's OWN verdict/exit contract is untouched — a gap does not change drain: complete / exit 0.
-printf '%s\n' "$out" | grep -qx "drain: complete" || fail "(GAP) the wave-close acceptance must NOT change the drain verdict (drain: complete expected)"
-python3 "$DRAIN" --tracker "$TG" --acceptance >/dev/null 2>&1; [ $? -eq 0 ] \
-  || fail "(GAP) the acceptance gap must NOT change the drain's exit code (0 expected — the check's exit 1 is not propagated)"
-echo "  ok (GAP) a Done-but-inert increment surfaces through the drain as 'acceptance: gap $DONE' (real check), verdict/exit unchanged"
+# and since Stage E3 the gap GATES the would-be-`complete` verdict: drain: acceptance-gap / exit 4
+# (non-terminal), on the EXISTING exit-4 code — the deep gating matrix lives in
+# drain-acceptance-nonterminal.sh; this pins that the Stage-B wiring + the E3 contract agree.
+printf '%s\n' "$out" | grep -qx "drain: acceptance-gap" \
+  || fail "(GAP) an inert wave close must gate the verdict to 'drain: acceptance-gap' (Stage E3) (got: $(printf '%s' "$out" | tr '\n' '|'))"
+python3 "$DRAIN" --tracker "$TG" --acceptance >/dev/null 2>&1; [ $? -eq 4 ] \
+  || fail "(GAP) an acceptance gap must exit 4 (the existing non-terminal code — Stage E3)"
+echo "  ok (GAP) a Done-but-inert increment surfaces through the drain as 'acceptance: gap $DONE' (real check) and gates the verdict to acceptance-gap/4"
 
 # ── (OPT-IN) without --acceptance, NO acceptance line (default output byte-identical) ──────────────
 out="$(python3 "$DRAIN" --tracker "$TG" 2>/dev/null)"
@@ -89,4 +93,4 @@ printf '%s\n' "$out" | grep -qi '^acceptance:' \
   && fail "(WAVE-OPEN) acceptance must run only at WAVE CLOSE (build lane drained), not while build work is eligible"
 echo "  ok (WAVE-OPEN) acceptance runs only at wave close — skipped while build work is eligible"
 
-echo "PASS: the drain loop invokes idc_acceptance_check.py at wave close (spy marker + real gap reproduced through the drain), opt-in (byte-identical default), only when the build lane is drained, and never changes the drain's verdict/exit-code contract"
+echo "PASS: the drain loop invokes idc_acceptance_check.py at wave close (spy marker + real gap reproduced through the drain), opt-in (byte-identical default), only when the build lane is drained; a real gap gates the verdict to acceptance-gap/4 (Stage E3) within the unchanged Phase-0 exit-code set"

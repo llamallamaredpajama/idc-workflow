@@ -27,16 +27,21 @@ a clean board** — a stale, un-cleared `mid_finish`/`unfiled_findings` taint ca
 hostage once the pipe is actually drained.
 
 WHAT "the board says pending" MEANS. We read the SANCTIONED drain predicate `idc_autorun_drain.py`
-and key on its EXISTING exit-code contract (Phase 0, unchanged here): exit 4 == `drain: recirc-pending`
-— the build lane is drained (nothing eligible) but the Recirculation/Consideration inbox is non-empty,
-i.e. the orchestrator's own next action is `/idc:recirculate` / plan, NOT stop. That, and only that, is
-the drop-E signal. Every OTHER drain state is allowed to stop:
+and key on its EXISTING exit-code contract (Phase 0, unchanged here): exit 4 == a NON-terminal wave
+close — `drain: recirc-pending` (the build lane is drained but the Recirculation/Consideration inbox
+is non-empty) or `drain: acceptance-gap` (v4 Phase 3 Stage E3: the wave-close acceptance check found a
+merged-Done item INERT — the filesystem gate runs the drain WITH `--acceptance` so an inert close is
+board-pending here too, not a dishonest `complete`). Either way the orchestrator's own next action is
+`/idc:recirculate` / plan, NOT stop. That, and only that, is the drop-E signal. Every OTHER drain
+state is allowed to stop:
   * `drain: complete` (exit 0) — genuinely done (the crux ALLOW).
   * `drain: continue` (exit 0) — eligible build work remains, but that is precisely what the outer
     `/loop` iterates on turn-by-turn; blocking here would fight the /loop model (an orchestrator turn
     LEGITIMATELY yields with build work still eligible). So: allow.
   * `drain: unknown` (exit 2) / `rate-limited` (exit 3) — resumable pauses by design; /loop re-checks.
-    Blocking would nag during a transient board-read failure or a quota outage. So: allow.
+    Blocking would nag during a transient board-read failure or a quota outage. So: allow. (An
+    acceptance ERROR — a corrupt/unrunnable wave-close check — lands here as `unknown`/2 by Stage E3
+    design: the gate blocks on PROVEN pending, and inability-to-prove is a resumable-pause allow.)
 The gate blocks on PROVEN pending, not on inability-to-prove; the latter is a resumable-pause allow.
 
 NO NEW BOARD GraphQL ON THE STOP PATH (the constraint). For the FILESYSTEM backend the drain is a pure
@@ -83,8 +88,8 @@ import idc_drain_verdict  # noqa: E402  (the persisted-verdict sidecar — Stage
 # completed drain"); mid_finish/unfiled_findings/recirc_checkpoint enrich the obligation set.
 ORCHESTRATOR_MARKER = "orchestrator_drain"
 DRAIN = "idc_autorun_drain.py"
-ACCEPT = "idc_acceptance_check.py"  # referenced only in prose here; the drain loop invokes it (--acceptance)
-_RECIRC_PENDING_EXIT = 4  # idc_autorun_drain.py's `drain: recirc-pending` exit code (Phase 0 contract)
+ACCEPT = "idc_acceptance_check.py"  # invoked BY the drain when the gate passes --acceptance (Stage E3)
+_RECIRC_PENDING_EXIT = 4  # the drain's NON-terminal exit: recirc-pending OR acceptance-gap (Phase 0 contract)
 # The FULL Phase-0 drain exit-code contract: 0 complete/continue · 2 unknown · 3 rate-limited · 4
 # recirc-pending. Any OTHER code means the drain itself CRASHED (an uncaught traceback exits 1) — the
 # verdict is untrustworthy, so a confirmed-orchestrator caller must fail CLOSED (see _board_says_pending).
@@ -157,8 +162,10 @@ def _github_says_pending(cwd, sid):
 def _board_says_pending(cwd, plugin_root, sid):
     """(board_pending, board_complete, detail).
 
-    board_pending is True ONLY when the drain PROVES a non-empty inbox with the build lane drained
-    (`idc_autorun_drain.py` exit 4 / `drain: recirc-pending`). complete/continue/unknown/rate-limited
+    board_pending is True ONLY when the drain PROVES a non-terminal wave close with the build lane
+    drained (`idc_autorun_drain.py` exit 4: `drain: recirc-pending` — non-empty inbox — or
+    `drain: acceptance-gap` — an inert merged-Done item, surfaced because the filesystem re-run passes
+    `--acceptance`, Stage E3). complete/continue/unknown/rate-limited
     → False (clean, or a resumable pause — never fight /loop or a rate-limit pause). GITHUB reads the
     LOCAL persisted verdict for THIS session (`_github_says_pending`) — zero board GraphQL on the stop
     path (the constraint) — and DEFERS (False + warn) when it has no fresh same-session verdict.
@@ -182,7 +189,12 @@ def _board_says_pending(cwd, plugin_root, sid):
     drain = os.path.join(plugin_root or "", "scripts", DRAIN)
     if not os.path.isfile(drain):
         raise RuntimeError(f"drain helper not found at {drain}")
-    r = subprocess.run([sys.executable, drain, "--tracker", tracker],
+    # `--acceptance` (Stage E3): the SAME predicate the autorun drain loop runs, so an INERT wave close
+    # (`drain: acceptance-gap`, exit 4) is board-pending at the stop too — without it this re-run would
+    # read the same inert board as a dishonest `drain: complete` and clear the marker. A pure local read
+    # (filesystem backend): the acceptance check is the sibling script over the same TRACKER.md — zero
+    # GraphQL, so the stop-path constraint is untouched.
+    r = subprocess.run([sys.executable, drain, "--tracker", tracker, "--acceptance"],
                        cwd=cwd, capture_output=True, text=True, timeout=30)
     # The drain's exit code is a CONTRACT (Phase 0): 0 complete/continue · 2 unknown · 3 rate-limited
     # · 4 recirc-pending. A code OUTSIDE that set means the drain itself CRASHED (an uncaught traceback
@@ -216,13 +228,21 @@ def _block_reason(detail, pending_taints):
     obligations = _obligation_labels(pending_taints)
     owed = (f" This session also holds unfinished ledger obligations: {', '.join(obligations)}."
             if obligations else "")
+    # Name the RIGHT pending conjunct: an acceptance-gap block (Stage E3) is an INERT merged-Done item
+    # (the `acceptance: gap <#s>` line names it), not a non-empty inbox — the remediation is still
+    # /idc:recirculate (file a recirculation for the inert items), so only the diagnosis sentence differs.
+    if "acceptance-gap" in detail:
+        why = ("The build lane is drained but the wave-close acceptance check found a merged-Done item "
+               "INERT (see the `acceptance: gap <#s>` line), so the run is NOT complete.")
+    else:
+        why = ("The build lane is empty but the Recirculation/Consideration inbox still owes upstream "
+               "work, so the run is NOT complete.")
     return (
         "IDC stop-fixpoint gate: this autorun/build drain session is stopping while the pipe is NOT "
-        f"drained ({detail}). The build lane is empty but the Recirculation/Consideration inbox still "
-        f"owes upstream work, so the run is NOT complete.{owed} Before you stop: drain the inbox with "
-        "`/idc:recirculate` (and plan any admitted considerations), then re-check "
-        "`${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py` — a clean `drain: complete` is the only "
-        "honest stop."
+        f"drained ({detail}). {why}{owed} Before you stop: drain the inbox with "
+        "`/idc:recirculate` (and plan any admitted considerations / recirculate the inert items), then "
+        "re-check `${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py` — a clean `drain: complete` is "
+        "the only honest stop."
     )
 
 

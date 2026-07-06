@@ -1,0 +1,17 @@
+# Builder write-roots for the phase4 team-execute run. The stock guard roots are
+# cwd-anchored plain prefixes and don't match paths inside nested unit worktrees
+# (.worktrees/<unit>/...), so anchor with **/ globs. Scoped to what Phase 4 touches.
+version: 1
+specialists:
+  builder:
+    extraWriteRoots:
+      - "**/commands/**"
+      - "**/skills/**"
+      - "**/hooks/**"
+      - "**/agents/**"
+      - "**/templates/**"
+      - "**/runtime/**"
+      - "**/docs/**"
+      - "**/scripts/**"
+      - "**/tests/**"
+      - "**/*.md"

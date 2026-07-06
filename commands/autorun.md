@@ -48,13 +48,14 @@ up front, before any new build work — not only when the operator remembers to 
 hand:
 ```bash
 # filesystem
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_janitor.py" --repo "$PWD" --tracker "$PWD/TRACKER.md" --report
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_janitor.py" --repo "$PWD" --tracker "$PWD/TRACKER.md" --json
 # github
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_janitor.py" --repo "$PWD" --backend github --owner <o> --project <n> --report
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_janitor.py" --repo "$PWD" --backend github --owner <o> --project <n> --json
 ```
-**Report-only by default** — autorun never applies a fix on its own initiative. The **one** opt-in
+**Report-only by default** — the janitor's default mode mutates nothing (`--json` only makes the
+report machine-readable), and autorun never applies a fix on its own initiative. The **one** opt-in
 exception is the operator-set `janitor: auto-safe` knob in `WORKFLOW-config.yaml`: when present,
-add `--apply-safe` to the SAME call above instead of `--report` — never a silent auto-apply, always
+add `--apply-safe` to the SAME call above — never a silent auto-apply, always
 traceable to an explicit operator setting. `--apply-safe` only ever touches the **SAFE-FIX** tier
 (the scanner's own contract). Relay every finding in the exit report as **advisory** — **RISKY and
 REPORT-ONLY stay so even with the knob set**, never auto-applied — never a halt, never a reason to

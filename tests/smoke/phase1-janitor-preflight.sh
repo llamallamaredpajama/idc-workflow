@@ -38,12 +38,16 @@ fail() { echo "FAIL: $1"; exit 1; }
 
 flat="$(tr '\n' ' ' < "$CMD" | tr -s ' ')"
 
-# ---- 1. the preflight invokes the janitor scanner, in --report mode, for both backends -----------
+# ---- 1. the preflight invokes the janitor scanner, read-only default + --json, for both backends --
+# (idc_git_janitor.py has NO --report flag — report-only IS its default mode; --json is the real
+#  machine-readable switch. A documented --report here was a latent doc bug the codex e2e caught.)
 # RED-WHEN-BROKEN: remove the preflight call entirely -> both greps fail.
 grep -qE 'idc_git_janitor\.py' "$CMD" \
   || fail "commands/autorun.md must invoke scripts/idc_git_janitor.py as a preflight step"
+grep -qE 'idc_git_janitor\.py[^`]*--json' "$CMD" \
+  || fail "commands/autorun.md janitor preflight must pass --json (machine-readable report; report-only is the default mode)"
 grep -qE -- '--report' "$CMD" \
-  || fail "commands/autorun.md janitor preflight must pass --report (explicit read-only default)"
+  && fail "commands/autorun.md must NOT pass --report to idc_git_janitor.py — the script has no such flag (doc bug)"
 grep -qE -- '--tracker' "$CMD" \
   || fail "commands/autorun.md janitor preflight must cover the filesystem backend (--tracker)"
 grep -qE -- '--backend github' "$CMD" \
@@ -86,4 +90,4 @@ build_line=$(lineof "$CMD" 'Build lane')
 [ "$jan_line" -lt "$build_line" ] \
   || fail "commands/autorun.md: the Janitor preflight (line $jan_line) must precede the Build lane (line $build_line) — near the top of the pipe, not an afterthought"
 
-echo "PASS: commands/autorun.md runs the janitor scanner (idc_git_janitor.py) as a --report preflight near the top of the pipe for both backends; report-only by default; the operator-set 'janitor: auto-safe' knob is the ONLY opt-in to --apply-safe (SAFE-FIX tier only, RISKY/REPORT-ONLY always advisory); findings never halt or self-narrow the drain"
+echo "PASS: commands/autorun.md runs the janitor scanner (idc_git_janitor.py) as a read-only --json preflight near the top of the pipe for both backends; report-only by default; the operator-set 'janitor: auto-safe' knob is the ONLY opt-in to --apply-safe (SAFE-FIX tier only, RISKY/REPORT-ONLY always advisory); findings never halt or self-narrow the drain"

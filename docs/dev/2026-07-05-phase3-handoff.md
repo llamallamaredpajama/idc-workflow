@@ -1,13 +1,24 @@
 # Handoff — IDC v4 Phase 3 ("loop & liveness enforcement") — 2026-07-05
 
-**Status:** 🟡 **IN PROGRESS** · **Branch:** `main` @ `440bb6d` · Stages **A, B, C, D, E1, E2 MERGED**;
-**E3 = UNVERIFIED WIP; E4, E5 pending.** Driven via `/auto-goal-teams` as a **sequential relay** (one
-enforcement point per stage: build → 2-lens adversarial review [codex + a teammate] → fix → merge).
-Authoritative design:
-[`2026-07-03-deterministic-core-refactor-plan.md`](2026-07-03-deterministic-core-refactor-plan.md) §3.2/§3.4
-+ §5 Phase 3. **NEXT = verify + finish Stage E3, then E4, E5.** ⚠ **Run halted 2026-07-06 on a monthly
-spend-limit block** (a teammate died `failureReason: monthly spend limit`) — see the RESUME 2026-07-06
-section at the bottom; the account spend cap must be raised before dispatching more teammates.
+**Status:** ✅ **PHASE 3 COMPLETE — 2026-07-06.** All stages **A, B, C, D, E1, E2, E3 (`d6e2836`),
+E4 (`8a4e312`), E5 MERGED/PASSED**; main also carries the E5-found autorun doc fix (`bcc357f`,
+janitor `--report`→`--json`). Authoritative design:
+[`2026-07-03-deterministic-core-refactor-plan.md`](2026-07-03-deterministic-core-refactor-plan.md)
+§3.2/§3.4 + §5 Phase 3. **E5 record (top-level acceptance, all green):** run-all ALL GREEN on merged
+main (real checkout); governance lane 37/37 under BOTH parsers; autorun-sandbox e2e driven by
+**Codex** (`codex exec --dangerously-bypass-approvals-and-sandbox`, the Anthropic monthly spend cap
+blocked every nested `claude -p` — capture `_idc-observability/run-p3e5-codex-resume.txt`): the
+spend-limit death of the first wave left a GENUINE mid-drain kill (plan lane merged, item #198
+stranded In-Progress with open PR #207), and the resume pass exercised the Phase-3 machinery live —
+E1 `reconcile: complete`, E4 `teammate-idle: 198 in-flight branch idc/198-healthcheck ahead 1`
+(breadcrumb stamped), drain looped to `drain: complete`/0 with the verdict persisted for
+`session_id: p3e5-codex`; `verify-drain.sh` PASS 5/5; post-condition janitor findings (1 RISKY,
+2 REPORT-ONLY) all trace to the seeded gated fixture (gate issue #201 has a blank Stage — seed
+hygiene, not drain damage). **E2 MINOR-2 CLOSED live:** on the real sandbox, the Stop gate (invoked
+directly with real Stop payloads — Claude hooks can't fire inside a Codex process) ALLOWED + cleared
+the marker on the real persisted `complete` verdict, DEFER-allowed a no-verdict session with the
+exact warn, and emitted `decision: block` on a persisted `recirc-pending`/4 — 0 GraphQL on the stop
+path (gate report Δ=0). **Next phase = plan §5 Phase 4** (journal/reconciliation + prose demotion).
 
 > The run's scratch briefs (`shared-context.md`, `stage-*-brief.md`) lived in a session scratchpad and do
 > **not** survive `/clear`. Everything needed to resume is below or in the plan; re-derive per-stage briefs
@@ -103,7 +114,26 @@ Fable audit + a corroborating codex pass:
 
 ---
 
-## RESUME 2026-07-06 — D/E1/E2 MERGED · E3 UNVERIFIED WIP · E4/E5 pending · HALTED on spend limit
+## E3/E4 completion record — 2026-07-06
+
+- **E3 (`d6e2836`)**: acceptance error/gap gates the wave close (`drain: unknown`/2, `drain:
+  acceptance-gap`/4 on the existing exit-4). 2-lens review converged on 2 findings, both fixed +
+  red-proven: the Stage-B scenario asserted the pre-E3 contract, and the filesystem Stop gate
+  re-drained WITHOUT `--acceptance` (an inert board read `complete` at Stop and cleared the marker).
+- **E4 (`8a4e312`)**: `scripts/idc_teammate_idle_synth.py` + `idc_git_finish.py --close-only`,
+  wired at pass-top beside E1's reconcile. **8 codex review rounds + a fresh reviewer lens**, every
+  guard mutation-proven; highlights: squash/rebase/cherry-pick landings need patch-equivalence (not
+  ancestry); ancestry alone can't distinguish landed-vs-stale (positive evidence = the Stage-D
+  `Issue: #N` trailer); close-only needs ownership + containment + LIVE-remote-tip proof before any
+  deletion (data-safety); dirty uncommitted worktrees dominate complete (the impl-235 shape); the
+  adapter branch shape (`worktree-build-N`) resolves before the strict leading-segment regex.
+  Documented residual: staging-landed-unpromoted reads in-flight by design (`--base` overrides).
+- Relay note: the Writer teammate idled without starting a round once (lead took over, then it woke
+  — back off when the worktree changes under you) and later died on the spend cap after its final
+  commit. codex found real findings in EVERY round for E4; rounds 7/8 were declared-final +
+  data-safety-exception; the residual pass after round 8 yielded doc-fixable items only.
+
+## RESUME 2026-07-06 (historical) — D/E1/E2 MERGED · E3 UNVERIFIED WIP · E4/E5 pending · HALTED on spend limit
 
 **main @ `440bb6d`.** The relay ran through three more stages cleanly; the 4th was interrupted by an
 account **monthly spend-limit** block (a Writer teammate died `failureReason: You've hit your monthly

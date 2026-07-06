@@ -17,7 +17,7 @@ mkdir -p "$(dirname "$J_PATH")" && touch "$J_PATH"
 prev_lines=$(wc -l < "$J_PATH")
 
 # Operation 1
-n1=$(gov_seed_item "$T" --title 'append-only-1' --stage 'Buildable' --status 'Todo')
+n1=$(eng create-ticket --title 'append-only-1' --stage 'Buildable' --status 'Todo')
 lines_after_1=$(wc -l < "$J_PATH")
 [ "$lines_after_1" -gt "$prev_lines" ] || fail "Line count did not increase after op 1. Before: $prev_lines, After: $lines_after_1"
 echo "  ok (1) line count increased after first operation"

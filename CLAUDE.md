@@ -64,10 +64,42 @@ runnable from here:
 
 - **Smoke suite (fast, hermetic).** `bash tests/smoke/run-all.sh` exercises the whole lifecycle in
   its own throwaway temp repos (filesystem backend, no GitHub). The inner loop; no sandbox needed.
-- **Full GitHub-fidelity e2e (against a sandbox).** The old caveat was over-stated: *inline* `/idc:*`
-  slash commands in THIS session act on THIS repo's cwd, so they can't target a sandbox — but a
-  **separate `claude` process whose cwd IS the sandbox does** (verified: it reads the sandbox's board
-  + install-receipt, not this repo's). So you spawn that session from the shell:
+- **Full GitHub-fidelity e2e (against a sandbox) — DEFAULT DRIVER = CODEX, not a nested claude.**
+  (Operator policy 2026-07-06: sandbox e2e must not spend Anthropic credit; the Codex-driven Phase-3
+  E5 run proved equal effectiveness — it even recovered a genuine mid-drain kill and caught a real
+  doc bug.) Drive the sandbox with a direct `codex exec` whose cwd IS the sandbox:
+  ```bash
+  export PATH="$HOME/.npm-global/bin:/opt/homebrew/bin:$HOME/.local/bin:$PATH"
+  nohup codex exec --cd /Users/jeremy/dev/sandbox/<sandbox-repo> \
+    --dangerously-bypass-approvals-and-sandbox \
+    "<orchestrator prompt — see below>" \
+    > /Users/jeremy/dev/sandbox/_idc-observability/run-<label>.txt 2>&1 &
+  echo "codex pid $!"   # poll: ps -p <pid>; read the capture as it grows
+  ```
+  - **The orchestrator prompt must inline what a claude session would get from the plugin loader**,
+    because Codex loads no Claude plugins: (1) name the sandbox + backend + project/owner and that it
+    is ISOLATED; (2) `PLUGIN_ROOT=/Users/jeremy/dev/proj/idc-workflow` (or the candidate worktree) and
+    "read PLUGIN_ROOT/commands/<cmd>.md + agents/idc-<cmd>.md FIRST and follow that playbook,
+    substituting PLUGIN_ROOT for `${CLAUDE_PLUGIN_ROOT}`"; (3) "every board read/mutation goes through
+    the plugin's python scripts, never raw `gh project` improvisations"; (4) "export
+    `CLAUDE_CODE_SESSION_ID=<label>` for every script call and pass `--session-id <label>` where
+    accepted" (the persisted-verdict chain stays testable); (5) the drain/exit contract + any
+    interactive decisions, since it can't stop to ask; (6) demand a final report with verbatim script
+    outputs. The Phase-3 E5 prompt in `docs/dev/2026-07-05-phase3-handoff.md` is the worked example.
+  - **Do NOT use the codex-companion `task` wrapper for sandbox e2e** — it network-sandboxes the job,
+    so `gh` dies with `unknown owner type` / connection failures and the run fail-closes at zero work.
+    Direct `codex exec --dangerously-bypass-approvals-and-sandbox` is required (sandboxes are
+    disposable + git-tracked, so it's safe). `codex review --base main` stays the review lens — that
+    part is unchanged.
+  - **Hook-fidelity caveat (state it in your report):** Claude Code hooks (Stop/SubagentStop/
+    PreToolUse…) do NOT fire inside a Codex process. Assert hook behavior against the REAL artifacts
+    the run leaves (ledger, `.idc-drain-verdict.json`, board) by invoking the hook scripts directly
+    with synthetic payloads — e.g. pipe a Stop payload into `scripts/hooks/idc_stop_fixpoint_gate.py`
+    and assert allow/defer/block. Same code, same artifacts, deterministic invocation.
+  - **Fallback (spend-cap-gated): the nested `claude -p` recipe below.** It is the only FULL
+    hook-fidelity path, but every nested claude bills Anthropic and **dies instantly once the monthly
+    spend cap is hit** (the tell: a ~232-byte capture ending `You've hit your monthly spend limit`).
+    Use it only when the operator confirms the cap has headroom or asks for hook fidelity:
   ```bash
   # one-time setup: printf '{"mcpServers":{}}' > /tmp/empty-mcp.json
   (
@@ -114,15 +146,17 @@ runnable from here:
    **autorun** sandbox (`/Users/jeremy/dev/sandbox/ke-idc-test-repo-autorun`, a seeded
    mid-lifecycle board — see `docs/dev/local-e2e-testing.md`).
 2. **Smoke-gate here first:** `bash tests/smoke/run-all.sh`. Fix failures before spending an e2e run.
-3. **Sync the baseline, then drive the run(s)** — all from here, by spawning sandbox-rooted `claude
-   -p` calls (snapshot pre/post with `ke-snap`):
+3. **Sync the baseline, then drive the run(s)** — all from here, via sandbox-rooted **`codex exec`**
+   (the default driver above; nested `claude -p` only as the spend-cap-gated hook-fidelity fallback),
+   snapshotting pre/post with `ke-snap`:
    - **Reset / baseline / version-sync is YOUR job.** A clean start is `git -C <sandbox> reset --hard
      <baseline-commit>`, or a spawned `/idc:uninstall --delete-board` to wipe; re-scaffold to the
      target version with a spawned `/idc:init` or `/idc:update` using `--plugin-dir` at the matching
      checkout. The sandbox carries **no version number** — its install receipt is fingerprint-only —
      so "sync to version X" = "its scaffold files match what checkout X produces," achieved by an
      `/idc:update` from that checkout.
-   - **Run the candidate:** spawn the command(s) with `--plugin-dir` at the candidate, capturing each
+   - **Run the candidate:** drive the command playbook(s) via `codex exec` with `PLUGIN_ROOT` at the
+     candidate checkout (or, fallback path, `claude -p --plugin-dir <candidate>`), capturing each
      to `_idc-observability/`.
 4. **Read + iterate from here:** snapshots live OUTSIDE the sandboxes at
    `/Users/jeremy/dev/sandbox/_idc-observability/` — `ke-snap-diff <pre> <post>` for the delta, the
@@ -133,13 +167,14 @@ runnable from here:
 ### Teammates & Codex (cmux)
 
 A teammate's *inline* `/idc:*` still can't aim at a sandbox (its cwd is this repo) — but ANY agent
-(lead, teammate, or Codex) can spawn a **sandbox-rooted `claude -p`** via Bash exactly as above, so
-sandbox e2e is fully delegable. The **shared snapshot dir (`_idc-observability/`)** stays the
-read-side integration point: whoever spawns the run captures output there; the lead reads it anywhere.
+(lead, teammate, or Codex) can spawn the **sandbox-rooted `codex exec`** (or the fallback `claude
+-p`) via Bash exactly as above, so sandbox e2e is fully delegable. The **shared snapshot dir
+(`_idc-observability/`)** stays the read-side integration point: whoever spawns the run captures
+output there; the lead reads it anywhere.
 
 ### Iterative loop
 
-Edit here → `bash tests/smoke/run-all.sh` → spawn the sandbox-rooted `claude -p "/idc:<cmd>"` →
-`ke-snap-diff` the result here → fix → re-spawn. Each `-p` run is a fresh session, so edited
+Edit here → `bash tests/smoke/run-all.sh` → spawn the sandbox-rooted `codex exec` (fallback: `claude
+-p "/idc:<cmd>"`) → `ke-snap-diff` the result here → fix → re-spawn. Each run is fresh, so edited
 command/skill markdown loads automatically every run; `scripts/*.py` apply live. Reset between runs
 with `git -C <sandbox> reset --hard <baseline>` or a spawned `/idc:uninstall --delete-board`.

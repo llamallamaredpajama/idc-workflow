@@ -234,9 +234,37 @@ cd /Users/jeremy/dev/sandbox/ke-idc-test-repo-install
 claude --plugin-dir /Users/jeremy/dev/proj/idc-workflow      # load THIS dev checkout for the session
 ```
 
-> **The lead agent drives this itself — no human needs to open the sandbox.** A separate `claude`
-> process whose cwd IS the sandbox targets the sandbox, so spawn it headlessly from anywhere (incl.
-> a session rooted in this plugin repo, or a teammate/Codex):
+> **The lead agent drives this itself — no human needs to open the sandbox.**
+>
+> **DEFAULT DRIVER = CODEX (operator policy 2026-07-06 — sandbox e2e must not spend Anthropic
+> credit).** A direct `codex exec` whose cwd IS the sandbox targets the sandbox:
+> ```bash
+> export PATH="$HOME/.npm-global/bin:/opt/homebrew/bin:$HOME/.local/bin:$PATH"
+> nohup codex exec --cd /Users/jeremy/dev/sandbox/<sandbox-repo> \
+>   --dangerously-bypass-approvals-and-sandbox \
+>   "<orchestrator prompt>" \
+>   > /Users/jeremy/dev/sandbox/_idc-observability/run-<label>.txt 2>&1 &
+> ```
+> Codex loads no Claude plugins, so the prompt must inline the wiring: point it at
+> `PLUGIN_ROOT=<checkout>` ("read PLUGIN_ROOT/commands/<cmd>.md + agents/idc-<cmd>.md first and
+> follow that playbook, substituting PLUGIN_ROOT for `${CLAUDE_PLUGIN_ROOT}`"), demand all board
+> mutations go through the plugin's python scripts, have it `export CLAUDE_CODE_SESSION_ID=<label>`
+> + pass `--session-id <label>` (keeps the persisted-verdict chain testable), inline any interactive
+> decisions, and require a final report with verbatim script outputs. Proven equal-or-better in the
+> Phase-3 E5 acceptance run (recovered a genuine mid-drain kill; caught a real doc bug) — worked
+> example prompt in `2026-07-05-phase3-handoff.md`. **Two Codex traps:** (1) do NOT use the
+> codex-companion `task` wrapper — it network-sandboxes the job so `gh` dies (`unknown owner type`)
+> and the run fail-closes at zero work; direct `codex exec --dangerously-bypass-approvals-and-sandbox`
+> is required (sandboxes are disposable). (2) Claude Code **hooks do not fire inside Codex** — assert
+> hook behavior by invoking the hook scripts directly with synthetic payloads against the run's real
+> artifacts (ledger / `.idc-drain-verdict.json` / board), and say so in the report.
+>
+> **Fallback — nested `claude -p` (spend-cap-gated; the only FULL hook-fidelity path).** Every nested
+> claude bills Anthropic and dies instantly once the monthly cap is hit (the tell: a ~232-byte capture
+> ending `You've hit your monthly spend limit`; note a mid-run cap hit looks like a hard kill — the
+> board keeps the partial work). Use only with confirmed cap headroom or when the operator asks for
+> hook fidelity. Spawn it headlessly from anywhere (incl. a session rooted in this plugin repo, or a
+> teammate/Codex):
 > ```bash
 > # one-time: printf '{"mcpServers":{}}' > /tmp/empty-mcp.json
 > (

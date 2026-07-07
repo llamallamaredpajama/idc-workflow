@@ -13,31 +13,37 @@ gov_engine_env
 
 J_PATH="$REPO/docs/workflow/transition-journal.ndjson"
 mkdir -p "$(dirname "$J_PATH")"
+# Start with a clean slate.
+> "$J_PATH"
 
-# (1) Filesystem backend: create + move + close should yield 2 journal entries.
-n_fs=$(gov_seed_item "$T" --title 'fs-item' --stage 'Buildable' --status 'Todo')
+# (1) Filesystem backend: create, link, move, close should yield 4 journal entries.
+n_parent=$(eng create-ticket --title 'fs-parent' --stage 'Buildable' --status 'Todo')
+n_child=$(eng create-ticket --title 'fs-child' --stage 'Buildable' --status 'Todo')
+
+eng link --parent "$n_parent" --child "$n_child" >/dev/null
+
 VERDICT_PATH="$REPO/verdict.json"
 cat > "$VERDICT_PATH" <<EOF
 {
   "verdict": "PASS",
-  "issue": $n_fs,
+  "issue": $n_child,
   "pr": 1,
   "merge_conditions": [
     {"id": "c1", "description": "d1", "met": true}
   ]
 }
 EOF
-eng move --num "$n_fs" --to-status "In Progress" >/dev/null
-eng close --num "$n_fs" --verdict "$VERDICT_PATH" --pr 1 >/dev/null
+eng move --num "$n_child" --to-status "In Progress" >/dev/null
+eng close --num "$n_child" --verdict "$VERDICT_PATH" --pr 1 >/dev/null
 
 [ -f "$J_PATH" ] || fail "journal file was not created"
 lines_fs=$(wc -l < "$J_PATH")
-[ "$lines_fs" -eq 2 ] || fail "fs ops: expected 2 journal lines, got $lines_fs"
-echo "  ok (1) fs backend: move, close wrote 2 journal lines"
+[ "$lines_fs" -eq 5 ] || fail "fs ops: expected 5 journal lines, got $lines_fs"
+echo "  ok (1) fs backend: create(x2), link, move, close wrote 5 journal lines"
 
 # (2) Github backend: move + close should yield 2 more journal entries.
 # We monkeypatch the github board interface to avoid real network calls.
-python3 - "$GOV_PLUGIN/scripts" "$REPO" "$n_fs" <<'PY' || fail "github journal unit failed (see above)"
+python3 - "$GOV_PLUGIN/scripts" "$REPO" <<'PY' || fail "github journal unit failed (see above)"
 import sys, json, os
 sys.path.insert(0, sys.argv[1])
 repo_root = sys.argv[2]
@@ -62,16 +68,26 @@ def set_status(o, p, r, iid, s): sets.append(s); CUR["status"] = s
 B.set_status = set_status
 def fake_close(o, p, n, r, item_id=None): CUR["status"] = "Done"
 C.close_issue = fake_close
-ctx = E.github_ctx(repo_root, "o", "1", itemid_cache={10: "PVTI_10"})
+comments = []
+def fake_comment(num, body, repo): comments.append({"num": num, "body": body})
+B.add_comment = fake_comment
+creates = []
+def fake_create(o, p, r, title, body, stage, status): creates.append(title); return "PVTI_12"
+B.create_item = fake_create
+ctx = E.github_ctx(repo_root, "o", "1", itemid_cache={10: "PVTI_10", 11: "PVTI_11"})
 
-# Perform a move and a close
+# Perform create, move, close and link
+E.run("create-ticket", ctx, title="gh-item")
 E.run("move", ctx, num=10, to_status="In Progress")
 E.run("close", ctx, num=10, verdict=verdict_path_gh, pr=2)
+
+# Also test link for github backend
+E.run("link", ctx, parent=10, child=11)
 PY
 
 lines_total=$(wc -l < "$J_PATH")
-[ "$lines_total" -eq 4 ] || fail "gh ops: expected 4 total journal lines, got $lines_total"
-echo "  ok (2) gh backend: move, close wrote 2 additional journal lines"
+[ "$lines_total" -eq 9 ] || fail "gh ops: expected 9 total journal lines, got $lines_total"
+echo "  ok (2) gh backend: create, move, close, link wrote 4 additional journal lines"
 
 # (3) Verify journal entries have the required structure.
 # We'll just check the last line for structure. A more rigorous check is too complex for bash.

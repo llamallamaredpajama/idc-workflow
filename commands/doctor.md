@@ -304,9 +304,9 @@ check 3 on github:
 backend=$(grep -E '^backend:' docs/workflow/tracker-config.yaml | awk '{print $2}')
 if [ "$backend" = "github" ]; then
   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_janitor.py" \
-    --repo "$PWD" --backend github --owner "$owner" --project "$num"
+    --repo "$PWD" --backend github --owner "$owner" --project "$num" --check-journal-divergence
 else
-  python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_janitor.py" --repo "$PWD" --tracker "$PWD/TRACKER.md"
+  python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_janitor.py" --repo "$PWD" --tracker "$PWD/TRACKER.md" --check-journal-divergence
 fi
 ```
 Read the scanner's exit code + its `janitor: N safe-fix, M risky, K report-only` summary:

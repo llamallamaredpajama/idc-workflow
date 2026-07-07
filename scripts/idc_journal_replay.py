@@ -6,7 +6,7 @@ import os
 
 # Allow importing from sibling scripts
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from idc_git_janitor import load_board_filesystem, load_board_github
+from idc_board_util import load_board_filesystem, load_board_github
 
 def reconstruct_state_from_journal(journal_path):
     """Reads an NDJSON journal and reconstructs the final state of each item."""

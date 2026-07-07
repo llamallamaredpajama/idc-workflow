@@ -60,6 +60,12 @@ import subprocess
 import sys
 import tempfile
 
+# Allow importing from sibling scripts
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from idc_board_util import load_board_filesystem, load_board_github
+from idc_journal_replay import reconstruct_state_from_journal
+
 # --- attribution -----------------------------------------------------------------------------------
 # IDC-attributable branch/worktree naming (the design's exact list). Anchored at the START, and `build`
 # REQUIRES a `-`/`/` separator (`build-*`/`build/*`) so a foreign name that merely starts with the
@@ -326,53 +332,6 @@ def github_merge_maps(repo):
     return {"merged_refs": merged_refs, "merged_oids": merged_oids, "closed_issues": closed_issues,
             "issue_state": states, "issue_reason": reasons, "ok": ok, "capped": capped,
             "indeterminate": (not ok) or capped}
-
-
-# --- board loaders ---------------------------------------------------------------------------------
-def load_board_github(owner, project, repo):
-    """All issue-backed board items via the paginating reader. Returns list of
-    {number,status,stage,title,item_id}. Exits 2 on an unreadable board (fail-closed, no hollow clean)."""
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    import idc_gh_board  # noqa: E402 — github-only dependency, imported lazily
-    try:
-        items = idc_gh_board.fetch_items(owner, project, repo)
-    except idc_gh_board.BoardReadError as e:
-        sys.stderr.write(f"idc-git-janitor: could not read the github board: {e}\n")
-        sys.exit(2)
-    except Exception as e:  # noqa: BLE001 — ANY unexpected board-read failure fail-CLOSES to exit 2
-        # An uncaught exception would exit 1 (== our "findings" code) with a traceback, masquerading a
-        # crash as a clean-ish result. Fail-closed: exit 2, never a hollow clean or a false "findings".
-        sys.stderr.write(f"idc-git-janitor: unexpected error reading the github board: {e}\n")
-        sys.exit(2)
-    board = []
-    for it in items:
-        content = it.get("content") or {}
-        number = content.get("number")
-        if number is None:
-            continue
-        board.append({
-            "number": number,
-            "status": it.get("status"),
-            "stage": it.get("stage"),
-            "title": content.get("title") or "",
-            "item_id": it.get("id"),
-        })
-    return board
-
-
-def load_board_filesystem(path):
-    """Read the filesystem TRACKER.md state block → list of {number,status,stage,title}.
-
-    Reuses `idc_autorun_drain.load_filesystem` — the ONE owner of the state-block fence + the
-    fail-closed corruption contract (a missing/corrupt tracker or a missing `issues` key ≠ an empty
-    board → exit 2; an explicit `issues: []` is a legitimate empty board). Not re-copied here, so the
-    drainer and the janitor can never disagree about what a valid board is. (On corruption the exit-2
-    diagnostic carries the drainer's `idc-autorun-drain:` prefix; the exit code is what matters.)"""
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    import idc_autorun_drain  # noqa: E402 — sibling helper, imported lazily (the established pattern)
-    issues = idc_autorun_drain.load_filesystem(path)  # exits 2 itself on any corruption
-    return [{"number": it["number"], "status": it.get("status"),
-             "stage": it.get("stage"), "title": it.get("title") or ""} for it in issues]
 
 
 # --- the scan --------------------------------------------------------------------------------------
@@ -801,6 +760,56 @@ def build_ctx(args):
 import datetime
 import tempfile
 
+def check_journal_divergence(ctx, findings, journal_path):
+    """Compares journal-reconstructed state with actual board state and adds findings."""
+    board = ctx.get("board")
+    if board is None:
+        return # Cannot check divergence without a board
+
+    expected_state, error = reconstruct_state_from_journal(journal_path)
+    if error:
+        findings.append(finding(RISKY, "journal", journal_path, f"Journal is unreadable: {error}"))
+        return
+
+    actual_state = {}
+    for item in board:
+        item_id = item.get("number")
+        if item_id is not None:
+            actual_state[item_id] = {
+                "stage": item.get("stage"),
+                "status": item.get("status")
+            }
+
+    all_item_ids = set(expected_state.keys()) | set(actual_state.keys())
+    for item_id in sorted(all_item_ids):
+        expected_item = expected_state.get(item_id, {})
+        actual_item = actual_state.get(item_id, {})
+
+        if not actual_item:
+            findings.append(finding(RISKY, "journal", f"#{item_id}",
+                "Item present in journal but missing from board.", "reconcile manually"))
+            continue
+        if not expected_item:
+            # This can happen for items created before journaling was introduced. Not a finding.
+            continue
+
+        exp_stage = expected_item.get("stage")
+        act_stage = actual_item.get("stage")
+        exp_status = expected_item.get("status")
+        act_status = actual_item.get("status")
+
+        if exp_stage != act_stage:
+            detail = (f"Stage mismatch: journal says '{exp_stage}', "
+                      f"board says '{act_stage}'")
+            findings.append(finding(RISKY, "journal", f"#{item_id}", detail, "reconcile manually"))
+
+        if exp_status != act_status:
+            detail = (f"Status mismatch: journal says '{exp_status}', "
+                      f"board says '{act_status}'")
+            findings.append(finding(RISKY, "journal", f"#{item_id}", detail, "reconcile manually"))
+
+
+
 def rotate_journal(ctx, journal_path):
     """Archives journal entries for terminal items."""
     board = ctx.get("board")
@@ -878,6 +887,10 @@ def main():
         sys.exit(0)
 
     findings, indeterminate = scan(ctx)
+
+    if args.check_journal_divergence:
+        journal_path = os.path.join(ctx["repo"], ".idc/journal.ndjson")
+        check_journal_divergence(ctx, findings, journal_path)
 
     if not args.apply_safe:
         if args.json:

@@ -807,6 +807,8 @@ def main():
     ap.add_argument("--apply-safe", action="store_true",
                     help="execute ONLY the SAFE-FIX tier, then re-scan and report the delta")
     ap.add_argument("--json", action="store_true", help="emit the machine-readable JSON report")
+    ap.add_argument("--check-journal-divergence", action="store_true", help="Check for journal divergence")
+    ap.add_argument("--rotate-journal", action="store_true", help="Rotate journal for terminal items")
     args = ap.parse_args()
 
     ctx = build_ctx(args)

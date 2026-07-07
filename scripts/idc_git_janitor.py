@@ -52,11 +52,13 @@ Usage:
   idc_git_janitor.py [--repo DIR] [--tracker T | --backend github --owner O --project N] [--apply-safe] [--json]
 """
 import argparse
+import datetime
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 
 # --- attribution -----------------------------------------------------------------------------------
 # IDC-attributable branch/worktree naming (the design's exact list). Anchored at the START, and `build`
@@ -796,6 +798,63 @@ def build_ctx(args):
     return ctx
 
 
+import datetime
+import tempfile
+
+def rotate_journal(ctx, journal_path):
+    """Archives journal entries for terminal items."""
+    board = ctx.get("board")
+    if board is None:
+        sys.stderr.write("idc-git-janitor: cannot rotate journal without a board. Use --tracker or --backend github.\n")
+        sys.exit(2)
+
+    terminal_items = {item["number"] for item in board if item.get("status") == "Done"}
+    if not terminal_items:
+        print("No terminal items found on board. Nothing to rotate.")
+        return
+
+    if not os.path.exists(journal_path):
+        print(f"Journal file not found at {journal_path}. Nothing to rotate.")
+        return
+
+    to_archive = []
+    to_keep = []
+    with open(journal_path, "r") as f:
+        for line in f:
+            try:
+                entry = json.loads(line)
+                item_id = entry.get("item")
+                if item_id in terminal_items:
+                    to_archive.append(line)
+                else:
+                    to_keep.append(line)
+            except json.JSONDecodeError:
+                to_keep.append(line) # Keep malformed lines
+
+    if not to_archive:
+        print("No journal entries found for terminal items. Nothing to rotate.")
+        return
+
+    # Atomically update journal
+    # 1. Write archive
+    now = datetime.datetime.now(datetime.timezone.utc)
+    archive_dir = os.path.join(ctx["repo"], "docs/workflow/journal-archive")
+    os.makedirs(archive_dir, exist_ok=True)
+    archive_path = os.path.join(archive_dir, f"{now.strftime('%Y-%m-%d')}.ndjson")
+    
+    with open(archive_path, "a") as f: # Append to daily archive
+        f.writelines(to_archive)
+    print(f"Archived {len(to_archive)} journal entries to {archive_path}")
+
+    # 2. Write new journal to temp file and rename
+    with tempfile.NamedTemporaryFile(mode='w', dir=os.path.dirname(journal_path), delete=False) as tmp:
+        tmp.writelines(to_keep)
+        temp_path = tmp.name
+    
+    os.rename(temp_path, journal_path)
+    print(f"Journal rotated. {len(to_keep)} entries remain.")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Deterministic board↔git reconciler (read-only by default).")
     ap.add_argument("--repo", default=".", help="repo dir to scan (default: cwd)")
@@ -812,6 +871,12 @@ def main():
     args = ap.parse_args()
 
     ctx = build_ctx(args)
+
+    if args.rotate_journal:
+        journal_path = os.path.join(ctx["repo"], ".idc/journal.ndjson")
+        rotate_journal(ctx, journal_path)
+        sys.exit(0)
+
     findings, indeterminate = scan(ctx)
 
     if not args.apply_safe:

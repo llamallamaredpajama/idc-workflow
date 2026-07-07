@@ -993,7 +993,8 @@ def main():
                     help="execute ONLY the SAFE-FIX tier, then re-scan and report the delta")
     ap.add_argument("--json", action="store_true", help="emit the machine-readable JSON report")
     ap.add_argument("--check-journal-divergence", action="store_true",
-                    help="compatibility flag; journal divergence is checked by default")
+                    help="run the journal-replay reconciliation dimension (opt-in until #150 "
+                         "journals every sanctioned mutation door; doctor Row 10 passes it)")
     ap.add_argument("--rotate-journal", action="store_true", help="Rotate journal for terminal items")
     args = ap.parse_args()
 
@@ -1007,7 +1008,11 @@ def main():
     findings, indeterminate = scan(ctx)
 
     journal_path = os.path.join(ctx["repo"], JOURNAL_REL)
-    indeterminate = check_journal_divergence(ctx, findings, journal_path) or indeterminate
+    # OPT-IN until #150: sanctioned mutation doors outside the engine (adapter claim/move/close
+    # prose, gate closes, recirc stage stamps) do not journal yet, so a default replay would report
+    # documented normal traffic as RISKY divergence. Doctor Row 10 passes the flag explicitly.
+    if args.check_journal_divergence:
+        indeterminate = check_journal_divergence(ctx, findings, journal_path) or indeterminate
 
     if not args.apply_safe:
         if args.json:
@@ -1028,7 +1033,8 @@ def main():
     ctx2 = build_ctx(args)                       # re-establish ground truth after mutation
     findings2, indeterminate2 = scan(ctx2)
     journal_path = os.path.join(ctx2["repo"], JOURNAL_REL)
-    indeterminate2 = check_journal_divergence(ctx2, findings2, journal_path) or indeterminate2
+    if args.check_journal_divergence:
+        indeterminate2 = check_journal_divergence(ctx2, findings2, journal_path) or indeterminate2
     if args.json:
         emit_json(findings2, ctx2, indeterminate2, applied=applied)
     else:

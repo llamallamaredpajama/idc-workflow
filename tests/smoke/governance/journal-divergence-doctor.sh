@@ -98,18 +98,23 @@ fi
 echo "PASS: Divergence found in divergent state."
 
 
-echo "--- Test case 5: Default janitor run includes journal reconciliation ---"
+echo "--- Test case 5: replay is OPT-IN until every sanctioned door journals (#150) ---"
+# Sanctioned mutation doors outside the engine (adapter claim/move/close prose, gate closes, recirc
+# stage stamps) do not journal yet, so a DEFAULT janitor run reporting replay divergence would cry
+# wolf on documented normal traffic (codex round-9 P1 on PR #149). Until #150 unifies the doors,
+# replay runs only behind --check-journal-divergence — which doctor Row 10 passes explicitly
+# (case 4 above proves the flagged surface reports the divergence).
 set +e
 output=$(python3 "$GOV_PLUGIN/scripts/idc_git_janitor.py" --repo "$REPO" --json --tracker "$T" 2>&1)
 rc=$?
 set -e
-[ "$rc" -eq 1 ] || fail "expected default janitor to report journal divergence exit 1, got $rc: $output"
-if ! echo "$output" | grep '"dim": "journal"' | grep "Status mismatch"; then
-    echo "FAIL: default janitor run did not include journal divergence."
+[ "$rc" -eq 0 ] || fail "expected the default janitor run to skip replay until #150 (exit 0), got $rc: $output"
+if echo "$output" | grep '"dim": "journal"'; then
+    echo "FAIL: default janitor run must not include replay findings until #150 unifies the doors."
     echo "$output"
     exit 1
 fi
-echo "PASS: default janitor includes journal reconciliation."
+echo "PASS: replay stays opt-in; the flagged surface (case 4) reports divergence."
 
 
 echo "--- Test case 6: Divergence survives --apply-safe re-scan ---"
@@ -129,7 +134,7 @@ echo "PASS: apply-safe re-scan preserves journal divergence."
 echo "--- Test case 7: Corrupt journal is indeterminate, not advisory debris ---"
 printf '{bad}\n' > "$REPO/docs/workflow/transition-journal.ndjson"
 set +e
-output=$(python3 "$GOV_PLUGIN/scripts/idc_git_janitor.py" --repo "$REPO" --json --tracker "$T" 2>&1)
+output=$(python3 "$GOV_PLUGIN/scripts/idc_git_janitor.py" --repo "$REPO" --json --check-journal-divergence --tracker "$T" 2>&1)
 rc=$?
 set -e
 [ "$rc" -eq 2 ] || fail "expected corrupt journal exit 2, got $rc: $output"
@@ -140,7 +145,7 @@ echo "PASS: corrupt journal fails closed as indeterminate."
 echo "--- Test case 8: Missing journal on a NON-EMPTY board is indeterminate, not clean ---"
 rm "$REPO/docs/workflow/transition-journal.ndjson"
 set +e
-output=$(python3 "$GOV_PLUGIN/scripts/idc_git_janitor.py" --repo "$REPO" --json --tracker "$T" 2>&1)
+output=$(python3 "$GOV_PLUGIN/scripts/idc_git_janitor.py" --repo "$REPO" --json --check-journal-divergence --tracker "$T" 2>&1)
 rc=$?
 set -e
 [ "$rc" -eq 2 ] || fail "expected missing journal on non-empty board to exit 2, got $rc: $output"
@@ -156,7 +161,7 @@ echo "--- Test case 9: board-only item ABOVE the create watermark is flagged; le
 wm=$(eng create-ticket --title 'journal watermark' --stage 'Buildable' --status 'Todo')
 rogue=$(python3 "$GOV_TRK" --tracker "$T" create --title 'rogue post-journal create' --status "Todo")
 set +e
-output=$(python3 "$GOV_PLUGIN/scripts/idc_git_janitor.py" --repo "$REPO" --json --tracker "$T" 2>&1)
+output=$(python3 "$GOV_PLUGIN/scripts/idc_git_janitor.py" --repo "$REPO" --json --check-journal-divergence --tracker "$T" 2>&1)
 rc=$?
 set -e
 [ "$rc" -eq 1 ] || fail "expected a post-watermark board-only item to be a finding (exit 1), got $rc: $output"
@@ -175,7 +180,7 @@ laundered=$(eng create-ticket --title 'stage launder probe' --stage 'Buildable' 
 python3 "$GOV_TRK" --tracker "$T" set --num "$laundered" --field Stage --value 'Planning' >/dev/null
 eng move --num "$laundered" --to-status "In Progress" >/dev/null
 set +e
-output=$(python3 "$GOV_PLUGIN/scripts/idc_git_janitor.py" --repo "$REPO" --json --tracker "$T" 2>&1)
+output=$(python3 "$GOV_PLUGIN/scripts/idc_git_janitor.py" --repo "$REPO" --json --check-journal-divergence --tracker "$T" 2>&1)
 rc=$?
 set -e
 [ "$rc" -eq 1 ] || fail "expected the laundered Stage mismatch to remain a finding (exit 1), got $rc: $output"
@@ -191,7 +196,7 @@ echo "--- Test case 10: findings + an indeterminate dimension keep the shipped e
 git -C "$REPO" branch "build-2" >/dev/null    # #2 is In Progress; tip == main HEAD → merged → SAFE-FIX
 printf '{bad}\n' > "$REPO/docs/workflow/transition-journal.ndjson"
 set +e
-output=$(python3 "$GOV_PLUGIN/scripts/idc_git_janitor.py" --repo "$REPO" --json --tracker "$T" 2>&1)
+output=$(python3 "$GOV_PLUGIN/scripts/idc_git_janitor.py" --repo "$REPO" --json --check-journal-divergence --tracker "$T" 2>&1)
 rc=$?
 set -e
 [ "$rc" -eq 1 ] || fail "expected findings to win over an indeterminate dimension (exit 1), got $rc: $output"

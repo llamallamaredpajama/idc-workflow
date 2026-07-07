@@ -30,7 +30,7 @@ git -C "$REPO" branch "build-$item" >/dev/null
 
 echo "--- --apply-safe must converge: the applied board close is journaled, re-scan is clean ---"
 set +e
-output=$(python3 "$GOV_PLUGIN/scripts/idc_git_janitor.py" --repo "$REPO" --json --apply-safe --tracker "$T" 2>&1)
+output=$(python3 "$GOV_PLUGIN/scripts/idc_git_janitor.py" --repo "$REPO" --json --check-journal-divergence --apply-safe --tracker "$T" 2>&1)
 rc=$?
 set -e
 [ "$rc" -eq 0 ] || fail "expected apply-safe to converge to a coherent board (exit 0), got $rc: $output"

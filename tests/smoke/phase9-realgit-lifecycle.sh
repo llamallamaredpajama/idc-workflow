@@ -136,10 +136,12 @@ gitc merge-base --is-ancestor "$BUILD_TIP" origin/main \
 # HEADLINE (design §E.1): the janitor certifies the finished end-state COHERENT — the two shipped
 # reconcilers AGREE. A finished build leaves nothing to flag.
 # ================================================================================================
-clean="$(python3 "$JAN" --repo "$REPO" --tracker "$TRACKER")"; rc=$?
+# --check-journal-divergence (doctor Row 10's surface): the COHERENT verdict below also proves the
+# journal replays to exactly the finished board end-state (engine claim + journaled finisher close).
+clean="$(python3 "$JAN" --repo "$REPO" --tracker "$TRACKER" --check-journal-divergence)"; rc=$?
 [ "$rc" -eq 0 ] || fail "a cleanly-finished lifecycle must exit 0 (COHERENT), got $rc" "$clean"
 printf '%s\n' "$clean" | grep -qx 'janitor: COHERENT' || fail "expected the COHERENT banner" "$clean"
-cj="$(python3 "$JAN" --repo "$REPO" --tracker "$TRACKER" --json)"
+cj="$(python3 "$JAN" --repo "$REPO" --tracker "$TRACKER" --check-journal-divergence --json)"
 printf '%s\n' "$cj" | grep -qF '"verdict": "coherent"' \
   || fail "JSON verdict must be 'coherent' (the exit-gate and the machine-readable report must agree)" "$cj"
 

@@ -87,6 +87,40 @@ def _journal_paths(journal_path):
     return paths
 
 
+_CREATE_OPS = ("create-ticket", "create-pointer", "recirculate-intake")
+
+
+def earliest_journaled_create(journal_path):
+    """Smallest item number among journaled create records, or None when there is none.
+
+    Item numbers are monotonic on both backends, so this is a DERIVED adoption watermark: any board
+    item numbered above it was created after create-journaling began and must therefore have journal
+    history — a board-only item above the watermark means its history was lost (truncation) or the
+    create bypassed the engine. Items below the watermark predate the journal (legacy) and are
+    tolerated. Returns None (no watermark → tolerate everything) on any read problem: corruption is
+    reconstruct_state_from_journal's fail-closed job, not this helper's.
+    """
+    watermark = None
+    for path in _journal_paths(journal_path):
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    if not line.strip():
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        return None
+                    if not isinstance(entry, dict) or entry.get("op") not in _CREATE_OPS:
+                        continue
+                    item_id = _coerce_item_id(entry.get("item"))
+                    if item_id is not None and (watermark is None or item_id < watermark):
+                        watermark = item_id
+        except OSError:
+            return None
+    return watermark
+
+
 def reconstruct_state_from_journal(journal_path):
     """Read NDJSON journal segments and reconstruct the final known state for each item.
 

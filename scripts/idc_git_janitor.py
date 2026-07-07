@@ -63,7 +63,7 @@ import tempfile
 # Allow importing from sibling scripts
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from idc_journal_replay import reconstruct_state_from_journal, journal_item_id
+from idc_journal_replay import reconstruct_state_from_journal, journal_item_id, earliest_journaled_create
 
 # --- attribution -----------------------------------------------------------------------------------
 # IDC-attributable branch/worktree naming (the design's exact list). Anchored at the START, and `build`
@@ -633,6 +633,19 @@ def apply_safe(findings, ctx):
     return results
 
 
+def _journal_board_fix(ctx, backend, number):
+    """A SAFE-FIX board close is a sanctioned mutation, so it lands in the SAME canonical transition
+    journal the engine writes — otherwise the --apply-safe re-scan immediately reports the janitor's
+    own fix as a journal↔board divergence and the apply pass can never converge. Best-effort by the
+    journal contract: the close already happened, a journal failure must not fail the fix."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import idc_transition
+    tracker = ctx.get("tracker")
+    tracker_rel = os.path.relpath(tracker, ctx["repo"]) if (backend == "filesystem" and tracker) else None
+    idc_transition.journal_append(ctx["repo"], "close", backend, tracker_rel,
+                                  {"num": number, "to_status": "Done", "agent": "janitor"})
+
+
 def _apply_board(f, ctx):
     op = f.get("op")
     repo = ctx["repo"]
@@ -644,8 +657,12 @@ def _apply_board(f, ctx):
                                capture_output=True, text=True)
         except (OSError, ValueError):
             return False, "tracker close invocation failed"
+        if p.returncode == 0:
+            _journal_board_fix(ctx, "filesystem", f["number"])
         return p.returncode == 0, ("set Status=Done" if p.returncode == 0 else "tracker close failed")
     if op == "close-issue":
+        # Closes the GitHub issue only — the board Status is already Done, so replay state is
+        # unchanged and there is nothing to journal.
         try:
             p = subprocess.run(["gh", "issue", "close", str(f["number"])],
                                cwd=repo, capture_output=True, text=True)
@@ -653,7 +670,10 @@ def _apply_board(f, ctx):
             return False, "gh issue close invocation failed"
         return p.returncode == 0, ("closed issue" if p.returncode == 0 else "gh issue close failed")
     if op == "set-done":
-        return _github_set_status_done(f.get("item_id"), ctx)
+        ok, note = _github_set_status_done(f.get("item_id"), ctx)
+        if ok:
+            _journal_board_fix(ctx, "github", f["number"])
+        return ok, note
     return False, "unknown board op"
 
 
@@ -826,6 +846,7 @@ def check_journal_divergence(ctx, findings, journal_path):
     expected_state, error = reconstruct_state_from_journal(journal_path)
     if error:
         return True
+    create_watermark = earliest_journaled_create(journal_path)
 
     actual_state = {}
     for item in board:
@@ -846,7 +867,14 @@ def check_journal_divergence(ctx, findings, journal_path):
                 "Item present in journal but missing from board.", "reconcile manually"))
             continue
         if not expected_item:
-            # This can happen for items created before journaling was introduced. Not a finding.
+            # Board-only items are tolerated ONLY below the derived adoption watermark (the earliest
+            # journaled create — item numbers are monotonic on both backends): those predate
+            # journaling (legacy). An item ABOVE the watermark was created after create-journaling
+            # began, so a total absence of journal lines means lost (truncated) or bypassed history.
+            if create_watermark is not None and item_id > create_watermark:
+                findings.append(finding(RISKY, "journal", f"#{item_id}",
+                    "Item has no journal history but was created after journaling began "
+                    f"(numbered above journaled create #{create_watermark})", "reconcile manually"))
             continue
 
         act_stage = actual_item.get("stage")
@@ -878,8 +906,12 @@ def rotate_journal(ctx, journal_path):
         return
 
     if not os.path.exists(journal_path):
-        print(f"Journal file not found at {journal_path}. Nothing to rotate.")
-        return
+        # Terminal items exist (checked above) but their journal history is gone — the same
+        # non-empty-board/missing-journal state the scan treats as indeterminate. Refusing keeps
+        # lost history from reading as successful maintenance.
+        sys.stderr.write(f"idc-git-janitor: board has terminal items but {journal_path} is missing — "
+                         "refusing to rotate (journal history indeterminate)\n")
+        sys.exit(2)
 
     to_archive = []
     to_keep = []

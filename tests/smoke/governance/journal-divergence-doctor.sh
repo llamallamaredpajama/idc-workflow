@@ -148,4 +148,23 @@ echo "$output" | grep -q '"verdict": "indeterminate"' || \
     fail "expected indeterminate verdict for missing journal on non-empty board, got: $output"
 echo "PASS: missing journal on non-empty board fails closed as indeterminate."
 
+echo "--- Test case 9: board-only item ABOVE the create watermark is flagged; legacy items below stay tolerated ---"
+# Rebirth the journal through the engine: the create record for the new item becomes the derived
+# adoption watermark (item numbers are monotonic on both backends). Items #1/#2 predate it (legacy,
+# tolerated); an item created AFTER it through the RAW tracker (bypassing the engine) has no journal
+# history it should have — lost/bypassed history must surface, not read as clean.
+wm=$(eng create-ticket --title 'journal watermark' --stage 'Buildable' --status 'Todo')
+rogue=$(python3 "$GOV_TRK" --tracker "$T" create --title 'rogue post-journal create' --status "Todo")
+set +e
+output=$(python3 "$GOV_PLUGIN/scripts/idc_git_janitor.py" --repo "$REPO" --json --tracker "$T" 2>&1)
+rc=$?
+set -e
+[ "$rc" -eq 1 ] || fail "expected a post-watermark board-only item to be a finding (exit 1), got $rc: $output"
+echo "$output" | grep '"dim": "journal"' | grep -q "#$rogue" || \
+    fail "expected a journal finding for the post-watermark board-only item #$rogue, got: $output"
+if echo "$output" | grep '"dim": "journal"' | grep -qE "#1|#2"; then
+    fail "legacy items below the create watermark must stay tolerated, got: $output"
+fi
+echo "PASS: post-watermark board-only item flagged; pre-watermark legacy items tolerated."
+
 echo "--- All journal-divergence tests passed! ---"

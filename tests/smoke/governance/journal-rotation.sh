@@ -79,4 +79,16 @@ python3 "$GOV_PLUGIN/scripts/idc_journal_replay.py" --journal "$JOURNAL" --track
   fail "expected replay after rotation to include archived terminal entries"
 
 echo "PASS: Canonical journal rotation archived terminal entries, kept live entries, and remains replayable."
+
+echo "--- Rotation on a MISSING journal with terminal board items must fail closed ---"
+rm "$JOURNAL"
+set +e
+output=$(python3 "$GOV_PLUGIN/scripts/idc_git_janitor.py" --repo "$REPO" --rotate-journal --tracker "$T" 2>&1)
+rc=$?
+set -e
+[ "$rc" -eq 2 ] || fail "expected rotation with terminal items but a missing journal to exit 2, got $rc: $output"
+echo "$output" | grep -q "Nothing to rotate" && \
+    fail "rotation must not report lost terminal history as a successful no-op: $output"
+echo "PASS: rotation refuses a missing journal when the board has terminal items."
+
 echo "--- All journal-rotation tests passed! ---"

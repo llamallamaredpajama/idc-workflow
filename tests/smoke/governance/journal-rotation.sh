@@ -2,75 +2,81 @@
 set -euo pipefail
 
 # idc-assert-class: behavior
+# Red-when-broken: rotation must archive terminal entries from the canonical transition journal while
+# leaving live-item lines intact in a single rewritten active journal.
 
-HERE="$(cd "$(dirname "$0")" && pwd)"
-ROOT="$(cd "$HERE/../../.." && pwd)"
+. "$(dirname "$0")/lib.sh"
+gov_engine_env
 
-WORK_DIR=$(mktemp -d)
-trap 'rm -rf "$WORK_DIR"' EXIT
+git -C "$REPO" init -b main >/dev/null 2>&1
+git -C "$REPO" config user.email "test@example.com" >/dev/null 2>&1
+git -C "$REPO" config user.name "Test" >/dev/null 2>&1
+git -C "$REPO" commit --allow-empty -m "initial commit" >/dev/null 2>&1
 
-cd "$WORK_DIR"
-git init -b main >/dev/null 2>&1
-git config user.email "test@example.com" >/dev/null 2>&1
-git config user.name "Test" >/dev/null 2>&1
-git commit --allow-empty -m "initial commit" >/dev/null 2>&1
+JOURNAL="$REPO/docs/workflow/transition-journal.ndjson"
 
-# 1. Setup initial state
-mkdir -p .idc
-mkdir -p docs/workflow/journal-archive # Pre-create to check permissions
+active=$(eng create-ticket --title 'journal rotation active' --stage 'Buildable' --status 'Todo')
+eng move --num "$active" --to-status "In Progress" >/dev/null
 
-cat > TRACKER.md <<EOF
-# Project Tracker
-<!-- idc-tracker-state:begin -->
-\`\`\`json
+terminal=$(eng create-ticket --title 'journal rotation terminal' --stage 'Buildable' --status 'Todo')
+eng move --num "$terminal" --to-status "In Progress" >/dev/null
+VERDICT_PATH="$REPO/verdict.json"
+cat > "$VERDICT_PATH" <<EOF
 {
-  "issues": [
-    {"number": 1, "status": "In Progress"},
-    {"number": 2, "status": "Done"},
-    {"number": 3, "status": "Done"}
+  "verdict": "PASS",
+  "issue": $terminal,
+  "pr": 1,
+  "merge_conditions": [
+    {"id": "c1", "description": "d1", "met": true}
   ]
 }
-\`\`\`
-<!-- idc-tracker-state:end -->
 EOF
+eng close --num "$terminal" --verdict "$VERDICT_PATH" --pr 1 >/dev/null
 
-cat > .idc/journal.ndjson <<EOF
-{"item": 1, "op": "transition", "to": {"status": "In Progress"}}
-{"item": 2, "op": "transition", "to": {"status": "In Progress"}}
-{"item": 2, "op": "transition", "to": {"status": "Done"}}
-{"item": 3, "op": "transition", "to": {"status": "Done"}}
-EOF
+[ -f "$JOURNAL" ] || fail "canonical transition journal was not created at $JOURNAL"
 
-# 2. Run rotation
-python3 "$ROOT/scripts/idc_git_janitor.py" --rotate-journal --tracker TRACKER.md
+python3 "$GOV_PLUGIN/scripts/idc_git_janitor.py" --repo "$REPO" --rotate-journal --tracker "$T"
 
-# 3. Verify journal file
-if ! grep -q '{"item": 1' .idc/journal.ndjson; then
-    echo "FAIL: Journal should still contain item 1."
-    exit 1
-fi
-if grep -q '{"item": 2' .idc/journal.ndjson || grep -q '{"item": 3' .idc/journal.ndjson; then
-    echo "FAIL: Journal should not contain items 2 or 3."
-    cat .idc/journal.ndjson
-    exit 1
-fi
-echo "PASS: Active journal file is correct."
+python3 - "$JOURNAL" "$REPO/docs/workflow/journal-archive" "$active" "$terminal" <<'PY'
+import json
+import pathlib
+import sys
 
-# 4. Verify archive file
-ARCHIVE_FILE=$(find docs/workflow/journal-archive -name "*.ndjson")
-if [ -z "$ARCHIVE_FILE" ]; then
-    echo "FAIL: Archive file not created."
-    exit 1
-fi
-if ! grep -q '{"item": 2' "$ARCHIVE_FILE" || ! grep -q '{"item": 3' "$ARCHIVE_FILE"; then
-    echo "FAIL: Archive file does not contain items 2 and 3."
-    cat "$ARCHIVE_FILE"
-    exit 1
-fi
-if grep -q '{"item": 1' "$ARCHIVE_FILE"; then
-    echo "FAIL: Archive file should not contain item 1."
-    exit 1
-fi
-echo "PASS: Archive file is correct."
+journal = pathlib.Path(sys.argv[1])
+archive_dir = pathlib.Path(sys.argv[2])
+active = int(sys.argv[3])
+terminal = int(sys.argv[4])
 
+def read_items(path):
+    items = []
+    with path.open(encoding="utf-8") as fh:
+        for line in fh:
+            if not line.strip():
+                continue
+            entry = json.loads(line)
+            items.append(entry.get("item"))
+    return items
+
+active_items = read_items(journal)
+if active not in active_items:
+    raise SystemExit(f"active journal should still contain item {active}; saw {active_items}")
+if terminal in active_items:
+    raise SystemExit(f"active journal should not contain terminal item {terminal}; saw {active_items}")
+
+archives = sorted(archive_dir.glob("*.ndjson"))
+if not archives:
+    raise SystemExit("archive file was not created")
+archive_items = []
+for path in archives:
+    archive_items.extend(read_items(path))
+if terminal not in archive_items:
+    raise SystemExit(f"archive should contain terminal item {terminal}; saw {archive_items}")
+if active in archive_items:
+    raise SystemExit(f"archive should not contain active item {active}; saw {archive_items}")
+PY
+
+python3 "$GOV_PLUGIN/scripts/idc_journal_replay.py" --journal "$JOURNAL" --tracker "$T" || \
+  fail "expected replay after rotation to include archived terminal entries"
+
+echo "PASS: Canonical journal rotation archived terminal entries, kept live entries, and remains replayable."
 echo "--- All journal-rotation tests passed! ---"

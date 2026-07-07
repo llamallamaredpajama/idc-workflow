@@ -2,79 +2,65 @@
 set -euo pipefail
 
 # idc-assert-class: behavior
+# Red-when-broken: drives the real transition engine producer, then requires replay to consume the
+# canonical docs/workflow/transition-journal.ndjson journal and fail closed on corrupt NDJSON.
 
-HERE="$(cd "$(dirname "$0")" && pwd)"
-ROOT="$(cd "$HERE/../../.." && pwd)"
-export PYTHONPATH="$ROOT/scripts"
+. "$(dirname "$0")/lib.sh"
+gov_engine_env
 
-WORK_DIR=$(mktemp -d)
-trap 'rm -rf "$WORK_DIR"' EXIT
+JOURNAL="$REPO/docs/workflow/transition-journal.ndjson"
 
-cd "$WORK_DIR"
+item=$(eng create-ticket --title 'journal replay lifecycle' --stage 'Buildable' --status 'Todo')
+eng move --num "$item" --to-status "In Progress" >/dev/null
 
-# 1. Setup initial state
-mkdir -p .idc
-
-cat > TRACKER.md <<EOF
-# Project Tracker
-
-<!-- idc-tracker-state:begin -->
-\`\`\`json
+VERDICT_PATH="$REPO/verdict.json"
+cat > "$VERDICT_PATH" <<EOF
 {
-  "issues": [
-    {
-      "number": 1,
-      "stage": "Plan",
-      "status": "Ready"
-    },
-    {
-      "number": 2,
-      "stage": "Build",
-      "status": "Done"
-    }
+  "verdict": "PASS",
+  "issue": $item,
+  "pr": 1,
+  "merge_conditions": [
+    {"id": "c1", "description": "d1", "met": true}
   ]
 }
-\`\`\`
-<!-- idc-tracker-state:end -->
 EOF
+eng close --num "$item" --verdict "$VERDICT_PATH" --pr 1 >/dev/null
 
-cat > .idc/journal.ndjson <<EOF
-{"ts": "2026-07-07T00:00:00Z", "op": "create", "item": 1}
-{"ts": "2026-07-07T00:01:00Z", "op": "transition", "item": 1, "to": {"stage": "Plan", "status": "Ready"}}
-{"ts": "2026-07-07T00:02:00Z", "op": "create", "item": 2}
-{"ts": "2026-07-07T00:03:00Z", "op": "transition", "item": 2, "to": {"stage": "Build", "status": "In Progress"}}
-{"ts": "2026-07-07T00:04:00Z", "op": "transition", "item": 2, "to": {"stage": "Build", "status": "Done"}}
-EOF
+[ -f "$JOURNAL" ] || fail "canonical transition journal was not created at $JOURNAL"
 
-echo "--- Test case 1: Journal and board are in sync ---"
-if ! python3 "$ROOT/scripts/idc_journal_replay.py" --tracker TRACKER.md; then
-    echo "FAIL: Expected script to exit 0 for synced board."
-    exit 1
-fi
-echo "PASS: Synced board test successful."
+echo "--- Test case 1: real transition lifecycle replays to an empty diff ---"
+python3 "$GOV_PLUGIN/scripts/idc_journal_replay.py" --journal "$JOURNAL" --tracker "$T" || \
+  fail "expected real lifecycle journal to replay cleanly"
+echo "PASS: real lifecycle replay matched board."
 
+echo "--- Test case 2: link records do not masquerade as status transitions ---"
+parent=$(eng create-ticket --title 'journal replay parent' --stage 'Buildable' --status 'Todo')
+child=$(eng create-ticket --title 'journal replay child' --stage 'Buildable' --status 'Todo')
+eng link --parent "$parent" --child "$child" >/dev/null
+python3 "$GOV_PLUGIN/scripts/idc_journal_replay.py" --journal "$JOURNAL" --tracker "$T" || \
+  fail "expected link journal record to replay without status false-positive"
+echo "PASS: link records are ignored by state replay."
 
-echo "--- Test case 2: Journal has extra item ---"
-echo '{"ts": "2026-07-07T00:05:00Z", "op": "create", "item": 3}' >> .idc/journal.ndjson
+echo "--- Test case 3: board divergence is detected ---"
+python3 "$GOV_TRK" --tracker "$T" move --num "$item" --status "In Progress" >/dev/null
+set +e
+output=$(python3 "$GOV_PLUGIN/scripts/idc_journal_replay.py" --journal "$JOURNAL" --tracker "$T" 2>&1)
+rc=$?
+set -e
+[ "$rc" -eq 1 ] || fail "expected divergence exit 1, got $rc: $output"
+echo "$output" | grep -q "Item #$item STATUS mismatch" || \
+  fail "expected status mismatch for #$item, got: $output"
+echo "PASS: divergence was detected."
 
-if python3 "$ROOT/scripts/idc_journal_replay.py" --tracker TRACKER.md >/dev/null 2>&1; then
-    echo "FAIL: Expected script to exit 1 for extra item in journal."
-    exit 1
-fi
-echo "PASS: Extra journal item test successful."
-
-# Reset journal
-sed -i.bak '$d' .idc/journal.ndjson
-
-echo "--- Test case 3: Board has status mismatch ---"
-sed -i.bak 's/"status": "Done"/"status": "In Progress"/' TRACKER.md
-
-output=$(python3 "$ROOT/scripts/idc_journal_replay.py" --tracker TRACKER.md 2>&1) || true
-if ! echo "$output" | grep -q "Item #2 STATUS mismatch"; then
-    echo "FAIL: Did not detect status mismatch."
-    echo "Output was: $output"
-    exit 1
-fi
-echo "PASS: Status mismatch test successful."
+echo "--- Test case 4: malformed journal fails closed ---"
+printf '{not-json}\n' > "$JOURNAL"
+set +e
+output=$(python3 "$GOV_PLUGIN/scripts/idc_journal_replay.py" --journal "$JOURNAL" --tracker "$T" 2>&1)
+rc=$?
+set -e
+[ "$rc" -eq 2 ] || fail "expected malformed journal exit 2, got $rc: $output"
+echo "$output" | grep -q "Malformed journal line" || \
+  fail "expected malformed-line diagnostic, got: $output"
+echo "PASS: malformed journal failed closed."
 
 echo "--- All journal-replay tests passed! ---"

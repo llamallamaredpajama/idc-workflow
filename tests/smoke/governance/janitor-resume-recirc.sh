@@ -40,6 +40,11 @@ gitc remote add origin "$O"
 printf base > "$R/base.txt"; gitc add -A; gitc commit -qm base
 gitc push -q -u origin main     || fail "initial push to origin failed"
 python3 "$TRK" --tracker "$R/TRACKER.md" init >/dev/null || fail "tracker init failed"
+# The board is seeded directly via the tracker (no engine transitions), so create the (empty)
+# transition journal explicitly: a non-empty board with a MISSING journal is indeterminate (exit 2,
+# fail-closed journal dimension) and would mask this scenario's exit-1 assertion.
+mkdir -p "$R/docs/workflow" && : > "$R/docs/workflow/transition-journal.ndjson" \
+  || fail "seeding the empty transition journal failed"
 
 # ---- seed: an OPEN recirculation inbox item (Stage=Recirculation, Status=Todo) --------------------
 python3 "$TRK" --tracker "$R/TRACKER.md" create --title 'recirc: drain the inbox' \

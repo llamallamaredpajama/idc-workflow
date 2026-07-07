@@ -62,6 +62,25 @@ TRK = os.path.join(HERE, "idc_tracker_fs.py")
 JOURNAL_REL = os.path.join("docs", "workflow", "transition-journal.ndjson")
 
 
+def _journal_item(value):
+    """Return an issue number safe for replay, or None when the backend returned a non-issue id."""
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
+def _github_created_issue_number(item_id, repo):
+    """Best-effort issue-number read-back for a newly created GitHub project item."""
+    try:
+        item = idc_gh_board.fetch_item(item_id, repo)
+    except Exception as e:  # noqa: BLE001 — journaling is best-effort; the create already succeeded
+        sys.stderr.write(f"idc-transition: could not resolve created github issue number for journal: {e}\n")
+        return None
+    return _journal_item((item.get("content") or {}).get("number"))
+
+
 class TransitionError(Exception):
     """An op the engine refuses: an illegal transition, an unmet guard, or a read-back divergence.
     The CLI maps it to exit 2. RateLimitError (github, resumable) is deliberately NOT a subclass —
@@ -327,15 +346,22 @@ def check_close_guards(spec, num, verdict_path, pr):
 
 # ── journal stub (Phase 4 builds the real thing) ─────────────────────────────────────────────────
 def journal_append(repo, op, backend, tracker_rel, kw, cur=None):
-    """Append ONE line per op. Best-effort — a journal failure never fails the op (the full
-    event-sourced journal + rotation + reconciliation is Phase 4)."""
+    """Append ONE line per op. Best-effort — a journal failure never fails the op.
+
+    The original journal-spine contract required the durable audit fields (who/what/when/guard hash /
+    backend/tracker).  U2 adds replayable structure on the same line — ``op``, ``item`` when the
+    issue number is known, and a target ``to`` state when the operation changes board state — so the
+    reconciler consumes the engine's canonical journal instead of a synthetic side journal.
+    """
     try:
         path = os.path.join(repo, JOURNAL_REL)
         os.makedirs(os.path.dirname(path), exist_ok=True)
 
         num = kw.get("num")
         what = f"{op} #{num}" if num else op
-        if op == "move" and cur:
+        if op in ("move", "claim", "unblock") and cur:
+            what += f" {cur.get('status')} -> {kw.get('to_status')}"
+        elif op in ("close", "retire") and cur:
             what += f" {cur.get('status')} -> {kw.get('to_status')}"
         elif op == "link":
             what = f"link #{kw.get('parent')} -> #{kw.get('child')}"
@@ -357,7 +383,24 @@ def journal_append(repo, op, backend, tracker_rel, kw, cur=None):
             "guard_evidence_hash": guard_hash,
             "backend": backend,
             "repo-relative tracker": tracker_rel,
+            "op": op,
         }
+
+        item = _journal_item(num)
+        if item is not None:
+            record["item"] = item
+        if kw.get("project_item_id"):
+            record["project_item_id"] = kw["project_item_id"]
+
+        to_state = {}
+        if kw.get("to_stage") is not None:
+            to_state["stage"] = kw.get("to_stage")
+        elif cur is not None and op in ("move", "claim", "unblock", "close", "retire"):
+            to_state["stage"] = cur.get("stage") or ""
+        if kw.get("to_status") is not None:
+            to_state["status"] = kw.get("to_status")
+        if to_state:
+            record["to"] = to_state
 
         line = json.dumps(record, sort_keys=True, ensure_ascii=False)
         with open(path, "a", encoding="utf-8") as fh:
@@ -536,13 +579,22 @@ def run(op, ctx, **kw):
 
     result = None
     if kind == "create":
+        target = spec.get("target") or {}
+        to_stage = kw.get("stage") or target.get("stage") or ""
+        to_status = kw.get("status") or target.get("status") or ""
         if backend == "github":
             result = _gh_create(machine, op, ctx["owner"], ctx["project"], ctx["repo"], spec,
                                  kw["title"], kw.get("body", ""), kw.get("stage"), kw.get("status"))
         else:
             result = _fs_create(machine, op, ctx["tracker"], spec, kw["title"], kw.get("body", ""),
                                 kw.get("stage"), kw.get("status"))
-        journal_append(ctx["repo"], op, backend, tracker_rel, kw)
+        journal_num = result
+        journal_extra = {}
+        if backend == "github":
+            journal_num = _github_created_issue_number(result, ctx["repo"])
+            journal_extra["project_item_id"] = result
+        journal_append(ctx["repo"], op, backend, tracker_rel,
+                       dict(kw, num=journal_num, to_stage=to_stage, to_status=to_status, **journal_extra))
         return result
 
     elif kind == "transition":
@@ -568,7 +620,7 @@ def run(op, ctx, **kw):
         set_status(ctx, machine, num, to_status)
         if spec.get("records_agent") and kw.get("agent"):
             record_owner(ctx, num, kw["agent"])
-        journal_append(ctx["repo"], op, backend, tracker_rel, kw, cur=cur)
+        journal_append(ctx["repo"], op, backend, tracker_rel, dict(kw, to_status=to_status), cur=cur)
 
     elif kind == "terminal":
         num = kw["num"]
@@ -580,7 +632,8 @@ def run(op, ctx, **kw):
         cur = get_item(ctx, num)
         check_close_guards(spec, num, kw.get("verdict"), kw.get("pr"))
         close_terminal(ctx, machine, num, spec.get("to_status"))
-        journal_append(ctx["repo"], op, backend, tracker_rel, kw, cur=cur)
+        journal_append(ctx["repo"], op, backend, tracker_rel,
+                       dict(kw, to_status=spec.get("to_status")), cur=cur)
 
     elif kind == "link":
         do_link(ctx, kw["parent"], kw["child"], kw.get("kind", "blocks"))

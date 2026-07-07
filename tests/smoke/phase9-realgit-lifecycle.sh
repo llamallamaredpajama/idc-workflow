@@ -90,6 +90,10 @@ gitc push -q origin "HEAD:$BASE"
 mkdir -p "$REPO/docs/workflow"; printf 'backend: filesystem\n' > "$REPO/docs/workflow/tracker-config.yaml"
 TRACKER="$REPO/TRACKER.md"
 python3 "$TRK" --tracker "$TRACKER" init >/dev/null                          || fail "tracker init failed"
+# Board items are seeded directly via the tracker (no engine transitions), so create the (empty)
+# transition journal explicitly: a non-empty board with a MISSING journal is indeterminate (exit 2,
+# fail-closed journal dimension) and would mask this scenario's COHERENT end-state assertion.
+: > "$REPO/docs/workflow/transition-journal.ndjson"                          || fail "seeding the empty transition journal failed"
 python3 "$TRK" --tracker "$TRACKER" create --title "buildable feature" >/dev/null  # #1
 python3 "$TRK" --tracker "$TRACKER" claim --num 1 --agent tester >/dev/null   || fail "claim failed"
 

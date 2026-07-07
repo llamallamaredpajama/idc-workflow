@@ -63,7 +63,11 @@ import idc_transition as E, idc_gh_board as B, idc_gh_close as C
 # Mock github state and interactions
 CUR = {"stage": "Buildable", "status": "Todo"}
 sets = []
-B.fetch_item = lambda iid, r: dict(CUR)
+def fake_fetch_item(iid, r):
+    if iid == "PVTI_12":
+        return {"stage": "Buildable", "status": "Todo", "content": {"number": 12, "title": "gh-item"}}
+    return dict(CUR)
+B.fetch_item = fake_fetch_item
 def set_status(o, p, r, iid, s): sets.append(s); CUR["status"] = s
 B.set_status = set_status
 def fake_close(o, p, n, r, item_id=None): CUR["status"] = "Done"
@@ -78,6 +82,11 @@ ctx = E.github_ctx(repo_root, "o", "1", itemid_cache={10: "PVTI_10", 11: "PVTI_1
 
 # Perform create, move, close and link
 E.run("create-ticket", ctx, title="gh-item")
+journal_path = os.path.join(repo_root, "docs", "workflow", "transition-journal.ndjson")
+with open(journal_path, encoding="utf-8") as fh:
+    create_line = json.loads(fh.readlines()[-1])
+if create_line.get("item") != 12:
+    raise SystemExit(f"github create journal line must record issue #12, got {create_line}")
 E.run("move", ctx, num=10, to_status="In Progress")
 E.run("close", ctx, num=10, verdict=verdict_path_gh, pr=2)
 

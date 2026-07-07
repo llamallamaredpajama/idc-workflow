@@ -63,8 +63,7 @@ import tempfile
 # Allow importing from sibling scripts
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from idc_board_util import load_board_filesystem, load_board_github
-from idc_journal_replay import reconstruct_state_from_journal
+from idc_journal_replay import reconstruct_state_from_journal, journal_item_id
 
 # --- attribution -----------------------------------------------------------------------------------
 # IDC-attributable branch/worktree naming (the design's exact list). Anchored at the START, and `build`
@@ -260,6 +259,7 @@ def gh_json(args, repo):
 # be TRUNCATED. So a result AT the cap makes that dimension possibly-partial → indeterminate (fail-closed).
 PR_LIST_LIMIT = 1000
 ISSUE_LIST_LIMIT = 2000
+JOURNAL_REL = os.path.join("docs", "workflow", "transition-journal.ndjson")
 
 
 def read_at_cap(n, limit):
@@ -332,6 +332,53 @@ def github_merge_maps(repo):
     return {"merged_refs": merged_refs, "merged_oids": merged_oids, "closed_issues": closed_issues,
             "issue_state": states, "issue_reason": reasons, "ok": ok, "capped": capped,
             "indeterminate": (not ok) or capped}
+
+
+# --- board loaders ---------------------------------------------------------------------------------
+def load_board_github(owner, project, repo):
+    """All issue-backed board items via the paginating reader. Returns list of
+    {number,status,stage,title,item_id}. Exits 2 on an unreadable board (fail-closed, no hollow clean)."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import idc_gh_board  # noqa: E402 — github-only dependency, imported lazily
+    try:
+        items = idc_gh_board.fetch_items(owner, project, repo)
+    except idc_gh_board.BoardReadError as e:
+        sys.stderr.write(f"idc-git-janitor: could not read the github board: {e}\n")
+        sys.exit(2)
+    except Exception as e:  # noqa: BLE001 — ANY unexpected board-read failure fail-CLOSES to exit 2
+        # An uncaught exception would exit 1 (== our "findings" code) with a traceback, masquerading a
+        # crash as a clean-ish result. Fail-closed: exit 2, never a hollow clean or a false "findings".
+        sys.stderr.write(f"idc-git-janitor: unexpected error reading the github board: {e}\n")
+        sys.exit(2)
+    board = []
+    for it in items:
+        content = it.get("content") or {}
+        number = content.get("number")
+        if number is None:
+            continue
+        board.append({
+            "number": number,
+            "status": it.get("status"),
+            "stage": it.get("stage"),
+            "title": content.get("title") or "",
+            "item_id": it.get("id"),
+        })
+    return board
+
+
+def load_board_filesystem(path):
+    """Read the filesystem TRACKER.md state block → list of {number,status,stage,title}.
+
+    Reuses `idc_autorun_drain.load_filesystem` — the ONE owner of the state-block fence + the
+    fail-closed corruption contract (a missing/corrupt tracker or a missing `issues` key ≠ an empty
+    board → exit 2; an explicit `issues: []` is a legitimate empty board). Not re-copied here, so the
+    drainer and the janitor can never disagree about what a valid board is. (On corruption the exit-2
+    diagnostic carries the drainer's `idc-autorun-drain:` prefix; the exit code is what matters.)"""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import idc_autorun_drain  # noqa: E402 — sibling helper, imported lazily (the established pattern)
+    issues = idc_autorun_drain.load_filesystem(path)  # exits 2 itself on any corruption
+    return [{"number": it["number"], "status": it.get("status"),
+             "stage": it.get("stage"), "title": it.get("title") or ""} for it in issues]
 
 
 # --- the scan --------------------------------------------------------------------------------------
@@ -661,7 +708,7 @@ def counts(findings):
 
 # The single authoritative fail-closed verdict rule — exit code, JSON, and the text banner ALL derive
 # from it, so the process exit that gates the e2e post-condition can never disagree with the report:
-# findings win → non-zero; else an indeterminate dimension refuses a clean result; else coherent.
+# indeterminate dimensions win (fail closed); else findings are actionable; else coherent.
 _VERDICT_EXIT = {"findings": 1, "coherent": 0, "indeterminate": 2}
 # The human banner for each verdict. Kept in lockstep with _VERDICT_EXIT so the printed line NEVER
 # disagrees with the exit code (the nit this closes: an indeterminate scan — exit 2 — used to print
@@ -670,9 +717,9 @@ _VERDICT_BANNER = {"coherent": "COHERENT", "findings": "findings", "indeterminat
 
 
 def verdict(findings, indeterminate):
-    if findings:
-        return "findings"
-    return "indeterminate" if indeterminate else "coherent"
+    if indeterminate:
+        return "indeterminate"
+    return "findings" if findings else "coherent"
 
 
 def print_report(findings, ctx):
@@ -757,26 +804,35 @@ def build_ctx(args):
     return ctx
 
 
-import datetime
-import tempfile
-
 def check_journal_divergence(ctx, findings, journal_path):
-    """Compares journal-reconstructed state with actual board state and adds findings."""
+    """Compare journal-reconstructed state with actual board state.
+
+    Returns True when the journal dimension is indeterminate (missing/corrupt/unreadable in a repo that
+    has board state), so the caller exits 2 instead of downgrading journal corruption to advisory debris.
+    """
     board = ctx.get("board")
     if board is None:
-        return # Cannot check divergence without a board
+        return False # Cannot check divergence without a board
+    if not os.path.exists(journal_path):
+        # The transition journal is created lazily, so absence is clean ONLY on a fresh (empty)
+        # board. A non-empty board with no journal means journal-backed history is missing
+        # (deleted, or the board was mutated outside the engine) → indeterminate, fail closed.
+        if board:
+            sys.stderr.write("idc-git-janitor: board has items but %s is missing — "
+                             "journal dimension indeterminate\n" % journal_path)
+            return True
+        return False
 
     expected_state, error = reconstruct_state_from_journal(journal_path)
     if error:
-        findings.append(finding(RISKY, "journal", journal_path, f"Journal is unreadable: {error}"))
-        return
+        return True
 
     actual_state = {}
     for item in board:
         item_id = item.get("number")
         if item_id is not None:
             actual_state[item_id] = {
-                "stage": item.get("stage"),
+                "stage": item.get("stage") or "",
                 "status": item.get("status")
             }
 
@@ -793,25 +849,24 @@ def check_journal_divergence(ctx, findings, journal_path):
             # This can happen for items created before journaling was introduced. Not a finding.
             continue
 
-        exp_stage = expected_item.get("stage")
         act_stage = actual_item.get("stage")
-        exp_status = expected_item.get("status")
         act_status = actual_item.get("status")
 
-        if exp_stage != act_stage:
-            detail = (f"Stage mismatch: journal says '{exp_stage}', "
+        if "stage" in expected_item and expected_item.get("stage") != act_stage:
+            detail = (f"Stage mismatch: journal says '{expected_item.get('stage')}', "
                       f"board says '{act_stage}'")
             findings.append(finding(RISKY, "journal", f"#{item_id}", detail, "reconcile manually"))
 
-        if exp_status != act_status:
-            detail = (f"Status mismatch: journal says '{exp_status}', "
+        if "status" in expected_item and expected_item.get("status") != act_status:
+            detail = (f"Status mismatch: journal says '{expected_item.get('status')}', "
                       f"board says '{act_status}'")
             findings.append(finding(RISKY, "journal", f"#{item_id}", detail, "reconcile manually"))
 
+    return False
 
 
 def rotate_journal(ctx, journal_path):
-    """Archives journal entries for terminal items."""
+    """Archive journal entries for terminal items and atomically rewrite the active journal."""
     board = ctx.get("board")
     if board is None:
         sys.stderr.write("idc-git-janitor: cannot rotate journal without a board. Use --tracker or --backend github.\n")
@@ -828,39 +883,66 @@ def rotate_journal(ctx, journal_path):
 
     to_archive = []
     to_keep = []
-    with open(journal_path, "r") as f:
-        for line in f:
+    with open(journal_path, "r", encoding="utf-8") as f:
+        for line_num, line in enumerate(f, 1):
+            if not line.strip():
+                to_keep.append(line)
+                continue
             try:
                 entry = json.loads(line)
-                item_id = entry.get("item")
-                if item_id in terminal_items:
-                    to_archive.append(line)
-                else:
-                    to_keep.append(line)
-            except json.JSONDecodeError:
-                to_keep.append(line) # Keep malformed lines
+            except json.JSONDecodeError as e:
+                sys.stderr.write(f"idc-git-janitor: malformed journal line {line_num}: {e.msg}\n")
+                sys.exit(2)
+            item_id = journal_item_id(entry)
+            if item_id in terminal_items:
+                to_archive.append(line)
+            else:
+                to_keep.append(line)
 
     if not to_archive:
         print("No journal entries found for terminal items. Nothing to rotate.")
         return
 
-    # Atomically update journal
-    # 1. Write archive
     now = datetime.datetime.now(datetime.timezone.utc)
     archive_dir = os.path.join(ctx["repo"], "docs/workflow/journal-archive")
     os.makedirs(archive_dir, exist_ok=True)
+    os.makedirs(os.path.dirname(journal_path), exist_ok=True)
     archive_path = os.path.join(archive_dir, f"{now.strftime('%Y-%m-%d')}.ndjson")
-    
-    with open(archive_path, "a") as f: # Append to daily archive
-        f.writelines(to_archive)
-    print(f"Archived {len(to_archive)} journal entries to {archive_path}")
 
-    # 2. Write new journal to temp file and rename
-    with tempfile.NamedTemporaryFile(mode='w', dir=os.path.dirname(journal_path), delete=False) as tmp:
-        tmp.writelines(to_keep)
-        temp_path = tmp.name
-    
-    os.rename(temp_path, journal_path)
+    existing_archive = []
+    if os.path.exists(archive_path):
+        with open(archive_path, "r", encoding="utf-8") as f:
+            existing_archive = f.readlines()
+
+    archive_tmp = None
+    journal_tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=archive_dir, delete=False) as tmp:
+            tmp.writelines(existing_archive)
+            tmp.writelines(to_archive)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+            archive_tmp = tmp.name
+
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=os.path.dirname(journal_path), delete=False) as tmp:
+            tmp.writelines(to_keep)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+            journal_tmp = tmp.name
+
+        os.replace(archive_tmp, archive_path)
+        archive_tmp = None
+        os.replace(journal_tmp, journal_path)
+        journal_tmp = None
+    finally:
+        for path in (archive_tmp, journal_tmp):
+            if path:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+
+    print(f"Archived {len(to_archive)} journal entries to {archive_path}")
     print(f"Journal rotated. {len(to_keep)} entries remain.")
 
 
@@ -875,22 +957,22 @@ def main():
     ap.add_argument("--apply-safe", action="store_true",
                     help="execute ONLY the SAFE-FIX tier, then re-scan and report the delta")
     ap.add_argument("--json", action="store_true", help="emit the machine-readable JSON report")
-    ap.add_argument("--check-journal-divergence", action="store_true", help="Check for journal divergence")
+    ap.add_argument("--check-journal-divergence", action="store_true",
+                    help="compatibility flag; journal divergence is checked by default")
     ap.add_argument("--rotate-journal", action="store_true", help="Rotate journal for terminal items")
     args = ap.parse_args()
 
     ctx = build_ctx(args)
 
     if args.rotate_journal:
-        journal_path = os.path.join(ctx["repo"], ".idc/journal.ndjson")
+        journal_path = os.path.join(ctx["repo"], JOURNAL_REL)
         rotate_journal(ctx, journal_path)
         sys.exit(0)
 
     findings, indeterminate = scan(ctx)
 
-    if args.check_journal_divergence:
-        journal_path = os.path.join(ctx["repo"], ".idc/journal.ndjson")
-        check_journal_divergence(ctx, findings, journal_path)
+    journal_path = os.path.join(ctx["repo"], JOURNAL_REL)
+    indeterminate = check_journal_divergence(ctx, findings, journal_path) or indeterminate
 
     if not args.apply_safe:
         if args.json:
@@ -910,6 +992,8 @@ def main():
             print(f"janitor: {mark} {f['dim']} {f['name']} — {note}")
     ctx2 = build_ctx(args)                       # re-establish ground truth after mutation
     findings2, indeterminate2 = scan(ctx2)
+    journal_path = os.path.join(ctx2["repo"], JOURNAL_REL)
+    indeterminate2 = check_journal_divergence(ctx2, findings2, journal_path) or indeterminate2
     if args.json:
         emit_json(findings2, ctx2, indeterminate2, applied=applied)
     else:

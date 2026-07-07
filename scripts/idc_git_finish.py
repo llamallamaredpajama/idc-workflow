@@ -515,11 +515,20 @@ def verify_filesystem_closed(tracker_path, issue):
         _fail("verify-tracker-closed", f"tracker issue #{issue} Status is {out.strip()!r}, expected Done")
 
 
-def tracker_close(backend, repo, issue, tracker_path, project_number, field_ids, owner, name):
+def tracker_close(backend, repo, issue, tracker_path, project_number, field_ids, owner, name,
+                  verdict_path=None):
     if backend == "filesystem":
         filesystem_close(tracker_path, issue)
     else:
         github_close(repo, issue, project_number, field_ids, owner, name)
+    # The finisher is a sanctioned close door, so its close must land in the SAME canonical
+    # transition journal the engine writes — otherwise replay reconciliation reports every normally
+    # finished item as a false journal↔board divergence. Best-effort like every journal_append: the
+    # close above already happened, a journal failure must not fail the finish.
+    tracker_rel = os.path.relpath(tracker_path, repo) if backend == "filesystem" else None
+    TE.journal_append(repo, "close", backend, tracker_rel,
+                      {"num": issue, "to_status": "Done", "verdict": verdict_path,
+                       "agent": "finisher"})
 
 
 def verify_tracker_closed(backend, repo, issue, tracker_path, project_number, owner, name):
@@ -720,7 +729,8 @@ def main():
     pr_merge(repo, args.pr, args.merge_method)
     verify_remote_branch_gone(repo, branch)
     branch_delete_local(repo, branch)
-    tracker_close(backend, repo, args.issue, tracker_path, project_number, field_ids, owner, name)
+    tracker_close(backend, repo, args.issue, tracker_path, project_number, field_ids, owner, name,
+                  verdict_path=args.verdict)
 
     # Final end-state verify — re-checks everything but the remote-branch state (already proven
     # right after the merge, above, with nothing in between that could touch a remote ref) before

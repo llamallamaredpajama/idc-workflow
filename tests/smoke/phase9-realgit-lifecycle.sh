@@ -90,12 +90,15 @@ gitc push -q origin "HEAD:$BASE"
 mkdir -p "$REPO/docs/workflow"; printf 'backend: filesystem\n' > "$REPO/docs/workflow/tracker-config.yaml"
 TRACKER="$REPO/TRACKER.md"
 python3 "$TRK" --tracker "$TRACKER" init >/dev/null                          || fail "tracker init failed"
-# Board items are seeded directly via the tracker (no engine transitions), so create the (empty)
-# transition journal explicitly: a non-empty board with a MISSING journal is indeterminate (exit 2,
-# fail-closed journal dimension) and would mask this scenario's COHERENT end-state assertion.
-: > "$REPO/docs/workflow/transition-journal.ndjson"                          || fail "seeding the empty transition journal failed"
 python3 "$TRK" --tracker "$TRACKER" create --title "buildable feature" >/dev/null  # #1
-python3 "$TRK" --tracker "$TRACKER" claim --num 1 --agent tester >/dev/null   || fail "claim failed"
+# Claim through the TRANSITION ENGINE (not the raw tracker) so the claim is JOURNALED — the real
+# lifecycle shape. The janitor's journal-replay dimension must still certify the finished lifecycle
+# COHERENT below, which requires the finisher's tracker-close to land in the same journal
+# (red-when-broken: an unjournaled finisher close leaves the journal at In Progress vs board Done
+# → a false RISKY divergence, exit 1).
+ENG="$PLUGIN/scripts/idc_transition.py"
+python3 "$ENG" --repo "$REPO" --backend filesystem --tracker "$TRACKER" claim --num 1 --agent tester >/dev/null \
+  || fail "engine claim failed"
 
 WT="$REPO/.claude/worktrees/$BRANCH"
 gitc worktree add -q -b "$BRANCH" "$WT" "$BASE"                              || fail "worktree add failed"
@@ -120,6 +123,8 @@ printf '%s\n' "$finish_out" | grep -qx 'finish: ok' || fail "finish must print '
 [ -z "$(gitc ls-remote --heads origin "$BRANCH")" ] || fail "finish must delete the remote build branch"
 [ "$(python3 "$TRK" --tracker "$TRACKER" show --num 1 --field Status)" = "Done" ] \
   || fail "finish must close the tracker issue (Status=Done)"
+grep -q '"item": 1.*"op": "close"' "$REPO/docs/workflow/transition-journal.ndjson" \
+  || fail "finish must journal its tracker-close (an op=close record for #1) — an unjournaled close makes replay report a false divergence"
 
 # Model the operator repo catching up to the merged reality (advances origin/main to include the
 # merge, prunes the deleted branch's stale tracking ref) — what any real repo does on its next fetch.

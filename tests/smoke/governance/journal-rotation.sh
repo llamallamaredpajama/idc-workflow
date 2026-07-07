@@ -91,4 +91,15 @@ echo "$output" | grep -q "Nothing to rotate" && \
     fail "rotation must not report lost terminal history as a successful no-op: $output"
 echo "PASS: rotation refuses a missing journal when the board has terminal items."
 
+echo "--- Rotation on a NON-OBJECT journal line must fail closed, not crash ---"
+printf '[]\n' > "$JOURNAL"    # syntactically valid JSON, but not a record object
+set +e
+output=$(python3 "$GOV_PLUGIN/scripts/idc_git_janitor.py" --repo "$REPO" --rotate-journal --tracker "$T" 2>&1)
+rc=$?
+set -e
+[ "$rc" -eq 2 ] || fail "expected rotation on a non-object journal line to exit 2 (fail-closed), got $rc: $output"
+echo "$output" | grep -q "Traceback" && \
+    fail "rotation must fail closed on corruption, not crash with a traceback: $output"
+echo "PASS: rotation fails closed on a non-object journal line."
+
 echo "--- All journal-rotation tests passed! ---"

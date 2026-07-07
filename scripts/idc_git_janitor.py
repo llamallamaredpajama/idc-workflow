@@ -737,9 +737,9 @@ _VERDICT_BANNER = {"coherent": "COHERENT", "findings": "findings", "indeterminat
 
 
 def verdict(findings, indeterminate):
-    if indeterminate:
-        return "indeterminate"
-    return "findings" if findings else "coherent"
+    if findings:
+        return "findings"
+    return "indeterminate" if indeterminate else "coherent"
 
 
 def print_report(findings, ctx):
@@ -924,6 +924,9 @@ def rotate_journal(ctx, journal_path):
                 entry = json.loads(line)
             except json.JSONDecodeError as e:
                 sys.stderr.write(f"idc-git-janitor: malformed journal line {line_num}: {e.msg}\n")
+                sys.exit(2)
+            if not isinstance(entry, dict):
+                sys.stderr.write(f"idc-git-janitor: malformed journal line {line_num}: expected object\n")
                 sys.exit(2)
             item_id = journal_item_id(entry)
             if item_id in terminal_items:

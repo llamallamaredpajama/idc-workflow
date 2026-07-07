@@ -167,4 +167,22 @@ if echo "$output" | grep '"dim": "journal"' | grep -qE "#1|#2"; then
 fi
 echo "PASS: post-watermark board-only item flagged; pre-watermark legacy items tolerated."
 
+echo "--- Test case 10: findings + an indeterminate dimension keep the shipped exit-1 contract ---"
+# The shipped janitor contract (autorun/doctor read it): exit 1 = findings present (actionable NOW,
+# whatever else is unknown); exit 2 = the scan would OTHERWISE be clean but a dimension was
+# indeterminate. A SAFE-FIX finding (merged IDC build branch, item not Done) + a corrupt journal
+# (indeterminate) must therefore exit 1 with verdict "findings", not report "could not determine".
+git -C "$REPO" branch "build-2" >/dev/null    # #2 is In Progress; tip == main HEAD → merged → SAFE-FIX
+printf '{bad}\n' > "$REPO/docs/workflow/transition-journal.ndjson"
+set +e
+output=$(python3 "$GOV_PLUGIN/scripts/idc_git_janitor.py" --repo "$REPO" --json --tracker "$T" 2>&1)
+rc=$?
+set -e
+[ "$rc" -eq 1 ] || fail "expected findings to win over an indeterminate dimension (exit 1), got $rc: $output"
+echo "$output" | grep -q '"verdict": "findings"' || \
+    fail "expected verdict 'findings' when findings coexist with an indeterminate dimension, got: $output"
+echo "$output" | grep -q '"dim": "board"' || \
+    fail "expected the SAFE-FIX board finding to be reported alongside the indeterminate journal, got: $output"
+echo "PASS: findings keep the exit-1 contract when a dimension is indeterminate."
+
 echo "--- All journal-divergence tests passed! ---"

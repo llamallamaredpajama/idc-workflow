@@ -105,8 +105,8 @@ def find_and_validate_references_in_file(fpath, valid_stages, valid_statuses, va
     
     # Pattern for `Stage: Value` and `Status: Value`. Does not span newlines.
     key_value_pattern = re.compile(r"\b(Stage|Status):\s*([A-Z][a-zA-Z]+(?:\s[A-Z][a-zA-Z]+)*)\b")
-    # Pattern for backticked op names: `lowercase-with-hyphens`.
-    backtick_pattern = re.compile(r"`([a-z][a-z-]+)`")
+    # Pattern for `eng <op-name>` CLI invocations.
+    engine_op_pattern = re.compile(r"\beng\s+([a-z][a-z-]+)\b")
 
     try:
         if not os.path.exists(fpath):
@@ -120,13 +120,12 @@ def find_and_validate_references_in_file(fpath, valid_stages, valid_statuses, va
                         errors.append(f"{fpath}:{i+1}: Invalid Stage reference: '{value}'")
                     elif key == "Status" and value not in valid_statuses:
                         errors.append(f"{fpath}:{i+1}: Invalid Status reference: '{value}'")
-
-                # The backticked op check was re-added then removed again. It is too noisy
-                # and catches things that are not op names. The high-value, high-confidence
-                # check is for Stage and Status, which are just strings in prose and can
-                # easily go stale. Op names are tied to `idc_transition.py` and less likely
-                # to be wrong in a way this simple check can reliably detect without noise.
-                pass
+                
+                # Check for `eng <op-name>` references
+                for match in engine_op_pattern.finditer(line):
+                    op_name = match.group(1)
+                    if op_name not in valid_ops:
+                        errors.append(f"{fpath}:{i+1}: Invalid transition engine op: 'eng {op_name}'")
 
     except Exception as e:
         errors.append(f"Could not process {fpath}: {e}")

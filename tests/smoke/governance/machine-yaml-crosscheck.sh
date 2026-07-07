@@ -77,6 +77,12 @@ cat >> "$TARGET_FILE" <<EOF
    Status: Planning
    \`\`\`
 
+4. Invalid engine op invocation:
+   - eng teleport-ticket
+
+5. Valid engine op invocation (should not fail):
+   - eng move --num 123 --to-status Todo
+
 EOF
 
 echo "  (2) Running linter on modified repo, expecting FAIL..."
@@ -88,6 +94,7 @@ echo "$output" | grep -q "Invalid Stage reference: 'Wibble'" || fail "Linter did
 echo "$output" | grep -q "Invalid Status reference: 'Buildable'" || fail "Linter did not report field-swapped status 'Buildable'"
 echo "$output" | grep -q "Invalid Stage reference: 'BogusStage'" || fail "Linter did not report unknown stage 'BogusStage' in yaml block"
 echo "$output" | grep -q "Invalid Status reference: 'Planning'" || fail "Linter did not report field-swapped status 'Planning' in yaml block"
+echo "$output" | grep -q "Invalid transition engine op: 'eng teleport-ticket'" || fail "Linter did not report invalid op 'teleport-ticket'"
 echo "    ok: linter failed as expected and reported the correct errors."
 
 

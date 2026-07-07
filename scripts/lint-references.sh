@@ -213,7 +213,9 @@ done
 
 # Rule O — workflow-machine.yaml cross-check.
 # Every workflow state/transition NAME referenced in shipped prose must exist in
-# templates/workflow-machine.yaml (stages, statuses, op names).
+# templates/workflow-machine.yaml. This enforces:
+#   - `Stage: <Name>` and `Status: <Name>` values match the `stages:`/`statuses:` lists.
+#   - `eng <op-name>` invocations match the `ops:` list.
 if [ -f scripts/idc_lint_machine_yaml_refs.py ]; then
   # The python script prints its own file:line: error reports, so here we just need to
   # capture the failure and set the global FAIL flag so the linter exits non-zero.

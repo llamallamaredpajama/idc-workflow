@@ -326,23 +326,44 @@ def check_close_guards(spec, num, verdict_path, pr):
 
 
 # ── journal stub (Phase 4 builds the real thing) ─────────────────────────────────────────────────
-def journal_append(repo, op, fields):
-    """Append ONE minimal line per op. Best-effort — a journal failure never fails the op (the full
-    event-sourced journal + rotation + reconciliation is Phase 4). A real timestamp is fine here
-    (an ordinary python script, not a workflow harness)."""
+def journal_append(repo, op, backend, tracker_rel, kw, cur=None):
+    """Append ONE line per op. Best-effort — a journal failure never fails the op (the full
+    event-sourced journal + rotation + reconciliation is Phase 4)."""
     try:
         path = os.path.join(repo, JOURNAL_REL)
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        args_hash = hashlib.sha1(
-            json.dumps(fields, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:12]
-        line = json.dumps({
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "op": op, "args_hash": args_hash, "stub": True,
-        }, ensure_ascii=False)
+
+        num = kw.get("num")
+        what = f"{op} #{num}" if num else op
+        if op == "move" and cur:
+            what += f" {cur.get('status')} -> {kw.get('to_status')}"
+        elif op == "link":
+            what = f"link #{kw.get('parent')} -> #{kw.get('child')}"
+        elif op in ("create-ticket", "recirculate-intake", "create-pointer"):
+            what = f"{op} '{kw.get('title')}'"
+
+        guard_hash = None
+        if kw.get("verdict"):
+            try:
+                with open(kw["verdict"], "rb") as f:
+                    guard_hash = hashlib.sha1(f.read()).hexdigest()[:12]
+            except (OSError, TypeError):
+                guard_hash = "unreadable-verdict"
+
+        record = {
+            "when": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "who": kw.get("agent", "unattributed"),
+            "what": what,
+            "guard_evidence_hash": guard_hash,
+            "backend": backend,
+            "repo-relative tracker": tracker_rel,
+        }
+
+        line = json.dumps(record, sort_keys=True, ensure_ascii=False)
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(line + "\n")
-    except OSError:
-        pass
+    except Exception as e:
+        sys.stderr.write(f"idc-transition: journal_append failed: {e}\n")
 
 
 # ── filesystem backend ───────────────────────────────────────────────────────────────────────────
@@ -510,6 +531,8 @@ def run(op, ctx, **kw):
     spec = op_spec(machine, op)
     kind = spec.get("kind")
     backend = ctx["backend"]
+    tracker_rel = os.path.relpath(ctx["tracker"], ctx["repo"]) if ctx.get("tracker") else None
+
 
     result = None
     if kind == "create":
@@ -519,10 +542,10 @@ def run(op, ctx, **kw):
         else:
             result = _fs_create(machine, op, ctx["tracker"], spec, kw["title"], kw.get("body", ""),
                                 kw.get("stage"), kw.get("status"))
+        journal_append(ctx["repo"], op, backend, tracker_rel, kw)
+        return result
 
     elif kind == "transition":
-        # Backend-agnostic: the guard path (terminal-source, from_status, refuse_terminal,
-        # worked-state) is the SAME code for fs and github — only get_item/set_status differ.
         num = kw["num"]
         to_status = spec.get("to_status")
         if to_status == "any":
@@ -530,47 +553,42 @@ def run(op, ctx, **kw):
             if not to_status:
                 raise TransitionError(f"{op}: --to-status is required")
         cur = get_item(ctx, num)
-        # Done is terminal — no transition resurrects it (kills the unblock/move-out-of-Done class).
+        if cur["status"] == to_status:
+            return # Idempotent transition is a no-op, do not journal
         if cur["status"] == machine.get("terminal_status"):
             raise TransitionError(
                 f"illegal transition: #{num} is {cur['status']!r} (terminal) — {op} cannot resurrect it")
-        # Op-specific source-Status constraint (e.g. unblock only lifts a Blocked item).
         allowed_from = spec.get("from_status")
         if allowed_from and cur["status"] not in allowed_from:
             raise TransitionError(
                 f"illegal transition: {op} requires source Status in {allowed_from}, "
                 f"but #{num} is {cur['status']!r}")
-        # No transition may MINT the terminal Status (only a guarded close reaches Done) nor drive a
-        # non-build item into the worked Status — both checked ENGINE-wide, same as the create gate.
         refuse_terminal(machine, op, to_status)
         check_worked_state(machine, op, cur["stage"], to_status)
         set_status(ctx, machine, num, to_status)
-        if spec.get("records_agent") and kw.get("agent"):  # ownership recording is DATA-driven, not op==claim
+        if spec.get("records_agent") and kw.get("agent"):
             record_owner(ctx, num, kw["agent"])
+        journal_append(ctx["repo"], op, backend, tracker_rel, kw, cur=cur)
 
     elif kind == "terminal":
         num = kw["num"]
         guards = spec.get("guards") or []
         if not guards:
-            # A guard-free terminal op would be a verdict-free path to Done — forbidden. The ONLY path
-            # to a terminal Status is a guarded `close` (valid, passing, item-owning verdict). `retire`
-            # has no verdict, and the board has just one terminal Status (Done), so it is fail-closed
-            # here. TODO(Phase 4): a distinct non-Done "closed-not-planned" disposition (board-schema
-            # change) would let retire terminalize a non-build item without minting an unaccepted Done.
             raise TransitionError(
                 f"{op}: refused — a verdict-free terminal op cannot reach the terminal Status "
                 "(only a guarded `close` may). Awaiting a non-Done terminal disposition (Phase 4).")
-        get_item(ctx, num)  # existence read-back before a guarded close (fails closed if absent) — both backends
-        check_close_guards(spec, num, kw.get("verdict"), kw.get("pr"))  # valid + passing + item-owning verdict
+        cur = get_item(ctx, num)
+        check_close_guards(spec, num, kw.get("verdict"), kw.get("pr"))
         close_terminal(ctx, machine, num, spec.get("to_status"))
+        journal_append(ctx["repo"], op, backend, tracker_rel, kw, cur=cur)
 
     elif kind == "link":
         do_link(ctx, kw["parent"], kw["child"], kw.get("kind", "blocks"))
+        journal_append(ctx["repo"], op, backend, tracker_rel, kw)
 
     else:
         raise TransitionError(f"machine table declares unknown kind {kind!r} for op {op!r}")
 
-    journal_append(ctx["repo"], op, kw)
     return result
 
 

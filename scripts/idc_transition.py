@@ -531,7 +531,8 @@ def run(op, ctx, **kw):
     spec = op_spec(machine, op)
     kind = spec.get("kind")
     backend = ctx["backend"]
-    tracker_rel = os.path.relpath(ctx["tracker"], ctx["repo"]) if ctx["tracker"] else None
+    tracker_rel = os.path.relpath(ctx["tracker"], ctx["repo"]) if ctx.get("tracker") else None
+
 
     result = None
     if kind == "create":
@@ -553,7 +554,7 @@ def run(op, ctx, **kw):
                 raise TransitionError(f"{op}: --to-status is required")
         cur = get_item(ctx, num)
         if cur["status"] == to_status:
-            raise TransitionError(f"illegal transition: #{num} is already {cur['status']!r}")
+            return # Idempotent transition is a no-op, do not journal
         if cur["status"] == machine.get("terminal_status"):
             raise TransitionError(
                 f"illegal transition: #{num} is {cur['status']!r} (terminal) — {op} cannot resurrect it")

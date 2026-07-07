@@ -167,6 +167,22 @@ if echo "$output" | grep '"dim": "journal"' | grep -qE "#1|#2"; then
 fi
 echo "PASS: post-watermark board-only item flagged; pre-watermark legacy items tolerated."
 
+echo "--- Test case 9b: a status-only op must not launder an out-of-band Stage change ---"
+# Rogue Stage edit outside the engine, then a LEGITIMATE status-only engine move. The move journals
+# only Status — it must not stamp the already-mutated board Stage into the journal as expected state,
+# or the reconciliation gate goes quiet on the rogue change after the very next sanctioned op.
+laundered=$(eng create-ticket --title 'stage launder probe' --stage 'Buildable' --status 'Todo')
+python3 "$GOV_TRK" --tracker "$T" set --num "$laundered" --field Stage --value 'Planning' >/dev/null
+eng move --num "$laundered" --to-status "In Progress" >/dev/null
+set +e
+output=$(python3 "$GOV_PLUGIN/scripts/idc_git_janitor.py" --repo "$REPO" --json --tracker "$T" 2>&1)
+rc=$?
+set -e
+[ "$rc" -eq 1 ] || fail "expected the laundered Stage mismatch to remain a finding (exit 1), got $rc: $output"
+echo "$output" | grep '"dim": "journal"' | grep "#$laundered" | grep -q "Stage mismatch" || \
+    fail "expected the out-of-band Stage change on #$laundered to STILL be reported after a status-only op, got: $output"
+echo "PASS: status-only ops preserve the prior journaled Stage; the rogue Stage change stays visible."
+
 echo "--- Test case 10: findings + an indeterminate dimension keep the shipped exit-1 contract ---"
 # The shipped janitor contract (autorun/doctor read it): exit 1 = findings present (actionable NOW,
 # whatever else is unknown); exit 2 = the scan would OTHERWISE be clean but a dimension was

@@ -395,8 +395,10 @@ def journal_append(repo, op, backend, tracker_rel, kw, cur=None):
         to_state = {}
         if kw.get("to_stage") is not None:
             to_state["stage"] = kw.get("to_stage")
-        elif cur is not None and op in ("move", "claim", "unblock", "close", "retire"):
-            to_state["stage"] = cur.get("stage") or ""
+        # Status-only ops journal ONLY status — stamping the current board Stage here would canonize
+        # an out-of-band Stage edit as expected state on the item's next sanctioned op, silencing the
+        # reconciliation gate. The prior stage-setting record (create / explicit stage target) stays
+        # the journal's Stage expectation.
         if kw.get("to_status") is not None:
             to_state["status"] = kw.get("to_status")
         if to_state:

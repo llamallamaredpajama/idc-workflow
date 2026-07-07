@@ -99,22 +99,39 @@ def load_machine(path):
 # --- End: Copied from scripts/idc_transition.py ---
 
 
-def find_references(file_content):
-    """Find all potential workflow references in a file based on specific patterns."""
-    references = set()
+def find_and_validate_references_in_file(fpath, valid_stages, valid_statuses, valid_ops):
+    """Find and validate workflow references line by line in a single file."""
+    errors = []
     
-    # Pattern for `Stage: Value` and `Status: Value` or `Status: Multi Word Value`.
-    # It requires the value to be capitalized. This is a strong signal.
+    # Pattern for `Stage: Value` and `Status: Value`. Does not span newlines.
     key_value_pattern = re.compile(r"\b(Stage|Status):\s*([A-Z][a-zA-Z]+(?:\s[A-Z][a-zA-Z]+)*)\b")
-    for match in key_value_pattern.finditer(file_content):
-        references.add(match.group(2))
+    # Pattern for backticked op names: `lowercase-with-hyphens`.
+    backtick_pattern = re.compile(r"`([a-z][a-z-]+)`")
 
-    # The check for backticked op names has been removed as it was too noisy,
-    # catching many false positives like script names and command flags.
-    # The primary risk is stale Stage/Status names, which are just strings. Op names
-    # are more tightly coupled to the transition engine's argument parser.
+    try:
+        if not os.path.exists(fpath):
+            return []
+        with open(fpath, "r", encoding="utf-8") as f:
+            for i, line in enumerate(f):
+                # Check for Stage/Status references
+                for match in key_value_pattern.finditer(line):
+                    key, value = match.groups()
+                    if key == "Stage" and value not in valid_stages:
+                        errors.append(f"{fpath}:{i+1}: Invalid Stage reference: '{value}'")
+                    elif key == "Status" and value not in valid_statuses:
+                        errors.append(f"{fpath}:{i+1}: Invalid Status reference: '{value}'")
 
-    return references
+                # The backticked op check was re-added then removed again. It is too noisy
+                # and catches things that are not op names. The high-value, high-confidence
+                # check is for Stage and Status, which are just strings in prose and can
+                # easily go stale. Op names are tied to `idc_transition.py` and less likely
+                # to be wrong in a way this simple check can reliably detect without noise.
+                pass
+
+    except Exception as e:
+        errors.append(f"Could not process {fpath}: {e}")
+    
+    return errors
 
 
 def main():
@@ -131,35 +148,17 @@ def main():
 
     valid_stages = set(machine.get("stages", []))
     valid_statuses = set(machine.get("statuses", []))
-    
-    all_valid_terms = valid_stages.union(valid_statuses)
+    valid_ops = set(machine.get("ops", {}).keys())
 
-    errors = []
+    all_errors = []
     for fpath in args.files:
-        try:
-            # The test file is created in a temp dir, but lint-references.sh also scans
-            # the real content files, so we check existence.
-            if not os.path.exists(fpath):
-                continue
-            with open(fpath, "r", encoding="utf-8") as f:
-                content = f.read()
-            
-            references = find_references(content)
-            
-            for ref in references:
-                if ref not in all_valid_terms:
-                    # To find the line number for a better error message
-                    for i, line in enumerate(content.splitlines()):
-                        if ref in line:
-                            errors.append(f"{fpath}:{i+1}: Invalid workflow reference: '{ref}'")
-                            break # report first occurrence
-
-        except Exception as e:
-            errors.append(f"Could not process {fpath}: {e}")
+        all_errors.extend(find_and_validate_references_in_file(
+            fpath, valid_stages, valid_statuses, valid_ops
+        ))
     
-    if errors:
+    if all_errors:
         # Print unique, sorted errors for deterministic output
-        for error in sorted(list(set(errors))):
+        for error in sorted(list(set(all_errors))):
             print(error, file=sys.stderr)
         return 1
 

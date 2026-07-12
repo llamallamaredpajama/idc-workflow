@@ -31,12 +31,14 @@ printf 'placeholder\n'             > "$RECEIPT"
 
 # --- stamp: compute fingerprints + emit the receipt -----------------------------------------
 python3 "$HELPER" stamp --repo "$SBX" --out "$RECEIPT" --written-by idc:update \
+  --plugin-version 4.1.0 \
   WORKFLOW.md docs/workflow/tracker-config.yaml sub/nested.txt \
   TRACKER.md .claude/settings.json docs/workflow/install-receipt.yaml \
   || fail "stamp exited non-zero"
 
 # receipt shape mirrors commands/init.md:137-151
-grep -Eq '^receipt_version:[[:space:]]*1$'            "$RECEIPT" || fail "receipt_version not 1"
+grep -Eq '^receipt_version:[[:space:]]*2$'            "$RECEIPT" || fail "receipt_version not 2"
+grep -Eq '^plugin_version:[[:space:]]*4\.1\.0$'       "$RECEIPT" || fail "plugin_version missing from v2 receipt"
 grep -Eq '^fingerprint_method:[[:space:]]*sha256$'    "$RECEIPT" || fail "fingerprint_method not sha256"
 grep -Eq '^written_by:[[:space:]]*idc:update$'        "$RECEIPT" || fail "written_by not recorded"
 grep -q  'path: WORKFLOW.md'                          "$RECEIPT" || fail "WORKFLOW.md not stamped"
@@ -82,6 +84,7 @@ python3 "$HELPER" verify --repo "$SBX" >/dev/null 2>&1 && fail "verify must exit
 printf 'restored\n' > "$SBX/sub/nested.txt"   # re-create the file removed above
 CUSTRECEIPT="$SBX/custom-receipt.yaml"
 python3 "$HELPER" stamp --repo "$SBX" --out "$CUSTRECEIPT" --written-by idc:update \
+  --plugin-version 4.1.0 \
   --customized WORKFLOW.md \
   WORKFLOW.md docs/workflow/tracker-config.yaml sub/nested.txt \
   || fail "stamp --customized exited non-zero"

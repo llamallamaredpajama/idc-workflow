@@ -270,11 +270,17 @@ YAML or compute fingerprints by hand: call the shipped deterministic writer, whi
 path, fingerprints each file's final on-disk bytes (after token substitution) with SHA-256,
 excludes the receipt itself / `TRACKER.md` / `.claude/settings.json`, and atomic-writes. Pass
 exactly the scaffold files Phase 2/3 created or gap-filled, marking the two operator-data files
-`--customized` (see the data-loss guard below):
+`--customized` (see the data-loss guard below). The receipt is v2: it records `plugin_version`
+— the version stamping this repo right now — so a later stale session can be caught before it
+runs old logic against a newer repo (see `/idc:update` Phase 0). Resolve the version from the
+running plugin's own manifest and pass it explicitly:
 ```bash
+PLUGIN_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' \
+  "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json")"
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_receipt_check.py" stamp \
   --repo "$(git rev-parse --show-toplevel)" \
   --out docs/workflow/install-receipt.yaml \
+  --plugin-version "$PLUGIN_VERSION" --written-by idc:init \
   --customized WORKFLOW-config.yaml --customized docs/workflow/tracker-config.yaml \
   WORKFLOW.md WORKFLOW-config.yaml \
   docs/workflow/tracker-config.yaml docs/workflow/workflow-machine.yaml docs/workflow/README.md \

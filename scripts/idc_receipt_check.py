@@ -14,15 +14,23 @@ deterministic, dependency-free core that the two lifecycle commands consume:
 The compare is safety-critical, so it fails toward asking: a missing or invalid receipt exits
 non-zero rather than silently treating files as untouched.
 
-Format (kept byte-compatible with commands/init.md:137-151):
+Format (v2; kept byte-compatible with commands/init.md:266-310):
 
-    receipt_version: 1
+    receipt_version: 2
+    plugin_version: 4.1.0
     fingerprint_method: sha256
     written_by: idc:init
     files:
       - path: WORKFLOW.md
         fingerprint: <64-lowercase-hex>
         state: stamped
+
+`plugin_version` is a repo contract, not just metadata: `scripts/idc_plugin_freshness.py`
+reads it as the running plugin's REQUIRED version, so a session whose loaded command body is
+older than the version that stamped this repo's scaffold is refused as stale-runtime (exit 4)
+rather than silently running old logic against a newer repo. A v1 receipt (no `plugin_version`)
+still parses — `read_required_version()` treats it as "no requirement recorded" — and is
+migrated to v2 the next time `/idc:init` or `/idc:update` stamps a fresh one.
 
 Rules: entry keys exactly path/fingerprint/state; sorted by path; the receipt never lists
 itself (docs/workflow/install-receipt.yaml), TRACKER.md (runtime footprint), or
@@ -33,12 +41,15 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
+import re
 import stat
 import sys
 import tempfile
 
-RECEIPT_VERSION = 1
+RECEIPT_VERSION = 2
+PLUGIN_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 FINGERPRINT_METHOD = "sha256"
 RECEIPT_RELPATH = "docs/workflow/install-receipt.yaml"
 # Paths the receipt must never list, by exact repo-relative path or basename.
@@ -91,8 +102,34 @@ def fingerprint(abs_path: str) -> str:
 
 # --- stamp ------------------------------------------------------------------------------------
 
+def default_plugin_version() -> str | None:
+    """Auto-resolve the plugin version from THIS script's own plugin root — the same
+    self-discovery `governed_expected_paths()` uses. Lets callers that predate --plugin-version
+    (or don't know which checkout is running) keep stamping a valid v2 receipt without every
+    call site having to resolve + pass it explicitly."""
+    plugin_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    manifest = os.path.join(plugin_root, ".claude-plugin", "plugin.json")
+    try:
+        with open(manifest, "r", encoding="utf-8") as f:
+            version = json.load(f).get("version")
+    except (OSError, ValueError):
+        return None
+    return version if isinstance(version, str) else None
+
+
+def resolve_plugin_version(explicit: str | None) -> str:
+    version = explicit if explicit is not None else default_plugin_version()
+    if not version:
+        die("--plugin-version is required: could not auto-resolve one from "
+            "<plugin-root>/.claude-plugin/plugin.json — pass it explicitly")
+    if not PLUGIN_VERSION_RE.fullmatch(version):
+        die(f"invalid --plugin-version {version!r}: must match X.Y.Z")
+    return version
+
+
 def cmd_stamp(args: argparse.Namespace) -> int:
     repo = os.path.abspath(args.repo)
+    plugin_version = resolve_plugin_version(args.plugin_version)
     # Files the operator kept customized at /idc:update's diff-and-ask: recorded state:
     # customized so the NEXT update asks again instead of silently re-stamping over them.
     customized = {norm_rel(p) for p in (args.customized or [])}
@@ -115,6 +152,7 @@ def cmd_stamp(args: argparse.Namespace) -> int:
     entries.sort(key=lambda e: e[0])
     lines = [
         f"receipt_version: {RECEIPT_VERSION}",
+        f"plugin_version: {plugin_version}",
         f"fingerprint_method: {FINGERPRINT_METHOD}",
         f"written_by: {args.written_by}",
         "files:",
@@ -165,8 +203,14 @@ def atomic_write(path: str, text: str) -> None:
 
 # --- verify -----------------------------------------------------------------------------------
 
-def parse_receipt(path: str) -> list[dict[str, str]]:
-    """Parse the fixed receipt format. Fail loud on anything that isn't a valid v1 receipt."""
+def parse_receipt_document(path: str) -> tuple[dict[str, str], list[dict[str, str]]]:
+    """Parse the fixed receipt format, returning (top-level metadata, file entries).
+
+    Fail loud on anything that isn't a valid v1 or v2 receipt: v1 predates `plugin_version`
+    (idc_plugin_freshness.py's repo-freshness contract migrates it on the next /idc:init or
+    /idc:update stamp); v2 requires `plugin_version` so a repo's receipt is a binding statement
+    of the plugin version its scaffold was stamped by.
+    """
     if not os.path.isfile(path):
         die(f"receipt not found at {path} — run /idc:init (or /idc:update to graduate one)")
     try:
@@ -174,13 +218,26 @@ def parse_receipt(path: str) -> list[dict[str, str]]:
     except OSError as exc:
         die(f"could not read receipt {path}: {exc}")
 
-    lines = raw.splitlines()
+    top: dict[str, str] = {}
+    for line in raw.splitlines():
+        if line and not line.startswith(" ") and ":" in line:
+            key, value = line.split(":", 1)
+            top[key.strip()] = value.strip()
+    version = top.get("receipt_version")
+    if version not in {"1", "2"}:
+        die(f"invalid receipt: receipt_version must be 1 or 2, got {version!r}")
+    if version == "2" and not top.get("plugin_version"):
+        die("invalid receipt: v2 receipt missing plugin_version")
+    return top, _parse_entries(raw, path)
+
+
+def _parse_entries(raw: str, path: str) -> list[dict[str, str]]:
     method = None
     files_seen = False
     entries: list[dict[str, str]] = []
-    cur: dict[str, str] | None = None
-    cur_lineno = 0
-    for lineno, line in enumerate(lines, 1):
+    current: dict[str, str] | None = None
+    current_line = 0
+    for line_number, line in enumerate(raw.splitlines(), 1):
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         if line.startswith("fingerprint_method:"):
@@ -191,23 +248,28 @@ def parse_receipt(path: str) -> list[dict[str, str]]:
             if rest and rest != "[]":
                 die(f"invalid receipt: 'files:' must be a block list, got inline {rest!r}")
         elif line.startswith("  - path:"):
-            if cur is not None:
-                entries.append(finish_entry(cur, cur_lineno))
-            cur = {"path": line.split(":", 1)[1].strip()}
-            cur_lineno = lineno
-        elif line.startswith("    fingerprint:") and cur is not None:
-            cur["fingerprint"] = line.split(":", 1)[1].strip()
-        elif line.startswith("    state:") and cur is not None:
-            cur["state"] = line.split(":", 1)[1].strip()
-        # top-level scalars other than the above (receipt_version, written_by) are ignored
-    if cur is not None:
-        entries.append(finish_entry(cur, cur_lineno))
-
+            if current is not None:
+                entries.append(finish_entry(current, current_line))
+            current = {"path": line.split(":", 1)[1].strip()}
+            current_line = line_number
+        elif line.startswith("    fingerprint:") and current is not None:
+            current["fingerprint"] = line.split(":", 1)[1].strip()
+        elif line.startswith("    state:") and current is not None:
+            current["state"] = line.split(":", 1)[1].strip()
+        # top-level scalars other than the above (receipt_version, plugin_version, written_by)
+        # are ignored here — parse_receipt_document's caller reads them from `top`.
+    if current is not None:
+        entries.append(finish_entry(current, current_line))
     if method != FINGERPRINT_METHOD:
         die(f"invalid receipt: fingerprint_method must be {FINGERPRINT_METHOD}, got {method!r}")
     if not files_seen:
         die("invalid receipt: missing 'files:' block")
     return entries
+
+
+def parse_receipt(path: str) -> list[dict[str, str]]:
+    """Back-compat entry point for existing callers that only need the file entries."""
+    return parse_receipt_document(path)[1]
 
 
 def finish_entry(cur: dict[str, str], lineno: int) -> dict[str, str]:
@@ -270,7 +332,6 @@ def cmd_verify(args: argparse.Namespace) -> int:
         classified.append((state, rel))
 
     if args.json:
-        import json
         out: dict[str, object] = {"unchanged": [], "modified": [], "missing": []}
         for state, rel in classified:
             out[state].append(rel)  # type: ignore[union-attr]
@@ -314,6 +375,11 @@ def main(argv: list[str]) -> int:
     sp.add_argument("--repo", required=True, help="repo root the paths are relative to")
     sp.add_argument("--out", help="write the receipt here (default: stdout)")
     sp.add_argument("--written-by", default="idc:init", help="written_by value (default idc:init)")
+    sp.add_argument("--plugin-version", metavar="X.Y.Z",
+                    help="the running plugin's version, stamped into the v2 receipt as "
+                         "plugin_version (the /idc:update stale-runtime guard's required-version "
+                         "contract). Default: auto-resolved from this script's own "
+                         "<plugin-root>/.claude-plugin/plugin.json.")
     sp.add_argument("--customized", action="append", metavar="RELPATH",
                     help="mark this stamped file state: customized (repeatable) — for files the "
                          "operator kept at update's diff-and-ask, so the next update asks again")

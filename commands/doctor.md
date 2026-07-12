@@ -81,16 +81,21 @@ ls WORKFLOW.md WORKFLOW-config.yaml docs/workflow/pillar-matrices docs/workflow/
 A partial tree is a FAIL that lists the missing paths. Fix hint: run `/idc:init`.
 
 **5 — Install receipt present.** PASS if `docs/workflow/install-receipt.yaml` exists and
-parses with the expected keys (`receipt_version`, `fingerprint_method: sha256`, `files[]`):
+parses with the expected keys (`receipt_version` — `1` legacy or `2`, `fingerprint_method:
+sha256`, `files[]`, and — for a `2` receipt — `plugin_version`, the version that last stamped
+this repo and the value `/idc:update`'s stale-runtime guard reads as this repo's required
+version):
 ```bash
 test -f docs/workflow/install-receipt.yaml \
   && grep -Eq '^fingerprint_method:[[:space:]]*sha256' docs/workflow/install-receipt.yaml \
   && echo receipt-ok
 ```
 If absent → **SKIP** with the note "pre-receipt install — run `/idc:init` to graduate a
-receipt" (a filesystem-only or pre-receipt repo is valid; do not hard-FAIL). Do **not**
-recompute or verify fingerprints here — that is update's job; doctor only checks presence
-and parse.
+receipt" (a filesystem-only or pre-receipt repo is valid; do not hard-FAIL). A `receipt_version:
+1` receipt (no `plugin_version`) still PASSes here — it has no recorded required-version yet
+and is migrated to `2` the next time `/idc:init` or `/idc:update` stamps a fresh one; do not
+treat it as drift. Do **not** recompute or verify fingerprints here — that is update's job;
+doctor only checks presence and parse.
 
 **6 — Pi runtime (optional).** The IDC Pi runtime (`runtime/pi/`, vendored) needs **Bun** to
 boot the coms-net hub + role harness; the **Pi agent** itself (the `pi` binary / npm package

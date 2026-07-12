@@ -27,16 +27,20 @@ run**, so a half-finished update can never masquerade as complete.
 2. **Stale-session guard (HALT if stale).** Claude Code caches this command's markdown at session
    start and runs it from a **version-keyed cache** dir. If the plugin was updated *this session*,
    a newer version sits in the cache but the body executing now may be the OLD one — running stale
-   update logic against a newer install can re-introduce just-fixed bugs. Check before doing
-   anything:
+   update logic against a newer install can re-introduce just-fixed bugs. This is now a **repo
+   contract, not just a cache check**: pass `--repo` so the running version is also compared
+   against this repo's own install receipt (`plugin_version` — the version that last stamped it),
+   never just the installed-cache siblings. Check before doing anything:
    ```bash
-   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_plugin_freshness.py" --plugin-root "${CLAUDE_PLUGIN_ROOT}"
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_plugin_freshness.py" \
+     --plugin-root "${CLAUDE_PLUGIN_ROOT}" --repo "$ROOT" --json
    ```
-   If it prints `verdict stale` (exit 4), **STOP immediately** and tell the operator: a newer IDC
-   version is installed than the one this session loaded — run `/reload-plugins` (or restart the
-   session) and re-run `/idc:update`. Do **not** proceed on stale logic. `verdict current` or
-   `unknown` (e.g. a `--plugin-dir` dev load) → proceed. A plugin update may also ship new
-   commands/skills an already-running session won't see until reload — same fix.
+   If `"verdict": "stale"` (exit 4), **STOP immediately** and tell the operator: this session's
+   IDC version is older than either this repo's install receipt or the installed plugin cache —
+   run `/reload-plugins` (or restart the session) and re-run `/idc:update`. Do **not** proceed on
+   stale logic. `"current"` or `"development-current"` (e.g. a `--plugin-dir` dev load newer than
+   the repo's receipt) → proceed. A plugin update may also ship new commands/skills an
+   already-running session won't see until reload — same fix.
 3. **Scope-aware plugin update (terminal step, done before this command).** `/idc:update` only
    resyncs this repo's scaffold files; pulling the new *plugin* version itself is a terminal
    command — `claude plugin update idc@idc-workflow --scope project`. The bare
@@ -237,19 +241,26 @@ gh repo view --json deleteBranchOnMerge --jq .deleteBranchOnMerge 2>/dev/null
 ## Phase 4 — Rewrite the receipt (end of a successful run only)
 
 Once every approved refresh is applied, write a fresh receipt over the stamped set so the next
-update and `/idc:uninstall` stay accurate. Pass the files the operator **kept customized** via
-`--customized` so the next update asks again instead of silently re-stamping over them — this
-**always includes the two data-bearing configs** (preserved in Phase 2 §A), which keeps a
-pre-guard `state: stamped` receipt from re-appearing:
+update and `/idc:uninstall` stay accurate. The receipt is v2: resolve the running plugin's own
+version and pass it as `--plugin-version` — this is the value the stale-runtime guard in Phase 0
+reads back on the next session, so it must always be **this session's real running version**,
+never a guess. Pass the files the operator **kept customized** via `--customized` so the next
+update asks again instead of silently re-stamping over them — this **always includes the two
+data-bearing configs** (preserved in Phase 2 §A), which keeps a pre-guard `state: stamped`
+receipt from re-appearing:
 ```bash
+PLUGIN_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' \
+  "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json")"
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_receipt_check.py" stamp \
-  --repo "$ROOT" --out docs/workflow/install-receipt.yaml --written-by idc:update \
+  --repo "$ROOT" --out docs/workflow/install-receipt.yaml \
+  --plugin-version "$PLUGIN_VERSION" --written-by idc:update \
   --customized WORKFLOW-config.yaml --customized docs/workflow/tracker-config.yaml \
   [--customized <other-kept-file> ...] <stamped-file> <stamped-file> ...
 ```
-This graduates a pre-receipt repo to receipt-driven, and — because it runs only at the very end —
-guarantees a partial update never leaves a receipt that claims more than was actually done. The
-receipt never lists itself, `TRACKER.md`, or `.claude/settings.json` (the helper drops them).
+This graduates a pre-receipt repo to receipt-driven (and a v1 receipt to v2 — the `plugin_version`
+requirement is satisfied from here on), and — because it runs only at the very end — guarantees a
+partial update never leaves a receipt that claims more than was actually done. The receipt never
+lists itself, `TRACKER.md`, or `.claude/settings.json` (the helper drops them).
 
 If a receipt already existed and nothing changed this run, leave it untouched and report
 `skipped-already-current`.

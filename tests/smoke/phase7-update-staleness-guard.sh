@@ -50,4 +50,39 @@ printf '%s' "$out" | grep -q 'verdict unknown' || fail "expected 'verdict unknow
 out="$(verdict "$PLUGIN")"; rc=$?
 [ "$rc" -ne 2 ] || fail "freshness helper usage error against the real plugin root: [$out]"
 
+# 5. Bind freshness to a repo's install receipt (--repo/--json): the running plugin version must
+#    not be older than the repo's own receipt-recorded plugin_version, not just the cache siblings.
+for v in 3.3.0 4.0.0; do
+  mkdir -p "$CACHE/$v/.claude-plugin"
+  printf '{\n  "name": "idc",\n  "version": "%s"\n}\n' "$v" \
+    > "$CACHE/$v/.claude-plugin/plugin.json"
+done
+
+write_receipt() {
+  mkdir -p "$1/docs/workflow"
+  printf 'receipt_version: 2\nplugin_version: %s\nfingerprint_method: sha256\nwritten_by: test\nfiles: []\n' "$2" \
+    > "$1/docs/workflow/install-receipt.yaml"
+}
+
+REPO="$SBX/repo"
+write_receipt "$REPO" 4.0.0
+
+out="$(python3 "$HELPER" --plugin-root "$CACHE/3.3.0" --repo "$REPO" --json)"; rc=$?
+[ "$rc" -eq 4 ] || fail "3.3.0 runtime against a 4.0.0 repo must be stale"
+printf '%s' "$out" | grep -q '"reason_code": "running-behind-receipt"' \
+  || fail "receipt mismatch reason missing: $out"
+
+write_receipt "$REPO" 4.1.0
+out="$(python3 "$HELPER" --plugin-root "$CACHE/4.0.0" --repo "$REPO" --json)"; rc=$?
+[ "$rc" -eq 4 ] || fail "4.0.0 runtime against a 4.1.0 repo must be stale"
+
+write_receipt "$REPO" 4.0.0
+out="$(python3 "$HELPER" --plugin-root "$DEV" --repo "$REPO" --json)"; rc=$?
+[ "$rc" -eq 0 ] || fail "newer --plugin-dir checkout must be allowed"
+printf '%s' "$out" | grep -q '"load_mode": "plugin-dir"' || fail "dev load not identified: $out"
+
+write_receipt "$REPO" 9.9.10
+out="$(python3 "$HELPER" --plugin-root "$DEV" --repo "$REPO" --json)"; rc=$?
+[ "$rc" -eq 4 ] || fail "a dev checkout older than the repo receipt must still be refused"
+
 echo "PASS: idc_plugin_freshness.py flags a stale-session load (numeric compare) and never blocks dev/unknown"

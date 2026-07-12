@@ -37,8 +37,20 @@ Identical across backends; the adapter routes without reshaping signatures.
 | `comment` | `(ticket_id, body)` |
 
 Conveniences layered on the six: `claim(ticket, agent)` (Status→In Progress + claim
-comment), `block(ticket, by)` (Status→Blocked + native blocked-by), `close(ticket)`
-(Status→Done; idempotent). A seventh core op is a contract change requiring a recirculation.
+comment), `block(ticket, by)` (Status→Blocked + native blocked-by), `close(ticket)` (the
+verdict-guarded path to Done; idempotent), and `dispose(ticket, disposition)` (the **non-verdict**
+guarded path to Done — gate approval / pointer retirement / recirc-drain retirement). A seventh
+core op is a contract change requiring a recirculation.
+
+**Status-changing ops route through the transition engine.** `setField(…, Status, …)`, `move`,
+`claim`, `block`, `close`, `dispose`, and `unblock` are transitions: dispatch them via
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_transition.py"` (both backends), which validates
+machine-legality, verifies the write's read-back, and journals every op to
+`docs/workflow/transition-journal.ndjson` — the record the janitor's board↔journal reconciliation
+replays. `Done` is reachable ONLY through a guarded terminal op — `close` (a passing, item-owning
+verdict) for built work, or `dispose --disposition {gate-approved|retired|drained}` (its
+deterministic evidence guard) for the non-verdict terminal dispositions. The backend skills' raw
+helpers stay the mechanics for reads and non-Status fields only.
 
 ### Merge lease (single-holder serialization)
 

@@ -278,7 +278,8 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_receipt_check.py" stamp \
   --customized WORKFLOW-config.yaml --customized docs/workflow/tracker-config.yaml \
   WORKFLOW.md WORKFLOW-config.yaml \
   docs/workflow/tracker-config.yaml docs/workflow/workflow-machine.yaml docs/workflow/README.md \
-  docs/workflow/pillar-matrices/.gitkeep docs/workflow/code-reviews/.gitkeep
+  docs/workflow/pillar-matrices/.gitkeep docs/workflow/code-reviews/.gitkeep \
+  docs/workflow/code-reviews/.gitignore
 ```
 `docs/workflow/workflow-machine.yaml` is the transition engine's legal-transition table (v4 Phase 2),
 scaffolded so it is operator-visible + update-managed. It is **pristine** (no operator data written

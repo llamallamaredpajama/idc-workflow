@@ -92,8 +92,20 @@ and `OWNER` from config; never hardcode.
 
 ## Six core ops (the portable interface)
 
+**Status transitions route through the transition engine** — the single sanctioned write door on
+this backend too:
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_transition.py" --backend github --owner "$OWNER" --project "$PROJ" <op>`
+(`create-ticket` / `claim` / `move` / `unblock` / `close` / `dispose` / `link`). It validates
+machine-legality, verifies the write's read-back, and journals every op to
+`docs/workflow/transition-journal.ndjson` — the record the janitor's board↔journal reconciliation
+replays. `Done` is reachable ONLY through a guarded terminal op — the verdict-guarded `close`, or
+`dispose --disposition {gate-approved|retired|drained}` for the non-verdict terminal dispositions
+(each with its own deterministic evidence guard). The raw recipes below are the *mechanics* that
+door drives; invoke them directly only for non-Status fields and reads.
+
 **createTicket(title, body, type, labels) -> issue#** — create the issue, add it to the
-board, then set initial fields via `setField`/`move`. Returns the issue number on stdout.
+board, then set initial fields via `setField`/`move` (or mint through the engine's
+`create-ticket`, which journals the create). Returns the issue number on stdout.
 ```bash
 URL=$(gh issue create --title "$T" --body "$B" \
         ${TYPE:+--label "type:$TYPE"} ${LABELS:+--label "$LABELS"}) || die_gh
@@ -102,9 +114,11 @@ gh project item-add "$PROJ" --owner "$OWNER" --url "$URL" || die_gh
 printf '%s\n' "$NUM"
 ```
 
-**setField(ticket, field, value)** — resolve the cached field node id, the option id (by name),
-and the project **node id** (`item-edit --project-id` needs the node id, NOT the integer `$PROJ`),
-then write the single-select value. Pre-seed the option first if it is new (see provisioning
+**setField(ticket, field, value)** — for the **non-Status fields** (`Stage`/`Wave`/`Phase`/
+`Domain`; a `Status` write is a transition — route it through the engine's `move`, which journals
+it; a raw Status `item-edit` bypasses the journal and reads as divergence): resolve the cached
+field node id, the option id (by name), and the project **node id** (`item-edit --project-id`
+needs the node id, NOT the integer `$PROJ`), then write the single-select value. Pre-seed the option first if it is new (see provisioning
 caveat). **Guard every resolved id before the mutation** — an empty item, option, or project-node
 id (issue not on the board, no such option, or an unresolvable project) would otherwise reach
 `updateProjectV2ItemFieldValue` as `''` (`Could not resolve to a node with the global id of ''`),
@@ -123,8 +137,9 @@ gh project item-edit --id "$IID" --project-id "$PNODE" \
   body line if sub-issues are unavailable).
 - `blocks` — native GitHub **blocked-by** dependency (see below).
 
-**move(ticket, status)** — convenience over `setField` for `Status`:
-`setField "$NUM" Status "$STATUS"` (status must be one of the four).
+**move(ticket, status)** — route through the engine:
+`idc_transition.py … move --num "$NUM" --to-status "$STATUS"` (machine-legal, read-back-verified,
+journaled; status must be one of the four).
 
 **query(filter) -> [#...]** — list board items and filter by field value(s). Reads the WHOLE board
 via the paginating `board_json` helper (so a board past 30 items is never truncated — the exact
@@ -167,13 +182,25 @@ degradation of the *link representation only* — it never silently drops the de
 
 ## Convenience ops
 
-- **claim(issue, agent)** — `move "$NUM" "In Progress"` + `comment "$NUM" "claimed by $AGENT"`.
-  No lock; the Build merge-queue serializes merges.
-- **block(issue, by)** — `move "$NUM" Blocked` + `link "$BY" "$NUM" blocks` (native blocked-by).
-- **close(issue)** — the **atomic**, read-back-verified close (design §B.2, RC3). Replaces the old
-  two-non-atomic-call recipe (`move "$NUM" Done` + `gh issue close`), which could leave a
-  **Done-but-open** issue when the second call silently no-op'd or a step failed between them (the live
-  board carried 10 such stragglers). Resolve + guard the item id (cache-aware via `itemid`), then hand
+- **claim(issue, agent)** — `idc_transition.py … claim --num "$NUM" --agent "$AGENT"`
+  (Status→In Progress + the claim comment, journaled). No lock; the Build merge-queue serializes
+  merges.
+- **block(issue, by)** — `idc_transition.py … move --num "$NUM" --to-status Blocked` + the
+  **native `link "$BY" "$NUM" blocks` recipe above** (the REST issue-dependencies edge, with its
+  documented fallback). The native relation is the ONLY representation the autorun drain's
+  dependency gate reads (`idc_autorun_drain._blocked_by_numbers`); the engine's
+  `link --kind blocks` records the journaled marker edge but does **not** create it (#158) —
+  substituting the engine link here leaves the child looking unblocked, claimable before its
+  parent finishes.
+- **close(issue)** — a verdict-backed close routes through the engine:
+  `idc_transition.py … close --num "$NUM" --verdict <verdict.json> --pr <PR>` — the guarded,
+  journaled path to `Done` (verdict must validate, pass, own the item and the PR, with every
+  `merge_conditions[]` met); internally it performs the same **atomic**, read-back-verified close
+  as the helper below (design §B.2, RC3), which replaced the old two-non-atomic-call recipe
+  (`move "$NUM" Done` + `gh issue close`) that could leave a **Done-but-open** issue when the
+  second call silently no-op'd (the live board carried 10 such stragglers). The raw helper
+  invocation stays the mechanic the engine's `close`/`dispose` drive:
+  resolve + guard the item id (cache-aware via `itemid`), then hand
   off to the helper — it sets Status→Done, closes the issue, and **reads back** the state, refusing
   success unless it is `CLOSED`:
   ```bash
@@ -185,15 +212,19 @@ degradation of the *link representation only* — it never silently drops the de
   so the caller never records a close that did not land; a rate-limit exits 3 (resumable —
   `rate-limited until <reset>`). Idempotent: re-closing an already-`Done`/closed issue re-verifies and
   exits 0. Passing `--item-id` (the cache-aware `itemid` result) lets the helper skip its own board read.
-- **retire(pointer, reason)** — retire a consideration pointer that is fully decomposed +
-  built: `setField "$NUM" Status Done` then `gh issue close "$NUM" --reason completed --comment
-  "$REASON" || die_gh`. Use this op (or `setField`/`close` above) — **never hand-roll the
+- **retire(pointer, reason)** — retire a consideration pointer that is fully decomposed + built
+  through the engine's guarded terminal door:
+  `idc_transition.py … dispose --disposition retired --num "$NUM" --child "$CHILD"` — the engine
+  verifies the pointer is a `Consideration` item AND that `$CHILD` (a decomposition child) references
+  it via the engine's own link record, then mints `Done`, closes the issue, and journals the
+  disposition + evidence. An unlinked pointer is refused (the decomposition record is the receipt).
+  Use this op — **never hand-roll the
   retire by capturing `gh project … --format json` into a shell var and re-parsing it with an
   external `jq`**: a raw control char (U+0000–U+001F) in any board title/body trips external jq
   (`parse error: control characters … must be escaped`), yields an **empty** item id, and the
   edit fails on the blank global id `''` (`Could not resolve to a node with the global id of ''`)
-  while the loop reports "retired → Done" — the swallowed failure the contract forbids. `setField`
-  resolves the id **in-process via `itemid` (gh `--jq`)** and guards the empty id, so the failure
+  while the loop reports "retired → Done" — the swallowed failure the contract forbids. The engine
+  resolves the id **in-process** (cache-aware `itemid`) and guards the empty id, so the failure
   surfaces non-zero instead.
   *Stage on a retired pointer is intentionally left at its last value (`Planning`), not cleared or
   advanced* — clearing was evaluated and rejected as NOT a clean fix: (1) the sibling **filesystem**

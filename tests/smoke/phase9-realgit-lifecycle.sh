@@ -91,7 +91,14 @@ mkdir -p "$REPO/docs/workflow"; printf 'backend: filesystem\n' > "$REPO/docs/wor
 TRACKER="$REPO/TRACKER.md"
 python3 "$TRK" --tracker "$TRACKER" init >/dev/null                          || fail "tracker init failed"
 python3 "$TRK" --tracker "$TRACKER" create --title "buildable feature" >/dev/null  # #1
-python3 "$TRK" --tracker "$TRACKER" claim --num 1 --agent tester >/dev/null   || fail "claim failed"
+# Claim through the TRANSITION ENGINE (not the raw tracker) so the claim is JOURNALED — the real
+# lifecycle shape. The janitor's journal-replay dimension must still certify the finished lifecycle
+# COHERENT below, which requires the finisher's tracker-close to land in the same journal
+# (red-when-broken: an unjournaled finisher close leaves the journal at In Progress vs board Done
+# → a false RISKY divergence, exit 1).
+ENG="$PLUGIN/scripts/idc_transition.py"
+python3 "$ENG" --repo "$REPO" --backend filesystem --tracker "$TRACKER" claim --num 1 --agent tester >/dev/null \
+  || fail "engine claim failed"
 
 WT="$REPO/.claude/worktrees/$BRANCH"
 gitc worktree add -q -b "$BRANCH" "$WT" "$BASE"                              || fail "worktree add failed"
@@ -116,6 +123,8 @@ printf '%s\n' "$finish_out" | grep -qx 'finish: ok' || fail "finish must print '
 [ -z "$(gitc ls-remote --heads origin "$BRANCH")" ] || fail "finish must delete the remote build branch"
 [ "$(python3 "$TRK" --tracker "$TRACKER" show --num 1 --field Status)" = "Done" ] \
   || fail "finish must close the tracker issue (Status=Done)"
+grep -q '"item": 1.*"op": "close"' "$REPO/docs/workflow/transition-journal.ndjson" \
+  || fail "finish must journal its tracker-close (an op=close record for #1) — an unjournaled close makes replay report a false divergence"
 
 # Model the operator repo catching up to the merged reality (advances origin/main to include the
 # merge, prunes the deleted branch's stale tracking ref) — what any real repo does on its next fetch.
@@ -127,10 +136,12 @@ gitc merge-base --is-ancestor "$BUILD_TIP" origin/main \
 # HEADLINE (design §E.1): the janitor certifies the finished end-state COHERENT — the two shipped
 # reconcilers AGREE. A finished build leaves nothing to flag.
 # ================================================================================================
-clean="$(python3 "$JAN" --repo "$REPO" --tracker "$TRACKER")"; rc=$?
+# --check-journal-divergence (doctor Row 10's surface): the COHERENT verdict below also proves the
+# journal replays to exactly the finished board end-state (engine claim + journaled finisher close).
+clean="$(python3 "$JAN" --repo "$REPO" --tracker "$TRACKER" --check-journal-divergence)"; rc=$?
 [ "$rc" -eq 0 ] || fail "a cleanly-finished lifecycle must exit 0 (COHERENT), got $rc" "$clean"
 printf '%s\n' "$clean" | grep -qx 'janitor: COHERENT' || fail "expected the COHERENT banner" "$clean"
-cj="$(python3 "$JAN" --repo "$REPO" --tracker "$TRACKER" --json)"
+cj="$(python3 "$JAN" --repo "$REPO" --tracker "$TRACKER" --check-journal-divergence --json)"
 printf '%s\n' "$cj" | grep -qF '"verdict": "coherent"' \
   || fail "JSON verdict must be 'coherent' (the exit-gate and the machine-readable report must agree)" "$cj"
 

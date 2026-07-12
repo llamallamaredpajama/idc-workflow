@@ -53,7 +53,8 @@ TRD (the `spec` layer) gates only when `gating.trd: on`. Two outcomes:
   function-first **ADMITTED consideration** per `idc:idc-consideration-schema` (carrying the
   discovered scope), write its board pointer as `Stage=Consideration`, `Status=Todo` (admitted —
   *Todo*, distinct from Think's pending-admission-behind-a-gate pointer which rides `Blocked`), then
-  **RETIRE the Recirculation ticket** (`move Status=Done` / close it). **Preserve provenance**: a
+  **RETIRE the Recirculation ticket** via the engine's guarded `dispose --disposition drained` (the
+  ticket's `idc-recirc-source` provenance is the receipt the guard verifies). **Preserve provenance**: a
   `discovered-scope` label on the consideration pointer (github) and an "originated as discovered
   scope (recirculation ticket #<n> — <Provenance>)" line in the consideration doc body, plus a
   closing comment on the retired ticket naming the consideration it became.

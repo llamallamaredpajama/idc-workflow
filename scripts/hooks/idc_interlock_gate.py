@@ -62,7 +62,7 @@ _CLOSE = (
 _ENGINE = (
     "route it through the single write door: "
     "`python3 ${CLAUDE_PLUGIN_ROOT}/scripts/idc_transition.py --repo <repo> <op> …` "
-    "(create-ticket | create-pointer | claim | move | close | retire | recirculate-intake | "
+    "(create-ticket | create-pointer | claim | move | close | dispose | recirculate-intake | "
     "link | unblock) — never mutate the board with a raw `gh project`/GraphQL call."
 )
 

@@ -25,11 +25,22 @@
 #                     Non-terminal ops declare no guards (they are bounded by validate_target instead).
 #
 # THE terminal invariant (the crown-jewel rule the engine enforces):
-#   The ONLY path to `terminal_status` (Done) is a guarded terminal `close` whose verdict is VALID,
-#   PASSING, and OWNS the item (verdict.issue == the closing item, verdict.pr == the mandatory --pr).
+#   `Done` is reachable ONLY through a GUARDED terminal op whose deterministic evidence guard passes.
+#   Two doors, no others:
+#     * `close`   — for BUILT work: its verdict must be VALID, PASSING, and OWN the item (verdict.issue
+#                   == the closing item, verdict.pr == the mandatory --pr).
+#     * `dispose` — for a NON-verdict terminal disposition (an approved operator gate, a decomposed
+#                   pointer, a drained recirc-inbox item): it mints Done only when the named
+#                   `--disposition`'s per-disposition evidence guard passes (see `ops.dispose` below).
 #   NOTHING else reaches Done — create/move/claim/unblock/recirculate-intake are refused from minting
-#   it, and a guard-free terminal op (e.g. `retire` here) is fail-closed. Every other write is bounded
-#   by the declared domains via one `validate_target` gate.
+#   it, and a terminal op that resolves to NO guards (a hand-authored `guards: []` op, or a `dispose`
+#   with a missing/unknown disposition) is FAIL-CLOSED. Every other write is bounded by the declared
+#   domains via one `validate_target` gate.
+#   (One disclosed NON-door exists outside the engine: the janitor's `--apply-safe` RECONCILER may
+#   stamp Done when the truth already happened elsewhere — the issue completed on GitHub / the IDC
+#   build branch merged clean — but it DECIDES nothing, and it journals its repair as its own
+#   `janitor-repair` record carrying that verified truth, never as an engine `close`/`dispose`, so
+#   the audit trail can always tell a reconciliation from a guarded close.)
 #
 # Two more machine-level invariants the engine enforces for EVERY write (create AND transition), so
 # there is no second path around a per-op rule:
@@ -44,6 +55,33 @@
 #                           PASSING, and OWNS the item/PR (the close receipt; #394ec6fe drop A/B/C).
 #   merge-conditions-met  — every entry in that verdict's merge_conditions[] is marked met (closes
 #                           the silently-downgraded pre-merge-condition failure, #246 -> #248).
+#   The `dispose` op's per-disposition evidence guards (deterministic, board/disk-checkable, SAME
+#   guard code on both backends; a board-read failure fails closed / resumable, never a bad close):
+#   gate-approval-artifact       — the item is an `[operator-action]` gate (by title prefix) AND the
+#                                  backend's real approval artifact is present, BOUND to this gate:
+#                                  github = the gate's OWN recorded `idc-gate-pr` approval PR is
+#                                  merged, or — only on an operator-DECISION gate, whose KIND is the
+#                                  producer-stamped `[operator-action] Decision — …` TITLE (labels
+#                                  never retype a gate) — the decision/decision-approved label pair;
+#                                  filesystem = the operator's own explicit Done-move via this op (the
+#                                  PR #73 gate-item semantics — no PRs/labels exist), the gate marker
+#                                  confining it to a genuine gate so it is never a verdict-free
+#                                  backdoor for build work.
+#   pointer-decomposition-record — the item is a Stage=Consideration (or legitimately advanced
+#                                  Planning) pointer AND a named `--child` on the board REFERENCES it
+#                                  through the engine's own kind=sub DECOMPOSITION link (child.parent
+#                                  == pointer on filesystem; a kind=sub idc-blocked-by marker or the
+#                                  native `Tracked by:#<pointer>` line on github — a blocks-edge is a
+#                                  dependency, never a decomposition), AND — above the journal
+#                                  adoption watermark — the engine's JOURNALED kind=sub link record
+#                                  corroborates that board relation (board links alone are
+#                                  adapter-forgeable, #151; a kind-less journal record predates kind
+#                                  journaling and is tolerated).
+#   recirc-provenance            — the item is on Stage=Recirculation AND carries the `idc-recirc-source`
+#                                  provenance marker the filer/sweep stamp onto every recirc-inbox ticket,
+#                                  AND — above the journal adoption watermark — a corroborating journal
+#                                  record proves a sanctioned door staged it (the sweep's re-stage or
+#                                  the engine's intake; markers alone are adapter-forgeable, #151).
 
 version: 1
 
@@ -96,16 +134,23 @@ ops:
     kind: terminal
     to_status: Done
     guards: [verdict-validated, merge-conditions-met]
-  # `retire` would administratively close a NON-build item (a decomposed Consideration, a drained
-  # Recirculation inbox item), but the board Status enum has only ONE terminal value (Done), and a
-  # verdict-free path to Done is forbidden. So retire declares NO guards and is FAIL-CLOSED here (the
-  # engine refuses a guard-free terminal op). TODO(Phase 4): a distinct non-Done "closed-not-planned"
-  # disposition (a board-schema change) would let retire terminalize a non-build item without minting
-  # an unaccepted Done — then this op gets a real guard/target and is enabled.
-  retire:
+  # `dispose` closes a NON-build item that has no review verdict — an approved operator gate, a
+  # decomposed Consideration pointer, or a drained Recirculation-inbox item (#150 door unification).
+  # The board Status enum has only ONE terminal value (Done) — no new board Status — so `dispose`
+  # mints that SAME Done, but ONLY when the caller's `--disposition` names one of the entries below
+  # AND that disposition's per-disposition evidence guard passes. A `dispose` with a missing/unknown
+  # disposition resolves to NO guards and is FAIL-CLOSED (the guard-free terminal invariant). Every
+  # disposition close journals which door + disposition + evidence.
+  dispose:
     kind: terminal
     to_status: Done
-    guards: []
+    dispositions:
+      gate-approved:
+        guards: [gate-approval-artifact]
+      retired:
+        guards: [pointer-decomposition-record]
+      drained:
+        guards: [recirc-provenance]
 
   # ── structural ops ───────────────────────────────────────────────────────────────────────────
   link:

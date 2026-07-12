@@ -247,9 +247,9 @@ def create_item(owner, project, repo, title, body, stage, status):
     anything: an unresolvable project id / Stage / Status leaves no dangling issue.
 
     Every gh call routes through `_gh` — the single seam a unit test monkeypatches to simulate a
-    partial (Status-set) failure and assert the discard fires. NOTE: this is the sanctioned atomic
-    github create primitive; re-pointing the shipped `idc_recirc_sweep.py` create path at it is
-    deferred to a later phase (that module is intentionally not touched here)."""
+    partial (Status-set) failure and assert the discard fires. This is the sanctioned atomic github
+    create primitive; `idc_recirc_sweep.py`'s ticket-filing path mints Recirculation tickets through
+    it (issue #130), so a filed ticket can never be the empty-Status pointer the old chain left."""
     # Resolve the project node id + Stage/Status field+option ids up front (item-edit needs the PVT_
     # node id, not the integer project number — the documented gotcha). Any unresolved id → refuse to
     # create, so we never leave a dangling issue behind.

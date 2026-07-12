@@ -2,6 +2,72 @@
 
 All notable changes for the IDC Workflow plugin are documented in this file.
 
+## 4.0.0 — 2026-07-11
+
+The v4 deterministic-core release (plan: `docs/dev/2026-07-03-deterministic-core-refactor-plan.md`,
+phases 0–4): **code owns state transitions, the LLM owns judgment.** Major version because the
+write paths changed shape — every board state change now goes through one legality-checked engine
+door, terminal states are reachable only through guarded terminal operations, and every engine op
+leaves an auditable journal line. Operators with custom tooling that mutated the board directly
+should switch to the engine CLI (`scripts/idc_transition.py`); `/idc:update` migrates governed
+repos' scaffolds (including files new to this version — see the `unrecorded` mechanism below).
+
+- **Single write door + machine-as-data (#133, #134, #137, #143).** The transition engine
+  `idc_transition.py` is the only sanctioned door for create/move/close/link/dispose, on both
+  backends, with transition legality checked against a machine table that now lives as data in
+  `docs/workflow/workflow-machine.yaml` (scaffolded into governed repos; WORKFLOW.md's board-schema
+  section routes to it). New lint Rule O cross-checks shipped files' states/statuses/engine-op
+  references against the machine yaml; a raw-board-mutation lint catches improvised `gh project`
+  writes in shipped playbooks.
+- **Guarded terminal operations (#135, #136, #150-W2).** `close` requires a review-verdict receipt
+  and honors `merge_conditions`; the build finisher gates on routed findings. Non-verdict terminal
+  dispositions — `drained`, `retired`, `gate-approved` — each pass their own guard (provenance
+  marker, decomposition link, approval artifact), with journal corroboration, gate binding, a
+  TOCTOU re-proof, and stranded-gate recovery. **Done is reachable only through a guarded terminal
+  op.** PreToolUse interlocks block raw terminal actions at the tool boundary.
+- **Transition journal + reconciliation (#141, #142, #150-W1).** Every engine op appends a
+  who/what/when/guard-evidence NDJSON line to `docs/workflow/transition-journal.ndjson` —
+  append-only (journal write failures are fail-soft + loud; reconciliation is the detector), with
+  atomic closed-segment rotation and a sidecar append lock. The recirculation sweep's restage +
+  intake are journaled and atomic (fixes the #130 root-cause class). `idc_journal_replay.py`
+  rebuilds expected board end-state from the journal and diffs the actual board;
+  janitor + doctor reconcile board↔journal↔git. The replay divergence check ships **opt-in**
+  (`idc_git_janitor.py --check-journal-divergence`); the default flip is parked on a
+  transactional journal/board design (#154 — the 24-round hardening is preserved on
+  `te/phase4-closeout-w3`).
+- **Hook spine (phase 3: #138, #139, #140 + stages D/E).** Obligations ledger (script-written,
+  session-scoped, advisory-locked); Stop fixpoint gate — an autorun/build orchestrator cannot stop
+  while the board says work remains (ledger alone never blocks a clean board), with a persisted
+  drain verdict making the github stop path 0-GraphQL; recirculator closeout-or-checkpoint on
+  SubagentStop + kill-safe main-session reconciliation; PostToolUse board-coherence self-repair
+  (commit↔claim, issue↔board-add); wave-close acceptance gate (an acceptance error/gap is
+  non-terminal, never a masqueraded `complete`); TeammateIdle synthesis reconstructs a phantom-idle
+  implementer's real state from git evidence.
+- **Truthful signals (phase 0: #124–#128).** Three-conjunct drain fixpoint with a distinct
+  `drain: recirc-pending` (exit 4); atomic Stage+Status item creation on both backends; board-lint
+  flags (+ `--fix`) empty-Status considerations; janitor RESUME-RECIRC finding for truncated
+  recirculation drains; the glob-driven red-when-broken governance test lane (59 scenarios,
+  parser-parity tested under PyYAML and the stdlib fallback).
+- **Release gate (#144).** `idc_release_check.py --governance` runs the governance lane as a
+  release gate (self-check guarded, isolated-lane override for tests); version-lockstep checking
+  unchanged.
+- **Prose demotion (#145).** Imperative control-flow prose across `commands/`, `agents/`,
+  `skills/` demoted to one-line advisory pointers wherever a deterministic gate now enforces the
+  behavior — judgment knowledge (severity meanings, disposition guidance, review rubrics) stays.
+  Every shipped file examined; 4 ablation-gated batches, log in `docs/dev/phase4-demotion-log.md`.
+- **Release-acceptance fixes (U6, this release's own gate).** The codex-driven sandbox e2e +
+  two-round review sweep caught and fixed before shipping: `/idc:update` now surfaces + installs
+  files new to the installed plugin version (`idc_receipt_check.py verify` `unrecorded` bucket —
+  without it, updated repos silently missed `workflow-machine.yaml` and the drift contract read
+  clean); the github tracker skill's `block()` recipe again creates the **native**
+  issue-dependencies edge (the engine-link substitution left children invisible to the drain's
+  dependency gate — engine-side native edge is #158); undecodable journal bytes now fail closed
+  (classified error, never an unclassified crash); `/idc:init` stamps
+  `docs/workflow/code-reviews/.gitignore`. Deferred with issues: #155 (janitor numberless-create
+  carve-out, opt-in surface), #156 (sweep rate-limit stop), #157 (Rule O `Stage = X` forms),
+  #159 (close-only recovery journal op), #160 (reclaim attribution), #161 (brownfield init
+  stamp), #162 (plan provenance doc example).
+
 ## 3.3.0 — 2026-07-02
 
 The 2026-07 effectiveness-audit fix package (umbrella #110): the pipeline now cleans up after

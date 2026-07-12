@@ -51,6 +51,18 @@ EXCLUDED_BASENAMES = {"install-receipt.yaml"}
 # `state: stamped`, and silently re-stamping would wipe that data. This set is the single source of
 # truth update consumes (verify --json -> "always_ask"); never silently refresh a path listed here.
 ALWAYS_ASK_RELPATHS = {"WORKFLOW-config.yaml", "docs/workflow/tracker-config.yaml"}
+# Fixed governed dests OUTSIDE the docs-tree, dest -> template source relative to the plugin root
+# (the same mapping idc_template_for.py / idc_init_scaffold.sh encode). Used by verify to derive
+# the CURRENT plugin's expected stamped set: a receipt written by an older plugin version does not
+# list files a newer version scaffolds (e.g. a 3.x receipt has no docs/workflow/workflow-machine.yaml),
+# so classifying only receipt entries silently skips them — the /idc:update 4.0.0 migration gap.
+GOVERNED_FIXED_DESTS = {
+    "WORKFLOW.md": "templates/WORKFLOW.md",
+    "WORKFLOW-config.yaml": "templates/WORKFLOW-config.yaml",
+    "docs/workflow/tracker-config.yaml": "templates/tracker-config.yaml",
+    "docs/workflow/workflow-machine.yaml": "templates/workflow-machine.yaml",
+}
+DOCS_TREE_TEMPLATE_DIR = "templates/docs-tree"
 
 
 def die(message: str, code: int = 2) -> None:
@@ -207,6 +219,37 @@ def finish_entry(cur: dict[str, str], lineno: int) -> dict[str, str]:
     return cur
 
 
+def governed_expected_paths() -> list[str]:
+    """The CURRENT plugin version's expected stamped set, enumerated from this script's own
+    plugin root exactly the way idc_init_scaffold.sh lays files down: the fixed dests whose
+    template source exists, plus every file under each VISIBLE top-level templates/docs-tree
+    entry (inner dotfiles like .gitkeep are copied by cp -R, so they count). Fail-soft: an
+    absent templates tree (broken install) yields [] with a stderr note — receipt
+    classification must keep working regardless."""
+    plugin_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    expected: list[str] = []
+    for dest, tmpl in GOVERNED_FIXED_DESTS.items():
+        if os.path.isfile(os.path.join(plugin_root, tmpl)):
+            expected.append(dest)
+    tree = os.path.join(plugin_root, DOCS_TREE_TEMPLATE_DIR)
+    if not os.path.isdir(tree):
+        print(f"idc-receipt: note: {DOCS_TREE_TEMPLATE_DIR} not found under {plugin_root} — "
+              "unrecorded detection limited to fixed dests", file=sys.stderr)
+        return sorted(rel for rel in expected if not is_excluded(rel))
+    for name in sorted(os.listdir(tree)):
+        if name.startswith("."):
+            continue  # scaffold copies visible top-level entries only
+        top = os.path.join(tree, name)
+        if os.path.isfile(top):
+            expected.append(f"docs/workflow/{name}")
+        elif os.path.isdir(top):
+            for dirpath, _dirnames, filenames in os.walk(top):
+                for fn in filenames:
+                    rel_in_tree = os.path.relpath(os.path.join(dirpath, fn), tree)
+                    expected.append(norm_rel(f"docs/workflow/{rel_in_tree}"))
+    return sorted(rel for rel in expected if not is_excluded(rel))
+
+
 def cmd_verify(args: argparse.Namespace) -> int:
     repo = os.path.abspath(args.repo)
     receipt = args.receipt or os.path.join(repo, RECEIPT_RELPATH)
@@ -244,6 +287,13 @@ def cmd_verify(args: argparse.Namespace) -> int:
         # files this repo actually stamps.
         receipt_paths = {e["path"] for e in entries}
         out["always_ask"] = sorted(ALWAYS_ASK_RELPATHS & receipt_paths)
+        # Files the CURRENT plugin stamps that this receipt does not list — new in a newer
+        # plugin version (the receipt predates them). update routes these to §B restore
+        # (absent on disk) / diff-and-ask (present); they are NOT in `ok` (back-compat: ok
+        # stays a modified+missing contract) and NOT in the TSV output (uninstall consumes
+        # TSV as its removal manifest and must never see never-stamped paths).
+        out["unrecorded"] = [rel for rel in governed_expected_paths()
+                             if rel not in receipt_paths]
         print(json.dumps(out, indent=2, sort_keys=True))
     else:
         for state, rel in classified:
@@ -278,7 +328,9 @@ def main(argv: list[str]) -> int:
                          "\"modified\":[paths], \"missing\":[paths], \"ok\": bool (true iff "
                          "modified+missing both empty), \"summary\": str, \"always_ask\":[paths] "
                          "(data-bearing files update must always diff-and-ask, never silently "
-                         "refresh)}")
+                         "refresh), \"unrecorded\":[paths] (files the current plugin stamps that "
+                         "the receipt does not list — new in a newer plugin version; update "
+                         "restores absent ones / diff-and-asks present ones)}")
     vp.set_defaults(func=cmd_verify)
 
     args = parser.parse_args(argv)

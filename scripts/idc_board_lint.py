@@ -12,9 +12,13 @@ prose dependencies that were never recorded as a native blocked-by link. It is *
 reports, it never gates. (Build does not re-validate every issue; the schema check stays Plan's
 gate. This is doctor's read-only heads-up that something slipped past it.)
 
-It is **github-only** by construction: the filesystem backend stores no issue bodies (only
-structured metadata), so there is no body to re-scan and a dependency can only ever BE the native
-`blocked_by` link — `/idc:doctor` skips this row for the filesystem backend.
+The BODY rules (schema / prose-dependency) are **github-only** by construction: the filesystem
+backend stores no issue bodies (only structured metadata), so there is no body to re-scan and a
+dependency can only ever BE the native `blocked_by` link — `/idc:doctor` feeds no scanned lane for
+the filesystem backend. The INDEX rules (`stranded-gate`, `empty-status`) are body-free and
+backend-NEUTRAL: doctor's filesystem branch feeds the tracker's structured records as index-only
+objects (Buildable+Todo excluded, so nothing is ever body-schema-scanned), because those strand
+classes exist on filesystem too.
 
 Input (stdin): a JSON array, OR newline-delimited JSON objects (one per line), each:
     {"number": <int>, "title": <str>, "body": <str>, "blocked_by": [<int>, ...] | null,
@@ -57,11 +61,32 @@ clause (omitted when <E> == 0, same byte-identical discipline). These items ride
 non-contract bodies are never schema-scanned) and are NOT counted toward `scanned` (which stays
 build-eligible-only), so a flagged count can exceed the scanned count in a pure empty-Status board.
 
+The **stranded-gate** rule (round-11 close-out) is the deterministic surface for the gate skill's
+dispose-first liveness gap: `idc:idc-gate-issue` step 4 closes the gate through the guarded
+`dispose` FIRST and unblocks dependents only after it succeeds, so a run killed between the two
+leaves a dependent `Status = Blocked` behind a gate that is already `Done` — invisible to the drain
+(Todo-only), to the open-gate re-checks (the gate is closed), and to every other rule here. It
+flags a `Status = Blocked` item ALL of whose blockers are `Done` when at least one blocker is an
+`[operator-action]` gate (title from the index; a live or unknown blocker still genuinely holds the
+issue, so the rule stays silent — same SOLE/SATISFIED discipline as retired-recirc). But a `Done`
+gate does NOT by itself prove the guarded dispose ran — a legacy/manual close, a raw `Status` edit,
+or a janitor repair also mints `Done` (round-13 P1). So `--journal <path>` TIERS the finding by the
+engine's own audit line: a gate whose `op=dispose`/`disposition=gate-approved` record is journaled is
+`stranded-gate` (a genuine interrupted dispose-then-unblock — the documented recovery, finish the
+unblock through the engine's journaled `unblock`, applies); a gate whose `Done` carries NO such
+record is `unproven-gate-done` — its dependents must NOT be auto-unblocked (a raw-closed requirements
+gate whose Think PR never merged would otherwise admit draft requirements). Without `--journal` the
+rule cannot prove it and flags `stranded-gate` with a VERIFY-the-journal-first remediation. Fires
+only when the caller supplies the Blocked item's `blocked_by` and its blockers' `title`/`status` in
+the index (doctor Row 9's recipe does); tallies ride the flagged parens as conditional
+`, <K> stranded-gate` / `, <U> unproven-gate-done` clauses. Flagged items ride index-only (never
+schema-scanned, not counted in `scanned`).
+
 `--fix` EMITS the repair (this stdin tool has no live board handle, so it never mutates a board): one
 `would-fix: #<n> Status=Todo` line per empty-Status item, printed after the summary, for a caller to
 apply (future-tense token — the tool proposes the repair, it does not perform it).
 
-Usage: idc_board_lint.py [--fix] < issues.json   (exit 0 = ran OK; 2 = unreadable/un-parseable input)
+Usage: idc_board_lint.py [--fix] [--journal <path>] < issues.json  (exit 0 = ran OK; 2 = bad input)
 """
 import json
 import os
@@ -99,6 +124,8 @@ FIX_STATUS = "Todo"
 # false-flag) nor counted as `scanned`.
 BUILDABLE_STAGE = "Buildable"
 TODO_STATUS = "Todo"
+# The stranded-gate rule's subject lane: a gate-parked dependent whose gate has since gone Done.
+BLOCKED_STATUS = "Blocked"
 
 # Prose dependency phrases — the SPACE/free-text forms a human writes in a body, deliberately NOT
 # the hyphenated structured tokens `blocked-by` / `blocks-on:` (those ARE recorded links / the
@@ -202,6 +229,105 @@ def retired_recirc_evidence(blocked_by, stage_status):
     return ""
 
 
+def _proven_gates(journal_path):
+    """The set of gate item numbers whose guarded dispose is JOURNALED — an `op=dispose`,
+    `disposition=gate-approved` record names them (the exact audit line the guarded gate-approved
+    door always writes). A Done gate NOT in this set reached Done by some other path (a raw close, a
+    manual Status edit, a janitor repair), so its dependents must never be auto-unblocked (codex
+    round-13 P1).
+
+    FAIL-CLOSED: an unreadable/corrupt journal (or the replay helper being unavailable) yields the
+    EMPTY set — every Done gate then reads as UNPROVEN, the safe direction (deny auto-unblock),
+    never a permissive all-proven. Archive-aware and sidecar-lock-safe (reuses the engine's own
+    strict scan, so it sees the same records the dispose-corroboration guard does)."""
+    try:
+        import idc_journal_replay as RP  # noqa: E402 — same-dir helper (sys.path set at import time)
+    except Exception:
+        return frozenset()
+    entries, err = RP.scan_journal_strict(journal_path)
+    if err or entries is None:
+        return frozenset()
+    proven = set()
+    for e in entries:
+        if isinstance(e, dict) and e.get("op") == "dispose" and e.get("disposition") == "gate-approved":
+            n = RP.journal_item_id(e)
+            if n is not None:
+                proven.add(n)
+    return proven
+
+
+def stranded_gate_evidence(status, blocked_by, stage_status, titles, proven_gates=None):
+    """Return ``(kind, evidence)`` for a Blocked dependent whose every blocker is Done and at least
+    one is an `[operator-action]` gate, else ``("", "")``.
+
+    `kind` is one of:
+      * ``"stranded-gate"`` — the gate's guarded dispose IS journaled (proven), OR the journal was
+        not supplied so it must be verified: an interrupted dispose-then-unblock. SAFE (once
+        verified) to finish the unblock.
+      * ``"unproven-gate-done"`` — the journal WAS supplied and the gate is Done but carries NO
+        journaled guarded dispose. A `Done` gate does NOT prove the guarded door ran: a legacy/manual
+        close, a raw `Status` edit, or a janitor repair also mints `Done` (codex round-13 P1). Its
+        dependents must NOT be auto-unblocked — a raw-closed requirements gate whose Think PR never
+        merged would otherwise admit draft requirements.
+
+    The gate skill's step 4 (dispose-FIRST, then unblock — the round-10 reorder that closed the
+    revoked-approval fail-open) leaves one liveness gap: a run killed between the gate's guarded
+    dispose (gate → Done, journaled) and the dependent unblock. The dependent then sits
+    `Status = Blocked` forever — the drain's build-candidate lane is Todo-only, and every
+    start-of-run gate re-check queries OPEN gates (this one is closed). This rule is that strand's
+    deterministic surface (round-11 close-out); the recovery is the gate skill's documented one —
+    finish the unblock through the engine's journaled `unblock`, never a raw setField — but ONLY
+    once the gate's guarded dispose is confirmed journaled (round-13 P1: `Done` alone is not proof).
+
+    `proven_gates` (set of gate item numbers whose `op=dispose`/`disposition=gate-approved` record
+    is journaled, or ``None`` when no journal was supplied) drives the tiering. When supplied, a
+    dependent is `stranded-gate` only if EVERY gate blocking it is proven; any unproven gate blocker
+    → `unproven-gate-done` (naming that gate). When ``None``, the rule cannot prove it here, so it
+    flags `stranded-gate` with a remediation that REQUIRES verifying the journal first.
+
+    SOLE/SATISFIED semantics (same as retired-recirc): flag ONLY when **every** blocker is Done —
+    a live (status ≠ Done) or unknown (absent from the index) blocker genuinely holds the issue —
+    AND at least one Done blocker is an `[operator-action]` gate (title from the index; an
+    untitled/unknown blocker never reads as a gate). `blocked_by` tri-state as everywhere:
+    `None` = UNKNOWN → silent."""
+    if status != BLOCKED_STATUS or not blocked_by:
+        return ("", "")
+    if not all(stage_status.get(b, (None, None))[1] == DONE_STATUS for b in blocked_by):
+        return ("", "")  # a live or unknown blocker still genuinely holds the issue — not stranded
+    gate_blockers = [b for b in blocked_by
+                     if str(titles.get(b, "")).strip().startswith(OPERATOR_GATE_PREFIX)]
+    if not gate_blockers:
+        return ("", "")
+    if proven_gates is not None:
+        # Journal supplied: a dependent is safe to auto-unblock ONLY if EVERY gate blocking it is
+        # proven (its guarded dispose is journaled). Any unproven gate → the Done is UNPROVEN.
+        unproven = [b for b in gate_blockers if b not in proven_gates]
+        if unproven:
+            g = unproven[0]
+            return ("unproven-gate-done",
+                    f"Status={BLOCKED_STATUS} behind gate #{g} that is {DONE_STATUS} but has NO "
+                    "journaled guarded dispose (op=dispose/disposition=gate-approved) — the "
+                    f"{DONE_STATUS} is UNPROVEN (a raw close, a manual Status edit, or a janitor "
+                    "repair also mints Done, none of which validated the approval); do NOT "
+                    "auto-unblock — confirm the gate was legitimately approved (its Think PR "
+                    "merged) before clearing the dependent, then unblock through the engine")
+        g = gate_blockers[0]
+        return ("stranded-gate",
+                f"Status={BLOCKED_STATUS} behind gate #{g} that is already {DONE_STATUS} — the "
+                "gate's guarded dispose IS journaled (proven), so this is an interrupted "
+                "dispose-then-unblock; finish it via the engine's journaled `unblock` "
+                "(idc:idc-gate-issue step 4 recovery), never a raw setField")
+    # No journal supplied: flag the strand, but the remediation REQUIRES verifying the journaled
+    # guarded dispose first — a Done gate alone does not prove the guarded door ran (round-13 P1).
+    g = gate_blockers[0]
+    return ("stranded-gate",
+            f"Status={BLOCKED_STATUS} behind gate #{g} that is already {DONE_STATUS} — VERIFY the "
+            f"gate's journaled guarded dispose (an op=dispose/disposition=gate-approved record "
+            f"naming #{g}) FIRST; only then finish the interrupted unblock via the engine's "
+            "journaled `unblock` (idc:idc-gate-issue step 4 recovery), never a raw setField — if it "
+            "is not journaled the Done is UNPROVEN (a raw/manual close), so do NOT unblock")
+
+
 def is_empty_status(status):
     """Whether a Status counts as EMPTY for the invariant rule.
 
@@ -251,19 +377,29 @@ def in_scan_lane(it):
     return stage == BUILDABLE_STAGE and status == TODO_STATUS
 
 
-def lint(issues):
+def lint(issues, proven_gates=None):
     """Return (lines, scanned, schema_count, prose_count, retired_count, unknown_count,
-    empty_status_count, fixes).
+    empty_status_count, stranded_count, unproven_count, fixes).
+
+    `proven_gates` (set | None) tiers the stranded-gate rule — see stranded_gate_evidence: a Done
+    gate whose guarded dispose is journaled is `stranded-gate`, one whose Done is unproven is
+    `unproven-gate-done`. `None` (no journal supplied) flags every strand `stranded-gate` with a
+    verify-first remediation.
 
     `fixes` is the list of item numbers flagged empty-status (the records `--fix` repairs to
     Status=Todo)."""
     lines = []
     scanned = schema_count = prose_count = retired_count = unknown_count = empty_status_count = 0
+    stranded_count = unproven_count = 0
     fixes = []
     # Blocker-resolution index: {number: (stage, status)} over the WHOLE input, so the retired-recirc
     # rule can resolve each native blocked-by to its board lane. Index-only entries (a Done
     # Recirculation ticket) ride in solely to populate this — see in_scan_lane().
     stage_status = {it.get("number"): (it.get("stage"), it.get("status")) for it in issues}
+    # Title index over the WHOLE input: the stranded-gate rule resolves a blocker number to its
+    # title to recognise an [operator-action] gate (index-only objects carry title when the caller
+    # supplies it; an absent title simply never reads as a gate).
+    titles = {it.get("number"): it.get("title") or "" for it in issues}
     for it in issues:
         title = str(it.get("title", "")).strip()
         if title.startswith(OPERATOR_GATE_PREFIX):
@@ -278,6 +414,27 @@ def lint(issues):
             fixes.append(num)
             label = f'#{num} "{title}"' if title else f"#{num}"
             lines.append(f"{label}: empty-status — {empty_ev}")
+        # Stranded-gate (round-11 close-out; round-13 journal tiering): ALSO a separate index-only
+        # path (a Blocked item is never in the scan lane) — see stranded_gate_evidence for the strand,
+        # the proven/unproven tiering, and the recovery.
+        stranded_kind, stranded_ev = stranded_gate_evidence(
+            it.get("status"), it.get("blocked_by"), stage_status, titles, proven_gates)
+        if stranded_kind:
+            num = it.get("number", "?")
+            label = f'#{num} "{title}"' if title else f"#{num}"
+            if stranded_kind == "unproven-gate-done":
+                unproven_count += 1
+            else:
+                stranded_count += 1
+            lines.append(f"{label}: {stranded_kind} — {stranded_ev}")
+        elif it.get("status") == BLOCKED_STATUS and it.get("blocked_by") is None:
+            # A `Status = Blocked` item whose dependency lookup FAILED (`blocked_by: null`) makes the
+            # stranded-gate check INDETERMINATE, not clean — but a Blocked item is index-only, so it
+            # exits below BEFORE the scan-lane `unknown_count` increment. Count it here (surfaced in
+            # the same `dependency lookups indeterminate` summary clause) so a Blocked-lane read
+            # outage can't masquerade as a clean board (codex round-15 P2). Not a finding — the
+            # stranded-gate check simply could not run for this item.
+            unknown_count += 1
         if not in_scan_lane(it):
             continue  # index-only entry (supplies a blocker's stage/status); not a scanned lane issue
         scanned += 1
@@ -309,7 +466,7 @@ def lint(issues):
             for f in findings:
                 lines.append(f"{label}: {f}")
     return (lines, scanned, schema_count, prose_count, retired_count, unknown_count,
-            empty_status_count, fixes)
+            empty_status_count, stranded_count, unproven_count, fixes)
 
 
 def main():
@@ -321,6 +478,13 @@ def main():
     ap.add_argument("--fix", action="store_true",
                     help="emit the repaired record (Status=Todo) for each empty-Status item a caller "
                          "applies to the live board (board-lint has no board handle; it never mutates)")
+    ap.add_argument("--journal", default=None,
+                    help="path to the transition journal (docs/workflow/transition-journal.ndjson); "
+                         "when supplied, the stranded-gate rule tiers a Done gate by whether its "
+                         "guarded dispose is JOURNALED — a proven strand rides `stranded-gate` (safe "
+                         "to finish the unblock), a gate whose Done is NOT journaled rides "
+                         "`unproven-gate-done` (do NOT auto-unblock). Absent → every strand is "
+                         "`stranded-gate` with a verify-the-journal-first remediation")
     opts = ap.parse_args()
 
     try:
@@ -333,23 +497,32 @@ def main():
             sys.stderr.write("idc-board-lint: each issue must be a JSON object\n")
             sys.exit(2)
 
+    # Only READ the journal when --journal is supplied (the tiering is opt-in; a bare invocation is
+    # byte-for-byte unchanged). Fail-closed inside _proven_gates: an unreadable journal → empty set
+    # → every Done gate reads UNPROVEN (deny auto-unblock), never a permissive all-proven.
+    proven_gates = _proven_gates(opts.journal) if opts.journal is not None else None
+
     (lines, scanned, schema_count, prose_count, retired_count, unknown_count,
-     empty_status_count, fixes) = lint(issues)
+     empty_status_count, stranded_count, unproven_count, fixes) = lint(issues, proven_gates)
     for ln in lines:
         print(ln)
-    flagged = schema_count + prose_count + retired_count + empty_status_count
+    flagged = (schema_count + prose_count + retired_count + empty_status_count
+               + stranded_count + unproven_count)
     # Append the degraded-lookup clause ONLY when >0 — when 0 the summary is byte-for-byte unchanged.
     _noun = "lookup" if unknown_count == 1 else "lookups"
     unknown_clause = f"; {unknown_count} dependency {_noun} indeterminate" if unknown_count else ""
-    # The retired-recirc + empty-status tallies ride the flagged parens as conditional clauses (like
-    # the degraded clause), so a board with zero of either keeps the pre-existing summary byte-for-byte
-    # (the existing schema/prose-dep assertions stay green).
+    # The retired-recirc + empty-status + stranded-gate + unproven-gate-done tallies ride the flagged
+    # parens as conditional clauses (like the degraded clause), so a board with zero of each keeps the
+    # pre-existing summary byte-for-byte (the existing schema/prose-dep assertions stay green). The
+    # unproven-gate-done clause appears only when the journal was supplied AND a Done gate is unproven.
     retired_clause = f", {retired_count} retired-recirc" if retired_count else ""
     empty_status_clause = f", {empty_status_count} empty-status" if empty_status_count else ""
+    stranded_clause = f", {stranded_count} stranded-gate" if stranded_count else ""
+    unproven_clause = f", {unproven_count} unproven-gate-done" if unproven_count else ""
     if flagged:
         print(f"board-lint: {flagged} flagged of {scanned} scanned "
               f"({schema_count} schema, {prose_count} prose-dep"
-              f"{retired_clause}{empty_status_clause}{unknown_clause})")
+              f"{retired_clause}{empty_status_clause}{stranded_clause}{unproven_clause}{unknown_clause})")
     else:
         print(f"board-lint: clean ({scanned} scanned{unknown_clause})")
     # --fix: EMIT the repair (this stdin tool has no board handle, so it can't write back) — one

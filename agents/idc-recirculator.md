@@ -27,7 +27,15 @@ mode only changes what gets fed in:
    through the decision flow; its five scope fields (`Discovered / Area / Suggested-scope /
    Provenance / PRD-TRD-impact`) are the discovered scope you feed to `idc:idc-recirculator-sync`.
    Items already behind a gate (`Blocked`) or retired (`Done`) are skipped, so a re-run is
-   idempotent. Draining the inbox admits discovered scope to the front of the pipeline so **Plan**
+   idempotent — except the interrupted-run recovery: a `Blocked` item whose blocking gate issue
+   is already `Done` MAY be an interrupted dispose-then-unblock — but **first verify that gate's
+   journaled guarded dispose** (an `op=dispose`/`disposition=gate-approved` record naming it —
+   `idc:idc-gate-issue` step 4 has the deterministic check). Only if it is journaled, finish its
+   unblock through the engine's journaled `unblock`, then drain it normally. A `Done` gate does NOT
+   alone prove the guarded door ran (a raw/manual close or janitor repair also mints `Done`): if it
+   is **not** journaled the `Done` is UNPROVEN — leave the item `Blocked` and surface the anomaly,
+   never auto-unblock. Draining the inbox admits
+   discovered scope to the front of the pipeline so **Plan**
    (unchanged) later decomposes the resulting admitted considerations. Autorun runs this mode at the
    top of the pipeline, before the Buildable wave.
 
@@ -52,7 +60,8 @@ mode only changes what gets fed in:
        carrying the discovered scope), validate it with `idc_consideration_check.py`, and write its
        board pointer via `idc:idc-tracker-adapter` `createTicket` as `Stage=Consideration`,
        `Status=Todo` — **admitted (Todo)**, distinct from Think's pending-admission-behind-a-gate
-       pointer which rides `Blocked`. Then **RETIRE the Recirculation ticket** (`move Status=Done`).
+       pointer which rides `Blocked`. Then **RETIRE the Recirculation ticket** via the engine's guarded
+       `dispose --disposition drained` (its `idc-recirc-source` provenance is the receipt the guard verifies).
        **Preserve provenance**: a `discovered-scope` label on the consideration pointer (github),
        an "originated as discovered scope (recirculation ticket #<n> — <Provenance>)" line in the
        consideration doc body, and a closing `comment` on the retired ticket naming the

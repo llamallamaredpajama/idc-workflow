@@ -19,7 +19,15 @@ Run the phases in order; each phase's evidence gates the next.
 - Scoop **every** admitted-but-undecomposed consideration — the full pending set, in one run, not
   one consideration at a time. Validate each one's shape with `idc:idc-consideration-schema`, and
   confirm each is **admitted** (its Think PR merged); an un-admitted consideration is not yet Plan's
-  to decompose.
+  to decompose. While confirming, run the interrupted-run recovery (Plan does not gate — this only
+  finishes a recovery the gate's own guarded close already validated): `query` `Status=Blocked`
+  items and, for any whose blocking gate issue is already `Done`, **first verify that gate's
+  journaled guarded dispose** — an `op=dispose`/`disposition=gate-approved` record naming it in
+  `docs/workflow/transition-journal.ndjson` (+ its `journal-archive/` segments) — and only then
+  finish the unblock through the engine's journaled `unblock`. A `Done` gate does NOT alone prove the
+  guarded door ran (a raw/manual close or janitor repair also mints `Done`): if it is **not**
+  journaled the `Done` is UNPROVEN — leave the dependent `Blocked` and surface it, never
+  auto-unblock. A `Done` gate must never strand its dependents.
 - Read each admitted consideration's requirements (the PRD + TRD) and the master plan, plus the live
   board through `idc:idc-tracker-adapter` (`query`) — including the open Buildable / in-flight
   issues. Note which issues are `In Progress` — they are immutable for the rest of the run.
@@ -91,7 +99,13 @@ pillar-level *file* clashes among the surviving, de-duplicated pillars.
    (`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_schema_check.py" <body>`); fix until PASS.
 2. Create issues and set `Status`/`Wave`/`Phase`/`Domain` + native blocked-by through
    `idc:idc-tracker-adapter`. All issues flow as `Todo` — **there is no gate in Plan**; the
-   requirements were already admitted at the end of Think. On the **github** backend, stamp each
+   requirements were already admitted at the end of Think. **Link each Buildable child back to its
+   consideration pointer** through the **engine** (`idc_transition.py … link --parent <pointer>
+   --child <buildable> --kind sub`) — the engine records the link durably (a journaled `idc-blocked-by`
+   marker on github; native `blocked_by`/`parent` on filesystem). This is the **pointer-decomposition
+   record** the engine's guarded `dispose --disposition retired` verifies (a named Buildable child that
+   references the pointer) before it retires the pointer in step 3; without it the retirement is
+   fail-closed. On the **github** backend, stamp each
    Buildable issue body with the provenance marker
    `<!-- idc-provenance: {"matrix":"<phase-tag>-matrix.yaml","pillar":"<id>"} -->`
    (`idc:idc-goal-contract`), carrying the **exact** `pillars[].id` from the matrix entry just
@@ -107,7 +121,8 @@ pillar-level *file* clashes among the surviving, de-duplicated pillars.
    to step 3. Plan **cannot report Phase 5 done while this check fails** — a dropped stamp used to
    silently disarm the Recirculator's provenance regime (`idc_recirc_sweep.py`); this converts that
    gap from PROSE-ONLY to a verified post-condition.
-3. Advance the consideration pointer (`Consideration → Planning`, retired as buildable issues
+3. Advance the consideration pointer (`Consideration → Planning`, retired via the engine's guarded
+   `dispose --disposition retired` — a decomposition child as the receipt — as its buildable issues
    land); open the planning PR whose **body is the audit trail** (what was planned, the matrix,
    the trace) and **automerge when green, deleting the merged branch as part of the merge**:
    a **direct, blocking** `gh pr merge --squash --delete-branch` (no human touchpoint; pick the

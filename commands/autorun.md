@@ -132,8 +132,10 @@ only when a full pass leaves nothing actionable:
    global re-wave stays coherent. Skip if none.
 3. **Heal board hygiene** in passing (the auto `--fix`; `/idc:doctor` stays read-only).
 4. **Build lane** — while eligible build work exists, run `idc:idc-build` on the eligible waves,
-   claiming **only `Stage = Buildable`** issues (a `Consideration`/`Planning`/`Recirculation` ticket
-   is never scooped — the glass wall), including waves unblocked mid-run from the operator's phone.
+   claiming **only `Stage = Buildable`** issues — a `Consideration`/`Planning`/`Recirculation`
+   ticket is never build work; the glass wall is enforced twice over (the drain helper's
+   eligibility allowlist never surfaces one, and the transition engine refuses a `claim` on one as
+   an illegal transition) — including waves unblocked mid-run from the operator's phone.
    Check the exit condition with the **same deterministic drain helper, by backend** — never
    improvise the predicate or read the board with a bare `gh project item-list` (it truncates at its
    30-item first page → a grown board blinds the lane):
@@ -149,9 +151,8 @@ only when a full pass leaves nothing actionable:
    # Stage E2); the drain also falls back to $CLAUDE_CODE_SESSION_ID if the flag is omitted.
    python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --backend github --project <n> --owner <o> --session-id "$CLAUDE_CODE_SESSION_ID"
    ```
-   Both apply the identical eligibility predicate (`Status = Todo` AND `(stage or "Buildable") ==
-   "Buildable"` AND title not `[operator-action]` AND every native blocked-by `Done`); an
-   empty/missing `Stage` reads as `Buildable` (the legacy 4-field default). On the github backend,
+   Both apply the identical Buildable-eligibility predicate — the drain helper is the predicate's
+   single source of truth; never re-derive it in prose or by hand. On the github backend,
    `idc:idc-build`'s own dispatch (Phase 1) mints + hands off the `IDC_ITEMID_CACHE` item-id cache
    once per wave for every tracker mutation that wave's triplets perform (design §C.1, RC4a, #98) —
    the drain this loop dispatches into benefits from that cost fix automatically; nothing further to

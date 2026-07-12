@@ -55,13 +55,15 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 # Reuse the sibling helpers (same directory) rather than re-implement matrix parsing / fs writes.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import idc_matrix_check  # noqa: E402  — parse_matrix (constrained-YAML pillar scanner)
 import idc_tracker_fs    # noqa: E402  — load/save/find + atomic TRACKER.md writer
-import idc_gh_board      # noqa: E402  — shared paginating board reader (TRUE cursor pagination)
+import idc_gh_board      # noqa: E402  — shared paginating board reader + atomic create_item (#130)
 import idc_board_lint    # noqa: E402  — OPERATOR_GATE_PREFIX (single-sourced marker)
+import idc_transition as TE  # noqa: E402  — the engine's canonical journal_append (journal every door, #150)
 
 # ── markers ──────────────────────────────────────────────────────────────────
 # Plan stamps provenance; the finisher posts discovery/deferral. The sentinel is matched first and
@@ -87,6 +89,16 @@ CONSIDERATION_STAGE = "Consideration"
 PLANNING_STAGE = "Planning"
 TODO_STATUS = "Todo"
 DONE_STATUS = "Done"
+
+# ── journal doors (issue #150) ────────────────────────────────────────────────
+# The sweep is a sanctioned CODE door: it stamps Stage=Recirculation (re-stage) and files new
+# Recirculation tickets, both OUTSIDE the transition engine. Each such mutation must append the
+# engine's canonical journal record, or the janitor's replay reconciliation reports documented sweep
+# traffic as a false journal↔board divergence. A re-stage is a Stage-only move (Status untouched), so
+# it journals under this dedicated op-kind; a filed ticket is a create, journaled as `recirculate-intake`
+# (the engine's recirc-inbox create op — replay's create watermark then recognises it as journaled).
+RESTAGE_JOURNAL_OP = "recirc-restage"
+INTAKE_JOURNAL_OP = "recirculate-intake"
 # A Buildable/Planning item is in-flight decomposition unless it is DONE. Only Done is excluded: Done
 # items accumulate on every mature board, so counting them would permanently silence the surface (the
 # bug this guards). Every NON-Done status — Todo, In Progress, AND Blocked (the caps' park-a-runaway
@@ -301,6 +313,161 @@ class Finding:
         self.captures = []              # list of discovery_source dicts to file as tickets
 
 
+# ── canonical journal door (issue #150) ──────────────────────────────────────
+def _journal_restage(repo, backend, tracker_rel, number, item_id=None, heal=None):
+    """Append the canonical transition-journal record for a sanctioned Stage=Recirculation re-stage.
+
+    The sweep re-stages a rogue OUTSIDE the transition engine, so without this the janitor's replay
+    reconciliation flags the swept item as a false Stage divergence. Best-effort like every
+    journal_append (the finisher/janitor/engine share the same contract): the re-stage already
+    landed, so a journal failure warns and never fails the fail-soft sweep. A re-stage moves ONLY the
+    Stage (Status is untouched), so it records `to.stage` alone — replay keeps the item's prior Status
+    from its create/move records and reconstructs the swept item to an exact match.
+
+    `heal` (heal_unjournaled_inbox only) stamps a disclosure field on the record: a BACKFILL for an
+    item the sweep did NOT itself re-stage must never read as if it had (codex round-11 P2).
+
+    Returns journal_append's success signal (True iff the record durably landed) — the sweep's
+    re-stage path ignores it (fail-soft, the board move already landed), but the journal-backfill
+    heal REQUIRES it: the record IS the whole point of the heal, so a swallowed append must never be
+    counted as healed (codex round-14 P2)."""
+    kw = {"num": number, "to_stage": RECIRC_STAGE, "agent": "recirc-sweep",
+          "project_item_id": item_id}
+    if heal:
+        kw["heal"] = heal
+    return TE.journal_append(repo, RESTAGE_JOURNAL_OP, backend, tracker_rel, kw)
+
+
+def heal_unjournaled_inbox(repo, backend, tracker_rel, candidates, read_text, log):
+    """Backfill the journal for a VALID Recirculation-inbox item that has NO sanctioned inbox record
+    (codex round-11 P2): the intake/restage landed on the board but its best-effort journal append
+    failed. Without this the item is PERMANENTLY undrainable — the drained guard's corroboration
+    fails closed, the filer's marker-dedupe never re-files it, the sweep's idempotent re-stage skip
+    never re-journals it, and the janitor's replay only REPORTS the divergence.
+
+    The sweep is already the sanctioned, journaled judge of what belongs on the inbox (it re-stages
+    any marker-bearing rogue through this same journal door), so ratifying an already-staged item
+    with the SAME validity predicate the drained guard uses (idc_transition._recirc_evidence) adds
+    no new trust — and the record it emits DISCLOSES itself via heal=journal-backfill. HONEST
+    RESIDUAL (#151): a well-formed forged marker is ratified too; corroboration proves a sanctioned
+    producer's journaled decision, never marker authenticity — exactly the trust level of the
+    sweep's own rogue re-stage door.
+
+    candidates: [{"number": int, "item_id": node-id-or-None}] — Stage=Recirculation, non-Done items.
+    read_text(candidate) -> the item's body+comments text; called ONLY for uncorroborated items, so
+    a fully-journaled inbox costs zero extra issue reads. Self-deduping: the emitted record IS the
+    corroboration the next run finds. A corrupt/unreadable journal SKIPS the heal (never backfill
+    blind — corruption is the janitor's reconciliation job). Fail-soft; returns the number healed."""
+    if not candidates:
+        return 0
+    import idc_journal_replay as RP
+    entries, err = RP.scan_journal_strict(
+        os.path.join(repo, "docs", "workflow", "transition-journal.ndjson"))
+    if err:
+        log(f"journal-heal: journal unreadable ({err}) — skipping the inbox backfill this sweep")
+        return 0
+    sanctioned = (RESTAGE_JOURNAL_OP, INTAKE_JOURNAL_OP)
+
+    def named(entry, num, item_id):
+        if RP.journal_item_id(entry) == num:
+            return True
+        return item_id is not None and entry.get("project_item_id") == item_id
+
+    healed = 0
+    unwritable = 0
+    for c in candidates:
+        num, item_id = c["number"], c.get("item_id")
+        if any(isinstance(e, dict) and e.get("op") in sanctioned and named(e, num, item_id)
+               for e in entries):
+            continue   # already corroborated — the self-dedupe that keeps this idempotent
+        try:
+            text = read_text(c)
+        except idc_gh_board.RateLimitError:
+            # A throttle on a heal-side read (github only — the fs read_text never raises): the
+            # REMAINING uncorroborated candidates would each fire the same doomed `gh issue view`, so
+            # DEFER them to the next sweep (codex round-15 P2). Non-"rate-limited"/"deferring"-phrased,
+            # per the round-14 collision note (recirc-sweep-atomic-intake.sh counts those words).
+            log("journal-heal: throttled on a heal read — skipping the remaining backfill candidates "
+                "this sweep (they would throttle too); retry on the next sweep")
+            break
+        if TE._recirc_evidence(text) is None:
+            continue   # no VALID provenance marker — never ratify a bare Recirculation item
+        # The heal's WHOLE PURPOSE is the journal record (the board item already exists), so a
+        # SWALLOWED journal_append (permissions/full disk/lock error) must NOT be counted as healed:
+        # no corroborating record landed, the ticket stays undrainable, and counting it would report a
+        # false heal every sweep (codex round-14 P2). Only count a CONFIRMED backfill.
+        if not _journal_restage(repo, backend, tracker_rel, num, item_id=item_id, heal="journal-backfill"):
+            unwritable += 1
+            continue
+        log(f"journal-heal: backfilled the sanctioned inbox record for Recirculation ticket #{num} "
+            "(its intake/restage journal record was lost — the backfill is disclosed in the record)")
+        healed += 1
+    if unwritable:
+        # One concise line, not per-item spam: surface that the journal could not be written (so the
+        # strand persists) without a false success and without hammering the log every sweep.
+        log(f"journal-heal: {unwritable} inbox backfill(s) could not be journaled (append failed — the "
+            "journal may be unwritable); those tickets stay stranded and will retry next sweep")
+    return healed
+
+
+def _github_issue_number(item_id, repo, attempts=3):
+    """Issue-number read-back for a freshly filed Recirculation ticket (the journal `item` key).
+
+    create_item JUST wrote this exact item, so the node read is near-certain — but a NUMBERLESS intake
+    record cannot self-heal (the source-marker dedupe skips the already-filed ticket on every later
+    sweep, and the janitor only REPORTS divergence, never backfills), so resolving the number NOW
+    matters. A transient read failure is therefore retried with a short backoff. Returns None only if
+    every attempt fails — the caller then surfaces the ticket and does NOT count it as filed."""
+    for attempt in range(attempts):
+        try:
+            item = idc_gh_board.fetch_item(item_id, repo)
+        except Exception as e:  # noqa: BLE001 — retry a transient node read, then give up (best-effort)
+            if attempt + 1 < attempts:
+                time.sleep(0.2 * (attempt + 1))
+                continue
+            sys.stderr.write(f"idc-recirc-sweep: could not resolve filed ticket issue number for journal: {e}\n")
+            return None
+        num = (item.get("content") or {}).get("number")
+        if isinstance(num, int):
+            return num
+        if isinstance(num, str) and num.isdigit():
+            return int(num)
+        return None  # item resolved but carries no number (unexpected for a real issue) — retry won't help
+    return None
+
+
+def _journal_intake(repo, item_id, number, title):
+    """Append the canonical journal record for a filed Recirculation ticket (issue #150). create_item
+    landed Stage=Recirculation + Status=Todo atomically, so the create journals BOTH via to.{stage,
+    status}; recording it under the engine's recirculate-intake op lets replay's create watermark
+    recognise the ticket as journaled. Best-effort/fail-soft; `number` may be None if the read-back
+    failed, in which case the record still carries the project_item_id."""
+    TE.journal_append(repo, INTAKE_JOURNAL_OP, "github", None,
+                      {"num": number, "title": title, "to_stage": RECIRC_STAGE,
+                       "to_status": TODO_STATUS, "agent": "recirc-sweep", "project_item_id": item_id})
+
+
+def _heal_partial_intake(repo, ctx, partial, log):
+    """Complete a throttle-partial Recirculation ticket IN PLACE: set Status=Todo (one setField — no new
+    issue, no duplicate) + journal the now-complete intake. The partial is a ticket create_item left
+    Stage=Recirculation with an EMPTY Status when a rate limit hit between its Stage and Status writes;
+    without healing, the marker-dedupe would skip it FOREVER (#150 / codex R4 P1a — SELF-HEAL, not skip).
+    Fail-soft: a gh failure (BoardReadError covers BoardWriteError + RateLimitError) logs and returns
+    False (re-healed next sweep). Returns True iff the heal landed."""
+    number, item_id = partial["number"], partial["item_id"]
+    if not item_id:
+        return False
+    try:
+        idc_gh_board.set_status(ctx["owner"], ctx["project_number"], repo, item_id, TODO_STATUS)
+    except idc_gh_board.BoardReadError as e:
+        log(f"github: could not heal partial Recirculation ticket #{number} "
+            f"({str(e).strip()[:120]}) — will retry next sweep")
+        return False
+    _journal_intake(repo, item_id, number, f"heal recirc intake #{number}")
+    log(f"github: healed throttle-partial Recirculation ticket #{number} → Status={TODO_STATUS}")
+    return True
+
+
 # ── filesystem backend ───────────────────────────────────────────────────────
 def scan_filesystem(tracker_path, matrices):
     """Build (findings, state). On filesystem, markers ride issue comments (no body); provenance
@@ -337,10 +504,15 @@ def scan_filesystem(tracker_path, matrices):
     return findings, state
 
 
-def apply_filesystem(findings, state, tracker_path):
+def apply_filesystem(findings, state, tracker_path, repo):
     """Mutate TRACKER.md: re-stage each rogue to Recirculation + clear its Wave. Idempotent — an
-    issue already at Recirculation with empty Wave is a no-op, so a re-run changes nothing."""
+    issue already at Recirculation with empty Wave is a no-op, so a re-run changes nothing.
+
+    Each re-stage that actually lands is journaled AFTER the durable save (issue #150) so the
+    janitor's replay reconciliation reconstructs the swept item to an exact match. The idempotent
+    skip above means a re-run neither mutates NOR re-journals."""
     changed = 0
+    restaged = []
     for f in findings:
         if f.action != RESTAGE:
             continue
@@ -349,9 +521,13 @@ def apply_filesystem(findings, state, tracker_path):
             continue  # already corrected — idempotent
         it["stage"] = RECIRC_STAGE
         it["wave"] = ""
+        restaged.append(f.number)
         changed += 1
     if changed:
         idc_tracker_fs.save(tracker_path, state)
+        tracker_rel = os.path.relpath(tracker_path, repo)
+        for number in restaged:
+            _journal_restage(repo, "filesystem", tracker_rel, number)
     return changed
 
 
@@ -388,7 +564,23 @@ def scan_github(repo, matrices, project_number, log):
     okn, node_out, _ = gh(["project", "view", project_number, "--owner", owner,
                            "--format", "json", "--jq", ".id"], repo)
     project_node = node_out.strip() if okn else ""
-    ctx = {"owner": owner, "project_node": project_node, "project_number": project_number}
+    ctx = {"owner": owner, "project_node": project_node, "project_number": project_number,
+           # A throttle-partial is a Recirculation item with an EMPTY Status (create_item left it when a
+           # rate limit hit between its Stage and Status writes). Flag their presence from THIS single
+           # board read so apply_github heals them independently of captures WITHOUT a second scan on a
+           # clean sweep (#150 codex R5 P1c — self-heal must not hide inside the new-ticket path).
+           "has_partials": any((it.get("stage") or "") == RECIRC_STAGE and not it.get("status")
+                               and (it.get("content") or {}).get("number") is not None for it in items),
+           # The journal-backfill heal's candidate set (codex round-11 P2), from THIS same board read:
+           # every live (non-Done, Status set — empty-Status partials heal via the path above, which
+           # journals their intake) Recirculation item. apply_github reads bodies only for the ones
+           # the journal does not already corroborate, so a healthy inbox costs no extra gh calls.
+           "recirc_candidates": [
+               {"number": (it.get("content") or {}).get("number"), "item_id": it.get("id")}
+               for it in items
+               if (it.get("stage") or "") == RECIRC_STAGE
+               and it.get("status") and it.get("status") != DONE_STATUS
+               and (it.get("content") or {}).get("number") is not None]}
 
     scanned = []
     for it in items:
@@ -441,16 +633,22 @@ def scan_github(repo, matrices, project_number, log):
 
 
 def github_existing_sources(repo, ctx, log):
-    """The {(origin, what)} already covered by an existing Recirculation ticket's hidden source
-    marker — the stateless dedupe set that makes ticket-filing idempotent across runs. Reads the
-    WHOLE board (paginated) so a Recirculation ticket past the first 30 items is not missed (which
-    would re-file a duplicate).
+    """Scan the WHOLE board (paginated) for Recirculation tickets carrying the hidden source marker and
+    split them by completeness:
 
-    Returns the dedupe set, or None when the board read FAILS — a VISIBLE degraded state (logged) that
-    the caller treats as "cannot dedupe → do not file". Returning an empty set here instead would
-    SILENTLY risk re-filing a duplicate Recirculation ticket (the dedupe can't see the existing one),
-    so fail-closed against duplicates rather than file blind."""
+      * `seen`     — {(origin, what)} for FULLY-filed tickets (Status set): the stateless dedupe set
+                     that keeps ticket-filing idempotent across runs.
+      * `partials` — [{"number","item_id","keys"}] for tickets whose Stage=Recirculation + source
+                     marker landed but whose Status is EMPTY — a throttle-partial create_item left when
+                     a rate limit hit between its Stage and Status writes. The caller HEALS these
+                     (completes Status=Todo in place) instead of skipping them FOREVER (#150 / codex R4
+                     P1a); a source marker + empty Status is unambiguously such a partial (only
+                     create_item ever writes that marker).
+
+    Returns (seen, partials) on success, or None when the board read FAILS — a VISIBLE degraded state
+    (logged) the caller treats as "cannot dedupe → do not file" (fail-closed against blind duplicates)."""
     seen = set()
+    partials = []
     try:
         items = idc_gh_board.fetch_items(ctx["owner"], ctx["project_number"], repo)
     except idc_gh_board.BoardReadError as e:
@@ -471,9 +669,15 @@ def github_existing_sources(repo, ctx, log):
             body = json.loads(body_out).get("body") or ""
         except json.JSONDecodeError:
             continue
-        for obj in parse_markers(body, RECIRC_SOURCE_MARKER):
-            seen.add((str(obj.get("origin", "")), str(obj.get("what", "")).strip()))
-    return seen
+        keys = [(str(obj.get("origin", "")), str(obj.get("what", "")).strip())
+                for obj in parse_markers(body, RECIRC_SOURCE_MARKER)]
+        if not keys:
+            continue
+        if it.get("status"):          # a real, fully-filed ticket → dedupe
+            seen.update(keys)
+        else:                         # marker present but EMPTY Status → a throttle-partial to HEAL
+            partials.append({"number": number, "item_id": it.get("id"), "keys": keys})
+    return seen, partials
 
 
 def apply_github(findings, repo, ctx, log):
@@ -521,15 +725,33 @@ def apply_github(findings, repo, ctx, log):
         else:
             tail = "(no Wave to clear)"
         log(f"github: #{f.number} re-staged → {RECIRC_STAGE} {tail} ({f.reason})")
+        # Journal the sanctioned Stage-only re-stage (issue #150). f.number is the issue number, f.item_id
+        # the project node id; the Status is untouched, so only to.stage is recorded.
+        _journal_restage(repo, "github", None, f.number, item_id=f.item_id)
         changed += 1
 
-    # Ticket capture (idempotent): file one Recirculation ticket per untickered (origin, what).
+    # Ticket capture + partial healing. The scan runs when there is EITHER new work to file (captures)
+    # OR a throttle-partial to heal (ctx.has_partials) — so a partial from a PRIOR sweep is healed even
+    # when THIS sweep re-staged its source out of the Buildable lane, leaving no capture (#150 codex R5
+    # P1c). Only NEW-ticket filing is gated on captures (the create loop below no-ops when captures==[]).
     captures = [c for f in findings for c in f.captures]
-    if captures:
-        already = github_existing_sources(repo, ctx, log)
-        if already is None:
-            # The dedupe board read failed (logged above) — do NOT file blind (would risk duplicates).
+    throttled = False   # a mid-create rate limit STOPS the sweep (incl. the heal pass) — see below
+    if captures or ctx.get("has_partials"):
+        sources = github_existing_sources(repo, ctx, log)
+        if sources is None:
+            # The dedupe board read failed (logged above) — do NOT file/heal blind (would risk duplicates).
             return changed
+        already, partials = sources
+        # SELF-HEAL throttle-partials (marker present, EMPTY Status) IN PLACE — complete + journal them
+        # instead of skipping them forever (#150 / codex R4 P1a). Independent of captures. DEDUPE the
+        # partial's keys WHETHER OR NOT the heal lands (#150 codex R6): the marker is ALREADY on the board
+        # (an incomplete ticket), so a matching capture below must never create a DUPLICATE — a heal that
+        # fails transiently just retries next sweep (the partial stays empty-Status → re-detected). Count
+        # only a successful heal as a board change.
+        for p in partials:
+            already.update(p["keys"])
+            if _heal_partial_intake(repo, ctx, p, log):
+                changed += 1
         for c in captures:
             key = (c["origin"], c["what"])
             if key in already:
@@ -537,34 +759,93 @@ def apply_github(findings, repo, ctx, log):
             already.add(key)             # in-run dedupe too (two markers, same scope)
             body = recirc_ticket_body(c, c.get("area", ""), c.get("suggested_scope", ""))
             title = f"recirc: {c['what'][:60] or 'discovered scope'}"
-            okc, url_out, errc = gh(["issue", "create", "--title", title, "--body", body], repo)
-            if not okc:
-                log(f"github: ticket for {c['origin']} failed ({errc.strip()[:120]})")
+            # Mint the ticket through the ATOMIC create primitive (issue #130): create_item sets Stage
+            # AND Status together and DISCARDS a partial, so the filed ticket can NEVER be the
+            # Stage=Recirculation/empty-Status item the old issue-create → item-add → item-edit chain
+            # left behind (the #255/#256 empty-Status pointer class the drain trips over). It also
+            # read-back verifies the atomic-verified item id, so there is no separate add/edit-failure
+            # partial to gate — a raise IS the failure signal. Fail-soft per capture: one failed create
+            # (BoardWriteError / RateLimitError, both BoardReadError subclasses) logs and continues,
+            # never aborting the sweep.
+            try:
+                iid = idc_gh_board.create_item(owner, project_number, repo, title, body,
+                                               RECIRC_STAGE, TODO_STATUS)
+            except idc_gh_board.RateLimitError as e:
+                # A throttle mid-create is RESUMABLE, but the sweep is a fail-soft SessionEnd hook with
+                # no pause/resume: create_item RE-RAISES RateLimitError WITHOUT discarding a partial (by
+                # design, for a rate-limit-aware caller). So DEFER filing (RateLimitError is a
+                # BoardReadError subclass — catch it FIRST) rather than hammer the throttled API or mask
+                # it as a hard failure, and STOP (the remaining captures would throttle too). Any partial
+                # create_item left is a Stage-set/empty-Status item that board-lint / doctor Row 9 (the
+                # #255/#256 detector) surfaces for reconciliation; the next unthrottled sweep re-drives
+                # any capture whose ticket body (with the source marker) was never written.
+                log(f"github: ticket-filing rate-limited ({e}) — deferring the remaining "
+                    "captures to the next sweep")
+                throttled = True
+                break
+            except idc_gh_board.BoardReadError as e:  # BoardWriteError (partial already discarded) — hard fail
+                log(f"github: ticket for {c['origin']} failed ({str(e).strip()[:120]}) — not counted as filed")
                 continue
-            url = url_out.strip().splitlines()[-1] if url_out.strip() else ""
-            # The issue now EXISTS, so an item-add / item-edit failure is a PARTIAL: surface it and do
-            # NOT report it as a clean "filed" (the old path logged "filed" + counted it even when the
-            # add/edit failed, hiding an off-board or un-staged orphan). Capture the new item's node id
-            # straight from item-add (`--jq .id`) — no board re-read.
-            ok_add, iid_out, _ = gh(["project", "item-add", project_number, "--owner", owner,
-                                     "--url", url, "--format", "json", "--jq", ".id"], repo)
-            iid = iid_out.strip() if ok_add else ""
-            if not iid:
-                log(f"github: ticket {url or c['origin']} created but NOT added to the board "
-                    "(item-add failed) — surfaced, not counted as filed")
-                continue
-            if not (project_node and stage_fid and recirc_oid):
-                log(f"github: ticket {url} added but NOT staged {RECIRC_STAGE} "
-                    "(Stage field/option id unresolved — provision via /idc:init) — not counted as filed")
-                continue
-            ok_edit, _, erre = stage_recirc(iid)
-            if not ok_edit:
-                log(f"github: ticket {url} added but Stage→{RECIRC_STAGE} FAILED "
-                    f"({erre.strip()[:120]}) — surfaced, not counted as filed")
+            # Journal the filed create as the engine's recirc-inbox create op (issue #150) so replay's
+            # create watermark recognises the ticket as journaled, not a bypassed board-only item.
+            # The journal keys the item by its ISSUE NUMBER; replay ignores project_item_id, so a record
+            # with no number would leave the live ticket looking board-only (a false divergence). Only
+            # report/count the filing as clean once the number is journaled — a resolve failure (rare:
+            # create_item just wrote this very item) is SURFACED and NOT counted, so the janitor/next
+            # sweep reconciles it rather than a silent-success hiding an unreconcilable ticket.
+            number = _github_issue_number(iid, repo)
+            _journal_intake(repo, iid, number, title)
+            if number is None:
+                # The ticket IS validly on the board (create_item is atomic), but its journal record
+                # has no issue number, so replay/janitor will surface it as board-only. It will NOT
+                # self-heal — the source-marker dedupe skips this ticket on later sweeps — so DON'T
+                # report it as cleanly filed: surface it for operator reconciliation (rare, since the
+                # number resolve above retries).
+                log(f"github: filed Recirculation ticket for {c['origin']} but its issue number could "
+                    f"NOT be resolved for the journal ({iid}) — surfaced, not counted as filed "
+                    "(needs operator reconciliation; will not self-heal)")
                 continue
             log(f"github: filed Recirculation ticket for {c['origin']} ({c['what'][:60]})")
             changed += 1
+
+    # A mid-create RATE LIMIT stops the whole sweep, not just ticket filing: the heal pass below fires
+    # a `gh issue view` per uncorroborated candidate (via _github_issue_text), so continuing into it
+    # while throttled would hammer the API with doomed reads — in the SessionEnd hook (codex round-14
+    # P2). Match the capture loop's defer-to-next-sweep discipline: skip the heal and return.
+    if throttled:
+        # (wording avoids "rate-limited"/"deferring" — the capture loop's own throttle-STOP signals,
+        # which recirc-sweep-atomic-intake.sh counts — so this heal-skip line never inflates them.)
+        log("github: throttled — skipping the journal-backfill heal this sweep "
+            "(its per-candidate issue reads would throttle too; retry on the next sweep)")
+        return changed
+
+    # Journal-backfill heal (codex round-11 P2): ratify any live Recirculation item whose sanctioned
+    # inbox record was lost (see heal_unjournaled_inbox). Runs LAST so records this very sweep just
+    # journaled (re-stages, intakes, partial heals) already corroborate their items — no double line.
+    changed += heal_unjournaled_inbox(repo, "github", None, ctx.get("recirc_candidates") or [],
+                                      lambda c: _github_issue_text(c["number"], repo), log)
     return changed
+
+
+def _github_issue_text(number, repo):
+    """One issue's body + comment bodies as a single text blob (the heal's marker source). Fail-soft:
+    an unreadable issue returns "" — the heal then finds no valid marker and skips (never ratify
+    what it could not read). EXCEPT a rate-limited read RAISES RateLimitError so the heal DEFERS the
+    remaining candidates instead of firing the same doomed `gh issue view` for each (codex round-15
+    P2 — the round-14 throttle short-circuit only covered create_item, not these heal reads)."""
+    okb, body_out, err = gh(["issue", "view", str(number), "--json", "body,comments"], repo)
+    if not okb:
+        if idc_gh_board._is_rate_limit_stderr(err):
+            # reset omitted: a fail-soft SessionEnd defer needs no pause-and-resume epoch, and skipping
+            # the extra `gh api rate_limit` probe avoids one more call while already throttled.
+            raise idc_gh_board.RateLimitError()
+        return ""
+    try:
+        jd = json.loads(body_out)
+    except json.JSONDecodeError:
+        return ""
+    return (jd.get("body") or "") + "\n" + \
+        "\n".join(str((c or {}).get("body", "")) for c in jd.get("comments", []))
 
 
 # ── shared finding builder ───────────────────────────────────────────────────
@@ -667,9 +948,20 @@ def run(repo, mode, tracker, matrices_dir):
             # idc_tracker_fs.load die()s (exits) on a corrupt tracker; convert to a soft skip.
             return (2 if mode == "report" else 0), out
         if mode == "auto-correct":
-            n = apply_filesystem(findings, state, tracker)
+            n = apply_filesystem(findings, state, tracker, repo)
             if n:
                 log(f"filesystem: re-staged {n} rogue Buildable(s) → {RECIRC_STAGE} + cleared Wave")
+            # Journal-backfill heal (codex round-11 P2) — AFTER apply, so re-stages this sweep just
+            # journaled already corroborate their items. `state` reflects the applied re-stages
+            # (apply_filesystem mutates it in place); markers ride comments on this backend.
+            issues = [it for it in state.get("issues", []) if isinstance(it, dict)]
+            candidates = [{"number": it.get("number"), "item_id": None} for it in issues
+                          if it.get("stage") == RECIRC_STAGE and it.get("status") != DONE_STATUS
+                          and it.get("number") is not None]
+            texts = {it.get("number"): "\n".join(str(c) for c in (it.get("comments") or [])
+                                                 if c is not None) for it in issues}
+            heal_unjournaled_inbox(repo, "filesystem", os.path.relpath(tracker, repo), candidates,
+                                   lambda c: texts.get(c["number"], ""), log)
             return 0, out
         out.extend(render_report(findings, backend, matrices))
         return 0, out

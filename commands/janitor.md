@@ -12,18 +12,16 @@ branches, board↔issue drift) and classifies every finding into four verdict ti
 Operator input: `$ARGUMENTS` — pass `--apply-safe` to apply the SAFE-FIX tier; otherwise a full,
 read-only report.
 
-The scanner (`scripts/idc_git_janitor.py`) reconciles, from a **single board read + the merged-PR
-list**, board state against git reality across four dimensions — **worktrees**, **branches**
-(local + remote), **board↔issue↔PR coherence**, and **attribution** — and assigns every finding a tier:
+The scanner (`scripts/idc_git_janitor.py`) reconciles board state against git reality and assigns
+every finding a tier. The dimensions it scans, the tier criteria (what counts as IDC-attributable,
+merged, clean), and the exact fix set `--apply-safe` may touch are computed by the scanner — it is
+the source of truth; do not re-derive them here. What each tier means for the operator:
 
-- **SAFE-FIX** — IDC-attributable (`idc-*`, `build*`, `plan/*`, `recirculate/*`, `worktree-*`) **AND**
-  merged **AND** clean. The *only* tier `--apply-safe` touches: remove a clean merged worktree, delete
-  a merged branch (local + remote), close a Done-but-open issue, set Status=Done on an issue whose
-  work merged. Deterministic, no judgment.
-- **REPORT-ONLY** — non-IDC artifacts (Codex / Antigravity / team-execute / claude / recovery debris).
-  **Always listed, NEVER touched** — the janitor does not clean tooling it did not create.
-- **RISKY** — dirty worktree, unmerged branch, or ambiguous attribution. Listed with a suggested
-  action; applied **only one-by-one on explicit operator confirmation**, never by `--apply-safe`.
+- **SAFE-FIX** — the *only* tier `--apply-safe` touches. Deterministic, no judgment.
+- **REPORT-ONLY** — another tool's artifacts. **Always listed, NEVER touched** — the janitor does
+  not clean tooling it did not create; route these to their own tooling.
+- **RISKY** — needs judgment. Listed with a suggested action; applied **only one-by-one on explicit
+  operator confirmation**, never by `--apply-safe`.
 - **COHERENT** — no findings.
 
 Provenance coherence ("Buildable with no `idc-provenance` marker") is **not** this command's job — it

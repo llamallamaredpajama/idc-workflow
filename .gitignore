@@ -10,3 +10,9 @@ __pycache__/
 /idc-*.png
 .playwright-mcp/
 .auto-goal-teams/
+
+# >>> pi-team init >>>
+# pi-team run state and worktrees (safe to gitignore).
+.pi/team-lead/
+.worktrees/
+# <<< pi-team init <<<

@@ -56,11 +56,17 @@ print("  ok (B) validate_machine refuses a Status/Stage drift from the backend e
 
 # ── (C) the SHIPPED table loads + has the full op set + the worked-state invariant ──
 m = E.load_machine(shipped)  # load_machine runs validate_machine internally
-expected_ops = {"create-ticket","create-pointer","recirculate-intake","claim","move","unblock","close","retire","link"}
+expected_ops = {"create-ticket","create-pointer","recirculate-intake","claim","move","unblock","close","dispose","link"}
 assert set(m["ops"]) == expected_ops, f"shipped ops {set(m['ops'])} != {expected_ops}"
+# The `dispose` terminal op carries a per-disposition guard table (the #150 non-verdict doors);
+# each disposition declares exactly one deterministic evidence guard.
+disp = m["ops"]["dispose"].get("dispositions") or {}
+assert set(disp) == {"gate-approved","retired","drained"}, f"dispose dispositions drift: {set(disp)}"
+for name, entry in disp.items():
+    assert entry.get("guards"), f"dispose disposition {name!r} must declare a non-empty guard list (fail-closed otherwise)"
 assert m.get("worked_status") == "In Progress", "shipped table lost worked_status"
 assert set(m.get("worked_forbidden_stages") or []) == {"Recirculation","Consideration"}, "worked_forbidden_stages drift"
-print("  ok (C1) the shipped table loads with the full 9-op set + the worked-state invariant")
+print("  ok (C1) the shipped table loads with the full 9-op set (dispose w/ 3 guarded dispositions) + the worked-state invariant")
 
 # ── (C2) PyYAML / fallback PARITY on the shipped table (skipped if PyYAML absent) ──
 try:

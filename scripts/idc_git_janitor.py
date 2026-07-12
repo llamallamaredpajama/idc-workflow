@@ -52,11 +52,23 @@ Usage:
   idc_git_janitor.py [--repo DIR] [--tracker T | --backend github --owner O --project N] [--apply-safe] [--json]
 """
 import argparse
+import datetime
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
+
+try:
+    import fcntl  # POSIX advisory file locks (macOS/Linux — IDC's platforms); None elsewhere
+except ImportError:  # pragma: no cover - non-POSIX fallback
+    fcntl = None
+
+# Allow importing from sibling scripts
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from idc_journal_replay import reconstruct_state_from_journal, journal_item_id, earliest_journaled_create
 
 # --- attribution -----------------------------------------------------------------------------------
 # IDC-attributable branch/worktree naming (the design's exact list). Anchored at the START, and `build`
@@ -252,6 +264,11 @@ def gh_json(args, repo):
 # be TRUNCATED. So a result AT the cap makes that dimension possibly-partial → indeterminate (fail-closed).
 PR_LIST_LIMIT = 1000
 ISSUE_LIST_LIMIT = 2000
+JOURNAL_REL = os.path.join("docs", "workflow", "transition-journal.ndjson")
+# The journal's advisory-lock SIDECAR, as a repo-root .gitignore pattern (always forward-slash). A
+# runtime-only token both rotation and journal_append create when they lock — never committed. Derived
+# from JOURNAL_REL so the ignore rule and the lock path can't drift.
+JOURNAL_LOCK_GITIGNORE_LINE = JOURNAL_REL.replace(os.sep, "/") + ".lock"
 
 
 def read_at_cap(n, limit):
@@ -625,6 +642,31 @@ def apply_safe(findings, ctx):
     return results
 
 
+def _journal_board_fix(ctx, backend, number, verified):
+    """A SAFE-FIX board close is a sanctioned mutation, so it lands in the SAME canonical transition
+    journal the engine writes — otherwise the --apply-safe re-scan immediately reports the janitor's
+    own fix as a journal↔board divergence and the apply pass can never converge. Best-effort by the
+    journal contract: the close already happened, a journal failure must not fail the fix.
+
+    Recorded as the janitor's OWN op kind — `janitor-repair`, carrying the deterministic truth the
+    SAFE-FIX classifier verified (`verified` = the finding detail: the merged IDC branch / merged-PR
+    close / CLOSED-as-completed state) — NEVER as an engine `close` (codex round-12 P1): the engine's
+    `close` is a GUARDED door (a valid, passing, item-owning verdict) and a look-alike record would
+    launder the janitor's reconciliation into a sanctioned guarded close in the audit trail. The
+    janitor DECIDES nothing here — it stamps Done only when the truth already happened elsewhere —
+    so its record must disclose exactly that. Replay is unaffected by the op name: reconstruction
+    reads the structured `item` + `to` fields, and the corroboration/watermark scans key on
+    create/link/restage/intake ops only."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import idc_transition
+    tracker = ctx.get("tracker")
+    tracker_rel = os.path.relpath(tracker, ctx["repo"]) if (backend == "filesystem" and tracker) else None
+    idc_transition.journal_append(ctx["repo"], "janitor-repair", backend, tracker_rel,
+                                  {"num": number, "to_status": "Done", "agent": "janitor",
+                                   "disposition_evidence": {"door": "janitor-safe-fix",
+                                                            "verified": verified}})
+
+
 def _apply_board(f, ctx):
     op = f.get("op")
     repo = ctx["repo"]
@@ -636,8 +678,12 @@ def _apply_board(f, ctx):
                                capture_output=True, text=True)
         except (OSError, ValueError):
             return False, "tracker close invocation failed"
+        if p.returncode == 0:
+            _journal_board_fix(ctx, "filesystem", f["number"], f.get("detail") or "merged IDC build branch")
         return p.returncode == 0, ("set Status=Done" if p.returncode == 0 else "tracker close failed")
     if op == "close-issue":
+        # Closes the GitHub issue only — the board Status is already Done, so replay state is
+        # unchanged and there is nothing to journal.
         try:
             p = subprocess.run(["gh", "issue", "close", str(f["number"])],
                                cwd=repo, capture_output=True, text=True)
@@ -645,7 +691,10 @@ def _apply_board(f, ctx):
             return False, "gh issue close invocation failed"
         return p.returncode == 0, ("closed issue" if p.returncode == 0 else "gh issue close failed")
     if op == "set-done":
-        return _github_set_status_done(f.get("item_id"), ctx)
+        ok, note = _github_set_status_done(f.get("item_id"), ctx)
+        if ok:
+            _journal_board_fix(ctx, "github", f["number"], f.get("detail") or "issue completed on GitHub")
+        return ok, note
     return False, "unknown board op"
 
 
@@ -700,7 +749,7 @@ def counts(findings):
 
 # The single authoritative fail-closed verdict rule — exit code, JSON, and the text banner ALL derive
 # from it, so the process exit that gates the e2e post-condition can never disagree with the report:
-# findings win → non-zero; else an indeterminate dimension refuses a clean result; else coherent.
+# indeterminate dimensions win (fail closed); else findings are actionable; else coherent.
 _VERDICT_EXIT = {"findings": 1, "coherent": 0, "indeterminate": 2}
 # The human banner for each verdict. Kept in lockstep with _VERDICT_EXIT so the printed line NEVER
 # disagrees with the exit code (the nit this closes: an indeterminate scan — exit 2 — used to print
@@ -796,6 +845,314 @@ def build_ctx(args):
     return ctx
 
 
+def check_journal_divergence(ctx, findings, journal_path):
+    """Compare journal-reconstructed state with actual board state.
+
+    Returns True when the journal dimension is indeterminate (missing/corrupt/unreadable in a repo that
+    has board state), so the caller exits 2 instead of downgrading journal corruption to advisory debris.
+    """
+    board = ctx.get("board")
+    if board is None:
+        return False # Cannot check divergence without a board
+    if not os.path.exists(journal_path):
+        # The transition journal is created lazily, so absence is clean ONLY on a fresh (empty)
+        # board. A non-empty board with no journal means journal-backed history is missing
+        # (deleted, or the board was mutated outside the engine) → indeterminate, fail closed.
+        if board:
+            sys.stderr.write("idc-git-janitor: board has items but %s is missing — "
+                             "journal dimension indeterminate\n" % journal_path)
+            return True
+        return False
+
+    expected_state, error = reconstruct_state_from_journal(journal_path)
+    if error:
+        return True
+    create_watermark = earliest_journaled_create(journal_path)
+
+    actual_state = {}
+    for item in board:
+        item_id = item.get("number")
+        if item_id is not None:
+            actual_state[item_id] = {
+                "stage": item.get("stage") or "",
+                "status": item.get("status")
+            }
+
+    all_item_ids = set(expected_state.keys()) | set(actual_state.keys())
+    for item_id in sorted(all_item_ids):
+        expected_item = expected_state.get(item_id, {})
+        actual_item = actual_state.get(item_id, {})
+
+        if not actual_item:
+            findings.append(finding(RISKY, "journal", f"#{item_id}",
+                "Item present in journal but missing from board.", "reconcile manually"))
+            continue
+        if not expected_item:
+            # Board-only items are tolerated ONLY below the derived adoption watermark (the earliest
+            # journaled create — item numbers are monotonic on both backends): those predate
+            # journaling (legacy). An item ABOVE the watermark was created after create-journaling
+            # began, so a total absence of journal lines means lost (truncated) or bypassed history.
+            if create_watermark is not None and item_id > create_watermark:
+                findings.append(finding(RISKY, "journal", f"#{item_id}",
+                    "Item has no journal history but was created after journaling began "
+                    f"(numbered above journaled create #{create_watermark})", "reconcile manually"))
+            continue
+
+        act_stage = actual_item.get("stage")
+        act_status = actual_item.get("status")
+
+        if "stage" in expected_item and expected_item.get("stage") != act_stage:
+            detail = (f"Stage mismatch: journal says '{expected_item.get('stage')}', "
+                      f"board says '{act_stage}'")
+            findings.append(finding(RISKY, "journal", f"#{item_id}", detail, "reconcile manually"))
+
+        if "status" in expected_item and expected_item.get("status") != act_status:
+            detail = (f"Status mismatch: journal says '{expected_item.get('status')}', "
+                      f"board says '{act_status}'")
+            findings.append(finding(RISKY, "journal", f"#{item_id}", detail, "reconcile manually"))
+
+    return False
+
+
+def _read_journal_bytes(journal_path):
+    """Read the active journal as raw bytes. A single seam — so rotation knows the EXACT offset a
+    concurrent journal_append would write past (below), and so the rotation/append-race governance test
+    can deterministically inject that append right after the read."""
+    with open(journal_path, "rb") as f:
+        return f.read()
+
+
+def journal_lock_path(journal_path):
+    """The STABLE sidecar lock path for the journal (`<journal>.lock`). The shared convention with the
+    engine's journal_append: both take fcntl.flock(LOCK_EX) on THIS file — never the journal itself —
+    so the exclusive lock survives rotation's atomic os.replace of the journal inode. idc_ledger locks
+    a `.lock` sidecar for exactly this reason (os.replace orphans a lock held on the renamed inode)."""
+    return journal_path + ".lock"
+
+
+def _lock_journal_sidecar(journal_path):
+    """Take fcntl.flock(LOCK_EX) on the journal's STABLE sidecar and return the held fd (close it to
+    release), or None if fcntl is unavailable / the lock could not be taken.
+
+    Because the sidecar inode never changes, an appender that takes the SAME lock and then waits here
+    wakes only AFTER rotation's replace and opens the CURRENT journal — so no write ever lands on the
+    replaced inode. BEST-EFFORT: a failure returns None and the caller proceeds unlocked (relying on
+    the drain fallback); it never blocks forever nor fails the janitor."""
+    if fcntl is None:
+        return None
+    try:
+        fh = open(journal_lock_path(journal_path), "w", encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+    except OSError:
+        try:
+            fh.close()
+        except OSError:
+            pass
+        return None
+    return fh
+
+
+def _drain_replaced_inode(old_fd, consumed):
+    """Bytes a concurrent journal_append wrote to the journal inode PAST `consumed` while rotation ran.
+
+    `old_fd` is an fd held open on the journal's inode from BEFORE the read. After rotation's atomic
+    os.replace unlinks that inode from the path, the inode itself persists while this fd (and any
+    appender's fd opened before the replace) stays open — so reading here recovers every append that
+    landed on the replaced inode DURING the whole rotation, including the read→replace window. This is
+    the FALLBACK that still protects an UNLOCKED appender (fcntl absent, or the engine's appender-side
+    lock not yet deployed); with both sides locking, no concurrent append lands and this reads empty.
+    journal_append is O_APPEND, so those bytes only ever extend past `consumed`. Empty on any error."""
+    try:
+        old_fd.seek(consumed)
+        return old_fd.read()
+    except OSError:
+        return b""
+
+
+def ensure_lock_gitignored(repo_root):
+    """Idempotently + NON-DESTRUCTIVELY add the journal's advisory-lock sidecar to the repo-root
+    `.gitignore` — a runtime-only token both rotation and journal_append create when they lock, never
+    committed (the same sidecar treatment the ledger/drain-verdict got in v4 Phase 3 Stage A).
+
+    Governed-repo-gated (a no-op without docs/workflow/tracker-config.yaml, so a stray call never
+    litters a non-IDC dir). APPEND-ONLY — never rewrites an operator's existing `.gitignore` lines.
+    Prints `journal-lock-gitignore-added` / `journal-lock-gitignore-already-present`; a `.gitignore`
+    write failure warns to stderr and is a no-op (best-effort scaffold step)."""
+    if not os.path.isfile(os.path.join(repo_root, "docs", "workflow", "tracker-config.yaml")):
+        return  # not a governed repo — no-op
+    line = JOURNAL_LOCK_GITIGNORE_LINE
+    gi = os.path.join(repo_root, ".gitignore")
+    try:
+        existing = ""
+        if os.path.isfile(gi):
+            with open(gi, encoding="utf-8") as fh:
+                existing = fh.read()
+        if any(ln.strip() == line for ln in existing.splitlines()):
+            print("journal-lock-gitignore-already-present")
+            return
+        with open(gi, "a", encoding="utf-8") as fh:
+            if existing and not existing.endswith("\n"):
+                fh.write("\n")
+            fh.write("# IDC transition-journal advisory lock (runtime sidecar; do not commit)\n")
+            fh.write(line + "\n")
+        print("journal-lock-gitignore-added")
+    except OSError as e:
+        sys.stderr.write(f"idc-git-janitor: could not ensure .gitignore in {repo_root}: {e}\n")
+
+
+def rotate_journal(ctx, journal_path):
+    """Archive journal entries for terminal items and atomically rewrite the active journal.
+
+    The rewrite stays a SINGLE atomic os.replace. The race between rotation's read and that replace (a
+    concurrent journal_append landing in between, dropped by the old code — issue #150 round-10 P2) is
+    closed by holding an fcntl.flock(LOCK_EX) on the journal's STABLE SIDECAR (`<journal>.lock`, never
+    replaced) across the whole critical section: the engine's journal_append takes the SAME sidecar
+    lock, so append and rotation serialise on a stable inode — an appender that waited wakes after the
+    replace and opens the CURRENT journal, never the replaced one (idc_ledger's sidecar-lock precedent).
+    Locking is BEST-EFFORT — on any flock failure it warns and proceeds unlocked. As the lock-failure
+    (and unlocked-appender) fallback, rotation also holds an fd on the pre-rotation journal inode and
+    DRAINS, after the replace, any bytes an unlocked appender wrote to it during rotation, re-appending
+    them so no sanctioned append is ever lost."""
+    board = ctx.get("board")
+    if board is None:
+        sys.stderr.write("idc-git-janitor: cannot rotate journal without a board. Use --tracker or --backend github.\n")
+        sys.exit(2)
+
+    terminal_items = {item["number"] for item in board if item.get("status") == "Done"}
+    if not terminal_items:
+        print("No terminal items found on board. Nothing to rotate.")
+        return
+
+    if not os.path.exists(journal_path):
+        # Terminal items exist (checked above) but their journal history is gone — the same
+        # non-empty-board/missing-journal state the scan treats as indeterminate. Refusing keeps
+        # lost history from reading as successful maintenance.
+        sys.stderr.write(f"idc-git-janitor: board has terminal items but {journal_path} is missing — "
+                         "refusing to rotate (journal history indeterminate)\n")
+        sys.exit(2)
+
+    # Take the exclusive SIDECAR lock (serialising a locked journal_append) for the whole critical
+    # section, AND hold an fd on the current journal inode for the DRAIN fallback (an unlocked appender
+    # that slipped in). Both best-effort: a lock failure warns and proceeds unlocked, relying on the drain.
+    lock_fh = _lock_journal_sidecar(journal_path)
+    if fcntl is not None and lock_fh is None:
+        sys.stderr.write("idc-git-janitor: could not take the journal sidecar lock for rotation — "
+                         "proceeding unlocked (best-effort; the post-replace drain still recovers appends)\n")
+    try:
+        old_fd = open(journal_path, "rb")
+    except OSError:
+        old_fd = None
+
+    # Read the journal as bytes through the seam so `consumed` is the exact offset a concurrent
+    # journal_append (during rotation) would write past.
+    raw = _read_journal_bytes(journal_path)
+    consumed = len(raw)
+    to_archive = []
+    to_keep = []
+    # Split on the NDJSON newline BYTE (0x0A) ONLY — NOT str.splitlines(), which also breaks on Unicode
+    # line/paragraph separators (U+2028/U+2029). json.dumps(ensure_ascii=False) emits those UNescaped
+    # (issue titles flow into `what`), so a VALID record carrying one would be split mid-record and
+    # wrongly rejected as malformed. 0x0A never occurs inside a multi-byte UTF-8 sequence, so a byte
+    # split is exact; re-attach the delimiter so each kept line is byte-identical to the original.
+    byte_lines = raw.split(b"\n")
+    if byte_lines and byte_lines[-1] == b"":
+        byte_lines.pop()   # the empty tail after the journal's final newline — not a record
+    for line_num, bline in enumerate(byte_lines, 1):
+        line = bline.decode("utf-8") + "\n"
+        if not line.strip():
+            to_keep.append(line)
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError as e:
+            sys.stderr.write(f"idc-git-janitor: malformed journal line {line_num}: {e.msg}\n")
+            sys.exit(2)
+        if not isinstance(entry, dict):
+            sys.stderr.write(f"idc-git-janitor: malformed journal line {line_num}: expected object\n")
+            sys.exit(2)
+        item_id = journal_item_id(entry)
+        if item_id in terminal_items:
+            to_archive.append(line)
+        else:
+            to_keep.append(line)
+
+    if not to_archive:
+        # Not rotating (no replace) — release the drain fd and the sidecar lock; the live journal is intact.
+        for fh in (old_fd, lock_fh):
+            if fh is not None:
+                try:
+                    fh.close()
+                except OSError:
+                    pass
+        print("No journal entries found for terminal items. Nothing to rotate.")
+        return
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    archive_dir = os.path.join(ctx["repo"], "docs/workflow/journal-archive")
+    os.makedirs(archive_dir, exist_ok=True)
+    os.makedirs(os.path.dirname(journal_path), exist_ok=True)
+    archive_path = os.path.join(archive_dir, f"{now.strftime('%Y-%m-%d')}.ndjson")
+
+    existing_archive = []
+    if os.path.exists(archive_path):
+        with open(archive_path, "r", encoding="utf-8") as f:
+            existing_archive = f.readlines()
+
+    archive_tmp = None
+    journal_tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=archive_dir, delete=False) as tmp:
+            tmp.writelines(existing_archive)
+            tmp.writelines(to_archive)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+            archive_tmp = tmp.name
+
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=os.path.dirname(journal_path), delete=False) as tmp:
+            tmp.writelines(to_keep)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+            journal_tmp = tmp.name
+
+        os.replace(archive_tmp, archive_path)
+        archive_tmp = None
+        os.replace(journal_tmp, journal_path)
+        journal_tmp = None
+
+        # DRAIN the replaced inode (issue #150 round-10 P2 fallback): while the flock serialises a
+        # LOCKED appender, this recovers any UNLOCKED appender (fcntl absent, or the engine's
+        # appender-side lock not yet deployed) that wrote to the pre-rotation inode DURING rotation —
+        # including the read→replace window — re-appending it so no sanctioned append is lost. With both
+        # sides locking, no concurrent append landed and this reads empty. A drained line for a
+        # since-terminal item is harmlessly kept and archived next rotation.
+        if old_fd is not None:
+            leftover = _drain_replaced_inode(old_fd, consumed)
+            if leftover:
+                with open(journal_path, "ab") as jt:
+                    jt.write(leftover)
+                    jt.flush()
+                    os.fsync(jt.fileno())
+    finally:
+        for fh in (old_fd, lock_fh):   # close the drain fd, then release the sidecar lock (lock_fh)
+            if fh is not None:
+                try:
+                    fh.close()
+                except OSError:
+                    pass
+        for path in (archive_tmp, journal_tmp):
+            if path:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+
+    print(f"Archived {len(to_archive)} journal entries to {archive_path}")
+    print(f"Journal rotated. {len(to_keep)} entries remain.")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Deterministic board↔git reconciler (read-only by default).")
     ap.add_argument("--repo", default=".", help="repo dir to scan (default: cwd)")
@@ -807,10 +1164,35 @@ def main():
     ap.add_argument("--apply-safe", action="store_true",
                     help="execute ONLY the SAFE-FIX tier, then re-scan and report the delta")
     ap.add_argument("--json", action="store_true", help="emit the machine-readable JSON report")
+    ap.add_argument("--check-journal-divergence", action="store_true",
+                    help="run the journal-replay reconciliation dimension (opt-in until #150 "
+                         "journals every sanctioned mutation door; doctor Row 10 passes it)")
+    ap.add_argument("--rotate-journal", action="store_true", help="Rotate journal for terminal items")
+    ap.add_argument("--ensure-gitignore", action="store_true",
+                    help="idempotently add the journal's advisory-lock sidecar to the repo-root "
+                         ".gitignore, then exit (scaffold/update step; append-only, non-destructive)")
     args = ap.parse_args()
 
+    # Scaffold/update step: no board read needed — ensure the sidecar is ignored and exit.
+    if args.ensure_gitignore:
+        ensure_lock_gitignored(os.path.abspath(args.repo))
+        sys.exit(0)
+
     ctx = build_ctx(args)
+
+    if args.rotate_journal:
+        journal_path = os.path.join(ctx["repo"], JOURNAL_REL)
+        rotate_journal(ctx, journal_path)
+        sys.exit(0)
+
     findings, indeterminate = scan(ctx)
+
+    journal_path = os.path.join(ctx["repo"], JOURNAL_REL)
+    # OPT-IN until #150: sanctioned mutation doors outside the engine (adapter claim/move/close
+    # prose, gate closes, recirc stage stamps) do not journal yet, so a default replay would report
+    # documented normal traffic as RISKY divergence. Doctor Row 10 passes the flag explicitly.
+    if args.check_journal_divergence:
+        indeterminate = check_journal_divergence(ctx, findings, journal_path) or indeterminate
 
     if not args.apply_safe:
         if args.json:
@@ -830,6 +1212,9 @@ def main():
             print(f"janitor: {mark} {f['dim']} {f['name']} — {note}")
     ctx2 = build_ctx(args)                       # re-establish ground truth after mutation
     findings2, indeterminate2 = scan(ctx2)
+    journal_path = os.path.join(ctx2["repo"], JOURNAL_REL)
+    if args.check_journal_divergence:
+        indeterminate2 = check_journal_divergence(ctx2, findings2, journal_path) or indeterminate2
     if args.json:
         emit_json(findings2, ctx2, indeterminate2, applied=applied)
     else:

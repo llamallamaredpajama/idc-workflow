@@ -9,9 +9,10 @@
 #   (#4a) github_existing_sources() returns None (a VISIBLE degraded state) when the dedupe board read
 #         FAILS — not an empty set — so apply_github SKIPS ticket-filing rather than re-file a blind
 #         duplicate it cannot see.
-#   (#4b) apply_github() gates the "filed" report + the `changed` count on the FULL filing chain
-#         succeeding (issue create → item-add → item-edit/stage). A failed item-add or item-edit is
-#         surfaced and NOT counted.
+#   (#4b) apply_github() files a Recirculation ticket through the ATOMIC idc_gh_board.create_item
+#         (issue #130 — Stage AND Status set together, partial discarded; no empty-Status pointer),
+#         gating the "filed" report + the `changed` count on that create succeeding. A create failure
+#         (BoardWriteError) is surfaced and NOT counted.
 #   (#2)  the re-stage loop's Wave `--clear` return is CHECKED — a failed clear is surfaced, never
 #         silently reported as "+ Wave cleared".
 #
@@ -80,62 +81,54 @@ check(changed == 0, "a skipped (un-dedupable) filing must NOT be counted")
 check(any("skipping ticket-filing" in l for l in logs),
       "the skipped filing must be surfaced (skipping ticket-filing …)")
 
-# ── #4b — apply_github gates 'filed'/changed on the FULL chain (create → item-add → item-edit) ────
-def run_filing(gh_fn):
-    """Apply a single LEAVE-finding-with-capture through apply_github with a scripted gh, dedupe OK
-    (empty board). Returns (changed, joined_log)."""
-    m.gh = gh_fn
+# ── #4b — apply_github files via the ATOMIC create_item (#130) + gates 'filed'/changed on it ───────
+import os, tempfile
+REPO_FILING = tempfile.mkdtemp()   # a writable repo so the intake journal_append does not fail-soft-warn
+os.makedirs(os.path.join(REPO_FILING, "docs", "workflow"), exist_ok=True)
+# fetch_item resolves the filed ticket's issue number for the intake journal record.
+m.idc_gh_board.fetch_item = lambda iid, repo: {"content": {"number": 99, "title": "recirc"}}
+
+def gh_filing(args, repo):
+    if args[:2] == ["project", "field-list"]:
+        return True, "OPT_recirc", ""
+    return True, "", ""
+
+def run_filing(create_fn):
+    """Apply a single LEAVE-finding-with-capture through apply_github with a scripted create_item,
+    dedupe OK (empty board). Returns (changed, joined_log)."""
+    m.gh = gh_filing
     m.idc_gh_board.fetch_items = empty_board
+    m.idc_gh_board.create_item = create_fn
     f = m.Finding(42, m.LEAVE, "host", item_id="PVTI_host")
     f.captures = [capture()]
     lg = []
-    ch = m.apply_github([f], "/x", CTX, lg.append)
+    ch = m.apply_github([f], REPO_FILING, CTX, lg.append)
     return ch, "\n".join(lg)
 
-def base(args):
-    if args[:2] == ["project", "field-list"]:
-        return True, "OPT_recirc", ""
-    if args[:2] == ["issue", "create"]:
-        return True, "https://h/issues/99\n", ""
-    return None
+# (b-i) create_item RAISES (BoardWriteError — e.g. an unresolved Stage/Status option, or a partial it
+#       discarded) → NOT counted as filed, surfaced. The atomic primitive owns the partial-discard, so
+#       apply_github only has to honour a raise (no add/edit half-states to gate).
+def ci_boom(owner, project, repo, title, body, stage, status):
+    raise m.idc_gh_board.BoardWriteError("simulated atomic-create failure")
+ch, log = run_filing(ci_boom)
+check(ch == 0, "a failed atomic create_item must NOT count as filed")
+check("not counted as filed" in log, "a failed create must be surfaced (not counted as filed)")
 
-# (b-i) item-add FAILS → created but not on the board → NOT counted as filed
-def gh_add_fail(args, repo):
-    b = base(args)
-    if b is not None:
-        return b
-    if args[:2] == ["project", "item-add"]:
-        return False, "", "add boom"
-    return True, "", ""
-ch, log = run_filing(gh_add_fail)
-check(ch == 0, "a failed item-add must NOT count as filed (the ticket is off-board)")
-check("NOT added to the board" in log, "a failed item-add must be surfaced (NOT added to the board)")
+# (b-ii) create_item is called with Stage=Recirculation AND Status=Todo TOGETHER — the #130 atomic
+#        contract that eliminates the empty-Status pointer class. Red-when-broken: a regression back to
+#        the Stage-only item-edit chain would never pass a Status here.
+seen = {}
+def ci_capture(owner, project, repo, title, body, stage, status):
+    seen["stage"], seen["status"] = stage, status
+    return "PVTI_new"
+ch, log = run_filing(ci_capture)
+check(seen.get("stage") == "Recirculation", f"create_item must set Stage=Recirculation, got {seen.get('stage')!r}")
+check(seen.get("status") == "Todo", f"create_item must set Status=Todo atomically (#130), got {seen.get('status')!r}")
 
-# (b-ii) item-add OK but item-edit/stage FAILS → on board but un-staged → NOT counted as filed
-def gh_edit_fail(args, repo):
-    b = base(args)
-    if b is not None:
-        return b
-    if args[:2] == ["project", "item-add"]:
-        return True, "PVTI_new\n", ""
-    if args[:2] == ["project", "item-edit"]:   # stage_recirc(iid) — the only item-edit in this path
-        return False, "", "edit boom"
-    return True, "", ""
-ch, log = run_filing(gh_edit_fail)
-check(ch == 0, "a failed Stage item-edit must NOT count as filed (the ticket is un-staged)")
-check("Stage→Recirculation FAILED" in log, "a failed Stage edit must be surfaced (Stage→Recirculation FAILED)")
-
-# (b-iii) POSITIVE control — full chain OK → counted + logged 'filed' (proves the test isn't a
-#         tautology: a blanket 'never count' would fail HERE)
-def gh_all_ok(args, repo):
-    b = base(args)
-    if b is not None:
-        return b
-    if args[:2] == ["project", "item-add"]:
-        return True, "PVTI_new\n", ""
-    return True, "", ""
-ch, log = run_filing(gh_all_ok)
-check(ch == 1, "a fully-successful filing chain MUST count as filed (positive control)")
+# (b-iii) POSITIVE control — a successful atomic create → counted + logged 'filed' (proves the test is
+#         not a tautology: a blanket 'never count' would fail HERE)
+ch, log = run_filing(lambda o, p, r, t, b, s, st: "PVTI_new")
+check(ch == 1, "a successful atomic filing MUST count as filed (positive control)")
 check("filed Recirculation ticket" in log, "a successful filing must be logged 'filed Recirculation ticket'")
 
 # ── #2 — the re-stage loop's Wave --clear return is checked (no false 'Wave cleared') ─────────────
@@ -144,7 +137,7 @@ def run_restage(gh_fn):
     m.idc_gh_board.fetch_items = empty_board
     f = m.Finding(207, m.RESTAGE, "rogue, no provenance", wave="Wave 2", item_id="PVTI_207")
     lg = []
-    ch = m.apply_github([f], "/x", CTX, lg.append)
+    ch = m.apply_github([f], REPO_FILING, CTX, lg.append)  # writable repo so the re-stage journal lands
     return ch, "\n".join(lg)
 
 # (2-i) Wave clear FAILS (Stage re-stage succeeds) → must surface the failure, must NOT claim cleared
@@ -179,4 +172,4 @@ if errs:
 print("ok")
 PY
 
-echo "PASS: github recirc-sweep — dedupe-fail returns None (no blind re-file), filing gates 'filed'/changed on create+item-add+item-edit success, re-stage Wave-clear honesty (no false 'Wave cleared')"
+echo "PASS: github recirc-sweep — dedupe-fail returns None (no blind re-file), filing mints via the atomic create_item (Stage+Status together, #130) and gates 'filed'/changed on it, re-stage Wave-clear honesty (no false 'Wave cleared')"

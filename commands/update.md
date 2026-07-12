@@ -75,6 +75,13 @@ run**, so a half-finished update can never masquerade as complete.
   - `missing` → was stamped but removed; offer to restore it from the template (default: leave
     removed unless the operator wants it back). A missing data-bearing config restores as the blank
     stub for the operator to re-fill.
+  - `unrecorded` → files the **installed plugin version stamps that this receipt does not list** —
+    they are **new in a newer plugin version** (e.g. a pre-4.0.0 receipt has no
+    `docs/workflow/workflow-machine.yaml`), so the receipt-driven classes above never see them.
+    Absent on disk → **install it via §B now** (this is the version migration, not an operator
+    removal — no leave-removed default). Present on disk → provenance unknown: show-diff-and-ask
+    like `modified`, never silently overwrite. An `unrecorded` data-bearing config follows §A as
+    always. Phase 4's fresh stamp records every one that landed.
   If the receipt is present but **invalid** (the helper exits non-zero), STOP and report the parse
   error — do not silently treat files as untouched.
 - **No receipt (pre-receipt install):** this is the one-time graduation. **Diff-and-ask for every
@@ -110,8 +117,9 @@ values it carries.
 
 ### §B — Template-stamped files (everything else)
 
-For each file approved for refresh (pristine-and-differing, operator-chose-replace, or
-restore-missing): **resolve its template source through the shared resolver — never guess the
+For each file approved for refresh (pristine-and-differing, operator-chose-replace,
+restore-missing, or an absent `unrecorded` file being installed by the version migration):
+**resolve its template source through the shared resolver — never guess the
 template by basename or path-tail** — then render and write it, substituting the same tokens
 `/idc:init` does — `{{PROJECT_NAME}}` (read from `WORKFLOW-config.yaml`) and, for the github
 backend, `{{TRACKER_PROJECT_NUMBER}}` (read from `docs/workflow/tracker-config.yaml`). Record, per
@@ -156,11 +164,17 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/idc_ledger.py" --cwd "$ROOT" ensure
 # per-session sidecar (the drain writes it so the Stop gate reads the github board conjunct locally,
 # zero GraphQL on the stop path). Ensure it is ignored too, identically additive + idempotent:
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/idc_drain_verdict.py" --cwd "$ROOT" ensure-gitignore
+# The transition-journal advisory-lock sidecar (docs/workflow/transition-journal.ndjson.lock, v4
+# Phase 4 #150) — the runtime flock token rotation + journal_append create on a STABLE sidecar so the
+# journal↔rotation lock survives os.replace. Working state, never committed; a repo scaffolded before
+# #150 has no ignore for it, so its first rotation would strand an untracked .lock the janitor then
+# flags as debris. Ensure it too (the janitor owns the lock-path convention + ignore rule):
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_janitor.py" --repo "$ROOT" --ensure-gitignore
 ```
 Idempotent: a no-op if the line is already present (report `ledger-gitignore-already-present` /
-`drain-verdict-gitignore-already-present`), otherwise appends it (`…-added`). Neither is a
-stamped/receipt-tracked file, so they never appear in the Phase 1 drift classification — they are
-standing additives the same way the Phase 3 `Stage`-option append is.
+`drain-verdict-gitignore-already-present` / `journal-lock-gitignore-already-present`), otherwise
+appends it (`…-added`). None is a stamped/receipt-tracked file, so they never appear in the Phase 1
+drift classification — they are standing additives the same way the Phase 3 `Stage`-option append is.
 
 ## Phase 3 — Board reconcile (one safe additive migration; everything else report-only)
 
@@ -246,7 +260,8 @@ Print one table of every stamped file (`refreshed` / `preserved — config curre
 new optional key(s)` / `restored` / `skipped-already-current`), then:
 - the board-reconcile outcome (one of: no drift / `stage-recirc-appended` /
   `stage-recirc-already-present` / other drift reported / could not verify),
-- the ledger-gitignore outcome (`ledger-gitignore-added` / `ledger-gitignore-already-present`),
+- the gitignore-additive outcomes (`ledger-gitignore-added`/`-already-present`, and likewise for
+  `drain-verdict-gitignore-` and `journal-lock-gitignore-`),
 - the `deleteBranchOnMerge` outcome (`enabled` / `declined` / `skipped-existing` / `n/a`),
 - the receipt status (`rewritten` / `graduated` / `skipped-already-current`),
 - and the cache-refresh reminder if any newly-shipped command/skill files arrived with this update.

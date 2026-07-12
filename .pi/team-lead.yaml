@@ -1,0 +1,33 @@
+# pi-team per-project config, seeded by `pi-team init`.
+#
+# Every setting below is commented out — pi-team falls back to its built-in defaults. Uncomment and
+# edit any section to override that default for THIS repo only. Safe to commit.
+#
+# phase4 preset: the team-execute v2 run phase4-2026-07-06 (desk docs:
+# ~/.claude/team-execute-runs/phase4-2026-07-06/). Reviewer rides a different provider than the
+# gemini builders for lens diversity; dashboard pinned to terminal (browser cockpit unshipped, V3).
+version: 1
+
+defaults:
+  dashboard: terminal
+
+teams:
+  phase4:
+    agents:
+      - role: review
+        model: openai-codex/gpt-5.5
+        thinking: high
+
+# workflows:
+#   idc:
+#     launcher: idc-pi
+#     roles: auto
+
+# assignmentTemplates:
+#   builder: fullauto-goal
+#   build-impl: fullauto-goal
+#   debugger: systematic-debugging
+#   test: tdd-regression
+#   review: fail-closed-review
+#   security: threat-model-review
+#   researcher: cited-research

@@ -169,8 +169,57 @@ flags prose dependencies with no recorded link. It is a **read-only `⚠` heads-
 FAIL** (Build still trusts the board; the schema check stays Plan's gate). Branch on
 `docs/workflow/tracker-config.yaml::backend`:
 
-- **`filesystem` → SKIP**, note: "filesystem board carries no issue bodies — the body-schema /
-  prose-dependency re-scan is github-only; the schema check runs at Plan authoring."
+- **`filesystem` → run the backend-neutral INDEX rules only** (read-only). The body-schema /
+  prose-dependency re-scan stays skipped (the filesystem board carries no issue bodies — the schema
+  check runs at Plan authoring), but the body-free index rules are backend-neutral and the strand
+  classes they catch exist on filesystem too: `stranded-gate` / `unproven-gate-done` (a dependent
+  still `Blocked` behind an `[operator-action]` gate already `Done` — the gate skill's dispose-first
+  step 4 interrupted between the gate close and the unblock; tiered by whether the gate's guarded
+  dispose is journaled) and `empty-status` (#255/#256). CAPTURE the producer's output first so a
+  tracker-read FAILURE is detectable: `idc_tracker_fs.load` `die()`s (exit ≠ 0) on a MISSING or
+  CORRUPT `TRACKER.md`, and piped straight into the lint that empty stdin prints a hollow
+  `board-lint: clean (0 scanned)` (exit 0) that reads as PASS — a clean all-clear for a board that
+  could not be inspected. Feed the tracker's structured records as INDEX-ONLY objects — the
+  Buildable+Todo lane is EXCLUDED so nothing is ever body-schema-scanned (`scanned` stays 0; a Todo
+  blocker is never `Done`, so its absence from the index keeps the stranded rule correctly silent) —
+  and pass `--journal` so a Done gate is tiered proven-vs-unproven:
+  ```bash
+  fs_lint_in="$(mktemp)"
+  if python3 - "${CLAUDE_PLUGIN_ROOT}/scripts" "$PWD/TRACKER.md" > "$fs_lint_in" <<'PY'
+  import json, sys
+  sys.path.insert(0, sys.argv[1])
+  import idc_tracker_fs
+  for it in idc_tracker_fs.load(sys.argv[2]).get("issues", []):
+      if not isinstance(it, dict) or it.get("number") is None:
+          continue
+      stage, status = it.get("stage") or "Buildable", it.get("status") or "none"
+      if stage == "Buildable" and status == "Todo":
+          continue  # the body re-scan lane is github-only; never fed, so never schema-scanned
+      obj = {"number": it["number"], "title": it.get("title") or "", "stage": stage, "status": status}
+      if status == "Blocked":
+          bb = it.get("blocked_by")
+          obj["blocked_by"] = bb if isinstance(bb, list) else []
+      print(json.dumps(obj))
+  PY
+  then
+    python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_board_lint.py" \
+      --journal "$PWD/docs/workflow/transition-journal.ndjson" < "$fs_lint_in"
+  else
+    # producer exited non-zero (missing/corrupt TRACKER.md) → emit an EXPLICIT SKIP marker so a
+    # mechanical run classifies Row 9 as SKIP ("could not determine"), never the hollow
+    # `clean (0 scanned)` an empty pipe would print. Capture + explicit exit check is portable in
+    # both zsh and bash (no PIPESTATUS-vs-pipestatus divergence); this mirrors the github branch's
+    # fail-closed posture below.
+    echo "board-lint: SKIP — filesystem tracker unreadable (idc_tracker_fs.load exit ≠ 0); could not determine"
+  fi
+  rm -f "$fs_lint_in"
+  ```
+  - `board-lint: clean (0 scanned)` → **PASS** (note "index rules clean — the body re-scan is
+    github-only"). A `stranded-gate` / `unproven-gate-done` / `empty-status` finding → **PASS with ⚠**
+    with the same fix hints as the github branch below.
+  - a `board-lint: SKIP — filesystem tracker unreadable …` line (the producer exited non-zero on a
+    missing/corrupt `TRACKER.md`) → **SKIP** ("could not determine"), **never FAIL** and never the
+    hollow `clean (0 scanned)` an empty pipe would print (no silent all-clear).
 - **`github` → run the lint** (read-only). Emit one JSONL object per issue and pipe to the shipped
   helper: the Buildable+Todo lane as rich `{number,title,body,blocked_by}` objects (the scanned
   lane), **plus** the rest of the board as index-only `{number,stage,status}` objects so the
@@ -209,34 +258,65 @@ FAIL** (Build still trusts the board; the schema check stays Plan's gate). Branc
         [ -n "$bb" ] || bb='null'   # empty stdout = the API call FAILED → UNKNOWN (not "no link"); a real no-dep result is the 200 '[]'. Tri-state lets the helper never false-flag a prose dep it couldn't disprove.
         gh issue view "$n" --json number,title,body --jq "{number:.number,title:.title,body:.body,blocked_by:$bb}"
       done
-    # (ii) the REST of the board → INDEX-ONLY {number,stage,status} objects, so the retired-recirc
-    #      rule can resolve a blocker number → "Done Recirculation ticket" (a paused issue eligible
-    #      ONLY behind a retired recirc ticket — the premature-eligibility trap). A SECOND jq over the
-    #      already-captured $board (NOT a second board read); EXCLUDES the Buildable+Todo lane already
-    #      emitted as rich objects in (i), so nothing is double-scanned (the helper's in_scan_lane()
-    #      treats a stage≠Buildable / status≠Todo object as index-only — never schema-scanned/counted).
+    # (ii) the REST of the board (except the Blocked lane, emitted richer in (iii)) → INDEX-ONLY
+    #      {number,title,stage,status} objects, so the retired-recirc rule can resolve a blocker
+    #      number → "Done Recirculation ticket" and the stranded-gate rule can recognise a blocker
+    #      as a Done [operator-action] gate (title comes free from the captured $board). A SECOND jq
+    #      over the already-captured $board (NOT a second board read); EXCLUDES the Buildable+Todo
+    #      lane already emitted as rich objects in (i), so nothing is double-scanned (the helper's
+    #      in_scan_lane() treats a stage≠Buildable / status≠Todo object as index-only — never
+    #      schema-scanned/counted).
     printf '%s\n' "$board" \
     | jq -c '.items[] | select(.content.number != null)
              | select((.status=="Todo" and (.stage // "Buildable")=="Buildable") | not)
-             | {number: .content.number, stage: (.stage // "Buildable"), status: (.status // "none")}'
-  } | python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_board_lint.py"
+             | select((.status // "") != "Blocked")
+             | {number: .content.number, title: (.content.title // ""), stage: (.stage // "Buildable"), status: (.status // "none")}'
+    # (iii) the BLOCKED lane → index-only objects PLUS their native blocked_by (one dependencies
+    #       call per Blocked item — the lane is small: gate dependents), so the stranded-gate rule
+    #       can flag a dependent still Blocked behind a gate that is already Done (the gate skill's
+    #       dispose-first step 4 interrupted between the gate close and the unblock). Same tri-state
+    #       bb convention as (i): a failed lookup → null → the rule stays silent (never a false flag).
+    printf '%s\n' "$board" \
+    | jq -r '.items[] | select((.status // "") == "Blocked") | select(.content.number != null) | .content.number' \
+    | while IFS= read -r n; do
+        [ -n "$n" ] || continue
+        bb=$(gh api "repos/{owner}/{repo}/issues/$n/dependencies/blocked_by" --jq '[.[].number]' 2>/dev/null) || bb=''
+        [ -n "$bb" ] || bb='null'
+        printf '%s\n' "$board" \
+        | jq -c --argjson n "$n" --argjson bb "$bb" '.items[] | select(.content.number == $n)
+                 | {number: .content.number, title: (.content.title // ""), stage: (.stage // "Buildable"), status: "Blocked", blocked_by: $bb}'
+      done
+  } | python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_board_lint.py" \
+        --journal "$PWD/docs/workflow/transition-journal.ndjson"
   fi
   ```
   (`dependencies/blocked_by` GET is the read counterpart of the documented write endpoint;
   `gh issue view --jq` / `jq -c` both emit control-char-safe escaped JSON, so no external slurp is
-  needed. The two passes share the one captured `$board` — the board is read exactly once.)
+  needed. The three passes share the one captured `$board` — the board is read exactly once.)
   - `board-lint: clean …` → **PASS** (note "N scanned, clean").
   - findings → **PASS with ⚠**: list the flagged issue numbers + counts; fix hint: "re-run the
     item through `/idc:plan`, or record the missing native blocked-by link (`gh … link … blocks`)."
     A `retired-recirc` finding means a paused issue is eligible only behind a **retired (Done)
     `Recirculation` ticket** (Plan's paused-issue re-link was skipped) — fix hint: "re-point it off
     the retired ticket onto its real new unblockers (re-run `/idc:plan` over the admitted scope)."
+    A `stranded-gate` finding means a dependent is still **Blocked behind a gate that is already
+    Done** AND that gate's guarded dispose **is journaled** (`--journal` proved an
+    `op=dispose`/`disposition=gate-approved` record) — an interrupted dispose-then-unblock — fix
+    hint: "finish the unblock through the engine's journaled `unblock` (`idc:idc-gate-issue` step 4
+    recovery), never a raw setField." An `unproven-gate-done` finding means the gate is **Done but
+    its guarded dispose is NOT journaled** — a raw/manual close, a `Status` edit, or a janitor repair
+    minted the `Done`, none of which validated the approval — fix hint: "do **not** auto-unblock;
+    confirm the gate was legitimately approved (its Think PR merged), then unblock through the engine
+    (`idc:idc-gate-issue` step 4). Unblocking a raw-closed requirements gate whose Think PR never
+    merged would admit draft requirements."
   - summary contains `dependency lookups indeterminate` → annotate the row **PASS with ⚠** (still
     **PASS, never FAIL**), independent of clean/flagged: note "the GitHub dependencies API looked
-    degraded — the native blocked-by lookup failed for N issue(s), so prose-dependency detection
-    was skipped for them; re-run `/idc:doctor` once the API recovers." (Guards against a board-wide
-    outage turning every issue UNKNOWN → nothing flagged → a `clean` summary masquerading as a true
-    all-clear.)
+    degraded — the native blocked-by lookup failed for N issue(s), so a dependency check
+    (prose-dependency on a Buildable item, or the stranded-gate check on a `Blocked` item) could not
+    run for them; re-run `/idc:doctor` once the API recovers." (Guards against a board-wide outage
+    turning every issue UNKNOWN → nothing flagged → a `clean` summary masquerading as a true
+    all-clear — including a `Blocked`-lane read outage that would otherwise leave a stranded gate
+    invisible; codex round-15 P2.)
   - an explicit `board-lint: SKIP — github board unreadable …` line (the board read exited non-zero),
     OR the lint helper exit 2 / a `gh` error → **SKIP** ("could not determine"), **never FAIL** — a
     board-read failure must SKIP on that explicit marker, never be read as the hollow `clean
@@ -304,9 +384,9 @@ check 3 on github:
 backend=$(grep -E '^backend:' docs/workflow/tracker-config.yaml | awk '{print $2}')
 if [ "$backend" = "github" ]; then
   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_janitor.py" \
-    --repo "$PWD" --backend github --owner "$owner" --project "$num"
+    --repo "$PWD" --backend github --owner "$owner" --project "$num" --check-journal-divergence
 else
-  python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_janitor.py" --repo "$PWD" --tracker "$PWD/TRACKER.md"
+  python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_janitor.py" --repo "$PWD" --tracker "$PWD/TRACKER.md" --check-journal-divergence
 fi
 ```
 Read the scanner's exit code + its `janitor: N safe-fix, M risky, K report-only` summary:

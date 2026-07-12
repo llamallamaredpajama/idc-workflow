@@ -21,9 +21,9 @@ readiness helper (consume, don't duplicate the predicate):
 (or the github-backend equivalent via `idc:idc-tracker-adapter` — materialize the same tracker
 state to a tempfile and feed it the identical script, exactly as Phase 4 does for the acceptance
 gate). It prints `eligible:` (the ready issue numbers) and, with `--width`, `width:` (the max-useful
-parallelism). The helper computes **dependency-readiness only** — an issue is eligible when every
-native `blocked_by` upstream is `Done`, **independent of `Wave`**: a later-wave issue whose blockers
-are all `Done` enters the frontier in the same pass as an early-wave one. `width:` is therefore a
+parallelism). The helper computes **dependency-readiness only** (its predicate is the source of
+truth — consume it, never re-derive it), **independent of `Wave`**: a later-wave issue whose
+blockers are all `Done` enters the frontier in the same pass as an early-wave one. `width:` is therefore a
 **ceiling**; the second half of "ready" — its **file surface is free** — is enforced on top by
 area-packing (Phase 1), never by this helper. If the helper exits non-zero (a corrupt/partial board
 — it fails **closed**, exit 2), **halt and surface it**; never hand-derive the frontier from the
@@ -166,8 +166,9 @@ PR it runs its own `/fullauto-goal` loop over **all** reviewer findings (includi
 then `/simplify` (Claude; the adapter maps or skips it for Codex) and git finalization.
 `FAIL`/`FAIL-BLOCKED` findings are fixed and re-reviewed until the verdict is
 `PASS`/`PASS-WITH-NITS`; an unsolvable/upstream finding is kicked back via a recirculation
-(`/idc:recirculate`). On a clean verdict the finisher merges, then closes the issue through
-`idc:idc-tracker-adapter` (`close` → `Status=Done`).
+(`/idc:recirculate`). On a clean verdict the finisher merges, then closes the issue — the close is
+verdict-gated twice over (the transition engine's terminal close guard and the finish tail's
+receipt gate both refuse a close whose verdict is missing, failing, or not the item's own).
 
 **Merge serialization (no silent race) — the commutative disjoint-surface merge train.** Parallel
 finishers must never race on the merge. Two layers guarantee it: (1) **matrix-disjoint areas** —

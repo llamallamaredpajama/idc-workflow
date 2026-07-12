@@ -95,32 +95,16 @@ The tracker is the glass wall (§1.2). Its backend is selected by `backend:` in
 roles never hard-code backend semantics. Two backends ship: `github` (a GitHub Projects
 v2 board; first-class) and `filesystem` (a root `TRACKER.md`; zero external setup).
 
-### 3.1 Board schema — five fields
+### 3.1 Board schema — the machine YAML
 
-| Field | Values | Meaning |
-|---|---|---|
-| `Status` | `Blocked` / `Todo` / `In Progress` / `Done` | Where the issue sits in the queue. |
-| `Stage` | `Consideration` / `Planning` / `Buildable` / `Recirculation` | Pipeline column: `Consideration` = an open Think PR / **pending admission** at the end-of-Think gate (§2); `Planning` = an admitted idea being decomposed; `Buildable` = a workable issue; `Recirculation` = the non-Buildable inbox for scope **discovered mid-build** (drained by `/idc:recirculate`, never claimed as build work). Upstream `Consideration`/`Planning` and `Recirculation` items are pointers; the board's one-stop to-do index. |
-| `Wave` | `Wave N` | Parallel-execution wave (matrix-assigned by Plan). |
-| `Phase` | `Phase N` | Master-plan phase trace. |
-| `Domain` | single-select | Master-plan domain trace. |
+The state machine — its stages, statuses, and legal transitions — are defined as data in
+`docs/workflow/workflow-machine.yaml`, which is the single source of truth. That file is scaffolded
+by `/idc:init` and is the canonical definition of the board's fields. The transition engine
+(`scripts/idc_transition.py`) enforces its rules for every state change. The primary fields are `Stage`,
+`Status`, `Wave`, `Phase`, and `Domain`, plus native `blocked-by` links.
 
 `/idc:init` links this board to the governed repo, so it appears on the repo's **Projects tab**
 and issue sidebar (a v2 board is org/user-owned and otherwise invisible from the repo).
-
-Plus **native blocked-by** links (dependencies), an `attempt:<n>` label (per-issue
-fix-loop counter for unattended observability), and **claim comments** (a builder claims
-an issue by flipping `Status` to `In Progress` and posting a comment naming the agent).
-There is no claim-state machine, no lane or track field, and no bookend ceremony — a board
-item is workable cold by any outside agent from its body + the plain GitHub API.
-
-`Stage` is the column-grouping field and is **additive**: a repo provisioned before it
-existed keeps working as a 4-field board (an empty `Stage` reads as buildable) until
-`/idc:init` provisions the field (`/idc:doctor` is read-only — it only *flags* a missing
-`Stage`, never provisions it) — no migration step, no data rewrite. The values are likewise
-additive: adding `Recirculation` to a board that already has a `Stage` field **appends one
-option** to the existing single-select set (existing options keep their ids) — never a replace
-of the option set, which would re-ID every option and wipe item values.
 
 ### 3.2 The issue is a self-sufficient goal contract
 

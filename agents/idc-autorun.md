@@ -75,8 +75,17 @@ loop below). Then the two lanes:
 2. **Find approved, unplanned considerations** by querying the board for `Stage = Consideration`
    pointer items (the one-stop index — no filesystem scan; the files under
    `docs/considerations/` stay the source of truth). Re-check open gates first (per
-   `idc:idc-gate-issue`) in case the operator merged a Think PR mid-run. A pointer still
-   **Blocked** behind its gate issue is an **open Think PR** (pending admission) — **report it and
+   `idc:idc-gate-issue`) in case the operator merged a Think PR mid-run — and include the
+   interrupted-run recovery: `query` `Status=Blocked` items and, for any whose blocking gate issue
+   is already `Done`, **first verify that gate's journaled guarded dispose** (an
+   `op=dispose`/`disposition=gate-approved` record naming it — see `idc:idc-gate-issue` step 4 for
+   the deterministic check) and only then finish the unblock through the engine's journaled
+   `unblock`. A `Done` gate does NOT alone prove the guarded door ran (a raw/manual close or janitor
+   repair also mints `Done`): if the guarded dispose is **not** journaled the gate's `Done` is
+   UNPROVEN — leave the dependent `Blocked` and surface the anomaly, never auto-unblock. A `Done`
+   gate must never strand its dependents — `/idc:doctor` Row 9 tiers a remaining strand
+   (`stranded-gate` when proven, `unproven-gate-done` when not). A pointer still **Blocked** behind an
+   **open** gate issue is an **open Think PR** (pending admission) — **report it and
    skip it**, never plan past it. For each **approved** (unblocked) one, dispatch a planning-lane
    worker; admit its issues one consideration at a time, and advance the pointer
    (`Consideration → Planning` while in flight, retired as buildable issues land). Skip this
@@ -96,11 +105,11 @@ loop below). Then the two lanes:
      (github wave-close acceptance runs in `idc:idc-build` Phase 4 — no `--acceptance` here). `--session-id`
      attributes the persisted drain verdict so the Stop fixpoint gate reads the github board conjunct
      locally (0 GraphQL on the stop path, v4 Phase 3 Stage E2; env `$CLAUDE_CODE_SESSION_ID` is the fallback).
-   Both apply the **identical** eligibility predicate (`Status = Todo` AND `(stage or "Buildable") ==
-   "Buildable"` AND the title is not `[operator-action]` AND every native blocked-by is `Done`) over
-   the **whole board** — the github mode pages **every** item, so **never** substitute a bare
+   Both apply the **identical** Buildable-eligibility predicate over the **whole board** — the drain
+   helper is the predicate's single source of truth (never re-derive it in prose or by hand), and
+   the github mode pages **every** item, so **never** substitute a bare
    `gh project item-list` (it returns only its 30-item first page → a grown board truncates and the
-   lane goes blind). An empty/missing `Stage` reads as `Buildable` (the legacy 4-field default). While
+   lane goes blind). While
    it reports `drain: continue`, run `idc:idc-build` on the eligible waves; re-check after each. Any
    non-zero drain exit is **neither** `continue` **nor** `complete` — that covers `drain: unknown` (the
    board read succeeded but a build candidate's blocked-by lookup could not be verified, or, under
@@ -112,10 +121,11 @@ loop below). Then the two lanes:
    recirc event and file a **new `Stage = Recirculation` ticket mid-drain** (Build's larger loop,
    `idc:idc-build` Phase 1b), which sits *upstream* of the build lane. So after the build lane
    drains, **loop back to the top of the pipe** and re-run recirculate → plan → build; repeat until a
-   **full pass** is a fixpoint — no `Stage = Recirculation` ticket remained, no approved
-   consideration was unplanned, AND the drain predicate reported `drain: complete` (only Done items,
-   requirements-gated Blocked items, the operator's gate issues, un-admitted considerations (open
-   Think PRs), and any gated recirculation backflow left). The re-loop **reuses the SAME machinery as
+   **full pass** is a fixpoint — the drain reported `drain: complete`. The drain's verdict already
+   folds in the top-of-pipe conjuncts (a non-empty recirculation inbox or an unplanned approved
+   consideration is `drain: recirc-pending`, never `complete`), and the **Stop fixpoint gate** is
+   the deterministic backstop: a drain session cannot honestly stop while the board still reports
+   pending. The re-loop **reuses the SAME machinery as
    Build's larger loop** — the consultant's structured closeout (`idc_recirc_closeout.py`), the
    per-issue recirc ceiling + cascade-depth cap (`idc_recirc_caps.py`), and the board-lint
    retired-recirc guard (`idc_board_lint.py`, doctor Row 9) — so it **parks, never churns**: the caps

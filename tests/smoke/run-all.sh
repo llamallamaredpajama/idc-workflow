@@ -76,6 +76,7 @@ for t in \
   phase7-update-legacy-receipt-guard \
   phase7-update-config-structure \
   phase7-update-staleness-guard \
+  phase7-update-unrecorded-files \
   phase7-file-commands-noop-default \
   phase7-command-prose-invariants \
   phase7-closing-keywords \

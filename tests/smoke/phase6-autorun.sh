@@ -178,8 +178,10 @@ grep -qiE 'Approval signal by backend' "$GATE" \
   || fail "idc-gate-issue must document the per-backend approval signal (Approval signal by backend) — else a filesystem gate is silently un-approvable (PR#72 follow-up)"
 grep -qiE 'no PRs and no labels' "$GATE" \
   || fail "idc-gate-issue must state the filesystem backend has no PRs and no labels (why the github merge/label signal can't apply) (PR#72 follow-up)"
-grep -qiE 'close --num <gate' "$GATE" \
-  || fail "idc-gate-issue must define the filesystem approval action: flip the gate issue's Status to Done via close --num <gate#> (PR#72 follow-up)"
+# The filesystem gate-approval Done-move now routes through the engine's guarded terminal door
+# (dispose --disposition gate-approved), not a raw idc_tracker_fs close — the #150 door unification.
+grep -qiE 'dispose --disposition gate-approved --num <gate' "$GATE" \
+  || fail "idc-gate-issue must define the filesystem approval action: flip the gate issue's Status to Done via the engine's guarded dispose --disposition gate-approved --num <gate#> (#150 door unification; PR#72 follow-up)"
 # WORKFLOW.md template carries the same backend-portable-approval note so the doctrine can't drift
 WF="$PLUGIN/templates/WORKFLOW.md"
 [ -f "$WF" ] || fail "templates/WORKFLOW.md missing"

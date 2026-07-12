@@ -75,4 +75,10 @@ python3 "$PLUGIN_ROOT/scripts/hooks/idc_ledger.py" --cwd "$REPO_ROOT" ensure-git
 # working state, never committed. Module owns the filename + ignore rule; idempotent + append-only.
 python3 "$PLUGIN_ROOT/scripts/hooks/idc_drain_verdict.py" --cwd "$REPO_ROOT" ensure-gitignore
 
+# Gitignore the transition-journal advisory-lock sidecar (docs/workflow/transition-journal.ndjson.lock,
+# v4 Phase 4 #150): the runtime-only flock token rotation + journal_append create on a stable sidecar so
+# the journal↔rotation lock survives os.replace — working state, never committed. The janitor owns the
+# lock-path convention + ignore rule (single source); idempotent + append-only, same as the ledger.
+python3 "$PLUGIN_ROOT/scripts/idc_git_janitor.py" --repo "$REPO_ROOT" --ensure-gitignore
+
 echo "idc-init scaffold complete (backend=$BACKEND, project=$PROJECT_NAME)"

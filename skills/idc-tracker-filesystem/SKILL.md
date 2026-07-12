@@ -25,10 +25,32 @@ upstream pointer items ride `Consideration`/`Planning`, buildable issues ride `B
 `/idc:recirculate`, never claimed as build work). A legacy 4-field tracker leaves Stage empty —
 additive. There is no claim-state machine, lane, track, or bookend ceremony (v1, removed).
 
-## Executable helper
+## Executable helper + the transition engine (the write door)
 
 The backend is executable so it round-trips deterministically (no agent guesswork, and the
-smoke tests are real). All mutations go through the shipped helper, standard-library Python:
+smoke tests are real). **Every Status change is a transition** and routes through the engine —
+the single sanctioned write door: it validates machine-legality against
+`workflow-machine.yaml`, verifies the write's read-back, and journals the op to
+`docs/workflow/transition-journal.ndjson` (the record the janitor's board↔journal reconciliation
+and doctor Row 10 replay). A raw Status write bypasses the journal and surfaces as divergence:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_transition.py" --backend filesystem --tracker <repo>/TRACKER.md <op> [args]
+```
+
+| Interface op | Engine invocation (journaled) |
+|---|---|
+| `createTicket` | `create-ticket --title T [--body B] [--stage Stg] [--status S]` → prints the new number (set `Wave`/`Phase`/`Domain`/blocked-by afterwards via the raw helper — non-Status fields have no engine op) |
+| `move` | `move --num N --to-status "In Progress"` |
+| claim | `claim --num N --agent NAME` (Status→In Progress + a comment naming the agent) |
+| unblock | `unblock --num N` (Blocked→Todo) |
+| block | `move --num N --to-status Blocked`, then `link --parent M --child N --kind blocks` (no single engine `block` op) |
+| `link` | `link --parent N --child M --kind blocks` |
+| close (verdict-backed) | `close --num N --verdict <verdict.json> --pr <PR>` — the guarded path to `Done`: the verdict must validate, pass, own the item and the PR, with every `merge_conditions[]` met |
+| dispose (non-verdict terminal) | `dispose --disposition {gate-approved\|retired\|drained} --num N` — the guarded door to `Done` for a terminal item with **no review verdict**: gate-issue approval, pointer retirement (`--child <decomposition-child>`), recirc-drain retirement. The disposition's deterministic evidence guard must pass; the engine mints `Done` and journals which door + disposition + evidence |
+
+The raw helper stays the mechanic for **reads, non-Status fields, and the primitives with no
+engine op** (leases), standard-library Python:
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_tracker_fs.py" --tracker <repo>/TRACKER.md <op> [args]
@@ -37,15 +59,9 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_tracker_fs.py" --tracker <repo>/TRACK
 | Interface op | Invocation |
 |---|---|
 | (bootstrap) | `init` — create an empty `TRACKER.md` (idempotent) |
-| `createTicket` | `create --title T [--status Todo] [--stage Stg] [--wave W] [--phase P] [--domain D] [--blocked-by N,N]` → prints the new number |
-| `setField` | `set --num N --field {Status\|Stage\|Wave\|Phase\|Domain} --value V` |
-| `move` | `move --num N --status "In Progress"` |
-| `link` | `link --parent N --child M --kind {blocks\|sub}` (`blocks` → M blocked-by N) |
+| `setField` (non-Status) | `set --num N --field {Stage\|Wave\|Phase\|Domain} --value V` — never `--field Status`: a Status write is a transition and goes through the engine above |
 | `query` | `query [--status S] [--stage Stg] [--wave W] [--phase P] [--domain D]` → newline-separated numbers |
 | `comment` | `comment --num N --body "…"` |
-| claim | `claim --num N --agent NAME` (Status→In Progress + a comment naming the agent) |
-| block | `block --num N [--by M]` (Status→Blocked + optional blocked-by) |
-| close | `close --num N` (Status→Done; idempotent) |
 | read | `show --num N [--field F \| --comments \| --blocked-by]` |
 | lease-acquire | `lease-acquire [--lease merge] --owner NAME [--ttl S]` → prints an opaque token, or exits non-zero if already held (fail-closed) |
 | lease-release | `lease-release [--lease merge] --token TOKEN` (release-by-token; idempotent when unheld; a wrong token is rejected) |
@@ -57,8 +73,9 @@ block and the table diverge. The caller commits `TRACKER.md` with a `tracker:` p
 
 ## Claim protocol
 
-A builder claims an issue by `claim --num N --agent <name>` — that flips `Status` to
-`In Progress` and records a claim comment naming the agent. Parallel claims on distinct
+A builder claims an issue through the engine — `idc_transition.py … claim --num N --agent <name>`
+— which flips `Status` to `In Progress`, records a claim comment naming the agent, and journals
+the transition. Parallel claims on distinct
 issues never race (disjoint surfaces). Where a single holder must be proven **atomically** —
 e.g. flat pi finisher residents with no orchestrator contending to update the integration ref —
 use the fail-closed **merge lease** (`lease-acquire`/`lease-release`): an advisory `flock` on a

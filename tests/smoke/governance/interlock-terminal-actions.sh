@@ -73,7 +73,12 @@ echo "  ok (O) IDC_HOOKS_OBSERVE_ONLY=1 downgrades the deny to a warning"
 gate "$REPO" Bash "gh project item-edit --id ITEM --project-id PVT_x --field-id F --single-select-option-id O"
 grep -q 'IDC interlock' "$ERR" || gov_fail "(B) raw gh project item-edit did not fire the interlock: $(cat "$ERR")"
 grep -q 'idc_transition.py' "$ERR" || gov_fail "(B) board-mutation warning did not name idc_transition.py: $(cat "$ERR")"
-echo "  ok (B) raw gh project item-edit ⇒ interlock fires naming idc_transition.py"
+# The remediation must name the CURRENT engine op set: the #150 `dispose` terminal-disposition door
+# is present, and the REMOVED `retire` op is gone (else the suggested self-healing recovery command
+# would be rejected by the engine's argparse). Red-when-broken: revert the op list to name `retire`.
+grep -q 'dispose' "$ERR" || gov_fail "(B) board-mutation remediation must name the dispose op (the #150 terminal-disposition door)"
+grep -qw 'retire' "$ERR" && gov_fail "(B) board-mutation remediation still names the removed retire engine op (its argparse-invalid recovery defeats the interlock self-heal)"
+echo "  ok (B) raw gh project item-edit ⇒ interlock fires naming idc_transition.py (op list = current, dispose present, retire gone)"
 
 # ── (C) state-closing gh api ⇒ interlock fires (REST field form AND JSON-body form) ─────────────────
 gate "$REPO" Bash 'gh api repos/o/r/issues/5 -X PATCH -f state=closed'

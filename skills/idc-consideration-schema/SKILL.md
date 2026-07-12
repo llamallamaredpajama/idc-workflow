@@ -17,7 +17,7 @@ gate at the end of Think (the Think PR), so the consideration declares **both** 
 # <topic> — Consideration
 
 - Date: <YYYY-MM-DD>
-- Status: Active
+- Status: Todo
 - PRD impact: <yes|no> — <one plain phrase on whether user-facing function changes>
 - TRD impact: <yes|no> — <one plain phrase on whether the technical approach changes>
 

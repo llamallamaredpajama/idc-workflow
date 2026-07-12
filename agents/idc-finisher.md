@@ -106,22 +106,20 @@ The finisher runs its **own** `/fullauto-goal` loop. Its completion contract car
    merge lock for *this area's* file surface — disjoint areas hold distinct leases and merge
    concurrently; see *Merge serialization*). Then run the deterministic tail —
    `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_finish.py" --pr <N> --issue <M> --worktree <path> --verdict <verdict.json>`
-   — **`--verdict` is mandatory**: the tail is a P5 **receipt gate** that refuses to merge/close unless
-   the review verdict for this PR/issue validates, is passing, **owns** the item, has every routable
-   finding (each `minor`/`nit` + every deferral) **already routed to the board** by the filer, and has
-   **no unmet `merge_conditions[]`** — so a nit can never merge as stranded prose, and an unmet
-   pre-merge condition can never be silently downgraded past the merge (the #246→#248 class)
-   (full rationale per step lives in the script's own docstring, tracing to audit RC1/RC2/RC3 —
-   not repeated here). It **removes the build worktree first** (so `build/*` is no longer checked
+   — **`--verdict` is mandatory**: the tail is a P5 **receipt gate** that refuses to merge/close on
+   any receipt violation (verdict validity/ownership, unrouted findings, unmet `merge_conditions[]`)
+   — `enforce_receipt_gate` in the script is the source of truth and its docstring carries the full
+   per-check rationale, not repeated here — so a nit can never merge as stranded prose, and an unmet
+   pre-merge condition can never be silently downgraded past the merge. It **removes the build
+   worktree first** (so `build/*` is no longer checked
    out — otherwise its local delete fails: `cannot delete branch … used by worktree`), **then
    merges** the triplet's PR into the **staging** branch (the merge train's shared integration ref,
    promoted to `main` only after the staging e2e — see *e2e layering*) with a **direct, blocking**
    `gh pr merge --squash --delete-branch` (default method; pass `--merge-method` for the method the
    repo allows) — **not** GitHub `--auto` (auto-merge would defer the merge and, with the repo's
-   `deleteBranchOnMerge` off, skip the delete). It then verifies the remote branch is actually gone
-   (`git ls-remote`), deletes the local branch, closes the tracker (both halves) through the
-   adapter's `close` op, and re-verifies the end state (PR merged, branches gone, worktree gone,
-   Status=Done, issue closed) before ever exiting 0. **Fail-closed:** any unverified step prints a
+   `deleteBranchOnMerge` off, skip the delete). The rest of the tail — branch deletes, tracker
+   close, end-state re-verify — is the script's deterministic step order, verified before it ever
+   exits 0; it is not re-narrated here. **Fail-closed:** any unverified step prints a
    machine-readable `finish: <step> failed` line and exits non-zero — never a silent drop; the
    janitor is the reconciler for whatever a dead session leaves behind anyway. A **mechanical**
    merge conflict the helper's merge call surfaces (an overlapping-file / git-merge / worktree

@@ -45,6 +45,11 @@ gitc remote add origin "$O"
 printf base > "$R/base.txt"; gitc add -A; gitc commit -qm base
 gitc push -q -u origin main       || fail "initial push to origin failed"
 python3 "$TRK" --tracker "$R/TRACKER.md" init >/dev/null || fail "tracker init failed"
+# Board items are seeded directly via the tracker (no engine transitions), so create the (empty)
+# transition journal explicitly: a non-empty board with a MISSING journal is indeterminate (exit 2,
+# fail-closed journal dimension) and would mask this scenario's debris assertions.
+mkdir -p "$R/docs/workflow" && : > "$R/docs/workflow/transition-journal.ndjson" \
+  || fail "seeding the empty transition journal failed"
 
 # ---- BEHAVIOR 1: a clean coherent repo exits 0 (COHERENT) -----------------------------------------
 out="$(python3 "$JAN" --repo "$R" --tracker "$R/TRACKER.md")"; rc=$?

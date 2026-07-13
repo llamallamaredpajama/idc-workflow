@@ -185,6 +185,26 @@ echo "== round-7 Fix 2: a backslash-newline continuation is joined BEFORE segmen
 deny $'gh \\\nissue create --title x --body-file /tmp/b'
 deny $'gh issue view 5 && gh \\\nissue create --title x --body-file /tmp/b'
 
+echo "== round-8 Fix 1: only the graphql QUERY arg is parsed — a --jq brace decoy cannot mask an opaque mutation =="
+# The whole-command "any word 'query' + any '{'" heuristic let a --jq '{...}' brace make an opaque
+# `-f query=\"\$MUT\"` mutation look readable. Parse the query ARG value specifically: an opaque
+# (shell-expansion) query body DENIES regardless of an unrelated brace elsewhere; a literal read query
+# stays ALLOWED even with a --jq object. Red-when-broken: revert to the whole-command scan → the decoy
+# masks the mutation → the deny stops firing.
+deny "MUT='mutation{x}'; gh api graphql -f query=\"\$MUT\" --jq '{data:.data}'"
+allow "gh api graphql -f query='query{viewer{login}}' --jq '{x:.x}'"
+
+echo "== round-8 Fix 2: a DYNAMIC bash -c / env -S payload fails closed; a static payload is inspected =="
+# `bash -c \"\$CMD\"` used to recurse on the literal token \$CMD, find nothing, and ALLOW — while the
+# shell expands it to a real mutation. A payload carrying ANY shell expansion now DENIES as
+# opaque-shell-indirection; a fully static payload is still inspected recursively (a real mutation in it
+# denies, a benign command allows). Red-when-broken: drop the expansion guard → the dynamic payload
+# recurses on \$CMD, finds nothing, and the deny stops firing.
+deny "CMD=\"gh issue \"\"create --title x --body-file /tmp/b\"; bash -c \"\$CMD\""
+deny "bash -c 'gh issue create --title x --body-file /tmp/b'"
+deny "env -S \"\$CMD\""
+allow "bash -c 'echo hi'"
+
 echo "== round-5 Fix 2: /idc:uninstall's own teardown ops are ALLOWED during an ACTIVE uninstall =="
 # The hard deny must not brick uninstall's documented --close-issues / --delete-board steps. The
 # allowance is keyed on the ACTIVE command being `uninstall`; the SAME raw ops under any other command
@@ -229,6 +249,34 @@ deny_under "$SUN" "bash -c 'gh issue close 5; gh api graphql --input mutation.js
 deny_under "$SUN" $'gh issue close 5 && gh \\\nissue create --title x --body-file /tmp/b'
 # A compound of teardown-ONLY ops stays allowed under uninstall (the carve-out still works).
 allow_under "$SUN" "gh issue close 5 && gh project item-delete 8 --owner o --id PVTI_X"
+
+echo "== round-8 Fix 3: /idc:init's OWN board provisioning is ALLOWED during an ACTIVE init =="
+# Symmetric to the uninstall teardown carve-out: a command may perform its OWN declared
+# lifecycle/provisioning ops. Init opens its lifecycle record after creating tracker-config, then
+# provisions the board — field creation, project link, and the Status option-reconcile GraphQL
+# mutation have no engine door, so the hard deny would brick a governed Init. They are ALLOWED ONLY
+# while an `init` command is active; the SAME raw ops under any other command stay DENIED, and every
+# OTHER protected mutation stays denied even during init. Red-when-broken: drop the init carve-out →
+# the provisioning allow_under cases start denying.
+SIN="sin-$$-$(basename "$WORK")"
+python3 "$CONTRACT" start --repo "$REPO" --session "$SIN" --command init \
+  --plugin-root "$GOV_PLUGIN" --args 'provision' --source user >/dev/null \
+  || gov_fail "could not open the active /idc:init command record for $SIN"
+
+# init OWNS these provisioning ops → ALLOWED while an init command is active.
+allow_under "$SIN" 'gh project field-create 5 --owner o --name Stage --data-type SINGLE_SELECT --single-select-options "Consideration,Planning,Buildable,Recirculation"'
+allow_under "$SIN" 'gh project link 5 --owner o --repo o/r'
+allow_under "$SIN" "gh api graphql -f query='mutation{updateProjectV2Field(input:{fieldId:\"F\",singleSelectOptions:[{name:\"Todo\",color:GRAY}]}){projectV2Field{id}}}'"
+# The SAME provisioning ops under a NON-init active command (think = S1) stay DENIED (keyed on init).
+deny_under "$S1" 'gh project field-create 5 --owner o --name Stage --data-type SINGLE_SELECT --single-select-options "Consideration"'
+deny_under "$S1" 'gh project link 5 --owner o --repo o/r'
+deny_under "$S1" "gh api graphql -f query='mutation{updateProjectV2Field(input:{fieldId:\"F\"}){projectV2Field{id}}}'"
+# Every OTHER protected mutation stays DENIED even DURING init (the carve-out is scoped to provisioning).
+deny_under "$SIN" 'gh issue create --title x --body-file /tmp/b'
+deny_under "$SIN" 'gh pr merge 12 --squash'
+deny_under "$SIN" 'gh project item-edit --id X --project-id Y --field-id F --single-select-option-id O'
+deny_under "$SIN" 'gh project delete 8 --owner o'
+deny_under "$SIN" "gh api graphql -f query='mutation{updateIssue(input:{id:\"I\",state:CLOSED}){issue{id}}}'"
 
 echo "== the sanctioned write door is never denied =="
 allow "python3 '$GOV_PLUGIN/scripts/idc_transition.py' --repo '$REPO' create-ticket --title safe --stage Buildable --status Todo"

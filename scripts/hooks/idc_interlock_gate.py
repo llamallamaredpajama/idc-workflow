@@ -17,9 +17,12 @@ the improvisation the pipeline forbids. OUTSIDE an active command it is a WARN-I
 remediation, never block) so ordinary governed-repo work is never bricked. IDC_HOOKS_OBSERVE_ONLY=1
 is the ONE debug escape hatch — it downgrades any deny back to a warning (honored inside
 pre_tool_deny()). There is no second bypass variable; the old IDC_HOOKS_INTERLOCK_ENFORCE opt-in is
-removed (the active-command deny is the shipped enforcement). ONE command-keyed exception: while the
-active command is `/idc:uninstall`, its OWN teardown ops (issue close, project/board delete, item
-delete) are allowed — those have no lifecycle engine door and every other op stays denied (Fix 2).
+removed (the active-command deny is the shipped enforcement). COMMAND-KEYED exceptions — a command may
+perform its OWN declared lifecycle/provisioning ops (the ones with no engine door): while the active
+command is `/idc:uninstall`, its teardown ops (issue close, project/board delete, item delete) are
+allowed; while it is `/idc:init`, its board-provisioning ops (project field-create, repo link, the
+Status option-reconcile `updateProjectV2Field` mutation) are allowed. Each is scoped to THAT command,
+requires EVERY protected segment to be one of the ops it owns, and every other op stays denied.
 
 CLASSIFIER (round-5 Fix 1): defense-in-depth by PER-SEGMENT classification, NOT a complete shell
 parser. The command is split into shell segments (`&&`/`||`/`;`/`|`/newline) and EACH is classified
@@ -219,8 +222,11 @@ def _combo_subject(pos):
         return _mk(f"a raw `gh issue {verb}`", _ENGINE, kind)
     if noun == "pr":
         return _mk(f"a raw `gh pr {verb}`", _FINISH, "pr-merge" if verb == "merge" else f"pr-{verb}")
-    kind = ("project-delete" if verb == "delete"
-            else "project-item-delete" if verb == "item-delete" else "project-mutation")
+    # field-create + link get DISTINCT kinds so the /idc:init provisioning carve-out can allow init's
+    # own field creation + repo link while item-add/item-edit/delete (also `gh project` mutations) stay
+    # denied even under init.
+    kind = {"delete": "project-delete", "item-delete": "project-item-delete",
+            "field-create": "project-field-create", "link": "project-link"}.get(verb, "project-mutation")
     return _mk("a raw `gh project` board mutation", _ENGINE, kind)
 
 
@@ -239,20 +245,85 @@ def _api_protected_path_kind(seg_str):
     return None
 
 
+# round-8 Fix 1: isolate the VALUE of the graphql `query` argument specifically, WITH its quote style —
+# `-f query=<v>` / `--field query=<v>` / `-F query=<v>` / `--raw-field query=<v>`, in the spaced,
+# `--field=query=` and combined `-fquery=` forms. Quote style is load-bearing: a SINGLE-quoted value
+# cannot be shell-expanded, so GraphQL `$vars` inside it are literal; a DOUBLE-quoted value with a `$`
+# or backtick IS a shell expansion. We parse the RAW segment (not shlex tokens) because shlex strips the
+# quotes and erases exactly that single-vs-double distinction.
+_GQL_QUERY_ARG_RE = re.compile(
+    r"""(?<![\w-])
+        (?:
+            (?:-f|-F|--field|--raw-field)\s+query=   # spaced:  -f query= / --field query=
+          | (?:--field|--raw-field)=query=           # attached long: --field=query=
+          | (?:-f|-F)query=                           # attached short: -fquery=
+        )
+        (?:
+            '(?P<sq>[^']*)'                           # single-quoted (no shell expansion possible)
+          | "(?P<dq>[^"]*)"                           # double-quoted ($/backtick ⇒ expansion)
+          | (?P<bare>\S*)                             # bare / unquoted
+        )
+    """, re.VERBOSE)
+# Project-FIELD provisioning mutations that /idc:init runs raw (Status option reconcile): `updateProjectV2Field`
+# / `createProjectV2Field`. Matched EXACTLY so the ITEM-value family (`updateProjectV2ItemFieldValue`,
+# `clearProjectV2ItemFieldValue`) — which init never runs raw — does NOT qualify for the init carve-out.
+_GQL_PROVISION = re.compile(r"(?<![A-Za-z])(?:create|update)ProjectV2Field(?![A-Za-z])")
+
+
+def _extract_graphql_query(seg_str):
+    """Isolate the graphql `query` argument value of a `gh api graphql` SEGMENT (round-8 Fix 1). Returns
+    `("literal", <value>)` when a STATIC literal query arg can be isolated, `("opaque", <why>)` when the
+    query is present but un-vettable (shell expansion, `@file`, `--input`, or concatenated), or
+    `("none", None)` when no query arg is found. ONLY the query arg is inspected — `--jq`/`-q`/other args
+    are ignored, so an unrelated `--jq '{…}'` brace can never influence the verdict."""
+    if re.search(r"(?<![\w-])--input(?![\w-])", seg_str):
+        return ("opaque", "query body supplied via --input file")
+    m = _GQL_QUERY_ARG_RE.search(seg_str)
+    if not m:
+        return ("none", None)
+    # Concatenation guard: anything glued to the value (`'query{'"$MUT"'}'`) makes it un-isolatable.
+    tail = seg_str[m.end():]
+    if tail[:1] and not tail[0].isspace() and tail[0] not in ";|&()<>":
+        return ("opaque", "concatenated/continued query value")
+    if m.group("sq") is not None:
+        return ("literal", m.group("sq"))            # single-quoted → no shell expansion, GraphQL $vars literal
+    if m.group("dq") is not None:
+        v = m.group("dq")
+        if "$" in v or "`" in v:
+            return ("opaque", "shell expansion in the query value")
+        return ("literal", v)
+    bare = m.group("bare")
+    if not bare or bare.startswith("@") or "$" in bare or "`" in bare:
+        return ("opaque", "file/expansion/empty query value")
+    return ("literal", bare)
+
+
 def _graphql_is_read(seg_str):
-    """True iff a `gh api graphql` SEGMENT is a PROVABLE read (round-7 Fix 1): a visible `query`
-    operation with a literal selection set (`{`) and NO `mutation` keyword. Decided on the OPERATION,
-    not the blunt "any -f body flag = write" rule — a read query is carried in `-f query='query{…}'`,
-    which the round-6 rule wrongly denied (breaking Doctor's board-link probe and Update's Stage-field
-    read). GraphQL REQUIRES the `mutation` keyword for a write, so a literal doc with a selection set
-    and no `mutation` can only be a query (including the anonymous `{ … }` shorthand — the `query`
-    body-flag name supplies the `query` token). Fail-closed: a `mutation` keyword ALWAYS denies, and an
-    OPAQUE query body (a shell variable / command substitution such as `-f query="$MUT"`, or
-    `--input FILE`) that carries no literal selection set we can vet is NOT provable as a read → denies,
-    so a mutation can never be smuggled through an expansion."""
-    if re.search(r"(?<![A-Za-z0-9_])mutation(?![A-Za-z0-9_])", seg_str):
+    """True iff a `gh api graphql` SEGMENT is a PROVABLE read (round-8 Fix 1): the isolated `query`
+    argument value is a STATIC LITERAL whose operation begins (ignoring leading whitespace) with the
+    `query` keyword or an anonymous `{ … }` selection AND contains NO `mutation` keyword. Decided on the
+    query ARGUMENT ALONE — not the whole command — so a `--jq '{…}'` object elsewhere cannot make an
+    opaque `-f query="$MUT"` mutation look readable (the round-7 regression). Fail-closed: an opaque
+    query body (shell expansion / `@file` / `--input`), a concatenated value, a `mutation` keyword, or a
+    value that cannot be isolated as a static literal all DENY — a mutation can never be smuggled through
+    an expansion."""
+    style, value = _extract_graphql_query(seg_str)
+    if style != "literal":
         return False
-    return bool(re.search(r"(?<![A-Za-z0-9_])query(?![A-Za-z0-9_])", seg_str)) and "{" in seg_str
+    op = value.lstrip()
+    if re.search(r"(?<![A-Za-z0-9_])mutation(?![A-Za-z0-9_])", op):
+        return False
+    return op.startswith("{") or bool(re.match(r"query(?![A-Za-z0-9_])", op))
+
+
+def _graphql_is_provision(seg_str):
+    """True iff the `gh api graphql` SEGMENT's isolated query value is a STATIC LITERAL naming a
+    project-FIELD provisioning mutation (`updateProjectV2Field`/`createProjectV2Field`) — the raw op
+    /idc:init runs to reconcile the built-in `Status` options. Fail-closed: an OPAQUE query body never
+    qualifies (it stays a plain denied `graphql`), so the init carve-out can never be reached through an
+    expansion."""
+    style, value = _extract_graphql_query(seg_str)
+    return style == "literal" and bool(_GQL_PROVISION.search(value))
 
 
 def _gh_api_finding(seg_str):
@@ -270,6 +341,11 @@ def _gh_api_finding(seg_str):
         # graphql: decide on the operation (read query vs mutation/opaque), not the blunt body flag.
         if _graphql_is_read(seg_str):
             return None                               # a provable read query → allow (doctor/update read)
+        # A LITERAL project-FIELD provisioning mutation (`updateProjectV2Field`) gets a distinct kind so
+        # the init carve-out can allow init's own Status option-reconcile while every other graphql
+        # mutation (issue writes, item-value writes, opaque bodies) stays denied under init too.
+        if _graphql_is_provision(seg_str):
+            return _mk("a raw project-field provisioning GraphQL mutation", _ENGINE, "project-field-graphql")
         return _mk("a raw GraphQL board/issue mutation", _ENGINE, "graphql")
     if not _api_write_indicator(seg_str):
         return None                                   # provably a pure read → allow (doctor's audit GET)
@@ -441,6 +517,21 @@ def _opaque(display, why):
         "[opaque-script-indirection]", _ENGINE, "opaque-script-indirection")
 
 
+def _opaque_shell(what):
+    """A refusal for a DYNAMIC inline interpreter payload the interlock cannot statically vet — a
+    `bash -c`/`env -S` string carrying a shell expansion (`$VAR`/`${…}`/`$(…)`/backtick), or one nested
+    past the depth bound (round-8 Fix 2). Named `opaque-shell-indirection`; carries NO payload content."""
+    return Finding(f"{what} the interlock cannot statically vet [opaque-shell-indirection]",
+                   _ENGINE, "opaque-shell-indirection")
+
+
+def _has_shell_expansion(payload):
+    """True iff an inline interpreter payload contains a shell expansion — `$VAR`, `${…}`, `$(…)`, or a
+    backtick. shlex has already stripped the surrounding quotes, so a surviving `$`/backtick means the
+    shell WOULD expand it at runtime → the resolved command is opaque (round-8 Fix 2)."""
+    return "$" in payload or "`" in payload
+
+
 def _inspect_target(target, cwd, plugin_root, depth, seen):
     """Resolve+vet a `bash|sh|zsh FILE` / `source FILE` / `. FILE` script target (rules 4–7).
 
@@ -581,8 +672,14 @@ def _inspect_segment(seg, cwd, plugin_root, depth, seen):
     """List of findings for one command segment's interpreter/source invocation (rules 3–4)."""
     # `env -S "<string>"` / `--split-string`: the embedded string IS the command — parse it recursively
     # (Fix 1), so an interpreter hidden inside the split-string is not waved through as an opaque value.
+    # round-8 Fix 2: a DYNAMIC split-string (any shell expansion) or one nested past the depth bound
+    # fails closed — its resolved command is opaque.
     payload = _env_split_payload(seg)
     if payload is not None:
+        if _has_shell_expansion(payload):
+            return [_opaque_shell("a dynamic `env -S` payload")]
+        if depth + 1 > MAX_SCRIPT_DEPTH:
+            return [_opaque_shell(f"an `env -S` payload nested past depth {MAX_SCRIPT_DEPTH}")]
         return collect_findings(payload, cwd, plugin_root, depth + 1, seen)
     seg = _strip_prefixes(seg)
     if not seg:
@@ -590,10 +687,18 @@ def _inspect_segment(seg, cwd, plugin_root, depth, seen):
     head = os.path.basename(seg[0])
     if head in INTERPRETERS:
         args = seg[1:]
-        # Rule 3: a quoted `-c PAYLOAD` is the whole command — recurse into it, no file target.
+        # Rule 3: a quoted `-c PAYLOAD` is the whole command — recurse into it ONLY when it is a fully
+        # STATIC literal. round-8 Fix 2: `bash -c "$CMD"` recursed on the literal token `$CMD`, found
+        # nothing, and allowed — while the shell expands it to a real mutation. A payload carrying ANY
+        # shell expansion, or one nested past the depth bound, now fails closed as opaque-shell-indirection.
         for i, a in enumerate(args):
             if a == "-c" and i + 1 < len(args):
-                return collect_findings(args[i + 1], cwd, plugin_root, depth + 1, seen)
+                inline = args[i + 1]
+                if _has_shell_expansion(inline):
+                    return [_opaque_shell(f"a dynamic `{head} -c` payload")]
+                if depth + 1 > MAX_SCRIPT_DEPTH:
+                    return [_opaque_shell(f"a `{head} -c` payload nested past depth {MAX_SCRIPT_DEPTH}")]
+                return collect_findings(inline, cwd, plugin_root, depth + 1, seen)
         # Rule 4: `bash|sh|zsh FILE` — the first non-flag argument is the script target.
         target = next((a for a in args if not a.startswith("-")), None)
         if target:
@@ -700,17 +805,24 @@ def _gate(payload, plugin_root):
     # honors IDC_HOOKS_OBSERVE_ONLY=1 (the ONE debug escape) inside pre_tool_deny().
     active = L.active_commands(cwd, session_id=payload.get("session_id"))
     finding = findings[0]
-    # Fix 2/3: /idc:uninstall's OWN teardown (issue close, project/board delete, item delete) would be
-    # blocked by the hard deny with no sanctioned replacement, so it is ALLOWED — but ONLY while an
-    # `uninstall` command is the active one, and ONLY when EVERY protected segment of the call is one of
-    # the ops uninstall legitimately owns. A single non-teardown mutation smuggled alongside a teardown
-    # (`gh issue close 5 && gh issue create …`, or one hidden in a `bash -c`/script body) DENIES the
-    # whole call (round-6 Fix 3). These same teardown ops under any OTHER command stay denied.
+    # Command-keyed lifecycle carve-outs (a command may perform its OWN declared lifecycle/provisioning
+    # operations — the ops that have no engine door): /idc:uninstall owns TEARDOWN (issue close,
+    # project/board delete, item delete); /idc:init owns board PROVISIONING (field creation, repo link,
+    # the Status option-reconcile GraphQL mutation). Each is ALLOWED ONLY while THAT command is active,
+    # and ONLY when EVERY protected segment of the call is one of the ops that command legitimately owns —
+    # a single foreign mutation smuggled alongside (`gh issue close 5 && gh issue create …`, or one hidden
+    # in a `bash -c`/script body) DENIES the whole call (round-6 Fix 3). The same ops under any OTHER
+    # command, and every other protected mutation under this one, stay denied.
+    carve = None
     if any(c.get("command") == "uninstall" for c in active):
-        offenders = [f for f in findings if f.kind not in _UNINSTALL_TEARDOWN_KINDS]
+        carve = _UNINSTALL_TEARDOWN_KINDS
+    elif any(c.get("command") == "init" for c in active):
+        carve = _INIT_PROVISION_KINDS
+    if carve is not None:
+        offenders = [f for f in findings if f.kind not in carve]
         if not offenders:
-            H.pre_tool_allow()               # every protected segment is uninstall's own teardown → allow
-        finding = offenders[0]               # a non-teardown mutation rode along → deny naming IT
+            H.pre_tool_allow()               # every protected segment is this command's own op → allow
+        finding = offenders[0]               # a foreign mutation rode along → deny naming IT
     reason = render_reason(finding, plugin_root)
     if active:
         H.pre_tool_deny(reason)
@@ -721,6 +833,14 @@ def _gate(payload, plugin_root):
 # delete the board/project, delete board items. NOT issue create/delete, pr merge, dependency writes,
 # graphql, or item-add/item-edit — none of which uninstall performs.
 _UNINSTALL_TEARDOWN_KINDS = {"issue-close", "project-delete", "project-item-delete"}
+
+# The board-provisioning ops /idc:init legitimately owns (init.md Phase 4): create the v2 fields
+# (`gh project field-create`), link the board to the repo (`gh project link`), and the Status
+# option-reconcile GraphQL mutation (`updateProjectV2Field`, tagged `project-field-graphql`). NOT
+# item-add/item-edit/item-delete, project delete, issue/pr writes, dependency writes, or issue/item
+# graphql mutations — none of which init performs raw (the Stage-option append routes through
+# idc_stage_options.py). A command may perform its own declared provisioning operations.
+_INIT_PROVISION_KINDS = {"project-field-create", "project-link", "project-field-graphql"}
 
 
 if __name__ == "__main__":

@@ -106,6 +106,24 @@ deny 'gh api -XPOST repos/o/r/issues/707/dependencies/blocked_by -fissue_id=8'
 echo "== the reopenIssue GraphQL mutation is in the protected write family (round-3 Fix 3) =="
 deny "gh api graphql -f query='mutation{reopenIssue(input:{issueId:\"I_1\"}){issue{id}}}'"
 
+echo "== round-4 Fix 1: gh flags BETWEEN subcommand levels + the \`issue new\` alias cannot bypass =="
+deny 'gh issue -R o/r create --title gate --body-file /tmp/body'
+deny 'gh pr --repo o/r merge 12 --squash'
+deny 'gh issue -R o/r close 5'
+deny 'gh project -R o/r item-delete 8 --id X'
+deny 'gh issue new --title gate --body-file /tmp/body'
+echo "== round-4 Fix 1: the -X=DELETE method form denies a dependency write =="
+deny 'gh api repos/o/r/issues/707/dependencies/blocked_by/708 -X=DELETE'
+echo "== round-4 Fix 1: the GraphQL write-mutation FAMILY (verb+object) is caught, not a fixed list =="
+deny "gh api graphql -f query='mutation{createProjectV2(input:{ownerId:\"O\"}){projectV2{id}}}'"
+deny "gh api graphql -f query='mutation{copyProjectV2(input:{}){projectV2{id}}}'"
+deny "gh api graphql -f query='mutation{linkProjectV2ToRepository(input:{}){repository{id}}}'"
+echo "== round-4 Fix 1: env -S \"<string>\" is parsed recursively (like bash -c) =="
+deny "env -S \"bash '$FIXTURE/fire_gate.sh'\""
+deny "env -S 'gh issue create --title x --body-file /tmp/b'"
+echo "== round-4 Fix 1: an AMBIGUOUS gh api method on a protected path fails closed (active command) =="
+deny 'gh api repos/o/r/issues/707/dependencies/blocked_by/708 -X "$METHOD"'
+
 echo "== the direct classifier is COMPLETE — the full REST/GraphQL write set denies (Fix 4) =="
 deny 'gh api repos/o/r/issues/5 -X PATCH -f state=open'
 deny 'gh api repos/o/r/issues/5 -X PATCH -f state=CLOSED'

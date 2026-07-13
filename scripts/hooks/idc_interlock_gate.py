@@ -109,82 +109,130 @@ def _has(command, *word_seqs):
     return True
 
 
-def _is_api_write(command):
-    """True iff a `gh api` invocation is a WRITE — an explicit write method (`-X`/`--method POST|DELETE|
-    PUT|PATCH`, in ALL forms: `-X DELETE`, `-XDELETE`, `--method DELETE`, `--method=DELETE`) or any body
-    flag that promotes the default GET to a POST (`-f`/`-F`/`--field`/`--raw-field`/`--input`, in both
-    the space-separated `-f key=val` and the combined `-fkey=val` forms). A bare `gh api …` with only
-    read flags (`--jq`, `--paginate`) is a GET."""
-    # write METHOD, all four spellings: `-X DELETE` / `-XDELETE` / `--method DELETE` / `--method=DELETE`.
-    if re.search(r"(?:-X\s*|--method[=\s]+)(?:POST|DELETE|PUT|PATCH)\b", command, re.I):
-        return True
-    # a body flag (standalone `-F key=v`, combined `-Fkey=v`, or a long `--field …`) turns GET into POST.
+_WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+_READ_METHODS = {"GET", "HEAD"}
+
+
+def _api_method_class(command):
+    """Classify a `gh api` HTTP method: 'write' | 'read' | 'ambiguous' | None (no explicit method flag).
+    Recognizes ALL forms — `-X DELETE`, `-XDELETE`, `-X=DELETE`, `--method DELETE`, `--method=DELETE`. A
+    method value that is a shell expansion / non-literal (`-X "$M"`) is 'ambiguous' (cannot be vetted)."""
+    m = re.search(r"(?:--method[=\s]+|-X[=\s]*)(\S+)", command, re.I)
+    if not m:
+        return None
+    val = m.group(1).strip("\"'").upper()
+    if val in _WRITE_METHODS:
+        return "write"
+    if val in _READ_METHODS:
+        return "read"
+    return "ambiguous"
+
+
+def _api_has_body(command):
+    """True iff a `gh api` carries a body flag (`-f`/`-F`/`--field`/`--raw-field`/`--input`), in the
+    space-separated (`-f k=v`) or combined (`-fk=v`) form — any body promotes the default GET to a POST."""
     return bool(re.search(r"(?<![\w-])(?:-[fF](?![\w-])|-[fF][A-Za-z_]|--field\b|--raw-field\b|--input\b)",
                           command))
 
 
-# ── gh subcommand normalization (Fix 3) ───────────────────────────────────────────────────────────
-# gh GLOBAL options that CONSUME a following value token (`gh -R o/r issue create`, `gh --repo o/r pr
-# merge`). The `--opt=val` and combined `-Rval` forms are self-contained single tokens, skipped as
-# plain flags. Everything up to the first non-option token is a global flag; the non-option run that
-# follows is the subcommand path (`issue create`, `pr merge`, `project item-delete`, …).
-_GH_GLOBAL_VALUE_OPTS = {"-R", "--repo", "-H", "--hostname"}
-# Protected gh SUBCOMMAND paths → (subject, remediation). Matched as a prefix of the normalized path so
-# trailing positional args (`pr merge 12`, `issue close 5`) still match while `pr view`/`issue view`/
-# `project item-list` (reads) do not.
-_PROTECTED_SUBCMDS = [
-    ("issue create", "a raw `gh issue create`", _ENGINE),
-    ("issue close", "a raw `gh issue close`", _CLOSE),
-    ("issue reopen", "a raw `gh issue reopen`", _CLOSE),
-    ("pr merge", "a raw `gh pr merge`", _FINISH),
-    ("project item-edit", "a raw `gh project item-{edit,add,delete}` board mutation", _ENGINE),
-    ("project item-add", "a raw `gh project item-{edit,add,delete}` board mutation", _ENGINE),
-    ("project item-delete", "a raw `gh project item-{edit,add,delete}` board mutation", _ENGINE),
-]
+def _is_api_write(command):
+    """True iff a `gh api` call is (or cannot be proven NOT to be) a WRITE. An explicit write method or
+    any body flag → write. An explicit read method (GET/HEAD) with no body → read. No method + no body →
+    the default GET (a read; the doctor audit path). An AMBIGUOUS method (a shell-expansion value) →
+    treated as a write so the active-command posture FAILS CLOSED — a raw write-shaped `gh api` on a
+    protected path never needs to be allowed mid-command (every legit mutation goes through the engine)."""
+    method = _api_method_class(command)
+    if method == "write":
+        return True
+    if _api_has_body(command):
+        return True
+    if method == "read":
+        return False
+    if method == "ambiguous":
+        return True
+    return False   # no explicit method, no body → default GET
 
 
-def _gh_segment_subcommand(seg):
-    """The NORMALIZED gh subcommand path for one command segment, or None. Strips leading wrapper words
-    (`env`/`command`/… + their options), requires a `gh` head, skips gh GLOBAL options (incl. their
-    consumed values and the `--opt=val`/`-Rval` self-contained forms), and returns the run of
-    subcommand words that follows (`issue create`, `pr merge 12`, `project item-delete 8`)."""
+# ── gh subcommand normalization (Fix 1: token-based, flag-placement-robust) ───────────────────────
+# gh flags that CONSUME a following value token (space-separated form). The `--opt=val` and combined
+# `-Rval`/`-XDELETE`/`-X=DELETE` forms are self-contained single tokens (skipped as one). Used to strip
+# options at ANY level so the POSITIONAL word sequence (`issue create`, `pr merge`) is what's matched —
+# a flag anywhere (`gh issue -R o/r create`) can no longer split the subcommand path.
+_GH_VALUE_OPTS = {"-R", "--repo", "-H", "--hostname", "--jq", "-F", "-f", "--field", "--raw-field",
+                  "-X", "--method", "--header", "--input", "--template"}
+# Protected gh subcommand combos as (noun, verb) — matched on the POSITIONAL sequence (options at any
+# level stripped), INCLUDING the `issue new` = `issue create` alias. Reads (`issue view`, `pr view`,
+# `project item-list`) are absent, so a governed read is never flagged.
+_PROTECTED_COMBOS = (
+    {("issue", v) for v in ("create", "new", "close", "delete", "edit", "reopen", "lock", "unlock",
+                            "transfer", "pin", "unpin")}
+    | {("pr", v) for v in ("merge", "close", "edit")}
+    | {("project", v) for v in ("item-add", "item-edit", "item-delete", "item-archive", "field-create",
+                                "edit", "delete", "copy", "link", "unlink")}
+)
+# The GraphQL WRITE-mutation family: a write verb glued to a protected object (createProjectV2,
+# copyProjectV2, linkProjectV2ToRepository, updateIssue, reopenIssue, clearProjectV2ItemFieldValue,
+# archiveProjectV2Item, …). Pattern-matched (verb+object), NOT a hand-kept name list, so a NEW mutation
+# name in the same family is caught. Case-sensitive (camelCase) to avoid matching ordinary prose.
+_GQL_WRITE = re.compile(
+    r"(?:create|update|delete|add|remove|copy|move|archive|unarchive|clear|convert|close|reopen|"
+    r"mark|link|unlink|merge)(?:ProjectV2|Issue|PullRequest|Item|Field)")
+
+
+def _gh_positionals(seg):
+    """The POSITIONAL word sequence of a `gh …` command SEGMENT — options at ANY level stripped (incl.
+    their consumed values and the self-contained `--opt=val`/`-Rval`/`-XDELETE` forms) — or None if the
+    segment is not a `gh` invocation. `gh issue -R o/r create` → ['issue', 'create']; the subcommand
+    path can no longer be split by a flag placed between levels."""
     seg = _strip_prefixes(seg)
     if not seg or os.path.basename(seg[0]) != "gh":
         return None
+    words = []
     i = 1
-    while i < len(seg):                       # skip gh global options to reach the subcommand
+    while i < len(seg):
         tok = seg[i]
         if tok == "--":
-            i += 1
+            words.extend(seg[i + 1:])         # everything after `--` is positional
             break
         if tok.startswith("-"):
-            if tok in _GH_GLOBAL_VALUE_OPTS and i + 1 < len(seg):
-                i += 2                         # `-R o/r` — consume the value token too
+            if tok in _GH_VALUE_OPTS and i + 1 < len(seg):
+                i += 2                         # `-R o/r` / `--method DELETE` — consume the value token
             else:
-                i += 1                         # `--repo=o/r`, `-Ro/r`, or a bare flag
+                i += 1                         # `--repo=o/r`, `-Rval`, `-XDELETE`, or a bare flag
             continue
-        break
-    words = []
-    while i < len(seg) and not seg[i].startswith("-"):
-        words.append(seg[i])
+        words.append(tok)
         i += 1
-    return " ".join(words) if words else None
+    return words
 
 
-def _gh_subcommand_paths(command):
-    """Every normalized gh subcommand path in `command` (one per compound segment). Tokenizes with the
-    shell lexer; a parse failure yields [] (the direct regex rules + the opaque-indirection path in
-    inspect_command still cover it), so this never raises into the classifier."""
+def _combo_subject(pos):
+    """(subject, remediation) if the positional sequence's leading (noun, verb) is a protected combo."""
+    if not pos or len(pos) < 2:
+        return None
+    noun, verb = pos[0], pos[1]
+    if (noun, verb) not in _PROTECTED_COMBOS:
+        return None
+    if noun == "issue":
+        if verb in ("close", "delete", "reopen"):
+            return (f"a raw `gh issue {verb}`", _CLOSE)
+        return (f"a raw `gh issue {verb}`", _ENGINE)
+    if noun == "pr":
+        return (f"a raw `gh pr {verb}`", _FINISH)
+    return ("a raw `gh project` board mutation", _ENGINE)
+
+
+def _gh_combo_findings(command):
+    """The first protected gh (noun, verb) combo across the command's segments, or None. A shell parse
+    failure yields None — the `_has` regex backstop in classify() still covers an unparseable body."""
     try:
         tokens = _lex(command)
     except ValueError:
-        return []
-    out = []
+        return None
     for seg in _segments(tokens):
-        path = _gh_segment_subcommand(seg)
-        if path:
-            out.append(path)
-    return out
+        hit = _combo_subject(_gh_positionals(seg))
+        if hit:
+            return hit
+    return None
 
 
 def classify(command):
@@ -196,37 +244,41 @@ def classify(command):
     the safe direction (the agent re-issues through the door); outside an active command it is only a
     warning."""
     c = command
+    # ── `gh api` content rules (matched on the raw string so JSON-body / here-string forms are caught) ──
     # issue-state-writing gh api — a hand issue close OR reopen (REST field forms `-f/-F state=closed`
     # / `state=open`, `state: closed`, and the JSON-body form `"state":"closed"`); case-insensitive so
     # `state=CLOSED` is caught too. Both directions are protected issue-state writes per the brief.
     if _has(c, "gh api") and re.search(r"state[\"']?\s*[=:]\s*[\"']?\s*(?:closed|open)", c, re.I):
         return ("an issue-state-writing `gh api` call", _CLOSE)
     # issue-dependency REST write — a raw dependencies/blocked_by POST/DELETE (the gate-chain door).
-    # METHOD-AWARE: only a WRITE (`-X`/`--method POST|DELETE` in any form, or any `gh api` body flag
-    # that turns the default GET into a POST) is protected. A read-only GET on `dependencies/blocked_by`
-    # is /idc:doctor's own audit read — it must stay ALLOWED.
+    # METHOD-AWARE (`_is_api_write`): a WRITE method, any body flag, OR an AMBIGUOUS (shell-expansion)
+    # method fails closed; a read-only GET/HEAD on `dependencies/blocked_by` is /idc:doctor's own audit
+    # read and stays ALLOWED.
     if _has(c, "gh api") and re.search(r"dependencies/blocked_by", c) and _is_api_write(c):
         return ("a raw issue-dependency REST write (`dependencies/blocked_by`)", _DEP)
-    # GraphQL board/issue mutations — the ProjectV2-item write family (add/delete/update/clear/archive/
-    # unarchive…ProjectV2…) and the issue write family (create/update/close/reopen/delete…Issue). Matched
-    # by the write-verb-glued-to-type family, not a hand-kept name list, so a new mutation name is caught.
-    if _has(c, "gh api") and re.search(
-            r"(?:add|delete|update|clear|archive|unarchive)ProjectV2"
-            r"|(?:create|update|close|reopen|delete)Issue", c):
+    # issue-collection REST write — a POST that CREATES an issue (`repos/o/r/issues` as the terminal
+    # collection, not `.../issues/N/…`). Method-aware, so listing issues (a GET) stays allowed.
+    if _has(c, "gh api") and _is_api_write(c) \
+            and re.search(r"repos/[^/\s'\"]+/[^/\s'\"]+/issues(?:[\s'\"?]|$)", c):
+        return ("a raw issue-create REST write", _ENGINE)
+    # GraphQL board/issue mutations — the write-verb-glued-to-object family (createProjectV2,
+    # copyProjectV2, linkProjectV2ToRepository, updateIssue, reopenIssue, clearProjectV2ItemFieldValue,
+    # archiveProjectV2Item, …). Pattern-matched, not a hand-kept name list, so a new mutation is caught.
+    if _has(c, "gh api") and _GQL_WRITE.search(c):
         return ("a raw GraphQL board/issue mutation", _ENGINE)
-    # gh SUBCOMMAND writes — TWO detectors, unioned:
-    #   (a) token-NORMALIZED paths, so gh global flags before the subcommand (`gh -R o/r issue create`)
-    #       and combined option forms cannot bypass the deny;
+    # ── gh SUBCOMMAND writes — TWO detectors, unioned ──
+    #   (a) token-NORMALIZED (noun, verb) combos: options at ANY level are stripped, so a flag placed
+    #       before OR between subcommand levels (`gh -R o/r issue create`, `gh issue -R o/r create`) and
+    #       every combined option form cannot bypass the deny; the `issue new` alias resolves to create.
     #   (b) a whitespace-flexible regex backstop (`_has`) that needs no shell parse, so a match inside a
-    #       complex/echoed SCRIPT BODY (heredocs, command substitutions, line continuations) is caught
-    #       even where the lexer would choke. Either detector firing is a deny.
-    for path in _gh_subcommand_paths(c):
-        for prefix, subject, remediation in _PROTECTED_SUBCMDS:
-            if path == prefix or path.startswith(prefix + " "):
-                return (subject, remediation)
+    #       complex/echoed SCRIPT BODY (heredocs, command substitutions) is caught even where the lexer
+    #       chokes. Either detector firing is a deny.
+    combo = _gh_combo_findings(c)
+    if combo:
+        return combo
     if _has(c, "gh pr merge"):
         return ("a raw `gh pr merge`", _FINISH)
-    if _has(c, "gh issue create"):
+    if _has(c, "gh issue create") or _has(c, "gh issue new"):
         return ("a raw `gh issue create`", _ENGINE)
     if _has(c, "gh issue close"):
         return ("a raw `gh issue close`", _CLOSE)
@@ -393,8 +445,36 @@ def _strip_prefixes(seg):
     return seg[i:]
 
 
+def _env_split_payload(seg):
+    """If `seg` is `env … -S/--split-string STRING …` (space form, combined `-Sstring`, or
+    `--split-string=string`), return STRING — the embedded command line `env` re-parses and executes.
+    It is inspected recursively (like a `bash -c` payload), so `env -S "bash fire_gate.sh"` is followed
+    THROUGH to fire_gate.sh instead of consuming the string as an opaque wrapper value. Else None."""
+    i = 0
+    while i < len(seg) and _ASSIGN_RE.match(seg[i]):     # skip leading VAR=val
+        i += 1
+    if i >= len(seg) or os.path.basename(seg[i]) != "env":
+        return None
+    i += 1
+    while i < len(seg):
+        tok = seg[i]
+        if tok in ("-S", "--split-string") and i + 1 < len(seg):
+            return seg[i + 1]
+        if tok.startswith("--split-string="):
+            return tok[len("--split-string="):]
+        if tok.startswith("-S") and not tok.startswith("--") and len(tok) > 2:
+            return tok[2:]
+        i += 1
+    return None
+
+
 def _inspect_segment(seg, cwd, plugin_root, depth, seen):
     """Inspect one command segment for an interpreter/source invocation (rules 3–4)."""
+    # `env -S "<string>"` / `--split-string`: the embedded string IS the command — parse it recursively
+    # (Fix 1), so an interpreter hidden inside the split-string is not waved through as an opaque value.
+    payload = _env_split_payload(seg)
+    if payload is not None:
+        return inspect_command(payload, cwd, plugin_root, depth + 1, seen)
     seg = _strip_prefixes(seg)
     if not seg:
         return None

@@ -43,7 +43,7 @@ guarded path to Done — gate approval / pointer retirement / recirc-drain retir
 core op is a contract change requiring a recirculation.
 
 **Every board mutation routes through the transition engine.** `createTicket`, `setField` (Status via
-`move`; the non-Status fields Wave/Phase/Domain/Stage via `set-field`), `link`, `move`, `claim`,
+`move`; the non-machine fields Wave/Phase/Domain via `set-field`), `link`, `move`, `claim`,
 `block`, `close`, `dispose`, and `unblock` are engine ops: dispatch them via `python3
 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_transition.py"` (both backends), which validates machine-legality,
 verifies the write's read-back, and journals every op to `docs/workflow/transition-journal.ndjson` —
@@ -58,9 +58,9 @@ are engine-internal mechanics — a role never runs a raw `gh project item-edit`
   comment + read-back sequence atomically, so every minted item lands normalized (never
   Stage-without-Status) and journaled. The engine is the only create door.
   A role **never** hand-mints an item with a raw `gh issue create` / `gh project item-add` / filesystem `create`.
-- **Setting a non-Status field** — `setField(ticket, Wave|Phase|Domain|Stage, value)` dispatches to
+- **Setting a non-machine field** — `setField(ticket, Wave|Phase|Domain, value)` dispatches to
   the engine's `set-field` op (resolves ids, writes the single-select value, journals it); never a raw `gh project item-edit`.
-  A Status change is a transition — use `move` (`set-field` refuses Status).
+  A Stage or Status change is a machine transition — use `move` (`set-field` refuses both).
 - **Creating a block** — `link(parent, child, blocks)` dispatches to the engine's `link` op, which
   writes BOTH the native GitHub blocked-by edge (what the drain reads) AND the marker, fail-closing if
   the native edge does not land; never a raw `dependencies/blocked_by` POST.

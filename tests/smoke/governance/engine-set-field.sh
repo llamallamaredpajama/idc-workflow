@@ -33,6 +33,17 @@ fi
 [ "$(gov_field "$T" "$n" Status)" = "Todo" ] || fail "the refused Status set-field still mutated Status"
 echo "  ok set-field refuses Status (Status stays Todo)"
 
+echo "== set-field REFUSES Stage (a Stage change is a machine transition — use move; Fix 2) =="
+# Round-4 Fix 2: set-field must NOT write the machine-governed Stage field. A raw Stage write reads
+# neither the item's current Status nor the machine invariants, so it can mint the machine-illegal
+# Stage/Status pair the shared guard forbids (e.g. In-Progress + Recirculation) and journals no
+# to_stage (→ replay divergence). set-field is restricted to NON-machine single-selects; Stage → move.
+if eng set-field --num "$n" --field Stage --value Recirculation >/dev/null 2>&1; then
+  fail "set-field wrongly accepted a Stage write (must refuse — Stage is a machine transition, use move)"
+fi
+[ "$(gov_field "$T" "$n" Stage)" = "Buildable" ] || fail "the refused Stage set-field still mutated Stage"
+echo "  ok set-field refuses Stage (Stage stays Buildable)"
+
 echo "== github: set-field drives set_single_select AND positively reads the written value back (Fix 2) =="
 python3 - "$GOV_PLUGIN/scripts" "$REPO" <<'PY' || fail "github set-field unit failed (see above)"
 import sys
@@ -80,17 +91,18 @@ except (E.TransitionError, B.BoardReadError):
     pass
 print("  ok an unreadable read-back makes set-field FAIL")
 
-# ---- Status is refused (a transition — use move); an unknown field is refused before any write ----
+# ---- Status AND Stage are refused (machine transitions — use move); an unknown field is refused ----
+# too, ALL before any board write (Fix 2: set-field owns only NON-machine single-selects).
 B.fetch_item = _readback_ok
-for bad_field in ("Status", "Bogus"):
+for bad_field in ("Status", "Stage", "Bogus"):
     n_before = len(calls)
     try:
-        E.run("set-field", ctx, num=5, field=bad_field, value="x")
+        E.run("set-field", ctx, num=5, field=bad_field, value="Recirculation" if bad_field == "Stage" else "x")
         print(f"FAIL: github set-field accepted a {bad_field} write"); sys.exit(1)
     except E.TransitionError:
         pass
     assert len(calls) == n_before, f"set-field wrote {bad_field} to the board before refusing it"
-print("  ok github set-field refuses Status and an unknown field BEFORE writing")
+print("  ok github set-field refuses Status, Stage, and an unknown field BEFORE writing")
 PY
 
 echo "PASS: set-field writes non-Status single-select fields through the single write door on both backends, positively reads the value back, and refuses Status / unknown fields"

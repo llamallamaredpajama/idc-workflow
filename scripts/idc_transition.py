@@ -1128,7 +1128,7 @@ def _fs_set_status(machine, tracker, num, status):
 
 
 def _fs_set_field(tracker, num, field, value):
-    """Set a NON-Status field (`Wave`/`Phase`/`Domain`/`Stage`) on the filesystem tracker via its `set`
+    """Set a NON-machine single-select field (`Wave`/`Phase`/`Domain`) on the filesystem tracker via its `set`
     op, then POSITIVELY READ THE VALUE BACK and confirm it landed — the fs analogue of _gh_set_field
     (read-back parity). (Field-name / Status validation happens in the dispatcher BEFORE this.)"""
     r = _trk(tracker, "set", "--num", str(num), "--field", field, "--value", value)
@@ -1246,7 +1246,7 @@ def _gh_link(ctx, parent, child, kind):
 
 
 def _gh_set_field(ctx, num, field, value):
-    """Set a NON-Status single-select field (`Wave`/`Phase`/`Domain`/`Stage`) on github, then POSITIVELY
+    """Set a NON-machine single-select field (`Wave`/`Phase`/`Domain`) on github, then POSITIVELY
     READ THE VALUE BACK and confirm it landed — the sanctioned `set-field` write primitive (replaces the
     raw `gh project item-edit` recipe the interlock now denies), with the same read-back parity as
     `move`. (Field-name / Status validation happens in the backend-agnostic dispatcher BEFORE this.) The
@@ -1303,22 +1303,31 @@ def set_status(ctx, machine, num, status):
         _fs_set_status(machine, ctx["tracker"], num, status)
 
 
-SETTABLE_FIELDS = ("Wave", "Phase", "Domain", "Stage")   # the non-Status single-select fields set-field owns
+# The NON-machine single-select fields set-field owns. Stage AND Status are MACHINE-governed
+# (the machine table enforces the legal Stage/Status pairing + terminal/worked invariants), so
+# set-field must NEVER write them — a raw Stage write reads neither the item's current Status nor
+# those invariants and can mint the machine-illegal pair the shared guard forbids (Fix 2). Both are
+# routed to `move`, the transition door that enforces the invariants and journals to_stage/to_status.
+SETTABLE_FIELDS = ("Wave", "Phase", "Domain")
+MACHINE_FIELDS = ("Stage", "Status")
 
 
 def set_field(ctx, num, field, value):
-    """Set a NON-Status single-select field (Wave/Phase/Domain/Stage) — the `set-field` op, both
-    backends. VALIDATES the field name (and, for Stage, the value against the machine's stage domain)
-    BEFORE any write, then writes and positively reads the value back. Status is refused (a transition —
-    use `move`); an unknown field is refused before touching the board."""
-    if field == "Status":
-        raise TransitionError("set-field: Status is a transition — use `move --to-status`, not set-field")
+    """Set a NON-machine single-select field (Wave/Phase/Domain) — the `set-field` op, both backends.
+    VALIDATES the field name BEFORE any write, then writes and positively reads the value back.
+
+    Stage and Status are MACHINE-governed and REFUSED (a Stage/Status change is a transition — use
+    `move`, which enforces the machine invariants and journals to_stage/to_status); an unknown field
+    is refused before touching the board. set-field's journal record therefore never carries a
+    to_stage/to_status, so replay/reconciliation never sees a field-only write as a transition."""
+    if field in MACHINE_FIELDS:
+        raise TransitionError(
+            f"set-field: {field} is a machine-governed field — a {field} change is a transition. Use "
+            f"`move` (it enforces the legal Stage/Status pairing and journals it), not set-field.")
     if field not in SETTABLE_FIELDS:
         raise TransitionError(
             f"set-field: {field!r} is not a settable single-select field "
             f"(expected one of {list(SETTABLE_FIELDS)}) — refusing before any write")
-    if field == "Stage":                                 # a Stage value must be within the machine domain
-        check_stage_legal(ctx["machine"], value)
     if ctx["backend"] == "github":
         _gh_set_field(ctx, num, field, value)
     else:
@@ -1387,6 +1396,16 @@ def run(op, ctx, **kw):
                 raise TransitionError(
                     f"create: could not resolve the issue number for new item {item_id} "
                     "— refusing to return a non-issue id (the door's contract is the issue number)")
+            # POSITIVE Stage/Status read-back (Fix 3): confirm the created item actually carries the
+            # REQUESTED Stage AND Status — the same read-back parity every other op has. A no-op field
+            # setter (or a partial create the discard missed) must never be journaled as a successful
+            # create. fetch_item already surfaced these fields; comparing them here is the whole read-back.
+            obs_stage, obs_status = item.get("stage"), item.get("status")
+            if obs_stage != to_stage or obs_status != to_status:
+                raise TransitionError(
+                    f"create read-back divergence: new item #{issue_num} is "
+                    f"Stage={obs_stage!r}/Status={obs_status!r}, expected {to_stage!r}/{to_status!r} "
+                    "— refusing to journal a create whose fields did not land")
             journal_append(ctx["repo"], op, backend, tracker_rel,
                            dict(kw, num=issue_num, to_stage=to_stage, to_status=to_status,
                                 project_item_id=item_id))
@@ -1497,7 +1516,7 @@ def run(op, ctx, **kw):
         num = kw["num"]
         field = kw["field"]
         value = kw["value"]
-        # A non-Status single-select field write (Wave/Phase/Domain/Stage) through the sanctioned door,
+        # A non-machine single-select field write (Wave/Phase/Domain) through the sanctioned door,
         # so no role runs a raw `gh project item-edit` (now denied by the interlock during a command).
         set_field(ctx, num, field, value)
         journal_append(ctx["repo"], op, backend, tracker_rel, kw)
@@ -1591,11 +1610,11 @@ def build_parser():
     mv.add_argument("--num", type=int, required=True)
     mv.add_argument("--to-status", dest="to_status", required=True)
 
-    # `set-field` — the sanctioned NON-Status single-select field write (Wave/Phase/Domain/Stage). A
+    # `set-field` — the sanctioned NON-machine single-select field write (Wave/Phase/Domain). Stage/
     # Status change is a transition — use `move`; set-field refuses Status.
     sf = sub.add_parser("set-field")
     sf.add_argument("--num", type=int, required=True)
-    sf.add_argument("--field", required=True, help="Wave | Phase | Domain | Stage (NOT Status — use move)")
+    sf.add_argument("--field", required=True, help="Wave | Phase | Domain (NOT Stage/Status — use move)")
     sf.add_argument("--value", required=True)
 
     ub = sub.add_parser("unblock")

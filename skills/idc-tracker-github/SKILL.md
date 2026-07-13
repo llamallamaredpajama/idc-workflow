@@ -131,10 +131,10 @@ gh project item-add "$PROJ" --owner "$OWNER" --url "$URL" || die_gh
 printf '%s\n' "$NUM"
 ```
 
-**setField(ticket, field, value)** — for the **non-Status fields** (`Stage`/`Wave`/`Phase`/`Domain`),
+**setField(ticket, field, value)** — for the **non-machine fields** (`Wave`/`Phase`/`Domain`),
 dispatch through the engine's `set-field` op, which resolves the ids, writes the single-select value,
-and journals it (a `Status` write is a transition — route it through `move`; `set-field` refuses
-Status):
+and journals it (a `Stage` or `Status` write is a machine transition — route it through `move`;
+`set-field` refuses both):
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_transition.py" --backend github \
   --owner "$OWNER" --project "$PROJ" set-field --num "$NUM" --field "$FIELD" --value "$VALUE"

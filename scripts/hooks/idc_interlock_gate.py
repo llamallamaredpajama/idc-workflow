@@ -17,7 +17,18 @@ the improvisation the pipeline forbids. OUTSIDE an active command it is a WARN-I
 remediation, never block) so ordinary governed-repo work is never bricked. IDC_HOOKS_OBSERVE_ONLY=1
 is the ONE debug escape hatch — it downgrades any deny back to a warning (honored inside
 pre_tool_deny()). There is no second bypass variable; the old IDC_HOOKS_INTERLOCK_ENFORCE opt-in is
-removed (the active-command deny is the shipped enforcement).
+removed (the active-command deny is the shipped enforcement). ONE command-keyed exception: while the
+active command is `/idc:uninstall`, its OWN teardown ops (issue close, project/board delete, item
+delete) are allowed — those have no lifecycle engine door and every other op stays denied (Fix 2).
+
+CLASSIFIER (round-5 Fix 1): defense-in-depth by PER-SEGMENT classification, NOT a complete shell
+parser. The command is split into shell segments (`&&`/`||`/`;`/`|`/newline) and EACH is classified
+on its own tokens, so a decoy method flag in another segment (`: -X GET && gh api … -X DELETE`) can
+never mask a write, and gh global flags (incl. `--hostname`) before the subcommand are stripped. A
+`gh api` on a protected path (issue state/create/close, `dependencies/blocked_by`, graphql) is
+FAIL-CLOSED — allowed only when provably a pure read (a defaulted/explicit GET/HEAD with no body and
+no `--input`); an opaque `--input FILE`/ambiguous method DENIES. `env -S "<string>"` (with trailing
+args) and `bash|sh|zsh < FILE` redirected stdin are followed through like any other indirection.
 
 INDIRECTION-AWARE (bounded interpreter inspection). Beyond the direct command-string classifier,
 inspect_command resolves:
@@ -62,6 +73,14 @@ class Finding:
     subject: str
     remediation: str
     source: str
+    kind: str = ""   # stable operation tag (issue-close / project-delete / …) for policy decisions
+                     # (Fix 2: keying the /idc:uninstall teardown allowance on the op, not a fragile
+                     # subject-string match). Empty = untagged (indirection wrappers inherit the inner).
+
+
+def _mk(subject, remediation, kind):
+    """A direct-classifier Finding carrying its op `kind` (source is always the direct classifier)."""
+    return Finding(subject, remediation, "direct", kind)
 
 
 # ── remediations (every message names the EXACT door command, per P3 self-healing) ────────────────
@@ -206,88 +225,134 @@ def _gh_positionals(seg):
 
 
 def _combo_subject(pos):
-    """(subject, remediation) if the positional sequence's leading (noun, verb) is a protected combo."""
+    """A Finding (with op `kind`) if the positional sequence's leading (noun, verb) is a protected
+    combo, else None. `kind` distinguishes uninstall-teardown ops (issue-close / project-delete /
+    project-item-delete) from everything else so the Fix-2 allowance can key on the OP, not a string."""
     if not pos or len(pos) < 2:
         return None
     noun, verb = pos[0], pos[1]
     if (noun, verb) not in _PROTECTED_COMBOS:
         return None
     if noun == "issue":
-        if verb in ("close", "delete", "reopen"):
-            return (f"a raw `gh issue {verb}`", _CLOSE)
-        return (f"a raw `gh issue {verb}`", _ENGINE)
+        if verb == "close":
+            return _mk("a raw `gh issue close`", _CLOSE, "issue-close")
+        if verb in ("delete", "reopen"):
+            return _mk(f"a raw `gh issue {verb}`", _CLOSE, f"issue-{verb}")
+        kind = "issue-create" if verb in ("create", "new") else f"issue-{verb}"
+        return _mk(f"a raw `gh issue {verb}`", _ENGINE, kind)
     if noun == "pr":
-        return (f"a raw `gh pr {verb}`", _FINISH)
-    return ("a raw `gh project` board mutation", _ENGINE)
+        return _mk(f"a raw `gh pr {verb}`", _FINISH, "pr-merge" if verb == "merge" else f"pr-{verb}")
+    kind = ("project-delete" if verb == "delete"
+            else "project-item-delete" if verb == "item-delete" else "project-mutation")
+    return _mk("a raw `gh project` board mutation", _ENGINE, kind)
 
 
-def _gh_combo_findings(command):
-    """The first protected gh (noun, verb) combo across the command's segments, or None. A shell parse
-    failure yields None — the `_has` regex backstop in classify() still covers an unparseable body."""
-    try:
-        tokens = _lex(command)
-    except ValueError:
+def _api_path_protected(path):
+    """True iff a `gh api` endpoint path is a PROTECTED write surface (round-5 Fix 1 fail-closed set):
+    the GraphQL endpoint, any `dependencies/blocked_by`, or a REST issue path (`repos/O/R/issues[/N]` —
+    the create collection AND a single issue's state/close). An arbitrary read path (`repos/O/R`,
+    `rate_limit`, …) is NOT protected, so an ordinary `gh api` read is never touched."""
+    if path == "graphql":
+        return True
+    if "dependencies/blocked_by" in path:
+        return True
+    return bool(re.search(r"repos/[^/\s'\"]+/[^/\s'\"]+/issues(?:/|[\s'\"?]|$)", path))
+
+
+def _gh_api_finding(pos, seg_str):
+    """Classify ONE `gh api` SEGMENT (pos[0]=='api'), method/body detection scoped to THIS segment's
+    tokens only (kills the `: -X GET && gh api … -X DELETE` cross-segment decoy). FAIL-CLOSED: a
+    protected path is ALLOWED only when it is provably a pure read (an explicit/defaulted GET/HEAD with
+    NO body flag and NO `--input`); anything else on a protected path — a write method, a body, an
+    opaque `--input FILE`, `graphql --input FILE`, or an unparseable/ambiguous method — DENIES, because
+    every real mutation goes through the Python engine doors."""
+    path = pos[1] if len(pos) > 1 else ""
+    if not _api_path_protected(path):
+        return None                                   # unprotected read path → allow
+    if not _is_api_write(seg_str):
+        return None                                   # provably a pure read → allow (doctor's audit GET)
+    if path == "graphql":
+        return _mk("a raw GraphQL board/issue mutation", _ENGINE, "graphql")
+    if "dependencies/blocked_by" in path:
+        return _mk("a raw issue-dependency REST write (`dependencies/blocked_by`)", _DEP, "dep-write")
+    if re.search(r"state[\"']?\s*[=:]\s*[\"']?\s*(?:closed|open)", seg_str, re.I):
+        return _mk("an issue-state-writing `gh api` call", _CLOSE, "issue-state")
+    return _mk("a raw issue-state/create `gh api` write", _ENGINE, "issue-create-rest")
+
+
+def _classify_segment_tokens(seg):
+    """A Finding for a protected gh operation in ONE shell segment, or None. Global gh flags (incl.
+    `--hostname`) are stripped by _gh_positionals, and method/body detection is scoped to this
+    segment — the two properties round-5 Fix 1 needs."""
+    pos = _gh_positionals(seg)
+    if not pos:
         return None
-    for seg in _segments(tokens):
-        hit = _combo_subject(_gh_positionals(seg))
-        if hit:
-            return hit
+    if pos[0] == "api":
+        return _gh_api_finding(pos, " ".join(seg))
+    return _combo_subject(pos)
+
+
+def _ws_combos(command):
+    """Whitespace-flexible `_has` backstop for the gh SUBCOMMAND combos (method-INDEPENDENT, so no
+    cross-segment decoy risk) — catches a combo hidden in a body the lexer segmented away (a heredoc /
+    an echoed line). Runs AFTER per-segment classification; an over-match only denies in the safe
+    direction during an active command (a warning otherwise)."""
+    c = command
+    if _has(c, "gh pr merge"):
+        return _mk("a raw `gh pr merge`", _FINISH, "pr-merge")
+    if _has(c, "gh issue create") or _has(c, "gh issue new"):
+        return _mk("a raw `gh issue create`", _ENGINE, "issue-create")
+    if _has(c, "gh issue close"):
+        return _mk("a raw `gh issue close`", _CLOSE, "issue-close")
+    if _has(c, "gh issue reopen"):
+        return _mk("a raw `gh issue reopen`", _CLOSE, "issue-reopen")
+    if _has(c, "gh issue delete"):
+        return _mk("a raw `gh issue delete`", _CLOSE, "issue-delete")
+    if _has(c, "gh project item-delete"):
+        return _mk("a raw `gh project item-delete` board mutation", _ENGINE, "project-item-delete")
+    if _has(c, "gh project delete"):
+        return _mk("a raw `gh project` board mutation", _ENGINE, "project-delete")
+    if _has(c, "gh project item-edit") or _has(c, "gh project item-add"):
+        return _mk("a raw `gh project item-{edit,add}` board mutation", _ENGINE, "project-mutation")
     return None
+
+
+def _classify_whole_string(command):
+    """The lex-FAILURE fallback (an unbalanced-quote script body the segmenter cannot parse): run the
+    `gh api` content rules on the whole string (best-effort — segmentation is unavailable here) plus
+    the combo backstop. On a parseable command classify() never reaches this — the per-segment path,
+    which is decoy-proof, owns that case."""
+    c = command
+    if _has(c, "gh api") and re.search(r"state[\"']?\s*[=:]\s*[\"']?\s*(?:closed|open)", c, re.I):
+        return _mk("an issue-state-writing `gh api` call", _CLOSE, "issue-state")
+    if _has(c, "gh api") and re.search(r"dependencies/blocked_by", c) and _is_api_write(c):
+        return _mk("a raw issue-dependency REST write (`dependencies/blocked_by`)", _DEP, "dep-write")
+    if _has(c, "gh api") and _is_api_write(c) \
+            and re.search(r"repos/[^/\s'\"]+/[^/\s'\"]+/issues(?:[\s'\"?]|$)", c):
+        return _mk("a raw issue-create REST write", _ENGINE, "issue-create-rest")
+    if _has(c, "gh api") and (_GQL_WRITE.search(c) or (re.search(r"(?<![\w-])graphql(?![\w-])", c)
+                                                       and _api_has_body(c))):
+        return _mk("a raw GraphQL board/issue mutation", _ENGINE, "graphql")
+    return _ws_combos(c)
 
 
 def classify(command):
-    """(subject, remediation) for a raw terminal/board command that bypasses the door, or None.
-    The `gh api` content rules (issue-state / dependency / GraphQL writes) match the raw string so a
-    JSON-body / here-string form is still caught; the gh SUBCOMMAND rules are token-NORMALIZED so gh
-    global flags before the subcommand (`gh -R o/r issue create`) and combined option forms cannot
-    bypass the deny. Under the active-command posture an over-match (a benign echoed line) denies in
-    the safe direction (the agent re-issues through the door); outside an active command it is only a
-    warning."""
-    c = command
-    # ── `gh api` content rules (matched on the raw string so JSON-body / here-string forms are caught) ──
-    # issue-state-writing gh api — a hand issue close OR reopen (REST field forms `-f/-F state=closed`
-    # / `state=open`, `state: closed`, and the JSON-body form `"state":"closed"`); case-insensitive so
-    # `state=CLOSED` is caught too. Both directions are protected issue-state writes per the brief.
-    if _has(c, "gh api") and re.search(r"state[\"']?\s*[=:]\s*[\"']?\s*(?:closed|open)", c, re.I):
-        return ("an issue-state-writing `gh api` call", _CLOSE)
-    # issue-dependency REST write — a raw dependencies/blocked_by POST/DELETE (the gate-chain door).
-    # METHOD-AWARE (`_is_api_write`): a WRITE method, any body flag, OR an AMBIGUOUS (shell-expansion)
-    # method fails closed; a read-only GET/HEAD on `dependencies/blocked_by` is /idc:doctor's own audit
-    # read and stays ALLOWED.
-    if _has(c, "gh api") and re.search(r"dependencies/blocked_by", c) and _is_api_write(c):
-        return ("a raw issue-dependency REST write (`dependencies/blocked_by`)", _DEP)
-    # issue-collection REST write — a POST that CREATES an issue (`repos/o/r/issues` as the terminal
-    # collection, not `.../issues/N/…`). Method-aware, so listing issues (a GET) stays allowed.
-    if _has(c, "gh api") and _is_api_write(c) \
-            and re.search(r"repos/[^/\s'\"]+/[^/\s'\"]+/issues(?:[\s'\"?]|$)", c):
-        return ("a raw issue-create REST write", _ENGINE)
-    # GraphQL board/issue mutations — the write-verb-glued-to-object family (createProjectV2,
-    # copyProjectV2, linkProjectV2ToRepository, updateIssue, reopenIssue, clearProjectV2ItemFieldValue,
-    # archiveProjectV2Item, …). Pattern-matched, not a hand-kept name list, so a new mutation is caught.
-    if _has(c, "gh api") and _GQL_WRITE.search(c):
-        return ("a raw GraphQL board/issue mutation", _ENGINE)
-    # ── gh SUBCOMMAND writes — TWO detectors, unioned ──
-    #   (a) token-NORMALIZED (noun, verb) combos: options at ANY level are stripped, so a flag placed
-    #       before OR between subcommand levels (`gh -R o/r issue create`, `gh issue -R o/r create`) and
-    #       every combined option form cannot bypass the deny; the `issue new` alias resolves to create.
-    #   (b) a whitespace-flexible regex backstop (`_has`) that needs no shell parse, so a match inside a
-    #       complex/echoed SCRIPT BODY (heredocs, command substitutions) is caught even where the lexer
-    #       chokes. Either detector firing is a deny.
-    combo = _gh_combo_findings(c)
-    if combo:
-        return combo
-    if _has(c, "gh pr merge"):
-        return ("a raw `gh pr merge`", _FINISH)
-    if _has(c, "gh issue create") or _has(c, "gh issue new"):
-        return ("a raw `gh issue create`", _ENGINE)
-    if _has(c, "gh issue close"):
-        return ("a raw `gh issue close`", _CLOSE)
-    if _has(c, "gh issue reopen"):
-        return ("a raw `gh issue reopen`", _CLOSE)
-    if _has(c, "gh project item-edit") or _has(c, "gh project item-add") \
-            or _has(c, "gh project item-delete"):
-        return ("a raw `gh project item-{edit,add,delete}` board mutation", _ENGINE)
-    return None
+    """A Finding for a raw terminal/board command that bypasses the door, or None. PER-SEGMENT: the
+    command is split into shell segments (`&&`/`||`/`;`/`|`/newline) and EACH is classified on its own
+    tokens, so gh global flags before the subcommand and a decoy method flag in another segment cannot
+    bypass the deny; `gh api` on a protected path is fail-closed (allowed only when provably a pure
+    read). This is defense-in-depth (a segment-based fail-closed posture), NOT a complete shell parser.
+    Under the active-command posture an over-match denies in the safe direction (re-issue through the
+    door); outside an active command it is only a warning."""
+    try:
+        tokens = _lex(command)
+    except ValueError:
+        return _classify_whole_string(command)        # unparseable body → whole-string best-effort
+    for seg in _segments(tokens):
+        hit = _classify_segment_tokens(seg)
+        if hit:
+            return hit
+    return _ws_combos(command)                          # method-independent combo backstop
 
 
 # ── bounded interpreter inspection (Task 3) ───────────────────────────────────────────────────────
@@ -382,9 +447,10 @@ def _inspect_target(target, cwd, plugin_root, depth, seen):
     inner = inspect_command(body, cwd, plugin_root, depth + 1, seen | {real})
     if inner is None:
         return None
-    # Keep the matched operation + its remediation; name the indirection path (rule 7: path only).
+    # Keep the matched operation + its remediation + op `kind`; name the indirection path (rule 7:
+    # path only, never the script body).
     return Finding(f"{inner.subject}, reached indirectly via `{display}`", inner.remediation,
-                   "script-indirection")
+                   "script-indirection", inner.kind)
 
 
 _ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -447,9 +513,12 @@ def _strip_prefixes(seg):
 
 def _env_split_payload(seg):
     """If `seg` is `env … -S/--split-string STRING …` (space form, combined `-Sstring`, or
-    `--split-string=string`), return STRING — the embedded command line `env` re-parses and executes.
-    It is inspected recursively (like a `bash -c` payload), so `env -S "bash fire_gate.sh"` is followed
-    THROUGH to fire_gate.sh instead of consuming the string as an opaque wrapper value. Else None."""
+    `--split-string=string`), return the FULL command line `env` re-parses and executes: the split
+    STRING followed by any TRAILING args appended after it — `env -S 'gh issue' create --title x`
+    reconstructs `gh issue create --title x` (env splits `-S`'s string into words, then appends the
+    remaining argv). It is inspected recursively (like a `bash -c` payload), so an interpreter hidden
+    inside the split-string is followed THROUGH instead of consumed as an opaque wrapper value (round-5
+    Fix 1: dropping the trailing args reopened `env -S 'gh issue' create …`). Else None."""
     i = 0
     while i < len(seg) and _ASSIGN_RE.match(seg[i]):     # skip leading VAR=val
         i += 1
@@ -458,12 +527,15 @@ def _env_split_payload(seg):
     i += 1
     while i < len(seg):
         tok = seg[i]
+        val, rest = None, []
         if tok in ("-S", "--split-string") and i + 1 < len(seg):
-            return seg[i + 1]
-        if tok.startswith("--split-string="):
-            return tok[len("--split-string="):]
-        if tok.startswith("-S") and not tok.startswith("--") and len(tok) > 2:
-            return tok[2:]
+            val, rest = seg[i + 1], seg[i + 2:]
+        elif tok.startswith("--split-string="):
+            val, rest = tok[len("--split-string="):], seg[i + 1:]
+        elif tok.startswith("-S") and not tok.startswith("--") and len(tok) > 2:
+            val, rest = tok[2:], seg[i + 1:]
+        if val is not None:
+            return " ".join([val, *rest]) if rest else val
         i += 1
     return None
 
@@ -502,10 +574,10 @@ def inspect_command(command, cwd, plugin_root, depth=0, seen=None):
         seen = frozenset()
     if not command or not command.strip():
         return None
-    # Rule 1: the direct protected-operation classifier on the whole command string.
+    # Rule 1: the direct per-segment protected-operation classifier (returns a Finding already).
     hit = classify(command)
     if hit:
-        return Finding(hit[0], hit[1], "direct")
+        return hit
     # Rule 2: tokenize; a parse failure is opaque ONLY when the command invokes an interpreter form.
     try:
         tokens = _lex(command)
@@ -514,12 +586,37 @@ def inspect_command(command, cwd, plugin_root, depth=0, seen=None):
             return Finding("an opaque shell command the interlock could not parse "
                            "[opaque-shell-indirection]", _ENGINE, "opaque-shell-indirection")
         return None
+    # Redirected script stdin (round-5 Fix 1): `bash|sh|zsh [flags] < FILE` runs FILE as its script —
+    # `<` splits segments, so detect the redirect here and inspect FILE like `bash FILE`.
+    for target in _stdin_script_targets(tokens):
+        f = _inspect_target(target, cwd, plugin_root, depth, seen)
+        if f:
+            return f
     # Rules 3–4: interpreter `-c` payloads and bash|sh|zsh|source|. FILE targets.
     for seg in _segments(tokens):
         f = _inspect_segment(seg, cwd, plugin_root, depth, seen)
         if f:
             return f
     return None
+
+
+def _stdin_script_targets(tokens):
+    """FILE(s) fed to an interpreter via redirected stdin — `bash|sh|zsh [flags] < FILE`. `<` is a
+    segment separator, so the interpreter head and the file land in different segments; recover the
+    pairing at the token level. Returns each redirected FILE whose segment head (prefixes stripped)
+    is an interpreter."""
+    out = []
+    for i, tok in enumerate(tokens):
+        if tok != "<" or i + 1 >= len(tokens):
+            continue
+        k, left = i - 1, []
+        while k >= 0 and tokens[k] not in _SEP and not (tokens[k] and all(ch in "&|;()<>\n\r" for ch in tokens[k])):
+            left.insert(0, tokens[k])
+            k -= 1
+        left = _strip_prefixes(left)
+        if left and os.path.basename(left[0]) in INTERPRETERS:
+            out.append(tokens[i + 1])
+    return out
 
 
 def render_reason(finding, plugin_root=""):
@@ -549,13 +646,34 @@ def _gate(payload, plugin_root):
     finding = inspect_command(command, cwd, plugin_root)
     if not finding:
         H.pre_tool_allow()
-    reason = render_reason(finding, plugin_root)
     # POSTURE: hard deny while the session owns an ACTIVE /idc:* command; warn otherwise. The deny
     # honors IDC_HOOKS_OBSERVE_ONLY=1 (the ONE debug escape) inside pre_tool_deny().
-    active = bool(L.active_commands(cwd, session_id=payload.get("session_id")))
+    active = L.active_commands(cwd, session_id=payload.get("session_id"))
+    # Fix 2: /idc:uninstall's OWN teardown (issue close, project/board delete, item delete) would be
+    # blocked by the hard deny with no sanctioned replacement, so it is ALLOWED — but ONLY while an
+    # `uninstall` command is the active one, and ONLY for the ops uninstall legitimately owns. Every
+    # other protected mutation stays denied during uninstall, and these same ops under any OTHER
+    # command remain denied. Uninstall's teardown is inherently raw-`gh` (there is no lifecycle
+    # engine op for bulk close / board delete), so this narrow, command-keyed carve-out is the door.
+    if _uninstall_teardown_ok(finding, active):
+        H.pre_tool_allow()
+    reason = render_reason(finding, plugin_root)
     if active:
         H.pre_tool_deny(reason)
     H.pre_tool_warn(reason)       # non-active governed work: warn-inject, never blocks
+
+
+# The gh teardown ops /idc:uninstall legitimately owns (uninstall.md Phase 4): close IDC issues,
+# delete the board/project, delete board items. NOT issue create/delete, pr merge, dependency writes,
+# graphql, or item-add/item-edit — none of which uninstall performs.
+_UNINSTALL_TEARDOWN_KINDS = {"issue-close", "project-delete", "project-item-delete"}
+
+
+def _uninstall_teardown_ok(finding, active):
+    """True iff `finding` is one of /idc:uninstall's own teardown ops AND an `uninstall` command is the
+    active one for this session — the ONLY case a protected op is allowed to run raw mid-command."""
+    return (finding.kind in _UNINSTALL_TEARDOWN_KINDS
+            and any(c.get("command") == "uninstall" for c in active))
 
 
 if __name__ == "__main__":

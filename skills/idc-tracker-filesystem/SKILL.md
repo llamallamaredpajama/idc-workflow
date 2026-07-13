@@ -59,7 +59,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_tracker_fs.py" --tracker <repo>/TRACK
 | Interface op | Invocation |
 |---|---|
 | (bootstrap) | `init` — create an empty `TRACKER.md` (idempotent) |
-| `setField` (non-Status) | `set --num N --field {Stage\|Wave\|Phase\|Domain} --value V` — never `--field Status`: a Status write is a transition and goes through the engine above |
+| `setField` (non-machine) | `set --num N --field {Wave\|Phase\|Domain} --value V` — the non-machine fields only. **Never `--field Status` or `--field Stage`**: both are machine-governed. A Status write is a transition (`move`, above); Stage is owned by the create ops (initial Stage) and the terminal dispositions (final Stage) — there is no role-facing Stage-write door. (The raw `set` primitive still validates a Stage/Status value against its option set, but no role recipe drives it for those fields.) |
 | `query` | `query [--status S] [--stage Stg] [--wave W] [--phase P] [--domain D]` → newline-separated numbers |
 | `comment` | `comment --num N --body "…"` |
 | read | `show --num N [--field F \| --comments \| --blocked-by]` |

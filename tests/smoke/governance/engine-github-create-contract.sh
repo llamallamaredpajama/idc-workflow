@@ -49,6 +49,10 @@ def make_gh(calls):
             return "PVTI_ABC123\n"
         if head == ["project", "item-edit"]:
             return ""
+        if head == ["project", "item-delete"]:   # the atomic-cleanup discard on a readback mismatch
+            return ""
+        if head == ["issue", "close"]:            # the atomic-cleanup issue close on a readback mismatch
+            return ""
         raise AssertionError(f"unexpected gh call reached the stub: {args!r}")
     return fake_gh
 
@@ -79,7 +83,9 @@ assert _has_label(issue_create, "type:Task"), \
     f"the `--type` (type:Task label) was not applied by the real create_item: {issue_create}"
 print("  ok the REAL create_item applies --label operator-action + type:Task to `gh issue create`")
 
-# (4) red-when-broken: a read-back whose Stage/Status does NOT match the request must FAIL the create.
+# (4) red-when-broken: a read-back whose Stage/Status does NOT match the request must FAIL the create
+#     AND leave NO orphan (the post-return mismatch must delete the project item + close the issue —
+#     round-5 Fix 5: create is atomic on a readback mismatch, not only on a failure inside create_item).
 calls2 = []
 B._gh = make_gh(calls2)
 B.fetch_item = lambda item_id, r: {"content": {"number": 4242, "type": "Issue"},
@@ -89,7 +95,12 @@ try:
     print("FAIL: create reported success when the Stage/Status read-back did not match the request"); sys.exit(1)
 except E.TransitionError:
     pass
-print("  ok the engine positively reads Stage/Status back and FAILS a create that did not land")
+# The residue MUST be removed: the discard deletes the project item and closes the created issue.
+deleted = [c for c in calls2 if c[:2] == ["project", "item-delete"]]
+closed  = [c for c in calls2 if c[:2] == ["issue", "close"]]
+assert deleted, f"a readback-mismatch create left an ORPHAN project item (no item-delete): {calls2}"
+assert closed,  f"a readback-mismatch create left the created ISSUE open (no issue close): {calls2}"
+print("  ok the engine reads Stage/Status back, FAILS a create that did not land, AND removes the orphan (delete item + close issue)")
 PY
 
 echo "PASS: the github create door returns the integer issue number, the real create_item applies --type/--labels, and the engine positively reads Stage/Status back"

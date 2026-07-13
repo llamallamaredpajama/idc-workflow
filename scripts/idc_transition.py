@@ -1191,6 +1191,20 @@ def _gh_create(machine, op, owner, project, repo, spec, title, body, stage_over,
     return idc_gh_board.create_item(owner, project, repo, title, body, stage, status, **extra)
 
 
+def _discard_created(ctx, item_id, issue_num):
+    """Tear down a just-created github item that failed its post-return read-back (round-5 Fix 5) —
+    delete the board item + close the backing issue via the SAME sanctioned discard create_item uses,
+    so create is atomic on a mismatch too. Best-effort: a discard failure is reported (never masks the
+    original divergence), and a throttle mid-discard is swallowed (the pause/resume path re-runs)."""
+    try:
+        incomplete = idc_gh_board.discard_partial_item(ctx["owner"], ctx["project"], ctx["repo"],
+                                                       item_id, issue_num)
+        if incomplete:
+            sys.stderr.write(f"idc-transition: create read-back discard INCOMPLETE: {incomplete}\n")
+    except idc_gh_board.BoardReadError as e:
+        sys.stderr.write(f"idc-transition: create read-back discard failed (item may survive): {e}\n")
+
+
 def _gh_item_id(ctx, num):
     """The project-item node id for issue `num`, from the shared item-id cache (GraphQL-budget: a
     cache hit costs ZERO board reads). Only on a cache MISS does it fall back to a single whole-board
@@ -1391,8 +1405,13 @@ def run(op, ctx, **kw):
                                  kw["title"], kw.get("body", ""), kw.get("stage"), kw.get("status"),
                                  labels=kw.get("labels"), issue_type=kw.get("type"))
             item = idc_gh_board.fetch_item(item_id, ctx["repo"])
-            issue_num = _journal_item((item.get("content") or {}).get("number"))
+            content_num = (item.get("content") or {}).get("number")
+            issue_num = _journal_item(content_num)
             if issue_num is None:
+                # ATOMIC on failure (round-5 Fix 5): a create whose number cannot be resolved is a
+                # partial item — delete the board item + close the backing issue before raising, so no
+                # orphan survives. content_num (may be None) is the best issue handle we have to close.
+                _discard_created(ctx, item_id, content_num)
                 raise TransitionError(
                     f"create: could not resolve the issue number for new item {item_id} "
                     "— refusing to return a non-issue id (the door's contract is the issue number)")
@@ -1402,10 +1421,15 @@ def run(op, ctx, **kw):
             # create. fetch_item already surfaced these fields; comparing them here is the whole read-back.
             obs_stage, obs_status = item.get("stage"), item.get("status")
             if obs_stage != to_stage or obs_status != to_status:
+                # ATOMIC on a post-return readback mismatch (round-5 Fix 5): the create_item discard
+                # only covers failures INSIDE create_item; a mismatch surfaced AFTER it returned used
+                # to raise leaving the malformed item alive. Delete the board item + close the issue
+                # through the SAME sanctioned cleanup before raising, so create stays atomic.
+                _discard_created(ctx, item_id, issue_num)
                 raise TransitionError(
                     f"create read-back divergence: new item #{issue_num} is "
                     f"Stage={obs_stage!r}/Status={obs_status!r}, expected {to_stage!r}/{to_status!r} "
-                    "— refusing to journal a create whose fields did not land")
+                    "— refusing to journal a create whose fields did not land (item discarded)")
             journal_append(ctx["repo"], op, backend, tracker_rel,
                            dict(kw, num=issue_num, to_stage=to_stage, to_status=to_status,
                                 project_item_id=item_id))

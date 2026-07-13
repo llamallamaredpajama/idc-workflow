@@ -133,8 +133,9 @@ printf '%s\n' "$NUM"
 
 **setField(ticket, field, value)** — for the **non-machine fields** (`Wave`/`Phase`/`Domain`),
 dispatch through the engine's `set-field` op, which resolves the ids, writes the single-select value,
-and journals it (a `Stage` or `Status` write is a machine transition — route it through `move`;
-`set-field` refuses both):
+and journals it. `Stage` and `Status` are machine-governed and `set-field` refuses BOTH: a `Status`
+change is a transition — route it through `move`; `Stage` is owned by the create ops (initial Stage)
+and the terminal dispositions (final Stage), with no standalone Stage-write door:
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_transition.py" --backend github \
   --owner "$OWNER" --project "$PROJ" set-field --num "$NUM" --field "$FIELD" --value "$VALUE"
@@ -259,7 +260,7 @@ absence, then moves the child `Blocked → Todo`) — never a raw `blocked_by` D
   surfaces non-zero instead.
   *Stage on a retired pointer is intentionally left at its last value (`Planning`), not cleared or
   advanced* — clearing was evaluated and rejected as NOT a clean fix: (1) the sibling **filesystem**
-  backend's `setField Stage` rejects any non-enum value (`scripts/idc_tracker_fs.py`), so a
+  backend's raw `set --field Stage` primitive rejects any non-enum value (`scripts/idc_tracker_fs.py`), so a
   cleared/empty `Stage` is not expressible there — clearing would make `retire` diverge by backend
   and break the adapter's backend-blindness; (2) a cleared `Stage` reads as `Buildable` via the
   `(.stage // "Buildable")` legacy default shared by both backends, so it drops the drain's

@@ -252,6 +252,35 @@ def _norm_labels(labels):
     return out
 
 
+def discard_partial_item(owner, project, repo, item_id, issue_num):
+    """Best-effort teardown of a half-created item so no partial (Stage-without-Status, or a
+    readback-mismatch) item survives — delete the board item AND close the backing issue. Each step is
+    guarded independently (a partly-failing discard still tries the rest). Returns None on a CLEAN
+    teardown, or a string naming the step(s) that themselves failed — so the caller reports the discard
+    TRUTHFULLY ("discard INCOMPLETE …") instead of asserting a rollback that never happened.
+
+    Module-level (not a create_item closure) so the ENGINE's post-return create read-back
+    (idc_transition) can invoke the SAME atomic cleanup on a Stage/Status mismatch (round-5 Fix 5),
+    not just failures inside create_item. `item-delete` takes the project number positionally +
+    --owner + --id (there is NO --project-id flag on item-delete — only item-edit has one)."""
+    problems = []
+    if item_id:
+        try:
+            _gh(["project", "item-delete", str(project), "--owner", owner, "--id", item_id], repo)
+        except BoardReadError as e:
+            problems.append(f"item-delete failed ({e})")
+    else:
+        # No board-item id, yet the item may exist server-side — we have no handle to delete it.
+        # Surface the possible orphan rather than silently claim it was cleaned.
+        problems.append("no board-item id captured — a possibly-orphaned board item could survive")
+    if issue_num:
+        try:
+            _gh(["issue", "close", str(issue_num)], repo)
+        except BoardReadError as e:
+            problems.append(f"issue close failed ({e})")
+    return "; ".join(problems) if problems else None
+
+
 def create_item(owner, project, repo, title, body, stage, status, labels=None, issue_type=None):
     """Create a board item with Stage AND Status set together — ATOMICALLY.
 
@@ -302,27 +331,7 @@ def create_item(owner, project, repo, title, body, stage, status, labels=None, i
     issue_num = url.rstrip("/").split("/")[-1]
 
     def _discard(item_id):
-        # Best-effort teardown so no half-created (Stage-without-Status) item survives. Each step is
-        # guarded independently (a partly-failing discard still tries the rest). Returns None on a
-        # CLEAN teardown, or a string naming the step(s) that themselves failed — so the caller reports
-        # the discard TRUTHFULLY ("discard INCOMPLETE …") instead of asserting a rollback that never
-        # happened. `item-delete` takes the project number positionally + --owner + --id (there is NO
-        # --project-id flag on item-delete — only item-edit has one).
-        problems = []
-        if item_id:
-            try:
-                _gh(["project", "item-delete", str(project), "--owner", owner, "--id", item_id], repo)
-            except BoardReadError as e:
-                problems.append(f"item-delete failed ({e})")
-        else:
-            # item-add gave us no id, yet it may have created the board item server-side — we have no
-            # handle to delete it. Surface the possible orphan rather than silently claim it was cleaned.
-            problems.append("no board-item id captured — a possibly-orphaned board item could survive")
-        try:
-            _gh(["issue", "close", str(issue_num)], repo)
-        except BoardReadError as e:
-            problems.append(f"issue close failed ({e})")
-        return "; ".join(problems) if problems else None
+        return discard_partial_item(owner, project, repo, item_id, issue_num)
 
     item_id = None
     try:

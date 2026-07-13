@@ -30,7 +30,7 @@ Identical across backends; the adapter routes without reshaping signatures.
 | Op | Signature |
 |---|---|
 | `createTicket` | `(title, body, type, labels) → ticket_id` |
-| `setField` | `(ticket_id, field ∈ {Status, Stage, Wave, Phase, Domain}, value)` |
+| `setField` | `(ticket_id, field ∈ {Wave, Phase, Domain}, value)` — non-machine fields only; Stage/Status are machine-governed (see below) |
 | `link` | `(parent_id, child_id, kind ∈ {sub, blocks})` |
 | `move` | `(ticket_id, status ∈ {Blocked, Todo, In Progress, Done})` |
 | `query` | `(filter) → [ticket_id, …]` |
@@ -42,8 +42,9 @@ verdict-guarded path to Done; idempotent), and `dispose(ticket, disposition)` (t
 guarded path to Done — gate approval / pointer retirement / recirc-drain retirement). A seventh
 core op is a contract change requiring a recirculation.
 
-**Every board mutation routes through the transition engine.** `createTicket`, `setField` (Status via
-`move`; the non-machine fields Wave/Phase/Domain via `set-field`), `link`, `move`, `claim`,
+**Every board mutation routes through the transition engine.** `createTicket`, `setField` (the
+non-machine fields Wave/Phase/Domain via `set-field`; a Status change via `move`; Stage owned by the
+create/terminal ops), `link`, `move`, `claim`,
 `block`, `close`, `dispose`, and `unblock` are engine ops: dispatch them via `python3
 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_transition.py"` (both backends), which validates machine-legality,
 verifies the write's read-back, and journals every op to `docs/workflow/transition-journal.ndjson` —
@@ -60,7 +61,11 @@ are engine-internal mechanics — a role never runs a raw `gh project item-edit`
   A role **never** hand-mints an item with a raw `gh issue create` / `gh project item-add` / filesystem `create`.
 - **Setting a non-machine field** — `setField(ticket, Wave|Phase|Domain, value)` dispatches to
   the engine's `set-field` op (resolves ids, writes the single-select value, journals it); never a raw `gh project item-edit`.
-  A Stage or Status change is a machine transition — use `move` (`set-field` refuses both).
+  Stage and Status are machine-governed and `set-field` refuses BOTH. A **Status** change is a
+  transition — use `move` (`--to-status`). **Stage** is owned by the ops that already set it: the
+  create ops (`create-ticket`/`create-pointer`/`recirculate-intake`) write the initial Stage, and the
+  terminal dispositions (`dispose --disposition retired`/`drained`) record the final Stage — there is
+  no standalone Stage-write door, and no role writes Stage through a raw path.
 - **Creating a block** — `link(parent, child, blocks)` dispatches to the engine's `link` op, which
   writes BOTH the native GitHub blocked-by edge (what the drain reads) AND the marker, fail-closing if
   the native edge does not land; never a raw `dependencies/blocked_by` POST.

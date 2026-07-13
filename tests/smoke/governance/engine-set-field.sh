@@ -94,14 +94,17 @@ print("  ok an unreadable read-back makes set-field FAIL")
 # ---- Status AND Stage are refused (machine transitions — use move); an unknown field is refused ----
 # too, ALL before any board write (Fix 2: set-field owns only NON-machine single-selects).
 B.fetch_item = _readback_ok
+# NB: B.set_single_select is still the `calls2` recorder installed above — so the "no write before
+# refusal" assertion must watch `calls2` (Fix 7). Watching the stale `calls` recorder would never see
+# a write-before-refusal regression (it's no longer the installed setter) — a false-green.
 for bad_field in ("Status", "Stage", "Bogus"):
-    n_before = len(calls)
+    n_before = len(calls2)
     try:
         E.run("set-field", ctx, num=5, field=bad_field, value="Recirculation" if bad_field == "Stage" else "x")
         print(f"FAIL: github set-field accepted a {bad_field} write"); sys.exit(1)
     except E.TransitionError:
         pass
-    assert len(calls) == n_before, f"set-field wrote {bad_field} to the board before refusing it"
+    assert len(calls2) == n_before, f"set-field wrote {bad_field} to the board before refusing it"
 print("  ok github set-field refuses Status, Stage, and an unknown field BEFORE writing")
 PY
 

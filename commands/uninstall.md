@@ -130,6 +130,14 @@ Default: the board and all issues are left exactly as they are. Only on the flag
   typed value doesn't match, abort the board deletion (the rest of the uninstall still stands).
   Issue deletion is never offered.
 
+These teardown ops (issue close, board/project delete, board-item delete) are inherently raw `gh` —
+there is **no** lifecycle engine op for bulk-close or board-delete, so they do **not** route through
+`idc_transition.py`. The mutation interlock normally denies raw board mutations during an active
+`/idc:*` command, but it makes a **narrow, command-keyed exception** for exactly these teardown ops
+**while the active command is `uninstall`**, so the teardown completes. It does **not** relax the deny
+for any other command or operation — an issue create, a `pr merge`, a dependency write, or a raw
+board edit are **never** allowed (not even during uninstall; e.g. `gh project item-add`/`item-edit`).
+
 For the `filesystem` backend these flags are no-ops (TRACKER.md was already handled in Phase 3);
 say so.
 

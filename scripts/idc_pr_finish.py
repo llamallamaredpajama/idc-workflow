@@ -82,12 +82,26 @@ def _is_merged(info):
 
 
 def _merge_pr(repo, pr):
-    """Squash-merge + delete the branch atomically (never GitHub --auto), then confirm MERGED."""
-    _gh(["pr", "merge", str(int(pr)), "--squash", "--delete-branch"], repo)
+    """Squash-merge + delete the branch atomically (never GitHub --auto), then confirm MERGED.
+
+    Robust to a NONZERO merge CLI result (round-5 Fix 6): the server can merge the PR and THEN fail a
+    later branch-cleanup step, returning nonzero — so we re-read PR state EVEN when `gh pr merge`
+    errors, and treat a PR that reads MERGED as success. Only a PR that is NOT merged after the attempt
+    is a real failure (the CLI error, if any, is surfaced). Returns (info, branch_deleted): a clean
+    merge exit deletes the branch atomically → True; a nonzero exit after a server-side merge means the
+    branch-delete step did not complete → False (reported, never silently dropped)."""
+    merge_err = None
+    try:
+        _gh(["pr", "merge", str(int(pr)), "--squash", "--delete-branch"], repo)
+    except FinishError as e:
+        merge_err = e
     after = pr_view(repo, pr, ["state", "mergedAt"])
     if not _is_merged(after):
-        raise FinishError(f"PR #{pr} did not reach MERGED after the squash-merge (state={after.get('state')!r})")
-    return after
+        # Genuinely not merged — surface the CLI error if there was one, else a plain non-MERGED state.
+        raise merge_err or FinishError(
+            f"PR #{pr} did not reach MERGED after the squash-merge (state={after.get('state')!r})")
+    branch_deleted = merge_err is None   # nonzero exit after a server merge = the branch delete failed
+    return after, branch_deleted
 
 
 def _transition(args, extra):
@@ -125,9 +139,10 @@ def cmd_autonomous(args):
     if not head.startswith(prefix):
         raise FinishError(f"autonomous: PR #{args.pr} head branch {head!r} does not match --kind {args.kind} "
                           f"(expected prefix {prefix!r}) — refuse to merge a mismatched PR")
-    _merge_pr(args.repo, args.pr)
+    _, branch_deleted = _merge_pr(args.repo, args.pr)
     receipt = {"op": "pr-finish", "mode": "autonomous", "kind": args.kind, "pr": int(args.pr),
-               "head": head, "state": "MERGED", "tracker_mutation": "none"}
+               "head": head, "state": "MERGED", "branch_deleted": branch_deleted,
+               "tracker_mutation": "none"}
     print(json.dumps(receipt, sort_keys=True))
     return 0
 
@@ -154,6 +169,7 @@ def _bound_pr(args):
 def cmd_requirements(args):
     _bound_pr(args)   # fail-closed BEFORE any tracker mutation (markerless / double / other-PR-bound)
     info = pr_view(args.repo, args.pr, ["state", "mergeable", "mergedAt"])
+    branch_deleted = None   # only a merge THIS run has a branch-deletion outcome to report
     if not _is_merged(info):
         # OPEN path: an explicit in-session operator approval is REQUIRED (IDC never infers it).
         if not args.operator_approved:
@@ -163,12 +179,12 @@ def cmd_requirements(args):
             raise FinishError(f"requirements: PR #{args.pr} is {info.get('state')!r}, neither MERGED nor OPEN")
         if info.get("mergeable") != "MERGEABLE":
             raise FinishError(f"requirements: PR #{args.pr} is not mergeable (mergeable={info.get('mergeable')!r})")
-        _merge_pr(args.repo, args.pr)
+        _, branch_deleted = _merge_pr(args.repo, args.pr)
     # MERGED confirmed → the guarded dispose-before-unblock tail (dispose FIRST; if it fails, no unblock).
     _transition(args, ["dispose", "--disposition", "gate-approved", "--num", str(int(args.gate))])
     _transition(args, ["unblock", "--num", str(int(args.pointer)), "--by", str(int(args.gate))])
     receipt = {"op": "pr-finish", "mode": "requirements", "pr": int(args.pr), "gate": int(args.gate),
-               "pointer": int(args.pointer), "state": "MERGED",
+               "pointer": int(args.pointer), "state": "MERGED", "branch_deleted": branch_deleted,
                "tracker_mutation": "dispose(gate-approved)+unblock",
                "operator_approved": bool(args.operator_approved)}
     print(json.dumps(receipt, sort_keys=True))

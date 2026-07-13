@@ -124,7 +124,7 @@ deny "env -S 'gh issue create --title x --body-file /tmp/b'"
 echo "== round-4 Fix 1: an AMBIGUOUS gh api method on a protected path fails closed (active command) =="
 deny 'gh api repos/o/r/issues/707/dependencies/blocked_by/708 -X "$METHOD"'
 
-echo "== the direct classifier is COMPLETE — the full REST/GraphQL write set denies (Fix 4) =="
+echo "== the direct classifier's REST/GraphQL write set denies (segment-based fail-closed posture) =="
 deny 'gh api repos/o/r/issues/5 -X PATCH -f state=open'
 deny 'gh api repos/o/r/issues/5 -X PATCH -f state=CLOSED'
 deny "gh api graphql -f query='mutation{updateIssue(input:{id:\"I_1\",state:CLOSED}){issue{id}}}'"
@@ -134,6 +134,60 @@ deny 'gh api --method POST repos/o/r/issues/707/dependencies/blocked_by -f issue
 
 echo "== the classifier is METHOD-AWARE — a read-only dependency GET (doctor's audit) is ALLOWED (Fix 4) =="
 allow "gh api repos/o/r/issues/707/dependencies/blocked_by --paginate --jq '.[].number'"
+
+echo "== round-5 Fix 1: per-SEGMENT classification + fail-closed gh api — every round-4 bypass denies =="
+# gh GLOBAL flag (--hostname) between `gh` and `api` no longer breaks `gh api` detection.
+deny 'gh --hostname github.com api repos/o/r/issues/707/dependencies/blocked_by/708 -X DELETE'
+# The `: -X GET && …` decoy: method detection is PER SEGMENT, so the leading `-X GET` cannot mask the
+# real `-X DELETE` in the second segment (each segment is judged on its own tokens).
+deny ': -X GET && gh api repos/o/r/issues/707/dependencies/blocked_by/708 -X DELETE'
+# `env -S "<string>"` reconstructs the FULL split-string INCLUDING trailing args → `gh issue create …`.
+deny "env -S 'gh issue' create --title x"
+# Redirected script stdin: `bash < FILE` resolves FILE and inspects it like `bash FILE`.
+deny "bash < '$FIXTURE/fire_gate.sh'"
+# A `gh api graphql` with an opaque `--input FILE` body cannot be proven a pure read → fail-closed DENY.
+deny 'gh api graphql --input mutation.json'
+
+echo "== round-5 Fix 1: read-only forms stay ALLOWED (the fail-closed posture never over-blocks reads) =="
+allow "gh issue view 5"
+allow "gh pr view 12"
+allow "gh --hostname github.com api repos/o/r/issues/707/dependencies/blocked_by/708"
+allow "gh api repos/o/r/issues"
+
+echo "== round-5 Fix 2: /idc:uninstall's own teardown ops are ALLOWED during an ACTIVE uninstall =="
+# The hard deny must not brick uninstall's documented --close-issues / --delete-board steps. The
+# allowance is keyed on the ACTIVE command being `uninstall`; the SAME raw ops under any other command
+# stay denied, and non-teardown mutations stay denied even during uninstall.
+SUN="sun-$$-$(basename "$WORK")"
+python3 "$CONTRACT" start --repo "$REPO" --session "$SUN" --command uninstall \
+  --plugin-root "$GOV_PLUGIN" --args 'teardown' --source user >/dev/null \
+  || gov_fail "could not open the active /idc:uninstall command record for $SUN"
+
+allow_under() {  # allow_under <session> <cmd> — must NOT deny or warn.
+  gate "$2" "$1"
+  [ "$RC" -eq 0 ] || gov_fail "ALLOW expected exit 0 but got $RC: [$2]"
+  [ -z "$OUT" ] || gov_fail "ALLOW expected no permission decision but got one: [$2] => [$OUT]"
+  grep -q 'IDC interlock' "$ERR" && gov_fail "ALLOW wrongly flagged during uninstall: [$2] => [$(cat "$ERR")]"
+  echo "  ok allow (uninstall teardown): $2"
+}
+deny_under() {  # deny_under <session> <cmd> — must hard-deny under that session.
+  gate "$2" "$1"
+  is_deny || gov_fail "DENY expected under session but not denied: [$2]  stdout=[$OUT] stderr=[$(cat "$ERR")]"
+  echo "  ok deny: $2"
+}
+
+# uninstall OWNS these teardown ops → ALLOWED while an uninstall command is active.
+allow_under "$SUN" "gh issue close 5"
+allow_under "$SUN" "gh project delete 8 --owner o"
+allow_under "$SUN" "gh project item-delete 8 --owner o --id PVTI_X"
+# The SAME teardown ops under a NON-uninstall active command (think = S1) stay DENIED (keyed on uninstall).
+deny_under "$S1" "gh issue close 5"
+deny_under "$S1" "gh project delete 8 --owner o"
+# Non-teardown mutations stay DENIED even DURING uninstall (the allowance is scoped to what it owns).
+deny_under "$SUN" "gh issue create --title x --body-file /tmp/b"
+deny_under "$SUN" "gh pr merge 12 --squash"
+deny_under "$SUN" "gh api repos/o/r/issues/707/dependencies/blocked_by/708 -X DELETE"
+deny_under "$SUN" "gh project item-edit --id X --project-id Y --field-id F --single-select-option-id O"
 
 echo "== the sanctioned write door is never denied =="
 allow "python3 '$GOV_PLUGIN/scripts/idc_transition.py' --repo '$REPO' create-ticket --title safe --stage Buildable --status Todo"

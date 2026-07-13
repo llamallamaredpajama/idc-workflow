@@ -1296,28 +1296,31 @@ def _gh_set_field(ctx, num, field, value):
 
 def _gh_remove_dep(ctx, child, parent):
     """Remove the `parent blocks child` dependency and VERIFY it is absent (the `unblock --by` first
-    step). Removes the NATIVE GitHub blocked_by edge first (the representation the drain reads), then
-    verifies via a native read-back, then best-effort cleans the engine's marker comment. Raises on a
-    still-present native edge so the caller leaves Status Blocked. Every REST call runs through
+    step). Removes the NATIVE GitHub blocked_by edge first, verifies it absent, then removes EVERY
+    engine marker comment and verifies those absent too. BOTH representations are authoritative parts
+    of the engine edge; any read/delete/readback failure raises so the caller leaves Status Blocked.
+    Every REST call runs through
     idc_gh_board (the engine subprocess), never the Bash tool — the interlock never sees a raw
     dependency DELETE.
 
     IDEMPOTENT rerun (Fix 5): checks ABSENCE FIRST — if the edge is already gone (a rerun after "edge
     removed but the Status write failed"), it SKIPS the DELETE (which GitHub may 404) and proceeds, so
     the rerun deterministically completes the remaining Blocked->Todo Status move. Only a still-present
-    edge is DELETEd; a still-present edge after the DELETE still raises (Status stays Blocked)."""
+    edge is DELETEd. Marker cleanup is likewise resumable: a rerun reads the remaining marker ids,
+    deletes only those, then completes the Status move after a final empty readback."""
     if int(parent) in idc_gh_board.blocked_by_numbers(int(child), ctx["repo"]):
         idc_gh_board.remove_blocked_by(int(child), int(parent), ctx["repo"])
     if int(parent) in idc_gh_board.blocked_by_numbers(int(child), ctx["repo"]):
         raise TransitionError(
             f"unblock: #{parent} still blocks #{child} after removal — refusing to unblock (Status stays Blocked)")
-    # Best-effort marker cleanup (the native edge is authoritative for the drain; a leftover marker is
-    # harmless but tidy to remove). A cleanup failure never fails the unblock.
-    try:
-        for cid in idc_gh_board.blocked_by_comment_ids(int(child), int(parent), ctx["repo"]):
-            idc_gh_board.delete_comment(cid, ctx["repo"])
-    except (idc_gh_board.BoardReadError, idc_gh_board.RateLimitError) as e:
-        sys.stderr.write(f"idc-transition: unblock marker-comment cleanup skipped (non-fatal): {e}\n")
+    marker_ids = idc_gh_board.blocked_by_comment_ids(int(child), int(parent), ctx["repo"])
+    for cid in marker_ids:
+        idc_gh_board.delete_comment(cid, ctx["repo"])
+    remaining = idc_gh_board.blocked_by_comment_ids(int(child), int(parent), ctx["repo"])
+    if remaining:
+        raise TransitionError(
+            f"unblock: #{parent} still has {len(remaining)} idc-blocked-by marker(s) on #{child} "
+            "after removal — refusing to unblock (Status stays Blocked)")
 
 
 # ── backend-agnostic dispatch (the guard path is SHARED; only the read/write primitives differ) ──

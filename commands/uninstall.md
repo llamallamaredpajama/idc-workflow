@@ -123,20 +123,26 @@ make no commit and report `skipped-absent` across the board.
 
 Default: the board and all issues are left exactly as they are. Only on the flags:
 
-- `--close-issues` — **reversible.** Close (never delete) the IDC issues on the board via the
-  `idc:idc-tracker-github` ops / `gh issue close`. Report the count closed; they can be reopened.
+- `--close-issues` — **reversible.** Close (never delete) only issue-backed items proven to be on
+  this board, through the GitHub tracker adapter. It pre-reads every issue state and positively
+  reads each close back. Report the count closed; they can be reopened:
+  ```bash
+  python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gh_board.py" close-project-issues \
+    --repo "$ROOT" --owner "$owner" --project "$num"
+  ```
 - `--delete-board` — **permanent.** Require a typed confirmation: the operator must type the board
-  number (or exact title) back before you run `gh project delete <num> --owner <owner>`. If the
-  typed value doesn't match, abort the board deletion (the rest of the uninstall still stands).
+  number (or exact title) back, then pass that exact value to the adapter. It re-reads the selected
+  board before deleting it and verifies the captured project node is absent afterward. If the typed
+  value doesn't match, abort the board deletion (the rest of the uninstall still stands):
+  ```bash
+  python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gh_board.py" delete-project \
+    --repo "$ROOT" --owner "$owner" --project "$num" --confirm "$typed_confirmation"
+  ```
   Issue deletion is never offered.
 
-These teardown ops (issue close, board/project delete, board-item delete) are inherently raw `gh` —
-there is **no** lifecycle engine op for bulk-close or board-delete, so they do **not** route through
-`idc_transition.py`. The mutation interlock normally denies raw board mutations during an active
-`/idc:*` command, but it makes a **narrow, command-keyed exception** for exactly these teardown ops
-**while the active command is `uninstall`**, so the teardown completes. It does **not** relax the deny
-for any other command or operation — an issue create, a `pr merge`, a dependency write, or a raw
-board edit are **never** allowed (not even during uninstall; e.g. `gh project item-add`/`item-edit`).
+All lifecycle writes go through these validating adapter doors. The mutation interlock has no
+Init/Uninstall exception: a raw issue close, project create/delete/link/field write, board-item
+delete, or GraphQL mutation is denied while any IDC command is active.
 
 For the `filesystem` backend these flags are no-ops (TRACKER.md was already handled in Phase 3);
 say so.

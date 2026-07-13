@@ -73,9 +73,9 @@ grep -q "idc-tracker-state:begin" "$SBX/TRACKER.md" || fail "TRACKER.md missing 
 python3 "$PLUGIN/scripts/idc_tracker_fs.py" --tracker "$SBX/TRACKER.md" create --title "smoke" >/dev/null \
                                                  || fail "tracker unusable after scaffold"
 
-# --- static guard: EVERY github-backend board mutation runs AFTER the destructive Status gate ---
-# Codex adversarial review (PR 40) + altitude follow-up: `gh project field-create` (adds fields)
-# and `gh project link` (publishes the board to the repo) both mutate an operator's board, so they
+# --- static guard: EVERY post-provenance github board mutation runs AFTER the Status gate ---
+# The validating adapter's `ensure-field` (adds fields) and `ensure-link` (publishes the board)
+# both mutate an operator's board, so they
 # must run only AFTER the destructive Status-options **STOP** gate — otherwise an existing populated
 # board with incompatible Status options gets stray fields added / gets linked, then init STOPs
 # half-provisioned. The hermetic suite has no live GitHub, so assert both mutation lines sit below
@@ -83,7 +83,7 @@ python3 "$PLUGIN/scripts/idc_tracker_fs.py" --tracker "$SBX/TRACKER.md" create -
 INIT_MD="$PLUGIN/commands/init.md"
 stop_ln=$(grep -nF '**STOP**' "$INIT_MD" | head -1 | cut -d: -f1)
 [ -n "$stop_ln" ] || fail "init.md: destructive Status **STOP** gate not found"
-for marker in 'gh project field-create' 'gh project link "$TRACKER_PROJECT_NUMBER"'; do
+for marker in 'python3 "$BOARD_DOOR" ensure-field' 'idc_gh_board.py" ensure-link'; do
   mut_ln=$(grep -nF "$marker" "$INIT_MD" | head -1 | cut -d: -f1)
   [ -n "$mut_ln" ] || fail "init.md: board mutation '$marker' not found"
   [ "$mut_ln" -gt "$stop_ln" ] \

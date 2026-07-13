@@ -68,8 +68,7 @@ Missing → FAIL (hint: run `/idc:init`). Otherwise branch on `backend:`:
   ```
   - `board-linked` → no note.
   - `board-not-linked` → **PASS with ⚠**, note: "board not linked to this repo — it won't appear
-    on the repo's Projects tab; run `/idc:init` to link it (or `gh project link <num> --owner
-    <owner> --repo <owner>/<repo>`)."
+    on the repo's Projects tab; run `/idc:init` to link it through the validating tracker adapter."
   - GraphQL call itself errors (transient / auth) → could-not-determine note, **never FAIL**.
 
 **4 — Governance scaffold present.** PASS only if all of these exist: `WORKFLOW.md` at the

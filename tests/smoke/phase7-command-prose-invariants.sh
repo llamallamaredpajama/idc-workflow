@@ -84,7 +84,9 @@ has "$I" 'customized .*tracker-config\.yaml|--customized docs/workflow/tracker-c
 # Board provisioning must carry the 3.1.0 4th Stage option on a fresh create AND reconcile an
 # existing pre-3.1.0 board by appending it non-destructively (the regression: init seeded only 3
 # options and skipped an existing field, so /idc:recirculate had no stage to file into).
-has "$I" 'single-select-options "Consideration,Planning,Buildable,Recirculation"' \
+has "$I" 'ensure-field.*--repo|ensure-field' \
+  || fail "init.md must create missing board fields through the validating adapter"
+has "$I" 'name Stage --option Consideration --option Planning --option Buildable --option Recirculation' \
   || fail "init.md must create the Stage field with all FOUR options incl. Recirculation"
 has "$I" 'idc_stage_options\.py' \
   || fail "init.md must reconcile an existing Stage field via the idc_stage_options.py append helper"

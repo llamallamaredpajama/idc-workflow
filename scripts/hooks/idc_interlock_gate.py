@@ -17,12 +17,9 @@ the improvisation the pipeline forbids. OUTSIDE an active command it is a WARN-I
 remediation, never block) so ordinary governed-repo work is never bricked. IDC_HOOKS_OBSERVE_ONLY=1
 is the ONE debug escape hatch — it downgrades any deny back to a warning (honored inside
 pre_tool_deny()). There is no second bypass variable; the old IDC_HOOKS_INTERLOCK_ENFORCE opt-in is
-removed (the active-command deny is the shipped enforcement). COMMAND-KEYED exceptions — a command may
-perform its OWN declared lifecycle/provisioning ops (the ones with no engine door): while the active
-command is `/idc:uninstall`, its teardown ops (issue close, project/board delete, item delete) are
-allowed; while it is `/idc:init`, its board-provisioning ops (project field-create, repo link, the
-Status option-reconcile `updateProjectV2Field` mutation) are allowed. Each is scoped to THAT command,
-requires EVERY protected segment to be one of the ops it owns, and every other op stays denied.
+removed (the active-command deny is the shipped enforcement). There are no command-name exceptions:
+Init and Uninstall lifecycle writes run through validating tracker-adapter helpers, while the same raw
+GitHub operations remain denied under every active IDC command.
 
 CLASSIFIER (round-5 Fix 1): defense-in-depth by PER-SEGMENT classification, NOT a complete shell
 parser. The command is split into shell segments (`&&`/`||`/`;`/`|`/newline) and EACH is classified
@@ -49,15 +46,12 @@ FAIL-CLOSED ON DYNAMIC/OPAQUE (round-9 Fix A). A static classifier cannot analyz
 shell, so the residual bypass class is "hide a protected mutation behind a construct the classifier
 cannot resolve." We close that class BY CONSTRUCTION rather than chase each variant: during an active
 command we DENY (subject `dynamic-opaque-indirection`) when the command carries a construct that could
-execute a hidden command or redirect an API surface and cannot be statically confirmed safe — command
-substitution `$(…)`/backticks, process substitution `<(…)`/`>(…)` (carve-outs only, since only there
-does the outer op get allowed), a `gh api` with a shell-expansion ENDPOINT (deny with any write
-indicator; deny outright under a carve-out), a `BASH_ENV`/`ENV`/`SHELLOPTS`/`*ENV`/`*RC` startup-file
-prefix before an interpreter, and a dynamic interpreter/`-c`/`env -S` target. Under the init/uninstall
-carve-outs the bar is absolute: ANY such construct denies, because the carve-out's whole safety
-argument is "every segment is a statically-recognized safe op" — only fully STATIC recognized
-provisioning/teardown ops are ever allowed. This is defense-in-depth, not a complete shell parser; a
-bare `$VAR` parameter expansion (a value, not an executed command) is deliberately never flagged.
+execute a hidden command or redirect an API surface and cannot be statically confirmed safe — a
+`gh api` with a shell-expansion endpoint and a write indicator, a
+`BASH_ENV`/`ENV`/`SHELLOPTS`/`*ENV`/`*RC` startup-file prefix before an interpreter, an opaque privilege
+wrapper around an interpreter, and a dynamic interpreter/`-c`/`env -S` target. This is
+defense-in-depth, not a complete shell parser; a bare `$VAR` parameter expansion (a value, not an
+executed command) is deliberately never flagged.
 
 Why this NEVER fires on the sanctioned path: the engine + finishers run `gh` via python subprocess,
 NOT via the Bash tool, so PreToolUse never sees them; and a `python3 …/idc_transition.py …` /
@@ -90,14 +84,27 @@ class Finding:
     subject: str
     remediation: str
     source: str
-    kind: str = ""   # stable operation tag (issue-close / project-delete / …) for policy decisions
-                     # (Fix 2: keying the /idc:uninstall teardown allowance on the op, not a fragile
-                     # subject-string match). Empty = untagged (indirection wrappers inherit the inner).
+
+
+@dataclasses.dataclass(frozen=True)
+class _Finding:
+    """Private classifier record. Policy tags stay private; the public Finding contract is exact."""
+    subject: str
+    remediation: str
+    source: str
+    kind: str = ""
 
 
 def _mk(subject, remediation, kind):
     """A direct-classifier Finding carrying its op `kind` (source is always the direct classifier)."""
-    return Finding(subject, remediation, "direct", kind)
+    return _Finding(subject, remediation, "direct", kind)
+
+
+def _public(finding):
+    """Project an internal tagged finding onto the exact three-field public contract."""
+    if finding is None or isinstance(finding, Finding):
+        return finding
+    return Finding(finding.subject, finding.remediation, finding.source)
 
 
 # ── remediations (every message names the EXACT door command, per P3 self-healing) ────────────────
@@ -180,18 +187,9 @@ _PROTECTED_COMBOS = (
     {("issue", v) for v in ("create", "new", "close", "delete", "edit", "reopen", "lock", "unlock",
                             "transfer", "pin", "unpin")}
     | {("pr", v) for v in ("merge", "close", "edit")}
-    | {("project", v) for v in ("item-add", "item-edit", "item-delete", "item-archive", "field-create",
-                                "edit", "delete", "copy", "link", "unlink")}
+    | {("project", v) for v in ("create", "item-add", "item-edit", "item-delete", "item-archive",
+                                "field-create", "edit", "delete", "copy", "link", "unlink")}
 )
-# The GraphQL WRITE-mutation family: a write verb glued to a protected object (createProjectV2,
-# copyProjectV2, linkProjectV2ToRepository, updateIssue, reopenIssue, clearProjectV2ItemFieldValue,
-# archiveProjectV2Item, …). Pattern-matched (verb+object), NOT a hand-kept name list, so a NEW mutation
-# name in the same family is caught. Case-sensitive (camelCase) to avoid matching ordinary prose.
-_GQL_WRITE = re.compile(
-    r"(?:create|update|delete|add|remove|copy|move|archive|unarchive|clear|convert|close|reopen|"
-    r"mark|link|unlink|merge)(?:ProjectV2|Issue|PullRequest|Item|Field)")
-
-
 def _gh_positionals(seg):
     """The POSITIONAL word sequence of a `gh …` command SEGMENT — options at ANY level stripped (incl.
     their consumed values and the self-contained `--opt=val`/`-Rval`/`-XDELETE` forms) — or None if the
@@ -229,14 +227,12 @@ def _gh_positionals(seg):
 
 def _combo_subject(pos):
     """A Finding (with op `kind`) if the positional sequence's leading (noun, verb) is a protected
-    combo, else None. `kind` distinguishes uninstall-teardown ops (issue-close / project-delete /
-    project-item-delete) from everything else so the Fix-2 allowance can key on the OP, not a string."""
+    combo, else None. The private `kind` keeps diagnostic detail out of the exact public contract."""
     if not pos:
         return None
     # round-11 Fix 2: when the SUBCOMMAND (noun) or the operation (verb) token is a shell expansion
     # (`gh issue "$op"` / `gh "$sub" merge`), its read-vs-write nature cannot be statically resolved →
-    # FAIL CLOSED. `_dynamic`'s kind is in no carve-out set, so it denies during any active command and,
-    # a fortiori, inside init/uninstall carve-outs. A dynamic ARGUMENT (`gh issue view "$num"`) is NOT
+    # FAIL CLOSED during any active command. A dynamic ARGUMENT (`gh issue view "$num"`) is NOT
     # flagged — only the noun/verb decide read-vs-write, so a static-read subcommand stays allowed.
     if _is_dynamic_token(pos[0]) or (len(pos) >= 2 and _is_dynamic_token(pos[1])):
         return _dynamic("a `gh` invocation whose subcommand is computed by a shell expansion")
@@ -254,9 +250,7 @@ def _combo_subject(pos):
         return _mk(f"a raw `gh issue {verb}`", _ENGINE, kind)
     if noun == "pr":
         return _mk(f"a raw `gh pr {verb}`", _FINISH, "pr-merge" if verb == "merge" else f"pr-{verb}")
-    # field-create + link get DISTINCT kinds so the /idc:init provisioning carve-out can allow init's
-    # own field creation + repo link while item-add/item-edit/delete (also `gh project` mutations) stay
-    # denied even under init.
+    # Keep distinct private kinds for precise diagnostics; policy denies every protected combo.
     kind = {"delete": "project-delete", "item-delete": "project-item-delete",
             "field-create": "project-field-create", "link": "project-link"}.get(verb, "project-mutation")
     return _mk("a raw `gh project` board mutation", _ENGINE, kind)
@@ -296,12 +290,6 @@ _GQL_QUERY_ARG_RE = re.compile(
           | (?P<bare>\S*)                             # bare / unquoted
         )
     """, re.VERBOSE)
-# Project-FIELD provisioning mutations that /idc:init runs raw (Status option reconcile). Matched as the
-# EXACT ROOT mutation field (Fix B, below), so the ITEM-value family (`updateProjectV2ItemFieldValue`,
-# `clearProjectV2ItemFieldValue`) — which init never runs raw — does NOT qualify for the init carve-out.
-_GQL_PROVISION_FIELDS = {"createProjectV2Field", "updateProjectV2Field"}
-
-
 def _extract_graphql_query(seg_str):
     """Isolate the graphql `query` argument value of a `gh api graphql` SEGMENT (round-8 Fix 1). Returns
     `("literal", <value>)` when a STATIC literal query arg can be isolated, `("opaque", <why>)` when the
@@ -348,145 +336,6 @@ def _graphql_is_read(seg_str):
     return op.startswith("{") or bool(re.match(r"query(?![A-Za-z0-9_])", op))
 
 
-def _strip_graphql_comments(text):
-    """Remove GraphQL line comments (`#` to end of line; GraphQL has no block comments). Used ONLY to
-    classify a query as provisioning — an ALLOWANCE — so stripping conservatively (any `#`→EOL, even one
-    inside a string literal) is fail-safe: removing text can only make a query look LESS like
-    provisioning, never conjure a provisioning ROOT field that wasn't there. This is exactly what closes
-    finding-2's comment smuggle (`mutation{closeIssue(…)} # updateProjectV2Field`)."""
-    return re.sub(r"#[^\n]*", "", text)
-
-
-def _skip_gql_string(text, i):
-    r"""Index just past a GraphQL string starting at text[i]=='"' — a triple-quoted block string
-    (three double-quotes … three double-quotes) or a regular double-quoted string (with `\"` escapes) —
-    or None if it never terminates. Used so a `{`, `}`, `(`, or `)` INSIDE a string argument value
-    cannot unbalance the selection-set scan."""
-    n = len(text)
-    if text[i:i + 3] == '"""':
-        j = i + 3
-        while j < n:
-            if text[j:j + 3] == '"""':
-                return j + 3
-            j += 1
-        return None
-    j = i + 1
-    while j < n:
-        if text[j] == "\\":
-            j += 2
-            continue
-        if text[j] == '"':
-            return j + 1
-        j += 1
-    return None
-
-
-def _skip_gql_balanced(text, i, open_ch, close_ch):
-    """Index just past the balanced `open_ch…close_ch` group that begins at text[i]==open_ch (string-
-    literal aware), or None if it never closes. Balances nested `open_ch`, skipping GraphQL strings so a
-    delimiter inside a `"…"` value is not counted."""
-    depth, n = 0, len(text)
-    while i < n:
-        ch = text[i]
-        if ch == '"':
-            j = _skip_gql_string(text, i)
-            if j is None:
-                return None
-            i = j
-            continue
-        if ch == open_ch:
-            depth += 1
-        elif ch == close_ch:
-            depth -= 1
-            if depth == 0:
-                return i + 1
-        i += 1
-    return None
-
-
-def _graphql_root_mutation_fields(query):
-    """EVERY ROOT mutation field name of a GraphQL operation LITERAL, in order — or None if the literal
-    is not a parseable `mutation` operation (round-10 Fix 3, generalizing round-9 Fix B from the FIRST
-    root field to ALL of them). Strips comments, requires a `mutation` operation, skips an optional
-    operation name + the variable-definition list `(…)`, enters the top-level selection set, and
-    enumerates each root field — skipping each field's optional `alias:`, argument list `(…)`, and
-    NESTED selection set `{…}` — so `mutation{ a(x:1){id} b }` yields ['a','b']. A provisioning name in a
-    COMMENT, an ARGUMENT, or a NESTED selection is therefore NOT a root field. Fail-closed: an
-    unterminated selection set, a directive, or any construct the enumerator cannot cleanly step over
-    returns None (never a spuriously-empty/short field list that could pass the all-provisioning check)."""
-    text = _strip_graphql_comments(query).lstrip()
-    if not re.match(r"mutation(?![A-Za-z0-9_])", text):
-        return None
-    i, n = len(re.match(r"mutation", text).group(0)), len(text)
-    while i < n and text[i].isspace():                 # ws before an optional operation name
-        i += 1
-    mn = re.match(r"[A-Za-z_][A-Za-z0-9_]*", text[i:])  # optional operation name
-    if mn:
-        i += mn.end()
-    while i < n and text[i].isspace():
-        i += 1
-    if i < n and text[i] == "(":                        # optional variable definitions
-        i = _skip_gql_balanced(text, i, "(", ")")
-        if i is None:
-            return None
-    while i < n and text[i].isspace():
-        i += 1
-    if i >= n or text[i] != "{":                        # top-level selection-set opening brace
-        return None
-    i += 1
-    fields = []
-    while i < n:
-        while i < n and (text[i].isspace() or text[i] == ","):
-            i += 1
-        if i >= n:
-            return None                                 # unterminated selection set → fail closed
-        if text[i] == "}":
-            return fields
-        fm = re.match(r"([A-Za-z_][A-Za-z0-9_]*)\s*(:)?", text[i:])   # a root field, or an `alias:`
-        if not fm:
-            return None                                 # a directive / unexpected token → fail closed
-        i += fm.end()
-        if fm.group(2):                                 # it was an alias — the real field follows
-            while i < n and text[i].isspace():
-                i += 1
-            fm = re.match(r"([A-Za-z_][A-Za-z0-9_]*)", text[i:])
-            if not fm:
-                return None
-            i += fm.end()
-        fields.append(fm.group(1))
-        while i < n:                                    # skip this field's arguments + nested selection
-            while i < n and text[i].isspace():
-                i += 1
-            if i < n and text[i] == "(":
-                i = _skip_gql_balanced(text, i, "(", ")")
-                if i is None:
-                    return None
-                continue
-            if i < n and text[i] == "{":
-                i = _skip_gql_balanced(text, i, "{", "}")
-                if i is None:
-                    return None
-                continue
-            break
-    return None                                         # ran off the end without a closing `}`
-
-
-def _graphql_is_provision(seg_str):
-    """True iff the `gh api graphql` SEGMENT's isolated query value is a STATIC LITERAL whose EVERY root
-    mutation field is a sanctioned project-FIELD provisioning mutation
-    (`updateProjectV2Field`/`createProjectV2Field`) — the raw op /idc:init runs to reconcile the
-    built-in `Status` options (round-10 Fix 3). Fail-closed three ways: an OPAQUE query body never
-    isolates a literal (stays a plain denied `graphql`); a sanctioned name that is only a substring of a
-    comment/argument/nested selection is NOT a root field; and a MULTI-root mutation that pairs a
-    provisioning field with ANY foreign write (`… closeIssue(…)`) has a non-provisioning root field, so
-    the whole call is denied under init."""
-    style, value = _extract_graphql_query(seg_str)
-    if style != "literal":
-        return False
-    fields = _graphql_root_mutation_fields(value)
-    return bool(fields) and all(f in _GQL_PROVISION_FIELDS for f in fields)
-
-
 def _gh_api_finding(seg_str, endpoint=None):
     """Classify ONE `gh api` SEGMENT bluntly (round-6 Fix 1+2; round-7 Fix 1 for graphql). A `gh api
     graphql` segment is judged on its OPERATION — a provable read `query{…}` is ALLOWED; a `mutation`,
@@ -499,9 +348,9 @@ def _gh_api_finding(seg_str, endpoint=None):
     round-9 Fix A (finding 1): a `gh api` whose ENDPOINT is a shell expansion (`gh api "$EP" …`) cannot
     be statically confirmed to avoid `graphql` / a protected REST path — the blunt path classifier sees
     no literal protected token and would wave it through. When such a dynamic endpoint ALSO carries a
-    write indicator, deny BY CONSTRUCTION. A dynamic-endpoint READ stays allowed here (no write
-    indicator); a carve-out denies even the read via `_carveout_dynamic_finding`. `endpoint` is the
-    token-parsed endpoint positional when available, else detected on the raw string (lex-failure path)."""
+    write indicator, deny BY CONSTRUCTION. A dynamic-endpoint READ stays allowed because it carries
+    no write indicator. `endpoint` is the token-parsed endpoint positional when available, else
+    detected on the raw string (lex-failure path)."""
     dyn_ep = _is_dynamic_token(endpoint) if endpoint is not None else _raw_dynamic_api_endpoint(seg_str)
     if dyn_ep and _api_write_indicator(seg_str):
         return _dynamic("a `gh api` with a shell-expansion endpoint and a write indicator")
@@ -512,11 +361,6 @@ def _gh_api_finding(seg_str, endpoint=None):
         # graphql: decide on the operation (read query vs mutation/opaque), not the blunt body flag.
         if _graphql_is_read(seg_str):
             return None                               # a provable read query → allow (doctor/update read)
-        # A LITERAL project-FIELD provisioning mutation (`updateProjectV2Field`) gets a distinct kind so
-        # the init carve-out can allow init's own Status option-reconcile while every other graphql
-        # mutation (issue writes, item-value writes, opaque bodies) stays denied under init too.
-        if _graphql_is_provision(seg_str):
-            return _mk("a raw project-field provisioning GraphQL mutation", _ENGINE, "project-field-graphql")
         return _mk("a raw GraphQL board/issue mutation", _ENGINE, "graphql")
     if not _api_write_indicator(seg_str):
         return None                                   # provably a pure read → allow (doctor's audit GET)
@@ -571,6 +415,8 @@ def _ws_combos(command):
         return _mk("a raw `gh pr edit`", _FINISH, "pr-edit")
     if _has(c, "gh project item-delete"):
         return _mk("a raw `gh project item-delete` board mutation", _ENGINE, "project-item-delete")
+    if _has(c, "gh project create"):
+        return _mk("a raw `gh project create` board mutation", _ENGINE, "project-create")
     if _has(c, "gh project field-create"):
         return _mk("a raw `gh project field-create` board mutation", _ENGINE, "project-field-create")
     if _has(c, "gh project link"):
@@ -688,23 +534,9 @@ def _raw_segments(command):
     return [s for s in _RAW_SEP_RE.split(_join_line_continuations(command)) if s.strip()]
 
 
-def classify(command):
-    """The FIRST Finding for a raw terminal/board command that bypasses the door, or None. The RAW
-    command string is segmented on newlines/`;`/`|`/`&` FIRST (Fix 1+2 — shlex would eat the newline),
-    then EACH segment is classified on its own tokens, so gh global flags before the subcommand and a
-    decoy method flag in another segment cannot bypass the deny; a `gh api` segment is fail-closed
-    (allowed only when provably a pure read). Defense-in-depth (a segment-based fail-closed posture),
-    NOT a complete shell parser. Under the active-command posture an over-match denies in the safe
-    direction; outside an active command it is only a warning."""
-    for finding in classify_all(command):
-        return finding
-    return None
-
-
 def classify_all(command):
     """EVERY direct protected-op Finding across the raw command's segments (order-preserving, possibly
-    empty). The gate uses the full set so the /idc:uninstall carve-out can require EVERY protected
-    segment to be a teardown op (round-6 Fix 3), not just the first one classify() returns."""
+    empty). The full set preserves compounds and every write hidden behind script indirection."""
     return [h for h in (_classify_one_segment(s) for s in _raw_segments(command)) if h]
 
 
@@ -762,7 +594,7 @@ def _is_sensitive(base):
 def _opaque(display, why):
     """A refusal for a target the interlock cannot vet — named `opaque-script-indirection`, carrying
     ONLY the normalized display path + the reason (rule 7: never echo script contents)."""
-    return Finding(
+    return _Finding(
         f"an opaque interpreter target `{display}` ({why}) the interlock cannot vet "
         "[opaque-script-indirection]", _ENGINE, "opaque-script-indirection")
 
@@ -771,8 +603,8 @@ def _opaque_shell(what):
     """A refusal for a DYNAMIC inline interpreter payload the interlock cannot statically vet — a
     `bash -c`/`env -S` string carrying a shell expansion (`$VAR`/`${…}`/`$(…)`/backtick), or one nested
     past the depth bound (round-8 Fix 2). Named `opaque-shell-indirection`; carries NO payload content."""
-    return Finding(f"{what} the interlock cannot statically vet [opaque-shell-indirection]",
-                   _ENGINE, "opaque-shell-indirection")
+    return _Finding(f"{what} the interlock cannot statically vet [opaque-shell-indirection]",
+                    _ENGINE, "opaque-shell-indirection")
 
 
 def _has_shell_expansion(payload):
@@ -787,18 +619,15 @@ def _has_shell_expansion(payload):
 # never analyze Turing-complete shell, so the remaining bypass class is "hide a protected mutation
 # behind a construct the classifier cannot resolve." Rather than chase each variant, we DENY the whole
 # call whenever the command carries a dynamic construct that could execute a hidden command or redirect
-# an API surface AND cannot be statically confirmed safe: command substitution `$(…)`/backticks,
-# process substitution `<(…)`/`>(…)`, a `gh api` with a shell-expansion ENDPOINT, and a
-# BASH_ENV/ENV/*ENV/*RC-style startup-file prefix before an interpreter. Under an init/uninstall
-# carve-out the bar is absolute — ANY of these deny, because a carve-out allows ops we would otherwise
-# deny and its whole safety argument is "every segment is a statically-recognized safe op."
+# an API surface AND cannot be statically confirmed safe: a `gh api` with a shell-expansion endpoint
+# plus a write indicator, a startup-file prefix before an interpreter, or an opaque interpreter hidden
+# behind a privilege wrapper.
 def _dynamic(what):
     """A refusal for an unresolvable DYNAMIC/opaque construct that could hide a protected mutation and
     cannot be statically confirmed safe (round-9 Fix A). Named `dynamic-opaque-indirection`; carries NO
-    command content. Its kind is in NO carve-out set, so it denies during ANY active command and — a
-    fortiori — under the init/uninstall carve-outs: only fully STATIC recognized ops are ever allowed."""
-    return Finding(f"{what} the interlock cannot statically confirm safe [dynamic-opaque-indirection]",
-                   _ENGINE, "dynamic-opaque-indirection")
+    command content. It denies during any active IDC command."""
+    return _Finding(f"{what} the interlock cannot statically confirm safe [dynamic-opaque-indirection]",
+                    _ENGINE, "dynamic-opaque-indirection")
 
 
 def _is_dynamic_token(tok):
@@ -806,104 +635,6 @@ def _is_dynamic_token(tok):
     `gh api` endpoint positional whose value the shell computes at runtime (`gh api "$EP" …`), which we
     cannot statically confirm is not `graphql` / a protected REST path."""
     return bool(tok) and ("$" in tok or "`" in tok)
-
-
-def _extract_paren(command, i):
-    """`command[i]` is `(`; return `(inner, index_past_the_matching_')')` for the balanced group, or
-    `(None, len)` if it never closes. Skips quoted regions so a `)` inside a string does not miscount."""
-    depth, n, start, q = 0, len(command), i + 1, None
-    while i < n:
-        ch = command[i]
-        if q:
-            if ch == "\\" and q == '"':
-                i += 2
-                continue
-            if ch == q:
-                q = None
-            i += 1
-            continue
-        if ch in "'\"":
-            q = ch
-            i += 1
-            continue
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth -= 1
-            if depth == 0:
-                return command[start:i], i + 1
-        i += 1
-    return None, n
-
-
-def _command_substitutions(command):
-    """Every command-/process-substitution INNER command string in `command` (round-10 Fix 2), quote-
-    aware by shell rules: `$(…)` and backticks are active unquoted AND inside double quotes; process
-    substitution `<(…)`/`>(…)` only unquoted; NOTHING inside single quotes (there `$`, backtick and `(`
-    are all literal, so a single-quoted GraphQL `$var` or `(input:…)` is never a substitution). A bare
-    `$VAR`/`${VAR}` PARAMETER expansion is deliberately NOT a substitution — it interpolates a value, it
-    cannot execute a hidden command — so a static provisioning op that uses `$OWNER`/`$PROJ` is fine.
-    Returns each inner WITHOUT its delimiters so the caller can recursively classify it — a READ inner is
-    benign, a protected-WRITE inner denies. Fail-closed: an UNBALANCED `$(`/`<(` yields the rest of the
-    string as the inner (so a smuggled write in it is still classified), then the scan stops."""
-    out = []
-    i, n = 0, len(command)
-    quote = None
-    while i < n:
-        ch = command[i]
-        nxt = command[i + 1] if i + 1 < n else ""
-        if quote == "'":
-            if ch == "'":
-                quote = None
-            i += 1
-            continue
-        if quote == '"':
-            if ch == '"':
-                quote = None
-                i += 1
-            elif ch == "`":
-                j = command.find("`", i + 1)
-                out.append(command[i + 1:j] if j != -1 else command[i + 1:])
-                if j == -1:
-                    break
-                i = j + 1
-            elif ch == "$" and nxt == "(":
-                inner, i = _extract_paren(command, i + 1)
-                out.append(inner if inner is not None else command[i:])
-                if inner is None:
-                    break
-            else:
-                i += 1
-            continue
-        # unquoted
-        if ch == "\\":
-            i += 2
-            continue
-        if ch == "'":
-            quote = "'"
-            i += 1
-        elif ch == '"':
-            quote = '"'
-            i += 1
-        elif ch == "`":
-            j = command.find("`", i + 1)
-            out.append(command[i + 1:j] if j != -1 else command[i + 1:])
-            if j == -1:
-                break
-            i = j + 1
-        elif ch == "$" and nxt == "(":
-            inner, i = _extract_paren(command, i + 1)
-            out.append(inner if inner is not None else command[i:])
-            if inner is None:
-                break
-        elif ch in "<>" and nxt == "(":
-            inner, i = _extract_paren(command, i + 1)
-            out.append(inner if inner is not None else command[i:])
-            if inner is None:
-                break
-        else:
-            i += 1
-    return out
 
 
 _RAW_DYN_API_EP_RE = re.compile(r"(?<![\w-])api\s+(?:-\S+\s+)*[\"']?[`$]")
@@ -914,60 +645,6 @@ def _raw_dynamic_api_endpoint(seg_str):
     shell expansion: after `api` and any leading `-flags`, the endpoint token begins with `$`/backtick.
     The token path (`_gh_positionals`) is primary and order-robust; this only backstops a lex failure."""
     return bool(_RAW_DYN_API_EP_RE.search(seg_str))
-
-
-def _dynamic_gh_api_endpoint(seg_str):
-    """True iff a `gh api` SEGMENT's endpoint positional is a shell expansion (round-9 Fix A). Used by
-    the carve-out check to deny a dynamic-endpoint `gh api` OUTRIGHT (regardless of write indicator) —
-    under a carve-out the endpoint cannot be confirmed static, so it breaks the 'all-static' guarantee."""
-    try:
-        tokens = _lex(seg_str)
-    except ValueError:
-        return _raw_dynamic_api_endpoint(seg_str)
-    pos = _gh_positionals(tokens)
-    return bool(pos and pos[0] == "api" and len(pos) >= 2 and _is_dynamic_token(pos[1]))
-
-
-def _classify_substitution(inner, cwd, plugin_root):
-    """A deny-Finding when a command-substitution INNER command is a protected WRITE or an unresolvable
-    dynamic that could hide one; else None — a READ / benign inner is fine (round-10 Fix 2). The inner is
-    run through the FULL classifier (`collect_findings`): the direct classifier flags only protected
-    WRITES/mutations (a read returns nothing), so ANY finding means the inner mutates → deny. Also
-    fail-closed on the inner's own dynamic `gh api` endpoint (a read carries no finding but the endpoint
-    is unresolvable) and on NESTED substitutions inside the inner."""
-    for f in collect_findings(inner, cwd, plugin_root):
-        return _dynamic(f"a command substitution running {f.subject}")
-    for seg in _raw_segments(inner):
-        if _dynamic_gh_api_endpoint(seg):
-            return _dynamic("a command substitution with a shell-expansion `gh api` endpoint")
-    for nested in _command_substitutions(inner):
-        hit = _classify_substitution(nested, cwd, plugin_root)
-        if hit is not None:
-            return hit
-    return None
-
-
-def _carveout_dynamic_finding(command, cwd, plugin_root):
-    """A `dynamic-opaque-indirection` Finding when a command running UNDER an init/uninstall carve-out
-    carries a construct that breaks the carve-out's 'every op is a statically-recognized safe op'
-    guarantee — else None. A carve-out ALLOWS ops we would otherwise deny (teardown / provisioning), so:
-      * a `gh api` with a shell-expansion ENDPOINT (`gh api "$EP"`) is unresolvable → deny (round-9);
-      * a command/process substitution `$(…)`/backtick/`<(…)` is CLASSIFIED BY CONTENTS (round-10 Fix 2):
-        its inner command is recursively classified — a WRITE inner (or an unresolvable dynamic inner)
-        denies, a READ inner does NOT (so init's `existing=$(gh …read…) … field-create` is allowed).
-    The startup-file prefix and interpreter `-c`/`env -S` expansion cases stay fail-closed as their own
-    findings (never in `carve`), handled by the ordinary offenders check — they are not substitutions."""
-    # round-11 Fix 1: strip comments here too — a `$(…)`/backtick inside a shell COMMENT is not executed,
-    # so the carve-out's dynamic-construct scan must not see it (matches collect_findings' pre-strip).
-    command = _strip_shell_comments(command)
-    for seg in _raw_segments(command):
-        if _dynamic_gh_api_endpoint(seg):
-            return _dynamic("a `gh api` with a shell-expansion endpoint")
-    for inner in _command_substitutions(command):
-        hit = _classify_substitution(inner, cwd, plugin_root)
-        if hit is not None:
-            return hit
-    return None
 
 
 # Env vars a NON-interactive interpreter SOURCES before running its payload/script — bash reads
@@ -1015,7 +692,7 @@ def _inspect_target(target, cwd, plugin_root, depth, seen):
         return [_opaque(display, "a sensitive file the interlock refuses to open")]
     # Rule 5: files whose RESOLVED path is beneath the plugin's own scripts/ dir are sanctioned — do not
     # scan their bodies. Resolving first means a symlink placed under scripts/ can no longer smuggle an
-    # unscanned external target through the sanctioned carve-out.
+    # unscanned external target through this sanctioned adapter boundary.
     if plugin_root:
         scripts_dir = os.path.normpath(os.path.realpath(os.path.join(plugin_root, "scripts")))
         if real == scripts_dir or real.startswith(scripts_dir + os.sep):
@@ -1037,11 +714,11 @@ def _inspect_target(target, cwd, plugin_root, depth, seen):
     except OSError:
         return [_opaque(display, "unreadable")]
     # Collect EVERY protected op reachable inside the script body (round-6 Fix 3: a compound hidden in
-    # a FILE — `gh issue close; gh issue create` — must surface ALL segments so the uninstall carve-out
-    # can require every one to be a teardown op, not just the first). Each is wrapped with the
+    # a FILE — `gh issue close; gh issue create` — must surface ALL segments, not just the first).
+    # Each is wrapped with the
     # indirection path (rule 7: path only, never the script body), keeping its op `kind`.
-    return [Finding(f"{inner.subject}, reached indirectly via `{display}`", inner.remediation,
-                    "script-indirection", inner.kind)
+    return [_Finding(f"{inner.subject}, reached indirectly via `{display}`", inner.remediation,
+                     "script-indirection", inner.kind)
             for inner in collect_findings(body, cwd, plugin_root, depth + 1, seen | {real})]
 
 
@@ -1112,6 +789,15 @@ _EXEC_WRAPPERS = {
                                "-a", "--arg-file", "-L", "--max-lines"},        "operands": 0},
     "chrt":    {"value_opts": {"-p", "--pid"},                                  "operands": 1},
     "taskset": {"value_opts": {"-p", "--pid", "-c", "--cpu-list"},              "operands": 1},
+    # Privilege wrappers are execution wrappers too. Their value-taking options must be consumed so
+    # `sudo -u root bash FILE` / `doas -u root sh FILE` reach the interpreter instead of stopping at
+    # the user name. An unrecognized option layout that still visibly contains an interpreter falls
+    # through to the opaque-wrapper refusal in `_inspect_segment` (fail closed, never wave through).
+    "sudo":    {"value_opts": {"-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt",
+                                "-C", "--close-from", "-D", "--chdir", "-R", "--chroot",
+                                "-r", "--role", "-t", "--type", "-T", "--command-timeout"},
+                "operands": 0},
+    "doas":    {"value_opts": {"-a", "-C", "-u"},                              "operands": 0},
 }
 _OPERAND_NUMERIC_RE = re.compile(r"^\+?[0-9]")   # a DIGIT-leading operand (duration/priority/mask), never a command word
 
@@ -1330,8 +1016,57 @@ def _interpreter_plan(args):
     return payload, sources, script
 
 
+def _su_command_payload(seg):
+    """Return ``(seen_command_flag, payload)`` for BSD/GNU ``su`` command forms.
+
+    Both place ``-c/--command`` either before or after the login name; the long and short joined forms
+    are accepted too. A seen flag with no value returns ``(True, None)`` so the caller fails closed.
+    """
+    for i, tok in enumerate(seg[1:], 1):
+        if tok in ("-c", "--command"):
+            return True, seg[i + 1] if i + 1 < len(seg) else None
+        if tok.startswith("--command="):
+            return True, tok.split("=", 1)[1]
+        if tok.startswith("-c") and not tok.startswith("--") and len(tok) > 2:
+            return True, tok[2:]
+    return False, None
+
+
+def _inspect_su(seg, cwd, plugin_root, depth, seen):
+    """Inspect ``su … -c COMMAND`` or an explicit interpreter tail; fail closed if opaque."""
+    has_command, payload = _su_command_payload(seg)
+    if has_command:
+        if not payload or _has_shell_expansion(payload):
+            return [_opaque_shell("an opaque `su -c` payload")]
+        if depth + 1 > MAX_SCRIPT_DEPTH:
+            return [_opaque_shell(f"a `su -c` payload nested past depth {MAX_SCRIPT_DEPTH}")]
+        return collect_findings(payload, cwd, plugin_root, depth + 1, seen)
+
+    # Some su implementations pass trailing arguments to the login shell. If an explicit supported
+    # interpreter is visible, inspect from that token. If the layout cannot be normalized, the caller's
+    # privilege-wrapper fallback refuses it as opaque rather than letting the wrapper hide the file.
+    for i, tok in enumerate(seg[1:], 1):
+        if os.path.basename(tok) in INTERPRETERS or tok in ("source", "."):
+            return _inspect_segment(seg[i:], cwd, plugin_root, depth, seen)
+    return []
+
+
+def _opaque_privilege_interpreter(seg):
+    """An opaque sudo/doas/su layout that visibly carries an interpreter, else None."""
+    wrapper_i = next((i for i, tok in enumerate(seg)
+                      if os.path.basename(tok) in {"sudo", "doas", "su"}), None)
+    if wrapper_i is None:
+        return None
+    if any(os.path.basename(tok) in INTERPRETERS or tok in ("source", ".")
+           for tok in seg[wrapper_i + 1:]):
+        wrapper = os.path.basename(seg[wrapper_i])
+        return _opaque_shell(f"an opaque `{wrapper}` interpreter wrapper")
+    return None
+
+
 def _inspect_segment(seg, cwd, plugin_root, depth, seen):
     """List of findings for one command segment's interpreter/source invocation (rules 3–4)."""
+    original_seg = list(seg)
     # round-14: normalize the front with the SINGLE fixpoint peel — cross ordinary `VAR=val` assignments
     # and peel exec wrappers / control words (`nohup`/`timeout 5`/`stdbuf -oL`/`setsid`/`command`/`time -p`/
     # …) in ANY interleaving, stopping only at the real head OR at a leading `env` / startup-env assignment
@@ -1362,6 +1097,8 @@ def _inspect_segment(seg, cwd, plugin_root, depth, seen):
     seg = _strip_prefixes(seg)
     if not seg:
         return []
+    if os.path.basename(seg[0]) == "su":
+        return _inspect_su(seg, cwd, plugin_root, depth, seen)
     # `source FILE` / `. FILE` — a shell BUILTIN at the head (never wrapped by nohup/timeout/…), so it is
     # matched on the exact stripped head BEFORE the interpreter scan, so a target literally named `bash`
     # is inspected as a sourced file, not mistaken for an interpreter head.
@@ -1391,15 +1128,15 @@ def _inspect_segment(seg, cwd, plugin_root, depth, seen):
         for target in [*sources, *([script] if script is not None else [])]:
             out.extend(_inspect_target(target, cwd, plugin_root, depth, seen))
         return out
-    return []
+    opaque = _opaque_privilege_interpreter(original_seg)
+    return [opaque] if opaque else []
 
 
 def collect_findings(command, cwd, plugin_root, depth=0, seen=None):
     """EVERY protected-op Finding reachable from `command` — direct per-segment (classify_all) AND
     through interpreter indirection (`bash -c` payloads, `env -S` strings, resolved interpreter/source
-    FILEs). Order-preserving, possibly empty. The gate uses the FULL set so the /idc:uninstall carve-out
-    can require EVERY protected segment (including ones smuggled after an allowed teardown, or hidden in
-    a script body) to be a teardown op (round-6 Fix 3), not just the first one classify() returns."""
+    FILEs). Order-preserving, possibly empty. The full set catches every protected segment, including
+    writes smuggled after another operation or hidden in a script body."""
     if seen is None:
         seen = frozenset()
     out = []
@@ -1422,8 +1159,8 @@ def collect_findings(command, cwd, plugin_root, depth=0, seen=None):
         tokens = _lex(command)
     except ValueError:
         if _mentions_interpreter_form(command):
-            out.append(Finding("an opaque shell command the interlock could not parse "
-                               "[opaque-shell-indirection]", _ENGINE, "opaque-shell-indirection"))
+            out.append(_Finding("an opaque shell command the interlock could not parse "
+                                "[opaque-shell-indirection]", _ENGINE, "opaque-shell-indirection"))
         return out
     # Redirected script stdin (round-5 Fix 1): `bash|sh|zsh [flags] < FILE` runs FILE as its script —
     # `<` splits segments, so detect the redirect here and inspect FILE like `bash FILE`.
@@ -1440,8 +1177,19 @@ def inspect_command(command, cwd, plugin_root, depth=0, seen=None):
     `command` (directly, via a bash -c payload, or inside a resolved interpreter/source FILE), else
     None — the single-finding view over collect_findings()."""
     for finding in collect_findings(command, cwd, plugin_root, depth, seen):
-        return finding
+        return _public(finding)
     return None
+
+
+def classify(command, cwd, plugin_root, active):
+    """Public Task-3 contract: classify one Bash command in its repo/session context.
+
+    ``active`` is deliberately part of the interface because the caller uses it to choose hard-deny
+    versus warning posture. Classification itself is identical in both postures so the same raw write
+    remains visible as a warning outside an active IDC command.
+    """
+    _ = bool(active)  # normalize truthiness without changing warn-vs-deny classification
+    return inspect_command(command, cwd, plugin_root)
 
 
 def _stdin_script_targets(tokens):
@@ -1487,60 +1235,16 @@ def _gate(payload, plugin_root):
     if not isinstance(command, str) or not command.strip():
         H.pre_tool_allow()
 
-    # Collect EVERY protected op reachable from the command (direct + through indirection) so the
-    # uninstall carve-out can judge ALL of them, not just the first (round-6 Fix 3).
-    findings = collect_findings(command, cwd, plugin_root)
-    if not findings:
-        H.pre_tool_allow()
     # POSTURE: hard deny while the session owns an ACTIVE /idc:* command; warn otherwise. The deny
     # honors IDC_HOOKS_OBSERVE_ONLY=1 (the ONE debug escape) inside pre_tool_deny().
-    active = L.active_commands(cwd, session_id=payload.get("session_id"))
-    finding = findings[0]
-    # Command-keyed lifecycle carve-outs (a command may perform its OWN declared lifecycle/provisioning
-    # operations — the ops that have no engine door): /idc:uninstall owns TEARDOWN (issue close,
-    # project/board delete, item delete); /idc:init owns board PROVISIONING (field creation, repo link,
-    # the Status option-reconcile GraphQL mutation). Each is ALLOWED ONLY while THAT command is active,
-    # and ONLY when EVERY protected segment of the call is one of the ops that command legitimately owns —
-    # a single foreign mutation smuggled alongside (`gh issue close 5 && gh issue create …`, or one hidden
-    # in a `bash -c`/script body) DENIES the whole call (round-6 Fix 3). The same ops under any OTHER
-    # command, and every other protected mutation under this one, stay denied.
-    carve = None
-    if any(c.get("command") == "uninstall" for c in active):
-        carve = _UNINSTALL_TEARDOWN_KINDS
-    elif any(c.get("command") == "init" for c in active):
-        carve = _INIT_PROVISION_KINDS
-    if carve is not None:
-        # A carve-out allows the command's OWN teardown/provisioning ops only. Beside them:
-        #   * a `gh api` with a shell-expansion ENDPOINT is unresolvable → deny (round-9 Fix A); and
-        #   * a command/process substitution `$(…)`/backtick/`<(…)` is classified BY CONTENTS (round-10
-        #     Fix 2) — a WRITE inner denies, a READ inner does not (so init's own `existing=$(gh …read…)
-        #     … field-create` provisioning is allowed instead of blanket-denied).
-        # A startup-file prefix / interpreter `-c`/`env -S` expansion still surfaces as its own
-        # `dynamic-opaque-indirection`/`opaque-shell-indirection` finding (never in `carve`), caught by
-        # the offenders check below — those are unresolvable, unlike a substitution whose contents are present.
-        dyn = _carveout_dynamic_finding(command, cwd, plugin_root)
-        offenders = [dyn] if dyn is not None else [f for f in findings if f.kind not in carve]
-        if not offenders:
-            H.pre_tool_allow()               # every protected segment is this command's own STATIC op → allow
-        finding = offenders[0]               # a foreign mutation / dynamic construct rode along → deny naming IT
+    active = bool(L.active_commands(cwd, session_id=payload.get("session_id")))
+    finding = classify(command, cwd, plugin_root, active)
+    if not finding:
+        H.pre_tool_allow()
     reason = render_reason(finding, plugin_root)
     if active:
         H.pre_tool_deny(reason)
     H.pre_tool_warn(reason)       # non-active governed work: warn-inject, never blocks
-
-
-# The gh teardown ops /idc:uninstall legitimately owns (uninstall.md Phase 4): close IDC issues,
-# delete the board/project, delete board items. NOT issue create/delete, pr merge, dependency writes,
-# graphql, or item-add/item-edit — none of which uninstall performs.
-_UNINSTALL_TEARDOWN_KINDS = {"issue-close", "project-delete", "project-item-delete"}
-
-# The board-provisioning ops /idc:init legitimately owns (init.md Phase 4): create the v2 fields
-# (`gh project field-create`), link the board to the repo (`gh project link`), and the Status
-# option-reconcile GraphQL mutation (`updateProjectV2Field`, tagged `project-field-graphql`). NOT
-# item-add/item-edit/item-delete, project delete, issue/pr writes, dependency writes, or issue/item
-# graphql mutations — none of which init performs raw (the Stage-option append routes through
-# idc_stage_options.py). A command may perform its own declared provisioning operations.
-_INIT_PROVISION_KINDS = {"project-field-create", "project-link", "project-field-graphql"}
 
 
 if __name__ == "__main__":

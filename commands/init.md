@@ -100,15 +100,19 @@ provisioning, and the receipt are this command's agent-driven phases.)
 ## Phase 4 — Provision (or link) the board (github backend)
 Decide create-vs-link:
 - `tracker-config.yaml` already carries a real integer `project_number` → **link**: reuse,
-  verify reachable with `gh project view <n> --owner <owner>`.
-- Else find an existing board titled `"<PROJECT_NAME> IDC Tracker"` via
-  `gh project list --owner <owner> --format json --limit 200` (always pass `--limit`; the
-  default 30 can silently truncate and create a duplicate). Otherwise **create**:
+  assign it to `TRACKER_PROJECT_NUMBER`, set `PROJECT_ACTION=configured`, and verify it is reachable
+  with `gh project view <n> --owner <owner>`.
+- Otherwise use the GitHub tracker adapter's exact-title create/reuse door. It lists all boards
+  (with an explicit 200-board limit), refuses duplicate title matches, creates only when none exists,
+  and positively reads the selected board back:
   ```bash
-  gh project create --owner "$OWNER" --title "$PROJECT_NAME IDC Tracker" --format json
+  PROJECT_RECEIPT=$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gh_board.py" ensure-project \
+    --repo "$PWD" --owner "$OWNER" --title "$PROJECT_NAME IDC Tracker") || exit $?
+  TRACKER_PROJECT_NUMBER=$(printf '%s' "$PROJECT_RECEIPT" | jq -er '.number') || exit $?
+  PROJECT_ACTION=$(printf '%s' "$PROJECT_RECEIPT" | jq -er '.action') || exit $?
   ```
-  Capture `number` (→ `TRACKER_PROJECT_NUMBER`) and the node `id`/`url`. Derive
-  `OWNER=$(gh repo view --json owner -q .owner.login)`.
+  Keep the receipt's `number`, node `id`, `url`, and `action` (`created` or
+  `skipped-existing`). Derive `OWNER=$(gh repo view --json owner -q .owner.login)`.
 
 Provision the **five** v2 fields — but **gate every board mutation behind the provenance check
 first**. The destructive risk is concentrated in one place (reconciling the built-in single-select
@@ -127,9 +131,14 @@ found — no fields added, not linked. Single-selects need ≥1 option at creati
 **Provenance gate (run first — it decides whether this board is safe to provision at all).**
 Reconcile the built-in `Status` to the four v2 values — **gated by board provenance** (the
 option-replacement mutation is destructive: it re-IDs every option and wipes item values;
-see `idc:idc-tracker-github`). Get the `Status` field node id + current options from
-`gh project field-list <n> --owner "$OWNER" --format json --limit 50`, then take exactly one:
-- **Board created this run** → safe: replace the option set with the full desired list
+see `idc:idc-tracker-github`). Run the adapter door before every other board mutation:
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gh_board.py" reconcile-status \
+  --repo "$PWD" --owner "$OWNER" --project "$TRACKER_PROJECT_NUMBER" || exit $?
+```
+The helper reads the current field and item count itself; it accepts no caller-supplied "created"
+bypass. It then takes exactly one path:
+- **Board created this run** (therefore still observed empty) → safe: replace the option set with the full desired list
   (`Blocked`, `Todo`, `In Progress`, `Done`) via the `updateProjectV2Field` GraphQL mutation.
 - **Linked board, options already exactly those four** → no-op (`skipped-existing`); never
   re-send (same-name replacement still re-IDs + wipes).
@@ -138,21 +147,23 @@ see `idc:idc-tracker-github`). Get the `Status` field node id + current options 
   proceed; ≥1 → **STOP** before any further mutation — leave the board untouched **and unlinked**
   (no fields added, not linked), record an operator action pointing at the snapshot→mutate→rebuild
   SOP in `idc:idc-tracker-github`.
-If the built-in field cannot be updated by your gh version, do not delete it (the API forbids
-deleting the built-in `Status`); record an operator action to set the four options in the web UI,
-then continue (not a STOP — the board is conformant enough to provision).
+After any update, the helper re-reads the options and accepts only the exact four-option result.
+If the field cannot be updated or read back, **STOP** and record an operator action; never delete
+the built-in `Status` or bypass the helper with a raw GraphQL mutation.
 
 **Past the gate — add the other four fields** (`Stage`, `Wave`, `Phase`, `Domain`). **Idempotent —
-create only what's missing:** `gh project field-create` does *not* dedupe, so on a linked board that
-already carries these a blind re-create would add a second same-named field. Re-read the field list
-and skip names that already exist:
+create only what's missing.** The adapter refuses duplicate same-named fields and positively reads
+every create back. Repeat `--option "<domain>"` once for each Phase-1 derived domain:
 ```bash
-existing=$(gh project field-list <n> --owner "$OWNER" --format json --limit 50 --jq '.fields[].name')
-have() { printf '%s\n' "$existing" | grep -qx "$1"; }
-have Stage  || gh project field-create <n> --owner "$OWNER" --name "Stage"  --data-type SINGLE_SELECT --single-select-options "Consideration,Planning,Buildable,Recirculation"
-have Wave   || gh project field-create <n> --owner "$OWNER" --name "Wave"   --data-type SINGLE_SELECT --single-select-options "Wave 1"
-have Phase  || gh project field-create <n> --owner "$OWNER" --name "Phase"  --data-type SINGLE_SELECT --single-select-options "Phase 1"
-have Domain || gh project field-create <n> --owner "$OWNER" --name "Domain" --data-type SINGLE_SELECT --single-select-options "<domain1>,<domain2>,..."
+BOARD_DOOR="${CLAUDE_PLUGIN_ROOT}/scripts/idc_gh_board.py"
+python3 "$BOARD_DOOR" ensure-field --repo "$PWD" --owner "$OWNER" --project "$TRACKER_PROJECT_NUMBER" \
+  --name Stage --option Consideration --option Planning --option Buildable --option Recirculation || exit $?
+python3 "$BOARD_DOOR" ensure-field --repo "$PWD" --owner "$OWNER" --project "$TRACKER_PROJECT_NUMBER" \
+  --name Wave --option "Wave 1" || exit $?
+python3 "$BOARD_DOOR" ensure-field --repo "$PWD" --owner "$OWNER" --project "$TRACKER_PROJECT_NUMBER" \
+  --name Phase --option "Phase 1" || exit $?
+python3 "$BOARD_DOOR" ensure-field --repo "$PWD" --owner "$OWNER" --project "$TRACKER_PROJECT_NUMBER" \
+  --name Domain --option "<domain1>" --option "<domain2>" || exit $?
 ```
 
 **Reconcile the `Stage` options — append `Recirculation` to a pre-3.1.0 board (additive,
@@ -191,18 +202,14 @@ This is the **last** post-gate mutation — linking is what publishes the board 
 the ≥1-item STOP the board is deliberately left *unlinked*: init couldn't complete the tracker
 contract, so it must not publish a half-provisioned, non-conforming board to the repo. The board number is resolved by now regardless of create-vs-link, so one idempotent
 step covers both. Check first; skip if already linked (re-link errors on some `gh` versions);
-report `linked` / `skipped-existing`:
+report `linked` / `skipped-existing`. The adapter verifies the project, reads the repo's links,
+writes only when absent, and reads the link back:
 ```bash
 OWNER=$(gh repo view --json owner -q .owner.login)
 REPO=$(gh repo view --json name -q .name)
-# Repo-rooted probe: is THIS board already among the repo's linked projects?
-linked=$(gh api graphql -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){projectsV2(first:100){nodes{number}}}}' \
-  -f o="$OWNER" -f r="$REPO" --jq '.data.repository.projectsV2.nodes[].number' 2>/dev/null)
-if printf '%s\n' "$linked" | grep -qx "$TRACKER_PROJECT_NUMBER"; then
-  :  # already linked → skipped-existing
-else
-  gh project link "$TRACKER_PROJECT_NUMBER" --owner "$OWNER" --repo "$OWNER/$REPO"  # → linked
-fi
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gh_board.py" ensure-link \
+  --repo "$PWD" --owner "$OWNER" --project "$TRACKER_PROJECT_NUMBER" \
+  --repository "$OWNER/$REPO" || exit $?
 ```
 
 Cache the contract: substitute the project number, then write each field's node `id` into

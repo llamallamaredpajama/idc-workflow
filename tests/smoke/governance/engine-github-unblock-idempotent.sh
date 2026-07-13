@@ -81,6 +81,60 @@ except E.TransitionError:
 assert removed3 == [], f"an illegal unblock REMOVED the dependency before refusing (unjournaled partial mutation): {removed3}"
 assert 7 in present.get(5, set()), f"the #7->#5 edge was removed by a REFUSED unblock: {present}"
 print("  ok an illegal unblock source (In Progress) refuses with NO dependency removal (Fix 3)")
+
+# ---- rubber-stamp Fix 4: BOTH dependency representations are blocking + positively read back -------
+# A marker lookup/delete/readback failure is a dependency-removal failure, not a non-fatal cleanup.
+# The dispatcher must therefore leave Status Blocked. After a partial native-edge success, a rerun
+# skips that already-absent native DELETE, resumes marker cleanup, and only then advances Status.
+present = {5: {7}}
+marker_ids = [501]
+status_writes = []
+status = ["Blocked"]
+native_deletes = []
+def _remove_native(child, parent, r):
+    native_deletes.append((child, parent)); present.get(int(child), set()).discard(int(parent))
+B.blocked_by_numbers = lambda child, r: sorted(present.get(int(child), set()))
+B.remove_blocked_by = _remove_native
+def _marker_read_fail(child, parent, r):
+    raise B.BoardReadError("marker read unavailable")
+B.blocked_by_comment_ids = _marker_read_fail
+B.fetch_item = lambda item_id, r: {"stage": "Consideration", "status": status[0]}
+def _set_status(*args):
+    status_writes.append(args); status[0] = args[-1]
+B.set_status = _set_status
+try:
+    E.run("unblock", ctx, num=5, to_status="Todo", by=7)
+    print("FAIL: marker-read failure did NOT fail the unblock"); sys.exit(1)
+except B.BoardReadError:
+    pass
+assert native_deletes == [(5, 7)], native_deletes
+assert status_writes == [], f"Status advanced despite an unverified marker representation: {status_writes}"
+assert marker_ids == [501]
+
+# Rerun: native is already absent (no second DELETE); marker deletion lands and its second read proves
+# absence before the Status write is permitted.
+marker_reads = []
+def _marker_ids(child, parent, r):
+    marker_reads.append(tuple(marker_ids)); return list(marker_ids)
+def _delete_marker(comment_id, r):
+    marker_ids.remove(comment_id)
+B.blocked_by_comment_ids = _marker_ids
+B.delete_comment = _delete_marker
+E.run("unblock", ctx, num=5, to_status="Todo", by=7)
+assert native_deletes == [(5, 7)], f"rerun re-deleted already-absent native edge: {native_deletes}"
+assert marker_reads == [(501,), ()], f"marker removal lacked positive absence readback: {marker_reads}"
+assert len(status_writes) == 1, f"Status did not advance after BOTH representations were absent: {status_writes}"
+
+# A delete that returns without removing the marker must still fail closed on readback.
+marker_ids[:] = [777]
+B.delete_comment = lambda comment_id, r: None
+try:
+    E._gh_remove_dep(ctx, child=5, parent=7)
+    print("FAIL: a marker still present after delete was reported as removed"); sys.exit(1)
+except E.TransitionError:
+    pass
+assert marker_ids == [777]
+print("  ok marker cleanup is blocking, read-back verified, and resumable before Status changes")
 PY
 
 echo "PASS: github unblock --by is idempotent — the absent-first rerun skips the DELETE and completes, a present edge is removed exactly once"

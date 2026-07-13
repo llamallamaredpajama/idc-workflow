@@ -217,24 +217,23 @@ deny "EP=graphql; gh api \"\$EP\" -f query='mutation{closeIssue(input:{issueId:\
 deny "BASH_ENV='$FIXTURE/fire_gate.sh' bash -c 'echo hi'"
 deny "ENV='$FIXTURE/fire_gate.sh' sh -c 'echo hi'"
 deny "env BASH_ENV='$FIXTURE/fire_gate.sh' bash -c 'echo hi'"
-# a DYNAMIC-endpoint gh api READ (no write indicator) stays ALLOWED outside a carve-out (never over-blocks).
+# a DYNAMIC-endpoint gh api READ (no write indicator) stays ALLOWED (never over-blocks reads).
 allow "gh api \"\$EP\" --jq .foo"
 
-echo "== round-5 Fix 2: /idc:uninstall's own teardown ops are ALLOWED during an ACTIVE uninstall =="
-# The hard deny must not brick uninstall's documented --close-issues / --delete-board steps. The
-# allowance is keyed on the ACTIVE command being `uninstall`; the SAME raw ops under any other command
-# stay denied, and non-teardown mutations stay denied even during uninstall.
+echo "== raw lifecycle writes are DENIED during an ACTIVE uninstall =="
+# Uninstall performs its opt-in teardown through idc_gh_board.py. Raw issue/project writes have no
+# command-name exception: their target cannot be trusted merely because `uninstall` is active.
 SUN="sun-$$-$(basename "$WORK")"
 python3 "$CONTRACT" start --repo "$REPO" --session "$SUN" --command uninstall \
   --plugin-root "$GOV_PLUGIN" --args 'teardown' --source user >/dev/null \
   || gov_fail "could not open the active /idc:uninstall command record for $SUN"
 
-allow_under() {  # allow_under <session> <cmd> — must NOT deny or warn.
+allow_under() {  # allow_under <session> <cmd> — sanctioned adapter call must NOT deny or warn.
   gate "$2" "$1"
   [ "$RC" -eq 0 ] || gov_fail "ALLOW expected exit 0 but got $RC: [$2]"
   [ -z "$OUT" ] || gov_fail "ALLOW expected no permission decision but got one: [$2] => [$OUT]"
-  grep -q 'IDC interlock' "$ERR" && gov_fail "ALLOW wrongly flagged during uninstall: [$2] => [$(cat "$ERR")]"
-  echo "  ok allow (uninstall teardown): $2"
+  grep -q 'IDC interlock' "$ERR" && gov_fail "ALLOW wrongly flagged sanctioned adapter call: [$2] => [$(cat "$ERR")]"
+  echo "  ok allow (sanctioned adapter): $2"
 }
 deny_under() {  # deny_under <session> <cmd> — must hard-deny under that session.
   gate "$2" "$1"
@@ -242,99 +241,75 @@ deny_under() {  # deny_under <session> <cmd> — must hard-deny under that sessi
   echo "  ok deny: $2"
 }
 
-# uninstall OWNS these teardown ops → ALLOWED while an uninstall command is active.
-allow_under "$SUN" "gh issue close 5"
-allow_under "$SUN" "gh project delete 8 --owner o"
-allow_under "$SUN" "gh project item-delete 8 --owner o --id PVTI_X"
-# The SAME teardown ops under a NON-uninstall active command (think = S1) stay DENIED (keyed on uninstall).
+# Even uninstall's intended raw teardown forms are denied.
+deny_under "$SUN" "gh issue close 5"
+deny_under "$SUN" "gh project delete 8 --owner o"
+deny_under "$SUN" "gh project item-delete 8 --owner o --id PVTI_X"
+# The same forms remain denied under every other active command.
 deny_under "$S1" "gh issue close 5"
 deny_under "$S1" "gh project delete 8 --owner o"
-# Non-teardown mutations stay DENIED even DURING uninstall (the allowance is scoped to what it owns).
+# Other protected writes stay denied too.
 deny_under "$SUN" "gh issue create --title x --body-file /tmp/b"
 deny_under "$SUN" "gh pr merge 12 --squash"
 deny_under "$SUN" "gh api repos/o/r/issues/707/dependencies/blocked_by/708 -X DELETE"
 deny_under "$SUN" "gh project item-edit --id X --project-id Y --field-id F --single-select-option-id O"
-# round-6 Fix 3: a forbidden mutation SMUGGLED after an allowed teardown must DENY the WHOLE call —
-# EVERY segment must be a teardown op, not just the first one classification happens to return.
+# Compounds and indirection remain denied in full.
 deny_under "$SUN" "gh issue close 5 && gh issue create --title x --body-file /tmp/b"
 deny_under "$SUN" "gh issue close 5 && gh api repos/o/r/issues/707/dependencies/blocked_by/708 -X DELETE"
 deny_under "$SUN" "bash -c 'gh issue close 5; gh api graphql --input mutation.json'"
-# round-7 Fix 2: a `gh \`+newline+`issue create` smuggled after an allowed teardown must DENY the whole
-# call — line-continuations are collapsed before segmentation, so the joined `gh issue create` is seen.
+# A `gh \`+newline+`issue create` is joined before classification and denied.
 deny_under "$SUN" $'gh issue close 5 && gh \\\nissue create --title x --body-file /tmp/b'
-# A compound of teardown-ONLY ops stays allowed under uninstall (the carve-out still works).
-allow_under "$SUN" "gh issue close 5 && gh project item-delete 8 --owner o --id PVTI_X"
-# round-9 Fix A (finding 3): a $()-command-substitution / backtick smuggled into an ALLOWED teardown op's
-# ARGUMENT executes the inner mutation before the outer close — a carve-out allows ONLY fully STATIC
-# recognized ops, so ANY dynamic construct DENIES the whole call. Red-when-broken: drop the carve-out
-# dynamic guard → the inner `gh issue create` rides along inside the --comment value and the deny stops.
+# A compound containing only intended teardown writes is still raw and denied.
+deny_under "$SUN" "gh issue close 5 && gh project item-delete 8 --owner o --id PVTI_X"
+# Command substitutions do not weaken the raw-write denial.
 deny_under "$SUN" "gh issue close 5 --comment \"\$(gh issue create --title x --body x)\""
 deny_under "$SUN" "gh issue close 5 --comment \"\`gh issue create --title x --body x\`\""
 
-echo "== round-8 Fix 3: /idc:init's OWN board provisioning is ALLOWED during an ACTIVE init =="
-# Symmetric to the uninstall teardown carve-out: a command may perform its OWN declared
-# lifecycle/provisioning ops. Init opens its lifecycle record after creating tracker-config, then
-# provisions the board — field creation, project link, and the Status option-reconcile GraphQL
-# mutation have no engine door, so the hard deny would brick a governed Init. They are ALLOWED ONLY
-# while an `init` command is active; the SAME raw ops under any other command stay DENIED, and every
-# OTHER protected mutation stays denied even during init. Red-when-broken: drop the init carve-out →
-# the provisioning allow_under cases start denying.
+echo "== raw lifecycle writes are DENIED during an ACTIVE init =="
+# Init provisions through idc_gh_board.py. Raw create/field/link/GraphQL writes have no active-command
+# exception and therefore cannot target an unrelated board under cover of Init.
 SIN="sin-$$-$(basename "$WORK")"
 python3 "$CONTRACT" start --repo "$REPO" --session "$SIN" --command init \
   --plugin-root "$GOV_PLUGIN" --args 'provision' --source user >/dev/null \
   || gov_fail "could not open the active /idc:init command record for $SIN"
 
-# init OWNS these provisioning ops → ALLOWED while an init command is active.
-allow_under "$SIN" 'gh project field-create 5 --owner o --name Stage --data-type SINGLE_SELECT --single-select-options "Consideration,Planning,Buildable,Recirculation"'
-allow_under "$SIN" 'gh project link 5 --owner o --repo o/r'
-allow_under "$SIN" "gh api graphql -f query='mutation{updateProjectV2Field(input:{fieldId:\"F\",singleSelectOptions:[{name:\"Todo\",color:GRAY}]}){projectV2Field{id}}}'"
-# The SAME provisioning ops under a NON-init active command (think = S1) stay DENIED (keyed on init).
+# Even Init's intended raw provisioning forms are denied.
+deny_under "$SIN" 'gh project create --owner o --title "x IDC Tracker" --format json'
+deny_under "$SIN" 'gh project field-create 5 --owner o --name Stage --data-type SINGLE_SELECT --single-select-options "Consideration,Planning,Buildable,Recirculation"'
+deny_under "$SIN" 'gh project link 5 --owner o --repo o/r'
+deny_under "$SIN" "gh api graphql -f query='mutation{updateProjectV2Field(input:{fieldId:\"F\",singleSelectOptions:[{name:\"Todo\",color:GRAY}]}){projectV2Field{id}}}'"
+# The same forms remain denied under every other active command.
 deny_under "$S1" 'gh project field-create 5 --owner o --name Stage --data-type SINGLE_SELECT --single-select-options "Consideration"'
 deny_under "$S1" 'gh project link 5 --owner o --repo o/r'
 deny_under "$S1" "gh api graphql -f query='mutation{updateProjectV2Field(input:{fieldId:\"F\"}){projectV2Field{id}}}'"
-# Every OTHER protected mutation stays DENIED even DURING init (the carve-out is scoped to provisioning).
+# Every other protected mutation stays denied during Init.
 deny_under "$SIN" 'gh issue create --title x --body-file /tmp/b'
 deny_under "$SIN" 'gh pr merge 12 --squash'
 deny_under "$SIN" 'gh project item-edit --id X --project-id Y --field-id F --single-select-option-id O'
 deny_under "$SIN" 'gh project delete 8 --owner o'
 deny_under "$SIN" "gh api graphql -f query='mutation{updateIssue(input:{id:\"I\",state:CLOSED}){issue{id}}}'"
 
-echo "== round-9 Fix A (finding 3): a dynamic construct beside an ALLOWED provisioning op DENIES under init =="
-# A $()-command-substitution / process-substitution smuggled into an allowed `gh project link` argument
-# executes the inner mutation — under init only fully STATIC provisioning ops are allowed. Red-when-broken:
-# drop the carve-out dynamic guard → the inner `gh issue create` rides along inside --repo and allows.
+echo "== dynamic constructs beside raw provisioning writes remain DENIED under init =="
 deny_under "$SIN" "gh project link 5 --owner o --repo \"\$(gh issue create --title x --body x)\""
 deny_under "$SIN" "gh project link 5 --owner o --repo <(gh issue create --title x)"
 
-echo "== round-9 Fix B: init's graphql provisioning carve-out classifies the ROOT mutation, not a substring =="
-# The carve-out must key on the REAL root mutation field, not any substring of the query text. A sanctioned
-# provisioning name appearing only in a trailing GraphQL COMMENT does NOT qualify (root is closeIssue → the
-# whole call DENIES under init); a real root `updateProjectV2Field` still qualifies (ALLOW). Red-when-broken:
-# revert _graphql_is_provision to the whole-value substring scan → the comment-smuggle is misclassified as
-# provisioning and allowed under init.
+echo "== GraphQL provisioning-shaped mutations receive no Init exception =="
+# Both a foreign root and a genuine project-field root are raw writes and denied.
 deny_under "$SIN" "gh api graphql -f query='mutation{closeIssue(input:{issueId:\"I\"}){issue{id}}} # updateProjectV2Field'"
-allow_under "$SIN" "gh api graphql -f query='mutation{updateProjectV2Field(input:{fieldId:\"F\"}){projectV2Field{id}}}'"
+deny_under "$SIN" "gh api graphql -f query='mutation{updateProjectV2Field(input:{fieldId:\"F\"}){projectV2Field{id}}}'"
 
-echo "== round-10 Fix 2: a command substitution is CLASSIFIED BY CONTENTS, not blanket-denied =="
-# Round-9 blanket-denied ANY substitution under a carve-out, which bricked init's own provisioning
-# (it reads current fields via `existing=$(gh …read…)` before `field-create`). Now the INNER command
-# of each `$(…)`/backtick/`<(…)` is classified: a READ inner does not deny; a WRITE inner denies.
-# Red-when-broken: revert to the blanket substitution deny → these read-inner ALLOWs start denying.
-# init's real provisioning shape: read the field list in a substitution, then create the missing field.
-allow_under "$SIN" "existing=\$(gh project field-list 5 --owner o --format json --jq '.fields[].name'); gh project field-create 5 --owner o --name Stage --data-type SINGLE_SELECT --single-select-options X"
-allow_under "$SIN" "linked=\$(gh api graphql -f query='query(\$o:String!,\$r:String!){repository(owner:\$o,name:\$r){projectsV2(first:100){nodes{number}}}}' -f o=o -f r=r --jq .data); gh project link 5 --owner o --repo o/r"
-# a READ-inner substitution beside an allowed teardown op is likewise fine under uninstall.
-allow_under "$SUN" "gh issue close 5 --comment \"\$(gh issue view 6 --json title --jq .title)\""
-# but a WRITE-inner substitution STILL denies (the inner `gh issue create` runs before the outer op) —
-# under init (regression: `gh project link … "\$(gh issue create …)"`) AND uninstall (backtick form).
+echo "== substitutions do not hide a raw lifecycle write =="
+deny_under "$SIN" "existing=\$(gh project field-list 5 --owner o --format json --jq '.fields[].name'); gh project field-create 5 --owner o --name Stage --data-type SINGLE_SELECT --single-select-options X"
+deny_under "$SIN" "linked=\$(gh api graphql -f query='query(\$o:String!,\$r:String!){repository(owner:\$o,name:\$r){projectsV2(first:100){nodes{number}}}}' -f o=o -f r=r --jq .data); gh project link 5 --owner o --repo o/r"
+# A benign inner read cannot make the raw outer close legal.
+deny_under "$SUN" "gh issue close 5 --comment \"\$(gh issue view 6 --json title --jq .title)\""
+# A write inner also denies.
 deny_under "$SIN" "gh project field-create 5 --owner o --name S --data-type SINGLE_SELECT --single-select-options \"\$(gh issue create --title x --body x)\""
 deny_under "$SUN" "gh issue close 5 --comment \"\`gh issue create --title x --body x\`\""
 
-echo "== round-10 Fix 2: init's ACTUAL provisioning code fences (from commands/init.md) pass under active init =="
-# Not synthetic commands: extract every ```bash fence from commands/init.md that performs board
-# provisioning (field-create / project link) and assert the gate does NOT deny it under an active init.
-# This is the real-surface proof the review demanded (a green synthetic test hid the broken real fence).
-# Red-when-broken: re-break the substitution/control-word handling → a real fence denies → this FAILs.
+echo "== init's ACTUAL sanctioned provisioning fences pass under active init =="
+# Extract the shipped idc_gh_board lifecycle calls, not synthetic commands. They are allowed because
+# the helper validates scope and performs the GitHub subprocess behind the adapter door.
 INITMD="$GOV_PLUGIN/commands/init.md"
 [ -f "$INITMD" ] || gov_fail "commands/init.md not found at $INITMD"
 # Bash 3.2-compatible (macOS /bin/bash is 3.2.57, no `mapfile`): read one JSON-line
@@ -346,7 +321,7 @@ import re, sys, json
 text = open(sys.argv[1], encoding="utf-8").read()
 for m in re.finditer(r"```bash\n(.*?)```", text, re.S):
     body = m.group(1)
-    if re.search(r"gh project (?:field-create|link)\b", body):
+    if re.search(r"idc_gh_board\.py.*\b(?:ensure-field|ensure-link)\b", body, re.S):
         print(json.dumps(body))
 PY
 )
@@ -358,18 +333,14 @@ for f in "${FENCES[@]}"; do
   echo "  ok init.md provisioning fence allowed under active init"
 done
 
-echo "== round-10 Fix 3: init's graphql carve-out requires EVERY root mutation field to be provisioning =="
-# _graphql_root_mutation_field returned only the FIRST root field, so a multi-root mutation that pairs
-# a provisioning field with a foreign write (closeIssue) was misclassified as provisioning and allowed
-# under init while ALSO closing an issue. Now EVERY comment-stripped root field must be sanctioned.
-# Red-when-broken: revert to first-root-only → the mixed multi-root mutation is allowed under init.
+echo "== multi-root GraphQL mutations receive no Init exception =="
 deny_under "$SIN" "gh api graphql -f query='mutation{updateProjectV2Field(input:{fieldId:\"F\"}){projectV2Field{id}} closeIssue(input:{issueId:\"I\"}){issue{id}}}'"
-# an all-provisioning multi-root mutation (every root field sanctioned) still qualifies → ALLOWED.
-allow_under "$SIN" "gh api graphql -f query='mutation{updateProjectV2Field(input:{fieldId:\"F\"}){projectV2Field{id}} createProjectV2Field(input:{}){projectV2Field{id}}}'"
+# Even an all-project-field multi-root mutation is raw and denied.
+deny_under "$SIN" "gh api graphql -f query='mutation{updateProjectV2Field(input:{fieldId:\"F\"}){projectV2Field{id}} createProjectV2Field(input:{}){projectV2Field{id}}}'"
 
 echo "== round-10 Fix 4: leading shell CONTROL WORDS do not hide a segment's command head =="
 # `else gh project link …` (init.md:201 uses this natural form) hid `gh` as the head, so `project link`
-# fell through and was ALLOWED under Think though it is init-only. Now leading control words/keywords
+# fell through and was allowed under Think. Now leading control words/keywords
 # (if/then/else/elif/fi/do/done/while/for/case/{/(/!/time) are skipped to find the real head.
 # Red-when-broken: drop the control-word strip → `else gh project link` classifies as non-gh → allowed
 # under Think.
@@ -377,8 +348,8 @@ deny 'else gh project link 5 --owner o --repo o/r'
 deny 'then gh issue create --title x --body-file /tmp/b'
 deny '! gh issue create --title x --body-file /tmp/b'
 deny 'time gh project field-create 5 --owner o --name S --data-type SINGLE_SELECT --single-select-options X'
-# but under an ACTIVE init the control-word-prefixed provisioning op is its OWN op → ALLOWED (init.md:201).
-allow_under "$SIN" 'else gh project link 5 --owner o --repo o/r'
+# The same raw write is denied under active Init too.
+deny_under "$SIN" 'else gh project link 5 --owner o --repo o/r'
 
 echo "== round-11 Fix 1: shell COMMENTS are stripped QUOTE-AWARE before classification =="
 # A benign command carrying an INLINE comment that mentions the forbidden `gh api graphql -f query="$MUT"`
@@ -479,8 +450,8 @@ deny 'setsid gh issue create --title x --body-file /tmp/b'
 deny 'nice -n 10 gh issue close 5'
 # under an ACTIVE init the wrapped provisioning op is init's OWN static op → ALLOWED (wrapper-agnostic
 # both ways).
-allow_under "$SIN" 'nohup gh project field-create 5 --owner o --name Stage --data-type SINGLE_SELECT --single-select-options "Consideration,Planning,Buildable,Recirculation"'
-allow_under "$SIN" 'nohup gh project link 5 --owner o --repo o/r'
+deny_under "$SIN" 'nohup gh project field-create 5 --owner o --name Stage --data-type SINGLE_SELECT --single-select-options "Consideration,Planning,Buildable,Recirculation"'
+deny_under "$SIN" 'nohup gh project link 5 --owner o --repo o/r'
 # a wrapped READ stays allowed (the scan flags only protected WRITE combos, never a read).
 allow 'nohup gh issue view 5'
 
@@ -586,9 +557,24 @@ allow "FOO=1 nohup env -S 'gh issue view 5'"
 allow "FOO=1 nohup bash '$GOV_PLUGIN/scripts/idc_transition.py'"
 allow "A=1 B=2 timeout 5 bash '$GOV_PLUGIN/scripts/idc_transition.py'"
 
+echo "== rubber-stamp Fix 3: privilege wrappers cannot hide interpreter FILEs or payloads =="
+deny "sudo bash '$FIXTURE/fire_gate.sh'"
+deny "sudo -u root sh '$FIXTURE/fire_gate.sh'"
+deny "doas zsh '$FIXTURE/fire_gate.sh'"
+deny "doas -u root bash '$FIXTURE/fire_gate.sh'"
+deny "su -c \"bash '$FIXTURE/fire_gate.sh'\" root"
+deny "su root -c \"sh '$FIXTURE/fire_gate.sh'\""
+deny "su --command=\"gh issue create --title gate --body-file /tmp/body\" root"
+
 echo "== the sanctioned write door is never denied =="
 allow "python3 '$GOV_PLUGIN/scripts/idc_transition.py' --repo '$REPO' create-ticket --title safe --stage Buildable --status Todo"
 allow "python3 '$GOV_PLUGIN/scripts/idc_pr_finish.py' autonomous --repo '$REPO' --pr 12 --kind planning"
+allow_under "$SIN" "python3 '$GOV_PLUGIN/scripts/idc_gh_board.py' ensure-project --repo '$REPO' --owner o --title 'x IDC Tracker'"
+allow_under "$SIN" "python3 '$GOV_PLUGIN/scripts/idc_gh_board.py' reconcile-status --repo '$REPO' --owner o --project 5"
+allow_under "$SIN" "python3 '$GOV_PLUGIN/scripts/idc_gh_board.py' ensure-field --repo '$REPO' --owner o --project 5 --name Stage --option Consideration --option Planning --option Buildable --option Recirculation"
+allow_under "$SIN" "python3 '$GOV_PLUGIN/scripts/idc_gh_board.py' ensure-link --repo '$REPO' --owner o --project 5 --repository o/r"
+allow_under "$SUN" "python3 '$GOV_PLUGIN/scripts/idc_gh_board.py' close-project-issues --repo '$REPO' --owner o --project 5"
+allow_under "$SUN" "python3 '$GOV_PLUGIN/scripts/idc_gh_board.py' delete-project --repo '$REPO' --owner o --project 5 --confirm 5"
 # Fix 2: the sanctioned engine doors that REPLACE the now-denied raw item-edit / blocked_by POST.
 allow "python3 '$GOV_PLUGIN/scripts/idc_transition.py' --repo '$REPO' set-field --num 5 --field Wave --value W1"
 allow "python3 '$GOV_PLUGIN/scripts/idc_transition.py' --repo '$REPO' link --parent 7 --child 5 --kind blocks"

@@ -103,16 +103,27 @@ awk '/path: WORKFLOW.md/{f=1} f&&/state:/{print; exit}' "$CUSTRECEIPT" | grep -q
 awk '/path: sub\/nested.txt/{f=1} f&&/state:/{print; exit}' "$CUSTRECEIPT" | grep -q 'stamped' \
   || fail "non-customized file should keep state: stamped"
 
-# --- doctor.md Row 5's receipt-ok check must enforce the rule it states (Finding 5): a
-# receipt_version: 2 receipt without a valid plugin_version is NOT clean. This is the exact
-# snippet from commands/doctor.md's Row 5 — keep the two in sync if either changes.
+# --- doctor.md Row 5's receipt-ok check must enforce the rule it states (Finding 5, round-2
+# Finding 3): a receipt_version: 2 receipt without a valid plugin_version is NOT clean, and a
+# receipt_version outside {1, 2} is NOT clean either. Rather than a hand-copied snippet (which
+# would stay green even if the REAL check in commands/doctor.md were weakened or removed), extract
+# the actual fenced bash block from doctor.md's Row 5 and evaluate it verbatim — this test is
+# bound to the shipped prose itself.
+D="$PLUGIN/commands/doctor.md"
+[ -f "$D" ] || fail "commands/doctor.md missing"
+DOCTOR_CHECK_SRC="$(python3 - "$D" <<'PY'
+import re, sys
+text = open(sys.argv[1], encoding="utf-8").read()
+for block in re.findall(r"```bash\n(.*?)```", text, re.S):
+    if "echo receipt-ok" in block:
+        sys.stdout.write(block)
+        break
+PY
+)"
+[ -n "$DOCTOR_CHECK_SRC" ] || fail "doctor.md Row 5's receipt-ok check block was not found (removed or renamed?) — this test must bind to the real check, not a copy"
+
 receipt_ok() {
-  ( cd "$SBX" && \
-    test -f docs/workflow/install-receipt.yaml \
-    && grep -Eq '^fingerprint_method:[[:space:]]*sha256' docs/workflow/install-receipt.yaml \
-    && { ! grep -Eq '^receipt_version:[[:space:]]*2$' docs/workflow/install-receipt.yaml \
-         || grep -Eq '^plugin_version:[[:space:]]*[0-9]+\.[0-9]+\.[0-9]+$' docs/workflow/install-receipt.yaml; } \
-    && echo receipt-ok )
+  ( cd "$SBX" && eval "$DOCTOR_CHECK_SRC" )
 }
 
 printf 'receipt_version: 2\nplugin_version: 4.1.0\nfingerprint_method: sha256\nwritten_by: test\nfiles:\n' > "$RECEIPT"
@@ -130,5 +141,20 @@ printf 'receipt_version: 2\nplugin_version: not-semver\nfingerprint_method: sha2
 printf 'receipt_version: 1\nfingerprint_method: sha256\nwritten_by: test\nfiles:\n' > "$RECEIPT"
 [ "$(receipt_ok)" = "receipt-ok" ] \
   || fail "doctor.md Row 5 check must still print receipt-ok for a v1 receipt (no plugin_version required)"
+
+printf 'receipt_version: 3\nplugin_version: 4.1.0\nfingerprint_method: sha256\nwritten_by: test\nfiles:\n' > "$RECEIPT"
+[ -z "$(receipt_ok)" ] \
+  || fail "doctor.md Row 5 check must NOT print receipt-ok for a receipt_version outside {1,2} (round-2 Finding 2/doctor gap)"
+
+# --- stamp: --plugin-version is REQUIRED — omitting it must fail loud, not silently write a
+# receipt with a guessed version (round-2 Finding 4: every OTHER smoke stamp call supplies the
+# flag, so a silently-restored auto-resolve fallback would otherwise stay invisible).
+NOFLAG_RECEIPT="$SBX/no-plugin-version-receipt.yaml"
+rm -f "$NOFLAG_RECEIPT"
+python3 "$HELPER" stamp --repo "$SBX" --out "$NOFLAG_RECEIPT" --written-by idc:update \
+  WORKFLOW.md >/dev/null 2>&1
+rc=$?
+[ "$rc" -ne 0 ] || fail "stamp without --plugin-version must exit non-zero (it is a required flag)"
+[ ! -f "$NOFLAG_RECEIPT" ] || fail "stamp without --plugin-version must not write a receipt file"
 
 echo "PASS: receipt helper stamps an init-compatible receipt + verify classifies drift (fail-loud)"

@@ -81,14 +81,17 @@ ls WORKFLOW.md WORKFLOW-config.yaml docs/workflow/pillar-matrices docs/workflow/
 A partial tree is a FAIL that lists the missing paths. Fix hint: run `/idc:init`.
 
 **5 — Install receipt present.** PASS if `docs/workflow/install-receipt.yaml` exists and
-parses with the expected keys (`receipt_version` — `1` legacy or `2`, `fingerprint_method:
-sha256`, `files[]`, and — for a `2` receipt — a valid `plugin_version`, the version that last
-stamped this repo and the value `/idc:update`'s stale-runtime guard reads as this repo's
-required version). A `2` receipt is **not clean** without a `plugin_version` matching
-`X.Y.Z` — the check below enforces that rule rather than only checking `fingerprint_method`:
+parses with the expected keys (`receipt_version` — exactly `1` legacy or `2`, no other value,
+`fingerprint_method: sha256`, `files[]`, and — for a `2` receipt — a valid `plugin_version`, the
+version that last stamped this repo and the value `/idc:update`'s stale-runtime guard reads as
+this repo's required version). A `2` receipt is **not clean** without a `plugin_version`
+matching `X.Y.Z`, and a receipt whose `receipt_version` is anything other than `1` or `2`
+(including absent or blank) is **not clean** either — the check below enforces both rules
+rather than only checking `fingerprint_method`:
 ```bash
 test -f docs/workflow/install-receipt.yaml \
   && grep -Eq '^fingerprint_method:[[:space:]]*sha256' docs/workflow/install-receipt.yaml \
+  && grep -Eq '^receipt_version:[[:space:]]*(1|2)$' docs/workflow/install-receipt.yaml \
   && { ! grep -Eq '^receipt_version:[[:space:]]*2$' docs/workflow/install-receipt.yaml \
        || grep -Eq '^plugin_version:[[:space:]]*[0-9]+\.[0-9]+\.[0-9]+$' docs/workflow/install-receipt.yaml; } \
   && echo receipt-ok
@@ -97,12 +100,13 @@ If absent → **SKIP** with the note "pre-receipt install — run `/idc:init` to
 receipt" (a filesystem-only or pre-receipt repo is valid; do not hard-FAIL). A `receipt_version:
 1` receipt (no `plugin_version`) still PASSes here — it has no recorded required-version yet
 and is migrated to `2` the next time `/idc:init` or `/idc:update` stamps a fresh one; do not
-treat it as drift. A `receipt_version: 2` receipt with a missing or malformed `plugin_version`
-(the check above does not print `receipt-ok`) → **FAIL** with the note "invalid v2 receipt —
-missing/malformed plugin_version; this is the same invalid-receipt state `/idc:update`'s
-freshness guard refuses to run against (exit 2) — repair or re-stamp it (`/idc:init` or
-`/idc:update`) before continuing." Do **not** recompute or verify fingerprints here — that is
-update's job; doctor only checks presence and parse.
+treat it as drift. A `receipt_version: 2` receipt with a missing or malformed `plugin_version`,
+or any receipt whose `receipt_version` is not `1` or `2` (including absent or blank) — anything
+the check above does not print `receipt-ok` for — → **FAIL** with the note "invalid receipt —
+receipt_version must be 1 or 2, and a `2` receipt requires a valid plugin_version; this is the
+same invalid-receipt state `/idc:update`'s freshness guard refuses to run against (exit 2) —
+repair or re-stamp it (`/idc:init` or `/idc:update`) before continuing." Do **not** recompute or
+verify fingerprints here — that is update's job; doctor only checks presence and parse.
 
 **6 — Pi runtime (optional).** The IDC Pi runtime (`runtime/pi/`, vendored) needs **Bun** to
 boot the coms-net hub + role harness; the **Pi agent** itself (the `pi` binary / npm package

@@ -29,9 +29,11 @@ Usage:
     --json               emit dataclasses.asdict(FreshnessResult) instead of the legacy one-liner.
 Exit 0 = current, development-current, or unknown (safe to proceed); 4 = stale-runtime (running
 version is behind the repo's receipt or the installed cache); 2 = usage error OR an invalid
-receipt (a `receipt_version: 2` repo receipt whose `plugin_version` is missing or not X.Y.Z — a
-v1 receipt, or no receipt at all, is NOT invalid: it yields required_version=None, the documented
-pre-guard migration path, and is allowed).
+receipt — a `receipt_version: 2` repo receipt whose `plugin_version` is missing or not exactly
+X.Y.Z, or ANY receipt whose `receipt_version` is not `1` or `2` (including absent/blank on an
+existing receipt file). A valid `receipt_version: 1` receipt, or no receipt at all, is NOT
+invalid: it yields required_version=None, the documented pre-guard migration path, and is
+allowed.
 """
 from __future__ import annotations
 
@@ -41,14 +43,16 @@ import os
 import re
 import sys
 
-_VER = re.compile(r"^\d+(\.\d+)*$")
+_VER = re.compile(r"^\d+\.\d+\.\d+$")
 
 
 class InvalidReceiptError(ValueError):
     """Raised when a repo's install-receipt.yaml cannot be trusted for freshness evaluation:
     specifically, a `receipt_version: 2` receipt whose `plugin_version` is missing or does not
-    match `_VER`. A v1 receipt (or no receipt) is NOT an error — it is the documented pre-guard
-    migration path and yields required_version=None (see read_required_version)."""
+    match `_VER` (exactly X.Y.Z), or a receipt whose `receipt_version` is anything other than
+    `1` or `2` (including absent or blank). A valid `receipt_version: 1` receipt (or no receipt
+    at all) is NOT an error — it is the documented pre-guard migration path and yields
+    required_version=None (see read_required_version)."""
 
 
 def version_tuple(v: str) -> tuple[int, ...]:
@@ -96,13 +100,18 @@ def evaluate(plugin_root: str, repo: str | None = None,
 def read_required_version(repo: str | None) -> str | None:
     """Read the repo's required plugin_version from its install receipt.
 
-    Reads `receipt_version` FIRST to decide how to treat a missing/malformed `plugin_version`:
-      * receipt_version != "2" (v1, or absent/garbled — no receipt file at all also lands here)
-        — no requirement was ever recorded; this is the documented migration path, so return
-        None (allowed) rather than erroring.
+    Reads `receipt_version` FIRST to decide how to treat the rest of the receipt. Only TWO cases
+    are the documented "no requirement recorded yet" migration path and return None (allowed):
+      * no repo, or no receipt file at all.
+      * a receipt whose `receipt_version` is exactly `1` (v1 predates `plugin_version`).
+    Every other receipt_version — `2` (see below), any other value (e.g. `3`), or missing/blank
+    — is either validated or treated as an INVALID receipt (never fail open to "no requirement"):
       * receipt_version == "2" — plugin_version is a REQUIRED, binding field. Missing or not
-        matching `_VER` means the receipt itself is invalid (never fail open to "no
-        requirement"); raise so the CLI can surface it as exit 2.
+        matching `_VER` (exactly X.Y.Z) means the receipt itself is invalid; raise so the CLI
+        can surface it as exit 2.
+      * receipt_version not in {"1", "2"} (including absent or blank on an existing receipt
+        file) — the receipt makes a version claim this reader does not understand; raise rather
+        than silently falling through to the v1/no-receipt migration path.
     """
     if not repo:
         return None
@@ -116,14 +125,18 @@ def read_required_version(repo: str | None) -> str | None:
             receipt_version = line.split(":", 1)[1].strip()
         elif line.startswith("plugin_version:"):
             plugin_version = line.split(":", 1)[1].strip()
-    if receipt_version != "2":
+    if receipt_version == "1":
         return None
-    if not plugin_version or not _VER.fullmatch(plugin_version):
-        raise InvalidReceiptError(
-            f"{receipt}: receipt_version: 2 requires a valid plugin_version (X.Y[.Z...]), "
-            f"got {plugin_version!r}"
-        )
-    return plugin_version
+    if receipt_version == "2":
+        if not plugin_version or not _VER.fullmatch(plugin_version):
+            raise InvalidReceiptError(
+                f"{receipt}: receipt_version: 2 requires a valid plugin_version (X.Y.Z), "
+                f"got {plugin_version!r}"
+            )
+        return plugin_version
+    raise InvalidReceiptError(
+        f"{receipt}: receipt_version must be 1 or 2, got {receipt_version!r}"
+    )
 
 
 def cache_version_root(plugin_root: str) -> bool:

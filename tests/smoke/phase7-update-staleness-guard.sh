@@ -123,6 +123,16 @@ printf 'receipt_version: 2\nplugin_version: not-semver\nfingerprint_method: sha2
 out="$(python3 "$HELPER" --plugin-root "$CACHE/4.0.0" --repo "$BADREPO" --json 2>&1)"; rc=$?
 [ "$rc" -eq 2 ] || fail "a v2 receipt with a non-semver plugin_version must exit 2 (invalid receipt); got $rc — [$out]"
 
+# 8b. A v2 receipt with a NUMERIC BUT MALFORMED plugin_version — not exactly X.Y.Z (three
+#     components) — is equally invalid -> exit 2. The version pattern must match the writer rule
+#     in idc_receipt_check.py exactly, not any loose dotted-numeric run (round-2 review Finding 1).
+for bad in 4.1 4.1.0.0; do
+  printf 'receipt_version: 2\nplugin_version: %s\nfingerprint_method: sha256\nwritten_by: test\nfiles: []\n' "$bad" \
+    > "$BADREPO/docs/workflow/install-receipt.yaml"
+  out="$(python3 "$HELPER" --plugin-root "$CACHE/4.0.0" --repo "$BADREPO" --json 2>&1)"; rc=$?
+  [ "$rc" -eq 2 ] || fail "a v2 receipt with plugin_version=$bad (not exactly X.Y.Z) must exit 2 (invalid receipt); got $rc — [$out]"
+done
+
 # 9. A well-formed v1 receipt (receipt_version: 1, no plugin_version) is NOT invalid — it's the
 #    documented pre-guard migration path: required_version stays None and the load is allowed.
 #    Distinct from the intentionally-INVALID v1 receipt exercised in phase7-lifecycle.sh (bad
@@ -137,5 +147,27 @@ printf '%s' "$out" | grep -q '"required_version": null' \
   || fail "a v1 receipt must yield required_version=null (no requirement recorded yet) — got: $out"
 assert_field "$out" 'verdict": "current' "v1 receipt + the newest cached running version should still verdict current"
 assert_field "$out" 'reason_code": "versions-current' "v1 receipt case reason_code must be versions-current"
+
+# 10. A receipt_version NOT in {1, 2} — e.g. 3 — is an INVALID receipt, not "no requirement
+#     recorded". The ONLY legitimate "allowed migration -> required_version=None" cases are no
+#     receipt at all and a valid receipt_version: 1 (round-2 review Finding 2). Must exit 2, never
+#     fail open to 0/stale.
+printf 'receipt_version: 3\nplugin_version: 4.0.0\nfingerprint_method: sha256\nwritten_by: test\nfiles: []\n' \
+  > "$BADREPO/docs/workflow/install-receipt.yaml"
+out="$(python3 "$HELPER" --plugin-root "$CACHE/4.0.0" --repo "$BADREPO" --json 2>&1)"; rc=$?
+[ "$rc" -eq 2 ] || fail "a receipt_version: 3 receipt must exit 2 (invalid receipt), not fail open; got $rc — [$out]"
+
+# 11. A receipt file that exists but has NO receipt_version field at all must be equally invalid
+#     -> exit 2 (must not silently fall through to the v1/no-receipt migration path).
+printf 'fingerprint_method: sha256\nwritten_by: test\nfiles: []\n' \
+  > "$BADREPO/docs/workflow/install-receipt.yaml"
+out="$(python3 "$HELPER" --plugin-root "$CACHE/4.0.0" --repo "$BADREPO" --json 2>&1)"; rc=$?
+[ "$rc" -eq 2 ] || fail "a receipt with no receipt_version field must exit 2 (invalid receipt); got $rc — [$out]"
+
+# 12. A receipt_version key present but BLANK (empty value) must also be exit 2, not treated as v1.
+printf 'receipt_version:\nfingerprint_method: sha256\nwritten_by: test\nfiles: []\n' \
+  > "$BADREPO/docs/workflow/install-receipt.yaml"
+out="$(python3 "$HELPER" --plugin-root "$CACHE/4.0.0" --repo "$BADREPO" --json 2>&1)"; rc=$?
+[ "$rc" -eq 2 ] || fail "a blank receipt_version must exit 2 (invalid receipt); got $rc — [$out]"
 
 echo "PASS: idc_plugin_freshness.py flags a stale-session load (numeric compare) and never blocks dev/unknown"

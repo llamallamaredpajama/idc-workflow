@@ -29,7 +29,7 @@ this handoff; if they disagree, report the conflict before changing code.
 | Baseline | — | `dd170ff` | plan+runbook+forensics |
 | 1. Runtime freshness → repo receipt | ✅ DONE | `dd170ff..50c5bcc` (`5629c3e`,`2c7c195`,`50c5bcc`) | Spec PASS / Quality APPROVED (3 rounds) |
 | 2. Command lifecycle envelope | ✅ DONE | `50c5bcc..503b6c7` (`6401fb4`,`d723453`,`f1402af`,`fe7a771`,`939ae49`,`503b6c7`) | Spec PASS / Quality APPROVED (6 rounds) |
-| 3. Hard mutation interlock + PR finisher | ✅ DONE (see note) | `503b6c7..HEAD` (20 commits through the round-18 checkpoint; first rubber-stamp fix `c484d1d`) | Three rubber-stamp reviews found actionable gaps. Their reported cases are fixed at the current Task-3 head; no independent post-fix verdict is recorded here. |
+| 3. Hard mutation interlock + PR finisher | ✅ DONE (see note) | `503b6c7..HEAD` (21 commits through the final smoke-receipt refresh; first rubber-stamp fix `c484d1d`) | Three rubber-stamp reviews found actionable gaps. Their reported cases are fixed at the current Task-3 head; no independent post-fix verdict is recorded here. |
 | 4. Exact-once intake manifest | ⏳ TODO | — | — |
 | 5. Next-action oracle | ⏳ TODO | — | — |
 | 6. `/idc:intake` + command-specific closeouts | ⏳ TODO | — | — |
@@ -39,12 +39,11 @@ this handoff; if they disagree, report the conflict before changing code.
 **Latest Task-3 implementation checkpoint: PASS** — real `/bin/bash` 3.2.57 ran the round-18
 execution-surface regression, command-head, public-contract, privilege-wrapper, lifecycle-door, and
 full interlock scenarios successfully. An explicit central-path break made the new scenario fail and
-the restored path returned green. `/bin/bash tests/smoke/run-all.sh` finished
-`idc smoke: ALL GREEN` (37 behavior · 22 mixed · 10 doc) before the final numeric-IO-adjacency and
-parenthesized-pipe hardening. Those last two roles have focused Bash-3.2 coverage, but that earlier
-full run does not prove the final tree; the controller must rerun it on the final commit.
-`lint-references: CLEAN` remained the pre-commit gate. This is implementation evidence, not an
-independent clean-review verdict.
+the restored path returned green. The controller independently ran
+`/bin/bash tests/smoke/run-all.sh` on exact code commit
+`249a8423464aed0520fcba79f4cdf3ae9602d043`: exit 0, `idc smoke: ALL GREEN`
+(37 behavior · 22 mixed · 10 doc). `lint-references: CLEAN` remained the pre-commit gate. This is
+verification evidence, not a clean independent review verdict.
 
 ### Task 3 note (why it took 14 review rounds plus three rubber-stamp fixes, and its terminal posture)
 Task 3 is the security-critical guard that must deny the incident's raw `gh` mutations and

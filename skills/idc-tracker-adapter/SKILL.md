@@ -42,12 +42,14 @@ verdict-guarded path to Done; idempotent), and `dispose(ticket, disposition)` (t
 guarded path to Done — gate approval / pointer retirement / recirc-drain retirement). A seventh
 core op is a contract change requiring a recirculation.
 
-**Create AND status-changing ops route through the transition engine.** `createTicket`, `setField(…,
-Status, …)`, `move`, `claim`, `block`, `close`, `dispose`, and `unblock` are engine ops: dispatch
-them via `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_transition.py"` (both backends), which validates
-machine-legality, verifies the write's read-back, and journals every op to
-`docs/workflow/transition-journal.ndjson` — the record the janitor's board↔journal reconciliation
-replays.
+**Every board mutation routes through the transition engine.** `createTicket`, `setField` (Status via
+`move`; the non-Status fields Wave/Phase/Domain/Stage via `set-field`), `link`, `move`, `claim`,
+`block`, `close`, `dispose`, and `unblock` are engine ops: dispatch them via `python3
+"${CLAUDE_PLUGIN_ROOT}/scripts/idc_transition.py"` (both backends), which validates machine-legality,
+verifies the write's read-back, and journals every op to `docs/workflow/transition-journal.ndjson` —
+the record the janitor's board↔journal reconciliation replays. The backend skills' raw `gh` recipes
+are engine-internal mechanics — a role never runs a raw `gh project item-edit` / `gh api
+…/dependencies/blocked_by` (the mutation interlock denies them during an active command).
 
 - **Minting an item** — `createTicket` (a Buildable), the **consideration pointer**, and a
   **Recirculation intake** ticket dispatch through the engine's create ops — `create-ticket`
@@ -56,6 +58,12 @@ replays.
   comment + read-back sequence atomically, so every minted item lands normalized (never
   Stage-without-Status) and journaled. The engine is the only create door.
   A role **never** hand-mints an item with a raw `gh issue create` / `gh project item-add` / filesystem `create`.
+- **Setting a non-Status field** — `setField(ticket, Wave|Phase|Domain|Stage, value)` dispatches to
+  the engine's `set-field` op (resolves ids, writes the single-select value, journals it); never a raw `gh project item-edit`.
+  A Status change is a transition — use `move` (`set-field` refuses Status).
+- **Creating a block** — `link(parent, child, blocks)` dispatches to the engine's `link` op, which
+  writes BOTH the native GitHub blocked-by edge (what the drain reads) AND the marker, fail-closing if
+  the native edge does not land; never a raw `dependencies/blocked_by` POST.
 - **Removing a block** — `unblock --num <blocked> --by <gate>` removes the `gate blocks <blocked>`
   dependency (verified absent) and then moves the blocked item `Blocked → Todo` in one guarded op;
   never a raw dependency edit.
@@ -63,7 +71,7 @@ replays.
 `Done` is reachable ONLY through a guarded terminal op — `close` (a passing, item-owning
 verdict) for built work, or `dispose --disposition {gate-approved|retired|drained}` (its
 deterministic evidence guard) for the non-verdict terminal dispositions. The backend skills' raw
-helpers stay the mechanics for reads and non-Status fields only.
+helpers stay the mechanics for **reads only** — every board *mutation* goes through an engine op.
 
 ### Merge lease (single-holder serialization)
 

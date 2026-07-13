@@ -75,7 +75,7 @@ from idc_journal_replay import reconstruct_state_from_journal, journal_item_id, 
 # REQUIRES a `-`/`/` separator (`build-*`/`build/*`) so a foreign name that merely starts with the
 # letters "build" — buildbot, buildkite, builder-x — is NOT misread as IDC. (`worktree-build-*` is still
 # covered by the `worktree-` alternative.)
-IDC_NAME_RE = re.compile(r"^(idc-|build[-/]|plan/|recirculate/|worktree-)")
+IDC_NAME_RE = re.compile(r"^(idc-|build[-/]|plan/|recirculate/|recirc/|worktree-)")
 # Known non-IDC tooling, labelled for a readable REPORT-ONLY line (the tier is binary IDC/not — this
 # only annotates WHICH foreign tool, so the operator can route it; an unmatched foreign name is "unknown").
 FOREIGN_TOOLS = (

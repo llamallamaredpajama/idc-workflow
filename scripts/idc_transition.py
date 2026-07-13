@@ -1127,6 +1127,16 @@ def _fs_set_status(machine, tracker, num, status):
     verify_readback(num, None, status, obs["stage"], obs["status"])   # Stage untouched; verify Status landed
 
 
+def _fs_set_field(tracker, num, field, value):
+    """Set a NON-Status field (`Wave`/`Phase`/`Domain`/`Stage`) on the filesystem tracker via its `set`
+    op — the fs analogue of _gh_set_field. Status is a transition (route through `move`)."""
+    if field == "Status":
+        raise TransitionError("set-field: Status is a transition — use `move --to-status`, not set-field")
+    r = _trk(tracker, "set", "--num", str(num), "--field", field, "--value", value)
+    if r.returncode != 0:
+        raise TransitionError(f"set-field {field}={value!r} on #{num} failed: {r.stderr.strip()[:160]}")
+
+
 def _fs_comment(tracker, num, body):
     r = _trk(tracker, "comment", "--num", str(num), "--body", body)
     if r.returncode != 0:
@@ -1201,13 +1211,34 @@ def _gh_close(ctx, num):
 
 
 def _gh_link(ctx, parent, child, kind):
-    """Record a dependency on github durably as a parseable comment marker on the CHILD (github has no
-    first-class blocks field on the project board; this mirrors the filer's Blocks-parent body line
-    and is read by the recirculator/acceptance). A native GitHub issue-dependency edge is a further
-    enhancement — the dependency IS recorded today."""
+    """Record a `parent blocks child` dependency on github durably, through BOTH representations of a
+    blocks edge: (1) the NATIVE GitHub issue-dependencies `blocked_by` relation — the ONLY one the
+    autorun drain's dependency gate reads — created + verified-present FIRST (fail-closed on a
+    still-absent edge so the caller never believes a block landed when it didn't); (2) the engine's
+    parseable comment marker on the CHILD (read by the dispose guards / recirculator). Every REST call
+    runs through idc_gh_board (the engine subprocess), never the Bash tool — so no role-facing recipe
+    runs a raw `blocked_by` POST and the interlock's deny of that raw command never bricks Plan. A
+    non-blocks kind (`sub`) records only the marker (grouping, no dependency edge)."""
+    if kind == "blocks":
+        idc_gh_board.add_blocked_by(int(child), int(parent), ctx["repo"])
+        if int(parent) not in idc_gh_board.blocked_by_numbers(int(child), ctx["repo"]):
+            raise TransitionError(
+                f"link: native blocked-by edge #{parent}->#{child} did not land after the POST "
+                "— refusing to record a block that the drain would not see")
     marker = json.dumps({"child": int(child), "parent": int(parent), "kind": kind}, ensure_ascii=False)
     idc_gh_board.add_comment(int(child), f"Blocked-by: #{int(parent)} ({kind})\n"
                              f"<!-- idc-blocked-by: {marker} -->", ctx["repo"])
+
+
+def _gh_set_field(ctx, num, field, value):
+    """Set a NON-Status single-select field (`Wave`/`Phase`/`Domain`/`Stage`) on github, then READ
+    BACK and verify Status/Stage are untouched — the sanctioned `set-field` write primitive (replaces
+    the raw `gh project item-edit` recipe the interlock now denies). Status is NOT settable here — a
+    Status change is a machine transition; route it through `move` so it is journaled + guarded."""
+    if field == "Status":
+        raise TransitionError("set-field: Status is a transition — use `move --to-status`, not set-field")
+    iid = _gh_item_id(ctx, num)
+    idc_gh_board.set_single_select(ctx["owner"], ctx["project"], ctx["repo"], iid, field, value)
 
 
 def _gh_remove_dep(ctx, child, parent):
@@ -1216,8 +1247,14 @@ def _gh_remove_dep(ctx, child, parent):
     verifies via a native read-back, then best-effort cleans the engine's marker comment. Raises on a
     still-present native edge so the caller leaves Status Blocked. Every REST call runs through
     idc_gh_board (the engine subprocess), never the Bash tool — the interlock never sees a raw
-    dependency DELETE."""
-    idc_gh_board.remove_blocked_by(int(child), int(parent), ctx["repo"])
+    dependency DELETE.
+
+    IDEMPOTENT rerun (Fix 5): checks ABSENCE FIRST — if the edge is already gone (a rerun after "edge
+    removed but the Status write failed"), it SKIPS the DELETE (which GitHub may 404) and proceeds, so
+    the rerun deterministically completes the remaining Blocked->Todo Status move. Only a still-present
+    edge is DELETEd; a still-present edge after the DELETE still raises (Status stays Blocked)."""
+    if int(parent) in idc_gh_board.blocked_by_numbers(int(child), ctx["repo"]):
+        idc_gh_board.remove_blocked_by(int(child), int(parent), ctx["repo"])
     if int(parent) in idc_gh_board.blocked_by_numbers(int(child), ctx["repo"]):
         raise TransitionError(
             f"unblock: #{parent} still blocks #{child} after removal — refusing to unblock (Status stays Blocked)")
@@ -1242,6 +1279,15 @@ def set_status(ctx, machine, num, status):
         _gh_set_status(ctx, machine, num, status)
     else:
         _fs_set_status(machine, ctx["tracker"], num, status)
+
+
+def set_field(ctx, num, field, value):
+    """Set a NON-Status single-select field (Wave/Phase/Domain/Stage) — the `set-field` op, both
+    backends. Status is refused (a transition — use `move`)."""
+    if ctx["backend"] == "github":
+        _gh_set_field(ctx, num, field, value)
+    else:
+        _fs_set_field(ctx["tracker"], num, field, value)
 
 
 def record_owner(ctx, num, agent):
@@ -1390,6 +1436,15 @@ def run(op, ctx, **kw):
         journal_append(ctx["repo"], op, backend, tracker_rel,
                        dict(kw, to_status=spec.get("to_status"), to_stage=term_stage), cur=cur)
 
+    elif kind == "field":
+        num = kw["num"]
+        field = kw["field"]
+        value = kw["value"]
+        # A non-Status single-select field write (Wave/Phase/Domain/Stage) through the sanctioned door,
+        # so no role runs a raw `gh project item-edit` (now denied by the interlock during a command).
+        set_field(ctx, num, field, value)
+        journal_append(ctx["repo"], op, backend, tracker_rel, kw)
+
     elif kind == "link":
         do_link(ctx, kw["parent"], kw["child"], kw.get("kind", "blocks"))
         journal_append(ctx["repo"], op, backend, tracker_rel, kw)
@@ -1474,6 +1529,13 @@ def build_parser():
     mv.add_argument("--num", type=int, required=True)
     mv.add_argument("--to-status", dest="to_status", required=True)
 
+    # `set-field` — the sanctioned NON-Status single-select field write (Wave/Phase/Domain/Stage). A
+    # Status change is a transition — use `move`; set-field refuses Status.
+    sf = sub.add_parser("set-field")
+    sf.add_argument("--num", type=int, required=True)
+    sf.add_argument("--field", required=True, help="Wave | Phase | Domain | Stage (NOT Status — use move)")
+    sf.add_argument("--value", required=True)
+
     ub = sub.add_parser("unblock")
     ub.add_argument("--num", type=int, required=True)
     ub.add_argument("--by", type=int, default=None,
@@ -1533,6 +1595,8 @@ def main():
         kw = {"num": args.num, "agent": args.agent}
     elif op == "move":
         kw = {"num": args.num, "to_status": args.to_status}
+    elif op == "set-field":
+        kw = {"num": args.num, "field": args.field, "value": args.value}
     elif op == "unblock":
         kw = {"num": args.num, "to_status": "Todo", "by": args.by}
     elif op == "close":

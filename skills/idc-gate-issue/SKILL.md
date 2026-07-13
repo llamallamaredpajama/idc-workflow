@@ -97,8 +97,9 @@ dependent to `Status=Todo` (never a raw dependency edit).
 > **Mechanized tail — `idc_pr_finish.py requirements`.** Steps "confirm the Think PR merged → guarded
 > dispose → unblock the dependents" are exactly the sanctioned PR finisher's `requirements` mode
 > (github — the Think PR is a github artifact; forward the same backend flags the engine tail needs):
-> `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_pr_finish.py" --repo "$PWD" --backend github --owner
-> "$OWNER" --project "$PROJ" requirements --pr <think-PR> --gate <gate#> --pointer <dependent#>`. On an **already-merged** Think PR (the async/web-merge
+> `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_pr_finish.py" requirements --repo "$PWD" --backend github
+> --owner "$OWNER" --project "$PROJ" --pr <think-PR> --gate <gate#> --pointer <dependent#>` (the
+> subcommand comes FIRST — the shared flags live on it). On an **already-merged** Think PR (the async/web-merge
 > path) it re-verifies the gate's single bound `idc-gate-pr` marker, runs the guarded
 > `dispose --disposition gate-approved`, then the `unblock` — dispose FIRST, and if the dispose fails
 > it never unblocks. For an **in-session** approval where the operator has given an unambiguous GO but

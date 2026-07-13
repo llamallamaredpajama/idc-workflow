@@ -177,19 +177,27 @@ def cmd_requirements(args):
 
 def build_parser():
     p = argparse.ArgumentParser(description="The sanctioned PR finisher (merge + optional guarded tail).")
-    p.add_argument("--repo", default=".", help="the governed repo root (gh infers owner/repo from its git remote)")
-    p.add_argument("--backend", choices=["filesystem", "github"], default=None,
-                   help="engine backend for the dispose/unblock tail (requirements mode)")
-    p.add_argument("--tracker", default=None, help="TRACKER.md path (filesystem backend)")
-    p.add_argument("--owner", default=None, help="github project owner (for the engine tail)")
-    p.add_argument("--project", default=None, help="github project number (for the engine tail)")
+    # The shared options live on a `parents=` parser attached to EACH subcommand, so the documented
+    # subcommand-FIRST form parses: `idc_pr_finish.py autonomous --repo R --pr N --kind planning`
+    # (with argparse, an option defined only on the PARENT parser must precede the subcommand — the
+    # exact mismatch that made `autonomous --repo …` exit 2 `unrecognized arguments: --repo`).
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--repo", default=".",
+                        help="the governed repo root (gh infers owner/repo from its git remote)")
+    common.add_argument("--backend", choices=["filesystem", "github"], default=None,
+                        help="engine backend for the dispose/unblock tail (requirements mode)")
+    common.add_argument("--tracker", default=None, help="TRACKER.md path (filesystem backend)")
+    common.add_argument("--owner", default=None, help="github project owner (for the engine tail)")
+    common.add_argument("--project", default=None, help="github project number (for the engine tail)")
     sub = p.add_subparsers(dest="mode", required=True)
 
-    a = sub.add_parser("autonomous", help="merge a planning/recirculation/intake PR (closes no tracker item)")
+    a = sub.add_parser("autonomous", parents=[common],
+                       help="merge a planning/recirculation/intake PR (closes no tracker item)")
     a.add_argument("--pr", type=int, required=True)
     a.add_argument("--kind", choices=sorted(KIND_PREFIX), required=True)
 
-    r = sub.add_parser("requirements", help="merge the bound gate PR then guarded dispose-before-unblock")
+    r = sub.add_parser("requirements", parents=[common],
+                       help="merge the bound gate PR then guarded dispose-before-unblock")
     r.add_argument("--pr", type=int, required=True)
     r.add_argument("--gate", type=int, required=True)
     r.add_argument("--pointer", type=int, required=True)

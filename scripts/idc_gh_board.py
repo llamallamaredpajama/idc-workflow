@@ -434,22 +434,32 @@ def fetch_item(item_id, repo="."):
     return _flatten(node)
 
 
-def set_status(owner, project, repo, item_id, status):
-    """Set a project item's Status single-select field to `status` (by name) — the github `move`/
-    terminal write primitive. Resolves the project node id + the Status field/option by name (like
-    idc_gh_close), then one item-edit. Raises BoardWriteError if the option is absent, BoardReadError/
-    RateLimitError on gh failure. Read-back is the caller's job (the engine re-reads via fetch_item)."""
+def set_single_select(owner, project, repo, item_id, field_name, option_name):
+    """Set ANY single-select field (`Status`, `Wave`, `Phase`, `Domain`, `Stage`) on a project item to
+    an option BY NAME — the one sanctioned github field-write primitive. Resolves the project node id +
+    the field/option ids (item-edit --project-id needs the PVT_ node id, NOT the integer number), then
+    one item-edit. Raises BoardWriteError if the field/option is absent, BoardReadError/RateLimitError
+    on gh failure. Read-back is the caller's job (the engine re-reads via fetch_item). This is the door
+    the engine's `move` (Status) and `set-field` (non-Status) ops drive — no role-facing recipe runs a
+    raw `gh project item-edit`, so the interlock's deny of that raw command never bricks Plan."""
     pnode = _resolve_project_node_id(owner, project, repo)
     fields_out = _gh(["project", "field-list", str(project), "--owner", owner, "--format", "json"], repo)
     try:
         fields = (json.loads(fields_out) or {}).get("fields") or []
     except json.JSONDecodeError as e:
-        raise BoardWriteError(f"unparseable field list ({e}) — refusing to set Status")
-    fid, oid = _field_and_option(fields, "Status", status)
+        raise BoardWriteError(f"unparseable field list ({e}) — refusing to set {field_name}")
+    fid, oid = _field_and_option(fields, field_name, option_name)
     if not (fid and oid):
-        raise BoardWriteError(f"Status field or option {status!r} not on the board — refusing to set Status")
+        raise BoardWriteError(f"{field_name} field or option {option_name!r} not on the board "
+                              f"— refusing to set {field_name}")
     _gh(["project", "item-edit", "--id", item_id, "--project-id", pnode,
          "--field-id", fid, "--single-select-option-id", oid], repo)
+
+
+def set_status(owner, project, repo, item_id, status):
+    """Set a project item's Status single-select field to `status` (by name) — the github `move`/
+    terminal write primitive; a thin alias over set_single_select for the Status field."""
+    set_single_select(owner, project, repo, item_id, "Status", status)
 
 
 def add_comment(issue_num, body, repo="."):
@@ -481,6 +491,21 @@ def blocked_by_numbers(child, repo="."):
     out = _gh(["api", f"repos/{{owner}}/{{repo}}/issues/{int(child)}/dependencies/blocked_by",
                "--paginate", "--jq", ".[].number"], repo)
     return [int(x) for x in out.split() if x.strip().lstrip("-").isdigit()]
+
+
+def add_blocked_by(child, parent, repo="."):
+    """CREATE the native `parent blocks child` dependency — a POST to `child`'s dependencies/blocked_by
+    keyed by `parent`'s DATABASE id (the endpoint keys the blocker by database id, not issue number).
+    The mirror of remove_blocked_by, and the representation the autorun drain's dependency gate reads.
+    IDEMPOTENT: if the edge is already present it is a no-op (a rerun after a partial link never 422s on
+    a duplicate). A real mutation (raises BoardReadError/RateLimitError on failure). Runs through `_gh`
+    (the engine subprocess), never the Bash tool — the interlock never sees a raw `blocked_by` POST."""
+    if int(parent) in blocked_by_numbers(int(child), repo):
+        return
+    pid = issue_database_id(int(parent), repo)
+    _gh(["api", "--method", "POST",
+         f"repos/{{owner}}/{{repo}}/issues/{int(child)}/dependencies/blocked_by",
+         "-F", f"issue_id={pid}"], repo)
 
 
 def remove_blocked_by(child, parent, repo="."):

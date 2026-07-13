@@ -132,12 +132,16 @@ def prompt_expansion_context(context):
 # via its JSON, not its exit code):
 #   * pre_tool_allow()        — say nothing; the normal permission flow proceeds (the hot path).
 #   * pre_tool_warn(reason)   — WARN-INJECT: surface the remediation on stderr but DO NOT decide, so
-#                               the action still proceeds through the normal flow. This is the SHIPPED
-#                               rollout posture — it can never brick a real workflow (§6 over-blocking).
+#                               the action still proceeds through the normal flow. The interlock uses
+#                               this OUTSIDE an active /idc:* command, so ordinary governed-repo work
+#                               is never bricked (§6 over-blocking).
 #   * pre_tool_deny(reason)   — HARD DENY: emit permissionDecision=deny with the remediation as the
 #                               reason (Claude Code feeds it back to the model → self-healing denial).
 #                               Honors IDC_HOOKS_OBSERVE_ONLY=1 → downgrade to warn-inject (§6).
-# Deny is the PROMOTED posture (a later operator decision, §6 decision 1); warn-inject ships first.
+# POSTURE (Task 3): the interlock HARD-DENIES while the session owns an ACTIVE /idc:* command (the
+# window where a raw mutation is the forbidden improvisation) and WARN-INJECTS otherwise; there is no
+# opt-in promotion step — the active-command deny is the shipped enforcement. IDC_HOOKS_OBSERVE_ONLY=1
+# is the one debug escape (downgrades any deny back to warn-inject).
 def pre_tool_allow():
     """Proceed: emit nothing, exit 0. The normal permission flow is untouched."""
     sys.exit(0)
@@ -145,9 +149,9 @@ def pre_tool_allow():
 
 def pre_tool_warn(reason):
     """Warn-inject: surface the remediation (stderr) but make NO permission decision, so the action
-    still proceeds. The shipped, non-bricking rollout posture. NOTE: exit-0 stderr is transcript/
-    telemetry only — it is NOT injected into the model context (the observe-first phase); the
-    model-visible self-heal is pre_tool_deny()."""
+    still proceeds. The non-bricking posture the interlock uses OUTSIDE an active /idc:* command. NOTE:
+    exit-0 stderr is transcript/telemetry only — it is NOT injected into the model context; the
+    model-visible self-heal is the active-command pre_tool_deny()."""
     warn(reason)
     sys.exit(0)
 

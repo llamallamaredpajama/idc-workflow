@@ -75,6 +75,11 @@ C.close_issue = fake_close
 comments = []
 def fake_comment(num, body, repo): comments.append({"num": num, "body": body})
 B.add_comment = fake_comment
+# github `link --kind blocks` now writes the native blocked-by edge too — stub the native helpers so
+# the unit stays hermetic (no live gh) while still exercising the journal append.
+native = {}
+B.add_blocked_by = lambda child, parent, r: native.setdefault(int(child), set()).add(int(parent))
+B.blocked_by_numbers = lambda child, r: sorted(native.get(int(child), set()))
 creates = []
 def fake_create(o, p, r, title, body, stage, status): creates.append(title); return "PVTI_12"
 B.create_item = fake_create

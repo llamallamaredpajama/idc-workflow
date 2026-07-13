@@ -100,9 +100,13 @@ door on this backend too:
 every op to `docs/workflow/transition-journal.ndjson` — the record the janitor's board↔journal
 reconciliation replays. `Done` is reachable ONLY through a guarded terminal op — the verdict-guarded
 `close`, or `dispose --disposition {gate-approved|retired|drained}` for the non-verdict terminal
-dispositions (each with its own deterministic evidence guard). The raw recipes below are the
-*mechanics* that door drives internally — invoke them directly only for non-Status fields and reads,
-**never** to mint an item or change a Status by hand.
+dispositions (each with its own deterministic evidence guard). **Every board mutation an IDC agent
+performs — create, Status move, non-Status field write, and native blocked-by edge — goes through the
+engine; the raw `gh`/GraphQL recipes below are the *mechanics* that door drives internally, shown only
+so the backend is legible. Never run a raw `gh issue create`/`gh project item-add`/`gh project
+item-edit`/`gh api …/dependencies/blocked_by` by hand** — the mutation interlock denies those during
+an active `/idc:*` command, and improvised writes desync the journal. Reads (`gh project item-list`,
+`gh api … GET`) stay fine to run directly.
 
 **createTicket(title, body, type, labels) -> issue#** — dispatch through the engine, which owns the
 complete create + board-add + Stage + Status + read-back + journal sequence atomically:
@@ -123,16 +127,23 @@ gh project item-add "$PROJ" --owner "$OWNER" --url "$URL" || die_gh
 printf '%s\n' "$NUM"
 ```
 
-**setField(ticket, field, value)** — for the **non-Status fields** (`Stage`/`Wave`/`Phase`/
-`Domain`; a `Status` write is a transition — route it through the engine's `move`, which journals
-it; a raw Status `item-edit` bypasses the journal and reads as divergence): resolve the cached
-field node id, the option id (by name), and the project **node id** (`item-edit --project-id`
-needs the node id, NOT the integer `$PROJ`), then write the single-select value. Pre-seed the option first if it is new (see provisioning
-caveat). **Guard every resolved id before the mutation** — an empty item, option, or project-node
-id (issue not on the board, no such option, or an unresolvable project) would otherwise reach
-`updateProjectV2ItemFieldValue` as `''` (`Could not resolve to a node with the global id of ''`),
-so `die_gh` first rather than mutating with a blank id:
+**setField(ticket, field, value)** — for the **non-Status fields** (`Stage`/`Wave`/`Phase`/`Domain`),
+dispatch through the engine's `set-field` op, which resolves the ids, writes the single-select value,
+and journals it (a `Status` write is a transition — route it through `move`; `set-field` refuses
+Status):
 ```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_transition.py" --backend github \
+  --owner "$OWNER" --project "$PROJ" set-field --num "$NUM" --field "$FIELD" --value "$VALUE"
+```
+The engine drives this raw `gh` mechanic **internally** — it is shown here only so the backend is
+legible; a role **never** runs it by hand (a raw `gh project item-edit` is denied by the mutation
+interlock during a command and bypasses the journal). It resolves the cached field node id, the option
+id (by name), and the project **node id** (`item-edit --project-id` needs the node id, NOT the integer
+`$PROJ`), guards every id (an empty item/option/project-node id would otherwise reach
+`updateProjectV2ItemFieldValue` as `''` → `Could not resolve to a node with the global id of ''`), and
+pre-seeds a new option first (see provisioning caveat):
+```bash
+# ── engine-internal mechanic — NOT a role-facing recipe; do not run by hand ──
 IID="$(itemid "$NUM")";            [ -n "$IID" ] || die_gh     # #NUM not on the board → never mutate with ''
 OID="$(optid "$FIELD" "$VALUE")";  [ -n "$OID" ] || die_gh     # no such option for $FIELD=$VALUE → never mutate with ''
 PNODE="$(projnode)";               [ -n "$PNODE" ] || die_gh   # project NODE id (PVT_…) — item-edit --project-id needs it, NOT the integer $PROJ
@@ -172,22 +183,29 @@ above (existing boards keep surfacing under `--stage Buildable` with no migratio
 
 **comment(ticket, body)** — `gh issue comment "$NUM" --body "$BODY" || die_gh`.
 
-## Blocked-by mechanism (native, with documented fallback)
+## Blocked-by mechanism (native, engine-owned)
 
-`blocks` uses the native GitHub **issue dependencies** "blocked by" relation through the REST
-API, so the dependency is first-class on the issue and surfaces in the §2 requirements gate chain.
-The endpoint keys the blocking issue by its **database id** (`issue_id`), **not** its issue number —
-passing the number returns a `422`, so resolve the number to the id first:
+A `blocks` edge is created through the engine's `link` op, which writes BOTH representations — the
+native GitHub **issue dependencies** "blocked by" relation (the ONLY one the autorun drain reads) and
+the engine's parseable comment marker on the child — and fail-closes if the native edge does not land:
 ```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_transition.py" --backend github \
+  --owner "$OWNER" --project "$PROJ" link --parent "$PARENT" --child "$CHILD" --kind blocks
+```
+The engine drives the native REST mechanic **internally** (never a raw `gh api …/dependencies/blocked_by`
+POST typed into Bash — the mutation interlock denies that during a command). The endpoint keys the
+blocking issue by its **database id** (`issue_id`), **not** its issue number (passing the number returns
+a `422`), so the engine resolves number → id first:
+```bash
+# ── engine-internal mechanic — NOT a role-facing recipe; do not run by hand ──
 PARENT_ID=$(gh api "repos/{owner}/{repo}/issues/$PARENT" --jq '.id')  # number → database id
 gh api --method POST \
   "repos/{owner}/{repo}/issues/$CHILD/dependencies/blocked_by" \
-  -F issue_id="$PARENT_ID" || blocks_fallback "$CHILD" "$PARENT"
+  -F issue_id="$PARENT_ID"
 ```
-**Fallback** (`blocks_fallback`) — if the dependencies endpoint is unavailable (404/501),
-record the relation as a tracked `blocks-on:#<parent>` line appended to the child's body and
-a `blocks-on:#<parent>` label, so the link is still queryable. The fallback is a documented
-degradation of the *link representation only* — it never silently drops the dependency.
+The dependency is first-class on the issue and surfaces in the §2 requirements gate chain. To clear an
+edge, use the engine's `unblock --num <child> --by <parent>` (removes the native edge + marker, verifies
+absence, then moves the child `Blocked → Todo`) — never a raw `blocked_by` DELETE.
 
 ## Convenience ops
 

@@ -76,9 +76,40 @@ deny ". '$FIXTURE/fire_gate.sh'"
 deny "bash -c 'gh project item-edit --id X --project-id Y --field-id F --single-select-option-id O'"
 deny "gh api repos/o/r/issues/707/dependencies/blocked_by/708 -X DELETE"
 
+echo "== a shell-prefix cannot smuggle the incident script past interpreter inspection (Fix 3) =="
+deny "X=1 bash '$FIXTURE/fire_gate.sh'"
+deny "env X=1 bash '$FIXTURE/fire_gate.sh'"
+deny "env A=1 B=2 command bash '$FIXTURE/fire_gate.sh'"
+deny "command bash '$FIXTURE/fire_gate.sh'"
+deny "builtin source '$FIXTURE/fire_gate.sh'"
+deny "exec bash '$FIXTURE/fire_gate.sh'"
+
+echo "== the direct classifier is COMPLETE — the full REST/GraphQL write set denies (Fix 4) =="
+deny 'gh api repos/o/r/issues/5 -X PATCH -f state=open'
+deny 'gh api repos/o/r/issues/5 -X PATCH -f state=CLOSED'
+deny "gh api graphql -f query='mutation{updateIssue(input:{id:\"I_1\",state:CLOSED}){issue{id}}}'"
+deny "gh api graphql -f query='mutation{clearProjectV2ItemFieldValue(input:{}){projectV2Item{id}}}'"
+deny "gh api graphql -f query='mutation{archiveProjectV2Item(input:{}){item{id}}}'"
+deny 'gh api --method POST repos/o/r/issues/707/dependencies/blocked_by -f issue_id=708'
+
+echo "== the classifier is METHOD-AWARE — a read-only dependency GET (doctor's audit) is ALLOWED (Fix 4) =="
+allow "gh api repos/o/r/issues/707/dependencies/blocked_by --paginate --jq '.[].number'"
+
 echo "== the sanctioned write door is never denied =="
 allow "python3 '$GOV_PLUGIN/scripts/idc_transition.py' --repo '$REPO' create-ticket --title safe --stage Buildable --status Todo"
 allow "python3 '$GOV_PLUGIN/scripts/idc_pr_finish.py' autonomous --repo '$REPO' --pr 12 --kind planning"
+# Fix 2: the sanctioned engine doors that REPLACE the now-denied raw item-edit / blocked_by POST.
+allow "python3 '$GOV_PLUGIN/scripts/idc_transition.py' --repo '$REPO' set-field --num 5 --field Wave --value W1"
+allow "python3 '$GOV_PLUGIN/scripts/idc_transition.py' --repo '$REPO' link --parent 7 --child 5 --kind blocks"
+
+echo "== the denial remediation names the REAL plugin path, never the literal token (Fix 6) =="
+gate "cd wt && gh pr merge 12 --squash" "$S1"
+is_deny || gov_fail "(fix6) a raw merge during an active command must deny"
+printf '%s' "$OUT" | grep -q '${CLAUDE_PLUGIN_ROOT}' \
+  && gov_fail "(fix6) the denial emitted the literal \${CLAUDE_PLUGIN_ROOT} token (unusable recovery command)"
+printf '%s' "$OUT" | grep -qF "$GOV_PLUGIN/scripts/idc_" \
+  || gov_fail "(fix6) the denial did not interpolate the real plugin path ($GOV_PLUGIN/scripts/…): [$OUT]"
+echo "  ok the denial remediation interpolates the real plugin path (no literal token)"
 
 echo "== outside an active command, the same raw mutation stays a WARNING (never bricks ordinary work) =="
 gate 'gh issue create --title gate --body-file /tmp/body' "$SNONE"
@@ -116,5 +147,18 @@ for name in .env .envrc key.pem id_rsa my_credential_file my_secret_file; do
   fi
 done
 echo "  ok .env/.envrc/*.pem/id_rsa*/credential/secret targets ⇒ denied unread, no content leaked"
+
+echo "== a sensitive target is DENIED WITHOUT being opened — proven via an unreadable FIFO (Fix 9) =="
+# A FIFO opened for reading with no writer BLOCKS forever. If the interlock opened this target the
+# gate would HANG; the sensitive-name refusal must fire BEFORE any open, so the gate returns promptly.
+FIFO="$WORK/.env"; rm -f "$FIFO"; mkfifo "$FIFO"
+FOUT="$(emit "$REPO" Bash "source '$FIFO'" "$S1" | timeout 10 python3 "$GATE" "$GOV_PLUGIN" 2>"$ERR")"; FRC=$?
+[ "$FRC" -ne 124 ] || gov_fail "(fix9) the gate HUNG on a sensitive FIFO — it must refuse before opening it"
+printf '%s' "$FOUT" | grep -q '"permissionDecision": *"deny"' \
+  || gov_fail "(fix9) sensitive FIFO source was not denied: [$FOUT][$(cat "$ERR")]"
+printf '%s%s' "$FOUT" "$(cat "$ERR")" | grep -qi 'sensitive' \
+  || gov_fail "(fix9) FIFO .env was not refused via the SENSITIVE path (denied as a plain opaque target instead?): [$FOUT]"
+rm -f "$FIFO"
+echo "  ok sensitive FIFO ⇒ denied promptly via the sensitive path, never opened (no hang)"
 
 echo "PASS: the mutation interlock is a hard deny during an active IDC command, sees through bash/sh/zsh/source/. indirection and quoted bash -c payloads, protects gh issue create + dependency REST writes, downgrades under OBSERVE_ONLY, warns (never bricks) outside an active command, and refuses opaque/sensitive interpreter targets unread"

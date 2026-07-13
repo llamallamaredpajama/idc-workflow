@@ -83,8 +83,9 @@ _CLOSE = (
 _ENGINE = (
     "route it through the single write door: "
     "`python3 ${CLAUDE_PLUGIN_ROOT}/scripts/idc_transition.py --repo <repo> <op> …` "
-    "(create-ticket | create-pointer | claim | move | close | dispose | recirculate-intake | "
-    "link | unblock) — never mutate the board with a raw `gh issue`/`gh project`/GraphQL call."
+    "(create-ticket | create-pointer | claim | move | set-field | close | dispose | "
+    "recirculate-intake | link | unblock) — never mutate the board with a raw "
+    "`gh issue`/`gh project`/GraphQL call."
 )
 _DEP = (
     "route the dependency through the single write door: "
@@ -108,6 +109,15 @@ def _has(command, *word_seqs):
     return True
 
 
+def _is_api_write(command):
+    """True iff a `gh api` invocation is a WRITE — an explicit write method (`-X`/`--method POST|DELETE|
+    PUT|PATCH`) or any body flag that promotes the default GET to a POST (`-f`/`-F`/`--field`/
+    `--raw-field`/`--input`). A bare `gh api …` with only read flags (`--jq`, `--paginate`) is a GET."""
+    if re.search(r"(?:-X|--method)\s+(?:POST|DELETE|PUT|PATCH)", command, re.I):
+        return True
+    return bool(re.search(r"(?<![\w-])(?:-f|-F|--field|--raw-field|--input)(?![\w-])", command))
+
+
 def classify(command):
     """(subject, remediation) for a raw terminal/board command that bypasses the door, or None.
     A pure command-string match (no shell parse), so an echoed/quoted occurrence also matches — under
@@ -115,16 +125,22 @@ def classify(command):
     is the safe direction (the agent re-issues through the door); outside an active command it is only
     a warning."""
     c = command
-    # state-closing gh api — a hand issue close (REST field forms `-f/-F state=closed`, `state: closed`,
-    # and the JSON-body form `"state":"closed"`).
-    if _has(c, "gh api") and re.search(r"state[\"']?\s*[=:]\s*[\"']?\s*closed", c):
-        return ("a state-closing `gh api` call", _CLOSE)
+    # issue-state-writing gh api — a hand issue close OR reopen (REST field forms `-f/-F state=closed`
+    # / `state=open`, `state: closed`, and the JSON-body form `"state":"closed"`); case-insensitive so
+    # `state=CLOSED` is caught too. Both directions are protected issue-state writes per the brief.
+    if _has(c, "gh api") and re.search(r"state[\"']?\s*[=:]\s*[\"']?\s*(?:closed|open)", c, re.I):
+        return ("an issue-state-writing `gh api` call", _CLOSE)
     # issue-dependency REST write — a raw dependencies/blocked_by POST/DELETE (the gate-chain door).
-    if _has(c, "gh api") and re.search(r"dependencies/blocked_by", c):
+    # METHOD-AWARE: only a WRITE (`-X`/`--method POST|DELETE`, or any `gh api` body flag that turns the
+    # default GET into a POST: `-f`/`-F`/`--field`/`--raw-field`/`--input`) is protected. A read-only
+    # GET on `dependencies/blocked_by` is /idc:doctor's own audit read — it must stay ALLOWED.
+    if _has(c, "gh api") and re.search(r"dependencies/blocked_by", c) and _is_api_write(c):
         return ("a raw issue-dependency REST write (`dependencies/blocked_by`)", _DEP)
-    # GraphQL board/issue mutations (field value / add / delete / issue create/close) — raw writes.
-    if _has(c, "gh api") and re.search(r"updateProjectV2ItemFieldValue|addProjectV2ItemById|"
-                                       r"deleteProjectV2Item|closeIssue|createIssue", c):
+    # GraphQL board/issue mutations — the ProjectV2-item write family (add/delete/update/clear/archive/
+    # unarchive…ProjectV2…) and the issue write family (create/update/close/delete…Issue). Matched by
+    # the write-verb-glued-to-type family, not a hand-kept name list, so a new mutation name is caught.
+    if _has(c, "gh api") and re.search(
+            r"(?:add|delete|update|clear|archive|unarchive)ProjectV2|(?:create|update|close|delete)Issue", c):
         return ("a raw GraphQL board/issue mutation", _ENGINE)
     if _has(c, "gh pr merge"):
         return ("a raw `gh pr merge`", _FINISH)
@@ -235,8 +251,28 @@ def _inspect_target(target, cwd, plugin_root, depth, seen):
                    "script-indirection")
 
 
+_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# Wrapper words that precede (and do not hide) the real interpreter: `env`/`command`/`builtin`/`exec`.
+_CMD_PREFIXES = {"env", "command", "builtin", "exec"}
+
+
+def _strip_prefixes(seg):
+    """Drop leading `VAR=val` assignments and `env [VAR=val…]` / `command` / `builtin` / `exec` wrapper
+    words so the REAL interpreter head is seen (Fix 3: `X=1 bash f.sh`, `env X=1 bash f.sh`, and
+    `command bash f.sh` must inspect `f.sh`, not wave the wrapper through as a benign head token)."""
+    i = 0
+    while i < len(seg):
+        tok = seg[i]
+        if _ASSIGN_RE.match(tok) or os.path.basename(tok) in _CMD_PREFIXES:
+            i += 1
+            continue
+        break
+    return seg[i:]
+
+
 def _inspect_segment(seg, cwd, plugin_root, depth, seen):
     """Inspect one command segment for an interpreter/source invocation (rules 3–4)."""
+    seg = _strip_prefixes(seg)
     if not seg:
         return None
     head = os.path.basename(seg[0])
@@ -283,11 +319,17 @@ def inspect_command(command, cwd, plugin_root, depth=0, seen=None):
     return None
 
 
-def render_reason(finding):
-    """The model-visible remediation string (a deny reason, or a warn line)."""
+def render_reason(finding, plugin_root=""):
+    """The model-visible remediation string (a deny reason, or a warn line). Interpolates the REAL
+    plugin root the gate received (argv) into the remediation so the recovery command is runnable —
+    `${CLAUDE_PLUGIN_ROOT}` text-substitutes only in command/agent/skill markdown, NOT in a Bash
+    env (Fix 6), so a literal token emitted from Python would resolve to `/scripts/idc_*.py`."""
+    remediation = finding.remediation
+    if plugin_root:
+        remediation = remediation.replace("${CLAUDE_PLUGIN_ROOT}", plugin_root)
     return (
         f"IDC interlock: {finding.subject} bypasses the single write door (the 394ec6fe "
-        f"hand-rolled-finish / loose-improvisation class). Do not run it by hand — {finding.remediation}"
+        f"hand-rolled-finish / loose-improvisation class). Do not run it by hand — {remediation}"
     )
 
 
@@ -304,7 +346,7 @@ def _gate(payload, plugin_root):
     finding = inspect_command(command, cwd, plugin_root)
     if not finding:
         H.pre_tool_allow()
-    reason = render_reason(finding)
+    reason = render_reason(finding, plugin_root)
     # POSTURE: hard deny while the session owns an ACTIVE /idc:* command; warn otherwise. The deny
     # honors IDC_HOOKS_OBSERVE_ONLY=1 (the ONE debug escape) inside pre_tool_deny().
     active = bool(L.active_commands(cwd, session_id=payload.get("session_id")))

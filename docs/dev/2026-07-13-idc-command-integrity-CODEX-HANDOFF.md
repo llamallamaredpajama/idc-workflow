@@ -29,19 +29,24 @@ this handoff; if they disagree, report the conflict before changing code.
 | Baseline | — | `dd170ff` | plan+runbook+forensics |
 | 1. Runtime freshness → repo receipt | ✅ DONE | `dd170ff..50c5bcc` (`5629c3e`,`2c7c195`,`50c5bcc`) | Spec PASS / Quality APPROVED (3 rounds) |
 | 2. Command lifecycle envelope | ✅ DONE | `50c5bcc..503b6c7` (`6401fb4`,`d723453`,`f1402af`,`fe7a771`,`939ae49`,`503b6c7`) | Spec PASS / Quality APPROVED (6 rounds) |
-| 3. Hard mutation interlock + PR finisher | ✅ DONE (see note) | `503b6c7..HEAD` (19 commits through this handoff refresh; first rubber-stamp fix `c484d1d`) | Both rubber-stamp reviews found actionable gaps. The first set was fixed in `c484d1d`; the round-2 command-head/parser findings are fixed at the current Task-3 head. No independent post-fix verdict is recorded here. |
+| 3. Hard mutation interlock + PR finisher | ✅ DONE (see note) | `503b6c7..HEAD` (20 commits through the round-18 checkpoint; first rubber-stamp fix `c484d1d`) | Three rubber-stamp reviews found actionable gaps. Their reported cases are fixed at the current Task-3 head; no independent post-fix verdict is recorded here. |
 | 4. Exact-once intake manifest | ⏳ TODO | — | — |
 | 5. Next-action oracle | ⏳ TODO | — | — |
 | 6. `/idc:intake` + command-specific closeouts | ⏳ TODO | — | — |
 | 7. Legacy gate repair (no fake history) | ⏳ TODO | — | — |
 | 8. Release gate (docs, 4.1.0 bump, hook-fidelity + e2e proof) | ⏳ TODO | — | — |
 
-**Latest Task-3 checkpoint: PASS** — real `/bin/bash` 3.2.57 ran the focused command-head,
-public-contract, privilege-wrapper, lifecycle-door, and full interlock scenarios successfully, then
-`/bin/bash tests/smoke/run-all.sh` finished `idc smoke: ALL GREEN` (37 behavior · 22 mixed · 10 doc).
-`lint-references: CLEAN` is the final pre-commit gate recorded in the commit handoff.
+**Latest Task-3 implementation checkpoint: PASS** — real `/bin/bash` 3.2.57 ran the round-18
+execution-surface regression, command-head, public-contract, privilege-wrapper, lifecycle-door, and
+full interlock scenarios successfully. An explicit central-path break made the new scenario fail and
+the restored path returned green. `/bin/bash tests/smoke/run-all.sh` finished
+`idc smoke: ALL GREEN` (37 behavior · 22 mixed · 10 doc) before the final numeric-IO-adjacency and
+parenthesized-pipe hardening. Those last two roles have focused Bash-3.2 coverage, but that earlier
+full run does not prove the final tree; the controller must rerun it on the final commit.
+`lint-references: CLEAN` remained the pre-commit gate. This is implementation evidence, not an
+independent clean-review verdict.
 
-### Task 3 note (why it took 14 review rounds plus two rubber-stamp fixes, and its terminal posture)
+### Task 3 note (why it took 14 review rounds plus three rubber-stamp fixes, and its terminal posture)
 Task 3 is the security-critical guard that must deny the incident's raw `gh` mutations and
 `bash <script>` indirection during an active IDC command, without breaking legitimate work. The
 independent reviewer found real bypasses across many rounds (dynamic gh endpoints, command
@@ -64,9 +69,13 @@ wrapper/assignment/control-word interleaving class by construction.
 - **Latest review state:** the first whole-range rubber stamp found public-contract, lifecycle-door,
   privilege-wrapper, and marker-cleanup gaps; `c484d1d` resolved them. The follow-up reproduced two
   assignment-plus-command-substitution bypasses and four false positives where argument text was mistaken
-  for an executable `gh`; the current Task-3 head separates real substitutions from the outer executable
-  head and adds those exact regressions. This handoff records the fixes, not an independent post-fix
-  rubber-stamp verdict.
+  for an executable `gh`; the next fix separated substitutions from the outer executable head. Round 18
+  then reproduced dequoted API-path bypasses, bare-shell stdin, computed executable heads, static/dynamic
+  `eval`, and heredoc body confusion. The current gate extracts one normalized execution-surface record
+  per command position (dequoted argv, syntactic redirects, pipe provenance, and raw GraphQL quote style),
+  recursively follows static executable payloads, and fails closed when code-bearing stdin is opaque.
+  Data arguments and heredoc documentation remain inert. This handoff records the fixes, not an independent
+  post-fix rubber-stamp verdict.
 
 ## How the loop was run (adapt as needed in Codex)
 Controller = `superpowers:subagent-driven-development`. Per task, strictly serial, one writer at a time:

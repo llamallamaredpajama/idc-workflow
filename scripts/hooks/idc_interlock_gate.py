@@ -21,19 +21,19 @@ removed (the active-command deny is the shipped enforcement). There are no comma
 Init and Uninstall lifecycle writes run through validating tracker-adapter helpers, while the same raw
 GitHub operations remain denied under every active IDC command.
 
-CLASSIFIER: defense-in-depth by quote-aware PER-SEGMENT classification, NOT a complete shell parser.
-Real command/process substitutions are extracted and inspected recursively; then each outer segment
-(`&&`/`||`/`;`/`|`/newline) is classified only when its normalized executable head is `gh`. Thus an
-inner read cannot hide a following outer write, while a `gh issue create` phrase in an ordinary
-argument is never mistaken for executable code. A decoy method flag in another segment
-(`: -X GET && gh api … -X DELETE`) cannot mask a write, and gh global flags (incl. `--hostname`)
-before the subcommand are stripped. A `gh api` on a protected path (issue state/create/close,
-`dependencies/blocked_by`, graphql) is FAIL-CLOSED — allowed only when provably a pure read. `env -S
-"<string>"` (with trailing args) and `bash|sh|zsh < FILE` redirected stdin are followed through too.
+CLASSIFIER: defense-in-depth through one quote-aware EXECUTION-SURFACE model, NOT a complete shell
+parser. Each outer command position carries its dequoted argv, syntactic redirections, pipe provenance,
+and raw spelling only where GraphQL quote style is meaningful. Real command/process substitutions,
+static `eval`/`-c` payloads, interpreter files, and shell-executed stdin recurse through that same model;
+opaque executable surfaces fail closed. Heredoc bodies stay data for `cat` but become code for a bare
+shell, while a `gh issue create` phrase in an ordinary argument is never mistaken for executable code.
+Protected API endpoints are classified from their dequoted token, with every write indicator still
+scanned order-robustly. A protected `gh api` path is allowed only when provably a pure read.
 
 INDIRECTION-AWARE (bounded interpreter inspection). Beyond the direct command-string classifier,
 inspect_command resolves:
   * quoted `bash -c '…'` / `sh -c '…'` / `zsh -c '…'` payloads (recursively);
+  * static `eval '…'` payloads and static here-string/heredoc shell stdin (recursively);
   * `bash|sh|zsh FILE`, `source FILE`, and `. FILE` script targets (resolved against cwd), scanning
     the file body for a protected operation.
 It is BOUNDED and SAFE: at most MAX_SCRIPT_DEPTH levels of nesting, files up to MAX_SCRIPT_BYTES,
@@ -94,6 +94,24 @@ class _Finding:
     remediation: str
     source: str
     kind: str = ""
+
+
+@dataclasses.dataclass(frozen=True)
+class _Heredoc:
+    """One heredoc body removed from the outer shell program before command segmentation."""
+    marker: str
+    body: str
+    quoted: bool
+
+
+@dataclasses.dataclass(frozen=True)
+class _ExecutionSurface:
+    """One shell command position, with normalized argv and its stdin execution boundary."""
+    raw: str
+    tokens: tuple
+    operators: tuple
+    io_numbers: tuple
+    piped_stdin: bool = False
 
 
 def _mk(subject, remediation, kind):
@@ -255,18 +273,22 @@ def _combo_subject(pos):
     return _mk("a raw `gh project` board mutation", _ENGINE, kind)
 
 
-def _api_protected_path_kind(seg_str):
-    """Which PROTECTED `gh api` write surface (if any) the segment TEXT names — scanned bluntly across
-    the whole segment string (round-6 Fix 1+2: no positional endpoint isolation, which a mis-parsed
-    value-taking flag like `-p nebula` could defeat): 'graphql' | 'dep' | 'issues', else None. An
-    arbitrary read path (`repos/O/R`, `rate_limit`, …) matches none, so an ordinary `gh api` read is
-    never touched."""
-    if re.search(r"(?<![\w-])graphql(?![\w-])", seg_str):
-        return "graphql"
-    if "dependencies/blocked_by" in seg_str:
-        return "dep"
-    if re.search(r"repos/[^/\s'\"]+/[^/\s'\"]+/issues(?:/|[\s'\"?]|$)", seg_str):
-        return "issues"
+def _api_protected_path_kind(api_words):
+    """Which protected endpoint the shell-normalized `gh api` argv names.
+
+    Quote removal and backslash processing are shell syntax, so the executable endpoint is the
+    DEQUOTED token (`graph"ql"` and `graph\\ql` both execute as `graphql`). Inspect normalized tokens,
+    never their raw spelling. The scan remains deliberately blunt across the API positionals: an
+    unknown gh flag such as the historical `-p nebula` probe must not hide a later protected REST
+    endpoint merely because `_gh_positionals` cannot know that third-party flag's arity.
+    """
+    for word in api_words:
+        if word == "graphql":
+            return "graphql"
+        if "dependencies/blocked_by" in word:
+            return "dep"
+        if re.search(r"repos/[^/\s]+/[^/\s]+/issues(?:/|[?]|$)", word):
+            return "issues"
     return None
 
 
@@ -335,7 +357,7 @@ def _graphql_is_read(seg_str):
     return op.startswith("{") or bool(re.match(r"query(?![A-Za-z0-9_])", op))
 
 
-def _gh_api_finding(seg_str, endpoint=None):
+def _gh_api_finding(seg_str, api_words=None):
     """Classify ONE `gh api` SEGMENT bluntly (round-6 Fix 1+2; round-7 Fix 1 for graphql). A `gh api
     graphql` segment is judged on its OPERATION — a provable read `query{…}` is ALLOWED; a `mutation`,
     or an opaque query body, DENIES (`_graphql_is_read`). For NON-graphql `gh api`, DENY iff the segment
@@ -348,12 +370,15 @@ def _gh_api_finding(seg_str, endpoint=None):
     be statically confirmed to avoid `graphql` / a protected REST path — the blunt path classifier sees
     no literal protected token and would wave it through. When such a dynamic endpoint ALSO carries a
     write indicator, deny BY CONSTRUCTION. A dynamic-endpoint READ stays allowed because it carries
-    no write indicator. `endpoint` is the token-parsed endpoint positional when available, else
-    detected on the raw string (lex-failure path)."""
+    no write indicator. `api_words` is the shell-normalized positional tail after `api`; its first
+    word is the endpoint when gh's option grammar is known, while the full tail retains the blunt
+    fallback for unknown flag layouts."""
+    api_words = list(api_words or [])
+    endpoint = api_words[0] if api_words else None
     dyn_ep = _is_dynamic_token(endpoint) if endpoint is not None else _raw_dynamic_api_endpoint(seg_str)
     if dyn_ep and _api_write_indicator(seg_str):
         return _dynamic("a `gh api` with a shell-expansion endpoint and a write indicator")
-    kind = _api_protected_path_kind(seg_str)
+    kind = _api_protected_path_kind(api_words)
     if not kind:
         return None                                   # no protected path in the segment → allow
     if kind == "graphql":
@@ -370,24 +395,39 @@ def _gh_api_finding(seg_str, endpoint=None):
     return _mk("a raw issue-state/create `gh api` write", _ENGINE, "issue-create-rest")
 
 
-def _classify_one_segment(seg_str):
+def _classify_one_segment(seg_str, tokens=None):
     """A Finding for a protected gh operation in ONE raw shell segment (already separator-free), or
     None. Token-classify the segment (gh global flags incl. `--hostname` stripped by _gh_positionals);
     a `gh api` segment goes through the blunt path-and-write-indicator rule. Only the actual executable
     head is classified: later arguments and quoted documentation text are data. Dynamic `gh`
     subcommands/endpoints and interpreter payloads retain their existing fail-closed paths."""
-    try:
-        tokens = _lex(seg_str)
-    except ValueError:
-        return None                            # a syntactically invalid segment does not execute
+    if tokens is None:
+        try:
+            tokens = _lex(seg_str)
+        except ValueError:
+            return None                        # a syntactically invalid segment does not execute
     pos = _gh_positionals(tokens)
-    if pos is None:
-        return None                            # not a `gh …` executable head
-    if pos and pos[0] == "api":
+    if pos is not None and pos and pos[0] == "api":
         # round-9 Fix A: pass the token-parsed endpoint positional so a shell-expansion endpoint
         # (`gh api "$EP" …`) is judged order-robustly (flags at any level already stripped by pos).
-        return _gh_api_finding(seg_str, endpoint=pos[1] if len(pos) >= 2 else None)
-    return _combo_subject(pos)
+        return _gh_api_finding(seg_str, api_words=pos[1:])
+    if pos is not None:
+        return _combo_subject(pos)
+
+    # A computed executable token can resolve to gh. Fail closed only when the following normalized
+    # argv is itself a protected gh operation shape; a dynamic word in an ordinary argument remains
+    # data (`echo "$G" issue create`) and a computed gh-shaped read remains allowed.
+    head = _strip_prefixes(tokens)
+    if not head or not _is_dynamic_token(head[0]):
+        return None
+    computed_pos = _gh_positionals(["gh", *head[1:]])
+    if computed_pos and computed_pos[0] == "api":
+        protected = _gh_api_finding(seg_str, api_words=computed_pos[1:])
+    else:
+        protected = _combo_subject(computed_pos)
+    if protected is not None:
+        return _dynamic("a computed executable token with a protected `gh` operation shape")
+    return None
 
 
 # ── shell execution surfaces: substitutions + top-level segments ─────────────────────────────────
@@ -598,6 +638,22 @@ def _separate_shell_substitutions(command):
             i += 1
             continue
 
+        # `((...))` is an arithmetic COMMAND, not a command group and not a heredoc-bearing argv.
+        # Harvest any real substitutions inside it, then keep one inert token in the outer surface so
+        # arithmetic `<<` shifts cannot be mistaken for stdin redirections.
+        if quote is None and ch == "(" and i + 1 < n and command[i + 1] == "(":
+            end = _paren_end(command, i)
+            if end is None:
+                errors.append("an unterminated arithmetic command")
+                out.append(_EXPANSION_MASK)
+                break
+            _masked, nested, nested_errors = _separate_shell_substitutions(command[i + 2:end - 1])
+            inner.extend(nested)
+            errors.extend(nested_errors)
+            out.append(_EXPANSION_MASK)
+            i = end + 1
+            continue
+
         substitution = ch == "$" and i + 1 < n and command[i + 1] == "("
         process_substitution = quote is None and ch in "<>" and i + 1 < n and command[i + 1] == "("
         if substitution or process_substitution:
@@ -634,18 +690,220 @@ def _separate_shell_substitutions(command):
     return "".join(out), inner, errors
 
 
-def _raw_segments(command):
-    """Top-level shell segments, split quote-aware on newlines / ``;|&()``.
+_HEREDOC_MARKER_PREFIX = "__IDC_HEREDOC_BODY_"
 
-    Unlike the old raw regex split, separators inside quoted arguments stay data. Command/process
-    substitutions have already been replaced by one inert marker, so their internal separators cannot
-    fragment the outer command; their real command bodies are inspected separately.
+
+def _heredoc_delimiter(command, start):
+    """Parse one heredoc delimiter word at ``start`` after ``<<`` / ``<<-``.
+
+    Returns ``(end, dequoted_delimiter, was_quoted, error)``. Shell quote removal determines the real
+    delimiter, while ``was_quoted`` records whether the parent shell expands the body.
     """
-    command = _join_line_continuations(command)
-    segments, buf = [], []
+    i, n = start, len(command)
+    while i < n and command[i] in " \t":
+        i += 1
+    word_start = i
     quote = None
-    i = 0
-    while i < len(command):
+    was_quoted = False
+    while i < n:
+        ch = command[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+            i += 1
+            continue
+        if quote == '"':
+            if ch == "\\" and i + 1 < n:
+                was_quoted = True
+                i += 2
+                continue
+            if ch == '"':
+                quote = None
+            i += 1
+            continue
+        if ch in " \t\r\n;|&()<>":
+            break
+        if ch in "'\"":
+            quote = ch
+            was_quoted = True
+            i += 1
+            continue
+        if ch == "\\":
+            was_quoted = True
+            i += 2 if i + 1 < n else 1
+            continue
+        i += 1
+    raw_word = command[word_start:i]
+    if quote is not None:
+        return i, None, was_quoted, "an unterminated heredoc delimiter quote"
+    if not raw_word:
+        return i, None, was_quoted, "a heredoc without a delimiter"
+    try:
+        words = shlex.split(raw_word, posix=True)
+    except ValueError:
+        return i, None, was_quoted, "an unparseable heredoc delimiter"
+    if len(words) != 1:
+        return i, None, was_quoted, "an unparseable heredoc delimiter"
+    return i, words[0], was_quoted, None
+
+
+def _extract_heredocs(command):
+    """Remove heredoc bodies from executable shell text and replace each delimiter with one marker.
+
+    A heredoc body is stdin DATA until its consumer is known. Keeping it out of normal command
+    segmentation prevents `cat <<'EOF'` documentation from being classified as executable, while the
+    marker lets the owning surface later decide whether a bare shell consumes that body as a script.
+    Quoted, unquoted, and tab-stripping (`<<-`) delimiters share this one structural path.
+    """
+    out, docs, errors, pending = [], [], [], []
+    quote = None
+    at_boundary = True
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if quote == "'":
+            out.append(ch)
+            if ch == "'":
+                quote = None
+            i += 1
+            at_boundary = False
+            continue
+        if quote == '"':
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(command[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                quote = None
+            i += 1
+            at_boundary = False
+            continue
+        if ch == "#" and at_boundary:
+            end = i
+            while end < n and command[end] not in "\r\n":
+                end += 1
+            out.append(command[i:end])
+            i = end
+            continue
+        if ch == "\\" and i + 1 < n:
+            out.extend((ch, command[i + 1]))
+            i += 2
+            at_boundary = False
+            continue
+        if ch == "'":
+            quote = "'"
+            out.append(ch)
+            i += 1
+            at_boundary = False
+            continue
+        if ch == '"':
+            quote = '"'
+            out.append(ch)
+            i += 1
+            at_boundary = False
+            continue
+        # Arithmetic shifts are not heredocs. Copy the complete arithmetic command/expression so a
+        # `1 << 2` inside `((...))` cannot create a synthetic stdin surface.
+        if ch == "(" and i + 1 < n and command[i + 1] == "(":
+            end = _paren_end(command, i)
+            if end is not None:
+                out.append(command[i:end + 1])
+                i = end + 1
+                at_boundary = False
+                continue
+        if ch == "<" and command[i:i + 3] == "<<<":
+            out.append("<<<")
+            i += 3
+            at_boundary = False
+            continue
+        if ch == "<" and i + 1 < n and command[i + 1] == "<" \
+                and not (i + 2 < n and command[i + 2] == "<"):
+            strip_tabs = i + 2 < n and command[i + 2] == "-"
+            after_op = i + (3 if strip_tabs else 2)
+            end, delimiter, was_quoted, error = _heredoc_delimiter(command, after_op)
+            if error:
+                errors.append(error)
+                out.append(command[i:end])
+                i = end
+                continue
+            marker = f"{_HEREDOC_MARKER_PREFIX}{len(docs) + len(pending)}__"
+            out.extend(("<< ", marker))
+            pending.append((marker, delimiter, was_quoted, strip_tabs))
+            i = end
+            at_boundary = False
+            continue
+        if ch in "\r\n" and quote is None:
+            if ch == "\r" and i + 1 < n and command[i + 1] == "\n":
+                i += 2
+            else:
+                i += 1
+            out.append("\n")
+            at_boundary = True
+            if not pending:
+                continue
+            for marker, delimiter, was_quoted, strip_tabs in pending:
+                body_parts = []
+                found = False
+                while i < n:
+                    line_end = i
+                    while line_end < n and command[line_end] not in "\r\n":
+                        line_end += 1
+                    line = command[i:line_end]
+                    compare = line.lstrip("\t") if strip_tabs else line
+                    if compare == delimiter:
+                        if line_end < n and command[line_end] == "\r" \
+                                and line_end + 1 < n and command[line_end + 1] == "\n":
+                            i = line_end + 2
+                        else:
+                            i = line_end + 1 if line_end < n else line_end
+                        found = True
+                        break
+                    body_parts.append(line.lstrip("\t") if strip_tabs else line)
+                    if line_end < n:
+                        body_parts.append("\n")
+                        if command[line_end] == "\r" and line_end + 1 < n \
+                                and command[line_end + 1] == "\n":
+                            i = line_end + 2
+                        else:
+                            i = line_end + 1
+                    else:
+                        i = line_end
+                docs.append(_Heredoc(marker, "".join(body_parts), was_quoted))
+                if not found:
+                    errors.append(f"an unterminated heredoc `{delimiter}`")
+                    break
+            pending = []
+            continue
+        out.append(ch)
+        at_boundary = ch in _WORD_BOUNDARY_CHARS
+        i += 1
+    if pending:
+        errors.append("a heredoc whose body never started")
+    return "".join(out), docs, errors
+
+
+def _split_raw_surfaces(command):
+    """Return ``(raw_segment, receives_pipe)`` pairs in shell execution order.
+
+    Separators are recognized quote-aware after substitutions and heredocs have become inert markers.
+    Pipe provenance is retained because a bare interpreter executes piped stdin even though it has no
+    argv script. Newlines after a pipe preserve that provenance.
+    """
+    parts, buf, pipe_context = [], [], []
+    quote = None
+    piped_stdin = False
+    i, n = 0, len(command)
+
+    def flush():
+        nonlocal buf
+        raw = "".join(buf)
+        if raw.strip():
+            parts.append((raw, piped_stdin))
+        buf = []
+        return bool(raw.strip())
+
+    while i < n:
         ch = command[i]
         if quote == "'":
             buf.append(ch)
@@ -655,7 +913,7 @@ def _raw_segments(command):
             continue
         if quote == '"':
             buf.append(ch)
-            if ch == "\\" and i + 1 < len(command):
+            if ch == "\\" and i + 1 < n:
                 buf.append(command[i + 1])
                 i += 2
                 continue
@@ -663,43 +921,139 @@ def _raw_segments(command):
                 quote = None
             i += 1
             continue
-        if ch == "\\" and i + 1 < len(command):
+        if ch == "\\" and i + 1 < n:
             buf.extend((ch, command[i + 1]))
             i += 2
             continue
-        if ch == "'":
-            quote = "'"
+        if ch in "'\"":
+            quote = ch
             buf.append(ch)
             i += 1
             continue
-        if ch == '"':
-            quote = '"'
+        if ch == "&" and i + 1 < n and command[i + 1] == ">":
             buf.append(ch)
             i += 1
             continue
-        if ch in "\n\r;|&()":
-            segment = "".join(buf)
-            if segment.strip():
-                segments.append(segment)
-            buf = []
+        if ch not in "\r\n;|&()":
+            buf.append(ch)
             i += 1
             continue
-        buf.append(ch)
+
+        if ch == "|" and i + 1 < n and command[i + 1] in "|&":
+            op = command[i:i + 2]
+            i += 2
+        elif ch == "&" and i + 1 < n and command[i + 1] == "&":
+            op = "&&"
+            i += 2
+        elif ch == "\r" and i + 1 < n and command[i + 1] == "\n":
+            op = "\n"
+            i += 2
+        else:
+            op = ch
+            i += 1
+        had_segment = flush()
+        if op == "(":
+            pipe_context.append(piped_stdin)
+        elif op == ")":
+            if pipe_context:
+                pipe_context.pop()
+            piped_stdin = pipe_context[-1] if pipe_context else False
+        elif op in ("|", "|&"):
+            piped_stdin = True
+        elif op in ("\n", "\r") and not had_segment and piped_stdin:
+            pass
+        else:
+            piped_stdin = pipe_context[-1] if pipe_context else False
+    flush()
+    return parts
+
+
+_LITERAL_META = {"<": "\ue000", ">": "\ue001", "&": "\ue002"}
+_RESTORE_LITERAL_META = {value: key for key, value in _LITERAL_META.items()}
+_IO_NUMBER_OPEN = "\ue003"
+_IO_NUMBER_CLOSE = "\ue004"
+
+
+def _mask_literal_redirection_chars(raw):
+    """Protect quoted/escaped redirection characters while shlex identifies real operators."""
+    out = []
+    quote = None
+    i = 0
+    while i < len(raw):
+        ch = raw[i]
+        if quote == "'":
+            out.append(_LITERAL_META.get(ch, ch))
+            if ch == "'":
+                quote = None
+            i += 1
+            continue
+        if quote == '"':
+            out.append(_LITERAL_META.get(ch, ch))
+            if ch == "\\" and i + 1 < len(raw):
+                out.append(_LITERAL_META.get(raw[i + 1], raw[i + 1]))
+                i += 2
+                continue
+            if ch == '"':
+                quote = None
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < len(raw) and raw[i + 1] in _LITERAL_META:
+            out.append(_LITERAL_META[raw[i + 1]])
+            i += 2
+            continue
+        # Shell grammar recognizes an IO number only when an unquoted all-digit word is IMMEDIATELY
+        # adjacent to `<`/`>`. Preserve that role so `bash 2>err` stays a bare shell, while
+        # `bash 2 >err` keeps `2` as the positional script argument it really is.
+        if ch.isdigit() and (i == 0 or raw[i - 1] in " \t\r\n;|&()"):
+            end = i + 1
+            while end < len(raw) and raw[end].isdigit():
+                end += 1
+            if end < len(raw) and raw[end] in "<>":
+                out.extend((_IO_NUMBER_OPEN, raw[i:end], _IO_NUMBER_CLOSE))
+                i = end
+                continue
+        out.append(ch)
+        if ch in "'\"":
+            quote = ch
         i += 1
-    segment = "".join(buf)
-    if segment.strip():
-        segments.append(segment)
-    return segments
+    return "".join(out)
 
 
-def classify_all(command):
-    """EVERY direct protected-op Finding across the raw command's segments (order-preserving, possibly
-    empty). The full set preserves compounds and every write hidden behind script indirection."""
-    return [h for h in (_classify_one_segment(s) for s in _raw_segments(command)) if h]
+def _lex_surface(raw):
+    """Return dequoted token values plus aligned redirection/operator syntax roles."""
+    masked_tokens = _lex(_mask_literal_redirection_chars(raw))
+    values, operators, io_numbers = [], [], []
+    for token in masked_tokens:
+        has_literal_meta = any(marker in token for marker in _RESTORE_LITERAL_META)
+        operators.append(not has_literal_meta and token in _REDIRECTION_TOKENS)
+        io_number = None
+        if token.startswith(_IO_NUMBER_OPEN) and token.endswith(_IO_NUMBER_CLOSE):
+            candidate = token[len(_IO_NUMBER_OPEN):-len(_IO_NUMBER_CLOSE)]
+            if candidate.isdigit():
+                token, io_number = candidate, candidate
+        for marker, value in _RESTORE_LITERAL_META.items():
+            token = token.replace(marker, value)
+        values.append(token)
+        io_numbers.append(io_number)
+    return tuple(values), tuple(operators), tuple(io_numbers)
+
+
+def _execution_surfaces(command):
+    """Normalize every visible outer command position into one execution-surface record."""
+    surfaces, errors = [], []
+    for raw, piped_stdin in _split_raw_surfaces(command):
+        try:
+            tokens, operators, io_numbers = _lex_surface(raw)
+        except ValueError:
+            if _mentions_interpreter_form(raw):
+                errors.append("an opaque shell command the interlock could not parse")
+            continue
+        if tokens:
+            surfaces.append(_ExecutionSurface(raw, tokens, operators, io_numbers, piped_stdin))
+    return surfaces, errors
 
 
 # ── bounded interpreter inspection (Task 3) ───────────────────────────────────────────────────────
-_SEP = {"&&", "||", "|", "|&", ";", "&", "(", ")"}
 
 
 def _lex(command):
@@ -710,26 +1064,9 @@ def _lex(command):
     return list(lx)
 
 
-def _segments(tokens):
-    """Split a token list into command segments on shell separators (`&&`, `|`, `;`, …), so an
-    interpreter invocation anywhere in a compound command is inspected on its own."""
-    seg, out = [], []
-    for t in tokens:
-        if t in _SEP or (t and all(ch in "&|;()<>\n\r" for ch in t)):
-            if seg:
-                out.append(seg)
-                seg = []
-        else:
-            seg.append(t)
-    if seg:
-        out.append(seg)
-    return out
-
-
 def _mentions_interpreter_form(command):
-    """True iff the raw command text looks like it invokes bash/sh/zsh or a source/`.` form — used to
-    decide whether an UNPARSEABLE command is opaque indirection (vs an unrelated quoting quirk)."""
-    if re.search(r"(?<![\w./-])(?:bash|sh|zsh|source)(?![\w-])", command):
+    """True iff raw text names a shell-evaluation head whose unparseable payload is opaque."""
+    if re.search(r"(?<![\w./-])(?:bash|sh|zsh|source|eval)(?![\w-])", command):
         return True
     if re.search(r"(?:^|[;&|]\s*)\.\s+\S", command):
         return True
@@ -1257,6 +1594,21 @@ def _inspect_segment(seg, cwd, plugin_root, depth, seen):
         return []
     if os.path.basename(seg[0]) == "su":
         return _inspect_su(seg, cwd, plugin_root, depth, seen)
+    # `eval ARG…` joins its dequoted argv with spaces and parses the result as a fresh shell program.
+    # A fully static payload therefore recurses through the SAME execution-surface model. Any shell
+    # expansion in that payload is runtime-computed code, so fail closed without echoing its contents.
+    if os.path.basename(seg[0]) == "eval":
+        args = seg[1:]
+        if args[:1] == ["--"]:
+            args = args[1:]
+        if not args:
+            return []
+        payload = " ".join(args)
+        if _has_shell_expansion(payload):
+            return [_opaque_shell("a dynamic `eval` payload")]
+        if depth + 1 > MAX_SCRIPT_DEPTH:
+            return [_opaque_shell(f"an `eval` payload nested past depth {MAX_SCRIPT_DEPTH}")]
+        return collect_findings(payload, cwd, plugin_root, depth + 1, seen)
     # `source FILE` / `. FILE` — a shell BUILTIN at the head (never wrapped by nohup/timeout/…), so it is
     # matched on the exact stripped head BEFORE the interpreter scan, so a target literally named `bash`
     # is inspected as a sourced file, not mistaken for an interpreter head.
@@ -1290,16 +1642,129 @@ def _inspect_segment(seg, cwd, plugin_root, depth, seen):
     return [opaque] if opaque else []
 
 
+_REDIRECTION_TOKENS = {"<", ">", ">>", "<<", "<<<", "<>", "<&", ">&", ">|", "&>", "&>>"}
+
+
+def _surface_redirections(surface, heredocs):
+    """Separate argv from redirects on one normalized execution surface.
+
+    Returns ``(argv, stdin_sources, attached_heredocs, errors)``. Redirection operands are data, never
+    executable argv. A stdin source is represented as ``(kind, value)`` where kind is `file`, `text`,
+    `heredoc`, or `opaque`. Heredocs on non-stdin file descriptors are still returned as attached so
+    their unquoted command substitutions can be inspected (the parent shell expands every heredoc).
+    """
+    argv, stdin_sources, attached, errors = [], [], [], []
+    docs_by_marker = {doc.marker: doc for doc in heredocs}
+    tokens = list(surface.tokens)
+    operators = list(surface.operators)
+    io_numbers = list(surface.io_numbers)
+    i = 0
+    while i < len(tokens):
+        fd = None
+        tok = tokens[i]
+        if io_numbers[i] is not None and i + 1 < len(tokens) and operators[i + 1]:
+            fd, tok = io_numbers[i], tokens[i + 1]
+            i += 1
+        if not operators[i]:
+            argv.append(tok)
+            i += 1
+            continue
+        if i + 1 >= len(tokens):
+            errors.append(f"a `{tok}` redirection without a target")
+            i += 1
+            continue
+        value = tokens[i + 1]
+        i += 2
+        if tok == "<<":
+            doc = docs_by_marker.get(value)
+            if doc is None:
+                errors.append("an opaque heredoc marker")
+            else:
+                attached.append(doc)
+                if fd in (None, "0"):
+                    stdin_sources.append(("heredoc", doc))
+            continue
+        if fd not in (None, "0"):
+            continue
+        if tok == "<":
+            stdin_sources.append(("file", value))
+        elif tok == "<<<":
+            stdin_sources.append(("text", value))
+        elif tok == "<>":
+            stdin_sources.append(("file", value))
+        elif tok == "<&":
+            stdin_sources.append(("opaque", None))
+    return argv, stdin_sources, attached, errors
+
+
+def _substitution_findings(text, cwd, plugin_root, depth, seen):
+    """Inspect only command/process substitutions in a DATA string (such as an unquoted heredoc)."""
+    out = []
+    _masked, substitutions, errors = _separate_shell_substitutions(text)
+    for error in errors:
+        out.append(_opaque_shell(error))
+    for substitution in substitutions:
+        if depth + 1 > MAX_SCRIPT_DEPTH:
+            out.append(_opaque_shell(f"a command substitution nested past depth {MAX_SCRIPT_DEPTH}"))
+            continue
+        for inner in collect_findings(substitution, cwd, plugin_root, depth + 1, seen):
+            out.append(_Finding(f"{inner.subject}, reached through a shell substitution",
+                                inner.remediation, "command-substitution", inner.kind))
+    return out
+
+
+def _stdin_execution_findings(surface, argv, stdin_sources, attached_docs,
+                              cwd, plugin_root, depth, seen):
+    """Inspect code fed through stdin when this surface is a bare bash/sh/zsh invocation."""
+    out = []
+    # The parent shell expands every UNQUOTED heredoc even if its consumer treats the result as data.
+    # Inspect command/process substitutions only; raw `gh …` lines remain inert for `cat`/`printf`.
+    for doc in attached_docs:
+        if not doc.quoted:
+            out.extend(_substitution_findings(doc.body, cwd, plugin_root, depth, seen))
+
+    normalized = _strip_prefixes(argv)
+    if not normalized or os.path.basename(normalized[0]) not in INTERPRETERS:
+        return out
+    head = os.path.basename(normalized[0])
+    payload, _sources, script = _interpreter_plan(normalized[1:])
+    if payload is not None or script is not None:
+        return out                              # -c / FILE owns execution; stdin is ordinary data
+
+    source = stdin_sources[-1] if stdin_sources else None   # shell redirections apply left-to-right
+    if source is None:
+        if surface.piped_stdin:
+            out.append(_opaque_shell(f"opaque piped stdin for a bare `{head}` interpreter"))
+        return out
+    kind, value = source
+    if kind == "file":
+        out.extend(_inspect_target(value, cwd, plugin_root, depth, seen))
+        return out
+    if kind == "opaque":
+        out.append(_opaque_shell(f"opaque redirected stdin for a bare `{head}` interpreter"))
+        return out
+    body = value.body if kind == "heredoc" else value
+    if _has_shell_expansion(body):
+        out.append(_opaque_shell(f"dynamic stdin for a bare `{head}` interpreter"))
+    elif depth + 1 > MAX_SCRIPT_DEPTH:
+        out.append(_opaque_shell(f"stdin for `{head}` nested past depth {MAX_SCRIPT_DEPTH}"))
+    else:
+        out.extend(collect_findings(body, cwd, plugin_root, depth + 1, seen))
+    return out
+
+
 def collect_findings(command, cwd, plugin_root, depth=0, seen=None):
-    """EVERY protected-op Finding reachable from `command` — direct per-segment (classify_all) AND
-    through interpreter indirection (`bash -c` payloads, `env -S` strings, resolved interpreter/source
-    FILEs). Order-preserving, possibly empty. The full set catches every protected segment, including
-    writes smuggled after another operation or hidden in a script body."""
+    """EVERY protected operation reachable through the normalized shell execution-surface model."""
     if seen is None:
         seen = frozenset()
     out = []
     if not command or not command.strip():
         return out
+    # Heredoc bodies are stdin DATA until the owning consumer is known. Remove them BEFORE comment
+    # stripping, substitution extraction, or segmentation, then reconnect each body to its marker.
+    command, heredocs, heredoc_errors = _extract_heredocs(command)
+    for error in heredoc_errors:
+        out.append(_opaque_shell(error))
     # round-11 Fix 1: strip shell comments QUOTE-AWARE FIRST — before joining line-continuations — so
     # comment TEXT (e.g. init.md/update.md's `# … gh api graphql -f query="$MUT" …` reconcile notes) is
     # never classified as executable, and a `\`+newline inside a comment (literal to bash) cannot pull a
@@ -1324,23 +1789,29 @@ def collect_findings(command, cwd, plugin_root, depth=0, seen=None):
         for inner in collect_findings(substitution, cwd, plugin_root, depth + 1, seen):
             out.append(_Finding(f"{inner.subject}, reached through a shell substitution",
                                 inner.remediation, "command-substitution", inner.kind))
-    # Rule 1: classify every top-level segment in the MASKED outer command.
-    out.extend(classify_all(command))
-    # Rule 2: tokenize; a parse failure is opaque ONLY when the command invokes an interpreter form.
-    try:
-        tokens = _lex(command)
-    except ValueError:
-        if _mentions_interpreter_form(command):
-            out.append(_Finding("an opaque shell command the interlock could not parse "
-                                "[opaque-shell-indirection]", _ENGINE, "opaque-shell-indirection"))
-        return out
-    # Redirected script stdin (round-5 Fix 1): `bash|sh|zsh [flags] < FILE` runs FILE as its script —
-    # `<` splits segments, so detect the redirect here and inspect FILE like `bash FILE`.
-    for target in _stdin_script_targets(tokens):
-        out.extend(_inspect_target(target, cwd, plugin_root, depth, seen))
-    # Rules 3–4: interpreter `-c` payloads and bash|sh|zsh|source|. FILE targets.
-    for seg in _segments(tokens):
-        out.extend(_inspect_segment(seg, cwd, plugin_root, depth, seen))
+    # Every outer executable position now has one raw view (only for quote-sensitive GraphQL fields),
+    # one dequoted argv, and explicit stdin provenance. No parallel raw/token command paths remain.
+    surfaces, surface_errors = _execution_surfaces(command)
+    for error in surface_errors:
+        out.append(_opaque_shell(error))
+    for surface in surfaces:
+        finding = _classify_one_segment(surface.raw, list(surface.tokens))
+        if finding:
+            out.append(finding)
+
+    attached_markers = set()
+    for surface in surfaces:
+        argv, stdin_sources, attached_docs, redirect_errors = _surface_redirections(surface, heredocs)
+        attached_markers.update(doc.marker for doc in attached_docs)
+        for error in redirect_errors:
+            out.append(_opaque_shell(error))
+        out.extend(_inspect_segment(argv, cwd, plugin_root, depth, seen))
+        out.extend(_stdin_execution_findings(surface, argv, stdin_sources, attached_docs,
+                                             cwd, plugin_root, depth, seen))
+    # A marker hidden inside a nested/opaque construct did not reach an owning surface. Fail closed;
+    # never reinterpret its body as top-level commands and never echo that body.
+    if any(doc.marker not in attached_markers for doc in heredocs):
+        out.append(_opaque_shell("an opaque nested heredoc execution surface"))
     return out
 
 
@@ -1362,25 +1833,6 @@ def classify(command, cwd, plugin_root, active):
     """
     _ = bool(active)  # normalize truthiness without changing warn-vs-deny classification
     return inspect_command(command, cwd, plugin_root)
-
-
-def _stdin_script_targets(tokens):
-    """FILE(s) fed to an interpreter via redirected stdin — `bash|sh|zsh [flags] < FILE`. `<` is a
-    segment separator, so the interpreter head and the file land in different segments; recover the
-    pairing at the token level. Returns each redirected FILE whose segment head (prefixes stripped)
-    is an interpreter."""
-    out = []
-    for i, tok in enumerate(tokens):
-        if tok != "<" or i + 1 >= len(tokens):
-            continue
-        k, left = i - 1, []
-        while k >= 0 and tokens[k] not in _SEP and not (tokens[k] and all(ch in "&|;()<>\n\r" for ch in tokens[k])):
-            left.insert(0, tokens[k])
-            k -= 1
-        left = _strip_prefixes(left)
-        if left and os.path.basename(left[0]) in INTERPRETERS:
-            out.append(tokens[i + 1])
-    return out
 
 
 def render_reason(finding, plugin_root=""):

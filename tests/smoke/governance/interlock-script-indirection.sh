@@ -477,6 +477,47 @@ allow_under "$SIN" 'nohup gh project link 5 --owner o --repo o/r'
 # a wrapped READ stays allowed (the scan flags only protected WRITE combos, never a read).
 allow 'nohup gh issue view 5'
 
+echo "== round-12 Fix 1: --rcfile/--init-file is inspected even when the SAME bash uses -c (no early return) =="
+# `bash --rcfile <fire_gate.sh> -i -c 'echo hi'` SOURCES the rcfile BEFORE running the innocuous -c
+# payload — so a protected mutation hidden in the rcfile must still DENY. Red-when-broken: return right
+# after inspecting the -c payload → the rcfile is never scanned → allowed.
+deny "bash --rcfile '$FIXTURE/fire_gate.sh' -i -c 'echo hi'"
+deny "bash --init-file '$FIXTURE/fire_gate.sh' -i -c 'echo hi'"
+deny "bash --rcfile='$FIXTURE/fire_gate.sh' -i -c 'echo hi'"
+# and BOTH targets are inspected: a sanctioned rcfile with a WRITE -c payload still denies on the payload.
+deny "bash --rcfile '$GOV_PLUGIN/scripts/idc_pr_finish.py' -i -c 'gh issue create --title x --body-file /tmp/b'"
+# a sanctioned rcfile + an innocuous -c payload stays ALLOWED (no over-block from combining the two).
+allow "bash --rcfile '$GOV_PLUGIN/scripts/idc_transition.py' -i -c 'echo hi'"
+
+echo "== round-12 Fix 2: interpreter detection is WRAPPER-AGNOSTIC (nohup/timeout/stdbuf/setsid/nice…) =="
+# `nohup bash <fire_gate.sh>` executes the script; the interpreter path must strip the SAME wrappers the
+# gh path does before detecting bash|sh|zsh. Red-when-broken: strip only env/command/builtin/exec → the
+# wrapped interpreter is not detected and the script is never inspected → allowed.
+deny "nohup bash '$FIXTURE/fire_gate.sh'"
+deny "timeout 5 bash '$FIXTURE/fire_gate.sh'"
+deny "stdbuf -oL sh '$FIXTURE/fire_gate.sh'"
+deny "setsid zsh '$FIXTURE/fire_gate.sh'"
+deny "nice -n 10 bash '$FIXTURE/fire_gate.sh'"
+deny "timeout -s KILL 5 bash '$FIXTURE/fire_gate.sh'"
+deny "nohup source '$FIXTURE/fire_gate.sh'"
+# a wrapped SANCTIONED interpreter target stays ALLOWED (wrapper-agnostic both ways, no over-block).
+allow "nohup bash '$GOV_PLUGIN/scripts/idc_transition.py'"
+allow "timeout 5 bash '$GOV_PLUGIN/scripts/idc_transition.py'"
+# a NON-wrapper leading word must NOT be peeled — `grep bash <file>` is an ordinary read, never mistaken
+# for `bash <file>` interpreter indirection (the numeric/alpha operand guard keeps the head honest).
+allow "grep bash '$REPO/docs/workflow/tracker-config.yaml'"
+
+echo "== round-12 Fix 3: -c inside a COMBINED short-flag cluster (-xc/-ic/-lc) is the command flag =="
+# `bash -xc '<payload>'` — the trailing `c` in the cluster means the next arg is the -c command string,
+# not a script filename. Red-when-broken: only an exact `-c` token is recognized → the quoted read is
+# mis-treated as a filename → opaque-target over-DENY of a harmless static read.
+allow "bash -xc 'gh issue view 5'"
+allow "sh -lc 'gh pr view 12 --json title'"
+allow "bash -ic 'echo hi'"
+# a WRITE payload inside the same cluster still DENIES (the payload is recursed as a command).
+deny "bash -xc 'gh issue create --title x --body-file /tmp/b'"
+deny "bash -ic 'gh pr merge 12 --squash'"
+
 echo "== the sanctioned write door is never denied =="
 allow "python3 '$GOV_PLUGIN/scripts/idc_transition.py' --repo '$REPO' create-ticket --title safe --stage Buildable --status Todo"
 allow "python3 '$GOV_PLUGIN/scripts/idc_pr_finish.py' autonomous --repo '$REPO' --pr 12 --kind planning"

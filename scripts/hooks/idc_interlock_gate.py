@@ -1091,11 +1091,70 @@ def _skip_wrapper_opts(seg, i, wrapper):
     return i
 
 
+# round-12 Fix 2: GENERIC execution wrappers that PRECEDE the real command and hand off to it, beyond the
+# env/command/builtin/exec family above. The gh path is already wrapper-AGNOSTIC (it scans the token
+# stream for a bare `gh` head after this strip); the interpreter path detects an EXACT head token, so it
+# needs these wrappers stripped HERE — sharing this ONE helper keeps the two paths from drifting (a
+# wrapper added here protects both). Each entry lists the wrapper's SHORT/long options that CONSUME the
+# next token (`timeout -s SIG`, `stdbuf -o L`, `nice -n 10`, …) and how many leading NUMERIC operands it
+# takes before the command word (`timeout DURATION`, `chrt PRIO`, `taskset MASK`). Only a DIGIT-leading
+# bare token is eaten as an operand, so an alpha command head (`gh`/`bash`) is never swallowed
+# (`timeout gh …` keeps `gh`); a NON-wrapper leading word (`grep bash f`) is not peeled at all.
+_EXEC_WRAPPERS = {
+    "nohup":   {"value_opts": set(),                                            "operands": 0},
+    "setsid":  {"value_opts": set(),                                            "operands": 0},
+    "stdbuf":  {"value_opts": {"-i", "-o", "-e", "--input", "--output", "--error"}, "operands": 0},
+    "timeout": {"value_opts": {"-s", "--signal", "-k", "--kill-after"},         "operands": 1},
+    "nice":    {"value_opts": {"-n", "--adjustment"},                           "operands": 0},
+    "ionice":  {"value_opts": {"-c", "--class", "-n", "--classdata", "-p", "--pid"}, "operands": 0},
+    "xargs":   {"value_opts": {"-I", "-i", "--replace", "-n", "--max-args", "-P", "--max-procs",
+                               "-s", "--max-chars", "-d", "--delimiter", "-E", "-e", "--eof",
+                               "-a", "--arg-file", "-L", "--max-lines"},        "operands": 0},
+    "chrt":    {"value_opts": {"-p", "--pid"},                                  "operands": 1},
+    "taskset": {"value_opts": {"-p", "--pid", "-c", "--cpu-list"},              "operands": 1},
+}
+_OPERAND_NUMERIC_RE = re.compile(r"^\+?[0-9]")   # a DIGIT-leading operand (duration/priority/mask), never a command word
+
+
+def _skip_exec_wrapper(seg, i, spec):
+    """Advance past a generic exec wrapper's dashed OPTIONS (value-opts consume the next token) and any
+    leading NUMERIC operand(s) so the real command head is reached (round-12 Fix 2). A bare ALPHA token
+    stops the strip — it is the command word (or the `gh`/interpreter head), never consumed as an
+    operand — so `timeout 5 bash f.sh` peels `timeout 5` but `timeout gh …`/`nohup bash f.sh` keep the
+    head. `--` ends option processing; the next token is the command."""
+    value_opts = spec["value_opts"]
+    operands = spec["operands"]
+    while i < len(seg):
+        tok = seg[i]
+        if tok == "--":                                    # end of options → next token is the command
+            return i + 1
+        if tok.startswith("-") and len(tok) > 1:
+            if tok.startswith("--") and "=" in tok:        # `--signal=KILL` — self-contained
+                i += 1
+            elif tok in value_opts and i + 1 < len(seg):   # `-s KILL` / `-o L` — consume the value
+                i += 2
+            else:                                          # bare/combined flag (`-oL`, `-c2`, `-10`)
+                i += 1
+            continue
+        if tok.startswith("+") and len(tok) > 1:           # `+x`-style flag
+            i += 1
+            continue
+        if operands > 0 and _OPERAND_NUMERIC_RE.match(tok):  # `timeout 5` / `chrt 20` / `taskset 0x3`
+            operands -= 1
+            i += 1
+            continue
+        break
+    return i
+
+
 def _strip_prefixes(seg):
-    """Drop leading `VAR=val` assignments and `env`/`command`/`builtin`/`exec` wrapper words TOGETHER
-    WITH their options so the REAL interpreter head is seen (`X=1 bash f.sh`, `env -i bash f.sh`,
-    `command -p bash f.sh` must all inspect `f.sh`, not wave the wrapper/option through as a benign
-    head token). Chained wrappers (`env -i command bash f.sh`) unwind one layer per outer-loop pass."""
+    """Drop leading `VAR=val` assignments and execution-wrapper words TOGETHER WITH their options so the
+    REAL command head is seen (`X=1 bash f.sh`, `env -i bash f.sh`, `command -p bash f.sh`, and the
+    generic `nohup`/`timeout 5`/`stdbuf -oL`/`setsid`/`nice -n 10`/… wrappers must all reach `f.sh`, not
+    wave the wrapper/option through as a benign head token). Shared by the gh path (which then scans for
+    a bare `gh` head) and the interpreter path (which detects an exact `bash|sh|zsh` head) so the two
+    stay wrapper-agnostic in lockstep. Chained wrappers (`env -i command bash f.sh`, `nohup timeout 5
+    bash f.sh`) unwind one layer per outer-loop pass."""
     i = 0
     while i < len(seg):
         tok = seg[i]
@@ -1108,6 +1167,9 @@ def _strip_prefixes(seg):
         base = os.path.basename(tok)
         if base in _CMD_PREFIXES:
             i = _skip_wrapper_opts(seg, i + 1, base)
+            continue
+        if base in _EXEC_WRAPPERS:                         # round-12 Fix 2: generic wrapper-agnostic strip
+            i = _skip_exec_wrapper(seg, i + 1, _EXEC_WRAPPERS[base])
             continue
         break
     return seg[i:]
@@ -1154,14 +1216,30 @@ _INTERP_FILE_OPTS = {"--rcfile", "--init-file"}
 _INTERP_VALUE_OPTS = {"-O", "+O", "-o", "+o"}
 
 
-def _interpreter_targets(args):
-    """Every path a `bash|sh|zsh` invocation would SOURCE or RUN, for inspection (round-11 Fix 3): each
-    `--rcfile`/`--init-file` value (a sourced startup file) AND the script target (the FIRST positional
-    after option processing). Value-taking options (`--rcfile FILE`, `--init-file FILE`, `-O shopt`,
-    `-o name`, and `--`) are handled so the script positional is identified correctly and a decoy option
-    value can no longer masquerade as the script. Script ARGUMENTS after the target are NOT returned —
-    only the first positional is the script; the rest are the script's own argv."""
-    sources, script = [], None
+def _is_dash_c_flag(tok):
+    """True if `tok` is bash's `-c` command flag — the bare `-c` OR a combined short-flag cluster whose
+    LAST letter is `c` (`-xc`, `-ic`, `-lc`): in a `-<letters>` bundle the trailing `c` means the NEXT
+    arg is the command STRING, not a script file (round-12 Fix 3). Restricted to an all-alpha `-<letters>`
+    token so a path/number (`-2c`, `-O`) or a long option (`--…`) is never mistaken for it."""
+    return (len(tok) >= 2 and tok[0] == "-" and tok[1] != "-"
+            and tok[-1] == "c" and all(ch.isalpha() for ch in tok[1:]))
+
+
+def _interpreter_plan(args):
+    """Single left-to-right walk of a `bash|sh|zsh` arg list, returning `(payload, sources, script)`:
+
+      * `payload` — the `-c` COMMAND STRING (recognized as a bare `-c` OR a combined cluster ending in
+        `c` per round-12 Fix 3), else None. With `-c`, the following positionals are $0/$1… (NOT a script
+        file), so `script` stays None.
+      * `sources` — every `--rcfile`/`--init-file` value bash SOURCES at startup, collected even when a
+        `-c` payload is present (round-12 Fix 1: no early return — the rcfile is sourced BEFORE the -c
+        payload runs, so a mutation hidden in it must still be inspected). Only sources seen BEFORE the
+        `-c` are startup files; after `-c` everything is positional, so the walk stops there.
+      * `script` — the positional script FILE bash RUNS (the FIRST positional after option processing),
+        or None. Value-taking options (`--rcfile FILE`, `-O shopt`, `-o name`, `--`) are consumed so a
+        decoy option value cannot masquerade as the script. Script ARGUMENTS after the target are not
+        returned — only the first positional is the script."""
+    payload, sources, script = None, [], None
     i, n = 0, len(args)
     while i < n:
         tok = args[i]
@@ -1169,6 +1247,10 @@ def _interpreter_targets(args):
             rest = args[i + 1:]
             script = rest[0] if rest else None
             break
+        if _is_dash_c_flag(tok):                             # `-c`/`-xc` PAYLOAD — command string, not a file
+            if i + 1 < n:
+                payload = args[i + 1]
+            break                                            # after -c everything is positional; stop
         if "=" in tok and tok.split("=", 1)[0] in _INTERP_FILE_OPTS:   # --rcfile=FILE
             sources.append(tok.split("=", 1)[1])
             i += 1
@@ -1185,7 +1267,7 @@ def _interpreter_targets(args):
             continue
         script = tok                                         # first non-flag positional = the script
         break
-    return [*sources, *([script] if script is not None else [])]
+    return payload, sources, script
 
 
 def _inspect_segment(seg, cwd, plugin_root, depth, seen):
@@ -1211,30 +1293,35 @@ def _inspect_segment(seg, cwd, plugin_root, depth, seen):
     seg = _strip_prefixes(seg)
     if not seg:
         return []
+    # `source FILE` / `. FILE` — a shell BUILTIN at the head (never wrapped by nohup/timeout/…), so it is
+    # matched on the exact stripped head BEFORE the interpreter scan, so a target literally named `bash`
+    # is inspected as a sourced file, not mistaken for an interpreter head.
+    if seg[0] in ("source", ".") and len(seg) >= 2:
+        return _inspect_target(seg[1], cwd, plugin_root, depth, seen)
     head = os.path.basename(seg[0])
     if head in INTERPRETERS:
         args = seg[1:]
-        # Rule 3: a quoted `-c PAYLOAD` is the whole command — recurse into it ONLY when it is a fully
-        # STATIC literal. round-8 Fix 2: `bash -c "$CMD"` recursed on the literal token `$CMD`, found
-        # nothing, and allowed — while the shell expands it to a real mutation. A payload carrying ANY
-        # shell expansion, or one nested past the depth bound, now fails closed as opaque-shell-indirection.
-        for i, a in enumerate(args):
-            if a == "-c" and i + 1 < len(args):
-                inline = args[i + 1]
-                if _has_shell_expansion(inline):
-                    return [_opaque_shell(f"a dynamic `{head} -c` payload")]
-                if depth + 1 > MAX_SCRIPT_DEPTH:
-                    return [_opaque_shell(f"a `{head} -c` payload nested past depth {MAX_SCRIPT_DEPTH}")]
-                return collect_findings(inline, cwd, plugin_root, depth + 1, seen)
+        payload, sources, script = _interpreter_plan(args)
+        out = []
+        # Rule 3: a quoted `-c PAYLOAD` is a command — recurse ONLY when it is a fully STATIC literal.
+        # round-8 Fix 2: `bash -c "$CMD"` recursed on the literal token `$CMD`, found nothing, and
+        # allowed — while the shell expands it to a real mutation. A payload carrying ANY shell
+        # expansion, or one nested past the depth bound, fails closed as opaque-shell-indirection.
+        # round-12 Fix 1: the `-c` payload is combined WITH the sourced/run targets below, not returned
+        # early, so a `--rcfile`/`--init-file` that bash SOURCES before the payload is still inspected.
+        if payload is not None:
+            if _has_shell_expansion(payload):
+                out.append(_opaque_shell(f"a dynamic `{head} -c` payload"))
+            elif depth + 1 > MAX_SCRIPT_DEPTH:
+                out.append(_opaque_shell(f"a `{head} -c` payload nested past depth {MAX_SCRIPT_DEPTH}"))
+            else:
+                out.extend(collect_findings(payload, cwd, plugin_root, depth + 1, seen))
         # Rule 4: `bash|sh|zsh [opts] FILE` — inspect EVERY path it would SOURCE or RUN (round-11 Fix 3):
         # each `--rcfile`/`--init-file` value AND the script target (found AFTER value-taking options are
         # consumed, so a `--rcfile <decoy>` value can no longer masquerade as the script).
-        out = []
-        for target in _interpreter_targets(args):
+        for target in [*sources, *([script] if script is not None else [])]:
             out.extend(_inspect_target(target, cwd, plugin_root, depth, seen))
         return out
-    if seg[0] in ("source", ".") and len(seg) >= 2:
-        return _inspect_target(seg[1], cwd, plugin_root, depth, seen)
     return []
 
 

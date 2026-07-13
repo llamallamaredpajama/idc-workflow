@@ -967,6 +967,8 @@ def journal_append(repo, op, backend, tracker_rel, kw, cur=None):
             what = f"link #{kw.get('parent')} -> #{kw.get('child')}"
         elif op in ("create-ticket", "recirculate-intake", "create-pointer"):
             what = f"{op} '{kw.get('title')}'"
+        elif op == "schema-reconciliation":
+            what = f"schema-reconciliation: field={kw.get('schema_field')!r} option={kw.get('schema_option')!r}"
 
         guard_hash = None
         if kw.get("verdict"):
@@ -1016,6 +1018,21 @@ def journal_append(repo, op, backend, tracker_rel, kw, cur=None):
         # proves the block was cleared through the guarded door, not a raw dependency DELETE.
         if op == "unblock" and kw.get("by") is not None:
             record["unblocked_by"] = _journal_item(kw["by"]) or kw["by"]
+        # A board-SCHEMA reconciliation (op="schema-reconciliation" — currently only the Stage
+        # single-select option append, `idc_stage_options.cmd_apply`) is not an item transition at
+        # all: it has no issue number, so `item` stays absent and `to` is never set below — replay's
+        # `journal_item_id` returns None for it (op not in its ref_ops, `what` does not start with a
+        # ref-op prefix) and reconstruct_state_from_journal skips it outright, so it can never be
+        # misread as a real item's state (round-16 fix — see the Global Constraint's reconciliation
+        # clause). These are its evidence fields: which field, which option, which sanctioned door.
+        if kw.get("schema_field") is not None:
+            record["field"] = kw["schema_field"]
+        if kw.get("schema_field_id") is not None:
+            record["field_id"] = kw["schema_field_id"]
+        if kw.get("schema_option") is not None:
+            record["option"] = kw["schema_option"]
+        if kw.get("door") is not None:
+            record["door"] = kw["door"]
 
         to_state = {}
         if kw.get("to_stage") is not None:

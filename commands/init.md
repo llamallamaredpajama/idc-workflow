@@ -167,16 +167,20 @@ option set** (a replace re-IDs every option and wipes existing item values; see
 operator action):
 ```bash
 PID=$(gh project view <n> --owner "$OWNER" --format json --jq '.id')   # PVT_… project node id
-# Read the Stage field via GraphQL (not `field-list`): the non-destructive append must re-send each
-# existing option's color + description, which `gh project field-list` omits (it returns only id+name).
+# Read the Stage field via GraphQL (a read query — ALLOWED by the mutation interlock; not `field-list`):
+# the non-destructive append must re-send each existing option's color + description, which
+# `gh project field-list` omits (it returns only id+name).
 STAGE_FIELD=$(gh api graphql -f query='query($p:ID!){node(id:$p){... on ProjectV2{field(name:"Stage"){... on ProjectV2SingleSelectField{id options{id name color description}}}}}}' -f p="$PID" --jq '.data.node.field')
 if [ -n "$STAGE_FIELD" ]; then
-  # The helper reads the field id straight out of $STAGE_FIELD; no separate extraction needed.
-  MUT=$(printf '%s' "$STAGE_FIELD" | python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_stage_options.py" append --ensure-option Recirculation --options-json -); RC=$?
+  # APPLY the append through the SANCTIONED PYTHON DOOR — `idc_stage_options.py apply` reads the field
+  # id straight out of $STAGE_FIELD, assembles AND runs the `updateProjectV2Field` mutation via its OWN
+  # gh subprocess. Do NOT run the mutation with a raw `gh api graphql -f query="$MUT"`: the interlock
+  # hard-DENIES a raw GraphQL mutation during this active /idc:init command.
+  printf '%s' "$STAGE_FIELD" | python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_stage_options.py" apply --ensure-option Recirculation --options-json - --repo "$(pwd)"; RC=$?
   case "$RC" in
-    0) gh api graphql -f query="$MUT" >/dev/null ;;   # appended → existing option ids + item values preserved
-    3) : ;;                                            # already present → idempotent no-op
-    *) echo "Stage reconcile: could not assemble the append (fail-closed) — record an operator action to add the Recirculation option" ;;
+    0) : ;;   # appended → existing option ids + item values preserved
+    3) : ;;   # already present → idempotent no-op
+    *) echo "Stage reconcile: could not apply the append (fail-closed) — record an operator action to add the Recirculation option" ;;
   esac
 fi
 ```

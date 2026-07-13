@@ -166,6 +166,25 @@ deny $'gh issue view 5\ngh issue -R o/r create --title x'
 # (4) the read-only dependency GET the doctor audit runs stays ALLOWED (never over-blocked).
 allow "gh api repos/o/r/issues/707/dependencies/blocked_by/708 -X GET"
 
+echo "== round-7 Fix 1: a read-only gh api graphql QUERY is ALLOWED; a graphql mutation/opaque body DENIES =="
+# Doctor's board-link probe and Update's Stage-field read are LITERAL query{…} reads — they must be
+# ALLOWED even during an active command (both commands hold active lifecycle records). Red-when-broken:
+# drop _graphql_is_read → the blunt "any -f body flag = write" rule denies these read queries again.
+allow "gh api graphql -f query='query(\$o:String!,\$r:String!){repository(owner:\$o,name:\$r){projectsV2(first:100){nodes{number}}}}' -f o=x -f r=y --jq .data"
+allow "gh api graphql -f query='query(\$p:ID!){node(id:\$p){... on ProjectV2{field(name:\"Stage\"){... on ProjectV2SingleSelectField{id options{id name color description}}}}}}' -f p=PVT_1 --jq .data.node.field"
+# A real GraphQL mutation still DENIES — decided on the OPERATION (mutation keyword), not the body flag.
+deny "gh api graphql -f query='mutation{updateProjectV2Field(input:{fieldId:\"F\"}){projectV2Field{id}}}'"
+# Fail-closed: an OPAQUE query body (a shell variable / command substitution) carries no literal
+# selection set we can prove is a read, so it DENIES — a mutation cannot be smuggled through `\$MUT`.
+deny 'gh api graphql -f query="$MUT"'
+
+echo "== round-7 Fix 2: a backslash-newline continuation is joined BEFORE segmenting (no bypass) =="
+# Bash runs `gh \`+newline+`issue create` as `gh issue create`, but the old segmenter split on the raw
+# newline into harmless pieces. Collapse line-continuations first → the joined `gh issue create` DENIES
+# during an active command. Red-when-broken: drop the continuation collapse → this segments away → allow.
+deny $'gh \\\nissue create --title x --body-file /tmp/b'
+deny $'gh issue view 5 && gh \\\nissue create --title x --body-file /tmp/b'
+
 echo "== round-5 Fix 2: /idc:uninstall's own teardown ops are ALLOWED during an ACTIVE uninstall =="
 # The hard deny must not brick uninstall's documented --close-issues / --delete-board steps. The
 # allowance is keyed on the ACTIVE command being `uninstall`; the SAME raw ops under any other command
@@ -205,6 +224,9 @@ deny_under "$SUN" "gh project item-edit --id X --project-id Y --field-id F --sin
 deny_under "$SUN" "gh issue close 5 && gh issue create --title x --body-file /tmp/b"
 deny_under "$SUN" "gh issue close 5 && gh api repos/o/r/issues/707/dependencies/blocked_by/708 -X DELETE"
 deny_under "$SUN" "bash -c 'gh issue close 5; gh api graphql --input mutation.json'"
+# round-7 Fix 2: a `gh \`+newline+`issue create` smuggled after an allowed teardown must DENY the whole
+# call — line-continuations are collapsed before segmentation, so the joined `gh issue create` is seen.
+deny_under "$SUN" $'gh issue close 5 && gh \\\nissue create --title x --body-file /tmp/b'
 # A compound of teardown-ONLY ops stays allowed under uninstall (the carve-out still works).
 allow_under "$SUN" "gh issue close 5 && gh project item-delete 8 --owner o --id PVTI_X"
 

@@ -11,9 +11,15 @@
 #     refused, exit 2), and reads BOTH back;
 #   * it JOURNALS to_stage, so replay/reconciliation see the transition (no unjournaled Stage flip).
 #
+# Coverage (round-7 Fix 4): the guarded Stage door is exercised on BOTH backends — filesystem (via the
+# `eng` CLI) AND github (in-process, low-level gh seams stubbed) — and the terminal-guard case creates a
+# REAL Done pointer and proves it is refused a Stage move (no resurrection, no partial write) on each.
+#
 # Red-when-broken: drop the --to-stage handling in the transition branch → the Stage does not change
-# (the readback/assert below FAILs); drop the journal to_stage → the journal assert FAILs; drop the
-# validate_target pair check → the illegal In-Progress-on-Consideration move stops being refused.
+# (the readback/assert below FAILs) and the github legal case never calls set_single_select; drop the
+# journal to_stage → the journal assert FAILs; drop the validate_target pair check → the illegal
+# In-Progress-on-Consideration move stops being refused; drop the terminal-status guard in the
+# --to-stage branch → the real Done pointer gets Stage-flipped on BOTH backends → the refusal FAILs.
 #
 # Usage: bash tests/smoke/governance/engine-stage-move.sh   (exit 0 = pass)
 set -uo pipefail
@@ -64,11 +70,67 @@ fi
   || fail "the refused illegal Stage move mutated Stage anyway (got $(gov_field "$T" "$P" Stage))"
 echo "  ok Consideration + In Progress (a worked-forbidden pair) is refused, no partial write"
 
-echo "== a Done pointer is never Stage-moved (no resurrection) =="
-# Reaching Done requires a guarded terminal op, which the seed can't satisfy here — assert instead that
-# an ordinary --to-status move still works unchanged (the non-Stage path is not regressed).
+echo "== a plain --to-status move (no Stage) is unchanged (the non-Stage path is not regressed) =="
 eng move --num "$P" --to-status Blocked || fail "a plain move --to-status regressed"
 [ "$(gov_field "$T" "$P" Status)" = "Blocked" ] || fail "plain move --to-status did not land"
 echo "  ok a plain move --to-status (no Stage) is unchanged"
 
-echo "PASS: move --to-stage is the guarded Stage-transition door — it writes+reads-back a machine-legal Stage/Status pair, journals to_stage for replay, refuses an illegal pair, and leaves the plain --to-status move unchanged"
+echo "== a DONE pointer is REFUSED a Stage move (terminal guard, no resurrection) — real Done pointer =="
+# Seed a REAL terminal (Done) pointer and prove the guarded Stage door REFUSES to Stage-move it (the
+# terminal-status guard in the move --to-stage branch). Red-when-broken: drop that guard → a Done item
+# gets Stage-flipped → the refusal assert below FAILs.
+DONE="$(gov_seed_item "$T" --title 'pointer: done' --stage Buildable --status Done)" \
+  || fail "could not seed the Done pointer"
+[ "$(gov_field "$T" "$DONE" Status)" = "Done" ] || fail "seed Done pointer is not at Status=Done"
+if eng move --num "$DONE" --to-stage Planning --to-status Todo 2>/dev/null; then
+  fail "the guarded Stage door Stage-moved a DONE (terminal) pointer — resurrection must be refused"
+fi
+[ "$(gov_field "$T" "$DONE" Stage)" = "Buildable" ] \
+  || fail "the refused Stage move mutated a Done pointer's Stage anyway (got $(gov_field "$T" "$DONE" Stage))"
+[ "$(gov_field "$T" "$DONE" Status)" = "Done" ] \
+  || fail "the refused Stage move mutated a Done pointer's Status anyway (got $(gov_field "$T" "$DONE" Status))"
+echo "  ok a Done pointer is refused a Stage move, with NO partial write (Stage+Status unchanged)"
+
+echo "== the guarded Stage door enforces the SAME rules on the GITHUB backend (not a parallel codepath) =="
+# github is not hermetically testable, so this UNIT-tests in-process: the low-level gh seams are
+# monkeypatched and the assertions are on whether the real gh Stage/Status writes are/aren't called.
+# Red-when-broken: drop the --to-stage handling → the legal case never calls set_single_select; drop
+# the terminal guard → the Done case Stage-writes anyway. Either FAILs here.
+python3 - "$GOV_PLUGIN/scripts" "$REPO" <<'PY' || fail "github Stage-move unit failed (see above)"
+import sys
+sys.path.insert(0, sys.argv[1])
+repo = sys.argv[2]
+import idc_transition as E, idc_gh_board as B
+
+CUR = {"stage": "Consideration", "status": "Todo"}
+stage_writes, status_writes = [], []
+B.fetch_item = lambda iid, r: dict(CUR)
+def _set_single_select(owner, project, r, iid, field, value):
+    stage_writes.append((field, value)); CUR["stage"] = value
+B.set_single_select = _set_single_select
+def _set_status(o, p, r, iid, s):
+    status_writes.append(s); CUR["status"] = s
+B.set_status = _set_status
+ctx = E.github_ctx(repo, "o", "1", itemid_cache={5: "PVTI_5"})
+
+def is_denied(fn):
+    try: fn(); return False
+    except E.TransitionError: return True
+
+# (1) a legal Stage move Consideration/Todo -> Planning/Todo: the gh Stage write (set_single_select) IS
+#     called on the GITHUB backend (same guarded door, different seam).
+CUR.update(stage="Consideration", status="Todo"); stage_writes.clear(); status_writes.clear()
+E.run("move", ctx, num=5, to_stage="Planning", to_status="Todo")
+assert stage_writes == [("Stage", "Planning")], f"legal github Stage move did not write Stage once: {stage_writes}"
+print("  ok (github) a legal Stage move writes Stage via set_single_select")
+
+# (2) a DONE pointer is REFUSED a Stage move on github too — the terminal guard denies BEFORE any write.
+CUR.update(stage="Buildable", status="Done"); stage_writes.clear(); status_writes.clear()
+assert is_denied(lambda: E.run("move", ctx, num=5, to_stage="Planning", to_status="Todo")), \
+    "github guarded Stage door resurrected a Done pointer"
+assert stage_writes == [] and status_writes == [], \
+    f"a refused github Stage move still wrote (Stage={stage_writes}, Status={status_writes})"
+print("  ok (github) a Done pointer is refused a Stage move and performs NO gh write")
+PY
+
+echo "PASS: move --to-stage is the guarded Stage-transition door on BOTH backends — it writes+reads-back a machine-legal Stage/Status pair, journals to_stage for replay, refuses an illegal pair, refuses a real Done pointer (no resurrection, no partial write), and leaves the plain --to-status move unchanged"

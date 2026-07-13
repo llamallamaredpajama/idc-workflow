@@ -87,4 +87,41 @@ JSON
 python3 "$H" append --ensure-option Recirculation --options-json "$WORK/field_noid.json" >/dev/null 2>&1
 [ $? = 2 ] || fail "missing field id (no JSON id, no --field-id) must fail closed with exit 2"
 
+# ---- (4) round-7 Fix 1: the `apply` mode RUNS the mutation itself (a sanctioned Python door) --------
+# The mutation must NOT be executed by a raw `gh api graphql -f query="$MUT"` in command prose — the
+# mutation interlock hard-DENIES a raw GraphQL mutation during an active /idc:init or /idc:update.
+# `apply` assembles AND runs the mutation via a python subprocess `gh`, which the interlock never sees.
+# Stub `gh` on PATH so this stays hermetic (no network).
+BIN="$WORK/bin"; mkdir -p "$BIN"
+cat > "$BIN/gh" <<SH
+#!/bin/bash
+printf '%s\n' "\$*" >> "$WORK/gh-calls.txt"
+exit 0
+SH
+chmod +x "$BIN/gh"
+
+: > "$WORK/gh-calls.txt"
+PATH="$BIN:$PATH" python3 "$H" apply --ensure-option Recirculation --options-json "$WORK/field3.json" --repo "$WORK"
+rc_apply=$?
+[ "$rc_apply" = "0" ] || fail "apply on a 3-option field must run the mutation and exit 0 (got $rc_apply)"
+grep -q 'api graphql' "$WORK/gh-calls.txt" || fail "apply must invoke \`gh api graphql\` to run the mutation"
+grep -q 'updateProjectV2Field' "$WORK/gh-calls.txt" || fail "apply must run the updateProjectV2Field append mutation"
+
+# idempotent: an already-present option → exit 3, and gh is NEVER called (no duplicate option, no write).
+: > "$WORK/gh-calls.txt"
+PATH="$BIN:$PATH" python3 "$H" apply --ensure-option Recirculation --options-json "$WORK/field4.json" --repo "$WORK"
+rc_apply2=$?
+[ "$rc_apply2" = "3" ] || fail "apply on an already-present option must be a no-op (exit 3, got $rc_apply2)"
+[ ! -s "$WORK/gh-calls.txt" ] || fail "apply must NOT invoke gh when the option is already present"
+
+# fail-closed: a failing gh mutation must surface as exit 2 (never a silent success).
+cat > "$BIN/gh" <<'SH'
+#!/bin/bash
+echo "boom" >&2
+exit 1
+SH
+chmod +x "$BIN/gh"
+PATH="$BIN:$PATH" python3 "$H" apply --ensure-option Recirculation --options-json "$WORK/field3.json" --repo "$WORK" >/dev/null 2>&1
+[ $? = 2 ] || fail "a failing gh mutation must make apply fail closed with exit 2"
+
 echo "PASS: Recirculation Stage-option append is non-destructive, idempotent, and fail-closed"

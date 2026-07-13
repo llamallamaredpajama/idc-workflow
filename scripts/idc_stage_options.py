@@ -8,11 +8,18 @@ existing item values (see `idc:idc-tracker-github` provisioning caveat). The saf
 against the live API: re-send every EXISTING option *with its node id* (so GitHub preserves it) and
 append the new option *without* an id (so GitHub creates just that one).
 
-This helper does the pure, testable part — turn the field's current options JSON into that exact
-`updateProjectV2Field` mutation. The gh I/O (read the field, run the mutation) lives in the caller
-(`commands/init.md` Phase 4), matching init's other helper-backed steps. No network here.
+Two modes:
+  * `append` — the pure, testable part: turn the field's current options JSON into that exact
+    `updateProjectV2Field` mutation and PRINT it. No network.
+  * `apply`  — assemble the SAME mutation and RUN it via a python subprocess `gh api graphql`
+    (round-7 Fix 1). This is the SANCTIONED write door: the mutation interlock hard-DENIES a raw
+    `gh api graphql -f query="$MUT"` typed into the Bash tool during an active /idc:init or
+    /idc:update, but never sees a `gh` subprocess spawned by this helper — so init/update reconcile
+    the Stage option through here instead of a raw GraphQL mutation in command prose.
 
     python3 idc_stage_options.py append --ensure-option <NAME> --options-json <FILE|-> \
+        [--field-id <ID>] [--color <ENUM>]
+    python3 idc_stage_options.py apply  --ensure-option <NAME> --options-json <FILE|-> --repo <DIR> \
         [--field-id <ID>] [--color <ENUM>]
 
 Input JSON — the Stage field object from
@@ -77,7 +84,9 @@ def _option_literal(opt, with_id):
     return "{" + ", ".join(parts) + "}"
 
 
-def cmd_append(args):
+def _build_append_mutation(args):
+    """Assemble the non-destructive `updateProjectV2Field` append mutation from the field JSON.
+    Returns the mutation STRING, or exits 3 (already-present, idempotent no-op) / 2 (fail-closed)."""
     json_field_id, existing = _load_field(args.options_json)
     # The field id rides in with the field JSON; --field-id is an optional override.
     field_id = (args.field_id or json_field_id or "").strip()
@@ -95,7 +104,7 @@ def cmd_append(args):
     lines = [_option_literal(o, with_id=True) for o in existing]
     lines.append(_option_literal({"name": new_name, "color": color, "description": ""}, with_id=False))
     options_block = "[\n    " + ",\n    ".join(lines) + "\n  ]"
-    mutation = (
+    return (
         "mutation {\n"
         "  updateProjectV2Field(input: {\n"
         f"    fieldId: {json.dumps(field_id)},\n"
@@ -105,19 +114,41 @@ def cmd_append(args):
         "  }\n"
         "}"
     )
-    print(mutation)
+
+
+def cmd_append(args):
+    print(_build_append_mutation(args))
+    sys.exit(0)
+
+
+def cmd_apply(args):
+    """Assemble AND run the append mutation via a python subprocess `gh api graphql` — the sanctioned
+    write door (round-7 Fix 1). Exit 0 = applied, 3 = already-present no-op, 2 = fail-closed."""
+    import subprocess
+    mutation = _build_append_mutation(args)   # exits 3 if already-present (gh never invoked)
+    try:
+        p = subprocess.run(["gh", "api", "graphql", "-f", "query=" + mutation],
+                           cwd=args.repo, capture_output=True, text=True)
+    except OSError as e:
+        _die(f"could not run gh to apply the append mutation: {e}")
+    if p.returncode != 0:
+        _die(f"gh rejected the Stage-option append mutation (rc={p.returncode}): {p.stderr.strip()[:300]}")
     sys.exit(0)
 
 
 def main():
-    p = argparse.ArgumentParser(description="Assemble a non-destructive single-select option-append mutation.")
+    p = argparse.ArgumentParser(description="Assemble/apply a non-destructive single-select option-append mutation.")
     sub = p.add_subparsers(dest="cmd", required=True)
-    a = sub.add_parser("append", help="emit a mutation that appends one option, preserving existing ones")
-    a.add_argument("--field-id", default="", help="optional override; by default read from the field JSON's id")
-    a.add_argument("--ensure-option", required=True)
-    a.add_argument("--color", default="GRAY")
-    a.add_argument("--options-json", required=True, help="file path, or - for stdin")
-    a.set_defaults(func=cmd_append)
+    for name, func, needs_repo in (("append", cmd_append, False), ("apply", cmd_apply, True)):
+        s = sub.add_parser(name, help=("emit" if name == "append" else "assemble AND run")
+                           + " a mutation that appends one option, preserving existing ones")
+        s.add_argument("--field-id", default="", help="optional override; by default read from the field JSON's id")
+        s.add_argument("--ensure-option", required=True)
+        s.add_argument("--color", default="GRAY")
+        s.add_argument("--options-json", required=True, help="file path, or - for stdin")
+        if needs_repo:
+            s.add_argument("--repo", required=True, help="repo dir the gh mutation runs in (cwd)")
+        s.set_defaults(func=func)
     args = p.parse_args()
     args.func(args)
 

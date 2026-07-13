@@ -1511,6 +1511,16 @@ def run(op, ctx, **kw):
             if cur["status"] == machine.get("terminal_status"):
                 raise TransitionError(
                     f"illegal transition: #{num} is {cur['status']!r} (terminal) — {op} cannot resurrect it")
+            # round-7 Fix 3: validate the SOURCE Status is a LEGAL unblock source BEFORE removing the
+            # dependency — else an illegal unblock (e.g. Status=In Progress) removes the edge and THEN
+            # raises, leaving an unjournaled partial mutation from a refused op. Legal sources: an
+            # allowed_from Status (Blocked), or the intentional idempotent already-Todo rerun
+            # (cur.status == to_status) that clears a stale edge on an already-unblocked pointer.
+            allowed_from = spec.get("from_status")
+            if cur["status"] != to_status and allowed_from and cur["status"] not in allowed_from:
+                raise TransitionError(
+                    f"illegal transition: {op} requires source Status in {allowed_from}, "
+                    f"but #{num} is {cur['status']!r}")
             remove_dependency(ctx, num, kw["by"])
         if cur["status"] == to_status:
             # Idempotent Status: a plain transition already at target is a silent no-op. For unblock --by

@@ -239,20 +239,40 @@ def _api_protected_path_kind(seg_str):
     return None
 
 
+def _graphql_is_read(seg_str):
+    """True iff a `gh api graphql` SEGMENT is a PROVABLE read (round-7 Fix 1): a visible `query`
+    operation with a literal selection set (`{`) and NO `mutation` keyword. Decided on the OPERATION,
+    not the blunt "any -f body flag = write" rule — a read query is carried in `-f query='query{…}'`,
+    which the round-6 rule wrongly denied (breaking Doctor's board-link probe and Update's Stage-field
+    read). GraphQL REQUIRES the `mutation` keyword for a write, so a literal doc with a selection set
+    and no `mutation` can only be a query (including the anonymous `{ … }` shorthand — the `query`
+    body-flag name supplies the `query` token). Fail-closed: a `mutation` keyword ALWAYS denies, and an
+    OPAQUE query body (a shell variable / command substitution such as `-f query="$MUT"`, or
+    `--input FILE`) that carries no literal selection set we can vet is NOT provable as a read → denies,
+    so a mutation can never be smuggled through an expansion."""
+    if re.search(r"(?<![A-Za-z0-9_])mutation(?![A-Za-z0-9_])", seg_str):
+        return False
+    return bool(re.search(r"(?<![A-Za-z0-9_])query(?![A-Za-z0-9_])", seg_str)) and "{" in seg_str
+
+
 def _gh_api_finding(seg_str):
-    """Classify ONE `gh api` SEGMENT bluntly (round-6 Fix 1+2). DENY iff the segment BOTH names a
-    protected API path anywhere AND shows ANY write indicator anywhere (a non-GET `-X`/`--method` — ALL
-    occurrences scanned — or any body flag). ALLOWED only when provably a pure read (a protected path
-    with NO write method anywhere and NO body). Fail-closed: an opaque `--input FILE`, an ambiguous
-    `-X "$M"`, or a trailing `-X DELETE` after a decoy `-X GET` all DENY — every real mutation goes
-    through the Python engine doors."""
+    """Classify ONE `gh api` SEGMENT bluntly (round-6 Fix 1+2; round-7 Fix 1 for graphql). A `gh api
+    graphql` segment is judged on its OPERATION — a provable read `query{…}` is ALLOWED; a `mutation`,
+    or an opaque query body, DENIES (`_graphql_is_read`). For NON-graphql `gh api`, DENY iff the segment
+    BOTH names a protected API path anywhere AND shows ANY write indicator anywhere (a non-GET
+    `-X`/`--method` — ALL occurrences scanned — or any body flag); ALLOWED only when provably a pure
+    read. Fail-closed: an opaque `--input FILE`, an ambiguous `-X "$M"`, or a trailing `-X DELETE` after
+    a decoy `-X GET` all DENY — every real mutation goes through the Python engine doors."""
     kind = _api_protected_path_kind(seg_str)
     if not kind:
         return None                                   # no protected path in the segment → allow
+    if kind == "graphql":
+        # graphql: decide on the operation (read query vs mutation/opaque), not the blunt body flag.
+        if _graphql_is_read(seg_str):
+            return None                               # a provable read query → allow (doctor/update read)
+        return _mk("a raw GraphQL board/issue mutation", _ENGINE, "graphql")
     if not _api_write_indicator(seg_str):
         return None                                   # provably a pure read → allow (doctor's audit GET)
-    if kind == "graphql":
-        return _mk("a raw GraphQL board/issue mutation", _ENGINE, "graphql")
     if kind == "dep":
         return _mk("a raw issue-dependency REST write (`dependencies/blocked_by`)", _DEP, "dep-write")
     if re.search(r"state[\"']?\s*[=:]\s*[\"']?\s*(?:closed|open)", seg_str, re.I):
@@ -322,12 +342,24 @@ def _classify_string_backstop(seg_str):
 # the raw string is quote-UNAWARE on purpose — over-splitting a quoted body only ever creates MORE
 # segments to classify (the conservative, fail-closed direction); it can never merge two commands.
 _RAW_SEP_RE = re.compile(r"[\n\r;|&]")
+# round-7 Fix 2: a shell line-continuation is a backslash IMMEDIATELY followed by a newline — bash
+# removes the pair and joins the tokens, so `gh \`+newline+`issue create` runs as `gh issue create`.
+# It MUST be collapsed BEFORE segmenting on newlines, or the classifier splits the real command into
+# harmless pieces (`gh \` / `issue create`) and waves the write through.
+_LINE_CONT_RE = re.compile(r"\\\r?\n")
+
+
+def _join_line_continuations(command):
+    """Collapse `\\`+newline shell line-continuations so a continued command is classified as the one
+    command bash actually runs (round-7 Fix 2). Idempotent — no continuation left after one pass."""
+    return _LINE_CONT_RE.sub("", command)
 
 
 def _raw_segments(command):
     """The command's shell segments, split on newlines / `;` / `|` / `&` (covering `&&` and `||` — the
-    empty middle piece is dropped). Blank pieces are dropped."""
-    return [s for s in _RAW_SEP_RE.split(command) if s.strip()]
+    empty middle piece is dropped). Line-continuations are collapsed FIRST (Fix 2). Blank pieces are
+    dropped."""
+    return [s for s in _RAW_SEP_RE.split(_join_line_continuations(command)) if s.strip()]
 
 
 def classify(command):
@@ -583,6 +615,10 @@ def collect_findings(command, cwd, plugin_root, depth=0, seen=None):
     out = []
     if not command or not command.strip():
         return out
+    # round-7 Fix 2: collapse `\`+newline line-continuations FIRST, so BOTH the direct per-segment
+    # classifier AND the token-level indirection inspection (`_lex`, stdin targets, `bash -c` payloads)
+    # see the single command bash actually runs, not the pre-join fragments.
+    command = _join_line_continuations(command)
     # Rule 1: the direct per-segment protected-operation classifier (all segments).
     out.extend(classify_all(command))
     # Rule 2: tokenize; a parse failure is opaque ONLY when the command invokes an interpreter form.

@@ -208,15 +208,20 @@ board mutation — appending a missing *required* `Stage` option, which is **non
     `stage-recirc-appended` (or `stage-recirc-already-present` on a re-run).
     ```bash
     PID=$(gh project view <num> --owner "$OWNER" --format json --jq '.id')   # PVT_… project node id
-    # GraphQL read (not field-list): the non-destructive append must re-send each existing option's
-    # color + description, which `gh project field-list` omits (it returns only id+name).
+    # GraphQL READ (a read query — ALLOWED by the mutation interlock; not `field-list`): the
+    # non-destructive append must re-send each existing option's color + description, which
+    # `gh project field-list` omits (it returns only id+name).
     STAGE_FIELD=$(gh api graphql -f query='query($p:ID!){node(id:$p){... on ProjectV2{field(name:"Stage"){... on ProjectV2SingleSelectField{id options{id name color description}}}}}}' -f p="$PID" --jq '.data.node.field')
     if [ -n "$STAGE_FIELD" ]; then
-      MUT=$(printf '%s' "$STAGE_FIELD" | python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_stage_options.py" append --ensure-option Recirculation --options-json -); RC=$?
+      # APPLY the append through the SANCTIONED PYTHON DOOR — `idc_stage_options.py apply` assembles
+      # AND runs the `updateProjectV2Field` mutation via its OWN gh subprocess. Do NOT run the mutation
+      # with a raw `gh api graphql -f query="$MUT"`: the interlock hard-DENIES a raw GraphQL mutation
+      # during this active /idc:update command (only reads and the Python doors are allowed).
+      printf '%s' "$STAGE_FIELD" | python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_stage_options.py" apply --ensure-option Recirculation --options-json - --repo "$(pwd)"; RC=$?
       case "$RC" in
-        0) gh api graphql -f query="$MUT" >/dev/null ;;   # stage-recirc-appended (existing ids + item values preserved)
-        3) : ;;                                            # stage-recirc-already-present (idempotent no-op)
-        *) echo "stage reconcile: could not assemble the append (fail-closed) — record an operator action" ;;
+        0) : ;;   # stage-recirc-appended (existing option ids + item values preserved)
+        3) : ;;   # stage-recirc-already-present (idempotent no-op)
+        *) echo "stage reconcile: could not apply the append (fail-closed) — record an operator action" ;;
       esac
     fi
     ```

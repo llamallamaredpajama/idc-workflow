@@ -110,6 +110,23 @@ def block(reason):
     sys.exit(0)
 
 
+# ── UserPromptExpansion family (the command entry gate, Task 2 — command integrity) ───────────────
+# A UserPromptExpansion hook decides whether a `/idc:*` command is allowed to expand into its body,
+# BEFORE the command runs. Two model-visible postures (both exit 0 — a hook signals via its JSON):
+#   * prompt_expansion_block(reason)   — REFUSE the expansion; `reason` is surfaced to the model.
+#   * prompt_expansion_context(context) — ALLOW + inject `context` alongside the expanded command.
+# The gate's observe-only downgrade is applied at the gate (it wraps block in its own observe check),
+# so these primitives stay minimal — the exact shape Claude Code's UserPromptExpansion contract expects.
+def prompt_expansion_block(reason):
+    sys.stdout.write(json.dumps({"decision": "block", "reason": reason}))
+    raise SystemExit(0)
+
+
+def prompt_expansion_context(context):
+    sys.stdout.write(json.dumps({"additionalContext": context}))
+    raise SystemExit(0)
+
+
 # ── PreToolUse family (the terminal-action interlocks, v4 Phase 2 §3.2) ───────────────────────────
 # A PreToolUse gate decides on a tool call BEFORE it runs. Three postures, all exit 0 (a hook signals
 # via its JSON, not its exit code):

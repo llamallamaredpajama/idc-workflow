@@ -87,7 +87,15 @@ LEDGER_FILENAME = ".idc-session-state.json"
 # The scaffold ignores the state file AND its sidecar write-lock (`.idc-session-state.json.lock`)
 # with ONE glob line — in gitignore `*` matches the empty string, so it still ignores the file itself.
 GITIGNORE_LINE = LEDGER_FILENAME + "*"
-_LEDGER_VERSION = 1
+# v2 (Task 2 — command integrity): the state file now carries a `commands` array (the universal IDC
+# command lifecycle envelope) ALONGSIDE the v1 `taints`. v1 files are read tolerantly and normalized
+# to v2 on read (see read_state); a v1 file is only rewritten with `version: 2` when the next write
+# happens. Every write preserves BOTH arrays — a taint write never drops commands, and vice versa.
+_LEDGER_VERSION = 2
+# Command lifecycle record states + the finished-history cap (never prunes an active record).
+_CMD_ACTIVE = "active"
+_CMD_FINISHED = "finished"
+_MAX_FINISHED = 20
 
 try:
     import fcntl  # POSIX advisory file locks (macOS/Linux — IDC's platforms)
@@ -144,20 +152,43 @@ def ledger_path(cwd):
 
 
 # ── tolerant read ────────────────────────────────────────────────────────────────────────────────
-def read_taints(cwd):
-    """Every taint dict currently in the ledger (a list). TOLERANT: a missing or corrupt ledger
-    reads as an EMPTY list and NEVER throws — a corrupt ledger must not brick a gate."""
+def _read_raw(cwd):
+    """The raw ledger dict (both `taints` and `commands`). TOLERANT: a missing or corrupt ledger
+    reads as an EMPTY dict and NEVER throws — a corrupt ledger must not brick a gate. The ONE decode
+    point both the v1 taint readers and the v2 command readers share, so tolerance is defined once."""
     try:
         with open(ledger_path(cwd), encoding="utf-8") as fh:
             data = json.load(fh)
     except (OSError, ValueError):
-        return []
-    if not isinstance(data, dict):
-        return []
-    taints = data.get("taints", [])
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def read_taints(cwd):
+    """Every taint dict currently in the ledger (a list). TOLERANT: a missing or corrupt ledger
+    reads as an EMPTY list and NEVER throws — a corrupt ledger must not brick a gate."""
+    taints = _read_raw(cwd).get("taints", [])
     if not isinstance(taints, list):
         return []
     return [t for t in taints if isinstance(t, dict) and t.get("kind")]
+
+
+def _read_commands(cwd):
+    """Every well-formed command lifecycle record currently in the ledger (a list). TOLERANT: a
+    missing/corrupt ledger — or a v1 file with no `commands` key — reads as EMPTY, never throws. A
+    record is well-formed iff it carries a session_id and a command (the identity a gate keys on)."""
+    cmds = _read_raw(cwd).get("commands", [])
+    if not isinstance(cmds, list):
+        return []
+    return [c for c in cmds if isinstance(c, dict) and c.get("session_id") and c.get("command")]
+
+
+def read_state(cwd):
+    """The whole ledger as a normalized v2 dict: {'version': 2, 'taints': [...], 'commands': [...]}.
+    TOLERANT. A v1 file (`{'version': 1, 'taints': [...]}`) is normalized in-memory to v2 with an
+    empty `commands` list — it is NOT rewritten on disk until the next write, so a read never mutates
+    the file."""
+    return {"version": _LEDGER_VERSION, "taints": read_taints(cwd), "commands": _read_commands(cwd)}
 
 
 def pending_taints(cwd, session_id=None):
@@ -174,12 +205,14 @@ def pending_taints(cwd, session_id=None):
 
 
 # ── atomic, best-effort write ────────────────────────────────────────────────────────────────────
-def _atomic_write(cwd, taints):
-    """Write the ledger atomically (temp-file + os.replace). BEST-EFFORT: an OSError warns and
-    returns (never raises) so recording a taint can never break the user's command."""
+def _atomic_write_state(cwd, taints, commands):
+    """Write the WHOLE ledger (both arrays) atomically (temp-file + os.replace). BEST-EFFORT: an
+    OSError warns and returns (never raises) so recording state can never break the user's command.
+    This is the single write door — every taint write AND every command write funnels through here,
+    so neither array can ever silently drop the other (the v1→v2 co-existence invariant)."""
     path = ledger_path(cwd)
     d = os.path.dirname(path) or "."
-    payload = {"version": _LEDGER_VERSION, "taints": taints}
+    payload = {"version": _LEDGER_VERSION, "commands": commands, "taints": taints}
     try:
         fd, tmp = tempfile.mkstemp(dir=d, prefix=".idc-ledger.", suffix=".tmp")
     except OSError as e:
@@ -198,6 +231,12 @@ def _atomic_write(cwd, taints):
             os.remove(tmp)
         except OSError:
             pass
+
+
+def _atomic_write(cwd, taints):
+    """Write `taints` while PRESERVING the existing `commands` array (the v1 taint writers' door).
+    Called under `_write_lock`, so the `_read_commands` read-back is race-free vs concurrent writers."""
+    _atomic_write_state(cwd, taints, _read_commands(cwd))
 
 
 # ── the write API (deterministic callers only) ──────────────────────────────────────────────────
@@ -228,6 +267,91 @@ def clear_taint(cwd, kind, key=None):
         after = [t for t in before if not (t.get("kind") == kind and t.get("key") == key)]
         if len(after) != len(before):
             _atomic_write(cwd, after)
+
+
+# ── the command lifecycle envelope (v2 — Task 2, command integrity) ───────────────────────────────
+# A `commands[]` record is the durable obligation that a governed `/idc:*` command was ENTERED and
+# must be CLOSED with a valid terminal status. Its identity is the (session_id, command) pair. The
+# deterministic entry gate opens it (command_start); the deterministic command tail closes it
+# (command_finish); the Stop closeout gate reads active_commands to refuse an un-closed command.
+def _prune_finished(commands):
+    """Cap the finished-record history at `_MAX_FINISHED`, newest write order, NEVER pruning an
+    active record. Active records are always retained in place; only the OLDEST finished records past
+    the cap are dropped."""
+    active = [c for c in commands if c.get("state") == _CMD_ACTIVE]
+    finished = [c for c in commands if c.get("state") != _CMD_ACTIVE]
+    if len(finished) > _MAX_FINISHED:
+        finished = finished[-_MAX_FINISHED:]
+    return active + finished
+
+
+def command_start(cwd, session_id, command, plugin_version, args_sha256, source):
+    """Atomic UPSERT of the active command record by (session_id, command) — never duplicates an
+    active record (a re-entry of the same command in the same session updates the one record in
+    place). REPO-GATED: a silent no-op outside a governed repo. Preserves the taint array. Returns
+    the record dict."""
+    if not idc_hook_lib.is_governed_repo(cwd):
+        return {}
+    session_id = str(session_id)
+    command = str(command)
+    rec = {
+        "session_id": session_id,
+        "command": command,
+        "state": _CMD_ACTIVE,
+        "plugin_version": plugin_version or "",
+        "args_sha256": args_sha256 or "",
+        "source": source or "",
+        "closeout": None,
+    }
+    with _write_lock(cwd):  # read-modify-write must be atomic vs concurrent writers (no lost records)
+        commands = _read_commands(cwd)
+        replaced = False
+        for i, c in enumerate(commands):
+            if (c.get("session_id") == session_id and c.get("command") == command
+                    and c.get("state") == _CMD_ACTIVE):
+                commands[i] = rec
+                replaced = True
+                break
+        if not replaced:
+            commands.append(rec)
+        _atomic_write_state(cwd, read_taints(cwd), _prune_finished(commands))
+    return rec
+
+
+def command_finish(cwd, session_id, command, status, evidence):
+    """Finish ONLY an existing ACTIVE record owned by `session_id` — a foreign session cannot finish
+    or inherit another session's record, and a missing active record is a no-op. Records the terminal
+    `status` + normalized `evidence` in the record's `closeout` and flips its state to finished.
+    REPO-GATED (no-op outside a governed repo). Returns the finished record dict, or None when there
+    was no matching active record owned by this session (the caller surfaces that as a failure)."""
+    if not idc_hook_lib.is_governed_repo(cwd):
+        return None
+    session_id = str(session_id)
+    command = str(command)
+    with _write_lock(cwd):  # read-modify-write must be atomic vs concurrent writers
+        commands = _read_commands(cwd)
+        target = None
+        for c in commands:
+            if (c.get("session_id") == session_id and c.get("command") == command
+                    and c.get("state") == _CMD_ACTIVE):
+                target = c
+                break
+        if target is None:
+            return None
+        target["state"] = _CMD_FINISHED
+        target["closeout"] = {"status": status, "evidence": evidence}
+        _atomic_write_state(cwd, read_taints(cwd), _prune_finished(commands))
+    return target
+
+
+def active_commands(cwd, session_id=None):
+    """The state=active command records, optionally scoped to one session. TOLERANT (a corrupt/missing
+    ledger reads as empty). session_id=None → every active record; session_id=X → only X's active
+    records, so the Stop closeout gate never traps an unrelated session with another's open command."""
+    active = [c for c in _read_commands(cwd) if c.get("state") == _CMD_ACTIVE]
+    if session_id is None:
+        return active
+    return [c for c in active if c.get("session_id") == str(session_id)]
 
 
 # ── the gitignore scaffold hook (idempotent, non-destructive) ────────────────────────────────────

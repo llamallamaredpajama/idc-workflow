@@ -102,9 +102,17 @@ def register_start(cwd: str, session_id: str, command: str, plugin_version: str,
                    args_text: str, source: str) -> dict:
     """Open (idempotently upsert) the command's active lifecycle record — the entry gate's helper.
     Computes the argument digest and delegates the single ledger write. Assumes freshness/admission
-    was already decided by the caller (the entry gate)."""
+    was already decided by the caller (the entry gate). Returns the record dict when the write
+    PERSISTED, `{}` outside a governed repo, or None when the ledger write FAILED (Fix 2)."""
     return idc_ledger.command_start(
         cwd, session_id, command, plugin_version, args_digest(args_text or ""), source or "")
+
+
+def active_records(cwd: str, session_id: str) -> list:
+    """The active command records for `session_id` — the SAME read path `status` reports from
+    (idc_ledger.active_commands). Exposed so the entry gate can READ BACK after a start and CONFIRM
+    the record actually persisted, rather than trusting the writer's return (Fix 2)."""
+    return idc_ledger.active_commands(cwd, session_id)
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────────────────────────
@@ -125,8 +133,15 @@ def _cmd_start(args) -> int:
               f"(running {result.running_version}, required {result.required_version}); "
               "run /reload-plugins, then retry.", file=sys.stderr)
         return 4
-    register_start(args.repo, args.session, args.command, result.running_version or "",
-                   args.args or "", args.source or "")
+    rec = register_start(args.repo, args.session, args.command, result.running_version or "",
+                         args.args or "", args.source or "")
+    if rec is None:
+        # A governed repo where the ledger write did NOT persist. Never report success for an
+        # obligation that was not recorded (Fix 2) — the Stop gate could not enforce its closeout.
+        print("idc-command-contract: could not persist the command record (the session state "
+              "ledger write failed — check that the repo root is writable), so no obligation was "
+              "opened.", file=sys.stderr)
+        return 1
     return 0
 
 

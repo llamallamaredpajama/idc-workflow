@@ -227,10 +227,14 @@ def pending_taints(cwd, session_id=None):
 
 # ── atomic, best-effort write ────────────────────────────────────────────────────────────────────
 def _atomic_write_state(cwd, taints, commands):
-    """Write the WHOLE ledger (both arrays) atomically (temp-file + os.replace). BEST-EFFORT: an
-    OSError warns and returns (never raises) so recording state can never break the user's command.
-    This is the single write door — every taint write AND every command write funnels through here,
-    so neither array can ever silently drop the other (the v1→v2 co-existence invariant)."""
+    """Write the WHOLE ledger (both arrays) atomically (temp-file + os.replace). BEST-EFFORT for the
+    caller's control flow — an OSError WARNS and RETURNS (never raises), so recording state can never
+    break the user's command — but the outcome is SURFACED as a bool: True iff the state actually
+    PERSISTED to disk, False if the temp-file create / write / os.replace failed. A caller that reports
+    a record as opened (the entry gate, command_start) MUST check this so a swallowed write is never
+    mistaken for a persisted one (Fix 2). This is the single write door — every taint write AND every
+    command write funnels through here, so neither array can ever silently drop the other (the v1→v2
+    co-existence invariant)."""
     path = ledger_path(cwd)
     d = os.path.dirname(path) or "."
     payload = {"version": _LEDGER_VERSION, "commands": commands, "taints": taints}
@@ -238,7 +242,7 @@ def _atomic_write_state(cwd, taints, commands):
         fd, tmp = tempfile.mkstemp(dir=d, prefix=".idc-ledger.", suffix=".tmp")
     except OSError as e:
         idc_hook_lib.warn(f"ledger: cannot create temp file in {d}: {e}")
-        return
+        return False
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, indent=2, sort_keys=True)
@@ -252,12 +256,16 @@ def _atomic_write_state(cwd, taints, commands):
             os.remove(tmp)
         except OSError:
             pass
+        return False
+    return True
 
 
 def _atomic_write(cwd, taints):
     """Write `taints` while PRESERVING the existing `commands` array (the v1 taint writers' door).
-    Called under `_write_lock`, so the `_read_commands` read-back is race-free vs concurrent writers."""
-    _atomic_write_state(cwd, taints, _read_commands(cwd))
+    Called under `_write_lock`, so the `_read_commands` read-back is race-free vs concurrent writers.
+    Returns the single-write-door's persisted bool (taint writers are best-effort and ignore it; the
+    command writers propagate it)."""
+    return _atomic_write_state(cwd, taints, _read_commands(cwd))
 
 
 # ── the write API (deterministic callers only) ──────────────────────────────────────────────────
@@ -309,8 +317,10 @@ def _prune_finished(commands):
 def command_start(cwd, session_id, command, plugin_version, args_sha256, source):
     """Atomic UPSERT of the active command record by (session_id, command) — never duplicates an
     active record (a re-entry of the same command in the same session updates the one record in
-    place). REPO-GATED: a silent no-op outside a governed repo. Preserves the taint array. Returns
-    the record dict."""
+    place). REPO-GATED: a silent no-op outside a governed repo (returns `{}`). Preserves the taint
+    array. Returns the record dict ONLY when the write actually PERSISTED; returns None when the
+    ledger write FAILED (Fix 2) — a caller must never report an obligation as opened on a failed
+    write, or the Stop gate would try to enforce a closeout for a record that does not exist."""
     if not idc_hook_lib.is_governed_repo(cwd):
         return {}
     session_id = str(session_id)
@@ -335,8 +345,8 @@ def command_start(cwd, session_id, command, plugin_version, args_sha256, source)
                 break
         if not replaced:
             commands.append(rec)
-        _atomic_write_state(cwd, read_taints(cwd), _prune_finished(commands))
-    return rec
+        persisted = _atomic_write_state(cwd, read_taints(cwd), _prune_finished(commands))
+    return rec if persisted else None
 
 
 def command_finish(cwd, session_id, command, status, evidence):
@@ -344,7 +354,8 @@ def command_finish(cwd, session_id, command, status, evidence):
     or inherit another session's record, and a missing active record is a no-op. Records the terminal
     `status` + normalized `evidence` in the record's `closeout` and flips its state to finished.
     REPO-GATED (no-op outside a governed repo). Returns the finished record dict, or None when there
-    was no matching active record owned by this session (the caller surfaces that as a failure)."""
+    was no matching active record owned by this session OR the closeout write did not PERSIST (Fix 2)
+    — either way the caller surfaces the non-close as a failure rather than reporting a false close."""
     if not idc_hook_lib.is_governed_repo(cwd):
         return None
     session_id = str(session_id)
@@ -367,7 +378,8 @@ def command_finish(cwd, session_id, command, status, evidence):
         # front of the list, where the cap would prune it as the "oldest" even though it just closed.
         commands.remove(target)
         commands.append(target)
-        _atomic_write_state(cwd, read_taints(cwd), _prune_finished(commands))
+        if not _atomic_write_state(cwd, read_taints(cwd), _prune_finished(commands)):
+            return None  # the close did not persist → do not report a false close (Fix 2)
     return target
 
 

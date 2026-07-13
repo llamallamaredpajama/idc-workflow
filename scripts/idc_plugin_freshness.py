@@ -68,14 +68,28 @@ def version_tuple(v: str) -> tuple[int, ...]:
 
 
 def read_version(plugin_root: str) -> str | None:
+    """The running plugin's version string, or None when it cannot be trusted. DEFENSIVE: the manifest
+    is UNTRUSTED input, so valid-but-wrong-shape JSON (e.g. a top-level list `[]`, or a `version` that
+    is absent or not a string) is treated as UNREADABLE (return None / fall back), NEVER raised. This
+    matters because the entry gate's recovery/allow path calls read_version a SECOND time OUTSIDE the
+    main try/except; a raise there would crash the hook with no lifecycle record."""
     manifest = os.path.join(plugin_root, ".claude-plugin", "plugin.json")
+    version = None
     try:
         with open(manifest, "r", encoding="utf-8") as f:
-            return json.load(f).get("version")
+            data = json.load(f)
+        if isinstance(data, dict):
+            candidate = data.get("version")
+            if isinstance(candidate, str):
+                version = candidate
     except (OSError, ValueError):
-        # Fall back to the cache dir name (.../idc/<version>), which is the version key.
-        base = os.path.basename(os.path.normpath(plugin_root))
-        return base if _VER.match(base) else None
+        version = None
+    if version is not None:
+        return version
+    # Unreadable / wrong-shape manifest → fall back to the cache dir name (.../idc/<version>), the
+    # version key. If that is not an X.Y.Z name either, the version is genuinely unknown (None).
+    base = os.path.basename(os.path.normpath(plugin_root))
+    return base if _VER.match(base) else None
 
 
 @dataclasses.dataclass(frozen=True)

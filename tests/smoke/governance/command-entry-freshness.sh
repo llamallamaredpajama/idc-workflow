@@ -167,4 +167,80 @@ for CMD in idc:doctor idc:janitor; do
 done
 echo "  ok (e) a stale cached runtime with an invalid receipt blocks recovery commands (positive-stale beats invalid-receipt)"
 
-echo "PASS: the command entry gate refuses a stale runtime with an actionable reload instruction, admits a current runtime while opening its lifecycle record, opens a record for a recovery command allowed on an invalid receipt, blocks a stale runtime even when the receipt is invalid (positive-stale precedence), and applies the admission-category matrix (workflow fail-closed on an invalid receipt; recovery/janitor/init may expand; all blocked when positively stale)"
+# (f) Fix 1 — read_version() must not CRASH on valid-but-wrong-shape JSON. A manifest whose top-level
+#     JSON is a list (`[]`) — valid JSON, wrong shape — must be treated as an unreadable version
+#     (None), NOT raise AttributeError. The recovery/allow path calls read_version a SECOND time
+#     (registration) OUTSIDE the main gate's try/except, so a raise there crashes the hook with no
+#     lifecycle record — violating "a recovery command allowed for any fail-closed reason owns a
+#     record." A governed `doctor` on a non-stale runtime with a wrong-shape manifest must still be
+#     ALLOWED and still OPEN its record, with no crash.
+#     Red-when-broken: let read_version do `json.load(f).get("version")` on `[]` ⇒ AttributeError
+#     escapes the recovery registration ⇒ no additionalContext + no active record ⇒ FAILs.
+REPO_F="$WORK/repo-f"; mkdir -p "$REPO_F/docs/workflow"
+printf 'backend: filesystem\n' > "$REPO_F/docs/workflow/tracker-config.yaml"
+printf 'receipt_version: 2\nplugin_version: 4.0.0\n' > "$REPO_F/docs/workflow/install-receipt.yaml"
+BADSHAPE_PLUGIN="$WORK/plugin-badshape"; mkdir -p "$BADSHAPE_PLUGIN/.claude-plugin"
+printf '[]\n' > "$BADSHAPE_PLUGIN/.claude-plugin/plugin.json"
+emit_expansion_repo() {
+  python3 - "$1" "$2" "$3" <<'PY'
+import json, sys
+print(json.dumps({
+    "session_id": "S-shape",
+    "cwd": sys.argv[3],
+    "hook_event_name": "UserPromptExpansion",
+    "expansion_type": "command",
+    "command_name": sys.argv[1],
+    "command_args": sys.argv[2],
+    "command_source": "plugin",
+    "prompt": "/" + sys.argv[1] + " " + sys.argv[2],
+}))
+PY
+}
+if ! OUT="$(emit_expansion_repo idc:doctor '' "$REPO_F" | python3 "$ENTRY_GATE" "$BADSHAPE_PLUGIN")"; then
+  gov_fail "(f) the entry gate CRASHED on a wrong-shape (\`[]\`) plugin manifest (read_version raised)"
+fi
+printf '%s' "$OUT" | grep -q 'additionalContext' \
+  || gov_fail "(f) doctor on a wrong-shape manifest was not allowed to expand"
+python3 "$GOV_PLUGIN/scripts/idc_command_contract.py" status --repo "$REPO_F" --session S-shape --json \
+  | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if sum(1 for r in d["active"] if r.get("command")=="doctor")==1 else 1)' \
+  || gov_fail "(f) doctor was allowed on a wrong-shape manifest but did NOT open its lifecycle record (Fix 1)"
+echo "  ok (f) a wrong-shape (\`[]\`) plugin manifest does not crash the gate; doctor is allowed AND opens its record"
+
+# (g) Fix 2 — a FAILED ledger write must NOT be reported as an opened record. If the state write
+#     cannot persist (here: an unwritable repo root, so the temp-file create / os.replace fails), the
+#     entry gate must NOT claim "record opened" and `status` must show NO active record — the honest
+#     fail path (a workflow command that cannot record its obligation is fail-closed/blocked, never
+#     silently admitted as if the Stop gate could enforce its closeout).
+#     Red-when-broken: have the gate trust command_start's return without a persisted readback (and
+#     command_start return a record even when the write failed) ⇒ the gate emits "opened a governed
+#     command record" while status is empty ⇒ the no-false-claim assertion FAILs.
+REPO_G="$WORK/repo-g"; mkdir -p "$REPO_G/docs/workflow"
+printf 'backend: filesystem\n' > "$REPO_G/docs/workflow/tracker-config.yaml"
+printf 'receipt_version: 2\nplugin_version: 4.0.0\n' > "$REPO_G/docs/workflow/install-receipt.yaml"
+emit_expansion_g() {
+  python3 - "$1" "$2" "$3" <<'PY'
+import json, sys
+print(json.dumps({
+    "session_id": "S-writefail",
+    "cwd": sys.argv[3],
+    "hook_event_name": "UserPromptExpansion",
+    "expansion_type": "command",
+    "command_name": sys.argv[1],
+    "command_args": sys.argv[2],
+    "command_source": "plugin",
+    "prompt": "/" + sys.argv[1] + " " + sys.argv[2],
+}))
+PY
+}
+chmod 500 "$REPO_G"   # read+traverse, NO write → the ledger temp-file create fails (write cannot persist)
+OUT="$(emit_expansion_g idc:think 'Drive first' "$REPO_G" | python3 "$ENTRY_GATE" "$CURRENT_PLUGIN")"
+chmod 700 "$REPO_G"   # restore so the status readback + cleanup are unambiguous
+if printf '%s' "$OUT" | grep -q 'opened a governed command record'; then
+  gov_fail "(g) a FAILED ledger write was falsely reported as an opened record (dishonest state)"
+fi
+python3 "$GOV_PLUGIN/scripts/idc_command_contract.py" status --repo "$REPO_G" --session S-writefail --json \
+  | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if len(d["active"])==0 else 1)' \
+  || gov_fail "(g) status shows an active record even though the ledger write failed (Fix 2)"
+echo "  ok (g) a failed ledger write is NOT reported as an opened record; status shows no active record"
+
+echo "PASS: the command entry gate refuses a stale runtime with an actionable reload instruction, admits a current runtime while opening its lifecycle record, opens a record for a recovery command allowed on an invalid receipt, blocks a stale runtime even when the receipt is invalid (positive-stale precedence), does not crash on a wrong-shape plugin manifest (Fix 1), never reports a failed ledger write as an opened record (Fix 2), and applies the admission-category matrix (workflow fail-closed on an invalid receipt; recovery/janitor/init may expand; all blocked when positively stale)"

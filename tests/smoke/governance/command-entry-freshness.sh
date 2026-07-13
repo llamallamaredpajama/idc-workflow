@@ -109,16 +109,29 @@ printf '%s' "$OUT" | grep -q 'additionalContext' \
   || gov_fail "(b) init on an invalid receipt was not allowed to expand"
 echo "  ok (b) init on an invalid receipt is allowed to expand (bootstrap)"
 
-# (c) a RECOVERY command (doctor) AND `janitor` on an unknown legacy receipt → ALLOWED to expand.
+# (c) a RECOVERY command (doctor) AND `janitor` on an unknown legacy receipt → ALLOWED to expand AND
+#     each OPENS its lifecycle record in the governed repo. The emitted additionalContext claims a
+#     record was opened, so a record MUST actually exist (the Stop closeout gate + a later `finish`
+#     both depend on it) — Fix 2.
 #     Red-when-broken for the janitor RECLASSIFICATION: move janitor back to the fail-closed set ⇒
-#     janitor is BLOCKED here instead of allowed ⇒ this assertion FAILs.
+#     janitor is BLOCKED here instead of allowed ⇒ the additionalContext assertion FAILs.
+#     Red-when-broken for Fix 2: emit additionalContext WITHOUT calling register_start ⇒ the
+#     active-record assertion FAILs.
 write_unknown_receipt "$REPO"
+# assert_active <session> <command>: exactly one active lifecycle record for that command+session.
+assert_active() {
+  python3 "$GOV_PLUGIN/scripts/idc_command_contract.py" status --repo "$REPO" --session "$1" --json \
+    | python3 -c 'import json,sys; d=json.load(sys.stdin); c=sys.argv[1]; sys.exit(0 if sum(1 for r in d["active"] if r.get("command")==c)==1 else 1)' "$2"
+}
 for CMD in idc:doctor idc:janitor; do
+  bare="${CMD#idc:}"
   OUT="$(emit_expansion "$CMD" '' | python3 "$ENTRY_GATE" "$CURRENT_PLUGIN")"
   printf '%s' "$OUT" | grep -q 'additionalContext' \
     || gov_fail "(c) $CMD on an unknown legacy receipt was not allowed to expand"
+  assert_active S-entry "$bare" \
+    || gov_fail "(c) $CMD was allowed on an invalid receipt but did NOT open its lifecycle record (Fix 2)"
 done
-echo "  ok (c) doctor AND janitor on an unknown legacy receipt are allowed to expand (recovery/diagnostic)"
+echo "  ok (c) doctor AND janitor on an unknown legacy receipt are allowed to expand AND open their lifecycle record"
 
 # (d) a POSITIVELY STALE runtime → BLOCKED for a recovery command, janitor, AND init alike (stale code
 #     is unsafe for EVERY command). Receipt requires 4.1.0 but OLD_PLUGIN runs 4.0.0.
@@ -132,4 +145,26 @@ for CMD in idc:doctor idc:janitor idc:init; do
 done
 echo "  ok (d) a positively stale runtime blocks recovery commands, janitor, and init alike"
 
-echo "PASS: the command entry gate refuses a stale runtime with an actionable reload instruction, admits a current runtime while opening its lifecycle record, and applies the admission-category matrix (workflow fail-closed on an invalid receipt; recovery/janitor/init may expand; all blocked when positively stale)"
+# (e) Fix 1 — precedence: a POSITIVELY STALE cached runtime hidden behind an INVALID receipt must
+#     STILL block a recovery command. The running-vs-cache staleness signal is receipt-INDEPENDENT
+#     and MUST be computed BEFORE the invalid-receipt recovery-allow path — a stale runtime is the
+#     more dangerous condition. Fixture: a version-keyed cache dir with 4.0.0 (running) + a newer
+#     4.1.0 sibling (so freshness sees running-behind-cache without consulting the receipt), plus a
+#     BAD v2 receipt that would otherwise raise into the recovery-allow branch.
+#     Red-when-broken: validate the receipt before the cache-stale check (the old precedence) ⇒ the
+#     invalid receipt raises first and doctor/janitor get ALLOWED here ⇒ the block assertion FAILs.
+CACHE_DIR="$WORK/cache/idc"; mkdir -p "$CACHE_DIR/4.1.0"
+STALE_CACHE_RUNNING="$CACHE_DIR/4.0.0"; mk_plugin "$STALE_CACHE_RUNNING" 4.0.0
+write_bad_v2_receipt "$REPO"
+for CMD in idc:doctor idc:janitor; do
+  OUT="$(emit_expansion "$CMD" '' | python3 "$ENTRY_GATE" "$STALE_CACHE_RUNNING")"
+  printf '%s' "$OUT" | grep -q '"decision": "block"' \
+    || gov_fail "(e) $CMD on a stale cached runtime with an invalid receipt was not blocked (invalid receipt hid the stale runtime)"
+  printf '%s' "$OUT" | grep -q '/reload-plugins' \
+    || gov_fail "(e) $CMD stale+invalid block did not name /reload-plugins"
+  printf '%s' "$OUT" | grep -q '/clear does not reload' \
+    || gov_fail "(e) $CMD stale+invalid block did not explain that /clear is insufficient"
+done
+echo "  ok (e) a stale cached runtime with an invalid receipt blocks recovery commands (positive-stale beats invalid-receipt)"
+
+echo "PASS: the command entry gate refuses a stale runtime with an actionable reload instruction, admits a current runtime while opening its lifecycle record, opens a record for a recovery command allowed on an invalid receipt, blocks a stale runtime even when the receipt is invalid (positive-stale precedence), and applies the admission-category matrix (workflow fail-closed on an invalid receipt; recovery/janitor/init may expand; all blocked when positively stale)"

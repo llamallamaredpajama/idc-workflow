@@ -34,6 +34,14 @@ X.Y.Z, or ANY receipt whose `receipt_version` is not `1` or `2` (including absen
 existing receipt file). A valid `receipt_version: 1` receipt, or no receipt at all, is NOT
 invalid: it yields required_version=None, the documented pre-guard migration path, and is
 allowed.
+
+PRECEDENCE (positively stale wins first). The running-vs-newest-cache check is receipt-independent
+and is evaluated BEFORE the receipt is parsed: a runtime running behind the newest installed cache
+version is reported `stale` (exit 4) even when the repo's receipt is otherwise INVALID. A stale
+runtime is the more dangerous condition, so it must be detected before an invalid receipt can hide
+it — otherwise an invalid receipt would downgrade a stale runtime to a mere exit-2 receipt error and
+a recovery command would run on stale code. The exit-2-on-invalid-receipt behavior is retained only
+when the runtime is NOT positively stale.
 """
 from __future__ import annotations
 
@@ -83,12 +91,26 @@ class FreshnessResult:
 def evaluate(plugin_root: str, repo: str | None = None,
              cache_root: str | None = None) -> FreshnessResult:
     running = read_version(plugin_root)
-    required = read_required_version(repo) if repo else None
     mode = "cache" if cache_version_root(plugin_root) else "plugin-dir"
     installed = newest_cached_version(plugin_root, cache_root) if mode == "cache" else None
+    # PRECEDENCE — positively stale wins first. The running-vs-newest-cache signal is
+    # receipt-INDEPENDENT, so compute it BEFORE reading (and possibly raising on) the receipt: a
+    # runtime running behind the newest installed cache version is stale no matter what the receipt
+    # says, and a stale runtime is the more dangerous condition that must be detected before an
+    # invalid receipt can hide it. An invalid receipt on a runtime that IS behind the cache therefore
+    # surfaces as `stale` (blockable by the entry gate), not as an exit-2 invalid-receipt error that
+    # would let a recovery command fall through to the receipt-repair path on stale code.
+    cache_stale = bool(mode == "cache" and running and installed
+                       and version_tuple(running) < version_tuple(installed))
+    try:
+        required = read_required_version(repo) if repo else None
+    except InvalidReceiptError:
+        if cache_stale:
+            return FreshnessResult(running, None, installed, mode, "stale", "running-behind-cache")
+        raise  # not positively stale → keep Task 1's exit-2-on-invalid-receipt behavior
     if running and required and version_tuple(running) < version_tuple(required):
         return FreshnessResult(running, required, installed, mode, "stale", "running-behind-receipt")
-    if mode == "cache" and running and installed and version_tuple(running) < version_tuple(installed):
+    if cache_stale:
         return FreshnessResult(running, required, installed, mode, "stale", "running-behind-cache")
     if mode == "plugin-dir" and running:
         return FreshnessResult(running, required, installed, mode, "development-current", "plugin-dir-current")

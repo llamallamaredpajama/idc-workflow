@@ -9,9 +9,30 @@ It is the file-backed-labels half of Omnigent's stateful-policy pattern; the gat
 THE FILE. One JSON file, `.idc-session-state.json`, at the **governed workspace root**
 (`ledger_path(cwd)`). It is transient working state, gitignored via the scaffold
 (`ensure_gitignored()`, wired into idc_init_scaffold.sh + /idc:update) so a clean autorun/build exit
-never leaves committed litter. Shape:
+never leaves committed litter. PRIMARY FORMAT — v2 (Task 2, command integrity), carrying BOTH the v1
+`taints` array AND a `commands` array (the universal IDC command lifecycle envelope):
 
-    {"version": 1, "taints": [ {"kind": ..., "key": ..., "session_id": ..., "fields": {...}}, ... ]}
+    {
+      "version": 2,
+      "taints":  [ {"kind": ..., "key": ..., "session_id": ..., "fields": {...}}, ... ],
+      "commands": [
+        {
+          "session_id":   "S1",              # the session that owns this command obligation
+          "command":      "think",           # one of idc_command_contract.COMMANDS
+          "state":        "active",          # "active" (open) → "finished" (closed)
+          "plugin_version": "4.1.0",         # the running plugin version that opened the record
+          "args_sha256":  "<64-lowercase-hex>",  # digest of the raw arg text (never the text itself)
+          "source":       "user",            # command_source (user | plugin | ...)
+          "closeout":     null               # null while active; the validated terminal envelope once finished
+        }
+      ]
+    }
+
+BACKWARD COMPATIBILITY. A v1 file — `{"version": 1, "taints": [...]}` with no `commands` — is read
+tolerantly and normalized to the v2 shape on read (see `read_state`); it is only rewritten with
+`version: 2` on the next write. Every write preserves BOTH arrays: a taint write never drops
+`commands`, and a command write never drops `taints`. The finished-command history is capped
+(`_MAX_FINISHED`, newest-finish order) while an active record is NEVER pruned.
 
 TAINT KINDS (at minimum; a taint's identity is the (kind, key) pair):
   - `unfiled_findings`         — reviewer nits/deferrals not yet routed to the board (drop A/B).

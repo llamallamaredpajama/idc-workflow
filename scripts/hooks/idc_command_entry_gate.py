@@ -17,7 +17,12 @@ unexpected gate exception — is BLOCKED with a repair message naming `/idc:doct
 we refuse to run an unverifiable workflow command. RECOVERY / DIAGNOSTIC commands
 `doctor|update|uninstall|janitor` (and `init`, which repairs/creates the scaffold) may still expand on
 an unknown/invalid legacy receipt so the operator can diagnose or migrate the repo — but they are
-STILL blocked on a positively stale runtime, because stale recovery code is itself unsafe. `janitor`
+STILL blocked on a positively stale runtime, because stale recovery code is itself unsafe. A recovery
+command allowed down this path in an ALREADY-governed repo also OPENS its lifecycle record (the same
+command_start path), so the Stop gate can catch abandonment and a later `finish` finds an owned record
+— the emitted context claims a record, so one must actually exist. `init` is the exception: it
+bootstraps a not-yet-governed repo and defers its `start` to commands/init.md (after tracker-config
+exists), so it is admitted with a bootstrap context that does NOT claim a record. `janitor`
 is a recovery/diagnostic sweep ("janitor remains recovery, not the primary guard") — it may run on an
 invalid/unknown receipt to help the operator diagnose, and is fail-closed only on a positively stale
 runtime, alongside the other recovery commands.
@@ -42,8 +47,14 @@ import idc_command_contract as C  # noqa: E402
 WORKFLOW_COMMANDS = {"think", "intake", "plan", "build", "recirculate", "autorun"}
 # May still expand on an unknown/invalid legacy receipt so the operator can diagnose or migrate the
 # repo. `janitor` is a recovery/diagnostic sweep (not the primary guard), so it lives here — blocked
-# only on a POSITIVELY stale runtime, never on a merely-unverifiable receipt. `init` bootstraps.
-ALLOW_ON_INVALID = {"doctor", "update", "uninstall", "janitor", "init"}
+# only on a POSITIVELY stale runtime, never on a merely-unverifiable receipt.
+RECOVERY_COMMANDS = {"doctor", "update", "uninstall", "janitor"}
+# `init` bootstraps a not-yet-governed repo: it is ALLOWED to expand but does NOT open a record in the
+# entry gate — commands/init.md opens its own lifecycle record right after it writes
+# tracker-config.yaml (Task 6). So init is the one governed command whose registration the entry gate
+# DEFERS; every other command's record is opened here.
+DEFERS_REGISTRATION = {"init"}
+ALLOW_ON_INVALID = RECOVERY_COMMANDS | DEFERS_REGISTRATION
 
 STALE_REASON = (
     "IDC refused to expand this command because the active plugin runtime is older than "
@@ -90,6 +101,48 @@ def _context(command, plugin_root):
     )
 
 
+def _bootstrap_context(command, plugin_root):
+    """The context for an ADMITTED expansion that did NOT open a lifecycle record — `/idc:init` before
+    the repo is governed, or a not-yet-governed / session-less invocation. It must NOT claim a record
+    exists (Fix 2): a false "record opened" claim would tell the body an obligation is owed that the
+    Stop gate cannot find. Instead it tells the command to open its OWN record once governance exists."""
+    return (
+        f"IDC command lifecycle: `/idc:{command}` was admitted, but NO governed command record was "
+        "opened by the entry gate (this repo is not governed yet, or this command opens its own "
+        f"record later). If this command establishes or repairs governance, open the record via "
+        f"`{_contract_script(plugin_root)} start` after tracker-config.yaml exists, then close it "
+        "with a valid terminal status before this session stops."
+    )
+
+
+def _emit_context(command, plugin_root, opened):
+    """Emit the additionalContext that matches reality: the record-owed message iff a record was
+    actually opened, otherwise the bootstrap message that claims no record."""
+    if opened:
+        H.prompt_expansion_context(_context(command, plugin_root))
+    H.prompt_expansion_context(_bootstrap_context(command, plugin_root))
+
+
+def _register_if_governed(payload, plugin_root, command):
+    """Open (idempotent upsert) the command's active lifecycle record when this is a governed repo
+    with a session to key on — the shared open-a-record path for BOTH the clean admit and the
+    allow-on-invalid-receipt fork. Returns True iff a record was opened. `init` defers its start to
+    commands/init.md (Task 6), and a non-governed repo / missing session has nothing to key on, so
+    those return False and the caller emits the bootstrap context instead of a false "record opened"
+    claim. The running version is read receipt-independently, so this works even when the receipt is
+    invalid (the caller has already proven the runtime is NOT positively stale)."""
+    if command in DEFERS_REGISTRATION:
+        return False
+    cwd = payload.get("cwd") or os.getcwd()
+    session_id = payload.get("session_id")
+    if not (session_id and H.is_governed_repo(cwd)):
+        return False
+    running = freshness.read_version(plugin_root) or ""
+    C.register_start(cwd, session_id, command, running,
+                     payload.get("command_args") or "", payload.get("command_source") or "")
+    return True
+
+
 def _block(reason):
     """Refuse the expansion, honoring the observe-only debug downgrade (warn + allow)."""
     if H.observe_only():
@@ -98,35 +151,39 @@ def _block(reason):
     H.prompt_expansion_block(reason)
 
 
-def _fail_closed_or_allow(command, why, plugin_root):
+def _fail_closed_or_allow(payload, command, why, plugin_root):
     """The unverifiable-freshness fork: fail CLOSED for the six workflow commands (block with the
     repair message); ALLOW recovery/diagnostic + init commands (they must run to diagnose or migrate
-    the repo)."""
+    the repo). This fork is only reached AFTER freshness has proven the runtime is NOT positively
+    stale (a stale runtime is blocked upstream / by the cache-first precedence in freshness.evaluate),
+    so an allowed governed recovery command safely OPENS its lifecycle record here — the emitted
+    context claims a record exists, so one must actually be opened (Fix 2)."""
     if command in ALLOW_ON_INVALID:
         H.warn(f"idc-entry-gate: allowing recovery command /idc:{command} despite: {why}")
-        H.prompt_expansion_context(_context(command, plugin_root))
+        opened = _register_if_governed(payload, plugin_root, command)
+        _emit_context(command, plugin_root, opened)
     _block(REPAIR_REASON)
 
 
 def _admit(payload, plugin_root, command):
     cwd = payload.get("cwd") or os.getcwd()
     # Task-1 freshness. An InvalidReceiptError (or any other exception) propagates to the caller's
-    # fail-closed handler; here we only decide on a CLEAN evaluation.
+    # fail-closed handler; here we only decide on a CLEAN evaluation. The cache-first precedence in
+    # freshness.evaluate means a runtime behind the installed cache is reported `stale` (blocked
+    # below) rather than raising, even when the receipt is invalid.
     result = freshness.evaluate(plugin_root, repo=cwd)
     if result.running_version is None:
         # The running plugin manifest could not be read → we cannot bind the runtime at all.
-        _fail_closed_or_allow(command, "the running plugin manifest could not be read", plugin_root)
+        _fail_closed_or_allow(payload, command,
+                              "the running plugin manifest could not be read", plugin_root)
     if result.verdict == "stale":
         _block(STALE_REASON)  # blocks EVERY command, recovery ones included (stale code is unsafe)
 
-    # Admitted. On a governed repo, open the lifecycle record (idempotent upsert). `/idc:init` before
-    # the repo is governed cannot register yet — init.md opens the record right after it writes
-    # tracker-config.yaml (Task 6). A missing session_id likewise skips the write (nothing to key on).
-    session_id = payload.get("session_id")
-    if session_id and H.is_governed_repo(cwd):
-        C.register_start(cwd, session_id, command, result.running_version or "",
-                         payload.get("command_args") or "", payload.get("command_source") or "")
-    H.prompt_expansion_context(_context(command, plugin_root))
+    # Admitted on a clean, non-stale freshness signal. Open the lifecycle record (idempotent upsert)
+    # when this is a governed repo with a session; init and non-governed / session-less cases emit the
+    # bootstrap context instead (no false "record opened" claim).
+    opened = _register_if_governed(payload, plugin_root, command)
+    _emit_context(command, plugin_root, opened)
 
 
 def main():
@@ -141,7 +198,7 @@ def main():
     except SystemExit:
         raise
     except Exception as exc:  # noqa: BLE001 — an unverifiable gate error is fail-closed for workflow
-        _fail_closed_or_allow(command, f"unexpected gate error: {exc}", plugin_root)
+        _fail_closed_or_allow(payload, command, f"unexpected gate error: {exc}", plugin_root)
     sys.exit(0)
 
 

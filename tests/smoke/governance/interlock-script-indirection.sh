@@ -547,6 +547,38 @@ deny "time bash '$FIXTURE/fire_gate.sh'"
 # `time -p` before a SANCTIONED interpreter target stays ALLOWED (no over-block).
 allow "time -p bash '$GOV_PLUGIN/scripts/idc_transition.py'"
 
+echo "== round-14: a benign leading assignment BEFORE a wrapper cannot smuggle the split-string/script =="
+# Round-13 stopped the inspect-prefix strip at the FIRST leading VAR=val assignment, so it never peeled
+# the FOLLOWING wrapper — `FOO=1 nohup env -S 'gh issue' create` left seg[0]=`FOO=1`, the env-split
+# detector saw `nohup` (not `env`) after the assignment, and the reconstructed `gh issue create` slipped.
+# A single fixpoint prefix-normalization loop now CROSSES ordinary assignments and PEELS wrappers/control
+# words in ANY interleaving, stopping only at the real head (or at `env`/a startup-env assignment, whose
+# payload must be inspected). Red-when-broken: stop the peel at any leading assignment → the wrapped
+# `env -S`/script after it is never reached → the write is allowed.
+deny "FOO=1 nohup env -S 'gh issue' create --title x"
+deny "FOO=1 timeout 5 env -S 'gh issue' create --title x"
+deny "FOO=1 command env -S 'gh issue' create --title x"
+deny "FOO=1 setsid env -S 'gh issue create --title x --body-file /tmp/b'"
+deny "FOO=1 stdbuf -oL env -S 'gh issue' create --title x"
+deny "FOO=1 nice -n 10 env -S 'gh issue' create --title x"
+# a benign assignment before a wrapped interpreter SCRIPT likewise denies (assignment→wrapper→bash FILE).
+deny "FOO=1 nohup bash '$FIXTURE/fire_gate.sh'"
+deny "FOO=1 timeout 5 bash '$FIXTURE/fire_gate.sh'"
+deny "A=1 B=2 nohup bash '$FIXTURE/fire_gate.sh'"
+# ANY interleaving order: an assignment AFTER a wrapper, and wrapper→assignment→wrapper→interpreter.
+deny "nohup FOO=1 timeout 5 bash '$FIXTURE/fire_gate.sh'"
+deny "FOO=1 nohup BAR=2 timeout 5 env -S 'gh issue' create --title x"
+# a startup-env (BASH_ENV) assignment BEHIND a benign assignment + wrapper still denies (signal preserved).
+deny "FOO=1 nohup env BASH_ENV='$FIXTURE/fire_gate.sh' bash -c 'echo hi'"
+deny "BAR=2 timeout 5 env BASH_ENV='$FIXTURE/fire_gate.sh' bash -c 'echo hi'"
+deny "FOO=1 nohup BASH_ENV='$FIXTURE/fire_gate.sh' bash -c 'echo hi'"
+# NO over-block: a benign assignment before a wrapped READ / sanctioned script stays ALLOWED.
+allow "FOO=1 nohup gh issue view 5"
+allow "FOO=1 timeout 5 gh issue view 5"
+allow "FOO=1 nohup env -S 'gh issue view 5'"
+allow "FOO=1 nohup bash '$GOV_PLUGIN/scripts/idc_transition.py'"
+allow "A=1 B=2 timeout 5 bash '$GOV_PLUGIN/scripts/idc_transition.py'"
+
 echo "== the sanctioned write door is never denied =="
 allow "python3 '$GOV_PLUGIN/scripts/idc_transition.py' --repo '$REPO' create-ticket --title safe --stage Buildable --status Todo"
 allow "python3 '$GOV_PLUGIN/scripts/idc_pr_finish.py' autonomous --repo '$REPO' --pr 12 --kind planning"

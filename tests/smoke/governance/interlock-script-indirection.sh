@@ -518,6 +518,35 @@ allow "bash -ic 'echo hi'"
 deny "bash -xc 'gh issue create --title x --body-file /tmp/b'"
 deny "bash -ic 'gh pr merge 12 --squash'"
 
+echo "== round-13 Fix 1: an exec WRAPPER before \`env -S\` cannot smuggle the split-string command =="
+# The `env -S`/startup-env/interpreter detection now runs on the segment AFTER leading exec wrappers /
+# control words are stripped, so `nohup`/`timeout 5`/`stdbuf -oL`/`setsid`/`command` before an
+# `env -S 'gh issue' create` no longer waves the reconstructed `gh issue create` through. Red-when-broken:
+# check env-split on the RAW segment → a leading wrapper makes seg[0] != `env` → the payload is never
+# parsed → the write is allowed.
+deny "nohup env -S 'gh issue' create --title x"
+deny "timeout 5 env -S 'gh issue' create --title x"
+deny "stdbuf -oL env -S 'gh issue' create --title x"
+deny "setsid env -S 'gh issue create --title x --body-file /tmp/b'"
+deny "command env -S 'gh issue' create --title x"
+# an exec wrapper before a BASH_ENV startup-file prefix likewise denies (startup-env on the stripped seg).
+deny "nohup env BASH_ENV='$FIXTURE/fire_gate.sh' bash -c 'echo hi'"
+deny "timeout 5 env BASH_ENV='$FIXTURE/fire_gate.sh' bash -c 'echo hi'"
+# a wrapped `env -S` whose reconstructed command is a READ stays ALLOWED (no over-block).
+allow "nohup env -S 'gh issue view 5'"
+
+echo "== round-13 Fix 2: \`time -p\`/\`time --portability\` is a wrapper before the interpreter/gh head =="
+# `time` is bash's keyword form `time [-p] pipeline`; the bare `time` was already handled as a control
+# word, but `time -p`/`time --portability` left `-p` dangling so the interpreter/gh head was never reached.
+# Red-when-broken: strip only the bare `time` token → `-p bash <fire>` has a non-interpreter head → allowed.
+deny "time -p bash '$FIXTURE/fire_gate.sh'"
+deny "time --portability sh '$FIXTURE/fire_gate.sh'"
+deny "time -p gh issue create --title x --body-file /tmp/b"
+# bare `time` (control-word path) still denies — no regression.
+deny "time bash '$FIXTURE/fire_gate.sh'"
+# `time -p` before a SANCTIONED interpreter target stays ALLOWED (no over-block).
+allow "time -p bash '$GOV_PLUGIN/scripts/idc_transition.py'"
+
 echo "== the sanctioned write door is never denied =="
 allow "python3 '$GOV_PLUGIN/scripts/idc_transition.py' --repo '$REPO' create-ticket --title safe --stage Buildable --status Todo"
 allow "python3 '$GOV_PLUGIN/scripts/idc_pr_finish.py' autonomous --repo '$REPO' --pr 12 --kind planning"

@@ -1147,25 +1147,48 @@ def _skip_exec_wrapper(seg, i, spec):
     return i
 
 
-def _strip_prefixes(seg):
+def _strip_prefixes(seg, descend_env=True, peel_assignments=True):
     """Drop leading `VAR=val` assignments and execution-wrapper words TOGETHER WITH their options so the
     REAL command head is seen (`X=1 bash f.sh`, `env -i bash f.sh`, `command -p bash f.sh`, and the
     generic `nohup`/`timeout 5`/`stdbuf -oL`/`setsid`/`nice -n 10`/… wrappers must all reach `f.sh`, not
     wave the wrapper/option through as a benign head token). Shared by the gh path (which then scans for
     a bare `gh` head) and the interpreter path (which detects an exact `bash|sh|zsh` head) so the two
     stay wrapper-agnostic in lockstep. Chained wrappers (`env -i command bash f.sh`, `nohup timeout 5
-    bash f.sh`) unwind one layer per outer-loop pass."""
+    bash f.sh`) unwind one layer per outer-loop pass.
+
+    round-13 Fix 2: `time`/`time -p`/`time --portability` (bash's `time [-p] pipeline` keyword form) peels
+    the `time` word AND its optional `-p`/`--portability` flag, so `time -p bash f.sh` / `time -p gh …`
+    reach the real interpreter/gh head instead of leaving `-p` dangling as a bogus head token.
+
+    round-13 Fix 1: the OUTER-wrapper-only mode (`descend_env=False, peel_assignments=False`) peels just
+    the exec WRAPPERS + control words but STOPS at an `env` token AND at a leading `VAR=val` assignment —
+    both carry a PAYLOAD the env-split / startup-file checks must inspect with their head intact (with the
+    default full descend, `_skip_wrapper_opts` would swallow `env -S`'s string, and the assignment peel
+    would erase the `BASH_ENV=…` startup signal). `_inspect_segment` peels in this mode FIRST so those two
+    checks run on a segment whose head is the real `env`/assignment even behind `nohup`/`timeout 5`/…; the
+    interpreter/source scan then re-peels with the default full descend to reach `bash|sh|zsh`. Leading
+    assignments only appear at the very front of a segment (never after a wrapper — invalid shell), so
+    stopping at one loses nothing."""
     i = 0
     while i < len(seg):
         tok = seg[i]
+        if tok == "time":                                  # round-13 Fix 2: `time [-p] pipeline` keyword
+            i += 1
+            while i < len(seg) and seg[i] in ("-p", "--portability"):
+                i += 1
+            continue
         if tok in _CONTROL_WORDS:                          # round-10 Fix 4: `else`/`then`/`!`/… head
             i += 1
             continue
         if _ASSIGN_RE.match(tok):
+            if not peel_assignments:                       # round-13 Fix 1: keep the assignment as head
+                break                                      # so the startup-file (`BASH_ENV=…`) check sees it
             i += 1
             continue
         base = os.path.basename(tok)
         if base in _CMD_PREFIXES:
+            if base == "env" and not descend_env:          # round-13 Fix 1: keep `env` as the head
+                break                                      # for env-split / startup-file inspection
             i = _skip_wrapper_opts(seg, i + 1, base)
             continue
         if base in _EXEC_WRAPPERS:                         # round-12 Fix 2: generic wrapper-agnostic strip
@@ -1272,6 +1295,14 @@ def _interpreter_plan(args):
 
 def _inspect_segment(seg, cwd, plugin_root, depth, seen):
     """List of findings for one command segment's interpreter/source invocation (rules 3–4)."""
+    # round-13 Fix 1: strip leading exec wrappers / control words (`nohup`/`timeout 5`/`stdbuf -oL`/
+    # `setsid`/`command`/`time -p`/…) FIRST — but keep a leading `env` OR `VAR=val` assignment as the head
+    # (both carry payload) — so the env-split, startup-file, and interpreter/source checks below all run on
+    # the REAL head. Before this, env-split ran on the RAW segment, so ANY wrapper in front (`nohup env -S
+    # 'gh issue' create`) made seg[0] != `env` and the reconstructed mutation slipped.
+    seg = _strip_prefixes(seg, descend_env=False, peel_assignments=False)
+    if not seg:
+        return []
     # round-9 Fix A (finding 4): a BASH_ENV/ENV/SHELLOPTS/*ENV/*RC startup-file prefix before an
     # interpreter head sources that file BEFORE the interpreter runs its `-c`/script, so it can smuggle
     # a protected mutation the payload inspection never sees. Fail closed — deny WITHOUT resolving the

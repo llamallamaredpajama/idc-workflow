@@ -206,22 +206,22 @@ python3 "$GOV_PLUGIN/scripts/idc_command_contract.py" status --repo "$REPO_F" --
   || gov_fail "(f) doctor was allowed on a wrong-shape manifest but did NOT open its lifecycle record (Fix 1)"
 echo "  ok (f) a wrong-shape (\`[]\`) plugin manifest does not crash the gate; doctor is allowed AND opens its record"
 
-# (g) Fix 2 — a FAILED ledger write must NOT be reported as an opened record. If the state write
-#     cannot persist (here: an unwritable repo root, so the temp-file create / os.replace fails), the
-#     entry gate must NOT claim "record opened" and `status` must show NO active record — the honest
-#     fail path (a workflow command that cannot record its obligation is fail-closed/blocked, never
-#     silently admitted as if the Stop gate could enforce its closeout).
-#     Red-when-broken: have the gate trust command_start's return without a persisted readback (and
-#     command_start return a record even when the write failed) ⇒ the gate emits "opened a governed
-#     command record" while status is empty ⇒ the no-false-claim assertion FAILs.
+# (g) Fix 2 — the FAILED-WRITE / admission contract, proven across the THREE ways it must hold. When
+#     the per-session state ledger cannot persist (an unwritable repo root → the temp-file create
+#     fails), the gate must react HONESTLY per command class, and a failed closeout must never be
+#     reported as a close. EVERY sub-case below is guarded by an EXPLICIT exit-status check, so a hook
+#     that CRASHED (non-zero, empty output) fails the case loudly instead of sliding past a mere
+#     "no forbidden text / no record" check — which an empty output would satisfy vacuously.
 REPO_G="$WORK/repo-g"; mkdir -p "$REPO_G/docs/workflow"
 printf 'backend: filesystem\n' > "$REPO_G/docs/workflow/tracker-config.yaml"
 printf 'receipt_version: 2\nplugin_version: 4.0.0\n' > "$REPO_G/docs/workflow/install-receipt.yaml"
+# emit_expansion_g <command> <args> <repo> <session> — a UserPromptExpansion payload with an explicit
+# session so each sub-case reads back its OWN ledger without cross-talk.
 emit_expansion_g() {
-  python3 - "$1" "$2" "$3" <<'PY'
+  python3 - "$1" "$2" "$3" "$4" <<'PY'
 import json, sys
 print(json.dumps({
-    "session_id": "S-writefail",
+    "session_id": sys.argv[4],
     "cwd": sys.argv[3],
     "hook_event_name": "UserPromptExpansion",
     "expansion_type": "command",
@@ -232,15 +232,80 @@ print(json.dumps({
 }))
 PY
 }
-chmod 500 "$REPO_G"   # read+traverse, NO write → the ledger temp-file create fails (write cannot persist)
-OUT="$(emit_expansion_g idc:think 'Drive first' "$REPO_G" | python3 "$ENTRY_GATE" "$CURRENT_PLUGIN")"
-chmod 700 "$REPO_G"   # restore so the status readback + cleanup are unambiguous
-if printf '%s' "$OUT" | grep -q 'opened a governed command record'; then
-  gov_fail "(g) a FAILED ledger write was falsely reported as an opened record (dishonest state)"
-fi
-python3 "$GOV_PLUGIN/scripts/idc_command_contract.py" status --repo "$REPO_G" --session S-writefail --json \
-  | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if len(d["active"])==0 else 1)' \
-  || gov_fail "(g) status shows an active record even though the ledger write failed (Fix 2)"
-echo "  ok (g) a failed ledger write is NOT reported as an opened record; status shows no active record"
+CONTRACT="$GOV_PLUGIN/scripts/idc_command_contract.py"
+# no_active <repo> <session> <command>: exit 0 iff NO active record for that command+session.
+no_active() {
+  python3 "$CONTRACT" status --repo "$1" --session "$2" --json \
+    | python3 -c 'import json,sys; d=json.load(sys.stdin); c=sys.argv[1]; sys.exit(0 if not any(r.get("command")==c for r in d["active"]) else 1)' "$3"
+}
 
-echo "PASS: the command entry gate refuses a stale runtime with an actionable reload instruction, admits a current runtime while opening its lifecycle record, opens a record for a recovery command allowed on an invalid receipt, blocks a stale runtime even when the receipt is invalid (positive-stale precedence), does not crash on a wrong-shape plugin manifest (Fix 1), never reports a failed ledger write as an opened record (Fix 2), and applies the admission-category matrix (workflow fail-closed on an invalid receipt; recovery/janitor/init may expand; all blocked when positively stale)"
+# (g1) a WORKFLOW command (think) whose obligation CANNOT be recorded must be BLOCKED — never admitted
+#      UNRECORDED, because the Stop closeout gate could not then enforce its closeout. The refusal is
+#      SPECIFICALLY the write-failure block (not bootstrap, not admission, not the stale/repair reason),
+#      the hook EXITS 0 (a clean block, not a crash), and NO active record exists.
+#      Red-when-broken: drop the `command in WORKFLOW_COMMANDS` write-fail block ⇒ think is bootstrap-
+#      admitted instead of blocked ⇒ the `"decision": "block"` assertion FAILs. Make that path
+#      `raise SystemExit(3)` ⇒ the exit-0 assertion FAILs (a crash is caught, not passed).
+chmod 500 "$REPO_G"   # read+traverse, NO write → the ledger temp-file create fails (write cannot persist)
+OUT="$(emit_expansion_g idc:think 'Drive first' "$REPO_G" S-wf-think | python3 "$ENTRY_GATE" "$CURRENT_PLUGIN")"; RC=$?
+chmod 700 "$REPO_G"   # restore so the status readback + cleanup are unambiguous
+[ "$RC" -eq 0 ] \
+  || gov_fail "(g1) the entry gate did NOT exit 0 on a workflow write-failure (a crash, not a clean block)"
+printf '%s' "$OUT" | grep -q '"decision": "block"' \
+  || gov_fail "(g1) a workflow command whose obligation could not be recorded was NOT blocked"
+printf '%s' "$OUT" | grep -q 'could not record the command' \
+  || gov_fail "(g1) the refusal was not the write-failure block (wrong reason: bootstrap/admission/stale/repair)"
+if printf '%s' "$OUT" | grep -q 'additionalContext'; then
+  gov_fail "(g1) a blocked workflow command still emitted admission context"
+fi
+no_active "$REPO_G" S-wf-think think \
+  || gov_fail "(g1) status shows an active record even though the ledger write failed (Fix 2)"
+echo "  ok (g1) a workflow command whose obligation cannot be recorded is BLOCKED (not admitted); no active record"
+
+# (g2) a RECOVERY command (doctor) on the SAME write-failure must still EXPAND to help the operator,
+#      but with the BOOTSTRAP context that does NOT falsely claim a record opened — and NO active
+#      record exists. It must NOT be blocked (recovery may run to diagnose) and must NOT claim a record.
+#      Red-when-broken: emit the record-owed context on the recovery write-fail path (opened=True) ⇒
+#      the "opened a governed command record" claim assertion FAILs.
+chmod 500 "$REPO_G"
+OUT="$(emit_expansion_g idc:doctor '' "$REPO_G" S-wf-doctor | python3 "$ENTRY_GATE" "$CURRENT_PLUGIN")"; RC=$?
+chmod 700 "$REPO_G"
+[ "$RC" -eq 0 ] \
+  || gov_fail "(g2) the entry gate did NOT exit 0 on a recovery write-failure (a crash)"
+printf '%s' "$OUT" | grep -q 'additionalContext' \
+  || gov_fail "(g2) a recovery command was NOT allowed to expand on a write-failure"
+if printf '%s' "$OUT" | grep -q 'opened a governed command record'; then
+  gov_fail "(g2) a recovery command FALSELY claimed a record opened despite the failed write (Fix 2)"
+fi
+if printf '%s' "$OUT" | grep -q '"decision": "block"'; then
+  gov_fail "(g2) a recovery command was BLOCKED instead of expanding with bootstrap context"
+fi
+no_active "$REPO_G" S-wf-doctor doctor \
+  || gov_fail "(g2) status shows an active record for a recovery command whose ledger write failed (Fix 2)"
+echo "  ok (g2) a recovery command on a write-failure expands with bootstrap context (no false 'record opened'); no active record"
+
+# (g3) a FAILED `command_finish` write must be reported as a FAILURE (non-zero) AND MUST leave the
+#      command ACTIVE — otherwise the Stop closeout gate would believe an un-closed command was closed.
+#      Open a real record first (writable, current runtime), then make the repo unwritable so the
+#      closeout's atomic write cannot persist.
+#      Red-when-broken: have command_finish ignore the atomic-write result (return the record even when
+#      the write failed) ⇒ `finish` exits 0 ⇒ the non-zero-report assertion FAILs.
+REPO_G3="$WORK/repo-g3"; mkdir -p "$REPO_G3/docs/workflow"
+printf 'backend: filesystem\n' > "$REPO_G3/docs/workflow/tracker-config.yaml"
+printf 'receipt_version: 2\nplugin_version: 4.0.0\n' > "$REPO_G3/docs/workflow/install-receipt.yaml"
+python3 "$CONTRACT" start --repo "$REPO_G3" --session S-finishfail --command doctor \
+  --plugin-root "$CURRENT_PLUGIN" >/dev/null \
+  || gov_fail "(g3) could not open the doctor record to set up the finish-failure case"
+no_active "$REPO_G3" S-finishfail doctor \
+  && gov_fail "(g3) precondition failed — the doctor record did not open before the finish-failure step"
+chmod 500 "$REPO_G3"   # the closeout's atomic write now cannot persist
+python3 "$CONTRACT" finish --repo "$REPO_G3" --session S-finishfail --command doctor \
+  --status complete --evidence-json '{"schema_version":1,"refs":{}}' >/dev/null 2>&1; RC=$?
+chmod 700 "$REPO_G3"
+[ "$RC" -ne 0 ] \
+  || gov_fail "(g3) a FAILED finish write was reported as SUCCESS (exit 0) — a false close (Fix 2)"
+no_active "$REPO_G3" S-finishfail doctor \
+  && gov_fail "(g3) the command is NO LONGER active after a FAILED finish write (closeout falsely recorded)"
+echo "  ok (g3) a failed command_finish write reports failure (non-zero) AND leaves the command active"
+
+echo "PASS: the command entry gate refuses a stale runtime with an actionable reload instruction, admits a current runtime while opening its lifecycle record, opens a record for a recovery command allowed on an invalid receipt, blocks a stale runtime even when the receipt is invalid (positive-stale precedence), does not crash on a wrong-shape plugin manifest (Fix 1), and honestly handles a failed ledger write (Fix 2): a workflow command is BLOCKED and unrecorded (g1), a recovery command still expands with bootstrap context and no false 'record opened' claim (g2), and a failed command_finish reports failure while leaving the command active (g3); plus the admission-category matrix (workflow fail-closed on an invalid receipt; recovery/janitor/init may expand; all blocked when positively stale)"

@@ -195,11 +195,20 @@ _GQL_WRITE = re.compile(
 def _gh_positionals(seg):
     """The POSITIONAL word sequence of a `gh …` command SEGMENT — options at ANY level stripped (incl.
     their consumed values and the self-contained `--opt=val`/`-Rval`/`-XDELETE` forms) — or None if the
-    segment is not a `gh` invocation. `gh issue -R o/r create` → ['issue', 'create']; the subcommand
-    path can no longer be split by a flag placed between levels."""
+    segment has no `gh` command head. `gh issue -R o/r create` → ['issue', 'create']; the subcommand
+    path can no longer be split by a flag placed between levels.
+
+    round-11 Fix 4 (wrapper-AGNOSTIC): after the known prefix-strip (`env`/`command`/`exec`/assignments/
+    control words), scan the remaining tokens for the FIRST bare `gh` head and take its positionals — so
+    ANY leading wrapper (`nohup`, `timeout 5`, `stdbuf -oL`, `setsid`, `nice -n 10`, `ionice`, `xargs`,
+    `time`, …) or none is handled uniformly, instead of chasing each wrapper's own option grammar. Only a
+    BARE `gh` token is a head; `gh` glued inside another token (`$(gh`, a quoted arg) is never one, so a
+    `gh` buried in a quoted string cannot be mistaken for a command head."""
     seg = _strip_prefixes(seg)
-    if not seg or os.path.basename(seg[0]) != "gh":
+    gi = next((k for k, t in enumerate(seg) if os.path.basename(t) == "gh"), None)
+    if gi is None:
         return None
+    seg = seg[gi:]
     words = []
     i = 1
     while i < len(seg):
@@ -222,7 +231,16 @@ def _combo_subject(pos):
     """A Finding (with op `kind`) if the positional sequence's leading (noun, verb) is a protected
     combo, else None. `kind` distinguishes uninstall-teardown ops (issue-close / project-delete /
     project-item-delete) from everything else so the Fix-2 allowance can key on the OP, not a string."""
-    if not pos or len(pos) < 2:
+    if not pos:
+        return None
+    # round-11 Fix 2: when the SUBCOMMAND (noun) or the operation (verb) token is a shell expansion
+    # (`gh issue "$op"` / `gh "$sub" merge`), its read-vs-write nature cannot be statically resolved →
+    # FAIL CLOSED. `_dynamic`'s kind is in no carve-out set, so it denies during any active command and,
+    # a fortiori, inside init/uninstall carve-outs. A dynamic ARGUMENT (`gh issue view "$num"`) is NOT
+    # flagged — only the noun/verb decide read-vs-write, so a static-read subcommand stays allowed.
+    if _is_dynamic_token(pos[0]) or (len(pos) >= 2 and _is_dynamic_token(pos[1])):
+        return _dynamic("a `gh` invocation whose subcommand is computed by a shell expansion")
+    if len(pos) < 2:
         return None
     noun, verb = pos[0], pos[1]
     if (noun, verb) not in _PROTECTED_COMBOS:
@@ -545,8 +563,18 @@ def _ws_combos(command):
         return _mk("a raw `gh issue reopen`", _CLOSE, "issue-reopen")
     if _has(c, "gh issue delete"):
         return _mk("a raw `gh issue delete`", _CLOSE, "issue-delete")
+    if _has(c, "gh issue edit"):
+        return _mk("a raw `gh issue edit`", _ENGINE, "issue-edit")
+    if _has(c, "gh pr close"):
+        return _mk("a raw `gh pr close`", _FINISH, "pr-close")
+    if _has(c, "gh pr edit"):
+        return _mk("a raw `gh pr edit`", _FINISH, "pr-edit")
     if _has(c, "gh project item-delete"):
         return _mk("a raw `gh project item-delete` board mutation", _ENGINE, "project-item-delete")
+    if _has(c, "gh project field-create"):
+        return _mk("a raw `gh project field-create` board mutation", _ENGINE, "project-field-create")
+    if _has(c, "gh project link"):
+        return _mk("a raw `gh project link` board mutation", _ENGINE, "project-link")
     if _has(c, "gh project delete"):
         return _mk("a raw `gh project` board mutation", _ENGINE, "project-delete")
     if _has(c, "gh project item-edit") or _has(c, "gh project item-add"):
@@ -584,6 +612,73 @@ def _join_line_continuations(command):
     """Collapse `\\`+newline shell line-continuations so a continued command is classified as the one
     command bash actually runs (round-7 Fix 2). Idempotent — no continuation left after one pass."""
     return _LINE_CONT_RE.sub("", command)
+
+
+# Chars after which a `#` begins a new word (so `#` there opens a shell comment): the start of the
+# string, whitespace, or a shell metacharacter. A `#` glued to a word (`foo#bar`, `$(cmd)#`) is literal.
+_WORD_BOUNDARY_CHARS = set(" \t\n\r;|&()<>")
+
+
+def _strip_shell_comments(command):
+    r"""Remove shell comments QUOTE-AWARE, matching bash (round-11 Fix 1). A `#` begins a comment ONLY
+    when it starts a word — at string start, or right after unquoted whitespace / a shell metacharacter
+    (`;|&()<>`) — and NOT inside single/double quotes and NOT escaped; from there to (not incl.) the
+    newline is discarded. A `#` mid-word (`foo#bar`) or inside quotes (`-f query='…#…'`) is literal and
+    kept. This is fail-safe for the classifier: it exactly mirrors bash's own comment rule, so it never
+    strips text bash WOULD execute (no bypass) and it removes the comment text the classifier must not
+    read as executable (init.md/update.md's `# … gh api graphql -f query="$MUT" …` reconcile notes).
+    MUST run BEFORE line-continuation joining: a `\`+newline INSIDE a comment is literal to bash (not a
+    continuation), so joining first could pull a following real command up into the stripped comment."""
+    out = []
+    quote = None                                   # None | "'" | '"'
+    at_boundary = True                             # start of string is a word boundary
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if quote == "'":
+            out.append(ch)
+            if ch == "'":
+                quote = None
+            at_boundary = False
+            i += 1
+            continue
+        if quote == '"':
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:           # inside "…", a backslash escapes the next char
+                out.append(command[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                quote = None
+            at_boundary = False
+            i += 1
+            continue
+        # unquoted
+        if ch == "\\":                             # a backslash escapes the next char (incl. a newline)
+            out.append(ch)
+            if i + 1 < n:
+                out.append(command[i + 1])
+                i += 2
+            else:
+                i += 1
+            at_boundary = False
+            continue
+        if ch == "#" and at_boundary:
+            while i < n and command[i] not in "\n\r":   # discard to end of line (keep the newline)
+                i += 1
+            at_boundary = True
+            continue
+        out.append(ch)
+        if ch == "'":
+            quote = "'"
+            at_boundary = False
+        elif ch == '"':
+            quote = '"'
+            at_boundary = False
+        else:
+            at_boundary = ch in _WORD_BOUNDARY_CHARS
+        i += 1
+    return "".join(out)
 
 
 def _raw_segments(command):
@@ -713,51 +808,6 @@ def _is_dynamic_token(tok):
     return bool(tok) and ("$" in tok or "`" in tok)
 
 
-def _scan_dynamic_constructs(command):
-    """Quote-aware scan for EXECUTING dynamic constructs (round-9 Fix A): command substitution `$(…)`, a
-    backtick command substitution, or process substitution `<(…)`/`>(…)`. Returns a short label for the
-    FIRST one found, else None. Tracks single-/double-quote state per shell rules — inside single quotes
-    `$`, backtick and `(` are all literal (so a single-quoted GraphQL `$var` or `(input:…)` never
-    matches); inside double quotes `$(…)` and backticks are still active but process substitution is not.
-    A bare `$VAR`/`${VAR}` PARAMETER expansion is deliberately NOT flagged — it interpolates a value, it
-    cannot execute a hidden command — so a static provisioning op that uses `$OWNER`/`$PROJ` is allowed."""
-    i, n = 0, len(command)
-    quote = None                                       # None | "'" | '"'
-    while i < n:
-        ch = command[i]
-        nxt = command[i + 1] if i + 1 < n else ""
-        if quote == "'":
-            if ch == "'":
-                quote = None
-            i += 1
-            continue
-        if quote == '"':
-            if ch == '"':
-                quote = None
-            elif ch == "`":
-                return "a backtick command substitution"
-            elif ch == "$" and nxt == "(":
-                return "a command substitution `$(…)`"
-            i += 1
-            continue
-        # unquoted
-        if ch == "\\":
-            i += 2                                      # a backslash escapes the next char (literal)
-            continue
-        if ch == "'":
-            quote = "'"
-        elif ch == '"':
-            quote = '"'
-        elif ch == "`":
-            return "a backtick command substitution"
-        elif ch == "$" and nxt == "(":
-            return "a command substitution `$(…)`"
-        elif ch in "<>" and nxt == "(":
-            return "a process substitution `<(…)`/`>(…)`"
-        i += 1
-    return None
-
-
 def _extract_paren(command, i):
     """`command[i]` is `(`; return `(inner, index_past_the_matching_')')` for the balanced group, or
     `(None, len)` if it never closes. Skips quoted regions so a `)` inside a string does not miscount."""
@@ -788,11 +838,14 @@ def _extract_paren(command, i):
 
 def _command_substitutions(command):
     """Every command-/process-substitution INNER command string in `command` (round-10 Fix 2), quote-
-    aware by the same shell rules as _scan_dynamic_constructs: `$(…)` and backticks are active unquoted
-    AND inside double quotes; process substitution `<(…)`/`>(…)` only unquoted; nothing inside single
-    quotes. Returns each inner WITHOUT its delimiters so the caller can recursively classify it — a READ
-    inner is benign, a protected-WRITE inner denies. Fail-closed: an UNBALANCED `$(`/`<(` yields the rest
-    of the string as the inner (so a smuggled write in it is still classified), then the scan stops."""
+    aware by shell rules: `$(…)` and backticks are active unquoted AND inside double quotes; process
+    substitution `<(…)`/`>(…)` only unquoted; NOTHING inside single quotes (there `$`, backtick and `(`
+    are all literal, so a single-quoted GraphQL `$var` or `(input:…)` is never a substitution). A bare
+    `$VAR`/`${VAR}` PARAMETER expansion is deliberately NOT a substitution — it interpolates a value, it
+    cannot execute a hidden command — so a static provisioning op that uses `$OWNER`/`$PROJ` is fine.
+    Returns each inner WITHOUT its delimiters so the caller can recursively classify it — a READ inner is
+    benign, a protected-WRITE inner denies. Fail-closed: an UNBALANCED `$(`/`<(` yields the rest of the
+    string as the inner (so a smuggled write in it is still classified), then the scan stops."""
     out = []
     i, n = 0, len(command)
     quote = None
@@ -904,6 +957,9 @@ def _carveout_dynamic_finding(command, cwd, plugin_root):
         denies, a READ inner does NOT (so init's `existing=$(gh …read…) … field-create` is allowed).
     The startup-file prefix and interpreter `-c`/`env -S` expansion cases stay fail-closed as their own
     findings (never in `carve`), handled by the ordinary offenders check — they are not substitutions."""
+    # round-11 Fix 1: strip comments here too — a `$(…)`/backtick inside a shell COMMENT is not executed,
+    # so the carve-out's dynamic-construct scan must not see it (matches collect_findings' pre-strip).
+    command = _strip_shell_comments(command)
     for seg in _raw_segments(command):
         if _dynamic_gh_api_endpoint(seg):
             return _dynamic("a `gh api` with a shell-expansion endpoint")
@@ -1086,6 +1142,52 @@ def _env_split_payload(seg):
     return None
 
 
+# Interpreter options that NAME A FILE the shell SOURCES (`bash --rcfile`/`--init-file` for an
+# interactive shell). Their VALUE is a startup file that must be inspected too — AND consumed, so it is
+# not mistaken for the script target (round-11 Fix 3: `bash --rcfile <decoy> <script>` runs <script>, but
+# the old "first non-flag arg" picked <decoy> as the script and never inspected <script>).
+_INTERP_FILE_OPTS = {"--rcfile", "--init-file"}
+# Interpreter options that consume a NON-file value token (a shopt name / `set -o` name) — skip BOTH so
+# the real script positional is still found. Over-consuming is safe: in every form where one of these
+# would swallow the script, bash treats the script as the option's argument and never runs it as a
+# script (e.g. `bash -O foo.sh` errors on an invalid shopt name), so nothing executes to bypass.
+_INTERP_VALUE_OPTS = {"-O", "+O", "-o", "+o"}
+
+
+def _interpreter_targets(args):
+    """Every path a `bash|sh|zsh` invocation would SOURCE or RUN, for inspection (round-11 Fix 3): each
+    `--rcfile`/`--init-file` value (a sourced startup file) AND the script target (the FIRST positional
+    after option processing). Value-taking options (`--rcfile FILE`, `--init-file FILE`, `-O shopt`,
+    `-o name`, and `--`) are handled so the script positional is identified correctly and a decoy option
+    value can no longer masquerade as the script. Script ARGUMENTS after the target are NOT returned —
+    only the first positional is the script; the rest are the script's own argv."""
+    sources, script = [], None
+    i, n = 0, len(args)
+    while i < n:
+        tok = args[i]
+        if tok == "--":                                      # end of options → next token is the script
+            rest = args[i + 1:]
+            script = rest[0] if rest else None
+            break
+        if "=" in tok and tok.split("=", 1)[0] in _INTERP_FILE_OPTS:   # --rcfile=FILE
+            sources.append(tok.split("=", 1)[1])
+            i += 1
+            continue
+        if tok in _INTERP_FILE_OPTS and i + 1 < n:           # --rcfile FILE (space form)
+            sources.append(args[i + 1])
+            i += 2
+            continue
+        if tok in _INTERP_VALUE_OPTS and i + 1 < n:          # -O shopt / -o name — consume the value token
+            i += 2
+            continue
+        if tok.startswith("-") or tok.startswith("+"):       # any other bare/self-contained flag
+            i += 1
+            continue
+        script = tok                                         # first non-flag positional = the script
+        break
+    return [*sources, *([script] if script is not None else [])]
+
+
 def _inspect_segment(seg, cwd, plugin_root, depth, seen):
     """List of findings for one command segment's interpreter/source invocation (rules 3–4)."""
     # round-9 Fix A (finding 4): a BASH_ENV/ENV/SHELLOPTS/*ENV/*RC startup-file prefix before an
@@ -1124,11 +1226,13 @@ def _inspect_segment(seg, cwd, plugin_root, depth, seen):
                 if depth + 1 > MAX_SCRIPT_DEPTH:
                     return [_opaque_shell(f"a `{head} -c` payload nested past depth {MAX_SCRIPT_DEPTH}")]
                 return collect_findings(inline, cwd, plugin_root, depth + 1, seen)
-        # Rule 4: `bash|sh|zsh FILE` — the first non-flag argument is the script target.
-        target = next((a for a in args if not a.startswith("-")), None)
-        if target:
-            return _inspect_target(target, cwd, plugin_root, depth, seen)
-        return []
+        # Rule 4: `bash|sh|zsh [opts] FILE` — inspect EVERY path it would SOURCE or RUN (round-11 Fix 3):
+        # each `--rcfile`/`--init-file` value AND the script target (found AFTER value-taking options are
+        # consumed, so a `--rcfile <decoy>` value can no longer masquerade as the script).
+        out = []
+        for target in _interpreter_targets(args):
+            out.extend(_inspect_target(target, cwd, plugin_root, depth, seen))
+        return out
     if seg[0] in ("source", ".") and len(seg) >= 2:
         return _inspect_target(seg[1], cwd, plugin_root, depth, seen)
     return []
@@ -1145,9 +1249,15 @@ def collect_findings(command, cwd, plugin_root, depth=0, seen=None):
     out = []
     if not command or not command.strip():
         return out
-    # round-7 Fix 2: collapse `\`+newline line-continuations FIRST, so BOTH the direct per-segment
-    # classifier AND the token-level indirection inspection (`_lex`, stdin targets, `bash -c` payloads)
-    # see the single command bash actually runs, not the pre-join fragments.
+    # round-11 Fix 1: strip shell comments QUOTE-AWARE FIRST — before joining line-continuations — so
+    # comment TEXT (e.g. init.md/update.md's `# … gh api graphql -f query="$MUT" …` reconcile notes) is
+    # never classified as executable, and a `\`+newline inside a comment (literal to bash) cannot pull a
+    # following real command up into the stripped region. Applied here so it covers direct classification
+    # AND every recursive path (script bodies, inner substitutions) that routes through collect_findings.
+    command = _strip_shell_comments(command)
+    # round-7 Fix 2: collapse `\`+newline line-continuations, so BOTH the direct per-segment classifier
+    # AND the token-level indirection inspection (`_lex`, stdin targets, `bash -c` payloads) see the
+    # single command bash actually runs, not the pre-join fragments.
     command = _join_line_continuations(command)
     # Rule 1: the direct per-segment protected-operation classifier (all segments).
     out.extend(classify_all(command))

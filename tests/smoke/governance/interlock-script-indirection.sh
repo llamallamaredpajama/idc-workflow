@@ -376,6 +376,107 @@ deny 'time gh project field-create 5 --owner o --name S --data-type SINGLE_SELEC
 # but under an ACTIVE init the control-word-prefixed provisioning op is its OWN op → ALLOWED (init.md:201).
 allow_under "$SIN" 'else gh project link 5 --owner o --repo o/r'
 
+echo "== round-11 Fix 1: shell COMMENTS are stripped QUOTE-AWARE before classification =="
+# A benign command carrying an INLINE comment that mentions the forbidden `gh api graphql -f query="$MUT"`
+# form must NOT be denied — a `#` at a word boundary begins a shell comment, not executable text.
+# Red-when-broken: drop the comment strip → the comment text classifies as an opaque graphql mutation → deny.
+allow 'echo hi   # do NOT run: gh api graphql -f query="$MUT"'
+allow $'echo hi\n# with a raw gh api graphql -f query="$MUT": the interlock hard-DENIES it\necho done'
+# A `#` INSIDE single quotes is literal (part of the arg), NOT a comment — the real mutation still denies.
+deny "gh api graphql -f query='mutation{updateIssue(input:{id:\"I#1\",state:CLOSED}){issue{id}}}'"
+# The uncommented forbidden form still denies (the strip removes comments, never real commands).
+deny 'gh api graphql -f query="$MUT"'
+# A `#`-comment must not let a real mutation on a FOLLOWING line be swallowed (comment ends at newline,
+# and a `\` inside a comment is NOT a line-continuation — comments are stripped BEFORE continuations join).
+deny $'echo hi # trailing comment \\\ngh issue create --title x --body-file /tmp/b'
+
+echo "== round-11 Fix 1: init.md AND update.md Stage-reconcile fences pass under active init/update =="
+# The reviewer's real-surface proof: BOTH shipped Stage-reconcile fences carry an explanatory comment
+# showing the forbidden `gh api graphql -f query="$MUT"` form, so before the strip both DENIED. Extract
+# every fence that runs `gh api graphql` (the reconcile + link-probe fences) and assert NONE deny under
+# the matching active command. Red-when-broken: drop the comment strip → the fence comment classifies as
+# a mutation → the fence DENIES → this FAILs. (init.md fences were only covered when they contained
+# field-create/link — the reconcile fence has neither, so this widens the extraction to catch it.)
+SUP="sup-$$-$(basename "$WORK")"
+python3 "$CONTRACT" start --repo "$REPO" --session "$SUP" --command update \
+  --plugin-root "$GOV_PLUGIN" --args 'reconcile' --source user >/dev/null \
+  || gov_fail "could not open the active /idc:update command record for $SUP"
+extract_fences() {  # extract_fences <md-file> <regex> → populates FENCES[]
+  mapfile -t FENCES < <(python3 - "$1" "$2" <<'PY'
+import re, sys, json
+text = open(sys.argv[1], encoding="utf-8").read()
+pat = sys.argv[2]
+for m in re.finditer(r"```bash\n(.*?)```", text, re.S):
+    body = m.group(1)
+    if re.search(pat, body):
+        print(json.dumps(body))
+PY
+)
+}
+UPDATEMD="$GOV_PLUGIN/commands/update.md"
+[ -f "$UPDATEMD" ] || gov_fail "commands/update.md not found at $UPDATEMD"
+extract_fences "$INITMD" 'gh api graphql'
+[ "${#FENCES[@]}" -ge 1 ] || gov_fail "no gh-api-graphql fences found in init.md (extraction regex stale?)"
+for f in "${FENCES[@]}"; do
+  fence="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1]))' "$f")"
+  gate "$fence" "$SIN"
+  is_deny && gov_fail "init.md Stage-reconcile fence DENIED under active init: [$fence] => [$OUT]"
+  echo "  ok init.md gh-api-graphql fence allowed under active init"
+done
+extract_fences "$UPDATEMD" 'gh api graphql'
+[ "${#FENCES[@]}" -ge 1 ] || gov_fail "no gh-api-graphql fences found in update.md (extraction regex stale?)"
+for f in "${FENCES[@]}"; do
+  fence="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1]))' "$f")"
+  gate "$fence" "$SUP"
+  is_deny && gov_fail "update.md Stage-reconcile fence DENIED under active update: [$fence] => [$OUT]"
+  echo "  ok update.md gh-api-graphql fence allowed under active update"
+done
+
+echo "== round-11 Fix 2: a VARIABLE-DERIVED gh subcommand fails closed (read-vs-write unprovable) =="
+# `gh issue "$op"` (op=create) hides the write because the operation token is an expansion the classifier
+# cannot resolve → DENY during an active command. Red-when-broken: drop the dynamic-subcommand guard →
+# the variable subcommand matches no combo → allowed.
+deny 'gh issue "$op" --title x --body-file /tmp/b'
+deny 'gh "$sub" merge 12 --squash'
+# the reviewer's exact bypass: the inner `gh issue "$op"` creates an issue before the allowed outer
+# `gh project link` — the dynamic subcommand inside the substitution DENIES the whole call under init.
+deny_under "$SIN" 'gh project link 5 --owner o --repo "$(op=create; gh issue "$op" --title x --body x)"'
+# a STATIC-read subcommand with a dynamic ARGUMENT stays ALLOWED (only the subcommand token is judged).
+allow 'gh issue view "$num"'
+allow 'gh pr view "$prnum" --json title'
+
+echo "== round-11 Fix 3: value-taking interpreter options cannot hide the real script target =="
+# `bash --rcfile <sanctioned>.py <fixture>/fire_gate.sh` — bash consumes the first path as --rcfile's
+# value and runs the SECOND path as the script. The gate must consume --rcfile's value AND inspect the
+# real script (fire_gate.sh). Red-when-broken: pick the first non-flag arg as the script → the sanctioned
+# decoy is inspected, fire_gate.sh is never scanned → allowed.
+deny "bash --rcfile '$GOV_PLUGIN/scripts/idc_transition.py' '$FIXTURE/fire_gate.sh'"
+deny "bash --init-file '$GOV_PLUGIN/scripts/idc_transition.py' '$FIXTURE/fire_gate.sh'"
+deny "bash --rcfile='$GOV_PLUGIN/scripts/idc_transition.py' '$FIXTURE/fire_gate.sh'"
+# the --rcfile/--init-file VALUE is itself a SOURCED file → a malicious rcfile hidden behind a sanctioned
+# decoy script still DENIES (EVERY path it would run OR source is inspected).
+deny "bash --rcfile '$FIXTURE/fire_gate.sh' '$GOV_PLUGIN/scripts/idc_transition.py'"
+# a plain sanctioned interpreter target with a sanctioned rcfile stays ALLOWED (no over-block).
+allow "bash --rcfile '$GOV_PLUGIN/scripts/idc_pr_finish.py' '$GOV_PLUGIN/scripts/idc_transition.py'"
+
+echo "== round-11 Fix 4: protected-gh detection is WRAPPER-AGNOSTIC (nohup/stdbuf/timeout/setsid/nice…) =="
+# `nohup gh project field-create …` bypassed because nohup wasn't a recognized wrapper and the fallback
+# verb list omitted project field-create/link. Detection now scans the token stream for a `gh` head after
+# ANY leading wrapper. Red-when-broken: revert to first-token-must-be-gh → the wrapped op classifies as
+# non-gh and is allowed under Think.
+deny 'nohup gh project field-create 5 --owner o --name S --data-type SINGLE_SELECT --single-select-options X'
+deny 'nohup gh project link 5 --owner o --repo o/r'
+deny 'stdbuf -oL gh issue create --title x --body-file /tmp/b'
+deny 'timeout 5 gh pr merge 12 --squash'
+deny 'setsid gh issue create --title x --body-file /tmp/b'
+deny 'nice -n 10 gh issue close 5'
+# under an ACTIVE init the wrapped provisioning op is init's OWN static op → ALLOWED (wrapper-agnostic
+# both ways).
+allow_under "$SIN" 'nohup gh project field-create 5 --owner o --name Stage --data-type SINGLE_SELECT --single-select-options "Consideration,Planning,Buildable,Recirculation"'
+allow_under "$SIN" 'nohup gh project link 5 --owner o --repo o/r'
+# a wrapped READ stays allowed (the scan flags only protected WRITE combos, never a read).
+allow 'nohup gh issue view 5'
+
 echo "== the sanctioned write door is never denied =="
 allow "python3 '$GOV_PLUGIN/scripts/idc_transition.py' --repo '$REPO' create-ticket --title safe --stage Buildable --status Todo"
 allow "python3 '$GOV_PLUGIN/scripts/idc_pr_finish.py' autonomous --repo '$REPO' --pr 12 --kind planning"

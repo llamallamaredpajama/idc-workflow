@@ -1592,6 +1592,10 @@ _CMD_PREFIXES = {"env", "command", "builtin", "exec"}
 # project link`). Matched as an EXACT leading token (a real command is never literally named `then`).
 _CONTROL_WORDS = {"if", "then", "else", "elif", "fi", "do", "done", "while", "until", "for", "case",
                   "esac", "in", "function", "{", "}", "(", ")", "!", "time"}
+# zsh command prefixes are executable-position syntax: at the normalized head they qualify the next
+# command rather than naming a process. They are deliberately peeled only by the two leading-prefix
+# walks below, so the same words later in argv remain inert data.
+_SHELL_EXECUTION_PREFIXES = {"noglob", "nocorrect", "coproc"}
 # Per-wrapper SHORT options that CONSUME a following value token — so `env -u NAME bash f.sh` and
 # `exec -a NAME bash f.sh` skip the value too, reaching the real interpreter. Long `--opt=val` forms are
 # self-contained single tokens; `--unset NAME`/`--chdir DIR` (space form) consume the next token.
@@ -1717,7 +1721,8 @@ def _strip_prefixes(seg):
             while i < len(seg) and seg[i] in ("-p", "--portability"):
                 i += 1
             continue
-        if tok in _CONTROL_WORDS:                          # round-10 Fix 4: `else`/`then`/`!`/… head
+        if tok in _CONTROL_WORDS or tok in _SHELL_EXECUTION_PREFIXES:
+            # round-10 control heads + zsh execution-position prefixes reveal the next command.
             i += 1
             continue
         if _ASSIGN_RE.match(tok):
@@ -1759,7 +1764,8 @@ def _peel_to_inspect_head(seg):
             while i < len(seg) and seg[i] in ("-p", "--portability"):
                 i += 1
             continue
-        if tok in _CONTROL_WORDS:                          # `else`/`then`/`!`/… leading control word
+        if tok in _CONTROL_WORDS or tok in _SHELL_EXECUTION_PREFIXES:
+            # Control heads and zsh execution prefixes are syntax only in this leading position.
             i += 1
             continue
         if _ASSIGN_RE.match(tok):
@@ -2184,7 +2190,7 @@ def _substitution_findings(text, cwd, plugin_root, depth, seen):
 
 
 def _stdin_execution_findings(surface, argv, stdin_sources, attached_docs,
-                              cwd, plugin_root, depth, seen):
+                              command_has_stdin, cwd, plugin_root, depth, seen):
     """Inspect code fed through stdin when this surface is a bare bash/sh/zsh invocation."""
     out = []
     # The parent shell expands every UNQUOTED heredoc even if its consumer treats the result as data.
@@ -2205,6 +2211,12 @@ def _stdin_execution_findings(surface, argv, stdin_sources, attached_docs,
     if source is None:
         if surface.piped_stdin:
             out.append(_opaque_shell(f"opaque piped stdin for a bare `{head}` interpreter"))
+        elif command_has_stdin:
+            # Keyword/function compound syntax can own command-wide stdin without attaching that
+            # ownership to the inner interpreter surface. Do not enumerate compound grammars here:
+            # a bare interpreter plus unresolved command-wide stdin is the conservative boundary.
+            out.append(_opaque_shell(
+                f"unresolved command-wide stdin for a bare `{head}` interpreter"))
         return out
     kind, value = source
     if kind == "file":
@@ -2275,15 +2287,24 @@ def collect_findings(command, cwd, plugin_root, depth=0, seen=None):
         if finding:
             out.append(finding)
 
-    attached_markers = set()
+    # Resolve every surface's stdin once, then derive a command-wide conservative signal. Keyword and
+    # function compounds may attach their pipe/redirect syntax to a different flattened surface than
+    # the bare interpreter that consumes it; this invariant intentionally does not enumerate them.
+    surface_io = []
+    command_has_stdin = False
     for surface in surfaces:
         argv, stdin_sources, attached_docs, redirect_errors = model.redirections(surface)
+        surface_io.append((surface, argv, stdin_sources, attached_docs, redirect_errors))
+        command_has_stdin = command_has_stdin or surface.piped_stdin or bool(stdin_sources)
+
+    attached_markers = set()
+    for surface, argv, stdin_sources, attached_docs, redirect_errors in surface_io:
         attached_markers.update(doc.marker for doc in attached_docs)
         for error in redirect_errors:
             out.append(_opaque_shell(error))
         out.extend(_inspect_segment(argv, cwd, plugin_root, depth, seen))
         out.extend(_stdin_execution_findings(surface, argv, stdin_sources, attached_docs,
-                                             cwd, plugin_root, depth, seen))
+                                             command_has_stdin, cwd, plugin_root, depth, seen))
     # A marker hidden inside a nested/opaque construct did not reach an owning surface. Fail closed;
     # never reinterpret its body as top-level commands and never echo that body.
     if any(doc.marker not in attached_markers for doc in heredocs):

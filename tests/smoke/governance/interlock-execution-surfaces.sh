@@ -108,6 +108,12 @@ must_deny = (
     'trap "$HANDLER" EXIT',
     "bash -c \"trap 'gh issue create --title x --body x' EXIT\"",
 
+    # zsh execution prefixes reveal the real command head only when they occupy the executable
+    # prefix position. Static -c payloads must recurse past all three prefixes.
+    "zsh -c 'noglob gh issue create --title x --body x'",
+    "zsh -c 'nocorrect gh issue close 7'",
+    "zsh -c 'coproc gh project item-delete 8 --owner o --id X'",
+
     # Whitespace before a redirect keeps the numeric word as argv, so bash would execute file `2`.
     # The missing target is opaque; an adjacent `2>` below is syntax and remains allowed.
     "bash 2 > /dev/null",
@@ -123,6 +129,14 @@ must_deny = (
     "bash -s -- '{}/scripts/idc_transition.py' <<< 'gh issue create --title x --body x'".format(plugin_root),
     "printf '%s\\n' 'gh issue create --title x --body x' | sh -s -- '{}/scripts/idc_transition.py'".format(plugin_root),
     "zsh -s -- '{}/scripts/idc_transition.py' <<'EOF'\ngh issue create --title x --body x\nEOF".format(plugin_root),
+
+    # A compound command can own stdin without spelling that ownership on the inner interpreter.
+    # The bare-interpreter boundary is intentionally compound-agnostic: pipe, file, here-string,
+    # and heredoc stdin all fail closed for the reviewer families instead of enumerating grammar.
+    "printf '%s\\n' 'gh issue create --title x --body x' | if :; then bash; fi",
+    "runner() {{ sh; }}; runner < {}".format(shlex.quote(direct_write)),
+    "for item in one; do zsh; done <<< 'gh issue create --title x --body x'",
+    "while :; do bash; break; done <<'EOF'\ngh issue create --title x --body x\nEOF",
 
     # A compound command owns pipe/redirection stdin for every command inside it. Parentheses and
     # braces share the same invariant, including a left pipeline and every trailing stdin form.
@@ -193,6 +207,18 @@ must_allow = (
     "{ cat; } <<'EOF'\ngh issue create --title x --body x\nEOF",
     "printf '%s\\n' 'gh issue create --title x --body x' | { :; cat; }",
 
+    # The compound-agnostic stdin rule is scoped to a bare interpreter. Data consumers, an
+    # interpreter with no command-wide stdin, explicit -c payloads, and sanctioned script targets
+    # retain their established behavior inside the same reviewer compound families.
+    "if :; then cat; fi < {}".format(shlex.quote(direct_write)),
+    "reader() {{ cat; }}; reader < {}".format(shlex.quote(direct_write)),
+    "for item in one; do cat; done <<< 'gh issue create --title x --body x'",
+    "while false; do cat; done <<'EOF'\ngh issue create --title x --body x\nEOF",
+    "if :; then bash; fi",
+    "if :; then bash -c 'printf %s ok'; fi < {}".format(shlex.quote(direct_write)),
+    "runner() {{ bash \"{}/scripts/idc_transition.py\"; }}; runner < {}".format(
+        plugin_root, shlex.quote(direct_write)),
+
     # The existing sanctioned plugin-script boundary remains intact.
     'bash "{}/scripts/idc_transition.py"'.format(plugin_root),
     'bash < "{}/scripts/idc_transition.py"'.format(plugin_root),
@@ -220,6 +246,11 @@ must_allow = (
     "trap '' EXIT",
     "trap ':' EXIT",
     "trap 'echo gh issue create' EXIT",
+
+    # Prefix words outside command-head/control position remain ordinary data.
+    "echo noglob gh issue create --title x --body x",
+    "printf '%s\\n' nocorrect gh issue close 7",
+    "git commit -m 'coproc gh project item-delete'",
 )
 
 failures = []

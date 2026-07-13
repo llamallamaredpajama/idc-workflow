@@ -154,6 +154,18 @@ allow "gh pr view 12"
 allow "gh --hostname github.com api repos/o/r/issues/707/dependencies/blocked_by/708"
 allow "gh api repos/o/r/issues"
 
+echo "== round-6 Fix 1+2: blunt newline-aware segment classifier + fail-closed gh api =="
+# (1) LAST -X wins in real gh, so a leading `-X GET` decoy cannot mask a real write — scan ALL methods.
+deny 'gh api repos/o/r/issues/707/dependencies/blocked_by/708 -X GET -X DELETE'
+# (2) a value-taking-flag mis-parse (`-p nebula`) no longer isolates a wrong endpoint — the write
+#     indicator (-X DELETE) + protected path anywhere in the segment is enough to DENY.
+deny 'gh api -p nebula repos/o/r/issues/707/dependencies/blocked_by/708 -X DELETE'
+# (3) NEWLINE-separated commands are separate segments (shlex silently eats newlines; raw-split first).
+deny $': -X GET\ngh api repos/o/r/issues/707/dependencies/blocked_by/708 -X DELETE'
+deny $'gh issue view 5\ngh issue -R o/r create --title x'
+# (4) the read-only dependency GET the doctor audit runs stays ALLOWED (never over-blocked).
+allow "gh api repos/o/r/issues/707/dependencies/blocked_by/708 -X GET"
+
 echo "== round-5 Fix 2: /idc:uninstall's own teardown ops are ALLOWED during an ACTIVE uninstall =="
 # The hard deny must not brick uninstall's documented --close-issues / --delete-board steps. The
 # allowance is keyed on the ACTIVE command being `uninstall`; the SAME raw ops under any other command
@@ -188,6 +200,13 @@ deny_under "$SUN" "gh issue create --title x --body-file /tmp/b"
 deny_under "$SUN" "gh pr merge 12 --squash"
 deny_under "$SUN" "gh api repos/o/r/issues/707/dependencies/blocked_by/708 -X DELETE"
 deny_under "$SUN" "gh project item-edit --id X --project-id Y --field-id F --single-select-option-id O"
+# round-6 Fix 3: a forbidden mutation SMUGGLED after an allowed teardown must DENY the WHOLE call —
+# EVERY segment must be a teardown op, not just the first one classification happens to return.
+deny_under "$SUN" "gh issue close 5 && gh issue create --title x --body-file /tmp/b"
+deny_under "$SUN" "gh issue close 5 && gh api repos/o/r/issues/707/dependencies/blocked_by/708 -X DELETE"
+deny_under "$SUN" "bash -c 'gh issue close 5; gh api graphql --input mutation.json'"
+# A compound of teardown-ONLY ops stays allowed under uninstall (the carve-out still works).
+allow_under "$SUN" "gh issue close 5 && gh project item-delete 8 --owner o --id PVTI_X"
 
 echo "== the sanctioned write door is never denied =="
 allow "python3 '$GOV_PLUGIN/scripts/idc_transition.py' --repo '$REPO' create-ticket --title safe --stage Buildable --status Todo"
@@ -254,5 +273,27 @@ printf '%s%s' "$FOUT" "$(cat "$ERR")" | grep -qi 'sensitive' \
   || gov_fail "(fix9) FIFO .env was not refused via the SENSITIVE path (denied as a plain opaque target instead?): [$FOUT]"
 rm -f "$FIFO"
 echo "  ok sensitive FIFO ⇒ denied promptly via the sensitive path, never opened (no hang)"
+
+echo "== round-6 Fix 4: a SYMLINK aliasing a sensitive target is refused on the RESOLVED path, unopened =="
+# Sensitivity/plugin/regular-file checks must run on realpath() FIRST, then open only the resolved
+# path — else a `safe.sh` symlink → `.env` is opened and its secret scanned/echoed.
+mkdir -p "$WORK/d1"; ENVT="$WORK/d1/.env"; SENTINEL2='SENTINEL_SYMLINK_LEAK_x7q_MUST_NOT_APPEAR'
+printf 'export TOKEN=%s\n' "$SENTINEL2" > "$ENVT"
+ln -sf "$ENVT" "$WORK/safe.sh"
+gate "bash '$WORK/safe.sh'" "$S1"
+is_deny || gov_fail "(fix4) a symlink to .env must be DENIED on the resolved path: [$OUT][$(cat "$ERR")]"
+if printf '%s%s' "$OUT" "$(cat "$ERR")" | grep -q "$SENTINEL2"; then
+  gov_fail "(fix4) the interlock READ a symlink-aliased .env and echoed its content — it must never open a sensitive target"
+fi
+printf '%s%s' "$OUT" "$(cat "$ERR")" | grep -qi 'sensitive' \
+  || gov_fail "(fix4) the symlink→.env was not refused via the SENSITIVE path: [$OUT][$(cat "$ERR")]"
+# Prove non-opening deterministically: point the symlink at a sensitive FIFO — opening it would HANG.
+mkdir -p "$WORK/d2"; FIFOT="$WORK/d2/.env"; rm -f "$FIFOT"; mkfifo "$FIFOT"; ln -sf "$FIFOT" "$WORK/safe2.sh"
+FOUT="$(emit "$REPO" Bash "bash '$WORK/safe2.sh'" "$S1" | timeout 10 python3 "$GATE" "$GOV_PLUGIN" 2>"$ERR")"; FRC=$?
+[ "$FRC" -ne 124 ] || gov_fail "(fix4) the gate HUNG on a symlink to a sensitive FIFO — realpath+sensitive check must precede any open"
+printf '%s' "$FOUT" | grep -q '"permissionDecision": *"deny"' \
+  || gov_fail "(fix4) symlink→FIFO .env was not denied: [$FOUT][$(cat "$ERR")]"
+rm -f "$FIFOT"
+echo "  ok symlink→.env (and →FIFO) ⇒ denied on the resolved path via the sensitive lane, never opened"
 
 echo "PASS: the mutation interlock is a hard deny during an active IDC command, sees through bash/sh/zsh/source/. indirection and quoted bash -c payloads, protects gh issue create + dependency REST writes, downgrades under OBSERVE_ONLY, warns (never bricks) outside an active command, and refuses opaque/sensitive interpreter targets unread"

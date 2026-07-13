@@ -101,6 +101,37 @@ closed  = [c for c in calls2 if c[:2] == ["issue", "close"]]
 assert deleted, f"a readback-mismatch create left an ORPHAN project item (no item-delete): {calls2}"
 assert closed,  f"a readback-mismatch create left the created ISSUE open (no issue close): {calls2}"
 print("  ok the engine reads Stage/Status back, FAILS a create that did not land, AND removes the orphan (delete item + close issue)")
+
+# (5) round-6 Fix 5: the post-create read-back returns NO issue number → the engine must NOT report
+#     success. It deletes the board item and FAILS LOUD (an unknown issue number can't be closed).
+calls3 = []
+B._gh = make_gh(calls3)
+B.fetch_item = lambda item_id, r: {"content": {"type": "Issue"},   # <-- no `number`
+                                   "stage": "Buildable", "status": "Todo"}
+try:
+    E.run("create-ticket", ctx, title="gate", body="b", stage=None, status=None)
+    print("FAIL: create reported success when the issue number could not be resolved"); sys.exit(1)
+except E.TransitionError:
+    pass
+assert any(c[:2] == ["project", "item-delete"] for c in calls3), \
+    f"an unresolved-issue-number create left an ORPHAN project item (no item-delete): {calls3}"
+print("  ok an unresolvable issue number ⇒ board item deleted + LOUD failure (never a silent success)")
+
+# (6) round-6 Fix 5: the post-create read-back itself RAISES → the engine must still discard the board
+#     item (not leak an orphan on a raising fetch) and fail loud.
+calls4 = []
+B._gh = make_gh(calls4)
+def _boom(item_id, r):
+    raise B.BoardReadError("readback boom")
+B.fetch_item = _boom
+try:
+    E.run("create-ticket", ctx, title="gate", body="b", stage=None, status=None)
+    print("FAIL: create reported success when the read-back fetch raised"); sys.exit(1)
+except (E.TransitionError, B.BoardReadError):
+    pass
+assert any(c[:2] == ["project", "item-delete"] for c in calls4), \
+    f"a raising read-back left an ORPHAN project item (no item-delete): {calls4}"
+print("  ok a raising read-back ⇒ board item discarded + fail closed (no orphan)")
 PY
 
 echo "PASS: the github create door returns the integer issue number, the real create_item applies --type/--labels, and the engine positively reads Stage/Status back"

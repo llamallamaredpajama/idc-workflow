@@ -134,8 +134,10 @@ printf '%s\n' "$NUM"
 **setField(ticket, field, value)** — for the **non-machine fields** (`Wave`/`Phase`/`Domain`),
 dispatch through the engine's `set-field` op, which resolves the ids, writes the single-select value,
 and journals it. `Stage` and `Status` are machine-governed and `set-field` refuses BOTH: a `Status`
-change is a transition — route it through `move`; `Stage` is owned by the create ops (initial Stage)
-and the terminal dispositions (final Stage), with no standalone Stage-write door:
+change is a transition — route it through `move --to-status`; a `Stage` advance is also a transition,
+through the guarded Stage door `move --to-stage <Stage> --to-status <Status>` (it validates the
+Stage/Status pair against the machine and journals `to_stage`). The create ops still write the initial
+Stage and the terminal dispositions the final Stage; a raw `set --field Stage` is never a role path:
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_transition.py" --backend github \
   --owner "$OWNER" --project "$PROJ" set-field --num "$NUM" --field "$FIELD" --value "$VALUE"

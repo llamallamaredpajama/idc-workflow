@@ -1335,9 +1335,10 @@ def set_field(ctx, num, field, value):
     is refused before touching the board. set-field's journal record therefore never carries a
     to_stage/to_status, so replay/reconciliation never sees a field-only write as a transition."""
     if field in MACHINE_FIELDS:
+        door = "move --to-stage <Stage> --to-status <Status>" if field == "Stage" else "move --to-status <Status>"
         raise TransitionError(
             f"set-field: {field} is a machine-governed field — a {field} change is a transition. Use "
-            f"`move` (it enforces the legal Stage/Status pairing and journals it), not set-field.")
+            f"`{door}` (it enforces the legal Stage/Status pairing and journals it), not set-field.")
     if field not in SETTABLE_FIELDS:
         raise TransitionError(
             f"set-field: {field!r} is not a settable single-select field "
@@ -1346,6 +1347,22 @@ def set_field(ctx, num, field, value):
         _gh_set_field(ctx, num, field, value)
     else:
         _fs_set_field(ctx["tracker"], num, field, value)
+
+
+def set_stage(ctx, num, stage):
+    """Write the MACHINE-governed Stage field — the guarded `move --to-stage` primitive (round-6 Fix 6 /
+    #151), both backends. This is the ONLY sanctioned Stage-write door for a mid-lifecycle transition
+    (Plan's Consideration -> Planning); the caller (`run`, `move` branch) validates the target
+    Stage/Status PAIR against the machine and reads BOTH fields back around this write. The fs `set`
+    op validates the Stage value against its enum; github's set_single_select validates the option
+    board-side."""
+    if ctx["backend"] == "github":
+        iid = _gh_item_id(ctx, num)
+        idc_gh_board.set_single_select(ctx["owner"], ctx["project"], ctx["repo"], iid, "Stage", stage)
+    else:
+        r = _trk(ctx["tracker"], "set", "--num", str(num), "--field", "Stage", "--value", stage)
+        if r.returncode != 0:
+            raise TransitionError(f"stage write failed for #{num}: {r.stderr.strip()[:160]}")
 
 
 def record_owner(ctx, num, agent):
@@ -1404,17 +1421,30 @@ def run(op, ctx, **kw):
             item_id = _gh_create(machine, op, ctx["owner"], ctx["project"], ctx["repo"], spec,
                                  kw["title"], kw.get("body", ""), kw.get("stage"), kw.get("status"),
                                  labels=kw.get("labels"), issue_type=kw.get("type"))
-            item = idc_gh_board.fetch_item(item_id, ctx["repo"])
+            # The post-create read-back can itself RAISE (round-6 Fix 5): the board item already exists,
+            # so a fetch failure must still DISCARD it (delete the board item + close the backing issue)
+            # before failing — never leak an unverified orphan. We can't resolve the issue number from a
+            # failed read-back, so discard_partial_item fails LOUD about the possibly-surviving issue.
+            try:
+                item = idc_gh_board.fetch_item(item_id, ctx["repo"])
+            except idc_gh_board.BoardReadError as e:
+                _discard_created(ctx, item_id, None)
+                raise TransitionError(
+                    f"create read-back failed for new item {item_id} ({e}) — discarded the board item; "
+                    "the backing issue could not be resolved to close (verify no orphan issue survives)")
             content_num = (item.get("content") or {}).get("number")
             issue_num = _journal_item(content_num)
             if issue_num is None:
-                # ATOMIC on failure (round-5 Fix 5): a create whose number cannot be resolved is a
+                # ATOMIC on failure (round-5/6 Fix 5): a create whose number cannot be resolved is a
                 # partial item — delete the board item + close the backing issue before raising, so no
-                # orphan survives. content_num (may be None) is the best issue handle we have to close.
+                # orphan survives. content_num (may be None) is the best issue handle we have to close;
+                # when it is None, discard_partial_item reports the possibly-surviving issue LOUDLY
+                # (it can only delete the board item), so this raises rather than reporting a clean create.
                 _discard_created(ctx, item_id, content_num)
                 raise TransitionError(
                     f"create: could not resolve the issue number for new item {item_id} "
-                    "— refusing to return a non-issue id (the door's contract is the issue number)")
+                    "— discarded the board item and FAILED (the door's contract is the issue number; "
+                    "verify no orphan issue survives)")
             # POSITIVE Stage/Status read-back (Fix 3): confirm the created item actually carries the
             # REQUESTED Stage AND Status — the same read-back parity every other op has. A no-op field
             # setter (or a partial create the discard missed) must never be journaled as a successful
@@ -1448,6 +1478,26 @@ def run(op, ctx, **kw):
             if not to_status:
                 raise TransitionError(f"{op}: --to-status is required")
         cur = get_item(ctx, num)
+        to_stage = kw.get("to_stage")   # only `move` carries it; None for every other transition op
+        # Guarded STAGE transition (round-6 Fix 6 / #151): `move --to-stage` is the ONLY sanctioned door
+        # that advances an item's machine-governed Stage (Plan's Consideration -> Planning). It writes
+        # Stage AND Status together, validated as a machine-LEGAL pair (an illegal pair — e.g.
+        # Consideration + a worked Status — is refused), reads BOTH back, and journals to_stage so
+        # replay/reconciliation see the move (no unjournaled raw Stage flip). Handled BEFORE the
+        # idempotent-Status short-circuit so a Stage advance that keeps Status is never no-op'd away.
+        if to_stage is not None:
+            if cur["status"] == machine.get("terminal_status"):
+                raise TransitionError(
+                    f"illegal transition: #{num} is {cur['status']!r} (terminal) — {op} cannot resurrect it")
+            validate_target(machine, op, to_stage, to_status)   # rejects a machine-illegal Stage/Status pair
+            set_stage(ctx, num, to_stage)
+            if cur["status"] != to_status:
+                set_status(ctx, machine, num, to_status)
+            obs = get_item(ctx, num)
+            verify_readback(num, to_stage, to_status, obs["stage"], obs["status"])
+            journal_append(ctx["repo"], op, backend, tracker_rel,
+                           dict(kw, to_stage=to_stage, to_status=to_status), cur=cur)
+            return
         is_unblock_by = (op == "unblock" and kw.get("by") is not None)
         # `unblock --by GATE`: ALWAYS remove-and-verify the `GATE blocks #num` dependency FIRST
         # (idempotent — already-absent is treated as done), regardless of the pointer's current Status,
@@ -1633,6 +1683,11 @@ def build_parser():
     mv = sub.add_parser("move")
     mv.add_argument("--num", type=int, required=True)
     mv.add_argument("--to-status", dest="to_status", required=True)
+    mv.add_argument("--to-stage", dest="to_stage", default=None,
+                    help="the guarded Stage-transition door (#151): advance an item's machine-governed "
+                         "Stage (e.g. Plan's Consideration -> Planning). Writes Stage AND Status "
+                         "together as a machine-legal pair and journals to_stage. Omit for a plain "
+                         "Status-only move.")
 
     # `set-field` — the sanctioned NON-machine single-select field write (Wave/Phase/Domain). Stage/
     # Status change is a transition — use `move`; set-field refuses Status.
@@ -1700,7 +1755,7 @@ def main():
     elif op == "claim":
         kw = {"num": args.num, "agent": args.agent}
     elif op == "move":
-        kw = {"num": args.num, "to_status": args.to_status}
+        kw = {"num": args.num, "to_status": args.to_status, "to_stage": args.to_stage}
     elif op == "set-field":
         kw = {"num": args.num, "field": args.field, "value": args.value}
     elif op == "unblock":

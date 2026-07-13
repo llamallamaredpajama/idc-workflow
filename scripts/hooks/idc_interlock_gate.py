@@ -128,25 +128,6 @@ def _has(command, *word_seqs):
     return True
 
 
-_WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
-_READ_METHODS = {"GET", "HEAD"}
-
-
-def _api_method_class(command):
-    """Classify a `gh api` HTTP method: 'write' | 'read' | 'ambiguous' | None (no explicit method flag).
-    Recognizes ALL forms — `-X DELETE`, `-XDELETE`, `-X=DELETE`, `--method DELETE`, `--method=DELETE`. A
-    method value that is a shell expansion / non-literal (`-X "$M"`) is 'ambiguous' (cannot be vetted)."""
-    m = re.search(r"(?:--method[=\s]+|-X[=\s]*)(\S+)", command, re.I)
-    if not m:
-        return None
-    val = m.group(1).strip("\"'").upper()
-    if val in _WRITE_METHODS:
-        return "write"
-    if val in _READ_METHODS:
-        return "read"
-    return "ambiguous"
-
-
 def _api_has_body(command):
     """True iff a `gh api` carries a body flag (`-f`/`-F`/`--field`/`--raw-field`/`--input`), in the
     space-separated (`-f k=v`) or combined (`-fk=v`) form — any body promotes the default GET to a POST."""
@@ -154,22 +135,18 @@ def _api_has_body(command):
                           command))
 
 
-def _is_api_write(command):
-    """True iff a `gh api` call is (or cannot be proven NOT to be) a WRITE. An explicit write method or
-    any body flag → write. An explicit read method (GET/HEAD) with no body → read. No method + no body →
-    the default GET (a read; the doctor audit path). An AMBIGUOUS method (a shell-expansion value) →
-    treated as a write so the active-command posture FAILS CLOSED — a raw write-shaped `gh api` on a
-    protected path never needs to be allowed mid-command (every legit mutation goes through the engine)."""
-    method = _api_method_class(command)
-    if method == "write":
-        return True
-    if _api_has_body(command):
-        return True
-    if method == "read":
-        return False
-    if method == "ambiguous":
-        return True
-    return False   # no explicit method, no body → default GET
+def _api_write_indicator(seg_str):
+    """True iff a `gh api` SEGMENT shows ANY write indicator (round-6 Fix 1+2 — BLUNT + fail-closed):
+    a `-X`/`--method` whose value is not GET — scan ALL occurrences, since real gh uses the LAST `-X`,
+    so a leading `-X GET` decoy can never mask a trailing `-X DELETE`; ANYTHING but a literal GET
+    (`HEAD`, a write verb, or a shell-expansion `"$M"`) counts as a write — OR any body flag
+    (`-f`/`-F`/`--field`/`--raw-field`/`--input`). Only a segment with NO non-GET method anywhere AND
+    NO body flag is a provable pure read. When in doubt, treat it as a write (real mutations go through
+    the Python engine doors)."""
+    for m in re.finditer(r"(?:--method[=\s]+|-X[=\s]*)(\S+)", seg_str, re.I):
+        if m.group(1).strip("\"'").upper() != "GET":
+            return True
+    return _api_has_body(seg_str)
 
 
 # ── gh subcommand normalization (Fix 1: token-based, flag-placement-robust) ───────────────────────
@@ -247,48 +224,57 @@ def _combo_subject(pos):
     return _mk("a raw `gh project` board mutation", _ENGINE, kind)
 
 
-def _api_path_protected(path):
-    """True iff a `gh api` endpoint path is a PROTECTED write surface (round-5 Fix 1 fail-closed set):
-    the GraphQL endpoint, any `dependencies/blocked_by`, or a REST issue path (`repos/O/R/issues[/N]` —
-    the create collection AND a single issue's state/close). An arbitrary read path (`repos/O/R`,
-    `rate_limit`, …) is NOT protected, so an ordinary `gh api` read is never touched."""
-    if path == "graphql":
-        return True
-    if "dependencies/blocked_by" in path:
-        return True
-    return bool(re.search(r"repos/[^/\s'\"]+/[^/\s'\"]+/issues(?:/|[\s'\"?]|$)", path))
+def _api_protected_path_kind(seg_str):
+    """Which PROTECTED `gh api` write surface (if any) the segment TEXT names — scanned bluntly across
+    the whole segment string (round-6 Fix 1+2: no positional endpoint isolation, which a mis-parsed
+    value-taking flag like `-p nebula` could defeat): 'graphql' | 'dep' | 'issues', else None. An
+    arbitrary read path (`repos/O/R`, `rate_limit`, …) matches none, so an ordinary `gh api` read is
+    never touched."""
+    if re.search(r"(?<![\w-])graphql(?![\w-])", seg_str):
+        return "graphql"
+    if "dependencies/blocked_by" in seg_str:
+        return "dep"
+    if re.search(r"repos/[^/\s'\"]+/[^/\s'\"]+/issues(?:/|[\s'\"?]|$)", seg_str):
+        return "issues"
+    return None
 
 
-def _gh_api_finding(pos, seg_str):
-    """Classify ONE `gh api` SEGMENT (pos[0]=='api'), method/body detection scoped to THIS segment's
-    tokens only (kills the `: -X GET && gh api … -X DELETE` cross-segment decoy). FAIL-CLOSED: a
-    protected path is ALLOWED only when it is provably a pure read (an explicit/defaulted GET/HEAD with
-    NO body flag and NO `--input`); anything else on a protected path — a write method, a body, an
-    opaque `--input FILE`, `graphql --input FILE`, or an unparseable/ambiguous method — DENIES, because
-    every real mutation goes through the Python engine doors."""
-    path = pos[1] if len(pos) > 1 else ""
-    if not _api_path_protected(path):
-        return None                                   # unprotected read path → allow
-    if not _is_api_write(seg_str):
+def _gh_api_finding(seg_str):
+    """Classify ONE `gh api` SEGMENT bluntly (round-6 Fix 1+2). DENY iff the segment BOTH names a
+    protected API path anywhere AND shows ANY write indicator anywhere (a non-GET `-X`/`--method` — ALL
+    occurrences scanned — or any body flag). ALLOWED only when provably a pure read (a protected path
+    with NO write method anywhere and NO body). Fail-closed: an opaque `--input FILE`, an ambiguous
+    `-X "$M"`, or a trailing `-X DELETE` after a decoy `-X GET` all DENY — every real mutation goes
+    through the Python engine doors."""
+    kind = _api_protected_path_kind(seg_str)
+    if not kind:
+        return None                                   # no protected path in the segment → allow
+    if not _api_write_indicator(seg_str):
         return None                                   # provably a pure read → allow (doctor's audit GET)
-    if path == "graphql":
+    if kind == "graphql":
         return _mk("a raw GraphQL board/issue mutation", _ENGINE, "graphql")
-    if "dependencies/blocked_by" in path:
+    if kind == "dep":
         return _mk("a raw issue-dependency REST write (`dependencies/blocked_by`)", _DEP, "dep-write")
     if re.search(r"state[\"']?\s*[=:]\s*[\"']?\s*(?:closed|open)", seg_str, re.I):
         return _mk("an issue-state-writing `gh api` call", _CLOSE, "issue-state")
     return _mk("a raw issue-state/create `gh api` write", _ENGINE, "issue-create-rest")
 
 
-def _classify_segment_tokens(seg):
-    """A Finding for a protected gh operation in ONE shell segment, or None. Global gh flags (incl.
-    `--hostname`) are stripped by _gh_positionals, and method/body detection is scoped to this
-    segment — the two properties round-5 Fix 1 needs."""
-    pos = _gh_positionals(seg)
-    if not pos:
-        return None
-    if pos[0] == "api":
-        return _gh_api_finding(pos, " ".join(seg))
+def _classify_one_segment(seg_str):
+    """A Finding for a protected gh operation in ONE raw shell segment (already separator-free), or
+    None. Token-classify the segment (gh global flags incl. `--hostname` stripped by _gh_positionals);
+    a `gh api` segment goes through the blunt path-and-write-indicator rule. A lex failure (an
+    over-split quote) or a non-gh head falls back to the method-independent whole-segment backstop —
+    which still catches a combo/api hidden inside a quoted body, always in the safe (deny) direction."""
+    try:
+        tokens = _lex(seg_str)
+    except ValueError:
+        return _classify_string_backstop(seg_str)
+    pos = _gh_positionals(tokens)
+    if pos is None:
+        return _classify_string_backstop(seg_str)     # not a `gh …` invocation
+    if pos and pos[0] == "api":
+        return _gh_api_finding(seg_str)
     return _combo_subject(pos)
 
 
@@ -317,42 +303,51 @@ def _ws_combos(command):
     return None
 
 
-def _classify_whole_string(command):
-    """The lex-FAILURE fallback (an unbalanced-quote script body the segmenter cannot parse): run the
-    `gh api` content rules on the whole string (best-effort — segmentation is unavailable here) plus
-    the combo backstop. On a parseable command classify() never reaches this — the per-segment path,
-    which is decoy-proof, owns that case."""
-    c = command
-    if _has(c, "gh api") and re.search(r"state[\"']?\s*[=:]\s*[\"']?\s*(?:closed|open)", c, re.I):
-        return _mk("an issue-state-writing `gh api` call", _CLOSE, "issue-state")
-    if _has(c, "gh api") and re.search(r"dependencies/blocked_by", c) and _is_api_write(c):
-        return _mk("a raw issue-dependency REST write (`dependencies/blocked_by`)", _DEP, "dep-write")
-    if _has(c, "gh api") and _is_api_write(c) \
-            and re.search(r"repos/[^/\s'\"]+/[^/\s'\"]+/issues(?:[\s'\"?]|$)", c):
-        return _mk("a raw issue-create REST write", _ENGINE, "issue-create-rest")
-    if _has(c, "gh api") and (_GQL_WRITE.search(c) or (re.search(r"(?<![\w-])graphql(?![\w-])", c)
-                                                       and _api_has_body(c))):
-        return _mk("a raw GraphQL board/issue mutation", _ENGINE, "graphql")
-    return _ws_combos(c)
+def _classify_string_backstop(seg_str):
+    """Whole-SEGMENT fallback for a raw segment that did not token-classify as `gh` (a lex failure from
+    an over-split quote, or a combo/`gh api` hidden inside a quoted body). Runs the blunt `gh api` rule
+    (only when the segment mentions `gh api`, so a bare `repos/…/issues` string in unrelated text is not
+    misread) plus the method-independent combo backstop, on the raw string."""
+    if _has(seg_str, "gh api"):
+        hit = _gh_api_finding(seg_str)
+        if hit:
+            return hit
+    return _ws_combos(seg_str)
+
+
+# ── raw newline-aware segmentation (round-6 Fix 1+2) ──────────────────────────────────────────────
+# Split the RAW command string on ALL shell separators BEFORE any lexing — this is the blunt, robust
+# segmentation the classifier needs: shlex SILENTLY EATS newlines (whitespace), so a token-level split
+# never sees a newline separator, and a real `\n`-separated compound looks like one segment. Splitting
+# the raw string is quote-UNAWARE on purpose — over-splitting a quoted body only ever creates MORE
+# segments to classify (the conservative, fail-closed direction); it can never merge two commands.
+_RAW_SEP_RE = re.compile(r"[\n\r;|&]")
+
+
+def _raw_segments(command):
+    """The command's shell segments, split on newlines / `;` / `|` / `&` (covering `&&` and `||` — the
+    empty middle piece is dropped). Blank pieces are dropped."""
+    return [s for s in _RAW_SEP_RE.split(command) if s.strip()]
 
 
 def classify(command):
-    """A Finding for a raw terminal/board command that bypasses the door, or None. PER-SEGMENT: the
-    command is split into shell segments (`&&`/`||`/`;`/`|`/newline) and EACH is classified on its own
-    tokens, so gh global flags before the subcommand and a decoy method flag in another segment cannot
-    bypass the deny; `gh api` on a protected path is fail-closed (allowed only when provably a pure
-    read). This is defense-in-depth (a segment-based fail-closed posture), NOT a complete shell parser.
-    Under the active-command posture an over-match denies in the safe direction (re-issue through the
-    door); outside an active command it is only a warning."""
-    try:
-        tokens = _lex(command)
-    except ValueError:
-        return _classify_whole_string(command)        # unparseable body → whole-string best-effort
-    for seg in _segments(tokens):
-        hit = _classify_segment_tokens(seg)
-        if hit:
-            return hit
-    return _ws_combos(command)                          # method-independent combo backstop
+    """The FIRST Finding for a raw terminal/board command that bypasses the door, or None. The RAW
+    command string is segmented on newlines/`;`/`|`/`&` FIRST (Fix 1+2 — shlex would eat the newline),
+    then EACH segment is classified on its own tokens, so gh global flags before the subcommand and a
+    decoy method flag in another segment cannot bypass the deny; a `gh api` segment is fail-closed
+    (allowed only when provably a pure read). Defense-in-depth (a segment-based fail-closed posture),
+    NOT a complete shell parser. Under the active-command posture an over-match denies in the safe
+    direction; outside an active command it is only a warning."""
+    for finding in classify_all(command):
+        return finding
+    return None
+
+
+def classify_all(command):
+    """EVERY direct protected-op Finding across the raw command's segments (order-preserving, possibly
+    empty). The gate uses the full set so the /idc:uninstall carve-out can require EVERY protected
+    segment to be a teardown op (round-6 Fix 3), not just the first one classify() returns."""
+    return [h for h in (_classify_one_segment(s) for s in _raw_segments(command)) if h]
 
 
 # ── bounded interpreter inspection (Task 3) ───────────────────────────────────────────────────────
@@ -415,42 +410,52 @@ def _opaque(display, why):
 
 
 def _inspect_target(target, cwd, plugin_root, depth, seen):
-    """Resolve+vet a `bash|sh|zsh FILE` / `source FILE` / `. FILE` script target (rules 4–7)."""
-    path = target if os.path.isabs(target) else os.path.join(cwd or ".", target)
-    path = os.path.normpath(path)
-    display = path
-    base = os.path.basename(path)
-    # Rule 6: sensitive — refuse WITHOUT reading (before any stat/open touches it).
-    if _is_sensitive(base):
-        return _opaque(display, "a sensitive file the interlock refuses to open")
-    # Rule 5: files beneath the plugin's own scripts/ dir are sanctioned — do not scan their bodies.
+    """Resolve+vet a `bash|sh|zsh FILE` / `source FILE` / `. FILE` script target (rules 4–7).
+
+    round-6 Fix 4: resolve realpath()/symlinks FIRST, then apply the sensitive-basename, plugin-scripts
+    sanctioned, and regular-file/size/cycle checks on the RESOLVED path, and OPEN ONLY the resolved
+    path — so a `safe.sh` symlink → `.env` is refused via the sensitive lane WITHOUT being opened, and a
+    symlink beneath `plugin_root/scripts/` whose real target is elsewhere is scanned, not waved through.
+    Sensitivity is checked on the lexical name TOO (belt-and-braces over-denial): a file aliased with a
+    sensitive name is never opened, whichever end carries the name."""
+    lexical = target if os.path.isabs(target) else os.path.join(cwd or ".", target)
+    lexical = os.path.normpath(lexical)
+    real = os.path.realpath(lexical)                  # resolve symlinks FIRST — every check runs on `real`
+    display = lexical                                 # rule 7: name the path the caller typed, not content
+    # Rule 6: sensitive — refuse WITHOUT reading (before any stat/open touches it). Check BOTH the
+    # resolved basename (a symlink → .env) AND the lexical basename (a .env → innocuous alias).
+    if _is_sensitive(os.path.basename(real)) or _is_sensitive(os.path.basename(lexical)):
+        return [_opaque(display, "a sensitive file the interlock refuses to open")]
+    # Rule 5: files whose RESOLVED path is beneath the plugin's own scripts/ dir are sanctioned — do not
+    # scan their bodies. Resolving first means a symlink placed under scripts/ can no longer smuggle an
+    # unscanned external target through the sanctioned carve-out.
     if plugin_root:
-        scripts_dir = os.path.normpath(os.path.join(plugin_root, "scripts"))
-        if path == scripts_dir or path.startswith(scripts_dir + os.sep):
-            return None
+        scripts_dir = os.path.normpath(os.path.realpath(os.path.join(plugin_root, "scripts")))
+        if real == scripts_dir or real.startswith(scripts_dir + os.sep):
+            return []
     # cycle + depth guards (rule 6): a self/mutually-including script, or nesting past the bound.
-    real = os.path.realpath(path)
     if real in seen:
-        return _opaque(display, "a cyclic include")
+        return [_opaque(display, "a cyclic include")]
     if depth + 1 > MAX_SCRIPT_DEPTH:
-        return _opaque(display, "include depth exhausted")
-    # follow REGULAR files only (rule 4); missing / non-regular / unreadable / too-large → opaque.
-    if not os.path.isfile(path):
-        return _opaque(display, "not a readable regular file")
+        return [_opaque(display, "include depth exhausted")]
+    # follow REGULAR files only (rule 4), on the RESOLVED path; missing / non-regular / unreadable /
+    # too-large → opaque. Open ONLY `real`.
+    if not os.path.isfile(real):
+        return [_opaque(display, "not a readable regular file")]
     try:
-        if os.path.getsize(path) > MAX_SCRIPT_BYTES:
-            return _opaque(display, f"larger than {MAX_SCRIPT_BYTES} bytes")
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        if os.path.getsize(real) > MAX_SCRIPT_BYTES:
+            return [_opaque(display, f"larger than {MAX_SCRIPT_BYTES} bytes")]
+        with open(real, "r", encoding="utf-8", errors="replace") as fh:
             body = fh.read(MAX_SCRIPT_BYTES + 1)
     except OSError:
-        return _opaque(display, "unreadable")
-    inner = inspect_command(body, cwd, plugin_root, depth + 1, seen | {real})
-    if inner is None:
-        return None
-    # Keep the matched operation + its remediation + op `kind`; name the indirection path (rule 7:
-    # path only, never the script body).
-    return Finding(f"{inner.subject}, reached indirectly via `{display}`", inner.remediation,
-                   "script-indirection", inner.kind)
+        return [_opaque(display, "unreadable")]
+    # Collect EVERY protected op reachable inside the script body (round-6 Fix 3: a compound hidden in
+    # a FILE — `gh issue close; gh issue create` — must surface ALL segments so the uninstall carve-out
+    # can require every one to be a teardown op, not just the first). Each is wrapped with the
+    # indirection path (rule 7: path only, never the script body), keeping its op `kind`.
+    return [Finding(f"{inner.subject}, reached indirectly via `{display}`", inner.remediation,
+                    "script-indirection", inner.kind)
+            for inner in collect_findings(body, cwd, plugin_root, depth + 1, seen | {real})]
 
 
 _ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -541,62 +546,69 @@ def _env_split_payload(seg):
 
 
 def _inspect_segment(seg, cwd, plugin_root, depth, seen):
-    """Inspect one command segment for an interpreter/source invocation (rules 3–4)."""
+    """List of findings for one command segment's interpreter/source invocation (rules 3–4)."""
     # `env -S "<string>"` / `--split-string`: the embedded string IS the command — parse it recursively
     # (Fix 1), so an interpreter hidden inside the split-string is not waved through as an opaque value.
     payload = _env_split_payload(seg)
     if payload is not None:
-        return inspect_command(payload, cwd, plugin_root, depth + 1, seen)
+        return collect_findings(payload, cwd, plugin_root, depth + 1, seen)
     seg = _strip_prefixes(seg)
     if not seg:
-        return None
+        return []
     head = os.path.basename(seg[0])
     if head in INTERPRETERS:
         args = seg[1:]
         # Rule 3: a quoted `-c PAYLOAD` is the whole command — recurse into it, no file target.
         for i, a in enumerate(args):
             if a == "-c" and i + 1 < len(args):
-                return inspect_command(args[i + 1], cwd, plugin_root, depth + 1, seen)
+                return collect_findings(args[i + 1], cwd, plugin_root, depth + 1, seen)
         # Rule 4: `bash|sh|zsh FILE` — the first non-flag argument is the script target.
         target = next((a for a in args if not a.startswith("-")), None)
         if target:
             return _inspect_target(target, cwd, plugin_root, depth, seen)
-        return None
+        return []
     if seg[0] in ("source", ".") and len(seg) >= 2:
         return _inspect_target(seg[1], cwd, plugin_root, depth, seen)
-    return None
+    return []
 
 
-def inspect_command(command, cwd, plugin_root, depth=0, seen=None):
-    """The indirection-aware classifier: a Finding for a protected operation reachable from `command`
-    (directly, via a bash -c payload, or inside a resolved interpreter/source FILE), else None."""
+def collect_findings(command, cwd, plugin_root, depth=0, seen=None):
+    """EVERY protected-op Finding reachable from `command` — direct per-segment (classify_all) AND
+    through interpreter indirection (`bash -c` payloads, `env -S` strings, resolved interpreter/source
+    FILEs). Order-preserving, possibly empty. The gate uses the FULL set so the /idc:uninstall carve-out
+    can require EVERY protected segment (including ones smuggled after an allowed teardown, or hidden in
+    a script body) to be a teardown op (round-6 Fix 3), not just the first one classify() returns."""
     if seen is None:
         seen = frozenset()
+    out = []
     if not command or not command.strip():
-        return None
-    # Rule 1: the direct per-segment protected-operation classifier (returns a Finding already).
-    hit = classify(command)
-    if hit:
-        return hit
+        return out
+    # Rule 1: the direct per-segment protected-operation classifier (all segments).
+    out.extend(classify_all(command))
     # Rule 2: tokenize; a parse failure is opaque ONLY when the command invokes an interpreter form.
     try:
         tokens = _lex(command)
     except ValueError:
         if _mentions_interpreter_form(command):
-            return Finding("an opaque shell command the interlock could not parse "
-                           "[opaque-shell-indirection]", _ENGINE, "opaque-shell-indirection")
-        return None
+            out.append(Finding("an opaque shell command the interlock could not parse "
+                               "[opaque-shell-indirection]", _ENGINE, "opaque-shell-indirection"))
+        return out
     # Redirected script stdin (round-5 Fix 1): `bash|sh|zsh [flags] < FILE` runs FILE as its script —
     # `<` splits segments, so detect the redirect here and inspect FILE like `bash FILE`.
     for target in _stdin_script_targets(tokens):
-        f = _inspect_target(target, cwd, plugin_root, depth, seen)
-        if f:
-            return f
+        out.extend(_inspect_target(target, cwd, plugin_root, depth, seen))
     # Rules 3–4: interpreter `-c` payloads and bash|sh|zsh|source|. FILE targets.
     for seg in _segments(tokens):
-        f = _inspect_segment(seg, cwd, plugin_root, depth, seen)
-        if f:
-            return f
+        out.extend(_inspect_segment(seg, cwd, plugin_root, depth, seen))
+    return out
+
+
+def inspect_command(command, cwd, plugin_root, depth=0, seen=None):
+    """The indirection-aware classifier: the FIRST Finding for a protected operation reachable from
+    `command` (directly, via a bash -c payload, or inside a resolved interpreter/source FILE), else
+    None — the single-finding view over collect_findings()."""
+    for finding in collect_findings(command, cwd, plugin_root, depth, seen):
+        return finding
     return None
 
 
@@ -643,20 +655,26 @@ def _gate(payload, plugin_root):
     if not isinstance(command, str) or not command.strip():
         H.pre_tool_allow()
 
-    finding = inspect_command(command, cwd, plugin_root)
-    if not finding:
+    # Collect EVERY protected op reachable from the command (direct + through indirection) so the
+    # uninstall carve-out can judge ALL of them, not just the first (round-6 Fix 3).
+    findings = collect_findings(command, cwd, plugin_root)
+    if not findings:
         H.pre_tool_allow()
     # POSTURE: hard deny while the session owns an ACTIVE /idc:* command; warn otherwise. The deny
     # honors IDC_HOOKS_OBSERVE_ONLY=1 (the ONE debug escape) inside pre_tool_deny().
     active = L.active_commands(cwd, session_id=payload.get("session_id"))
-    # Fix 2: /idc:uninstall's OWN teardown (issue close, project/board delete, item delete) would be
+    finding = findings[0]
+    # Fix 2/3: /idc:uninstall's OWN teardown (issue close, project/board delete, item delete) would be
     # blocked by the hard deny with no sanctioned replacement, so it is ALLOWED — but ONLY while an
-    # `uninstall` command is the active one, and ONLY for the ops uninstall legitimately owns. Every
-    # other protected mutation stays denied during uninstall, and these same ops under any OTHER
-    # command remain denied. Uninstall's teardown is inherently raw-`gh` (there is no lifecycle
-    # engine op for bulk close / board delete), so this narrow, command-keyed carve-out is the door.
-    if _uninstall_teardown_ok(finding, active):
-        H.pre_tool_allow()
+    # `uninstall` command is the active one, and ONLY when EVERY protected segment of the call is one of
+    # the ops uninstall legitimately owns. A single non-teardown mutation smuggled alongside a teardown
+    # (`gh issue close 5 && gh issue create …`, or one hidden in a `bash -c`/script body) DENIES the
+    # whole call (round-6 Fix 3). These same teardown ops under any OTHER command stay denied.
+    if any(c.get("command") == "uninstall" for c in active):
+        offenders = [f for f in findings if f.kind not in _UNINSTALL_TEARDOWN_KINDS]
+        if not offenders:
+            H.pre_tool_allow()               # every protected segment is uninstall's own teardown → allow
+        finding = offenders[0]               # a non-teardown mutation rode along → deny naming IT
     reason = render_reason(finding, plugin_root)
     if active:
         H.pre_tool_deny(reason)
@@ -667,13 +685,6 @@ def _gate(payload, plugin_root):
 # delete the board/project, delete board items. NOT issue create/delete, pr merge, dependency writes,
 # graphql, or item-add/item-edit — none of which uninstall performs.
 _UNINSTALL_TEARDOWN_KINDS = {"issue-close", "project-delete", "project-item-delete"}
-
-
-def _uninstall_teardown_ok(finding, active):
-    """True iff `finding` is one of /idc:uninstall's own teardown ops AND an `uninstall` command is the
-    active one for this session — the ONLY case a protected op is allowed to run raw mid-command."""
-    return (finding.kind in _UNINSTALL_TEARDOWN_KINDS
-            and any(c.get("command") == "uninstall" for c in active))
 
 
 if __name__ == "__main__":

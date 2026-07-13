@@ -278,6 +278,11 @@ def discard_partial_item(owner, project, repo, item_id, issue_num):
             _gh(["issue", "close", str(issue_num)], repo)
         except BoardReadError as e:
             problems.append(f"issue close failed ({e})")
+    else:
+        # No issue number to close (a read-back that couldn't resolve it) — we can only delete the
+        # board item. Report the possibly-surviving backing issue LOUDLY so the caller never treats a
+        # discard that closed NO issue as a clean teardown (round-6 Fix 5).
+        problems.append("no issue number to close — a backing issue may survive; close it by hand")
     return "; ".join(problems) if problems else None
 
 

@@ -59,7 +59,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_tracker_fs.py" --tracker <repo>/TRACK
 | Interface op | Invocation |
 |---|---|
 | (bootstrap) | `init` — create an empty `TRACKER.md` (idempotent) |
-| `setField` (non-machine) | `set --num N --field {Wave\|Phase\|Domain} --value V` — the non-machine fields only. **Never `--field Status` or `--field Stage`**: both are machine-governed. A Status write is a transition (`move`, above); Stage is owned by the create ops (initial Stage) and the terminal dispositions (final Stage) — there is no role-facing Stage-write door. (The raw `set` primitive still validates a Stage/Status value against its option set, but no role recipe drives it for those fields.) |
+| `setField` (non-machine) | `set --num N --field {Wave\|Phase\|Domain} --value V` — the non-machine fields only. **Never `--field Status` or `--field Stage`**: both are machine-governed. A Status write is a transition (`move --to-status`, above); a Stage advance is the guarded transition `move --to-stage <Stage> --to-status <Status>` (validates the pair, journals `to_stage`), with the create ops writing the initial Stage and the terminal dispositions the final Stage — no role-facing *raw* Stage-write path. (The raw `set` primitive still validates a Stage/Status value against its option set, but no role recipe drives it for those machine fields.) |
 | `query` | `query [--status S] [--stage Stg] [--wave W] [--phase P] [--domain D]` → newline-separated numbers |
 | `comment` | `comment --num N --body "…"` |
 | read | `show --num N [--field F \| --comments \| --blocked-by]` |

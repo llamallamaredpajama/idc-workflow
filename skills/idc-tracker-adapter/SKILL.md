@@ -62,10 +62,15 @@ are engine-internal mechanics — a role never runs a raw `gh project item-edit`
 - **Setting a non-machine field** — `setField(ticket, Wave|Phase|Domain, value)` dispatches to
   the engine's `set-field` op (resolves ids, writes the single-select value, journals it); never a raw `gh project item-edit`.
   Stage and Status are machine-governed and `set-field` refuses BOTH. A **Status** change is a
-  transition — use `move` (`--to-status`). **Stage** is owned by the ops that already set it: the
-  create ops (`create-ticket`/`create-pointer`/`recirculate-intake`) write the initial Stage, and the
-  terminal dispositions (`dispose --disposition retired`/`drained`) record the final Stage — there is
-  no standalone Stage-write door, and no role writes Stage through a raw path.
+  transition — use `move --to-status`. A **Stage** advance is also a transition, through the guarded
+  Stage door **`move --to-stage <Stage> --to-status <Status>`** (both backends): it writes Stage AND
+  Status together, validated as a machine-legal pair (an illegal pair — e.g. `In Progress` on a
+  Consideration pointer — is refused), reads both back, and **journals `to_stage`** so
+  replay/reconciliation see the move. Plan advances a decomposition pointer `Consideration → Planning`
+  through exactly this door. The create ops (`create-ticket`/`create-pointer`/`recirculate-intake`)
+  still write the *initial* Stage and the terminal dispositions (`dispose --disposition
+  retired`/`drained`) record the *final* Stage. **No role writes Stage through a raw path**:
+  never a raw `gh project item-edit` or `set --field Stage` — the mutation interlock denies those during a command.
 - **Creating a block** — `link(parent, child, blocks)` dispatches to the engine's `link` op, which
   writes BOTH the native GitHub blocked-by edge (what the drain reads) AND the marker, fail-closing if
   the native edge does not land; never a raw `dependencies/blocked_by` POST.

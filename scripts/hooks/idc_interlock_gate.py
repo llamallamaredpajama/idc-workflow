@@ -21,14 +21,15 @@ removed (the active-command deny is the shipped enforcement). There are no comma
 Init and Uninstall lifecycle writes run through validating tracker-adapter helpers, while the same raw
 GitHub operations remain denied under every active IDC command.
 
-CLASSIFIER (round-5 Fix 1): defense-in-depth by PER-SEGMENT classification, NOT a complete shell
-parser. The command is split into shell segments (`&&`/`||`/`;`/`|`/newline) and EACH is classified
-on its own tokens, so a decoy method flag in another segment (`: -X GET && gh api … -X DELETE`) can
-never mask a write, and gh global flags (incl. `--hostname`) before the subcommand are stripped. A
-`gh api` on a protected path (issue state/create/close, `dependencies/blocked_by`, graphql) is
-FAIL-CLOSED — allowed only when provably a pure read (a defaulted/explicit GET/HEAD with no body and
-no `--input`); an opaque `--input FILE`/ambiguous method DENIES. `env -S "<string>"` (with trailing
-args) and `bash|sh|zsh < FILE` redirected stdin are followed through like any other indirection.
+CLASSIFIER: defense-in-depth by quote-aware PER-SEGMENT classification, NOT a complete shell parser.
+Real command/process substitutions are extracted and inspected recursively; then each outer segment
+(`&&`/`||`/`;`/`|`/newline) is classified only when its normalized executable head is `gh`. Thus an
+inner read cannot hide a following outer write, while a `gh issue create` phrase in an ordinary
+argument is never mistaken for executable code. A decoy method flag in another segment
+(`: -X GET && gh api … -X DELETE`) cannot mask a write, and gh global flags (incl. `--hostname`)
+before the subcommand are stripped. A `gh api` on a protected path (issue state/create/close,
+`dependencies/blocked_by`, graphql) is FAIL-CLOSED — allowed only when provably a pure read. `env -S
+"<string>"` (with trailing args) and `bash|sh|zsh < FILE` redirected stdin are followed through too.
 
 INDIRECTION-AWARE (bounded interpreter inspection). Beyond the direct command-string classifier,
 inspect_command resolves:
@@ -137,14 +138,16 @@ _DEP = (
     "clear one — never a raw `gh api …/dependencies/blocked_by` POST/DELETE."
 )
 
-# Classifier rules, checked in order. `_has(*seqs)` → the command contains a whitespace-flexible run
-# of words for EVERY seq (so `gh   pr   merge` and `cd x && gh pr merge --squash` both match, while
-# `gh pr view` / `gh project item-list` do not).
+
+# Shared compatibility helper for the fail-open PostToolUse issue-create observer. The interlock's
+# executable classifier deliberately does NOT use this broad text matcher: it identifies the structural
+# command head below. `idc_post_issue_create.py` uses `_has` only to decide whether to emit a reminder
+# after a tool result already confirms that an issue was created.
 _WS = r"\s+"
 
 
 def _has(command, *word_seqs):
-    """True iff `command` contains a run of whitespace-separated words for EVERY seq in `word_seqs`."""
+    """True iff ``command`` contains every whitespace-flexible word sequence requested by the caller."""
     for seq in word_seqs:
         pat = _WS.join(re.escape(w) for w in seq.split())
         if not re.search(r"(?<![\w-])" + pat + r"(?![\w-])", command):
@@ -196,17 +199,13 @@ def _gh_positionals(seg):
     segment has no `gh` command head. `gh issue -R o/r create` → ['issue', 'create']; the subcommand
     path can no longer be split by a flag placed between levels.
 
-    round-11 Fix 4 (wrapper-AGNOSTIC): after the known prefix-strip (`env`/`command`/`exec`/assignments/
-    control words), scan the remaining tokens for the FIRST bare `gh` head and take its positionals — so
-    ANY leading wrapper (`nohup`, `timeout 5`, `stdbuf -oL`, `setsid`, `nice -n 10`, `ionice`, `xargs`,
-    `time`, …) or none is handled uniformly, instead of chasing each wrapper's own option grammar. Only a
-    BARE `gh` token is a head; `gh` glued inside another token (`$(gh`, a quoted arg) is never one, so a
-    `gh` buried in a quoted string cannot be mistaken for a command head."""
+    After the shared prefix-strip (`env`/`command`/`exec`/assignments/control words plus the supported
+    execution wrappers), the FIRST remaining token must itself be `gh`. A later bare `gh` is an argument,
+    not the executable head (`printf '%s' gh issue create` must stay inert). Command substitutions are
+    extracted and inspected separately before this function is called."""
     seg = _strip_prefixes(seg)
-    gi = next((k for k, t in enumerate(seg) if os.path.basename(t) == "gh"), None)
-    if gi is None:
+    if not seg or os.path.basename(seg[0]) != "gh":
         return None
-    seg = seg[gi:]
     words = []
     i = 1
     while i < len(seg):
@@ -374,16 +373,16 @@ def _gh_api_finding(seg_str, endpoint=None):
 def _classify_one_segment(seg_str):
     """A Finding for a protected gh operation in ONE raw shell segment (already separator-free), or
     None. Token-classify the segment (gh global flags incl. `--hostname` stripped by _gh_positionals);
-    a `gh api` segment goes through the blunt path-and-write-indicator rule. A lex failure (an
-    over-split quote) or a non-gh head falls back to the method-independent whole-segment backstop —
-    which still catches a combo/api hidden inside a quoted body, always in the safe (deny) direction."""
+    a `gh api` segment goes through the blunt path-and-write-indicator rule. Only the actual executable
+    head is classified: later arguments and quoted documentation text are data. Dynamic `gh`
+    subcommands/endpoints and interpreter payloads retain their existing fail-closed paths."""
     try:
         tokens = _lex(seg_str)
     except ValueError:
-        return _classify_string_backstop(seg_str)
+        return None                            # a syntactically invalid segment does not execute
     pos = _gh_positionals(tokens)
     if pos is None:
-        return _classify_string_backstop(seg_str)     # not a `gh …` invocation
+        return None                            # not a `gh …` executable head
     if pos and pos[0] == "api":
         # round-9 Fix A: pass the token-parsed endpoint positional so a shell-expansion endpoint
         # (`gh api "$EP" …`) is judged order-robustly (flags at any level already stripped by pos).
@@ -391,62 +390,12 @@ def _classify_one_segment(seg_str):
     return _combo_subject(pos)
 
 
-def _ws_combos(command):
-    """Whitespace-flexible `_has` backstop for the gh SUBCOMMAND combos (method-INDEPENDENT, so no
-    cross-segment decoy risk) — catches a combo hidden in a body the lexer segmented away (a heredoc /
-    an echoed line). Runs AFTER per-segment classification; an over-match only denies in the safe
-    direction during an active command (a warning otherwise)."""
-    c = command
-    if _has(c, "gh pr merge"):
-        return _mk("a raw `gh pr merge`", _FINISH, "pr-merge")
-    if _has(c, "gh issue create") or _has(c, "gh issue new"):
-        return _mk("a raw `gh issue create`", _ENGINE, "issue-create")
-    if _has(c, "gh issue close"):
-        return _mk("a raw `gh issue close`", _CLOSE, "issue-close")
-    if _has(c, "gh issue reopen"):
-        return _mk("a raw `gh issue reopen`", _CLOSE, "issue-reopen")
-    if _has(c, "gh issue delete"):
-        return _mk("a raw `gh issue delete`", _CLOSE, "issue-delete")
-    if _has(c, "gh issue edit"):
-        return _mk("a raw `gh issue edit`", _ENGINE, "issue-edit")
-    if _has(c, "gh pr close"):
-        return _mk("a raw `gh pr close`", _FINISH, "pr-close")
-    if _has(c, "gh pr edit"):
-        return _mk("a raw `gh pr edit`", _FINISH, "pr-edit")
-    if _has(c, "gh project item-delete"):
-        return _mk("a raw `gh project item-delete` board mutation", _ENGINE, "project-item-delete")
-    if _has(c, "gh project create"):
-        return _mk("a raw `gh project create` board mutation", _ENGINE, "project-create")
-    if _has(c, "gh project field-create"):
-        return _mk("a raw `gh project field-create` board mutation", _ENGINE, "project-field-create")
-    if _has(c, "gh project link"):
-        return _mk("a raw `gh project link` board mutation", _ENGINE, "project-link")
-    if _has(c, "gh project delete"):
-        return _mk("a raw `gh project` board mutation", _ENGINE, "project-delete")
-    if _has(c, "gh project item-edit") or _has(c, "gh project item-add"):
-        return _mk("a raw `gh project item-{edit,add}` board mutation", _ENGINE, "project-mutation")
-    return None
-
-
-def _classify_string_backstop(seg_str):
-    """Whole-SEGMENT fallback for a raw segment that did not token-classify as `gh` (a lex failure from
-    an over-split quote, or a combo/`gh api` hidden inside a quoted body). Runs the blunt `gh api` rule
-    (only when the segment mentions `gh api`, so a bare `repos/…/issues` string in unrelated text is not
-    misread) plus the method-independent combo backstop, on the raw string."""
-    if _has(seg_str, "gh api"):
-        hit = _gh_api_finding(seg_str)
-        if hit:
-            return hit
-    return _ws_combos(seg_str)
-
-
-# ── raw newline-aware segmentation (round-6 Fix 1+2) ──────────────────────────────────────────────
-# Split the RAW command string on ALL shell separators BEFORE any lexing — this is the blunt, robust
-# segmentation the classifier needs: shlex SILENTLY EATS newlines (whitespace), so a token-level split
-# never sees a newline separator, and a real `\n`-separated compound looks like one segment. Splitting
-# the raw string is quote-UNAWARE on purpose — over-splitting a quoted body only ever creates MORE
-# segments to classify (the conservative, fail-closed direction); it can never merge two commands.
-_RAW_SEP_RE = re.compile(r"[\n\r;|&]")
+# ── shell execution surfaces: substitutions + top-level segments ─────────────────────────────────
+# A fixed token used only in the parser's private masked copy. Keeping expansions as one inert word lets
+# shlex see the outer command exactly as the shell does after parsing: an assignment value stays attached
+# to its assignment, while an expansion used as a gh subcommand/endpoint or interpreter payload remains
+# visibly dynamic to those existing fail-closed checks.
+_EXPANSION_MASK = "__IDC_SHELL_EXPANSION__"
 # round-7 Fix 2: a shell line-continuation is a backslash IMMEDIATELY followed by a newline — bash
 # removes the pair and joins the tokens, so `gh \`+newline+`issue create` runs as `gh issue create`.
 # It MUST be collapsed BEFORE segmenting on newlines, or the classifier splits the real command into
@@ -527,11 +476,220 @@ def _strip_shell_comments(command):
     return "".join(out)
 
 
+def _backtick_end(command, start):
+    """Index of the unescaped closing backtick for ``command[start]``, else None."""
+    i = start + 1
+    while i < len(command):
+        if command[i] == "\\" and i + 1 < len(command):
+            i += 2
+            continue
+        if command[i] == "`":
+            return i
+        i += 1
+    return None
+
+
+def _paren_end(command, opening):
+    """Matching close for a shell parenthesis at ``opening``, respecting quotes and nested regions.
+
+    Nested command/process/arithmetic substitutions are skipped recursively with a fresh quote context,
+    which matters for valid forms such as ``$(printf '%s' "$(inner)")``. Returns None when incomplete.
+    """
+    i = opening + 1
+    quote = None
+    while i < len(command):
+        ch = command[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+            i += 1
+            continue
+        if quote == '"':
+            if ch == "\\" and i + 1 < len(command):
+                i += 2
+                continue
+            if ch == '"':
+                quote = None
+                i += 1
+                continue
+            if ch == "`":
+                end = _backtick_end(command, i)
+                if end is None:
+                    return None
+                i = end + 1
+                continue
+            if ch == "$" and i + 1 < len(command) and command[i + 1] == "(":
+                end = _paren_end(command, i + 1)
+                if end is None:
+                    return None
+                i = end + 1
+                continue
+            i += 1
+            continue
+
+        if ch == "\\" and i + 1 < len(command):
+            i += 2
+            continue
+        if ch == "'":
+            quote = "'"
+            i += 1
+            continue
+        if ch == '"':
+            quote = '"'
+            i += 1
+            continue
+        if ch == "`":
+            end = _backtick_end(command, i)
+            if end is None:
+                return None
+            i = end + 1
+            continue
+        if ch in "$<>" and i + 1 < len(command) and command[i + 1] == "(":
+            end = _paren_end(command, i + 1)
+            if end is None:
+                return None
+            i = end + 1
+            continue
+        if ch == "(":
+            end = _paren_end(command, i)
+            if end is None:
+                return None
+            i = end + 1
+            continue
+        if ch == ")":
+            return i
+        i += 1
+    return None
+
+
+def _separate_shell_substitutions(command):
+    """Return ``(masked_outer, executed_inner_commands, errors)`` for one shell command string.
+
+    Real ``$(...)``/backtick command substitutions and unquoted ``<(...)``/``>(...)`` process
+    substitutions execute commands, so their bodies are returned for independent recursive inspection.
+    Arithmetic ``$((...))`` is data, but any command substitutions nested inside it are still extracted.
+    Single-quoted lookalikes are literal text. Every consumed expansion is replaced with one marker in the
+    outer copy so its words cannot leak a later ``gh`` argument into the executable-head position.
+    """
+    out, inner, errors = [], [], []
+    quote = None
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if quote == "'":
+            out.append(ch)
+            if ch == "'":
+                quote = None
+            i += 1
+            continue
+
+        if ch == "\\" and i + 1 < n:
+            out.extend((ch, command[i + 1]))
+            i += 2
+            continue
+        if ch == "'" and quote is None:
+            quote = "'"
+            out.append(ch)
+            i += 1
+            continue
+        if ch == '"':
+            quote = None if quote == '"' else '"'
+            out.append(ch)
+            i += 1
+            continue
+
+        substitution = ch == "$" and i + 1 < n and command[i + 1] == "("
+        process_substitution = quote is None and ch in "<>" and i + 1 < n and command[i + 1] == "("
+        if substitution or process_substitution:
+            end = _paren_end(command, i + 1)
+            if end is None:
+                errors.append("an unterminated shell substitution")
+                out.append(_EXPANSION_MASK)
+                break
+            # `$((...))` is arithmetic, not an executed command. Recursively harvest only real command
+            # substitutions inside the arithmetic expression, then mask the expression in the outer copy.
+            if substitution and i + 2 < n and command[i + 2] == "(":
+                _masked, nested, nested_errors = _separate_shell_substitutions(command[i + 2:end])
+                inner.extend(nested)
+                errors.extend(nested_errors)
+            else:
+                inner.append(command[i + 2:end])
+            out.append(_EXPANSION_MASK)
+            i = end + 1
+            continue
+
+        if ch == "`":
+            end = _backtick_end(command, i)
+            if end is None:
+                errors.append("an unterminated backtick command substitution")
+                out.append(_EXPANSION_MASK)
+                break
+            inner.append(command[i + 1:end])
+            out.append(_EXPANSION_MASK)
+            i = end + 1
+            continue
+
+        out.append(ch)
+        i += 1
+    return "".join(out), inner, errors
+
+
 def _raw_segments(command):
-    """The command's shell segments, split on newlines / `;` / `|` / `&` (covering `&&` and `||` — the
-    empty middle piece is dropped). Line-continuations are collapsed FIRST (Fix 2). Blank pieces are
-    dropped."""
-    return [s for s in _RAW_SEP_RE.split(_join_line_continuations(command)) if s.strip()]
+    """Top-level shell segments, split quote-aware on newlines / ``;|&()``.
+
+    Unlike the old raw regex split, separators inside quoted arguments stay data. Command/process
+    substitutions have already been replaced by one inert marker, so their internal separators cannot
+    fragment the outer command; their real command bodies are inspected separately.
+    """
+    command = _join_line_continuations(command)
+    segments, buf = [], []
+    quote = None
+    i = 0
+    while i < len(command):
+        ch = command[i]
+        if quote == "'":
+            buf.append(ch)
+            if ch == "'":
+                quote = None
+            i += 1
+            continue
+        if quote == '"':
+            buf.append(ch)
+            if ch == "\\" and i + 1 < len(command):
+                buf.append(command[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                quote = None
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < len(command):
+            buf.extend((ch, command[i + 1]))
+            i += 2
+            continue
+        if ch == "'":
+            quote = "'"
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == '"':
+            quote = '"'
+            buf.append(ch)
+            i += 1
+            continue
+        if ch in "\n\r;|&()":
+            segment = "".join(buf)
+            if segment.strip():
+                segments.append(segment)
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    segment = "".join(buf)
+    if segment.strip():
+        segments.append(segment)
+    return segments
 
 
 def classify_all(command):
@@ -609,9 +767,9 @@ def _opaque_shell(what):
 
 def _has_shell_expansion(payload):
     """True iff an inline interpreter payload contains a shell expansion — `$VAR`, `${…}`, `$(…)`, or a
-    backtick. shlex has already stripped the surrounding quotes, so a surviving `$`/backtick means the
-    shell WOULD expand it at runtime → the resolved command is opaque (round-8 Fix 2)."""
-    return "$" in payload or "`" in payload
+    backtick. shlex has already stripped the surrounding quotes; the private expansion marker preserves
+    that signal after structural substitution extraction. The resolved command is opaque (round-8 Fix 2)."""
+    return "$" in payload or "`" in payload or _EXPANSION_MASK in payload
 
 
 # ── round-9 Fix A: fail closed on ANY unresolvable dynamic/opaque construct ────────────────────────
@@ -633,8 +791,9 @@ def _dynamic(what):
 def _is_dynamic_token(tok):
     """True iff a (shlex-dequoted) token carries a shell expansion — a `$` or a backtick. Used to flag a
     `gh api` endpoint positional whose value the shell computes at runtime (`gh api "$EP" …`), which we
-    cannot statically confirm is not `graphql` / a protected REST path."""
-    return bool(tok) and ("$" in tok or "`" in tok)
+    cannot statically confirm is not `graphql` / a protected REST path. The private expansion marker
+    preserves the same signal after command-substitution extraction."""
+    return bool(tok) and ("$" in tok or "`" in tok or _EXPANSION_MASK in tok)
 
 
 _RAW_DYN_API_EP_RE = re.compile(r"(?<![\w-])api\s+(?:-\S+\s+)*[\"']?[`$]")
@@ -769,10 +928,9 @@ def _skip_wrapper_opts(seg, i, wrapper):
 
 
 # round-12 Fix 2: GENERIC execution wrappers that PRECEDE the real command and hand off to it, beyond the
-# env/command/builtin/exec family above. The gh path is already wrapper-AGNOSTIC (it scans the token
-# stream for a bare `gh` head after this strip); the interpreter path detects an EXACT head token, so it
-# needs these wrappers stripped HERE — sharing this ONE helper keeps the two paths from drifting (a
-# wrapper added here protects both). Each entry lists the wrapper's SHORT/long options that CONSUME the
+# env/command/builtin/exec family above. Both the gh path and interpreter path require an EXACT normalized
+# head token, so they share this wrapper strip and cannot drift. Each entry lists the wrapper's SHORT/long
+# options that CONSUME the
 # next token (`timeout -s SIG`, `stdbuf -o L`, `nice -n 10`, …) and how many leading NUMERIC operands it
 # takes before the command word (`timeout DURATION`, `chrt PRIO`, `taskset MASK`). Only a DIGIT-leading
 # bare token is eaten as an operand, so an alpha command head (`gh`/`bash`) is never swallowed
@@ -838,7 +996,7 @@ def _strip_prefixes(seg):
     execution-wrapper words TOGETHER WITH their options (`X=1 bash f.sh`, `env -i bash f.sh`, `command -p
     bash f.sh`, and the generic `nohup`/`timeout 5`/`stdbuf -oL`/`setsid`/`nice -n 10`/… wrappers must all
     reach `f.sh`, not wave the wrapper/option through as a benign head token). `env` is DESCENDED (its
-    `-S`/`-u NAME`/`-i` options are consumed). Shared by the gh path (which then scans for a bare `gh`
+    `-S`/`-u NAME`/`-i` options are consumed). Shared by the gh path (which then requires `gh` as the exact
     head), the startup-env detector, the interpreter/source scan, and the stdin-redirect pairing so they
     stay wrapper-agnostic in lockstep. Chained wrappers (`env -i command bash f.sh`, `nohup timeout 5
     bash f.sh`) unwind one layer per outer-loop pass.
@@ -1152,7 +1310,21 @@ def collect_findings(command, cwd, plugin_root, depth=0, seen=None):
     # AND the token-level indirection inspection (`_lex`, stdin targets, `bash -c` payloads) see the
     # single command bash actually runs, not the pre-join fragments.
     command = _join_line_continuations(command)
-    # Rule 1: the direct per-segment protected-operation classifier (all segments).
+    # Shell substitutions are separate execution surfaces. Inspect each real command/process
+    # substitution recursively, but mask it in the OUTER command before locating that command's head.
+    # This prevents an inner read (`$(gh issue view …)`) from swallowing a following outer write, while
+    # also preventing inert argument text (`printf … gh issue create`) from masquerading as a command.
+    command, substitutions, substitution_errors = _separate_shell_substitutions(command)
+    for error in substitution_errors:
+        out.append(_opaque_shell(error))
+    for substitution in substitutions:
+        if depth + 1 > MAX_SCRIPT_DEPTH:
+            out.append(_opaque_shell(f"a command substitution nested past depth {MAX_SCRIPT_DEPTH}"))
+            continue
+        for inner in collect_findings(substitution, cwd, plugin_root, depth + 1, seen):
+            out.append(_Finding(f"{inner.subject}, reached through a shell substitution",
+                                inner.remediation, "command-substitution", inner.kind))
+    # Rule 1: classify every top-level segment in the MASKED outer command.
     out.extend(classify_all(command))
     # Rule 2: tokenize; a parse failure is opaque ONLY when the command invokes an interpreter form.
     try:

@@ -439,9 +439,9 @@ allow "bash --rcfile '$GOV_PLUGIN/scripts/idc_pr_finish.py' '$GOV_PLUGIN/scripts
 
 echo "== round-11 Fix 4: protected-gh detection is WRAPPER-AGNOSTIC (nohup/stdbuf/timeout/setsid/nice…) =="
 # `nohup gh project field-create …` bypassed because nohup wasn't a recognized wrapper and the fallback
-# verb list omitted project field-create/link. Detection now scans the token stream for a `gh` head after
-# ANY leading wrapper. Red-when-broken: revert to first-token-must-be-gh → the wrapped op classifies as
-# non-gh and is allowed under Think.
+# verb list omitted project field-create/link. Detection now normalizes the supported execution wrappers
+# and requires `gh` as the exact resulting head. Red-when-broken: skip wrapper normalization → the wrapped
+# op classifies as non-gh and is allowed under Think.
 deny 'nohup gh project field-create 5 --owner o --name S --data-type SINGLE_SELECT --single-select-options X'
 deny 'nohup gh project link 5 --owner o --repo o/r'
 deny 'stdbuf -oL gh issue create --title x --body-file /tmp/b'

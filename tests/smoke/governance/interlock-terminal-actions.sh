@@ -4,21 +4,24 @@
 # The invariant: a RAW terminal/board command typed into the Bash tool — `gh pr merge`,
 # `gh issue close`, a state-closing `gh api`, a raw board mutation (`gh project item-edit|item-add|
 # item-delete`, a GraphQL board write) — bypasses the single write door (idc_transition.py /
-# idc_git_finish.py). The interlock gate intercepts it and names the exact door command. It SHIPS in
-# warn-inject (surface the remediation, never block — a fresh install can't brick a workflow); a
-# promotion switch (IDC_HOOKS_INTERLOCK_ENFORCE=1) makes it a hard deny; IDC_HOOKS_OBSERVE_ONLY=1
-# downgrades any deny back to warn. It NEVER fires on the sanctioned path (the finisher's own python
-# call), on a read (`gh pr view` / `gh project item-list`), on a non-Bash tool, or outside a
-# governed repo.
+# idc_git_finish.py). The interlock gate intercepts it and names the exact door command.
+#
+# POSTURE (Task 3): a HARD DENY while the session owns an ACTIVE `/idc:*` command
+# (idc_ledger.active_commands, scoped to the payload's session); a WARN-INJECT (surface the
+# remediation, never block — ordinary governed-repo work is never bricked) OUTSIDE an active command;
+# IDC_HOOKS_OBSERVE_ONLY=1 downgrades any deny back to warn. It NEVER fires on the sanctioned path
+# (the finisher's own python call), on a read (`gh pr view` / `gh project item-list`), on a non-Bash
+# tool, or outside a governed repo. (Indirection-aware inspection is covered by the sibling
+# interlock-script-indirection.sh.)
 #
 # Red-when-broken: neuter idc_interlock_gate.classify (make it always return None) → the (W)/(D)/(B)/
 # (C) fire-cases all stop firing → this scenario FAILs.
 #
-#   (W) raw `gh pr merge` ⇒ WARN-INJECT naming idc_git_finish.py, exit 0, NO deny on stdout [headline]
-#   (D) same, IDC_HOOKS_INTERLOCK_ENFORCE=1 ⇒ hard DENY (permissionDecision=deny) naming idc_git_finish.py
-#   (O) same + IDC_HOOKS_OBSERVE_ONLY=1 ⇒ downgraded to warn (no deny on stdout)
-#   (B) raw `gh project item-edit` ⇒ interlock fires naming idc_transition.py
-#   (C) state-closing `gh api … -f state=closed` ⇒ interlock fires (close remediation)
+#   (W) raw `gh pr merge`, NO active command ⇒ WARN-INJECT naming idc_git_finish.py, NO deny [headline]
+#   (D) same, an ACTIVE /idc:* command owned by the payload's session ⇒ hard DENY naming idc_git_finish.py
+#   (O) same active command + IDC_HOOKS_OBSERVE_ONLY=1 ⇒ downgraded to warn (no deny on stdout)
+#   (B) raw `gh project item-edit` (no active command) ⇒ interlock fires naming idc_transition.py
+#   (C) state-closing `gh api … -f state=closed` (no active command) ⇒ interlock fires (close remediation)
 #   (A) allow: `gh pr view` / `gh project item-list` / the finisher's own python call ⇒ NO output
 #   (T) a non-Bash tool ⇒ NO output (self-gated)
 #   (G) non-governed repo ⇒ NO output (repo-gated)
@@ -28,49 +31,58 @@ set -uo pipefail
 . "$(dirname "$0")/lib.sh"
 
 GATE="$GOV_PLUGIN/scripts/hooks/idc_interlock_gate.py"
+CONTRACT="$GOV_PLUGIN/scripts/idc_command_contract.py"
 [ -f "$GATE" ] || gov_fail "idc_interlock_gate.py not found at $GATE (not implemented yet)"
+[ -f "$CONTRACT" ] || gov_fail "idc_command_contract.py not found at $CONTRACT (not implemented yet)"
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 REPO="$WORK/repo"; mkdir -p "$REPO/docs/workflow"
 printf 'backend: filesystem\n' > "$REPO/docs/workflow/tracker-config.yaml"
 NONGOV="$WORK/plain"; mkdir -p "$NONGOV"   # no docs/workflow/tracker-config.yaml
 
-# emit a PreToolUse payload JSON (cwd + tool + command) with python so command quoting is exact.
-emit() { CWD="$1" TOOL="$2" CMD="$3" python3 -c \
-  'import os,json;print(json.dumps({"cwd":os.environ["CWD"],"tool_name":os.environ["TOOL"],"tool_input":{"command":os.environ["CMD"]}}))'; }
+# SD owns an ACTIVE /idc:* command; SW owns nothing (per-run-unique, like the sibling lifecycle test).
+SD="sd-$$-$(basename "$WORK")"
+SW="sw-$$-$(basename "$WORK")"
+python3 "$CONTRACT" start --repo "$REPO" --session "$SD" --command build \
+  --plugin-root "$GOV_PLUGIN" --args 'x' --source user >/dev/null \
+  || gov_fail "could not open the active /idc:build command record for $SD"
+
+# emit a PreToolUse payload JSON (cwd + tool + command + session) with python so quoting is exact.
+emit() { CWD="$1" TOOL="$2" CMD="$3" SID="$4" python3 -c \
+  'import os,json;print(json.dumps({"cwd":os.environ["CWD"],"tool_name":os.environ["TOOL"],"tool_input":{"command":os.environ["CMD"]},"session_id":os.environ["SID"]}))'; }
 
 ERR="$WORK/err"
-# gate <cwd> <tool> <command>  → runs the gate; sets $OUT (stdout) + writes stderr to $ERR + $RC.
+# gate <cwd> <tool> <command> <session>  → runs the gate; sets $OUT (stdout) + stderr $ERR + $RC.
 # Env prefixes (IDC_HOOKS_*) set by the caller propagate to the gate + its children.
-gate() { OUT="$(emit "$1" "$2" "$3" | python3 "$GATE" "$GOV_PLUGIN" 2>"$ERR")"; RC=$?; }
+gate() { OUT="$(emit "$1" "$2" "$3" "$4" | python3 "$GATE" "$GOV_PLUGIN" 2>"$ERR")"; RC=$?; }
 
 MERGE="cd wt && gh pr merge 12 --squash --delete-branch"
 
-# ── (W) warn-inject by default (headline) ──────────────────────────────────────────────────────────
-gate "$REPO" Bash "$MERGE"
+# ── (W) warn-inject when NO active command owns the session (headline) ───────────────────────────────
+gate "$REPO" Bash "$MERGE" "$SW"
 [ "$RC" -eq 0 ] || gov_fail "(W) gate exit was $RC, expected 0 (warn-inject never blocks)"
 [ -z "$OUT" ] || gov_fail "(W) warn-inject must NOT emit a permission decision on stdout: $OUT"
 grep -q 'IDC interlock' "$ERR" || gov_fail "(W) no interlock warning on stderr: $(cat "$ERR")"
 grep -q 'idc_git_finish.py' "$ERR" || gov_fail "(W) warning did not name the idc_git_finish.py remediation: $(cat "$ERR")"
-echo "  ok (W) raw gh pr merge ⇒ warn-inject naming idc_git_finish.py, never blocks [headline]"
+echo "  ok (W) raw gh pr merge, no active command ⇒ warn-inject naming idc_git_finish.py, never blocks [headline]"
 
-# ── (D) hard deny under the promotion switch ────────────────────────────────────────────────────────
-IDC_HOOKS_INTERLOCK_ENFORCE=1 gate "$REPO" Bash "$MERGE"
+# ── (D) hard deny while the session owns an active /idc:* command ─────────────────────────────────────
+gate "$REPO" Bash "$MERGE" "$SD"
 [ "$RC" -eq 0 ] || gov_fail "(D) gate exit was $RC, expected 0 (a hook signals via JSON, not exit code)"
 printf '%s' "$OUT" | grep -q '"permissionDecision": *"deny"' \
-  || gov_fail "(D) IDC_HOOKS_INTERLOCK_ENFORCE=1 did not hard-deny: $OUT"
+  || gov_fail "(D) an active command did not hard-deny the raw merge: $OUT"
 printf '%s' "$OUT" | grep -q 'idc_git_finish.py' \
   || gov_fail "(D) deny reason did not name the idc_git_finish.py remediation: $OUT"
-echo "  ok (D) IDC_HOOKS_INTERLOCK_ENFORCE=1 ⇒ hard deny naming idc_git_finish.py"
+echo "  ok (D) active /idc:* command ⇒ hard deny naming idc_git_finish.py"
 
-# ── (O) OBSERVE_ONLY downgrades the deny back to warn ───────────────────────────────────────────────
-IDC_HOOKS_INTERLOCK_ENFORCE=1 IDC_HOOKS_OBSERVE_ONLY=1 gate "$REPO" Bash "$MERGE"
+# ── (O) OBSERVE_ONLY downgrades the active-command deny back to warn ─────────────────────────────────
+IDC_HOOKS_OBSERVE_ONLY=1 gate "$REPO" Bash "$MERGE" "$SD"
 [ -z "$OUT" ] || gov_fail "(O) OBSERVE_ONLY must downgrade deny → no stdout decision: $OUT"
 grep -qi 'would deny' "$ERR" || gov_fail "(O) OBSERVE_ONLY did not warn-downgrade the deny: $(cat "$ERR")"
-echo "  ok (O) IDC_HOOKS_OBSERVE_ONLY=1 downgrades the deny to a warning"
+echo "  ok (O) IDC_HOOKS_OBSERVE_ONLY=1 downgrades the active-command deny to a warning"
 
 # ── (B) raw board mutation ⇒ interlock fires naming the engine ──────────────────────────────────────
-gate "$REPO" Bash "gh project item-edit --id ITEM --project-id PVT_x --field-id F --single-select-option-id O"
+gate "$REPO" Bash "gh project item-edit --id ITEM --project-id PVT_x --field-id F --single-select-option-id O" "$SW"
 grep -q 'IDC interlock' "$ERR" || gov_fail "(B) raw gh project item-edit did not fire the interlock: $(cat "$ERR")"
 grep -q 'idc_transition.py' "$ERR" || gov_fail "(B) board-mutation warning did not name idc_transition.py: $(cat "$ERR")"
 # The remediation must name the CURRENT engine op set: the #150 `dispose` terminal-disposition door
@@ -81,15 +93,15 @@ grep -qw 'retire' "$ERR" && gov_fail "(B) board-mutation remediation still names
 echo "  ok (B) raw gh project item-edit ⇒ interlock fires naming idc_transition.py (op list = current, dispose present, retire gone)"
 
 # ── (C) state-closing gh api ⇒ interlock fires (REST field form AND JSON-body form) ─────────────────
-gate "$REPO" Bash 'gh api repos/o/r/issues/5 -X PATCH -f state=closed'
+gate "$REPO" Bash 'gh api repos/o/r/issues/5 -X PATCH -f state=closed' "$SW"
 grep -q 'IDC interlock' "$ERR" || gov_fail "(C) state-closing gh api (-f state=closed) did not fire: $(cat "$ERR")"
-gate "$REPO" Bash 'gh api repos/o/r/issues/5 -X PATCH --input - <<< '\''{"state":"closed"}'\'''
+gate "$REPO" Bash 'gh api repos/o/r/issues/5 -X PATCH --input - <<< '\''{"state":"closed"}'\''' "$SW"
 grep -q 'IDC interlock' "$ERR" || gov_fail "(C) state-closing gh api (JSON body \"state\":\"closed\") did not fire: $(cat "$ERR")"
 echo "  ok (C) state-closing gh api (REST -f state=closed AND JSON body) ⇒ interlock fires (close remediation)"
 
 # ── (A) allow the sanctioned path + reads (no false positives) ──────────────────────────────────────
-allow_case() {  # $1 = command that must NOT fire the interlock
-  gate "$REPO" Bash "$1"
+allow_case() {  # $1 = command that must NOT fire the interlock (even while a command is active: SD)
+  gate "$REPO" Bash "$1" "$SD"
   [ "$RC" -eq 0 ] || gov_fail "(A) exit $RC on an allowed command: $1"
   [ -z "$OUT" ] || gov_fail "(A) emitted a decision for an allowed command ($1): $OUT"
   grep -q 'IDC interlock' "$ERR" && gov_fail "(A) wrongly fired the interlock on: $1  ⇒ $(cat "$ERR")"
@@ -102,15 +114,15 @@ allow_case 'gh issue view 5 --json state'
 echo "  ok (A) the finisher's own call + gh reads (pr view / project item-list / issue view) ⇒ no false positive"
 
 # ── (T) a non-Bash tool ⇒ self-gated no-op ──────────────────────────────────────────────────────────
-gate "$REPO" Write "$MERGE"
+gate "$REPO" Write "$MERGE" "$SD"
 [ -z "$OUT" ] || gov_fail "(T) fired for a non-Bash tool: $OUT"
 grep -q 'IDC interlock' "$ERR" && gov_fail "(T) fired for a non-Bash tool: $(cat "$ERR")"
 echo "  ok (T) a non-Bash tool ⇒ self-gated no-op"
 
 # ── (G) non-governed repo ⇒ repo-gated no-op ────────────────────────────────────────────────────────
-gate "$NONGOV" Bash "$MERGE"
+gate "$NONGOV" Bash "$MERGE" "$SD"
 [ -z "$OUT" ] || gov_fail "(G) fired outside a governed repo: $OUT"
 grep -q 'IDC interlock' "$ERR" && gov_fail "(G) fired outside a governed repo: $(cat "$ERR")"
 echo "  ok (G) non-governed repo ⇒ repo-gated no-op"
 
-echo "PASS: PreToolUse interlocks — a raw gh pr merge / gh issue close / state-closing gh api / raw board mutation warn-injects the exact door command (deny-capable via IDC_HOOKS_INTERLOCK_ENFORCE=1; OBSERVE_ONLY downgrades); the sanctioned finisher call, reads, non-Bash tools, and non-governed repos are untouched"
+echo "PASS: PreToolUse interlocks — a raw gh pr merge / gh issue close / state-closing gh api / raw board mutation hard-denies while the session owns an active /idc:* command and warn-injects the exact door command otherwise (OBSERVE_ONLY downgrades any deny); the sanctioned finisher call, reads, non-Bash tools, and non-governed repos are untouched"

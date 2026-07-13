@@ -1012,6 +1012,10 @@ def journal_append(repo, op, backend, tracker_rel, kw, cur=None):
         # happened (codex round-11 P2; the sweep's heal_unjournaled_inbox is the only producer).
         if kw.get("heal"):
             record["heal"] = kw["heal"]
+        # `unblock --by GATE` records the gate whose dependency was removed — the audit line that
+        # proves the block was cleared through the guarded door, not a raw dependency DELETE.
+        if op == "unblock" and kw.get("by") is not None:
+            record["unblocked_by"] = _journal_item(kw["by"]) or kw["by"]
 
         to_state = {}
         if kw.get("to_stage") is not None:
@@ -1135,6 +1139,19 @@ def _fs_link(tracker, parent, child, kind):
         raise TransitionError(f"link #{parent}->#{child} ({kind}) failed: {r.stderr.strip()[:160]}")
 
 
+def _fs_remove_dep(tracker, child, parent):
+    """Remove the `parent blocks child` dependency and VERIFY it is absent (the `unblock --by` first
+    step). Raises on a failed removal or a still-present edge so the caller leaves Status Blocked."""
+    r = _trk(tracker, "unlink", "--parent", str(parent), "--child", str(child), "--kind", "blocks")
+    if r.returncode != 0:
+        raise TransitionError(
+            f"unblock: could not remove the #{parent} blocks #{child} dependency: {r.stderr.strip()[:160]}")
+    it = _fs_item_full(tracker, child)
+    if int(parent) in [int(b) for b in (it.get("blocked_by") or [])]:
+        raise TransitionError(
+            f"unblock: #{parent} still blocks #{child} after removal — refusing to unblock (Status stays Blocked)")
+
+
 # ── github backend ─────────────────────────────────────────────────────────────────────────────
 def _gh_create(machine, op, owner, project, repo, spec, title, body, stage_over, status_over):
     target = spec.get("target") or {}
@@ -1193,6 +1210,26 @@ def _gh_link(ctx, parent, child, kind):
                              f"<!-- idc-blocked-by: {marker} -->", ctx["repo"])
 
 
+def _gh_remove_dep(ctx, child, parent):
+    """Remove the `parent blocks child` dependency and VERIFY it is absent (the `unblock --by` first
+    step). Removes the NATIVE GitHub blocked_by edge first (the representation the drain reads), then
+    verifies via a native read-back, then best-effort cleans the engine's marker comment. Raises on a
+    still-present native edge so the caller leaves Status Blocked. Every REST call runs through
+    idc_gh_board (the engine subprocess), never the Bash tool — the interlock never sees a raw
+    dependency DELETE."""
+    idc_gh_board.remove_blocked_by(int(child), int(parent), ctx["repo"])
+    if int(parent) in idc_gh_board.blocked_by_numbers(int(child), ctx["repo"]):
+        raise TransitionError(
+            f"unblock: #{parent} still blocks #{child} after removal — refusing to unblock (Status stays Blocked)")
+    # Best-effort marker cleanup (the native edge is authoritative for the drain; a leftover marker is
+    # harmless but tidy to remove). A cleanup failure never fails the unblock.
+    try:
+        for cid in idc_gh_board.blocked_by_comment_ids(int(child), int(parent), ctx["repo"]):
+            idc_gh_board.delete_comment(cid, ctx["repo"])
+    except (idc_gh_board.BoardReadError, idc_gh_board.RateLimitError) as e:
+        sys.stderr.write(f"idc-transition: unblock marker-comment cleanup skipped (non-fatal): {e}\n")
+
+
 # ── backend-agnostic dispatch (the guard path is SHARED; only the read/write primitives differ) ──
 def get_item(ctx, num):
     if ctx["backend"] == "github":
@@ -1219,6 +1256,15 @@ def do_link(ctx, parent, child, kind):
         _gh_link(ctx, parent, child, kind)
     else:
         _fs_link(ctx["tracker"], parent, child, kind)
+
+
+def remove_dependency(ctx, child, parent):
+    """Remove the `parent blocks child` dependency and verify it is absent (the `unblock --by` first
+    step, both backends). Raises TransitionError if the edge cannot be removed / still present."""
+    if ctx["backend"] == "github":
+        _gh_remove_dep(ctx, child, parent)
+    else:
+        _fs_remove_dep(ctx["tracker"], child, parent)
 
 
 def close_terminal(ctx, machine, num, to_status):
@@ -1281,6 +1327,12 @@ def run(op, ctx, **kw):
                 f"but #{num} is {cur['status']!r}")
         refuse_terminal(machine, op, to_status)
         check_worked_state(machine, op, cur["stage"], to_status)
+        # `unblock --by GATE`: remove the `GATE blocks #num` dependency FIRST and verify it is absent,
+        # THEN move Status Blocked -> Todo. If dependency removal (or its verify) fails, this raises
+        # BEFORE the Status write, so the pointer stays Blocked; if the Status write later fails, a
+        # rerun re-removes (idempotent, already absent) and completes the remaining Status transition.
+        if op == "unblock" and kw.get("by") is not None:
+            remove_dependency(ctx, num, kw["by"])
         set_status(ctx, machine, num, to_status)
         if spec.get("records_agent") and kw.get("agent"):
             record_owner(ctx, num, kw["agent"])
@@ -1424,6 +1476,9 @@ def build_parser():
 
     ub = sub.add_parser("unblock")
     ub.add_argument("--num", type=int, required=True)
+    ub.add_argument("--by", type=int, default=None,
+                    help="the GATE whose `GATE blocks <num>` dependency to remove before unblocking "
+                         "(removed + verified absent FIRST, then Status Blocked -> Todo)")
 
     cls = sub.add_parser("close")
     cls.add_argument("--num", type=int, required=True)
@@ -1479,7 +1534,7 @@ def main():
     elif op == "move":
         kw = {"num": args.num, "to_status": args.to_status}
     elif op == "unblock":
-        kw = {"num": args.num, "to_status": "Todo"}
+        kw = {"num": args.num, "to_status": "Todo", "by": args.by}
     elif op == "close":
         kw = {"num": args.num, "verdict": args.verdict, "pr": args.pr}
     elif op == "dispose":

@@ -52,8 +52,17 @@ mode only changes what gets fed in:
    - **gate: no — not gate-worthy.**
      - *Drift intake:* edit that layer and every layer below it (arch spec, master plan,
        subphases, pillars, the CLAUDE.md tree, affected open issues) **synchronized in one
-       PR**, automerge. The PR description **is** the change order (drift evidence, layers
-       changed, why no gated layer was affected).
+       PR** on a **`recirc/<slug>` branch**, then **automerge it through the sanctioned finisher**
+       (the change-order PR closes no tracker item; a raw `gh pr merge` is denied during an active
+       command):
+       ```bash
+       python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_pr_finish.py" autonomous \
+         --repo "$PWD" --pr <recirc-PR> --kind recirculation
+       ```
+       (the finisher requires the PR's head branch to carry the `recirc/` prefix, does a direct
+       blocking squash-merge, and deletes the branch atomically — never GitHub `--auto`). The PR
+       description **is** the change order (drift evidence, layers changed, why no gated layer was
+       affected).
      - *Inbox-drain:* the discovered scope fits within today's requirements, so **admit it
        directly**. Author a function-first **ADMITTED consideration** per
        `idc:idc-consideration-schema` (`docs/considerations/<YYYY-MM-DD>-<slug>-considerations.md`,

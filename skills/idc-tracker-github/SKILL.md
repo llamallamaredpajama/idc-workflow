@@ -92,21 +92,30 @@ and `OWNER` from config; never hardcode.
 
 ## Six core ops (the portable interface)
 
-**Status transitions route through the transition engine** — the single sanctioned write door on
-this backend too:
+**Create AND status transitions route through the transition engine** — the single sanctioned write
+door on this backend too:
 `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_transition.py" --backend github --owner "$OWNER" --project "$PROJ" <op>`
-(`create-ticket` / `claim` / `move` / `unblock` / `close` / `dispose` / `link`). It validates
-machine-legality, verifies the write's read-back, and journals every op to
-`docs/workflow/transition-journal.ndjson` — the record the janitor's board↔journal reconciliation
-replays. `Done` is reachable ONLY through a guarded terminal op — the verdict-guarded `close`, or
-`dispose --disposition {gate-approved|retired|drained}` for the non-verdict terminal dispositions
-(each with its own deterministic evidence guard). The raw recipes below are the *mechanics* that
-door drives; invoke them directly only for non-Status fields and reads.
+(`create-ticket` / `create-pointer` / `recirculate-intake` / `claim` / `move` / `unblock` / `close` /
+`dispose` / `link`). It validates machine-legality, verifies the write's read-back, and journals
+every op to `docs/workflow/transition-journal.ndjson` — the record the janitor's board↔journal
+reconciliation replays. `Done` is reachable ONLY through a guarded terminal op — the verdict-guarded
+`close`, or `dispose --disposition {gate-approved|retired|drained}` for the non-verdict terminal
+dispositions (each with its own deterministic evidence guard). The raw recipes below are the
+*mechanics* that door drives internally — invoke them directly only for non-Status fields and reads,
+**never** to mint an item or change a Status by hand.
 
-**createTicket(title, body, type, labels) -> issue#** — create the issue, add it to the
-board, then set initial fields via `setField`/`move` (or mint through the engine's
-`create-ticket`, which journals the create). Returns the issue number on stdout.
+**createTicket(title, body, type, labels) -> issue#** — dispatch through the engine, which owns the
+complete create + board-add + Stage + Status + read-back + journal sequence atomically:
 ```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_transition.py" --backend github \
+  --owner "$OWNER" --project "$PROJ" create-ticket --title "$T" --body "$B"   # -> issue# on stdout
+```
+(Use `create-pointer` for a Consideration pointer and `recirculate-intake` for a Recirculation inbox
+ticket.) The engine drives this raw `gh` mechanic **internally** — it is shown here only so the
+backend is legible; a role **never** runs it by hand (a raw `gh issue create` + `gh project item-add`
+mints an UNjournaled, possibly Stage-without-Status item and reads as replay divergence):
+```bash
+# ── engine-internal mechanic — NOT a role-facing recipe; do not run by hand ──
 URL=$(gh issue create --title "$T" --body "$B" \
         ${TYPE:+--label "type:$TYPE"} ${LABELS:+--label "$LABELS"}) || die_gh
 NUM=$(printf '%s\n' "$URL" | grep -oE '[0-9]+$')

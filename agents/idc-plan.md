@@ -124,11 +124,19 @@ pillar-level *file* clashes among the surviving, de-duplicated pillars.
 3. Advance the consideration pointer (`Consideration → Planning`, retired via the engine's guarded
    `dispose --disposition retired` — a decomposition child as the receipt — as its buildable issues
    land); open the planning PR whose **body is the audit trail** (what was planned, the matrix,
-   the trace) and **automerge when green, deleting the merged branch as part of the merge**:
-   a **direct, blocking** `gh pr merge --squash --delete-branch` (no human touchpoint; pick the
-   method the repo allows) — **not** GitHub `--auto`. Auto-merge defers the merge server-side and,
-   with the repo's `deleteBranchOnMerge` off, would skip the branch delete and leave an orphaned
-   `plan/*`. Branch deletion is **atomic with the merge**, not a separate best-effort step.
+   the trace) and **automerge when green** through the sanctioned finisher, which does a **direct,
+   blocking** squash-merge and **deletes the merged branch as part of the merge** (no human
+   touchpoint):
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_pr_finish.py" autonomous \
+     --repo "$PWD" --pr <planning-pr> --kind planning
+   ```
+   The finisher runs `gh pr merge --squash --delete-branch` **internally** (never a raw merge typed
+   into the Bash tool — the mutation interlock denies that during an active command) and re-reads
+   `state=MERGED`; the planning PR closes no tracker item, so this is the sanctioned door for it.
+   It is **not** GitHub `--auto`: auto-merge defers the merge server-side and, with the repo's
+   `deleteBranchOnMerge` off, would skip the branch delete and leave an orphaned `plan/*`. Branch
+   deletion is **atomic with the merge**, not a separate best-effort step.
 4. **Report the newly-created Buildable issue numbers on completion.** When this run was spawned by a
    parent orchestrator (Build's larger loop, or Autorun), Plan's closeout **reports the new Buildable
    issues** so the parent re-queries its ready frontier and the still-running kitchen picks up

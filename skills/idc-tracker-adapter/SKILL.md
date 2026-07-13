@@ -42,12 +42,25 @@ verdict-guarded path to Done; idempotent), and `dispose(ticket, disposition)` (t
 guarded path to Done — gate approval / pointer retirement / recirc-drain retirement). A seventh
 core op is a contract change requiring a recirculation.
 
-**Status-changing ops route through the transition engine.** `setField(…, Status, …)`, `move`,
-`claim`, `block`, `close`, `dispose`, and `unblock` are transitions: dispatch them via
-`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_transition.py"` (both backends), which validates
+**Create AND status-changing ops route through the transition engine.** `createTicket`, `setField(…,
+Status, …)`, `move`, `claim`, `block`, `close`, `dispose`, and `unblock` are engine ops: dispatch
+them via `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_transition.py"` (both backends), which validates
 machine-legality, verifies the write's read-back, and journals every op to
 `docs/workflow/transition-journal.ndjson` — the record the janitor's board↔journal reconciliation
-replays. `Done` is reachable ONLY through a guarded terminal op — `close` (a passing, item-owning
+replays.
+
+- **Minting an item** — `createTicket` (a Buildable), the **consideration pointer**, and a
+  **Recirculation intake** ticket dispatch through the engine's create ops — `create-ticket`
+  (`Stage=Buildable`), `create-pointer` (`Stage=Consideration`), and `recirculate-intake`
+  (`Stage=Recirculation`) — which own the **complete** create + board-add + Stage + Status + marker
+  comment + read-back sequence atomically, so every minted item lands normalized (never
+  Stage-without-Status) and journaled. The engine is the only create door.
+  A role **never** hand-mints an item with a raw `gh issue create` / `gh project item-add` / filesystem `create`.
+- **Removing a block** — `unblock --num <blocked> --by <gate>` removes the `gate blocks <blocked>`
+  dependency (verified absent) and then moves the blocked item `Blocked → Todo` in one guarded op;
+  never a raw dependency edit.
+
+`Done` is reachable ONLY through a guarded terminal op — `close` (a passing, item-owning
 verdict) for built work, or `dispose --disposition {gate-approved|retired|drained}` (its
 deterministic evidence guard) for the non-verdict terminal dispositions. The backend skills' raw
 helpers stay the mechanics for reads and non-Status fields only.

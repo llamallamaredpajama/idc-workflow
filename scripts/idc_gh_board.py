@@ -29,6 +29,7 @@ API:  fetch_items(owner, project_number, repo=".") -> list[dict]  (raises BoardR
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -455,6 +456,75 @@ def add_comment(issue_num, body, repo="."):
     """Post a comment on an issue — the github `link` / ownership-recording write. A real, durable
     mutation (raises BoardReadError/RateLimitError on failure), monkeypatchable by attribute in tests."""
     _gh(["issue", "comment", str(issue_num), "--body", body], repo)
+
+
+# ── dependency mutation (the engine's `unblock --by` door, github backend) ────────────────────────
+# On github a `blocks` edge has TWO representations: the NATIVE GitHub issue-dependencies
+# `dependencies/blocked_by` relation (the ONLY one the autorun drain's dependency gate reads,
+# idc_autorun_drain._blocked_by_numbers) and the engine's parseable comment marker on the CHILD
+# (`<!-- idc-blocked-by: {child, parent, kind} -->`, read by the dispose guards). `unblock --by`
+# removes BOTH: the native edge first (so the drain sees the item unblocked) then the marker comment.
+# Every REST call runs through the SANCTIONED engine subprocess (never the Bash tool, so the interlock
+# never sees a raw `gh api …/dependencies/blocked_by … -X DELETE`); no role-facing recipe names them.
+def issue_database_id(num, repo="."):
+    """The issue's REST database id (the key the dependencies endpoint uses — NOT the issue number)."""
+    out = _gh(["api", f"repos/{{owner}}/{{repo}}/issues/{int(num)}", "--jq", ".id"], repo)
+    try:
+        return int(out.strip())
+    except ValueError as e:
+        raise BoardReadError(f"could not resolve issue #{num} database id ({e})")
+
+
+def blocked_by_numbers(child, repo="."):
+    """The issue NUMBERS of every native `blocked_by` dependency on `child` — the representation the
+    drain reads, and the read-back that proves an `unblock --by` removal landed."""
+    out = _gh(["api", f"repos/{{owner}}/{{repo}}/issues/{int(child)}/dependencies/blocked_by",
+               "--paginate", "--jq", ".[].number"], repo)
+    return [int(x) for x in out.split() if x.strip().lstrip("-").isdigit()]
+
+
+def remove_blocked_by(child, parent, repo="."):
+    """DELETE the native `parent blocks child` dependency (keyed by `parent`'s DATABASE id). A real
+    mutation (raises BoardReadError/RateLimitError on failure)."""
+    pid = issue_database_id(int(parent), repo)
+    _gh(["api", "--method", "DELETE",
+         f"repos/{{owner}}/{{repo}}/issues/{int(child)}/dependencies/blocked_by/{pid}"], repo)
+
+
+def blocked_by_comment_ids(child, parent, repo="."):
+    """The REST comment ids on `child` whose idc-blocked-by marker names `parent` (the engine's marker
+    edge, cleaned up after the native edge is removed). Reads via `gh api …/issues/<n>/comments` so the
+    numeric REST id comment-delete needs is available (`gh issue view --json comments` gives only node
+    ids). BoardReadError/RateLimitError propagate (resumable)."""
+    out = _gh(["api", f"repos/{{owner}}/{{repo}}/issues/{int(child)}/comments", "--paginate",
+               "--jq", ".[] | {id: .id, body: .body}"], repo)
+    ids = []
+    marker = re.compile(r"<!--\s*idc-blocked-by:\s*(.*?)\s*-->", re.S)
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        for m in marker.finditer(obj.get("body") or ""):
+            try:
+                rec = json.loads(m.group(1))
+            except ValueError:
+                continue
+            if isinstance(rec, dict) and rec.get("parent") == int(parent) \
+                    and rec.get("child") == int(child) and rec.get("kind") == "blocks":
+                ids.append(obj.get("id"))
+                break
+    return [i for i in ids if i is not None]
+
+
+def delete_comment(comment_id, repo="."):
+    """Delete one issue comment by its REST id — the durable removal of a blocks-edge marker. A real
+    mutation (raises BoardReadError/RateLimitError on failure)."""
+    _gh(["api", "--method", "DELETE",
+         f"repos/{{owner}}/{{repo}}/issues/comments/{int(comment_id)}"], repo)
 
 
 def idmap_lines(items):

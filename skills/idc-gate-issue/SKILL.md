@@ -90,7 +90,22 @@ open gates at the start of a run: `query` for `operator-action` issues and confi
 `dispose --disposition gate-approved --num <gate#>` — it re-verifies the gate's own recorded
 approval artifact (the merged `idc-gate-pr`) before minting `Done`, so the close *records* the
 operator's approval rather than *being* it. Then, **only after the dispose succeeds**, for each
-thing the gate blocked: remove the blocks link via the adapter and `setField` `Status=Todo`.
+thing the gate blocked, run the engine's `unblock --num <dependent#> --by <gate#>` — one guarded,
+journaled op that removes the `gate blocks <dependent>` dependency (verified absent) and moves the
+dependent to `Status=Todo` (never a raw dependency edit).
+
+> **Mechanized tail — `idc_pr_finish.py requirements`.** Steps "confirm the Think PR merged → guarded
+> dispose → unblock the dependents" are exactly the sanctioned PR finisher's `requirements` mode
+> (github — the Think PR is a github artifact; forward the same backend flags the engine tail needs):
+> `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_pr_finish.py" --repo "$PWD" --backend github --owner
+> "$OWNER" --project "$PROJ" requirements --pr <think-PR> --gate <gate#> --pointer <dependent#>`. On an **already-merged** Think PR (the async/web-merge
+> path) it re-verifies the gate's single bound `idc-gate-pr` marker, runs the guarded
+> `dispose --disposition gate-approved`, then the `unblock` — dispose FIRST, and if the dispose fails
+> it never unblocks. For an **in-session** approval where the operator has given an unambiguous GO but
+> the Think PR is still open, add `--operator-approved` — the finisher then merges the bound PR before
+> the same dispose-before-unblock tail. **IDC never infers human approval**: pass `--operator-approved`
+> ONLY after an unambiguous user instruction in the current session; absent it, an open Think PR leaves
+> the chain `Blocked` and the run moves on.
 **Never unblock first**: the guarded dispose IS the validation — an approval revoked between
 detection and the dispose would otherwise leave already-unblocked dependents proceeding with no
 current approval; a refused dispose leaves the chain `Blocked`. And dispose-first must not strand
@@ -214,10 +229,13 @@ so the engine binds approval to that PR's merge.
    `dispose --disposition gate-approved --num <gate#>` — it re-verifies the GO artifact (the merged
    `idc-gate-pr` decision-PR, or the `decision`+`decision-approved` label pair on this
    decision-titled gate) before minting `Done`. Then, **only after the dispose succeeds**, for each
-   gated dependent: remove the blocks link and `setField` `Status=Todo` — never unblock first, so a
-   GO revoked between detection and the dispose (label pulled, `decision-rejected` added) can never
-   leave dependents unblocked; the same interrupted-run recovery applies (a `Done` gate with
-   still-`Blocked` dependents → finish the unblock on the next re-check). On a
+   gated dependent, run the engine's `unblock --num <dependent#> --by <gate#>` — the one guarded op
+   that removes the blocks dependency and moves the dependent to `Status=Todo` — never unblock first,
+   so a GO revoked between detection and the dispose (label pulled, `decision-rejected` added) can
+   never leave dependents unblocked; the same interrupted-run recovery applies (a `Done` gate with
+   still-`Blocked` dependents → finish the unblock on the next re-check). (An in-session decision-PR
+   approval can be mechanized with `idc_pr_finish.py requirements … --operator-approved`, exactly as
+   the requirements gate above.) On a
    `decision-rejected` (NO-GO): drop or re-sequence the dependents per the
    operator's note via the adapter — never silently proceed. `/idc:autorun`, `/idc:build`, and
    `/idc:plan` re-check open `operator-decision` gates at the start of a run via `query`, the same
@@ -282,12 +300,15 @@ push is only a convenience nudge.
   only that decision's dependents). It does not create or modify any other issue.
 - **Never edits canonical docs.** The PRD/TRD diff is authored upstream (by `/idc:think` or
   `/idc:recirculate`) and only referenced here; this skill writes the gate issue, not the PRD/TRD.
-- **Never approves on the operator's behalf** — never merges the Think PR, never adds the
-  `decision-approved` label or merges a decision-PR. Approval is the operator's act; this skill only
-  *detects* it, closes the gate as a **journaled cleanup** via the guarded `dispose --disposition
-  gate-approved` op — which **re-verifies the operator's own approval artifact** before minting
-  `Done` — and only then clears the resulting blocks. The close *records* approval, and can never
-  *be* it (a gate with no merged approval artifact is refused, fail-closed, and its dependents stay
-  `Blocked`).
+- **Never approves on the operator's behalf** — never *infers* human approval. It does not add the
+  `decision-approved` label, and it merges the Think/decision PR **only** when the operator has given
+  an unambiguous in-session GO (the `idc_pr_finish.py requirements --operator-approved` path is the
+  one door that carries out such an explicit instruction; absent it, an open PR leaves the chain
+  `Blocked` and the run moves on). Approval is the operator's act; this skill only *detects* it (or
+  carries out an explicit GO), closes the gate as a **journaled cleanup** via the guarded `dispose
+  --disposition gate-approved` op — which **re-verifies the operator's own approval artifact** before
+  minting `Done` — and only then clears the resulting blocks. The close *records* approval, and can
+  never *be* it (a gate with no merged approval artifact is refused, fail-closed, and its dependents
+  stay `Blocked`).
 - All tracker mutation goes through `idc:idc-tracker-adapter`; this skill holds no
   backend-specific logic.

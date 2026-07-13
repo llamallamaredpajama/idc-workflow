@@ -176,6 +176,22 @@ def op_link(path, args):
     save(path, state)
 
 
+def op_unlink(path, args):
+    """Remove a dependency edge — the inverse of op_link (the engine's `unblock --by` door). For
+    `blocks`, drop `parent` from the child's `blocked_by`; for `sub`, clear the child's `parent` when
+    it points at `parent`. Idempotent: removing an absent edge is a no-op."""
+    state = load(path)
+    child = find(state, args.child)
+    if args.kind == "blocks":
+        child["blocked_by"] = [b for b in child.get("blocked_by", []) if int(b) != int(args.parent)]
+    elif args.kind == "sub":
+        if child.get("parent") == args.parent:
+            child.pop("parent", None)
+    else:
+        die("unlink --kind must be 'blocks' or 'sub'")
+    save(path, state)
+
+
 def op_query(path, args):
     state = load(path)
     out = []
@@ -389,6 +405,11 @@ def main():
     lk.add_argument("--child", type=int, required=True)
     lk.add_argument("--kind", default="blocks")
 
+    ul = sub.add_parser("unlink")
+    ul.add_argument("--parent", type=int, required=True)
+    ul.add_argument("--child", type=int, required=True)
+    ul.add_argument("--kind", default="blocks")
+
     q = sub.add_parser("query")
     q.add_argument("--status")
     q.add_argument("--stage")
@@ -432,7 +453,7 @@ def main():
     args = p.parse_args()
     ops = {
         "init": op_init, "create": op_create, "set": op_set, "move": op_move,
-        "link": op_link, "query": op_query, "comment": op_comment, "claim": op_claim,
+        "link": op_link, "unlink": op_unlink, "query": op_query, "comment": op_comment, "claim": op_claim,
         "block": op_block, "close": op_close, "show": op_show,
         "lease-acquire": op_lease_acquire, "lease-release": op_lease_release,
         "lease-show": op_lease_show,

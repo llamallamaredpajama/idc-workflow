@@ -277,6 +277,16 @@ printf '%s' "$OUT" | grep -q 'additionalContext' \
 if printf '%s' "$OUT" | grep -q 'opened a governed command record'; then
   gov_fail "(g2) a recovery command FALSELY claimed a record opened despite the failed write (Fix 2)"
 fi
+# Positive proof the emitted context IS the real bootstrap message (not arbitrary admission context):
+# the exact marker text idc_command_entry_gate.py's _bootstrap_context() emits, plus its `start`
+# remediation instruction. Without this, a gate that emitted ANY non-"opened"-containing context would
+# still pass the two checks above.
+# Red-when-broken: change the gate's bootstrap marker text (or point this assertion at a wrong
+# string) — this check fails while the two negative checks above still pass.
+printf '%s' "$OUT" | grep -q 'NO governed command record was opened by the entry gate' \
+  || gov_fail "(g2) the emitted context did not contain the gate's actual bootstrap marker text (may be arbitrary context, not the real bootstrap message)"
+printf '%s' "$OUT" | grep -q 'idc_command_contract.py start' \
+  || gov_fail "(g2) the emitted context did not contain the bootstrap 'start' remediation instruction"
 if printf '%s' "$OUT" | grep -q '"decision": "block"'; then
   gov_fail "(g2) a recovery command was BLOCKED instead of expanding with bootstrap context"
 fi

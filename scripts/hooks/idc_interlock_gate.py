@@ -22,11 +22,12 @@ Init and Uninstall lifecycle writes run through validating tracker-adapter helpe
 GitHub operations remain denied under every active IDC command.
 
 CLASSIFIER: defense-in-depth through one quote-aware EXECUTION-SURFACE model, NOT a complete shell
-parser. Each outer command position carries its dequoted argv, syntactic redirections, pipe provenance,
-and raw spelling only where GraphQL quote style is meaningful. Real command/process substitutions,
-static `eval`/`-c` payloads, interpreter files, and shell-executed stdin recurse through that same model;
-opaque executable surfaces fail closed. Heredoc bodies stay data for `cat` but become code for a bare
-shell, while a `gh issue create` phrase in an ordinary argument is never mistaken for executable code.
+parser. Each outer command position carries its dequoted argv, quoted-vs-splitting expansion roles,
+local/compound-group redirections, pipe provenance, and raw spelling only where GraphQL quote style is
+meaningful. Real command/process substitutions, static `eval`/`-c` payloads, interpreter files, and
+shell-executed stdin (including explicit `bash|sh|zsh -s`) recurse through that same model; opaque
+executable surfaces fail closed. Heredoc bodies stay data for `cat` but become code for a bare shell,
+while a `gh issue create` phrase in an ordinary argument is never mistaken for executable code.
 Protected API endpoints are classified from their dequoted token, with every write indicator still
 scanned order-robustly. A protected `gh api` path is allowed only when provably a pure read.
 
@@ -50,9 +51,10 @@ command we DENY (subject `dynamic-opaque-indirection`) when the command carries 
 execute a hidden command or redirect an API surface and cannot be statically confirmed safe — a
 `gh api` with a shell-expansion endpoint and a write indicator, a
 `BASH_ENV`/`ENV`/`SHELLOPTS`/`*ENV`/`*RC` startup-file prefix before an interpreter, an opaque privilege
-wrapper around an interpreter, and a dynamic interpreter/`-c`/`env -S` target. This is
-defense-in-depth, not a complete shell parser; a bare `$VAR` parameter expansion (a value, not an
-executed command) is deliberately never flagged.
+wrapper around an interpreter, a dynamic interpreter/`-c`/`env -S` target, or an unresolved unquoted
+expansion in executable-head position that can split into several command words. This is
+defense-in-depth, not a complete shell parser; a `$VAR` in an ordinary data argument is deliberately
+never treated as a command.
 
 Why this NEVER fires on the sanctioned path: the engine + finishers run `gh` via python subprocess,
 NOT via the Bash tool, so PreToolUse never sees them; and a `python3 …/idc_transition.py …` /
@@ -105,13 +107,31 @@ class _Heredoc:
 
 
 @dataclasses.dataclass(frozen=True)
+class _ShellSubstitution:
+    """One independently executed substitution plus its outer-shell word-splitting role."""
+    marker: str
+    command: str
+    quoted: bool
+
+
+@dataclasses.dataclass(frozen=True)
 class _ExecutionSurface:
-    """One shell command position, with normalized argv and its stdin execution boundary."""
+    """One shell command position, with every shell-owned execution role kept together."""
     raw: str
     tokens: tuple
     operators: tuple
     io_numbers: tuple
     piped_stdin: bool = False
+    expansion_roles: tuple = ()
+    inherited_redirections: tuple = ()
+
+
+@dataclasses.dataclass
+class _CompoundGroup:
+    """A parenthesized/brace command group and the stdin syntax owned by that group."""
+    kind: str
+    piped_stdin: bool
+    redirections: list = dataclasses.field(default_factory=list)
 
 
 def _mk(subject, remediation, kind):
@@ -395,7 +415,7 @@ def _gh_api_finding(seg_str, api_words=None):
     return _mk("a raw issue-state/create `gh api` write", _ENGINE, "issue-create-rest")
 
 
-def _classify_one_segment(seg_str, tokens=None):
+def _classify_one_segment(seg_str, tokens=None, expansion_roles=None):
     """A Finding for a protected gh operation in ONE raw shell segment (already separator-free), or
     None. Token-classify the segment (gh global flags incl. `--hostname` stripped by _gh_positionals);
     a `gh api` segment goes through the blunt path-and-write-indicator rule. Only the actual executable
@@ -414,12 +434,24 @@ def _classify_one_segment(seg_str, tokens=None):
     if pos is not None:
         return _combo_subject(pos)
 
-    # A computed executable token can resolve to gh. Fail closed only when the following normalized
-    # argv is itself a protected gh operation shape; a dynamic word in an ordinary argument remains
-    # data (`echo "$G" issue create`) and a computed gh-shaped read remains allowed.
+    # A quoted computed executable token is one argv[0]: fail closed when its following normalized argv
+    # is a protected gh shape, while a quoted computed read stays allowed. An unresolved UNQUOTED head
+    # is handled separately below because field splitting may supply the entire command. A dynamic word
+    # in an ordinary argument remains data (`echo "$G" issue create`).
     head = _strip_prefixes(tokens)
-    if not head or not _is_dynamic_token(head[0]):
+    if not head:
         return None
+    head_i = len(tokens) - len(head)
+    role = expansion_roles[head_i] if expansion_roles and head_i < len(expansion_roles) else None
+    dynamic_head = role in ("quoted", "split") if role is not None else _is_dynamic_token(head[0])
+    if not dynamic_head:
+        return None
+    # An unquoted parameter/opaque command expansion in command position is not one computed argv[0].
+    # Shell field splitting may turn it into the ENTIRE command (`$CMD` -> `gh issue create`). Even an
+    # apparently simple substitution can call a redefined shell function, so every split-capable head
+    # fails closed rather than guessing at runtime stdout.
+    if role == "split":
+        return _dynamic("an unquoted computed executable that can expand into multiple command words")
     computed_pos = _gh_positionals(["gh", *head[1:]])
     if computed_pos and computed_pos[0] == "api":
         protected = _gh_api_finding(seg_str, api_words=computed_pos[1:])
@@ -436,6 +468,7 @@ def _classify_one_segment(seg_str, tokens=None):
 # to its assignment, while an expansion used as a gh subcommand/endpoint or interpreter payload remains
 # visibly dynamic to those existing fail-closed checks.
 _EXPANSION_MASK = "__IDC_SHELL_EXPANSION__"
+_SUBSTITUTION_MARKER_PREFIX = "__IDC_SUBSTITUTION_"
 # round-7 Fix 2: a shell line-continuation is a backslash IMMEDIATELY followed by a newline — bash
 # removes the pair and joins the tokens, so `gh \`+newline+`issue create` runs as `gh issue create`.
 # It MUST be collapsed BEFORE segmenting on newlines, or the classifier splits the real command into
@@ -602,15 +635,18 @@ def _paren_end(command, opening):
     return None
 
 
-def _separate_shell_substitutions(command):
-    """Return ``(masked_outer, executed_inner_commands, errors)`` for one shell command string.
+def _separate_shell_substitutions(command, counter=None):
+    """Return ``(masked_outer, executed_substitutions, errors)`` for one shell command string.
 
     Real ``$(...)``/backtick command substitutions and unquoted ``<(...)``/``>(...)`` process
     substitutions execute commands, so their bodies are returned for independent recursive inspection.
     Arithmetic ``$((...))`` is data, but any command substitutions nested inside it are still extracted.
-    Single-quoted lookalikes are literal text. Every consumed expansion is replaced with one marker in the
-    outer copy so its words cannot leak a later ``gh`` argument into the executable-head position.
+    Single-quoted lookalikes are literal text. Every consumed expansion gets a unique marker carrying
+    whether the OUTER shell quotes it. The execution-surface model therefore keeps the fact that an
+    unquoted result can field-split instead of pretending every expansion is one inert word.
     """
+    if counter is None:
+        counter = [0]
     out, inner, errors = [], [], []
     quote = None
     i, n = 0, len(command)
@@ -647,7 +683,8 @@ def _separate_shell_substitutions(command):
                 errors.append("an unterminated arithmetic command")
                 out.append(_EXPANSION_MASK)
                 break
-            _masked, nested, nested_errors = _separate_shell_substitutions(command[i + 2:end - 1])
+            _masked, nested, nested_errors = _separate_shell_substitutions(
+                command[i + 2:end - 1], counter)
             inner.extend(nested)
             errors.extend(nested_errors)
             out.append(_EXPANSION_MASK)
@@ -665,11 +702,19 @@ def _separate_shell_substitutions(command):
             # `$((...))` is arithmetic, not an executed command. Recursively harvest only real command
             # substitutions inside the arithmetic expression, then mask the expression in the outer copy.
             if substitution and i + 2 < n and command[i + 2] == "(":
-                _masked, nested, nested_errors = _separate_shell_substitutions(command[i + 2:end])
+                _masked, nested, nested_errors = _separate_shell_substitutions(
+                    command[i + 2:end], counter)
                 inner.extend(nested)
                 errors.extend(nested_errors)
             else:
-                inner.append(command[i + 2:end])
+                body = command[i + 2:end]
+                marker = f"{_SUBSTITUTION_MARKER_PREFIX}{counter[0]}__"
+                counter[0] += 1
+                inner.append(_ShellSubstitution(
+                    marker, body, quote == '"' or process_substitution))
+                out.append(marker)
+                i = end + 1
+                continue
             out.append(_EXPANSION_MASK)
             i = end + 1
             continue
@@ -680,8 +725,11 @@ def _separate_shell_substitutions(command):
                 errors.append("an unterminated backtick command substitution")
                 out.append(_EXPANSION_MASK)
                 break
-            inner.append(command[i + 1:end])
-            out.append(_EXPANSION_MASK)
+            body = command[i + 1:end]
+            marker = f"{_SUBSTITUTION_MARKER_PREFIX}{counter[0]}__"
+            counter[0] += 1
+            inner.append(_ShellSubstitution(marker, body, quote == '"'))
+            out.append(marker)
             i = end + 1
             continue
 
@@ -883,95 +931,209 @@ def _extract_heredocs(command):
     return "".join(out), docs, errors
 
 
-def _split_raw_surfaces(command):
-    """Return ``(raw_segment, receives_pipe)`` pairs in shell execution order.
+class _ExecutionSurfaceModel:
+    """The one parser boundary for executable argv, expansions, groups, pipes, and redirects.
 
-    Separators are recognized quote-aware after substitutions and heredocs have become inert markers.
-    Pipe provenance is retained because a bare interpreter executes piped stdin even though it has no
-    argv script. Newlines after a pipe preserve that provenance.
+    The security invariant is ownership: syntax that changes HOW a command executes must live on the
+    same surface as that command. In particular, a group-level pipe or trailing stdin redirect belongs
+    to every command inside the parenthesized/brace group, and an unquoted expansion retains its
+    split-capable role until it is either proven literal or denied. No later classifier reconstructs
+    either fact from a flattened word list.
     """
-    parts, buf, pipe_context = [], [], []
-    quote = None
-    piped_stdin = False
-    i, n = 0, len(command)
 
-    def flush():
-        nonlocal buf
-        raw = "".join(buf)
-        if raw.strip():
-            parts.append((raw, piped_stdin))
-        buf = []
-        return bool(raw.strip())
+    def __init__(self, command, heredocs=(), substitutions=()):
+        self.heredocs = tuple(heredocs)
+        self.substitutions = tuple(substitutions)
+        self.groups = []
+        self.errors = []
+        drafts = self._split(command)
+        self.surfaces = []
+        for raw, piped_stdin, group_ids in drafts:
+            try:
+                tokens, operators, io_numbers, expansion_roles = _lex_surface(
+                    raw, self.substitutions)
+            except ValueError:
+                if _mentions_interpreter_form(raw):
+                    self.errors.append("an opaque shell command the interlock could not parse")
+                continue
+            if not tokens:
+                continue
+            inherited = []
+            for group_id in group_ids:
+                for redirect in self.groups[group_id].redirections:
+                    try:
+                        r_tokens, r_operators, r_io_numbers, r_roles = _lex_surface(
+                            redirect, self.substitutions)
+                    except ValueError:
+                        self.errors.append("an opaque compound-command redirection")
+                        continue
+                    inherited.append(_ExecutionSurface(
+                        redirect, r_tokens, r_operators, r_io_numbers, False, r_roles, ()))
+            self.surfaces.append(_ExecutionSurface(
+                raw, tokens, operators, io_numbers, piped_stdin,
+                expansion_roles, tuple(inherited)))
 
-    while i < n:
-        ch = command[i]
-        if quote == "'":
-            buf.append(ch)
-            if ch == "'":
-                quote = None
-            i += 1
-            continue
-        if quote == '"':
-            buf.append(ch)
+    def _redirect_only(self, raw):
+        """Whether ``raw`` is solely redirects belonging to the just-closed compound group."""
+        try:
+            tokens, operators, io_numbers, _roles = _lex_surface(raw, self.substitutions)
+        except ValueError:
+            return False
+        i, saw_redirect = 0, False
+        while i < len(tokens):
+            if io_numbers[i] is not None and i + 1 < len(tokens) and operators[i + 1]:
+                i += 1
+            if i >= len(tokens) or not operators[i] or i + 1 >= len(tokens):
+                return False
+            saw_redirect = True
+            i += 2
+        return saw_redirect
+
+    @staticmethod
+    def _brace_boundary(command, i):
+        """A brace is group syntax only as a standalone shell word, never inside ordinary data."""
+        before = command[i - 1] if i else ""
+        after = command[i + 1] if i + 1 < len(command) else ""
+        left = not before or before.isspace() or before in ";|&()"
+        right = not after or after.isspace() or after in ";|&()<>"
+        return left and right
+
+    def _split(self, command):
+        """Build raw command drafts while retaining compound-command ownership."""
+        parts, buf, stack = [], [], []
+        quote = None
+        piped_stdin = False
+        pending_closed = None
+        i, n = 0, len(command)
+
+        def inherited_pipe():
+            return any(self.groups[group_id].piped_stdin for group_id in stack)
+
+        def flush():
+            nonlocal buf, pending_closed
+            raw = "".join(buf)
+            buf = []
+            had_surface = pending_closed is not None
+            if not raw.strip():
+                return had_surface
+            if pending_closed is not None and self._redirect_only(raw):
+                self.groups[pending_closed].redirections.append(raw)
+                pending_closed = None
+                return True
+            pending_closed = None
+            group_ids = tuple(stack)
+            parts.append((raw, piped_stdin, group_ids))
+            return True
+
+        def open_group(kind):
+            nonlocal pending_closed, piped_stdin
+            flush()
+            pending_closed = None
+            group_id = len(self.groups)
+            self.groups.append(_CompoundGroup(kind, piped_stdin))
+            stack.append(group_id)
+            piped_stdin = inherited_pipe()
+
+        def close_group(kind):
+            nonlocal pending_closed, piped_stdin
+            flush()
+            if stack and self.groups[stack[-1]].kind == kind:
+                pending_closed = stack.pop()
+            else:
+                pending_closed = None
+            piped_stdin = inherited_pipe()
+
+        while i < n:
+            ch = command[i]
+            if quote == "'":
+                buf.append(ch)
+                if ch == "'":
+                    quote = None
+                i += 1
+                continue
+            if quote == '"':
+                buf.append(ch)
+                if ch == "\\" and i + 1 < n:
+                    buf.append(command[i + 1])
+                    i += 2
+                    continue
+                if ch == '"':
+                    quote = None
+                i += 1
+                continue
             if ch == "\\" and i + 1 < n:
-                buf.append(command[i + 1])
+                buf.extend((ch, command[i + 1]))
                 i += 2
                 continue
-            if ch == '"':
-                quote = None
-            i += 1
-            continue
-        if ch == "\\" and i + 1 < n:
-            buf.extend((ch, command[i + 1]))
-            i += 2
-            continue
-        if ch in "'\"":
-            quote = ch
-            buf.append(ch)
-            i += 1
-            continue
-        if ch == "&" and i + 1 < n and command[i + 1] == ">":
-            buf.append(ch)
-            i += 1
-            continue
-        if ch not in "\r\n;|&()":
-            buf.append(ch)
-            i += 1
-            continue
+            if ch in "'\"":
+                quote = ch
+                buf.append(ch)
+                i += 1
+                continue
+            if ch == "&" and i + 1 < n and command[i + 1] == ">":
+                buf.append(ch)
+                i += 1
+                continue
 
-        if ch == "|" and i + 1 < n and command[i + 1] in "|&":
-            op = command[i:i + 2]
-            i += 2
-        elif ch == "&" and i + 1 < n and command[i + 1] == "&":
-            op = "&&"
-            i += 2
-        elif ch == "\r" and i + 1 < n and command[i + 1] == "\n":
-            op = "\n"
-            i += 2
-        else:
-            op = ch
-            i += 1
-        had_segment = flush()
-        if op == "(":
-            pipe_context.append(piped_stdin)
-        elif op == ")":
-            if pipe_context:
-                pipe_context.pop()
-            piped_stdin = pipe_context[-1] if pipe_context else False
-        elif op in ("|", "|&"):
-            piped_stdin = True
-        elif op in ("\n", "\r") and not had_segment and piped_stdin:
-            pass
-        else:
-            piped_stdin = pipe_context[-1] if pipe_context else False
-    flush()
-    return parts
+            # Command substitutions/arithmetic are already inert markers. Remaining parentheses are
+            # compound groups. A brace group is recognized only at command position and as its own word.
+            if ch == "(":
+                open_group("(")
+                i += 1
+                continue
+            if ch == ")":
+                close_group("(")
+                i += 1
+                continue
+            if ch == "{" and not "".join(buf).strip() and self._brace_boundary(command, i):
+                open_group("{")
+                i += 1
+                continue
+            if ch == "}" and stack and self.groups[stack[-1]].kind == "{" \
+                    and not "".join(buf).strip() and self._brace_boundary(command, i):
+                close_group("{")
+                i += 1
+                continue
+
+            if ch not in "\r\n;|&":
+                buf.append(ch)
+                i += 1
+                continue
+            if ch == "|" and i + 1 < n and command[i + 1] in "|&":
+                op = command[i:i + 2]
+                i += 2
+            elif ch == "&" and i + 1 < n and command[i + 1] == "&":
+                op = "&&"
+                i += 2
+            elif ch == "\r" and i + 1 < n and command[i + 1] == "\n":
+                op = "\n"
+                i += 2
+            else:
+                op = ch
+                i += 1
+            had_surface = flush()
+            pending_closed = None
+            if op in ("|", "|&"):
+                piped_stdin = True
+            elif op in ("\n", "\r") and not had_surface and piped_stdin:
+                pass
+            else:
+                piped_stdin = inherited_pipe()
+        flush()
+        return parts
+
+    def redirections(self, surface):
+        """Return local + inherited redirect state through the same model boundary."""
+        return _surface_redirections(surface, self.heredocs)
 
 
 _LITERAL_META = {"<": "\ue000", ">": "\ue001", "&": "\ue002"}
 _RESTORE_LITERAL_META = {value: key for key, value in _LITERAL_META.items()}
 _IO_NUMBER_OPEN = "\ue003"
 _IO_NUMBER_CLOSE = "\ue004"
+_LITERAL_EXPANSION_META = "\ue005"
+_QUOTED_EXPANSION_META = "\ue006"
+_SPLIT_EXPANSION_META = "\ue007"
 
 
 def _mask_literal_redirection_chars(raw):
@@ -982,24 +1144,39 @@ def _mask_literal_redirection_chars(raw):
     while i < len(raw):
         ch = raw[i]
         if quote == "'":
-            out.append(_LITERAL_META.get(ch, ch))
+            if ch == "$":
+                out.append(_LITERAL_EXPANSION_META)
+            else:
+                out.append(_LITERAL_META.get(ch, ch))
             if ch == "'":
                 quote = None
             i += 1
             continue
         if quote == '"':
-            out.append(_LITERAL_META.get(ch, ch))
+            if ch == "$":
+                out.append(_QUOTED_EXPANSION_META)
+            else:
+                out.append(_LITERAL_META.get(ch, ch))
             if ch == "\\" and i + 1 < len(raw):
-                out.append(_LITERAL_META.get(raw[i + 1], raw[i + 1]))
+                escaped = raw[i + 1]
+                if escaped == "$":
+                    out.append(_LITERAL_EXPANSION_META)
+                else:
+                    out.append(_LITERAL_META.get(escaped, escaped))
                 i += 2
                 continue
             if ch == '"':
                 quote = None
             i += 1
             continue
-        if ch == "\\" and i + 1 < len(raw) and raw[i + 1] in _LITERAL_META:
-            out.append(_LITERAL_META[raw[i + 1]])
+        if ch == "\\" and i + 1 < len(raw) and raw[i + 1] in set(_LITERAL_META) | {"$"}:
+            escaped = raw[i + 1]
+            out.append(_LITERAL_META.get(escaped, _LITERAL_EXPANSION_META))
             i += 2
+            continue
+        if ch == "$":
+            out.append(_SPLIT_EXPANSION_META)
+            i += 1
             continue
         # Shell grammar recognizes an IO number only when an unquoted all-digit word is IMMEDIATELY
         # adjacent to `<`/`>`. Preserve that role so `bash 2>err` stays a bare shell, while
@@ -1019,11 +1196,27 @@ def _mask_literal_redirection_chars(raw):
     return "".join(out)
 
 
-def _lex_surface(raw):
-    """Return dequoted token values plus aligned redirection/operator syntax roles."""
+def _lex_surface(raw, substitutions=()):
+    """Return dequoted values plus aligned redirect and expansion syntax roles.
+
+    An unquoted expansion keeps a `split` role, distinct from a quoted one-word expansion. Shell
+    functions and inherited environment can change even an apparently simple substitution command,
+    so this static interlock never guesses at its stdout.
+    """
     masked_tokens = _lex(_mask_literal_redirection_chars(raw))
-    values, operators, io_numbers = [], [], []
+    values, operators, io_numbers, expansion_roles = [], [], [], []
+    substitutions_by_marker = {item.marker: item for item in substitutions}
     for token in masked_tokens:
+        role = "none"
+        for marker, item in substitutions_by_marker.items():
+            if marker not in token:
+                continue
+            token = token.replace(marker, _EXPANSION_MASK)
+            role = "quoted" if item.quoted else "split"
+        if _SPLIT_EXPANSION_META in token:
+            role = "split"
+        elif _QUOTED_EXPANSION_META in token and role != "split":
+            role = "quoted"
         has_literal_meta = any(marker in token for marker in _RESTORE_LITERAL_META)
         operators.append(not has_literal_meta and token in _REDIRECTION_TOKENS)
         io_number = None
@@ -1033,24 +1226,13 @@ def _lex_surface(raw):
                 token, io_number = candidate, candidate
         for marker, value in _RESTORE_LITERAL_META.items():
             token = token.replace(marker, value)
+        token = token.replace(_LITERAL_EXPANSION_META, "$")
+        token = token.replace(_QUOTED_EXPANSION_META, "$")
+        token = token.replace(_SPLIT_EXPANSION_META, "$")
         values.append(token)
         io_numbers.append(io_number)
-    return tuple(values), tuple(operators), tuple(io_numbers)
-
-
-def _execution_surfaces(command):
-    """Normalize every visible outer command position into one execution-surface record."""
-    surfaces, errors = [], []
-    for raw, piped_stdin in _split_raw_surfaces(command):
-        try:
-            tokens, operators, io_numbers = _lex_surface(raw)
-        except ValueError:
-            if _mentions_interpreter_form(raw):
-                errors.append("an opaque shell command the interlock could not parse")
-            continue
-        if tokens:
-            surfaces.append(_ExecutionSurface(raw, tokens, operators, io_numbers, piped_stdin))
-    return surfaces, errors
+        expansion_roles.append(role)
+    return tuple(values), tuple(operators), tuple(io_numbers), tuple(expansion_roles)
 
 
 # ── bounded interpreter inspection (Task 3) ───────────────────────────────────────────────────────
@@ -1466,8 +1648,14 @@ def _is_dash_c_flag(tok):
             and tok[-1] == "c" and all(ch.isalpha() for ch in tok[1:]))
 
 
+def _is_dash_s_flag(tok):
+    """True when a short option word explicitly selects stdin, without an ambiguous `c` payload."""
+    return (len(tok) >= 2 and tok[0] == "-" and tok[1] != "-" and "s" in tok[1:]
+            and "c" not in tok[1:] and all(ch.isalpha() for ch in tok[1:]))
+
+
 def _interpreter_plan(args):
-    """Single left-to-right walk of a `bash|sh|zsh` arg list, returning `(payload, sources, script)`:
+    """Single walk of a shell arg list, returning `(payload, sources, script, stdin_program)`:
 
       * `payload` — the `-c` COMMAND STRING (recognized as a bare `-c` OR a combined cluster ending in
         `c` per round-12 Fix 3), else None. With `-c`, the following positionals are $0/$1… (NOT a script
@@ -1479,19 +1667,27 @@ def _interpreter_plan(args):
       * `script` — the positional script FILE bash RUNS (the FIRST positional after option processing),
         or None. Value-taking options (`--rcfile FILE`, `-O shopt`, `-o name`, `--`) are consumed so a
         decoy option value cannot masquerade as the script. Script ARGUMENTS after the target are not
-        returned — only the first positional is the script."""
-    payload, sources, script = None, [], None
+        returned — only the first positional is the script.
+      * `stdin_program` — `-s` explicitly makes stdin the program. Every later positional (including
+        one after `--`) is a shell parameter, never a script target that suppresses stdin inspection.
+    """
+    payload, sources, script, stdin_program = None, [], None, False
     i, n = 0, len(args)
     while i < n:
         tok = args[i]
-        if tok == "--":                                      # end of options → next token is the script
+        if tok == "--":                                      # with -s, remaining words are parameters
             rest = args[i + 1:]
-            script = rest[0] if rest else None
+            if not stdin_program:
+                script = rest[0] if rest else None
             break
         if _is_dash_c_flag(tok):                             # `-c`/`-xc` PAYLOAD — command string, not a file
             if i + 1 < n:
                 payload = args[i + 1]
             break                                            # after -c everything is positional; stop
+        if _is_dash_s_flag(tok):                              # stdin program; later positionals are argv
+            stdin_program = True
+            i += 1
+            continue
         if "=" in tok and tok.split("=", 1)[0] in _INTERP_FILE_OPTS:   # --rcfile=FILE
             sources.append(tok.split("=", 1)[1])
             i += 1
@@ -1506,9 +1702,10 @@ def _interpreter_plan(args):
         if tok.startswith("-") or tok.startswith("+"):       # any other bare/self-contained flag
             i += 1
             continue
-        script = tok                                         # first non-flag positional = the script
+        if not stdin_program:
+            script = tok                                     # first non-flag positional = the script
         break
-    return payload, sources, script
+    return payload, sources, script, stdin_program
 
 
 def _su_command_payload(seg):
@@ -1617,7 +1814,7 @@ def _inspect_segment(seg, cwd, plugin_root, depth, seen):
     head = os.path.basename(seg[0])
     if head in INTERPRETERS:
         args = seg[1:]
-        payload, sources, script = _interpreter_plan(args)
+        payload, sources, script, _stdin_program = _interpreter_plan(args)
         out = []
         # Rule 3: a quoted `-c PAYLOAD` is a command — recurse ONLY when it is a fully STATIC literal.
         # round-8 Fix 2: `bash -c "$CMD"` recursed on the literal token `$CMD`, found nothing, and
@@ -1650,50 +1847,60 @@ def _surface_redirections(surface, heredocs):
 
     Returns ``(argv, stdin_sources, attached_heredocs, errors)``. Redirection operands are data, never
     executable argv. A stdin source is represented as ``(kind, value)`` where kind is `file`, `text`,
-    `heredoc`, or `opaque`. Heredocs on non-stdin file descriptors are still returned as attached so
-    their unquoted command substitutions can be inspected (the parent shell expands every heredoc).
+    `heredoc`, or `opaque`. Compound-group redirects are consumed first (outer to inner), then the
+    command's own redirects, matching shell override order. Heredocs on non-stdin file descriptors are
+    still returned as attached so their unquoted substitutions are inspected by the parent shell.
     """
     argv, stdin_sources, attached, errors = [], [], [], []
     docs_by_marker = {doc.marker: doc for doc in heredocs}
-    tokens = list(surface.tokens)
-    operators = list(surface.operators)
-    io_numbers = list(surface.io_numbers)
-    i = 0
-    while i < len(tokens):
-        fd = None
-        tok = tokens[i]
-        if io_numbers[i] is not None and i + 1 < len(tokens) and operators[i + 1]:
-            fd, tok = io_numbers[i], tokens[i + 1]
-            i += 1
-        if not operators[i]:
-            argv.append(tok)
-            i += 1
-            continue
-        if i + 1 >= len(tokens):
-            errors.append(f"a `{tok}` redirection without a target")
-            i += 1
-            continue
-        value = tokens[i + 1]
-        i += 2
-        if tok == "<<":
-            doc = docs_by_marker.get(value)
-            if doc is None:
-                errors.append("an opaque heredoc marker")
-            else:
-                attached.append(doc)
-                if fd in (None, "0"):
-                    stdin_sources.append(("heredoc", doc))
-            continue
-        if fd not in (None, "0"):
-            continue
-        if tok == "<":
-            stdin_sources.append(("file", value))
-        elif tok == "<<<":
-            stdin_sources.append(("text", value))
-        elif tok == "<>":
-            stdin_sources.append(("file", value))
-        elif tok == "<&":
-            stdin_sources.append(("opaque", None))
+
+    def consume(candidate, keep_argv):
+        tokens = list(candidate.tokens)
+        operators = list(candidate.operators)
+        io_numbers = list(candidate.io_numbers)
+        i = 0
+        while i < len(tokens):
+            fd = None
+            tok = tokens[i]
+            if io_numbers[i] is not None and i + 1 < len(tokens) and operators[i + 1]:
+                fd, tok = io_numbers[i], tokens[i + 1]
+                i += 1
+            if not operators[i]:
+                if keep_argv:
+                    argv.append(tok)
+                else:
+                    errors.append("an opaque compound-command redirection")
+                i += 1
+                continue
+            if i + 1 >= len(tokens):
+                errors.append(f"a `{tok}` redirection without a target")
+                i += 1
+                continue
+            value = tokens[i + 1]
+            i += 2
+            if tok == "<<":
+                doc = docs_by_marker.get(value)
+                if doc is None:
+                    errors.append("an opaque heredoc marker")
+                else:
+                    attached.append(doc)
+                    if fd in (None, "0"):
+                        stdin_sources.append(("heredoc", doc))
+                continue
+            if fd not in (None, "0"):
+                continue
+            if tok == "<":
+                stdin_sources.append(("file", value))
+            elif tok == "<<<":
+                stdin_sources.append(("text", value))
+            elif tok == "<>":
+                stdin_sources.append(("file", value))
+            elif tok == "<&":
+                stdin_sources.append(("opaque", None))
+
+    for inherited in surface.inherited_redirections:
+        consume(inherited, False)
+    consume(surface, True)
     return argv, stdin_sources, attached, errors
 
 
@@ -1707,7 +1914,7 @@ def _substitution_findings(text, cwd, plugin_root, depth, seen):
         if depth + 1 > MAX_SCRIPT_DEPTH:
             out.append(_opaque_shell(f"a command substitution nested past depth {MAX_SCRIPT_DEPTH}"))
             continue
-        for inner in collect_findings(substitution, cwd, plugin_root, depth + 1, seen):
+        for inner in collect_findings(substitution.command, cwd, plugin_root, depth + 1, seen):
             out.append(_Finding(f"{inner.subject}, reached through a shell substitution",
                                 inner.remediation, "command-substitution", inner.kind))
     return out
@@ -1727,7 +1934,7 @@ def _stdin_execution_findings(surface, argv, stdin_sources, attached_docs,
     if not normalized or os.path.basename(normalized[0]) not in INTERPRETERS:
         return out
     head = os.path.basename(normalized[0])
-    payload, _sources, script = _interpreter_plan(normalized[1:])
+    payload, _sources, script, _stdin_program = _interpreter_plan(normalized[1:])
     if payload is not None or script is not None:
         return out                              # -c / FILE owns execution; stdin is ordinary data
 
@@ -1786,22 +1993,25 @@ def collect_findings(command, cwd, plugin_root, depth=0, seen=None):
         if depth + 1 > MAX_SCRIPT_DEPTH:
             out.append(_opaque_shell(f"a command substitution nested past depth {MAX_SCRIPT_DEPTH}"))
             continue
-        for inner in collect_findings(substitution, cwd, plugin_root, depth + 1, seen):
+        for inner in collect_findings(substitution.command, cwd, plugin_root, depth + 1, seen):
             out.append(_Finding(f"{inner.subject}, reached through a shell substitution",
                                 inner.remediation, "command-substitution", inner.kind))
-    # Every outer executable position now has one raw view (only for quote-sensitive GraphQL fields),
-    # one dequoted argv, and explicit stdin provenance. No parallel raw/token command paths remain.
-    surfaces, surface_errors = _execution_surfaces(command)
-    for error in surface_errors:
+    # Every outer executable position now comes from ONE ownership model: raw GraphQL spelling,
+    # dequoted argv, quoted-vs-split expansions, local/group redirects, and pipe provenance cannot
+    # drift into parallel paths.
+    model = _ExecutionSurfaceModel(command, heredocs, substitutions)
+    surfaces = model.surfaces
+    for error in model.errors:
         out.append(_opaque_shell(error))
     for surface in surfaces:
-        finding = _classify_one_segment(surface.raw, list(surface.tokens))
+        finding = _classify_one_segment(
+            surface.raw, list(surface.tokens), list(surface.expansion_roles))
         if finding:
             out.append(finding)
 
     attached_markers = set()
     for surface in surfaces:
-        argv, stdin_sources, attached_docs, redirect_errors = _surface_redirections(surface, heredocs)
+        argv, stdin_sources, attached_docs, redirect_errors = model.redirections(surface)
         attached_markers.update(doc.marker for doc in attached_docs)
         for error in redirect_errors:
             out.append(_opaque_shell(error))

@@ -3,9 +3,10 @@
 # same normalized classifier; opaque executable surfaces fail closed without turning ordinary data
 # arguments or heredoc documentation into commands.
 #
-# Red-when-broken: restore the pre-round-18 split between raw segments, token heads, substitutions,
-# and redirected files. The quoted/escaped API endpoints, stdin-fed interpreters, computed heads,
-# eval payloads, or interpreter heredocs below then escape; the cat heredocs also become false denies.
+# Red-when-broken: restore the pre-round-19 split between raw segments, token heads, substitutions,
+# groups, and redirected files. The quoted/escaped API endpoints, stdin-fed interpreters, computed
+# heads, eval payloads, compound-command stdin, or interpreter heredocs below then escape; the data
+# consumers also become false denies.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -38,9 +39,17 @@ must_deny = (
     "bash <<< 'gh issue create --title x --body x'",
     "printf '%s\\n' 'gh issue create --title x --body x' | (bash)",
 
-    # A computed executable token fails closed only when the following argv has a protected gh shape.
+    # A quoted one-word computed write is protected by its following gh shape; an unquoted command
+    # substitution is split-capable and therefore fails closed regardless of the apparent inner text.
     'G=gh; "$G" issue create --title x --body x',
     '$(printf gh) issue create --title x --body x',
+
+    # An UNQUOTED expansion in command position undergoes field splitting. It may therefore supply
+    # the complete protected command, not merely one computed executable word.
+    "CMD='gh issue create'; $CMD --title x --body x",
+    "$(printf 'gh issue create') --title x --body x",
+    "$(printf gh) issue view 7",
+    "printf() { command printf 'gh issue create'; }; $(printf gh) --title x --body x",
 
     # Static eval payloads recurse through the same surface model; dynamic payloads are opaque.
     "eval 'gh issue create --title x --body x'",
@@ -58,14 +67,33 @@ must_deny = (
     "sh <<EOF\ngh issue close 7\nEOF",
     "zsh <<-'EOF'\n\tgh project item-delete 8 --owner o --id X\n\tEOF",
 
+    # `-s` explicitly selects stdin as the shell program. Every later positional is an argument to
+    # that program, so even a sanctioned plugin-script pathname cannot masquerade as the script file.
+    "bash -s -- '{}/scripts/idc_transition.py' <<< 'gh issue create --title x --body x'".format(plugin_root),
+    "printf '%s\\n' 'gh issue create --title x --body x' | sh -s -- '{}/scripts/idc_transition.py'".format(plugin_root),
+    "zsh -s -- '{}/scripts/idc_transition.py' <<'EOF'\ngh issue create --title x --body x\nEOF".format(plugin_root),
+
+    # A compound command owns pipe/redirection stdin for every command inside it. Parentheses and
+    # braces share the same invariant, including a left pipeline and every trailing stdin form.
+    "(bash) <<< 'gh issue create --title x --body x'",
+    "{ bash; } <<< 'gh issue create --title x --body x'",
+    "printf '%s\\n' 'gh issue create --title x --body x' | { :; bash; }",
+    "(bash) < '{}/tests/smoke/fixtures/session-b7a93ff6/fire_gate.sh'".format(plugin_root),
+    "{ bash; } <<'EOF'\ngh issue create --title x --body x\nEOF",
+
     # An unquoted data-consumer heredoc still performs parent-shell substitutions.
     "cat <<EOF\n$(gh issue create --title x --body x)\nEOF",
 )
 
 must_allow = (
-    # A computed head followed by a read-shaped gh argv is not a protected mutation.
+    # Quoting proves the computed executable is exactly one word, so a read-shaped argv stays allowed.
     'G=gh; "$G" issue view 7',
-    '$(printf gh) issue view 7',
+    '"$(printf gh)" issue view 7',
+
+    # Quoting suppresses field splitting: these are single executable names containing spaces, not
+    # a `gh issue create` command assembled from several words.
+    "CMD='gh issue create'; \"$CMD\" --title x --body x",
+    '"$(printf \'gh issue create\')" --title x --body x',
 
     # Protected words in ordinary argv stay data.
     "echo 'gh issue create --title example'",
@@ -80,6 +108,9 @@ must_allow = (
     "cat <<EOF\ngh issue close 7\nEOF",
     "cat <<-'EOF'\n\tgh project item-delete 8 --owner o --id X\n\tEOF",
     "cat <<'EOF'\n$(gh issue create --title x --body x)\nEOF",
+    "(cat) <<< 'gh issue create --title x --body x'",
+    "{ cat; } <<'EOF'\ngh issue create --title x --body x\nEOF",
+    "printf '%s\\n' 'gh issue create --title x --body x' | { :; cat; }",
 
     # The existing sanctioned plugin-script boundary remains intact.
     'bash "{}/scripts/idc_transition.py"'.format(plugin_root),

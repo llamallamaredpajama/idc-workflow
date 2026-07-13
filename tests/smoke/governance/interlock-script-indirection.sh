@@ -315,6 +315,67 @@ echo "== round-9 Fix B: init's graphql provisioning carve-out classifies the ROO
 deny_under "$SIN" "gh api graphql -f query='mutation{closeIssue(input:{issueId:\"I\"}){issue{id}}} # updateProjectV2Field'"
 allow_under "$SIN" "gh api graphql -f query='mutation{updateProjectV2Field(input:{fieldId:\"F\"}){projectV2Field{id}}}'"
 
+echo "== round-10 Fix 2: a command substitution is CLASSIFIED BY CONTENTS, not blanket-denied =="
+# Round-9 blanket-denied ANY substitution under a carve-out, which bricked init's own provisioning
+# (it reads current fields via `existing=$(gh …read…)` before `field-create`). Now the INNER command
+# of each `$(…)`/backtick/`<(…)` is classified: a READ inner does not deny; a WRITE inner denies.
+# Red-when-broken: revert to the blanket substitution deny → these read-inner ALLOWs start denying.
+# init's real provisioning shape: read the field list in a substitution, then create the missing field.
+allow_under "$SIN" "existing=\$(gh project field-list 5 --owner o --format json --jq '.fields[].name'); gh project field-create 5 --owner o --name Stage --data-type SINGLE_SELECT --single-select-options X"
+allow_under "$SIN" "linked=\$(gh api graphql -f query='query(\$o:String!,\$r:String!){repository(owner:\$o,name:\$r){projectsV2(first:100){nodes{number}}}}' -f o=o -f r=r --jq .data); gh project link 5 --owner o --repo o/r"
+# a READ-inner substitution beside an allowed teardown op is likewise fine under uninstall.
+allow_under "$SUN" "gh issue close 5 --comment \"\$(gh issue view 6 --json title --jq .title)\""
+# but a WRITE-inner substitution STILL denies (the inner `gh issue create` runs before the outer op) —
+# under init (regression: `gh project link … "\$(gh issue create …)"`) AND uninstall (backtick form).
+deny_under "$SIN" "gh project field-create 5 --owner o --name S --data-type SINGLE_SELECT --single-select-options \"\$(gh issue create --title x --body x)\""
+deny_under "$SUN" "gh issue close 5 --comment \"\`gh issue create --title x --body x\`\""
+
+echo "== round-10 Fix 2: init's ACTUAL provisioning code fences (from commands/init.md) pass under active init =="
+# Not synthetic commands: extract every ```bash fence from commands/init.md that performs board
+# provisioning (field-create / project link) and assert the gate does NOT deny it under an active init.
+# This is the real-surface proof the review demanded (a green synthetic test hid the broken real fence).
+# Red-when-broken: re-break the substitution/control-word handling → a real fence denies → this FAILs.
+INITMD="$GOV_PLUGIN/commands/init.md"
+[ -f "$INITMD" ] || gov_fail "commands/init.md not found at $INITMD"
+mapfile -t FENCES < <(python3 - "$INITMD" <<'PY'
+import re, sys, json
+text = open(sys.argv[1], encoding="utf-8").read()
+for m in re.finditer(r"```bash\n(.*?)```", text, re.S):
+    body = m.group(1)
+    if re.search(r"gh project (?:field-create|link)\b", body):
+        print(json.dumps(body))
+PY
+)
+[ "${#FENCES[@]}" -ge 1 ] || gov_fail "no provisioning fences found in init.md (extraction regex stale?)"
+for f in "${FENCES[@]}"; do
+  fence="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1]))' "$f")"
+  gate "$fence" "$SIN"
+  is_deny && gov_fail "init.md provisioning fence DENIED under active init: [$fence] => [$OUT]"
+  echo "  ok init.md provisioning fence allowed under active init"
+done
+
+echo "== round-10 Fix 3: init's graphql carve-out requires EVERY root mutation field to be provisioning =="
+# _graphql_root_mutation_field returned only the FIRST root field, so a multi-root mutation that pairs
+# a provisioning field with a foreign write (closeIssue) was misclassified as provisioning and allowed
+# under init while ALSO closing an issue. Now EVERY comment-stripped root field must be sanctioned.
+# Red-when-broken: revert to first-root-only → the mixed multi-root mutation is allowed under init.
+deny_under "$SIN" "gh api graphql -f query='mutation{updateProjectV2Field(input:{fieldId:\"F\"}){projectV2Field{id}} closeIssue(input:{issueId:\"I\"}){issue{id}}}'"
+# an all-provisioning multi-root mutation (every root field sanctioned) still qualifies → ALLOWED.
+allow_under "$SIN" "gh api graphql -f query='mutation{updateProjectV2Field(input:{fieldId:\"F\"}){projectV2Field{id}} createProjectV2Field(input:{}){projectV2Field{id}}}'"
+
+echo "== round-10 Fix 4: leading shell CONTROL WORDS do not hide a segment's command head =="
+# `else gh project link …` (init.md:201 uses this natural form) hid `gh` as the head, so `project link`
+# fell through and was ALLOWED under Think though it is init-only. Now leading control words/keywords
+# (if/then/else/elif/fi/do/done/while/for/case/{/(/!/time) are skipped to find the real head.
+# Red-when-broken: drop the control-word strip → `else gh project link` classifies as non-gh → allowed
+# under Think.
+deny 'else gh project link 5 --owner o --repo o/r'
+deny 'then gh issue create --title x --body-file /tmp/b'
+deny '! gh issue create --title x --body-file /tmp/b'
+deny 'time gh project field-create 5 --owner o --name S --data-type SINGLE_SELECT --single-select-options X'
+# but under an ACTIVE init the control-word-prefixed provisioning op is its OWN op → ALLOWED (init.md:201).
+allow_under "$SIN" 'else gh project link 5 --owner o --repo o/r'
+
 echo "== the sanctioned write door is never denied =="
 allow "python3 '$GOV_PLUGIN/scripts/idc_transition.py' --repo '$REPO' create-ticket --title safe --stage Buildable --status Todo"
 allow "python3 '$GOV_PLUGIN/scripts/idc_pr_finish.py' autonomous --repo '$REPO' --pr 12 --kind planning"

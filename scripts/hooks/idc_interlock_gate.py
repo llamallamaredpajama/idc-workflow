@@ -339,13 +339,63 @@ def _strip_graphql_comments(text):
     return re.sub(r"#[^\n]*", "", text)
 
 
-def _graphql_root_mutation_field(query):
-    """The ROOT mutation field name of a GraphQL operation LITERAL, or None (round-9 Fix B). Strips
-    comments, then (fail-closed) requires a `mutation` operation: skips an optional operation name and
-    the variable-definition list `(…)`, finds the selection-set `{`, skips an optional field alias, and
-    returns the FIRST field name inside it. A provisioning name appearing only in a COMMENT, an ARGUMENT,
-    or a NESTED selection is therefore NOT the root field, so it cannot qualify the query for the init
-    carve-out — only the actual executed root mutation does."""
+def _skip_gql_string(text, i):
+    r"""Index just past a GraphQL string starting at text[i]=='"' — a triple-quoted block string
+    (three double-quotes … three double-quotes) or a regular double-quoted string (with `\"` escapes) —
+    or None if it never terminates. Used so a `{`, `}`, `(`, or `)` INSIDE a string argument value
+    cannot unbalance the selection-set scan."""
+    n = len(text)
+    if text[i:i + 3] == '"""':
+        j = i + 3
+        while j < n:
+            if text[j:j + 3] == '"""':
+                return j + 3
+            j += 1
+        return None
+    j = i + 1
+    while j < n:
+        if text[j] == "\\":
+            j += 2
+            continue
+        if text[j] == '"':
+            return j + 1
+        j += 1
+    return None
+
+
+def _skip_gql_balanced(text, i, open_ch, close_ch):
+    """Index just past the balanced `open_ch…close_ch` group that begins at text[i]==open_ch (string-
+    literal aware), or None if it never closes. Balances nested `open_ch`, skipping GraphQL strings so a
+    delimiter inside a `"…"` value is not counted."""
+    depth, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch == '"':
+            j = _skip_gql_string(text, i)
+            if j is None:
+                return None
+            i = j
+            continue
+        if ch == open_ch:
+            depth += 1
+        elif ch == close_ch:
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return None
+
+
+def _graphql_root_mutation_fields(query):
+    """EVERY ROOT mutation field name of a GraphQL operation LITERAL, in order — or None if the literal
+    is not a parseable `mutation` operation (round-10 Fix 3, generalizing round-9 Fix B from the FIRST
+    root field to ALL of them). Strips comments, requires a `mutation` operation, skips an optional
+    operation name + the variable-definition list `(…)`, enters the top-level selection set, and
+    enumerates each root field — skipping each field's optional `alias:`, argument list `(…)`, and
+    NESTED selection set `{…}` — so `mutation{ a(x:1){id} b }` yields ['a','b']. A provisioning name in a
+    COMMENT, an ARGUMENT, or a NESTED selection is therefore NOT a root field. Fail-closed: an
+    unterminated selection set, a directive, or any construct the enumerator cannot cleanly step over
+    returns None (never a spuriously-empty/short field list that could pass the all-provisioning check)."""
     text = _strip_graphql_comments(query).lstrip()
     if not re.match(r"mutation(?![A-Za-z0-9_])", text):
         return None
@@ -357,49 +407,66 @@ def _graphql_root_mutation_field(query):
         i += mn.end()
     while i < n and text[i].isspace():
         i += 1
-    if i < n and text[i] == "(":                        # optional variable definitions — balance parens
-        depth = 0
-        while i < n:
-            if text[i] == "(":
-                depth += 1
-            elif text[i] == ")":
-                depth -= 1
-                if depth == 0:
-                    i += 1
-                    break
-            i += 1
+    if i < n and text[i] == "(":                        # optional variable definitions
+        i = _skip_gql_balanced(text, i, "(", ")")
+        if i is None:
+            return None
     while i < n and text[i].isspace():
         i += 1
-    if i >= n or text[i] != "{":                        # selection-set opening brace
+    if i >= n or text[i] != "{":                        # top-level selection-set opening brace
         return None
     i += 1
-    while i < n and text[i].isspace():
-        i += 1
-    fm = re.match(r"([A-Za-z_][A-Za-z0-9_]*)\s*(:)?", text[i:])   # first field, or an `alias:`
-    if not fm:
-        return None
-    if fm.group(2):                                     # it was an alias — the real field follows
-        i += fm.end()
-        while i < n and text[i].isspace():
+    fields = []
+    while i < n:
+        while i < n and (text[i].isspace() or text[i] == ","):
             i += 1
-        fm = re.match(r"([A-Za-z_][A-Za-z0-9_]*)", text[i:])
+        if i >= n:
+            return None                                 # unterminated selection set → fail closed
+        if text[i] == "}":
+            return fields
+        fm = re.match(r"([A-Za-z_][A-Za-z0-9_]*)\s*(:)?", text[i:])   # a root field, or an `alias:`
         if not fm:
-            return None
-    return fm.group(1)
+            return None                                 # a directive / unexpected token → fail closed
+        i += fm.end()
+        if fm.group(2):                                 # it was an alias — the real field follows
+            while i < n and text[i].isspace():
+                i += 1
+            fm = re.match(r"([A-Za-z_][A-Za-z0-9_]*)", text[i:])
+            if not fm:
+                return None
+            i += fm.end()
+        fields.append(fm.group(1))
+        while i < n:                                    # skip this field's arguments + nested selection
+            while i < n and text[i].isspace():
+                i += 1
+            if i < n and text[i] == "(":
+                i = _skip_gql_balanced(text, i, "(", ")")
+                if i is None:
+                    return None
+                continue
+            if i < n and text[i] == "{":
+                i = _skip_gql_balanced(text, i, "{", "}")
+                if i is None:
+                    return None
+                continue
+            break
+    return None                                         # ran off the end without a closing `}`
 
 
 def _graphql_is_provision(seg_str):
-    """True iff the `gh api graphql` SEGMENT's isolated query value is a STATIC LITERAL whose ROOT
-    mutation field is EXACTLY a sanctioned project-FIELD provisioning mutation
+    """True iff the `gh api graphql` SEGMENT's isolated query value is a STATIC LITERAL whose EVERY root
+    mutation field is a sanctioned project-FIELD provisioning mutation
     (`updateProjectV2Field`/`createProjectV2Field`) — the raw op /idc:init runs to reconcile the
-    built-in `Status` options (round-9 Fix B). Fail-closed twice over: an OPAQUE query body never
-    isolates a literal (stays a plain denied `graphql`), and a sanctioned name that is only a substring
-    of a comment/argument/nested selection is NOT the root field, so neither can reach the init
-    carve-out."""
+    built-in `Status` options (round-10 Fix 3). Fail-closed three ways: an OPAQUE query body never
+    isolates a literal (stays a plain denied `graphql`); a sanctioned name that is only a substring of a
+    comment/argument/nested selection is NOT a root field; and a MULTI-root mutation that pairs a
+    provisioning field with ANY foreign write (`… closeIssue(…)`) has a non-provisioning root field, so
+    the whole call is denied under init."""
     style, value = _extract_graphql_query(seg_str)
     if style != "literal":
         return False
-    return _graphql_root_mutation_field(value) in _GQL_PROVISION_FIELDS
+    fields = _graphql_root_mutation_fields(value)
+    return bool(fields) and all(f in _GQL_PROVISION_FIELDS for f in fields)
 
 
 def _gh_api_finding(seg_str, endpoint=None):
@@ -691,6 +758,101 @@ def _scan_dynamic_constructs(command):
     return None
 
 
+def _extract_paren(command, i):
+    """`command[i]` is `(`; return `(inner, index_past_the_matching_')')` for the balanced group, or
+    `(None, len)` if it never closes. Skips quoted regions so a `)` inside a string does not miscount."""
+    depth, n, start, q = 0, len(command), i + 1, None
+    while i < n:
+        ch = command[i]
+        if q:
+            if ch == "\\" and q == '"':
+                i += 2
+                continue
+            if ch == q:
+                q = None
+            i += 1
+            continue
+        if ch in "'\"":
+            q = ch
+            i += 1
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return command[start:i], i + 1
+        i += 1
+    return None, n
+
+
+def _command_substitutions(command):
+    """Every command-/process-substitution INNER command string in `command` (round-10 Fix 2), quote-
+    aware by the same shell rules as _scan_dynamic_constructs: `$(…)` and backticks are active unquoted
+    AND inside double quotes; process substitution `<(…)`/`>(…)` only unquoted; nothing inside single
+    quotes. Returns each inner WITHOUT its delimiters so the caller can recursively classify it — a READ
+    inner is benign, a protected-WRITE inner denies. Fail-closed: an UNBALANCED `$(`/`<(` yields the rest
+    of the string as the inner (so a smuggled write in it is still classified), then the scan stops."""
+    out = []
+    i, n = 0, len(command)
+    quote = None
+    while i < n:
+        ch = command[i]
+        nxt = command[i + 1] if i + 1 < n else ""
+        if quote == "'":
+            if ch == "'":
+                quote = None
+            i += 1
+            continue
+        if quote == '"':
+            if ch == '"':
+                quote = None
+                i += 1
+            elif ch == "`":
+                j = command.find("`", i + 1)
+                out.append(command[i + 1:j] if j != -1 else command[i + 1:])
+                if j == -1:
+                    break
+                i = j + 1
+            elif ch == "$" and nxt == "(":
+                inner, i = _extract_paren(command, i + 1)
+                out.append(inner if inner is not None else command[i:])
+                if inner is None:
+                    break
+            else:
+                i += 1
+            continue
+        # unquoted
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == "'":
+            quote = "'"
+            i += 1
+        elif ch == '"':
+            quote = '"'
+            i += 1
+        elif ch == "`":
+            j = command.find("`", i + 1)
+            out.append(command[i + 1:j] if j != -1 else command[i + 1:])
+            if j == -1:
+                break
+            i = j + 1
+        elif ch == "$" and nxt == "(":
+            inner, i = _extract_paren(command, i + 1)
+            out.append(inner if inner is not None else command[i:])
+            if inner is None:
+                break
+        elif ch in "<>" and nxt == "(":
+            inner, i = _extract_paren(command, i + 1)
+            out.append(inner if inner is not None else command[i:])
+            if inner is None:
+                break
+        else:
+            i += 1
+    return out
+
+
 _RAW_DYN_API_EP_RE = re.compile(r"(?<![\w-])api\s+(?:-\S+\s+)*[\"']?[`$]")
 
 
@@ -713,19 +875,42 @@ def _dynamic_gh_api_endpoint(seg_str):
     return bool(pos and pos[0] == "api" and len(pos) >= 2 and _is_dynamic_token(pos[1]))
 
 
-def _carveout_dynamic_finding(command):
+def _classify_substitution(inner, cwd, plugin_root):
+    """A deny-Finding when a command-substitution INNER command is a protected WRITE or an unresolvable
+    dynamic that could hide one; else None — a READ / benign inner is fine (round-10 Fix 2). The inner is
+    run through the FULL classifier (`collect_findings`): the direct classifier flags only protected
+    WRITES/mutations (a read returns nothing), so ANY finding means the inner mutates → deny. Also
+    fail-closed on the inner's own dynamic `gh api` endpoint (a read carries no finding but the endpoint
+    is unresolvable) and on NESTED substitutions inside the inner."""
+    for f in collect_findings(inner, cwd, plugin_root):
+        return _dynamic(f"a command substitution running {f.subject}")
+    for seg in _raw_segments(inner):
+        if _dynamic_gh_api_endpoint(seg):
+            return _dynamic("a command substitution with a shell-expansion `gh api` endpoint")
+    for nested in _command_substitutions(inner):
+        hit = _classify_substitution(nested, cwd, plugin_root)
+        if hit is not None:
+            return hit
+    return None
+
+
+def _carveout_dynamic_finding(command, cwd, plugin_root):
     """A `dynamic-opaque-indirection` Finding when a command running UNDER an init/uninstall carve-out
-    contains ANY unresolvable dynamic construct that breaks the carve-out's 'every segment is a
-    statically-recognized safe op' guarantee (round-9 Fix A) — else None. A carve-out ALLOWS ops we
-    would otherwise deny (teardown / provisioning), so a construct that could execute a hidden command
-    beside the allowed op (`$(…)`/backticks/`<(…)`) or redirect an API surface (a `gh api` with a
-    shell-expansion endpoint) is fatal: only FULLY STATIC recognized ops are allowed."""
-    what = _scan_dynamic_constructs(command)
-    if what is not None:
-        return _dynamic(what)
+    carries a construct that breaks the carve-out's 'every op is a statically-recognized safe op'
+    guarantee — else None. A carve-out ALLOWS ops we would otherwise deny (teardown / provisioning), so:
+      * a `gh api` with a shell-expansion ENDPOINT (`gh api "$EP"`) is unresolvable → deny (round-9);
+      * a command/process substitution `$(…)`/backtick/`<(…)` is CLASSIFIED BY CONTENTS (round-10 Fix 2):
+        its inner command is recursively classified — a WRITE inner (or an unresolvable dynamic inner)
+        denies, a READ inner does NOT (so init's `existing=$(gh …read…) … field-create` is allowed).
+    The startup-file prefix and interpreter `-c`/`env -S` expansion cases stay fail-closed as their own
+    findings (never in `carve`), handled by the ordinary offenders check — they are not substitutions."""
     for seg in _raw_segments(command):
         if _dynamic_gh_api_endpoint(seg):
             return _dynamic("a `gh api` with a shell-expansion endpoint")
+    for inner in _command_substitutions(command):
+        hit = _classify_substitution(inner, cwd, plugin_root)
+        if hit is not None:
+            return hit
     return None
 
 
@@ -807,6 +992,13 @@ def _inspect_target(target, cwd, plugin_root, depth, seen):
 _ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # Wrapper words that precede (and do not hide) the real interpreter: `env`/`command`/`builtin`/`exec`.
 _CMD_PREFIXES = {"env", "command", "builtin", "exec"}
+# Leading shell control words / compound-command keywords a segment can open with WITHOUT changing the
+# real command head (round-10 Fix 4): `else gh project link …` runs `gh project link`, not a command
+# named `else`. Skipped when locating a segment's head, else `project link`/`field-create` fell through
+# the gh classifier and were ALLOWED under Think though they are init-only (init.md:201 uses `else gh
+# project link`). Matched as an EXACT leading token (a real command is never literally named `then`).
+_CONTROL_WORDS = {"if", "then", "else", "elif", "fi", "do", "done", "while", "until", "for", "case",
+                  "esac", "in", "function", "{", "}", "(", ")", "!", "time"}
 # Per-wrapper SHORT options that CONSUME a following value token — so `env -u NAME bash f.sh` and
 # `exec -a NAME bash f.sh` skip the value too, reaching the real interpreter. Long `--opt=val` forms are
 # self-contained single tokens; `--unset NAME`/`--chdir DIR` (space form) consume the next token.
@@ -851,6 +1043,9 @@ def _strip_prefixes(seg):
     i = 0
     while i < len(seg):
         tok = seg[i]
+        if tok in _CONTROL_WORDS:                          # round-10 Fix 4: `else`/`then`/`!`/… head
+            i += 1
+            continue
         if _ASSIGN_RE.match(tok):
             i += 1
             continue
@@ -1049,13 +1244,15 @@ def _gate(payload, plugin_root):
     elif any(c.get("command") == "init" for c in active):
         carve = _INIT_PROVISION_KINDS
     if carve is not None:
-        # round-9 Fix A: a carve-out allows ONLY fully STATIC recognized ops. ANY unresolvable dynamic
-        # construct beside the allowed teardown/provisioning op — command substitution `$(…)`/backticks,
-        # process substitution `<(…)`/`>(…)`, or a `gh api` with a shell-expansion endpoint — could
-        # execute a hidden protected mutation, so it denies the whole call BY CONSTRUCTION, even when the
-        # outer op is one the command legitimately owns (finding 3). A startup-file prefix / dynamic
-        # write-endpoint already surfaces as a `dynamic-opaque-indirection` finding (never in `carve`).
-        dyn = _carveout_dynamic_finding(command)
+        # A carve-out allows the command's OWN teardown/provisioning ops only. Beside them:
+        #   * a `gh api` with a shell-expansion ENDPOINT is unresolvable → deny (round-9 Fix A); and
+        #   * a command/process substitution `$(…)`/backtick/`<(…)` is classified BY CONTENTS (round-10
+        #     Fix 2) — a WRITE inner denies, a READ inner does not (so init's own `existing=$(gh …read…)
+        #     … field-create` provisioning is allowed instead of blanket-denied).
+        # A startup-file prefix / interpreter `-c`/`env -S` expansion still surfaces as its own
+        # `dynamic-opaque-indirection`/`opaque-shell-indirection` finding (never in `carve`), caught by
+        # the offenders check below — those are unresolvable, unlike a substitution whose contents are present.
+        dyn = _carveout_dynamic_finding(command, cwd, plugin_root)
         offenders = [dyn] if dyn is not None else [f for f in findings if f.kind not in carve]
         if not offenders:
             H.pre_tool_allow()               # every protected segment is this command's own STATIC op → allow

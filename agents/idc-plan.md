@@ -125,8 +125,8 @@ pillar-level *file* clashes among the surviving, de-duplicated pillars.
    (the only sanctioned Stage-write — it validates the Stage/Status pair against the machine and
    journals the transition; a raw `set --field Stage` is denied by the mutation interlock):
    ```bash
-   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_transition.py" move \
-     --repo "$PWD" --num <pointer> --to-stage Planning --to-status Todo
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_transition.py" --repo "$PWD" move \
+     --num <pointer> --to-stage Planning --to-status Todo
    ```
    Then retire it via the engine's guarded `dispose --disposition retired` — a decomposition child as
    the receipt — as its buildable issues land; open the planning PR whose **body is the audit trail**

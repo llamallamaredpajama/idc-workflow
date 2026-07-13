@@ -45,6 +45,20 @@ scanned). Sensitive targets (`.env`, `.envrc`, `*.pem`, `id_rsa*`, or names cont
 depth-exhausted targets are refused as `opaque-script-indirection`. A denial NEVER echoes script
 contents — only the normalized display path and the matched operation.
 
+FAIL-CLOSED ON DYNAMIC/OPAQUE (round-9 Fix A). A static classifier cannot analyze Turing-complete
+shell, so the residual bypass class is "hide a protected mutation behind a construct the classifier
+cannot resolve." We close that class BY CONSTRUCTION rather than chase each variant: during an active
+command we DENY (subject `dynamic-opaque-indirection`) when the command carries a construct that could
+execute a hidden command or redirect an API surface and cannot be statically confirmed safe — command
+substitution `$(…)`/backticks, process substitution `<(…)`/`>(…)` (carve-outs only, since only there
+does the outer op get allowed), a `gh api` with a shell-expansion ENDPOINT (deny with any write
+indicator; deny outright under a carve-out), a `BASH_ENV`/`ENV`/`SHELLOPTS`/`*ENV`/`*RC` startup-file
+prefix before an interpreter, and a dynamic interpreter/`-c`/`env -S` target. Under the init/uninstall
+carve-outs the bar is absolute: ANY such construct denies, because the carve-out's whole safety
+argument is "every segment is a statically-recognized safe op" — only fully STATIC recognized
+provisioning/teardown ops are ever allowed. This is defense-in-depth, not a complete shell parser; a
+bare `$VAR` parameter expansion (a value, not an executed command) is deliberately never flagged.
+
 Why this NEVER fires on the sanctioned path: the engine + finishers run `gh` via python subprocess,
 NOT via the Bash tool, so PreToolUse never sees them; and a `python3 …/idc_transition.py …` /
 `python3 …/idc_pr_finish.py …` Bash call does not invoke an interpreter FILE form and matches no
@@ -264,10 +278,10 @@ _GQL_QUERY_ARG_RE = re.compile(
           | (?P<bare>\S*)                             # bare / unquoted
         )
     """, re.VERBOSE)
-# Project-FIELD provisioning mutations that /idc:init runs raw (Status option reconcile): `updateProjectV2Field`
-# / `createProjectV2Field`. Matched EXACTLY so the ITEM-value family (`updateProjectV2ItemFieldValue`,
+# Project-FIELD provisioning mutations that /idc:init runs raw (Status option reconcile). Matched as the
+# EXACT ROOT mutation field (Fix B, below), so the ITEM-value family (`updateProjectV2ItemFieldValue`,
 # `clearProjectV2ItemFieldValue`) — which init never runs raw — does NOT qualify for the init carve-out.
-_GQL_PROVISION = re.compile(r"(?<![A-Za-z])(?:create|update)ProjectV2Field(?![A-Za-z])")
+_GQL_PROVISION_FIELDS = {"createProjectV2Field", "updateProjectV2Field"}
 
 
 def _extract_graphql_query(seg_str):
@@ -316,24 +330,96 @@ def _graphql_is_read(seg_str):
     return op.startswith("{") or bool(re.match(r"query(?![A-Za-z0-9_])", op))
 
 
+def _strip_graphql_comments(text):
+    """Remove GraphQL line comments (`#` to end of line; GraphQL has no block comments). Used ONLY to
+    classify a query as provisioning — an ALLOWANCE — so stripping conservatively (any `#`→EOL, even one
+    inside a string literal) is fail-safe: removing text can only make a query look LESS like
+    provisioning, never conjure a provisioning ROOT field that wasn't there. This is exactly what closes
+    finding-2's comment smuggle (`mutation{closeIssue(…)} # updateProjectV2Field`)."""
+    return re.sub(r"#[^\n]*", "", text)
+
+
+def _graphql_root_mutation_field(query):
+    """The ROOT mutation field name of a GraphQL operation LITERAL, or None (round-9 Fix B). Strips
+    comments, then (fail-closed) requires a `mutation` operation: skips an optional operation name and
+    the variable-definition list `(…)`, finds the selection-set `{`, skips an optional field alias, and
+    returns the FIRST field name inside it. A provisioning name appearing only in a COMMENT, an ARGUMENT,
+    or a NESTED selection is therefore NOT the root field, so it cannot qualify the query for the init
+    carve-out — only the actual executed root mutation does."""
+    text = _strip_graphql_comments(query).lstrip()
+    if not re.match(r"mutation(?![A-Za-z0-9_])", text):
+        return None
+    i, n = len(re.match(r"mutation", text).group(0)), len(text)
+    while i < n and text[i].isspace():                 # ws before an optional operation name
+        i += 1
+    mn = re.match(r"[A-Za-z_][A-Za-z0-9_]*", text[i:])  # optional operation name
+    if mn:
+        i += mn.end()
+    while i < n and text[i].isspace():
+        i += 1
+    if i < n and text[i] == "(":                        # optional variable definitions — balance parens
+        depth = 0
+        while i < n:
+            if text[i] == "(":
+                depth += 1
+            elif text[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    i += 1
+                    break
+            i += 1
+    while i < n and text[i].isspace():
+        i += 1
+    if i >= n or text[i] != "{":                        # selection-set opening brace
+        return None
+    i += 1
+    while i < n and text[i].isspace():
+        i += 1
+    fm = re.match(r"([A-Za-z_][A-Za-z0-9_]*)\s*(:)?", text[i:])   # first field, or an `alias:`
+    if not fm:
+        return None
+    if fm.group(2):                                     # it was an alias — the real field follows
+        i += fm.end()
+        while i < n and text[i].isspace():
+            i += 1
+        fm = re.match(r"([A-Za-z_][A-Za-z0-9_]*)", text[i:])
+        if not fm:
+            return None
+    return fm.group(1)
+
+
 def _graphql_is_provision(seg_str):
-    """True iff the `gh api graphql` SEGMENT's isolated query value is a STATIC LITERAL naming a
-    project-FIELD provisioning mutation (`updateProjectV2Field`/`createProjectV2Field`) — the raw op
-    /idc:init runs to reconcile the built-in `Status` options. Fail-closed: an OPAQUE query body never
-    qualifies (it stays a plain denied `graphql`), so the init carve-out can never be reached through an
-    expansion."""
+    """True iff the `gh api graphql` SEGMENT's isolated query value is a STATIC LITERAL whose ROOT
+    mutation field is EXACTLY a sanctioned project-FIELD provisioning mutation
+    (`updateProjectV2Field`/`createProjectV2Field`) — the raw op /idc:init runs to reconcile the
+    built-in `Status` options (round-9 Fix B). Fail-closed twice over: an OPAQUE query body never
+    isolates a literal (stays a plain denied `graphql`), and a sanctioned name that is only a substring
+    of a comment/argument/nested selection is NOT the root field, so neither can reach the init
+    carve-out."""
     style, value = _extract_graphql_query(seg_str)
-    return style == "literal" and bool(_GQL_PROVISION.search(value))
+    if style != "literal":
+        return False
+    return _graphql_root_mutation_field(value) in _GQL_PROVISION_FIELDS
 
 
-def _gh_api_finding(seg_str):
+def _gh_api_finding(seg_str, endpoint=None):
     """Classify ONE `gh api` SEGMENT bluntly (round-6 Fix 1+2; round-7 Fix 1 for graphql). A `gh api
     graphql` segment is judged on its OPERATION — a provable read `query{…}` is ALLOWED; a `mutation`,
     or an opaque query body, DENIES (`_graphql_is_read`). For NON-graphql `gh api`, DENY iff the segment
     BOTH names a protected API path anywhere AND shows ANY write indicator anywhere (a non-GET
     `-X`/`--method` — ALL occurrences scanned — or any body flag); ALLOWED only when provably a pure
     read. Fail-closed: an opaque `--input FILE`, an ambiguous `-X "$M"`, or a trailing `-X DELETE` after
-    a decoy `-X GET` all DENY — every real mutation goes through the Python engine doors."""
+    a decoy `-X GET` all DENY — every real mutation goes through the Python engine doors.
+
+    round-9 Fix A (finding 1): a `gh api` whose ENDPOINT is a shell expansion (`gh api "$EP" …`) cannot
+    be statically confirmed to avoid `graphql` / a protected REST path — the blunt path classifier sees
+    no literal protected token and would wave it through. When such a dynamic endpoint ALSO carries a
+    write indicator, deny BY CONSTRUCTION. A dynamic-endpoint READ stays allowed here (no write
+    indicator); a carve-out denies even the read via `_carveout_dynamic_finding`. `endpoint` is the
+    token-parsed endpoint positional when available, else detected on the raw string (lex-failure path)."""
+    dyn_ep = _is_dynamic_token(endpoint) if endpoint is not None else _raw_dynamic_api_endpoint(seg_str)
+    if dyn_ep and _api_write_indicator(seg_str):
+        return _dynamic("a `gh api` with a shell-expansion endpoint and a write indicator")
     kind = _api_protected_path_kind(seg_str)
     if not kind:
         return None                                   # no protected path in the segment → allow
@@ -370,7 +456,9 @@ def _classify_one_segment(seg_str):
     if pos is None:
         return _classify_string_backstop(seg_str)     # not a `gh …` invocation
     if pos and pos[0] == "api":
-        return _gh_api_finding(seg_str)
+        # round-9 Fix A: pass the token-parsed endpoint positional so a shell-expansion endpoint
+        # (`gh api "$EP" …`) is judged order-robustly (flags at any level already stripped by pos).
+        return _gh_api_finding(seg_str, endpoint=pos[1] if len(pos) >= 2 else None)
     return _combo_subject(pos)
 
 
@@ -532,6 +620,141 @@ def _has_shell_expansion(payload):
     return "$" in payload or "`" in payload
 
 
+# ── round-9 Fix A: fail closed on ANY unresolvable dynamic/opaque construct ────────────────────────
+# DEFENSE-IN-DEPTH, FAIL-CLOSED BY CONSTRUCTION (not a complete shell parser). A static classifier can
+# never analyze Turing-complete shell, so the remaining bypass class is "hide a protected mutation
+# behind a construct the classifier cannot resolve." Rather than chase each variant, we DENY the whole
+# call whenever the command carries a dynamic construct that could execute a hidden command or redirect
+# an API surface AND cannot be statically confirmed safe: command substitution `$(…)`/backticks,
+# process substitution `<(…)`/`>(…)`, a `gh api` with a shell-expansion ENDPOINT, and a
+# BASH_ENV/ENV/*ENV/*RC-style startup-file prefix before an interpreter. Under an init/uninstall
+# carve-out the bar is absolute — ANY of these deny, because a carve-out allows ops we would otherwise
+# deny and its whole safety argument is "every segment is a statically-recognized safe op."
+def _dynamic(what):
+    """A refusal for an unresolvable DYNAMIC/opaque construct that could hide a protected mutation and
+    cannot be statically confirmed safe (round-9 Fix A). Named `dynamic-opaque-indirection`; carries NO
+    command content. Its kind is in NO carve-out set, so it denies during ANY active command and — a
+    fortiori — under the init/uninstall carve-outs: only fully STATIC recognized ops are ever allowed."""
+    return Finding(f"{what} the interlock cannot statically confirm safe [dynamic-opaque-indirection]",
+                   _ENGINE, "dynamic-opaque-indirection")
+
+
+def _is_dynamic_token(tok):
+    """True iff a (shlex-dequoted) token carries a shell expansion — a `$` or a backtick. Used to flag a
+    `gh api` endpoint positional whose value the shell computes at runtime (`gh api "$EP" …`), which we
+    cannot statically confirm is not `graphql` / a protected REST path."""
+    return bool(tok) and ("$" in tok or "`" in tok)
+
+
+def _scan_dynamic_constructs(command):
+    """Quote-aware scan for EXECUTING dynamic constructs (round-9 Fix A): command substitution `$(…)`, a
+    backtick command substitution, or process substitution `<(…)`/`>(…)`. Returns a short label for the
+    FIRST one found, else None. Tracks single-/double-quote state per shell rules — inside single quotes
+    `$`, backtick and `(` are all literal (so a single-quoted GraphQL `$var` or `(input:…)` never
+    matches); inside double quotes `$(…)` and backticks are still active but process substitution is not.
+    A bare `$VAR`/`${VAR}` PARAMETER expansion is deliberately NOT flagged — it interpolates a value, it
+    cannot execute a hidden command — so a static provisioning op that uses `$OWNER`/`$PROJ` is allowed."""
+    i, n = 0, len(command)
+    quote = None                                       # None | "'" | '"'
+    while i < n:
+        ch = command[i]
+        nxt = command[i + 1] if i + 1 < n else ""
+        if quote == "'":
+            if ch == "'":
+                quote = None
+            i += 1
+            continue
+        if quote == '"':
+            if ch == '"':
+                quote = None
+            elif ch == "`":
+                return "a backtick command substitution"
+            elif ch == "$" and nxt == "(":
+                return "a command substitution `$(…)`"
+            i += 1
+            continue
+        # unquoted
+        if ch == "\\":
+            i += 2                                      # a backslash escapes the next char (literal)
+            continue
+        if ch == "'":
+            quote = "'"
+        elif ch == '"':
+            quote = '"'
+        elif ch == "`":
+            return "a backtick command substitution"
+        elif ch == "$" and nxt == "(":
+            return "a command substitution `$(…)`"
+        elif ch in "<>" and nxt == "(":
+            return "a process substitution `<(…)`/`>(…)`"
+        i += 1
+    return None
+
+
+_RAW_DYN_API_EP_RE = re.compile(r"(?<![\w-])api\s+(?:-\S+\s+)*[\"']?[`$]")
+
+
+def _raw_dynamic_api_endpoint(seg_str):
+    """Best-effort (lex-failure fallback) detection that a `gh api` segment's ENDPOINT positional is a
+    shell expansion: after `api` and any leading `-flags`, the endpoint token begins with `$`/backtick.
+    The token path (`_gh_positionals`) is primary and order-robust; this only backstops a lex failure."""
+    return bool(_RAW_DYN_API_EP_RE.search(seg_str))
+
+
+def _dynamic_gh_api_endpoint(seg_str):
+    """True iff a `gh api` SEGMENT's endpoint positional is a shell expansion (round-9 Fix A). Used by
+    the carve-out check to deny a dynamic-endpoint `gh api` OUTRIGHT (regardless of write indicator) —
+    under a carve-out the endpoint cannot be confirmed static, so it breaks the 'all-static' guarantee."""
+    try:
+        tokens = _lex(seg_str)
+    except ValueError:
+        return _raw_dynamic_api_endpoint(seg_str)
+    pos = _gh_positionals(tokens)
+    return bool(pos and pos[0] == "api" and len(pos) >= 2 and _is_dynamic_token(pos[1]))
+
+
+def _carveout_dynamic_finding(command):
+    """A `dynamic-opaque-indirection` Finding when a command running UNDER an init/uninstall carve-out
+    contains ANY unresolvable dynamic construct that breaks the carve-out's 'every segment is a
+    statically-recognized safe op' guarantee (round-9 Fix A) — else None. A carve-out ALLOWS ops we
+    would otherwise deny (teardown / provisioning), so a construct that could execute a hidden command
+    beside the allowed op (`$(…)`/backticks/`<(…)`) or redirect an API surface (a `gh api` with a
+    shell-expansion endpoint) is fatal: only FULLY STATIC recognized ops are allowed."""
+    what = _scan_dynamic_constructs(command)
+    if what is not None:
+        return _dynamic(what)
+    for seg in _raw_segments(command):
+        if _dynamic_gh_api_endpoint(seg):
+            return _dynamic("a `gh api` with a shell-expansion endpoint")
+    return None
+
+
+# Env vars a NON-interactive interpreter SOURCES before running its payload/script — bash reads
+# $BASH_ENV, sh reads $ENV; SHELLOPTS/BASHOPTS/*ENV/*RC-style names likewise inject startup behavior. A
+# prefix assignment to one of these, before an interpreter head, points the shell at a file we cannot
+# statically confirm safe (finding 4: `BASH_ENV=fire_gate.sh bash -c 'echo hi'` sources fire_gate.sh —
+# with its protected `gh issue create` — BEFORE the innocuous `-c` payload the classifier inspects).
+_STARTUP_ENV_RE = re.compile(r"^(?:BASH_ENV|ENV|SHELLOPTS|BASHOPTS|[A-Za-z_][A-Za-z0-9_]*(?:ENV|RC))=(.*)$")
+
+
+def _startup_env_prefix(seg):
+    """The name of a startup-sourcing env var (`BASH_ENV`/`ENV`/`SHELLOPTS`/`*ENV`/`*RC`) assigned a
+    NON-EMPTY value as a prefix on `seg` whose interpreter-stripped head is an interpreter — else None.
+    Such an assignment sources a file before the interpreter runs its `-c`/script, so it can smuggle a
+    protected mutation the payload inspection never sees → fail closed (round-9 Fix A / finding 4). Both
+    the bare-prefix (`BASH_ENV=x bash …`) and `env`-wrapped (`env BASH_ENV=x bash …`) forms are covered:
+    the prefix region is every token before the interpreter head that `_strip_prefixes` peels off."""
+    head_seg = _strip_prefixes(seg)
+    if not head_seg or os.path.basename(head_seg[0]) not in INTERPRETERS:
+        return None
+    prefix_len = len(seg) - len(head_seg)              # the assignment/wrapper tokens peeled before the head
+    for tok in seg[:prefix_len]:
+        m = _STARTUP_ENV_RE.match(tok)
+        if m and m.group(1) != "":                    # an empty value just CLEARS the var → inert
+            return tok.split("=", 1)[0]
+    return None
+
+
 def _inspect_target(target, cwd, plugin_root, depth, seen):
     """Resolve+vet a `bash|sh|zsh FILE` / `source FILE` / `. FILE` script target (rules 4–7).
 
@@ -670,6 +893,13 @@ def _env_split_payload(seg):
 
 def _inspect_segment(seg, cwd, plugin_root, depth, seen):
     """List of findings for one command segment's interpreter/source invocation (rules 3–4)."""
+    # round-9 Fix A (finding 4): a BASH_ENV/ENV/SHELLOPTS/*ENV/*RC startup-file prefix before an
+    # interpreter head sources that file BEFORE the interpreter runs its `-c`/script, so it can smuggle
+    # a protected mutation the payload inspection never sees. Fail closed — deny WITHOUT resolving the
+    # (often dynamic) referenced path.
+    startup = _startup_env_prefix(seg)
+    if startup is not None:
+        return [_dynamic(f"a `{startup}=…` startup-file prefix before an interpreter")]
     # `env -S "<string>"` / `--split-string`: the embedded string IS the command — parse it recursively
     # (Fix 1), so an interpreter hidden inside the split-string is not waved through as an opaque value.
     # round-8 Fix 2: a DYNAMIC split-string (any shell expansion) or one nested past the depth bound
@@ -819,10 +1049,17 @@ def _gate(payload, plugin_root):
     elif any(c.get("command") == "init" for c in active):
         carve = _INIT_PROVISION_KINDS
     if carve is not None:
-        offenders = [f for f in findings if f.kind not in carve]
+        # round-9 Fix A: a carve-out allows ONLY fully STATIC recognized ops. ANY unresolvable dynamic
+        # construct beside the allowed teardown/provisioning op — command substitution `$(…)`/backticks,
+        # process substitution `<(…)`/`>(…)`, or a `gh api` with a shell-expansion endpoint — could
+        # execute a hidden protected mutation, so it denies the whole call BY CONSTRUCTION, even when the
+        # outer op is one the command legitimately owns (finding 3). A startup-file prefix / dynamic
+        # write-endpoint already surfaces as a `dynamic-opaque-indirection` finding (never in `carve`).
+        dyn = _carveout_dynamic_finding(command)
+        offenders = [dyn] if dyn is not None else [f for f in findings if f.kind not in carve]
         if not offenders:
-            H.pre_tool_allow()               # every protected segment is this command's own op → allow
-        finding = offenders[0]               # a foreign mutation rode along → deny naming IT
+            H.pre_tool_allow()               # every protected segment is this command's own STATIC op → allow
+        finding = offenders[0]               # a foreign mutation / dynamic construct rode along → deny naming IT
     reason = render_reason(finding, plugin_root)
     if active:
         H.pre_tool_deny(reason)

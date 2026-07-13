@@ -40,7 +40,8 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_transition.py" --backend filesystem -
 
 | Interface op | Engine invocation (journaled) |
 |---|---|
-| `createTicket` | `create-ticket --title T [--body B] [--stage Stg] [--status S]` → prints the new number (set `Wave`/`Phase`/`Domain`/blocked-by afterwards via the raw helper — non-Status fields have no engine op) |
+| `createTicket` | `create-ticket --title T [--body B] [--stage Stg] [--status S]` → prints the new number (set `Wave`/`Phase`/`Domain` afterwards through the engine's `set-field` op below; add a block via `link`) |
+| `setField` (non-machine) | `set-field --num N --field {Wave\|Phase\|Domain} --value V` — the non-machine single-select fields; resolves ids, writes the value, reads it back, and journals it. **Never `--field Status` or `--field Stage`** (both machine-governed): a `Status` change is a transition (`move --to-status`, below); a `Stage` advance is the guarded `move --to-stage <Stage> --to-status <Status>` (validates the pair, journals `to_stage`) |
 | `move` | `move --num N --to-status "In Progress"` |
 | claim | `claim --num N --agent NAME` (Status→In Progress + a comment naming the agent) |
 | unblock | `unblock --num N` (Blocked→Todo) |
@@ -49,8 +50,8 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_transition.py" --backend filesystem -
 | close (verdict-backed) | `close --num N --verdict <verdict.json> --pr <PR>` — the guarded path to `Done`: the verdict must validate, pass, own the item and the PR, with every `merge_conditions[]` met |
 | dispose (non-verdict terminal) | `dispose --disposition {gate-approved\|retired\|drained} --num N` — the guarded door to `Done` for a terminal item with **no review verdict**: gate-issue approval, pointer retirement (`--child <decomposition-child>`), recirc-drain retirement. The disposition's deterministic evidence guard must pass; the engine mints `Done` and journals which door + disposition + evidence |
 
-The raw helper stays the mechanic for **reads, non-Status fields, and the primitives with no
-engine op** (leases), standard-library Python:
+The raw helper stays the mechanic for **reads and the primitives with no engine op** (leases),
+standard-library Python:
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_tracker_fs.py" --tracker <repo>/TRACKER.md <op> [args]
@@ -59,7 +60,6 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_tracker_fs.py" --tracker <repo>/TRACK
 | Interface op | Invocation |
 |---|---|
 | (bootstrap) | `init` — create an empty `TRACKER.md` (idempotent) |
-| `setField` (non-machine) | `set --num N --field {Wave\|Phase\|Domain} --value V` — the non-machine fields only. **Never `--field Status` or `--field Stage`**: both are machine-governed. A Status write is a transition (`move --to-status`, above); a Stage advance is the guarded transition `move --to-stage <Stage> --to-status <Status>` (validates the pair, journals `to_stage`), with the create ops writing the initial Stage and the terminal dispositions the final Stage — no role-facing *raw* Stage-write path. (The raw `set` primitive still validates a Stage/Status value against its option set, but no role recipe drives it for those machine fields.) |
 | `query` | `query [--status S] [--stage Stg] [--wave W] [--phase P] [--domain D]` → newline-separated numbers |
 | `comment` | `comment --num N --body "…"` |
 | read | `show --num N [--field F \| --comments \| --blocked-by]` |
@@ -70,6 +70,13 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_tracker_fs.py" --tracker <repo>/TRACK
 The helper writes atomically (temp + replace), re-renders the board table on every
 mutation, validates Status and Stage against their option sets, and never lets the JSON
 block and the table diverge. The caller commits `TRACKER.md` with a `tracker:` prefix.
+
+The low-level `set` primitive still exists as the engine-internal write that the transition engine's
+`set-field` op calls under the hood (and that the journal-replay drift-simulation tests drive
+directly), but **no role invokes raw `set` for Wave/Phase/Domain** — a role-facing non-machine field
+write always routes through `idc_transition.py … set-field` (the engine table above), so it is
+validated, read back, and journaled. A raw `set` that skips the journal surfaces as board↔journal
+divergence, exactly like a raw Status write.
 
 ## Claim protocol
 

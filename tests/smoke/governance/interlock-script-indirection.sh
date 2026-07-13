@@ -205,6 +205,21 @@ deny "bash -c 'gh issue create --title x --body-file /tmp/b'"
 deny "env -S \"\$CMD\""
 allow "bash -c 'echo hi'"
 
+echo "== round-9 Fix A: unresolvable DYNAMIC constructs fail closed BY CONSTRUCTION (findings 1/3/4 + class) =="
+# finding 1 — a `gh api` whose ENDPOINT is a shell expansion (`$EP` could be `graphql` / a protected REST
+# path) carrying a write indicator cannot be statically confirmed safe → DENY during an active command.
+# Red-when-broken: drop the dynamic-endpoint guard → the endpoint isn't a literal `graphql`, so the blunt
+# path classifier sees no protected path and waves the mutation through.
+deny "EP=graphql; gh api \"\$EP\" -f query='mutation{closeIssue(input:{issueId:\"I\"}){issue{id}}}'"
+# finding 4 — a BASH_ENV/ENV/*RC prefix assignment points a NON-interactive interpreter at a file it
+# sources BEFORE running its `-c` payload, so a static-looking `bash -c 'echo hi'` can smuggle a mutation
+# through the sourced startup file → DENY (both the bare-prefix and the `env`-wrapped forms).
+deny "BASH_ENV='$FIXTURE/fire_gate.sh' bash -c 'echo hi'"
+deny "ENV='$FIXTURE/fire_gate.sh' sh -c 'echo hi'"
+deny "env BASH_ENV='$FIXTURE/fire_gate.sh' bash -c 'echo hi'"
+# a DYNAMIC-endpoint gh api READ (no write indicator) stays ALLOWED outside a carve-out (never over-blocks).
+allow "gh api \"\$EP\" --jq .foo"
+
 echo "== round-5 Fix 2: /idc:uninstall's own teardown ops are ALLOWED during an ACTIVE uninstall =="
 # The hard deny must not brick uninstall's documented --close-issues / --delete-board steps. The
 # allowance is keyed on the ACTIVE command being `uninstall`; the SAME raw ops under any other command
@@ -249,6 +264,12 @@ deny_under "$SUN" "bash -c 'gh issue close 5; gh api graphql --input mutation.js
 deny_under "$SUN" $'gh issue close 5 && gh \\\nissue create --title x --body-file /tmp/b'
 # A compound of teardown-ONLY ops stays allowed under uninstall (the carve-out still works).
 allow_under "$SUN" "gh issue close 5 && gh project item-delete 8 --owner o --id PVTI_X"
+# round-9 Fix A (finding 3): a $()-command-substitution / backtick smuggled into an ALLOWED teardown op's
+# ARGUMENT executes the inner mutation before the outer close — a carve-out allows ONLY fully STATIC
+# recognized ops, so ANY dynamic construct DENIES the whole call. Red-when-broken: drop the carve-out
+# dynamic guard → the inner `gh issue create` rides along inside the --comment value and the deny stops.
+deny_under "$SUN" "gh issue close 5 --comment \"\$(gh issue create --title x --body x)\""
+deny_under "$SUN" "gh issue close 5 --comment \"\`gh issue create --title x --body x\`\""
 
 echo "== round-8 Fix 3: /idc:init's OWN board provisioning is ALLOWED during an ACTIVE init =="
 # Symmetric to the uninstall teardown carve-out: a command may perform its OWN declared
@@ -277,6 +298,22 @@ deny_under "$SIN" 'gh pr merge 12 --squash'
 deny_under "$SIN" 'gh project item-edit --id X --project-id Y --field-id F --single-select-option-id O'
 deny_under "$SIN" 'gh project delete 8 --owner o'
 deny_under "$SIN" "gh api graphql -f query='mutation{updateIssue(input:{id:\"I\",state:CLOSED}){issue{id}}}'"
+
+echo "== round-9 Fix A (finding 3): a dynamic construct beside an ALLOWED provisioning op DENIES under init =="
+# A $()-command-substitution / process-substitution smuggled into an allowed `gh project link` argument
+# executes the inner mutation — under init only fully STATIC provisioning ops are allowed. Red-when-broken:
+# drop the carve-out dynamic guard → the inner `gh issue create` rides along inside --repo and allows.
+deny_under "$SIN" "gh project link 5 --owner o --repo \"\$(gh issue create --title x --body x)\""
+deny_under "$SIN" "gh project link 5 --owner o --repo <(gh issue create --title x)"
+
+echo "== round-9 Fix B: init's graphql provisioning carve-out classifies the ROOT mutation, not a substring =="
+# The carve-out must key on the REAL root mutation field, not any substring of the query text. A sanctioned
+# provisioning name appearing only in a trailing GraphQL COMMENT does NOT qualify (root is closeIssue → the
+# whole call DENIES under init); a real root `updateProjectV2Field` still qualifies (ALLOW). Red-when-broken:
+# revert _graphql_is_provision to the whole-value substring scan → the comment-smuggle is misclassified as
+# provisioning and allowed under init.
+deny_under "$SIN" "gh api graphql -f query='mutation{closeIssue(input:{issueId:\"I\"}){issue{id}}} # updateProjectV2Field'"
+allow_under "$SIN" "gh api graphql -f query='mutation{updateProjectV2Field(input:{fieldId:\"F\"}){projectV2Field{id}}}'"
 
 echo "== the sanctioned write door is never denied =="
 allow "python3 '$GOV_PLUGIN/scripts/idc_transition.py' --repo '$REPO' create-ticket --title safe --stage Buildable --status Todo"

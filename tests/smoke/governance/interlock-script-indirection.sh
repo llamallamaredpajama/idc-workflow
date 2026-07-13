@@ -337,7 +337,11 @@ echo "== round-10 Fix 2: init's ACTUAL provisioning code fences (from commands/i
 # Red-when-broken: re-break the substitution/control-word handling → a real fence denies → this FAILs.
 INITMD="$GOV_PLUGIN/commands/init.md"
 [ -f "$INITMD" ] || gov_fail "commands/init.md not found at $INITMD"
-mapfile -t FENCES < <(python3 - "$INITMD" <<'PY'
+# Bash 3.2-compatible (macOS /bin/bash is 3.2.57, no `mapfile`): read one JSON-line
+# fence per iteration. The python emits one `json.dumps(body)` line per fence (never a
+# bare empty line), so a plain read loop preserves the exact set mapfile would have built.
+FENCES=()
+while IFS= read -r line; do FENCES+=("$line"); done < <(python3 - "$INITMD" <<'PY'
 import re, sys, json
 text = open(sys.argv[1], encoding="utf-8").read()
 for m in re.finditer(r"```bash\n(.*?)```", text, re.S):
@@ -402,7 +406,10 @@ python3 "$CONTRACT" start --repo "$REPO" --session "$SUP" --command update \
   --plugin-root "$GOV_PLUGIN" --args 'reconcile' --source user >/dev/null \
   || gov_fail "could not open the active /idc:update command record for $SUP"
 extract_fences() {  # extract_fences <md-file> <regex> → populates FENCES[]
-  mapfile -t FENCES < <(python3 - "$1" "$2" <<'PY'
+  # Bash 3.2-compatible read loop in place of `mapfile` (see note above): one JSON-line
+  # fence per iteration; the python never emits a bare empty line.
+  FENCES=()
+  while IFS= read -r line; do FENCES+=("$line"); done < <(python3 - "$1" "$2" <<'PY'
 import re, sys, json
 text = open(sys.argv[1], encoding="utf-8").read()
 pat = sys.argv[2]

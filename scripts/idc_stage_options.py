@@ -121,9 +121,38 @@ def cmd_append(args):
     sys.exit(0)
 
 
+def _readback_has_option(stdout, want_name):
+    """True iff the mutation response echoes an option named ``want_name``.
+
+    The append mutation SELECTS `projectV2Field { … options { id name } }`, so GitHub's response
+    carries the field's post-write option set — the server's authoritative echo of what it stored.
+    Confirming the new option is present there is a positive readback of the write (round-15 Fix 2):
+    a non-zero `gh` exit is not enough, because a partial/racey success could return rc=0 without the
+    option actually landing. Parse defensively — any shape we can't confirm counts as "not present"
+    so `apply` fails closed rather than reporting a success it did not verify."""
+    try:
+        data = json.loads(stdout)
+    except (json.JSONDecodeError, ValueError):
+        return False
+    try:
+        opts = data["data"]["updateProjectV2Field"]["projectV2Field"]["options"]
+    except (KeyError, TypeError):
+        return False
+    if not isinstance(opts, list):
+        return False
+    return any(isinstance(o, dict) and o.get("name") == want_name for o in opts)
+
+
 def cmd_apply(args):
     """Assemble AND run the append mutation via a python subprocess `gh api graphql` — the sanctioned
-    write door (round-7 Fix 1). Exit 0 = applied, 3 = already-present no-op, 2 = fail-closed."""
+    write door (round-7 Fix 1). Exit 0 = applied AND read back, 3 = already-present no-op, 2 = fail-closed.
+
+    Journaling note (round-15 Fix 2): this is a board-SCHEMA change (adding a single-select option to
+    the Stage field), NOT an item-state transition. `idc_transition.journal_append` records item
+    transitions keyed on an issue number / status change / verdict-guard evidence — a schema
+    option-append has none of those, so forcing it into that record shape would emit a malformed,
+    itemless journal line. The reconciliation guarantee here is instead met by the POSITIVE READBACK
+    below plus the explicit success receipt, which together prove the write landed on the real board."""
     import subprocess
     mutation = _build_append_mutation(args)   # exits 3 if already-present (gh never invoked)
     try:
@@ -133,6 +162,13 @@ def cmd_apply(args):
         _die(f"could not run gh to apply the append mutation: {e}")
     if p.returncode != 0:
         _die(f"gh rejected the Stage-option append mutation (rc={p.returncode}): {p.stderr.strip()[:300]}")
+    # POSITIVE READBACK: confirm the option actually landed in the field's post-write option set
+    # (the mutation's own `options{ id name }` selection). A silent partial success must not pass.
+    if not _readback_has_option(p.stdout, args.ensure_option):
+        _die("append mutation returned success but the Stage field options do NOT contain "
+             f"{args.ensure_option!r} on readback — write unconfirmed (rc=0, response: "
+             f"{p.stdout.strip()[:300]!r})")
+    sys.stderr.write(f"idc_stage_options: applied + read back Stage option {args.ensure_option!r}\n")
     sys.exit(0)
 
 

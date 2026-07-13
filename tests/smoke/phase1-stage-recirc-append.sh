@@ -91,14 +91,28 @@ python3 "$H" append --ensure-option Recirculation --options-json "$WORK/field_no
 # The mutation must NOT be executed by a raw `gh api graphql -f query="$MUT"` in command prose — the
 # mutation interlock hard-DENIES a raw GraphQL mutation during an active /idc:init or /idc:update.
 # `apply` assembles AND runs the mutation via a python subprocess `gh`, which the interlock never sees.
-# Stub `gh` on PATH so this stays hermetic (no network).
+# Stub `gh` on PATH so this stays hermetic (no network). The stub logs its args AND emits a mutation
+# response on stdout (read from $WORK/gh-response.json), so `apply`'s round-15 POSITIVE READBACK has a
+# real server echo to confirm against — exactly the `projectV2Field{ options{ id name } }` shape GitHub
+# returns for the append mutation.
 BIN="$WORK/bin"; mkdir -p "$BIN"
 cat > "$BIN/gh" <<SH
 #!/bin/bash
 printf '%s\n' "\$*" >> "$WORK/gh-calls.txt"
+cat "$WORK/gh-response.json"
 exit 0
 SH
 chmod +x "$BIN/gh"
+
+# A successful append response: the field's post-write options DO contain Recirculation.
+cat > "$WORK/gh-response.json" <<'JSON'
+{"data":{"updateProjectV2Field":{"projectV2Field":{"id":"PVTSSF_OLD","options":[
+  {"id":"aaa111","name":"Consideration"},
+  {"id":"bbb222","name":"Planning"},
+  {"id":"ccc333","name":"Buildable"},
+  {"id":"eee555","name":"Recirculation"}
+]}}}}
+JSON
 
 : > "$WORK/gh-calls.txt"
 PATH="$BIN:$PATH" python3 "$H" apply --ensure-option Recirculation --options-json "$WORK/field3.json" --repo "$WORK"
@@ -106,6 +120,38 @@ rc_apply=$?
 [ "$rc_apply" = "0" ] || fail "apply on a 3-option field must run the mutation and exit 0 (got $rc_apply)"
 grep -q 'api graphql' "$WORK/gh-calls.txt" || fail "apply must invoke \`gh api graphql\` to run the mutation"
 grep -q 'updateProjectV2Field' "$WORK/gh-calls.txt" || fail "apply must run the updateProjectV2Field append mutation"
+
+# ---- (4a) round-15 Fix 2: apply POSITIVELY READS BACK the write — a rc=0 mutation whose returned
+# option set does NOT contain Recirculation must FAIL (not silently report success). This is the
+# red-when-broken proof for the readback: drop the `_readback_has_option` check and this case passes
+# wrongly (exit 0). The stub still exits 0 and logs the call — only its response omits Recirculation.
+cat > "$WORK/gh-response.json" <<'JSON'
+{"data":{"updateProjectV2Field":{"projectV2Field":{"id":"PVTSSF_OLD","options":[
+  {"id":"aaa111","name":"Consideration"},
+  {"id":"bbb222","name":"Planning"},
+  {"id":"ccc333","name":"Buildable"}
+]}}}}
+JSON
+: > "$WORK/gh-calls.txt"
+PATH="$BIN:$PATH" python3 "$H" apply --ensure-option Recirculation --options-json "$WORK/field3.json" --repo "$WORK" >/dev/null 2>&1
+rc_readback=$?
+[ "$rc_readback" = "2" ] || fail "apply must FAIL closed (exit 2) when the mutation response's option set lacks Recirculation on readback (got $rc_readback)"
+grep -q 'api graphql' "$WORK/gh-calls.txt" || fail "the readback-failure case must still have RUN the mutation (gh invoked) before failing on the readback"
+
+# an empty / unparseable mutation response is likewise treated as unconfirmed → apply fails closed.
+printf '' > "$WORK/gh-response.json"
+PATH="$BIN:$PATH" python3 "$H" apply --ensure-option Recirculation --options-json "$WORK/field3.json" --repo "$WORK" >/dev/null 2>&1
+[ $? = 2 ] || fail "an empty/unparseable mutation response must make apply fail closed (readback unconfirmed)"
+
+# restore the SUCCESS response for the remaining apply cases below.
+cat > "$WORK/gh-response.json" <<'JSON'
+{"data":{"updateProjectV2Field":{"projectV2Field":{"id":"PVTSSF_OLD","options":[
+  {"id":"aaa111","name":"Consideration"},
+  {"id":"bbb222","name":"Planning"},
+  {"id":"ccc333","name":"Buildable"},
+  {"id":"eee555","name":"Recirculation"}
+]}}}}
+JSON
 
 # idempotent: an already-present option → exit 3, and gh is NEVER called (no duplicate option, no write).
 : > "$WORK/gh-calls.txt"

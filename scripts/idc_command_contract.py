@@ -85,10 +85,14 @@ def validate_closeout(command: str, status: str, evidence: object) -> CloseoutRe
             f"unknown terminal status {status!r} (expected one of {sorted(TERMINAL_STATUSES)})", {})
     if not isinstance(evidence, dict):
         return CloseoutResult(False, "evidence-not-object", "evidence must be a JSON object", {})
-    if evidence.get("schema_version") != 1:
+    schema_version = evidence.get("schema_version")
+    # STRICT: the INTEGER 1 only. Python's `True == 1` and `1.0 == 1`, so a bare `!= 1` would admit
+    # JSON `true` (bool) and `1.0` (float). Reject bool explicitly (bool is a subclass of int) and
+    # any non-int type, so only a genuine integer 1 passes.
+    if isinstance(schema_version, bool) or not isinstance(schema_version, int) or schema_version != 1:
         return CloseoutResult(
             False, "bad-schema-version",
-            f"evidence.schema_version must be 1, got {evidence.get('schema_version')!r}", {})
+            f"evidence.schema_version must be the integer 1, got {schema_version!r}", {})
     if not isinstance(evidence.get("refs"), dict):
         return CloseoutResult(False, "refs-not-object", "evidence.refs must be an object", {})
     return CloseoutResult(True, "ok", "closeout envelope valid", evidence)

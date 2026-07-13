@@ -340,6 +340,12 @@ def command_finish(cwd, session_id, command, status, evidence):
             return None
         target["state"] = _CMD_FINISHED
         target["closeout"] = {"status": status, "evidence": evidence}
+        # Move the just-finished record to the NEWEST write position so the finished-history cap
+        # (_prune_finished keeps the last _MAX_FINISHED in write order) drops the OLDEST finished
+        # record — never this one. Finishing in place would leave an early-started record at the
+        # front of the list, where the cap would prune it as the "oldest" even though it just closed.
+        commands.remove(target)
+        commands.append(target)
         _atomic_write_state(cwd, read_taints(cwd), _prune_finished(commands))
     return target
 

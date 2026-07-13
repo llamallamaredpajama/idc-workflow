@@ -80,4 +80,56 @@ python3 "$GOV_PLUGIN/scripts/idc_command_contract.py" status --repo "$REPO" \
   || gov_fail "current expansion did not register the active command"
 echo "  ok (current) a current runtime is admitted with additionalContext + registers the command"
 
-echo "PASS: the command entry gate refuses a stale runtime with an actionable reload instruction and admits a current runtime while opening its lifecycle record"
+# ── the ADMISSION-CATEGORY matrix (Fix 5), directly exercised ───────────────────────────────────────
+# A receipt can be UNVERIFIABLE two ways (freshness raises InvalidReceiptError): an invalid v2 receipt
+# (receipt_version: 2 with no plugin_version) or an unknown legacy receipt (a receipt_version this
+# reader does not understand). CURRENT_PLUGIN reads fine (4.0.0), so the receipt is the only fault.
+# Categorization: the SIX workflow commands (think|intake|plan|build|recirculate|autorun) are
+# fail-closed on an unverifiable receipt; the recovery/diagnostic group (doctor|update|uninstall|
+# janitor) + init may expand on an unknown/invalid receipt to diagnose/migrate; EVERY command
+# (recovery, janitor, init included) is blocked on a POSITIVELY stale runtime.
+write_bad_v2_receipt()  { printf 'receipt_version: 2\n' > "$1/docs/workflow/install-receipt.yaml"; }
+write_unknown_receipt() { printf 'receipt_version: 99\nplugin_version: 4.0.0\n' > "$1/docs/workflow/install-receipt.yaml"; }
+
+# (a) a WORKFLOW command (plan) on an invalid receipt → BLOCKED with the repair message naming BOTH
+#     /idc:doctor AND /idc:update (fail-closed — we refuse an unverifiable workflow body).
+write_bad_v2_receipt "$REPO"
+OUT="$(emit_expansion idc:plan 'Ship it' | python3 "$ENTRY_GATE" "$CURRENT_PLUGIN")"
+printf '%s' "$OUT" | grep -q '"decision": "block"' \
+  || gov_fail "(a) a workflow command on an invalid receipt was not blocked"
+printf '%s' "$OUT" | grep -q '/idc:doctor' \
+  || gov_fail "(a) the workflow repair message did not name /idc:doctor"
+printf '%s' "$OUT" | grep -q '/idc:update' \
+  || gov_fail "(a) the workflow repair message did not name /idc:update"
+echo "  ok (a) a workflow command on an invalid receipt is fail-closed with the /idc:doctor + /idc:update repair"
+
+# (b) `init` on an invalid receipt → ALLOWED to expand (bootstrap), returning additionalContext.
+OUT="$(emit_expansion idc:init '' | python3 "$ENTRY_GATE" "$CURRENT_PLUGIN")"
+printf '%s' "$OUT" | grep -q 'additionalContext' \
+  || gov_fail "(b) init on an invalid receipt was not allowed to expand"
+echo "  ok (b) init on an invalid receipt is allowed to expand (bootstrap)"
+
+# (c) a RECOVERY command (doctor) AND `janitor` on an unknown legacy receipt → ALLOWED to expand.
+#     Red-when-broken for the janitor RECLASSIFICATION: move janitor back to the fail-closed set ⇒
+#     janitor is BLOCKED here instead of allowed ⇒ this assertion FAILs.
+write_unknown_receipt "$REPO"
+for CMD in idc:doctor idc:janitor; do
+  OUT="$(emit_expansion "$CMD" '' | python3 "$ENTRY_GATE" "$CURRENT_PLUGIN")"
+  printf '%s' "$OUT" | grep -q 'additionalContext' \
+    || gov_fail "(c) $CMD on an unknown legacy receipt was not allowed to expand"
+done
+echo "  ok (c) doctor AND janitor on an unknown legacy receipt are allowed to expand (recovery/diagnostic)"
+
+# (d) a POSITIVELY STALE runtime → BLOCKED for a recovery command, janitor, AND init alike (stale code
+#     is unsafe for EVERY command). Receipt requires 4.1.0 but OLD_PLUGIN runs 4.0.0.
+write_receipt "$REPO" 4.1.0
+for CMD in idc:doctor idc:janitor idc:init; do
+  OUT="$(emit_expansion "$CMD" '' | python3 "$ENTRY_GATE" "$OLD_PLUGIN")"
+  printf '%s' "$OUT" | grep -q '"decision": "block"' \
+    || gov_fail "(d) $CMD on a positively stale runtime was not blocked"
+  printf '%s' "$OUT" | grep -q '/reload-plugins' \
+    || gov_fail "(d) $CMD stale block did not name /reload-plugins"
+done
+echo "  ok (d) a positively stale runtime blocks recovery commands, janitor, and init alike"
+
+echo "PASS: the command entry gate refuses a stale runtime with an actionable reload instruction, admits a current runtime while opening its lifecycle record, and applies the admission-category matrix (workflow fail-closed on an invalid receipt; recovery/janitor/init may expand; all blocked when positively stale)"

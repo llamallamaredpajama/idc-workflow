@@ -28,12 +28,20 @@ import idc_hook_lib as H  # noqa: E402
 import idc_ledger  # noqa: E402
 
 
-def _block_reason(session_id, command):
+def _contract_script(plugin_root):
+    """The REAL absolute path to idc_command_contract.py under the plugin root the gate was handed.
+    `${CLAUDE_PLUGIN_ROOT}` is a markdown-only substitution — NOT a shell/Python env var — so a
+    Python-emitted literal would resolve to the broken `/scripts/idc_command_contract.py`. The gate
+    receives the real root as argv[1], so we join that actual path into every remediation it prints."""
+    return os.path.join(plugin_root or "", "scripts", "idc_command_contract.py")
+
+
+def _block_reason(session_id, command, plugin_root):
     return (
         f"IDC command closeout gate: the '/idc:{command}' command opened in this session has no "
         "recorded closeout, so this stop cannot prove the command finished honestly. Close it with "
         "its terminal status via "
-        f"`${{CLAUDE_PLUGIN_ROOT}}/scripts/idc_command_contract.py finish --repo <repo> "
+        f"`{_contract_script(plugin_root)} finish --repo <repo> "
         f"--session {session_id} --command {command} "
         "--status <complete|waiting_gate|no_action|blocked_external> --evidence-json '<envelope>'`, "
         "then stop. (Bounded — this will not block indefinitely.)"
@@ -67,7 +75,7 @@ def _gate(payload, plugin_root):
     command = sorted(str(c.get("command")) for c in active)[0]
     key = f"command-closeout.{session_id}.{command}"
     try:
-        H.bounded_block(key, _block_reason(session_id, command))
+        H.bounded_block(key, _block_reason(session_id, command, plugin_root))
     except SystemExit:
         raise
     except Exception as exc:  # noqa: BLE001 — an error AFTER a record was found is fail-closed
@@ -75,7 +83,7 @@ def _gate(payload, plugin_root):
             key,
             "IDC command closeout gate: an open command record exists for this session but its "
             f"state could not be verified ({exc}). Failing closed — close the command via "
-            "`${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py finish ...`, then stop.")
+            f"`{_contract_script(plugin_root)} finish ...`, then stop.")
 
 
 if __name__ == "__main__":

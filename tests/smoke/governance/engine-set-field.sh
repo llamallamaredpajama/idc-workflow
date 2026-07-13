@@ -33,29 +33,64 @@ fi
 [ "$(gov_field "$T" "$n" Status)" = "Todo" ] || fail "the refused Status set-field still mutated Status"
 echo "  ok set-field refuses Status (Status stays Todo)"
 
-echo "== github: set-field drives the sanctioned set_single_select primitive, not a raw item-edit =="
+echo "== github: set-field drives set_single_select AND positively reads the written value back (Fix 2) =="
 python3 - "$GOV_PLUGIN/scripts" "$REPO" <<'PY' || fail "github set-field unit failed (see above)"
 import sys
 sys.path.insert(0, sys.argv[1])
 repo = sys.argv[2]
 import idc_transition as E, idc_gh_board as B
-
-calls = []
-B.set_single_select = lambda owner, project, r, item_id, field, value: calls.append((item_id, field, value))
-def _readback(item_id, r):   # fetch_item after the write — Stage/Status untouched
-    return {"stage": "Buildable", "status": "Todo"}
-B.fetch_item = _readback
 ctx = E.github_ctx(repo, "o", "1", itemid_cache={5: "PVTI_5"})
 
+# ---- positive: the write lands and the read-back CONFIRMS it (fetch_item MUST be consulted) ----
+calls, reads = [], []
+B.set_single_select = lambda owner, project, r, item_id, field, value: calls.append((item_id, field, value))
+def _readback_ok(item_id, r):
+    reads.append(item_id)
+    return {"domain": "core", "stage": "Buildable", "status": "Todo"}   # the write is reflected
+B.fetch_item = _readback_ok
 E.run("set-field", ctx, num=5, field="Domain", value="core")
 assert calls == [("PVTI_5", "Domain", "core")], f"set-field did not drive set_single_select: {calls}"
+assert reads, "set-field did NOT read the field back (no fetch_item call) — the readback is missing"
+print("  ok github set-field drives set_single_select AND reads the written value back to confirm it")
 
+# ---- red-when-broken: a NO-OP setter + a read-back that does NOT match the request must FAIL ----
+# If set-field skipped the positive read-back, this no-op write would be reported as success.
+calls2, reads2 = [], []
+B.set_single_select = lambda *a, **k: calls2.append(a)          # NO-OP: pretends to write, changes nothing
+def _readback_wrong(item_id, r):
+    reads2.append(item_id)
+    return {"domain": "STILL_OLD", "stage": "Buildable", "status": "Todo"}   # the request ("core") did NOT land
+B.fetch_item = _readback_wrong
 try:
-    E.run("set-field", ctx, num=5, field="Status", value="Done")
-    print("FAIL: github set-field accepted a Status write"); sys.exit(1)
+    E.run("set-field", ctx, num=5, field="Domain", value="core")
+    print("FAIL: set-field reported success when the read-back value did not match the request"); sys.exit(1)
 except E.TransitionError:
     pass
-print("  ok github set-field drives set_single_select for a non-Status field and refuses Status")
+assert reads2, "set-field did NOT read back on the mismatch path either — the readback is missing"
+print("  ok a no-op write with a non-matching read-back makes set-field FAIL (readback is real, not decorative)")
+
+# ---- read-back cannot be read at all → also a hard failure (never a blind success) ----
+def _readback_raises(item_id, r):
+    raise B.BoardReadError("simulated read-back failure")
+B.fetch_item = _readback_raises
+try:
+    E.run("set-field", ctx, num=5, field="Domain", value="core")
+    print("FAIL: set-field reported success when the read-back could not be read"); sys.exit(1)
+except (E.TransitionError, B.BoardReadError):
+    pass
+print("  ok an unreadable read-back makes set-field FAIL")
+
+# ---- Status is refused (a transition — use move); an unknown field is refused before any write ----
+B.fetch_item = _readback_ok
+for bad_field in ("Status", "Bogus"):
+    n_before = len(calls)
+    try:
+        E.run("set-field", ctx, num=5, field=bad_field, value="x")
+        print(f"FAIL: github set-field accepted a {bad_field} write"); sys.exit(1)
+    except E.TransitionError:
+        pass
+    assert len(calls) == n_before, f"set-field wrote {bad_field} to the board before refusing it"
+print("  ok github set-field refuses Status and an unknown field BEFORE writing")
 PY
 
-echo "PASS: set-field writes non-Status single-select fields through the single write door on both backends and refuses Status"
+echo "PASS: set-field writes non-Status single-select fields through the single write door on both backends, positively reads the value back, and refuses Status / unknown fields"

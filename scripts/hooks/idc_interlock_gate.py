@@ -111,19 +111,90 @@ def _has(command, *word_seqs):
 
 def _is_api_write(command):
     """True iff a `gh api` invocation is a WRITE — an explicit write method (`-X`/`--method POST|DELETE|
-    PUT|PATCH`) or any body flag that promotes the default GET to a POST (`-f`/`-F`/`--field`/
-    `--raw-field`/`--input`). A bare `gh api …` with only read flags (`--jq`, `--paginate`) is a GET."""
-    if re.search(r"(?:-X|--method)\s+(?:POST|DELETE|PUT|PATCH)", command, re.I):
+    PUT|PATCH`, in ALL forms: `-X DELETE`, `-XDELETE`, `--method DELETE`, `--method=DELETE`) or any body
+    flag that promotes the default GET to a POST (`-f`/`-F`/`--field`/`--raw-field`/`--input`, in both
+    the space-separated `-f key=val` and the combined `-fkey=val` forms). A bare `gh api …` with only
+    read flags (`--jq`, `--paginate`) is a GET."""
+    # write METHOD, all four spellings: `-X DELETE` / `-XDELETE` / `--method DELETE` / `--method=DELETE`.
+    if re.search(r"(?:-X\s*|--method[=\s]+)(?:POST|DELETE|PUT|PATCH)\b", command, re.I):
         return True
-    return bool(re.search(r"(?<![\w-])(?:-f|-F|--field|--raw-field|--input)(?![\w-])", command))
+    # a body flag (standalone `-F key=v`, combined `-Fkey=v`, or a long `--field …`) turns GET into POST.
+    return bool(re.search(r"(?<![\w-])(?:-[fF](?![\w-])|-[fF][A-Za-z_]|--field\b|--raw-field\b|--input\b)",
+                          command))
+
+
+# ── gh subcommand normalization (Fix 3) ───────────────────────────────────────────────────────────
+# gh GLOBAL options that CONSUME a following value token (`gh -R o/r issue create`, `gh --repo o/r pr
+# merge`). The `--opt=val` and combined `-Rval` forms are self-contained single tokens, skipped as
+# plain flags. Everything up to the first non-option token is a global flag; the non-option run that
+# follows is the subcommand path (`issue create`, `pr merge`, `project item-delete`, …).
+_GH_GLOBAL_VALUE_OPTS = {"-R", "--repo", "-H", "--hostname"}
+# Protected gh SUBCOMMAND paths → (subject, remediation). Matched as a prefix of the normalized path so
+# trailing positional args (`pr merge 12`, `issue close 5`) still match while `pr view`/`issue view`/
+# `project item-list` (reads) do not.
+_PROTECTED_SUBCMDS = [
+    ("issue create", "a raw `gh issue create`", _ENGINE),
+    ("issue close", "a raw `gh issue close`", _CLOSE),
+    ("issue reopen", "a raw `gh issue reopen`", _CLOSE),
+    ("pr merge", "a raw `gh pr merge`", _FINISH),
+    ("project item-edit", "a raw `gh project item-{edit,add,delete}` board mutation", _ENGINE),
+    ("project item-add", "a raw `gh project item-{edit,add,delete}` board mutation", _ENGINE),
+    ("project item-delete", "a raw `gh project item-{edit,add,delete}` board mutation", _ENGINE),
+]
+
+
+def _gh_segment_subcommand(seg):
+    """The NORMALIZED gh subcommand path for one command segment, or None. Strips leading wrapper words
+    (`env`/`command`/… + their options), requires a `gh` head, skips gh GLOBAL options (incl. their
+    consumed values and the `--opt=val`/`-Rval` self-contained forms), and returns the run of
+    subcommand words that follows (`issue create`, `pr merge 12`, `project item-delete 8`)."""
+    seg = _strip_prefixes(seg)
+    if not seg or os.path.basename(seg[0]) != "gh":
+        return None
+    i = 1
+    while i < len(seg):                       # skip gh global options to reach the subcommand
+        tok = seg[i]
+        if tok == "--":
+            i += 1
+            break
+        if tok.startswith("-"):
+            if tok in _GH_GLOBAL_VALUE_OPTS and i + 1 < len(seg):
+                i += 2                         # `-R o/r` — consume the value token too
+            else:
+                i += 1                         # `--repo=o/r`, `-Ro/r`, or a bare flag
+            continue
+        break
+    words = []
+    while i < len(seg) and not seg[i].startswith("-"):
+        words.append(seg[i])
+        i += 1
+    return " ".join(words) if words else None
+
+
+def _gh_subcommand_paths(command):
+    """Every normalized gh subcommand path in `command` (one per compound segment). Tokenizes with the
+    shell lexer; a parse failure yields [] (the direct regex rules + the opaque-indirection path in
+    inspect_command still cover it), so this never raises into the classifier."""
+    try:
+        tokens = _lex(command)
+    except ValueError:
+        return []
+    out = []
+    for seg in _segments(tokens):
+        path = _gh_segment_subcommand(seg)
+        if path:
+            out.append(path)
+    return out
 
 
 def classify(command):
     """(subject, remediation) for a raw terminal/board command that bypasses the door, or None.
-    A pure command-string match (no shell parse), so an echoed/quoted occurrence also matches — under
-    the active-command deny posture that over-denies a benign echoed line inside an IDC command, which
-    is the safe direction (the agent re-issues through the door); outside an active command it is only
-    a warning."""
+    The `gh api` content rules (issue-state / dependency / GraphQL writes) match the raw string so a
+    JSON-body / here-string form is still caught; the gh SUBCOMMAND rules are token-NORMALIZED so gh
+    global flags before the subcommand (`gh -R o/r issue create`) and combined option forms cannot
+    bypass the deny. Under the active-command posture an over-match (a benign echoed line) denies in
+    the safe direction (the agent re-issues through the door); outside an active command it is only a
+    warning."""
     c = command
     # issue-state-writing gh api — a hand issue close OR reopen (REST field forms `-f/-F state=closed`
     # / `state=open`, `state: closed`, and the JSON-body form `"state":"closed"`); case-insensitive so
@@ -131,23 +202,36 @@ def classify(command):
     if _has(c, "gh api") and re.search(r"state[\"']?\s*[=:]\s*[\"']?\s*(?:closed|open)", c, re.I):
         return ("an issue-state-writing `gh api` call", _CLOSE)
     # issue-dependency REST write — a raw dependencies/blocked_by POST/DELETE (the gate-chain door).
-    # METHOD-AWARE: only a WRITE (`-X`/`--method POST|DELETE`, or any `gh api` body flag that turns the
-    # default GET into a POST: `-f`/`-F`/`--field`/`--raw-field`/`--input`) is protected. A read-only
-    # GET on `dependencies/blocked_by` is /idc:doctor's own audit read — it must stay ALLOWED.
+    # METHOD-AWARE: only a WRITE (`-X`/`--method POST|DELETE` in any form, or any `gh api` body flag
+    # that turns the default GET into a POST) is protected. A read-only GET on `dependencies/blocked_by`
+    # is /idc:doctor's own audit read — it must stay ALLOWED.
     if _has(c, "gh api") and re.search(r"dependencies/blocked_by", c) and _is_api_write(c):
         return ("a raw issue-dependency REST write (`dependencies/blocked_by`)", _DEP)
     # GraphQL board/issue mutations — the ProjectV2-item write family (add/delete/update/clear/archive/
-    # unarchive…ProjectV2…) and the issue write family (create/update/close/delete…Issue). Matched by
-    # the write-verb-glued-to-type family, not a hand-kept name list, so a new mutation name is caught.
+    # unarchive…ProjectV2…) and the issue write family (create/update/close/reopen/delete…Issue). Matched
+    # by the write-verb-glued-to-type family, not a hand-kept name list, so a new mutation name is caught.
     if _has(c, "gh api") and re.search(
-            r"(?:add|delete|update|clear|archive|unarchive)ProjectV2|(?:create|update|close|delete)Issue", c):
+            r"(?:add|delete|update|clear|archive|unarchive)ProjectV2"
+            r"|(?:create|update|close|reopen|delete)Issue", c):
         return ("a raw GraphQL board/issue mutation", _ENGINE)
+    # gh SUBCOMMAND writes — TWO detectors, unioned:
+    #   (a) token-NORMALIZED paths, so gh global flags before the subcommand (`gh -R o/r issue create`)
+    #       and combined option forms cannot bypass the deny;
+    #   (b) a whitespace-flexible regex backstop (`_has`) that needs no shell parse, so a match inside a
+    #       complex/echoed SCRIPT BODY (heredocs, command substitutions, line continuations) is caught
+    #       even where the lexer would choke. Either detector firing is a deny.
+    for path in _gh_subcommand_paths(c):
+        for prefix, subject, remediation in _PROTECTED_SUBCMDS:
+            if path == prefix or path.startswith(prefix + " "):
+                return (subject, remediation)
     if _has(c, "gh pr merge"):
         return ("a raw `gh pr merge`", _FINISH)
     if _has(c, "gh issue create"):
         return ("a raw `gh issue create`", _ENGINE)
     if _has(c, "gh issue close"):
         return ("a raw `gh issue close`", _CLOSE)
+    if _has(c, "gh issue reopen"):
+        return ("a raw `gh issue reopen`", _CLOSE)
     if _has(c, "gh project item-edit") or _has(c, "gh project item-add") \
             or _has(c, "gh project item-delete"):
         return ("a raw `gh project item-{edit,add,delete}` board mutation", _ENGINE)
@@ -171,7 +255,7 @@ def _segments(tokens):
     interpreter invocation anywhere in a compound command is inspected on its own."""
     seg, out = [], []
     for t in tokens:
-        if t in _SEP or (t and all(ch in "&|;()<>" for ch in t)):
+        if t in _SEP or (t and all(ch in "&|;()<>\n\r" for ch in t)):
             if seg:
                 out.append(seg)
                 seg = []
@@ -254,17 +338,56 @@ def _inspect_target(target, cwd, plugin_root, depth, seen):
 _ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # Wrapper words that precede (and do not hide) the real interpreter: `env`/`command`/`builtin`/`exec`.
 _CMD_PREFIXES = {"env", "command", "builtin", "exec"}
+# Per-wrapper SHORT options that CONSUME a following value token — so `env -u NAME bash f.sh` and
+# `exec -a NAME bash f.sh` skip the value too, reaching the real interpreter. Long `--opt=val` forms are
+# self-contained single tokens; `--unset NAME`/`--chdir DIR` (space form) consume the next token.
+_WRAPPER_VALUE_OPTS = {
+    "env": {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"},
+    "exec": {"-a"},
+    "command": set(),
+    "builtin": set(),
+}
+
+
+def _skip_wrapper_opts(seg, i, wrapper):
+    """Advance past a wrapper's OPTIONS (and, for `env`, any interleaved `VAR=val` assignments) so the
+    real interpreter head is reached (Fix 4). `env -i`/`-u NAME`/`-C DIR`/`-0`/`--`, `command -p`/`-v`,
+    `exec -a NAME`, etc. must not stop the strip at the wrapper's first option (which reopened the
+    `env -i bash f.sh` / `command -p bash f.sh` script-indirection bypass)."""
+    value_opts = _WRAPPER_VALUE_OPTS.get(wrapper, set())
+    while i < len(seg):
+        tok = seg[i]
+        if tok == "--":                                   # end of options
+            return i + 1
+        if tok.startswith("-") and len(tok) > 1:
+            if tok.startswith("--") and "=" in tok:       # `--unset=NAME` — self-contained
+                i += 1
+            elif tok in value_opts and i + 1 < len(seg):  # `-u NAME` / `--chdir DIR` — consume the value
+                i += 2
+            else:                                         # bare/combined flag (`-i`, `-pv`, `-Ctmp`)
+                i += 1
+            continue
+        if wrapper == "env" and _ASSIGN_RE.match(tok):    # `env -i A=1 bash f.sh`
+            i += 1
+            continue
+        break
+    return i
 
 
 def _strip_prefixes(seg):
-    """Drop leading `VAR=val` assignments and `env [VAR=val…]` / `command` / `builtin` / `exec` wrapper
-    words so the REAL interpreter head is seen (Fix 3: `X=1 bash f.sh`, `env X=1 bash f.sh`, and
-    `command bash f.sh` must inspect `f.sh`, not wave the wrapper through as a benign head token)."""
+    """Drop leading `VAR=val` assignments and `env`/`command`/`builtin`/`exec` wrapper words TOGETHER
+    WITH their options so the REAL interpreter head is seen (`X=1 bash f.sh`, `env -i bash f.sh`,
+    `command -p bash f.sh` must all inspect `f.sh`, not wave the wrapper/option through as a benign
+    head token). Chained wrappers (`env -i command bash f.sh`) unwind one layer per outer-loop pass."""
     i = 0
     while i < len(seg):
         tok = seg[i]
-        if _ASSIGN_RE.match(tok) or os.path.basename(tok) in _CMD_PREFIXES:
+        if _ASSIGN_RE.match(tok):
             i += 1
+            continue
+        base = os.path.basename(tok)
+        if base in _CMD_PREFIXES:
+            i = _skip_wrapper_opts(seg, i + 1, base)
             continue
         break
     return seg[i:]

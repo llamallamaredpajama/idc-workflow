@@ -84,4 +84,16 @@ rep="$(python3 "$JAN" --repo "$R" --tracker "$R/TRACKER.md")"
 printf '%s\n' "$rep" | grep -qE 'RESUME-RECIRC' \
   && fail "contrast 2: RESUME-RECIRC must DISAPPEAR when the recirc branch is merged (inbox still open)" "$rep"
 
-echo "PASS: janitor emits RISKY RESUME-RECIRC iff an open recirc branch coexists with an open Stage=Recirculation inbox; retiring the ticket OR merging the branch each makes it disappear (both conditions required)"
+# ================================================================================================
+# CASE D (Fix 7 — the `recirc/*` prefix is recognized too): #2 is still an OPEN Stage=Recirculation
+# inbox; add an OPEN (unmerged) `recirc/<slug>` branch → RESUME-RECIRC must FIRE. Red-when-broken: the
+# detector filtering only `recirculate/*` misses `recirc/*` → RESUME-RECIRC never fires → this FAILs.
+gitc checkout -q -b recirc/short-slug main
+printf y > "$R/recirc2.txt"; gitc add recirc2.txt; gitc commit -qm "wip: recirc short-slug drain"
+gitc checkout -q main
+rep="$(python3 "$JAN" --repo "$R" --tracker "$R/TRACKER.md")"; rc=$?
+[ "$rc" -eq 1 ] || fail "case D must exit 1 (findings present), got $rc" "$rep"
+printf '%s\n' "$rep" | grep -qE 'RESUME-RECIRC' \
+  || fail "case D: an open recirc/ branch + open Stage=Recirculation inbox must trigger RESUME-RECIRC" "$rep"
+
+echo "PASS: janitor emits RISKY RESUME-RECIRC iff an open recirc branch (recirculate/* OR recirc/*) coexists with an open Stage=Recirculation inbox; retiring the ticket OR merging the branch each makes it disappear (both conditions required)"

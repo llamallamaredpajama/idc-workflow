@@ -76,13 +76,35 @@ deny ". '$FIXTURE/fire_gate.sh'"
 deny "bash -c 'gh project item-edit --id X --project-id Y --field-id F --single-select-option-id O'"
 deny "gh api repos/o/r/issues/707/dependencies/blocked_by/708 -X DELETE"
 
-echo "== a shell-prefix cannot smuggle the incident script past interpreter inspection (Fix 3) =="
+echo "== a shell-prefix cannot smuggle the incident script past interpreter inspection =="
 deny "X=1 bash '$FIXTURE/fire_gate.sh'"
 deny "env X=1 bash '$FIXTURE/fire_gate.sh'"
 deny "env A=1 B=2 command bash '$FIXTURE/fire_gate.sh'"
 deny "command bash '$FIXTURE/fire_gate.sh'"
 deny "builtin source '$FIXTURE/fire_gate.sh'"
 deny "exec bash '$FIXTURE/fire_gate.sh'"
+
+echo "== wrapper OPTIONS cannot hide the interpreter — env/command options are skipped (round-3 Fix 4) =="
+deny "env -i bash '$FIXTURE/fire_gate.sh'"
+deny "env -u X bash '$FIXTURE/fire_gate.sh'"
+deny "env -i -u FOO bash '$FIXTURE/fire_gate.sh'"
+deny "env -C /tmp bash '$FIXTURE/fire_gate.sh'"
+deny "env -u X A=1 bash '$FIXTURE/fire_gate.sh'"
+deny "command -p bash '$FIXTURE/fire_gate.sh'"
+deny "command -pv bash '$FIXTURE/fire_gate.sh'"
+
+echo "== gh GLOBAL FLAGS before the subcommand cannot bypass the deny (round-3 Fix 3 normalize) =="
+deny 'gh -R o/r issue create --title gate --body-file /tmp/body'
+deny 'gh --repo o/r pr merge 12 --squash'
+deny 'gh --repo=o/r issue close 5'
+deny 'gh -R o/r project item-delete 8 --id X'
+echo "== gh api METHOD forms (combined / =-joined) + combined -F body flag deny (round-3 Fix 3) =="
+deny 'gh api --method=DELETE repos/o/r/issues/707/dependencies/blocked_by/708'
+deny 'gh api -XDELETE repos/o/r/issues/707/dependencies/blocked_by/708'
+deny 'gh api --method=POST repos/o/r/issues/707/dependencies/blocked_by -Fissue_id=8'
+deny 'gh api -XPOST repos/o/r/issues/707/dependencies/blocked_by -fissue_id=8'
+echo "== the reopenIssue GraphQL mutation is in the protected write family (round-3 Fix 3) =="
+deny "gh api graphql -f query='mutation{reopenIssue(input:{issueId:\"I_1\"}){issue{id}}}'"
 
 echo "== the direct classifier is COMPLETE — the full REST/GraphQL write set denies (Fix 4) =="
 deny 'gh api repos/o/r/issues/5 -X PATCH -f state=open'

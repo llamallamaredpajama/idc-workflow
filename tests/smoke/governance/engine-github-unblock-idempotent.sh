@@ -39,6 +39,26 @@ B.remove_blocked_by = _remove
 E._gh_remove_dep(ctx, child=5, parent=7)
 assert deletes == [(5, 7)], f"present-edge path did not DELETE exactly once: {deletes}"
 print("  ok github unblock DELETEs exactly once when the edge is present")
+
+# ---- Fix 5: the DISPATCHER always removes-and-verifies the dependency FIRST, even when the pointer is
+#      ALREADY Todo. The old dispatcher early-returned on Status==Todo BEFORE the removal, stranding a
+#      stale blocked_by edge. Red-when-broken: revert the reorder → removal is never called → this FAILs.
+present = {5: {7}}
+removed = []
+def _remove2(child, parent, r):
+    removed.append((child, parent)); present.get(int(child), set()).discard(int(parent))
+B.blocked_by_numbers = lambda child, r: sorted(present.get(int(child), set()))
+B.remove_blocked_by = _remove2
+B.blocked_by_comment_ids = lambda child, parent, r: []
+# The pointer #5 is ALREADY Todo (Status change is a no-op) but the #7->#5 edge is STILL PRESENT.
+B.fetch_item = lambda item_id, r: {"stage": "Buildable", "status": "Todo"}
+def _no_status_write(*a, **k):
+    raise AssertionError("set_status must NOT be called — the pointer is already Todo")
+B.set_status = _no_status_write
+E.run("unblock", ctx, num=5, to_status="Todo", by=7)
+assert removed == [(5, 7)], f"dispatcher did NOT remove the dependency on an already-Todo pointer: {removed}"
+assert 7 not in present.get(5, set()), f"the #7->#5 edge is still present after unblock: {present}"
+print("  ok dispatcher unblock --by removes the stale edge even when the pointer is already Todo (Fix 5)")
 PY
 
 echo "PASS: github unblock --by is idempotent — the absent-first rerun skips the DELETE and completes, a present edge is removed exactly once"

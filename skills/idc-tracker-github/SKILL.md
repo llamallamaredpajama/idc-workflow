@@ -109,10 +109,14 @@ an active `/idc:*` command, and improvised writes desync the journal. Reads (`gh
 `gh api … GET`) stay fine to run directly.
 
 **createTicket(title, body, type, labels) -> issue#** — dispatch through the engine, which owns the
-complete create + board-add + Stage + Status + read-back + journal sequence atomically:
+complete create + board-add + Stage + Status + read-back + journal sequence atomically. It prints the
+integer **issue number** on stdout (never the `PVTI_…` project-item id — the door resolves the number,
+journaling the PVTI internally). `--type` (applied as a `type:<T>` label) and `--labels` (repeatable or
+a comma-list) are how a gate carries its `operator-action` label through the door:
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_transition.py" --backend github \
-  --owner "$OWNER" --project "$PROJ" create-ticket --title "$T" --body "$B"   # -> issue# on stdout
+  --owner "$OWNER" --project "$PROJ" create-ticket --title "$T" --body "$B" \
+  ${TYPE:+--type "$TYPE"} ${LABELS:+--labels "$LABELS"}   # -> issue# on stdout
 ```
 (Use `create-pointer` for a Consideration pointer and `recirculate-intake` for a Recirculation inbox
 ticket.) The engine drives this raw `gh` mechanic **internally** — it is shown here only so the
@@ -212,13 +216,13 @@ absence, then moves the child `Blocked → Todo`) — never a raw `blocked_by` D
 - **claim(issue, agent)** — `idc_transition.py … claim --num "$NUM" --agent "$AGENT"`
   (Status→In Progress + the claim comment, journaled). No lock; the Build merge-queue serializes
   merges.
-- **block(issue, by)** — `idc_transition.py … move --num "$NUM" --to-status Blocked` + the
-  **native `link "$BY" "$NUM" blocks` recipe above** (the REST issue-dependencies edge, with its
-  documented fallback). The native relation is the ONLY representation the autorun drain's
-  dependency gate reads (`idc_autorun_drain._blocked_by_numbers`); the engine's
-  `link --kind blocks` records the journaled marker edge but does **not** create it (#158) —
-  substituting the engine link here leaves the child looking unblocked, claimable before its
-  parent finishes.
+- **block(issue, by)** — `idc_transition.py … move --num "$NUM" --to-status Blocked` + the engine's
+  `link --parent "$BY" --child "$NUM" --kind blocks`. That single sanctioned `link` op writes BOTH
+  representations — the **native** GitHub blocked-by edge (the ONLY representation the autorun drain's
+  dependency gate reads, `idc_autorun_drain._blocked_by_numbers`) AND the journaled marker — and
+  fail-closes if the native edge does not land, so the child is genuinely blocked (not claimable before
+  its parent finishes). Never a raw `dependencies/blocked_by` POST (the interlock denies it during a
+  command).
 - **close(issue)** — a verdict-backed close routes through the engine:
   `idc_transition.py … close --num "$NUM" --verdict <verdict.json> --pr <PR>` — the guarded,
   journaled path to `Done` (verdict must validate, pass, own the item and the PR, with every

@@ -597,14 +597,16 @@ def scan(ctx):
     # composes from data already in hand — the loaded board + the branch scans' cached merge verdicts —
     # so it adds NO board read or gh call (the single-board-read promise).
     #   OPEN inbox  = a board item with stage == "Recirculation" and status != "Done".
-    #   OPEN branch = a `recirculate/*` branch (local or remote) that is NOT merged (an open-PR proxy on
-    #                 the filesystem backend). Judged via branch_merged (server tip for remotes).
+    #   OPEN branch = a `recirculate/*` OR `recirc/*` branch (local or remote) that is NOT merged (an
+    #                 open-PR proxy on the filesystem backend). Judged via branch_merged (server tip for
+    #                 remotes). BOTH prefixes are IDC recirc branches (IDC_NAME_RE), so both must resume.
+    _recirc_pfx = ("recirculate/", "recirc/")
     open_inbox = [bi for bi in board
                   if bi.get("stage") == "Recirculation" and bi.get("status") != "Done"]
     open_recirc = [b for b in locals_
-                   if b.startswith("recirculate/") and not branch_merged(b, remote=False)[0]]
+                   if b.startswith(_recirc_pfx) and not branch_merged(b, remote=False)[0]]
     open_recirc += [b for b in remotes_
-                    if b.startswith("recirculate/") and not branch_merged(b, remote=True)[0]]
+                    if b.startswith(_recirc_pfx) and not branch_merged(b, remote=True)[0]]
     if open_inbox and open_recirc:
         b0 = sorted(open_recirc)[0]
         n_inbox = len(open_inbox)

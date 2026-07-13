@@ -1129,12 +1129,19 @@ def _fs_set_status(machine, tracker, num, status):
 
 def _fs_set_field(tracker, num, field, value):
     """Set a NON-Status field (`Wave`/`Phase`/`Domain`/`Stage`) on the filesystem tracker via its `set`
-    op — the fs analogue of _gh_set_field. Status is a transition (route through `move`)."""
-    if field == "Status":
-        raise TransitionError("set-field: Status is a transition — use `move --to-status`, not set-field")
+    op, then POSITIVELY READ THE VALUE BACK and confirm it landed — the fs analogue of _gh_set_field
+    (read-back parity). (Field-name / Status validation happens in the dispatcher BEFORE this.)"""
     r = _trk(tracker, "set", "--num", str(num), "--field", field, "--value", value)
     if r.returncode != 0:
         raise TransitionError(f"set-field {field}={value!r} on #{num} failed: {r.stderr.strip()[:160]}")
+    rb = _trk(tracker, "show", "--num", str(num), "--field", field)
+    if rb.returncode != 0:
+        raise TransitionError(f"set-field read-back of #{num} {field} failed: {rb.stderr.strip()[:160]}")
+    got = rb.stdout.strip()
+    if got != value:
+        raise TransitionError(
+            f"set-field read-back divergence: #{num} {field} is {got!r} after the write, "
+            f"expected {value!r} — refusing to report a write that did not land")
 
 
 def _fs_comment(tracker, num, body):
@@ -1163,17 +1170,25 @@ def _fs_remove_dep(tracker, child, parent):
 
 
 # ── github backend ─────────────────────────────────────────────────────────────────────────────
-def _gh_create(machine, op, owner, project, repo, spec, title, body, stage_over, status_over):
+def _gh_create(machine, op, owner, project, repo, spec, title, body, stage_over, status_over,
+               labels=None, issue_type=None):
     target = spec.get("target") or {}
     stage = stage_over or target.get("stage") or ""
     status = status_over or target.get("status") or ""
     validate_target(machine, op, stage, status)  # SAME gate as fs — github stage/terminal/worked checks too
     # create_item is the ATOMIC github primitive: it sets Stage AND Status together and DISCARDS a
-    # partial (Stage-without-Status) create, returning the item id only once both landed. That
+    # partial (Stage-without-Status) create, returning the PROJECT-ITEM id only once both landed. That
     # atomic-verified return IS the create read-back for github — no extra whole-board fetch (which
     # would burn GraphQL budget and defeat the item-id cache).  Referenced by attribute so the
     # verdict-filer unit test's monkeypatch of idc_gh_board.create_item still intercepts it.
-    return idc_gh_board.create_item(owner, project, repo, title, body, stage, status)
+    # labels/type are passed ONLY when present, so a create with neither still calls create_item with
+    # its original 7-positional signature (unchanged for every existing caller/test double).
+    extra = {}
+    if labels:
+        extra["labels"] = labels
+    if issue_type:
+        extra["issue_type"] = issue_type
+    return idc_gh_board.create_item(owner, project, repo, title, body, stage, status, **extra)
 
 
 def _gh_item_id(ctx, num):
@@ -1231,14 +1246,21 @@ def _gh_link(ctx, parent, child, kind):
 
 
 def _gh_set_field(ctx, num, field, value):
-    """Set a NON-Status single-select field (`Wave`/`Phase`/`Domain`/`Stage`) on github, then READ
-    BACK and verify Status/Stage are untouched — the sanctioned `set-field` write primitive (replaces
-    the raw `gh project item-edit` recipe the interlock now denies). Status is NOT settable here — a
-    Status change is a machine transition; route it through `move` so it is journaled + guarded."""
-    if field == "Status":
-        raise TransitionError("set-field: Status is a transition — use `move --to-status`, not set-field")
+    """Set a NON-Status single-select field (`Wave`/`Phase`/`Domain`/`Stage`) on github, then POSITIVELY
+    READ THE VALUE BACK and confirm it landed — the sanctioned `set-field` write primitive (replaces the
+    raw `gh project item-edit` recipe the interlock now denies), with the same read-back parity as
+    `move`. (Field-name / Status validation happens in the backend-agnostic dispatcher BEFORE this.) The
+    option value is validated board-side by set_single_select (an option not defined for the field
+    raises). A read-back that cannot be read (BoardReadError) propagates → resumable, never a blind
+    success; a read-back that does not equal the request is a hard divergence."""
     iid = _gh_item_id(ctx, num)
     idc_gh_board.set_single_select(ctx["owner"], ctx["project"], ctx["repo"], iid, field, value)
+    obs = idc_gh_board.fetch_item(iid, ctx["repo"])
+    got = obs.get(field.lower())
+    if got != value:
+        raise TransitionError(
+            f"set-field read-back divergence: #{num} {field} is {got!r} after the write, "
+            f"expected {value!r} — refusing to report a write that did not land")
 
 
 def _gh_remove_dep(ctx, child, parent):
@@ -1281,9 +1303,22 @@ def set_status(ctx, machine, num, status):
         _fs_set_status(machine, ctx["tracker"], num, status)
 
 
+SETTABLE_FIELDS = ("Wave", "Phase", "Domain", "Stage")   # the non-Status single-select fields set-field owns
+
+
 def set_field(ctx, num, field, value):
     """Set a NON-Status single-select field (Wave/Phase/Domain/Stage) — the `set-field` op, both
-    backends. Status is refused (a transition — use `move`)."""
+    backends. VALIDATES the field name (and, for Stage, the value against the machine's stage domain)
+    BEFORE any write, then writes and positively reads the value back. Status is refused (a transition —
+    use `move`); an unknown field is refused before touching the board."""
+    if field == "Status":
+        raise TransitionError("set-field: Status is a transition — use `move --to-status`, not set-field")
+    if field not in SETTABLE_FIELDS:
+        raise TransitionError(
+            f"set-field: {field!r} is not a settable single-select field "
+            f"(expected one of {list(SETTABLE_FIELDS)}) — refusing before any write")
+    if field == "Stage":                                 # a Stage value must be within the machine domain
+        check_stage_legal(ctx["machine"], value)
     if ctx["backend"] == "github":
         _gh_set_field(ctx, num, field, value)
     else:
@@ -1339,18 +1374,27 @@ def run(op, ctx, **kw):
         to_stage = kw.get("stage") or target.get("stage") or ""
         to_status = kw.get("status") or target.get("status") or ""
         if backend == "github":
-            result = _gh_create(machine, op, ctx["owner"], ctx["project"], ctx["repo"], spec,
-                                 kw["title"], kw.get("body", ""), kw.get("stage"), kw.get("status"))
-        else:
-            result = _fs_create(machine, op, ctx["tracker"], spec, kw["title"], kw.get("body", ""),
-                                kw.get("stage"), kw.get("status"))
-        journal_num = result
-        journal_extra = {}
-        if backend == "github":
-            journal_num = _github_created_issue_number(result, ctx["repo"])
-            journal_extra["project_item_id"] = result
+            # The door RETURNS the integer ISSUE NUMBER (the adapter contract), not the PVTI
+            # project-item id. create_item mints the item (applying labels/type) and returns the PVTI;
+            # we resolve number → journal (keeping the PVTI internally) → return the number. A board
+            # error while resolving propagates (resumable exit 3); a genuinely absent number refuses.
+            item_id = _gh_create(machine, op, ctx["owner"], ctx["project"], ctx["repo"], spec,
+                                 kw["title"], kw.get("body", ""), kw.get("stage"), kw.get("status"),
+                                 labels=kw.get("labels"), issue_type=kw.get("type"))
+            item = idc_gh_board.fetch_item(item_id, ctx["repo"])
+            issue_num = _journal_item((item.get("content") or {}).get("number"))
+            if issue_num is None:
+                raise TransitionError(
+                    f"create: could not resolve the issue number for new item {item_id} "
+                    "— refusing to return a non-issue id (the door's contract is the issue number)")
+            journal_append(ctx["repo"], op, backend, tracker_rel,
+                           dict(kw, num=issue_num, to_stage=to_stage, to_status=to_status,
+                                project_item_id=item_id))
+            return issue_num
+        result = _fs_create(machine, op, ctx["tracker"], spec, kw["title"], kw.get("body", ""),
+                            kw.get("stage"), kw.get("status"))
         journal_append(ctx["repo"], op, backend, tracker_rel,
-                       dict(kw, num=journal_num, to_stage=to_stage, to_status=to_status, **journal_extra))
+                       dict(kw, num=result, to_stage=to_stage, to_status=to_status))
         return result
 
     elif kind == "transition":
@@ -1361,8 +1405,27 @@ def run(op, ctx, **kw):
             if not to_status:
                 raise TransitionError(f"{op}: --to-status is required")
         cur = get_item(ctx, num)
+        is_unblock_by = (op == "unblock" and kw.get("by") is not None)
+        # `unblock --by GATE`: ALWAYS remove-and-verify the `GATE blocks #num` dependency FIRST
+        # (idempotent — already-absent is treated as done), regardless of the pointer's current Status,
+        # and BEFORE the idempotent-Status short-circuit below — so a pointer that is already Todo but
+        # still carries a STALE blocked_by edge still gets the edge removed (the Fix-5 gap: the old
+        # dispatcher early-returned on Status==Todo before ever removing the dependency). A terminal
+        # (Done) item is never unblockable, so guard that before the removal. If removal (or its verify)
+        # fails, it raises BEFORE any Status write (the pointer stays Blocked); a rerun re-removes
+        # (no-op) and completes the remaining Blocked->Todo move.
+        if is_unblock_by:
+            if cur["status"] == machine.get("terminal_status"):
+                raise TransitionError(
+                    f"illegal transition: #{num} is {cur['status']!r} (terminal) — {op} cannot resurrect it")
+            remove_dependency(ctx, num, kw["by"])
         if cur["status"] == to_status:
-            return # Idempotent transition is a no-op, do not journal
+            # Idempotent Status: a plain transition already at target is a silent no-op. For unblock --by
+            # the guarded dependency removal above DID run, so journal the real operation (unblocked_by).
+            if is_unblock_by:
+                journal_append(ctx["repo"], op, backend, tracker_rel,
+                               dict(kw, to_status=to_status), cur=cur)
+            return
         if cur["status"] == machine.get("terminal_status"):
             raise TransitionError(
                 f"illegal transition: #{num} is {cur['status']!r} (terminal) — {op} cannot resurrect it")
@@ -1373,12 +1436,6 @@ def run(op, ctx, **kw):
                 f"but #{num} is {cur['status']!r}")
         refuse_terminal(machine, op, to_status)
         check_worked_state(machine, op, cur["stage"], to_status)
-        # `unblock --by GATE`: remove the `GATE blocks #num` dependency FIRST and verify it is absent,
-        # THEN move Status Blocked -> Todo. If dependency removal (or its verify) fails, this raises
-        # BEFORE the Status write, so the pointer stays Blocked; if the Status write later fails, a
-        # rerun re-removes (idempotent, already absent) and completes the remaining Status transition.
-        if op == "unblock" and kw.get("by") is not None:
-            remove_dependency(ctx, num, kw["by"])
         set_status(ctx, machine, num, to_status)
         if spec.get("records_agent") and kw.get("agent"):
             record_owner(ctx, num, kw["agent"])
@@ -1520,6 +1577,11 @@ def build_parser():
         c.add_argument("--body", default="")
         c.add_argument("--stage", default=None, help="override the machine default target Stage")
         c.add_argument("--status", default=None, help="override the machine default target Status")
+        c.add_argument("--type", default=None, dest="type",
+                       help="issue type — applied as a `type:<T>` label (adapter's `type` input)")
+        c.add_argument("--labels", action="append", default=None,
+                       help="label(s) to apply to the created issue (repeatable or a comma-list, "
+                            "e.g. --labels operator-action)")
 
     cl = sub.add_parser("claim")
     cl.add_argument("--num", type=int, required=True)
@@ -1590,7 +1652,8 @@ def main():
     kw = {}
     op = args.op
     if op in ("create-ticket", "create-pointer", "recirculate-intake"):
-        kw = {"title": args.title, "body": args.body, "stage": args.stage, "status": args.status}
+        kw = {"title": args.title, "body": args.body, "stage": args.stage, "status": args.status,
+              "type": args.type, "labels": args.labels}
     elif op == "claim":
         kw = {"num": args.num, "agent": args.agent}
     elif op == "move":

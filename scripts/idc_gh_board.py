@@ -235,8 +235,29 @@ def _field_and_option(fields, field_name, option_name):
     return None, None
 
 
-def create_item(owner, project, repo, title, body, stage, status):
+def _norm_labels(labels):
+    """Normalize a labels argument (a list, a single string, a comma-list, or None) to a de-duped list
+    of non-empty label names — so `--labels operator-action`, `--labels a,b`, and a repeated `--labels`
+    all resolve the same way. Order-preserving."""
+    if not labels:
+        return []
+    if isinstance(labels, str):
+        labels = [labels]
+    out = []
+    for item in labels:
+        for part in str(item).split(","):
+            part = part.strip()
+            if part and part not in out:
+                out.append(part)
+    return out
+
+
+def create_item(owner, project, repo, title, body, stage, status, labels=None, issue_type=None):
     """Create a board item with Stage AND Status set together — ATOMICALLY.
+
+    `labels` (a list / comma-list / single string) are applied to the backing issue at create time;
+    `issue_type` is applied as a `type:<issue_type>` label (the adapter's `type` input). Both are how a
+    gate issue carries its `operator-action` label through the sanctioned door.
 
     Creates the backing issue, adds it to project #<project>, then sets Stage and Status as one
     logical unit. If ANY step after issue creation fails, DISCARDS the partial item (deletes the
@@ -267,8 +288,14 @@ def create_item(owner, project, repo, title, body, stage, status):
     if not (status_fid and status_oid):
         raise BoardWriteError(f"Status field or option {status!r} not on the board — refusing to create")
 
-    # 1. Create the backing issue. Nothing to discard yet, so a failure here just propagates.
-    url = _gh(["issue", "create", "--title", title, "--body", body], repo).strip()
+    # 1. Create the backing issue (with any labels / type label). Nothing to discard yet, so a failure
+    #    here just propagates.
+    issue_args = ["issue", "create", "--title", title, "--body", body]
+    for lbl in _norm_labels(labels):
+        issue_args += ["--label", lbl]
+    if issue_type:
+        issue_args += ["--label", f"type:{issue_type}"]
+    url = _gh(issue_args, repo).strip()
     url = url.splitlines()[-1] if url else ""
     if not url:
         raise BoardWriteError("issue create returned no URL — refusing to continue")

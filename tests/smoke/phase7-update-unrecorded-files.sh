@@ -26,6 +26,7 @@ printf 'w\n' > "$WORK/WORKFLOW.md"
 printf 'c\n' > "$WORK/WORKFLOW-config.yaml"
 printf 't\n' > "$WORK/docs/workflow/tracker-config.yaml"
 python3 "$HELPER" stamp --repo "$WORK" --out "$WORK/docs/workflow/install-receipt.yaml" \
+  --plugin-version 3.3.0 \
   --customized WORKFLOW-config.yaml --customized docs/workflow/tracker-config.yaml \
   WORKFLOW.md WORKFLOW-config.yaml docs/workflow/tracker-config.yaml >/dev/null \
   || fail "could not stamp the old-version receipt"
@@ -53,6 +54,7 @@ assert "WORKFLOW.md" not in u, f"receipt-listed WORKFLOW.md wrongly unrecorded: 
 cp "$PLUGIN/templates/workflow-machine.yaml" "$WORK/docs/workflow/workflow-machine.yaml" \
   || fail "could not lay down the machine template"
 python3 "$HELPER" stamp --repo "$WORK" --out "$WORK/docs/workflow/install-receipt.yaml" \
+  --plugin-version 4.0.0 \
   --customized WORKFLOW-config.yaml --customized docs/workflow/tracker-config.yaml \
   WORKFLOW.md WORKFLOW-config.yaml docs/workflow/tracker-config.yaml \
   docs/workflow/workflow-machine.yaml >/dev/null || fail "could not re-stamp with the machine file"

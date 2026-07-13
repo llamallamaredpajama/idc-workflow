@@ -28,7 +28,10 @@ Usage:
                          inferred as ROOT's parent when ROOT looks like .../idc/<version>.
     --json               emit dataclasses.asdict(FreshnessResult) instead of the legacy one-liner.
 Exit 0 = current, development-current, or unknown (safe to proceed); 4 = stale-runtime (running
-version is behind the repo's receipt or the installed cache); 2 = usage error.
+version is behind the repo's receipt or the installed cache); 2 = usage error OR an invalid
+receipt (a `receipt_version: 2` repo receipt whose `plugin_version` is missing or not X.Y.Z — a
+v1 receipt, or no receipt at all, is NOT invalid: it yields required_version=None, the documented
+pre-guard migration path, and is allowed).
 """
 from __future__ import annotations
 
@@ -39,6 +42,13 @@ import re
 import sys
 
 _VER = re.compile(r"^\d+(\.\d+)*$")
+
+
+class InvalidReceiptError(ValueError):
+    """Raised when a repo's install-receipt.yaml cannot be trusted for freshness evaluation:
+    specifically, a `receipt_version: 2` receipt whose `plugin_version` is missing or does not
+    match `_VER`. A v1 receipt (or no receipt) is NOT an error — it is the documented pre-guard
+    migration path and yields required_version=None (see read_required_version)."""
 
 
 def version_tuple(v: str) -> tuple[int, ...]:
@@ -84,16 +94,36 @@ def evaluate(plugin_root: str, repo: str | None = None,
 
 
 def read_required_version(repo: str | None) -> str | None:
+    """Read the repo's required plugin_version from its install receipt.
+
+    Reads `receipt_version` FIRST to decide how to treat a missing/malformed `plugin_version`:
+      * receipt_version != "2" (v1, or absent/garbled — no receipt file at all also lands here)
+        — no requirement was ever recorded; this is the documented migration path, so return
+        None (allowed) rather than erroring.
+      * receipt_version == "2" — plugin_version is a REQUIRED, binding field. Missing or not
+        matching `_VER` means the receipt itself is invalid (never fail open to "no
+        requirement"); raise so the CLI can surface it as exit 2.
+    """
     if not repo:
         return None
     receipt = os.path.join(repo, "docs", "workflow", "install-receipt.yaml")
     if not os.path.isfile(receipt):
         return None
+    receipt_version: str | None = None
+    plugin_version: str | None = None
     for line in open(receipt, "r", encoding="utf-8"):
-        if line.startswith("plugin_version:"):
-            value = line.split(":", 1)[1].strip()
-            return value if _VER.fullmatch(value) else None
-    return None
+        if line.startswith("receipt_version:"):
+            receipt_version = line.split(":", 1)[1].strip()
+        elif line.startswith("plugin_version:"):
+            plugin_version = line.split(":", 1)[1].strip()
+    if receipt_version != "2":
+        return None
+    if not plugin_version or not _VER.fullmatch(plugin_version):
+        raise InvalidReceiptError(
+            f"{receipt}: receipt_version: 2 requires a valid plugin_version (X.Y[.Z...]), "
+            f"got {plugin_version!r}"
+        )
+    return plugin_version
 
 
 def cache_version_root(plugin_root: str) -> bool:
@@ -144,7 +174,11 @@ def main(argv: list[str]) -> int:
               "[--cache-root DIR] [--json]", file=sys.stderr)
         return 2
 
-    result = evaluate(plugin_root, repo=repo, cache_root=cache_root)
+    try:
+        result = evaluate(plugin_root, repo=repo, cache_root=cache_root)
+    except InvalidReceiptError as exc:
+        print(f"idc-freshness: invalid receipt: {exc}", file=sys.stderr)
+        return 2
 
     if as_json:
         print(json.dumps(dataclasses.asdict(result), indent=2, sort_keys=True))

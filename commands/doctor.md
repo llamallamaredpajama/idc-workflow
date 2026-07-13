@@ -82,20 +82,27 @@ A partial tree is a FAIL that lists the missing paths. Fix hint: run `/idc:init`
 
 **5 — Install receipt present.** PASS if `docs/workflow/install-receipt.yaml` exists and
 parses with the expected keys (`receipt_version` — `1` legacy or `2`, `fingerprint_method:
-sha256`, `files[]`, and — for a `2` receipt — `plugin_version`, the version that last stamped
-this repo and the value `/idc:update`'s stale-runtime guard reads as this repo's required
-version):
+sha256`, `files[]`, and — for a `2` receipt — a valid `plugin_version`, the version that last
+stamped this repo and the value `/idc:update`'s stale-runtime guard reads as this repo's
+required version). A `2` receipt is **not clean** without a `plugin_version` matching
+`X.Y.Z` — the check below enforces that rule rather than only checking `fingerprint_method`:
 ```bash
 test -f docs/workflow/install-receipt.yaml \
   && grep -Eq '^fingerprint_method:[[:space:]]*sha256' docs/workflow/install-receipt.yaml \
+  && { ! grep -Eq '^receipt_version:[[:space:]]*2$' docs/workflow/install-receipt.yaml \
+       || grep -Eq '^plugin_version:[[:space:]]*[0-9]+\.[0-9]+\.[0-9]+$' docs/workflow/install-receipt.yaml; } \
   && echo receipt-ok
 ```
 If absent → **SKIP** with the note "pre-receipt install — run `/idc:init` to graduate a
 receipt" (a filesystem-only or pre-receipt repo is valid; do not hard-FAIL). A `receipt_version:
 1` receipt (no `plugin_version`) still PASSes here — it has no recorded required-version yet
 and is migrated to `2` the next time `/idc:init` or `/idc:update` stamps a fresh one; do not
-treat it as drift. Do **not** recompute or verify fingerprints here — that is update's job;
-doctor only checks presence and parse.
+treat it as drift. A `receipt_version: 2` receipt with a missing or malformed `plugin_version`
+(the check above does not print `receipt-ok`) → **FAIL** with the note "invalid v2 receipt —
+missing/malformed plugin_version; this is the same invalid-receipt state `/idc:update`'s
+freshness guard refuses to run against (exit 2) — repair or re-stamp it (`/idc:init` or
+`/idc:update`) before continuing." Do **not** recompute or verify fingerprints here — that is
+update's job; doctor only checks presence and parse.
 
 **6 — Pi runtime (optional).** The IDC Pi runtime (`runtime/pi/`, vendored) needs **Bun** to
 boot the coms-net hub + role harness; the **Pi agent** itself (the `pi` binary / npm package
@@ -157,9 +164,10 @@ echo "running ${run_ver:-unknown}; marketplace ${clone_ver:-absent}"
 - **PASS** — `run_ver` is readable and the clone is `absent` or equals it. Note the running
   version, e.g. "running 2.1.0".
 - **PASS with ⚠** — clone version differs from the running version: the cache is **stale**. Fix
-  hint: `claude plugin update idc@idc-workflow --scope project`, then re-enable (or restart the
-  session) to rebuild the cache. (Still counts as PASS — a stale cache is a heads-up, not a
-  broken repo.)
+  hint: `claude plugin update idc@idc-workflow --scope project`, then run `/reload-plugins` (or
+  restart the session) to rebuild the cache. **`/clear` does not reload plugin commands or
+  hooks** and will not fix this — it only clears conversation context. (Still counts as PASS — a
+  stale cache is a heads-up, not a broken repo.)
 - **SKIP** — `run_ver` unreadable (a managed / `--plugin-dir` load with no manifest on the cache
   path). This row is **advisory and is never FAIL.**
 

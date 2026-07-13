@@ -102,26 +102,10 @@ def fingerprint(abs_path: str) -> str:
 
 # --- stamp ------------------------------------------------------------------------------------
 
-def default_plugin_version() -> str | None:
-    """Auto-resolve the plugin version from THIS script's own plugin root — the same
-    self-discovery `governed_expected_paths()` uses. Lets callers that predate --plugin-version
-    (or don't know which checkout is running) keep stamping a valid v2 receipt without every
-    call site having to resolve + pass it explicitly."""
-    plugin_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    manifest = os.path.join(plugin_root, ".claude-plugin", "plugin.json")
-    try:
-        with open(manifest, "r", encoding="utf-8") as f:
-            version = json.load(f).get("version")
-    except (OSError, ValueError):
-        return None
-    return version if isinstance(version, str) else None
-
-
-def resolve_plugin_version(explicit: str | None) -> str:
-    version = explicit if explicit is not None else default_plugin_version()
-    if not version:
-        die("--plugin-version is required: could not auto-resolve one from "
-            "<plugin-root>/.claude-plugin/plugin.json — pass it explicitly")
+def validate_plugin_version(version: str) -> str:
+    """`--plugin-version` is REQUIRED and explicitly supplied by every caller (no auto-resolve
+    fallback) — a v2 receipt must never be stamped with a silently-guessed version. Validate the
+    format only."""
     if not PLUGIN_VERSION_RE.fullmatch(version):
         die(f"invalid --plugin-version {version!r}: must match X.Y.Z")
     return version
@@ -129,7 +113,7 @@ def resolve_plugin_version(explicit: str | None) -> str:
 
 def cmd_stamp(args: argparse.Namespace) -> int:
     repo = os.path.abspath(args.repo)
-    plugin_version = resolve_plugin_version(args.plugin_version)
+    plugin_version = validate_plugin_version(args.plugin_version)
     # Files the operator kept customized at /idc:update's diff-and-ask: recorded state:
     # customized so the NEXT update asks again instead of silently re-stamping over them.
     customized = {norm_rel(p) for p in (args.customized or [])}
@@ -375,11 +359,11 @@ def main(argv: list[str]) -> int:
     sp.add_argument("--repo", required=True, help="repo root the paths are relative to")
     sp.add_argument("--out", help="write the receipt here (default: stdout)")
     sp.add_argument("--written-by", default="idc:init", help="written_by value (default idc:init)")
-    sp.add_argument("--plugin-version", metavar="X.Y.Z",
-                    help="the running plugin's version, stamped into the v2 receipt as "
+    sp.add_argument("--plugin-version", metavar="X.Y.Z", required=True,
+                    help="REQUIRED. The running plugin's version, stamped into the v2 receipt as "
                          "plugin_version (the /idc:update stale-runtime guard's required-version "
-                         "contract). Default: auto-resolved from this script's own "
-                         "<plugin-root>/.claude-plugin/plugin.json.")
+                         "contract). Never auto-resolved or guessed — the caller must pass its "
+                         "own real running version explicitly.")
     sp.add_argument("--customized", action="append", metavar="RELPATH",
                     help="mark this stamped file state: customized (repeatable) — for files the "
                          "operator kept at update's diff-and-ask, so the next update asks again")

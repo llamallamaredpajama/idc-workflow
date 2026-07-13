@@ -75,6 +75,15 @@ echo "$out" | grep -Eq 'missing[[:space:]]+sub/nested.txt' || fail "removed sub/
 printf 'receipt_version: 1\nfingerprint_method: md5\nfiles: not-a-list\n' > "$RECEIPT"
 python3 "$HELPER" verify --repo "$SBX" >/dev/null 2>&1 && fail "verify must exit non-zero on an invalid receipt"
 
+# --- verify: a WELL-FORMED v1 receipt (no plugin_version — predates the repo contract) still ---
+# parses + verifies cleanly — read-compat must survive the v2/plugin_version hardening. Distinct
+# from the intentionally-INVALID v1 receipt directly above (bad fingerprint_method + non-list
+# files:): this one is a legitimate legacy receipt an old /idc:init could have written.
+V1FP="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$SBX/WORKFLOW.md")"
+printf 'receipt_version: 1\nfingerprint_method: sha256\nwritten_by: idc:init\nfiles:\n  - path: WORKFLOW.md\n    fingerprint: %s\n    state: stamped\n' "$V1FP" > "$RECEIPT"
+out="$(python3 "$HELPER" verify --repo "$SBX")" || fail "verify exited non-zero on a well-formed v1 receipt (v1 read-compat broken)"
+echo "$out" | grep -Eq 'unchanged[[:space:]]+WORKFLOW.md' || fail "well-formed v1 receipt: WORKFLOW.md not reported unchanged"
+
 # --- verify: a missing receipt fails loud ---------------------------------------------------
 rm -f "$RECEIPT"
 python3 "$HELPER" verify --repo "$SBX" >/dev/null 2>&1 && fail "verify must exit non-zero on a missing receipt"
@@ -93,5 +102,33 @@ awk '/path: WORKFLOW.md/{f=1} f&&/state:/{print; exit}' "$CUSTRECEIPT" | grep -q
   || fail "--customized WORKFLOW.md did not record state: customized"
 awk '/path: sub\/nested.txt/{f=1} f&&/state:/{print; exit}' "$CUSTRECEIPT" | grep -q 'stamped' \
   || fail "non-customized file should keep state: stamped"
+
+# --- doctor.md Row 5's receipt-ok check must enforce the rule it states (Finding 5): a
+# receipt_version: 2 receipt without a valid plugin_version is NOT clean. This is the exact
+# snippet from commands/doctor.md's Row 5 — keep the two in sync if either changes.
+receipt_ok() {
+  ( cd "$SBX" && \
+    test -f docs/workflow/install-receipt.yaml \
+    && grep -Eq '^fingerprint_method:[[:space:]]*sha256' docs/workflow/install-receipt.yaml \
+    && { ! grep -Eq '^receipt_version:[[:space:]]*2$' docs/workflow/install-receipt.yaml \
+         || grep -Eq '^plugin_version:[[:space:]]*[0-9]+\.[0-9]+\.[0-9]+$' docs/workflow/install-receipt.yaml; } \
+    && echo receipt-ok )
+}
+
+printf 'receipt_version: 2\nplugin_version: 4.1.0\nfingerprint_method: sha256\nwritten_by: test\nfiles:\n' > "$RECEIPT"
+[ "$(receipt_ok)" = "receipt-ok" ] \
+  || fail "doctor.md Row 5 check must print receipt-ok for a well-formed v2 receipt"
+
+printf 'receipt_version: 2\nfingerprint_method: sha256\nwritten_by: test\nfiles:\n' > "$RECEIPT"
+[ -z "$(receipt_ok)" ] \
+  || fail "doctor.md Row 5 check must NOT print receipt-ok for a v2 receipt missing plugin_version (Finding 5 regression)"
+
+printf 'receipt_version: 2\nplugin_version: not-semver\nfingerprint_method: sha256\nwritten_by: test\nfiles:\n' > "$RECEIPT"
+[ -z "$(receipt_ok)" ] \
+  || fail "doctor.md Row 5 check must NOT print receipt-ok for a v2 receipt with a non-semver plugin_version"
+
+printf 'receipt_version: 1\nfingerprint_method: sha256\nwritten_by: test\nfiles:\n' > "$RECEIPT"
+[ "$(receipt_ok)" = "receipt-ok" ] \
+  || fail "doctor.md Row 5 check must still print receipt-ok for a v1 receipt (no plugin_version required)"
 
 echo "PASS: receipt helper stamps an init-compatible receipt + verify classifies drift (fail-loud)"

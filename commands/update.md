@@ -37,10 +37,17 @@ run**, so a half-finished update can never masquerade as complete.
    ```
    If `"verdict": "stale"` (exit 4), **STOP immediately** and tell the operator: this session's
    IDC version is older than either this repo's install receipt or the installed plugin cache —
-   run `/reload-plugins` (or restart the session) and re-run `/idc:update`. Do **not** proceed on
-   stale logic. `"current"` or `"development-current"` (e.g. a `--plugin-dir` dev load newer than
-   the repo's receipt) → proceed. A plugin update may also ship new commands/skills an
-   already-running session won't see until reload — same fix.
+   run `/reload-plugins` (or restart the session) and re-run `/idc:update`. **`/clear` does not
+   reload plugin commands or hooks** — it only clears conversation context, not the cached plugin
+   bundle — so `/clear` alone will NOT fix a stale session; only `/reload-plugins` or a full
+   restart re-reads the plugin. Do **not** proceed on stale logic. `"current"` or
+   `"development-current"` (e.g. a `--plugin-dir` dev load newer than the repo's receipt) →
+   proceed. A plugin update may also ship new commands/skills an already-running session won't see
+   until reload — same fix. If the command instead exits `2` (invalid receipt — a
+   `receipt_version: 2` receipt whose `plugin_version` is missing or malformed), **STOP**: the
+   repo's install receipt is corrupt or hand-edited, not stale — report this to the operator and do
+   not guess a version or proceed; the receipt needs manual repair (or deletion, to graduate a
+   fresh one) before `/idc:update` can run safely.
 3. **Scope-aware plugin update (terminal step, done before this command).** `/idc:update` only
    resyncs this repo's scaffold files; pulling the new *plugin* version itself is a terminal
    command — `claude plugin update idc@idc-workflow --scope project`. The bare

@@ -29,23 +29,26 @@ this handoff; if they disagree, report the conflict before changing code.
 | Baseline | — | `dd170ff` | plan+runbook+forensics |
 | 1. Runtime freshness → repo receipt | ✅ DONE | `dd170ff..50c5bcc` (`5629c3e`,`2c7c195`,`50c5bcc`) | Spec PASS / Quality APPROVED (3 rounds) |
 | 2. Command lifecycle envelope | ✅ DONE | `50c5bcc..503b6c7` (`6401fb4`,`d723453`,`f1402af`,`fe7a771`,`939ae49`,`503b6c7`) | Spec PASS / Quality APPROVED (6 rounds) |
-| 3. Hard mutation interlock + PR finisher | ✅ DONE (see note) | `503b6c7..HEAD` (22 commits through the fourth rubber-stamp fix; first rubber-stamp fix `c484d1d`) | Four rubber-stamp reviews found actionable gaps. Their reported cases are fixed at the current Task-3 head; no independent post-fix verdict is recorded here. |
+| 3. Hard mutation interlock + PR finisher | ✅ DONE (see note) | `503b6c7..HEAD` (23 commits through the fifth rubber-stamp fix; first rubber-stamp fix `c484d1d`) | Five rubber-stamp reviews found actionable gaps. Their reported cases are fixed at the current Task-3 head; no independent post-fix verdict is recorded here. |
 | 4. Exact-once intake manifest | ⏳ TODO | — | — |
 | 5. Next-action oracle | ⏳ TODO | — | — |
 | 6. `/idc:intake` + command-specific closeouts | ⏳ TODO | — | — |
 | 7. Legacy gate repair (no fake history) | ⏳ TODO | — | — |
 | 8. Release gate (docs, 4.1.0 bump, hook-fidelity + e2e proof) | ⏳ TODO | — | — |
 
-**Latest Task-3 implementation checkpoint: PASS** — real `/bin/bash` 3.2.57 ran the round-19
+**Latest Task-3 implementation checkpoint: PASS** — real `/bin/bash` 3.2.57 ran the expanded round-20
 execution-surface regression plus every prior rubber-stamp command-head, public-contract,
-privilege-wrapper, lifecycle-door, and full interlock scenario successfully. An explicit break at the
-central execution-surface boundary made the focused scenario fail; restoring that exact line returned
-green. The final pre-commit `/bin/bash tests/smoke/run-all.sh` exited 0 with
+privilege-wrapper, lifecycle-door, and full interlock scenario successfully. Round 20 replaced raw REST
+flag scans with normalized option/value ownership, retained quoted-many-word expansion cardinality,
+recursed through deferred traps and direct shell-file heads, and separated inert array assignments from
+command groups. An explicit break at the central execution-surface boundary made the focused scenario
+fail across those paths; restoring that exact line returned green. The final pre-commit
+`/bin/bash tests/smoke/run-all.sh` exited 0 with
 `idc smoke: ALL GREEN` (37 behavior · 22 mixed · 10 doc), and `lint-references: CLEAN` remained the
 immediate pre-commit gate. This is implementation verification evidence, not a clean independent review
 verdict.
 
-### Task 3 note (why it took 14 review rounds plus four rubber-stamp fixes, and its terminal posture)
+### Task 3 note (why it took 14 review rounds plus five rubber-stamp fixes, and its terminal posture)
 Task 3 is the security-critical guard that must deny the incident's raw `gh` mutations and
 `bash <script>` indirection during an active IDC command, without breaking legitimate work. The
 independent reviewer found real bypasses across many rounds (dynamic gh endpoints, command
@@ -72,12 +75,15 @@ wrapper/assignment/control-word interleaving class by construction.
   then reproduced dequoted API-path bypasses, bare-shell stdin, computed executable heads, static/dynamic
   `eval`, and heredoc body confusion. The fourth rubber stamp found that unquoted expansion heads could
   split into a complete mutation, `bash|sh|zsh -s` mistook a later argument for a script, and compound
-  groups dropped their owning stdin. The current `_ExecutionSurfaceModel` keeps dequoted argv,
-  quoted-vs-splitting expansion roles, parenthesis/brace-group ownership, outer-to-inner redirects,
-  pipe provenance, and raw GraphQL quote style on one path. It recursively follows static executable
-  payloads, never guesses the stdout of an unquoted executable substitution, and fails closed when
-  code-bearing stdin is opaque; quoted computed reads, data arguments, and heredoc documentation remain
-  inert. This handoff records the fixes, not an independent post-fix rubber-stamp verdict.
+  groups dropped their owning stdin. The fifth rubber stamp then found raw REST option matching,
+  quoted expansions that can still yield many words, uninspected deferred traps and direct shell-file
+  heads, plus array assignments mistaken for groups. The current `_ExecutionSurfaceModel` keeps
+  dequoted option/value ownership, single-vs-many-word expansion roles, parenthesis/brace-group
+  ownership, outer-to-inner redirects, pipe provenance, and raw GraphQL quote style on one path. It
+  recursively follows static eval/trap/interpreter/direct-file payloads, never guesses expansion output,
+  and fails closed when executable code or protected API option argv is opaque; quoted computed reads,
+  formatting/header data, array values, ordinary arguments, and heredoc documentation remain inert.
+  This handoff records the fixes, not an independent post-fix rubber-stamp verdict.
 
 ## How the loop was run (adapt as needed in Codex)
 Controller = `superpowers:subagent-driven-development`. Per task, strictly serial, one writer at a time:

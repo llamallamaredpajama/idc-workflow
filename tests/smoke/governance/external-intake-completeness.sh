@@ -316,6 +316,15 @@ record_round7_failure() {
   fi
 }
 
+ROUND8_FAILURES=""
+record_round8_failure() {
+  if [ -n "$ROUND8_FAILURES" ]; then
+    ROUND8_FAILURES="$ROUND8_FAILURES, $1"
+  else
+    ROUND8_FAILURES="$1"
+  fi
+}
+
 status_must_fail_cleanly() {
   local expected="$1"
   local output rc
@@ -1420,6 +1429,89 @@ fi
 
 [ -z "$ROUND7_FAILURES" ] \
   || gov_fail "Task 4 review round 7 regressions failed: $ROUND7_FAILURES"
+
+# Review round 8 RED probe: leading or trailing separators cannot hide credential segments.
+ROUND8_PREFIX_KEY="_API_KEY=placeholder"
+ROUND8_PREFIX_SECRET="__SERVICE_SECRET=placeholder"
+ROUND8_TRAILING_TOKEN="SERVICE_TOKEN_=placeholder"
+ROUND8_ORDINARY_PASS="DB_PASS=placeholder"
+ROUND8_KEYBOARD="KEYBOARD_LAYOUT=us-test-layout"
+ROUND8_COMPASS="COMPASS_MODE=north"
+ROUND8_TOKENIZER="TOKENIZER_MODEL=test-model"
+ROUND8_REGION="SERVICE_REGION=us-test-1"
+ROUND8_PRIVACY_SOURCE="$WORK/round8-leading-underscore-credentials.md"
+ROUND8_PRIVACY_MANIFEST="$WORK/2026-07-12-round8-leading-underscore-credentials.json"
+python3 - "$ROUND8_PRIVACY_SOURCE" "$ROUND8_PREFIX_KEY" "$ROUND8_PREFIX_SECRET" \
+  "$ROUND8_TRAILING_TOKEN" "$ROUND8_ORDINARY_PASS" "$ROUND8_KEYBOARD" \
+  "$ROUND8_COMPASS" "$ROUND8_TOKENIZER" "$ROUND8_REGION" <<'PY'
+import sys
+path, *values = sys.argv[1:]
+lines = ["# Wrapper"]
+for index, value in enumerate(values, 1):
+    verb = "use" if index <= 4 else "keep"
+    lines.extend((f"## U{index} - {verb} {value}", "body"))
+open(path, "w", encoding="utf-8", newline="").write("\n".join(lines) + "\n")
+PY
+ROUND8_PRIVACY_OK=1
+if ! intake extract --source "$ROUND8_PRIVACY_SOURCE" --out "$ROUND8_PRIVACY_MANIFEST" \
+     --goal "Use $ROUND8_PREFIX_KEY, $ROUND8_PREFIX_SECRET, $ROUND8_TRAILING_TOKEN, and $ROUND8_ORDINARY_PASS; keep $ROUND8_KEYBOARD, $ROUND8_COMPASS, $ROUND8_TOKENIZER, and $ROUND8_REGION" \
+     --plugin-version 4.1.0 >/dev/null 2>&1; then
+  ROUND8_PRIVACY_OK=0
+elif ! python3 - "$ROUND8_PRIVACY_MANIFEST" "$ROUND8_PREFIX_KEY" \
+       "$ROUND8_PREFIX_SECRET" "$ROUND8_TRAILING_TOKEN" "$ROUND8_ORDINARY_PASS" \
+       "$ROUND8_KEYBOARD" "$ROUND8_COMPASS" "$ROUND8_TOKENIZER" \
+       "$ROUND8_REGION" <<'PY' >/dev/null 2>&1
+import json, sys
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+unsafe = sys.argv[2:6]
+controls = sys.argv[6:]
+serialized = json.dumps(manifest, sort_keys=True)
+assert all(value not in serialized for value in unsafe)
+assert all(value in serialized for value in controls)
+assert manifest["operator_goal"]["redactions"] == ["credential"]
+assert "[REDACTED_CREDENTIAL]" in serialized
+assert manifest["expected_unit_ids"] == [f"U{index}" for index in range(1, 9)]
+PY
+then
+  ROUND8_PRIVACY_OK=0
+fi
+
+ROUND8_NOTE_INDEX=0
+for ROUND8_PRIVATE_NOTE in \
+  "$ROUND8_PREFIX_KEY" "$ROUND8_PREFIX_SECRET" "$ROUND8_TRAILING_TOKEN" \
+  "$ROUND8_ORDINARY_PASS"
+do
+  ROUND8_NOTE_INDEX=$((ROUND8_NOTE_INDEX + 1))
+  fresh_case "round8-private-note-$ROUND8_NOTE_INDEX"
+  ROUND8_PRIVATE_REVIEW="$CASE_DIR/ordinary-private-note-review.json"
+  write_bound_review "$CASE_MANIFEST" "$ROUND8_PRIVATE_REVIEW" "$ROUND8_PRIVATE_NOTE" \
+    || gov_fail "could not prepare round 8 private review-note case $ROUND8_NOTE_INDEX"
+  ROUND8_PRIVATE_OUTPUT="$(intake validate --manifest "$CASE_MANIFEST" \
+    --review "$ROUND8_PRIVATE_REVIEW" 2>&1)"
+  ROUND8_PRIVATE_RC=$?
+  if [ "$ROUND8_PRIVATE_RC" -ne 2 ] \
+     || ! printf '%s' "$ROUND8_PRIVATE_OUTPUT" \
+          | grep -Fq "idc-intake: FAIL — review.notes[1] contains unsafe private data (credential)" \
+     || printf '%s' "$ROUND8_PRIVATE_OUTPUT" | grep -q "Traceback" \
+     || printf '%s' "$ROUND8_PRIVATE_OUTPUT" | grep -Fq "$ROUND8_PRIVATE_NOTE"; then
+    ROUND8_PRIVACY_OK=0
+  fi
+done
+
+fresh_case round8-review-note-controls
+ROUND8_CONTROL_REVIEW="$CASE_DIR/ordinary-control-note-review.json"
+write_bound_review "$CASE_MANIFEST" "$ROUND8_CONTROL_REVIEW" \
+  "$ROUND8_KEYBOARD; $ROUND8_COMPASS; $ROUND8_TOKENIZER; $ROUND8_REGION" \
+  || gov_fail "could not prepare round 8 safe review-note controls"
+if ! intake validate --manifest "$CASE_MANIFEST" --review "$ROUND8_CONTROL_REVIEW" \
+     >/dev/null 2>&1; then
+  ROUND8_PRIVACY_OK=0
+fi
+[ "$ROUND8_PRIVACY_OK" -eq 1 ] \
+  || record_round8_failure "leading-underscore-credential-privacy"
+
+[ -z "$ROUND8_FAILURES" ] \
+  || gov_fail "Task 4 review round 8 regressions failed: $ROUND8_FAILURES"
 
 fresh_case missing-b2
 drop_unit B2 "$CASE_MANIFEST"

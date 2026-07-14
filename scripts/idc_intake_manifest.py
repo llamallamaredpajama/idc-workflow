@@ -80,11 +80,9 @@ MACHINE_PATH_RE = re.compile(
 CREDENTIAL_NAME_SEGMENTS = (
     "KEY", "SECRET", "TOKEN", "CREDENTIAL", "PASSWORD", "PASSWD", "PASS", "PWD",
 )
-CREDENTIAL_NAME_SEGMENT_RE = "|".join(
-    re.escape(segment) for segment in CREDENTIAL_NAME_SEGMENTS)
 CREDENTIAL_ASSIGNMENT_RE = re.compile(
-    rf"\b(?:[A-Za-z0-9]+[_-]+)*(?:{CREDENTIAL_NAME_SEGMENT_RE})"
-    r"(?:[_-]+[A-Za-z0-9]+)*\b\s*[:=]\s*"
+    r"(?<![A-Za-z0-9_-])(?P<name>[A-Za-z0-9_-]*[A-Za-z0-9][A-Za-z0-9_-]*)"
+    r"\s*[:=]\s*"
     r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
     re.IGNORECASE,
 )
@@ -95,7 +93,7 @@ CREDENTIAL_TOKEN_RE = re.compile(
     r"|AKIA[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{10,})\b"
 )
 SENSITIVE_TEXT_PATTERNS = {
-    "credential": (CREDENTIAL_ASSIGNMENT_RE, CREDENTIAL_BEARER_RE, CREDENTIAL_TOKEN_RE),
+    "credential": (CREDENTIAL_BEARER_RE, CREDENTIAL_TOKEN_RE),
     "machine_specific_path": (MACHINE_PATH_RE,),
     "private_url": (PRIVATE_URL_RE,),
 }
@@ -137,17 +135,36 @@ def _expect_string_list(value: Any, label: str, *, allow_empty: bool = True) -> 
 
 
 def _sensitive_categories(value: str) -> list[str]:
-    return sorted(
+    categories = {
         category
         for category, patterns in SENSITIVE_TEXT_PATTERNS.items()
         if any(pattern.search(value) for pattern in patterns)
-    )
+    }
+    if any(
+        _credential_name_is_sensitive(match.group("name"))
+        for match in CREDENTIAL_ASSIGNMENT_RE.finditer(value)
+    ):
+        categories.add("credential")
+    return sorted(categories)
+
+
+def _credential_name_is_sensitive(name: str) -> bool:
+    segments = (segment for segment in re.split(r"[_-]+", name) if segment)
+    return any(segment.upper() in CREDENTIAL_NAME_SEGMENTS for segment in segments)
+
+
+def _redact_credential_assignment(match: re.Match[str]) -> str:
+    if _credential_name_is_sensitive(match.group("name")):
+        return REDACTION_MARKERS["credential"]
+    return match.group(0)
 
 
 def _redact_human_text(value: str) -> tuple[str, list[str]]:
     categories = _sensitive_categories(value)
     redacted = value
     for category in categories:
+        if category == "credential":
+            redacted = CREDENTIAL_ASSIGNMENT_RE.sub(_redact_credential_assignment, redacted)
         for pattern in SENSITIVE_TEXT_PATTERNS[category]:
             redacted = pattern.sub(REDACTION_MARKERS[category], redacted)
     return redacted, categories

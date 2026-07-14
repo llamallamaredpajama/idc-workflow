@@ -61,6 +61,39 @@ EXPLICIT_ID_RE = re.compile(r"^(U\d+|B\d+)\b")
 STABLE_HEADING_RE = re.compile(r"^(?:Phase|Step|Gate|Stop)\b", re.IGNORECASE)
 VALID_UNIT_ID_RE = re.compile(r"^(?:U\d+|B\d+|L\d+|Drive)$")
 
+PRIVATE_URL_RE = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s<>{}\[\]\"']+", re.IGNORECASE)
+MACHINE_PATH_RE = re.compile(
+    r"(?<![\w.])(?:"
+    r"/(?:Users|home|private|Volumes|tmp)(?:/[^\s<>{}\[\]\"']*)?"
+    r"|/var/folders(?:/[^\s<>{}\[\]\"']*)?"
+    r"|(?<![:/])/(?!/|idc:)(?:[^/\s<>{}\[\]\"']+/)+[^\s<>{}\[\]\"']*"
+    r"|[A-Za-z]:[\\/][^\s<>{}\[\]\"']+"
+    r"|file://[^\s<>{}\[\]\"']+"
+    r")",
+    re.IGNORECASE,
+)
+CREDENTIAL_ASSIGNMENT_RE = re.compile(
+    r"\b(?:[A-Za-z][A-Za-z0-9]*[_-])*(?:api[_-]?key|access[_-]?token|auth[_-]?token"
+    r"|client[_-]?secret|password|passwd|secret|token)\b\s*[:=]\s*"
+    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
+    re.IGNORECASE,
+)
+CREDENTIAL_BEARER_RE = re.compile(r"\bBearer\s+[^\s,;]+", re.IGNORECASE)
+CREDENTIAL_TOKEN_RE = re.compile(
+    r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}"
+    r"|sk-(?:proj-)?[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{10,})\b"
+)
+SENSITIVE_TEXT_PATTERNS = {
+    "credential": (CREDENTIAL_ASSIGNMENT_RE, CREDENTIAL_BEARER_RE, CREDENTIAL_TOKEN_RE),
+    "machine_specific_path": (MACHINE_PATH_RE,),
+    "private_url": (PRIVATE_URL_RE,),
+}
+REDACTION_MARKERS = {
+    "credential": "[REDACTED_CREDENTIAL]",
+    "machine_specific_path": "[REDACTED_MACHINE_PATH]",
+    "private_url": "[REDACTED_PRIVATE_URL]",
+}
+
 
 class IntakeError(Exception):
     """A deterministic extraction, shape, binding, or write failure."""
@@ -92,6 +125,29 @@ def _expect_string_list(value: Any, label: str, *, allow_empty: bool = True) -> 
     return value
 
 
+def _sensitive_categories(value: str) -> list[str]:
+    return sorted(
+        category
+        for category, patterns in SENSITIVE_TEXT_PATTERNS.items()
+        if any(pattern.search(value) for pattern in patterns)
+    )
+
+
+def _redact_human_text(value: str) -> tuple[str, list[str]]:
+    categories = _sensitive_categories(value)
+    redacted = value
+    for category in categories:
+        for pattern in SENSITIVE_TEXT_PATTERNS[category]:
+            redacted = pattern.sub(REDACTION_MARKERS[category], redacted)
+    return redacted, categories
+
+
+def _reject_unsafe_text(value: str, label: str) -> None:
+    categories = _sensitive_categories(value)
+    if categories:
+        raise IntakeError(f"{label} contains unsafe private data ({', '.join(categories)})")
+
+
 def _safe_relative(value: Any, label: str, *, allow_none: bool) -> str | None:
     if value is None and allow_none:
         return None
@@ -110,15 +166,55 @@ def _source_locator(argument: str) -> str | None:
     if os.path.isabs(argument):
         return None
     try:
-        return _safe_relative(argument, "source locator", allow_none=True)
+        locator = _safe_relative(argument, "source locator", allow_none=True)
     except IntakeError:
         return None
+    _reject_unsafe_text(argument, "source locator")
+    return locator
 
 
-def _review_locator(argument: str) -> str:
-    if os.path.isabs(argument):
-        return os.path.basename(os.path.normpath(argument))
-    return _safe_relative(argument, "review path", allow_none=False) or os.path.basename(argument)
+def _operational_directory(manifest_path: str) -> str:
+    return os.path.realpath(os.path.dirname(os.path.abspath(manifest_path)))
+
+
+def _confined_real_path(root: str, candidate: str, label: str) -> str:
+    resolved = os.path.realpath(candidate)
+    try:
+        confined = os.path.commonpath((root, resolved)) == root
+    except ValueError:
+        confined = False
+    if not confined or resolved == root:
+        raise IntakeError(f"{label} must stay within the manifest operational directory")
+    return resolved
+
+
+def _review_locator(manifest_path: str, argument: str) -> tuple[str, str]:
+    if not isinstance(argument, str) or not argument.strip():
+        raise IntakeError("review path must be a non-empty path")
+    root = _operational_directory(manifest_path)
+    supplied = os.path.abspath(argument)
+    resolved = _confined_real_path(root, supplied, "review path")
+    locator = os.path.relpath(resolved, root).replace(os.sep, "/")
+    safe_locator = _safe_relative(locator, "review path", allow_none=False)
+    assert safe_locator is not None
+    _reject_unsafe_text(safe_locator, "review path")
+    return safe_locator, resolved
+
+
+def _resolve_stamped_review(manifest_path: str, manifest: dict[str, Any]) -> dict[str, Any]:
+    verification = manifest["verification"]
+    if verification["status"] != "passed" or not verification["review_path"]:
+        raise IntakeError("operation requires an independently reviewed manifest")
+    locator = _safe_relative(
+        verification["review_path"], "manifest.verification.review_path", allow_none=False)
+    assert locator is not None
+    _reject_unsafe_text(locator, "manifest.verification.review_path")
+    root = _operational_directory(manifest_path)
+    candidate = os.path.join(root, *locator.split("/"))
+    review_path = _confined_real_path(root, candidate, "manifest.verification.review_path")
+    review = _load_json(review_path, "stamped review")
+    validate_review(review, manifest)
+    return review
 
 
 def _natural_key(value: str) -> tuple[tuple[int, Any], ...]:
@@ -228,11 +324,47 @@ def _summary(heading: str, unit_id: str) -> str:
     return remainder or heading
 
 
+def _opening_fence(line: str) -> tuple[str, int] | None:
+    match = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+    if not match:
+        return None
+    marker, suffix = match.groups()
+    if marker[0] == "`" and "`" in suffix:
+        return None
+    return marker[0], len(marker)
+
+
+def _closing_fence(line: str, marker: str, minimum: int) -> bool:
+    return bool(re.fullmatch(rf" {{0,3}}{re.escape(marker)}{{{minimum},}}[ \t]*", line))
+
+
+def _is_indented_code(line: str) -> bool:
+    column = 0
+    for character in line:
+        if character == " ":
+            column += 1
+        elif character == "\t":
+            column += 4 - (column % 4)
+        else:
+            break
+        if column >= 4:
+            return True
+    return False
+
+
 def _extract_units(text: str) -> tuple[list[str], list[dict[str, Any]]]:
     lines = text.splitlines()
     anchors: list[dict[str, Any]] = []
     seen: dict[str, int] = {}
+    fence: tuple[str, int] | None = None
     for line_no, line in enumerate(lines, 1):
+        if fence is not None:
+            if _closing_fence(line, fence[0], fence[1]):
+                fence = None
+            continue
+        fence = _opening_fence(line)
+        if fence is not None or _is_indented_code(line):
+            continue
         found = _candidate(line, line_no)
         if not found:
             continue
@@ -241,7 +373,8 @@ def _extract_units(text: str) -> tuple[list[str], list[dict[str, Any]]]:
             raise IntakeError(
                 f"duplicate source unit id {unit_id!r} at lines {seen[unit_id]} and {line_no}")
         seen[unit_id] = line_no
-        anchors.append({"id": unit_id, "heading": heading, "line_start": line_no})
+        redacted_heading, _ = _redact_human_text(heading)
+        anchors.append({"id": unit_id, "heading": redacted_heading, "line_start": line_no})
 
     if not anchors:
         raise IntakeError("source contains no intake unit anchors")
@@ -291,6 +424,7 @@ def extract_manifest(source_path: str, out_path: str, goal: str, plugin_version:
 
     source_hash = hashlib.sha256(raw).hexdigest()
     expected, units = _extract_units(parsed_text)
+    redacted_goal, goal_redactions = _redact_human_text(goal)
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "intake_id": _intake_id_from_output(out_path),
@@ -301,9 +435,9 @@ def extract_manifest(source_path: str, out_path: str, goal: str, plugin_version:
             "sha256": source_hash,
         },
         "operator_goal": {
-            "verbatim_or_redacted": goal,
-            "normalized": _normalize_goal(goal),
-            "redactions": [],
+            "verbatim_or_redacted": redacted_goal,
+            "normalized": _normalize_goal(redacted_goal),
+            "redactions": goal_redactions,
         },
         "runtime": {"plugin_version": plugin_version},
         "expected_unit_ids": expected,
@@ -323,7 +457,10 @@ def _validate_source(source: Any) -> dict[str, Any]:
     if not isinstance(display, str) or not display or display != os.path.basename(display) or \
             "/" in display or "\\" in display:
         raise IntakeError("manifest.source.display_name must be a basename")
-    _safe_relative(obj["repo_relative_locator"], "manifest.source.repo_relative_locator", allow_none=True)
+    locator = _safe_relative(
+        obj["repo_relative_locator"], "manifest.source.repo_relative_locator", allow_none=True)
+    if locator is not None:
+        _reject_unsafe_text(obj["repo_relative_locator"], "manifest.source.repo_relative_locator")
     if not isinstance(obj["sha256"], str) or not SHA256_RE.fullmatch(obj["sha256"]):
         raise IntakeError("manifest.source.sha256 must be 64 lowercase hex characters")
     return obj
@@ -335,6 +472,7 @@ def _validate_goal(goal: Any) -> None:
     for key in ("verbatim_or_redacted", "normalized"):
         if not isinstance(obj[key], str) or not obj[key].strip():
             raise IntakeError(f"manifest.operator_goal.{key} must be a non-empty string")
+        _reject_unsafe_text(obj[key], f"manifest.operator_goal.{key}")
     _expect_string_list(obj["redactions"], "manifest.operator_goal.redactions")
 
 
@@ -352,6 +490,7 @@ def _validate_verification(verification: Any, source_hash: str) -> dict[str, Any
         raise IntakeError("manifest.verification.status must be pending or passed")
     if obj["review_path"] is not None:
         _safe_relative(obj["review_path"], "manifest.verification.review_path", allow_none=False)
+        _reject_unsafe_text(obj["review_path"], "manifest.verification.review_path")
     if obj["source_sha256"] != source_hash:
         raise IntakeError("manifest.verification.source_sha256 does not match source.sha256")
     return obj
@@ -366,7 +505,11 @@ def _validate_disposition(unit_id: str, unit_class: str, disposition: Any) -> di
     target = obj["target_ref"]
     if target is not None and (not isinstance(target, str) or not target.strip()):
         raise IntakeError(f"unit {unit_id} target_ref must be a non-empty string or null")
+    if target is not None:
+        _reject_unsafe_text(target, f"unit {unit_id}.disposition.target_ref")
     evidence = _expect_string_list(obj["evidence"], f"unit {unit_id}.disposition.evidence")
+    for index, ref in enumerate(evidence):
+        _reject_unsafe_text(ref, f"unit {unit_id}.disposition.evidence[{index}]")
 
     if state == "unclassified":
         raise IntakeError(f"unit {unit_id} remains unclassified")
@@ -442,11 +585,13 @@ def validate_manifest(data: dict[str, Any], *, require_classified: bool = True) 
         _expect_exact_keys(anchor, ANCHOR_KEYS, f"unit {unit_id}.source_anchor")
         if not isinstance(anchor["heading"], str) or not anchor["heading"].strip():
             raise IntakeError(f"unit {unit_id} source heading must be non-empty")
+        _reject_unsafe_text(anchor["heading"], f"unit {unit_id}.source_anchor.heading")
         if not _is_int(anchor["line_start"]) or not _is_int(anchor["line_end"]) or \
                 anchor["line_start"] <= 0 or anchor["line_end"] < anchor["line_start"]:
             raise IntakeError(f"unit {unit_id} source line range is invalid")
         if not isinstance(unit["summary"], str) or not unit["summary"].strip():
             raise IntakeError(f"unit {unit_id} summary must be non-empty")
+        _reject_unsafe_text(unit["summary"], f"unit {unit_id}.summary")
 
         dependencies = _expect_string_list(unit["dependencies"], f"unit {unit_id}.dependencies")
         if len(set(dependencies)) != len(dependencies):
@@ -455,11 +600,11 @@ def validate_manifest(data: dict[str, Any], *, require_classified: bool = True) 
         graph[unit_id] = dependencies
 
         unit_class, route = unit["class"], unit["route"]
-        if not require_classified and unit_class is None and route is None \
-                and unit["disposition"].get("state") == "unclassified":
+        if not require_classified and unit_class is None and route is None:
             disposition = _expect_object(unit["disposition"], f"unit {unit_id}.disposition")
             _expect_exact_keys(disposition, DISPOSITION_KEYS, f"unit {unit_id}.disposition")
-            continue
+            if disposition.get("state") == "unclassified":
+                continue
         if unit_class not in CLASS_ROUTES:
             raise IntakeError(f"unit {unit_id} has invalid class {unit_class!r}")
         if route in FORBIDDEN_ROUTES:
@@ -505,8 +650,10 @@ def validate_review(review: dict[str, Any], manifest: dict[str, Any]) -> None:
             raise IntakeError(f"review.{key} must be empty for PASS")
 
 
-def _status(data: dict[str, Any]) -> dict[str, Any]:
+def _status(data: dict[str, Any], manifest_path: str) -> dict[str, Any]:
     validate_manifest(data, require_classified=False)
+    if data["verification"]["status"] == "passed":
+        _resolve_stamped_review(manifest_path, data)
     counts = Counter(unit["disposition"]["state"] for unit in data["units"])
     queued = sorted((unit["id"] for unit in data["units"] if unit["disposition"]["state"] == "queued"),
                     key=_natural_key)
@@ -552,11 +699,12 @@ def cmd_validate(args: argparse.Namespace) -> int:
     validate_manifest(manifest)
     if not args.review:
         raise IntakeError("independent --review is required; verification.status cannot self-certify")
-    review = _load_json(args.review, "review")
+    review_locator, review_path = _review_locator(args.manifest, args.review)
+    review = _load_json(review_path, "review")
     validate_review(review, manifest)
     manifest["verification"] = {
         "status": "passed",
-        "review_path": _review_locator(args.review),
+        "review_path": review_locator,
         "source_sha256": manifest["source"]["sha256"],
     }
     _atomic_write_json(args.manifest, manifest)
@@ -572,8 +720,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
 def cmd_link(args: argparse.Namespace) -> int:
     manifest = _load_json(args.manifest, "manifest")
     validate_manifest(manifest)
-    if manifest["verification"]["status"] != "passed" or not manifest["verification"]["review_path"]:
-        raise IntakeError("link requires an independently reviewed manifest")
+    _resolve_stamped_review(args.manifest, manifest)
     matches = [unit for unit in manifest["units"] if unit["id"] == args.unit]
     if len(matches) != 1:
         raise IntakeError(f"link unit {args.unit!r} must exist exactly once")
@@ -597,7 +744,7 @@ def cmd_link(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    status = _status(_load_json(args.manifest, "manifest"))
+    status = _status(_load_json(args.manifest, "manifest"), args.manifest)
     if args.json:
         print(json.dumps(status, sort_keys=True))
     else:

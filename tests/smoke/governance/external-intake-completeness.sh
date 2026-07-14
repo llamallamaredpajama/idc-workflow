@@ -92,8 +92,13 @@ elif kind == "cycle":
     next(unit for unit in data["units"] if unit["id"] == "U2")["dependencies"] = ["U1"]
 elif kind == "absolute-source":
     data["source"]["repo_relative_locator"] = "/private/external-plan.md"
+elif kind == "unsafe-source-locator":
+    data["source"]["repo_relative_locator"] = arg
 elif kind == "self-certified":
     data["verification"].update({"status": "passed", "review_path": "invented.review.json"})
+elif kind == "malformed-unclassified":
+    unit = next(unit for unit in data["units"] if unit["id"] == arg)
+    unit.update({"class": None, "route": None, "disposition": []})
 elif kind == "no-target":
     unit = next(unit for unit in data["units"] if unit["id"] == arg)
     unit["disposition"] = {"state": "materialized", "target_ref": None, "evidence": []}
@@ -146,6 +151,15 @@ must_fail_reviewed() {
   fi
 }
 
+REVIEW_FIX_FAILURES=""
+record_review_fix_failure() {
+  if [ -n "$REVIEW_FIX_FAILURES" ]; then
+    REVIEW_FIX_FAILURES="$REVIEW_FIX_FAILURES, $1"
+  else
+    REVIEW_FIX_FAILURES="$1"
+  fi
+}
+
 intake extract --source "$FIXTURE/external-plan.md" --out "$MANIFEST" \
   --goal 'execute the whole program; Drive first' --plugin-version 4.1.0 >/dev/null \
   || gov_fail "extract failed"
@@ -168,6 +182,7 @@ assert re.fullmatch(r"[0-9a-f]{64}", data["source"]["sha256"])
 assert data["operator_goal"]["verbatim_or_redacted"] == "execute the whole program; Drive first"
 assert data["operator_goal"]["normalized"] == \
        "execute the complete program in dependency order with Drive first"
+assert data["operator_goal"]["redactions"] == []
 assert data["verification"] == {"status": "pending", "review_path": None,
                                 "source_sha256": data["source"]["sha256"]}
 for unit in data["units"]:
@@ -199,6 +214,178 @@ PY
 
 cp "$MANIFEST" "$COMPLETE" || gov_fail "could not freeze complete manifest"
 cp "$REVIEW" "$GOOD_REVIEW" || gov_fail "could not freeze passing review"
+
+# Review-fix RED probes: keep these collected so one baseline run reports all four review findings.
+# 1. Downstream operations must resolve and revalidate the stamped review, not trust editable fields.
+REVIEW_BINDING_OK=1
+fresh_case forged-link
+mutate_manifest self-certified ignored "$CASE_MANIFEST"
+if intake link --manifest "$CASE_MANIFEST" --unit U4 --state queued >/dev/null 2>&1; then
+  REVIEW_BINDING_OK=0
+fi
+fresh_case forged-status
+mutate_manifest self-certified ignored "$CASE_MANIFEST"
+if intake status --manifest "$CASE_MANIFEST" --json >/dev/null 2>&1; then
+  REVIEW_BINDING_OK=0
+fi
+
+TAMPER_DIR="$WORK/tampered-review"
+mkdir -p "$TAMPER_DIR" || gov_fail "could not create tampered-review case"
+cp "$COMPLETE" "$TAMPER_DIR/2026-07-12-example.json" \
+  || gov_fail "could not copy tampered-review manifest"
+cp "$GOOD_REVIEW" "$TAMPER_DIR/2026-07-12-example.review.json" \
+  || gov_fail "could not copy tampered review"
+mutate_review verdict FAIL "$TAMPER_DIR/2026-07-12-example.review.json"
+if intake status --manifest "$TAMPER_DIR/2026-07-12-example.json" --json >/dev/null 2>&1; then
+  REVIEW_BINDING_OK=0
+fi
+
+OUTSIDE_REVIEW="$WORK/../$(basename "$WORK")-outside.review.json"
+cp "$GOOD_REVIEW" "$OUTSIDE_REVIEW" || gov_fail "could not create outside review case"
+fresh_case outside-review
+if intake validate --manifest "$CASE_MANIFEST" --review "$OUTSIDE_REVIEW" >/dev/null 2>&1; then
+  REVIEW_BINDING_OK=0
+fi
+rm -f "$OUTSIDE_REVIEW"
+[ "$REVIEW_BINDING_OK" -eq 1 ] || record_review_fix_failure "review-binding"
+
+# 2. Source-derived human text is redacted; manually supplied durable references are rejected.
+SAMPLE_PRIVATE_URL="https://private.example.invalid/intake/42"
+SAMPLE_PRIVATE_URL_ALT="ssh://private.example.invalid/intake/43"
+SAMPLE_MACHINE_PATH="/Users/example/private/intake"
+SAMPLE_MACHINE_PATH_ALT="/opt/example/private/intake"
+SAMPLE_CREDENTIAL="api_key=sample-sensitive-value"
+SAMPLE_CREDENTIAL_ALT="FIRECRAWL_API_KEY=sample-sensitive-value"
+PRIVACY_SOURCE="$WORK/privacy.md"
+PRIVACY_MANIFEST="$WORK/2026-07-12-privacy.json"
+python3 - "$PRIVACY_SOURCE" "$SAMPLE_PRIVATE_URL" "$SAMPLE_PRIVATE_URL_ALT" \
+  "$SAMPLE_MACHINE_PATH" "$SAMPLE_MACHINE_PATH_ALT" "$SAMPLE_CREDENTIAL" \
+  "$SAMPLE_CREDENTIAL_ALT" <<'PY'
+import sys
+path, private_url, private_url_alt, machine_path, machine_path_alt, credential, credential_alt = \
+    sys.argv[1:]
+text = f"""# Wrapper
+## U1 - Read {machine_path}
+body
+**B1 - Fetch {private_url}**
+body
+1. U2 - Use {credential}
+body
+## U3 - Read {machine_path_alt}, fetch {private_url_alt}, and use {credential_alt}
+body
+"""
+open(path, "w", encoding="utf-8", newline="").write(text)
+PY
+PRIVACY_OK=1
+if ! intake extract --source "$PRIVACY_SOURCE" --out "$PRIVACY_MANIFEST" \
+     --goal "Run $SAMPLE_MACHINE_PATH and $SAMPLE_MACHINE_PATH_ALT with $SAMPLE_PRIVATE_URL, $SAMPLE_PRIVATE_URL_ALT, $SAMPLE_CREDENTIAL, and $SAMPLE_CREDENTIAL_ALT" \
+     --plugin-version 4.1.0 >/dev/null 2>&1; then
+  PRIVACY_OK=0
+elif ! python3 - "$PRIVACY_MANIFEST" "$SAMPLE_PRIVATE_URL" "$SAMPLE_PRIVATE_URL_ALT" \
+       "$SAMPLE_MACHINE_PATH" "$SAMPLE_MACHINE_PATH_ALT" "$SAMPLE_CREDENTIAL" \
+       "$SAMPLE_CREDENTIAL_ALT" <<'PY' >/dev/null 2>&1
+import json, sys
+path, *unsafe_values = sys.argv[1:]
+data = json.load(open(path, encoding="utf-8"))
+serialized = json.dumps(data, sort_keys=True)
+for unsafe_value in unsafe_values:
+    assert unsafe_value not in serialized
+assert set(data["operator_goal"]["redactions"]) == {
+    "credential", "machine_specific_path", "private_url"
+}
+assert "[REDACTED_" in data["operator_goal"]["verbatim_or_redacted"]
+for unit in data["units"]:
+    for unsafe_value in unsafe_values:
+        assert unsafe_value not in unit["source_anchor"]["heading"]
+        assert unsafe_value not in unit["summary"]
+PY
+then
+  PRIVACY_OK=0
+fi
+
+fresh_case unsafe-source-locator
+mutate_manifest unsafe-source-locator "$SAMPLE_PRIVATE_URL" "$CASE_MANIFEST"
+if intake validate --manifest "$CASE_MANIFEST" --review "$CASE_REVIEW" >/dev/null 2>&1; then
+  PRIVACY_OK=0
+fi
+fresh_case unsafe-target-ref
+if intake link --manifest "$CASE_MANIFEST" --unit U4 --state materialized \
+     --target-ref "$SAMPLE_MACHINE_PATH_ALT" >/dev/null 2>&1; then
+  PRIVACY_OK=0
+fi
+fresh_case unsafe-evidence-ref
+if intake link --manifest "$CASE_MANIFEST" --unit U4 --state queued \
+     --evidence "$SAMPLE_PRIVATE_URL_ALT" --evidence "$SAMPLE_CREDENTIAL_ALT" >/dev/null 2>&1; then
+  PRIVACY_OK=0
+fi
+[ "$PRIVACY_OK" -eq 1 ] || record_review_fix_failure "privacy-redaction"
+
+# 3. Markdown-looking lines inside fenced or indented code are not execution units.
+CODE_SOURCE="$WORK/code-regions.md"
+CODE_MANIFEST="$WORK/2026-07-12-code-regions.json"
+python3 - "$CODE_SOURCE" <<'PY'
+import sys
+text = """# Wrapper
+```markdown
+## U90 - fenced heading
+**B90 - fenced bold**
+1. U91 - fenced numbered
+- [ ] fenced checklist
+```
+~~~text
+## U92 - tilde-fenced heading
+**B91 - tilde-fenced bold**
+1. U93 - tilde-fenced numbered
+- [ ] tilde-fenced checklist
+~~~
+    **B92 - indented bold**
+    1. U94 - indented numbered
+    - [ ] indented checklist
+## U1 - real heading
+real body
+**B1 - real bold**
+real tail
+"""
+open(sys.argv[1], "w", encoding="utf-8", newline="").write(text)
+PY
+CODE_REGIONS_OK=1
+if ! intake extract --source "$CODE_SOURCE" --out "$CODE_MANIFEST" --goal complete \
+     --plugin-version 4.1.0 >/dev/null 2>&1; then
+  CODE_REGIONS_OK=0
+elif ! python3 - "$CODE_MANIFEST" <<'PY' >/dev/null 2>&1
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+assert data["expected_unit_ids"] == ["B1", "U1"]
+by_id = {unit["id"]: unit for unit in data["units"]}
+assert by_id["U1"]["source_anchor"] == {
+    "heading": "U1 - real heading", "line_start": 17, "line_end": 18
+}
+assert by_id["B1"]["source_anchor"] == {
+    "heading": "B1 - real bold", "line_start": 19, "line_end": 20
+}
+PY
+then
+  CODE_REGIONS_OK=0
+fi
+[ "$CODE_REGIONS_OK" -eq 1 ] || record_review_fix_failure "code-regions"
+
+# 4. Malformed unclassified dispositions must use the helper's deterministic exit-2 contract.
+fresh_case malformed-disposition
+mutate_manifest malformed-unclassified U4 "$CASE_MANIFEST"
+MALFORMED_OUTPUT="$(intake status --manifest "$CASE_MANIFEST" --json 2>&1)"
+MALFORMED_RC=$?
+MALFORMED_OK=1
+case "$MALFORMED_OUTPUT" in
+  *"idc-intake: FAIL — unit U4.disposition must be a JSON object"*) ;;
+  *) MALFORMED_OK=0 ;;
+esac
+if [ "$MALFORMED_RC" -ne 2 ] || printf '%s' "$MALFORMED_OUTPUT" | grep -q "Traceback"; then
+  MALFORMED_OK=0
+fi
+[ "$MALFORMED_OK" -eq 1 ] || record_review_fix_failure "malformed-disposition"
+
+[ -z "$REVIEW_FIX_FAILURES" ] \
+  || gov_fail "Task 4 review regressions failed: $REVIEW_FIX_FAILURES"
 
 fresh_case missing-b2
 drop_unit B2 "$CASE_MANIFEST"

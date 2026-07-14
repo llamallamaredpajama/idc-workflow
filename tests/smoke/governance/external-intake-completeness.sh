@@ -307,6 +307,15 @@ record_round6_failure() {
   fi
 }
 
+ROUND7_FAILURES=""
+record_round7_failure() {
+  if [ -n "$ROUND7_FAILURES" ]; then
+    ROUND7_FAILURES="$ROUND7_FAILURES, $1"
+  else
+    ROUND7_FAILURES="$1"
+  fi
+}
+
 status_must_fail_cleanly() {
   local expected="$1"
   local output rc
@@ -1278,6 +1287,139 @@ fi
 
 [ -z "$ROUND6_FAILURES" ] \
   || gov_fail "Task 4 review round 6 regressions failed: $ROUND6_FAILURES"
+
+# Review round 7 RED probes: collect both adjudicated findings before production edits.
+# 1. Credential assignment names are decided by exact case-insensitive segments, not substrings.
+ROUND7_AWS_KEY="AWS_ACCESS_KEY_ID=sample-sensitive-value"
+ROUND7_AZURE_KEY="AZURE_STORAGE_ACCOUNT_KEY=sample-sensitive-value"
+ROUND7_CREDENTIAL="SERVICE_CREDENTIAL=sample-sensitive-value"
+ROUND7_PASS="DB_PASS=sample-sensitive-value"
+ROUND7_KEYBOARD="KEYBOARD_LAYOUT=us-test-layout"
+ROUND7_COMPASS="COMPASS_MODE=north"
+ROUND7_TOKENIZER="TOKENIZER_MODEL=test-model"
+ROUND7_REGION="SERVICE_REGION=us-test-1"
+ROUND7_PRIVACY_SOURCE="$WORK/round7-credential-name-segments.md"
+ROUND7_PRIVACY_MANIFEST="$WORK/2026-07-12-round7-credential-name-segments.json"
+python3 - "$ROUND7_PRIVACY_SOURCE" "$ROUND7_AWS_KEY" "$ROUND7_AZURE_KEY" \
+  "$ROUND7_CREDENTIAL" "$ROUND7_PASS" "$ROUND7_KEYBOARD" "$ROUND7_COMPASS" \
+  "$ROUND7_TOKENIZER" "$ROUND7_REGION" <<'PY'
+import sys
+path, *values = sys.argv[1:]
+lines = ["# Wrapper"]
+for index, value in enumerate(values, 1):
+    verb = "use" if index <= 4 else "keep"
+    lines.extend((f"## U{index} - {verb} {value}", "body"))
+open(path, "w", encoding="utf-8", newline="").write("\n".join(lines) + "\n")
+PY
+ROUND7_CREDENTIAL_OK=1
+if ! intake extract --source "$ROUND7_PRIVACY_SOURCE" --out "$ROUND7_PRIVACY_MANIFEST" \
+     --goal "Use $ROUND7_AWS_KEY, $ROUND7_AZURE_KEY, $ROUND7_CREDENTIAL, and $ROUND7_PASS; keep $ROUND7_KEYBOARD, $ROUND7_COMPASS, $ROUND7_TOKENIZER, and $ROUND7_REGION" \
+     --plugin-version 4.1.0 >/dev/null 2>&1; then
+  ROUND7_CREDENTIAL_OK=0
+elif ! python3 - "$ROUND7_PRIVACY_MANIFEST" "$ROUND7_AWS_KEY" "$ROUND7_AZURE_KEY" \
+       "$ROUND7_CREDENTIAL" "$ROUND7_PASS" "$ROUND7_KEYBOARD" "$ROUND7_COMPASS" \
+       "$ROUND7_TOKENIZER" "$ROUND7_REGION" <<'PY' >/dev/null 2>&1
+import json, sys
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+unsafe = sys.argv[2:6]
+controls = sys.argv[6:]
+serialized = json.dumps(manifest, sort_keys=True)
+assert all(value not in serialized for value in unsafe)
+assert all(value in serialized for value in controls)
+assert manifest["operator_goal"]["redactions"] == ["credential"]
+assert "[REDACTED_CREDENTIAL]" in serialized
+assert manifest["expected_unit_ids"] == [f"U{index}" for index in range(1, 9)]
+PY
+then
+  ROUND7_CREDENTIAL_OK=0
+fi
+
+ROUND7_NOTE_INDEX=0
+for ROUND7_PRIVATE_NOTE in \
+  "$ROUND7_AWS_KEY" "$ROUND7_AZURE_KEY" "$ROUND7_CREDENTIAL" "$ROUND7_PASS"
+do
+  ROUND7_NOTE_INDEX=$((ROUND7_NOTE_INDEX + 1))
+  fresh_case "round7-private-note-$ROUND7_NOTE_INDEX"
+  ROUND7_PRIVATE_REVIEW="$CASE_DIR/ordinary-private-note-review.json"
+  write_bound_review "$CASE_MANIFEST" "$ROUND7_PRIVATE_REVIEW" "$ROUND7_PRIVATE_NOTE" \
+    || gov_fail "could not prepare round 7 private review-note case $ROUND7_NOTE_INDEX"
+  ROUND7_PRIVATE_OUTPUT="$(intake validate --manifest "$CASE_MANIFEST" \
+    --review "$ROUND7_PRIVATE_REVIEW" 2>&1)"
+  ROUND7_PRIVATE_RC=$?
+  if [ "$ROUND7_PRIVATE_RC" -ne 2 ] \
+     || ! printf '%s' "$ROUND7_PRIVATE_OUTPUT" \
+          | grep -Fq "idc-intake: FAIL — review.notes[1] contains unsafe private data (credential)" \
+     || printf '%s' "$ROUND7_PRIVATE_OUTPUT" | grep -q "Traceback" \
+     || printf '%s' "$ROUND7_PRIVATE_OUTPUT" | grep -Fq "$ROUND7_PRIVATE_NOTE"; then
+    ROUND7_CREDENTIAL_OK=0
+  fi
+done
+
+fresh_case round7-review-note-controls
+ROUND7_CONTROL_REVIEW="$CASE_DIR/ordinary-control-note-review.json"
+write_bound_review "$CASE_MANIFEST" "$ROUND7_CONTROL_REVIEW" \
+  "$ROUND7_KEYBOARD; $ROUND7_COMPASS; $ROUND7_TOKENIZER; $ROUND7_REGION" \
+  || gov_fail "could not prepare round 7 safe review-note controls"
+if ! intake validate --manifest "$CASE_MANIFEST" --review "$ROUND7_CONTROL_REVIEW" \
+     >/dev/null 2>&1; then
+  ROUND7_CREDENTIAL_OK=0
+fi
+[ "$ROUND7_CREDENTIAL_OK" -eq 1 ] || record_round7_failure "credential-name-segments"
+
+# 2. A list item's first block may itself be a backtick or tilde fenced code block.
+ROUND7_FENCE_SOURCE="$WORK/round7-list-marker-first-fences.md"
+ROUND7_FENCE_MANIFEST="$WORK/2026-07-12-round7-list-marker-first-fences.json"
+python3 - "$ROUND7_FENCE_SOURCE" <<'PY'
+import sys
+text = """# Wrapper
+- ```markdown
+  - [ ] phantom bullet-fenced checklist
+  ```
+## U1 - real after bullet fence
+real body
+100. ~~~text
+     - [ ] phantom ordered-fenced checklist
+     ~~~
+## U2 - real after ordered fence
+sibling body
+Paragraph ends list context.
+
+    - ```markdown
+      - [ ] standalone indented pseudo-list
+## U3 - real after standalone code
+real tail
+"""
+open(sys.argv[1], "w", encoding="utf-8", newline="").write(text)
+PY
+ROUND7_FENCE_OK=1
+if ! intake extract --source "$ROUND7_FENCE_SOURCE" --out "$ROUND7_FENCE_MANIFEST" \
+     --goal complete --plugin-version 4.1.0 >/dev/null 2>&1; then
+  ROUND7_FENCE_OK=0
+elif ! python3 - "$ROUND7_FENCE_MANIFEST" <<'PY' >/dev/null 2>&1
+import json, sys
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+assert manifest["expected_unit_ids"] == ["U1", "U2", "U3"]
+by_id = {unit["id"]: unit for unit in manifest["units"]}
+assert by_id["U1"]["source_anchor"] == {
+    "heading": "U1 - real after bullet fence", "line_start": 5, "line_end": 9,
+}
+assert by_id["U2"]["source_anchor"] == {
+    "heading": "U2 - real after ordered fence", "line_start": 10, "line_end": 15,
+}
+assert by_id["U3"]["source_anchor"] == {
+    "heading": "U3 - real after standalone code", "line_start": 16, "line_end": 17,
+}
+assert all("phantom" not in unit["source_anchor"]["heading"] for unit in manifest["units"])
+assert all("standalone indented" not in unit["source_anchor"]["heading"]
+           for unit in manifest["units"])
+PY
+then
+  ROUND7_FENCE_OK=0
+fi
+[ "$ROUND7_FENCE_OK" -eq 1 ] || record_round7_failure "list-marker-first-fences"
+
+[ -z "$ROUND7_FAILURES" ] \
+  || gov_fail "Task 4 review round 7 regressions failed: $ROUND7_FAILURES"
 
 fresh_case missing-b2
 drop_unit B2 "$CASE_MANIFEST"

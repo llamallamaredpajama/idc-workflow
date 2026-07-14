@@ -77,10 +77,14 @@ MACHINE_PATH_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
+CREDENTIAL_NAME_SEGMENTS = (
+    "KEY", "SECRET", "TOKEN", "CREDENTIAL", "PASSWORD", "PASSWD", "PASS", "PWD",
+)
+CREDENTIAL_NAME_SEGMENT_RE = "|".join(
+    re.escape(segment) for segment in CREDENTIAL_NAME_SEGMENTS)
 CREDENTIAL_ASSIGNMENT_RE = re.compile(
-    r"\b(?:[A-Za-z][A-Za-z0-9]*[_-])*(?:api[_-]?key|access[_-]?token|auth[_-]?token"
-    r"|client[_-]?secret|secret[_-]?access[_-]?key|private[_-]?key|password|passwd"
-    r"|secret|token)(?:[_-][A-Za-z0-9]+)*\b\s*[:=]\s*"
+    rf"\b(?:[A-Za-z0-9]+[_-]+)*(?:{CREDENTIAL_NAME_SEGMENT_RE})"
+    r"(?:[_-]+[A-Za-z0-9]+)*\b\s*[:=]\s*"
     r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
     re.IGNORECASE,
 )
@@ -323,17 +327,27 @@ def _summary(heading: str, unit_id: str) -> str:
 def _opening_fence(
         line: str, container_indents: tuple[int, ...] = (),
 ) -> tuple[str, int, int] | None:
-    match = re.match(r"^([ \t]*)(`{3,}|~{3,})(.*)$", line)
-    if not match:
-        return None
-    leading, marker, suffix = match.groups()
+    list_match = re.match(
+        r"^[ \t]*(?:[-*+]|\d+[.)])[ \t]+(`{3,}|~{3,})(.*)$", line)
+    if list_match is not None:
+        marker, suffix = list_match.groups()
+        layout = _list_item_layout(line)
+        if layout is None or layout[1] not in container_indents:
+            return None
+        base = layout[1]
+    else:
+        match = re.match(r"^([ \t]*)(`{3,}|~{3,})(.*)$", line)
+        if match is None:
+            return None
+        leading, marker, suffix = match.groups()
+        indent = _indent_columns(leading)
+        bases = [base for base in (0, *container_indents) if 0 <= indent - base <= 3]
+        if not bases:
+            return None
+        base = max(bases)
     if marker[0] == "`" and "`" in suffix:
         return None
-    indent = _indent_columns(leading)
-    bases = [base for base in (0, *container_indents) if 0 <= indent - base <= 3]
-    if not bases:
-        return None
-    return marker[0], len(marker), max(bases)
+    return marker[0], len(marker), base
 
 
 def _closing_fence(line: str, marker: str, minimum: int, container_indent: int) -> bool:
@@ -387,11 +401,6 @@ def _extract_units(text: str) -> tuple[list[str], list[dict[str, Any]]]:
             if _closing_fence(line, fence[0], fence[1], fence[2]):
                 fence = None
             continue
-        fence = _opening_fence(line, tuple(item[1] for item in list_items))
-        if fence is not None:
-            if fence[2] == 0:
-                list_items.clear()
-            continue
 
         indent = _indent_columns(line)
         list_item = _list_item_layout(line)
@@ -405,6 +414,12 @@ def _extract_units(text: str) -> tuple[list[str], list[dict[str, Any]]]:
                 list_items.append((marker_indent, content_indent))
         elif line.strip() and indent == 0:
             list_items.clear()
+
+        fence = _opening_fence(line, tuple(item[1] for item in list_items))
+        if fence is not None:
+            if fence[2] == 0:
+                list_items.clear()
+            continue
 
         found = _candidate(line, line_no)
         if _is_indented_code(line) and not (nested_list_item and found is not None):

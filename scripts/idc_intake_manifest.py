@@ -50,8 +50,8 @@ UNIT_KEYS = {
 ANCHOR_KEYS = {"heading", "line_start", "line_end"}
 DISPOSITION_KEYS = {"state", "target_ref", "evidence"}
 REVIEW_KEYS = {
-    "schema_version", "intake_id", "source_sha256", "verdict", "missing_unit_ids",
-    "duplicate_unit_ids", "misrouted_unit_ids", "notes",
+    "schema_version", "intake_id", "source_sha256", "manifest_content_sha256", "verdict",
+    "missing_unit_ids", "duplicate_unit_ids", "misrouted_unit_ids", "notes",
 }
 
 INTAKE_ID_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
@@ -338,7 +338,7 @@ def _closing_fence(line: str, marker: str, minimum: int) -> bool:
     return bool(re.fullmatch(rf" {{0,3}}{re.escape(marker)}{{{minimum},}}[ \t]*", line))
 
 
-def _is_indented_code(line: str) -> bool:
+def _indent_columns(line: str) -> int:
     column = 0
     for character in line:
         if character == " ":
@@ -347,9 +347,20 @@ def _is_indented_code(line: str) -> bool:
             column += 4 - (column % 4)
         else:
             break
-        if column >= 4:
-            return True
-    return False
+    return column
+
+
+def _is_indented_code(line: str) -> bool:
+    return _indent_columns(line) >= 4
+
+
+def _list_item_indent(line: str) -> int | None:
+    match = re.match(r"^([ \t]*)(?:[-*+]|\d+[.)])[ \t]+", line)
+    return _indent_columns(match.group(1)) if match else None
+
+
+def _is_unchecked_checklist(line: str) -> bool:
+    return bool(re.match(r"^[ \t]*[-*+][ \t]+\[[ \t]\][ \t]+", line))
 
 
 def _extract_units(text: str) -> tuple[list[str], list[dict[str, Any]]]:
@@ -357,13 +368,32 @@ def _extract_units(text: str) -> tuple[list[str], list[dict[str, Any]]]:
     anchors: list[dict[str, Any]] = []
     seen: dict[str, int] = {}
     fence: tuple[str, int] | None = None
+    list_indents: list[int] = []
     for line_no, line in enumerate(lines, 1):
         if fence is not None:
             if _closing_fence(line, fence[0], fence[1]):
                 fence = None
             continue
         fence = _opening_fence(line)
-        if fence is not None or _is_indented_code(line):
+        if fence is not None:
+            if _indent_columns(line) <= 3:
+                list_indents.clear()
+            continue
+
+        indent = _indent_columns(line)
+        list_indent = _list_item_indent(line)
+        nested_list_item = False
+        if list_indent is not None:
+            while list_indents and list_indents[-1] >= list_indent:
+                list_indents.pop()
+            nested_list_item = bool(list_indents) and list_indent - list_indents[-1] <= 4
+            if list_indent < 4 or nested_list_item:
+                list_indents.append(list_indent)
+        elif line.strip() and indent == 0:
+            list_indents.clear()
+
+        nested_checklist = nested_list_item and _is_unchecked_checklist(line)
+        if _is_indented_code(line) and not nested_checklist:
             continue
         found = _candidate(line, line_no)
         if not found:
@@ -496,11 +526,13 @@ def _validate_verification(verification: Any, source_hash: str) -> dict[str, Any
     return obj
 
 
-def _validate_disposition(unit_id: str, unit_class: str, disposition: Any) -> dict[str, Any]:
+def _validate_disposition(
+        unit_id: str, unit_class: str, disposition: Any, *, allow_unclassified: bool = False,
+) -> dict[str, Any]:
     obj = _expect_object(disposition, f"unit {unit_id}.disposition")
     _expect_exact_keys(obj, DISPOSITION_KEYS, f"unit {unit_id}.disposition")
     state = obj["state"]
-    if state not in DISPOSITION_STATES:
+    if not isinstance(state, str) or state not in DISPOSITION_STATES:
         raise IntakeError(f"unit {unit_id} has invalid disposition state {state!r}")
     target = obj["target_ref"]
     if target is not None and (not isinstance(target, str) or not target.strip()):
@@ -512,6 +544,8 @@ def _validate_disposition(unit_id: str, unit_class: str, disposition: Any) -> di
         _reject_unsafe_text(ref, f"unit {unit_id}.disposition.evidence[{index}]")
 
     if state == "unclassified":
+        if allow_unclassified:
+            return obj
         raise IntakeError(f"unit {unit_id} remains unclassified")
     if state == "materialized" and target is None:
         raise IntakeError(f"unit {unit_id} materialized disposition requires target_ref")
@@ -596,14 +630,17 @@ def validate_manifest(data: dict[str, Any], *, require_classified: bool = True) 
         dependencies = _expect_string_list(unit["dependencies"], f"unit {unit_id}.dependencies")
         if len(set(dependencies)) != len(dependencies):
             raise IntakeError(f"unit {unit_id} has duplicate dependencies")
-        _expect_string_list(unit["operator_stops"], f"unit {unit_id}.operator_stops")
+        operator_stops = _expect_string_list(
+            unit["operator_stops"], f"unit {unit_id}.operator_stops")
+        for stop_index, stop in enumerate(operator_stops):
+            _reject_unsafe_text(stop, f"unit {unit_id}.operator_stops[{stop_index}]")
         graph[unit_id] = dependencies
 
         unit_class, route = unit["class"], unit["route"]
         if not require_classified and unit_class is None and route is None:
-            disposition = _expect_object(unit["disposition"], f"unit {unit_id}.disposition")
-            _expect_exact_keys(disposition, DISPOSITION_KEYS, f"unit {unit_id}.disposition")
-            if disposition.get("state") == "unclassified":
+            disposition = _validate_disposition(
+                unit_id, "", unit["disposition"], allow_unclassified=True)
+            if disposition["state"] == "unclassified":
                 continue
         if unit_class not in CLASS_ROUTES:
             raise IntakeError(f"unit {unit_id} has invalid class {unit_class!r}")
@@ -633,6 +670,19 @@ def validate_manifest(data: dict[str, Any], *, require_classified: bool = True) 
     return data
 
 
+def _manifest_content_sha256(manifest: dict[str, Any]) -> str:
+    content = {
+        "expected_unit_ids": manifest["expected_unit_ids"],
+        "units": [
+            {key: unit[key] for key in ("id", "class", "route", "dependencies")}
+            for unit in manifest["units"]
+        ],
+    }
+    encoded = json.dumps(
+        content, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def validate_review(review: dict[str, Any], manifest: dict[str, Any]) -> None:
     _expect_exact_keys(review, REVIEW_KEYS, "review")
     if not _is_int(review["schema_version"]) or review["schema_version"] != SCHEMA_VERSION:
@@ -641,6 +691,11 @@ def validate_review(review: dict[str, Any], manifest: dict[str, Any]) -> None:
         raise IntakeError("review intake_id does not match manifest")
     if review["source_sha256"] != manifest["source"]["sha256"]:
         raise IntakeError("review source_sha256 does not match manifest source")
+    content_hash = review["manifest_content_sha256"]
+    if not isinstance(content_hash, str) or not SHA256_RE.fullmatch(content_hash):
+        raise IntakeError("review.manifest_content_sha256 must be 64 lowercase hex characters")
+    if content_hash != _manifest_content_sha256(manifest):
+        raise IntakeError("review manifest_content_sha256 does not match manifest content")
     if review["verdict"] != "PASS":
         raise IntakeError("review verdict must be PASS")
     for key in ("missing_unit_ids", "duplicate_unit_ids", "misrouted_unit_ids", "notes"):

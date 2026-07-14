@@ -47,10 +47,21 @@ PY
 
 write_passing_review() {
   python3 - "$1" "$2" <<'PY'
-import json, sys
+import hashlib, json, sys
 manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+content = {
+    "expected_unit_ids": manifest["expected_unit_ids"],
+    "units": [
+        {key: unit[key] for key in ("id", "class", "route", "dependencies")}
+        for unit in manifest["units"]
+    ],
+}
+content_sha256 = hashlib.sha256(json.dumps(
+    content, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+).encode("utf-8")).hexdigest()
 review = {"schema_version": 1, "intake_id": manifest["intake_id"],
-          "source_sha256": manifest["source"]["sha256"], "verdict": "PASS",
+          "source_sha256": manifest["source"]["sha256"],
+          "manifest_content_sha256": content_sha256, "verdict": "PASS",
           "missing_unit_ids": [], "duplicate_unit_ids": [],
           "misrouted_unit_ids": [], "notes": []}
 json.dump(review, open(sys.argv[2], "w", encoding="utf-8"), indent=2, sort_keys=True)
@@ -99,6 +110,25 @@ elif kind == "self-certified":
 elif kind == "malformed-unclassified":
     unit = next(unit for unit in data["units"] if unit["id"] == arg)
     unit.update({"class": None, "route": None, "disposition": []})
+elif kind == "coordinated-remove":
+    data["expected_unit_ids"] = [unit_id for unit_id in data["expected_unit_ids"] if unit_id != arg]
+    data["units"] = [unit for unit in data["units"] if unit["id"] != arg]
+elif kind == "unsafe-operator-stop":
+    next(unit for unit in data["units"] if unit["id"] == arg)["operator_stops"] = [
+        "SERVICE_API_KEY=sample-sensitive-value"
+    ]
+elif kind == "malformed-unclassified-evidence":
+    unit = next(unit for unit in data["units"] if unit["id"] == arg)
+    unit.update({"class": None, "route": None,
+                 "disposition": {"state": "unclassified", "target_ref": None, "evidence": None}})
+elif kind == "malformed-unclassified-target":
+    unit = next(unit for unit in data["units"] if unit["id"] == arg)
+    unit.update({"class": None, "route": None,
+                 "disposition": {"state": "unclassified", "target_ref": 42, "evidence": []}})
+elif kind == "malformed-unclassified-state":
+    unit = next(unit for unit in data["units"] if unit["id"] == arg)
+    unit.update({"class": None, "route": None,
+                 "disposition": {"state": [], "target_ref": None, "evidence": []}})
 elif kind == "no-target":
     unit = next(unit for unit in data["units"] if unit["id"] == arg)
     unit["disposition"] = {"state": "materialized", "target_ref": None, "evidence": []}
@@ -158,6 +188,29 @@ record_review_fix_failure() {
   else
     REVIEW_FIX_FAILURES="$1"
   fi
+}
+
+ROUND2_FAILURES=""
+record_round2_failure() {
+  if [ -n "$ROUND2_FAILURES" ]; then
+    ROUND2_FAILURES="$ROUND2_FAILURES, $1"
+  else
+    ROUND2_FAILURES="$1"
+  fi
+}
+
+status_must_fail_cleanly() {
+  local expected="$1"
+  local output rc
+  output="$(intake status --manifest "$CASE_MANIFEST" --json 2>&1)"
+  rc=$?
+  [ "$rc" -eq 2 ] || return 1
+  case "$output" in
+    *"idc-intake: FAIL — $expected"*) ;;
+    *) return 1 ;;
+  esac
+  printf '%s' "$output" | grep -q "Traceback" && return 1
+  return 0
 }
 
 intake extract --source "$FIXTURE/external-plan.md" --out "$MANIFEST" \
@@ -386,6 +439,89 @@ fi
 
 [ -z "$REVIEW_FIX_FAILURES" ] \
   || gov_fail "Task 4 review regressions failed: $REVIEW_FIX_FAILURES"
+
+# Review round 2 RED probes: report all four independent-review findings in one baseline run.
+# 1. A review of the complete manifest must not survive coordinated removal from both exact-once lists.
+CONTENT_BINDING_OK=1
+fresh_case coordinated-removal
+mutate_manifest coordinated-remove B2 "$CASE_MANIFEST"
+if intake validate --manifest "$CASE_MANIFEST" --review "$CASE_REVIEW" >/dev/null 2>&1; then
+  CONTENT_BINDING_OK=0
+fi
+fresh_case coordinated-removal-status
+mutate_manifest coordinated-remove B2 "$CASE_MANIFEST"
+if intake status --manifest "$CASE_MANIFEST" --json >/dev/null 2>&1; then
+  CONTENT_BINDING_OK=0
+fi
+[ "$CONTENT_BINDING_OK" -eq 1 ] || record_round2_failure "review-content-binding"
+
+# 2. A nested task item is an execution unit; visually similar fenced/indented code remains inert.
+NESTED_SOURCE="$WORK/nested-checklist.md"
+NESTED_MANIFEST="$WORK/2026-07-12-nested-checklist.json"
+python3 - "$NESTED_SOURCE" <<'PY'
+import sys
+text = """# Wrapper
+- Parent list item
+    - [ ] nested execution item
+      nested body
+Paragraph ends list context.
+
+    - [ ] indented code sample
+
+```markdown
+- [ ] fenced code sample
+```
+## U1 - real heading
+real body
+"""
+open(sys.argv[1], "w", encoding="utf-8", newline="").write(text)
+PY
+NESTED_OK=1
+if ! intake extract --source "$NESTED_SOURCE" --out "$NESTED_MANIFEST" --goal complete \
+     --plugin-version 4.1.0 >/dev/null 2>&1; then
+  NESTED_OK=0
+elif ! python3 - "$NESTED_MANIFEST" <<'PY' >/dev/null 2>&1
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+assert data["expected_unit_ids"] == ["L3", "U1"]
+by_id = {unit["id"]: unit for unit in data["units"]}
+assert by_id["L3"]["source_anchor"] == {
+    "heading": "nested execution item", "line_start": 3, "line_end": 11
+}
+assert by_id["U1"]["source_anchor"] == {
+    "heading": "U1 - real heading", "line_start": 12, "line_end": 13
+}
+PY
+then
+  NESTED_OK=0
+fi
+[ "$NESTED_OK" -eq 1 ] || record_round2_failure "nested-checklist"
+
+# 3. Manifest string-list privacy applies to operator_stops too.
+fresh_case unsafe-operator-stop
+mutate_manifest unsafe-operator-stop U4 "$CASE_MANIFEST"
+if intake validate --manifest "$CASE_MANIFEST" --review "$CASE_REVIEW" >/dev/null 2>&1; then
+  record_round2_failure "operator-stops-privacy"
+fi
+
+# 4. Every unclassified disposition field must be shape-safe before status consumes it.
+ROUND2_DISPOSITION_OK=1
+fresh_case malformed-unclassified-evidence
+mutate_manifest malformed-unclassified-evidence U4 "$CASE_MANIFEST"
+status_must_fail_cleanly "unit U4.disposition.evidence must be a list of non-empty strings" \
+  || ROUND2_DISPOSITION_OK=0
+fresh_case malformed-unclassified-target
+mutate_manifest malformed-unclassified-target U4 "$CASE_MANIFEST"
+status_must_fail_cleanly "unit U4 target_ref must be a non-empty string or null" \
+  || ROUND2_DISPOSITION_OK=0
+fresh_case malformed-unclassified-state
+mutate_manifest malformed-unclassified-state U4 "$CASE_MANIFEST"
+status_must_fail_cleanly "unit U4 has invalid disposition state []" \
+  || ROUND2_DISPOSITION_OK=0
+[ "$ROUND2_DISPOSITION_OK" -eq 1 ] || record_round2_failure "unclassified-disposition-shape"
+
+[ -z "$ROUND2_FAILURES" ] \
+  || gov_fail "Task 4 review round 2 regressions failed: $ROUND2_FAILURES"
 
 fresh_case missing-b2
 drop_unit B2 "$CASE_MANIFEST"

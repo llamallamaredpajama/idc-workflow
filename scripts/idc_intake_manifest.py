@@ -50,8 +50,8 @@ UNIT_KEYS = {
 ANCHOR_KEYS = {"heading", "line_start", "line_end"}
 DISPOSITION_KEYS = {"state", "target_ref", "evidence"}
 REVIEW_KEYS = {
-    "schema_version", "intake_id", "source_sha256", "manifest_content_sha256", "verdict",
-    "missing_unit_ids", "duplicate_unit_ids", "misrouted_unit_ids", "notes",
+    "schema_version", "intake_id", "source_sha256", "verdict", "missing_unit_ids",
+    "duplicate_unit_ids", "misrouted_unit_ids", "notes",
 }
 
 INTAKE_ID_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
@@ -188,7 +188,7 @@ def _confined_real_path(root: str, candidate: str, label: str) -> str:
     return resolved
 
 
-def _review_locator(manifest_path: str, argument: str) -> tuple[str, str]:
+def _review_locator(manifest_path: str, argument: str, manifest: dict[str, Any]) -> tuple[str, str]:
     if not isinstance(argument, str) or not argument.strip():
         raise IntakeError("review path must be a non-empty path")
     root = _operational_directory(manifest_path)
@@ -198,6 +198,7 @@ def _review_locator(manifest_path: str, argument: str) -> tuple[str, str]:
     safe_locator = _safe_relative(locator, "review path", allow_none=False)
     assert safe_locator is not None
     _reject_unsafe_text(safe_locator, "review path")
+    _validate_review_locator(safe_locator, manifest, "review path")
     return safe_locator, resolved
 
 
@@ -209,6 +210,7 @@ def _resolve_stamped_review(manifest_path: str, manifest: dict[str, Any]) -> dic
         verification["review_path"], "manifest.verification.review_path", allow_none=False)
     assert locator is not None
     _reject_unsafe_text(locator, "manifest.verification.review_path")
+    _validate_review_locator(locator, manifest, "manifest.verification.review_path")
     root = _operational_directory(manifest_path)
     candidate = os.path.join(root, *locator.split("/"))
     review_path = _confined_real_path(root, candidate, "manifest.verification.review_path")
@@ -455,12 +457,13 @@ def extract_manifest(source_path: str, out_path: str, goal: str, plugin_version:
     source_hash = hashlib.sha256(raw).hexdigest()
     expected, units = _extract_units(parsed_text)
     redacted_goal, goal_redactions = _redact_human_text(goal)
+    display_name, _ = _redact_human_text(os.path.basename(os.path.normpath(source_path)))
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "intake_id": _intake_id_from_output(out_path),
         "source": {
             "kind": "external_markdown",
-            "display_name": os.path.basename(os.path.normpath(source_path)),
+            "display_name": display_name,
             "repo_relative_locator": _source_locator(source_path),
             "sha256": source_hash,
         },
@@ -487,6 +490,7 @@ def _validate_source(source: Any) -> dict[str, Any]:
     if not isinstance(display, str) or not display or display != os.path.basename(display) or \
             "/" in display or "\\" in display:
         raise IntakeError("manifest.source.display_name must be a basename")
+    _reject_unsafe_text(display, "manifest.source.display_name")
     locator = _safe_relative(
         obj["repo_relative_locator"], "manifest.source.repo_relative_locator", allow_none=True)
     if locator is not None:
@@ -642,6 +646,10 @@ def validate_manifest(data: dict[str, Any], *, require_classified: bool = True) 
                 unit_id, "", unit["disposition"], allow_unclassified=True)
             if disposition["state"] == "unclassified":
                 continue
+        if not isinstance(unit_class, str):
+            raise IntakeError(f"unit {unit_id} class must be a string")
+        if not isinstance(route, str):
+            raise IntakeError(f"unit {unit_id} route must be a string")
         if unit_class not in CLASS_ROUTES:
             raise IntakeError(f"unit {unit_id} has invalid class {unit_class!r}")
         if route in FORBIDDEN_ROUTES:
@@ -683,6 +691,16 @@ def _manifest_content_sha256(manifest: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _expected_review_basename(manifest: dict[str, Any]) -> str:
+    return f"{manifest['intake_id']}.review.{_manifest_content_sha256(manifest)}.json"
+
+
+def _validate_review_locator(locator: str, manifest: dict[str, Any], label: str) -> None:
+    expected = _expected_review_basename(manifest)
+    if locator.rsplit("/", 1)[-1] != expected:
+        raise IntakeError(f"{label} basename must be {expected!r} for current manifest content")
+
+
 def validate_review(review: dict[str, Any], manifest: dict[str, Any]) -> None:
     _expect_exact_keys(review, REVIEW_KEYS, "review")
     if not _is_int(review["schema_version"]) or review["schema_version"] != SCHEMA_VERSION:
@@ -691,11 +709,6 @@ def validate_review(review: dict[str, Any], manifest: dict[str, Any]) -> None:
         raise IntakeError("review intake_id does not match manifest")
     if review["source_sha256"] != manifest["source"]["sha256"]:
         raise IntakeError("review source_sha256 does not match manifest source")
-    content_hash = review["manifest_content_sha256"]
-    if not isinstance(content_hash, str) or not SHA256_RE.fullmatch(content_hash):
-        raise IntakeError("review.manifest_content_sha256 must be 64 lowercase hex characters")
-    if content_hash != _manifest_content_sha256(manifest):
-        raise IntakeError("review manifest_content_sha256 does not match manifest content")
     if review["verdict"] != "PASS":
         raise IntakeError("review verdict must be PASS")
     for key in ("missing_unit_ids", "duplicate_unit_ids", "misrouted_unit_ids", "notes"):
@@ -754,7 +767,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
     validate_manifest(manifest)
     if not args.review:
         raise IntakeError("independent --review is required; verification.status cannot self-certify")
-    review_locator, review_path = _review_locator(args.manifest, args.review)
+    review_locator, review_path = _review_locator(args.manifest, args.review, manifest)
     review = _load_json(review_path, "review")
     validate_review(review, manifest)
     manifest["verification"] = {

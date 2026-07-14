@@ -18,7 +18,7 @@ FIXTURE="$GOV_PLUGIN/tests/smoke/fixtures/session-b7a93ff6"
 WORK="$(mktemp -d)" || gov_fail "could not create temp workspace"
 trap 'rm -rf "$WORK"' EXIT
 MANIFEST="$WORK/2026-07-12-example.json"
-REVIEW="$WORK/2026-07-12-example.review.json"
+REVIEW=""
 COMPLETE="$WORK/complete.json"
 GOOD_REVIEW="$WORK/good-review.json"
 
@@ -47,6 +47,18 @@ PY
 
 write_passing_review() {
   python3 - "$1" "$2" <<'PY'
+import json, sys
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+review = {"schema_version": 1, "intake_id": manifest["intake_id"],
+          "source_sha256": manifest["source"]["sha256"], "verdict": "PASS",
+          "missing_unit_ids": [], "duplicate_unit_ids": [],
+          "misrouted_unit_ids": [], "notes": []}
+json.dump(review, open(sys.argv[2], "w", encoding="utf-8"), indent=2, sort_keys=True)
+PY
+}
+
+manifest_content_sha256() {
+  python3 - "$1" <<'PY'
 import hashlib, json, sys
 manifest = json.load(open(sys.argv[1], encoding="utf-8"))
 content = {
@@ -56,16 +68,20 @@ content = {
         for unit in manifest["units"]
     ],
 }
-content_sha256 = hashlib.sha256(json.dumps(
+print(hashlib.sha256(json.dumps(
     content, ensure_ascii=False, separators=(",", ":"), sort_keys=True
-).encode("utf-8")).hexdigest()
-review = {"schema_version": 1, "intake_id": manifest["intake_id"],
-          "source_sha256": manifest["source"]["sha256"],
-          "manifest_content_sha256": content_sha256, "verdict": "PASS",
-          "missing_unit_ids": [], "duplicate_unit_ids": [],
-          "misrouted_unit_ids": [], "notes": []}
-json.dump(review, open(sys.argv[2], "w", encoding="utf-8"), indent=2, sort_keys=True)
+).encode("utf-8")).hexdigest())
 PY
+}
+
+canonical_review_path() {
+  local digest
+  digest="$(manifest_content_sha256 "$1")" || return 1
+  printf '%s/%s.review.%s.json\n' "$2" "$(jq -r '.intake_id' "$1")" "$digest"
+}
+
+write_canonical_review() {
+  write_passing_review "$1" "$2"
 }
 
 drop_unit() {
@@ -84,6 +100,16 @@ import json, sys
 unit_id, route, path = sys.argv[1:]
 data = json.load(open(path, encoding="utf-8"))
 next(unit for unit in data["units"] if unit["id"] == unit_id)["route"] = route
+json.dump(data, open(path, "w", encoding="utf-8"), indent=2, sort_keys=True)
+PY
+}
+
+set_unit_json_field() {
+  python3 - "$1" "$2" "$3" "$4" <<'PY'
+import json, sys
+unit_id, field, encoded, path = sys.argv[1:]
+data = json.load(open(path, encoding="utf-8"))
+next(unit for unit in data["units"] if unit["id"] == unit_id)[field] = json.loads(encoded)
 json.dump(data, open(path, "w", encoding="utf-8"), indent=2, sort_keys=True)
 PY
 }
@@ -169,16 +195,42 @@ PY
 }
 
 fresh_case() {
-  CASE_MANIFEST="$WORK/case-$1.json"
-  CASE_REVIEW="$WORK/case-$1.review.json"
+  CASE_DIR="$WORK/case-$1"
+  mkdir -p "$CASE_DIR" || gov_fail "could not create case directory for $1"
+  CASE_MANIFEST="$CASE_DIR/2026-07-12-example.json"
+  CASE_REVIEW="$CASE_DIR/$(basename "$REVIEW")"
   cp "$COMPLETE" "$CASE_MANIFEST" || gov_fail "could not copy complete manifest for $1"
   cp "$GOOD_REVIEW" "$CASE_REVIEW" || gov_fail "could not copy passing review for $1"
 }
 
-must_fail_reviewed() {
-  if intake validate --manifest "$CASE_MANIFEST" --review "$CASE_REVIEW" >/dev/null 2>&1; then
-    gov_fail "$1"
+refresh_case_review() {
+  local prior_review="$CASE_REVIEW"
+  CASE_REVIEW="$(canonical_review_path "$CASE_MANIFEST" "$CASE_DIR")" \
+    || gov_fail "could not calculate review path for $CASE_DIR"
+  [ "$prior_review" = "$CASE_REVIEW" ] || rm -f "$prior_review"
+  write_passing_review "$CASE_MANIFEST" "$CASE_REVIEW" \
+    || gov_fail "could not refresh review for $CASE_DIR"
+}
+
+validate_must_fail_cleanly() {
+  local expected="$1"
+  local failure="$2"
+  local output rc
+  output="$(intake validate --manifest "$CASE_MANIFEST" --review "$CASE_REVIEW" 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 2 ] || ! printf '%s' "$output" | grep -Fq "idc-intake: FAIL — $expected" \
+       || printf '%s' "$output" | grep -q "Traceback"; then
+    gov_fail "$failure (expected clean failure containing: $expected; got rc=$rc: $output)"
   fi
+}
+
+must_fail_manifest() {
+  refresh_case_review
+  validate_must_fail_cleanly "$1" "$2"
+}
+
+must_fail_reviewed() {
+  validate_must_fail_cleanly "$1" "$2"
 }
 
 REVIEW_FIX_FAILURES=""
@@ -196,6 +248,15 @@ record_round2_failure() {
     ROUND2_FAILURES="$ROUND2_FAILURES, $1"
   else
     ROUND2_FAILURES="$1"
+  fi
+}
+
+ROUND3_FAILURES=""
+record_round3_failure() {
+  if [ -n "$ROUND3_FAILURES" ]; then
+    ROUND3_FAILURES="$ROUND3_FAILURES, $1"
+  else
+    ROUND3_FAILURES="$1"
   fi
 }
 
@@ -253,15 +314,17 @@ map_every_unit "$MANIFEST"
 if intake validate --manifest "$MANIFEST" >/dev/null 2>&1; then
   gov_fail "manifest without independent review passed"
 fi
+REVIEW="$(canonical_review_path "$MANIFEST" "$WORK")" \
+  || gov_fail "could not calculate passing review path"
 write_passing_review "$MANIFEST" "$REVIEW"
 intake validate --manifest "$MANIFEST" --review "$REVIEW" >/dev/null \
   || gov_fail "complete independently reviewed manifest failed"
 
-python3 - "$MANIFEST" <<'PY' || gov_fail "passing review was not atomically stamped"
+python3 - "$MANIFEST" "$REVIEW" <<'PY' || gov_fail "passing review was not atomically stamped"
 import json, os, sys
 data = json.load(open(sys.argv[1], encoding="utf-8"))
 assert data["verification"]["status"] == "passed"
-assert data["verification"]["review_path"] == "2026-07-12-example.review.json"
+assert data["verification"]["review_path"] == os.path.basename(sys.argv[2])
 assert not os.path.isabs(data["verification"]["review_path"])
 PY
 
@@ -286,20 +349,19 @@ TAMPER_DIR="$WORK/tampered-review"
 mkdir -p "$TAMPER_DIR" || gov_fail "could not create tampered-review case"
 cp "$COMPLETE" "$TAMPER_DIR/2026-07-12-example.json" \
   || gov_fail "could not copy tampered-review manifest"
-cp "$GOOD_REVIEW" "$TAMPER_DIR/2026-07-12-example.review.json" \
+TAMPER_REVIEW="$TAMPER_DIR/$(basename "$REVIEW")"
+cp "$GOOD_REVIEW" "$TAMPER_REVIEW" \
   || gov_fail "could not copy tampered review"
-mutate_review verdict FAIL "$TAMPER_DIR/2026-07-12-example.review.json"
+mutate_review verdict FAIL "$TAMPER_REVIEW"
 if intake status --manifest "$TAMPER_DIR/2026-07-12-example.json" --json >/dev/null 2>&1; then
   REVIEW_BINDING_OK=0
 fi
 
-OUTSIDE_REVIEW="$WORK/../$(basename "$WORK")-outside.review.json"
-cp "$GOOD_REVIEW" "$OUTSIDE_REVIEW" || gov_fail "could not create outside review case"
+OUTSIDE_REVIEW="$REVIEW"
 fresh_case outside-review
 if intake validate --manifest "$CASE_MANIFEST" --review "$OUTSIDE_REVIEW" >/dev/null 2>&1; then
   REVIEW_BINDING_OK=0
 fi
-rm -f "$OUTSIDE_REVIEW"
 [ "$REVIEW_BINDING_OK" -eq 1 ] || record_review_fix_failure "review-binding"
 
 # 2. Source-derived human text is redacted; manually supplied durable references are rejected.
@@ -523,65 +585,175 @@ status_must_fail_cleanly "unit U4 has invalid disposition state []" \
 [ -z "$ROUND2_FAILURES" ] \
   || gov_fail "Task 4 review round 2 regressions failed: $ROUND2_FAILURES"
 
+# Review round 3 RED probes: collect every adjudicated finding before changing production code.
+# 1. The published review schema has exactly eight fields; content binding lives in its real path.
+ROUND3_SCHEMA_DIR="$WORK/round3-canonical-schema"
+mkdir -p "$ROUND3_SCHEMA_DIR" || gov_fail "could not create canonical review case"
+ROUND3_SCHEMA_MANIFEST="$ROUND3_SCHEMA_DIR/2026-07-12-example.json"
+cp "$COMPLETE" "$ROUND3_SCHEMA_MANIFEST" || gov_fail "could not copy canonical review manifest"
+ROUND3_SCHEMA_REVIEW="$(canonical_review_path "$ROUND3_SCHEMA_MANIFEST" "$ROUND3_SCHEMA_DIR")" \
+  || gov_fail "could not calculate canonical review path"
+write_canonical_review "$ROUND3_SCHEMA_MANIFEST" "$ROUND3_SCHEMA_REVIEW" \
+  || gov_fail "could not write canonical review"
+if ! python3 - "$ROUND3_SCHEMA_REVIEW" <<'PY' >/dev/null 2>&1
+import json, sys
+review = json.load(open(sys.argv[1], encoding="utf-8"))
+assert set(review) == {
+    "schema_version", "intake_id", "source_sha256", "verdict",
+    "missing_unit_ids", "duplicate_unit_ids", "misrouted_unit_ids", "notes",
+}
+PY
+then
+  gov_fail "canonical review fixture does not have exactly eight fields"
+fi
+if ! intake validate --manifest "$ROUND3_SCHEMA_MANIFEST" \
+     --review "$ROUND3_SCHEMA_REVIEW" >/dev/null 2>&1; then
+  record_round3_failure "canonical-review-schema"
+fi
+
+# 2. Removing only the exact-set gate must let missing B2 through, proving no stale binding masks it.
+ROUND3_SABOTAGE_DIR="$WORK/round3-exact-set-sabotage"
+mkdir -p "$ROUND3_SABOTAGE_DIR" || gov_fail "could not create exact-set sabotage case"
+ROUND3_SABOTAGE_MANIFEST="$ROUND3_SABOTAGE_DIR/2026-07-12-example.json"
+cp "$COMPLETE" "$ROUND3_SABOTAGE_MANIFEST" \
+  || gov_fail "could not copy exact-set sabotage manifest"
+drop_unit B2 "$ROUND3_SABOTAGE_MANIFEST"
+ROUND3_SABOTAGE_REVIEW="$(canonical_review_path \
+  "$ROUND3_SABOTAGE_MANIFEST" "$ROUND3_SABOTAGE_DIR")" \
+  || gov_fail "could not calculate exact-set sabotage review path"
+write_canonical_review "$ROUND3_SABOTAGE_MANIFEST" "$ROUND3_SABOTAGE_REVIEW" \
+  || gov_fail "could not write exact-set sabotage review"
+ROUND3_SABOTAGED_INTAKE="$WORK/idc-intake-without-exact-set.py"
+python3 - "$INTAKE" "$ROUND3_SABOTAGED_INTAKE" <<'PY' \
+  || gov_fail "could not prepare exact-set sabotage helper"
+import sys
+source, destination = sys.argv[1:]
+text = open(source, encoding="utf-8").read()
+needle = '''    if missing or extra:
+        raise IntakeError(f"manifest exact-once unit mismatch (missing={missing}, extra={extra})")
+'''
+assert text.count(needle) == 1
+open(destination, "w", encoding="utf-8").write(text.replace(needle, "", 1))
+PY
+if ! python3 "$ROUND3_SABOTAGED_INTAKE" validate \
+     --manifest "$ROUND3_SABOTAGE_MANIFEST" --review "$ROUND3_SABOTAGE_REVIEW" \
+     >/dev/null 2>&1; then
+  record_round3_failure "negative-validator-reasons"
+fi
+
+# 3. Even an absolute source path with a credential-shaped basename must persist only safe text.
+ROUND3_PRIVATE_BASENAME="SERVICE_API_KEY=sample-sensitive-value.md"
+ROUND3_PRIVATE_SOURCE="$WORK/$ROUND3_PRIVATE_BASENAME"
+ROUND3_PRIVATE_MANIFEST="$WORK/2026-07-12-private-basename.json"
+python3 - "$ROUND3_PRIVATE_SOURCE" <<'PY'
+import sys
+open(sys.argv[1], "w", encoding="utf-8").write("## U1 - safe unit\nbody\n")
+PY
+ROUND3_BASENAME_OK=1
+if ! intake extract --source "$ROUND3_PRIVATE_SOURCE" --out "$ROUND3_PRIVATE_MANIFEST" \
+     --goal complete --plugin-version 4.1.0 >/dev/null 2>&1; then
+  ROUND3_BASENAME_OK=0
+elif ! python3 - "$ROUND3_PRIVATE_MANIFEST" "$ROUND3_PRIVATE_BASENAME" \
+       <<'PY' >/dev/null 2>&1
+import json, sys
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+display_name = manifest["source"]["display_name"]
+assert sys.argv[2] not in display_name
+assert "[REDACTED_CREDENTIAL]" in display_name
+PY
+then
+  ROUND3_BASENAME_OK=0
+fi
+[ "$ROUND3_BASENAME_OK" -eq 1 ] || record_round3_failure "source-basename-privacy"
+
+# 4. Every malformed class/route container or scalar must use the clean exit-2 contract.
+ROUND3_CLASS_ROUTE_OK=1
+for FIELD in class route; do
+  for SHAPE in '[]' '{}' '42'; do
+    fresh_case "round3-$FIELD-$(printf '%s' "$SHAPE" | tr -cd '[:alnum:]')"
+    set_unit_json_field U4 "$FIELD" "$SHAPE" "$CASE_MANIFEST"
+    status_must_fail_cleanly "unit U4 $FIELD must be a string" \
+      || ROUND3_CLASS_ROUTE_OK=0
+  done
+done
+[ "$ROUND3_CLASS_ROUTE_OK" -eq 1 ] || record_round3_failure "class-route-shape"
+
+[ -z "$ROUND3_FAILURES" ] \
+  || gov_fail "Task 4 review round 3 regressions failed: $ROUND3_FAILURES"
+
 fresh_case missing-b2
 drop_unit B2 "$CASE_MANIFEST"
-must_fail_reviewed "missing B2 passed exact-once validation"
+must_fail_manifest "manifest exact-once unit mismatch" \
+  "missing B2 did not fail the exact-once validator"
 
 fresh_case duplicate-u3
 mutate_manifest duplicate U3 "$CASE_MANIFEST"
-must_fail_reviewed "duplicate U3 passed exact-once validation"
+must_fail_manifest "manifest.units contains duplicate ids" \
+  "duplicate U3 did not fail the duplicate-id validator"
 
 fresh_case build-route
 set_route U4 build "$CASE_MANIFEST"
-must_fail_reviewed "foreign unit routed directly to Build"
+must_fail_manifest "unit U4 may not route directly to build" \
+  "foreign unit did not fail the direct-Build route validator"
 
 fresh_case autorun-route
 set_route U4 autorun "$CASE_MANIFEST"
-must_fail_reviewed "foreign unit routed directly to Autorun"
+must_fail_manifest "unit U4 may not route directly to autorun" \
+  "foreign unit did not fail the direct-Autorun route validator"
 
 fresh_case bad-class-route
 mutate_manifest bad-class-route U4 "$CASE_MANIFEST"
-must_fail_reviewed "invalid class/route pair passed"
+must_fail_manifest "unit U4 class new_requirement cannot route to 'recirculate'" \
+  "invalid class/route pair did not fail its validator"
 
 fresh_case unknown-dependency
 mutate_manifest unknown-dependency U4 "$CASE_MANIFEST"
-must_fail_reviewed "unknown dependency passed"
+must_fail_manifest "unit U4 names unknown dependencies" \
+  "unknown dependency did not fail its validator"
 
 fresh_case dependency-cycle
 mutate_manifest cycle ignored "$CASE_MANIFEST"
-must_fail_reviewed "dependency cycle passed"
+must_fail_manifest "dependency cycle detected" \
+  "dependency cycle did not fail its validator"
 
 fresh_case stale-review
 mutate_review hash "$(printf '0%.0s' {1..64})" "$CASE_REVIEW"
-must_fail_reviewed "stale review hash passed"
+must_fail_reviewed "review source_sha256 does not match manifest source" \
+  "stale review hash passed"
 
 fresh_case wrong-intake
 mutate_review intake 2026-07-12-other "$CASE_REVIEW"
-must_fail_reviewed "review for another intake passed"
+must_fail_reviewed "review intake_id does not match manifest" \
+  "review for another intake passed"
 
 fresh_case nonpass-review
 mutate_review verdict FAIL "$CASE_REVIEW"
-must_fail_reviewed "non-PASS review passed"
+must_fail_reviewed "review verdict must be PASS" "non-PASS review passed"
 
 fresh_case review-findings
 mutate_review finding U4 "$CASE_REVIEW"
-must_fail_reviewed "review with findings passed"
+must_fail_reviewed "review.missing_unit_ids must be empty for PASS" \
+  "review with findings passed"
 
 fresh_case absolute-source
 mutate_manifest absolute-source ignored "$CASE_MANIFEST"
-must_fail_reviewed "absolute source locator passed"
+must_fail_manifest "manifest.source.repo_relative_locator must never be absolute" \
+  "absolute source locator passed"
 
 fresh_case no-target
 mutate_manifest no-target U4 "$CASE_MANIFEST"
-must_fail_reviewed "unit with neither target nor explicit queued state passed"
+must_fail_manifest "unit U4 materialized disposition requires target_ref" \
+  "unit with neither target nor explicit queued state passed"
 
 fresh_case done-no-evidence
 mutate_manifest done-without-evidence U4 "$CASE_MANIFEST"
-must_fail_reviewed "already-done unit without evidence passed"
+must_fail_manifest "unit U4 verified_done disposition requires evidence" \
+  "already-done unit without evidence passed"
 
 fresh_case ignored-no-reason
 mutate_manifest ignored-without-reason U4 "$CASE_MANIFEST"
-must_fail_reviewed "ignored unit without a reason passed"
+must_fail_manifest "unit U4 ignored disposition requires a reason in evidence" \
+  "ignored unit without a reason passed"
 
 fresh_case self-certified
 mutate_manifest self-certified ignored "$CASE_MANIFEST"

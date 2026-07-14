@@ -251,6 +251,13 @@ def _blocked_by_numbers(repo, number):
         return [], False
 
 
+def _reject_malformed_github_item(root, sid, detail):
+    """Fail closed at the shared item-normalization boundary with one stable diagnostic."""
+    _persist_verdict(root, sid, "board-read-error", 2)
+    sys.stderr.write(f"idc-autorun-drain: malformed github board item: {detail}\n")
+    sys.exit(2)
+
+
 def load_github(owner, project_number, repo, root=None, sid=None, repository=None):
     """Build the predicate's issues list from the github board (ALL pages via idc_gh_board).
 
@@ -301,8 +308,18 @@ def load_github(owner, project_number, repo, root=None, sid=None, repository=Non
     issues = []
     for it in items:
         content = it.get("content") or {}
-        if content.get("type") != "Issue" or content.get("repository") != repository:
+        if content.get("type") != "Issue":
             continue
+        item_repository = content.get("repository")
+        if not isinstance(item_repository, str) or not item_repository:
+            _reject_malformed_github_item(
+                root, sid, "Issue repository identity is missing or invalid")
+        if item_repository != repository:
+            continue
+        title = content.get("title")
+        if not isinstance(title, str):
+            _reject_malformed_github_item(
+                root, sid, "local Issue title is missing or invalid")
         number = content.get("number")
         if type(number) is not int or number <= 0:
             _persist_verdict(root, sid, "board-read-error", 2)
@@ -313,7 +330,7 @@ def load_github(owner, project_number, repo, root=None, sid=None, repository=Non
             "number": number,
             "status": it.get("status"),
             "stage": it.get("stage"),
-            "title": content.get("title") or "",
+            "title": title,
         })
     unverified = 0
     for it in issues:

@@ -386,6 +386,14 @@ def board_nodes():
         ]
     if mode == "invalid-local-number":
         return [node(0, title="invalid local identity")]
+    if mode == "missing-issue-repository":
+        malformed = node(9, title="Issue whose repository identity is absent")
+        malformed["content"].pop("repository")
+        return [malformed]
+    if mode == "missing-local-title":
+        malformed = node(10, title="placeholder removed below")
+        malformed["content"].pop("title")
+        return [malformed]
     if mode == "healthy-fixpoint":
         return []
     raise SystemExit(f"unknown FAKE_GH_MODE {mode!r}")
@@ -411,13 +419,19 @@ if args[:2] == ["api", "graphql"]:
 if args and args[0] == "api" and len(args) > 1 and "dependencies/blocked_by" in args[1]:
     match = re.search(r"/issues/([^/]+)/dependencies/blocked_by", args[1])
     number = match.group(1) if match else ""
-    strict = "--paginate" in args and ".[].number" in args
+    has_paginate = "--paginate" in args
+    has_jq_flag = "--jq" in args
+    has_expression = ".[].number" in args
+    strict = has_paginate and has_jq_flag and has_expression
+    if not strict:
+        print("dependency reader omitted --paginate --jq .[].number", file=sys.stderr)
+        raise SystemExit(9)
     if mode == "dependency-pagination" and number == "2":
-        print("1" if strict else "[]")
+        print("1")
     elif mode == "dependency-malformed" and number == "2":
-        print("true" if strict else "[true]")
+        print("true")
     else:
-        print("" if strict else "[]")
+        print("")
     raise SystemExit(0)
 print(f"unexpected gh call in {mode}: {' '.join(args)}", file=sys.stderr)
 raise SystemExit(99)
@@ -438,6 +452,7 @@ run_github_oracle() {
 
 review_expect_github_drain_result() {
   local label="$1" repo="$2" mode="$3" expected_rc="$4" expected_stdout="$5"
+  local expected_stderr="${6-__IGNORE__}"
   local out="$WORK/$1-github-drain.out" err="$WORK/$1-github-drain.err" rc detail=""
   (cd "$repo" && FAKE_GH_MODE="$mode" PATH="$GITHUB_ORACLE_BIN:$PATH" \
     python3 "$DRAIN" --backend github --owner owner --project 7 --repo "$repo") \
@@ -450,10 +465,16 @@ review_expect_github_drain_result() {
     [ -z "$detail" ] || detail="$detail; "
     detail="${detail}stdout=$(tr '\n' '|' < "$out")"
   fi
+  if [ "$expected_stderr" != "__IGNORE__" ] && [ "$(cat "$err")" != "$expected_stderr" ]; then
+    [ -z "$detail" ] || detail="$detail; "
+    detail="${detail}stderr=$(tr '\n' '|' < "$err")"
+  fi
   if [ -n "$detail" ]; then
-    [ -s "$err" ] && detail="$detail; stderr=$(tr '\n' '|' < "$err")"
+    if [ "$expected_stderr" = "__IGNORE__" ] && [ -s "$err" ]; then
+      detail="$detail; stderr=$(tr '\n' '|' < "$err")"
+    fi
     record_review_failure "$label" \
-      "expected direct GitHub drain exit=$expected_rc stdout=$(printf '%s' "$expected_stdout" | tr '\n' '|'); got $detail"
+      "expected direct GitHub drain exit=$expected_rc stdout=$(printf '%s' "$expected_stdout" | tr '\n' '|') stderr=$expected_stderr; got $detail"
   fi
 }
 
@@ -870,6 +891,25 @@ run_github_oracle "$R" healthy-fixpoint
 review_expect_result github-healthy-fixpoint 0 no_action fixpoint __NULL__ '[]' \
   eligible_buildables=0
 
+# Successful GraphQL transport does not make malformed item content trustworthy. An Issue with no
+# repository identity cannot be proven local or foreign; an exact-local Issue with no textual title
+# cannot be proven not to be an operator gate. Both boundaries must fail closed in the standalone
+# oracle and the real GitHub Drain, with stable exit/diagnostic contracts.
+R="$(new_repo github-missing-issue-repository)"
+printf 'backend: github\nproject_number: 7\n' > "$R/docs/workflow/tracker-config.yaml"
+run_github_oracle "$R" missing-issue-repository
+review_expect_action github-missing-issue-repository 2 invalid-tracker __NULL__
+review_expect_github_drain_result drain-github-missing-issue-repository "$R" \
+  missing-issue-repository 2 "" \
+  "idc-autorun-drain: malformed github board item: Issue repository identity is missing or invalid"
+
+R="$(new_repo github-missing-local-title)"
+printf 'backend: github\nproject_number: 7\n' > "$R/docs/workflow/tracker-config.yaml"
+run_github_oracle "$R" missing-local-title
+review_expect_action github-missing-local-title 2 invalid-tracker __NULL__
+review_expect_github_drain_result drain-github-missing-local-title "$R" missing-local-title 2 "" \
+  "idc-autorun-drain: malformed github board item: local Issue title is missing or invalid"
+
 # The shared native dependency reader must use its strict paginating contract. The first fixture
 # exposes a blocker only when `--paginate --jq .[].number` is used; the second returns a malformed
 # boolean record that must fail closed as invalid tracker state, never silently become no blockers.
@@ -1055,7 +1095,7 @@ review_real_root_persistence real-root-autorun-persistence "$R" "$R/fake-bin" \
   task5-real-root
 
 if [ -n "$REVIEW_FAILURES" ]; then
-  gov_fail "round-5 review regressions: $REVIEW_FAILURES"
+  gov_fail "round-6 review regressions: $REVIEW_FAILURES"
 fi
 
-echo "PASS: durable next-action truth table — validated reviewed intake routes to Think/Recirculate/operator wait with precedence intact; same-lane Recirculation stays singular while distinct downstream lanes select Autorun; exact frozen dataclass contracts hold; operator gates stay outside oracle and Drain automation; empty/foreign-Markdown state fixes at no action; corrupt intake review, exact config, and positive tracker identities fail closed; healthy GitHub action/fixpoint reads filter local Issues and strict paginated dependencies; every throttle remains resumable exit 3 without observer side effects; a real Autorun drain persists its exact complete verdict idempotently"
+echo "PASS: durable next-action truth table — validated reviewed intake routes to Think/Recirculate/operator wait with precedence intact; same-lane Recirculation stays singular while distinct downstream lanes select Autorun; exact frozen dataclass contracts hold; operator gates stay outside oracle and Drain automation; empty/foreign-Markdown state fixes at no action; corrupt intake review, exact config, and positive tracker identities fail closed; healthy GitHub action/fixpoint reads filter exact local Issues while malformed item identity/title fails closed; dependency reads require strict --paginate --jq .[].number; every throttle remains resumable exit 3 without observer side effects; a real Autorun drain persists its exact complete verdict idempotently"

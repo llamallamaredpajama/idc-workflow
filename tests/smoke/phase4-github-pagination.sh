@@ -103,12 +103,13 @@ if [ "$sub" = "api" ]; then
   if [ -n "$path" ]; then
     n="$(printf '%s' "$path" | sed -E 's#.*/issues/([0-9]+)/dependencies/blocked_by#\1#')"
     if [ "$n" = "210" ]; then echo "dependencies API boom" >&2; exit 1; fi   # simulate a FAILED lookup
-    paginate=0; strict_jq=0
+    paginate=0; jq_flag=0; jq_expression=0
     for a in "$@"; do
       [ "$a" = "--paginate" ] && paginate=1
-      [ "$a" = ".[].number" ] && strict_jq=1
+      [ "$a" = "--jq" ] && jq_flag=1
+      [ "$a" = ".[].number" ] && jq_expression=1
     done
-    [ "$paginate" = 1 ] && [ "$strict_jq" = 1 ] \
+    [ "$paginate" = 1 ] && [ "$jq_flag" = 1 ] && [ "$jq_expression" = 1 ] \
       || { echo "dependency reader omitted --paginate --jq .[].number" >&2; exit 9; }
     jq -r --arg n "$n" '.[$n][]?' "$FIX/blocked_by.json"
     exit 0

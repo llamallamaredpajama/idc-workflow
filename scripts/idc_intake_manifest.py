@@ -34,6 +34,10 @@ CLASS_ROUTES = {
 FORBIDDEN_ROUTES = {"build", "autorun"}
 DISPOSITION_STATES = {"unclassified", "queued", "materialized", "verified_done", "ignored"}
 TERMINAL_DISPOSITIONS = {"materialized", "verified_done", "ignored"}
+TERMINAL_CLASS_BY_STATE = {
+    "verified_done": "already_done",
+    "ignored": "ignored_non_execution",
+}
 
 TOP_KEYS = {
     "schema_version", "intake_id", "source", "operator_goal", "runtime",
@@ -53,6 +57,7 @@ REVIEW_KEYS = {
     "schema_version", "intake_id", "source_sha256", "verdict", "missing_unit_ids",
     "duplicate_unit_ids", "misrouted_unit_ids", "notes",
 }
+REVIEW_BINDING_PREFIX = "manifest_content_sha256="
 
 INTAKE_ID_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -75,14 +80,15 @@ MACHINE_PATH_RE = re.compile(
 CREDENTIAL_ASSIGNMENT_RE = re.compile(
     r"\b(?:[A-Za-z][A-Za-z0-9]*[_-])*(?:api[_-]?key|access[_-]?token|auth[_-]?token"
     r"|client[_-]?secret|secret[_-]?access[_-]?key|private[_-]?key|password|passwd"
-    r"|secret|token)\b\s*[:=]\s*"
+    r"|secret|token)(?:[_-][A-Za-z0-9]+)*\b\s*[:=]\s*"
     r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
     re.IGNORECASE,
 )
 CREDENTIAL_BEARER_RE = re.compile(r"\bBearer\s+[^\s,;]+", re.IGNORECASE)
 CREDENTIAL_TOKEN_RE = re.compile(
     r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}"
-    r"|sk-(?:proj-)?[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{10,})\b"
+    r"|sk-(?:proj-)?[A-Za-z0-9_-]{20,}|sk_[A-Za-z0-9]+_[A-Za-z0-9_]{20,}"
+    r"|AKIA[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{10,})\b"
 )
 SENSITIVE_TEXT_PATTERNS = {
     "credential": (CREDENTIAL_ASSIGNMENT_RE, CREDENTIAL_BEARER_RE, CREDENTIAL_TOKEN_RE),
@@ -187,20 +193,6 @@ def _confined_real_path(root: str, candidate: str, label: str) -> str:
     if not confined or resolved == root:
         raise IntakeError(f"{label} must stay within the manifest operational directory")
     return resolved
-
-
-def _review_locator(manifest_path: str, argument: str, manifest: dict[str, Any]) -> tuple[str, str]:
-    if not isinstance(argument, str) or not argument.strip():
-        raise IntakeError("review path must be a non-empty path")
-    root = _operational_directory(manifest_path)
-    supplied = os.path.abspath(argument)
-    resolved = _confined_real_path(root, supplied, "review path")
-    locator = os.path.relpath(resolved, root).replace(os.sep, "/")
-    safe_locator = _safe_relative(locator, "review path", allow_none=False)
-    assert safe_locator is not None
-    _reject_unsafe_text(safe_locator, "review path")
-    _validate_review_locator(safe_locator, manifest, "review path")
-    return safe_locator, resolved
 
 
 def _resolve_stamped_review(manifest_path: str, manifest: dict[str, Any]) -> dict[str, Any]:
@@ -328,18 +320,29 @@ def _summary(heading: str, unit_id: str) -> str:
     return remainder or heading
 
 
-def _opening_fence(line: str) -> tuple[str, int] | None:
-    match = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+def _opening_fence(
+        line: str, container_indents: tuple[int, ...] = (),
+) -> tuple[str, int, int] | None:
+    match = re.match(r"^([ \t]*)(`{3,}|~{3,})(.*)$", line)
     if not match:
         return None
-    marker, suffix = match.groups()
+    leading, marker, suffix = match.groups()
     if marker[0] == "`" and "`" in suffix:
         return None
-    return marker[0], len(marker)
+    indent = _indent_columns(leading)
+    bases = [base for base in (0, *container_indents) if 0 <= indent - base <= 3]
+    if not bases:
+        return None
+    return marker[0], len(marker), max(bases)
 
 
-def _closing_fence(line: str, marker: str, minimum: int) -> bool:
-    return bool(re.fullmatch(rf" {{0,3}}{re.escape(marker)}{{{minimum},}}[ \t]*", line))
+def _closing_fence(line: str, marker: str, minimum: int, container_indent: int) -> bool:
+    match = re.fullmatch(
+        rf"([ \t]*){re.escape(marker)}{{{minimum},}}[ \t]*", line)
+    if not match:
+        return False
+    indent = _indent_columns(match.group(1))
+    return 0 <= indent - container_indent <= 3
 
 
 def _indent_columns(line: str) -> int:
@@ -377,16 +380,16 @@ def _extract_units(text: str) -> tuple[list[str], list[dict[str, Any]]]:
     lines = text.splitlines()
     anchors: list[dict[str, Any]] = []
     seen: dict[str, int] = {}
-    fence: tuple[str, int] | None = None
+    fence: tuple[str, int, int] | None = None
     list_items: list[tuple[int, int]] = []
     for line_no, line in enumerate(lines, 1):
         if fence is not None:
-            if _closing_fence(line, fence[0], fence[1]):
+            if _closing_fence(line, fence[0], fence[1], fence[2]):
                 fence = None
             continue
-        fence = _opening_fence(line)
+        fence = _opening_fence(line, tuple(item[1] for item in list_items))
         if fence is not None:
-            if _indent_columns(line) <= 3:
+            if fence[2] == 0:
                 list_items.clear()
             continue
 
@@ -452,6 +455,8 @@ def _intake_id_from_output(path: str) -> str:
 def extract_manifest(source_path: str, out_path: str, goal: str, plugin_version: str) -> dict[str, Any]:
     if not PLUGIN_VERSION_RE.fullmatch(plugin_version):
         raise IntakeError("plugin version must be exactly X.Y.Z")
+    if not isinstance(goal, str) or not goal.strip():
+        raise IntakeError("operator goal must be non-empty")
     try:
         with open(source_path, "rb") as handle:
             raw = handle.read()
@@ -563,6 +568,10 @@ def _validate_disposition(
         if allow_unclassified:
             return obj
         raise IntakeError(f"unit {unit_id} remains unclassified")
+    required_class = TERMINAL_CLASS_BY_STATE.get(state)
+    if required_class is not None and unit_class != required_class:
+        raise IntakeError(
+            f"unit {unit_id} {state} disposition is only valid for {required_class}")
     if state == "materialized" and target is None:
         raise IntakeError(f"unit {unit_id} materialized disposition requires target_ref")
     if state == "verified_done" and not evidence:
@@ -718,6 +727,10 @@ def _expected_review_basename(manifest: dict[str, Any]) -> str:
     return f"{manifest['intake_id']}.review.{_manifest_content_sha256(manifest)}.json"
 
 
+def _review_binding_note(manifest: dict[str, Any]) -> str:
+    return f"{REVIEW_BINDING_PREFIX}{_manifest_content_sha256(manifest)}"
+
+
 def _validate_review_locator(locator: str, manifest: dict[str, Any], label: str) -> None:
     expected = _expected_review_basename(manifest)
     if locator.rsplit("/", 1)[-1] != expected:
@@ -734,8 +747,16 @@ def validate_review(review: dict[str, Any], manifest: dict[str, Any]) -> None:
         raise IntakeError("review source_sha256 does not match manifest source")
     if review["verdict"] != "PASS":
         raise IntakeError("review verdict must be PASS")
-    for key in ("missing_unit_ids", "duplicate_unit_ids", "misrouted_unit_ids", "notes"):
+    for key in ("missing_unit_ids", "duplicate_unit_ids", "misrouted_unit_ids"):
         _expect_string_list(review[key], f"review.{key}")
+    notes = _expect_string_list(review["notes"], "review.notes")
+    for index, note in enumerate(notes):
+        _reject_unsafe_text(note, f"review.notes[{index}]")
+    binding_notes = [note for note in notes if note.startswith(REVIEW_BINDING_PREFIX)]
+    if len(binding_notes) != 1:
+        raise IntakeError("review.notes must contain exactly one manifest content binding")
+    if binding_notes[0] != _review_binding_note(manifest):
+        raise IntakeError("review manifest content binding does not match manifest")
     for key in ("missing_unit_ids", "duplicate_unit_ids", "misrouted_unit_ids"):
         if review[key]:
             raise IntakeError(f"review.{key} must be empty for PASS")
@@ -790,9 +811,11 @@ def cmd_validate(args: argparse.Namespace) -> int:
     validate_manifest(manifest)
     if not args.review:
         raise IntakeError("independent --review is required; verification.status cannot self-certify")
-    review_locator, review_path = _review_locator(args.manifest, args.review, manifest)
-    review = _load_json(review_path, "review")
+    review = _load_json(args.review, "review")
     validate_review(review, manifest)
+    review_locator = _expected_review_basename(manifest)
+    review_path = os.path.join(_operational_directory(args.manifest), review_locator)
+    _atomic_write_json(review_path, review)
     manifest["verification"] = {
         "status": "passed",
         "review_path": review_locator,
@@ -805,13 +828,6 @@ def cmd_validate(args: argparse.Namespace) -> int:
         print(json.dumps(receipt, sort_keys=True))
     else:
         print(f"idc-intake: PASS {manifest['intake_id']} ({len(manifest['units'])} units)")
-    return 0
-
-
-def cmd_review_path(args: argparse.Namespace) -> int:
-    manifest = _load_json(args.manifest, "manifest")
-    validate_manifest(manifest)
-    print(_expected_review_basename(manifest))
     return 0
 
 
@@ -867,12 +883,6 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--review")
     validate.add_argument("--json", action="store_true")
     validate.set_defaults(func=cmd_validate)
-
-    review_path = sub.add_parser(
-        "review-path", help="print the canonical same-directory review filename",
-        description="Print the canonical same-directory review filename without an absolute path.")
-    review_path.add_argument("--manifest", required=True)
-    review_path.set_defaults(func=cmd_review_path)
 
     link = sub.add_parser("link", help="record one unit's durable disposition")
     link.add_argument("--manifest", required=True)

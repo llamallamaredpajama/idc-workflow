@@ -19,6 +19,7 @@ WORK="$(mktemp -d)" || gov_fail "could not create temp workspace"
 trap 'rm -rf "$WORK"' EXIT
 MANIFEST="$WORK/2026-07-12-example.json"
 REVIEW=""
+STAMPED_REVIEW=""
 COMPLETE="$WORK/complete.json"
 GOOD_REVIEW="$WORK/good-review.json"
 
@@ -46,28 +47,25 @@ PY
 }
 
 write_passing_review() {
-  python3 - "$1" "$2" <<'PY'
-import json, sys
-manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+  write_bound_review "$1" "$2"
+}
+
+write_bound_review() {
+  python3 - "$INTAKE" "$1" "$2" "${@:3}" <<'PY'
+import importlib.util, json, sys
+helper_path, manifest_path, review_path, *notes = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("idc_intake_manifest_for_test", helper_path)
+assert spec is not None and spec.loader is not None
+helper = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(helper)
+manifest = json.load(open(manifest_path, encoding="utf-8"))
+binding = f"manifest_content_sha256={helper._manifest_content_sha256(manifest)}"
 review = {"schema_version": 1, "intake_id": manifest["intake_id"],
           "source_sha256": manifest["source"]["sha256"], "verdict": "PASS",
           "missing_unit_ids": [], "duplicate_unit_ids": [],
-          "misrouted_unit_ids": [], "notes": []}
-json.dump(review, open(sys.argv[2], "w", encoding="utf-8"), indent=2, sort_keys=True)
+          "misrouted_unit_ids": [], "notes": [binding, *notes]}
+json.dump(review, open(review_path, "w", encoding="utf-8"), indent=2, sort_keys=True)
 PY
-}
-
-canonical_review_path() {
-  local locator
-  locator="$(intake review-path --manifest "$1")" || return 1
-  case "$locator" in
-    ""|*/*|*\\*) return 1 ;;
-  esac
-  printf '%s/%s\n' "$(dirname "$1")" "$locator"
-}
-
-write_canonical_review() {
-  write_passing_review "$1" "$2"
 }
 
 drop_unit() {
@@ -202,19 +200,27 @@ PY
 }
 
 fresh_case() {
+  local stamped_locator
   CASE_DIR="$WORK/case-$1"
   mkdir -p "$CASE_DIR" || gov_fail "could not create case directory for $1"
   CASE_MANIFEST="$CASE_DIR/2026-07-12-example.json"
-  CASE_REVIEW="$CASE_DIR/$(basename "$REVIEW")"
+  CASE_REVIEW="$CASE_DIR/supplied-review.json"
   cp "$COMPLETE" "$CASE_MANIFEST" || gov_fail "could not copy complete manifest for $1"
   cp "$GOOD_REVIEW" "$CASE_REVIEW" || gov_fail "could not copy passing review for $1"
+  stamped_locator="$(python3 - "$CASE_MANIFEST" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["verification"]["review_path"])
+PY
+)" || gov_fail "could not read stamped review locator for $1"
+  case "$stamped_locator" in
+    ""|*/*|*\\*) gov_fail "stored review locator was not a safe basename for $1" ;;
+  esac
+  cp "$GOOD_REVIEW" "$CASE_DIR/$stamped_locator" \
+    || gov_fail "could not copy stamped review for $1"
 }
 
 refresh_case_review() {
-  local prior_review="$CASE_REVIEW"
-  CASE_REVIEW="$(canonical_review_path "$CASE_MANIFEST")" \
-    || gov_fail "could not calculate review path for $CASE_DIR"
-  [ "$prior_review" = "$CASE_REVIEW" ] || rm -f "$prior_review"
+  CASE_REVIEW="$CASE_DIR/refreshed-review.json"
   write_passing_review "$CASE_MANIFEST" "$CASE_REVIEW" \
     || gov_fail "could not refresh review for $CASE_DIR"
 }
@@ -235,7 +241,7 @@ must_fail_manifest() {
   local expected="$1"
   local failure="$2"
   local output rc
-  output="$(intake review-path --manifest "$CASE_MANIFEST" 2>&1)"
+  output="$(intake validate --manifest "$CASE_MANIFEST" 2>&1)"
   rc=$?
   if [ "$rc" -ne 2 ] || ! printf '%s' "$output" | grep -Fq "idc-intake: FAIL — $expected" \
        || printf '%s' "$output" | grep -q "Traceback"; then
@@ -289,6 +295,15 @@ record_round5_failure() {
     ROUND5_FAILURES="$ROUND5_FAILURES, $1"
   else
     ROUND5_FAILURES="$1"
+  fi
+}
+
+ROUND6_FAILURES=""
+record_round6_failure() {
+  if [ -n "$ROUND6_FAILURES" ]; then
+    ROUND6_FAILURES="$ROUND6_FAILURES, $1"
+  else
+    ROUND6_FAILURES="$1"
   fi
 }
 
@@ -346,22 +361,33 @@ map_every_unit "$MANIFEST"
 if intake validate --manifest "$MANIFEST" >/dev/null 2>&1; then
   gov_fail "manifest without independent review passed"
 fi
-REVIEW="$(canonical_review_path "$MANIFEST")" \
-  || gov_fail "could not calculate passing review path"
+REVIEW="$WORK/supplied-independent-review.json"
 write_passing_review "$MANIFEST" "$REVIEW"
 intake validate --manifest "$MANIFEST" --review "$REVIEW" >/dev/null \
   || gov_fail "complete independently reviewed manifest failed"
 
-python3 - "$MANIFEST" "$REVIEW" <<'PY' || gov_fail "passing review was not atomically stamped"
+STAMPED_REVIEW="$(python3 - "$MANIFEST" <<'PY'
+import json, os, sys
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+print(os.path.join(os.path.dirname(sys.argv[1]), manifest["verification"]["review_path"]))
+PY
+)" || gov_fail "could not resolve stamped review copy"
+python3 - "$MANIFEST" "$REVIEW" "$STAMPED_REVIEW" <<'PY' \
+  || gov_fail "passing review was not atomically copied and stamped"
 import json, os, sys
 data = json.load(open(sys.argv[1], encoding="utf-8"))
+supplied_path, stamped_path = sys.argv[2:]
 assert data["verification"]["status"] == "passed"
-assert data["verification"]["review_path"] == os.path.basename(sys.argv[2])
-assert not os.path.isabs(data["verification"]["review_path"])
+locator = data["verification"]["review_path"]
+assert locator == os.path.basename(stamped_path)
+assert not os.path.isabs(locator) and "/" not in locator and "\\" not in locator
+assert os.path.realpath(stamped_path) != os.path.realpath(supplied_path)
+assert json.load(open(stamped_path, encoding="utf-8")) == \
+       json.load(open(supplied_path, encoding="utf-8"))
 PY
 
 cp "$MANIFEST" "$COMPLETE" || gov_fail "could not freeze complete manifest"
-cp "$REVIEW" "$GOOD_REVIEW" || gov_fail "could not freeze passing review"
+cp "$STAMPED_REVIEW" "$GOOD_REVIEW" || gov_fail "could not freeze passing review"
 
 # Review-fix RED probes: keep these collected so one baseline run reports all four review findings.
 # 1. Downstream operations must resolve and revalidate the stamped review, not trust editable fields.
@@ -379,19 +405,19 @@ fi
 
 TAMPER_DIR="$WORK/tampered-review"
 mkdir -p "$TAMPER_DIR" || gov_fail "could not create tampered-review case"
-cp "$COMPLETE" "$TAMPER_DIR/2026-07-12-example.json" \
+TAMPER_MANIFEST="$TAMPER_DIR/2026-07-12-example.json"
+cp "$COMPLETE" "$TAMPER_MANIFEST" \
   || gov_fail "could not copy tampered-review manifest"
-TAMPER_REVIEW="$TAMPER_DIR/$(basename "$REVIEW")"
+TAMPER_LOCATOR="$(python3 - "$TAMPER_MANIFEST" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["verification"]["review_path"])
+PY
+)" || gov_fail "could not resolve tampered review locator"
+TAMPER_REVIEW="$TAMPER_DIR/$TAMPER_LOCATOR"
 cp "$GOOD_REVIEW" "$TAMPER_REVIEW" \
   || gov_fail "could not copy tampered review"
 mutate_review verdict FAIL "$TAMPER_REVIEW"
-if intake status --manifest "$TAMPER_DIR/2026-07-12-example.json" --json >/dev/null 2>&1; then
-  REVIEW_BINDING_OK=0
-fi
-
-OUTSIDE_REVIEW="$REVIEW"
-fresh_case outside-review
-if intake validate --manifest "$CASE_MANIFEST" --review "$OUTSIDE_REVIEW" >/dev/null 2>&1; then
+if intake status --manifest "$TAMPER_MANIFEST" --json >/dev/null 2>&1; then
   REVIEW_BINDING_OK=0
 fi
 [ "$REVIEW_BINDING_OK" -eq 1 ] || record_review_fix_failure "review-binding"
@@ -623,9 +649,8 @@ ROUND3_SCHEMA_DIR="$WORK/round3-canonical-schema"
 mkdir -p "$ROUND3_SCHEMA_DIR" || gov_fail "could not create canonical review case"
 ROUND3_SCHEMA_MANIFEST="$ROUND3_SCHEMA_DIR/2026-07-12-example.json"
 cp "$COMPLETE" "$ROUND3_SCHEMA_MANIFEST" || gov_fail "could not copy canonical review manifest"
-ROUND3_SCHEMA_REVIEW="$(canonical_review_path "$ROUND3_SCHEMA_MANIFEST")" \
-  || gov_fail "could not calculate canonical review path"
-write_canonical_review "$ROUND3_SCHEMA_MANIFEST" "$ROUND3_SCHEMA_REVIEW" \
+ROUND3_SCHEMA_REVIEW="$ROUND3_SCHEMA_DIR/reviewer-output.json"
+write_passing_review "$ROUND3_SCHEMA_MANIFEST" "$ROUND3_SCHEMA_REVIEW" \
   || gov_fail "could not write canonical review"
 if ! python3 - "$ROUND3_SCHEMA_REVIEW" <<'PY' >/dev/null 2>&1
 import json, sys
@@ -662,11 +687,8 @@ needle = '''    if missing or extra:
 assert text.count(needle) == 1
 open(destination, "w", encoding="utf-8").write(text.replace(needle, "", 1))
 PY
-ROUND3_SABOTAGE_LOCATOR="$(python3 "$ROUND3_SABOTAGED_INTAKE" review-path \
-  --manifest "$ROUND3_SABOTAGE_MANIFEST")" \
-  || gov_fail "could not calculate exact-set sabotage review path"
-ROUND3_SABOTAGE_REVIEW="$ROUND3_SABOTAGE_DIR/$ROUND3_SABOTAGE_LOCATOR"
-write_canonical_review "$ROUND3_SABOTAGE_MANIFEST" "$ROUND3_SABOTAGE_REVIEW" \
+ROUND3_SABOTAGE_REVIEW="$ROUND3_SABOTAGE_DIR/reviewer-output.json"
+write_passing_review "$ROUND3_SABOTAGE_MANIFEST" "$ROUND3_SABOTAGE_REVIEW" \
   || gov_fail "could not write exact-set sabotage review"
 if ! python3 "$ROUND3_SABOTAGED_INTAKE" validate \
      --manifest "$ROUND3_SABOTAGE_MANIFEST" --review "$ROUND3_SABOTAGE_REVIEW" \
@@ -928,11 +950,11 @@ do
 done
 [ "$ROUND5_PRIVACY_OK" -eq 1 ] || record_round5_failure "private-key-redactions-privacy"
 
-# 3. The helper publicly names the confined review file without exposing its absolute directory.
-ROUND5_PUBLIC_DIR="$WORK/round5-public-review-locator"
-mkdir -p "$ROUND5_PUBLIC_DIR" || gov_fail "could not create public review-locator case"
+# 3. Validation accepts an ordinary review path, then persists only its safe local copy.
+ROUND5_PUBLIC_DIR="$WORK/round5-review-persistence"
+mkdir -p "$ROUND5_PUBLIC_DIR" || gov_fail "could not create review-persistence case"
 ROUND5_PUBLIC_MANIFEST="$ROUND5_PUBLIC_DIR/2026-07-12-example.json"
-cp "$COMPLETE" "$ROUND5_PUBLIC_MANIFEST" || gov_fail "could not copy public locator manifest"
+cp "$COMPLETE" "$ROUND5_PUBLIC_MANIFEST" || gov_fail "could not copy review-persistence manifest"
 python3 - "$ROUND5_PUBLIC_MANIFEST" <<'PY'
 import json, sys
 path = sys.argv[1]
@@ -943,31 +965,31 @@ data["verification"] = {
 json.dump(data, open(path, "w", encoding="utf-8"), indent=2, sort_keys=True)
 PY
 ROUND5_PUBLIC_OK=1
-ROUND5_PUBLIC_OUTPUT="$(intake review-path --manifest "$ROUND5_PUBLIC_MANIFEST" 2>&1)"
-ROUND5_PUBLIC_RC=$?
-if [ "$ROUND5_PUBLIC_RC" -ne 0 ]; then
+ROUND5_PUBLIC_REVIEW="$WORK/round5 ordinary reviewer output.json"
+write_passing_review "$ROUND5_PUBLIC_MANIFEST" "$ROUND5_PUBLIC_REVIEW" \
+  || gov_fail "could not write ordinary-path review"
+if ! intake validate --manifest "$ROUND5_PUBLIC_MANIFEST" \
+     --review "$ROUND5_PUBLIC_REVIEW" >/dev/null 2>&1; then
   ROUND5_PUBLIC_OK=0
-elif ! python3 - "$ROUND5_PUBLIC_OUTPUT" <<'PY' >/dev/null 2>&1
-import re, sys
-locator = sys.argv[1]
+elif ! python3 - "$ROUND5_PUBLIC_MANIFEST" "$ROUND5_PUBLIC_REVIEW" \
+       <<'PY' >/dev/null 2>&1
+import json, os, re, sys
+manifest_path, supplied_path = sys.argv[1:]
+manifest = json.load(open(manifest_path, encoding="utf-8"))
+locator = manifest["verification"]["review_path"]
 assert re.fullmatch(r"2026-07-12-example\.review\.[0-9a-f]{64}\.json", locator)
 assert "/" not in locator and "\\" not in locator
+stored_path = os.path.join(os.path.dirname(manifest_path), locator)
+assert json.load(open(stored_path, encoding="utf-8")) == \
+       json.load(open(supplied_path, encoding="utf-8"))
 PY
 then
   ROUND5_PUBLIC_OK=0
 else
-  ROUND5_PUBLIC_REVIEW="$ROUND5_PUBLIC_DIR/$ROUND5_PUBLIC_OUTPUT"
-  write_canonical_review "$ROUND5_PUBLIC_MANIFEST" "$ROUND5_PUBLIC_REVIEW" \
-    || gov_fail "could not write public-locator canonical review"
-  if ! intake validate --manifest "$ROUND5_PUBLIC_MANIFEST" \
-       --review "$ROUND5_PUBLIC_REVIEW" >/dev/null 2>&1; then
-    ROUND5_PUBLIC_OK=0
-  else
-    mutate_manifest reviewed-summary U4 "$ROUND5_PUBLIC_MANIFEST"
-    CASE_MANIFEST="$ROUND5_PUBLIC_MANIFEST"
-    status_must_fail_cleanly "manifest.verification.review_path basename must be" \
-      || ROUND5_PUBLIC_OK=0
-  fi
+  mutate_manifest reviewed-summary U4 "$ROUND5_PUBLIC_MANIFEST"
+  CASE_MANIFEST="$ROUND5_PUBLIC_MANIFEST"
+  status_must_fail_cleanly "manifest.verification.review_path basename must be" \
+    || ROUND5_PUBLIC_OK=0
 fi
 
 ROUND5_UNCLASSIFIED_SOURCE="$ROUND5_PUBLIC_DIR/unclassified.md"
@@ -978,9 +1000,9 @@ open(sys.argv[1], "w", encoding="utf-8").write("## U1 - not classified yet\nbody
 PY
 intake extract --source "$ROUND5_UNCLASSIFIED_SOURCE" --out "$ROUND5_UNCLASSIFIED_MANIFEST" \
   --goal complete --plugin-version 4.1.0 >/dev/null \
-  || gov_fail "could not prepare unclassified review-locator case"
-ROUND5_UNCLASSIFIED_OUTPUT="$(intake review-path \
-  --manifest "$ROUND5_UNCLASSIFIED_MANIFEST" 2>&1)"
+  || gov_fail "could not prepare unclassified review-validation case"
+ROUND5_UNCLASSIFIED_OUTPUT="$(intake validate --manifest "$ROUND5_UNCLASSIFIED_MANIFEST" \
+  --review "$ROUND5_PUBLIC_REVIEW" 2>&1)"
 ROUND5_UNCLASSIFIED_RC=$?
 if [ "$ROUND5_UNCLASSIFIED_RC" -ne 2 ] \
    || ! printf '%s' "$ROUND5_UNCLASSIFIED_OUTPUT" \
@@ -988,11 +1010,10 @@ if [ "$ROUND5_UNCLASSIFIED_RC" -ne 2 ] \
    || printf '%s' "$ROUND5_UNCLASSIFIED_OUTPUT" | grep -q "Traceback"; then
   ROUND5_PUBLIC_OK=0
 fi
-if ! python3 "$INTAKE" --help 2>&1 | grep -q "review-path" \
-   || ! python3 "$INTAKE" review-path --help 2>&1 | grep -q "same-directory"; then
+if python3 "$INTAKE" --help 2>&1 | grep -q "review-path"; then
   ROUND5_PUBLIC_OK=0
 fi
-[ "$ROUND5_PUBLIC_OK" -eq 1 ] || record_round5_failure "public-review-locator"
+[ "$ROUND5_PUBLIC_OK" -eq 1 ] || record_round5_failure "ordinary-review-persistence"
 
 # 4. A non-directory output parent must stay inside the helper's clean exit-2 contract.
 ROUND5_BLOCKING_PARENT="$WORK/round5-output-parent-file"
@@ -1012,6 +1033,251 @@ fi
 
 [ -z "$ROUND5_FAILURES" ] \
   || gov_fail "Task 4 review round 5 regressions failed: $ROUND5_FAILURES"
+
+# Review round 6 RED probes: collect the five adjudicated findings before production edits.
+# 1. Complete credential shapes redact everywhere, while review notes reject private data.
+ROUND6_SECRET_ASSIGNMENT="SERVICE_SECRET_KEY=sample-sensitive-value"
+ROUND6_UNDERSCORE_TOKEN="sk_test_sample_sensitive_value_1234567890"
+ROUND6_CONTROL="SERVICE_REGION=us-test-1"
+ROUND6_PRIVACY_SOURCE="$WORK/round6-complete-credential-privacy.md"
+ROUND6_PRIVACY_MANIFEST="$WORK/2026-07-12-round6-complete-credential-privacy.json"
+python3 - "$ROUND6_PRIVACY_SOURCE" "$ROUND6_CONTROL" "$ROUND6_SECRET_ASSIGNMENT" \
+  "$ROUND6_UNDERSCORE_TOKEN" <<'PY'
+import sys
+path, control, assignment, token = sys.argv[1:]
+open(path, "w", encoding="utf-8", newline="").write(
+    f"## U1 - keep {control}\nbody\n"
+    f"## U2 - use {assignment}\nbody\n"
+    f"## U3 - use {token}\nbody\n"
+)
+PY
+ROUND6_PRIVACY_OK=1
+if ! intake extract --source "$ROUND6_PRIVACY_SOURCE" --out "$ROUND6_PRIVACY_MANIFEST" \
+     --goal "Keep $ROUND6_CONTROL; use $ROUND6_SECRET_ASSIGNMENT and $ROUND6_UNDERSCORE_TOKEN" \
+     --plugin-version 4.1.0 >/dev/null 2>&1; then
+  ROUND6_PRIVACY_OK=0
+elif ! python3 - "$ROUND6_PRIVACY_MANIFEST" "$ROUND6_CONTROL" \
+       "$ROUND6_SECRET_ASSIGNMENT" "$ROUND6_UNDERSCORE_TOKEN" <<'PY' >/dev/null 2>&1
+import json, sys
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+control, *unsafe = sys.argv[2:]
+serialized = json.dumps(manifest, sort_keys=True)
+assert control in serialized
+assert all(value not in serialized for value in unsafe)
+assert manifest["operator_goal"]["redactions"] == ["credential"]
+assert "[REDACTED_CREDENTIAL]" in serialized
+PY
+then
+  ROUND6_PRIVACY_OK=0
+fi
+
+fresh_case round6-review-note-privacy
+ROUND6_PRIVATE_REVIEW="$CASE_DIR/ordinary-private-note-review.json"
+write_bound_review "$CASE_MANIFEST" "$ROUND6_PRIVATE_REVIEW" "$ROUND6_SECRET_ASSIGNMENT" \
+  || gov_fail "could not prepare round 6 private review-note case"
+ROUND6_PRIVATE_REVIEW_OUTPUT="$(intake validate --manifest "$CASE_MANIFEST" \
+  --review "$ROUND6_PRIVATE_REVIEW" 2>&1)"
+ROUND6_PRIVATE_REVIEW_RC=$?
+if [ "$ROUND6_PRIVATE_REVIEW_RC" -ne 2 ] \
+   || ! printf '%s' "$ROUND6_PRIVATE_REVIEW_OUTPUT" \
+        | grep -Fq "idc-intake: FAIL — review.notes[1] contains unsafe private data (credential)" \
+   || printf '%s' "$ROUND6_PRIVATE_REVIEW_OUTPUT" | grep -q "Traceback" \
+   || printf '%s' "$ROUND6_PRIVATE_REVIEW_OUTPUT" | grep -Fq "$ROUND6_SECRET_ASSIGNMENT"; then
+  ROUND6_PRIVACY_OK=0
+fi
+[ "$ROUND6_PRIVACY_OK" -eq 1 ] \
+  || record_round6_failure "complete-credential-review-privacy"
+
+# 2. Terminal shortcuts are compatible only with their declared semantic class, including via link.
+ROUND6_ROUTE_OK=1
+fresh_case round6-ignored-route-bypass
+python3 - "$CASE_MANIFEST" U4 <<'PY' \
+  || gov_fail "could not prepare round 6 ignored route-bypass case"
+import json, sys
+path, queued_id = sys.argv[1:]
+manifest = json.load(open(path, encoding="utf-8"))
+for unit in manifest["units"]:
+    if unit["id"] == queued_id:
+        unit["disposition"] = {"state": "queued", "target_ref": None, "evidence": []}
+    else:
+        unit["disposition"] = {
+            "state": "materialized", "target_ref": f"intake-unit:{unit['id']}",
+            "evidence": [f"prepared:{unit['id']}"],
+        }
+json.dump(manifest, open(path, "w", encoding="utf-8"), indent=2, sort_keys=True)
+PY
+ROUND6_ROUTE_PRE="$(intake status --manifest "$CASE_MANIFEST" --json 2>/dev/null)"
+if [ $? -ne 0 ] || ! ROUND6_ROUTE_PRE="$ROUND6_ROUTE_PRE" python3 - <<'PY' >/dev/null 2>&1
+import json, os
+status = json.loads(os.environ["ROUND6_ROUTE_PRE"])
+assert status["complete"] is False
+assert status["queued_unit_ids"] == ["U4"]
+PY
+then
+  ROUND6_ROUTE_OK=0
+fi
+cp "$CASE_MANIFEST" "$CASE_DIR/before-invalid-ignored.json" \
+  || gov_fail "could not snapshot round 6 ignored route-bypass manifest"
+ROUND6_IGNORED_OUTPUT="$(intake link --manifest "$CASE_MANIFEST" --unit U4 --state ignored \
+  --evidence 'not execution' 2>&1)"
+ROUND6_IGNORED_RC=$?
+if [ "$ROUND6_IGNORED_RC" -ne 2 ] \
+   || ! printf '%s' "$ROUND6_IGNORED_OUTPUT" \
+        | grep -Fq "idc-intake: FAIL — unit U4 ignored disposition is only valid for ignored_non_execution" \
+   || printf '%s' "$ROUND6_IGNORED_OUTPUT" | grep -q "Traceback" \
+   || ! cmp -s "$CASE_DIR/before-invalid-ignored.json" "$CASE_MANIFEST"; then
+  ROUND6_ROUTE_OK=0
+fi
+ROUND6_ROUTE_POST="$(intake status --manifest "$CASE_MANIFEST" --json 2>/dev/null)"
+if [ $? -ne 0 ] || ! ROUND6_ROUTE_POST="$ROUND6_ROUTE_POST" python3 - <<'PY' >/dev/null 2>&1
+import json, os
+status = json.loads(os.environ["ROUND6_ROUTE_POST"])
+assert status["complete"] is False
+assert status["queued_unit_ids"] == ["U4"]
+PY
+then
+  ROUND6_ROUTE_OK=0
+fi
+
+fresh_case round6-verified-route-bypass
+cp "$CASE_MANIFEST" "$CASE_DIR/before-invalid-verified.json" \
+  || gov_fail "could not snapshot round 6 verified route-bypass manifest"
+ROUND6_VERIFIED_OUTPUT="$(intake link --manifest "$CASE_MANIFEST" --unit Drive \
+  --state verified_done --evidence 'checked locally' 2>&1)"
+ROUND6_VERIFIED_RC=$?
+if [ "$ROUND6_VERIFIED_RC" -ne 2 ] \
+   || ! printf '%s' "$ROUND6_VERIFIED_OUTPUT" \
+        | grep -Fq "idc-intake: FAIL — unit Drive verified_done disposition is only valid for already_done" \
+   || printf '%s' "$ROUND6_VERIFIED_OUTPUT" | grep -q "Traceback" \
+   || ! cmp -s "$CASE_DIR/before-invalid-verified.json" "$CASE_MANIFEST"; then
+  ROUND6_ROUTE_OK=0
+fi
+[ "$ROUND6_ROUTE_OK" -eq 1 ] || record_round6_failure "route-disposition-enforcement"
+
+# 3. Ordinary review paths work, but copied PASS bodies stay bound to immutable manifest content.
+ROUND6_REVIEW_OK=1
+fresh_case round6-ordinary-review-path
+ROUND6_ORDINARY_REVIEW="$WORK/ordinary-independent-review.json"
+write_bound_review "$CASE_MANIFEST" "$ROUND6_ORDINARY_REVIEW" \
+  || gov_fail "could not prepare round 6 ordinary-path review"
+if ! intake validate --manifest "$CASE_MANIFEST" --review "$ROUND6_ORDINARY_REVIEW" \
+     >/dev/null 2>&1; then
+  ROUND6_REVIEW_OK=0
+elif ! python3 - "$CASE_MANIFEST" "$ROUND6_ORDINARY_REVIEW" <<'PY' >/dev/null 2>&1
+import json, os, sys
+manifest_path, supplied_path = sys.argv[1:]
+manifest = json.load(open(manifest_path, encoding="utf-8"))
+locator = manifest["verification"]["review_path"]
+assert manifest["verification"]["status"] == "passed"
+assert isinstance(locator, str) and locator and not os.path.isabs(locator)
+assert "/" not in locator and "\\" not in locator
+stored_path = os.path.join(os.path.dirname(manifest_path), locator)
+assert os.path.realpath(stored_path) != os.path.realpath(supplied_path)
+stored = json.load(open(stored_path, encoding="utf-8"))
+supplied = json.load(open(supplied_path, encoding="utf-8"))
+assert stored == supplied
+assert set(stored) == {
+    "schema_version", "intake_id", "source_sha256", "verdict",
+    "missing_unit_ids", "duplicate_unit_ids", "misrouted_unit_ids", "notes",
+}
+PY
+then
+  ROUND6_REVIEW_OK=0
+elif ! intake status --manifest "$CASE_MANIFEST" --json >/dev/null 2>&1; then
+  ROUND6_REVIEW_OK=0
+fi
+
+fresh_case round6-copied-stale-review
+ROUND6_OLD_PASS="$CASE_DIR/old-pass-body.json"
+ROUND6_RENAMED_PASS="$CASE_DIR/renamed-old-pass.json"
+write_bound_review "$CASE_MANIFEST" "$ROUND6_OLD_PASS" \
+  || gov_fail "could not prepare round 6 stale review body"
+mutate_manifest coordinated-remove B2 "$CASE_MANIFEST"
+cp "$ROUND6_OLD_PASS" "$ROUND6_RENAMED_PASS" \
+  || gov_fail "could not rename round 6 stale review body"
+cp "$CASE_MANIFEST" "$CASE_DIR/before-stale-review-validation.json" \
+  || gov_fail "could not snapshot round 6 stale-review manifest"
+ROUND6_STALE_OUTPUT="$(intake validate --manifest "$CASE_MANIFEST" \
+  --review "$ROUND6_RENAMED_PASS" 2>&1)"
+ROUND6_STALE_RC=$?
+if [ "$ROUND6_STALE_RC" -ne 2 ] \
+   || ! printf '%s' "$ROUND6_STALE_OUTPUT" \
+        | grep -Fq "idc-intake: FAIL — review manifest content binding does not match manifest" \
+   || printf '%s' "$ROUND6_STALE_OUTPUT" | grep -q "Traceback" \
+   || ! cmp -s "$CASE_DIR/before-stale-review-validation.json" "$CASE_MANIFEST"; then
+  ROUND6_REVIEW_OK=0
+fi
+[ "$ROUND6_REVIEW_OK" -eq 1 ] || record_round6_failure "ordinary-review-content-binding"
+
+# 4. Backtick and tilde fences nested at list-content indentation keep example tasks inert.
+ROUND6_FENCE_SOURCE="$WORK/round6-nested-list-fences.md"
+ROUND6_FENCE_MANIFEST="$WORK/2026-07-12-round6-nested-list-fences.json"
+python3 - "$ROUND6_FENCE_SOURCE" <<'PY'
+import sys
+text = """# Wrapper
+10. Parent item
+    ```markdown
+    - [ ] phantom backtick-fenced checklist
+    ```
+    - [ ] real four-column child
+      child body
+100. Wide parent
+     ~~~text
+     - [ ] phantom tilde-fenced checklist
+     ~~~
+     - [ ] real five-column child
+       wide body
+Paragraph ends list context.
+
+     - [ ] standalone indented code
+## U1 - real heading
+real body
+"""
+open(sys.argv[1], "w", encoding="utf-8", newline="").write(text)
+PY
+ROUND6_FENCE_OK=1
+if ! intake extract --source "$ROUND6_FENCE_SOURCE" --out "$ROUND6_FENCE_MANIFEST" \
+     --goal complete --plugin-version 4.1.0 >/dev/null 2>&1; then
+  ROUND6_FENCE_OK=0
+elif ! python3 - "$ROUND6_FENCE_MANIFEST" <<'PY' >/dev/null 2>&1
+import json, sys
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+assert manifest["expected_unit_ids"] == ["L6", "L12", "U1"]
+by_id = {unit["id"]: unit for unit in manifest["units"]}
+assert by_id["L6"]["source_anchor"] == {
+    "heading": "real four-column child", "line_start": 6, "line_end": 11,
+}
+assert by_id["L12"]["source_anchor"] == {
+    "heading": "real five-column child", "line_start": 12, "line_end": 16,
+}
+assert by_id["U1"]["source_anchor"] == {
+    "heading": "U1 - real heading", "line_start": 17, "line_end": 18,
+}
+assert all("phantom" not in unit["source_anchor"]["heading"] for unit in manifest["units"])
+assert all("standalone" not in unit["source_anchor"]["heading"] for unit in manifest["units"])
+PY
+then
+  ROUND6_FENCE_OK=0
+fi
+[ "$ROUND6_FENCE_OK" -eq 1 ] || record_round6_failure "nested-list-fences"
+
+# 5. A whitespace-only goal fails before any manifest can be written.
+ROUND6_EMPTY_GOAL_MANIFEST="$WORK/2026-07-12-round6-whitespace-goal.json"
+ROUND6_EMPTY_GOAL_OUTPUT="$(intake extract --source "$FIXTURE/external-plan.md" \
+  --out "$ROUND6_EMPTY_GOAL_MANIFEST" --goal $' \t  ' --plugin-version 4.1.0 2>&1)"
+ROUND6_EMPTY_GOAL_RC=$?
+ROUND6_EMPTY_GOAL_OK=1
+if [ "$ROUND6_EMPTY_GOAL_RC" -ne 2 ] \
+   || ! printf '%s' "$ROUND6_EMPTY_GOAL_OUTPUT" \
+        | grep -Fq "idc-intake: FAIL — operator goal must be non-empty" \
+   || printf '%s' "$ROUND6_EMPTY_GOAL_OUTPUT" | grep -q "Traceback" \
+   || [ -e "$ROUND6_EMPTY_GOAL_MANIFEST" ]; then
+  ROUND6_EMPTY_GOAL_OK=0
+fi
+[ "$ROUND6_EMPTY_GOAL_OK" -eq 1 ] || record_round6_failure "whitespace-goal"
+
+[ -z "$ROUND6_FAILURES" ] \
+  || gov_fail "Task 4 review round 6 regressions failed: $ROUND6_FAILURES"
 
 fresh_case missing-b2
 drop_unit B2 "$CASE_MANIFEST"

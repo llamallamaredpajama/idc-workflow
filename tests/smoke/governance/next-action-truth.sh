@@ -120,10 +120,48 @@ if count:
 PY
 }
 
+# Round-1 review regressions must be collected in one run while the old implementation is still in
+# place. These helpers record every mismatch and defer the final failure until all cases ran.
+REVIEW_FAILURES=""
+record_review_failure() {
+  local label="$1" detail="$2"
+  echo "RED[$label]: $detail"
+  if [ -n "$REVIEW_FAILURES" ]; then
+    REVIEW_FAILURES="$REVIEW_FAILURES,$label"
+  else
+    REVIEW_FAILURES="$label"
+  fi
+}
+
+review_expect_action() {
+  local label="$1" expected_rc="$2" reason="$3" command="$4"
+  local expected actual json_rc stderr_head
+  expected="$reason|$command"
+  actual="$(python3 - "$ORACLE_OUT" <<'PY'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, UnicodeError, json.JSONDecodeError):
+    raise SystemExit(2)
+command = "__NULL__" if data.get("command") is None else data.get("command")
+print(f"{data.get('reason_code')}|{command}")
+PY
+)"
+  json_rc=$?
+  if [ "$ORACLE_RC" -eq "$expected_rc" ] && [ "$json_rc" -eq 0 ] && [ "$actual" = "$expected" ]; then
+    return
+  fi
+  stderr_head="$(sed -n '1p' "$ORACLE_ERR")"
+  [ -n "$actual" ] || actual="<no-json>"
+  [ -n "$stderr_head" ] || stderr_head="<empty>"
+  record_review_failure "$label" \
+    "expected exit=$expected_rc result=$expected; got exit=$ORACLE_RC result=$actual stderr=$stderr_head"
+}
+
 # Public Python interface: exact frozen dataclass field order and decide(repo) return type.
 INTERFACE_REPO="$(new_repo interface)"
 python3 - "$ORACLE" "$INTERFACE_REPO" <<'PY' || gov_fail "public WorkflowState/NextAction interface drifted"
-import dataclasses, importlib.util, sys
+import dataclasses, importlib.util, sys, typing
 path, repo = sys.argv[1:]
 spec = importlib.util.spec_from_file_location("idc_next_action_for_test", path)
 assert spec is not None and spec.loader is not None
@@ -137,14 +175,34 @@ assert [field.name for field in dataclasses.fields(module.WorkflowState)] == [
 assert [field.name for field in dataclasses.fields(module.NextAction)] == [
     "verdict", "reason_code", "command", "refs", "counts",
 ]
+assert typing.get_type_hints(module.WorkflowState) == {
+    "intake_think": tuple[str, ...],
+    "intake_recirc": tuple[str, ...],
+    "recirc_tickets": tuple[int, ...],
+    "considerations": tuple[int, ...],
+    "eligible_buildables": tuple[int, ...],
+    "waiting_gates": tuple[int, ...],
+}
+assert typing.get_type_hints(module.NextAction) == {
+    "verdict": str,
+    "reason_code": str,
+    "command": str | None,
+    "refs": tuple[str, ...],
+    "counts": dict[str, int],
+}
+assert module.WorkflowState.__dataclass_params__.frozen is True
+assert module.NextAction.__dataclass_params__.frozen is True
 result = module.decide(repo)
 assert isinstance(result, module.NextAction)
-try:
-    result.reason_code = "mutated"
-except dataclasses.FrozenInstanceError:
-    pass
-else:
-    raise AssertionError("NextAction is not frozen")
+state = module.WorkflowState((), (), (), (), (), ())
+for obj, field, value in ((state, "intake_think", ("changed",)),
+                          (result, "reason_code", "mutated")):
+    try:
+        setattr(obj, field, value)
+    except dataclasses.FrozenInstanceError:
+        pass
+    else:
+        raise AssertionError(f"{type(obj).__name__} is not frozen")
 PY
 
 # 1. A queued new requirement always returns Think with the exact manifest and unit.
@@ -210,6 +268,21 @@ for pair in recirc-plan recirc-build plan-build; do
   assert_action 0 multi-lane-actionable /idc:autorun
 done
 
+# Queued-intake Recirculation is the same downstream lane as a tracker inbox ticket. Combining that
+# durable intake lane with Plan or Build must also select Autorun; removing `state.intake_recirc`
+# from the lane calculation makes both cases fail while the tracker-only pairs above stay green.
+for downstream in plan build; do
+  R="$(new_repo "multi-intake-recirc-$downstream")"
+  seed_intake "$R" "intake-recirc-$downstream" U3 admitted_unplanned >/dev/null
+  if [ "$downstream" = "plan" ]; then
+    gov_seed_item "$R/TRACKER.md" --title plan --stage Consideration --status Todo >/dev/null
+  else
+    gov_seed_item "$R/TRACKER.md" --title build --stage Buildable --status Todo >/dev/null
+  fi
+  run_oracle "$R"
+  assert_action 0 multi-lane-actionable /idc:autorun "intake_recirc=1"
+done
+
 # 7. Only an open operator gate is an honest human wait, never build work.
 R="$(new_repo gate)"
 gov_seed_item "$R/TRACKER.md" --title '[operator-action] approve requirements' \
@@ -238,6 +311,28 @@ printf '{"schema_version":1,"units":[' > \
   "$R/docs/workflow/intakes/2026-07-14-corrupt.json"
 run_oracle "$R"
 assert_action 2 invalid-intake __NULL__
+
+# The intake store itself is durable state. A non-directory or broken locator must fail closed rather
+# than be mistaken for an absent/empty intake store.
+for storage_kind in regular-file broken-path; do
+  R="$(new_repo "corrupt-intake-store-$storage_kind")"
+  rm -rf "$R/docs/workflow/intakes"
+  if [ "$storage_kind" = "regular-file" ]; then
+    printf 'not a directory\n' > "$R/docs/workflow/intakes"
+  else
+    ln -s "$R/missing-intake-target" "$R/docs/workflow/intakes" \
+      || gov_fail "could not seed broken intake path"
+  fi
+  run_oracle "$R"
+  review_expect_action "intake-store-$storage_kind" 2 invalid-intake __NULL__
+done
+
+# Invalid UTF-8 in a canonical manifest must be deterministic invalid-intake JSON, never a Python
+# UnicodeDecodeError traceback with exit 1.
+R="$(new_repo corrupt-intake-utf8)"
+printf '\377' > "$R/docs/workflow/intakes/2026-07-14-invalid-utf8.json"
+run_oracle "$R"
+review_expect_action intake-invalid-utf8 2 invalid-intake __NULL__
 
 # Tracker corruption also fails closed under the documented invalid-state exit contract.
 R="$(new_repo corrupt-tracker)"
@@ -296,4 +391,66 @@ assert_action 3 rate-limited __NULL__
 [ ! -e "$R/.idc-drain-verdict.json" ] \
   || gov_fail "read-only oracle wrote Autorun's drain verdict sidecar"
 
-echo "PASS: durable next-action truth table — validated queued intake routes only to Think/Recirculate; Think outranks a busy downstream pipe; every two-lane combination routes to Autorun; single Recirculation/Plan/Build lanes stay exact; a human gate waits; empty/foreign-Markdown state fixes at no action; corrupt intake/tracker state fails closed; GitHub quota exhaustion remains resumable exit 3 without Autorun side effects"
+# A dependency lookup is part of the complete GitHub state read. If #2's blocked_by read is throttled,
+# exit 3 must dominate even though #1 would otherwise be eligible Build work.
+R="$(new_repo github-dependency-rate-limit)"
+printf 'backend: github\nproject_number: 9\n' > "$R/docs/workflow/tracker-config.yaml"
+mkdir -p "$R/fake-bin" || gov_fail "could not create dependency-rate fake gh directory"
+python3 - "$R/fake-bin/gh" <<'PY'
+import json, os, sys
+
+path = sys.argv[1]
+source = r'''#!/usr/bin/env python3
+import json
+import sys
+
+args = sys.argv[1:]
+if args[:2] == ["api", "rate_limit"]:
+    print(json.dumps({"resources": {"graphql": {"remaining": 100, "reset": 1999999999}}}))
+    raise SystemExit(0)
+if args[:2] == ["repo", "view"]:
+    print("owner/repo")
+    raise SystemExit(0)
+if args[:2] == ["project", "view"]:
+    print("PVT_next_action_test")
+    raise SystemExit(0)
+if args[:2] == ["api", "graphql"]:
+    def item(number):
+        return {
+            "id": f"PVTI_{number}",
+            "fieldValues": {"nodes": [
+                {"__typename": "ProjectV2ItemFieldSingleSelectValue", "name": "Todo",
+                 "field": {"name": "Status"}},
+                {"__typename": "ProjectV2ItemFieldSingleSelectValue", "name": "Buildable",
+                 "field": {"name": "Stage"}},
+            ]},
+            "content": {"__typename": "Issue", "number": number,
+                        "title": f"buildable {number}",
+                        "repository": {"nameWithOwner": "owner/repo"}},
+        }
+    print(json.dumps({"data": {"node": {"items": {
+        "pageInfo": {"hasNextPage": False, "endCursor": None},
+        "nodes": [item(1), item(2)],
+    }}}}))
+    raise SystemExit(0)
+if args and args[0] == "api" and len(args) > 1 and "issues/1/" in args[1]:
+    print("[]")
+    raise SystemExit(0)
+if args and args[0] == "api" and len(args) > 1 and "issues/2/" in args[1]:
+    print("API rate limit exceeded", file=sys.stderr)
+    raise SystemExit(1)
+print(f"unexpected gh call: {' '.join(args)}", file=sys.stderr)
+raise SystemExit(99)
+'''
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(source)
+os.chmod(path, 0o755)
+PY
+PATH="$R/fake-bin:$PATH" run_oracle "$R"
+review_expect_action github-dependency-rate-limit 3 rate-limited __NULL__
+
+if [ -n "$REVIEW_FAILURES" ]; then
+  gov_fail "round-1 review regressions: $REVIEW_FAILURES"
+fi
+
+echo "PASS: durable next-action truth table — validated queued intake routes only to Think/Recirculate; Think outranks a busy downstream pipe; tracker and queued-intake Recirculation combine truthfully with Plan/Build for Autorun; exact frozen dataclass contracts hold; single lanes stay exact; a human gate waits; empty/foreign-Markdown state fixes at no action; corrupt intake storage/content and tracker state fail closed; every GitHub throttle, including dependency reads beside eligible work, remains dominant resumable exit 3 without Autorun side effects"

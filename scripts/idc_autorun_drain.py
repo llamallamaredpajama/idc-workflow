@@ -222,10 +222,14 @@ def _blocked_by_numbers(repo, number):
     """The native blocked-by issue numbers for one issue, via the GitHub dependencies API.
 
     Uses gh's literal `{owner}/{repo}` placeholders (resolved from the repo in `cwd`), the same read
-    counterpart of the documented write endpoint that doctor Row 9 uses. Returns (numbers, ok). On
-    any gh failure ok is False — the caller fail-CLOSES (treats the issue as still-blocked this pass)
-    so the drain never claims work whose blockers it could not verify; the next /loop iteration
-    re-checks. Mirrors doctor Row 9's tri-state (a failed lookup ≠ no link)."""
+    counterpart of the documented write endpoint that doctor Row 9 uses. Returns (numbers, ok). On a
+    non-rate gh failure ok is False — the caller fail-CLOSES (treats the issue as still-blocked this
+    pass) so the drain never claims work whose blockers it could not verify; the next /loop iteration
+    re-checks. A rate limit raises the shared reader's `RateLimitError`, because throttling anywhere in
+    the complete state read must dominate any provisional eligible item. Mirrors doctor Row 9's
+    tri-state (a failed lookup ≠ no link) while retaining GitHub's distinct resumable exit 3."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import idc_gh_board  # noqa: E402 — reuse the shared rate-limit detector/reset semantics
     try:
         p = subprocess.run(
             ["gh", "api", f"repos/{{owner}}/{{repo}}/issues/{number}/dependencies/blocked_by",
@@ -234,6 +238,9 @@ def _blocked_by_numbers(repo, number):
     except (OSError, ValueError):
         return [], False
     if p.returncode != 0:
+        if idc_gh_board._is_rate_limit_stderr(p.stderr):
+            info = idc_gh_board._rate_limit_info(repo)
+            raise idc_gh_board.RateLimitError(info[1] if info else None)
         return [], False
     try:
         nums = json.loads(p.stdout or "[]")
@@ -253,8 +260,9 @@ def load_github(owner, project_number, repo, root=None, sid=None):
     (an unresolvable sentinel blocker) so it is excluded this pass, never claimed unverified — AND is
     tallied into `unverified` so the AGGREGATE verdict (main) can refuse a false `drain: complete` when
     nothing is eligible only because every candidate's blockers were unverifiable. Exits 2 on an
-    unreadable board (fail-closed, never a hollow empty drain), or 3 on a RATE-LIMITED board read (see
-    below) — never a hollow empty drain, and never conflated with a hard failure either."""
+    unreadable board (fail-closed, never a hollow empty drain), or 3 on a RATE-LIMIT anywhere in the
+    complete board/dependency read (see below) — never a hollow empty drain, and never conflated with
+    a hard failure either."""
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import idc_gh_board  # noqa: E402 — github-only dependency, imported lazily
     try:
@@ -296,7 +304,15 @@ def load_github(owner, project_number, repo, root=None, sid=None):
         if not _is_build_candidate(it):
             it["blocked_by"] = []
             continue
-        nums, ok = _blocked_by_numbers(repo, it["number"])
+        try:
+            nums, ok = _blocked_by_numbers(repo, it["number"])
+        except idc_gh_board.RateLimitError as e:
+            # Dependency reads are part of this SAME state snapshot. A throttle here dominates even
+            # if an earlier candidate looked eligible; returning that provisional frontier would hide
+            # an incomplete board read and violate the shared resumable exit-3 contract.
+            _persist_verdict(root, sid, "rate-limited", 3)
+            print(f"drain: rate-limited until {e.reset}")
+            sys.exit(3)
         if not ok:
             unverified += 1
             sys.stderr.write(

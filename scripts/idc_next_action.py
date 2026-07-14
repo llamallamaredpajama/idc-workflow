@@ -83,8 +83,10 @@ def _collect_intakes(repo: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
     validated even if all its units are terminal, so corruption cannot hide behind completion.
     """
     root = os.path.join(repo, "docs", "workflow", "intakes")
-    if not os.path.isdir(root):
+    if not os.path.lexists(root):
         return (), ()
+    if not os.path.isdir(root):
+        raise _StateError("invalid-intake", _repo_relative(repo, root))
 
     think: list[str] = []
     recirc: list[str] = []
@@ -112,7 +114,8 @@ def _collect_intakes(repo: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
             if manifest["verification"]["status"] != "passed":
                 raise INTAKE.IntakeError("manifest has not passed independent review")
             INTAKE._resolve_stamped_review(path, manifest)
-        except (OSError, json.JSONDecodeError, INTAKE.IntakeError, KeyError, TypeError) as exc:
+        except (OSError, UnicodeError, json.JSONDecodeError,
+                INTAKE.IntakeError, KeyError, TypeError) as exc:
             raise _StateError("invalid-intake", rel) from exc
 
         for unit in manifest["units"]:

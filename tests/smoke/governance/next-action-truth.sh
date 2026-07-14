@@ -214,6 +214,16 @@ PY
   fi
 }
 
+review_expect_drain_invalid() {
+  local label="$1" tracker="$2" out="$WORK/$1-drain.out" err="$WORK/$1-drain.err" rc
+  python3 "$DRAIN" --tracker "$tracker" >"$out" 2>"$err"
+  rc=$?
+  if [ "$rc" -ne 2 ]; then
+    record_review_failure "$label" \
+      "expected direct filesystem drain exit=2; got exit=$rc stdout=$(tr '\n' '|' < "$out") stderr=$(tr '\n' '|' < "$err")"
+  fi
+}
+
 review_real_root_persistence() {
   local label="$1" repo="$2" fake_bin="$3" session="$4"
   local expected detail="" pass out err rc json_rc gitignore_count temp_artifacts
@@ -472,6 +482,7 @@ printf '%s\n' '<!-- idc-tracker-state:begin -->' '```json' \
   '```' '<!-- idc-tracker-state:end -->' > "$R/TRACKER.md"
 run_oracle "$R"
 review_expect_action tracker-boolean-number 2 invalid-tracker __NULL__
+review_expect_drain_invalid drain-boolean-number "$R/TRACKER.md"
 
 R="$(new_repo corrupt-tracker-boolean-blocker)"
 printf '%s\n' '<!-- idc-tracker-state:begin -->' '```json' \
@@ -479,6 +490,7 @@ printf '%s\n' '<!-- idc-tracker-state:begin -->' '```json' \
   '```' '<!-- idc-tracker-state:end -->' > "$R/TRACKER.md"
 run_oracle "$R"
 review_expect_action tracker-boolean-blocker 2 invalid-tracker __NULL__
+review_expect_drain_invalid drain-boolean-blocker "$R/TRACKER.md"
 
 # A genuinely absent tracker config preserves the brief's legacy filesystem default.
 R="$(new_repo absent-tracker-config)"
@@ -667,7 +679,7 @@ review_real_root_persistence real-root-autorun-persistence "$R" "$R/fake-bin" \
   task5-real-root
 
 if [ -n "$REVIEW_FAILURES" ]; then
-  gov_fail "round-3 review regressions: $REVIEW_FAILURES"
+  gov_fail "round-4 review regressions: $REVIEW_FAILURES"
 fi
 
 echo "PASS: durable next-action truth table — validated queued intake routes only to Think/Recirculate; Think outranks a busy downstream pipe; tracker and queued-intake Recirculation combine truthfully with Plan/Build for Autorun; exact frozen dataclass contracts hold; single lanes stay exact; every operator gate waits outside automated lanes; empty/foreign-Markdown state fixes at no action; corrupt intake storage/content and strict integer tracker identities fail closed; every GitHub throttle, including dependency reads beside eligible work, remains dominant resumable exit 3 without observer side effects; a real Autorun drain persists its exact complete verdict idempotently"

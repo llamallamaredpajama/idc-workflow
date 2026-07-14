@@ -18,10 +18,28 @@ sys.path.insert(0, sys.argv[1])
 repo = sys.argv[2]
 import idc_transition as E, idc_gh_board as B
 
-# A comment/API parse failure is UNKNOWN state, never verified marker absence. Exercise the real
-# parser (not a replacement lambda): every malformed representation must raise BoardReadError so the
-# transition engine cannot advance Status from Blocked to Todo on an unreadable marker set.
+# A native dependency or comment/API parse failure is UNKNOWN state, never verified absence. Exercise
+# the real parsers (not replacement lambdas): malformed representations must raise BoardReadError so
+# the transition engine cannot advance Status from Blocked to Todo on an unreadable dependency set.
 real_gh = B._gh
+malformed_native_reads = {
+    "JSON null": "null\n",
+    "mixed valid and invalid tokens": "7\nbogus\n",
+    "zero issue number": "0\n",
+    "negative issue number": "-7\n",
+}
+for name, output in malformed_native_reads.items():
+    B._gh = lambda *args, _output=output, **kwargs: _output
+    try:
+        B.blocked_by_numbers(5, repo)
+        raise AssertionError(f"{name} was treated as a verified native dependency set")
+    except B.BoardReadError:
+        pass
+B._gh = lambda *args, **kwargs: ""
+assert B.blocked_by_numbers(5, repo) == [], "a genuinely empty native dependency read was rejected"
+B._gh = lambda *args, **kwargs: "7\n11\n"
+assert B.blocked_by_numbers(5, repo) == [7, 11], "valid native issue numbers did not parse"
+
 malformed_marker_reads = {
     "non-JSON comment record": "not-json\n",
     "non-object comment record": "[]\n",
@@ -45,7 +63,7 @@ B._gh = lambda *args, **kwargs: (
 assert B.blocked_by_comment_ids(5, 8, repo) == [], "unrelated valid marker was not ignored"
 assert B.blocked_by_comment_ids(5, 7, repo) == [501], "matching valid marker was not returned"
 B._gh = real_gh
-print("  ok malformed marker reads fail closed while valid marker records still parse")
+print("  ok malformed dependency reads fail closed while valid native and marker records still parse")
 
 # The rerun state: the edge is ALREADY ABSENT (removed on the first, partially-failed run).
 deletes = []

@@ -537,7 +537,18 @@ def blocked_by_numbers(child, repo="."):
     drain reads, and the read-back that proves an `unblock --by` removal landed."""
     out = _gh(["api", f"repos/{{owner}}/{{repo}}/issues/{int(child)}/dependencies/blocked_by",
                "--paginate", "--jq", ".[].number"], repo)
-    return [int(x) for x in out.split() if x.strip().lstrip("-").isdigit()]
+    numbers = []
+    for record_no, raw in enumerate(out.split(), 1):
+        try:
+            number = int(raw)
+        except ValueError as e:
+            raise BoardReadError(
+                f"blocked-by dependency read returned invalid issue number in record {record_no} ({e})")
+        if number <= 0:
+            raise BoardReadError(
+                f"blocked-by dependency read returned non-positive issue number in record {record_no}")
+        numbers.append(number)
+    return numbers
 
 
 def add_blocked_by(child, parent, repo="."):

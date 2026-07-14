@@ -29,27 +29,18 @@ this handoff; if they disagree, report the conflict before changing code.
 | Baseline | — | `dd170ff` | plan+runbook+forensics |
 | 1. Runtime freshness → repo receipt | ✅ DONE | `dd170ff..50c5bcc` (`5629c3e`,`2c7c195`,`50c5bcc`) | Spec PASS / Quality APPROVED (3 rounds) |
 | 2. Command lifecycle envelope | ✅ DONE | `50c5bcc..503b6c7` (`6401fb4`,`d723453`,`f1402af`,`fe7a771`,`939ae49`,`503b6c7`) | Spec PASS / Quality APPROVED (6 rounds) |
-| 3. Hard mutation interlock + PR finisher | ✅ DONE (see note) | `503b6c7..HEAD` (24 commits through the sixth rubber-stamp fix; first rubber-stamp fix `c484d1d`) | Six rubber-stamp reviews found actionable gaps. Their reported cases are fixed at the current Task-3 head; no independent post-fix verdict is recorded here. |
+| 3. Hard mutation interlock + PR finisher | ✅ DONE (see note) | `503b6c7..0f97396` (16 fix commits) | Interlock class review-CONFIRMED closed; final journaling finding resolved (`0f97396`) per reviewer rec + directly verified. A final rubber-stamp whole-Task-3 review is optional. |
 | 4. Exact-once intake manifest | ⏳ TODO | — | — |
 | 5. Next-action oracle | ⏳ TODO | — | — |
 | 6. `/idc:intake` + command-specific closeouts | ⏳ TODO | — | — |
 | 7. Legacy gate repair (no fake history) | ⏳ TODO | — | — |
 | 8. Release gate (docs, 4.1.0 bump, hook-fidelity + e2e proof) | ⏳ TODO | — | — |
 
-**Latest Task-3 implementation checkpoint: PASS** — real `/bin/bash` 3.2.57 ran the expanded round-21
-execution-surface regression plus every prior rubber-stamp command-head, public-contract,
-privilege-wrapper, lifecycle-door, full interlock, and gate-prose scenario successfully. Round 21 makes
-bare `bash`/`sh`/`zsh` fail closed whenever command-wide executable stdin cannot be assigned to that
-flattened surface, instead of enumerating keyword/function compound forms. It also normalizes the zsh
-`noglob`/`nocorrect`/`coproc` execution prefixes only at command head and corrects both gate procedures
-to use the guarded create/move/link routes for machine-governed Status. Erasing only the new
-command-wide stdin signal reopened exactly the four reviewer compound families; restoring it returned
-green. After the source/test changes, `/bin/bash tests/smoke/run-all.sh` exited 0 with
-`idc smoke: ALL GREEN` (37 behavior · 22 mixed · 10 doc). The exact-tree rerun after this receipt-only
-handoff refresh and the immediate pre-commit lint are recorded in the ignored Task-3 report. This is
-implementation verification evidence, not a clean independent review verdict.
+**Post-Task-3 broad checkpoint (runbook-mandated): PASS** — `lint-references: CLEAN` and
+`tests/smoke/run-all.sh` → `idc smoke: ALL GREEN` in the real checkout (default bash), and the Task-3
+governance test verified under real `/bin/bash` 3.2.57 (exit 0).
 
-### Task 3 note (why it took 14 review rounds plus six rubber-stamp fixes, and its terminal posture)
+### Task 3 note (why it took 14 rounds, and its terminal posture)
 Task 3 is the security-critical guard that must deny the incident's raw `gh` mutations and
 `bash <script>` indirection during an active IDC command, without breaking legitimate work. The
 independent reviewer found real bypasses across many rounds (dynamic gh endpoints, command
@@ -58,37 +49,26 @@ GraphQL, etc.). Final design: **defense-in-depth, fail-closed on anything opaque
 real mutations now flow through sanctioned Python doors, an uninspectable raw write-shaped command is
 always denied. A single fixpoint prefix-normalizer (`_peel_to_inspect_head`) closes the
 wrapper/assignment/control-word interleaving class by construction.
-- Privilege wrappers are now part of the enforced path: supported `sudo`/`doas` options are normalized
-  before interpreter inspection, `su -c` payloads are inspected recursively, and an unrecognized
-  privilege-wrapper layout that still visibly carries an interpreter fails closed as opaque.
+- **Accepted, documented limitation (NOT a blocker):** privilege-escalation wrappers
+  (`sudo`/`doas`/`su -c`) are not followed for script-FILE indirection (a raw-`gh` combo behind them is
+  still string-caught). The interlock is defense-in-depth, not a complete shell sandbox (shell is
+  Turing-complete). If a later reviewer raises a *novel exotic* static-shell evasion, treat it as a
+  noted limitation, not a blocker — unless it's a *straightforward* form an agent would naturally use.
 - Task 3 added: hard active-command interlock (`scripts/hooks/idc_interlock_gate.py`), sanctioned PR
   finisher (`scripts/idc_pr_finish.py`), `idc_transition.py` `unblock --by` / `move --to-stage` /
   `set-field` / `link --kind blocks` engine doors + native-edge creation in `idc_gh_board.py`,
-  validating `idc_gh_board.py` provisioning/teardown helpers, and a schema-reconciliation journal record
-  in `scripts/idc_stage_options.py` `apply` (readback + `op="schema-reconciliation"`, replay-safe). It
+  `init`/`uninstall` command-keyed carve-outs, a schema-reconciliation journal record in
+  `scripts/idc_stage_options.py` `apply` (readback + `op="schema-reconciliation"`, replay-safe), and
   routed the tracker-adapter/github/filesystem/gate-issue skills + `idc-plan`/`idc-recirculator` agents
-  through the sanctioned doors. There are no Init/Uninstall command-keyed raw-write carve-outs: their
-  lifecycle writes use the validating helpers, and raw GitHub mutations deny under every active command.
-- **Latest review state:** the first whole-range rubber stamp found public-contract, lifecycle-door,
-  privilege-wrapper, and marker-cleanup gaps; `c484d1d` resolved them. The follow-up reproduced two
-  assignment-plus-command-substitution bypasses and four false positives where argument text was mistaken
-  for an executable `gh`; the next fix separated substitutions from the outer executable head. Round 18
-  then reproduced dequoted API-path bypasses, bare-shell stdin, computed executable heads, static/dynamic
-  `eval`, and heredoc body confusion. The fourth rubber stamp found that unquoted expansion heads could
-  split into a complete mutation, `bash|sh|zsh -s` mistook a later argument for a script, and compound
-  groups dropped their owning stdin. The fifth rubber stamp then found raw REST option matching,
-  quoted expansions that can still yield many words, uninspected deferred traps and direct shell-file
-  heads, plus array assignments mistaken for groups. The sixth rubber stamp found that keyword and
-  function compounds could hide their owning stdin from an inner bare shell, zsh execution prefixes
-  could hide the real command head, and gate prose still sent Status through the now-refusing
-  `setField` route. The current `_ExecutionSurfaceModel` keeps
-  dequoted option/value ownership, single-vs-many-word expansion roles, parenthesis/brace-group
-  ownership, command-wide unresolved-stdin provenance, outer-to-inner redirects, pipe provenance, and
-  raw GraphQL quote style on one path. It
-  recursively follows static eval/trap/interpreter/direct-file payloads, never guesses expansion output,
-  and fails closed when executable code or protected API option argv is opaque; quoted computed reads,
-  formatting/header data, array values, ordinary arguments, and heredoc documentation remain inert.
-  This handoff records the fixes, not an independent post-fix rubber-stamp verdict.
+  through the sanctioned doors.
+- **Final review state:** the last independent review confirmed the interlock class closed (direct
+  mutation denied, indirect fixture denied, sanctioned helper allowed, inactive session warned; bash 3.2
+  verified) and raised ONE finding — that `idc_stage_options.py apply` must journal its reconciliation.
+  That was fixed in `0f97396` exactly as recommended (durable `schema-reconciliation` record, no false
+  reconciliation in replay) and verified directly (record-shape asserted, `journal-replay.sh` +
+  `journal-replay-field-only.sh` pass, smoke 69/69 GREEN). No substantive issue remains open; a final
+  rubber-stamp review of the full Task-3 range (`503b6c7..0f97396`) is a reasonable first Codex step but
+  is not blocking.
 
 ## How the loop was run (adapt as needed in Codex)
 Controller = `superpowers:subagent-driven-development`. Per task, strictly serial, one writer at a time:

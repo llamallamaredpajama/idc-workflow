@@ -56,21 +56,19 @@ recorded PR has merged, so an unrelated merged PR can never terminalize an unapp
 
 ## Procedure (identical for Think and the Recirculator)
 
-All tracker ops route through `idc:idc-tracker-adapter` (`createTicket`, `setField`, `move`,
-`block`, `link`, `comment`, `query`) — **never hard-code github vs filesystem semantics**; the
+All tracker ops route through `idc:idc-tracker-adapter` (`createTicket`, `setField`,
+`link`, `comment`, `query`) — **never hard-code github vs filesystem semantics**; the
 adapter reads the backend from config and dispatches. An outside or cloud agent runs these
 four steps over the plain tracker API.
 
 **1 — Open the Think PR + the gate.** Open the (draft) Think PR carrying the PRD/TRD diff, then
-`createTicket` the gate issue with the plain-terms body above and the `operator-action` label. The
-engine-owned create lands the new issue in `Status=Todo` and applies that label in the **same guarded create**;
-do not issue a follow-on Status write. On **github**, stamp the gate body's `<!-- idc-gate-pr: <PR#> -->` marker
+`createTicket` the gate issue with the plain-terms body above; `setField` `Status=Todo` and the
+`operator-action` label. On **github**, stamp the gate body's `<!-- idc-gate-pr: <PR#> -->` marker
 with the just-opened Think PR number — the engine's guarded `dispose --disposition gate-approved`
 close binds approval to that recorded PR. One gate issue per admission, no matter how much it gates.
 
-**2 — Chain what's pending.** Block what must wait on admission through the adapter convenience
-`block(<dependent>, by=<gate>)`. Its guarded engine route is `move --to-status Blocked`, then
-`link --parent <gate> --child <dependent> --kind blocks`; never write Status through `setField`:
+**2 — Chain what's pending.** Block what must wait on admission, via `setField` `Status=Blocked`
++ `link kind=blocks` from the gate issue:
 - **At Think** — the **consideration pointer** (`Stage = Consideration`): it is pending admission
   while the Think PR is open.
 - **At the Recirculator** — each affected work issue (the requirements-touching set only). Work
@@ -214,15 +212,12 @@ so the engine binds approval to that PR's merge.
 
 **Procedure** (mirrors the requirements gate, different approval signal):
 
-1. **Open the gate.** `createTicket` the decision issue with the body above and the
-   `operator-action` label. The engine-owned create lands it in `Status=Todo` and applies that label
-   in the **same guarded create**; do not issue a follow-on Status write. Optionally open a lightweight **decision-PR** (a
+1. **Open the gate.** `createTicket` the decision issue with the body above; `setField`
+   `Status=Todo` + the `operator-action` label. Optionally open a lightweight **decision-PR** (a
    one-line entry in a decisions log) when a durable artifact is wanted — its **merge** is then a
    second valid GO signal, identical in spirit to the Think-PR merge.
-2. **Chain only its dependents.** For each issue this decision gates, use
-   `block(<dependent>, by=<gate>)`: its guarded engine route is `move --to-status Blocked`, then
-   `link --parent <gate> --child <dependent> --kind blocks`; never write Status through `setField`.
-   Everything the decision does **not** gate is left alone
+2. **Chain only its dependents.** For each issue this decision gates, `setField` `Status=Blocked` +
+   `link kind=blocks` from the gate issue. Everything the decision does **not** gate is left alone
    and keeps flowing — the gate pauses *only its dependents*, never the whole pipe.
 3. **Notify** the operator once (the push fallback below), with a "Decision needed" message. Never
    block the run on delivery.

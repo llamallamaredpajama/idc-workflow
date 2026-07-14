@@ -81,7 +81,7 @@ CREDENTIAL_NAME_SEGMENTS = (
     "KEY", "SECRET", "TOKEN", "CREDENTIAL", "PASSWORD", "PASSWD", "PASS", "PWD",
 )
 CREDENTIAL_ASSIGNMENT_RE = re.compile(
-    r"(?<![A-Za-z0-9_-])(?P<name>[A-Za-z0-9_-]*[A-Za-z0-9][A-Za-z0-9_-]*)"
+    r"(?<![A-Za-z0-9_-])(?P<name>[A-Za-z0-9_-]+)"
     r"\s*[:=]\s*"
     r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
     re.IGNORECASE,

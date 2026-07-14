@@ -325,6 +325,15 @@ record_round8_failure() {
   fi
 }
 
+ROUND9_FAILURES=""
+record_round9_failure() {
+  if [ -n "$ROUND9_FAILURES" ]; then
+    ROUND9_FAILURES="$ROUND9_FAILURES, $1"
+  else
+    ROUND9_FAILURES="$1"
+  fi
+}
+
 status_must_fail_cleanly() {
   local expected="$1"
   local output rc
@@ -1512,6 +1521,57 @@ fi
 
 [ -z "$ROUND8_FAILURES" ] \
   || gov_fail "Task 4 review round 8 regressions failed: $ROUND8_FAILURES"
+
+# Review round 9 RED probe: harmless long headings must not make privacy scanning quadratic.
+ROUND9_LONG_SOURCE="$WORK/round9-long-harmless-heading.md"
+ROUND9_LONG_MANIFEST="$WORK/2026-07-12-round9-long-harmless-heading.json"
+ROUND9_CEILING_SECONDS="0.750"
+python3 - "$ROUND9_LONG_SOURCE" <<'PY'
+import sys
+identifier = "H" * 16000
+open(sys.argv[1], "w", encoding="utf-8", newline="").write(
+    f"# Wrapper\n## U1 - {identifier}\nbody\n"
+)
+PY
+ROUND9_PERF_SECONDS="$(python3 - "$INTAKE" "$ROUND9_LONG_SOURCE" \
+  "$ROUND9_LONG_MANIFEST" "$ROUND9_CEILING_SECONDS" <<'PY'
+import json, subprocess, sys, time
+
+helper, source, manifest_path, ceiling_text = sys.argv[1:]
+started = time.perf_counter()
+completed = subprocess.run(
+    [sys.executable, helper, "extract", "--source", source, "--out", manifest_path,
+     "--goal", "Process the harmless heading", "--plugin-version", "4.1.0"],
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    check=False,
+)
+elapsed = time.perf_counter() - started
+print(f"{elapsed:.6f}")
+if completed.returncode != 0:
+    raise SystemExit(2)
+try:
+    manifest = json.load(open(manifest_path, encoding="utf-8"))
+    identifier = "H" * 16000
+    assert manifest["expected_unit_ids"] == ["U1"]
+    assert manifest["units"][0]["source_anchor"]["heading"] == f"U1 - {identifier}"
+    assert manifest["operator_goal"]["redactions"] == []
+except (AssertionError, KeyError, OSError, ValueError):
+    raise SystemExit(2)
+if elapsed > float(ceiling_text):
+    raise SystemExit(1)
+PY
+)"
+ROUND9_PERF_RC=$?
+if [ "$ROUND9_PERF_RC" -ne 0 ]; then
+  record_round9_failure "harmless-identifier-performance"
+fi
+
+if [ -n "$ROUND9_FAILURES" ]; then
+  printf 'Task 4 review round 9 timing: %ss (ceiling %ss)\n' \
+    "${ROUND9_PERF_SECONDS:-unavailable}" "$ROUND9_CEILING_SECONDS" >&2
+  gov_fail "Task 4 review round 9 regressions failed: $ROUND9_FAILURES"
+fi
 
 fresh_case missing-b2
 drop_unit B2 "$CASE_MANIFEST"

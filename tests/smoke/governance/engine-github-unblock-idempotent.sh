@@ -18,6 +18,35 @@ sys.path.insert(0, sys.argv[1])
 repo = sys.argv[2]
 import idc_transition as E, idc_gh_board as B
 
+# A comment/API parse failure is UNKNOWN state, never verified marker absence. Exercise the real
+# parser (not a replacement lambda): every malformed representation must raise BoardReadError so the
+# transition engine cannot advance Status from Blocked to Todo on an unreadable marker set.
+real_gh = B._gh
+malformed_marker_reads = {
+    "non-JSON comment record": "not-json\n",
+    "non-object comment record": "[]\n",
+    "malformed IDC marker JSON": '{"id":501,"body":"<!-- idc-blocked-by: not-json -->"}\n',
+    "non-object IDC marker JSON": '{"id":501,"body":"<!-- idc-blocked-by: [] -->"}\n',
+}
+for name, output in malformed_marker_reads.items():
+    B._gh = lambda *args, _output=output, **kwargs: _output
+    try:
+        B.blocked_by_comment_ids(5, 7, repo)
+        raise AssertionError(f"{name} was treated as a verified empty marker set")
+    except B.BoardReadError:
+        pass
+
+# Paired controls: valid unrelated data is an empty set; a valid matching marker returns its REST id.
+B._gh = lambda *args, **kwargs: (
+    '{"id":400,"body":"ordinary comment"}\n'
+    '{"id":501,"body":"<!-- idc-blocked-by: '
+    '{\\"child\\":5,\\"parent\\":7,\\"kind\\":\\"blocks\\"} -->"}\n'
+)
+assert B.blocked_by_comment_ids(5, 8, repo) == [], "unrelated valid marker was not ignored"
+assert B.blocked_by_comment_ids(5, 7, repo) == [501], "matching valid marker was not returned"
+B._gh = real_gh
+print("  ok malformed marker reads fail closed while valid marker records still parse")
+
 # The rerun state: the edge is ALREADY ABSENT (removed on the first, partially-failed run).
 deletes = []
 B.blocked_by_numbers = lambda child, r: []          # #7 no longer blocks #5

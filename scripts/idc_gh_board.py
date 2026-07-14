@@ -572,24 +572,42 @@ def blocked_by_comment_ids(child, parent, repo="."):
                "--jq", ".[] | {id: .id, body: .body}"], repo)
     ids = []
     marker = re.compile(r"<!--\s*idc-blocked-by:\s*(.*?)\s*-->", re.S)
-    for line in out.splitlines():
+    for line_no, line in enumerate(out.splitlines(), 1):
         line = line.strip()
         if not line:
             continue
         try:
             obj = json.loads(line)
-        except ValueError:
-            continue
-        for m in marker.finditer(obj.get("body") or ""):
+        except ValueError as e:
+            raise BoardReadError(
+                f"blocked-by comment read returned malformed JSON record {line_no} ({e})")
+        if not isinstance(obj, dict):
+            raise BoardReadError(
+                f"blocked-by comment read returned non-object record {line_no}")
+        comment_id = obj.get("id")
+        if isinstance(comment_id, bool) or not isinstance(comment_id, int):
+            raise BoardReadError(
+                f"blocked-by comment read returned invalid comment id in record {line_no}")
+        body = obj.get("body")
+        if body is None:
+            body = ""
+        if not isinstance(body, str):
+            raise BoardReadError(
+                f"blocked-by comment read returned non-text body in record {line_no}")
+        for m in marker.finditer(body):
             try:
                 rec = json.loads(m.group(1))
-            except ValueError:
-                continue
+            except ValueError as e:
+                raise BoardReadError(
+                    f"blocked-by marker in comment {comment_id} is malformed JSON ({e})")
+            if not isinstance(rec, dict):
+                raise BoardReadError(
+                    f"blocked-by marker in comment {comment_id} is not an object")
             if isinstance(rec, dict) and rec.get("parent") == int(parent) \
                     and rec.get("child") == int(child) and rec.get("kind") == "blocks":
-                ids.append(obj.get("id"))
+                ids.append(comment_id)
                 break
-    return [i for i in ids if i is not None]
+    return ids
 
 
 def delete_comment(comment_id, repo="."):

@@ -74,7 +74,7 @@ MACHINE_PATH_RE = re.compile(
 )
 CREDENTIAL_ASSIGNMENT_RE = re.compile(
     r"\b(?:[A-Za-z][A-Za-z0-9]*[_-])*(?:api[_-]?key|access[_-]?token|auth[_-]?token"
-    r"|client[_-]?secret|password|passwd|secret|token)\b\s*[:=]\s*"
+    r"|client[_-]?secret|secret[_-]?access[_-]?key|password|passwd|secret|token)\b\s*[:=]\s*"
     r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
     re.IGNORECASE,
 )
@@ -308,15 +308,16 @@ def _candidate(line: str, line_no: int) -> tuple[str, str] | None:
         unit_id = _explicit_id(heading)
         return (unit_id, heading) if unit_id else None
 
+    checklist = re.match(
+        r"^\s*(?:[-*+]|\d+[.)])[ \t]+\[[ \t]\][ \t]+(.+?)\s*$", line)
+    if checklist:
+        return f"L{line_no}", checklist.group(1).strip()
+
     numbered = re.match(r"^\s*\d+[.)][ \t]+(.+?)\s*$", line)
     if numbered:
         heading = _strip_optional_bold(numbered.group(1))
         unit_id = _explicit_id(heading)
         return (unit_id, heading) if unit_id else None
-
-    checklist = re.match(r"^\s*[-*+][ \t]+\[[ \t]\][ \t]+(.+?)\s*$", line)
-    if checklist:
-        return f"L{line_no}", checklist.group(1).strip()
     return None
 
 
@@ -361,10 +362,6 @@ def _list_item_indent(line: str) -> int | None:
     return _indent_columns(match.group(1)) if match else None
 
 
-def _is_unchecked_checklist(line: str) -> bool:
-    return bool(re.match(r"^[ \t]*[-*+][ \t]+\[[ \t]\][ \t]+", line))
-
-
 def _extract_units(text: str) -> tuple[list[str], list[dict[str, Any]]]:
     lines = text.splitlines()
     anchors: list[dict[str, Any]] = []
@@ -394,10 +391,9 @@ def _extract_units(text: str) -> tuple[list[str], list[dict[str, Any]]]:
         elif line.strip() and indent == 0:
             list_indents.clear()
 
-        nested_checklist = nested_list_item and _is_unchecked_checklist(line)
-        if _is_indented_code(line) and not nested_checklist:
-            continue
         found = _candidate(line, line_no)
+        if _is_indented_code(line) and not (nested_list_item and found is not None):
+            continue
         if not found:
             continue
         unit_id, heading = found
@@ -680,9 +676,20 @@ def validate_manifest(data: dict[str, Any], *, require_classified: bool = True) 
 
 def _manifest_content_sha256(manifest: dict[str, Any]) -> str:
     content = {
+        "schema_version": manifest["schema_version"],
+        "intake_id": manifest["intake_id"],
+        "source": manifest["source"],
+        "operator_goal": manifest["operator_goal"],
+        "runtime": manifest["runtime"],
         "expected_unit_ids": manifest["expected_unit_ids"],
         "units": [
-            {key: unit[key] for key in ("id", "class", "route", "dependencies")}
+            {
+                key: unit[key]
+                for key in (
+                    "id", "source_anchor", "summary", "class", "route", "dependencies",
+                    "operator_stops",
+                )
+            }
             for unit in manifest["units"]
         ],
     }

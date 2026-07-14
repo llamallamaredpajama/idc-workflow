@@ -62,9 +62,20 @@ manifest_content_sha256() {
 import hashlib, json, sys
 manifest = json.load(open(sys.argv[1], encoding="utf-8"))
 content = {
+    "schema_version": manifest["schema_version"],
+    "intake_id": manifest["intake_id"],
+    "source": manifest["source"],
+    "operator_goal": manifest["operator_goal"],
+    "runtime": manifest["runtime"],
     "expected_unit_ids": manifest["expected_unit_ids"],
     "units": [
-        {key: unit[key] for key in ("id", "class", "route", "dependencies")}
+        {
+            key: unit[key]
+            for key in (
+                "id", "source_anchor", "summary", "class", "route", "dependencies",
+                "operator_stops",
+            )
+        }
         for unit in manifest["units"]
     ],
 }
@@ -169,6 +180,21 @@ elif kind == "ignored-without-reason":
     unit = next(unit for unit in data["units"] if unit["id"] == arg)
     unit.update({"class": "ignored_non_execution", "route": "ignore"})
     unit["disposition"] = {"state": "ignored", "target_ref": None, "evidence": []}
+elif kind == "reviewed-anchor-heading":
+    next(unit for unit in data["units"] if unit["id"] == arg)["source_anchor"]["heading"] = \
+        f"{arg} - changed after review"
+elif kind == "reviewed-anchor-range":
+    next(unit for unit in data["units"] if unit["id"] == arg)["source_anchor"]["line_end"] += 1
+elif kind == "reviewed-summary":
+    next(unit for unit in data["units"] if unit["id"] == arg)["summary"] = \
+        "Changed after independent review"
+elif kind == "reviewed-operator-goal":
+    data["operator_goal"]["normalized"] = "changed after independent review"
+elif kind == "add-reviewed-operator-stop":
+    next(unit for unit in data["units"] if unit["id"] == arg)["operator_stops"] = \
+        ["operator approval required"]
+elif kind == "remove-reviewed-operator-stop":
+    next(unit for unit in data["units"] if unit["id"] == arg)["operator_stops"] = []
 else:
     raise SystemExit(f"unknown manifest mutation {kind}")
 json.dump(data, open(path, "w", encoding="utf-8"), indent=2, sort_keys=True)
@@ -257,6 +283,15 @@ record_round3_failure() {
     ROUND3_FAILURES="$ROUND3_FAILURES, $1"
   else
     ROUND3_FAILURES="$1"
+  fi
+}
+
+ROUND4_FAILURES=""
+record_round4_failure() {
+  if [ -n "$ROUND4_FAILURES" ]; then
+    ROUND4_FAILURES="$ROUND4_FAILURES, $1"
+  else
+    ROUND4_FAILURES="$1"
   fi
 }
 
@@ -680,6 +715,114 @@ done
 
 [ -z "$ROUND3_FAILURES" ] \
   || gov_fail "Task 4 review round 3 regressions failed: $ROUND3_FAILURES"
+
+# Review round 4 RED probes: collect all three findings before production changes.
+# 1. Numbered checklists and nested numbered labels are work; code-shaped controls stay inert.
+ROUND4_NUMBERED_SOURCE="$WORK/round4-numbered-units.md"
+ROUND4_NUMBERED_MANIFEST="$WORK/2026-07-12-round4-numbered-units.json"
+python3 - "$ROUND4_NUMBERED_SOURCE" <<'PY'
+import sys
+text = """# Wrapper
+1. [ ] top numbered checklist
+top body
+- Parent list item
+    1. U7 - nested numbered unit
+       nested body
+Paragraph ends list context.
+
+    1. U90 - genuine indented code
+    1. [ ] genuine indented checklist code
+```markdown
+1. [ ] fenced checklist
+- Parent
+    1. U91 - fenced nested number
+```
+## U1 - real heading
+real body
+"""
+open(sys.argv[1], "w", encoding="utf-8", newline="").write(text)
+PY
+ROUND4_NUMBERED_OK=1
+if ! intake extract --source "$ROUND4_NUMBERED_SOURCE" --out "$ROUND4_NUMBERED_MANIFEST" \
+     --goal complete --plugin-version 4.1.0 >/dev/null 2>&1; then
+  ROUND4_NUMBERED_OK=0
+elif ! python3 - "$ROUND4_NUMBERED_MANIFEST" <<'PY' >/dev/null 2>&1
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+assert data["expected_unit_ids"] == ["L2", "U1", "U7"]
+by_id = {unit["id"]: unit for unit in data["units"]}
+assert by_id["L2"]["source_anchor"] == {
+    "heading": "top numbered checklist", "line_start": 2, "line_end": 4,
+}
+assert by_id["U7"]["source_anchor"] == {
+    "heading": "U7 - nested numbered unit", "line_start": 5, "line_end": 15,
+}
+assert by_id["U1"]["source_anchor"] == {
+    "heading": "U1 - real heading", "line_start": 16, "line_end": 17,
+}
+assert "U90" not in by_id and "U91" not in by_id
+PY
+then
+  ROUND4_NUMBERED_OK=0
+fi
+[ "$ROUND4_NUMBERED_OK" -eq 1 ] || record_round4_failure "numbered-unit-extraction"
+
+# 2. Every immutable field shown to the reviewer invalidates a stale content-addressed PASS path.
+ROUND4_BINDING_OK=1
+for MUTATION in reviewed-anchor-heading reviewed-anchor-range reviewed-summary reviewed-operator-goal; do
+  fresh_case "round4-$MUTATION"
+  mutate_manifest "$MUTATION" U4 "$CASE_MANIFEST"
+  status_must_fail_cleanly "manifest.verification.review_path basename must be" \
+    || ROUND4_BINDING_OK=0
+done
+fresh_case round4-reviewed-operator-stop
+mutate_manifest add-reviewed-operator-stop U4 "$CASE_MANIFEST"
+refresh_case_review
+intake validate --manifest "$CASE_MANIFEST" --review "$CASE_REVIEW" >/dev/null \
+  || gov_fail "could not prepare reviewed operator-stop case"
+mutate_manifest remove-reviewed-operator-stop U4 "$CASE_MANIFEST"
+status_must_fail_cleanly "manifest.verification.review_path basename must be" \
+  || ROUND4_BINDING_OK=0
+[ "$ROUND4_BINDING_OK" -eq 1 ] || record_round4_failure "review-immutable-content-binding"
+
+# 3. AWS_SECRET_ACCESS_KEY assignments are credentials; nearby AWS_REGION text is harmless.
+ROUND4_AWS_SECRET="AWS_SECRET_ACCESS_KEY=sample-sensitive-value"
+ROUND4_AWS_CONTROL="AWS_REGION=us-east-1"
+ROUND4_AWS_SOURCE="$WORK/round4-aws-secret.md"
+ROUND4_AWS_MANIFEST="$WORK/2026-07-12-round4-aws-secret.json"
+python3 - "$ROUND4_AWS_SOURCE" "$ROUND4_AWS_CONTROL" "$ROUND4_AWS_SECRET" <<'PY'
+import sys
+path, control, secret = sys.argv[1:]
+open(path, "w", encoding="utf-8", newline="").write(
+    f"## U1 - configure {control}\nbody\n## U2 - use {secret}\nbody\n"
+)
+PY
+ROUND4_AWS_OK=1
+if ! intake extract --source "$ROUND4_AWS_SOURCE" --out "$ROUND4_AWS_MANIFEST" \
+     --goal "Keep $ROUND4_AWS_CONTROL; use $ROUND4_AWS_SECRET" \
+     --plugin-version 4.1.0 >/dev/null 2>&1; then
+  ROUND4_AWS_OK=0
+elif ! python3 - "$ROUND4_AWS_MANIFEST" "$ROUND4_AWS_CONTROL" "$ROUND4_AWS_SECRET" \
+       <<'PY' >/dev/null 2>&1
+import json, sys
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+control, secret = sys.argv[2:]
+serialized = json.dumps(manifest, sort_keys=True)
+assert secret not in serialized
+assert control in serialized
+assert "[REDACTED_CREDENTIAL]" in manifest["operator_goal"]["verbatim_or_redacted"]
+assert manifest["operator_goal"]["redactions"] == ["credential"]
+by_id = {unit["id"]: unit for unit in manifest["units"]}
+assert control in by_id["U1"]["source_anchor"]["heading"]
+assert "[REDACTED_CREDENTIAL]" in by_id["U2"]["source_anchor"]["heading"]
+PY
+then
+  ROUND4_AWS_OK=0
+fi
+[ "$ROUND4_AWS_OK" -eq 1 ] || record_round4_failure "aws-secret-privacy"
+
+[ -z "$ROUND4_FAILURES" ] \
+  || gov_fail "Task 4 review round 4 regressions failed: $ROUND4_FAILURES"
 
 fresh_case missing-b2
 drop_unit B2 "$CASE_MANIFEST"

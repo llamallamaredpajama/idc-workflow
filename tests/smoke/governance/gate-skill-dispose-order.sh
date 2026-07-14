@@ -62,6 +62,53 @@ if "still-`Blocked` dependents" not in text:
     raise SystemExit("FAIL: the skill never names the interrupted-run recovery (a Done gate with "
                      "still-Blocked dependents must have its unblock finished on the next re-check)")
 print("  ok interrupted-run recovery (Done gate, still-Blocked dependents) is named")
+
+# Status is machine-governed. The gate playbook must never send it through setField, and both gate
+# procedures must name the same real public routes: createTicket owns the initial Todo state and the
+# adapter's block convenience owns the guarded Blocked transition plus dependency edge.
+illegal_status_writes = re.findall(r"`setField`\s+`Status=(?:Todo|Blocked)`", text)
+if illegal_status_writes:
+    raise SystemExit("FAIL: gate skill still routes machine-governed Status through setField: " +
+                     ", ".join(illegal_status_writes))
+
+def bounded(start_pat, end_pat, name):
+    start = re.search(start_pat, text)
+    if not start:
+        raise SystemExit(f"FAIL: could not locate {name} start")
+    end = re.search(end_pat, text[start.end():])
+    if not end:
+        raise SystemExit(f"FAIL: could not locate {name} end")
+    return text[start.start():start.end() + end.start()]
+
+open_blocks = [
+    (bounded(r"\*\*1 — Open the Think PR \+ the gate\.\*\*", r"\*\*2 —", "requirements open"),
+     "requirements-gate"),
+    (bounded(r"1\. \*\*Open the gate\.\*\*", r"2\. \*\*Chain", "decision open"),
+     "decision-gate"),
+]
+for block, name in open_blocks:
+    required = ("`createTicket`", "`Status=Todo`", "`operator-action` label",
+                "same guarded create")
+    missing = [phrase for phrase in required if phrase not in block]
+    if missing:
+        raise SystemExit(f"FAIL: {name} open step does not describe the atomic initial-status route; "
+                         f"missing {missing}")
+    print(f"  ok {name}: createTicket owns initial Todo state and label in the same guarded create")
+
+chain_blocks = [
+    (bounded(r"\*\*2 — Chain what's pending\.\*\*", r"\*\*3 —", "requirements chain"),
+     "requirements-gate"),
+    (bounded(r"2\. \*\*Chain only its dependents\.\*\*", r"3\. \*\*Notify", "decision chain"),
+     "decision-gate"),
+]
+for block, name in chain_blocks:
+    required = ("`block(<dependent>, by=<gate>)`", "`move --to-status Blocked`",
+                "`link --parent <gate> --child <dependent> --kind blocks`")
+    missing = [phrase for phrase in required if phrase not in block]
+    if missing:
+        raise SystemExit(f"FAIL: {name} chain step does not name the guarded block route; "
+                         f"missing {missing}")
+    print(f"  ok {name}: adapter block routes through guarded move then link")
 PY
 
 echo "PASS: idc:idc-gate-issue step 4 (both gate kinds) runs the guarded dispose FIRST and unblocks dependents only after it succeeds, with the interrupted-run recovery named — a revoked approval can no longer leave dependents unblocked"

@@ -15,8 +15,10 @@ set -uo pipefail
 
 ORACLE="$GOV_PLUGIN/scripts/idc_next_action.py"
 INTAKE="$GOV_PLUGIN/scripts/idc_intake_manifest.py"
+DRAIN="$GOV_PLUGIN/scripts/idc_autorun_drain.py"
 [ -f "$ORACLE" ] || gov_fail "scripts/idc_next_action.py not found"
 [ -f "$INTAKE" ] || gov_fail "scripts/idc_intake_manifest.py not found"
+[ -f "$DRAIN" ] || gov_fail "scripts/idc_autorun_drain.py not found"
 
 WORK="$(mktemp -d)" || gov_fail "could not create temp workspace"
 trap 'rm -rf "$WORK"' EXIT
@@ -192,6 +194,76 @@ review_expect_observer_clean() {
   fi
 }
 
+review_expect_counts() {
+  local label="$1" first="$2" second="$3"
+  if ! python3 - "$ORACLE_OUT" "$first" "$second" <<'PY'
+import json, sys
+path, first, second = sys.argv[1:]
+try:
+    data = json.load(open(path, encoding="utf-8"))
+except (OSError, UnicodeError, json.JSONDecodeError):
+    raise SystemExit(2)
+for encoded in (first, second):
+    key, value = encoded.split("=", 1)
+    if data.get("counts", {}).get(key) != int(value):
+        raise SystemExit(2)
+PY
+  then
+    record_review_failure "$label" \
+      "expected counts $first,$second; got $(tr '\n' '|' < "$ORACLE_OUT")"
+  fi
+}
+
+review_real_root_persistence() {
+  local label="$1" repo="$2" fake_bin="$3" session="$4"
+  local expected detail="" pass out err rc json_rc gitignore_count temp_artifacts
+  expected="$(printf 'eligible: \nrecirc_inbox: 0\nunplanned_considerations: 0\ndrain: complete\n')"
+  for pass in 1 2; do
+    out="$WORK/real-drain-$pass.out"
+    err="$WORK/real-drain-$pass.err"
+    (cd "$repo" && PATH="$fake_bin:$PATH" python3 "$DRAIN" --backend github \
+      --owner owner --project 10 --repo "$repo" --session-id "$session") >"$out" 2>"$err"
+    rc=$?
+    if [ "$rc" -ne 0 ] || [ "$(cat "$out")" != "$expected" ] || [ -s "$err" ]; then
+      [ -z "$detail" ] || detail="$detail; "
+      detail="${detail}pass$pass rc=$rc stdout=$(tr '\n' '|' < "$out") stderr=$(tr '\n' '|' < "$err")"
+    fi
+  done
+  python3 - "$repo/.idc-drain-verdict.json" "$session" <<'PY'
+import json, sys
+path, session = sys.argv[1:]
+try:
+    data = json.load(open(path, encoding="utf-8"))
+except (OSError, UnicodeError, json.JSONDecodeError):
+    raise SystemExit(2)
+assert set(data) == {"version", "verdict", "exit", "session_id", "ts"}, data
+assert data["version"] == 1, data
+assert data["verdict"] == "complete", data
+assert data["exit"] == 0, data
+assert data["session_id"] == session, data
+assert isinstance(data["ts"], (int, float)), data
+PY
+  json_rc=$?
+  if [ "$json_rc" -ne 0 ]; then
+    [ -z "$detail" ] || detail="$detail; "
+    detail="${detail}missing-or-invalid-verdict"
+  fi
+  gitignore_count="$(grep -c '^\.idc-drain-verdict\.json\*$' "$repo/.gitignore" 2>/dev/null)"
+  gitignore_count="${gitignore_count:-0}"
+  if [ "$gitignore_count" -ne 1 ]; then
+    [ -z "$detail" ] || detail="$detail; "
+    detail="${detail}gitignore-entry-count=$gitignore_count"
+  fi
+  temp_artifacts="$(find "$repo" -maxdepth 1 -name '.idc-drain-verdict.*.tmp' -print)"
+  if [ -n "$temp_artifacts" ]; then
+    [ -z "$detail" ] || detail="$detail; "
+    detail="${detail}temp-artifacts=$(printf '%s' "$temp_artifacts" | tr '\n' '|')"
+  fi
+  if [ -n "$detail" ]; then
+    record_review_failure "$label" "concrete-root Autorun persistence failed: $detail"
+  fi
+}
+
 # Public Python interface: exact frozen dataclass field order and decide(repo) return type.
 INTERFACE_REPO="$(new_repo interface)"
 python3 - "$ORACLE" "$INTERFACE_REPO" <<'PY' || gov_fail "public WorkflowState/NextAction interface drifted"
@@ -324,6 +396,22 @@ gov_seed_item "$R/TRACKER.md" --title '[operator-action] approve requirements' \
 run_oracle "$R"
 assert_action 0 waiting-human-gate __NULL__ "waiting_gates=1"
 
+# The operator marker owns the item regardless of its Stage. Gates accidentally filed in either
+# upstream Todo lane must still wait for the human and must never become automated Recirculate/Plan
+# work. Collect both mismatches in one RED run against the prior implementation.
+for gate_stage in Recirculation Consideration; do
+  R="$(new_repo "gate-$gate_stage")"
+  gov_seed_item "$R/TRACKER.md" --title '[operator-action] approve upstream decision' \
+    --stage "$gate_stage" --status Todo >/dev/null
+  run_oracle "$R"
+  review_expect_action "operator-gate-$gate_stage" 0 waiting-human-gate __NULL__
+  if [ "$gate_stage" = "Recirculation" ]; then
+    review_expect_counts "operator-gate-$gate_stage-counts" waiting_gates=1 recirc_tickets=0
+  else
+    review_expect_counts "operator-gate-$gate_stage-counts" waiting_gates=1 considerations=0
+  fi
+done
+
 # 8. A truly empty board is a fixpoint and can never invent Recirculate, Build, or Autorun.
 R="$(new_repo empty)"
 run_oracle "$R"
@@ -374,6 +462,23 @@ printf '%s\n' '<!-- idc-tracker-state:begin -->' '```json' '{"next_number":1}' '
   '<!-- idc-tracker-state:end -->' > "$R/TRACKER.md"
 run_oracle "$R"
 assert_action 2 invalid-tracker __NULL__
+
+# JSON booleans are Python ints, but they are not valid issue identities. Pin both positions where
+# accepting `true` would corrupt the dependency graph: as an issue number and as a blocker that
+# falsely aliases issue #1.
+R="$(new_repo corrupt-tracker-boolean-number)"
+printf '%s\n' '<!-- idc-tracker-state:begin -->' '```json' \
+  '{"next_number":2,"issues":[{"number":true,"title":"boolean issue","status":"Todo","stage":"Buildable","blocked_by":[]}]}' \
+  '```' '<!-- idc-tracker-state:end -->' > "$R/TRACKER.md"
+run_oracle "$R"
+review_expect_action tracker-boolean-number 2 invalid-tracker __NULL__
+
+R="$(new_repo corrupt-tracker-boolean-blocker)"
+printf '%s\n' '<!-- idc-tracker-state:begin -->' '```json' \
+  '{"next_number":3,"issues":[{"number":1,"title":"done upstream","status":"Done","stage":"Buildable","blocked_by":[]},{"number":2,"title":"boolean-blocked child","status":"Todo","stage":"Buildable","blocked_by":[true]}]}' \
+  '```' '<!-- idc-tracker-state:end -->' > "$R/TRACKER.md"
+run_oracle "$R"
+review_expect_action tracker-boolean-blocker 2 invalid-tracker __NULL__
 
 # A genuinely absent tracker config preserves the brief's legacy filesystem default.
 R="$(new_repo absent-tracker-config)"
@@ -524,8 +629,45 @@ review_expect_action github-dependency-rate-limit 3 rate-limited __NULL__
 review_expect_observer_clean github-dependency-observer-persistence "$R" existing \
   "$WORK/dependency-rate.gitignore.before"
 
+# Exercise the real Autorun drain with a concrete governed root, not the oracle's explicit read-only
+# mode. A healthy empty GitHub board must persist the exact complete verdict, atomically and
+# idempotently, while preserving the drain's stdout/exit contract across two passes.
+R="$(new_repo real-root-autorun-persistence)"
+printf 'backend: github\nproject_number: 10\n' > "$R/docs/workflow/tracker-config.yaml"
+mkdir -p "$R/fake-bin" || gov_fail "could not create real-root fake gh directory"
+python3 - "$R/fake-bin/gh" <<'PY'
+import os, sys
+
+path = sys.argv[1]
+source = r'''#!/usr/bin/env python3
+import json
+import sys
+
+args = sys.argv[1:]
+if args[:2] == ["api", "rate_limit"]:
+    print(json.dumps({"resources": {"graphql": {"remaining": 100, "reset": 1999999999}}}))
+    raise SystemExit(0)
+if args[:2] == ["project", "view"]:
+    print("PVT_real_root")
+    raise SystemExit(0)
+if args[:2] == ["api", "graphql"]:
+    print(json.dumps({"data": {"node": {"items": {
+        "pageInfo": {"hasNextPage": False, "endCursor": None},
+        "nodes": [],
+    }}}}))
+    raise SystemExit(0)
+print(f"unexpected gh call: {' '.join(args)}", file=sys.stderr)
+raise SystemExit(99)
+'''
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(source)
+os.chmod(path, 0o755)
+PY
+review_real_root_persistence real-root-autorun-persistence "$R" "$R/fake-bin" \
+  task5-real-root
+
 if [ -n "$REVIEW_FAILURES" ]; then
-  gov_fail "round-2 review regressions: $REVIEW_FAILURES"
+  gov_fail "round-3 review regressions: $REVIEW_FAILURES"
 fi
 
-echo "PASS: durable next-action truth table — validated queued intake routes only to Think/Recirculate; Think outranks a busy downstream pipe; tracker and queued-intake Recirculation combine truthfully with Plan/Build for Autorun; exact frozen dataclass contracts hold; single lanes stay exact; a human gate waits; empty/foreign-Markdown state fixes at no action; corrupt intake storage/content and tracker state fail closed; every GitHub throttle, including dependency reads beside eligible work, remains dominant resumable exit 3 without Autorun side effects"
+echo "PASS: durable next-action truth table — validated queued intake routes only to Think/Recirculate; Think outranks a busy downstream pipe; tracker and queued-intake Recirculation combine truthfully with Plan/Build for Autorun; exact frozen dataclass contracts hold; single lanes stay exact; every operator gate waits outside automated lanes; empty/foreign-Markdown state fixes at no action; corrupt intake storage/content and strict integer tracker identities fail closed; every GitHub throttle, including dependency reads beside eligible work, remains dominant resumable exit 3 without observer side effects; a real Autorun drain persists its exact complete verdict idempotently"

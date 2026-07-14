@@ -149,9 +149,10 @@ def load_filesystem(path):
     and print `drain: complete`; an explicit `issues: []` is still a legitimate empty board. Every
     entry must be a dict (membership tests, `.get()`, the sort key, and `.startswith()` all assume
     it), `number` must be an int (it is a dict key AND a sort key — an unhashable/unsortable value
-    would crash instead of exiting 2), and `blocked_by` must be a list (the predicate iterates it).
-    A scalar entry, a non-int number, or a non-list blocked_by exits 2 with a clean diagnostic — the
-    same fail-closed contract the sibling idc_acceptance_check.py applies to its own fields."""
+    would crash instead of exiting 2), and `blocked_by` must be a list of true integers (the
+    predicate uses each value as an issue identity). A scalar entry, a non-int number, or a
+    non-list/non-int blocked_by exits 2 with a clean diagnostic — the same fail-closed contract the
+    sibling idc_acceptance_check.py applies to its own fields."""
     try:
         state = load(path)
     except (OSError, UnicodeError, json.JSONDecodeError) as e:
@@ -171,12 +172,14 @@ def load_filesystem(path):
         if "number" not in it:
             sys.stderr.write("idc-autorun-drain: corrupt tracker — an issue is missing `number`\n")
             sys.exit(2)
-        if not isinstance(it["number"], int):
+        if type(it["number"]) is not int:
             sys.stderr.write("idc-autorun-drain: corrupt tracker — an issue `number` must be an int\n")
             sys.exit(2)
-        if not isinstance(it.get("blocked_by", []), list):
+        blocked_by = it.get("blocked_by", [])
+        if not isinstance(blocked_by, list) or any(type(value) is not int for value in blocked_by):
             sys.stderr.write(
-                f"idc-autorun-drain: corrupt tracker — issue {it['number']} `blocked_by` must be a list\n")
+                f"idc-autorun-drain: corrupt tracker — issue {it['number']} "
+                "`blocked_by` must be a list of ints\n")
             sys.exit(2)
     return issues
 

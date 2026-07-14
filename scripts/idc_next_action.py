@@ -169,7 +169,7 @@ def _validate_issues(issues: Any) -> list[dict[str, Any]]:
         raise _StateError("invalid-tracker")
     seen: set[int] = set()
     for issue in issues:
-        if not isinstance(issue, dict) or not isinstance(issue.get("number"), int):
+        if not isinstance(issue, dict) or type(issue.get("number")) is not int:
             raise _StateError("invalid-tracker")
         number = issue["number"]
         if number in seen:
@@ -182,7 +182,7 @@ def _validate_issues(issues: Any) -> list[dict[str, Any]]:
         if not isinstance(issue.get("title", ""), str):
             raise _StateError("invalid-tracker", f"#{number}")
         blocked_by = issue.get("blocked_by", [])
-        if not isinstance(blocked_by, list) or any(not isinstance(value, int) for value in blocked_by):
+        if not isinstance(blocked_by, list) or any(type(value) is not int for value in blocked_by):
             raise _StateError("invalid-tracker", f"#{number}")
     return issues
 
@@ -228,19 +228,25 @@ def _load_tracker_issues(repo: str) -> list[dict[str, Any]]:
 def _collect_workflow_state(repo: str) -> WorkflowState:
     intake_think, intake_recirc = _collect_intakes(repo)
     issues = _load_tracker_issues(repo)
+
+    def is_operator_gate(issue: dict[str, Any]) -> bool:
+        return issue.get("title", "").strip().startswith(BOARD_LINT.OPERATOR_GATE_PREFIX)
+
     recirc = tuple(sorted(
         issue["number"] for issue in issues
         if issue.get("stage") == "Recirculation" and issue.get("status") == "Todo"
+        and not is_operator_gate(issue)
     ))
     considerations = tuple(sorted(
         issue["number"] for issue in issues
         if issue.get("stage") == "Consideration" and issue.get("status") == "Todo"
+        and not is_operator_gate(issue)
     ))
     eligible = tuple(DRAIN.compute_eligible(issues))
     gates = tuple(sorted(
         issue["number"] for issue in issues
         if issue.get("status") != "Done"
-        and issue.get("title", "").strip().startswith(BOARD_LINT.OPERATOR_GATE_PREFIX)
+        and is_operator_gate(issue)
     ))
     return WorkflowState(
         intake_think=intake_think,

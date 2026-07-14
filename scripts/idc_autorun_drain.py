@@ -247,6 +247,8 @@ def _blocked_by_numbers(repo, number):
         return idc_gh_board.blocked_by_numbers(number, repo), True
     except idc_gh_board.RateLimitError:
         raise
+    except idc_gh_board.MalformedBoardDataError:
+        raise
     except idc_gh_board.BoardReadError:
         return [], False
 
@@ -311,13 +313,14 @@ def load_github(owner, project_number, repo, root=None, sid=None, repository=Non
         if content.get("type") != "Issue":
             continue
         item_repository = content.get("repository")
-        if not isinstance(item_repository, str) or not item_repository:
+        if not isinstance(item_repository, str) \
+                or not re.fullmatch(r"[^/\s]+/[^/\s]+", item_repository):
             _reject_malformed_github_item(
                 root, sid, "Issue repository identity is missing or invalid")
         if item_repository != repository:
             continue
         title = content.get("title")
-        if not isinstance(title, str):
+        if not isinstance(title, str) or not title.strip():
             _reject_malformed_github_item(
                 root, sid, "local Issue title is missing or invalid")
         number = content.get("number")
@@ -346,6 +349,12 @@ def load_github(owner, project_number, repo, root=None, sid=None, repository=Non
             _persist_verdict(root, sid, "rate-limited", 3)
             print(f"drain: rate-limited until {e.reset}")
             sys.exit(3)
+        except idc_gh_board.MalformedBoardDataError as e:
+            _persist_verdict(root, sid, "board-read-error", 2)
+            sys.stderr.write(
+                f"idc-autorun-drain: malformed github dependency data for "
+                f"#{it['number']}: {e}\n")
+            sys.exit(2)
         if not ok:
             unverified += 1
             sys.stderr.write(

@@ -107,6 +107,13 @@ class BoardReadError(Exception):
     Callers that must fail-closed catch this; the CLI maps it to exit 2 with a stderr diagnostic."""
 
 
+class MalformedBoardDataError(BoardReadError):
+    """A successful read returned malformed durable board data.
+
+    This remains a BoardReadError for existing fail-closed callers, while readers that distinguish
+    retryable transport failures can reject corrupt durable identities for the whole snapshot."""
+
+
 class BoardWriteError(BoardReadError):
     """A board write failed or was refused by a validating adapter guard.
 
@@ -543,7 +550,7 @@ def blocked_by_numbers(child, repo="."):
         if not raw:
             continue
         if not re.fullmatch(r"[1-9][0-9]*", raw):
-            raise BoardReadError(
+            raise MalformedBoardDataError(
                 f"blocked-by dependency read returned invalid issue number in record {record_no}")
         numbers.append(int(raw))
     return numbers

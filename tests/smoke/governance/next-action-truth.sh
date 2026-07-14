@@ -367,7 +367,7 @@ def node(number, status="Todo", stage="Buildable", *, content_type="Issue",
     content = {
         "__typename": content_type,
         "number": number,
-        "title": title or f"item {number}",
+        "title": f"item {number}" if title is None else title,
         "repository": {"nameWithOwner": repository},
     }
     return {"id": f"PVTI_{number}", "fieldValues": fields, "content": content}
@@ -377,6 +377,10 @@ def board_nodes():
         return [node(1, status="Blocked"), node(2)]
     if mode == "dependency-malformed":
         return [node(2)]
+    if mode == "dependency-malformed-with-ready":
+        return [node(20, title="unrelated ready issue"), node(21, title="malformed dependency")]
+    if mode == "dependency-transient-with-ready":
+        return [node(22, title="proven ready issue"), node(23, title="transient dependency read")]
     if mode == "content-filter-action":
         return [
             node(5, title="local issue"),
@@ -394,6 +398,10 @@ def board_nodes():
         malformed = node(10, title="placeholder removed below")
         malformed["content"].pop("title")
         return [malformed]
+    if mode == "unusable-issue-repository":
+        return [node(11, repository="not-owner/repo/extra", title="unusable repository identity")]
+    if mode == "blank-local-title":
+        return [node(12, title="   ")]
     if mode == "healthy-fixpoint":
         return []
     raise SystemExit(f"unknown FAKE_GH_MODE {mode!r}")
@@ -426,9 +434,13 @@ if args and args[0] == "api" and len(args) > 1 and "dependencies/blocked_by" in 
     if not strict:
         print("dependency reader omitted --paginate --jq .[].number", file=sys.stderr)
         raise SystemExit(9)
+    if mode == "dependency-transient-with-ready" and number == "23":
+        print("temporary dependency API failure", file=sys.stderr)
+        raise SystemExit(1)
     if mode == "dependency-pagination" and number == "2":
         print("1")
-    elif mode == "dependency-malformed" and number == "2":
+    elif (mode == "dependency-malformed" and number == "2") or (
+            mode == "dependency-malformed-with-ready" and number == "21"):
         print("true")
     else:
         print("")
@@ -910,6 +922,23 @@ review_expect_action github-missing-local-title 2 invalid-tracker __NULL__
 review_expect_github_drain_result drain-github-missing-local-title "$R" missing-local-title 2 "" \
   "idc-autorun-drain: malformed github board item: local Issue title is missing or invalid"
 
+# Present does not mean usable. Repository identity must be exactly owner/repository, and a local
+# title must contain non-whitespace text. These values cannot be normalized or silently classified.
+R="$(new_repo github-unusable-issue-repository)"
+printf 'backend: github\nproject_number: 7\n' > "$R/docs/workflow/tracker-config.yaml"
+run_github_oracle "$R" unusable-issue-repository
+review_expect_action github-unusable-issue-repository 2 invalid-tracker __NULL__
+review_expect_github_drain_result drain-github-unusable-issue-repository "$R" \
+  unusable-issue-repository 2 "" \
+  "idc-autorun-drain: malformed github board item: Issue repository identity is missing or invalid"
+
+R="$(new_repo github-blank-local-title)"
+printf 'backend: github\nproject_number: 7\n' > "$R/docs/workflow/tracker-config.yaml"
+run_github_oracle "$R" blank-local-title
+review_expect_action github-blank-local-title 2 invalid-tracker __NULL__
+review_expect_github_drain_result drain-github-blank-local-title "$R" blank-local-title 2 "" \
+  "idc-autorun-drain: malformed github board item: local Issue title is missing or invalid"
+
 # The shared native dependency reader must use its strict paginating contract. The first fixture
 # exposes a blocker only when `--paginate --jq .[].number` is used; the second returns a malformed
 # boolean record that must fail closed as invalid tracker state, never silently become no blockers.
@@ -926,9 +955,28 @@ R="$(new_repo github-dependency-malformed)"
 printf 'backend: github\nproject_number: 7\n' > "$R/docs/workflow/tracker-config.yaml"
 run_github_oracle "$R" dependency-malformed
 review_expect_action github-dependency-malformed 2 invalid-tracker __NULL__
-expected_github_drain="$(printf 'eligible: \nrecirc_inbox: 0\nunplanned_considerations: 0\ndrain: unknown\n')"
-review_expect_github_drain_result drain-github-dependency-malformed "$R" \
-  dependency-malformed 2 "$expected_github_drain"
+review_expect_github_drain_result drain-github-dependency-malformed "$R" dependency-malformed 2 \
+  "" "idc-autorun-drain: malformed github dependency data for #2: blocked-by dependency read returned invalid issue number in record 1"
+
+# Malformed durable dependency data dominates the whole snapshot even when unrelated work is ready.
+# A real API/read failure remains the existing per-item retry path and may expose proven ready work.
+R="$(new_repo github-dependency-malformed-with-ready)"
+printf 'backend: github\nproject_number: 7\n' > "$R/docs/workflow/tracker-config.yaml"
+run_github_oracle "$R" dependency-malformed-with-ready
+review_expect_action github-dependency-malformed-with-ready 2 invalid-tracker __NULL__
+review_expect_github_drain_result drain-github-dependency-malformed-with-ready "$R" \
+  dependency-malformed-with-ready 2 "" \
+  "idc-autorun-drain: malformed github dependency data for #21: blocked-by dependency read returned invalid issue number in record 1"
+
+R="$(new_repo github-dependency-transient-with-ready)"
+printf 'backend: github\nproject_number: 7\n' > "$R/docs/workflow/tracker-config.yaml"
+run_github_oracle "$R" dependency-transient-with-ready
+review_expect_result github-dependency-transient-with-ready 0 action eligible-buildable \
+  /idc:build '["#22"]' eligible_buildables=1
+expected_github_drain="$(printf 'eligible: 22\nrecirc_inbox: 0\nunplanned_considerations: 0\ndrain: continue\n')"
+review_expect_github_drain_result drain-github-dependency-transient-with-ready "$R" \
+  dependency-transient-with-ready 0 "$expected_github_drain" \
+  "idc-autorun-drain: blocked_by lookup failed for #23 — excluded this pass (will retry next /loop)"
 
 # Local issue identities are durable and positive. A local #0 is corruption. In contrast, PRs,
 # drafts, and foreign Issues above are simply outside this governed repo's executable issue set.
@@ -1095,7 +1143,7 @@ review_real_root_persistence real-root-autorun-persistence "$R" "$R/fake-bin" \
   task5-real-root
 
 if [ -n "$REVIEW_FAILURES" ]; then
-  gov_fail "round-6 review regressions: $REVIEW_FAILURES"
+  gov_fail "round-7 review regressions: $REVIEW_FAILURES"
 fi
 
-echo "PASS: durable next-action truth table — validated reviewed intake routes to Think/Recirculate/operator wait with precedence intact; same-lane Recirculation stays singular while distinct downstream lanes select Autorun; exact frozen dataclass contracts hold; operator gates stay outside oracle and Drain automation; empty/foreign-Markdown state fixes at no action; corrupt intake review, exact config, and positive tracker identities fail closed; healthy GitHub action/fixpoint reads filter exact local Issues while malformed item identity/title fails closed; dependency reads require strict --paginate --jq .[].number; every throttle remains resumable exit 3 without observer side effects; a real Autorun drain persists its exact complete verdict idempotently"
+echo "PASS: durable next-action truth table — validated reviewed intake routes to Think/Recirculate/operator wait with precedence intact; same-lane Recirculation stays singular while distinct downstream lanes select Autorun; exact frozen dataclass contracts hold; operator gates stay outside oracle and Drain automation; empty/foreign-Markdown state fixes at no action; corrupt intake review, exact config, and positive tracker identities fail closed; GitHub reads require usable owner/repository identity and nonblank local titles; malformed dependency data dominates unrelated ready work while genuine transient reads stay per-item retryable; dependency reads require strict --paginate --jq .[].number; every throttle remains resumable exit 3 without observer side effects; a real Autorun drain persists its exact complete verdict idempotently"

@@ -21,6 +21,8 @@ import idc_transition as E, idc_gh_board as B
 # A native dependency or comment/API parse failure is UNKNOWN state, never verified absence. Exercise
 # the real parsers (not replacement lambdas): malformed representations must raise BoardReadError so
 # the transition engine cannot advance Status from Blocked to Todo on an unreadable dependency set.
+assert issubclass(B.MalformedBoardDataError, B.BoardReadError), (
+    "malformed durable data must retain BoardReadError compatibility")
 real_gh = B._gh
 malformed_native_reads = {
     "JSON null": "null\n",
@@ -35,12 +37,20 @@ for name, output in malformed_native_reads.items():
     try:
         B.blocked_by_numbers(5, repo)
         raise AssertionError(f"{name} was treated as a verified native dependency set")
-    except B.BoardReadError:
+    except B.MalformedBoardDataError:
         pass
 B._gh = lambda *args, **kwargs: ""
 assert B.blocked_by_numbers(5, repo) == [], "a genuinely empty native dependency read was rejected"
 B._gh = lambda *args, **kwargs: "7\n11\n"
 assert B.blocked_by_numbers(5, repo) == [7, 11], "valid native issue numbers did not parse"
+B._gh = lambda *args, **kwargs: (_ for _ in ()).throw(B.BoardReadError("transient read failure"))
+try:
+    B.blocked_by_numbers(5, repo)
+    raise AssertionError("a transient dependency read failure was treated as verified data")
+except B.MalformedBoardDataError:
+    raise AssertionError("a transient dependency read failure was mislabeled as malformed data")
+except B.BoardReadError:
+    pass
 
 malformed_marker_reads = {
     "non-JSON comment record": "not-json\n",

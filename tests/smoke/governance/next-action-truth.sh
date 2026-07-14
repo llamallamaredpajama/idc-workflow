@@ -42,7 +42,10 @@ seed_intake() {
   local manifest="$repo/docs/workflow/intakes/2026-07-14-$canonical_slug.json"
   local supplied_review="$repo/docs/workflow/intakes/$slug-supplied-review.json"
   local route="recirculate"
-  [ "$unit_class" = "new_requirement" ] && route="think"
+  case "$unit_class" in
+    new_requirement) route="think" ;;
+    operator_stop) route="operator_decision" ;;
+  esac
   printf '# %s - durable unit\n\nEvidence only.\n' "$unit_id" > "$source"
   python3 "$INTAKE" extract --source "$source" --out "$manifest" \
     --goal "route $unit_id truthfully" --plugin-version 4.1.0 >/dev/null \
@@ -224,6 +227,65 @@ review_expect_drain_invalid() {
   fi
 }
 
+review_expect_result() {
+  local label="$1" expected_rc="$2" verdict="$3" reason="$4" command="$5" refs_json="$6"
+  shift 6
+  local actual json_rc stderr_head
+  actual="$(python3 - "$ORACLE_OUT" "$verdict" "$reason" "$command" "$refs_json" "$@" <<'PY'
+import json, sys
+path, verdict, reason, command, refs_json, *counts = sys.argv[1:]
+try:
+    data = json.load(open(path, encoding="utf-8"))
+except (OSError, UnicodeError, json.JSONDecodeError):
+    raise SystemExit(2)
+expected_command = None if command == "__NULL__" else command
+ok = (
+    data.get("verdict") == verdict
+    and data.get("reason_code") == reason
+    and data.get("command") == expected_command
+    and data.get("refs") == json.loads(refs_json)
+)
+for encoded in counts:
+    key, value = encoded.split("=", 1)
+    ok = ok and data.get("counts", {}).get(key) == int(value)
+if not ok:
+    print(json.dumps(data, sort_keys=True))
+    raise SystemExit(2)
+PY
+)"
+  json_rc=$?
+  if [ "$ORACLE_RC" -eq "$expected_rc" ] && [ "$json_rc" -eq 0 ]; then
+    return
+  fi
+  stderr_head="$(sed -n '1p' "$ORACLE_ERR")"
+  [ -n "$actual" ] || actual="<no-matching-json>"
+  [ -n "$stderr_head" ] || stderr_head="<empty>"
+  record_review_failure "$label" \
+    "expected exit=$expected_rc verdict=$verdict reason=$reason command=$command refs=$refs_json; got exit=$ORACLE_RC result=$actual stderr=$stderr_head"
+}
+
+review_expect_drain_result() {
+  local label="$1" tracker="$2" expected_rc="$3" expected_stdout="$4"
+  local out="$WORK/$1-drain.out" err="$WORK/$1-drain.err" rc detail=""
+  python3 "$DRAIN" --backend filesystem --tracker "$tracker" >"$out" 2>"$err"
+  rc=$?
+  if [ "$rc" -ne "$expected_rc" ]; then
+    detail="exit=$rc"
+  fi
+  if [ "$(cat "$out")" != "$expected_stdout" ]; then
+    [ -z "$detail" ] || detail="$detail; "
+    detail="${detail}stdout=$(tr '\n' '|' < "$out")"
+  fi
+  if [ -s "$err" ]; then
+    [ -z "$detail" ] || detail="$detail; "
+    detail="${detail}stderr=$(tr '\n' '|' < "$err")"
+  fi
+  if [ -n "$detail" ]; then
+    record_review_failure "$label" \
+      "expected direct filesystem drain exit=$expected_rc stdout=$(printf '%s' "$expected_stdout" | tr '\n' '|'); got $detail"
+  fi
+}
+
 review_real_root_persistence() {
   local label="$1" repo="$2" fake_bin="$3" session="$4"
   local expected detail="" pass out err rc json_rc gitignore_count temp_artifacts
@@ -271,6 +333,127 @@ PY
   fi
   if [ -n "$detail" ]; then
     record_review_failure "$label" "concrete-root Autorun persistence failed: $detail"
+  fi
+}
+
+GITHUB_ORACLE_BIN="$WORK/github-oracle-bin"
+mkdir -p "$GITHUB_ORACLE_BIN" || gov_fail "could not create healthy GitHub oracle stub directory"
+python3 - "$GITHUB_ORACLE_BIN/gh" <<'PY'
+import json
+import os
+import re
+import sys
+
+path = sys.argv[1]
+source = r'''#!/usr/bin/env python3
+import json
+import os
+import re
+import sys
+
+args = sys.argv[1:]
+mode = os.environ.get("FAKE_GH_MODE", "")
+
+def field(name, value):
+    return {
+        "__typename": "ProjectV2ItemFieldSingleSelectValue",
+        "name": value,
+        "field": {"name": name},
+    }
+
+def node(number, status="Todo", stage="Buildable", *, content_type="Issue",
+         repository="owner/repo", title=None):
+    fields = {"nodes": [field("Status", status), field("Stage", stage)]}
+    content = {
+        "__typename": content_type,
+        "number": number,
+        "title": title or f"item {number}",
+        "repository": {"nameWithOwner": repository},
+    }
+    return {"id": f"PVTI_{number}", "fieldValues": fields, "content": content}
+
+def board_nodes():
+    if mode == "dependency-pagination":
+        return [node(1, status="Blocked"), node(2)]
+    if mode == "dependency-malformed":
+        return [node(2)]
+    if mode == "content-filter-action":
+        return [
+            node(5, title="local issue"),
+            node(7, content_type="PullRequest", title="local pull request"),
+            node(8, repository="other/repo", title="foreign issue"),
+            {"id": "PVTI_draft", "fieldValues": {"nodes": []}, "content": None},
+        ]
+    if mode == "invalid-local-number":
+        return [node(0, title="invalid local identity")]
+    if mode == "healthy-fixpoint":
+        return []
+    raise SystemExit(f"unknown FAKE_GH_MODE {mode!r}")
+
+if args[:2] == ["api", "rate_limit"]:
+    print(json.dumps({"resources": {"graphql": {"remaining": 100, "reset": 1999999999}}}))
+    raise SystemExit(0)
+if args[:2] == ["repo", "view"]:
+    print("owner/repo")
+    raise SystemExit(0)
+if args[:2] == ["project", "view"]:
+    print("PVT_next_action_round5")
+    raise SystemExit(0)
+if args[:2] == ["api", "graphql"]:
+    if mode == "wrong-shape":
+        print("[]")
+    else:
+        print(json.dumps({"data": {"node": {"items": {
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+            "nodes": board_nodes(),
+        }}}}))
+    raise SystemExit(0)
+if args and args[0] == "api" and len(args) > 1 and "dependencies/blocked_by" in args[1]:
+    match = re.search(r"/issues/([^/]+)/dependencies/blocked_by", args[1])
+    number = match.group(1) if match else ""
+    strict = "--paginate" in args and ".[].number" in args
+    if mode == "dependency-pagination" and number == "2":
+        print("1" if strict else "[]")
+    elif mode == "dependency-malformed" and number == "2":
+        print("true" if strict else "[true]")
+    else:
+        print("" if strict else "[]")
+    raise SystemExit(0)
+print(f"unexpected gh call in {mode}: {' '.join(args)}", file=sys.stderr)
+raise SystemExit(99)
+'''
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(source)
+os.chmod(path, 0o755)
+PY
+
+run_github_oracle() {
+  local repo="$1" mode="$2"
+  ORACLE_OUT="$WORK/oracle-out.json"
+  ORACLE_ERR="$WORK/oracle-err.txt"
+  (cd "$repo" && FAKE_GH_MODE="$mode" PATH="$GITHUB_ORACLE_BIN:$PATH" \
+    python3 "$ORACLE" --repo "$repo" --json) >"$ORACLE_OUT" 2>"$ORACLE_ERR"
+  ORACLE_RC=$?
+}
+
+review_expect_github_drain_result() {
+  local label="$1" repo="$2" mode="$3" expected_rc="$4" expected_stdout="$5"
+  local out="$WORK/$1-github-drain.out" err="$WORK/$1-github-drain.err" rc detail=""
+  (cd "$repo" && FAKE_GH_MODE="$mode" PATH="$GITHUB_ORACLE_BIN:$PATH" \
+    python3 "$DRAIN" --backend github --owner owner --project 7 --repo "$repo") \
+    >"$out" 2>"$err"
+  rc=$?
+  if [ "$rc" -ne "$expected_rc" ]; then
+    detail="exit=$rc"
+  fi
+  if [ "$(cat "$out")" != "$expected_stdout" ]; then
+    [ -z "$detail" ] || detail="$detail; "
+    detail="${detail}stdout=$(tr '\n' '|' < "$out")"
+  fi
+  if [ -n "$detail" ]; then
+    [ -s "$err" ] && detail="$detail; stderr=$(tr '\n' '|' < "$err")"
+    record_review_failure "$label" \
+      "expected direct GitHub drain exit=$expected_rc stdout=$(printf '%s' "$expected_stdout" | tr '\n' '|'); got $detail"
   fi
 }
 
@@ -399,6 +582,42 @@ for downstream in plan build; do
   assert_action 0 multi-lane-actionable /idc:autorun "intake_recirc=1"
 done
 
+# Queued intake and a tracker ticket are two sources in the SAME Recirculation lane, not two lanes.
+# They select one precise Recirculation action and must never inflate into Autorun.
+R="$(new_repo same-lane-recirculation)"
+M="$(seed_intake "$R" same-lane U4 admitted_unplanned)"
+gov_seed_item "$R/TRACKER.md" --title 'tracker recirculation inbox' \
+  --stage Recirculation --status Todo >/dev/null
+run_oracle "$R"
+review_expect_action same-lane-recirculation 0 intake-needs-recirculation \
+  "/idc:recirculate docs/workflow/intakes/$(basename "$M")#U4"
+
+# A reviewed queued operator stop is durable human work, not corrupt intake. It contributes to the
+# existing waiting count without changing the frozen public dataclasses. Think and downstream work
+# retain their documented precedence while the stop remains visible in counts.
+R="$(new_repo intake-operator-stop)"
+M="$(seed_intake "$R" operator-stop U5 operator_stop)"
+GATE_REF="docs/workflow/intakes/$(basename "$M")#U5"
+run_oracle "$R"
+review_expect_result intake-operator-stop 0 waiting waiting-human-gate __NULL__ \
+  "[\"$GATE_REF\"]" waiting_gates=1
+
+R="$(new_repo intake-operator-stop-think)"
+seed_intake "$R" operator-stop U5 operator_stop >/dev/null
+THINK_M="$(seed_intake "$R" operator-stop-think U6 new_requirement)"
+run_oracle "$R"
+review_expect_result intake-operator-stop-think 0 action intake-needs-think \
+  "/idc:think --doc docs/workflow/intakes/$(basename "$THINK_M") --unit U6" \
+  "[\"docs/workflow/intakes/$(basename "$THINK_M")#U6\"]" waiting_gates=1
+
+R="$(new_repo intake-operator-stop-build)"
+seed_intake "$R" operator-stop U5 operator_stop >/dev/null
+gov_seed_item "$R/TRACKER.md" --title 'build despite pending human stop' \
+  --stage Buildable --status Todo >/dev/null
+run_oracle "$R"
+review_expect_result intake-operator-stop-build 0 action eligible-buildable /idc:build \
+  '["#1"]' waiting_gates=1
+
 # 7. Only an open operator gate is an honest human wait, never build work.
 R="$(new_repo gate)"
 gov_seed_item "$R/TRACKER.md" --title '[operator-action] approve requirements' \
@@ -420,6 +639,9 @@ for gate_stage in Recirculation Consideration; do
   else
     review_expect_counts "operator-gate-$gate_stage-counts" waiting_gates=1 considerations=0
   fi
+  expected_gate_drain="$(printf 'eligible: \nrecirc_inbox: 0\nunplanned_considerations: 0\ndrain: complete\n')"
+  review_expect_drain_result "drain-operator-gate-$gate_stage" "$R/TRACKER.md" 0 \
+    "$expected_gate_drain"
 done
 
 # 8. A truly empty board is a fixpoint and can never invent Recirculate, Build, or Autorun.
@@ -443,6 +665,53 @@ printf '{"schema_version":1,"units":[' > \
   "$R/docs/workflow/intakes/2026-07-14-corrupt.json"
 run_oracle "$R"
 assert_action 2 invalid-intake __NULL__
+
+# Durable intake is executable only after an independent PASS stamp. Pin both halves of that gate:
+# a fully classified queued manifest still pending review, and a manifest claiming passed whose
+# stamped review is missing or tampered.
+R="$(new_repo intake-review-pending)"
+M="$(seed_intake "$R" review-pending U7 new_requirement)"
+python3 - "$M" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+data = json.load(open(path, encoding="utf-8"))
+review = data["verification"]["review_path"]
+data["verification"].update({"status": "pending", "review_path": None})
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(data, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+if review:
+    os.remove(os.path.join(os.path.dirname(path), review))
+PY
+run_oracle "$R"
+review_expect_action intake-review-pending 2 invalid-intake __NULL__
+
+R="$(new_repo intake-review-missing)"
+M="$(seed_intake "$R" review-missing U7 new_requirement)"
+python3 - "$M" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+data = json.load(open(path, encoding="utf-8"))
+os.remove(os.path.join(os.path.dirname(path), data["verification"]["review_path"]))
+PY
+run_oracle "$R"
+review_expect_action intake-review-missing 2 invalid-intake __NULL__
+
+R="$(new_repo intake-review-tampered)"
+M="$(seed_intake "$R" review-tampered U7 new_requirement)"
+python3 - "$M" <<'PY'
+import json, os, sys
+manifest_path = sys.argv[1]
+manifest = json.load(open(manifest_path, encoding="utf-8"))
+review_path = os.path.join(os.path.dirname(manifest_path), manifest["verification"]["review_path"])
+review = json.load(open(review_path, encoding="utf-8"))
+review["verdict"] = "FAIL"
+with open(review_path, "w", encoding="utf-8") as handle:
+    json.dump(review, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+PY
+run_oracle "$R"
+review_expect_action intake-review-tampered 2 invalid-intake __NULL__
 
 # The intake store itself is durable state. A non-directory or broken locator must fail closed rather
 # than be mistaken for an absent/empty intake store.
@@ -492,6 +761,24 @@ run_oracle "$R"
 review_expect_action tracker-boolean-blocker 2 invalid-tracker __NULL__
 review_expect_drain_invalid drain-boolean-blocker "$R/TRACKER.md"
 
+# Durable issue and dependency identities start at 1. Zero is the old internal sentinel and negative
+# values are never allocated; neither may enter the oracle or the real filesystem Drain.
+R="$(new_repo corrupt-tracker-nonpositive-number)"
+printf '%s\n' '<!-- idc-tracker-state:begin -->' '```json' \
+  '{"next_number":1,"issues":[{"number":-1,"title":"negative","status":"Todo","stage":"Buildable","blocked_by":[]},{"number":0,"title":"zero","status":"Todo","stage":"Buildable","blocked_by":[]}]}' \
+  '```' '<!-- idc-tracker-state:end -->' > "$R/TRACKER.md"
+run_oracle "$R"
+review_expect_action tracker-nonpositive-number 2 invalid-tracker __NULL__
+review_expect_drain_invalid drain-nonpositive-number "$R/TRACKER.md"
+
+R="$(new_repo corrupt-tracker-nonpositive-blocker)"
+printf '%s\n' '<!-- idc-tracker-state:begin -->' '```json' \
+  '{"next_number":2,"issues":[{"number":1,"title":"invalid blockers","status":"Todo","stage":"Buildable","blocked_by":[-1,0]}]}' \
+  '```' '<!-- idc-tracker-state:end -->' > "$R/TRACKER.md"
+run_oracle "$R"
+review_expect_action tracker-nonpositive-blocker 2 invalid-tracker __NULL__
+review_expect_drain_invalid drain-nonpositive-blocker "$R/TRACKER.md"
+
 # A genuinely absent tracker config preserves the brief's legacy filesystem default.
 R="$(new_repo absent-tracker-config)"
 rm -f "$R/docs/workflow/tracker-config.yaml"
@@ -525,11 +812,100 @@ printf 'project_number: 7\n' > "$R/docs/workflow/tracker-config.yaml"
 run_oracle "$R"
 review_expect_action tracker-config-invalid-content 2 invalid-tracker __NULL__
 
+# Only exact top-level scalar keys select a backend. Prefix garbage, nested-only keys, and duplicate
+# backend/project declarations are ambiguous durable state and must fail closed. Unsupported values
+# are pinned too, while the canonical quoted + inline-comment filesystem spelling remains valid.
+for config_case in trailing-garbage nested-only duplicate-backend duplicate-project unsupported; do
+  R="$(new_repo "tracker-config-$config_case")"
+  case "$config_case" in
+    trailing-garbage)
+      printf 'backend: filesystem garbage\n' > "$R/docs/workflow/tracker-config.yaml"
+      ;;
+    nested-only)
+      printf 'tracker:\n  backend: filesystem\n' > "$R/docs/workflow/tracker-config.yaml"
+      ;;
+    duplicate-backend)
+      printf 'backend: filesystem\nbackend: filesystem\n' > "$R/docs/workflow/tracker-config.yaml"
+      ;;
+    duplicate-project)
+      printf 'backend: filesystem\nproject_number: 7\nproject_number: 8\n' \
+        > "$R/docs/workflow/tracker-config.yaml"
+      ;;
+    unsupported)
+      printf 'backend: unknown\n' > "$R/docs/workflow/tracker-config.yaml"
+      ;;
+  esac
+  run_oracle "$R"
+  review_expect_action "tracker-config-$config_case" 2 invalid-tracker __NULL__
+done
+
+R="$(new_repo tracker-config-quoted-comment)"
+printf 'backend: "filesystem"  # github | filesystem\n' > "$R/docs/workflow/tracker-config.yaml"
+run_oracle "$R"
+review_expect_action tracker-config-quoted-comment 0 fixpoint __NULL__
+
 # Invalid UTF-8 in filesystem TRACKER.md must be invalid-tracker JSON, never a loader traceback.
 R="$(new_repo corrupt-tracker-utf8)"
 printf '\377' > "$R/TRACKER.md"
 run_oracle "$R"
 review_expect_action tracker-invalid-utf8 2 invalid-tracker __NULL__
+
+# Healthy GitHub reads must produce the same exact oracle actions as filesystem. The action fixture
+# deliberately mixes a local Issue with a local PR, a foreign Issue, and a draft: only local #5 is
+# executable. The empty fixture also pins the successful GitHub fixpoint path and canonical quoted,
+# inline-commented config scalars.
+R="$(new_repo github-healthy-local-action)"
+printf 'backend: github\nproject_number: 7\n' > "$R/docs/workflow/tracker-config.yaml"
+run_github_oracle "$R" content-filter-action
+review_expect_result github-healthy-local-action 0 action eligible-buildable /idc:build \
+  '["#5"]' eligible_buildables=1
+expected_github_drain="$(printf 'eligible: 5\nrecirc_inbox: 0\nunplanned_considerations: 0\ndrain: continue\n')"
+review_expect_github_drain_result drain-github-local-content "$R" content-filter-action 0 \
+  "$expected_github_drain"
+
+R="$(new_repo github-healthy-fixpoint)"
+printf 'backend: "github"  # github | filesystem\nproject_number: "7"  # project\n' \
+  > "$R/docs/workflow/tracker-config.yaml"
+run_github_oracle "$R" healthy-fixpoint
+review_expect_result github-healthy-fixpoint 0 no_action fixpoint __NULL__ '[]' \
+  eligible_buildables=0
+
+# The shared native dependency reader must use its strict paginating contract. The first fixture
+# exposes a blocker only when `--paginate --jq .[].number` is used; the second returns a malformed
+# boolean record that must fail closed as invalid tracker state, never silently become no blockers.
+R="$(new_repo github-dependency-pagination)"
+printf 'backend: github\nproject_number: 7\n' > "$R/docs/workflow/tracker-config.yaml"
+run_github_oracle "$R" dependency-pagination
+review_expect_result github-dependency-pagination 0 no_action fixpoint __NULL__ '[]' \
+  eligible_buildables=0
+expected_github_drain="$(printf 'eligible: \nrecirc_inbox: 0\nunplanned_considerations: 0\ndrain: complete\n')"
+review_expect_github_drain_result drain-github-dependency-pagination "$R" \
+  dependency-pagination 0 "$expected_github_drain"
+
+R="$(new_repo github-dependency-malformed)"
+printf 'backend: github\nproject_number: 7\n' > "$R/docs/workflow/tracker-config.yaml"
+run_github_oracle "$R" dependency-malformed
+review_expect_action github-dependency-malformed 2 invalid-tracker __NULL__
+expected_github_drain="$(printf 'eligible: \nrecirc_inbox: 0\nunplanned_considerations: 0\ndrain: unknown\n')"
+review_expect_github_drain_result drain-github-dependency-malformed "$R" \
+  dependency-malformed 2 "$expected_github_drain"
+
+# Local issue identities are durable and positive. A local #0 is corruption. In contrast, PRs,
+# drafts, and foreign Issues above are simply outside this governed repo's executable issue set.
+R="$(new_repo github-invalid-local-number)"
+printf 'backend: github\nproject_number: 7\n' > "$R/docs/workflow/tracker-config.yaml"
+run_github_oracle "$R" invalid-local-number
+review_expect_action github-invalid-local-number 2 invalid-tracker __NULL__
+review_expect_github_drain_result drain-github-invalid-local-number "$R" \
+  invalid-local-number 2 ""
+
+# A successful gh invocation with a wrong top-level JSON shape is still an unreadable board. The
+# oracle must translate it to deterministic invalid-tracker JSON/exit 2 without a traceback.
+R="$(new_repo github-wrong-shape)"
+printf 'backend: github\nproject_number: 7\n' > "$R/docs/workflow/tracker-config.yaml"
+run_github_oracle "$R" wrong-shape
+review_expect_action github-wrong-shape 2 invalid-tracker __NULL__
+review_expect_github_drain_result drain-github-wrong-shape "$R" wrong-shape 2 ""
 
 # GitHub quota exhaustion retains the shared reader's distinct resumable exit 3. The preflight must
 # stop before any board query; an unexpected fake-gh call makes the case fail rather than go hollow.
@@ -622,7 +998,7 @@ if args[:2] == ["api", "graphql"]:
     }}}}))
     raise SystemExit(0)
 if args and args[0] == "api" and len(args) > 1 and "issues/1/" in args[1]:
-    print("[]")
+    print("")
     raise SystemExit(0)
 if args and args[0] == "api" and len(args) > 1 and "issues/2/" in args[1]:
     print("API rate limit exceeded", file=sys.stderr)
@@ -679,7 +1055,7 @@ review_real_root_persistence real-root-autorun-persistence "$R" "$R/fake-bin" \
   task5-real-root
 
 if [ -n "$REVIEW_FAILURES" ]; then
-  gov_fail "round-4 review regressions: $REVIEW_FAILURES"
+  gov_fail "round-5 review regressions: $REVIEW_FAILURES"
 fi
 
-echo "PASS: durable next-action truth table — validated queued intake routes only to Think/Recirculate; Think outranks a busy downstream pipe; tracker and queued-intake Recirculation combine truthfully with Plan/Build for Autorun; exact frozen dataclass contracts hold; single lanes stay exact; every operator gate waits outside automated lanes; empty/foreign-Markdown state fixes at no action; corrupt intake storage/content and strict integer tracker identities fail closed; every GitHub throttle, including dependency reads beside eligible work, remains dominant resumable exit 3 without observer side effects; a real Autorun drain persists its exact complete verdict idempotently"
+echo "PASS: durable next-action truth table — validated reviewed intake routes to Think/Recirculate/operator wait with precedence intact; same-lane Recirculation stays singular while distinct downstream lanes select Autorun; exact frozen dataclass contracts hold; operator gates stay outside oracle and Drain automation; empty/foreign-Markdown state fixes at no action; corrupt intake review, exact config, and positive tracker identities fail closed; healthy GitHub action/fixpoint reads filter local Issues and strict paginated dependencies; every throttle remains resumable exit 3 without observer side effects; a real Autorun drain persists its exact complete verdict idempotently"

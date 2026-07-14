@@ -75,8 +75,8 @@ def _repo_relative(repo: str, path: str) -> str:
     return os.path.relpath(path, repo).replace(os.sep, "/")
 
 
-def _collect_intakes(repo: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Validate canonical manifests and return queued ``manifest#unit`` references.
+def _collect_intakes(repo: str) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    """Validate canonical manifests and return queued action/gate ``manifest#unit`` references.
 
     Review files and arbitrary JSON inputs are not manifests: only the canonical
     ``<YYYY-MM-DD>-<slug>.json`` names enter the durable read model. Every canonical file is
@@ -84,12 +84,13 @@ def _collect_intakes(repo: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """
     root = os.path.join(repo, "docs", "workflow", "intakes")
     if not os.path.lexists(root):
-        return (), ()
+        return (), (), ()
     if not os.path.isdir(root):
         raise _StateError("invalid-intake", _repo_relative(repo, root))
 
     think: list[str] = []
     recirc: list[str] = []
+    gates: list[str] = []
     try:
         names = sorted(os.listdir(root))
     except OSError as exc:
@@ -127,11 +128,34 @@ def _collect_intakes(repo: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
             elif unit["class"] in ("admitted_unplanned", "discovered_drift") \
                     and unit["route"] == "recirculate":
                 recirc.append(ref)
+            elif unit["class"] == "operator_stop" and unit["route"] == "operator_decision":
+                gates.append(ref)
             else:
                 # A reviewed queued unit with no representable IDC entry point is not a fixpoint.
                 # Fail closed rather than silently dropping durable intake work.
                 raise _StateError("invalid-intake", ref)
-    return tuple(sorted(think)), tuple(sorted(recirc))
+    return tuple(sorted(think)), tuple(sorted(recirc)), tuple(sorted(gates))
+
+
+def _config_scalar(raw: str) -> str:
+    """Parse one constrained top-level YAML scalar with an optional inline comment."""
+    raw = raw.strip()
+    if not raw:
+        raise ValueError("empty scalar")
+    if raw[0] in ("'", '"'):
+        quote = raw[0]
+        end = raw.find(quote, 1)
+        if end < 0:
+            raise ValueError("unterminated quoted scalar")
+        value = raw[1:end]
+        tail = raw[end + 1:].strip()
+        if tail and not tail.startswith("#"):
+            raise ValueError("garbage after quoted scalar")
+    else:
+        value = re.split(r"\s+#", raw, maxsplit=1)[0].strip()
+    if not value or any(character.isspace() for character in value):
+        raise ValueError("scalar must be one exact token")
+    return value
 
 
 def _read_tracker_config(repo: str) -> tuple[str, str]:
@@ -145,20 +169,22 @@ def _read_tracker_config(repo: str) -> tuple[str, str]:
         return "filesystem", ""
     if not os.path.isfile(path):
         raise _StateError("invalid-tracker", _repo_relative(repo, path))
-    backend = ""
-    project = ""
+    values: dict[str, list[str]] = {"backend": [], "project_number": []}
     try:
         with open(path, encoding="utf-8") as handle:
             for line in handle:
-                match = re.match(r"^\s*backend:\s*['\"]?([A-Za-z0-9_-]+)", line)
+                if line.startswith((" ", "\t")):
+                    continue
+                match = re.match(r"^(backend|project_number):[ \t]*(.*?)\s*$", line)
                 if match:
-                    backend = match.group(1).strip()
-                match = re.match(r'^\s*project_number:\s*"?([^"#\n]*)"?', line)
-                if match:
-                    project = match.group(1).strip()
-    except (OSError, UnicodeError) as exc:
+                    values[match.group(1)].append(_config_scalar(match.group(2)))
+    except (OSError, UnicodeError, ValueError) as exc:
         raise _StateError("invalid-tracker", _repo_relative(repo, path)) from exc
-    if not backend:
+    if len(values["backend"]) != 1 or len(values["project_number"]) > 1:
+        raise _StateError("invalid-tracker", _repo_relative(repo, path))
+    backend = values["backend"][0]
+    project = values["project_number"][0] if values["project_number"] else ""
+    if backend not in ("filesystem", "github"):
         raise _StateError("invalid-tracker", _repo_relative(repo, path))
     return backend, project
 
@@ -169,7 +195,8 @@ def _validate_issues(issues: Any) -> list[dict[str, Any]]:
         raise _StateError("invalid-tracker")
     seen: set[int] = set()
     for issue in issues:
-        if not isinstance(issue, dict) or type(issue.get("number")) is not int:
+        if not isinstance(issue, dict) or type(issue.get("number")) is not int \
+                or issue["number"] <= 0:
             raise _StateError("invalid-tracker")
         number = issue["number"]
         if number in seen:
@@ -182,7 +209,8 @@ def _validate_issues(issues: Any) -> list[dict[str, Any]]:
         if not isinstance(issue.get("title", ""), str):
             raise _StateError("invalid-tracker", f"#{number}")
         blocked_by = issue.get("blocked_by", [])
-        if not isinstance(blocked_by, list) or any(type(value) is not int for value in blocked_by):
+        if not isinstance(blocked_by, list) or any(
+                type(value) is not int or value <= 0 for value in blocked_by):
             raise _StateError("invalid-tracker", f"#{number}")
     return issues
 
@@ -201,20 +229,22 @@ def _load_tracker_issues(repo: str) -> list[dict[str, Any]]:
         raise _StateError("invalid-tracker", "docs/workflow/tracker-config.yaml")
 
     try:
-        owner = GH_BOARD._current_repository(repo).split("/", 1)[0]
+        repository = GH_BOARD._current_repository(repo)
+        owner = repository.split("/", 1)[0]
         # The shared drain loader owns pagination, board normalization, dependency reads, and their
         # rate-limit/hard-error exit semantics. Suppress its drain-specific stdout token so this
         # oracle's stdout remains one JSON document. ``root=None`` prevents verdict persistence: this
         # command is an observer, not an Autorun drain pass.
         with contextlib.redirect_stdout(io.StringIO()):
-            issues, unverified = DRAIN.load_github(owner, int(project), repo, root=None, sid=None)
+            issues, unverified = DRAIN.load_github(
+                owner, int(project), repo, root=None, sid=None, repository=repository)
     except GH_BOARD.RateLimitError as exc:
         raise _RateLimited() from exc
     except SystemExit as exc:
         if exc.code == 3:
             raise _RateLimited() from exc
         raise _StateError("invalid-tracker", f"github-project-{project}") from exc
-    except (GH_BOARD.BoardReadError, OSError, ValueError) as exc:
+    except (GH_BOARD.BoardReadError, OSError, ValueError, AttributeError, TypeError) as exc:
         raise _StateError("invalid-tracker", f"github-project-{project}") from exc
 
     issues = _validate_issues(issues)
@@ -225,8 +255,8 @@ def _load_tracker_issues(repo: str) -> list[dict[str, Any]]:
     return issues
 
 
-def _collect_workflow_state(repo: str) -> WorkflowState:
-    intake_think, intake_recirc = _collect_intakes(repo)
+def _collect_workflow_state(repo: str) -> tuple[WorkflowState, tuple[str, ...]]:
+    intake_think, intake_recirc, intake_gates = _collect_intakes(repo)
     issues = _load_tracker_issues(repo)
 
     def is_operator_gate(issue: dict[str, Any]) -> bool:
@@ -255,17 +285,17 @@ def _collect_workflow_state(repo: str) -> WorkflowState:
         considerations=considerations,
         eligible_buildables=eligible,
         waiting_gates=gates,
-    )
+    ), intake_gates
 
 
-def _counts(state: WorkflowState) -> dict[str, int]:
+def _counts(state: WorkflowState, intake_gates: tuple[str, ...] = ()) -> dict[str, int]:
     return {
         "intake_think": len(state.intake_think),
         "intake_recirc": len(state.intake_recirc),
         "recirc_tickets": len(state.recirc_tickets),
         "considerations": len(state.considerations),
         "eligible_buildables": len(state.eligible_buildables),
-        "waiting_gates": len(state.waiting_gates),
+        "waiting_gates": len(state.waiting_gates) + len(intake_gates),
     }
 
 
@@ -289,14 +319,14 @@ def decide(repo: str) -> NextAction:
     """Return the one deterministic IDC action, wait, fixpoint, or invalid-state verdict."""
     repo = os.path.realpath(os.path.abspath(repo))
     try:
-        state = _collect_workflow_state(repo)
+        state, intake_gates = _collect_workflow_state(repo)
     except _RateLimited:
         return _action("blocked_external", "rate-limited", None, (), _zero_counts())
     except _StateError as exc:
         refs = (exc.ref,) if exc.ref else ()
         return _action("invalid", exc.reason_code, None, refs, _zero_counts())
 
-    counts = _counts(state)
+    counts = _counts(state, intake_gates)
 
     # Think is the gate at the top of the pipe. Autorun must never bury a new requirement.
     if state.intake_think:
@@ -338,10 +368,10 @@ def decide(repo: str) -> NextAction:
             "action", "eligible-buildable", "/idc:build",
             tuple(f"#{number}" for number in state.eligible_buildables), counts,
         )
-    if state.waiting_gates:
+    if intake_gates or state.waiting_gates:
         return _action(
             "waiting", "waiting-human-gate", None,
-            tuple(f"#{number}" for number in state.waiting_gates), counts,
+            tuple([*intake_gates, *(f"#{number}" for number in state.waiting_gates)]), counts,
         )
     return _action("no_action", "fixpoint", None, (), counts)
 

@@ -74,7 +74,8 @@ MACHINE_PATH_RE = re.compile(
 )
 CREDENTIAL_ASSIGNMENT_RE = re.compile(
     r"\b(?:[A-Za-z][A-Za-z0-9]*[_-])*(?:api[_-]?key|access[_-]?token|auth[_-]?token"
-    r"|client[_-]?secret|secret[_-]?access[_-]?key|password|passwd|secret|token)\b\s*[:=]\s*"
+    r"|client[_-]?secret|secret[_-]?access[_-]?key|private[_-]?key|password|passwd"
+    r"|secret|token)\b\s*[:=]\s*"
     r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
     re.IGNORECASE,
 )
@@ -241,10 +242,10 @@ def _load_json(path: str, label: str) -> dict[str, Any]:
 
 def _atomic_write_json(path: str, value: dict[str, Any]) -> None:
     parent = os.path.dirname(os.path.abspath(path))
-    os.makedirs(parent, exist_ok=True)
     fd = -1
     tmp = ""
     try:
+        os.makedirs(parent, exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix=".idc-intake-", suffix=".json", dir=parent)
         if os.path.exists(path):
             os.chmod(tmp, stat.S_IMODE(os.stat(path).st_mode))
@@ -357,9 +358,19 @@ def _is_indented_code(line: str) -> bool:
     return _indent_columns(line) >= 4
 
 
-def _list_item_indent(line: str) -> int | None:
-    match = re.match(r"^([ \t]*)(?:[-*+]|\d+[.)])[ \t]+", line)
-    return _indent_columns(match.group(1)) if match else None
+def _list_item_layout(line: str) -> tuple[int, int] | None:
+    match = re.match(r"^([ \t]*)([-*+]|\d+[.)])([ \t]+)", line)
+    if not match:
+        return None
+    leading, marker, separator = match.groups()
+    marker_indent = _indent_columns(leading)
+    content_indent = marker_indent + len(marker)
+    for character in separator:
+        if character == " ":
+            content_indent += 1
+        else:
+            content_indent += 4 - (content_indent % 4)
+    return marker_indent, content_indent
 
 
 def _extract_units(text: str) -> tuple[list[str], list[dict[str, Any]]]:
@@ -367,7 +378,7 @@ def _extract_units(text: str) -> tuple[list[str], list[dict[str, Any]]]:
     anchors: list[dict[str, Any]] = []
     seen: dict[str, int] = {}
     fence: tuple[str, int] | None = None
-    list_indents: list[int] = []
+    list_items: list[tuple[int, int]] = []
     for line_no, line in enumerate(lines, 1):
         if fence is not None:
             if _closing_fence(line, fence[0], fence[1]):
@@ -376,20 +387,21 @@ def _extract_units(text: str) -> tuple[list[str], list[dict[str, Any]]]:
         fence = _opening_fence(line)
         if fence is not None:
             if _indent_columns(line) <= 3:
-                list_indents.clear()
+                list_items.clear()
             continue
 
         indent = _indent_columns(line)
-        list_indent = _list_item_indent(line)
+        list_item = _list_item_layout(line)
         nested_list_item = False
-        if list_indent is not None:
-            while list_indents and list_indents[-1] >= list_indent:
-                list_indents.pop()
-            nested_list_item = bool(list_indents) and list_indent - list_indents[-1] <= 4
-            if list_indent < 4 or nested_list_item:
-                list_indents.append(list_indent)
+        if list_item is not None:
+            marker_indent, content_indent = list_item
+            while list_items and marker_indent < list_items[-1][1]:
+                list_items.pop()
+            nested_list_item = bool(list_items) and marker_indent >= list_items[-1][1]
+            if marker_indent < 4 or nested_list_item:
+                list_items.append((marker_indent, content_indent))
         elif line.strip() and indent == 0:
-            list_indents.clear()
+            list_items.clear()
 
         found = _candidate(line, line_no)
         if _is_indented_code(line) and not (nested_list_item and found is not None):
@@ -503,7 +515,11 @@ def _validate_goal(goal: Any) -> None:
         if not isinstance(obj[key], str) or not obj[key].strip():
             raise IntakeError(f"manifest.operator_goal.{key} must be a non-empty string")
         _reject_unsafe_text(obj[key], f"manifest.operator_goal.{key}")
-    _expect_string_list(obj["redactions"], "manifest.operator_goal.redactions")
+    redactions = _expect_string_list(obj["redactions"], "manifest.operator_goal.redactions")
+    if len(set(redactions)) != len(redactions):
+        raise IntakeError("manifest.operator_goal.redactions must not contain duplicates")
+    if any(category not in REDACTION_MARKERS for category in redactions):
+        raise IntakeError("manifest.operator_goal.redactions contains unknown categories")
 
 
 def _validate_runtime(runtime: Any) -> None:
@@ -792,6 +808,13 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_review_path(args: argparse.Namespace) -> int:
+    manifest = _load_json(args.manifest, "manifest")
+    validate_manifest(manifest)
+    print(_expected_review_basename(manifest))
+    return 0
+
+
 def cmd_link(args: argparse.Namespace) -> int:
     manifest = _load_json(args.manifest, "manifest")
     validate_manifest(manifest)
@@ -844,6 +867,12 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--review")
     validate.add_argument("--json", action="store_true")
     validate.set_defaults(func=cmd_validate)
+
+    review_path = sub.add_parser(
+        "review-path", help="print the canonical same-directory review filename",
+        description="Print the canonical same-directory review filename without an absolute path.")
+    review_path.add_argument("--manifest", required=True)
+    review_path.set_defaults(func=cmd_review_path)
 
     link = sub.add_parser("link", help="record one unit's durable disposition")
     link.add_argument("--manifest", required=True)

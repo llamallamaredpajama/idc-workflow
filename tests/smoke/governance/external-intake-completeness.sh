@@ -57,38 +57,13 @@ json.dump(review, open(sys.argv[2], "w", encoding="utf-8"), indent=2, sort_keys=
 PY
 }
 
-manifest_content_sha256() {
-  python3 - "$1" <<'PY'
-import hashlib, json, sys
-manifest = json.load(open(sys.argv[1], encoding="utf-8"))
-content = {
-    "schema_version": manifest["schema_version"],
-    "intake_id": manifest["intake_id"],
-    "source": manifest["source"],
-    "operator_goal": manifest["operator_goal"],
-    "runtime": manifest["runtime"],
-    "expected_unit_ids": manifest["expected_unit_ids"],
-    "units": [
-        {
-            key: unit[key]
-            for key in (
-                "id", "source_anchor", "summary", "class", "route", "dependencies",
-                "operator_stops",
-            )
-        }
-        for unit in manifest["units"]
-    ],
-}
-print(hashlib.sha256(json.dumps(
-    content, ensure_ascii=False, separators=(",", ":"), sort_keys=True
-).encode("utf-8")).hexdigest())
-PY
-}
-
 canonical_review_path() {
-  local digest
-  digest="$(manifest_content_sha256 "$1")" || return 1
-  printf '%s/%s.review.%s.json\n' "$2" "$(jq -r '.intake_id' "$1")" "$digest"
+  local locator
+  locator="$(intake review-path --manifest "$1")" || return 1
+  case "$locator" in
+    ""|*/*|*\\*) return 1 ;;
+  esac
+  printf '%s/%s\n' "$(dirname "$1")" "$locator"
 }
 
 write_canonical_review() {
@@ -195,6 +170,12 @@ elif kind == "add-reviewed-operator-stop":
         ["operator approval required"]
 elif kind == "remove-reviewed-operator-stop":
     next(unit for unit in data["units"] if unit["id"] == arg)["operator_stops"] = []
+elif kind == "goal-redactions-arbitrary":
+    data["operator_goal"]["redactions"] = ["SSH_PRIVATE_KEY=sample-sensitive-value"]
+elif kind == "goal-redactions-duplicate":
+    data["operator_goal"]["redactions"] = ["credential", "credential"]
+elif kind == "goal-redactions-malformed":
+    data["operator_goal"]["redactions"] = {"credential": True}
 else:
     raise SystemExit(f"unknown manifest mutation {kind}")
 json.dump(data, open(path, "w", encoding="utf-8"), indent=2, sort_keys=True)
@@ -231,7 +212,7 @@ fresh_case() {
 
 refresh_case_review() {
   local prior_review="$CASE_REVIEW"
-  CASE_REVIEW="$(canonical_review_path "$CASE_MANIFEST" "$CASE_DIR")" \
+  CASE_REVIEW="$(canonical_review_path "$CASE_MANIFEST")" \
     || gov_fail "could not calculate review path for $CASE_DIR"
   [ "$prior_review" = "$CASE_REVIEW" ] || rm -f "$prior_review"
   write_passing_review "$CASE_MANIFEST" "$CASE_REVIEW" \
@@ -251,8 +232,15 @@ validate_must_fail_cleanly() {
 }
 
 must_fail_manifest() {
-  refresh_case_review
-  validate_must_fail_cleanly "$1" "$2"
+  local expected="$1"
+  local failure="$2"
+  local output rc
+  output="$(intake review-path --manifest "$CASE_MANIFEST" 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 2 ] || ! printf '%s' "$output" | grep -Fq "idc-intake: FAIL — $expected" \
+       || printf '%s' "$output" | grep -q "Traceback"; then
+    gov_fail "$failure (expected clean failure containing: $expected; got rc=$rc: $output)"
+  fi
 }
 
 must_fail_reviewed() {
@@ -292,6 +280,15 @@ record_round4_failure() {
     ROUND4_FAILURES="$ROUND4_FAILURES, $1"
   else
     ROUND4_FAILURES="$1"
+  fi
+}
+
+ROUND5_FAILURES=""
+record_round5_failure() {
+  if [ -n "$ROUND5_FAILURES" ]; then
+    ROUND5_FAILURES="$ROUND5_FAILURES, $1"
+  else
+    ROUND5_FAILURES="$1"
   fi
 }
 
@@ -349,7 +346,7 @@ map_every_unit "$MANIFEST"
 if intake validate --manifest "$MANIFEST" >/dev/null 2>&1; then
   gov_fail "manifest without independent review passed"
 fi
-REVIEW="$(canonical_review_path "$MANIFEST" "$WORK")" \
+REVIEW="$(canonical_review_path "$MANIFEST")" \
   || gov_fail "could not calculate passing review path"
 write_passing_review "$MANIFEST" "$REVIEW"
 intake validate --manifest "$MANIFEST" --review "$REVIEW" >/dev/null \
@@ -626,7 +623,7 @@ ROUND3_SCHEMA_DIR="$WORK/round3-canonical-schema"
 mkdir -p "$ROUND3_SCHEMA_DIR" || gov_fail "could not create canonical review case"
 ROUND3_SCHEMA_MANIFEST="$ROUND3_SCHEMA_DIR/2026-07-12-example.json"
 cp "$COMPLETE" "$ROUND3_SCHEMA_MANIFEST" || gov_fail "could not copy canonical review manifest"
-ROUND3_SCHEMA_REVIEW="$(canonical_review_path "$ROUND3_SCHEMA_MANIFEST" "$ROUND3_SCHEMA_DIR")" \
+ROUND3_SCHEMA_REVIEW="$(canonical_review_path "$ROUND3_SCHEMA_MANIFEST")" \
   || gov_fail "could not calculate canonical review path"
 write_canonical_review "$ROUND3_SCHEMA_MANIFEST" "$ROUND3_SCHEMA_REVIEW" \
   || gov_fail "could not write canonical review"
@@ -653,11 +650,6 @@ ROUND3_SABOTAGE_MANIFEST="$ROUND3_SABOTAGE_DIR/2026-07-12-example.json"
 cp "$COMPLETE" "$ROUND3_SABOTAGE_MANIFEST" \
   || gov_fail "could not copy exact-set sabotage manifest"
 drop_unit B2 "$ROUND3_SABOTAGE_MANIFEST"
-ROUND3_SABOTAGE_REVIEW="$(canonical_review_path \
-  "$ROUND3_SABOTAGE_MANIFEST" "$ROUND3_SABOTAGE_DIR")" \
-  || gov_fail "could not calculate exact-set sabotage review path"
-write_canonical_review "$ROUND3_SABOTAGE_MANIFEST" "$ROUND3_SABOTAGE_REVIEW" \
-  || gov_fail "could not write exact-set sabotage review"
 ROUND3_SABOTAGED_INTAKE="$WORK/idc-intake-without-exact-set.py"
 python3 - "$INTAKE" "$ROUND3_SABOTAGED_INTAKE" <<'PY' \
   || gov_fail "could not prepare exact-set sabotage helper"
@@ -670,6 +662,12 @@ needle = '''    if missing or extra:
 assert text.count(needle) == 1
 open(destination, "w", encoding="utf-8").write(text.replace(needle, "", 1))
 PY
+ROUND3_SABOTAGE_LOCATOR="$(python3 "$ROUND3_SABOTAGED_INTAKE" review-path \
+  --manifest "$ROUND3_SABOTAGE_MANIFEST")" \
+  || gov_fail "could not calculate exact-set sabotage review path"
+ROUND3_SABOTAGE_REVIEW="$ROUND3_SABOTAGE_DIR/$ROUND3_SABOTAGE_LOCATOR"
+write_canonical_review "$ROUND3_SABOTAGE_MANIFEST" "$ROUND3_SABOTAGE_REVIEW" \
+  || gov_fail "could not write exact-set sabotage review"
 if ! python3 "$ROUND3_SABOTAGED_INTAKE" validate \
      --manifest "$ROUND3_SABOTAGE_MANIFEST" --review "$ROUND3_SABOTAGE_REVIEW" \
      >/dev/null 2>&1; then
@@ -823,6 +821,197 @@ fi
 
 [ -z "$ROUND4_FAILURES" ] \
   || gov_fail "Task 4 review round 4 regressions failed: $ROUND4_FAILURES"
+
+# Review round 5 RED probes: collect the three Important findings and the Minor before production edits.
+# 1. A wide ordered-list marker makes five columns the valid child content indentation.
+ROUND5_NESTED_SOURCE="$WORK/round5-wide-marker-nesting.md"
+ROUND5_NESTED_MANIFEST="$WORK/2026-07-12-round5-wide-marker-nesting.json"
+python3 - "$ROUND5_NESTED_SOURCE" <<'PY'
+import sys
+text = """# Wrapper
+100. Parent item
+     - [ ] five-column nested checklist
+       nested body
+101. U7 - ordinary numbered sibling
+sibling body
+Paragraph ends list context.
+
+     - [ ] standalone indented code
+```markdown
+     - [ ] fenced nested-looking code
+```
+## U1 - real heading
+real body
+"""
+open(sys.argv[1], "w", encoding="utf-8", newline="").write(text)
+PY
+ROUND5_NESTED_OK=1
+if ! intake extract --source "$ROUND5_NESTED_SOURCE" --out "$ROUND5_NESTED_MANIFEST" \
+     --goal complete --plugin-version 4.1.0 >/dev/null 2>&1; then
+  ROUND5_NESTED_OK=0
+elif ! python3 - "$ROUND5_NESTED_MANIFEST" <<'PY' >/dev/null 2>&1
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+assert data["expected_unit_ids"] == ["L3", "U1", "U7"]
+by_id = {unit["id"]: unit for unit in data["units"]}
+assert by_id["L3"]["source_anchor"] == {
+    "heading": "five-column nested checklist", "line_start": 3, "line_end": 4,
+}
+assert by_id["U7"]["source_anchor"] == {
+    "heading": "U7 - ordinary numbered sibling", "line_start": 5, "line_end": 12,
+}
+assert by_id["U1"]["source_anchor"] == {
+    "heading": "U1 - real heading", "line_start": 13, "line_end": 14,
+}
+assert all("standalone" not in unit["source_anchor"]["heading"] for unit in data["units"])
+assert all("fenced" not in unit["source_anchor"]["heading"] for unit in data["units"])
+PY
+then
+  ROUND5_NESTED_OK=0
+fi
+[ "$ROUND5_NESTED_OK" -eq 1 ] || record_round5_failure "wide-marker-nested-checklist"
+
+# 2. Private-key assignments redact everywhere, and goal redaction metadata is a closed set.
+ROUND5_PRIVATE_KEY="SSH_PRIVATE_KEY=sample-sensitive-value"
+ROUND5_SSH_CONTROL="SSH_PORT=22"
+ROUND5_PRIVATE_SOURCE="$WORK/round5-private-key.md"
+ROUND5_PRIVATE_MANIFEST="$WORK/2026-07-12-round5-private-key.json"
+python3 - "$ROUND5_PRIVATE_SOURCE" "$ROUND5_SSH_CONTROL" "$ROUND5_PRIVATE_KEY" <<'PY'
+import sys
+path, control, private_key = sys.argv[1:]
+open(path, "w", encoding="utf-8", newline="").write(
+    f"## U1 - keep {control}\nbody\n## U2 - use {private_key}\nbody\n"
+)
+PY
+ROUND5_PRIVACY_OK=1
+if ! intake extract --source "$ROUND5_PRIVATE_SOURCE" --out "$ROUND5_PRIVATE_MANIFEST" \
+     --goal "Keep $ROUND5_SSH_CONTROL; use $ROUND5_PRIVATE_KEY" \
+     --plugin-version 4.1.0 >/dev/null 2>&1; then
+  ROUND5_PRIVACY_OK=0
+elif ! python3 - "$ROUND5_PRIVATE_MANIFEST" "$ROUND5_SSH_CONTROL" "$ROUND5_PRIVATE_KEY" \
+       <<'PY' >/dev/null 2>&1
+import json, sys
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+control, private_key = sys.argv[2:]
+serialized = json.dumps(manifest, sort_keys=True)
+assert private_key not in serialized
+assert control in serialized
+assert manifest["operator_goal"]["redactions"] == ["credential"]
+assert "[REDACTED_CREDENTIAL]" in manifest["operator_goal"]["verbatim_or_redacted"]
+by_id = {unit["id"]: unit for unit in manifest["units"]}
+assert control in by_id["U1"]["source_anchor"]["heading"]
+assert "[REDACTED_CREDENTIAL]" in by_id["U2"]["source_anchor"]["heading"]
+PY
+then
+  ROUND5_PRIVACY_OK=0
+fi
+
+for SPEC in \
+  'goal-redactions-arbitrary|manifest.operator_goal.redactions contains unknown categories' \
+  'goal-redactions-duplicate|manifest.operator_goal.redactions must not contain duplicates' \
+  'goal-redactions-malformed|manifest.operator_goal.redactions must be a list of non-empty strings'
+do
+  MUTATION="${SPEC%%|*}"
+  EXPECTED="${SPEC#*|}"
+  fresh_case "round5-$MUTATION"
+  mutate_manifest "$MUTATION" ignored "$CASE_MANIFEST"
+  ROUND5_GOAL_OUTPUT="$(intake validate --manifest "$CASE_MANIFEST" 2>&1)"
+  ROUND5_GOAL_RC=$?
+  case "$ROUND5_GOAL_OUTPUT" in
+    *"idc-intake: FAIL — $EXPECTED"*) ;;
+    *) ROUND5_PRIVACY_OK=0 ;;
+  esac
+  if [ "$ROUND5_GOAL_RC" -ne 2 ] || printf '%s' "$ROUND5_GOAL_OUTPUT" | grep -q "Traceback" \
+       || printf '%s' "$ROUND5_GOAL_OUTPUT" | grep -q "sample-sensitive-value"; then
+    ROUND5_PRIVACY_OK=0
+  fi
+done
+[ "$ROUND5_PRIVACY_OK" -eq 1 ] || record_round5_failure "private-key-redactions-privacy"
+
+# 3. The helper publicly names the confined review file without exposing its absolute directory.
+ROUND5_PUBLIC_DIR="$WORK/round5-public-review-locator"
+mkdir -p "$ROUND5_PUBLIC_DIR" || gov_fail "could not create public review-locator case"
+ROUND5_PUBLIC_MANIFEST="$ROUND5_PUBLIC_DIR/2026-07-12-example.json"
+cp "$COMPLETE" "$ROUND5_PUBLIC_MANIFEST" || gov_fail "could not copy public locator manifest"
+python3 - "$ROUND5_PUBLIC_MANIFEST" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path, encoding="utf-8"))
+data["verification"] = {
+    "status": "pending", "review_path": None, "source_sha256": data["source"]["sha256"],
+}
+json.dump(data, open(path, "w", encoding="utf-8"), indent=2, sort_keys=True)
+PY
+ROUND5_PUBLIC_OK=1
+ROUND5_PUBLIC_OUTPUT="$(intake review-path --manifest "$ROUND5_PUBLIC_MANIFEST" 2>&1)"
+ROUND5_PUBLIC_RC=$?
+if [ "$ROUND5_PUBLIC_RC" -ne 0 ]; then
+  ROUND5_PUBLIC_OK=0
+elif ! python3 - "$ROUND5_PUBLIC_OUTPUT" <<'PY' >/dev/null 2>&1
+import re, sys
+locator = sys.argv[1]
+assert re.fullmatch(r"2026-07-12-example\.review\.[0-9a-f]{64}\.json", locator)
+assert "/" not in locator and "\\" not in locator
+PY
+then
+  ROUND5_PUBLIC_OK=0
+else
+  ROUND5_PUBLIC_REVIEW="$ROUND5_PUBLIC_DIR/$ROUND5_PUBLIC_OUTPUT"
+  write_canonical_review "$ROUND5_PUBLIC_MANIFEST" "$ROUND5_PUBLIC_REVIEW" \
+    || gov_fail "could not write public-locator canonical review"
+  if ! intake validate --manifest "$ROUND5_PUBLIC_MANIFEST" \
+       --review "$ROUND5_PUBLIC_REVIEW" >/dev/null 2>&1; then
+    ROUND5_PUBLIC_OK=0
+  else
+    mutate_manifest reviewed-summary U4 "$ROUND5_PUBLIC_MANIFEST"
+    CASE_MANIFEST="$ROUND5_PUBLIC_MANIFEST"
+    status_must_fail_cleanly "manifest.verification.review_path basename must be" \
+      || ROUND5_PUBLIC_OK=0
+  fi
+fi
+
+ROUND5_UNCLASSIFIED_SOURCE="$ROUND5_PUBLIC_DIR/unclassified.md"
+ROUND5_UNCLASSIFIED_MANIFEST="$ROUND5_PUBLIC_DIR/2026-07-12-unclassified.json"
+python3 - "$ROUND5_UNCLASSIFIED_SOURCE" <<'PY'
+import sys
+open(sys.argv[1], "w", encoding="utf-8").write("## U1 - not classified yet\nbody\n")
+PY
+intake extract --source "$ROUND5_UNCLASSIFIED_SOURCE" --out "$ROUND5_UNCLASSIFIED_MANIFEST" \
+  --goal complete --plugin-version 4.1.0 >/dev/null \
+  || gov_fail "could not prepare unclassified review-locator case"
+ROUND5_UNCLASSIFIED_OUTPUT="$(intake review-path \
+  --manifest "$ROUND5_UNCLASSIFIED_MANIFEST" 2>&1)"
+ROUND5_UNCLASSIFIED_RC=$?
+if [ "$ROUND5_UNCLASSIFIED_RC" -ne 2 ] \
+   || ! printf '%s' "$ROUND5_UNCLASSIFIED_OUTPUT" \
+        | grep -Fq "idc-intake: FAIL — unit U1 class must be a string" \
+   || printf '%s' "$ROUND5_UNCLASSIFIED_OUTPUT" | grep -q "Traceback"; then
+  ROUND5_PUBLIC_OK=0
+fi
+if ! python3 "$INTAKE" --help 2>&1 | grep -q "review-path" \
+   || ! python3 "$INTAKE" review-path --help 2>&1 | grep -q "same-directory"; then
+  ROUND5_PUBLIC_OK=0
+fi
+[ "$ROUND5_PUBLIC_OK" -eq 1 ] || record_round5_failure "public-review-locator"
+
+# 4. A non-directory output parent must stay inside the helper's clean exit-2 contract.
+ROUND5_BLOCKING_PARENT="$WORK/round5-output-parent-file"
+printf '%s\n' "not a directory" > "$ROUND5_BLOCKING_PARENT" \
+  || gov_fail "could not prepare blocking output parent"
+ROUND5_WRITE_OUTPUT="$(intake extract --source "$FIXTURE/external-plan.md" \
+  --out "$ROUND5_BLOCKING_PARENT/2026-07-12-impossible.json" --goal complete \
+  --plugin-version 4.1.0 2>&1)"
+ROUND5_WRITE_RC=$?
+ROUND5_WRITE_OK=1
+if [ "$ROUND5_WRITE_RC" -ne 2 ] \
+   || ! printf '%s' "$ROUND5_WRITE_OUTPUT" | grep -Fq "idc-intake: FAIL — could not safely write" \
+   || printf '%s' "$ROUND5_WRITE_OUTPUT" | grep -q "Traceback"; then
+  ROUND5_WRITE_OK=0
+fi
+[ "$ROUND5_WRITE_OK" -eq 1 ] || record_round5_failure "output-parent-error-contract"
+
+[ -z "$ROUND5_FAILURES" ] \
+  || gov_fail "Task 4 review round 5 regressions failed: $ROUND5_FAILURES"
 
 fresh_case missing-b2
 drop_unit B2 "$CASE_MANIFEST"

@@ -25,6 +25,8 @@ real_gh = B._gh
 malformed_native_reads = {
     "JSON null": "null\n",
     "mixed valid and invalid tokens": "7\nbogus\n",
+    "multiple issue numbers in one record": "7 11\n",
+    "Python-only underscore numeric": "7_0\n",
     "zero issue number": "0\n",
     "negative issue number": "-7\n",
 }
@@ -43,8 +45,21 @@ assert B.blocked_by_numbers(5, repo) == [7, 11], "valid native issue numbers did
 malformed_marker_reads = {
     "non-JSON comment record": "not-json\n",
     "non-object comment record": "[]\n",
+    "non-positive comment id": '{"id":0,"body":"ordinary comment"}\n',
+    "non-text comment body": '{"id":501,"body":[]}\n',
     "malformed IDC marker JSON": '{"id":501,"body":"<!-- idc-blocked-by: not-json -->"}\n',
     "non-object IDC marker JSON": '{"id":501,"body":"<!-- idc-blocked-by: [] -->"}\n',
+    "missing IDC marker field": '{"id":501,"body":"<!-- idc-blocked-by: '
+                                '{\\"child\\":5,\\"parent\\":7} -->"}\n',
+    "wrong-typed IDC marker endpoint": '{"id":501,"body":"<!-- idc-blocked-by: '
+                                       '{\\"child\\":\\"5\\",\\"parent\\":7,'
+                                       '\\"kind\\":\\"blocks\\"} -->"}\n',
+    "non-positive IDC marker endpoint": '{"id":501,"body":"<!-- idc-blocked-by: '
+                                          '{\\"child\\":5,\\"parent\\":0,'
+                                          '\\"kind\\":\\"blocks\\"} -->"}\n',
+    "unknown IDC marker kind": '{"id":501,"body":"<!-- idc-blocked-by: '
+                               '{\\"child\\":5,\\"parent\\":7,'
+                               '\\"kind\\":\\"mystery\\"} -->"}\n',
 }
 for name, output in malformed_marker_reads.items():
     B._gh = lambda *args, _output=output, **kwargs: _output
@@ -57,6 +72,8 @@ for name, output in malformed_marker_reads.items():
 # Paired controls: valid unrelated data is an empty set; a valid matching marker returns its REST id.
 B._gh = lambda *args, **kwargs: (
     '{"id":400,"body":"ordinary comment"}\n'
+    '{"id":450,"body":"<!-- idc-blocked-by: '
+    '{\\"child\\":5,\\"parent\\":7,\\"kind\\":\\"sub\\"} -->"}\n'
     '{"id":501,"body":"<!-- idc-blocked-by: '
     '{\\"child\\":5,\\"parent\\":7,\\"kind\\":\\"blocks\\"} -->"}\n'
 )

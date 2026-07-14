@@ -135,6 +135,11 @@ deny 'gh api --method POST repos/o/r/issues/707/dependencies/blocked_by -f issue
 echo "== the classifier is METHOD-AWARE — a read-only dependency GET (doctor's audit) is ALLOWED (Fix 4) =="
 allow "gh api repos/o/r/issues/707/dependencies/blocked_by --paginate --jq '.[].number'"
 
+echo "== protected words used as literal inspection/documentation data are not executable mutations =="
+allow "grep -F 'gh issue create' '$GOV_PLUGIN/skills/idc-tracker-github/SKILL.md'"
+allow "echo 'gh issue create --title documented-example'"
+allow "printf '%s\\n' 'gh project item-edit --id documented-example'"
+
 echo "== round-5 Fix 1: per-SEGMENT classification + fail-closed gh api — every round-4 bypass denies =="
 # gh GLOBAL flag (--hostname) between `gh` and `api` no longer breaks `gh api` detection.
 deny 'gh --hostname github.com api repos/o/r/issues/707/dependencies/blocked_by/708 -X DELETE'

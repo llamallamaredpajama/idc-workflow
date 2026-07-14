@@ -191,22 +191,14 @@ _PROTECTED_COMBOS = (
                                 "field-create", "edit", "delete", "copy", "link", "unlink")}
 )
 def _gh_positionals(seg):
-    """The POSITIONAL word sequence of a `gh …` command SEGMENT — options at ANY level stripped (incl.
-    their consumed values and the self-contained `--opt=val`/`-Rval`/`-XDELETE` forms) — or None if the
-    segment has no `gh` command head. `gh issue -R o/r create` → ['issue', 'create']; the subcommand
-    path can no longer be split by a flag placed between levels.
-
-    round-11 Fix 4 (wrapper-AGNOSTIC): after the known prefix-strip (`env`/`command`/`exec`/assignments/
-    control words), scan the remaining tokens for the FIRST bare `gh` head and take its positionals — so
-    ANY leading wrapper (`nohup`, `timeout 5`, `stdbuf -oL`, `setsid`, `nice -n 10`, `ionice`, `xargs`,
-    `time`, …) or none is handled uniformly, instead of chasing each wrapper's own option grammar. Only a
-    BARE `gh` token is a head; `gh` glued inside another token (`$(gh`, a quoted arg) is never one, so a
-    `gh` buried in a quoted string cannot be mistaken for a command head."""
+    """The POSITIONAL word sequence of a `gh …` command SEGMENT — known execution prefixes and options
+    at any gh level stripped — or None when the real command head is not `gh`. `gh issue -R o/r create`
+    becomes `['issue', 'create']`. Requiring the actual normalized head keeps literal documentation text
+    passed to `grep`/`echo`/`printf` from being mistaken for an executed mutation; interpreter payloads
+    and script files are inspected separately by the bounded indirection path."""
     seg = _strip_prefixes(seg)
-    gi = next((k for k, t in enumerate(seg) if os.path.basename(t) == "gh"), None)
-    if gi is None:
+    if not seg or os.path.basename(seg[0]) != "gh":
         return None
-    seg = seg[gi:]
     words = []
     i = 1
     while i < len(seg):
@@ -374,16 +366,16 @@ def _gh_api_finding(seg_str, endpoint=None):
 def _classify_one_segment(seg_str):
     """A Finding for a protected gh operation in ONE raw shell segment (already separator-free), or
     None. Token-classify the segment (gh global flags incl. `--hostname` stripped by _gh_positionals);
-    a `gh api` segment goes through the blunt path-and-write-indicator rule. A lex failure (an
-    over-split quote) or a non-gh head falls back to the method-independent whole-segment backstop —
-    which still catches a combo/api hidden inside a quoted body, always in the safe (deny) direction."""
+    a `gh api` segment goes through the blunt path-and-write-indicator rule. A lex failure falls back to
+    the conservative whole-segment matcher. A successfully parsed non-gh command is data/another tool,
+    not a raw gh invocation; bounded interpreter and script inspection runs separately."""
     try:
         tokens = _lex(seg_str)
     except ValueError:
         return _classify_string_backstop(seg_str)
     pos = _gh_positionals(tokens)
     if pos is None:
-        return _classify_string_backstop(seg_str)     # not a `gh …` invocation
+        return None                                   # protected words may be literal data for another tool
     if pos and pos[0] == "api":
         # round-9 Fix A: pass the token-parsed endpoint positional so a shell-expansion endpoint
         # (`gh api "$EP" …`) is judged order-robustly (flags at any level already stripped by pos).
@@ -392,10 +384,8 @@ def _classify_one_segment(seg_str):
 
 
 def _ws_combos(command):
-    """Whitespace-flexible `_has` backstop for the gh SUBCOMMAND combos (method-INDEPENDENT, so no
-    cross-segment decoy risk) — catches a combo hidden in a body the lexer segmented away (a heredoc /
-    an echoed line). Runs AFTER per-segment classification; an over-match only denies in the safe
-    direction during an active command (a warning otherwise)."""
+    """Whitespace-flexible gh-subcommand backstop for an unparseable shell segment. Parsed segments use
+    the real normalized command head, so literal command examples passed to another tool stay data."""
     c = command
     if _has(c, "gh pr merge"):
         return _mk("a raw `gh pr merge`", _FINISH, "pr-merge")
@@ -429,10 +419,8 @@ def _ws_combos(command):
 
 
 def _classify_string_backstop(seg_str):
-    """Whole-SEGMENT fallback for a raw segment that did not token-classify as `gh` (a lex failure from
-    an over-split quote, or a combo/`gh api` hidden inside a quoted body). Runs the blunt `gh api` rule
-    (only when the segment mentions `gh api`, so a bare `repos/…/issues` string in unrelated text is not
-    misread) plus the method-independent combo backstop, on the raw string."""
+    """Conservative whole-segment fallback when shell tokenization fails. Runs the blunt `gh api` rule
+    only when the segment names `gh api`, then the method-independent combo matcher."""
     if _has(seg_str, "gh api"):
         hit = _gh_api_finding(seg_str)
         if hit:

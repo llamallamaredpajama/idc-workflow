@@ -538,16 +538,14 @@ def blocked_by_numbers(child, repo="."):
     out = _gh(["api", f"repos/{{owner}}/{{repo}}/issues/{int(child)}/dependencies/blocked_by",
                "--paginate", "--jq", ".[].number"], repo)
     numbers = []
-    for record_no, raw in enumerate(out.split(), 1):
-        try:
-            number = int(raw)
-        except ValueError as e:
+    for record_no, raw in enumerate(out.splitlines(), 1):
+        raw = raw.strip()
+        if not raw:
+            continue
+        if not re.fullmatch(r"[1-9][0-9]*", raw):
             raise BoardReadError(
-                f"blocked-by dependency read returned invalid issue number in record {record_no} ({e})")
-        if number <= 0:
-            raise BoardReadError(
-                f"blocked-by dependency read returned non-positive issue number in record {record_no}")
-        numbers.append(number)
+                f"blocked-by dependency read returned invalid issue number in record {record_no}")
+        numbers.append(int(raw))
     return numbers
 
 
@@ -596,15 +594,14 @@ def blocked_by_comment_ids(child, parent, repo="."):
             raise BoardReadError(
                 f"blocked-by comment read returned non-object record {line_no}")
         comment_id = obj.get("id")
-        if isinstance(comment_id, bool) or not isinstance(comment_id, int):
+        if isinstance(comment_id, bool) or not isinstance(comment_id, int) or comment_id <= 0:
             raise BoardReadError(
                 f"blocked-by comment read returned invalid comment id in record {line_no}")
         body = obj.get("body")
-        if body is None:
-            body = ""
         if not isinstance(body, str):
             raise BoardReadError(
                 f"blocked-by comment read returned non-text body in record {line_no}")
+        matched = False
         for m in marker.finditer(body):
             try:
                 rec = json.loads(m.group(1))
@@ -614,10 +611,24 @@ def blocked_by_comment_ids(child, parent, repo="."):
             if not isinstance(rec, dict):
                 raise BoardReadError(
                     f"blocked-by marker in comment {comment_id} is not an object")
-            if isinstance(rec, dict) and rec.get("parent") == int(parent) \
-                    and rec.get("child") == int(child) and rec.get("kind") == "blocks":
-                ids.append(comment_id)
-                break
+            if not all(key in rec for key in ("child", "parent", "kind")):
+                raise BoardReadError(
+                    f"blocked-by marker in comment {comment_id} is missing required fields")
+            for endpoint in ("child", "parent"):
+                value = rec[endpoint]
+                if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                    raise BoardReadError(
+                        f"blocked-by marker in comment {comment_id} has invalid {endpoint}")
+            if rec["kind"] not in ("blocks", "sub"):
+                raise BoardReadError(
+                    f"blocked-by marker in comment {comment_id} has invalid kind")
+            if rec["child"] != int(child):
+                raise BoardReadError(
+                    f"blocked-by marker in comment {comment_id} names the wrong child")
+            if rec["parent"] == int(parent) and rec["kind"] == "blocks":
+                matched = True
+        if matched:
+            ids.append(comment_id)
     return ids
 
 

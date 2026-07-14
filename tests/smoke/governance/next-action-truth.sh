@@ -94,6 +94,14 @@ run_oracle() {
   ORACLE_RC=$?
 }
 
+run_oracle_from_repo() {
+  local repo="$1"
+  ORACLE_OUT="$WORK/oracle-out.json"
+  ORACLE_ERR="$WORK/oracle-err.txt"
+  (cd "$repo" && python3 "$ORACLE" --repo "$repo" --json) >"$ORACLE_OUT" 2>"$ORACLE_ERR"
+  ORACLE_RC=$?
+}
+
 # assert_action <expected-rc> <reason-code> <command-or-__NULL__> [expected-count-key=count]
 assert_action() {
   local expected_rc="$1" reason="$2" command="$3" count="${4:-}"
@@ -120,8 +128,8 @@ if count:
 PY
 }
 
-# Round-1 review regressions must be collected in one run while the old implementation is still in
-# place. These helpers record every mismatch and defer the final failure until all cases ran.
+# Review regressions are collected in one run while the prior implementation is still in place.
+# These helpers record every mismatch and defer the final failure until all cases ran.
 REVIEW_FAILURES=""
 record_review_failure() {
   local label="$1" detail="$2"
@@ -156,6 +164,32 @@ PY
   [ -n "$stderr_head" ] || stderr_head="<empty>"
   record_review_failure "$label" \
     "expected exit=$expected_rc result=$expected; got exit=$ORACLE_RC result=$actual stderr=$stderr_head"
+}
+
+review_expect_observer_clean() {
+  local label="$1" repo="$2" gitignore_mode="$3" gitignore_before="${4:-}"
+  local detail="" artifacts stderr_text
+  stderr_text="$(tr '\n' '|' < "$ORACLE_ERR")"
+  if [ -n "$stderr_text" ]; then
+    detail="stderr=$stderr_text"
+  fi
+  artifacts="$(find "$repo" -maxdepth 1 -name '.idc-drain-verdict.json*' -print | sort)"
+  if [ -n "$artifacts" ]; then
+    [ -z "$detail" ] || detail="$detail; "
+    detail="${detail}verdict-artifacts=$(printf '%s' "$artifacts" | tr '\n' '|')"
+  fi
+  if [ "$gitignore_mode" = "absent" ]; then
+    if [ -e "$repo/.gitignore" ] || [ -L "$repo/.gitignore" ]; then
+      [ -z "$detail" ] || detail="$detail; "
+      detail="${detail}.gitignore-created"
+    fi
+  elif ! cmp -s "$gitignore_before" "$repo/.gitignore"; then
+    [ -z "$detail" ] || detail="$detail; "
+    detail="${detail}.gitignore-altered"
+  fi
+  if [ -n "$detail" ]; then
+    record_review_failure "$label" "read-only governed-cwd observer entered persistence path: $detail"
+  fi
 }
 
 # Public Python interface: exact frozen dataclass field order and decide(repo) return type.
@@ -341,6 +375,45 @@ printf '%s\n' '<!-- idc-tracker-state:begin -->' '```json' '{"next_number":1}' '
 run_oracle "$R"
 assert_action 2 invalid-tracker __NULL__
 
+# A genuinely absent tracker config preserves the brief's legacy filesystem default.
+R="$(new_repo absent-tracker-config)"
+rm -f "$R/docs/workflow/tracker-config.yaml"
+run_oracle "$R"
+assert_action 0 fixpoint __NULL__
+
+# An existing-but-invalid config locator is corruption, not legacy absence.
+for config_kind in directory dangling-symlink; do
+  R="$(new_repo "corrupt-tracker-config-$config_kind")"
+  rm -f "$R/docs/workflow/tracker-config.yaml"
+  if [ "$config_kind" = "directory" ]; then
+    mkdir "$R/docs/workflow/tracker-config.yaml" \
+      || gov_fail "could not seed tracker config directory"
+  else
+    ln -s "$R/missing-tracker-config" "$R/docs/workflow/tracker-config.yaml" \
+      || gov_fail "could not seed dangling tracker config"
+  fi
+  run_oracle "$R"
+  review_expect_action "tracker-config-$config_kind" 2 invalid-tracker __NULL__
+done
+
+# Existing config content must be readable and name a backend. Invalid UTF-8 and a structurally
+# empty config both fail closed instead of silently selecting filesystem.
+R="$(new_repo corrupt-tracker-config-utf8)"
+printf '\377' > "$R/docs/workflow/tracker-config.yaml"
+run_oracle "$R"
+review_expect_action tracker-config-invalid-utf8 2 invalid-tracker __NULL__
+
+R="$(new_repo corrupt-tracker-config-content)"
+printf 'project_number: 7\n' > "$R/docs/workflow/tracker-config.yaml"
+run_oracle "$R"
+review_expect_action tracker-config-invalid-content 2 invalid-tracker __NULL__
+
+# Invalid UTF-8 in filesystem TRACKER.md must be invalid-tracker JSON, never a loader traceback.
+R="$(new_repo corrupt-tracker-utf8)"
+printf '\377' > "$R/TRACKER.md"
+run_oracle "$R"
+review_expect_action tracker-invalid-utf8 2 invalid-tracker __NULL__
+
 # GitHub quota exhaustion retains the shared reader's distinct resumable exit 3. The preflight must
 # stop before any board query; an unexpected fake-gh call makes the case fail rather than go hollow.
 R="$(new_repo github-rate-limit)"
@@ -384,12 +457,10 @@ printf '%s\n' '#!/bin/bash' \
   'echo "unexpected gh call: $*" >&2' \
   'exit 99' > "$R/fake-bin/gh"
 chmod +x "$R/fake-bin/gh"
-PATH="$R/fake-bin:$PATH" run_oracle "$R"
-assert_action 3 rate-limited __NULL__
-[ ! -s "$ORACLE_ERR" ] \
-  || gov_fail "read-only oracle leaked Autorun diagnostics on a board rate limit: $(tr '\n' '|' < "$ORACLE_ERR")"
-[ ! -e "$R/.idc-drain-verdict.json" ] \
-  || gov_fail "read-only oracle wrote Autorun's drain verdict sidecar"
+rm -f "$R/.gitignore"
+PATH="$R/fake-bin:$PATH" run_oracle_from_repo "$R"
+review_expect_action github-board-rate-limit 3 rate-limited __NULL__
+review_expect_observer_clean github-board-observer-persistence "$R" absent
 
 # A dependency lookup is part of the complete GitHub state read. If #2's blocked_by read is throttled,
 # exit 3 must dominate even though #1 would otherwise be eligible Build work.
@@ -446,11 +517,15 @@ with open(path, "w", encoding="utf-8") as handle:
     handle.write(source)
 os.chmod(path, 0o755)
 PY
-PATH="$R/fake-bin:$PATH" run_oracle "$R"
+printf '# operator sentinel — observer must preserve this byte-for-byte\n' > "$R/.gitignore"
+cp "$R/.gitignore" "$WORK/dependency-rate.gitignore.before"
+PATH="$R/fake-bin:$PATH" run_oracle_from_repo "$R"
 review_expect_action github-dependency-rate-limit 3 rate-limited __NULL__
+review_expect_observer_clean github-dependency-observer-persistence "$R" existing \
+  "$WORK/dependency-rate.gitignore.before"
 
 if [ -n "$REVIEW_FAILURES" ]; then
-  gov_fail "round-1 review regressions: $REVIEW_FAILURES"
+  gov_fail "round-2 review regressions: $REVIEW_FAILURES"
 fi
 
 echo "PASS: durable next-action truth table — validated queued intake routes only to Think/Recirculate; Think outranks a busy downstream pipe; tracker and queued-intake Recirculation combine truthfully with Plan/Build for Autorun; exact frozen dataclass contracts hold; single lanes stay exact; a human gate waits; empty/foreign-Markdown state fixes at no action; corrupt intake storage/content and tracker state fail closed; every GitHub throttle, including dependency reads beside eligible work, remains dominant resumable exit 3 without Autorun side effects"

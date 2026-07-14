@@ -141,8 +141,10 @@ def _read_tracker_config(repo: str) -> tuple[str, str]:
     retains IDC's existing filesystem default for older governed repos.
     """
     path = os.path.join(repo, "docs", "workflow", "tracker-config.yaml")
-    if not os.path.isfile(path):
+    if not os.path.lexists(path):
         return "filesystem", ""
+    if not os.path.isfile(path):
+        raise _StateError("invalid-tracker", _repo_relative(repo, path))
     backend = ""
     project = ""
     try:
@@ -154,9 +156,11 @@ def _read_tracker_config(repo: str) -> tuple[str, str]:
                 match = re.match(r'^\s*project_number:\s*"?([^"#\n]*)"?', line)
                 if match:
                     project = match.group(1).strip()
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         raise _StateError("invalid-tracker", _repo_relative(repo, path)) from exc
-    return backend or "filesystem", project
+    if not backend:
+        raise _StateError("invalid-tracker", _repo_relative(repo, path))
+    return backend, project
 
 
 def _validate_issues(issues: Any) -> list[dict[str, Any]]:

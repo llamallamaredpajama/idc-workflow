@@ -93,7 +93,13 @@ def _persist_verdict(root, sid, verdict, exit_code):
     governed, write error) degrades silently to a stderr note so it can't break the drain. Backend-
     agnostic: written on both backends (the filesystem gate ignores it and keeps re-draining live; only
     the github gate consumes it). Last-write-wins: every pass overwrites, so the final `complete`
-    supersedes any earlier `recirc-pending`."""
+    supersedes any earlier `recirc-pending`.
+
+    `root=None` is the explicit read-only observer mode used by the next-action oracle. Return before
+    importing or entering any verdict/gitignore write path; observing state must never emit persistence
+    diagnostics or mutate the caller's governed current directory."""
+    if root is None:
+        return
     try:
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "hooks"))
         import idc_drain_verdict  # noqa: E402 — sidecar in scripts/hooks/, imported lazily
@@ -148,7 +154,7 @@ def load_filesystem(path):
     same fail-closed contract the sibling idc_acceptance_check.py applies to its own fields."""
     try:
         state = load(path)
-    except (OSError, json.JSONDecodeError) as e:
+    except (OSError, UnicodeError, json.JSONDecodeError) as e:
         sys.stderr.write(f"idc-autorun-drain: cannot read {path}: {e}\n")
         sys.exit(2)
     if "issues" not in state:

@@ -51,6 +51,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -130,9 +131,17 @@ def _known_helper(name: object) -> bool:
     return os.path.isfile(os.path.join(_HERE, base)) or os.path.isfile(os.path.join(_HERE, "hooks", base))
 
 
-def _check_blocker(refs: dict) -> CloseoutResult:
+# The autorun drain writes a NON-complete verdict (rate-limited/unknown/board-read-error/…) to the
+# durable, session-scoped `.idc-drain-verdict.json` on EVERY blocked path — so a blocked_external that
+# cites the drain can be RE-DERIVED from that artifact rather than a caller-typed exit/diagnostic.
+_DRAIN_HELPER = "idc_autorun_drain.py"
+
+
+def _check_blocker(refs: dict, repo: str, session: str) -> CloseoutResult:
     """`blocked_external` proof: a REAL shipped deterministic helper, its NONZERO exit, and a concise
-    diagnostic. This is an honest blocked stop — never a disguised success."""
+    diagnostic. This is an honest blocked stop — never a disguised success. For the DRAIN helper the
+    blocked verdict is additionally RE-DERIVED from THIS session's persisted drain verdict (round-2
+    F1) — the durable artifact the drain wrote — so an invented drain failure is refused."""
     blocker = refs.get("blocker")
     if not isinstance(blocker, dict):
         return _fail("blocked-external-no-blocker",
@@ -149,6 +158,22 @@ def _check_blocker(refs: dict) -> CloseoutResult:
                      "refs.blocker.exit must be the helper's NONZERO exit code (a blocker is not a success)")
     if not _ne_str(blocker.get("diagnostic")):
         return _fail("blocked-external-no-diagnostic", "refs.blocker.diagnostic must be a concise reason")
+    if os.path.basename(str(blocker.get("helper"))) == _DRAIN_HELPER:
+        # RE-DERIVE the drain blocker from the DURABLE artifact the drain wrote (session-scoped,
+        # staleness-guarded) — never the caller's typed exit/diagnostic. The drain persists a
+        # non-complete verdict + nonzero exit on every blocked path, so an invented drain failure
+        # (no such verdict for THIS session) can no longer manufacture a blocked stop.
+        verdict = _persisted_drain_verdict(repo, session)
+        if verdict is None:
+            return _fail("blocked-external-drain-unproven",
+                         "blocked_external citing the drain requires THIS session's persisted drain "
+                         "verdict (.idc-drain-verdict.json) — none found (absent, foreign, or stale)")
+        token = verdict.get("verdict")
+        vexit = verdict.get("exit")
+        if token == "complete" or isinstance(vexit, bool) or vexit in (0, None):
+            return _fail("blocked-external-drain-not-blocked",
+                         "blocked_external citing the drain requires a NON-complete persisted verdict "
+                         f"with a nonzero exit; got verdict={token!r} exit={vexit!r}")
     return CloseoutResult(True, "ok", "blocked_external cites a deterministic helper failure", {})
 
 
@@ -183,6 +208,85 @@ def _check_no_action(command: str, repo: str) -> CloseoutResult:
         return _fail("no-action-contradicted",
                      "no_action rejected — the oracle still reports eligible Buildable work")
     return CloseoutResult(True, "ok", "no_action is oracle-backed", {})
+
+
+# ── real GitHub-state reads (round-2 F1/F2): a PR merged-state / issue body is a claim that lives on
+# GitHub, so the validator READS it for real (`gh pr view` / `gh issue view`) and never trusts a
+# caller `state:"MERGED"`. Every read is fail-closed: gh missing, a nonzero exit, or unparseable JSON
+# all yield None, and the caller treats None as "not proven". Hermetic tests inject a fake `gh` on PATH
+# (the suite's established pattern), including a sabotage where the fake returns UNMERGED. ─────────────
+_GH_TIMEOUT_S = 30
+
+
+def _gh_capture(repo: str, args: list) -> str | None:
+    """Run `gh <args>` in `repo`, returning stdout on a zero exit, else None (gh absent, nonzero, or
+    a timeout). Read-only by contract — callers pass only `view`/read subcommands."""
+    if not _ne_str(repo) or not os.path.isdir(repo):
+        return None
+    try:
+        proc = subprocess.run(["gh", *args], cwd=repo, capture_output=True, text=True,
+                              timeout=_GH_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout
+
+
+def _gh_pr_merged(repo: str, pr: object):
+    """A REAL `gh pr view` read of `pr`'s merged-state. Returns True (MERGED), False (a real read
+    proved NOT merged), or None (could not establish — fail closed). The caller NEVER supplies the
+    state; it is re-derived here."""
+    if isinstance(pr, bool) or not _present(pr):
+        return None
+    try:
+        pr_int = int(pr)
+    except (TypeError, ValueError):
+        return None
+    out = _gh_capture(repo, ["pr", "view", str(pr_int), "--json", "state,mergedAt"])
+    if out is None:
+        return None
+    try:
+        info = json.loads(out)
+    except ValueError:
+        return None
+    if not isinstance(info, dict):
+        return None
+    return info.get("state") == "MERGED" or bool(info.get("mergedAt"))
+
+
+def _gh_issue_body(repo: str, num: object):
+    """The LIVE github issue body for `num` via `gh issue view`, or None (missing/unreadable — fail
+    closed). A successful read also PROVES the issue exists."""
+    if isinstance(num, bool) or not _present(num):
+        return None
+    try:
+        num_int = int(num)
+    except (TypeError, ValueError):
+        return None
+    return _gh_capture(repo, ["issue", "view", str(num_int), "--json", "body", "-q", ".body"])
+
+
+def _repo_backend(repo: str) -> str:
+    """The repo's tracker backend (`github`/`filesystem`), tolerant: any read problem defaults to
+    `filesystem` (the historical default) so a github-only re-verification is only DEMANDED where the
+    config actually says github."""
+    try:
+        import idc_next_action as NEXT  # noqa: E402 — reuse the one constrained config reader
+        backend, _ = NEXT._read_tracker_config(repo)
+        return backend
+    except Exception:  # noqa: BLE001
+        return "filesystem"
+
+
+def _load_issue_numbers(repo: str):
+    """The set of live tracker issue numbers (as canonical strings) via the shared reader, or None on
+    any read failure (fail closed). Used to verify decomposition children EXIST on the board."""
+    try:
+        import idc_next_action as NEXT  # noqa: E402
+        return {_gate_key(i["number"]) for i in NEXT._load_tracker_issues(repo)}
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _confined_repo_path(repo: str, rel: object) -> str | None:
@@ -348,24 +452,120 @@ def _valid_matrix(repo: str, matrix_rel: object) -> CloseoutResult:
     return CloseoutResult(True, "ok", "matrix re-validated", {})
 
 
+def _verify_decomposition(repo: str, matrix_rel: object, children: list) -> CloseoutResult:
+    """Re-verify Plan's decomposition CHILDREN from durable state (round-2 F2). On the github backend
+    the children are live issues: RE-RUN the shipped schema check on each child's live body AND
+    re-derive its `idc-provenance` marker against the matrix Plan authored (both are github-only by
+    the shipped helpers' own design) — a missing child, a schema-invalid body, or an absent/mismatched
+    provenance marker fails closed. On the filesystem backend (no issue bodies) the children are
+    verified to EXIST via the shared tracker reader. Either way a caller can no longer assert
+    'children exist / schema+provenance pass' — the validator re-derives it."""
+    backend = _repo_backend(repo)
+    if backend == "github":
+        matrix_path = _confined_repo_path(repo, matrix_rel)
+        if matrix_path is None or not os.path.isfile(matrix_path):
+            return _fail("plan-matrix-bad-ref", "plan complete requires a repo-relative matrix path")
+        try:
+            import idc_matrix_check as MX  # noqa: E402
+            import idc_schema_check as SCHEMA  # noqa: E402
+            import idc_recirc_sweep as SWEEP  # noqa: E402
+            with open(matrix_path, encoding="utf-8") as handle:
+                pillar_ids = {p["id"] for p in MX.parse_matrix(handle.read()) if p.get("id")}
+        except Exception as exc:  # noqa: BLE001
+            return _fail("plan-matrix-invalid", f"could not load the matrix pillar ids: {exc}")
+        matrix_name = os.path.basename(str(matrix_rel))
+        for child in children:
+            body = _gh_issue_body(repo, child)
+            if body is None:
+                return _fail("plan-child-missing",
+                             f"decomposition child #{child} could not be read from the board (fail closed)")
+            problems = SCHEMA.check(body)
+            if problems:
+                return _fail("plan-child-schema",
+                             f"decomposition child #{child} fails the issue-body schema check: {problems[0]}")
+            prov = SWEEP.provenance_of(body)
+            if not prov or prov.get("matrix") != matrix_name or prov.get("pillar") not in pillar_ids:
+                return _fail("plan-child-provenance",
+                             f"decomposition child #{child} lacks a valid idc-provenance marker for "
+                             f"the authored matrix (re-run provenance check)")
+        return CloseoutResult(True, "ok", "decomposition children re-verified (schema + provenance)", {})
+    # filesystem: no issue bodies to schema/provenance-check — verify the children EXIST on the board.
+    numbers = _load_issue_numbers(repo)
+    if numbers is None:
+        return _fail("plan-children-unreadable",
+                     "plan complete could not read the tracker to verify decomposition children (fail closed)")
+    missing = sorted(_gate_key(c) for c in children if _gate_key(c) not in numbers)
+    if missing:
+        return _fail("plan-child-missing",
+                     f"decomposition children not present in the tracker: {', '.join('#' + m for m in missing)}")
+    return CloseoutResult(True, "ok", "decomposition children exist on the tracker", {})
+
+
 def _v_plan(status: str, refs: dict, repo: str, session: str) -> CloseoutResult:
     if status == "no_action":
         return _check_no_action("plan", repo)
     # The deconfliction matrix is a DURABLE artifact — re-validate the referenced file (never a caller
-    # "pass"). The merged planning PR + real decomposition children carry the rest of the proof.
+    # "pass").
     mcheck = _valid_matrix(repo, refs.get("matrix"))
     if not mcheck.ok:
         return mcheck
-    if not _present(refs.get("planning_pr")) or refs.get("planning_pr_state") != "MERGED":
-        return _fail("plan-pr-unmerged", "plan complete requires refs.planning_pr MERGED")
+    # The planning PR merged-state is a GitHub claim — RE-READ it (never a caller state:"MERGED").
+    merged = _gh_pr_merged(repo, refs.get("planning_pr"))
+    if merged is None:
+        return _fail("plan-pr-unverified",
+                     "plan complete: the planning PR merged-state could not be verified by a real gh "
+                     "read (a caller state is never trusted) — fail closed")
+    if not merged:
+        return _fail("plan-pr-unmerged", "plan complete requires the planning PR MERGED (real gh read)")
     decompositions = refs.get("decompositions")
     if not isinstance(decompositions, dict) or not decompositions \
             or any(not _present(v) for v in decompositions.values()):
         return _fail("plan-decomposition",
                      "plan complete requires refs.decompositions {consideration: child} (non-empty)")
-    if not isinstance(refs.get("pointers_retired"), list):
+    # pointers_retired must be CROSS-CHECKED against the re-derived delta: every consideration that was
+    # decomposed must have its pointer retired, so `pointers_retired:[]` is valid ONLY when nothing was
+    # decomposed (round-2 F2) — an empty list against real decompositions is refused.
+    pointers = refs.get("pointers_retired")
+    if not isinstance(pointers, list):
         return _fail("plan-pointers", "plan complete requires refs.pointers_retired (a list)")
-    return CloseoutResult(True, "ok", "plan decomposed + admitted (matrix re-validated)", refs)
+    retired = {_gate_key(p) for p in pointers}
+    decomposed = {_gate_key(k) for k in decompositions}
+    if decomposed - retired:
+        missing = sorted(decomposed - retired)
+        return _fail("plan-pointers-open",
+                     "plan complete requires every decomposed consideration's pointer retired; "
+                     f"still-open: {', '.join('#' + m for m in missing)}")
+    # Re-verify the decomposition children (existence + schema + provenance) from durable state.
+    dcheck = _verify_decomposition(repo, refs.get("matrix"), list(decompositions.values()))
+    if not dcheck.ok:
+        return dcheck
+    return CloseoutResult(True, "ok", "plan decomposed + admitted (matrix + PR + children re-verified)", refs)
+
+
+def _reconciliation_verdict(repo: str, session: str):
+    """RE-DERIVE the recirculation reconciliation verdict from durable state by RE-RUNNING the
+    deterministic reconciliation READ-ONLY (round-2 F5-r2) — never a caller `reconciliation:"ran"`
+    string. Forces `IDC_HOOKS_OBSERVE_ONLY=1` so the re-run is a pure dry run (no board comment, no
+    ledger taint) that still reads the inbox/board and returns the same verdict the drain would. A
+    nonexistent/ungoverned/unreadable repo yields `ungoverned`/`unknown` → None (fail-closed). Returns
+    the verdict string only when it is a settled `reconciled`/`complete`, else None."""
+    if not _ne_str(repo):
+        return None
+    prev = os.environ.get("IDC_HOOKS_OBSERVE_ONLY")
+    try:
+        import idc_recirc_reconcile as RC  # noqa: E402 — lazy
+        import idc_recirc_closeout_gate as RG  # noqa: E402 — for its backend reader
+        os.environ["IDC_HOOKS_OBSERVE_ONLY"] = "1"   # force a side-effect-free re-run
+        backend = RG._read_backend(repo) or "filesystem"
+        verdict = RC.reconcile(repo, backend, session or None)[0]
+    except Exception:  # noqa: BLE001 — any reconciliation failure fails the closeout closed
+        return None
+    finally:
+        if prev is None:
+            os.environ.pop("IDC_HOOKS_OBSERVE_ONLY", None)
+        else:
+            os.environ["IDC_HOOKS_OBSERVE_ONLY"] = prev
+    return verdict if verdict in ("reconciled", "complete") else None
 
 
 def _v_recirculate(status: str, refs: dict, repo: str, session: str) -> CloseoutResult:
@@ -373,30 +573,43 @@ def _v_recirculate(status: str, refs: dict, repo: str, session: str) -> Closeout
         if not _present(refs.get("gate")):
             return _fail("recirc-gate", "recirculate waiting_gate requires a valid requirements gate/Think PR ref")
         return CloseoutResult(True, "ok", "recirculation waiting on the requirements gate", refs)
-    # complete: reconciliation ran + every requested ticket/unit has a valid closeout.
-    if refs.get("reconciliation") != "ran":
-        return _fail("recirc-reconcile", "recirculate complete requires refs.reconciliation == 'ran'")
+    # complete: reconciliation is RE-DERIVED from durable state (a read-only re-run of the
+    # deterministic reconciliation — never a caller `reconciliation:"ran"` string), and every
+    # requested ticket/unit carries a valid closeout. A nonexistent/unreadable repo fails closed.
+    if _reconciliation_verdict(repo, session) is None:
+        return _fail("recirc-reconcile",
+                     "recirculate complete requires the reconciliation to RE-DERIVE as "
+                     "reconciled/complete from durable state (a read-only re-run) — a caller "
+                     "'reconciliation:\"ran\"' is not proof, and a nonexistent/unreadable repo fails closed")
     closeouts = refs.get("closeouts")
     if not isinstance(closeouts, dict) or any(not _ne_str(v) for v in closeouts.values()):
         return _fail("recirc-closeouts",
                      "recirculate complete requires refs.closeouts {ticket/unit: disposition}")
-    return CloseoutResult(True, "ok", "recirculation inbox drained + reconciled", refs)
+    return CloseoutResult(True, "ok", "recirculation inbox drained + reconciled (re-derived)", refs)
 
 
-def _valid_build_receipt(issue: object, receipt: object) -> CloseoutResult:
-    """A build receipt must be a STRUCTURED reference to a merged PR — `{pr, state: "MERGED"}` — not an
-    arbitrary string. The issue key must be a real reference, the PR a real reference, and the state
-    MERGED, so a receipt can't be fabricated from a bare token."""
+def _valid_build_receipt(issue: object, receipt: object, repo: str) -> CloseoutResult:
+    """A build receipt references a merged PR by NUMBER — `{pr: <n>}` — and the validator RE-READS the
+    PR's merged-state for real (`gh pr view`), never trusting a caller `state:"MERGED"` (round-2 F1).
+    The issue key must be a real reference and the PR a real number; a merged-state that cannot be
+    proven by a real read (gh absent/errored, or the PR reads NOT merged) fails the receipt closed."""
     if not _present(issue):
         return _fail("build-receipt-issue", "each build receipt must be keyed by a real issue reference")
     if not isinstance(receipt, dict):
         return _fail("build-receipt-shape",
-                     f"build receipt for {issue} must be {{pr, state}} referencing a MERGED PR "
+                     f"build receipt for {issue} must be {{pr}} referencing a MERGED PR "
                      f"(an arbitrary receipt string is not proof)")
-    if not _present(receipt.get("pr")):
+    pr = receipt.get("pr")
+    if not _present(pr):
         return _fail("build-receipt-pr", f"build receipt for {issue} must cite a real PR (refs.receipts.{issue}.pr)")
-    if receipt.get("state") != "MERGED":
-        return _fail("build-receipt-unmerged", f"build receipt for {issue} requires the PR state MERGED")
+    merged = _gh_pr_merged(repo, pr)
+    if merged is None:
+        return _fail("build-receipt-unverified",
+                     f"build receipt for {issue}: PR #{pr}'s merged-state could not be verified by a "
+                     f"real gh read (a caller state is never trusted) — fail closed")
+    if not merged:
+        return _fail("build-receipt-unmerged",
+                     f"build receipt for {issue}: the real gh read shows PR #{pr} is NOT merged")
     return CloseoutResult(True, "ok", "receipt ok", {})
 
 
@@ -406,10 +619,10 @@ def _v_build(status: str, refs: dict, repo: str, session: str) -> CloseoutResult
     receipts = refs.get("receipts")
     if isinstance(receipts, dict) and receipts:
         for issue, receipt in receipts.items():
-            result = _valid_build_receipt(issue, receipt)
+            result = _valid_build_receipt(issue, receipt, repo)
             if not result.ok:
                 return result
-        return CloseoutResult(True, "ok", "build receipts reference merged PRs", refs)
+        return CloseoutResult(True, "ok", "build receipts reference merged PRs (re-read)", refs)
     if refs.get("frontier") == "none-eligible":
         # an empty ready frontier is oracle-backed, never trusted (the same door as no_action).
         return _check_no_action("build", repo)
@@ -432,12 +645,34 @@ def _persisted_drain_verdict(repo: str, session: str):
         return None
 
 
+def _gate_key(ref: object) -> str:
+    """Canonicalize a gate reference for comparison: an int, `708`, or `#708` all key on `708`."""
+    return str(ref).lstrip("#").strip()
+
+
 def _v_autorun(status: str, refs: dict, repo: str, session: str) -> CloseoutResult:
     if status == "waiting_gate":
         gates = refs.get("gates")
-        if not isinstance(gates, list) or not gates:
+        if not isinstance(gates, list) or not gates or any(not _present(g) for g in gates):
             return _fail("autorun-gates", "autorun waiting_gate requires a non-empty refs.gates list")
-        return CloseoutResult(True, "ok", "autorun paused behind human gate(s)", refs)
+        # CONSULT THE ORACLE (round-2 F5-r2): a nonempty caller list is not proof. The oracle must
+        # report a human-gate wait as the live blocking state (no actionable pipeline work ahead of
+        # it), and every NAMED gate must be one of the oracle's live gates. A nonexistent/unreadable
+        # repo cannot establish the oracle → fail closed.
+        action = _oracle_action(repo)
+        if action is None:
+            return _fail("autorun-gate-unproven",
+                         "autorun waiting_gate requires a fresh, valid next-action oracle result for this repo")
+        if action.reason_code != "waiting-human-gate":
+            return _fail("autorun-gate-contradicted",
+                         f"autorun waiting_gate rejected — the oracle reports {action.reason_code!r}, "
+                         "not a human-gate wait (there is still actionable pipeline work or a fixpoint)")
+        oracle_gates = {_gate_key(r) for r in (action.refs or ())}
+        if not {_gate_key(g) for g in gates} <= oracle_gates:
+            return _fail("autorun-gate-mismatch",
+                         "autorun waiting_gate names gate(s) that are not among the oracle's live "
+                         "blocking gates")
+        return CloseoutResult(True, "ok", "autorun paused behind the oracle's live human gate(s)", refs)
     # complete: THIS session's PERSISTED drain verdict must read exactly `complete`. The drain status
     # is read from the DURABLE artifact (.idc-drain-verdict.json), never a caller-supplied drain string
     # — a forged `refs.drain` can no longer clear the obligation.
@@ -492,13 +727,75 @@ def _v_update(status: str, refs: dict, repo: str, session: str) -> CloseoutResul
     return CloseoutResult(True, "ok", "update resynced + the receipt matches the running version", refs)
 
 
+_IDC_PLUGIN_NAME = "idc@idc-workflow"
+_GOVERNANCE_ANCHOR = "docs/workflow/tracker-config.yaml"
+
+
+def _plugin_still_enabled(settings_path: str) -> bool:
+    """True iff the IDC plugin is STILL enabled in the settings file (round-2 F4-r2 'settings
+    mutated' check). Fail-closed: an unreadable/unparseable settings file reads as still-enabled, so
+    an applied uninstall cannot claim the key was stripped without a readable, stripped file."""
+    try:
+        with open(settings_path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, UnicodeError, ValueError):
+        return True
+    plugins = data.get("enabledPlugins") if isinstance(data, dict) else None
+    if isinstance(plugins, dict):
+        return _IDC_PLUGIN_NAME in plugins
+    if isinstance(plugins, list):
+        return _IDC_PLUGIN_NAME in plugins
+    return False
+
+
 def _v_uninstall(status: str, refs: dict, repo: str, session: str) -> CloseoutResult:
     outcome = refs.get("outcome")
     if outcome not in ("applied", "no-action"):
         return _fail("uninstall-outcome", "uninstall complete requires refs.outcome of 'applied' or 'no-action'")
-    if outcome == "applied" and not _ne_str(refs.get("archive")):
+    if outcome == "no-action":
+        return CloseoutResult(True, "ok", "uninstall no-action (nothing to remove)", refs)
+    # applied: the destructive work must have ACTUALLY HAPPENED — validate it by INDEPENDENT checks,
+    # never a caller assertion (round-2 F4-r2). This is what stops a finish from recording 'applied'
+    # before the uninstall ran.
+    removed = refs.get("removed")
+    if not isinstance(removed, list) or not removed or any(not _ne_str(p) for p in removed):
+        return _fail("uninstall-removed",
+                     "an applied uninstall requires refs.removed — a non-empty list of the footprint "
+                     "paths that must now be ABSENT")
+    for rel in removed:
+        path = _confined_repo_path(repo, rel)
+        if path is None:
+            return _fail("uninstall-removed-bad-ref", f"refs.removed path {rel!r} must be repo-relative")
+        if os.path.exists(path):
+            return _fail("uninstall-not-removed",
+                         f"refs.removed names {rel!r} but it is STILL PRESENT — the uninstall work did "
+                         f"not complete (a closeout cannot record 'applied' before doing the removal)")
+    # The governance anchor + ledger substrate must STILL be present at finish: their removal is the
+    # single documented POST-finish step, so a finish that runs after the anchor is gone is refused.
+    anchor = _confined_repo_path(repo, _GOVERNANCE_ANCHOR)
+    if anchor is None or not os.path.exists(anchor):
+        return _fail("uninstall-anchor-gone",
+                     "the governance anchor (docs/workflow/tracker-config.yaml) must still be present "
+                     "at finish — it is removed only AFTER a successful finish")
+    # settings mutated: the enablement key must be stripped (when a settings file is cited).
+    settings_rel = refs.get("settings")
+    if settings_rel is not None:
+        spath = _confined_repo_path(repo, settings_rel)
+        if spath is None or not os.path.isfile(spath):
+            return _fail("uninstall-settings-missing",
+                         "refs.settings must be a repo-relative path to the settings file")
+        if _plugin_still_enabled(spath):
+            return _fail("uninstall-settings-enabled",
+                         "the IDC enablement key was NOT stripped from the settings file")
+    # the work-product archive must exist (the archive receipt).
+    archive_rel = refs.get("archive")
+    if not _ne_str(archive_rel):
         return _fail("uninstall-archive", "an applied uninstall requires refs.archive (the work-product archive path)")
-    return CloseoutResult(True, "ok", "uninstall manifest applied or a no-action result", refs)
+    apath = _confined_repo_path(repo, archive_rel)
+    if apath is None or not os.path.exists(apath):
+        return _fail("uninstall-archive-missing",
+                     "refs.archive must reference the work-product archive file, and it must exist")
+    return CloseoutResult(True, "ok", "uninstall work independently verified (footprints gone, settings stripped, archive present)", refs)
 
 
 _COMMAND_VALIDATORS = {
@@ -521,17 +818,23 @@ _UNIT_ARG_RE = re.compile(r"(?:^|\s)--unit(?:=|\s+)(\S+)")
 
 def intake_ref_from_args(command: str, args_text: str):
     """Extract a Think run's intake manifest + selected units from its raw arg text, so intake mode is
-    recorded DURABLY on the command record at start (finding 2). Only `/idc:think --doc <manifest>
-    --unit <ids>` carries intake mode; every other command / arg shape yields (None, None). Storing
-    this on the record (not inferring it from caller-supplied finish input) is what stops an
-    intake-mode run from dropping units by simply omitting the intake fields at finish."""
+    recorded DURABLY on the command record at start (finding 2). Intake mode is stamped IF AND ONLY IF
+    the invocation binds a manifest per the brief's argument contract — BOTH `--doc <manifest>` AND a
+    NON-EMPTY `--unit <ids>` (round-2 F3-r2). A plain anchor-doc Think (`--doc <anchor>` with no
+    `--unit`) is an ordinary, non-intake run and MUST NOT be intake-stamped — stamping it would leave
+    an empty selection that the closeout's coverage check rejects, so an honest anchor-doc Think could
+    never close. Every other command / arg shape yields (None, None). Storing this on the record (not
+    inferring it from caller-supplied finish input) is what stops an intake-mode run from dropping
+    units by simply omitting the intake fields at finish."""
     if command != "think" or not args_text:
         return None, None
     doc = _DOC_ARG_RE.search(args_text)
-    if not doc:
-        return None, None
     unit = _UNIT_ARG_RE.search(args_text)
-    units = [u for u in unit.group(1).split(",") if u] if unit else []
+    if not doc or not unit:
+        return None, None
+    units = [u for u in unit.group(1).split(",") if u]
+    if not units:  # `--unit` present but empty/comma-only is not a real intake selection
+        return None, None
     return doc.group(1), units
 
 
@@ -574,9 +877,10 @@ def validate_closeout(command: str, status: str, evidence: object,
             f"{status!r} is not a legal terminal status for /idc:{command} "
             f"(legal: {sorted(LEGAL_STATUSES[command])})", {})
 
-    # (5) command-specific evidence. blocked_external is uniform across every command.
+    # (5) command-specific evidence. blocked_external is uniform across every command (with a drain
+    # blocker additionally re-derived from this session's persisted verdict).
     if status == "blocked_external":
-        result = _check_blocker(refs)
+        result = _check_blocker(refs, repo or "", session or "")
     else:
         result = _COMMAND_VALIDATORS[command](status, refs, repo or "", session or "")
     if not result.ok:

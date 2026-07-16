@@ -100,35 +100,49 @@ the removal commit deletes them — a `git revert` restores the tracked files, a
 covers anything untracked. The archive stays untracked (and is matched by the `idc-archive-*`
 preflight exemption); it is never part of the removal commit.
 
-## Phase 3 — Remove footprints in ONE revertable commit
+## Phase 3 — Do the work, then close, then remove the anchor (in that order)
 
-**Close the command contract FIRST — while the repo is still governed.** The removal below deletes
-`docs/workflow/tracker-config.yaml`, which is what marks this repo IDC-governed; once it is gone the
-session-ledger write is a repo-gated no-op and the `finish` can no longer land (it exits 2). So
-discharge the obligation now, before any deletion — the manifest is settled (Phase 1) and the archive
-path is known (Phase 2), so the terminal state is already decided:
+Do the destructive uninstall in **three ordered sub-steps**. The closeout runs in the MIDDLE: it
+**independently verifies the work already happened** (the footprints are gone, the enablement key is
+stripped, the archive exists) before recording `applied` — so the record can never claim `applied`
+before the uninstall ran. The one thing left for AFTER the finish is removing the governance anchor
+(`docs/workflow/tracker-config.yaml`), because that file is what marks the repo IDC-governed; once it
+is gone the session-ledger write is a repo-gated no-op and `finish` can no longer land.
+
+**3a — Remove every footprint EXCEPT the governance anchor.** Delete the manifest files (keep
+`docs/workflow/tracker-config.yaml` for now), strip only the enablement key, and remove the
+runtime `TRACKER.md`. Do **not** commit yet:
+```bash
+# delete the manifest files but KEEP the governance anchor (it stays until sub-step 3c)
+git -C "$ROOT" rm -r --quiet <manifest footprint paths — everything the receipt lists EXCEPT the anchor>
+# strip ONLY the enablement key, preserving every other operator setting (atomic safe-write)
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_settings_json.py" \
+  disable .claude/settings.json idc@idc-workflow
+git -C "$ROOT" add .claude/settings.json 2>/dev/null || true
+# filesystem backend: TRACKER.md (runtime-created, not receipt-listed)
+[ -f "$ROOT/TRACKER.md" ] && git -C "$ROOT" rm --quiet TRACKER.md
+```
+
+**3b — Close the command contract (the work is now verifiable).** The validator re-checks each cited
+removal is ABSENT, the settings key is stripped, the archive exists, and the anchor is still present —
+a caller cannot assert `applied` without the work having happened:
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command uninstall \
   --status <complete|blocked_external> --evidence-json '<envelope>'
 ```
-- **`complete`** — the receipt-driven manifest is settled (about to be applied), or the run is an
-  explicit no-action (nothing left to remove). Evidence refs: `outcome:"applied"` **and**
-  `archive:"<archive path>"` when work products were archived + removed, or `outcome:"no-action"`.
+- **`complete`** — either the footprints were removed, or the run is an explicit no-action. Evidence
+  refs for an applied run: `outcome:"applied"`, `removed:[<repo-relative footprint paths that are now
+  ABSENT>]` (non-empty; the validator confirms each is gone), `settings:".claude/settings.json"` (the
+  validator confirms the IDC key is stripped), and `archive:"<archive path>"` (the validator confirms
+  the file exists). For a no-op run: `outcome:"no-action"`.
 - **`blocked_external`** — a safety refusal (a dirty tree, an unverifiable board, an invalid receipt):
   `blocker:{helper, exit (nonzero), diagnostic}`. Report it as blocked; do not proceed to remove.
 
-Then apply every removal as a single commit so the whole uninstall reverts atomically:
+**3c — The single POST-finish step: remove the anchor + commit atomically.** Only after `finish`
+succeeds, remove the governance anchor and land ALL removals as one revertable commit:
 ```bash
-# 1) delete the manifest files (tracked → git rm; the receipt + scaffold are tracked)
-git -C "$ROOT" rm -r --quiet <manifest paths kept for removal>
-# 2) strip ONLY the enablement key, preserving every other operator setting (atomic safe-write)
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_settings_json.py" \
-  disable .claude/settings.json idc@idc-workflow
-git -C "$ROOT" add .claude/settings.json 2>/dev/null || true
-# 3) filesystem backend: TRACKER.md (runtime-created, not receipt-listed)
-[ -f "$ROOT/TRACKER.md" ] && git -C "$ROOT" rm --quiet TRACKER.md
-# 4) one revertable commit (never --no-verify)
+git -C "$ROOT" rm --quiet docs/workflow/tracker-config.yaml
 git -C "$ROOT" commit -m "idc: uninstall — remove IDC footprints (revert this commit to reinstate)"
 ```
 Stage only the removed paths and `.claude/settings.json` — **not** the archive tarball (it must

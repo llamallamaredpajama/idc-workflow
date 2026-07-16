@@ -355,6 +355,15 @@ def command_start(cwd, session_id, command, plugin_version, args_sha256, source,
         for i, c in enumerate(commands):
             if (c.get("session_id") == session_id and c.get("command") == command
                     and c.get("state") == _CMD_ACTIVE):
+                # MONOTONIC intake marker (round-2 F3-r2): a re-start of an ACTIVE intake-mode record
+                # can never silently shed its coverage obligation. If the existing active record
+                # carries an intake manifest and this re-start supplied none, carry the prior marker
+                # FORWARD onto the upsert — so a plain re-entry of the same command cannot make an
+                # intake-mode run look non-intake and slip a dropped-unit close past the coverage
+                # check. (A re-start that DOES supply its own intake ref replaces it as usual.)
+                if not intake_manifest and c.get("intake_manifest"):
+                    rec["intake_manifest"] = c.get("intake_manifest")
+                    rec["intake_units"] = list(c.get("intake_units") or [])
                 commands[i] = rec
                 replaced = True
                 break

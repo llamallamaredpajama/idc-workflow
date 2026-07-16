@@ -132,9 +132,11 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
 ```
 
 - **`complete`** — every requested ticket/unit has a valid closeout **and** the deterministic
-  reconciliation ran. Evidence refs: `reconciliation:"ran"`, `closeouts:{<ticket|unit>:<disposition>}`
-  (each disposition one of admitted/drained/gated/paused/materialized; an empty inbox drains to a
-  vacuous complete once reconciliation ran).
+  reconciliation re-derives as reconciled/complete. Evidence refs:
+  `closeouts:{<ticket|unit>:<disposition>}` (each disposition one of
+  admitted/drained/gated/paused/materialized). The validator **re-runs the deterministic reconciliation
+  read-only** and refuses the close unless the inbox re-derives as reconciled/complete — a caller
+  `reconciliation:"ran"` string is **not** proof, and a nonexistent/unreadable repo fails closed.
 - **`waiting_gate`** — a valid requirements gate / Think PR is open (a gated backflow paused behind
   its gate). Evidence refs: `gate:<ref>`.
 - **`blocked_external`** — a deterministic helper failed: `blocker:{helper, exit (nonzero),

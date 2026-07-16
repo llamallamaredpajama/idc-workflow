@@ -53,11 +53,14 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
 
 - **`complete`** — every admitted consideration decomposed has a decomposition child; the deconfliction
   matrix re-validates; the consideration pointers are retired; the planning PR is MERGED. Evidence refs:
-  `planning_pr`, `planning_pr_state:"MERGED"`, `matrix:"<repo-relative path to the matrix YAML you
-  wrote>"` (the validator re-runs `idc_matrix_check` on the referenced file — **never a `"pass"`
-  string**), `decompositions:{<consideration>:<child>}`, `pointers_retired:[…]`. (The schema + provenance
-  checks still run during decomposition; the durable proof of `complete` is the re-validated matrix
-  file + merged planning PR + real decomposition children.)
+  `planning_pr` (the PR **number** — the validator **re-reads its merged-state for real (`gh pr view`)**,
+  never a caller `state`), `matrix:"<repo-relative path to the matrix YAML you wrote>"` (the validator
+  re-runs `idc_matrix_check` on the referenced file — **never a `"pass"` string**),
+  `decompositions:{<consideration>:<child>}`, `pointers_retired:[…]`. The validator **re-derives** the
+  rest: it confirms every decomposition child **exists** (via the tracker reader; on the github backend
+  it additionally **re-runs the schema + provenance checks** on each child's live body), and it
+  cross-checks `pointers_retired` against the decomposed set — an empty `pointers_retired` is valid only
+  when nothing was decomposed. No caller "pass" boolean is trusted anywhere in this proof.
 - **`no_action`** — the **live oracle** reports no admitted consideration to plan (its
   `considerations` count is 0). Never claim `no_action` without that fresh oracle result.
 - **`blocked_external`** — a deterministic helper failed: `blocker:{helper, exit (nonzero),

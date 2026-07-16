@@ -222,7 +222,10 @@ only when a full pass leaves nothing actionable:
      string clears it** — the evidence refs may be empty (`refs:{}`); just ensure the drain ran with
      `--session-id` for THIS session.
    - **`waiting_gate`** — the oracle reports only human gates (an open Think PR / `[operator-action]`
-     gate). Evidence refs: `gates:[<refs>]` (non-empty).
+     gate). Evidence refs: `gates:[<refs>]` (non-empty). The validator **re-runs the oracle** and
+     refuses the claim unless it reports a human-gate wait as the live blocking state (no actionable
+     pipeline work ahead of it) and every named gate is one of the oracle's live gates — a nonempty
+     caller list alone is not proof, and a nonexistent/unreadable repo fails closed.
    - **`blocked_external`** — the drain reported `unknown`/`rate-limited`: `blocker:{helper, exit
      (nonzero), diagnostic}`. Report it as blocked, never as a drained run.
 

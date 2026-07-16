@@ -110,14 +110,15 @@ has "$UN" 'idc_gh_board\.py' \
   || fail "uninstall.md in-flight count must read the whole board via the paginating idc_gh_board.py (not a truncating gh item-list)"
 grep -E 'gh project item-list.*--format json' "$UN" \
   && fail "uninstall.md must not read the board with a truncating gh project item-list --format json (use the paginating idc_gh_board.py)"
-# Finding 4: uninstall's deterministic closeout must be EXECUTABLE. It removes
-# docs/workflow/tracker-config.yaml, which is what marks the repo IDC-governed; once that file is gone
-# the ledger write is a repo-gated no-op and `idc_command_contract.py finish` exits 2. So the finish
-# must be documented BEFORE that removal (while still governed), and the prose must NOT excuse a
-# failing/late finish as "expected"/"harmless". Assert the finish line precedes the manifest-removing
-# git-rm, and no expected/harmless-failure framing survives. Red-when-broken: place the finish after
-# the removal (baseline), or call a no-op finish expected/harmless ⇒ RED.
-python3 - "$UN" <<'PY' || fail "uninstall.md must finish its command contract BEFORE the git-rm that removes tracker-config.yaml (a post-removal finish exits 2 on the now-ungoverned repo), and must not call a failing/late finish 'expected'/'harmless'"
+# Round-2 finding F4-r2: uninstall must DO the destructive work, THEN finish (which independently
+# verifies that work), THEN remove the governance anchor. The finish must NOT record 'applied' before
+# the work happened, and the anchor removal (docs/workflow/tracker-config.yaml — what marks the repo
+# governed; once gone the ledger write is a repo-gated no-op and finish exits 2) must be the single
+# POST-finish step. Assert the ordering: footprint-removal git-rm  <  finish  <  anchor-removal git-rm,
+# and no expected/harmless-failure framing survives. Red-when-broken: finish before the footprint
+# removal (records 'applied' before the work), or the anchor removal before finish (finish can't land),
+# or a no-op finish excused as expected/harmless ⇒ RED.
+python3 - "$UN" <<'PY' || fail "uninstall.md must remove the footprints, THEN finish (validating the work), THEN remove the governance anchor (tracker-config.yaml) as the single post-finish step; and must not call a failing/late finish 'expected'/'harmless'"
 import re, sys
 lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
 def first_idx(pred):
@@ -125,12 +126,18 @@ def first_idx(pred):
         if pred(ln):
             return i
     return None
+def is_git_rm(l):
+    return re.search(r'git .*\brm\b', l) is not None
 finish_i = first_idx(lambda l: "idc_command_contract.py" in l and "finish" in l)
-rm_i = first_idx(lambda l: re.search(r'git .*\brm\b', l) and ("manifest" in l.lower() or "tracker-config" in l.lower()))
-if finish_i is None or rm_i is None:
-    sys.exit(1)                 # both the finish and the manifest-removing git-rm must be present
-if finish_i > rm_i:
-    sys.exit(1)                 # finish documented AFTER the ungoverning removal — not executable
+# the footprint-removal step: a git-rm naming the manifest/footprint paths, NOT the anchor.
+work_rm_i = first_idx(lambda l: is_git_rm(l) and ("manifest" in l.lower() or "footprint" in l.lower())
+                                and "tracker-config" not in l.lower())
+# the anchor removal: the git-rm that deletes docs/workflow/tracker-config.yaml.
+anchor_rm_i = first_idx(lambda l: is_git_rm(l) and "tracker-config" in l.lower())
+if None in (finish_i, work_rm_i, anchor_rm_i):
+    sys.exit(1)                 # all three ordered steps must be present
+if not (work_rm_i < finish_i < anchor_rm_i):
+    sys.exit(1)                 # required order: remove footprints -> finish -> remove the anchor
 text = "\n".join(lines).lower()
 if re.search(r'(no-op|no op|exit ?2|fail\w*)[^.\n]{0,80}(expected|harmless)', text) or \
    re.search(r'(expected|harmless)[^.\n]{0,80}(no-op|no op|exit ?2|fail\w*)', text):

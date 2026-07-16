@@ -288,6 +288,8 @@ contract finish --repo "$REPO3" --session "$S3" --command doctor --status comple
   || gov_fail "(7c) doctor complete with rows + a FAIL verdict was rejected"
 echo "  ok (7c) legal-status-per-command holds (doctor may not claim no_action; a FAIL verdict still completes)"
 
+DV="$GOV_PLUGIN/scripts/hooks/idc_drain_verdict.py"
+[ -f "$DV" ] || gov_fail "scripts/hooks/idc_drain_verdict.py not found"
 # (7d) blocked_external is an HONEST blocked stop, never a disguised success: it must cite a
 # deterministic helper's NONZERO exit + a concise diagnostic. A zero exit is not a blocker.
 contract start --repo "$REPO3" --session "$S3" --command build --plugin-root "$GOV_PLUGIN" \
@@ -302,10 +304,22 @@ if contract finish --repo "$REPO3" --session "$S3" --command build --status bloc
      --evidence-json '{"schema_version":1,"refs":{"blocker":{"helper":"totally_not_a_real_helper.py","exit":3,"diagnostic":"phantom"}}}' 2>/dev/null; then
   gov_fail "(7d-sabotage) a blocked_external citing a PHANTOM helper (not shipped under scripts/) was accepted"
 fi
+# (7d-sabotage, round-2 F1) an INVENTED drain failure — a blocked_external citing idc_autorun_drain.py
+# with NO persisted drain verdict for THIS session — is refused. The drain writes a non-complete
+# verdict on every blocked path, so its blocker is RE-DERIVED from that durable artifact, never from a
+# caller-typed exit/diagnostic. Red-when-broken: skip the durable-verdict re-derivation ⇒ accepted.
+if contract finish --repo "$REPO3" --session "$S3" --command build --status blocked_external \
+     --evidence-json '{"schema_version":1,"refs":{"blocker":{"helper":"idc_autorun_drain.py","exit":3,"diagnostic":"github GraphQL rate-limited until reset"}}}' 2>/dev/null; then
+  gov_fail "(7d-sabotage) an INVENTED drain blocked_external (no persisted drain verdict for this session) was accepted"
+fi
+# now write a REAL non-complete drain verdict for this session (the drain's durable artifact) — the
+# blocker re-derives from it and is accepted.
+python3 "$DV" --cwd "$REPO3" write --verdict unknown --exit 2 --session "$S3" \
+  || gov_fail "(7d) could not persist a non-complete drain verdict"
 contract finish --repo "$REPO3" --session "$S3" --command build --status blocked_external \
   --evidence-json '{"schema_version":1,"refs":{"blocker":{"helper":"idc_autorun_drain.py","exit":3,"diagnostic":"github GraphQL rate-limited until reset"}}}' \
-  || gov_fail "(7d) a blocked_external citing a nonzero helper exit + diagnostic was rejected"
-echo "  ok (7d) blocked_external requires a deterministic helper's NONZERO exit + a diagnostic"
+  || gov_fail "(7d) a drain blocked_external backed by THIS session's persisted non-complete verdict was rejected"
+echo "  ok (7d) blocked_external requires a deterministic helper's NONZERO exit + diagnostic; a drain blocker re-derives from the durable verdict"
 
 # (7e, finding 1) autorun complete reads THIS session's PERSISTED drain verdict
 # (.idc-drain-verdict.json) — a DURABLE artifact — never a caller-supplied drain string. Write a real
@@ -336,11 +350,61 @@ contract finish --repo "$REPO3" --session "$S3" --command autorun --status compl
   || gov_fail "(7e-sabotage) could not honestly close the autorun record"
 echo "  ok (7e-sabotage) a forged caller drain claim with a foreign/absent verdict is refused (durable artifact wins)"
 
-# (7f, finding 1) plan complete re-validates a DURABLE matrix artifact (idc_matrix_check), never a
-# caller "pass" string.
-mkdir -p "$REPO3/docs/workflow/pillar-matrices"
+# write_fake_gh <path> — a hermetic `gh` stub on PATH (the suite's established fake-gh pattern; see
+# next-action-truth.sh). It answers the two READ-ONLY calls the round-2 validators make:
+#   * `gh pr view <N> --json state,mergedAt`  → MERGED when N is in $FAKE_MERGED_PRS (space list),
+#     else OPEN; $FAKE_PR_ERROR=1 makes it EXIT NONZERO (simulates gh missing / an unresolvable PR).
+#   * `gh issue view <N> --json body -q .body` → prints $FAKE_ISSUE_DIR/<N>.body, or EXITS NONZERO
+#     when that file is absent (a missing decomposition child).
+write_fake_gh() {  # $1 = path to the fake gh
+  python3 - "$1" <<'PY'
+import os, sys
+path = sys.argv[1]
+src = r'''#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+if args[:2] == ["pr", "view"] and len(args) >= 3:
+    if os.environ.get("FAKE_PR_ERROR") == "1":
+        sys.stderr.write("fake gh: pr read failed\n"); raise SystemExit(2)
+    merged = set((os.environ.get("FAKE_MERGED_PRS") or "").split())
+    if args[2] in merged:
+        print(json.dumps({"state": "MERGED", "mergedAt": "2026-07-12T00:00:00Z"}))
+    else:
+        print(json.dumps({"state": "OPEN", "mergedAt": None}))
+    raise SystemExit(0)
+if args[:2] == ["issue", "view"] and len(args) >= 3:
+    d = os.environ.get("FAKE_ISSUE_DIR") or ""
+    p = os.path.join(d, args[2] + ".body") if d else ""
+    if p and os.path.isfile(p):
+        with open(p, encoding="utf-8") as h:
+            sys.stdout.write(h.read())
+        raise SystemExit(0)
+    sys.stderr.write("fake gh: no Issue #%s\n" % args[2]); raise SystemExit(1)
+sys.stderr.write("fake gh: unexpected call %s\n" % " ".join(args)); raise SystemExit(3)
+'''
+with open(path, "w", encoding="utf-8") as h:
+    h.write(src)
+os.chmod(path, 0o755)
+PY
+}
+FAKE_BIN="$WORK/fake-bin"; mkdir -p "$FAKE_BIN" || gov_fail "could not make fake-bin"
+write_fake_gh "$FAKE_BIN/gh"
+gh_finish() { PATH="$FAKE_BIN:$PATH" contract finish "$@"; }
+
+# (7f, findings 1+2) plan complete RE-DERIVES every terminal claim: the matrix re-validates
+# (idc_matrix_check), the planning PR merged-state is read for REAL (gh pr view — never a caller
+# state), the decomposition children EXIST on the tracker, and pointers_retired is cross-checked
+# against the decomposed set. Fresh filesystem board with a consideration (#1) + its child (#2).
+REPO_PLAN="$WORK/repo-plan"; mkdir -p "$REPO_PLAN/docs/workflow/pillar-matrices"
+printf 'backend: filesystem\n' > "$REPO_PLAN/docs/workflow/tracker-config.yaml"
+python3 "$GOV_TRK" --tracker "$REPO_PLAN/TRACKER.md" init >/dev/null || gov_fail "could not init REPO_PLAN"
+python3 "$GOV_TRK" --tracker "$REPO_PLAN/TRACKER.md" create --title "consider dark mode" \
+  --stage Consideration --status Todo >/dev/null || gov_fail "could not create consideration #1"
+python3 "$GOV_TRK" --tracker "$REPO_PLAN/TRACKER.md" create --title "dark mode child" \
+  --stage Buildable --status Todo >/dev/null || gov_fail "could not create child #2"
+SP="sp-$$-$(basename "$WORK")"
 GOODMX="docs/workflow/pillar-matrices/good.yaml"
-cat > "$REPO3/$GOODMX" <<'YML'
+cat > "$REPO_PLAN/$GOODMX" <<'YML'
 phase: Phase 1
 pillars:
   - id: pillar-a
@@ -354,18 +418,41 @@ pillars:
     surfaces: [src/b/]
     blocks_on: []
 YML
-plan_complete_ev() {  # $1 = matrix repo-relative locator
-  printf '{"schema_version":1,"refs":{"matrix":"%s","planning_pr":42,"planning_pr_state":"MERGED","decompositions":{"5":101},"pointers_retired":[5]}}' "$1"
+plan_ev() {  # $1 = matrix locator, $2 = decompositions JSON, $3 = pointers_retired JSON
+  printf '{"schema_version":1,"refs":{"matrix":"%s","planning_pr":42,"decompositions":%s,"pointers_retired":%s}}' "$1" "$2" "$3"
 }
-contract start --repo "$REPO3" --session "$S3" --command plan --plugin-root "$GOV_PLUGIN" \
+contract start --repo "$REPO_PLAN" --session "$SP" --command plan --plugin-root "$GOV_PLUGIN" \
   --args 'p' --source user >/dev/null
-contract finish --repo "$REPO3" --session "$S3" --command plan --status complete \
-  --evidence-json "$(plan_complete_ev "$GOODMX")" \
-  || gov_fail "(7f) a plan complete backed by a re-validated matrix + merged PR + real decomposition children was rejected"
-echo "  ok (7f) plan complete re-validates the durable matrix artifact (idc_matrix_check), not a caller 'pass' string"
-# (7f-sabotage) a colliding matrix (same wave, shared surface) and a missing matrix both fail closed.
+FAKE_MERGED_PRS="42" gh_finish --repo "$REPO_PLAN" --session "$SP" --command plan --status complete \
+  --evidence-json "$(plan_ev "$GOODMX" '{"1":2}' '[1]')" \
+  || gov_fail "(7f) a plan complete backed by matrix + REAL merged-PR read + existing child + retired pointer was rejected"
+echo "  ok (7f) plan complete re-derives matrix + real merged-PR read + existing children + retired pointers"
+
+# (7f-sabotage) each re-derived claim fails closed independently.
+contract start --repo "$REPO_PLAN" --session "$SP" --command plan --plugin-root "$GOV_PLUGIN" --args 'p2' --source user >/dev/null
+# (i) the planning PR is NOT merged (real gh read shows OPEN) — a caller cannot assert MERGED.
+if FAKE_MERGED_PRS="" gh_finish --repo "$REPO_PLAN" --session "$SP" --command plan --status complete \
+     --evidence-json "$(plan_ev "$GOODMX" '{"1":2}' '[1]')" 2>/dev/null; then
+  gov_fail "(7f-sabotage) a plan complete whose planning PR reads NOT merged (real gh) was accepted"
+fi
+# (ii) gh cannot establish the PR state (error) — fail closed, never trust the caller.
+if FAKE_PR_ERROR=1 gh_finish --repo "$REPO_PLAN" --session "$SP" --command plan --status complete \
+     --evidence-json "$(plan_ev "$GOODMX" '{"1":2}' '[1]')" 2>/dev/null; then
+  gov_fail "(7f-sabotage) a plan complete accepted an UNVERIFIABLE planning-PR merged-state (gh errored)"
+fi
+# (iii) a decomposition child that does NOT exist on the tracker (PR merged so it reaches the child check).
+if FAKE_MERGED_PRS="42" gh_finish --repo "$REPO_PLAN" --session "$SP" --command plan --status complete \
+     --evidence-json "$(plan_ev "$GOODMX" '{"1":999}' '[1]')" 2>/dev/null; then
+  gov_fail "(7f-sabotage) a plan complete naming a decomposition child ABSENT from the tracker was accepted"
+fi
+# (iv) pointers_retired is EMPTY while a consideration was decomposed — the retired set must cover it.
+if FAKE_MERGED_PRS="42" gh_finish --repo "$REPO_PLAN" --session "$SP" --command plan --status complete \
+     --evidence-json "$(plan_ev "$GOODMX" '{"1":2}' '[]')" 2>/dev/null; then
+  gov_fail "(7f-sabotage) a plan complete with pointers_retired:[] against a real decomposition was accepted"
+fi
+# (v) a colliding matrix (same wave, shared surface) still fails closed.
 BADMX="docs/workflow/pillar-matrices/collide.yaml"
-cat > "$REPO3/$BADMX" <<'YML'
+cat > "$REPO_PLAN/$BADMX" <<'YML'
 phase: Phase 1
 pillars:
   - id: pillar-a
@@ -379,23 +466,86 @@ pillars:
     surfaces: [src/x/]
     blocks_on: []
 YML
-contract start --repo "$REPO3" --session "$S3" --command plan --plugin-root "$GOV_PLUGIN" \
-  --args 'p2' --source user >/dev/null
-if contract finish --repo "$REPO3" --session "$S3" --command plan --status complete \
-     --evidence-json "$(plan_complete_ev "$BADMX")" 2>/dev/null; then
-  gov_fail "(7f-sabotage) a plan complete whose referenced matrix FAILS deconfliction (same-wave shared surface) was accepted"
+if FAKE_MERGED_PRS="42" gh_finish --repo "$REPO_PLAN" --session "$SP" --command plan --status complete \
+     --evidence-json "$(plan_ev "$BADMX" '{"1":2}' '[1]')" 2>/dev/null; then
+  gov_fail "(7f-sabotage) a plan complete whose matrix FAILS deconfliction was accepted"
 fi
-if contract finish --repo "$REPO3" --session "$S3" --command plan --status complete \
-     --evidence-json "$(plan_complete_ev "docs/workflow/pillar-matrices/nope.yaml")" 2>/dev/null; then
-  gov_fail "(7f-sabotage) a plan complete referencing a MISSING matrix file was accepted"
-fi
-contract finish --repo "$REPO3" --session "$S3" --command plan --status complete \
-  --evidence-json "$(plan_complete_ev "$GOODMX")" >/dev/null \
+FAKE_MERGED_PRS="42" gh_finish --repo "$REPO_PLAN" --session "$SP" --command plan --status complete \
+  --evidence-json "$(plan_ev "$GOODMX" '{"1":2}' '[1]')" >/dev/null \
   || gov_fail "(7f-sabotage) could not honestly close the plan record"
-echo "  ok (7f-sabotage) plan complete fails closed on a colliding or missing matrix artifact"
+echo "  ok (7f-sabotage) plan complete fails closed on unmerged/unverifiable PR, missing child, empty pointers, colliding matrix"
 
-# (7g, finding 1) build complete requires STRUCTURED merged-PR receipts (a real PR ref + MERGED
-# state), not an arbitrary receipt string; the empty-frontier path is oracle-backed. Runs on a FRESH
+# (7f-gh, finding 2) on the GITHUB backend the closeout RE-RUNS the shipped github-only schema +
+# provenance checks against each decomposition child's LIVE body (fake gh). A schema-invalid body or
+# an absent/mismatched idc-provenance marker fails closed.
+REPO_PLAN_GH="$WORK/repo-plan-gh"; mkdir -p "$REPO_PLAN_GH/docs/workflow/pillar-matrices"
+printf 'backend: github\nproject_number: 10\n' > "$REPO_PLAN_GH/docs/workflow/tracker-config.yaml"
+GHMX="docs/workflow/pillar-matrices/p1-matrix.yaml"
+cat > "$REPO_PLAN_GH/$GHMX" <<'YML'
+phase: Phase 1
+pillars:
+  - id: pillar-a
+    wave: 1
+    domain: ui
+    surfaces: [src/a/]
+    blocks_on: []
+YML
+ISSUE_DIR="$WORK/gh-issue-bodies"; mkdir -p "$ISSUE_DIR"
+# a schema-valid Buildable body carrying a valid idc-provenance marker for pillar-a in p1-matrix.yaml.
+cat > "$ISSUE_DIR/2.body" <<'MD'
+GOAL: Users can toggle dark mode in Settings and it persists across sessions.
+VERIFICATION SURFACE: `pnpm test settings/theme` green; new test theme_persist.test added first (red→green).
+CONSTRAINTS: existing settings unchanged; no new deps; no-punt — incidental fixes land here.
+BOUNDARIES: touch src/settings/, src/theme/ ; off-limits src/auth/, src/billing/
+ITERATION POLICY: record-and-vary
+BLOCKED-STOP: halt after 3 failed hypotheses or on a missing design token; surface evidence.
+ASSUMPTIONS: "System" follows OS at launch (vetoable).
+---
+Dependencies: blocked-by #0 (none)
+Trace: pillars/dark-mode-toggle-plan.md · PRD §Appearance
+<!-- idc-provenance: {"matrix":"p1-matrix.yaml","pillar":"pillar-a"} -->
+MD
+SPG="spg-$$-$(basename "$WORK")"
+contract start --repo "$REPO_PLAN_GH" --session "$SPG" --command plan --plugin-root "$GOV_PLUGIN" --args 'pg' --source user >/dev/null
+FAKE_MERGED_PRS="42" FAKE_ISSUE_DIR="$ISSUE_DIR" PATH="$FAKE_BIN:$PATH" contract finish --repo "$REPO_PLAN_GH" --session "$SPG" --command plan --status complete \
+  --evidence-json "$(plan_ev "$GHMX" '{"1":2}' '[1]')" \
+  || gov_fail "(7f-gh) a github plan complete with schema-valid, provenance-stamped children was rejected"
+echo "  ok (7f-gh) github plan complete re-runs schema + provenance on each child's live body"
+# (7f-gh-sabotage) a schema-invalid child body fails closed.
+printf 'GOAL: make settings better\nBOUNDARIES: touch everything\n' > "$ISSUE_DIR/2.body"
+contract start --repo "$REPO_PLAN_GH" --session "$SPG" --command plan --plugin-root "$GOV_PLUGIN" --args 'pg2' --source user >/dev/null
+if FAKE_MERGED_PRS="42" FAKE_ISSUE_DIR="$ISSUE_DIR" PATH="$FAKE_BIN:$PATH" contract finish --repo "$REPO_PLAN_GH" --session "$SPG" --command plan --status complete \
+     --evidence-json "$(plan_ev "$GHMX" '{"1":2}' '[1]')" 2>/dev/null; then
+  gov_fail "(7f-gh-sabotage) a github plan complete whose child body FAILS the schema check was accepted"
+fi
+# (7f-gh-sabotage) a child body missing the idc-provenance marker fails closed.
+cat > "$ISSUE_DIR/2.body" <<'MD'
+GOAL: Users can toggle dark mode in Settings and it persists across sessions.
+VERIFICATION SURFACE: `pnpm test settings/theme` green; red→green.
+CONSTRAINTS: no new deps.
+BOUNDARIES: touch src/theme/ ; off-limits src/auth/
+ITERATION POLICY: record-and-vary
+BLOCKED-STOP: halt after 3 failed hypotheses.
+ASSUMPTIONS: none.
+---
+Dependencies: blocked-by #0 (none)
+Trace: pillars/x-plan.md
+MD
+contract start --repo "$REPO_PLAN_GH" --session "$SPG" --command plan --plugin-root "$GOV_PLUGIN" --args 'pg3' --source user >/dev/null
+if FAKE_MERGED_PRS="42" FAKE_ISSUE_DIR="$ISSUE_DIR" PATH="$FAKE_BIN:$PATH" contract finish --repo "$REPO_PLAN_GH" --session "$SPG" --command plan --status complete \
+     --evidence-json "$(plan_ev "$GHMX" '{"1":2}' '[1]')" 2>/dev/null; then
+  gov_fail "(7f-gh-sabotage) a github plan complete whose child lacks a valid idc-provenance marker was accepted"
+fi
+# (7f-gh-sabotage) a child issue that does not exist (gh issue view errors) fails closed.
+contract start --repo "$REPO_PLAN_GH" --session "$SPG" --command plan --plugin-root "$GOV_PLUGIN" --args 'pg4' --source user >/dev/null
+if FAKE_MERGED_PRS="42" FAKE_ISSUE_DIR="$ISSUE_DIR" PATH="$FAKE_BIN:$PATH" contract finish --repo "$REPO_PLAN_GH" --session "$SPG" --command plan --status complete \
+     --evidence-json "$(plan_ev "$GHMX" '{"1":404}' '[1]')" 2>/dev/null; then
+  gov_fail "(7f-gh-sabotage) a github plan complete naming a NONEXISTENT child issue was accepted"
+fi
+echo "  ok (7f-gh-sabotage) github plan complete fails closed on schema-invalid, provenance-missing, or absent children"
+
+# (7g, finding 1) build complete RE-READS each receipt's PR merged-state for real (gh pr view) — a
+# caller `state:"MERGED"` is never trusted; the empty-frontier path is oracle-backed. Runs on a FRESH
 # clean board (REPO5) — REPO3 carries case-7b's intentionally-invalid intake manifest, which correctly
 # makes the oracle fail-closed (invalid), so the oracle-backed empty-frontier close needs a clean repo.
 REPO5="$WORK/repo5"; mkdir -p "$REPO5/docs/workflow"
@@ -404,25 +554,30 @@ python3 "$GOV_TRK" --tracker "$REPO5/TRACKER.md" init >/dev/null || gov_fail "co
 S6="s6-$$-$(basename "$WORK")"
 contract start --repo "$REPO5" --session "$S6" --command build --plugin-root "$GOV_PLUGIN" \
   --args 'bb' --source user >/dev/null
-contract finish --repo "$REPO5" --session "$S6" --command build --status complete \
-  --evidence-json '{"schema_version":1,"refs":{"receipts":{"101":{"pr":55,"state":"MERGED"}}}}' \
-  || gov_fail "(7g) a build complete with a structured merged-PR receipt was rejected"
-echo "  ok (7g) build complete requires structured merged-PR receipts (real PR ref + MERGED state)"
-# (7g-sabotage) an arbitrary receipt string, and an unmerged-PR receipt, both fail closed.
+FAKE_MERGED_PRS="55" gh_finish --repo "$REPO5" --session "$S6" --command build --status complete \
+  --evidence-json '{"schema_version":1,"refs":{"receipts":{"101":{"pr":55}}}}' \
+  || gov_fail "(7g) a build complete whose receipt PR reads MERGED (real gh) was rejected"
+echo "  ok (7g) build complete re-reads each receipt PR's merged-state for real (gh pr view)"
+# (7g-sabotage) an arbitrary receipt string, an unmerged PR (real read OPEN), an UNVERIFIABLE read
+# (gh errored), and a caller state:"MERGED" that the real read contradicts, all fail closed.
 contract start --repo "$REPO5" --session "$S6" --command build --plugin-root "$GOV_PLUGIN" \
   --args 'bb2' --source user >/dev/null
-if contract finish --repo "$REPO5" --session "$S6" --command build --status complete \
+if FAKE_MERGED_PRS="55" gh_finish --repo "$REPO5" --session "$S6" --command build --status complete \
      --evidence-json '{"schema_version":1,"refs":{"receipts":{"101":"done"}}}' 2>/dev/null; then
   gov_fail "(7g-sabotage) a build complete with an ARBITRARY receipt string (no real PR reference) was accepted"
 fi
-if contract finish --repo "$REPO5" --session "$S6" --command build --status complete \
-     --evidence-json '{"schema_version":1,"refs":{"receipts":{"101":{"pr":55,"state":"OPEN"}}}}' 2>/dev/null; then
-  gov_fail "(7g-sabotage) a build complete whose receipt PR is not MERGED was accepted"
+if FAKE_MERGED_PRS="" gh_finish --repo "$REPO5" --session "$S6" --command build --status complete \
+     --evidence-json '{"schema_version":1,"refs":{"receipts":{"101":{"pr":55,"state":"MERGED"}}}}' 2>/dev/null; then
+  gov_fail "(7g-sabotage) a build complete whose PR reads NOT merged (real gh) was accepted despite a caller state:MERGED"
+fi
+if FAKE_PR_ERROR=1 gh_finish --repo "$REPO5" --session "$S6" --command build --status complete \
+     --evidence-json '{"schema_version":1,"refs":{"receipts":{"101":{"pr":55}}}}' 2>/dev/null; then
+  gov_fail "(7g-sabotage) a build complete accepted an UNVERIFIABLE PR merged-state (gh errored)"
 fi
 contract finish --repo "$REPO5" --session "$S6" --command build --status complete \
   --evidence-json '{"schema_version":1,"refs":{"frontier":"none-eligible"}}' >/dev/null \
   || gov_fail "(7g) a build complete via an oracle-backed empty ready frontier was rejected"
-echo "  ok (7g-sabotage) build complete fails closed on an arbitrary/unmerged receipt; empty frontier is oracle-backed"
+echo "  ok (7g-sabotage) build complete fails closed on arbitrary/unmerged/unverifiable receipts; empty frontier is oracle-backed"
 
 # (8) Finding 5 — an EMPTY session identity is refused fail-closed. Codex/Pi fire no
 # UserPromptExpansion and set no CLAUDE_CODE_SESSION_ID, so a bare `--session "$CLAUDE_CODE_SESSION_ID"`
@@ -442,32 +597,76 @@ if contract finish --repo "$REPO" --session "" --command think --status waiting_
 fi
 echo "  ok (8) an empty session identity is refused fail-closed (no anonymous record opened or finished)"
 
-# (9) Finding 4 — Uninstall's closeout must run WHILE the repo is still governed. Uninstall removes
-# docs/workflow/tracker-config.yaml (what marks the repo governed); once it is gone the ledger is a
-# repo-gated no-op and a finish CANNOT land, so the command must finish BEFORE that removal. Walk both
-# orders on a real governed repo. (Never restore via `git checkout` — REPO4 is a throwaway; just rm.)
-REPO4="$WORK/repo4"; mkdir -p "$REPO4/docs/workflow"
-printf 'backend: filesystem\n' > "$REPO4/docs/workflow/tracker-config.yaml"
+# (9) Round-2 finding F4-r2 — Uninstall must do ALL destructive work EXCEPT removing the governance
+# anchor (tracker-config.yaml) + ledger substrate, THEN `finish` validates that work by INDEPENDENT
+# absence checks (footprints gone, settings mutated, archive present, anchor still present). Only
+# after a successful finish does the final anchor removal run. So a finish can no longer record
+# 'applied' BEFORE the uninstall actually happened. (Never restore via `git checkout` — REPO4 is a
+# throwaway; just rm.)
+REPO4="$WORK/repo4"; mkdir -p "$REPO4/docs/workflow" "$REPO4/.claude"
+printf 'backend: filesystem\n' > "$REPO4/docs/workflow/tracker-config.yaml"   # the governance anchor
+printf 'workflow\n' > "$REPO4/WORKFLOW.md"
+printf 'machine\n' > "$REPO4/docs/workflow/workflow-machine.yaml"
+printf 'idc data\n' > "$REPO4/TRACKER.md"
+printf '{"enabledPlugins":{"idc@idc-workflow":true},"theme":"dark"}\n' > "$REPO4/.claude/settings.json"
+ARCHIVE_REL="idc-archive-20260712-000000.tar.gz"
 S4="s4-$$-$(basename "$WORK")"
-UNINSTALL_EV='{"schema_version":1,"refs":{"outcome":"applied","archive":"idc-archive-20260712-000000.tar.gz"}}'
-# (9a) the documented order — finish WHILE governed → succeeds and the record closes.
+applied_ev() {
+  printf '{"schema_version":1,"refs":{"outcome":"applied","removed":["WORKFLOW.md","docs/workflow/workflow-machine.yaml","TRACKER.md"],"settings":".claude/settings.json","archive":"%s"}}' "$ARCHIVE_REL"
+}
+
+# (9-sabotage, THE FIX) BEFORE the destructive work: a finish CLAIMING 'applied' while the footprints
+# are STILL PRESENT is REFUSED — finish independently checks each removed path is absent. Red-when-
+# broken: skip the absence checks in _v_uninstall ⇒ 'applied' is recorded before the work happened.
 contract start --repo "$REPO4" --session "$S4" --command uninstall --plugin-root "$GOV_PLUGIN" \
   --args 'uninstall' --source user >/dev/null
-contract finish --repo "$REPO4" --session "$S4" --command uninstall --status complete \
-  --evidence-json "$UNINSTALL_EV" \
-  || gov_fail "(9a) an uninstall finish WHILE the repo is still governed was rejected — the documented order must succeed"
-[ "$(contract status --repo "$REPO4" --session "$S4" --json | json_count active)" -eq 0 ] \
-  || gov_fail "(9a) the uninstall record did not close on a governed-repo finish"
-# (9b) the WHY: after tracker-config.yaml is removed the repo is ungoverned and a finish CANNOT land —
-# exactly why the closeout must PRECEDE the removal.
-contract start --repo "$REPO4" --session "$S4" --command uninstall --plugin-root "$GOV_PLUGIN" \
-  --args 'uninstall again' --source user >/dev/null
-rm -f "$REPO4/docs/workflow/tracker-config.yaml"   # Phase 3's removal ungoverns the repo
 if contract finish --repo "$REPO4" --session "$S4" --command uninstall --status complete \
-     --evidence-json "$UNINSTALL_EV" 2>/dev/null; then
-  gov_fail "(9b) an uninstall finish AFTER the repo was ungoverned unexpectedly succeeded — the closeout must run BEFORE the tracker-config.yaml removal"
+     --evidence-json "$(applied_ev)" 2>/dev/null; then
+  gov_fail "(9-sabotage) an uninstall recorded 'applied' while its footprints were STILL PRESENT (complete-before-the-work)"
 fi
-echo "  ok (9) uninstall finishes its record WHILE governed (a post-ungovern finish cannot land — closeout must precede removal)"
+# Now perform the destructive work EXCEPT removing the anchor (tracker-config.yaml stays until AFTER
+# the finish): remove the footprints + strip ONLY the enablement key.
+rm -f "$REPO4/WORKFLOW.md" "$REPO4/docs/workflow/workflow-machine.yaml" "$REPO4/TRACKER.md"
+python3 "$GOV_PLUGIN/scripts/idc_settings_json.py" disable "$REPO4/.claude/settings.json" idc@idc-workflow >/dev/null \
+  || gov_fail "(9) could not strip the enablement key"
+# (9-sabotage) with the footprints gone but the archive file still MISSING, finish still refuses.
+if contract finish --repo "$REPO4" --session "$S4" --command uninstall --status complete \
+     --evidence-json "$(applied_ev)" 2>/dev/null; then
+  gov_fail "(9-sabotage) an applied uninstall was accepted with a MISSING archive file"
+fi
+: > "$REPO4/$ARCHIVE_REL"
+# (9a) NOW the finish lands WHILE the repo is still governed: every removed footprint is absent, the
+# settings key is stripped, the archive exists, and the anchor is still present.
+contract finish --repo "$REPO4" --session "$S4" --command uninstall --status complete \
+  --evidence-json "$(applied_ev)" \
+  || gov_fail "(9a) an uninstall finish whose independently-verified work is complete (footprints gone, settings stripped, archive present, anchor present) was rejected"
+[ "$(contract status --repo "$REPO4" --session "$S4" --json | json_count active)" -eq 0 ] \
+  || gov_fail "(9a) the uninstall record did not close on the verified finish"
+echo "  ok (9a) uninstall 'applied' finish is validated by INDEPENDENT absence checks (footprints gone, settings stripped, archive present)"
+
+# (9b) sabotage ONE removal: a footprint that is STILL PRESENT after the removals fails closed.
+printf 'not actually removed\n' > "$REPO4/WORKFLOW.md"
+contract start --repo "$REPO4" --session "$S4" --command uninstall --plugin-root "$GOV_PLUGIN" \
+  --args 'uninstall2' --source user >/dev/null
+if contract finish --repo "$REPO4" --session "$S4" --command uninstall --status complete \
+     --evidence-json "$(applied_ev)" 2>/dev/null; then
+  gov_fail "(9b) an applied uninstall was accepted with a footprint (WORKFLOW.md) STILL PRESENT (one removal skipped)"
+fi
+rm -f "$REPO4/WORKFLOW.md"
+contract finish --repo "$REPO4" --session "$S4" --command uninstall --status complete \
+  --evidence-json "$(applied_ev)" >/dev/null || gov_fail "(9b) could not honestly close after re-removing the footprint"
+echo "  ok (9b) an applied uninstall fails closed when ANY documented removal did not actually happen"
+
+# (9c) the WHY the anchor removal is the single POST-finish step: after tracker-config.yaml is gone
+# the repo is ungoverned and a finish CANNOT land — so it must run only AFTER a successful finish.
+contract start --repo "$REPO4" --session "$S4" --command uninstall --plugin-root "$GOV_PLUGIN" \
+  --args 'uninstall3' --source user >/dev/null
+rm -f "$REPO4/docs/workflow/tracker-config.yaml"   # the single post-finish anchor removal (done early here to prove the why)
+if contract finish --repo "$REPO4" --session "$S4" --command uninstall --status complete \
+     --evidence-json "$(applied_ev)" 2>/dev/null; then
+  gov_fail "(9c) an uninstall finish AFTER the anchor was removed unexpectedly succeeded — the anchor removal must be the POST-finish step"
+fi
+echo "  ok (9c) the governance anchor removal is the single POST-finish step (a post-anchor-removal finish cannot land)"
 
 # (10) Finding 2 — intake mode is DURABLE on the record: a think started with `--doc/--unit` records
 # that fact, and intake coverage is re-verified from the RECORD on EVERY closeout path — even a finish
@@ -540,5 +739,110 @@ contract finish --repo "$REPO3" --session "$S5" --command think --status complet
   --evidence-json "$THINK_COMPLETE_BARE" \
   || gov_fail "(10b) an intake-mode think whose recorded coverage is satisfied (Drive materialized, U1/U2 durable) was refused even though the finish omitted the intake fields"
 echo "  ok (10b) an intake-mode record with satisfied coverage still closes honestly (coverage from the record, not the caller)"
+
+# ============================================================================================
+# (11) Round-2 finding F3-r2 — Think intake IDENTITY is correct + MONOTONIC. Intake mode is stamped
+# iff the invocation binds a manifest per the brief's arg contract (BOTH `--doc` AND `--unit`); a
+# plain anchor-doc Think (`--doc <anchor>` with NO `--unit`) must NOT be intake-stamped. And the
+# marker is monotonic for the session: a second `command_start` for the same command while an
+# intake-mode record is active carries the marker forward — it can never silently shed it.
+
+# (11a) a plain anchor-doc Think (`--doc <anchor>`, no `--unit`) is NOT intake-mode: it closes with a
+# bare think complete (no intake fields), because no coverage obligation was ever stamped.
+# Red-when-broken: stamp intake mode on any `--doc` ⇒ the empty selection makes coverage reject this
+# honest close ⇒ FAIL (a plain anchor-doc Think can never close — the identity bug).
+ANCHOR_REL="anchor-note.md"
+printf '# an ordinary anchor document\n\nnot an intake manifest\n' > "$REPO3/$ANCHOR_REL"
+S7="s7-$$-$(basename "$WORK")"
+contract start --repo "$REPO3" --session "$S7" --command think --plugin-root "$GOV_PLUGIN" \
+  --args "--doc $ANCHOR_REL" --source user >/dev/null
+contract finish --repo "$REPO3" --session "$S7" --command think --status complete \
+  --evidence-json "$THINK_COMPLETE_BARE" \
+  || gov_fail "(11a) a plain anchor-doc Think (--doc with NO --unit) was wrongly intake-stamped and could not close (intake identity bug)"
+echo "  ok (11a) a plain anchor-doc Think (--doc, no --unit) is NOT intake-stamped and closes honestly"
+
+# (11b) MONOTONICITY: start intake-mode (--doc/--unit on an UNMAT manifest whose Drive is NOT
+# materialized), then RESTART the same session's think with PLAIN args, then finish complete WITHOUT
+# the intake fields. The re-start must carry the intake marker forward, so coverage is still enforced
+# from the record and the drop is REFUSED. Red-when-broken: let command_start shed the marker on a
+# plain re-start ⇒ the record looks non-intake ⇒ the bare complete slips past coverage ⇒ FAIL.
+S8="s8-$$-$(basename "$WORK")"
+contract start --repo "$REPO3" --session "$S8" --command think --plugin-root "$GOV_PLUGIN" \
+  --args "--doc $UNMAT_REL --unit Drive" --source user >/dev/null
+contract start --repo "$REPO3" --session "$S8" --command think --plugin-root "$GOV_PLUGIN" \
+  --args 'plain restart, no intake args' --source user >/dev/null
+if contract finish --repo "$REPO3" --session "$S8" --command think --status complete \
+     --evidence-json "$THINK_COMPLETE_BARE" 2>/dev/null; then
+  gov_fail "(11b) a plain think RE-START shed the intake marker, letting an intake-mode run drop its selected unit by omitting the intake fields at finish (monotonicity bypass)"
+fi
+[ "$(contract status --repo "$REPO3" --session "$S8" --json | json_count active)" -eq 1 ] \
+  || gov_fail "(11b) the rejected monotonicity-bypass finish must leave the think record active"
+echo "  ok (11b) the intake marker is monotonic — a plain re-start carries it forward, coverage still enforced"
+
+# ============================================================================================
+# (12) Round-2 finding F5-r2 — Autorun `waiting_gate` must CONSULT THE ORACLE to confirm the named
+# gates are genuinely the live blocking state; a nonempty caller string list is not proof. A
+# nonexistent/unreadable repo fails closed (the review's probe).
+# direct_validate: isolate the validator exactly as the reviewer probed it (validate_closeout is the
+# unit under test; the CLI's active-record check would otherwise mask a nonexistent-repo accept).
+direct_validate() {  # $1=command $2=status $3=evidence-json $4=repo ; prints "ok" or "reject:<code>"
+  SCRIPTS_DIR="$GOV_PLUGIN/scripts" python3 - "$1" "$2" "$3" "$4" <<'PY'
+import json, os, sys
+sys.path.insert(0, os.environ["SCRIPTS_DIR"])
+import idc_command_contract as cc
+cmd, status, ev_json, repo = sys.argv[1:]
+res = cc.validate_closeout(cmd, status, json.loads(ev_json), repo=repo, session="probe-session")
+print("ok" if res.ok else f"reject:{res.reason_code}")
+PY
+}
+
+REPO_GATE="$WORK/repo-gate"; mkdir -p "$REPO_GATE/docs/workflow"
+printf 'backend: filesystem\n' > "$REPO_GATE/docs/workflow/tracker-config.yaml"
+python3 "$GOV_TRK" --tracker "$REPO_GATE/TRACKER.md" init >/dev/null || gov_fail "could not init REPO_GATE board"
+python3 "$GOV_TRK" --tracker "$REPO_GATE/TRACKER.md" create \
+  --title "[operator-action] approve the Think PR" --status Todo >/dev/null \
+  || gov_fail "could not create the operator gate"
+SG="sg-$$-$(basename "$WORK")"
+
+# (12a) a governed repo whose oracle reports ONLY a live human gate accepts autorun waiting_gate when
+# the named gate is the oracle's live blocking gate.
+contract start --repo "$REPO_GATE" --session "$SG" --command autorun --plugin-root "$GOV_PLUGIN" \
+  --args 'a' --source user >/dev/null
+contract finish --repo "$REPO_GATE" --session "$SG" --command autorun --status waiting_gate \
+  --evidence-json '{"schema_version":1,"refs":{"gates":["#1"]}}' \
+  || gov_fail "(12a) an autorun waiting_gate naming the oracle's live human gate was rejected"
+echo "  ok (12a) autorun waiting_gate accepts the oracle's live human gate"
+
+# (12b) THE PROBE: a nonexistent repo must FAIL CLOSED — the oracle cannot be established, so the
+# named gate is unproven. Red-when-broken: skip the oracle consult in _v_autorun ⇒ this is accepted.
+r="$(direct_validate autorun waiting_gate '{"schema_version":1,"refs":{"gates":["#1"]}}' "$WORK/does-not-exist")"
+[ "$r" != "ok" ] || gov_fail "(12b) autorun waiting_gate returned success against a NONEXISTENT repo (oracle not consulted)"
+echo "  ok (12b) autorun waiting_gate fails closed on a nonexistent/unreadable repo (oracle unproven)"
+
+# (12c) a governed repo at FIXPOINT (empty board, no gate) rejects a fabricated gate claim — the
+# oracle reports fixpoint, not a human-gate wait, so the named gates are not the live blocking state.
+r="$(direct_validate autorun waiting_gate '{"schema_version":1,"refs":{"gates":["#99"]}}' "$REPO5")"
+[ "$r" != "ok" ] || gov_fail "(12c) autorun waiting_gate accepted a fabricated gate on a fixpoint board (oracle contradicts a gate wait)"
+echo "  ok (12c) autorun waiting_gate rejects a fabricated gate when the oracle reports fixpoint (not a gate wait)"
+
+# ============================================================================================
+# (13) Round-2 finding F5-r2 — Recirculate `complete` must RE-DERIVE that reconciliation is
+# reconciled/complete from durable state (a read-only re-run of the deterministic reconciliation),
+# never a caller `reconciliation:"ran"` string; a nonexistent/unreadable repo fails closed (the probe).
+SR="sr-$$-$(basename "$WORK")"
+# (13a) a governed repo with a drained inbox re-derives reconcile=complete → recirculate complete is
+# accepted (the caller need not — and cannot — assert reconciliation ran).
+contract start --repo "$REPO5" --session "$SR" --command recirculate --plugin-root "$GOV_PLUGIN" \
+  --args 'r' --source user >/dev/null
+contract finish --repo "$REPO5" --session "$SR" --command recirculate --status complete \
+  --evidence-json '{"schema_version":1,"refs":{"closeouts":{"#12":"absorbed"}}}' \
+  || gov_fail "(13a) a recirculate complete whose reconciliation re-derives from a drained inbox was rejected"
+echo "  ok (13a) recirculate complete re-derives reconciliation from durable state (drained inbox)"
+
+# (13b) THE PROBE: a nonexistent repo must FAIL CLOSED — the reconciliation re-derives 'ungoverned',
+# so no caller `reconciliation:"ran"` can clear it. Red-when-broken: trust refs.reconciliation ⇒ accept.
+r="$(direct_validate recirculate complete '{"schema_version":1,"refs":{"reconciliation":"ran","closeouts":{"#12":"absorbed"}}}' "$WORK/does-not-exist")"
+[ "$r" != "ok" ] || gov_fail "(13b) recirculate complete returned success against a NONEXISTENT repo (reconciliation string trusted)"
+echo "  ok (13b) recirculate complete fails closed on a nonexistent/unreadable repo (reconciliation re-derived)"
 
 echo "PASS: the IDC command lifecycle envelope holds — start upserts one obligation, Stop refuses an open command with the exact finish remediation, an unknown/malformed status cannot clear it, a schema-valid + command-specific closeout ends it, no foreign session can finish another's record, and the Task-6 matrix blocks a think closeout that drops exact-once intake units, an illegal per-command status, a zero-exit blocked_external, and a foreign-session autorun drain"

@@ -232,7 +232,17 @@ Monitor it with bounded cmux checks such as `cmux top`, `cmux list-workspaces`, 
 
 ### 5. Resolve findings before moving on
 
-- Any Critical or Important finding, any `Spec compliance: FAIL`, or `Task quality: CHANGES REQUIRED` blocks the next task.
+**Terminal posture (operator directive 2026-07-16, binds Tasks 6–8 and any re-run):** the finish
+line is the incident, not perfection. A finding blocks only if it is a demonstrated, exploitable
+failure of an incident-class behavior (stale runtime admitted; plan units dropped; closeout forged
+with fake evidence; a failed read counted as a pass; a gate closed without proof) with a concrete
+repro an agent would naturally hit. Everything else is deferred hardening — ledger/known-debts,
+no fix wave. Reviewers use exactly two severity buckets (`BLOCKS` with repro / `DEFERRED`), and
+FAIL/CHANGES-REQUIRED verdicts are legal only when a BLOCKS finding exists. Hard cap: two
+posture-governed review rounds per task; if the second still returns BLOCKS findings, stop and
+bring the operator the list with a recommendation — no further wave without sign-off.
+
+- Any `BLOCKS` finding, any `Spec compliance: FAIL`, or `Task quality: CHANGES REQUIRED` blocks the next task (subject to the terminal posture and round cap above).
 - Send the complete finding set back to the same implementer for that task.
 - The fixer must append its fix and focused test receipts to the existing report file and commit the fix.
 - Generate a new review package from the original `TASK_BASE` to the new head.

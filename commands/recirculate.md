@@ -133,10 +133,15 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
 
 - **`complete`** — every requested ticket/unit has a valid closeout **and** the deterministic
   reconciliation re-derives as reconciled/complete. Evidence refs:
-  `closeouts:{<ticket|unit>:<disposition>}` (each disposition one of
-  admitted/drained/gated/paused/materialized). The validator **re-runs the deterministic reconciliation
-  read-only** and refuses the close unless the inbox re-derives as reconciled/complete — a caller
-  `reconciliation:"ran"` string is **not** proof, and a nonexistent/unreadable repo fails closed.
+  `closeouts:{<ticket|unit>:<disposition>}` — each disposition must be one of the **closed documented
+  set** `admitted`/`drained`/`gated`/`paused`/`materialized` (any other string is refused; the prose and
+  the validator agree). The validator **re-runs the deterministic reconciliation read-only** and refuses
+  the close unless the inbox re-derives as reconciled/complete — a caller `reconciliation:"ran"` string
+  is **not** proof, and a nonexistent/unreadable repo fails closed. When the run was invoked on a NAMED
+  item (`<manifest>#<unit>` or `#<ticket>`, recorded on the record at start), EVERY named item must
+  carry a closeout whose disposition is **re-checked against durable state** (a `<manifest>#<unit>` must
+  be non-`queued` in the manifest); `closeouts:{}` is valid only for a bare full-inbox drain (no named
+  item).
 - **`waiting_gate`** — a valid requirements gate / Think PR is open (a gated backflow paused behind
   its gate). Evidence refs: `gate:<ref>`.
 - **`blocked_external`** — a deterministic helper failed: `blocker:{helper, exit (nonzero),

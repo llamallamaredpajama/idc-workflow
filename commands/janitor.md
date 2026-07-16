@@ -81,14 +81,19 @@ walk-away from an open command). Janitor is a **reconciler/diagnostic** — no p
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" status \
   --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --json
-# … after the scan …
+# … after the scan, PERSIST the scan result so the closeout can RE-READ it (never a caller integer): …
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/idc_command_report.py" --cwd "$PWD" write \
+  --kind janitor --session "$CLAUDE_CODE_SESSION_ID" \
+  --payload-json '{"scanner_exit":<the scanner exit code>,"clean":<true iff exit 0>}'
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command janitor \
   --status <complete|blocked_external> --evidence-json '<envelope>'
 ```
 
 - **`complete`** — the scanner recorded a real verdict: exit **0** (COHERENT) or exit **1** (findings,
-  **without claiming clean**). Evidence refs: `scanner_exit:<0|1>`, and on exit 1
-  `scanner_clean:false` (a findings run may never report clean).
-- **`blocked_external`** — the scanner exited **2** (ground truth could not be established): `blocker:{helper,
-  exit (nonzero), diagnostic}`. Report it as blocked, never as a coherent repo.
+  **without claiming clean**). The closeout **re-reads the persisted janitor report** (`.idc-janitor-report.json`,
+  written above) — a caller `scanner_exit` integer is ignored; a findings run (exit 1) must record
+  `clean:false`. Evidence refs: `refs:{}` (the report is the proof).
+- **`blocked_external`** — the scanner exited **2** (ground truth could not be established); persist the
+  report (`scanner_exit:2`) and cite it: `blocker:{helper:"idc_git_janitor.py", exit:2, diagnostic}`
+  (the cited exit must MATCH the persisted report). Report it as blocked, never as a coherent repo.

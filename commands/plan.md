@@ -60,7 +60,10 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   rest: it confirms every decomposition child **exists** (via the tracker reader; on the github backend
   it additionally **re-runs the schema + provenance checks** on each child's live body), and it
   cross-checks `pointers_retired` against the decomposed set — an empty `pointers_retired` is valid only
-  when nothing was decomposed. No caller "pass" boolean is trusted anywhere in this proof.
+  when nothing was decomposed. It also **independently re-derives the required admitted-consideration
+  set** from the tracker: a `complete` is refused while the board still shows ANY admitted consideration
+  un-planned (omitting one drops its child + pointer obligations) — so decompose (and retire) **every**
+  admitted consideration, not just the ones you list. No caller "pass" boolean is trusted anywhere.
 - **`no_action`** — the **live oracle** reports no admitted consideration to plan (its
   `considerations` count is 0). Never claim `no_action` without that fresh oracle result.
 - **`blocked_external`** — a deterministic helper failed: `blocker:{helper, exit (nonzero),

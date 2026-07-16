@@ -315,7 +315,7 @@ def _prune_finished(commands):
 
 
 def command_start(cwd, session_id, command, plugin_version, args_sha256, source,
-                  intake_manifest=None, intake_units=None):
+                  intake_manifest=None, intake_units=None, recirc_requested=None):
     """Atomic UPSERT of the active command record by (session_id, command) — never duplicates an
     active record (a re-entry of the same command in the same session updates the one record in
     place). REPO-GATED: a silent no-op outside a governed repo (returns `{}`). Preserves the taint
@@ -349,6 +349,13 @@ def command_start(cwd, session_id, command, plugin_version, args_sha256, source,
     if intake_manifest:
         rec["intake_manifest"] = str(intake_manifest)
         rec["intake_units"] = [str(u) for u in (intake_units or [])]
+    # Durable recirculate requested-set marker (wave-3 finding 4): a /idc:recirculate run started with
+    # a named `<manifest>#<unit>` (or a bare `#<ticket>`) records the requested item(s) on the record,
+    # so the recirculate closeout re-verifies that EVERY requested item got a validated, tracker-checked
+    # disposition — never inferable only from caller-supplied finish input. A bare full-inbox drain
+    # (`/idc:recirculate` with no named item) records an empty requested set.
+    if recirc_requested:
+        rec["recirc_requested"] = [str(r) for r in recirc_requested]
     with _write_lock(cwd):  # read-modify-write must be atomic vs concurrent writers (no lost records)
         commands = _read_commands(cwd)
         replaced = False
@@ -364,6 +371,10 @@ def command_start(cwd, session_id, command, plugin_version, args_sha256, source,
                 if not intake_manifest and c.get("intake_manifest"):
                     rec["intake_manifest"] = c.get("intake_manifest")
                     rec["intake_units"] = list(c.get("intake_units") or [])
+                # MONOTONIC recirc requested-set marker: a re-start that supplies no requested set
+                # carries the prior one forward, so a plain re-entry cannot shed the coverage obligation.
+                if not recirc_requested and c.get("recirc_requested"):
+                    rec["recirc_requested"] = list(c.get("recirc_requested") or [])
                 commands[i] = rec
                 replaced = True
                 break

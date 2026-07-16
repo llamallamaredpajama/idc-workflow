@@ -175,6 +175,10 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/idc_ledger.py" --cwd "$ROOT" ensure
 # per-session sidecar (the drain writes it so the Stop gate reads the github board conjunct locally,
 # zero GraphQL on the stop path). Ensure it is ignored too, identically additive + idempotent:
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/idc_drain_verdict.py" --cwd "$ROOT" ensure-gitignore
+# The persisted per-command diagnostic reports (.idc-<kind>-report.json, Task 6 wave 3) — /idc:doctor +
+# /idc:janitor write their run's result there so the command contract re-reads the run's OWN report;
+# transient per-session working state, never committed. Ensure it is ignored too (additive, idempotent):
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/idc_command_report.py" --cwd "$ROOT" ensure-gitignore
 # The transition-journal advisory-lock sidecar (docs/workflow/transition-journal.ndjson.lock, v4
 # Phase 4 #150) — the runtime flock token rotation + journal_append create on a STABLE sidecar so the
 # journal↔rotation lock survives os.replace. Working state, never committed; a repo scaffolded before
@@ -308,8 +312,10 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   --status <complete|blocked_external> --evidence-json '<envelope>'
 ```
 
-- **`complete`** — the v2 receipt verifies **and** the running version equals the receipt version.
-  Evidence refs: `receipt_version:2`, `running_version:"<X.Y.Z>"`,
-  `receipt_plugin_version:"<X.Y.Z>"` (the two must match — a mismatch is not complete).
+- **`complete`** — the v2 receipt verifies **and** the running version equals the receipt version. The
+  closeout **re-derives** this: it parses the install receipt (must be `receipt_version: 2`) and reads
+  the **running** plugin version live from `plugin.json`, refusing unless the receipt's `plugin_version`
+  equals it — **never two caller-typed versions**. Evidence refs: `refs:{}` (optionally
+  `receipt:"<repo-rel receipt path>"` if non-default).
 - **`blocked_external`** — a diff, permission, or update failure (incl. the Phase-0 stale-runtime
   HALT or an invalid receipt): `blocker:{helper, exit (nonzero), diagnostic}`.

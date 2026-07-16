@@ -123,19 +123,28 @@ git -C "$ROOT" add .claude/settings.json 2>/dev/null || true
 [ -f "$ROOT/TRACKER.md" ] && git -C "$ROOT" rm --quiet TRACKER.md
 ```
 
-**3b — Close the command contract (the work is now verifiable).** The validator re-checks each cited
-removal is ABSENT, the settings key is stripped, the archive exists, and the anchor is still present —
+If the operator passed the opt-in GitHub flags (`--close-issues` / `--delete-board`), do that board
+work **HERE, before the finish** — ALL destructive operations must precede the closeout; the only step
+left for after the finish is the governance-anchor removal (sub-step 3c). See Phase 4 for the flag
+mechanics; run those commands at this point, not after 3b.
+
+**3b — Close the command contract (the work is now verifiable).** The validator derives the removal set
+from the install receipt and re-checks each footprint is ABSENT, the settings key is stripped, the
+archive exists, and the anchor is still present —
 a caller cannot assert `applied` without the work having happened:
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command uninstall \
   --status <complete|blocked_external> --evidence-json '<envelope>'
 ```
-- **`complete`** — either the footprints were removed, or the run is an explicit no-action. Evidence
-  refs for an applied run: `outcome:"applied"`, `removed:[<repo-relative footprint paths that are now
-  ABSENT>]` (non-empty; the validator confirms each is gone), `settings:".claude/settings.json"` (the
-  validator confirms the IDC key is stripped), and `archive:"<archive path>"` (the validator confirms
-  the file exists). For a no-op run: `outcome:"no-action"`.
+- **`complete`** — either the footprints were removed, or the run is an explicit no-action. The
+  validator **derives the removal set from the install receipt** (never a caller `removed` list): for an
+  applied run it confirms EVERY receipt-listed footprint (except the governance anchor) is now ABSENT,
+  the settings IDC key is stripped, the archive file exists, and the anchor is still present. Evidence
+  refs for an applied run: `outcome:"applied"`, `settings:".claude/settings.json"`, `archive:"<archive
+  path>"`. For a no-op run: `outcome:"no-action"` — the validator re-reads the receipt and confirms
+  every non-anchor footprint is ALREADY absent (a no-action with any footprint still present, or with no
+  receipt to prove it, is refused).
 - **`blocked_external`** — a safety refusal (a dirty tree, an unverifiable board, an invalid receipt):
   `blocker:{helper, exit (nonzero), diagnostic}`. Report it as blocked; do not proceed to remove.
 
@@ -150,6 +159,10 @@ stay untracked). Capture the commit SHA for the summary. On a re-run with nothin
 make no commit and report `skipped-absent` across the board.
 
 ## Phase 4 — GitHub side (opt-in; default leaves it untouched)
+
+**Ordering:** when these flags are passed, run them in Phase 3a **BEFORE the 3b finish** — every
+destructive operation completes before the closeout; only the governance-anchor removal is post-finish.
+This section documents the flag mechanics; it is not a later phase.
 
 Default: the board and all issues are left exactly as they are. Only on the flags:
 

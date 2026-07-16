@@ -105,16 +105,25 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   --status <complete|waiting_gate|blocked_external> --evidence-json '<envelope>'
 ```
 
-- **`complete`** — the operator merged the Think PR. Evidence refs: `consideration:"pass"`, `think_pr`,
-  `think_pr_state:"MERGED"`, `gate`, `gate_markers:1`, `gate_disposition:"disposed"`, `pointer`,
-  `pointer_state:"admitted"`, and — for a `--doc` run — `intake_manifest:"<repo-rel>"` +
+Evidence is a set of **reference keys** — the validator RE-DERIVES every terminal fact for itself (it
+re-runs the consideration checker, reads the PR/gate bodies for real, and reads the transition journal
+for the gate disposal + pointer admission); it never trusts a caller `pass`/`disposed`/`admitted` string.
+
+- **`complete`** — the operator merged the Think PR. Evidence refs: `consideration:"<repo-rel path to the
+  consideration file>"` (the checker is RE-RUN on it), `think_pr` (its merged-state is RE-READ via `gh
+  pr view`), `gate` (its body must carry **exactly one** `idc-gate-pr` marker bound to the Think PR, and
+  a `dispose`/`gate-approved` **journal** record must name it), `pointer` (it must exist and an `unblock`
+  **journal** record must name it), and — for a `--doc` run — `intake_manifest:"<repo-rel>"` +
   `intake_selected:[<ids>]`. The closeout re-reads the manifest and enforces the **intake remainder**:
-  every **selected** unit is `materialized` AND **every unselected expected unit** keeps a valid
-  durable disposition (`queued`/`materialized`/`verified_done`/`ignored`) — a closeout that materializes
-  one unit but drops the rest of the exact-once set is refused.
-- **`waiting_gate`** — the Think PR is still OPEN (pending admission): same artifacts with
-  `think_pr_state:"OPEN"`, `gate_disposition:"blocked"`, `pointer_state:"blocked"`.
-- **`blocked_external`** — a deterministic helper failed: `blocker:{helper, exit (nonzero), diagnostic}`.
+  every **selected** unit is `materialized` AND **every unselected expected unit** keeps a valid durable
+  disposition (`queued`/`materialized`/`verified_done`/`ignored`) — a closeout that materializes one unit
+  but drops the rest of the exact-once set is refused.
+- **`waiting_gate`** — the Think PR is still OPEN (pending admission): same reference keys — the PR reads
+  OPEN (real `gh` read; a nonexistent PR/gate/pointer fails closed), the gate carries its bound marker
+  but has NO dispose journal record yet, and the pointer exists but has NO unblock record yet.
+- **`blocked_external`** — a deterministic helper failed: `blocker:{helper, exit (nonzero), diagnostic}`
+  (the helper must be one of Think's own — the consideration checker, the PR finisher, the board reader,
+  or the transition engine).
 
 ## Boundaries
 

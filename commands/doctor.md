@@ -448,17 +448,21 @@ command):
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" status \
   --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --json
-# … after the table + verdict …
+# … after the table + verdict, PERSIST them so the closeout can RE-READ its own report: …
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/idc_command_report.py" --cwd "$PWD" write \
+  --kind doctor --session "$CLAUDE_CODE_SESSION_ID" \
+  --payload-json '{"rows":[<the captured row results>],"verdict":"<PASS|FAIL|…>"}'
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command doctor \
   --status <complete|blocked_external> --evidence-json '<envelope>'
 ```
 
 - **`complete`** — all rows **and** a final verdict were captured (**a FAIL verdict is still a complete
-  doctor run** — doctor completing is not the repo passing). Evidence refs: `rows:[<row results>]`,
-  `verdict:"<PASS|FAIL|…>"`.
+  doctor run** — doctor completing is not the repo passing). The closeout **re-reads the persisted doctor
+  report** (`.idc-doctor-report.json`, written above) — forged rows/verdict without a real report are
+  refused. Evidence refs: `refs:{}` (the report is the proof).
 - **`blocked_external`** — doctor could not even establish a row (e.g. the cwd is not a git repo):
-  `blocker:{helper, exit (nonzero), diagnostic}`.
+  `blocker:{helper, exit (nonzero), diagnostic}` (an allowlisted doctor helper).
 
 Doctor is a **diagnostic**, not a pipeline stage: it does not call the next-action oracle and never
 claims a pipeline handoff.

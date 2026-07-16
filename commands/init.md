@@ -365,8 +365,11 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
 ```
 
 - **`complete`** — the tracker config, the scaffold, the plugin enablement, and a **v2 install
-  receipt** all verify. Evidence refs: `tracker_config:"ok"`, `scaffold:"ok"`, `hooks:"ok"`,
-  `receipt_version:2`.
+  receipt** all verify. The closeout **re-derives** this from durable state — it parses the install
+  receipt (must be `receipt_version: 2`), confirms the governance anchor
+  (`docs/workflow/tracker-config.yaml`) exists, and confirms the settings file has the IDC plugin
+  enabled — **never three caller `"ok"` strings**. Evidence refs: `refs:{}` (optionally
+  `receipt:"<repo-rel receipt path>"` / `settings:"<repo-rel settings path>"` if non-default).
 - **`blocked_external`** — a deterministic init helper or board provisioning step returned a nonzero
   receipt (e.g. the ≥1-item board STOP, or a scaffold-helper error): `blocker:{helper, exit (nonzero),
   diagnostic}`.

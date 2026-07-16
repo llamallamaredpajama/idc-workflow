@@ -75,6 +75,12 @@ python3 "$PLUGIN_ROOT/scripts/hooks/idc_ledger.py" --cwd "$REPO_ROOT" ensure-git
 # working state, never committed. Module owns the filename + ignore rule; idempotent + append-only.
 python3 "$PLUGIN_ROOT/scripts/hooks/idc_drain_verdict.py" --cwd "$REPO_ROOT" ensure-gitignore
 
+# Gitignore the persisted per-command diagnostic reports (.idc-<kind>-report.json, Task 6 wave 3): the
+# same transient per-session sidecar treatment. /idc:doctor + /idc:janitor write their run's result
+# there so the command contract's finish re-reads the run's OWN report instead of a caller integer;
+# working state, never committed. Module owns the filename glob + ignore rule; idempotent + append-only.
+python3 "$PLUGIN_ROOT/scripts/hooks/idc_command_report.py" --cwd "$REPO_ROOT" ensure-gitignore
+
 # Gitignore the transition-journal advisory-lock sidecar (docs/workflow/transition-journal.ndjson.lock,
 # v4 Phase 4 #150): the runtime-only flock token rotation + journal_append create on a stable sidecar so
 # the journal↔rotation lock survives os.replace — working state, never committed. The janitor owns the

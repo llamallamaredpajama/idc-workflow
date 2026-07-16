@@ -49,7 +49,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
 ```
 
 - **`complete`** — the manifest + independent review validate and the intake PR reads `MERGED`.
-  Evidence refs: `manifest:"<repo-rel>"`, `review:"<review-basename>"`, `intake_pr`,
-  `intake_pr_state:"MERGED"`.
+  Evidence refs: `manifest:"<repo-rel>"`, `review:"<review-basename>"`, `intake_pr` (the PR **number** —
+  the validator **re-reads its merged-state for real (`gh pr view`)**, never a caller `state` string).
 - **`blocked_external`** — the extractor, validator, or PR helper returned a nonzero receipt:
   `blocker:{helper, exit (nonzero), diagnostic}`. Report it as blocked, never as a completed intake.

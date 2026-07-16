@@ -314,15 +314,24 @@ def _prune_finished(commands):
     return active + finished
 
 
-def command_start(cwd, session_id, command, plugin_version, args_sha256, source):
+def command_start(cwd, session_id, command, plugin_version, args_sha256, source,
+                  intake_manifest=None, intake_units=None):
     """Atomic UPSERT of the active command record by (session_id, command) — never duplicates an
     active record (a re-entry of the same command in the same session updates the one record in
     place). REPO-GATED: a silent no-op outside a governed repo (returns `{}`). Preserves the taint
     array. Returns the record dict ONLY when the write actually PERSISTED; returns None when the
     ledger write FAILED (Fix 2) — a caller must never report an obligation as opened on a failed
-    write, or the Stop gate would try to enforce a closeout for a record that does not exist."""
+    write, or the Stop gate would try to enforce a closeout for a record that does not exist.
+
+    An EMPTY/blank session identity is REFUSED fail-closed (returns None, no write): a runtime that
+    fires no Claude UserPromptExpansion (Codex/Pi) can leave `$CLAUDE_CODE_SESSION_ID` empty, and an
+    anonymous record keyed on session="" would let two session-less runs collide on (session="",
+    command) — finishing or overwriting each other's obligation. The identity is load-bearing, so a
+    blank one is never stored (finding 5)."""
     if not idc_hook_lib.is_governed_repo(cwd):
         return {}
+    if not str(session_id).strip():
+        return None
     session_id = str(session_id)
     command = str(command)
     rec = {
@@ -334,6 +343,12 @@ def command_start(cwd, session_id, command, plugin_version, args_sha256, source)
         "source": source or "",
         "closeout": None,
     }
+    # Durable intake-mode marker (finding 2): a Think run started with `--doc/--unit` records its
+    # intake manifest (repo-relative) + selected units on the record, so the Think closeout re-verifies
+    # exact-once coverage from the RECORD — never inferable only from caller-supplied finish input.
+    if intake_manifest:
+        rec["intake_manifest"] = str(intake_manifest)
+        rec["intake_units"] = [str(u) for u in (intake_units or [])]
     with _write_lock(cwd):  # read-modify-write must be atomic vs concurrent writers (no lost records)
         commands = _read_commands(cwd)
         replaced = False
@@ -355,8 +370,13 @@ def command_finish(cwd, session_id, command, status, evidence):
     `status` + normalized `evidence` in the record's `closeout` and flips its state to finished.
     REPO-GATED (no-op outside a governed repo). Returns the finished record dict, or None when there
     was no matching active record owned by this session OR the closeout write did not PERSIST (Fix 2)
-    — either way the caller surfaces the non-close as a failure rather than reporting a false close."""
+    — either way the caller surfaces the non-close as a failure rather than reporting a false close.
+
+    An EMPTY/blank session identity is REFUSED fail-closed (returns None): a session="" finish could
+    otherwise close another anonymous session's record (finding 5)."""
     if not idc_hook_lib.is_governed_repo(cwd):
+        return None
+    if not str(session_id).strip():
         return None
     session_id = str(session_id)
     command = str(command)

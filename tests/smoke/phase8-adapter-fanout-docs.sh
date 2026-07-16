@@ -103,4 +103,29 @@ hasflat_sec "$PI_SEC" 'idc-pi run' || fail "pi adapter's two-level section must 
 hasflat_sec "$PI_SEC" 'not yet|adapter[^.]*wiring|adapter-driven' \
   || fail "pi adapter caveat must state the N-resident pool is adapter wiring not yet emitted by idc-pi run"
 
+# ---- Task 6 / Finding 5: a runtime-portable, NON-EMPTY session identity in the lifecycle envelope --
+# Codex/Pi fire no UserPromptExpansion and set no CLAUDE_CODE_SESSION_ID, so a BARE
+# `--session "$CLAUDE_CODE_SESSION_ID"` is empty there — two anonymous sessions would then collide on
+# (session="", command) and finish/overwrite each other's record. Each non-Claude adapter's Command
+# lifecycle envelope must (1) NOT pass the bare Claude-only ref and (2) derive a REAL runtime identity
+# it REFUSES when blank (fail-closed). Scoped to the lifecycle-envelope section so the pre-existing
+# "thread"/"resident" prose elsewhere can't mask a regression. Red-when-broken: restore the bare
+# `--session "$CLAUDE_CODE_SESSION_ID"` ⇒ RED; drop the empty-session guard ⇒ RED.
+lifecycle() { awk '/^## Command lifecycle envelope/{f=1;next} f&&/^## /{f=0} f' "$1"; }
+CODEX_LC="$SECDIR/codex-lc"; lifecycle "$CODEX" > "$CODEX_LC"
+PI_LC="$SECDIR/pi-lc";    lifecycle "$PI"    > "$PI_LC"
+[ -s "$CODEX_LC" ] || fail "codex adapter 'Command lifecycle envelope' section missing/empty"
+[ -s "$PI_LC" ]    || fail "pi adapter 'Command lifecycle envelope' section missing/empty"
+for lc in "$CODEX_LC" "$PI_LC"; do
+  if grep -qF -- '--session "$CLAUDE_CODE_SESSION_ID"' "$lc"; then
+    fail "an adapter lifecycle envelope still passes a BARE \$CLAUDE_CODE_SESSION_ID as --session (empty outside Claude) — derive a real runtime identity"
+  fi
+  grep -qiE '\-z .*(session|sid)|no session identity|session identity.*(refus|requir|missing|empty|blank)|refus.*(empty|blank) session' "$lc" \
+    || fail "an adapter lifecycle envelope must REFUSE a blank session identity fail-closed (guard on an empty session id)"
+done
+grep -qiE 'thread|run label' "$CODEX_LC" \
+  || fail "codex lifecycle envelope must derive the session identity from its own Codex thread/run label"
+grep -qiE 'idc-|resident' "$PI_LC" \
+  || fail "pi lifecycle envelope must derive the session identity from the resident's own idc-<role> session id"
+
 echo "PASS: all three adapters document the two-level fan-out + cook->area-staging->merge worktree topology"

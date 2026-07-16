@@ -296,21 +296,249 @@ if contract finish --repo "$REPO3" --session "$S3" --command build --status bloc
      --evidence-json '{"schema_version":1,"refs":{"blocker":{"helper":"idc_autorun_drain.py","exit":0,"diagnostic":"ok"}}}' 2>/dev/null; then
   gov_fail "(7d) a blocked_external with a ZERO helper exit was accepted (a blocker is not a success)"
 fi
+# (7d-sabotage, finding 1) the cited helper must be a REAL shipped deterministic helper — a phantom
+# helper name (nonzero exit + diagnostic and all) is refused: the referenced artifact must exist.
+if contract finish --repo "$REPO3" --session "$S3" --command build --status blocked_external \
+     --evidence-json '{"schema_version":1,"refs":{"blocker":{"helper":"totally_not_a_real_helper.py","exit":3,"diagnostic":"phantom"}}}' 2>/dev/null; then
+  gov_fail "(7d-sabotage) a blocked_external citing a PHANTOM helper (not shipped under scripts/) was accepted"
+fi
 contract finish --repo "$REPO3" --session "$S3" --command build --status blocked_external \
   --evidence-json '{"schema_version":1,"refs":{"blocker":{"helper":"idc_autorun_drain.py","exit":3,"diagnostic":"github GraphQL rate-limited until reset"}}}' \
   || gov_fail "(7d) a blocked_external citing a nonzero helper exit + diagnostic was rejected"
 echo "  ok (7d) blocked_external requires a deterministic helper's NONZERO exit + a diagnostic"
 
-# (7e) autorun complete binds to THIS session's drain verdict — a foreign/absent drain_session fails.
+# (7e, finding 1) autorun complete reads THIS session's PERSISTED drain verdict
+# (.idc-drain-verdict.json) — a DURABLE artifact — never a caller-supplied drain string. Write a real
+# complete verdict for S3, then close WITHOUT any caller drain claim: the artifact is what clears it.
+DV="$GOV_PLUGIN/scripts/hooks/idc_drain_verdict.py"
+[ -f "$DV" ] || gov_fail "scripts/hooks/idc_drain_verdict.py not found"
+python3 "$DV" --cwd "$REPO3" write --verdict complete --exit 0 --session "$S3" \
+  || gov_fail "(7e) could not persist a drain verdict"
 contract start --repo "$REPO3" --session "$S3" --command autorun --plugin-root "$GOV_PLUGIN" \
   --args 'a' --source user >/dev/null
-if contract finish --repo "$REPO3" --session "$S3" --command autorun --status complete \
-     --evidence-json '{"schema_version":1,"refs":{"drain":"complete","drain_session":"someone-else"}}' 2>/dev/null; then
-  gov_fail "(7e) an autorun complete bound to a FOREIGN drain_session was accepted"
-fi
 contract finish --repo "$REPO3" --session "$S3" --command autorun --status complete \
-  --evidence-json "$(printf '{"schema_version":1,"refs":{"drain":"complete","drain_session":"%s"}}' "$S3")" \
-  || gov_fail "(7e) an autorun complete bound to THIS session's drain: complete was rejected"
-echo "  ok (7e) autorun complete requires THIS session's drain: complete verdict"
+  --evidence-json '{"schema_version":1,"refs":{}}' \
+  || gov_fail "(7e) an autorun complete backed by THIS session's persisted drain: complete verdict was rejected"
+echo "  ok (7e) autorun complete is cleared by the durable .idc-drain-verdict.json (this session, verdict complete)"
+# (7e-sabotage) a FORGED caller drain claim with the persisted verdict FOREIGN/absent fails closed —
+# the drain status is read from the durable artifact, not the caller's evidence.
+python3 "$DV" --cwd "$REPO3" write --verdict complete --exit 0 --session "someone-else" \
+  || gov_fail "(7e) could not overwrite the drain verdict to a foreign session"
+contract start --repo "$REPO3" --session "$S3" --command autorun --plugin-root "$GOV_PLUGIN" \
+  --args 'a2' --source user >/dev/null
+if contract finish --repo "$REPO3" --session "$S3" --command autorun --status complete \
+     --evidence-json "$(printf '{"schema_version":1,"refs":{"drain":"complete","drain_session":"%s"}}' "$S3")" 2>/dev/null; then
+  gov_fail "(7e-sabotage) an autorun complete with a FORGED caller drain claim but a foreign persisted verdict was ACCEPTED (drain status must come from the durable artifact)"
+fi
+python3 "$DV" --cwd "$REPO3" write --verdict complete --exit 0 --session "$S3" >/dev/null
+contract finish --repo "$REPO3" --session "$S3" --command autorun --status complete \
+  --evidence-json '{"schema_version":1,"refs":{}}' >/dev/null \
+  || gov_fail "(7e-sabotage) could not honestly close the autorun record"
+echo "  ok (7e-sabotage) a forged caller drain claim with a foreign/absent verdict is refused (durable artifact wins)"
+
+# (7f, finding 1) plan complete re-validates a DURABLE matrix artifact (idc_matrix_check), never a
+# caller "pass" string.
+mkdir -p "$REPO3/docs/workflow/pillar-matrices"
+GOODMX="docs/workflow/pillar-matrices/good.yaml"
+cat > "$REPO3/$GOODMX" <<'YML'
+phase: Phase 1
+pillars:
+  - id: pillar-a
+    wave: 1
+    domain: ui
+    surfaces: [src/a/]
+    blocks_on: []
+  - id: pillar-b
+    wave: 1
+    domain: api
+    surfaces: [src/b/]
+    blocks_on: []
+YML
+plan_complete_ev() {  # $1 = matrix repo-relative locator
+  printf '{"schema_version":1,"refs":{"matrix":"%s","planning_pr":42,"planning_pr_state":"MERGED","decompositions":{"5":101},"pointers_retired":[5]}}' "$1"
+}
+contract start --repo "$REPO3" --session "$S3" --command plan --plugin-root "$GOV_PLUGIN" \
+  --args 'p' --source user >/dev/null
+contract finish --repo "$REPO3" --session "$S3" --command plan --status complete \
+  --evidence-json "$(plan_complete_ev "$GOODMX")" \
+  || gov_fail "(7f) a plan complete backed by a re-validated matrix + merged PR + real decomposition children was rejected"
+echo "  ok (7f) plan complete re-validates the durable matrix artifact (idc_matrix_check), not a caller 'pass' string"
+# (7f-sabotage) a colliding matrix (same wave, shared surface) and a missing matrix both fail closed.
+BADMX="docs/workflow/pillar-matrices/collide.yaml"
+cat > "$REPO3/$BADMX" <<'YML'
+phase: Phase 1
+pillars:
+  - id: pillar-a
+    wave: 1
+    domain: ui
+    surfaces: [src/x/]
+    blocks_on: []
+  - id: pillar-b
+    wave: 1
+    domain: ui
+    surfaces: [src/x/]
+    blocks_on: []
+YML
+contract start --repo "$REPO3" --session "$S3" --command plan --plugin-root "$GOV_PLUGIN" \
+  --args 'p2' --source user >/dev/null
+if contract finish --repo "$REPO3" --session "$S3" --command plan --status complete \
+     --evidence-json "$(plan_complete_ev "$BADMX")" 2>/dev/null; then
+  gov_fail "(7f-sabotage) a plan complete whose referenced matrix FAILS deconfliction (same-wave shared surface) was accepted"
+fi
+if contract finish --repo "$REPO3" --session "$S3" --command plan --status complete \
+     --evidence-json "$(plan_complete_ev "docs/workflow/pillar-matrices/nope.yaml")" 2>/dev/null; then
+  gov_fail "(7f-sabotage) a plan complete referencing a MISSING matrix file was accepted"
+fi
+contract finish --repo "$REPO3" --session "$S3" --command plan --status complete \
+  --evidence-json "$(plan_complete_ev "$GOODMX")" >/dev/null \
+  || gov_fail "(7f-sabotage) could not honestly close the plan record"
+echo "  ok (7f-sabotage) plan complete fails closed on a colliding or missing matrix artifact"
+
+# (7g, finding 1) build complete requires STRUCTURED merged-PR receipts (a real PR ref + MERGED
+# state), not an arbitrary receipt string; the empty-frontier path is oracle-backed. Runs on a FRESH
+# clean board (REPO5) — REPO3 carries case-7b's intentionally-invalid intake manifest, which correctly
+# makes the oracle fail-closed (invalid), so the oracle-backed empty-frontier close needs a clean repo.
+REPO5="$WORK/repo5"; mkdir -p "$REPO5/docs/workflow"
+printf 'backend: filesystem\n' > "$REPO5/docs/workflow/tracker-config.yaml"
+python3 "$GOV_TRK" --tracker "$REPO5/TRACKER.md" init >/dev/null || gov_fail "could not init REPO5 board"
+S6="s6-$$-$(basename "$WORK")"
+contract start --repo "$REPO5" --session "$S6" --command build --plugin-root "$GOV_PLUGIN" \
+  --args 'bb' --source user >/dev/null
+contract finish --repo "$REPO5" --session "$S6" --command build --status complete \
+  --evidence-json '{"schema_version":1,"refs":{"receipts":{"101":{"pr":55,"state":"MERGED"}}}}' \
+  || gov_fail "(7g) a build complete with a structured merged-PR receipt was rejected"
+echo "  ok (7g) build complete requires structured merged-PR receipts (real PR ref + MERGED state)"
+# (7g-sabotage) an arbitrary receipt string, and an unmerged-PR receipt, both fail closed.
+contract start --repo "$REPO5" --session "$S6" --command build --plugin-root "$GOV_PLUGIN" \
+  --args 'bb2' --source user >/dev/null
+if contract finish --repo "$REPO5" --session "$S6" --command build --status complete \
+     --evidence-json '{"schema_version":1,"refs":{"receipts":{"101":"done"}}}' 2>/dev/null; then
+  gov_fail "(7g-sabotage) a build complete with an ARBITRARY receipt string (no real PR reference) was accepted"
+fi
+if contract finish --repo "$REPO5" --session "$S6" --command build --status complete \
+     --evidence-json '{"schema_version":1,"refs":{"receipts":{"101":{"pr":55,"state":"OPEN"}}}}' 2>/dev/null; then
+  gov_fail "(7g-sabotage) a build complete whose receipt PR is not MERGED was accepted"
+fi
+contract finish --repo "$REPO5" --session "$S6" --command build --status complete \
+  --evidence-json '{"schema_version":1,"refs":{"frontier":"none-eligible"}}' >/dev/null \
+  || gov_fail "(7g) a build complete via an oracle-backed empty ready frontier was rejected"
+echo "  ok (7g-sabotage) build complete fails closed on an arbitrary/unmerged receipt; empty frontier is oracle-backed"
+
+# (8) Finding 5 — an EMPTY session identity is refused fail-closed. Codex/Pi fire no
+# UserPromptExpansion and set no CLAUDE_CODE_SESSION_ID, so a bare `--session "$CLAUDE_CODE_SESSION_ID"`
+# is empty there; the ledger/contract layer must refuse it so two anonymous sessions can never collide
+# on (session="", command). Red-when-broken: drop the empty-session guard in command_start/finish ⇒
+# an anonymous record is opened/finished ⇒ these asserts FAIL.
+if contract start --repo "$REPO" --session "" --command think --plugin-root "$GOV_PLUGIN" \
+     --args 'anon' --source codex 2>/dev/null; then
+  gov_fail "(8) an empty session identity opened a command record (anonymous obligation)"
+fi
+anon_active=$(contract status --repo "$REPO" --json \
+  | python3 -c 'import json,sys; print(sum(1 for c in json.load(sys.stdin)["active"] if not str(c.get("session_id","")).strip()))')
+[ "$anon_active" -eq 0 ] || gov_fail "(8) an anonymous (session=\"\") active record was written to the ledger"
+if contract finish --repo "$REPO" --session "" --command think --status waiting_gate \
+     --evidence-json "$THINK_WAIT_EV" 2>/dev/null; then
+  gov_fail "(8) an empty session identity finished a command record"
+fi
+echo "  ok (8) an empty session identity is refused fail-closed (no anonymous record opened or finished)"
+
+# (9) Finding 4 — Uninstall's closeout must run WHILE the repo is still governed. Uninstall removes
+# docs/workflow/tracker-config.yaml (what marks the repo governed); once it is gone the ledger is a
+# repo-gated no-op and a finish CANNOT land, so the command must finish BEFORE that removal. Walk both
+# orders on a real governed repo. (Never restore via `git checkout` — REPO4 is a throwaway; just rm.)
+REPO4="$WORK/repo4"; mkdir -p "$REPO4/docs/workflow"
+printf 'backend: filesystem\n' > "$REPO4/docs/workflow/tracker-config.yaml"
+S4="s4-$$-$(basename "$WORK")"
+UNINSTALL_EV='{"schema_version":1,"refs":{"outcome":"applied","archive":"idc-archive-20260712-000000.tar.gz"}}'
+# (9a) the documented order — finish WHILE governed → succeeds and the record closes.
+contract start --repo "$REPO4" --session "$S4" --command uninstall --plugin-root "$GOV_PLUGIN" \
+  --args 'uninstall' --source user >/dev/null
+contract finish --repo "$REPO4" --session "$S4" --command uninstall --status complete \
+  --evidence-json "$UNINSTALL_EV" \
+  || gov_fail "(9a) an uninstall finish WHILE the repo is still governed was rejected — the documented order must succeed"
+[ "$(contract status --repo "$REPO4" --session "$S4" --json | json_count active)" -eq 0 ] \
+  || gov_fail "(9a) the uninstall record did not close on a governed-repo finish"
+# (9b) the WHY: after tracker-config.yaml is removed the repo is ungoverned and a finish CANNOT land —
+# exactly why the closeout must PRECEDE the removal.
+contract start --repo "$REPO4" --session "$S4" --command uninstall --plugin-root "$GOV_PLUGIN" \
+  --args 'uninstall again' --source user >/dev/null
+rm -f "$REPO4/docs/workflow/tracker-config.yaml"   # Phase 3's removal ungoverns the repo
+if contract finish --repo "$REPO4" --session "$S4" --command uninstall --status complete \
+     --evidence-json "$UNINSTALL_EV" 2>/dev/null; then
+  gov_fail "(9b) an uninstall finish AFTER the repo was ungoverned unexpectedly succeeded — the closeout must run BEFORE the tracker-config.yaml removal"
+fi
+echo "  ok (9) uninstall finishes its record WHILE governed (a post-ungovern finish cannot land — closeout must precede removal)"
+
+# (10) Finding 2 — intake mode is DURABLE on the record: a think started with `--doc/--unit` records
+# that fact, and intake coverage is re-verified from the RECORD on EVERY closeout path — even a finish
+# that omits the intake fields, and INCLUDING waiting_gate. Previously coverage ran only when the
+# caller SUPPLIED refs.intake_manifest, so an intake-mode run could drop its selected unit simply by
+# omitting the intake fields at finish (the bypass). Build a reviewed manifest whose units are all
+# QUEUED (nothing materialized), so any honest coverage read fails.
+S5="s5-$$-$(basename "$WORK")"
+UNMAT_MANIFEST="$REPO3/docs/workflow/intakes/2026-07-12-unmat.json"
+UNMAT_REL="docs/workflow/intakes/2026-07-12-unmat.json"
+python3 "$INTAKE" extract --source "$SRC" --out "$UNMAT_MANIFEST" \
+  --goal 'execute the whole program; Drive first' --plugin-version 4.1.0 >/dev/null \
+  || gov_fail "(10) intake extract failed"
+python3 - "$UNMAT_MANIFEST" <<'PY' || gov_fail "(10) could not classify unmat manifest"
+import json, os, sys, tempfile
+path = sys.argv[1]
+data = json.load(open(path, encoding="utf-8"))
+for unit in data["units"]:
+    unit.update({"class": "new_requirement", "route": "think", "dependencies": [], "operator_stops": []})
+    unit["disposition"] = {"state": "queued", "target_ref": None, "evidence": []}
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".unmat-", suffix=".json")
+with os.fdopen(fd, "w", encoding="utf-8") as h:
+    json.dump(data, h, indent=2, sort_keys=True); h.write("\n")
+os.replace(tmp, path)
+PY
+UNMAT_REVIEW="$REPO3/unmat-review.json"
+python3 - "$INTAKE" "$UNMAT_MANIFEST" "$UNMAT_REVIEW" <<'PY' || gov_fail "(10) could not write unmat review"
+import importlib.util, json, sys
+helper_path, manifest_path, review_path = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("idc_intake_unmat", helper_path)
+helper = importlib.util.module_from_spec(spec); spec.loader.exec_module(helper)
+m = json.load(open(manifest_path, encoding="utf-8"))
+review = {"schema_version": 1, "intake_id": m["intake_id"], "source_sha256": m["source"]["sha256"],
+          "verdict": "PASS", "missing_unit_ids": [], "duplicate_unit_ids": [], "misrouted_unit_ids": [],
+          "notes": [f"manifest_content_sha256={helper._manifest_content_sha256(m)}"]}
+json.dump(review, open(review_path, "w", encoding="utf-8"), indent=2, sort_keys=True)
+PY
+python3 "$INTAKE" validate --manifest "$UNMAT_MANIFEST" --review "$UNMAT_REVIEW" >/dev/null \
+  || gov_fail "(10) could not validate unmat manifest"
+# A bare, otherwise-valid think complete envelope that OMITS intake_manifest/intake_selected.
+THINK_COMPLETE_BARE='{"schema_version":1,"refs":{"consideration":"pass","think_pr":706,"think_pr_state":"MERGED","gate":708,"gate_markers":1,"gate_disposition":"disposed","pointer":707,"pointer_state":"admitted"}}'
+
+# (10a) intake-mode record (--doc/--unit) + a bare think COMPLETE that omits the intake fields, on a
+# manifest whose selected unit Drive is NOT materialized → REFUSED (coverage re-read from the record).
+contract start --repo "$REPO3" --session "$S5" --command think --plugin-root "$GOV_PLUGIN" \
+  --args "--doc $UNMAT_REL --unit Drive" --source user >/dev/null
+if contract finish --repo "$REPO3" --session "$S5" --command think --status complete \
+     --evidence-json "$THINK_COMPLETE_BARE" 2>/dev/null; then
+  gov_fail "(10a) an intake-mode think (record carries --doc/--unit) closed WITHOUT materializing its selected unit by OMITTING the intake fields at finish — the coverage bypass"
+fi
+[ "$(contract status --repo "$REPO3" --session "$S5" --json | json_count active)" -eq 1 ] \
+  || gov_fail "(10a) the rejected bypass finish must leave the think record active"
+echo "  ok (10a) an intake-mode record enforces coverage from the RECORD even when the finish omits the intake fields (complete)"
+
+# (10c) the same bypass on the WAITING_GATE path is closed too (coverage runs on EVERY path).
+contract start --repo "$REPO3" --session "$S5" --command think --plugin-root "$GOV_PLUGIN" \
+  --args "--doc $UNMAT_REL --unit Drive" --source user >/dev/null
+if contract finish --repo "$REPO3" --session "$S5" --command think --status waiting_gate \
+     --evidence-json "$THINK_WAIT_EV" 2>/dev/null; then
+  gov_fail "(10c) an intake-mode think WAITING_GATE closed WITHOUT materializing its selected unit — coverage must run on the waiting_gate path too"
+fi
+echo "  ok (10c) intake coverage is enforced on the waiting_gate path too (not only complete)"
+
+# (10b) the record-based enforcement still ACCEPTS an honest close: reuse REPO3's $MANIFEST (Drive
+# materialized, U1/U2 durably queued). An intake-mode record whose coverage is satisfied closes even
+# though the finish omits the intake fields (they are read from the record, not the caller).
+contract start --repo "$REPO3" --session "$S5" --command think --plugin-root "$GOV_PLUGIN" \
+  --args "--doc $MANIFEST_REL --unit Drive" --source user >/dev/null
+contract finish --repo "$REPO3" --session "$S5" --command think --status complete \
+  --evidence-json "$THINK_COMPLETE_BARE" \
+  || gov_fail "(10b) an intake-mode think whose recorded coverage is satisfied (Drive materialized, U1/U2 durable) was refused even though the finish omitted the intake fields"
+echo "  ok (10b) an intake-mode record with satisfied coverage still closes honestly (coverage from the record, not the caller)"
 
 echo "PASS: the IDC command lifecycle envelope holds — start upserts one obligation, Stop refuses an open command with the exact finish remediation, an unknown/malformed status cannot clear it, a schema-valid + command-specific closeout ends it, no foreign session can finish another's record, and the Task-6 matrix blocks a think closeout that drops exact-once intake units, an illegal per-command status, a zero-exit blocked_external, and a foreign-session autorun drain"

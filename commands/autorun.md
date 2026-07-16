@@ -216,9 +216,11 @@ only when a full pass leaves nothing actionable:
      --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command autorun \
      --status <complete|waiting_gate|blocked_external> --evidence-json '<envelope>'
    ```
-   - **`complete`** — **this session's** drain read exactly `drain: complete`. Evidence refs:
-     `drain:"complete"`, `drain_session:"$CLAUDE_CODE_SESSION_ID"` (the verdict must be attributed to
-     THIS session, not an unrelated drain).
+   - **`complete`** — **this session's** PERSISTED drain verdict (`.idc-drain-verdict.json`, written by
+     `idc_autorun_drain.py --session-id "$CLAUDE_CODE_SESSION_ID"`) reads exactly `drain: complete`. The
+     validator reads that DURABLE artifact directly (session-scoped), so **no caller-supplied `drain`
+     string clears it** — the evidence refs may be empty (`refs:{}`); just ensure the drain ran with
+     `--session-id` for THIS session.
    - **`waiting_gate`** — the oracle reports only human gates (an open Think PR / `[operator-action]`
      gate). Evidence refs: `gates:[<refs>]` (non-empty).
    - **`blocked_external`** — the drain reported `unknown`/`rate-limited`: `blocker:{helper, exit

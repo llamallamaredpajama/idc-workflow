@@ -110,6 +110,33 @@ has "$UN" 'idc_gh_board\.py' \
   || fail "uninstall.md in-flight count must read the whole board via the paginating idc_gh_board.py (not a truncating gh item-list)"
 grep -E 'gh project item-list.*--format json' "$UN" \
   && fail "uninstall.md must not read the board with a truncating gh project item-list --format json (use the paginating idc_gh_board.py)"
+# Finding 4: uninstall's deterministic closeout must be EXECUTABLE. It removes
+# docs/workflow/tracker-config.yaml, which is what marks the repo IDC-governed; once that file is gone
+# the ledger write is a repo-gated no-op and `idc_command_contract.py finish` exits 2. So the finish
+# must be documented BEFORE that removal (while still governed), and the prose must NOT excuse a
+# failing/late finish as "expected"/"harmless". Assert the finish line precedes the manifest-removing
+# git-rm, and no expected/harmless-failure framing survives. Red-when-broken: place the finish after
+# the removal (baseline), or call a no-op finish expected/harmless ⇒ RED.
+python3 - "$UN" <<'PY' || fail "uninstall.md must finish its command contract BEFORE the git-rm that removes tracker-config.yaml (a post-removal finish exits 2 on the now-ungoverned repo), and must not call a failing/late finish 'expected'/'harmless'"
+import re, sys
+lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+def first_idx(pred):
+    for i, ln in enumerate(lines):
+        if pred(ln):
+            return i
+    return None
+finish_i = first_idx(lambda l: "idc_command_contract.py" in l and "finish" in l)
+rm_i = first_idx(lambda l: re.search(r'git .*\brm\b', l) and ("manifest" in l.lower() or "tracker-config" in l.lower()))
+if finish_i is None or rm_i is None:
+    sys.exit(1)                 # both the finish and the manifest-removing git-rm must be present
+if finish_i > rm_i:
+    sys.exit(1)                 # finish documented AFTER the ungoverning removal — not executable
+text = "\n".join(lines).lower()
+if re.search(r'(no-op|no op|exit ?2|fail\w*)[^.\n]{0,80}(expected|harmless)', text) or \
+   re.search(r'(expected|harmless)[^.\n]{0,80}(no-op|no op|exit ?2|fail\w*)', text):
+    sys.exit(1)                 # a failing/no-op finish must not be excused as expected/harmless
+sys.exit(0)
+PY
 
 # --- doctor.md: read-only (it must never mutate the repo or board) ------------------------------
 D="$C/doctor.md"

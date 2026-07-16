@@ -22,12 +22,16 @@ ENVELOPE + COMMAND-SPECIFIC EVIDENCE (Task 2 shipped the envelope; Task 6 adds t
 matrix). `finish` first validates the COMMON envelope — `schema_version` == 1 and `refs` is an object
 — then the per-command, per-status evidence matrix (`validate_closeout`): a think `complete` must carry
 a MERGED Think PR + a disposed one-marker gate + an admitted pointer + valid intake coverage; a build
-`complete` its per-issue receipts (or an empty ready frontier); an autorun `complete` this session's
-`drain: complete`; and so on. Evidence is a set of REFERENCES and observed facts — never a
-caller-supplied `passed: true`. Two facts are re-verified against durable state rather than trusted:
-intake coverage is re-read from the referenced manifest, and every `no_action` close is checked
-against a fresh read-only next-action oracle result. `blocked_external` must cite a deterministic
-helper's nonzero exit + a concise diagnostic; it is an honest blocked stop, never a disguised success.
+`complete` its per-issue STRUCTURED merged-PR receipts (or an oracle-backed empty ready frontier); an
+autorun `complete` this session's PERSISTED `drain: complete` verdict; and so on. Evidence is a set of
+REFERENCES to DURABLE artifacts the validator re-verifies for real — never a caller-supplied `passed:
+true` or a `"pass"` string. Facts re-read from durable state rather than trusted: intake coverage is
+re-read from the recorded manifest (finding 2); every `no_action`/empty-frontier close is checked
+against a fresh read-only next-action oracle; the autorun `drain: complete` is read from
+`.idc-drain-verdict.json` (session-scoped); the plan matrix is re-validated through `idc_matrix_check`;
+and a `blocked_external` helper must be a REAL shipped deterministic script. `blocked_external` must
+cite that helper's nonzero exit + a concise diagnostic; it is an honest blocked stop, never a disguised
+success.
 The legal terminal statuses are further narrowed PER COMMAND (a lifecycle/diagnostic command may not
 claim a pipeline `waiting_gate`/`no_action`).
 
@@ -46,6 +50,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import re
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -113,8 +118,20 @@ def _present(value: object) -> bool:
     return _ne_str(value)
 
 
+def _known_helper(name: object) -> bool:
+    """True iff `name` is a REAL deterministic helper shipped with the plugin — a basename that exists
+    under `scripts/` or `scripts/hooks/`. A blocker must cite a helper that EXISTS (verify the
+    referenced artifact for real), so a phantom helper name can never manufacture a blocked stop."""
+    if not _ne_str(name):
+        return False
+    base = os.path.basename(str(name))
+    if base != str(name) or not (base.endswith(".py") or base.endswith(".sh")):
+        return False
+    return os.path.isfile(os.path.join(_HERE, base)) or os.path.isfile(os.path.join(_HERE, "hooks", base))
+
+
 def _check_blocker(refs: dict) -> CloseoutResult:
-    """`blocked_external` proof: a named deterministic helper, its NONZERO exit, and a concise
+    """`blocked_external` proof: a REAL shipped deterministic helper, its NONZERO exit, and a concise
     diagnostic. This is an honest blocked stop — never a disguised success."""
     blocker = refs.get("blocker")
     if not isinstance(blocker, dict):
@@ -122,6 +139,10 @@ def _check_blocker(refs: dict) -> CloseoutResult:
                      "blocked_external requires refs.blocker = {helper, exit, diagnostic}")
     if not _ne_str(blocker.get("helper")):
         return _fail("blocked-external-no-helper", "refs.blocker.helper must name the failing helper")
+    if not _known_helper(blocker.get("helper")):
+        return _fail("blocked-external-unknown-helper",
+                     "refs.blocker.helper must name a real deterministic helper shipped under scripts/ "
+                     "(a phantom helper cannot manufacture a blocked stop)")
     code = blocker.get("exit")
     if isinstance(code, bool) or not isinstance(code, int) or code == 0:
         return _fail("blocked-external-zero-exit",
@@ -250,6 +271,23 @@ def _valid_reviewed_manifest(repo: str, manifest_rel: object) -> CloseoutResult:
     return CloseoutResult(True, "ok", "manifest reviewed + valid", {})
 
 
+def _think_record_intake(repo: str, session: str):
+    """The intake manifest + selected units recorded on THIS session's ACTIVE think record at start
+    (finding 2), or (None, None). This is the DURABLE source of intake mode: a finish that omits the
+    intake fields can no longer make an intake-mode run look non-intake and slip a dropped-unit close
+    past coverage. Read tolerantly — any read failure yields (None, None) and the finish falls back to
+    the caller-supplied ref (belt-and-suspenders for a runtime with no record readback)."""
+    if not _ne_str(repo) or not _ne_str(session):
+        return None, None
+    try:
+        for rec in idc_ledger.active_commands(repo, session):
+            if rec.get("command") == "think" and rec.get("intake_manifest"):
+                return rec.get("intake_manifest"), rec.get("intake_units") or []
+    except Exception:  # noqa: BLE001 — a ledger read failure must not brick the closeout
+        return None, None
+    return None, None
+
+
 def _v_think(status: str, refs: dict, repo: str, session: str) -> CloseoutResult:
     if refs.get("consideration") != "pass":
         return _fail("think-consideration", "think closeout requires refs.consideration == 'pass'")
@@ -259,6 +297,20 @@ def _v_think(status: str, refs: dict, repo: str, session: str) -> CloseoutResult
     if refs.get("gate_markers") != 1:
         return _fail("think-gate-markers",
                      "think closeout requires exactly one idc-gate-pr marker (refs.gate_markers == 1)")
+    # Intake coverage is enforced from the DURABLE record on EVERY closeout path (finding 2). If the
+    # active record says this run is intake-mode (started with --doc/--unit), coverage is MANDATORY and
+    # re-read from the RECORDED manifest + selected units — a finish that omits the intake fields cannot
+    # bypass it, and it applies to waiting_gate as well as complete. Only when no record marker exists
+    # do we fall back to a caller-supplied intake ref (still verified, never trusted).
+    rec_manifest, rec_units = _think_record_intake(repo, session)
+    if rec_manifest is not None:
+        cov = _check_intake_coverage(repo, rec_manifest, rec_units)
+        if not cov.ok:
+            return cov
+    elif refs.get("intake_manifest") is not None:
+        cov = _check_intake_coverage(repo, refs.get("intake_manifest"), refs.get("intake_selected"))
+        if not cov.ok:
+            return cov
     if status == "complete":
         if refs.get("think_pr_state") != "MERGED":
             return _fail("think-pr-unmerged", "think complete requires the Think PR MERGED")
@@ -266,10 +318,6 @@ def _v_think(status: str, refs: dict, repo: str, session: str) -> CloseoutResult
             return _fail("think-gate-open", "think complete requires the gate disposed (gate-approved)")
         if refs.get("pointer_state") != "admitted":
             return _fail("think-pointer", "think complete requires the consideration pointer admitted")
-        if refs.get("intake_manifest") is not None:
-            cov = _check_intake_coverage(repo, refs.get("intake_manifest"), refs.get("intake_selected"))
-            if not cov.ok:
-                return cov
         return CloseoutResult(True, "ok", "think admitted + intake coverage valid", refs)
     # waiting_gate: same artifacts, PR OPEN, gate + pointer still blocked.
     if refs.get("think_pr_state") != "OPEN":
@@ -281,12 +329,33 @@ def _v_think(status: str, refs: dict, repo: str, session: str) -> CloseoutResult
     return CloseoutResult(True, "ok", "think waiting on the requirements gate", refs)
 
 
+def _valid_matrix(repo: str, matrix_rel: object) -> CloseoutResult:
+    """Re-validate the referenced deconfliction matrix — a DURABLE repo artifact Plan wrote — through
+    idc_matrix_check, rather than trusting a caller `matrix: "pass"` string. A missing file or a matrix
+    that fails deconfliction (e.g. same-wave pillars sharing a surface) fails the closeout closed."""
+    path = _confined_repo_path(repo, matrix_rel)
+    if path is None or not os.path.isfile(path):
+        return _fail("plan-matrix-bad-ref",
+                     "refs.matrix must be a repo-relative path to the deconfliction matrix Plan wrote")
+    try:
+        import idc_matrix_check as MX  # noqa: E402 — lazy
+        with open(path, encoding="utf-8") as handle:
+            problems = MX.check(handle.read())
+    except Exception as exc:  # noqa: BLE001 — an unreadable/unparseable matrix blocks the closeout
+        return _fail("plan-matrix-invalid", f"the referenced matrix could not be validated: {exc}")
+    if problems:
+        return _fail("plan-matrix-fail", f"the referenced matrix fails deconfliction: {problems[0]}")
+    return CloseoutResult(True, "ok", "matrix re-validated", {})
+
+
 def _v_plan(status: str, refs: dict, repo: str, session: str) -> CloseoutResult:
     if status == "no_action":
         return _check_no_action("plan", repo)
-    for key in ("schema", "matrix", "provenance"):
-        if refs.get(key) != "pass":
-            return _fail("plan-checks", f"plan complete requires refs.{key} == 'pass'")
+    # The deconfliction matrix is a DURABLE artifact — re-validate the referenced file (never a caller
+    # "pass"). The merged planning PR + real decomposition children carry the rest of the proof.
+    mcheck = _valid_matrix(repo, refs.get("matrix"))
+    if not mcheck.ok:
+        return mcheck
     if not _present(refs.get("planning_pr")) or refs.get("planning_pr_state") != "MERGED":
         return _fail("plan-pr-unmerged", "plan complete requires refs.planning_pr MERGED")
     decompositions = refs.get("decompositions")
@@ -296,7 +365,7 @@ def _v_plan(status: str, refs: dict, repo: str, session: str) -> CloseoutResult:
                      "plan complete requires refs.decompositions {consideration: child} (non-empty)")
     if not isinstance(refs.get("pointers_retired"), list):
         return _fail("plan-pointers", "plan complete requires refs.pointers_retired (a list)")
-    return CloseoutResult(True, "ok", "plan decomposed + admitted", refs)
+    return CloseoutResult(True, "ok", "plan decomposed + admitted (matrix re-validated)", refs)
 
 
 def _v_recirculate(status: str, refs: dict, repo: str, session: str) -> CloseoutResult:
@@ -314,16 +383,53 @@ def _v_recirculate(status: str, refs: dict, repo: str, session: str) -> Closeout
     return CloseoutResult(True, "ok", "recirculation inbox drained + reconciled", refs)
 
 
+def _valid_build_receipt(issue: object, receipt: object) -> CloseoutResult:
+    """A build receipt must be a STRUCTURED reference to a merged PR — `{pr, state: "MERGED"}` — not an
+    arbitrary string. The issue key must be a real reference, the PR a real reference, and the state
+    MERGED, so a receipt can't be fabricated from a bare token."""
+    if not _present(issue):
+        return _fail("build-receipt-issue", "each build receipt must be keyed by a real issue reference")
+    if not isinstance(receipt, dict):
+        return _fail("build-receipt-shape",
+                     f"build receipt for {issue} must be {{pr, state}} referencing a MERGED PR "
+                     f"(an arbitrary receipt string is not proof)")
+    if not _present(receipt.get("pr")):
+        return _fail("build-receipt-pr", f"build receipt for {issue} must cite a real PR (refs.receipts.{issue}.pr)")
+    if receipt.get("state") != "MERGED":
+        return _fail("build-receipt-unmerged", f"build receipt for {issue} requires the PR state MERGED")
+    return CloseoutResult(True, "ok", "receipt ok", {})
+
+
 def _v_build(status: str, refs: dict, repo: str, session: str) -> CloseoutResult:
     if status == "no_action":
         return _check_no_action("build", repo)
     receipts = refs.get("receipts")
-    if isinstance(receipts, dict) and receipts and all(_ne_str(v) for v in receipts.values()):
-        return CloseoutResult(True, "ok", "build receipts pass", refs)
+    if isinstance(receipts, dict) and receipts:
+        for issue, receipt in receipts.items():
+            result = _valid_build_receipt(issue, receipt)
+            if not result.ok:
+                return result
+        return CloseoutResult(True, "ok", "build receipts reference merged PRs", refs)
     if refs.get("frontier") == "none-eligible":
-        return CloseoutResult(True, "ok", "no eligible requested item on the ready frontier", refs)
+        # an empty ready frontier is oracle-backed, never trusted (the same door as no_action).
+        return _check_no_action("build", repo)
     return _fail("build-receipts",
-                 "build complete requires refs.receipts {issue: receipt} or refs.frontier == 'none-eligible'")
+                 "build complete requires refs.receipts {issue: {pr, state:'MERGED'}} "
+                 "or refs.frontier == 'none-eligible' (oracle-backed)")
+
+
+def _persisted_drain_verdict(repo: str, session: str):
+    """THIS session's PERSISTED drain verdict (`.idc-drain-verdict.json`, Stage E2) via
+    idc_drain_verdict.current_verdict — a DURABLE artifact the drain wrote, session-scoped and
+    staleness-guarded by that reader. None when there is no fresh verdict for THIS session (absent,
+    foreign, or stale). Read tolerantly: any failure yields None → the autorun complete fails closed."""
+    if not _ne_str(repo) or not _ne_str(session):
+        return None
+    try:
+        import idc_drain_verdict as DV  # noqa: E402 — lazy (scripts/hooks is already on sys.path)
+        return DV.current_verdict(repo, session)
+    except Exception:  # noqa: BLE001 — a verdict read failure is fail-closed for autorun complete
+        return None
 
 
 def _v_autorun(status: str, refs: dict, repo: str, session: str) -> CloseoutResult:
@@ -332,13 +438,19 @@ def _v_autorun(status: str, refs: dict, repo: str, session: str) -> CloseoutResu
         if not isinstance(gates, list) or not gates:
             return _fail("autorun-gates", "autorun waiting_gate requires a non-empty refs.gates list")
         return CloseoutResult(True, "ok", "autorun paused behind human gate(s)", refs)
-    # complete: THIS session's drain reads exactly `drain: complete`.
-    if refs.get("drain") != "complete":
-        return _fail("autorun-drain", "autorun complete requires refs.drain == 'complete'")
-    if refs.get("drain_session") != session:
-        return _fail("autorun-drain-session",
-                     "autorun complete requires refs.drain_session to be THIS session's drain verdict")
-    return CloseoutResult(True, "ok", "autorun drained to fixpoint this session", refs)
+    # complete: THIS session's PERSISTED drain verdict must read exactly `complete`. The drain status
+    # is read from the DURABLE artifact (.idc-drain-verdict.json), never a caller-supplied drain string
+    # — a forged `refs.drain` can no longer clear the obligation.
+    verdict = _persisted_drain_verdict(repo, session)
+    if verdict is None:
+        return _fail("autorun-drain",
+                     "autorun complete requires THIS session's persisted drain verdict "
+                     "(.idc-drain-verdict.json) — none found (absent, foreign, or stale)")
+    if verdict.get("verdict") != "complete":
+        return _fail("autorun-drain-incomplete",
+                     f"autorun complete requires the persisted drain verdict to be 'complete', "
+                     f"got {verdict.get('verdict')!r}")
+    return CloseoutResult(True, "ok", "autorun drained to fixpoint this session (persisted verdict)", refs)
 
 
 def _v_janitor(status: str, refs: dict, repo: str, session: str) -> CloseoutResult:
@@ -403,6 +515,26 @@ def args_digest(text: str) -> str:
     return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
 
 
+_DOC_ARG_RE = re.compile(r"(?:^|\s)--doc(?:=|\s+)(\S+)")
+_UNIT_ARG_RE = re.compile(r"(?:^|\s)--unit(?:=|\s+)(\S+)")
+
+
+def intake_ref_from_args(command: str, args_text: str):
+    """Extract a Think run's intake manifest + selected units from its raw arg text, so intake mode is
+    recorded DURABLY on the command record at start (finding 2). Only `/idc:think --doc <manifest>
+    --unit <ids>` carries intake mode; every other command / arg shape yields (None, None). Storing
+    this on the record (not inferring it from caller-supplied finish input) is what stops an
+    intake-mode run from dropping units by simply omitting the intake fields at finish."""
+    if command != "think" or not args_text:
+        return None, None
+    doc = _DOC_ARG_RE.search(args_text)
+    if not doc:
+        return None, None
+    unit = _UNIT_ARG_RE.search(args_text)
+    units = [u for u in unit.group(1).split(",") if u] if unit else []
+    return doc.group(1), units
+
+
 def validate_closeout(command: str, status: str, evidence: object,
                       repo: str | None = None, session: str | None = None) -> CloseoutResult:
     """Validate a closeout's command, terminal status, COMMON envelope, and per-command evidence
@@ -457,9 +589,15 @@ def register_start(cwd: str, session_id: str, command: str, plugin_version: str,
     """Open (idempotently upsert) the command's active lifecycle record — the entry gate's helper.
     Computes the argument digest and delegates the single ledger write. Assumes freshness/admission
     was already decided by the caller (the entry gate). Returns the record dict when the write
-    PERSISTED, `{}` outside a governed repo, or None when the ledger write FAILED (Fix 2)."""
+    PERSISTED, `{}` outside a governed repo, or None when the ledger write FAILED (Fix 2).
+
+    A Think run started with `--doc/--unit` durably stamps its intake manifest + selected units on the
+    record (finding 2), so the Think closeout enforces exact-once coverage from the RECORD on every
+    path — a finish that omits the intake fields cannot make an intake-mode run look non-intake."""
+    intake_manifest, intake_units = intake_ref_from_args(command, args_text or "")
     return idc_ledger.command_start(
-        cwd, session_id, command, plugin_version, args_digest(args_text or ""), source or "")
+        cwd, session_id, command, plugin_version, args_digest(args_text or ""), source or "",
+        intake_manifest=intake_manifest, intake_units=intake_units)
 
 
 def active_records(cwd: str, session_id: str) -> list:
@@ -473,6 +611,15 @@ def active_records(cwd: str, session_id: str) -> list:
 def _cmd_start(args) -> int:
     if args.command not in COMMANDS:
         print(f"idc-command-contract: unknown command {args.command!r}", file=sys.stderr)
+        return 2
+    # A REAL, non-empty session identity is required (finding 5). Codex/Pi fire no Claude
+    # UserPromptExpansion, so a bare `$CLAUDE_CODE_SESSION_ID` can be empty; refuse it here with a
+    # precise message rather than opening an anonymous obligation that another session-less run could
+    # collide with on (session="", command).
+    if not (args.session or "").strip():
+        print("idc-command-contract: refusing to open a command record without a session identity "
+              "(the runtime must supply a real, non-empty --session — Codex: its thread/run label; "
+              "Pi: the resident's idc-<role> id).", file=sys.stderr)
         return 2
     try:
         result = freshness.evaluate(args.plugin_root, repo=args.repo)
@@ -500,6 +647,10 @@ def _cmd_start(args) -> int:
 
 
 def _cmd_finish(args) -> int:
+    if not (args.session or "").strip():
+        print("idc-command-contract: refusing to finish a command record without a session identity "
+              "(a blank --session could close another anonymous session's record).", file=sys.stderr)
+        return 2
     try:
         evidence = json.loads(args.evidence_json)
     except ValueError as exc:

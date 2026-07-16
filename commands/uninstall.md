@@ -102,7 +102,23 @@ preflight exemption); it is never part of the removal commit.
 
 ## Phase 3 — Remove footprints in ONE revertable commit
 
-Apply every removal as a single commit so the whole uninstall reverts atomically:
+**Close the command contract FIRST — while the repo is still governed.** The removal below deletes
+`docs/workflow/tracker-config.yaml`, which is what marks this repo IDC-governed; once it is gone the
+session-ledger write is a repo-gated no-op and the `finish` can no longer land (it exits 2). So
+discharge the obligation now, before any deletion — the manifest is settled (Phase 1) and the archive
+path is known (Phase 2), so the terminal state is already decided:
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
+  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command uninstall \
+  --status <complete|blocked_external> --evidence-json '<envelope>'
+```
+- **`complete`** — the receipt-driven manifest is settled (about to be applied), or the run is an
+  explicit no-action (nothing left to remove). Evidence refs: `outcome:"applied"` **and**
+  `archive:"<archive path>"` when work products were archived + removed, or `outcome:"no-action"`.
+- **`blocked_external`** — a safety refusal (a dirty tree, an unverifiable board, an invalid receipt):
+  `blocker:{helper, exit (nonzero), diagnostic}`. Report it as blocked; do not proceed to remove.
+
+Then apply every removal as a single commit so the whole uninstall reverts atomically:
 ```bash
 # 1) delete the manifest files (tracked → git rm; the receipt + scaffold are tracked)
 git -C "$ROOT" rm -r --quiet <manifest paths kept for removal>
@@ -162,29 +178,18 @@ Print one table of every footprint (`removed` / `skipped-absent` / `kept (custom
 | Footprint | Status |
 |-----------|--------|
 
-## Command lifecycle — verify at entry, close out honestly
+## Command lifecycle — verify at entry, close BEFORE ungoverning
 
-The command entry gate opened this command's lifecycle record at expansion; verify it, and **close it
-with a validated terminal status** before your final answer. Uninstall is a **removal** command — no
-pipeline oracle handoff:
+The command entry gate opened this command's lifecycle record at expansion; verify it early:
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" status \
   --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --json
-# … after the manifest is settled …
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
-  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command uninstall \
-  --status <complete|blocked_external> --evidence-json '<envelope>'
 ```
 
-- **`complete`** — the receipt-driven manifest was applied, or the run was an explicit no-action
-  (nothing left to remove). Evidence refs: `outcome:"applied"` **and** `archive:"<archive path>"` when
-  work products were archived + removed, or `outcome:"no-action"`.
-- **`blocked_external`** — a safety refusal (a dirty tree, an unverifiable board, an invalid receipt):
-  `blocker:{helper, exit (nonzero), diagnostic}`.
-
-**Once the removal deletes `docs/workflow/tracker-config.yaml`, this repo is no longer governed** — so
-the session ledger write and the Stop closeout gate are both repo-gated no-ops from that point. A
-`finish` that no-ops on the now-ungoverned repo is expected and harmless: the obligation dissolved with
-the governance footprint. **Do not re-initialize the repo** (re-create `tracker-config.yaml`, re-open a
-record) merely to make the `finish` "land" — that would undo the uninstall.
+Uninstall is a **removal** command — no pipeline oracle handoff. Its closeout `finish` is called in
+**Phase 3, immediately BEFORE the removal deletes `docs/workflow/tracker-config.yaml`** — because that
+deletion ungoverns the repo, after which a `finish` is a repo-gated no-op (exit 2), never a valid
+close. Close the record while the repo is still governed, then remove. **Do not re-initialize the
+repo** (re-create `tracker-config.yaml`, re-open a record) to make a late `finish` land — that would
+undo the uninstall.

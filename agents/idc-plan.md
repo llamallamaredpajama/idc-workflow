@@ -147,12 +147,16 @@ pillar-level *file* clashes among the surviving, de-duplicated pillars.
 
    **Advance a consumed intake unit's manifest disposition.** When a consideration being decomposed
    **originated from a reviewed external-intake unit** — its paused-origin / discovered-scope
-   provenance names a `docs/workflow/intakes/<file>.json#<unit>` reference — record that unit's
-   completion on the exact-once manifest as its Buildables land, so the manifest never goes stale
-   against the board:
+   provenance names a `docs/workflow/intakes/<file>.json#<unit>` reference — record the decomposition
+   on the exact-once manifest as its Buildables land, so the manifest never goes stale against the
+   board. A recirculate-origin unit's class is `admitted_unplanned` / `discovered_drift`, so the
+   manifest state machine's ONLY legal durable disposition for it is **`materialized`**
+   (`verified_done` is reserved for `class=already_done` and the helper rejects it here). Recirculation
+   already materialized the unit against its recirculation ticket; append the planning-PR evidence and
+   keep it materialized:
    ```bash
    python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_intake_manifest.py" link \
-     --manifest "$MANIFEST" --unit "$UNIT" --state verified_done --evidence "plan:<planning-pr>"
+     --manifest "$MANIFEST" --unit "$UNIT" --state materialized --evidence "plan:<planning-pr>"
    ```
    A consideration with no intake provenance has no manifest to touch — skip this.
 4. **Report the newly-created Buildable issue numbers on completion.** When this run was spawned by a

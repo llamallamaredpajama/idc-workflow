@@ -151,16 +151,27 @@ A Pi resident/session loads **no Claude plugins and fires no `UserPromptExpansio
 the command lifecycle record for you. When a Pi role drives a governed `/idc:<command>`, it must call
 `idc_command_contract.py start` **explicitly** at command entry — passing `--plugin-root` so the Task-1
 freshness check runs (a stale runtime is refused with exit 4 and no record) — then verify it with
-`status` and close it with a validated terminal status via `finish` before the run ends:
+`status` and close it with a validated terminal status via `finish` before the run ends.
+
+A Pi resident sets **no `CLAUDE_CODE_SESSION_ID`** (no UserPromptExpansion), so **bind the
+resident's OWN session identity** — the `--session-id idc-<role>` the `idc-pi` launcher opened it
+with (`idc-think`, `idc-build-impl`, …) — and **refuse a blank one**: two anonymous residents must
+never collide on `(session="", command)` (the contract layer also rejects an empty `--session`
+fail-closed, so a bare `$CLAUDE_CODE_SESSION_ID` would just hard-fail).
 ```bash
+SESSION="${IDC_PI_SESSION:-${CLAUDE_CODE_SESSION_ID:-}}"   # the resident's idc-<role> session id
+if [ -z "$SESSION" ]; then
+  echo "idc: no Pi session identity — set IDC_PI_SESSION to the resident's idc-<role> session id" >&2
+  exit 2
+fi
 python3 "$PLUGIN_ROOT/scripts/idc_command_contract.py" start \
-  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command <command> \
+  --repo "$PWD" --session "$SESSION" --command <command> \
   --plugin-root "$PLUGIN_ROOT" --args "$ARGS" --source pi
 python3 "$PLUGIN_ROOT/scripts/idc_command_contract.py" status \
-  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --json
+  --repo "$PWD" --session "$SESSION" --json
 # … run the command playbook …
 python3 "$PLUGIN_ROOT/scripts/idc_command_contract.py" finish \
-  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command <command> \
+  --repo "$PWD" --session "$SESSION" --command <command> \
   --status <validated-status> --evidence-json '<envelope>'
 ```
 The evidence matrix and the terminal-status rules are **identical across runtimes** (one

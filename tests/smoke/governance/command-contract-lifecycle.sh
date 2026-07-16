@@ -60,6 +60,49 @@ stop_payload() {
   python3 -c 'import json,sys; print(json.dumps({"session_id":sys.argv[1],"cwd":sys.argv[2],"hook_event_name":"Stop","stop_hook_active":False}))' "$1" "$REPO"
 }
 
+# write_fake_gh <path> — a hermetic `gh` stub on PATH (the suite's established fake-gh pattern; see
+# next-action-truth.sh). Defined UP HERE because the Task-6 think/plan/build `complete` closeouts all
+# RE-READ a PR's merged-state for real, so the think cases below (7a/7b/10b/11a) need it too. It
+# answers the two READ-ONLY calls the round-2 validators make:
+#   * `gh pr view <N> --json state,mergedAt`  → MERGED when N is in $FAKE_MERGED_PRS (space list),
+#     else OPEN; $FAKE_PR_ERROR=1 makes it EXIT NONZERO (simulates gh missing / an unresolvable PR).
+#   * `gh issue view <N> --json body -q .body` → prints $FAKE_ISSUE_DIR/<N>.body, or EXITS NONZERO
+#     when that file is absent (a missing decomposition child).
+write_fake_gh() {  # $1 = path to the fake gh
+  python3 - "$1" <<'PY'
+import os, sys
+path = sys.argv[1]
+src = r'''#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+if args[:2] == ["pr", "view"] and len(args) >= 3:
+    if os.environ.get("FAKE_PR_ERROR") == "1":
+        sys.stderr.write("fake gh: pr read failed\n"); raise SystemExit(2)
+    merged = set((os.environ.get("FAKE_MERGED_PRS") or "").split())
+    if args[2] in merged:
+        print(json.dumps({"state": "MERGED", "mergedAt": "2026-07-12T00:00:00Z"}))
+    else:
+        print(json.dumps({"state": "OPEN", "mergedAt": None}))
+    raise SystemExit(0)
+if args[:2] == ["issue", "view"] and len(args) >= 3:
+    d = os.environ.get("FAKE_ISSUE_DIR") or ""
+    p = os.path.join(d, args[2] + ".body") if d else ""
+    if p and os.path.isfile(p):
+        with open(p, encoding="utf-8") as h:
+            sys.stdout.write(h.read())
+        raise SystemExit(0)
+    sys.stderr.write("fake gh: no Issue #%s\n" % args[2]); raise SystemExit(1)
+sys.stderr.write("fake gh: unexpected call %s\n" % " ".join(args)); raise SystemExit(3)
+'''
+with open(path, "w", encoding="utf-8") as h:
+    h.write(src)
+os.chmod(path, 0o755)
+PY
+}
+FAKE_BIN="$WORK/fake-bin"; mkdir -p "$FAKE_BIN" || gov_fail "could not make fake-bin"
+write_fake_gh "$FAKE_BIN/gh"
+gh_finish() { PATH="$FAKE_BIN:$PATH" contract finish "$@"; }
+
 # (1) start creates one active record and is idempotent for the same session+command.
 contract start --repo "$REPO" --session "$S1" --command think --plugin-root "$GOV_PLUGIN" \
   --args 'Drive first' --source user >/dev/null
@@ -235,17 +278,45 @@ python3 "$INTAKE" link --manifest "$MANIFEST" --unit Drive --state materialized 
   || gov_fail "(7) could not materialize Drive"
 
 think_complete_ev() {
-  # $1 = manifest repo-relative locator, $2 = selected JSON array
-  printf '{"schema_version":1,"refs":{"consideration":"pass","think_pr":706,"think_pr_state":"MERGED","gate":708,"gate_markers":1,"gate_disposition":"disposed","pointer":707,"pointer_state":"admitted","intake_manifest":"%s","intake_selected":%s}}' "$1" "$2"
+  # $1 = manifest repo-relative locator, $2 = selected JSON array. The caller passes ONLY the Think PR
+  # NUMBER (think_pr) — its merged-state is RE-READ for real by the validator (gh pr view), never a
+  # caller think_pr_state (round-2 F1 parity with plan/build). The successful cases run under
+  # FAKE_MERGED_PRS="706" gh_finish so the real read reports the Think PR MERGED.
+  printf '{"schema_version":1,"refs":{"consideration":"pass","think_pr":706,"gate":708,"gate_markers":1,"gate_disposition":"disposed","pointer":707,"pointer_state":"admitted","intake_manifest":"%s","intake_selected":%s}}' "$1" "$2"
 }
 
-# (7a) a think complete with Drive materialized + U1/U2 durably queued PASSES.
+# (7a) a think complete with Drive materialized + U1/U2 durably queued PASSES — under a real gh read
+# that reports the Think PR (706) MERGED.
 contract start --repo "$REPO3" --session "$S3" --command think --plugin-root "$GOV_PLUGIN" \
   --args 'life' --source user >/dev/null
-contract finish --repo "$REPO3" --session "$S3" --command think --status complete \
+FAKE_MERGED_PRS="706" gh_finish --repo "$REPO3" --session "$S3" --command think --status complete \
   --evidence-json "$(think_complete_ev "$MANIFEST_REL" '["Drive"]')" \
-  || gov_fail "(7a) a complete think with full intake coverage was rejected"
-echo "  ok (7a) think complete accepts full intake coverage (selected materialized, remainder durable)"
+  || gov_fail "(7a) a complete think with full intake coverage + a real MERGED Think-PR read was rejected"
+echo "  ok (7a) think complete accepts full intake coverage (selected materialized, remainder durable) + a real MERGED PR read"
+
+# (7a-sabotage, THIS FIX) think complete RE-READS the Think PR's merged-state for real (gh pr view),
+# mirroring plan/build's _gh_pr_merged path — a caller state is never trusted. Coverage passes (Drive
+# materialized) so the sabotage reaches the PR check. Red-when-broken: trust a caller think_pr_state
+# (the OLD behaviour) ⇒ both bogus closes below are ACCEPTED.
+contract start --repo "$REPO3" --session "$S3" --command think --plugin-root "$GOV_PLUGIN" \
+  --args 'life-unmerged' --source user >/dev/null
+# (i) the Think PR reads NOT merged (real gh OPEN) — refused even if the caller claims MERGED.
+if FAKE_MERGED_PRS="" gh_finish --repo "$REPO3" --session "$S3" --command think --status complete \
+     --evidence-json "$(think_complete_ev "$MANIFEST_REL" '["Drive"]')" 2>/dev/null; then
+  gov_fail "(7a-sabotage) a think complete whose Think PR reads NOT merged (real gh) was accepted"
+fi
+# (ii) gh cannot establish the PR state (error) — fail closed, never trust the caller.
+if FAKE_PR_ERROR=1 gh_finish --repo "$REPO3" --session "$S3" --command think --status complete \
+     --evidence-json "$(think_complete_ev "$MANIFEST_REL" '["Drive"]')" 2>/dev/null; then
+  gov_fail "(7a-sabotage) a think complete accepted an UNVERIFIABLE Think-PR merged-state (gh errored)"
+fi
+[ "$(contract status --repo "$REPO3" --session "$S3" --json | json_count active)" -eq 1 ] \
+  || gov_fail "(7a-sabotage) a rejected sabotage finish must leave the think record active"
+# honest close: the real gh read confirms the Think PR (706) MERGED.
+FAKE_MERGED_PRS="706" gh_finish --repo "$REPO3" --session "$S3" --command think --status complete \
+  --evidence-json "$(think_complete_ev "$MANIFEST_REL" '["Drive"]')" >/dev/null \
+  || gov_fail "(7a-sabotage) could not honestly close the think record with a real MERGED gh read"
+echo "  ok (7a-sabotage) think complete re-reads the Think PR merged-state (unmerged/unverifiable refused; a real MERGED read closes)"
 
 # (7b) THE STEP-8 GUARANTEE: a think complete that materializes Drive but DROPS U1/U2 from the
 # exact-once manifest is BLOCKED — the closeout re-reads the manifest and the drop fails validation.
@@ -269,8 +340,8 @@ if contract finish --repo "$REPO3" --session "$S3" --command think --status comp
 fi
 [ "$(contract status --repo "$REPO3" --session "$S3" --json | json_count active)" -eq 1 ] \
   || gov_fail "(7b) the rejected drop-coverage finish must leave the think record active"
-# close it honestly so the record does not leak.
-contract finish --repo "$REPO3" --session "$S3" --command think --status complete \
+# close it honestly so the record does not leak (real gh read reports the Think PR MERGED).
+FAKE_MERGED_PRS="706" gh_finish --repo "$REPO3" --session "$S3" --command think --status complete \
   --evidence-json "$(think_complete_ev "$MANIFEST_REL" '["Drive"]')" >/dev/null \
   || gov_fail "(7b) could not honestly close the drop-case think record"
 echo "  ok (7b) a think closeout that drops units from the exact-once manifest is BLOCKED (Step-8)"
@@ -350,46 +421,8 @@ contract finish --repo "$REPO3" --session "$S3" --command autorun --status compl
   || gov_fail "(7e-sabotage) could not honestly close the autorun record"
 echo "  ok (7e-sabotage) a forged caller drain claim with a foreign/absent verdict is refused (durable artifact wins)"
 
-# write_fake_gh <path> — a hermetic `gh` stub on PATH (the suite's established fake-gh pattern; see
-# next-action-truth.sh). It answers the two READ-ONLY calls the round-2 validators make:
-#   * `gh pr view <N> --json state,mergedAt`  → MERGED when N is in $FAKE_MERGED_PRS (space list),
-#     else OPEN; $FAKE_PR_ERROR=1 makes it EXIT NONZERO (simulates gh missing / an unresolvable PR).
-#   * `gh issue view <N> --json body -q .body` → prints $FAKE_ISSUE_DIR/<N>.body, or EXITS NONZERO
-#     when that file is absent (a missing decomposition child).
-write_fake_gh() {  # $1 = path to the fake gh
-  python3 - "$1" <<'PY'
-import os, sys
-path = sys.argv[1]
-src = r'''#!/usr/bin/env python3
-import json, os, sys
-args = sys.argv[1:]
-if args[:2] == ["pr", "view"] and len(args) >= 3:
-    if os.environ.get("FAKE_PR_ERROR") == "1":
-        sys.stderr.write("fake gh: pr read failed\n"); raise SystemExit(2)
-    merged = set((os.environ.get("FAKE_MERGED_PRS") or "").split())
-    if args[2] in merged:
-        print(json.dumps({"state": "MERGED", "mergedAt": "2026-07-12T00:00:00Z"}))
-    else:
-        print(json.dumps({"state": "OPEN", "mergedAt": None}))
-    raise SystemExit(0)
-if args[:2] == ["issue", "view"] and len(args) >= 3:
-    d = os.environ.get("FAKE_ISSUE_DIR") or ""
-    p = os.path.join(d, args[2] + ".body") if d else ""
-    if p and os.path.isfile(p):
-        with open(p, encoding="utf-8") as h:
-            sys.stdout.write(h.read())
-        raise SystemExit(0)
-    sys.stderr.write("fake gh: no Issue #%s\n" % args[2]); raise SystemExit(1)
-sys.stderr.write("fake gh: unexpected call %s\n" % " ".join(args)); raise SystemExit(3)
-'''
-with open(path, "w", encoding="utf-8") as h:
-    h.write(src)
-os.chmod(path, 0o755)
-PY
-}
-FAKE_BIN="$WORK/fake-bin"; mkdir -p "$FAKE_BIN" || gov_fail "could not make fake-bin"
-write_fake_gh "$FAKE_BIN/gh"
-gh_finish() { PATH="$FAKE_BIN:$PATH" contract finish "$@"; }
+# (the hermetic fake-gh stub — write_fake_gh, FAKE_BIN, gh_finish — is defined near the top of this
+# file, because the think `complete` cases above already need a real PR merged-state read.)
 
 # (7f, findings 1+2) plan complete RE-DERIVES every terminal claim: the matrix re-validates
 # (idc_matrix_check), the planning PR merged-state is read for REAL (gh pr view — never a caller
@@ -706,8 +739,11 @@ json.dump(review, open(review_path, "w", encoding="utf-8"), indent=2, sort_keys=
 PY
 python3 "$INTAKE" validate --manifest "$UNMAT_MANIFEST" --review "$UNMAT_REVIEW" >/dev/null \
   || gov_fail "(10) could not validate unmat manifest"
-# A bare, otherwise-valid think complete envelope that OMITS intake_manifest/intake_selected.
-THINK_COMPLETE_BARE='{"schema_version":1,"refs":{"consideration":"pass","think_pr":706,"think_pr_state":"MERGED","gate":708,"gate_markers":1,"gate_disposition":"disposed","pointer":707,"pointer_state":"admitted"}}'
+# A bare, otherwise-valid think complete envelope that OMITS intake_manifest/intake_selected. The
+# caller passes only the Think PR NUMBER (think_pr) — its merged-state is RE-READ for real, so the
+# cases that must CLOSE run under FAKE_MERGED_PRS="706" gh_finish (the cases that must FAIL do so at
+# the intake-coverage check, which runs BEFORE the PR read, so they need no gh).
+THINK_COMPLETE_BARE='{"schema_version":1,"refs":{"consideration":"pass","think_pr":706,"gate":708,"gate_markers":1,"gate_disposition":"disposed","pointer":707,"pointer_state":"admitted"}}'
 
 # (10a) intake-mode record (--doc/--unit) + a bare think COMPLETE that omits the intake fields, on a
 # manifest whose selected unit Drive is NOT materialized → REFUSED (coverage re-read from the record).
@@ -735,7 +771,7 @@ echo "  ok (10c) intake coverage is enforced on the waiting_gate path too (not o
 # though the finish omits the intake fields (they are read from the record, not the caller).
 contract start --repo "$REPO3" --session "$S5" --command think --plugin-root "$GOV_PLUGIN" \
   --args "--doc $MANIFEST_REL --unit Drive" --source user >/dev/null
-contract finish --repo "$REPO3" --session "$S5" --command think --status complete \
+FAKE_MERGED_PRS="706" gh_finish --repo "$REPO3" --session "$S5" --command think --status complete \
   --evidence-json "$THINK_COMPLETE_BARE" \
   || gov_fail "(10b) an intake-mode think whose recorded coverage is satisfied (Drive materialized, U1/U2 durable) was refused even though the finish omitted the intake fields"
 echo "  ok (10b) an intake-mode record with satisfied coverage still closes honestly (coverage from the record, not the caller)"
@@ -756,7 +792,7 @@ printf '# an ordinary anchor document\n\nnot an intake manifest\n' > "$REPO3/$AN
 S7="s7-$$-$(basename "$WORK")"
 contract start --repo "$REPO3" --session "$S7" --command think --plugin-root "$GOV_PLUGIN" \
   --args "--doc $ANCHOR_REL" --source user >/dev/null
-contract finish --repo "$REPO3" --session "$S7" --command think --status complete \
+FAKE_MERGED_PRS="706" gh_finish --repo "$REPO3" --session "$S7" --command think --status complete \
   --evidence-json "$THINK_COMPLETE_BARE" \
   || gov_fail "(11a) a plain anchor-doc Think (--doc with NO --unit) was wrongly intake-stamped and could not close (intake identity bug)"
 echo "  ok (11a) a plain anchor-doc Think (--doc, no --unit) is NOT intake-stamped and closes honestly"

@@ -416,8 +416,17 @@ def _v_think(status: str, refs: dict, repo: str, session: str) -> CloseoutResult
         if not cov.ok:
             return cov
     if status == "complete":
-        if refs.get("think_pr_state") != "MERGED":
-            return _fail("think-pr-unmerged", "think complete requires the Think PR MERGED")
+        # The Think PR merged-state is a GitHub claim — RE-READ it (never a caller state:"MERGED"),
+        # the same _gh_pr_merged path plan/build use. The caller passes only the PR NUMBER
+        # (refs.think_pr, already required above); the validator re-derives merged-state for real and
+        # fails closed when it cannot be established (gh absent/errored or the PR reads NOT merged).
+        merged = _gh_pr_merged(repo, refs.get("think_pr"))
+        if merged is None:
+            return _fail("think-pr-unverified",
+                         "think complete: the Think PR merged-state could not be verified by a real gh "
+                         "read (a caller state is never trusted) — fail closed")
+        if not merged:
+            return _fail("think-pr-unmerged", "think complete requires the Think PR MERGED (real gh read)")
         if refs.get("gate_disposition") != "disposed":
             return _fail("think-gate-open", "think complete requires the gate disposed (gate-approved)")
         if refs.get("pointer_state") != "admitted":

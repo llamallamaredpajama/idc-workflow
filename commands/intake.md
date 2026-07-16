@@ -45,11 +45,13 @@ a different handoff:
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_next_action.py" --repo "$PWD" --json
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command intake \
-  --status <complete|blocked_external> --evidence-json '<envelope>'
+  --status <complete> --evidence-json '<envelope>'
 ```
 
 - **`complete`** — the manifest + independent review validate and the intake PR reads `MERGED`.
   Evidence refs: `manifest:"<repo-rel>"`, `review:"<review-basename>"`, `intake_pr` (the PR **number** —
   the validator **re-reads its merged-state for real (`gh pr view`)**, never a caller `state` string).
-- **`blocked_external`** — the extractor, validator, or PR helper returned a nonzero receipt:
-  `blocker:{helper, exit (nonzero), diagnostic}`. Report it as blocked, never as a completed intake.
+
+Intake has **no `blocked_external`** terminal: the extractor / validator / PR helper write no durable
+failure receipt the validator can re-derive, so a blocked stop is not claimable — fix the failing
+helper or wait; never self-report a blocked intake as a completed terminal.

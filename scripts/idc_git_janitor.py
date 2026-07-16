@@ -1173,6 +1173,13 @@ def main():
     ap.add_argument("--ensure-gitignore", action="store_true",
                     help="idempotently add the journal's advisory-lock sidecar to the repo-root "
                          ".gitignore, then exit (scaffold/update step; append-only, non-destructive)")
+    ap.add_argument("--report-session",
+                    help="write THIS run's scan result (scanner_exit + clean) to the session-scoped "
+                         "janitor command report so the /idc:janitor closeout can re-read it — the "
+                         "honest path where the SCANNER, not the caller, records the exit code")
+    ap.add_argument("--report-nonce",
+                    help="bind the written janitor report to the active command record's nonce "
+                         "(the closeout requires the report's nonce to match)")
     args = ap.parse_args()
 
     # Scaffold/update step: no board read needed — ensure the sidecar is ignored and exit.
@@ -1202,7 +1209,9 @@ def main():
         else:
             print_report(findings, ctx)
             print("janitor: " + _VERDICT_BANNER[verdict(findings, indeterminate)])
-        sys.exit(_exit_code(findings, indeterminate))
+        code = _exit_code(findings, indeterminate)
+        _write_scan_report(ctx["repo"], args.report_session, args.report_nonce, code)
+        sys.exit(code)
 
     # --apply-safe: execute SAFE-FIX, re-scan, report the delta.
     if not args.json:
@@ -1226,11 +1235,31 @@ def main():
         v2 = verdict(findings2, indeterminate2)
         print("janitor: " + ("findings remain (RISKY/REPORT-ONLY need review)"
                              if v2 == "findings" else _VERDICT_BANNER[v2]))
-    sys.exit(_exit_code(findings2, indeterminate2))
+    code2 = _exit_code(findings2, indeterminate2)
+    _write_scan_report(ctx2["repo"], args.report_session, args.report_nonce, code2)
+    sys.exit(code2)
 
 
 def _exit_code(findings, indeterminate):
     return _VERDICT_EXIT[verdict(findings, indeterminate)]
+
+
+def _write_scan_report(repo, session, nonce, exit_code):
+    """Persist THIS scan's verdict to the session-scoped janitor command report (wave-4 finding 7): the
+    /idc:janitor closeout re-reads `{scanner_exit, clean, nonce}` from it, so the SCANNER — not a
+    caller integer — records the exit, bound to the active command record's nonce. BEST-EFFORT + a
+    no-op without `--report-session` (a plain scan / --json consumer is unaffected)."""
+    if not session:
+        return
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "hooks"))
+        import idc_command_report as CR  # noqa: E402 — lazy (scripts/hooks on sys.path)
+        CR.write_report(repo, "janitor",
+                        {"scanner_exit": int(exit_code), "clean": int(exit_code) == 0,
+                         "nonce": str(nonce) if nonce else None},
+                        session_id=session)
+    except Exception:  # noqa: BLE001 — persisting the report must never break the scan's exit contract
+        pass
 
 
 if __name__ == "__main__":

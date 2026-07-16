@@ -48,7 +48,7 @@ oracle's next command/reason**; it never invents a different handoff:
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_next_action.py" --repo "$PWD" --json
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command plan \
-  --status <complete|no_action|blocked_external> --evidence-json '<envelope>'
+  --status <complete|no_action> --evidence-json '<envelope>'
 ```
 
 - **`complete`** — every admitted consideration decomposed has a decomposition child; the deconfliction
@@ -59,12 +59,17 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   `decompositions:{<consideration>:<child>}`, `pointers_retired:[…]`. The validator **re-derives** the
   rest: it confirms every decomposition child **exists** (via the tracker reader; on the github backend
   it additionally **re-runs the schema + provenance checks** on each child's live body), and it
-  cross-checks `pointers_retired` against the decomposed set — an empty `pointers_retired` is valid only
-  when nothing was decomposed. It also **independently re-derives the required admitted-consideration
-  set** from the tracker: a `complete` is refused while the board still shows ANY admitted consideration
-  un-planned (omitting one drops its child + pointer obligations) — so decompose (and retire) **every**
-  admitted consideration, not just the ones you list. No caller "pass" boolean is trusted anywhere.
+  cross-checks `pointers_retired` against the decomposed set: `pointers_retired` must **EQUAL** the
+  decomposed set — an empty list is valid only when nothing was decomposed, and an **extra** retired
+  pointer (retiring a consideration you never decomposed — the retire-then-omit bypass) is refused. It
+  also re-derives the **required admitted-consideration set** from BOTH the set STAMPED at command start
+  (which remembers a consideration Plan itself retires off the board) AND the live board: a `complete`
+  is refused while the board still shows any admitted consideration un-acted, OR a start-admitted
+  consideration was retired but never decomposed. Decompose (and retire) **every** admitted
+  consideration, not just the ones you list. No caller "pass" boolean is trusted anywhere.
 - **`no_action`** — the **live oracle** reports no admitted consideration to plan (its
   `considerations` count is 0). Never claim `no_action` without that fresh oracle result.
-- **`blocked_external`** — a deterministic helper failed: `blocker:{helper, exit (nonzero),
-  diagnostic}`.
+
+Plan has **no `blocked_external`** terminal: its deterministic helpers write no durable failure receipt
+and cannot be re-run read-only, so a blocked stop cannot be re-derived and is not claimable — fix the
+failing check or wait; never self-report a blocked stop as a completed terminal.

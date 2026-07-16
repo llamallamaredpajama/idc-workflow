@@ -79,21 +79,24 @@ with a validated terminal status** before your final answer (the Stop closeout g
 walk-away from an open command). Janitor is a **reconciler/diagnostic** — no pipeline oracle handoff:
 
 ```bash
+# Read this command record's `nonce` (the entry gate stamped it), then RUN THE SCANNER ITSELF so IT
+# writes the session-scoped janitor report bound to that nonce — never an LLM-typed integer:
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" status \
-  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --json
-# … after the scan, PERSIST the scan result so the closeout can RE-READ it (never a caller integer): …
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/idc_command_report.py" --cwd "$PWD" write \
-  --kind janitor --session "$CLAUDE_CODE_SESSION_ID" \
-  --payload-json '{"scanner_exit":<the scanner exit code>,"clean":<true iff exit 0>}'
+  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --json   # -> read the active record's `nonce`
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_janitor.py" --repo "$PWD" <board args> \
+  --report-session "$CLAUDE_CODE_SESSION_ID" --report-nonce "<nonce from the status record>"
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command janitor \
   --status <complete|blocked_external> --evidence-json '<envelope>'
 ```
 
 - **`complete`** — the scanner recorded a real verdict: exit **0** (COHERENT) or exit **1** (findings,
-  **without claiming clean**). The closeout **re-reads the persisted janitor report** (`.idc-janitor-report.json`,
-  written above) — a caller `scanner_exit` integer is ignored; a findings run (exit 1) must record
+  **without claiming clean**). The closeout **re-reads the SCANNER-written janitor report**
+  (`.idc-janitor-report.json`) and requires it **bound to this record's nonce** — a caller `scanner_exit`
+  integer, or a report not bound to the record, is refused; a findings run (exit 1) records
   `clean:false`. Evidence refs: `refs:{}` (the report is the proof).
-- **`blocked_external`** — the scanner exited **2** (ground truth could not be established); persist the
-  report (`scanner_exit:2`) and cite it: `blocker:{helper:"idc_git_janitor.py", exit:2, diagnostic}`
-  (the cited exit must MATCH the persisted report). Report it as blocked, never as a coherent repo.
+- **`blocked_external`** — the scanner exited **2** (ground truth could not be established); the
+  scanner-written report records `scanner_exit:2` (nonce-bound) — cite it:
+  `blocker:{helper:"idc_git_janitor.py", exit:2, diagnostic}` (only the **documented blocked exit 2**
+  grounds this — exit 1 is a completed scan with findings, i.e. `complete`, not blocked; the cited exit
+  must MATCH the persisted report). Report it as blocked, never as a coherent repo.

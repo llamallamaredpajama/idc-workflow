@@ -128,24 +128,29 @@ oracle's next command/reason**, never an improvised handoff:
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_next_action.py" --repo "$PWD" --json
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command recirculate \
-  --status <complete|waiting_gate|blocked_external> --evidence-json '<envelope>'
+  --status <complete|waiting_gate> --evidence-json '<envelope>'
 ```
 
 - **`complete`** — every requested ticket/unit has a valid closeout **and** the deterministic
   reconciliation re-derives as reconciled/complete. Evidence refs:
-  `closeouts:{<ticket|unit>:<disposition>}` — each disposition must be one of the **closed documented
-  set** `admitted`/`drained`/`gated`/`paused`/`materialized` (any other string is refused; the prose and
-  the validator agree). The validator **re-runs the deterministic reconciliation read-only** and refuses
-  the close unless the inbox re-derives as reconciled/complete — a caller `reconciliation:"ran"` string
-  is **not** proof, and a nonexistent/unreadable repo fails closed. When the run was invoked on a NAMED
-  item (`<manifest>#<unit>` or `#<ticket>`, recorded on the record at start), EVERY named item must
-  carry a closeout whose disposition is **re-checked against durable state** (a `<manifest>#<unit>` must
-  be non-`queued` in the manifest); `closeouts:{}` is valid only for a bare full-inbox drain (no named
-  item).
-- **`waiting_gate`** — a valid requirements gate / Think PR is open (a gated backflow paused behind
-  its gate). Evidence refs: `gate:<ref>`.
-- **`blocked_external`** — a deterministic helper failed: `blocker:{helper, exit (nonzero),
-  diagnostic}`.
+  `closeouts:{<ticket|unit>:<disposition>}`. The validator **re-runs the deterministic reconciliation
+  read-only** and refuses the close unless the inbox re-derives as reconciled/complete — a caller
+  `reconciliation:"ran"` string is **not** proof, and a nonexistent/unreadable repo fails closed. When
+  the run was invoked on a NAMED item (`<manifest>#<unit>` or `#<ticket>`, recorded on the record at
+  start), EVERY named item must carry a closeout whose disposition is **re-checked against durable
+  state**: a `<manifest>#<unit>` closeout's disposition must **EQUAL** the durable manifest disposition
+  (`materialized`/`verified_done`/`ignored` — never `queued`); a bare `#<ticket>` closeout's disposition
+  (`admitted`/`drained`/`gated`/`paused`/`materialized`) gets a **per-ticket board re-read** proving the
+  ticket's Status is consistent (a terminal disposition ⇒ the ticket is Done; a paused/gated one ⇒ still
+  open). `closeouts:{}` is valid only for a bare full-inbox drain (no named item).
+- **`waiting_gate`** — a valid requirements gate / Think PR is **open** (a gated backflow paused behind
+  its gate). Evidence refs: `gate:<ref>` (and `think_pr:<N>` when the gate is a Think PR). The validator
+  reads the referenced gate **for real** — a Think PR must read OPEN, a gate issue must be present and
+  not Done on the CURRENT board; a nonexistent/closed gate is refused (a dead gate is not a wait).
+
+Recirculate has **no `blocked_external`** terminal: its deterministic helpers write no durable failure
+receipt and cannot be re-run read-only, so a blocked stop cannot be re-derived and is not claimable —
+fix the failing helper or wait; never self-report a blocked stop as a completed terminal.
 
 No verdict taxonomy, no change-order files — they are deleted; the PR body is the record. Do
 not write source or tests; never admit a requirements (PRD/TRD) change without the gate; never

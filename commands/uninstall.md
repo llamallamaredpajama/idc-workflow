@@ -138,10 +138,13 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   --status <complete|blocked_external> --evidence-json '<envelope>'
 ```
 - **`complete`** — either the footprints were removed, or the run is an explicit no-action. The
-  validator **derives the removal set from the install receipt** (never a caller `removed` list): for an
-  applied run it confirms EVERY receipt-listed footprint (except the governance anchor) is now ABSENT,
-  the settings IDC key is stripped, the archive file exists, and the anchor is still present. Evidence
-  refs for an applied run: `outcome:"applied"`, `settings:".claude/settings.json"`, `archive:"<archive
+  validator **derives the removal set from the install receipt UNION the documented runtime artifacts**
+  (`TRACKER.md` — runtime-created, not receipt-listed), never a caller `removed` list: for an applied
+  run it confirms EVERY footprint in that set (except the governance anchor) is now ABSENT, the settings
+  IDC key is stripped, the archive file exists, and the anchor is still present. It ALSO verifies any
+  opt-in board flags **stamped at start** were honored by a **real read** BEFORE finish: `--close-issues`
+  ⇒ no open issue remains on the board; `--delete-board` ⇒ the board substrate is gone. Evidence refs
+  for an applied run: `outcome:"applied"`, `settings:".claude/settings.json"`, `archive:"<archive
   path>"`. For a no-op run: `outcome:"no-action"` — the validator re-reads the receipt and confirms
   every non-anchor footprint is ALREADY absent (a no-action with any footprint still present, or with no
   receipt to prove it, is refused).

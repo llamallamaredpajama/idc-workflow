@@ -130,28 +130,30 @@ _DRAIN_HELPER = "idc_autorun_drain.py"
 # The janitor scanner persists its exit to the durable session-scoped janitor report (idc_command_report),
 # so a janitor blocked_external's cited exit is RE-DERIVED + MATCHED against that artifact too.
 _JANITOR_HELPER = "idc_git_janitor.py"
+# The receipt checker is safely RE-RUNNABLE read-only (a fingerprint verify), so an init/update/uninstall
+# blocker citing it is RE-DERIVED by re-running it — grounded only when the re-run actually FAILS.
+_RECEIPT_HELPER = "idc_receipt_check.py"
+# The janitor scanner's DOCUMENTED blocked exit (ground truth could not be established). Exit 1 is a
+# COMPLETED scan with findings (a `complete`, not blocked); only exit 2 grounds `blocked_external`
+# (wave-4 finding 1 — fix the exit map).
+_JANITOR_BLOCKED_EXIT = 2
 
-# Per-command allowlist of LEGITIMATE blocking helpers (wave-3 finding 1). A `blocked_external` may
-# only cite a deterministic helper that BELONGS to the command — a helper from another command (the
-# janitor scanner closing a Think, say) can no longer manufacture a blocked stop for an unrelated
-# command. Basenames only (matched against the real shipped script). Kept deliberately tight: each set
-# is the deterministic helpers that command actually shells out to on a blocked path.
+# Per-command allowlist of LEGITIMATE blocking helpers (wave-3 finding 1, tightened wave-4 finding 1).
+# A `blocked_external` may cite ONLY a deterministic helper that BELONGS to the command AND is
+# RE-DERIVABLE — one that either wrote a DURABLE failure receipt (the drain verdict, the janitor report)
+# or is safely RE-RUNNABLE read-only (the receipt fingerprint checker). Helpers that write no receipt and
+# cannot be re-run read-only (PR finishers, transition/board mutators, arg-hungry checkers) are OFF the
+# allowlist (rule B): a caller `exit`/`diagnostic` for them is never accepted, so those commands cannot
+# manufacture a blocked stop. Commands with NO re-derivable helper carry no `blocked_external` claim at
+# all (see _CLAIM_TABLE — not claimable, fail closed).
 _BLOCKER_HELPERS = {
-    "intake":      {"idc_intake_manifest.py", "idc_pr_finish.py"},
-    "think":       {"idc_consideration_check.py", "idc_pr_finish.py", "idc_gh_board.py",
-                    "idc_transition.py"},
-    "plan":        {"idc_matrix_check.py", "idc_schema_check.py", "idc_dag.py", "idc_pr_finish.py",
-                    "idc_transition.py"},
-    "recirculate": {"idc_recirc_reconcile.py", "idc_recirc_closeout.py", "idc_recirculator_layers.py",
-                    "idc_transition.py", "idc_pr_finish.py"},
-    "build":       {"idc_autorun_drain.py", "idc_pr_finish.py", "idc_git_finish.py"},
-    "autorun":     {"idc_autorun_drain.py", "idc_gh_board.py"},
-    "janitor":     {"idc_git_janitor.py"},
-    "init":        {"idc_receipt_check.py", "idc_stage_options.py", "idc_gh_board.py",
-                    "idc_settings_json.py"},
-    "doctor":      {"idc_git_janitor.py", "idc_recirc_sweep.py", "idc_gh_board.py", "idc_board_lint.py"},
-    "update":      {"idc_receipt_check.py", "idc_gh_board.py", "idc_stage_options.py"},
-    "uninstall":   {"idc_receipt_check.py", "idc_settings_json.py", "idc_gh_board.py"},
+    "build":       {_DRAIN_HELPER},
+    "autorun":     {_DRAIN_HELPER},
+    "janitor":     {_JANITOR_HELPER},
+    "doctor":      {_JANITOR_HELPER},
+    "init":        {_RECEIPT_HELPER},
+    "update":      {_RECEIPT_HELPER},
+    "uninstall":   {_RECEIPT_HELPER},
 }
 
 
@@ -207,23 +209,46 @@ def _check_blocker(command: str, refs: dict, repo: str, session: str) -> Closeou
                          "caller's typed value")
     elif base == _JANITOR_HELPER:
         # RE-DERIVE + MATCH the janitor blocker from THIS session's persisted janitor report: the
-        # scanner records its exit there, so a blocked janitor (scanner exit 2, ground truth
-        # unestablished) is proven by the artifact, and the cited exit MATCHED against it.
+        # scanner records its exit there. Only the DOCUMENTED blocked exit (2 — ground truth could not
+        # be established) grounds a blocked stop; a persisted exit 1 is a COMPLETED scan WITH FINDINGS
+        # (a `complete`, not blocked — wave-4 finding 1). The report must be nonce-bound to this record.
         report = _command_report(repo, "janitor", session)
         rexit = report.get("scanner_exit") if isinstance(report, dict) else None
         if not isinstance(rexit, int) or isinstance(rexit, bool):
             return _fail("blocked-external-janitor-unproven",
                          "blocked_external citing the janitor scanner requires THIS session's persisted "
                          "janitor report (.idc-janitor-report.json) recording the scanner_exit — none found")
-        if rexit == 0:
+        if not _report_nonce_bound(repo, command, session, report):
+            return _fail("blocked-external-janitor-nonce",
+                         "blocked_external citing the janitor scanner requires the persisted report bound "
+                         "to THIS command record's nonce (written by the scanner run of this invocation)")
+        if rexit != _JANITOR_BLOCKED_EXIT:
             return _fail("blocked-external-janitor-not-blocked",
-                         "blocked_external citing the janitor scanner requires a NONZERO persisted "
-                         f"scanner_exit; the report records {rexit!r} (coherent, not blocked)")
+                         "blocked_external citing the janitor scanner requires the DOCUMENTED blocked "
+                         f"exit {_JANITOR_BLOCKED_EXIT} (ground truth unestablished); the report records "
+                         f"{rexit!r} — exit 1 is a completed scan with findings (that is `complete`, not blocked)")
         if code != rexit:
             return _fail("blocked-external-janitor-exit-mismatch",
                          f"blocked_external cites exit {code} but the janitor report PERSISTED "
                          f"scanner_exit {rexit!r} — the cited exit must MATCH the durable artifact")
-    return CloseoutResult(True, "ok", "blocked_external cites a deterministic helper failure (allowlisted)", {})
+    elif base == _RECEIPT_HELPER:
+        # RE-RUN the receipt fingerprint checker READ-ONLY (safely re-runnable): the blocker is grounded
+        # ONLY when the re-run actually FAILS (an invalid receipt, or a modified/missing stamped file).
+        # A clean re-run refuses the blocker (a helper that succeeds cannot ground a blocked stop).
+        fp = _receipt_fingerprints_ok(repo, refs.get("receipt"))
+        if fp.ok:
+            return _fail("blocked-external-receipt-not-failing",
+                         "blocked_external citing the receipt checker requires a re-run to actually FAIL "
+                         "(an invalid receipt or a modified/missing stamped file); the read-only re-run "
+                         "passed — there is no deterministic failure to ground a blocked stop")
+    else:
+        # A helper on no re-derivation path (no durable receipt, not safely re-runnable) cannot ground a
+        # blocked stop — a caller exit/diagnostic is never accepted as ground truth (wave-4 finding 1).
+        return _fail("blocked-external-not-rederivable",
+                     f"{base!r} writes no durable failure receipt and cannot be re-run read-only, so a "
+                     "caller-supplied exit/diagnostic cannot prove it failed — this helper cannot ground "
+                     "a blocked_external (fail closed)")
+    return CloseoutResult(True, "ok", "blocked_external re-derived from a durable receipt or a read-only re-run", {})
 
 
 def _command_report(repo: str, kind: str, session: str):
@@ -237,6 +262,32 @@ def _command_report(repo: str, kind: str, session: str):
         return CR.current_report(repo, kind, session)
     except Exception:  # noqa: BLE001 — a report read failure is fail-closed for the closeout
         return None
+
+
+def _record_nonce(repo: str, command: str, session: str):
+    """The per-invocation nonce stamped on THIS session's ACTIVE record for `command` at start
+    (wave-4 finding 7), or None. A diagnostic report (doctor/janitor) must carry this nonce for its
+    closeout to accept it, so a stale/foreign report cannot back a new run. Read tolerantly."""
+    if not _ne_str(repo) or not _ne_str(session):
+        return None
+    try:
+        for rec in idc_ledger.active_commands(repo, session):
+            if rec.get("command") == command and rec.get("nonce"):
+                return rec.get("nonce")
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def _report_nonce_bound(repo: str, command: str, session: str, report: dict) -> bool:
+    """True iff the persisted report's `nonce` matches the active record's stamped nonce (wave-4
+    finding 7). When the record carries NO nonce (an older record shape / a runtime with no record
+    readback), fall back to session scoping alone (the report is already session-scoped) so a
+    nonce-less honest run is not falsely refused — the nonce is defense-in-depth, not the only gate."""
+    record_nonce = _record_nonce(repo, command, session)
+    if record_nonce is None:
+        return True
+    return isinstance(report, dict) and report.get("nonce") == record_nonce
 
 
 def _oracle_action(repo: str):
@@ -295,10 +346,11 @@ def _gh_capture(repo: str, args: list) -> str | None:
     return proc.stdout
 
 
-def _gh_pr_merged(repo: str, pr: object):
-    """A REAL `gh pr view` read of `pr`'s merged-state. Returns True (MERGED), False (a real read
-    proved NOT merged), or None (could not establish — fail closed). The caller NEVER supplies the
-    state; it is re-derived here."""
+def _gh_pr_state(repo: str, pr: object):
+    """A REAL `gh pr view` read of `pr`'s state, returned as the enum `"MERGED"`/`"OPEN"`/`"CLOSED"`
+    (a closed-unmerged PR), or None (could not establish — fail closed). The caller NEVER supplies the
+    state; it is re-derived here (wave-4 finding 2: a dead CLOSED gate is operator-attention, not a
+    valid wait, so the enum must distinguish CLOSED from OPEN — the old boolean collapsed both)."""
     if isinstance(pr, bool) or not _present(pr):
         return None
     try:
@@ -314,7 +366,57 @@ def _gh_pr_merged(repo: str, pr: object):
         return None
     if not isinstance(info, dict):
         return None
-    return info.get("state") == "MERGED" or bool(info.get("mergedAt"))
+    if info.get("state") == "MERGED" or info.get("mergedAt"):
+        return "MERGED"
+    return "CLOSED" if info.get("state") == "CLOSED" else "OPEN"
+
+
+def _gh_pr_merged(repo: str, pr: object):
+    """A REAL `gh pr view` read of `pr`'s merged-state. Returns True (MERGED), False (a real read
+    proved NOT merged — OPEN or CLOSED), or None (could not establish — fail closed). Derived from the
+    state enum so the merged fact and the OPEN/CLOSED distinction never drift."""
+    state = _gh_pr_state(repo, pr)
+    return None if state is None else (state == "MERGED")
+
+
+def _gh_pr_closes_issue(repo: str, pr: object, issue: object):
+    """True iff a REAL `gh pr view --json closingIssuesReferences` read shows PR `pr` closes issue
+    `issue` — the PR↔issue linkage proven from the PR's OWN closing references, never receipt
+    adjacency (wave-4 finding 5). None when the read cannot be established (fail closed)."""
+    if isinstance(pr, bool) or not _present(pr) or not _present(issue):
+        return None
+    try:
+        pr_int, issue_int = int(pr), int(_gate_key(issue))
+    except (TypeError, ValueError):
+        return None
+    out = _gh_capture(repo, ["pr", "view", str(pr_int), "--json", "closingIssuesReferences"])
+    if out is None:
+        return None
+    try:
+        info = json.loads(out)
+        refs = info.get("closingIssuesReferences") if isinstance(info, dict) else None
+    except ValueError:
+        return None
+    if not isinstance(refs, list):
+        return None
+    return any(isinstance(r, dict) and r.get("number") == issue_int for r in refs)
+
+
+def _issue_status(repo: str, num: object):
+    """The referenced issue's CURRENT board status (`Todo`/`Blocked`/`Done`/…) via the shared tracker
+    reader, or None when it is absent from the board / the tracker cannot be read (fail closed). Lets a
+    waiting/closeout claim read the LIVE board state (wave-4 findings 2/4: the gate still open, the
+    pointer genuinely Blocked, the recirc ticket in a Stage/Status consistent with its claim) rather
+    than journal-absence alone."""
+    try:
+        import idc_next_action as NEXT  # noqa: E402 — reuse the shared, constrained tracker reader
+        key = _gate_key(num)
+        for issue in NEXT._load_tracker_issues(repo):
+            if _gate_key(issue.get("number")) == key:
+                return issue.get("status")
+    except Exception:  # noqa: BLE001 — any tracker read failure fails the closeout closed
+        return None
+    return None
 
 
 def _gh_issue_body(repo: str, num: object):
@@ -556,10 +658,15 @@ def _remaining_admitted_considerations(repo: str):
         return None
 
 
-def _manifest_unit_processed(repo: str, manifest_rel: object, unit: str) -> CloseoutResult:
+# The durable manifest dispositions a PROCESSED intake unit may carry (never `queued` = unprocessed).
+_MANIFEST_PROCESSED = {"materialized", "verified_done", "ignored"}
+
+
+def _manifest_unit_processed(repo: str, manifest_rel: object, unit: str, claimed: object) -> CloseoutResult:
     """Re-check a recirculate-requested intake unit against durable manifest state: the unit exists in
-    the referenced manifest and its disposition is NO LONGER `queued` — i.e. it was actually processed
-    into a durable route (wave-3 finding 4). Never trusts the caller's disposition string."""
+    the referenced manifest, its disposition is a PROCESSED state (not `queued`), AND the caller's
+    CLAIMED disposition EQUALS the durable manifest disposition (wave-4 finding 4 — manifest-state
+    equality, not merely non-queued). Never trusts the caller's disposition string as ground truth."""
     path = _confined_repo_path(repo, manifest_rel)
     if path is None or not os.path.isfile(path):
         return _fail("recirc-unit-bad-manifest",
@@ -575,11 +682,42 @@ def _manifest_unit_processed(repo: str, manifest_rel: object, unit: str) -> Clos
     if not isinstance(u, dict):
         return _fail("recirc-unit-absent", f"requested unit {unit!r} is not in manifest {manifest_rel!r}")
     state = (u.get("disposition") or {}).get("state")
-    if state == "queued" or not _ne_str(state):
+    if state not in _MANIFEST_PROCESSED:
         return _fail("recirc-unit-unprocessed",
-                     f"requested unit {unit!r} is still {state!r} in the manifest — recirculate cannot "
-                     "claim it closed until it was processed into a durable route (state != queued)")
+                     f"requested unit {unit!r} is {state!r} in the manifest — recirculate cannot claim it "
+                     f"closed until it was processed into a durable route (one of {sorted(_MANIFEST_PROCESSED)})")
+    if claimed != state:
+        return _fail("recirc-unit-disposition-mismatch",
+                     f"recirculate claims disposition {claimed!r} for unit {unit!r} but the durable "
+                     f"manifest disposition is {state!r} — the claimed disposition must EQUAL the durable one")
     return CloseoutResult(True, "ok", f"requested unit {unit} processed (state {state})", {})
+
+
+# The claimed bare-#ticket dispositions that are TERMINAL (the ticket was processed + closed → the
+# board must read Done) vs NON-TERMINAL (paused/gated behind its own gate → the ticket is still open).
+_RECIRC_TERMINAL_DISPOSITIONS = {"admitted", "drained", "materialized"}
+_RECIRC_OPEN_DISPOSITIONS = {"gated", "paused"}
+
+
+def _ticket_board_consistent(repo: str, ticket: object, claimed: object) -> CloseoutResult:
+    """Per-ticket board re-read (wave-4 finding 4): a bare `#<ticket>` requested item's CURRENT board
+    Status must be CONSISTENT with the claimed disposition — a terminal disposition
+    (admitted/drained/materialized) requires the ticket Done; a non-terminal one (gated/paused)
+    requires it still open (present, not Done). A ticket absent from the board fails closed."""
+    status = _issue_status(repo, ticket)
+    if status is None:
+        return _fail("recirc-ticket-board-missing",
+                     f"recirculate requested ticket {ticket!r} could not be read from the CURRENT board "
+                     "(a nonexistent/unreadable ticket fails closed)")
+    if claimed in _RECIRC_TERMINAL_DISPOSITIONS and status != "Done":
+        return _fail("recirc-ticket-not-terminal",
+                     f"recirculate claims disposition {claimed!r} for ticket {ticket!r} but the board "
+                     f"reads status {status!r}, not Done — a processed ticket must be closed on the board")
+    if claimed in _RECIRC_OPEN_DISPOSITIONS and status == "Done":
+        return _fail("recirc-ticket-not-open",
+                     f"recirculate claims disposition {claimed!r} (paused/gated) for ticket {ticket!r} but "
+                     "the board reads Done — a paused ticket must still be open")
+    return CloseoutResult(True, "ok", f"ticket {ticket} board state consistent with {claimed}", {})
 
 
 _RECEIPT_RELPATH = "docs/workflow/install-receipt.yaml"
@@ -597,6 +735,32 @@ def _receipt_document(repo: str, receipt_rel: object = None):
         return RC.parse_receipt_document(path)
     except Exception:  # noqa: BLE001 — an invalid receipt fails the closeout closed (never trusted)
         return None
+
+
+def _receipt_fingerprints_ok(repo: str, receipt_rel: object) -> CloseoutResult:
+    """RUN the real receipt FINGERPRINT verification (idc_receipt_check.verify_receipt_fingerprints —
+    not a syntax parse): every stamped file's current on-disk bytes must match its recorded SHA-256
+    (wave-4 finding 7). A modified or missing stamped file — or an invalid/unreadable receipt — fails
+    the closeout closed. This is what proves the scaffold actually landed intact, which the old
+    version/syntax parse never checked."""
+    rel = receipt_rel if _ne_str(receipt_rel) else _RECEIPT_RELPATH
+    path = _confined_repo_path(repo, rel)
+    if path is None or not os.path.isfile(path):
+        return _fail("receipt-fingerprint-bad-ref",
+                     "the install receipt could not be resolved to run the fingerprint verification")
+    try:
+        import idc_receipt_check as RC  # noqa: E402 — lazy
+        ok, counts = RC.verify_receipt_fingerprints(repo, path)
+    except SystemExit as exc:  # parse_receipt_document dies (invalid receipt) with SystemExit
+        return _fail("receipt-fingerprint-invalid",
+                     f"the install receipt is invalid, so the fingerprint check could not run ({exc})")
+    except Exception as exc:  # noqa: BLE001 — any verification failure fails closed
+        return _fail("receipt-fingerprint-error", f"the receipt fingerprint verification failed: {exc}")
+    if not ok:
+        return _fail("receipt-fingerprint-mismatch",
+                     f"the receipt fingerprint verification found drift ({counts['modified']} modified, "
+                     f"{counts['missing']} missing) — the scaffold is not intact at the stamped version")
+    return CloseoutResult(True, "ok", "receipt fingerprints verify (scaffold intact)", {})
 
 
 def _running_plugin_version():
@@ -750,16 +914,23 @@ def _claim_think_pr_merged(refs: dict, repo: str, session: str) -> CloseoutResul
 
 
 def _claim_think_pr_open(refs: dict, repo: str, session: str) -> CloseoutResult:
-    # waiting_gate: the Think PR must READ (a nonexistent PR fails closed) and be NOT merged (OPEN).
-    merged = _gh_pr_merged(repo, refs.get("think_pr"))
-    if merged is None:
+    # waiting_gate: the Think PR must READ exactly OPEN (wave-4 finding 2). The real PR-state enum
+    # distinguishes CLOSED (a dead, operator-abandoned gate — NOT a valid wait) from OPEN (a live gate
+    # pending admission); the old boolean collapsed both to "not merged" and let a CLOSED-unmerged PR
+    # satisfy waiting_gate. A nonexistent/unreadable PR fails closed.
+    state = _gh_pr_state(repo, refs.get("think_pr"))
+    if state is None:
         return _fail("think-pr-unverified",
                      "think waiting_gate: the Think PR could not be read (a nonexistent/unreadable PR "
                      "fails closed) — the OPEN state is re-derived, never a caller string")
-    if merged:
+    if state == "MERGED":
         return _fail("think-pr-merged",
                      "think waiting_gate: the Think PR reads MERGED — a merged PR is not a wait; close as "
                      "complete instead")
+    if state == "CLOSED":
+        return _fail("think-pr-dead-gate",
+                     "think waiting_gate: the Think PR reads CLOSED (unmerged) — a dead gate is "
+                     "operator-attention, not a valid wait; it must be OPEN to wait behind it")
     return CloseoutResult(True, "ok", "Think PR open (real gh read)", {})
 
 
@@ -772,6 +943,19 @@ def _claim_think_gate_disposed(refs: dict, repo: str, session: str) -> CloseoutR
 
 
 def _claim_think_gate_not_disposed(refs: dict, repo: str, session: str) -> CloseoutResult:
+    # waiting_gate: re-derive from CURRENT board state (wave-4 finding 2) — the referenced gate is on
+    # the board and still OPEN (status != Done), not merely journal-absence. A manually-closed gate
+    # (Done on the board with no journal record) is no longer a valid wait; a gate absent from the
+    # board fails closed. The journal-absence check stays as an additional guard.
+    status = _issue_status(repo, refs.get("gate"))
+    if status is None:
+        return _fail("think-gate-board-missing",
+                     "think waiting_gate: the referenced gate could not be read from the CURRENT board "
+                     "(a nonexistent/unreadable gate fails closed) — a wait requires a live, open gate")
+    if status == "Done":
+        return _fail("think-gate-board-closed",
+                     "think waiting_gate: the referenced gate reads Done on the board — a closed gate is "
+                     "not a wait; close as complete instead")
     return _gate_not_disposed(repo, refs.get("gate"))
 
 
@@ -780,6 +964,19 @@ def _claim_think_pointer_admitted(refs: dict, repo: str, session: str) -> Closeo
 
 
 def _claim_think_pointer_blocked(refs: dict, repo: str, session: str) -> CloseoutResult:
+    # waiting_gate: re-derive from CURRENT board state (wave-4 finding 2) — the pointer is genuinely
+    # Blocked on the board, not merely un-admitted in the journal. A manually-advanced pointer (Todo on
+    # the board with no unblock record) is no longer a valid wait; a pointer absent from the board fails
+    # closed. The journal-absence check stays as an additional guard.
+    status = _issue_status(repo, refs.get("pointer"))
+    if status is None:
+        return _fail("think-pointer-board-missing",
+                     "think waiting_gate: the consideration pointer could not be read from the CURRENT "
+                     "board (a nonexistent/unreadable pointer fails closed)")
+    if status != "Blocked":
+        return _fail("think-pointer-board-unblocked",
+                     f"think waiting_gate: the consideration pointer reads {status!r} on the board, not "
+                     "Blocked — a pointer already advanced past its gate is not a wait")
     return _pointer_blocked(repo, refs.get("pointer"))
 
 
@@ -877,9 +1074,10 @@ def _claim_plan_decomposition(refs: dict, repo: str, session: str) -> CloseoutRe
             or any(not _present(v) for v in decompositions.values()):
         return _fail("plan-decomposition",
                      "plan complete requires refs.decompositions {consideration: child} (non-empty)")
-    # pointers_retired must be CROSS-CHECKED against the decomposed set: every consideration that was
-    # decomposed must have its pointer retired, so `pointers_retired:[]` is valid ONLY when nothing was
-    # decomposed — an empty list against real decompositions is refused.
+    # pointers_retired must EQUAL the decomposed set (wave-4 finding 3): every decomposed consideration
+    # has its pointer retired AND no EXTRA pointer is retired. `retired == decomposed` — an empty list
+    # is valid only when nothing was decomposed, and an extra retired pointer (retiring a consideration
+    # that was never decomposed, the retire-then-omit bypass) is refused.
     pointers = refs.get("pointers_retired")
     if not isinstance(pointers, list):
         return _fail("plan-pointers", "plan complete requires refs.pointers_retired (a list)")
@@ -890,26 +1088,61 @@ def _claim_plan_decomposition(refs: dict, repo: str, session: str) -> CloseoutRe
         return _fail("plan-pointers-open",
                      "plan complete requires every decomposed consideration's pointer retired; "
                      f"still-open: {', '.join('#' + m for m in missing)}")
+    if retired - decomposed:
+        extra = sorted(retired - decomposed)
+        return _fail("plan-pointers-extra",
+                     "plan complete retired pointer(s) for consideration(s) that were NOT decomposed: "
+                     f"{', '.join('#' + m for m in extra)} — retiring a consideration's pointer without "
+                     "decomposing it (the retire-then-omit bypass) drops its child obligation; retired "
+                     "must EQUAL the decomposed set")
     # Re-verify the decomposition children (existence + schema + provenance) from durable state.
     return _verify_decomposition(repo, refs.get("matrix"), list(decompositions.values()))
 
 
+def _plan_record_admitted(repo: str, session: str):
+    """The admitted-consideration set STAMPED on THIS session's ACTIVE plan record at start (rule A,
+    wave-4 finding 3), or None when no stamp exists. Captured at start so a consideration the plan
+    itself RETIRES stays in the required set — a retire-then-omit that drops it off the live board
+    cannot make the obligation disappear. Read tolerantly (any failure → None)."""
+    if not _ne_str(repo) or not _ne_str(session):
+        return None
+    try:
+        for rec in idc_ledger.active_commands(repo, session):
+            if rec.get("command") == "plan" and rec.get("plan_admitted") is not None:
+                return {_gate_key(p) for p in (rec.get("plan_admitted") or [])}
+    except Exception:  # noqa: BLE001 — a ledger read failure falls back to the live derivation
+        return None
+    return None
+
+
 def _claim_plan_admitted_set_covered(refs: dict, repo: str, session: str) -> CloseoutResult:
-    # DERIVE the required admitted-consideration set INDEPENDENTLY from durable tracker state (never the
-    # caller's decompositions keys — wave-3 finding 3): a plan `complete` is honest only when NO admitted
-    # consideration remains on the board un-planned. If the caller omits one consideration, that
-    # consideration is still Consideration/Todo → the derived remaining set is non-empty → refuse.
-    remaining = _remaining_admitted_considerations(repo)
-    if remaining is None:
+    # Two independent checks re-derive plan completeness (wave-4 finding 3), never the caller's keys:
+    #   (1) NO admitted consideration may still be on the board (live Consideration/Todo) — one still
+    #       there was never acted on (the old check; also catches a consideration ADDED after start).
+    #   (2) EVERY consideration admitted AT START (the rule-A stamp) must be decomposed — a
+    #       retire-then-omit that moves a consideration off the board without decomposing it (its
+    #       pointer retired but no child planned) is caught by the stamp, which remembers it.
+    # If neither source can be established, fail closed (unproven completeness is never complete).
+    stamped = _plan_record_admitted(repo, session)
+    live = _remaining_admitted_considerations(repo)
+    if stamped is None and live is None:
         return _fail("plan-admitted-unread",
-                     "plan complete: the admitted-consideration set could not be re-derived from the "
-                     "tracker (fail closed) — an unproven completeness is never a complete plan")
-    if remaining:
+                     "plan complete: the admitted-consideration set could not be established (no "
+                     "start-stamped set on the record AND the live tracker is unreadable) — an unproven "
+                     "completeness is never a complete plan")
+    if live:
         return _fail("plan-admitted-remaining",
                      "plan complete rejected — the tracker still shows admitted consideration(s) not "
-                     f"planned: {', '.join('#' + n for n in sorted(remaining))} (an omitted consideration "
-                     "drops its child + pointer obligations; plan them or the plan is not complete)")
-    return CloseoutResult(True, "ok", "no admitted consideration remains un-planned (re-derived)", {})
+                     f"acted on: {', '.join('#' + n for n in sorted(live))} (plan + retire every one)")
+    decompositions = refs.get("decompositions")
+    decomposed = {_gate_key(k) for k in decompositions} if isinstance(decompositions, dict) else set()
+    uncovered = set(stamped or set()) - decomposed
+    if uncovered:
+        return _fail("plan-admitted-retired-not-decomposed",
+                     "plan complete rejected — consideration(s) admitted at start were retired off the "
+                     f"board but NOT decomposed: {', '.join('#' + n for n in sorted(uncovered))} (the "
+                     "retire-then-omit bypass drops their child obligations; decompose EVERY one)")
+    return CloseoutResult(True, "ok", "every admitted consideration acted on + decomposed (re-derived)", {})
 
 
 def _reconciliation_verdict(repo: str, session: str):
@@ -961,9 +1194,33 @@ def _recirc_requested_from_record(repo: str, session: str):
 
 
 def _claim_recirc_gate(refs: dict, repo: str, session: str) -> CloseoutResult:
-    if not _present(refs.get("gate")):
+    # waiting_gate: the referenced gate must be REAL and still blocking (wave-4 finding 4) — a nonempty
+    # ref is not proof. A Think PR ref reads OPEN (real gh); a gate issue ref reads present + not Done
+    # on the CURRENT board. A nonexistent/closed/merged gate fails closed (a dead gate is not a wait).
+    gate = refs.get("gate")
+    if not _present(gate):
         return _fail("recirc-gate", "recirculate waiting_gate requires a valid requirements gate/Think PR ref")
-    return CloseoutResult(True, "ok", "recirculation waiting on the requirements gate", {})
+    think_pr = refs.get("think_pr")
+    if _present(think_pr):
+        state = _gh_pr_state(repo, think_pr)
+        if state is None:
+            return _fail("recirc-gate-pr-unread",
+                         "recirculate waiting_gate: the requirements Think PR could not be read (fail closed)")
+        if state != "OPEN":
+            return _fail("recirc-gate-pr-not-open",
+                         f"recirculate waiting_gate: the requirements Think PR reads {state} — a "
+                         "merged/closed PR is not a wait")
+        return CloseoutResult(True, "ok", "recirculation waiting on an open requirements Think PR", {})
+    status = _issue_status(repo, gate)
+    if status is None:
+        return _fail("recirc-gate-board-missing",
+                     "recirculate waiting_gate: the requirements gate could not be read from the CURRENT "
+                     "board (a nonexistent/unreadable gate fails closed)")
+    if status == "Done":
+        return _fail("recirc-gate-board-closed",
+                     "recirculate waiting_gate: the requirements gate reads Done on the board — a closed "
+                     "gate is not a wait")
+    return CloseoutResult(True, "ok", "recirculation waiting on the open requirements gate", {})
 
 
 def _claim_recirc_reconciled(refs: dict, repo: str, session: str) -> CloseoutResult:
@@ -978,19 +1235,27 @@ def _claim_recirc_reconciled(refs: dict, repo: str, session: str) -> CloseoutRes
     return CloseoutResult(True, "ok", "reconciliation re-derived reconciled/complete", {})
 
 
+def _is_manifest_unit_ref(ref: str) -> bool:
+    """A `<manifest>#<unit>` intake-recirc token (a path with a `#unit` suffix), vs a bare `#<ticket>`."""
+    return "#" in ref and not ref.lstrip().startswith("#")
+
+
 def _claim_recirc_closeouts(refs: dict, repo: str, session: str) -> CloseoutResult:
-    # Every closeout disposition must be in the CLOSED documented vocabulary, and EVERY requested item
-    # (re-derived from the durable start record) must carry a validated closeout whose disposition is
-    # RE-CHECKED against tracker/manifest state (finding 4). `closeouts:{}` passes only when the
-    # re-derived requested set is empty (a bare full-inbox drain named no specific items).
+    # Every closeout disposition must be in the CLOSED documented vocabulary (a manifest unit carries a
+    # durable manifest disposition; a bare ticket carries a recirc-board disposition), and EVERY
+    # requested item (re-derived from the durable start record) must carry a validated closeout whose
+    # disposition is RE-CHECKED against durable state (wave-4 finding 4): a `<manifest>#<unit>` closeout
+    # must EQUAL the manifest disposition, a bare `#<ticket>` closeout must be board-consistent.
+    # `closeouts:{}` passes only when the re-derived requested set is empty (a bare full-inbox drain).
     closeouts = refs.get("closeouts")
     if not isinstance(closeouts, dict):
         return _fail("recirc-closeouts", "recirculate complete requires refs.closeouts {ticket/unit: disposition}")
     for item, disp in closeouts.items():
-        if disp not in _RECIRC_DISPOSITIONS:
+        vocab = _MANIFEST_PROCESSED if _is_manifest_unit_ref(str(item)) else _RECIRC_DISPOSITIONS
+        if disp not in vocab:
             return _fail("recirc-disposition-vocab",
                          f"recirculate closeout for {item!r} has disposition {disp!r} — not one of the "
-                         f"documented dispositions {sorted(_RECIRC_DISPOSITIONS)}")
+                         f"documented dispositions {sorted(vocab)}")
     requested = _recirc_requested_from_record(repo, session)
     if not requested:
         # No named requested items (a bare full-inbox drain) — reconciliation already proved the inbox
@@ -1001,19 +1266,24 @@ def _claim_recirc_closeouts(refs: dict, repo: str, session: str) -> CloseoutResu
             return _fail("recirc-requested-uncovered",
                          f"recirculate complete: requested item {ref!r} has no closeout — every requested "
                          "item needs a validated closeout (a full-inbox drain claim cannot silently drop it)")
-        if "#" in ref and not ref.lstrip().startswith("#"):
+        disp = closeouts[ref]
+        if _is_manifest_unit_ref(ref):
             manifest_rel, unit = ref.rsplit("#", 1)
-            check = _manifest_unit_processed(repo, manifest_rel, unit)
-            if not check.ok:
-                return check
+            check = _manifest_unit_processed(repo, manifest_rel, unit, disp)
+        else:
+            check = _ticket_board_consistent(repo, ref, disp)
+        if not check.ok:
+            return check
     return CloseoutResult(True, "ok", "every requested recirc item processed + reconciled (re-derived)", {})
 
 
 def _valid_build_receipt(issue: object, receipt: object, repo: str) -> CloseoutResult:
     """A build receipt references a merged PR by NUMBER — `{pr: <n>}` — and the validator RE-READS the
     PR's merged-state for real (`gh pr view`), never trusting a caller `state:"MERGED"` (round-2 F1).
-    The issue key must be a real reference and the PR a real number; a merged-state that cannot be
-    proven by a real read (gh absent/errored, or the PR reads NOT merged) fails the receipt closed."""
+    It ALSO proves the PR↔issue linkage from the PR's OWN closing references (wave-4 finding 5), never
+    receipt adjacency — a merged PR that does not close THIS issue fails the receipt closed. A
+    merged-state that cannot be proven by a real read (gh absent/errored, or the PR reads NOT merged)
+    fails closed."""
     if not _present(issue):
         return _fail("build-receipt-issue", "each build receipt must be keyed by a real issue reference")
     if not isinstance(receipt, dict):
@@ -1031,7 +1301,32 @@ def _valid_build_receipt(issue: object, receipt: object, repo: str) -> CloseoutR
     if not merged:
         return _fail("build-receipt-unmerged",
                      f"build receipt for {issue}: the real gh read shows PR #{pr} is NOT merged")
+    closes = _gh_pr_closes_issue(repo, pr, issue)
+    if closes is None:
+        return _fail("build-receipt-linkage-unverified",
+                     f"build receipt for {issue}: PR #{pr}'s closing references could not be read "
+                     "(fail closed) — the PR↔issue linkage is proven from the PR's own closing refs")
+    if not closes:
+        return _fail("build-receipt-wrong-issue",
+                     f"build receipt for {issue}: merged PR #{pr} does NOT close issue #{_gate_key(issue)} "
+                     "(its closing references name a different issue) — a receipt cannot borrow an "
+                     "unrelated merged PR")
     return CloseoutResult(True, "ok", "receipt ok", {})
+
+
+def _build_requested_from_record(repo: str, session: str):
+    """The build requested-issue set STAMPED on THIS session's ACTIVE build record at start (rule A,
+    wave-4 finding 5), or None when no explicit issue set was named (a whole-frontier build). Read
+    tolerantly (any failure → None)."""
+    if not _ne_str(repo) or not _ne_str(session):
+        return None
+    try:
+        for rec in idc_ledger.active_commands(repo, session):
+            if rec.get("command") == "build" and rec.get("build_requested"):
+                return {_gate_key(b) for b in (rec.get("build_requested") or [])}
+    except Exception:  # noqa: BLE001
+        return None
+    return None
 
 
 def _claim_build_no_action(refs: dict, repo: str, session: str) -> CloseoutResult:
@@ -1040,18 +1335,39 @@ def _claim_build_no_action(refs: dict, repo: str, session: str) -> CloseoutResul
 
 def _claim_build_receipts(refs: dict, repo: str, session: str) -> CloseoutResult:
     receipts = refs.get("receipts")
-    if isinstance(receipts, dict) and receipts:
+    if not isinstance(receipts, dict):
+        receipts = {}
+    # The REQUIRED issue set is STAMPED at start (rule A, wave-4 finding 5): a `/idc:build #1 #2` run
+    # records {1,2}, so `complete` requires ONE verified merged-PR receipt PER requested issue — a
+    # request for two issues cannot close with one receipt. A whole-frontier build (no issue named,
+    # nothing stamped) uses the oracle-backed empty-frontier path.
+    requested = _build_requested_from_record(repo, session)
+    if requested:
+        missing = sorted(str(i) for i in requested if _gate_key(i) not in {_gate_key(k) for k in receipts})
+        if missing:
+            return _fail("build-requested-uncovered",
+                         "build complete: requested issue(s) have no merged-PR receipt: "
+                         f"{', '.join('#' + m for m in missing)} — every requested issue needs one "
+                         "verified merged PR that closes it (a partial close is not complete)")
+        for issue in requested:
+            key = _gate_key(issue)
+            receipt = next((v for k, v in receipts.items() if _gate_key(k) == key), None)
+            result = _valid_build_receipt(issue, receipt, repo)
+            if not result.ok:
+                return result
+        return CloseoutResult(True, "ok", "every requested build issue has a linked merged-PR receipt", {})
+    if receipts:
         for issue, receipt in receipts.items():
             result = _valid_build_receipt(issue, receipt, repo)
             if not result.ok:
                 return result
-        return CloseoutResult(True, "ok", "build receipts reference merged PRs (re-read)", {})
+        return CloseoutResult(True, "ok", "build receipts reference merged PRs (re-read + linked)", {})
     if refs.get("frontier") == "none-eligible":
         # an empty ready frontier is oracle-backed, never trusted (the same door as no_action).
         return _check_no_action("build", repo)
     return _fail("build-receipts",
-                 "build complete requires refs.receipts {issue: {pr}} referencing MERGED PRs "
-                 "or refs.frontier == 'none-eligible' (oracle-backed)")
+                 "build complete requires refs.receipts {issue: {pr}} referencing MERGED PRs that close "
+                 "each requested issue, or refs.frontier == 'none-eligible' (oracle-backed)")
 
 
 def _persisted_drain_verdict(repo: str, session: str):
@@ -1118,6 +1434,10 @@ def _claim_janitor_report(refs: dict, repo: str, session: str) -> CloseoutResult
         return _fail("janitor-report-unproven",
                      "janitor complete requires THIS session's persisted janitor report "
                      "(.idc-janitor-report.json recording the scan) — none found (the scan writes it)")
+    if not _report_nonce_bound(repo, "janitor", session, report):
+        return _fail("janitor-report-nonce",
+                     "janitor complete: the persisted janitor report is not bound to THIS command "
+                     "record's nonce — the report must be written BY the scanner run of this invocation")
     code = report.get("scanner_exit")
     if isinstance(code, bool) or code not in (0, 1):
         return _fail("janitor-scan",
@@ -1143,6 +1463,9 @@ def _claim_init_scaffolded(refs: dict, repo: str, session: str) -> CloseoutResul
     if top.get("receipt_version") != "2":
         return _fail("init-receipt-version",
                      f"init complete requires a v2 install receipt, got receipt_version {top.get('receipt_version')!r}")
+    fp = _receipt_fingerprints_ok(repo, refs.get("receipt"))
+    if not fp.ok:
+        return fp
     anchor = _confined_repo_path(repo, _GOVERNANCE_ANCHOR)
     if anchor is None or not os.path.exists(anchor):
         return _fail("init-anchor-missing",
@@ -1164,9 +1487,22 @@ def _claim_doctor_report(refs: dict, repo: str, session: str) -> CloseoutResult:
         return _fail("doctor-report-unproven",
                      "doctor complete requires THIS session's persisted doctor report "
                      "(.idc-doctor-report.json recording the rows + verdict) — none found (the run writes it)")
+    if not _report_nonce_bound(repo, "doctor", session, report):
+        return _fail("doctor-report-nonce",
+                     "doctor complete: the persisted doctor report is not bound to THIS command "
+                     "record's nonce — the report must be written BY the doctor run of this invocation")
     rows = report.get("rows")
+    # Every doctor row must be a MACHINE-CHECKABLE result (wave-4 finding 7 / rule B): a row object
+    # carrying at least a row id and a result/status. A row with no machine-checkable artifact (the old
+    # bare "1..10" string) is NOT claimable as verified — the report must record the real per-row result.
     if not isinstance(rows, list) or not rows:
         return _fail("doctor-rows", "doctor complete requires the persisted report to record the check rows")
+    for row in rows:
+        if not isinstance(row, dict) or not _present(row.get("id")) or not _ne_str(row.get("result")):
+            return _fail("doctor-rows-not-checkable",
+                         "doctor complete requires each persisted row to be a machine-checkable result "
+                         "{id, result, …} — a bare row string (e.g. \"1..10\") records no verifiable "
+                         "artifact and is not claimable (rule B)")
     if not _ne_str(report.get("verdict")):
         return _fail("doctor-verdict",
                      "doctor complete requires the persisted report to record a verdict (a FAIL result "
@@ -1196,7 +1532,10 @@ def _claim_update_resynced(refs: dict, repo: str, session: str) -> CloseoutResul
         return _fail("update-version-mismatch",
                      f"update complete requires the receipt's plugin_version ({receipt_version!r}) to equal "
                      f"the RUNNING plugin version ({running!r}) — the repo was not resynced to this version")
-    return CloseoutResult(True, "ok", "update resynced: receipt plugin_version == running version", {})
+    fp = _receipt_fingerprints_ok(repo, refs.get("receipt"))
+    if not fp.ok:
+        return fp
+    return CloseoutResult(True, "ok", "update resynced: receipt plugin_version == running version + fingerprints verify", {})
 
 
 _IDC_PLUGIN_NAME = "idc@idc-workflow"
@@ -1220,10 +1559,17 @@ def _plugin_still_enabled(settings_path: str) -> bool:
     return False
 
 
+# Runtime-created IDC artifacts the receipt deliberately does NOT list (idc_receipt_check excludes
+# TRACKER.md as a runtime footprint), but which an applied uninstall must STILL remove (wave-4 finding
+# 6): the removal set is the receipt footprints UNION these documented runtime artifacts.
+_RUNTIME_UNINSTALL_ARTIFACTS = {"TRACKER.md"}
+
+
 def _receipt_removal_set(repo: str, refs: dict):
     """The removal set DERIVED from the install receipt (never the caller's `removed` list — wave-3
-    finding 5): every receipt-listed footprint EXCEPT the governance anchor (removed only post-finish).
-    Returns (footprints_set, None) or (None, CloseoutResult-failure)."""
+    finding 5) UNION the playbook's documented runtime-created artifacts (`TRACKER.md` — wave-4 finding
+    6), minus the governance anchor (removed only post-finish). Returns (footprints_set, None) or
+    (None, CloseoutResult-failure)."""
     doc = _receipt_document(repo, refs.get("receipt"))
     if doc is None:
         return None, _fail("uninstall-no-receipt",
@@ -1231,8 +1577,34 @@ def _receipt_removal_set(repo: str, refs: dict):
                            "(docs/workflow/install-receipt.yaml) — none found or it does not parse; the "
                            "caller's `removed` list is never authoritative")
     _top, entries = doc
-    footprints = {e["path"] for e in entries} - {_GOVERNANCE_ANCHOR}
+    footprints = ({e["path"] for e in entries} | _RUNTIME_UNINSTALL_ARTIFACTS) - {_GOVERNANCE_ANCHOR}
     return footprints, None
+
+
+def _uninstall_flags_from_record(repo: str, session: str):
+    """The opt-in board flags (`--close-issues` / `--delete-board`) STAMPED on THIS session's ACTIVE
+    uninstall record at start (rule A, wave-4 finding 6), or an empty set. Read tolerantly."""
+    if not _ne_str(repo) or not _ne_str(session):
+        return set()
+    try:
+        for rec in idc_ledger.active_commands(repo, session):
+            if rec.get("command") == "uninstall" and rec.get("uninstall_flags"):
+                return set(rec.get("uninstall_flags") or [])
+    except Exception:  # noqa: BLE001
+        return set()
+    return set()
+
+
+def _open_issues(repo: str):
+    """The set of live NON-Done tracker issue numbers (canonical strings) via the shared reader, or
+    None on any read failure / an unreadable board (which a `--delete-board` verify treats as gone).
+    Used to verify a stamped `--close-issues` was actually honored before an applied uninstall closes."""
+    try:
+        import idc_next_action as NEXT  # noqa: E402
+        return {_gate_key(i["number"]) for i in NEXT._load_tracker_issues(repo)
+                if i.get("status") != "Done"}
+    except Exception:  # noqa: BLE001 — an unreadable board reads as "no open issues" (board gone)
+        return None
 
 
 def _claim_uninstall(refs: dict, repo: str, session: str) -> CloseoutResult:
@@ -1264,8 +1636,26 @@ def _claim_uninstall(refs: dict, repo: str, session: str) -> CloseoutResult:
                              f"uninstall no-action rejected — receipt footprint {e['path']!r} is still "
                              "present (there IS work to remove; record 'applied', not 'no-action')")
         return CloseoutResult(True, "ok", "uninstall no-action (verified: every receipt footprint already absent)", {})
-    # applied: the destructive work must have ACTUALLY HAPPENED — validate it by INDEPENDENT checks
-    # against the receipt-DERIVED removal set (never the caller's `removed` list — finding 5).
+    # applied: FIRST verify the stamped opt-in board flags were actually honored by REAL reads (wave-4
+    # finding 6) — `--close-issues` means no open issue may remain on the board; `--delete-board` means
+    # the board substrate is gone. The flags are re-derived from the start record, never caller-supplied.
+    flags = _uninstall_flags_from_record(repo, session)
+    if "close-issues" in flags:
+        open_issues = _open_issues(repo)
+        if open_issues:
+            return _fail("uninstall-close-issues-open",
+                         "uninstall was invoked with --close-issues but the board still shows open "
+                         f"issue(s): {', '.join('#' + n for n in sorted(open_issues))} — the requested "
+                         "close was not honored (close them before finishing)")
+    if "delete-board" in flags:
+        board_relpath = _confined_repo_path(repo, "TRACKER.md")
+        board_gone = _open_issues(repo) is None or (board_relpath is not None and not os.path.exists(board_relpath))
+        if not board_gone:
+            return _fail("uninstall-delete-board-present",
+                         "uninstall was invoked with --delete-board but the board is still present — the "
+                         "requested board deletion was not honored")
+    # the destructive work must have ACTUALLY HAPPENED — validate it by INDEPENDENT checks against the
+    # receipt-DERIVED removal set (never the caller's `removed` list — finding 5).
     footprints, err = _receipt_removal_set(repo, refs)
     if err is not None:
         return err
@@ -1331,11 +1721,16 @@ def _claim_blocker_for(command: str):
                  lambda refs, repo, session: _check_blocker(command, refs, repo, session))
 
 
+# A `blocked_external` claim is enumerated ONLY for commands with a RE-DERIVABLE deterministic-helper
+# blocker (a durable receipt or a safe read-only re-run — see _BLOCKER_HELPERS): build/autorun (drain
+# verdict), janitor/doctor (janitor report), init/update/uninstall (receipt fingerprint re-run). The
+# pipeline commands intake/think/plan/recirculate have NO such helper (their would-be blockers are PR
+# finishers / board mutators / arg-hungry checkers that write no receipt and cannot be re-run), so per
+# rule B they carry NO `blocked_external` entry — it is not claimable (fail closed), never a self-report.
 _CLAIM_TABLE = {
     "intake": {
         "complete": (Claim("intake-manifest-reviewed", _claim_intake_manifest_reviewed),
                      Claim("intake-pr-merged", _claim_intake_pr_merged)),
-        "blocked_external": (_claim_blocker_for("intake"),),
     },
     "think": {
         "complete": (Claim("think-refs-present", _claim_think_refs_present),
@@ -1352,7 +1747,6 @@ _CLAIM_TABLE = {
                          Claim("think-gate-marker-bound", _claim_think_gate_marker),
                          Claim("think-gate-not-disposed", _claim_think_gate_not_disposed),
                          Claim("think-pointer-blocked", _claim_think_pointer_blocked)),
-        "blocked_external": (_claim_blocker_for("think"),),
     },
     "plan": {
         "complete": (Claim("plan-matrix-revalidated", _claim_plan_matrix),
@@ -1360,13 +1754,11 @@ _CLAIM_TABLE = {
                      Claim("plan-decomposition-children", _claim_plan_decomposition),
                      Claim("plan-admitted-set-covered", _claim_plan_admitted_set_covered)),
         "no_action": (Claim("plan-oracle-no-admitted", _claim_plan_no_action),),
-        "blocked_external": (_claim_blocker_for("plan"),),
     },
     "recirculate": {
         "complete": (Claim("recirc-reconciled", _claim_recirc_reconciled),
                      Claim("recirc-requested-closeouts", _claim_recirc_closeouts)),
         "waiting_gate": (Claim("recirc-gate", _claim_recirc_gate),),
-        "blocked_external": (_claim_blocker_for("recirculate"),),
     },
     "build": {
         "complete": (Claim("build-receipts-merged", _claim_build_receipts),),
@@ -1476,6 +1868,48 @@ def recirc_requested_from_args(command: str, args_text: str):
     return requested
 
 
+_ISSUE_REF_RE = re.compile(r"(?:^|\s)#(\d+)\b")
+_UNINSTALL_FLAG_RE = re.compile(r"(?:^|\s)--(close-issues|delete-board)\b")
+
+
+def build_requested_from_args(command: str, args_text: str):
+    """The Build requested-issue set from its raw arg text (wave-4 finding 5): the explicit `#<issue>`
+    references a `/idc:build #1 #2` names. Recorded durably at start so `complete` requires ONE verified
+    merged-PR receipt PER requested issue. A whole-board-frontier build (a scope summary / no `#issue`)
+    yields None (no stamped set → the oracle-backed frontier path). Every other command yields None."""
+    if command != "build" or not args_text:
+        return None
+    issues = _ISSUE_REF_RE.findall(args_text)
+    return issues or None
+
+
+def uninstall_flags_from_args(command: str, args_text: str):
+    """The Uninstall opt-in board flags (`--close-issues` / `--delete-board`) from its raw arg text
+    (wave-4 finding 6). Recorded durably at start so the closeout verifies each was actually honored
+    (issues closed / board gone) by a real read BEFORE finish. Every other command yields None."""
+    if command != "uninstall" or not args_text:
+        return None
+    flags = _UNINSTALL_FLAG_RE.findall(args_text)
+    return flags or None
+
+
+def _make_nonce():
+    """A short, unguessable per-invocation nonce (wave-4 finding 7) that binds a diagnostic report to
+    the command record it was opened with. Uses os.urandom (available to the deterministic hook), never
+    Math.random-style state that would break resume."""
+    return os.urandom(8).hex()
+
+
+def _plan_admitted_at_start(command: str, repo: str):
+    """The admitted-consideration set to STAMP on a Plan record at start (rule A, wave-4 finding 3):
+    the live Consideration/Todo set read deterministically from the tracker, or None when it cannot be
+    read. Captured at start so a consideration Plan itself retires stays in the required set."""
+    if command != "plan":
+        return None
+    remaining = _remaining_admitted_considerations(repo)
+    return sorted(remaining) if remaining is not None else None
+
+
 def validate_closeout(command: str, status: str, evidence: object,
                       repo: str | None = None, session: str | None = None) -> CloseoutResult:
     """Validate a closeout's command, terminal status, COMMON envelope, and per-command EVIDENCE
@@ -1536,9 +1970,14 @@ def register_start(cwd: str, session_id: str, command: str, plugin_version: str,
     path — a finish that omits those fields cannot make the run look like it had no obligation."""
     intake_manifest, intake_units = intake_ref_from_args(command, args_text or "")
     recirc_requested = recirc_requested_from_args(command, args_text or "")
+    build_requested = build_requested_from_args(command, args_text or "")
+    uninstall_flags = uninstall_flags_from_args(command, args_text or "")
+    plan_admitted = _plan_admitted_at_start(command, cwd)
     return idc_ledger.command_start(
         cwd, session_id, command, plugin_version, args_digest(args_text or ""), source or "",
-        intake_manifest=intake_manifest, intake_units=intake_units, recirc_requested=recirc_requested)
+        intake_manifest=intake_manifest, intake_units=intake_units, recirc_requested=recirc_requested,
+        build_requested=build_requested, plan_admitted=plan_admitted, uninstall_flags=uninstall_flags,
+        nonce=_make_nonce())
 
 
 def active_records(cwd: str, session_id: str) -> list:

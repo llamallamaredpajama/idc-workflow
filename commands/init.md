@@ -366,10 +366,13 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
 
 - **`complete`** — the tracker config, the scaffold, the plugin enablement, and a **v2 install
   receipt** all verify. The closeout **re-derives** this from durable state — it parses the install
-  receipt (must be `receipt_version: 2`), confirms the governance anchor
-  (`docs/workflow/tracker-config.yaml`) exists, and confirms the settings file has the IDC plugin
-  enabled — **never three caller `"ok"` strings**. Evidence refs: `refs:{}` (optionally
-  `receipt:"<repo-rel receipt path>"` / `settings:"<repo-rel settings path>"` if non-default).
-- **`blocked_external`** — a deterministic init helper or board provisioning step returned a nonzero
-  receipt (e.g. the ≥1-item board STOP, or a scaffold-helper error): `blocker:{helper, exit (nonzero),
-  diagnostic}`.
+  receipt (must be `receipt_version: 2`), **RUNS the real fingerprint verification** (every stamped
+  file's current bytes match its recorded SHA-256 — a modified or missing scaffold file fails closed,
+  not just a syntax parse), confirms the governance anchor (`docs/workflow/tracker-config.yaml`) exists,
+  and confirms the settings file has the IDC plugin enabled — **never three caller `"ok"` strings**.
+  Evidence refs: `refs:{}` (optionally `receipt:"<repo-rel receipt path>"` /
+  `settings:"<repo-rel settings path>"` if non-default).
+- **`blocked_external`** — a deterministic init helper failure the validator can RE-DERIVE by a
+  read-only re-run: cite `idc_receipt_check.py` (the receipt fingerprint re-run must actually find drift
+  — an invalid receipt or a modified/missing stamped file): `blocker:{helper:"idc_receipt_check.py",
+  exit (nonzero), diagnostic}`. A caller exit/diagnostic alone is never accepted.

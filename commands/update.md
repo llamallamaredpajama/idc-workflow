@@ -313,9 +313,12 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
 ```
 
 - **`complete`** — the v2 receipt verifies **and** the running version equals the receipt version. The
-  closeout **re-derives** this: it parses the install receipt (must be `receipt_version: 2`) and reads
-  the **running** plugin version live from `plugin.json`, refusing unless the receipt's `plugin_version`
-  equals it — **never two caller-typed versions**. Evidence refs: `refs:{}` (optionally
-  `receipt:"<repo-rel receipt path>"` if non-default).
-- **`blocked_external`** — a diff, permission, or update failure (incl. the Phase-0 stale-runtime
-  HALT or an invalid receipt): `blocker:{helper, exit (nonzero), diagnostic}`.
+  closeout **re-derives** this: it parses the install receipt (must be `receipt_version: 2`), reads the
+  **running** plugin version live from `plugin.json` (refusing unless the receipt's `plugin_version`
+  equals it), **and RUNS the real fingerprint verification** (every stamped file's bytes match its
+  recorded SHA-256 — a modified/missing scaffold file fails closed) — **never two caller-typed
+  versions**. Evidence refs: `refs:{}` (optionally `receipt:"<repo-rel receipt path>"` if non-default).
+- **`blocked_external`** — an update failure the validator can RE-DERIVE by a read-only re-run: cite
+  `idc_receipt_check.py` (the fingerprint re-run must actually find drift — an invalid receipt or a
+  modified/missing stamped file): `blocker:{helper:"idc_receipt_check.py", exit (nonzero), diagnostic}`.
+  A caller exit/diagnostic alone is never accepted.

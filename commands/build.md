@@ -56,11 +56,15 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
 ```
 
 - **`complete`** — the requested issue receipts pass, or the whole ready frontier had no eligible
-  requested item. Evidence refs: `receipts:{<issue>:{"pr":<merged-PR#>}}` (a **PR number per issue**,
-  non-empty — not a bare receipt string). The validator **re-reads each PR's merged-state for real
-  (`gh pr view`)** and never trusts a caller `state`; a PR that is not merged, or a read it cannot
-  establish, fails the receipt closed. Or `frontier:"none-eligible"` (**oracle-backed**: the validator
-  re-reads the live ready frontier and refuses the claim unless there is genuinely no eligible Buildable).
+  requested item. When the run was invoked on explicit `#<issue>` refs, that **requested issue set is
+  stamped on the record at start**, and `complete` requires **one verified merged-PR receipt PER
+  requested issue** — a request for two issues cannot close with one receipt. Evidence refs:
+  `receipts:{<issue>:{"pr":<merged-PR#>}}` (a **PR number per issue**, not a bare receipt string). The
+  validator **re-reads each PR's merged-state for real (`gh pr view`)** AND proves the **PR↔issue
+  linkage from the PR's OWN closing references** (`closingIssuesReferences`) — a merged PR that closes a
+  *different* issue fails the receipt closed; a caller `state` is never trusted. For a whole-frontier
+  build (no `#<issue>` named), use `frontier:"none-eligible"` (**oracle-backed**: the validator re-reads
+  the live ready frontier and refuses unless there is genuinely no eligible Buildable).
 - **`no_action`** — the **live oracle** reports no eligible Buildable work (its `eligible_buildables`
   count is 0). Never claim `no_action` without that fresh oracle result.
 - **`blocked_external`** — an existing drain error or rate-limit receipt: `blocker:{helper, exit

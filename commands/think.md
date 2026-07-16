@@ -102,7 +102,7 @@ or names the open gate**; it never invents a different handoff:
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_next_action.py" --repo "$PWD" --json
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command think \
-  --status <complete|waiting_gate|blocked_external> --evidence-json '<envelope>'
+  --status <complete|waiting_gate> --evidence-json '<envelope>'
 ```
 
 Evidence is a set of **reference keys** — the validator RE-DERIVES every terminal fact for itself (it
@@ -118,12 +118,16 @@ for the gate disposal + pointer admission); it never trusts a caller `pass`/`dis
   every **selected** unit is `materialized` AND **every unselected expected unit** keeps a valid durable
   disposition (`queued`/`materialized`/`verified_done`/`ignored`) — a closeout that materializes one unit
   but drops the rest of the exact-once set is refused.
-- **`waiting_gate`** — the Think PR is still OPEN (pending admission): same reference keys — the PR reads
-  OPEN (real `gh` read; a nonexistent PR/gate/pointer fails closed), the gate carries its bound marker
-  but has NO dispose journal record yet, and the pointer exists but has NO unblock record yet.
-- **`blocked_external`** — a deterministic helper failed: `blocker:{helper, exit (nonzero), diagnostic}`
-  (the helper must be one of Think's own — the consideration checker, the PR finisher, the board reader,
-  or the transition engine).
+- **`waiting_gate`** — the Think PR is still OPEN (pending admission): same reference keys — the PR
+  reads **exactly OPEN** (real `gh` read; a **CLOSED** unmerged PR is a dead gate, not a wait, and is
+  refused; a nonexistent/unreadable PR fails closed), the gate carries its bound marker, and — read
+  from **CURRENT board state**, not journal-absence alone — the gate is still open (not Done) and the
+  pointer is genuinely **Blocked**.
+
+Think has **no `blocked_external`** terminal: its would-be blockers (the PR finisher, the board reader,
+the transition engine) write no durable failure receipt and cannot be re-run read-only, so a blocked
+stop cannot be re-derived and is not claimable (fail closed). A genuine deterministic-helper failure is
+fixed or waited on — it is never self-reported as a completed terminal.
 
 ## Boundaries
 

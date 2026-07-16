@@ -315,7 +315,8 @@ def _prune_finished(commands):
 
 
 def command_start(cwd, session_id, command, plugin_version, args_sha256, source,
-                  intake_manifest=None, intake_units=None, recirc_requested=None):
+                  intake_manifest=None, intake_units=None, recirc_requested=None,
+                  build_requested=None, plan_admitted=None, uninstall_flags=None, nonce=None):
     """Atomic UPSERT of the active command record by (session_id, command) — never duplicates an
     active record (a re-entry of the same command in the same session updates the one record in
     place). REPO-GATED: a silent no-op outside a governed repo (returns `{}`). Preserves the taint
@@ -356,6 +357,23 @@ def command_start(cwd, session_id, command, plugin_version, args_sha256, source,
     # (`/idc:recirculate` with no named item) records an empty requested set.
     if recirc_requested:
         rec["recirc_requested"] = [str(r) for r in recirc_requested]
+    # Durable rule-A obligation markers stamped at command START, re-derived at finish (wave-4). A
+    # Build run records its requested issue set; a Plan run records the admitted-consideration set it
+    # was started against (so a consideration the command itself retires stays in the required set); an
+    # Uninstall run records the requested opt-in flags (--close-issues / --delete-board). The finish
+    # validator compares against the STAMPED set + live reads, never caller-supplied keys.
+    if build_requested:
+        rec["build_requested"] = [str(b) for b in build_requested]
+    if plan_admitted is not None:
+        rec["plan_admitted"] = [str(p) for p in plan_admitted]
+    if uninstall_flags:
+        rec["uninstall_flags"] = sorted({str(f) for f in uninstall_flags})
+    # A per-record nonce binds a diagnostic report (doctor/janitor) to THIS command invocation
+    # (wave-4 finding 7): the helper that RUNS the scan writes the report carrying this nonce, and the
+    # closeout requires the report's nonce to MATCH the active record's — so a stale/foreign report
+    # cannot back a new run.
+    if nonce:
+        rec["nonce"] = str(nonce)
     with _write_lock(cwd):  # read-modify-write must be atomic vs concurrent writers (no lost records)
         commands = _read_commands(cwd)
         replaced = False
@@ -375,6 +393,17 @@ def command_start(cwd, session_id, command, plugin_version, args_sha256, source,
                 # carries the prior one forward, so a plain re-entry cannot shed the coverage obligation.
                 if not recirc_requested and c.get("recirc_requested"):
                     rec["recirc_requested"] = list(c.get("recirc_requested") or [])
+                # MONOTONIC rule-A markers (wave-4): a plain re-entry carries every prior obligation
+                # marker forward, so it can never silently shed the requested/admitted/flags/nonce it
+                # was opened with.
+                if not build_requested and c.get("build_requested"):
+                    rec["build_requested"] = list(c.get("build_requested") or [])
+                if plan_admitted is None and c.get("plan_admitted") is not None:
+                    rec["plan_admitted"] = list(c.get("plan_admitted") or [])
+                if not uninstall_flags and c.get("uninstall_flags"):
+                    rec["uninstall_flags"] = list(c.get("uninstall_flags") or [])
+                if not nonce and c.get("nonce"):
+                    rec["nonce"] = c.get("nonce")
                 commands[i] = rec
                 replaced = True
                 break

@@ -296,11 +296,12 @@ def governed_expected_paths() -> list[str]:
     return sorted(rel for rel in expected if not is_excluded(rel))
 
 
-def cmd_verify(args: argparse.Namespace) -> int:
-    repo = os.path.abspath(args.repo)
-    receipt = args.receipt or os.path.join(repo, RECEIPT_RELPATH)
-    entries = parse_receipt(receipt)
-
+def classify_receipt(repo: str, entries: list[dict[str, str]]) -> tuple[dict[str, int], list[tuple[str, str]]]:
+    """Fingerprint-verify every receipt entry against the repo's CURRENT on-disk bytes, returning
+    (counts, classified) where each classification is `unchanged` (bytes match the stamped
+    fingerprint), `modified` (bytes differ), or `missing` (file gone). This is the deterministic
+    fingerprint check — not a syntax parse — the /idc:init and /idc:update closeouts re-run to prove
+    the scaffold actually landed intact (a modified or missing stamped file fails the closeout closed)."""
     classified: list[tuple[str, str]] = []
     counts = {"unchanged": 0, "modified": 0, "missing": 0}
     for entry in sorted(entries, key=lambda e: e["path"]):
@@ -314,6 +315,25 @@ def cmd_verify(args: argparse.Namespace) -> int:
             state = "modified"
         counts[state] += 1
         classified.append((state, rel))
+    return counts, classified
+
+
+def verify_receipt_fingerprints(repo: str, receipt_path: str) -> tuple[bool, dict[str, int]]:
+    """Parse `receipt_path` and fingerprint-verify every listed file, returning (ok, counts) where
+    ok == (no modified AND no missing entries). Raises SystemExit (via parse_receipt_document/die) on
+    an invalid/unreadable receipt — a caller that must fail closed catches SystemExit. The one library
+    entry point the command contract re-runs to re-derive an init/update `complete`."""
+    _top, entries = parse_receipt_document(receipt_path)
+    counts, _classified = classify_receipt(repo, entries)
+    return counts["modified"] == 0 and counts["missing"] == 0, counts
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    repo = os.path.abspath(args.repo)
+    receipt = args.receipt or os.path.join(repo, RECEIPT_RELPATH)
+    entries = parse_receipt(receipt)
+
+    counts, classified = classify_receipt(repo, entries)
 
     if args.json:
         out: dict[str, object] = {"unchanged": [], "modified": [], "missing": []}

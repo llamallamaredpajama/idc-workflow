@@ -58,9 +58,11 @@ stop_payload() {
 }
 
 # write_fake_gh <path> — the suite's hermetic `gh` stub on PATH (see next-action-truth.sh). It answers
-# the READ-ONLY calls the wave-3 validators make:
-#   * `gh pr view <N> --json state,mergedAt`  → MERGED when N in $FAKE_MERGED_PRS (space list), else
-#     OPEN; $FAKE_PR_ERROR=1 makes it EXIT NONZERO (gh missing / an unresolvable PR).
+# the READ-ONLY calls the wave-3/wave-4 validators make:
+#   * `gh pr view <N> --json state,mergedAt`  → MERGED when N in $FAKE_MERGED_PRS (space list), CLOSED
+#     (unmerged, a dead gate) when N in $FAKE_CLOSED_PRS, else OPEN; $FAKE_PR_ERROR=1 EXITS NONZERO.
+#   * `gh pr view <N> --json closingIssuesReferences` → the issues N closes, from $FAKE_PR_CLOSES
+#     (space list of `pr:issue` pairs — the PR↔issue linkage a build receipt is proven against).
 #   * `gh issue view <N> --json body -q .body` → prints $FAKE_ISSUE_DIR/<N>.body, or EXITS NONZERO when
 #     absent (a nonexistent gate/pointer/child).
 write_fake_gh() {  # $1 = path to the fake gh
@@ -73,9 +75,20 @@ args = sys.argv[1:]
 if args[:2] == ["pr", "view"] and len(args) >= 3:
     if os.environ.get("FAKE_PR_ERROR") == "1":
         sys.stderr.write("fake gh: pr read failed\n"); raise SystemExit(2)
+    fields = args[args.index("--json") + 1] if "--json" in args else ""
+    if "closingIssuesReferences" in fields:
+        closes = {}
+        for pair in (os.environ.get("FAKE_PR_CLOSES") or "").split():
+            pr, _, issue = pair.partition(":")
+            closes.setdefault(pr, []).append({"number": int(issue)})
+        print(json.dumps({"closingIssuesReferences": closes.get(args[2], [])}))
+        raise SystemExit(0)
     merged = set((os.environ.get("FAKE_MERGED_PRS") or "").split())
+    closed = set((os.environ.get("FAKE_CLOSED_PRS") or "").split())
     if args[2] in merged:
         print(json.dumps({"state": "MERGED", "mergedAt": "2026-07-12T00:00:00Z"}))
+    elif args[2] in closed:
+        print(json.dumps({"state": "CLOSED", "mergedAt": None}))
     else:
         print(json.dumps({"state": "OPEN", "mergedAt": None}))
     raise SystemExit(0)
@@ -104,10 +117,19 @@ journal_line() {
   mkdir -p "$(dirname "$jr")"
   printf '%s\n' "$2" >> "$jr"
 }
-# doctor_report <repo> <session> <verdict> — write THIS session's persisted doctor report.
+# rec_nonce <repo> <session> <command> — the per-invocation nonce the entry gate stamped on the active
+# command record (wave-4 finding 7): a diagnostic report must carry it for the closeout to accept it.
+rec_nonce() {
+  python3 -c 'import json,sys
+d=json.load(open(sys.argv[1]+"/.idc-session-state.json"))
+print(next((c.get("nonce","") for c in d["commands"] if c.get("state")=="active" and c.get("session_id")==sys.argv[2] and c.get("command")==sys.argv[3]),""))' "$1" "$2" "$3" 2>/dev/null
+}
+# doctor_report <repo> <session> <verdict> — write THIS session's persisted doctor report the way the
+# doctor RUN does: MACHINE-CHECKABLE rows ({id,result}) + the active record's nonce (wave-4 finding 7).
 doctor_report() {
+  local n; n="$(rec_nonce "$1" "$2" doctor)"
   python3 "$CR" --cwd "$1" write --kind doctor --session "$2" \
-    --payload-json "$(printf '{"rows":["1..10"],"verdict":"%s"}' "$3")" >/dev/null \
+    --payload-json "$(printf '{"rows":[{"id":1,"result":"PASS"},{"id":2,"result":"%s"}],"verdict":"%s","nonce":"%s"}' "$3" "$3" "$n")" >/dev/null \
     || gov_fail "could not write doctor report"
 }
 # a consideration file that PASSES idc_consideration_check (H1 + function/PRD/TRD/open-questions).
@@ -129,11 +151,13 @@ TRD impact: yes — a theme provider + a persisted preference.
 MD
 }
 
-# (1) start creates one active record and is idempotent for the same session+command.
-contract start --repo "$REPO" --session "$S1" --command think --plugin-root "$GOV_PLUGIN" \
-  --args 'Drive first' --source user >/dev/null
-contract start --repo "$REPO" --session "$S1" --command think --plugin-root "$GOV_PLUGIN" \
-  --args 'Drive first' --source user >/dev/null
+# (1) start creates one active record and is idempotent for the same session+command. S1 opens a
+# `build` record — its cheap oracle-backed `no_action` close (REPO's board is empty) lets case (4)
+# demonstrate a valid closeout without the heavy think evidence fixtures (which cases 7+ exercise).
+contract start --repo "$REPO" --session "$S1" --command build --plugin-root "$GOV_PLUGIN" \
+  --args 'drive it' --source user >/dev/null
+contract start --repo "$REPO" --session "$S1" --command build --plugin-root "$GOV_PLUGIN" \
+  --args 'drive it' --source user >/dev/null
 [ "$(contract status --repo "$REPO" --session "$S1" --json | json_count active)" -eq 1 ] \
   || gov_fail "start must upsert one active command record"
 echo "  ok (1) start upserts exactly one active command record (idempotent)"
@@ -151,11 +175,11 @@ fi
 echo "  ok (2) Stop closeout gate blocks an open command + names the exact finish remediation (real absolute path)"
 
 # (3) the record cannot be cleared with an unknown or malformed status (status guard, isolated).
-if contract finish --repo "$REPO" --session "$S1" --command think --status done \
+if contract finish --repo "$REPO" --session "$S1" --command build --status done \
   --evidence-json '{}'; then
   gov_fail "unrecognized status cleared the obligation"
 fi
-if contract finish --repo "$REPO" --session "$S1" --command think --status done \
+if contract finish --repo "$REPO" --session "$S1" --command build --status done \
   --evidence-json '{"schema_version":1,"refs":{}}'; then
   gov_fail "an unknown status with a valid envelope must still be rejected (status guard)"
 fi
@@ -164,15 +188,15 @@ fi
 echo "  ok (3) an unknown/malformed terminal status cannot clear the obligation (status guard isolated)"
 
 # (3.1) COMMON-ENVELOPE guards, isolated (the envelope check runs BEFORE the per-command claim table).
-if contract finish --repo "$REPO" --session "$S1" --command think --status waiting_gate \
+if contract finish --repo "$REPO" --session "$S1" --command build --status no_action \
   --evidence-json '{"schema_version":true,"refs":{}}'; then
   gov_fail "(3.1a) schema_version: true (bool) was accepted as the integer 1"
 fi
-if contract finish --repo "$REPO" --session "$S1" --command think --status waiting_gate \
+if contract finish --repo "$REPO" --session "$S1" --command build --status no_action \
   --evidence-json '{"schema_version":1.0,"refs":{}}'; then
   gov_fail "(3.1b) schema_version: 1.0 (float) was accepted as the integer 1"
 fi
-if contract finish --repo "$REPO" --session "$S1" --command think --status waiting_gate \
+if contract finish --repo "$REPO" --session "$S1" --command build --status no_action \
   --evidence-json '{"schema_version":1,"refs":[]}'; then
   gov_fail "(3.1c) a non-object refs was accepted"
 fi
@@ -181,11 +205,11 @@ fi
 echo "  ok (3.1) common-envelope guards isolated: schema_version rejects true/1.0, refs must be an object"
 
 # (4) a valid, command-specific closeout ends the command honestly → Stop no longer blocks. S1's open
-# record is `think`; close it with an allowlisted blocked_external (idc_pr_finish.py belongs to think),
-# a cheap real-derivation closeout, then prove Stop passes only when NO command is open.
-contract finish --repo "$REPO" --session "$S1" --command think --status blocked_external \
-  --evidence-json '{"schema_version":1,"refs":{"blocker":{"helper":"idc_pr_finish.py","exit":2,"diagnostic":"gate PR could not be opened"}}}' \
-  || gov_fail "(4) could not close S1's think record via an allowlisted blocked_external"
+# record is `build`; close it with an oracle-backed `no_action` (REPO's board is empty — a real
+# re-derivation, not a caller flag), then prove Stop passes only when NO command is open.
+contract finish --repo "$REPO" --session "$S1" --command build --status no_action \
+  --evidence-json '{"schema_version":1,"refs":{}}' \
+  || gov_fail "(4) could not close S1's build record via an oracle-backed no_action"
 stop_payload "$S1" | python3 "$CLOSEOUT_GATE" "$GOV_PLUGIN" > "$OUT"
 [ ! -s "$OUT" ] || gov_fail "(4) a valid closeout still blocked Stop"
 echo "  ok (4) a valid closeout ends the command → Stop no longer blocks"
@@ -363,6 +387,55 @@ FAKE_MERGED_PRS="706" FAKE_ISSUE_DIR="$REPO3_ISSUES" gh_finish --repo "$REPO3" -
   || gov_fail "(7b) could not honestly close after the F2 sabotages"
 echo "  ok (7b, F2) think re-derives consideration/marker-binding/gate-disposal/pointer-admission — each fails closed independently"
 
+# (7w, F2) think WAITING_GATE: the Think PR must read exactly OPEN (a CLOSED dead gate refuses), and
+# the gate/pointer are re-derived from CURRENT board state (the gate open, the pointer genuinely
+# Blocked) — not journal-absence alone.
+REPO_W="$WORK/repo-w"; mkdir -p "$REPO_W/docs/workflow/considerations"
+printf 'backend: filesystem\n' > "$REPO_W/docs/workflow/tracker-config.yaml"
+python3 "$GOV_TRK" --tracker "$REPO_W/TRACKER.md" init >/dev/null || gov_fail "(7w) could not init REPO_W"
+write_consideration "$REPO_W" "$CONS_REL"
+python3 "$GOV_TRK" --tracker "$REPO_W/TRACKER.md" create --title gate --status Blocked >/dev/null            # #1 gate (open)
+python3 "$GOV_TRK" --tracker "$REPO_W/TRACKER.md" create --title ptr --stage Consideration --status Blocked >/dev/null  # #2 pointer (blocked)
+python3 "$GOV_TRK" --tracker "$REPO_W/TRACKER.md" create --title ptr2 --stage Consideration --status Todo >/dev/null    # #3 pointer (advanced, Todo)
+python3 "$GOV_TRK" --tracker "$REPO_W/TRACKER.md" create --title gate2 --status Done >/dev/null             # #4 gate (closed)
+W_ISSUES="$WORK/w-issues"; mkdir -p "$W_ISSUES"
+printf 'Gate.\n<!-- idc-gate-pr: 50 -->\n' > "$W_ISSUES/1.body"
+printf 'pointer, blocked.\n' > "$W_ISSUES/2.body"
+printf 'pointer, advanced.\n' > "$W_ISSUES/3.body"
+printf 'Gate closed.\n<!-- idc-gate-pr: 50 -->\n' > "$W_ISSUES/4.body"
+SW="sw-$$-$(basename "$WORK")"
+wait_ev() { printf '{"schema_version":1,"refs":{"consideration":"%s","think_pr":50,"gate":%s,"pointer":%s}}' "$CONS_REL" "$1" "$2"; }
+# honest: PR 50 OPEN, gate #1 open on the board, pointer #2 Blocked → accepted.
+contract start --repo "$REPO_W" --session "$SW" --command think --plugin-root "$GOV_PLUGIN" --args 'w' --source user >/dev/null
+FAKE_ISSUE_DIR="$W_ISSUES" gh_finish --repo "$REPO_W" --session "$SW" --command think --status waiting_gate \
+  --evidence-json "$(wait_ev 1 2)" \
+  || gov_fail "(7w) an honest think waiting_gate (PR OPEN, gate open on board, pointer Blocked) was rejected"
+# (i) a CLOSED (unmerged, dead) Think PR is NOT a valid wait.
+contract start --repo "$REPO_W" --session "$SW" --command think --plugin-root "$GOV_PLUGIN" --args 'w2' --source user >/dev/null
+if FAKE_CLOSED_PRS="50" FAKE_ISSUE_DIR="$W_ISSUES" gh_finish --repo "$REPO_W" --session "$SW" \
+     --command think --status waiting_gate --evidence-json "$(wait_ev 1 2)" 2>/dev/null; then
+  gov_fail "(7w-i) a think waiting_gate whose Think PR reads CLOSED (a dead gate) was accepted"
+fi
+# (ii) an UNVERIFIABLE Think PR (gh errored) fails closed.
+if FAKE_PR_ERROR=1 FAKE_ISSUE_DIR="$W_ISSUES" gh_finish --repo "$REPO_W" --session "$SW" \
+     --command think --status waiting_gate --evidence-json "$(wait_ev 1 2)" 2>/dev/null; then
+  gov_fail "(7w-ii) a think waiting_gate accepted an UNVERIFIABLE Think-PR state (gh errored)"
+fi
+# (iii) a gate that reads Done on the CURRENT board is not a wait (gate #4).
+if FAKE_ISSUE_DIR="$W_ISSUES" gh_finish --repo "$REPO_W" --session "$SW" \
+     --command think --status waiting_gate --evidence-json "$(wait_ev 4 2)" 2>/dev/null; then
+  gov_fail "(7w-iii) a think waiting_gate whose gate reads Done on the board was accepted"
+fi
+# (iv) a pointer that is NOT Blocked on the CURRENT board (advanced to Todo) is not a wait (pointer #3).
+if FAKE_ISSUE_DIR="$W_ISSUES" gh_finish --repo "$REPO_W" --session "$SW" \
+     --command think --status waiting_gate --evidence-json "$(wait_ev 1 3)" 2>/dev/null; then
+  gov_fail "(7w-iv) a think waiting_gate whose pointer reads Todo (advanced past its gate) was accepted"
+fi
+FAKE_ISSUE_DIR="$W_ISSUES" gh_finish --repo "$REPO_W" --session "$SW" --command think --status waiting_gate \
+  --evidence-json "$(wait_ev 1 2)" >/dev/null \
+  || gov_fail "(7w) could not honestly close the waiting_gate record after the sabotages"
+echo "  ok (7w, F2) think waiting_gate requires an OPEN PR + gate open + pointer Blocked on the CURRENT board (CLOSED/errored/Done-gate/advanced-pointer refused)"
+
 # (7b-drop / F7-shape) a think complete that materializes Drive but DROPS U1/U2 from the exact-once
 # manifest is BLOCKED — the closeout re-reads the manifest and the drop fails validation.
 DROP_MANIFEST="$REPO3/docs/workflow/intakes/2026-07-12-drop.json"
@@ -397,11 +470,20 @@ if contract finish --repo "$REPO3" --session "$S3" --command doctor --status no_
      --evidence-json '{"schema_version":1,"refs":{}}' 2>/dev/null; then
   gov_fail "(7c) doctor no_action (an illegal terminal status for a diagnostic command) was accepted"
 fi
+# (F7) a persisted report whose rows are a BARE STRING ("1..10") records no machine-checkable artifact
+# — each row must be a {id, result} object — so it is not claimable as verified (rule B), even nonce-bound.
+DOC_N="$(rec_nonce "$REPO3" "$S3" doctor)"
+python3 "$CR" --cwd "$REPO3" write --kind doctor --session "$S3" \
+  --payload-json "$(printf '{"rows":["1..10"],"verdict":"PASS","nonce":"%s"}' "$DOC_N")" >/dev/null
+if contract finish --repo "$REPO3" --session "$S3" --command doctor --status complete \
+     --evidence-json '{"schema_version":1,"refs":{}}' 2>/dev/null; then
+  gov_fail "(7c, F7) a doctor complete whose report rows are a bare string (no machine-checkable result) was accepted"
+fi
 doctor_report "$REPO3" "$S3" FAIL
 contract finish --repo "$REPO3" --session "$S3" --command doctor --status complete \
   --evidence-json '{"schema_version":1,"refs":{}}' \
-  || gov_fail "(7c) doctor complete backed by a persisted FAIL report was rejected"
-echo "  ok (7c, F6) doctor complete re-reads the durable report (forged rows refused; a FAIL verdict still completes; no_action illegal)"
+  || gov_fail "(7c) doctor complete backed by a persisted FAIL report with machine-checkable rows was rejected"
+echo "  ok (7c, F6/F7) doctor complete re-reads the nonce-bound report (forged/no-report refused; bare-string rows not claimable; a FAIL verdict still completes; no_action illegal)"
 
 # (7d, F1) blocked_external: an allowlisted helper + NONZERO exit + diagnostic; a zero exit, a phantom
 # helper, a helper NOT belonging to the command, and an invented/mismatched drain are all refused.
@@ -437,6 +519,55 @@ contract finish --repo "$REPO3" --session "$S3" --command build --status blocked
   || gov_fail "(7d) a drain blocked_external whose cited exit MATCHES the persisted verdict was rejected"
 echo "  ok (7d, F1) blocked_external requires an ALLOWLISTED helper + nonzero exit + diagnostic; a drain blocker re-derives + MATCHES the durable verdict exit"
 
+# (7d-jan, F1) janitor blocked_external: ONLY the documented blocked exit (2 — ground truth
+# unestablished) grounds it. A persisted scanner_exit of 1 is a COMPLETED scan WITH FINDINGS (that is
+# `complete`, not blocked), so a blocked_external citing exit 1 is refused. The report is nonce-bound.
+REPO_JB="$WORK/repo-jb"; mkdir -p "$REPO_JB/docs/workflow"
+printf 'backend: filesystem\n' > "$REPO_JB/docs/workflow/tracker-config.yaml"
+SJB="sjb-$$-$(basename "$WORK")"
+contract start --repo "$REPO_JB" --session "$SJB" --command janitor --plugin-root "$GOV_PLUGIN" --args 'scan' --source user >/dev/null
+JBN="$(rec_nonce "$REPO_JB" "$SJB" janitor)"
+python3 "$CR" --cwd "$REPO_JB" write --kind janitor --session "$SJB" \
+  --payload-json "$(printf '{"scanner_exit":1,"clean":false,"nonce":"%s"}' "$JBN")" >/dev/null
+if contract finish --repo "$REPO_JB" --session "$SJB" --command janitor --status blocked_external \
+     --evidence-json '{"schema_version":1,"refs":{"blocker":{"helper":"idc_git_janitor.py","exit":1,"diagnostic":"findings"}}}' 2>/dev/null; then
+  gov_fail "(7d-jan, F1) a janitor blocked_external citing scanner_exit 1 (findings, NOT blocked) was accepted"
+fi
+# exit 2 (the documented blocked exit) DOES ground it (cited exit must match the persisted 2).
+python3 "$CR" --cwd "$REPO_JB" write --kind janitor --session "$SJB" \
+  --payload-json "$(printf '{"scanner_exit":2,"clean":false,"nonce":"%s"}' "$JBN")" >/dev/null
+contract finish --repo "$REPO_JB" --session "$SJB" --command janitor --status blocked_external \
+  --evidence-json '{"schema_version":1,"refs":{"blocker":{"helper":"idc_git_janitor.py","exit":2,"diagnostic":"not a git repo"}}}' \
+  || gov_fail "(7d-jan, F1) a janitor blocked_external citing the documented blocked exit 2 was rejected"
+echo "  ok (7d-jan, F1) janitor blocked_external grounds ONLY on the documented blocked exit 2 (exit 1 findings = complete, not blocked)"
+
+# (7d-receipt, F1) a blocked_external citing the receipt checker is grounded ONLY when a read-only
+# RE-RUN actually FAILS (an invalid/modified receipt); a clean receipt refuses the blocker (no failure
+# to prove). A caller exit/diagnostic alone is never accepted. Also: a NON-re-derivable helper (a PR
+# finisher — no receipt, not re-runnable) can never ground a blocked stop for any command.
+REPO_RB="$WORK/repo-rb"; mkdir -p "$REPO_RB/docs/workflow"
+printf 'backend: filesystem\n' > "$REPO_RB/docs/workflow/tracker-config.yaml"; printf 'wf\n' > "$REPO_RB/WORKFLOW.md"
+SRB="srb-$$-$(basename "$WORK")"
+python3 "$RECEIPT" stamp --repo "$REPO_RB" --out "$REPO_RB/docs/workflow/install-receipt.yaml" \
+  --plugin-version "$RUN_VER" WORKFLOW.md docs/workflow/tracker-config.yaml >/dev/null || gov_fail "(7d-receipt) stamp failed"
+contract start --repo "$REPO_RB" --session "$SRB" --command init --plugin-root "$GOV_PLUGIN" --args 'x' --source user >/dev/null
+# clean receipt → the re-run passes → the blocker is refused (a helper that succeeds cannot block).
+if contract finish --repo "$REPO_RB" --session "$SRB" --command init --status blocked_external \
+     --evidence-json '{"schema_version":1,"refs":{"blocker":{"helper":"idc_receipt_check.py","exit":2,"diagnostic":"drift"}}}' 2>/dev/null; then
+  gov_fail "(7d-receipt, F1) an init blocked_external citing the receipt checker was accepted while the re-run PASSES"
+fi
+# a NON-re-derivable helper (idc_pr_finish.py — not on init's allowlist) can never ground a blocked stop.
+if contract finish --repo "$REPO_RB" --session "$SRB" --command init --status blocked_external \
+     --evidence-json '{"schema_version":1,"refs":{"blocker":{"helper":"idc_pr_finish.py","exit":2,"diagnostic":"x"}}}' 2>/dev/null; then
+  gov_fail "(7d-receipt, F1) an init blocked_external citing a non-re-derivable helper (idc_pr_finish.py) was accepted"
+fi
+# now MODIFY a stamped file → the read-only re-run FAILS → the blocker IS grounded.
+printf 'TAMPERED\n' > "$REPO_RB/WORKFLOW.md"
+contract finish --repo "$REPO_RB" --session "$SRB" --command init --status blocked_external \
+  --evidence-json '{"schema_version":1,"refs":{"blocker":{"helper":"idc_receipt_check.py","exit":2,"diagnostic":"scaffold drift"}}}' \
+  || gov_fail "(7d-receipt, F1) an init blocked_external whose receipt re-run genuinely FAILS was rejected"
+echo "  ok (7d-receipt, F1) a receipt-checker blocker grounds only on a failing read-only re-run; a non-re-derivable helper never blocks"
+
 # (7e) autorun complete reads THIS session's PERSISTED drain: complete verdict — never a caller string.
 python3 "$DV" --cwd "$REPO3" write --verdict complete --exit 0 --session "$S3" \
   || gov_fail "(7e) could not persist a drain verdict"
@@ -455,6 +586,40 @@ contract finish --repo "$REPO3" --session "$S3" --command autorun --status compl
   --evidence-json '{"schema_version":1,"refs":{}}' >/dev/null \
   || gov_fail "(7e-sabotage) could not honestly close the autorun record"
 echo "  ok (7e) autorun complete is cleared only by THIS session's durable drain: complete verdict (forged/foreign refused)"
+
+# (7g-req, F5) Build stamps its REQUESTED issue set at start; complete requires ONE verified merged-PR
+# receipt PER requested issue, with the PR↔issue linkage proven from the PR's OWN closing references.
+REPO_BUILD="$WORK/repo-build"; mkdir -p "$REPO_BUILD/docs/workflow"
+printf 'backend: filesystem\n' > "$REPO_BUILD/docs/workflow/tracker-config.yaml"
+SB="sb-$$-$(basename "$WORK")"
+# started with `#1 #2` → requested {1,2}. A single merged-PR receipt for #1 leaves #2 uncovered → refuse.
+contract start --repo "$REPO_BUILD" --session "$SB" --command build --plugin-root "$GOV_PLUGIN" \
+  --args '#1 #2' --source user >/dev/null
+if FAKE_MERGED_PRS="90" FAKE_PR_CLOSES="90:1" gh_finish --repo "$REPO_BUILD" --session "$SB" \
+     --command build --status complete \
+     --evidence-json '{"schema_version":1,"refs":{"receipts":{"1":{"pr":90}}}}' 2>/dev/null; then
+  gov_fail "(7g-req, F5) a build complete for TWO requested issues with only ONE merged-PR receipt was accepted"
+fi
+# a merged PR that closes the WRONG issue (#2, not the requested #1) fails the linkage closed.
+if FAKE_MERGED_PRS="90 91" FAKE_PR_CLOSES="90:1 91:2" gh_finish --repo "$REPO_BUILD" --session "$SB" \
+     --command build --status complete \
+     --evidence-json '{"schema_version":1,"refs":{"receipts":{"1":{"pr":90},"2":{"pr":91}}}}' 2>/dev/null; then
+  : # this SHOULD pass (90→#1, 91→#2) — asserted below; the wrong-issue case is next.
+fi
+# wrong-issue: requested #2's receipt cites a merged PR (93) whose closing refs name #1, not #2 → refuse.
+contract start --repo "$REPO_BUILD" --session "$SB" --command build --plugin-root "$GOV_PLUGIN" \
+  --args '#1 #2' --source user >/dev/null
+if FAKE_MERGED_PRS="90 93" FAKE_PR_CLOSES="90:1 93:1" gh_finish --repo "$REPO_BUILD" --session "$SB" \
+     --command build --status complete \
+     --evidence-json '{"schema_version":1,"refs":{"receipts":{"1":{"pr":90},"2":{"pr":93}}}}' 2>/dev/null; then
+  gov_fail "(7g-req, F5) a build complete accepted a receipt whose merged PR closes the WRONG issue"
+fi
+# honest: each requested issue has a merged PR that closes IT (90→#1, 92→#2) → accepted.
+FAKE_MERGED_PRS="90 92" FAKE_PR_CLOSES="90:1 92:2" gh_finish --repo "$REPO_BUILD" --session "$SB" \
+  --command build --status complete \
+  --evidence-json '{"schema_version":1,"refs":{"receipts":{"1":{"pr":90},"2":{"pr":92}}}}' \
+  || gov_fail "(7g-req, F5) a build complete with a linked merged-PR receipt per requested issue was rejected"
+echo "  ok (7g-req, F5) build stamps the requested issue set; complete needs a linked merged-PR receipt per issue (partial/wrong-issue refused)"
 
 # ============================================================================================
 # (7f, F3) plan complete re-derives: matrix re-validates, planning PR reads MERGED (real gh), the
@@ -500,6 +665,57 @@ FAKE_MERGED_PRS="42" gh_finish --repo "$REPO_PLAN" --session "$SP" --command pla
   --evidence-json "$(plan_ev "$GOODMX" '{"1":2}' '[1]')" \
   || gov_fail "(7f) a plan complete backed by matrix + MERGED PR + existing child + retired pointer + no-admitted-remaining was rejected"
 echo "  ok (7f, F3) plan complete re-derives matrix + merged PR + children + retired pointers + the required admitted set (an omitted consideration refuses)"
+
+# (7f-retire, F3) THE RETIRE-THEN-OMIT bypass: the admitted set STAMPED at start remembers a
+# consideration the plan itself RETIRES off the board, so retiring #1 and #3 but decomposing only
+# #1→#2 (dropping #3's child) is REFUSED — the stamp catches #3 even though the live board is clean.
+REPO_RT="$WORK/repo-rt"; mkdir -p "$REPO_RT/docs/workflow/pillar-matrices"
+printf 'backend: filesystem\n' > "$REPO_RT/docs/workflow/tracker-config.yaml"
+python3 "$GOV_TRK" --tracker "$REPO_RT/TRACKER.md" init >/dev/null || gov_fail "(7f-retire) could not init REPO_RT"
+python3 "$GOV_TRK" --tracker "$REPO_RT/TRACKER.md" create --title cA --stage Consideration --status Todo >/dev/null  # #1
+python3 "$GOV_TRK" --tracker "$REPO_RT/TRACKER.md" create --title cB --stage Consideration --status Todo >/dev/null  # #2
+python3 "$GOV_TRK" --tracker "$REPO_RT/TRACKER.md" create --title chA --stage Buildable --status Todo >/dev/null     # #3
+python3 "$GOV_TRK" --tracker "$REPO_RT/TRACKER.md" create --title chB --stage Buildable --status Todo >/dev/null     # #4
+cp "$REPO_PLAN/$GOODMX" "$REPO_RT/$GOODMX"
+SRT="srt-$$-$(basename "$WORK")"
+# START stamps plan_admitted = {1,2} (both considerations). Retire BOTH off the board.
+contract start --repo "$REPO_RT" --session "$SRT" --command plan --plugin-root "$GOV_PLUGIN" --args 'retire-omit' --source user >/dev/null
+python3 "$GOV_TRK" --tracker "$REPO_RT/TRACKER.md" move --num 1 --status Done >/dev/null
+python3 "$GOV_TRK" --tracker "$REPO_RT/TRACKER.md" move --num 2 --status Done >/dev/null
+# decompose only #1→#3 (drop #2's child), claim only pointer #1 retired → REFUSED (the stamp remembers #2).
+if FAKE_MERGED_PRS="42" gh_finish --repo "$REPO_RT" --session "$SRT" --command plan --status complete \
+     --evidence-json "$(plan_ev "$GOODMX" '{"1":3}' '[1]')" 2>/dev/null; then
+  gov_fail "(7f-retire, F3) a plan complete that retired #2 off the board but never decomposed it was ACCEPTED (retire-then-omit)"
+fi
+# honest: decompose BOTH (#1→#3, #2→#4) with both pointers retired → accepted.
+FAKE_MERGED_PRS="42" gh_finish --repo "$REPO_RT" --session "$SRT" --command plan --status complete \
+  --evidence-json "$(plan_ev "$GOODMX" '{"1":3,"2":4}' '[1,2]')" \
+  || gov_fail "(7f-retire, F3) a plan complete decomposing EVERY admitted consideration was rejected"
+echo "  ok (7f-retire, F3) the retire-then-omit bypass is caught by the start-stamped admitted set (retire #1,#2 + decompose only #1 → refused)"
+
+# (7f-gh-admitted, F3) the FULL admitted-set claim runs on the GITHUB path too: the required set is the
+# rule-A STAMP on the record (the live github board read is unavailable hermetically), so a decompositions
+# set that omits a stamped consideration is REFUSED, and one that covers all is accepted.
+REPO_GHP="$WORK/repo-ghp"; mkdir -p "$REPO_GHP/docs/workflow"
+printf 'backend: github\nproject_number: 10\n' > "$REPO_GHP/docs/workflow/tracker-config.yaml"
+SGHP="sghp-$$-$(basename "$WORK")"
+plan_admitted_claim() {  # $1=repo $2=session $3=stamped-csv $4=decompositions-json -> ok / reject:<code>
+  SCRIPTS_DIR="$GOV_PLUGIN/scripts" python3 - "$1" "$2" "$3" "$4" <<'PY'
+import json, os, sys
+sys.path.insert(0, os.environ["SCRIPTS_DIR"]); sys.path.insert(0, os.path.join(os.environ["SCRIPTS_DIR"],"hooks"))
+import idc_ledger, idc_command_contract as cc
+repo, sess, adm, dec = sys.argv[1:]
+idc_ledger.command_start(repo, sess, "plan", "4.1.0", "d"*64, "user",
+                         plan_admitted=[x for x in adm.split(",") if x])
+res = cc._claim_plan_admitted_set_covered({"decompositions": json.loads(dec)}, repo, sess)
+print("ok" if res.ok else f"reject:{res.reason_code}")
+PY
+}
+[ "$(plan_admitted_claim "$REPO_GHP" "$SGHP" '1,3' '{"1":2}')" != "ok" ] \
+  || gov_fail "(7f-gh-admitted, F3) a github plan complete omitting a stamped admitted consideration was accepted"
+[ "$(plan_admitted_claim "$REPO_GHP" "$SGHP" '1,3' '{"1":2,"3":4}')" = "ok" ] \
+  || gov_fail "(7f-gh-admitted, F3) a github plan complete decomposing every stamped consideration was rejected"
+echo "  ok (7f-gh-admitted, F3) the admitted-set claim runs on the github path from the start-stamped set (omission refused)"
 
 # (7f-sabotage) each re-derived claim fails closed independently (children present so the reach is real).
 python3 "$GOV_TRK" --tracker "$REPO_PLAN/TRACKER.md" create --title "second consideration" \
@@ -696,6 +912,59 @@ contract finish --repo "$REPO4B" --session "$S4B" --command uninstall --status c
   || gov_fail "(9c-iii) a uninstall no-action whose receipt footprints are all absent was rejected"
 echo "  ok (9c, F5) uninstall no-action is proven from the receipt (no-receipt + still-present-footprint refused; all-absent accepted)"
 
+# (9-runtime, F6) the removal set is the receipt footprints UNION the documented runtime-created
+# artifacts (TRACKER.md at minimum): an applied uninstall that leaves TRACKER.md behind is REFUSED.
+REPO_UF="$WORK/repo-uf"; mkdir -p "$REPO_UF/docs/workflow" "$REPO_UF/.claude"
+printf 'backend: filesystem\n' > "$REPO_UF/docs/workflow/tracker-config.yaml"
+printf 'wf\n' > "$REPO_UF/WORKFLOW.md"; printf 'idc data\n' > "$REPO_UF/TRACKER.md"
+printf '{"enabledPlugins":{"idc@idc-workflow":true}}\n' > "$REPO_UF/.claude/settings.json"
+python3 "$RECEIPT" stamp --repo "$REPO_UF" --out "$REPO_UF/docs/workflow/install-receipt.yaml" \
+  --plugin-version "$RUN_VER" WORKFLOW.md docs/workflow/tracker-config.yaml >/dev/null || gov_fail "(9-runtime) stamp failed"
+UF_ARCH="idc-archive-uf.tar.gz"; : > "$REPO_UF/$UF_ARCH"
+SUF="suf-$$-$(basename "$WORK")"
+uf_ev() { printf '{"schema_version":1,"refs":{"outcome":"applied","settings":".claude/settings.json","archive":"%s"}}' "$UF_ARCH"; }
+contract start --repo "$REPO_UF" --session "$SUF" --command uninstall --plugin-root "$GOV_PLUGIN" --args 'uninstall' --source user >/dev/null
+rm -f "$REPO_UF/WORKFLOW.md"   # remove the receipt footprint but LEAVE the runtime TRACKER.md
+python3 "$GOV_PLUGIN/scripts/idc_settings_json.py" disable "$REPO_UF/.claude/settings.json" idc@idc-workflow >/dev/null
+if contract finish --repo "$REPO_UF" --session "$SUF" --command uninstall --status complete \
+     --evidence-json "$(uf_ev)" 2>/dev/null; then
+  gov_fail "(9-runtime, F6) an applied uninstall that LEFT the runtime TRACKER.md behind was accepted"
+fi
+rm -f "$REPO_UF/TRACKER.md"   # now remove the runtime artifact too
+contract finish --repo "$REPO_UF" --session "$SUF" --command uninstall --status complete \
+  --evidence-json "$(uf_ev)" \
+  || gov_fail "(9-runtime, F6) an applied uninstall whose receipt footprints + runtime TRACKER.md are all gone was rejected"
+echo "  ok (9-runtime, F6) the removal set includes the documented runtime artifacts (TRACKER.md left behind → refused)"
+
+# (9-flags, F6) a stamped opt-in flag must be HONORED before finish: an uninstall started with
+# --close-issues while the board still shows an open issue is REFUSED (verified by a real board read).
+REPO_UF2="$WORK/repo-uf2"; mkdir -p "$REPO_UF2/docs/workflow" "$REPO_UF2/.claude"
+printf 'backend: filesystem\n' > "$REPO_UF2/docs/workflow/tracker-config.yaml"
+printf 'wf\n' > "$REPO_UF2/WORKFLOW.md"
+printf '{"enabledPlugins":{"idc@idc-workflow":true}}\n' > "$REPO_UF2/.claude/settings.json"
+python3 "$GOV_TRK" --tracker "$REPO_UF2/TRACKER.md" init >/dev/null
+python3 "$GOV_TRK" --tracker "$REPO_UF2/TRACKER.md" create --title "still open" --status Todo >/dev/null   # #1 open
+python3 "$RECEIPT" stamp --repo "$REPO_UF2" --out "$REPO_UF2/docs/workflow/install-receipt.yaml" \
+  --plugin-version "$RUN_VER" WORKFLOW.md docs/workflow/tracker-config.yaml >/dev/null || gov_fail "(9-flags) stamp failed"
+UF2_ARCH="idc-archive-uf2.tar.gz"; : > "$REPO_UF2/$UF2_ARCH"
+SUF2="suf2-$$-$(basename "$WORK")"
+uf2_ev() { printf '{"schema_version":1,"refs":{"outcome":"applied","settings":".claude/settings.json","archive":"%s"}}' "$UF2_ARCH"; }
+contract start --repo "$REPO_UF2" --session "$SUF2" --command uninstall --plugin-root "$GOV_PLUGIN" \
+  --args 'uninstall --close-issues' --source user >/dev/null
+rm -f "$REPO_UF2/WORKFLOW.md"
+python3 "$GOV_PLUGIN/scripts/idc_settings_json.py" disable "$REPO_UF2/.claude/settings.json" idc@idc-workflow >/dev/null
+# TRACKER.md still present WITH an open issue → the requested --close-issues was NOT honored → refuse.
+if contract finish --repo "$REPO_UF2" --session "$SUF2" --command uninstall --status complete \
+     --evidence-json "$(uf2_ev)" 2>/dev/null; then
+  gov_fail "(9-flags, F6) an uninstall --close-issues with an OPEN board issue still present was accepted"
+fi
+# honoring it (removing the board substrate → no open issues) + removing the runtime TRACKER.md closes it.
+rm -f "$REPO_UF2/TRACKER.md"
+contract finish --repo "$REPO_UF2" --session "$SUF2" --command uninstall --status complete \
+  --evidence-json "$(uf2_ev)" \
+  || gov_fail "(9-flags, F6) an uninstall --close-issues whose board is gone (no open issues) was rejected"
+echo "  ok (9-flags, F6) a stamped --close-issues is verified by a real board read (unhonored open issue → refused)"
+
 # ============================================================================================
 # (10, F2) intake mode is DURABLE on the record: coverage is re-verified from the RECORD on EVERY path,
 # even a finish that omits the intake fields, and INCLUDING waiting_gate.
@@ -883,6 +1152,59 @@ contract finish --repo "$REPO_RC" --session "$SR" --command recirculate --status
   || gov_fail "(13-req) a recirculate complete whose requested unit was actually processed (materialized) was rejected"
 echo "  ok (13-req, F4) every requested recirc item needs a tracker-checked closeout ('drained' while queued / omitted → refused; materialized → accepted)"
 
+# (13-mismatch, F4) the claimed disposition must EQUAL the durable manifest disposition, not merely be
+# non-queued: RC_MANIFEST's U1 is `materialized`, so a closeout claiming `verified_done` for it is REFUSED.
+contract start --repo "$REPO_RC" --session "$SR" --command recirculate --plugin-root "$GOV_PLUGIN" \
+  --args "$REQ_REF" --source user >/dev/null
+if contract finish --repo "$REPO_RC" --session "$SR" --command recirculate --status complete \
+     --evidence-json "$(printf '{"schema_version":1,"refs":{"closeouts":{"%s":"verified_done"}}}' "$REQ_REF")" 2>/dev/null; then
+  gov_fail "(13-mismatch, F4) a recirculate complete claiming 'verified_done' for a 'materialized' manifest unit was accepted"
+fi
+contract finish --repo "$REPO_RC" --session "$SR" --command recirculate --status complete \
+  --evidence-json "$(printf '{"schema_version":1,"refs":{"closeouts":{"%s":"materialized"}}}' "$REQ_REF")" >/dev/null \
+  || gov_fail "(13-mismatch, F4) could not close the disposition-equality record honestly"
+echo "  ok (13-mismatch, F4) a manifest-unit closeout disposition must EQUAL the durable manifest state ('verified_done' != 'materialized' refused)"
+
+# (13-ticket, F4) a bare `#<ticket>` requested item gets a per-ticket board re-read: the board Status
+# must be consistent with the claimed disposition (a terminal 'drained' needs the ticket Done; a
+# non-terminal 'paused' needs it still open). The inbox is settled (ticket #1 Done → reconciliation complete).
+REPO_RCT="$WORK/repo-rct"; mkdir -p "$REPO_RCT/docs/workflow"
+printf 'backend: filesystem\n' > "$REPO_RCT/docs/workflow/tracker-config.yaml"
+python3 "$GOV_TRK" --tracker "$REPO_RCT/TRACKER.md" init >/dev/null || gov_fail "(13-ticket) could not init REPO_RCT"
+python3 "$GOV_TRK" --tracker "$REPO_RCT/TRACKER.md" create --title t1 --stage Recirculation --status Done >/dev/null  # #1 Done
+SRT2="srt2-$$-$(basename "$WORK")"
+# (i) omitting the requested ticket's closeout is refused.
+contract start --repo "$REPO_RCT" --session "$SRT2" --command recirculate --plugin-root "$GOV_PLUGIN" --args '#1' --source user >/dev/null
+if contract finish --repo "$REPO_RCT" --session "$SRT2" --command recirculate --status complete \
+     --evidence-json '{"schema_version":1,"refs":{"closeouts":{}}}' 2>/dev/null; then
+  gov_fail "(13-ticket, F4) a recirculate complete with closeouts:{} against a NAMED bare ticket was accepted"
+fi
+# (ii) a board-inconsistent disposition ('paused' while the ticket reads Done) is refused.
+if contract finish --repo "$REPO_RCT" --session "$SRT2" --command recirculate --status complete \
+     --evidence-json '{"schema_version":1,"refs":{"closeouts":{"#1":"paused"}}}' 2>/dev/null; then
+  gov_fail "(13-ticket, F4) a bare-ticket closeout claiming 'paused' while the ticket reads Done was accepted"
+fi
+# (iii) the board-consistent disposition ('drained' while the ticket is Done) is accepted.
+contract finish --repo "$REPO_RCT" --session "$SRT2" --command recirculate --status complete \
+  --evidence-json '{"schema_version":1,"refs":{"closeouts":{"#1":"drained"}}}' \
+  || gov_fail "(13-ticket, F4) a bare-ticket 'drained' closeout consistent with the Done board ticket was rejected"
+echo "  ok (13-ticket, F4) a bare-ticket closeout gets a per-ticket board re-read (omitted / board-inconsistent refused)"
+
+# (13-gate, F4) recirculate waiting_gate reads the referenced gate for real — an OPEN gate on the board
+# is a valid wait; a nonexistent (hollow) or Done gate is refused.
+REPO_RCG="$WORK/repo-rcg"; mkdir -p "$REPO_RCG/docs/workflow"
+printf 'backend: filesystem\n' > "$REPO_RCG/docs/workflow/tracker-config.yaml"
+python3 "$GOV_TRK" --tracker "$REPO_RCG/TRACKER.md" init >/dev/null || gov_fail "(13-gate) could not init REPO_RCG"
+python3 "$GOV_TRK" --tracker "$REPO_RCG/TRACKER.md" create --title g1 --status Blocked >/dev/null   # #1 open gate
+python3 "$GOV_TRK" --tracker "$REPO_RCG/TRACKER.md" create --title g2 --status Done >/dev/null       # #2 closed gate
+r="$(direct_validate recirculate waiting_gate '{"schema_version":1,"refs":{"gate":"#999"}}' "$REPO_RCG")"
+[ "$r" != "ok" ] || gov_fail "(13-gate, F4) a recirculate waiting_gate on a HOLLOW (nonexistent) gate was accepted"
+r="$(direct_validate recirculate waiting_gate '{"schema_version":1,"refs":{"gate":"#2"}}' "$REPO_RCG")"
+[ "$r" != "ok" ] || gov_fail "(13-gate, F4) a recirculate waiting_gate on a Done (closed) gate was accepted"
+r="$(direct_validate recirculate waiting_gate '{"schema_version":1,"refs":{"gate":"#1"}}' "$REPO_RCG")"
+[ "$r" = "ok" ] || gov_fail "(13-gate, F4) a recirculate waiting_gate on a real OPEN gate was rejected ($r)"
+echo "  ok (13-gate, F4) recirculate waiting_gate reads the referenced gate for real (hollow/closed gate refused)"
+
 # ============================================================================================
 # (14, F6) the diagnostic/lifecycle commands re-derive from durable artifacts: intake PR (real gh read),
 # janitor report, init receipt+presence, update receipt+plugin.json. (doctor covered in 7c.)
@@ -899,18 +1221,36 @@ FAKE_MERGED_PRS="806" FAKE_ISSUE_DIR="$REPO3_ISSUES" gh_finish --repo "$REPO3" -
   || gov_fail "(14-intake) an intake complete with a reviewed manifest + a real MERGED intake-PR read was rejected"
 echo "  ok (14-intake, F6) intake complete re-reads the intake PR merged-state (unmerged refused, merged accepted)"
 
-# (14-janitor) janitor complete re-reads THIS session's persisted janitor report (a caller scanner_exit is ignored).
-contract start --repo "$REPO3" --session "$S6" --command janitor --plugin-root "$GOV_PLUGIN" --args 'scan' --source user >/dev/null
-if contract finish --repo "$REPO3" --session "$S6" --command janitor --status complete \
+# (14-janitor, F7) janitor complete re-reads THIS session's persisted janitor report, which the SCANNER
+# RUN writes (the honest path actually runs the scanner) bound to the active record's NONCE — a caller
+# scanner_exit, and a report NOT bound to the record's nonce, are both refused.
+REPO_JAN="$WORK/repo-jan"; mkdir -p "$REPO_JAN/docs/workflow"
+printf 'backend: filesystem\n' > "$REPO_JAN/docs/workflow/tracker-config.yaml"
+git -C "$REPO_JAN" init -q && git -C "$REPO_JAN" add -A \
+  && GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
+     git -C "$REPO_JAN" commit -qm init || gov_fail "(14-janitor) could not init the janitor git repo"
+contract start --repo "$REPO_JAN" --session "$S6" --command janitor --plugin-root "$GOV_PLUGIN" --args 'scan' --source user >/dev/null
+# (i) a caller scanner_exit with NO persisted report is refused.
+if contract finish --repo "$REPO_JAN" --session "$S6" --command janitor --status complete \
      --evidence-json '{"schema_version":1,"refs":{"scanner_exit":0}}' 2>/dev/null; then
   gov_fail "(14-janitor) a janitor complete with a caller scanner_exit but NO persisted report was accepted"
 fi
-python3 "$CR" --cwd "$REPO3" write --kind janitor --session "$S6" \
-  --payload-json '{"scanner_exit":1,"clean":false}' >/dev/null || gov_fail "(14-janitor) could not write janitor report"
-contract finish --repo "$REPO3" --session "$S6" --command janitor --status complete \
+# (ii) a hand-written report NOT bound to the record's nonce is refused (must be written by the scanner run).
+python3 "$CR" --cwd "$REPO_JAN" write --kind janitor --session "$S6" \
+  --payload-json '{"scanner_exit":1,"clean":false,"nonce":"forged-nonce"}' >/dev/null
+if contract finish --repo "$REPO_JAN" --session "$S6" --command janitor --status complete \
+     --evidence-json '{"schema_version":1,"refs":{}}' 2>/dev/null; then
+  gov_fail "(14-janitor) a janitor complete backed by a report NOT bound to the record nonce was accepted"
+fi
+# (iii) the honest path: RUN the real scanner, which writes the report bound to the record's nonce.
+JAN_NONCE="$(rec_nonce "$REPO_JAN" "$S6" janitor)"
+[ -n "$JAN_NONCE" ] || gov_fail "(14-janitor) the janitor record carries no nonce"
+python3 "$GOV_PLUGIN/scripts/idc_git_janitor.py" --repo "$REPO_JAN" \
+  --report-session "$S6" --report-nonce "$JAN_NONCE" >/dev/null 2>&1
+contract finish --repo "$REPO_JAN" --session "$S6" --command janitor --status complete \
   --evidence-json '{"schema_version":1,"refs":{}}' \
-  || gov_fail "(14-janitor) a janitor complete backed by a persisted findings report (exit 1, not clean) was rejected"
-echo "  ok (14-janitor, F6) janitor complete re-reads the durable scan report (a caller exit is ignored)"
+  || gov_fail "(14-janitor) a janitor complete backed by the SCANNER-written, nonce-bound report was rejected"
+echo "  ok (14-janitor, F7) janitor complete re-reads the SCANNER-written report bound to the record nonce (caller exit / unbound report refused)"
 
 # (14-init) init complete re-derives from the install receipt (v2) + governance anchor + enablement.
 REPO_INIT="$WORK/repo-init"; mkdir -p "$REPO_INIT/docs/workflow" "$REPO_INIT/.claude"
@@ -926,10 +1266,18 @@ fi
 python3 "$RECEIPT" stamp --repo "$REPO_INIT" --out "$REPO_INIT/docs/workflow/install-receipt.yaml" \
   --plugin-version "$RUN_VER" WORKFLOW.md docs/workflow/tracker-config.yaml >/dev/null \
   || gov_fail "(14-init) could not stamp the init receipt"
+# (F7) the closeout RUNS the real FINGERPRINT verification, not a syntax parse: a stamped file whose
+# bytes were modified after stamping (scaffold drift) fails the init complete closed.
+printf 'TAMPERED\n' > "$REPO_INIT/WORKFLOW.md"
+if contract finish --repo "$REPO_INIT" --session "$SI2" --command init --status complete \
+     --evidence-json '{"schema_version":1,"refs":{}}' 2>/dev/null; then
+  gov_fail "(14-init, F7) an init complete accepted a receipt whose stamped file was MODIFIED (no fingerprint check)"
+fi
+printf 'workflow\n' > "$REPO_INIT/WORKFLOW.md"   # restore to the exact stamped bytes
 contract finish --repo "$REPO_INIT" --session "$SI2" --command init --status complete \
   --evidence-json '{"schema_version":1,"refs":{}}' \
-  || gov_fail "(14-init) an init complete backed by a v2 receipt + anchor + enablement was rejected"
-echo "  ok (14-init, F6) init complete re-derives from the install receipt + governance anchor + enablement"
+  || gov_fail "(14-init) an init complete backed by a v2 receipt + anchor + enablement + intact fingerprints was rejected"
+echo "  ok (14-init, F6/F7) init complete re-derives from the install receipt + anchor + enablement + RUNS the fingerprint verify (modified scaffold refused)"
 
 # (14-update) update complete re-derives from the install receipt + the RUNNING plugin version (plugin.json).
 REPO_UPD="$WORK/repo-upd"; mkdir -p "$REPO_UPD/docs/workflow"
@@ -949,10 +1297,17 @@ fi
 python3 "$RECEIPT" stamp --repo "$REPO_UPD" --out "$REPO_UPD/docs/workflow/install-receipt.yaml" \
   --plugin-version "$RUN_VER" WORKFLOW.md docs/workflow/tracker-config.yaml >/dev/null \
   || gov_fail "(14-update) could not re-stamp the receipt to the running version"
+# (F7) update ALSO runs the fingerprint verify: a modified stamped file fails the update complete closed.
+printf 'TAMPERED\n' > "$REPO_UPD/WORKFLOW.md"
+if contract finish --repo "$REPO_UPD" --session "$SU2" --command update --status complete \
+     --evidence-json '{"schema_version":1,"refs":{}}' 2>/dev/null; then
+  gov_fail "(14-update, F7) an update complete accepted a receipt whose stamped file was MODIFIED (no fingerprint check)"
+fi
+printf 'workflow\n' > "$REPO_UPD/WORKFLOW.md"   # restore to the exact stamped bytes
 contract finish --repo "$REPO_UPD" --session "$SU2" --command update --status complete \
   --evidence-json '{"schema_version":1,"refs":{}}' \
-  || gov_fail "(14-update) an update complete whose receipt plugin_version == the running version was rejected"
-echo "  ok (14-update, F6) update complete re-derives receipt v2 + receipt plugin_version == the RUNNING plugin version"
+  || gov_fail "(14-update) an update complete whose receipt plugin_version == the running version + intact fingerprints was rejected"
+echo "  ok (14-update, F6/F7) update complete re-derives receipt v2 + plugin_version == running + RUNS the fingerprint verify (modified scaffold refused)"
 
 # ============================================================================================
 # (15, F7) THE INCIDENT-SIZED REGRESSION. Run the full U0–U8/B1/B2 fixture through Think closeout,

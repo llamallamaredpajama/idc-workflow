@@ -48,7 +48,7 @@ Model allocation:
 | Tasks 1, 4, and 5 | Sonnet, `high` |
 | Tasks 2, 3, 6, and 7 | Opus, `xhigh` |
 | Task 8 | Opus, `xhigh`, with the lead closely supervising integration and release proof |
-| Every Codex review | Explicitly use the current configured strongest reviewer model; on this machine at authoring time, `gpt-5.6-sol` with maximum reasoning |
+| Every Codex review | Explicitly use the current configured strongest reviewer model with `xhigh` reasoning effort — NOT `max` (operator directive 2026-07-16: max overthinks on review work); on this machine at authoring time, `gpt-5.6-sol` |
 
 Do not keep eight teammates alive. Create one implementer for the current task, review that task, close or release the task panes, then create the next fresh implementer. More simultaneous writers would increase merge risk and weaken the exact task boundaries.
 
@@ -223,7 +223,7 @@ Launch it in its own cmux workspace. The command shape is:
 cmux new-workspace \
   --name "idc-review-task-${TASK_NUMBER}" \
   --cwd "$WORKTREE" \
-  --command "codex exec --ephemeral --sandbox read-only -m gpt-5.6-sol -c 'model_reasoning_effort=\"max\"' -C '$WORKTREE' -o '$SDD/task-${TASK_NUMBER}-review.md' - < '$SDD/task-${TASK_NUMBER}-review-prompt.md'"
+  --command "codex exec --ephemeral --sandbox read-only -m gpt-5.6-sol -c 'model_reasoning_effort=\"xhigh\"' -C '$WORKTREE' -o '$SDD/task-${TASK_NUMBER}-review.md' - < '$SDD/task-${TASK_NUMBER}-review-prompt.md'"
 ```
 
 This is intentionally a flat, detached launch. Do not run that `codex exec` directly in the lead's foreground shell.

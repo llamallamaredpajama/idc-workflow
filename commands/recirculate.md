@@ -25,6 +25,19 @@ below (`idc:idc-recirculator-sync` → `idc_recirculator_layers.py`). Mode is ch
   that scope to the front of the pipeline so **Plan** (unchanged) later decomposes it. Autorun runs
   this mode at the top of the pipeline before the Buildable wave.
 
+- **Reviewed intake unit (`<manifest>#<unit>`).** `$ARGUMENTS` may be a single external-intake
+  reference `docs/workflow/intakes/<file>.json#<unit>` — accepted **only** for a unit whose `route`
+  is `recirculate` (validate the manifest + its independent review first; reject any other route, and
+  never build from a foreign plan). Process that **one** unit through the **identical** decision flow
+  below — its `summary` + `dependencies` are the discovered scope. After it lands (an admitted
+  consideration, a gated Think PR, or a paused ticket), **link the unit on the exact-once manifest**
+  so the manifest is never left stale:
+  ```bash
+  python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_intake_manifest.py" link \
+    --manifest "$MANIFEST" --unit "$UNIT" --state materialized \
+    --target-ref "<recirc-ticket | consideration | gate>" --evidence "recirculate:<ref>"
+  ```
+
 The Recirculator's trigger is **narrowed to scope/menu (requirements/plan) drift**: a purely
 **mechanical** conflict (an overlapping-file / git-merge / worktree clash) does **not** reach
 here — it deconflicts **in-kitchen** via Build's **build-time mechanical-deconfliction step**; only
@@ -96,6 +109,36 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_recirc_reconcile.py" --repo "$PWD" --
 It is **idempotent** (the taint is the latch — a re-run never duplicates a comment), **fail-soft**
 (never breaks this command), and **repo-gated**. Autorun re-runs the same reconciliation at the top
 of every pass, so a hard-killed drain is recovered on the next pass regardless.
+
+## Command lifecycle — verify at entry, close out through the oracle
+
+The command entry gate opened this command's lifecycle record at expansion; verify it, and **close it
+with a validated terminal status** before your final answer (the Stop closeout gate refuses a
+walk-away from an open command):
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" status \
+  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --json
+```
+
+Before the final answer, call the oracle and finish the contract; the final prose **quotes the
+oracle's next command/reason**, never an improvised handoff:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_next_action.py" --repo "$PWD" --json
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
+  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command recirculate \
+  --status <complete|waiting_gate|blocked_external> --evidence-json '<envelope>'
+```
+
+- **`complete`** — every requested ticket/unit has a valid closeout **and** the deterministic
+  reconciliation ran. Evidence refs: `reconciliation:"ran"`, `closeouts:{<ticket|unit>:<disposition>}`
+  (each disposition one of admitted/drained/gated/paused/materialized; an empty inbox drains to a
+  vacuous complete once reconciliation ran).
+- **`waiting_gate`** — a valid requirements gate / Think PR is open (a gated backflow paused behind
+  its gate). Evidence refs: `gate:<ref>`.
+- **`blocked_external`** — a deterministic helper failed: `blocker:{helper, exit (nonzero),
+  diagnostic}`.
 
 No verdict taxonomy, no change-order files — they are deleted; the PR body is the record. Do
 not write source or tests; never admit a requirements (PRD/TRD) change without the gate; never

@@ -201,4 +201,16 @@ grep -qiE 'every other pending consideration' "$MX" \
 grep -qiE 'one unified assessment' "$MX" \
   || fail "idc-matrix-analysis pre-pass must synthesize ONE unified assessment (P2)"
 
+# ---- (g) Task 6: Plan closes its command contract + records a consumed intake unit -------------
+# Plan closes its lifecycle record and surfaces the oracle handoff (command frame — pinned across all
+# commands in phase7). When Plan decomposes a consideration that ORIGINATED from an intake unit (a
+# recirculation-admitted consideration whose paused-origin traces to a manifest#unit), it must record
+# that unit's durable disposition through the exact-once manifest — never leave the manifest stale.
+grep -qF 'idc_next_action.py' "$PLAN_CMD" \
+  || fail "commands/plan.md must derive its next-stage handoff from the oracle (idc_next_action.py) (Task 6)"
+grep -qF 'idc_command_contract.py' "$PLAN_CMD" \
+  || fail "commands/plan.md must open+close its command-contract record (Task 6)"
+grep -qF 'idc_intake_manifest.py' "$PLAN" \
+  || fail "agents/idc-plan.md must record a consumed intake unit's disposition via idc_intake_manifest.py link (Task 6)"
+
 echo "PASS: schema check + matrix deconfliction green; Plan is pure decomposition; plan PR direct-merges (not --auto) and deletes its branch; contract requires an outcome test; Plan batch dedup/deconflict (scoop-all -> 3 read-only comparisons -> one unified deconflicted plan, quality layer)"

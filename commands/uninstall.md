@@ -161,3 +161,30 @@ Print one table of every footprint (`removed` / `skipped-absent` / `kept (custom
 
 | Footprint | Status |
 |-----------|--------|
+
+## Command lifecycle — verify at entry, close out honestly
+
+The command entry gate opened this command's lifecycle record at expansion; verify it, and **close it
+with a validated terminal status** before your final answer. Uninstall is a **removal** command — no
+pipeline oracle handoff:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" status \
+  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --json
+# … after the manifest is settled …
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
+  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command uninstall \
+  --status <complete|blocked_external> --evidence-json '<envelope>'
+```
+
+- **`complete`** — the receipt-driven manifest was applied, or the run was an explicit no-action
+  (nothing left to remove). Evidence refs: `outcome:"applied"` **and** `archive:"<archive path>"` when
+  work products were archived + removed, or `outcome:"no-action"`.
+- **`blocked_external`** — a safety refusal (a dirty tree, an unverifiable board, an invalid receipt):
+  `blocker:{helper, exit (nonzero), diagnostic}`.
+
+**Once the removal deletes `docs/workflow/tracker-config.yaml`, this repo is no longer governed** — so
+the session ledger write and the Stop closeout gate are both repo-gated no-ops from that point. A
+`finish` that no-ops on the now-ungoverned repo is expected and harmless: the obligation dissolved with
+the governance footprint. **Do not re-initialize the repo** (re-create `tracker-config.yaml`, re-open a
+record) merely to make the `finish` "land" — that would undo the uninstall.

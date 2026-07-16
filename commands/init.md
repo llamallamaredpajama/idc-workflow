@@ -97,6 +97,23 @@ Phase 4. For **github**, the `{{TRACKER_PROJECT_NUMBER}}` token stays until Phas
 it. (The helper does only the mechanical, testable scaffold; domain derivation, board
 provisioning, and the receipt are this command's agent-driven phases.)
 
+### Phase 3b — Open this command's lifecycle record (init registers itself)
+
+Now that `docs/workflow/tracker-config.yaml` exists, the repo is **governed** — so open init's
+lifecycle record here. The command entry gate **deferred** init's registration (at expansion the repo
+was not yet governed and had no ledger), so init calls `start` itself, then verifies it:
+```bash
+PLUGIN_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' \
+  "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json")"
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" start \
+  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command init \
+  --plugin-root "${CLAUDE_PLUGIN_ROOT}" --args "$ARGUMENTS" --source user
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" status \
+  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --json
+```
+A stale runtime is refused here too (`start` exits 4) — do not scaffold further on stale logic; run
+`/reload-plugins`. From here init owes an honest closeout (Phase 8).
+
 ## Phase 4 — Provision (or link) the board (github backend)
 Decide create-vs-link:
 - `tracker-config.yaml` already carries a real integer `project_number` → **link**: reuse,
@@ -335,3 +352,21 @@ suggesting `/idc:doctor`, and — if any scope/probe was skipped — name exactl
 
 | Item | Status |
 |------|--------|
+
+## Closeout — finish the init lifecycle record
+
+Close the record opened in Phase 3b with a validated terminal status (the Stop closeout gate refuses a
+walk-away from an open command). Init is a **scaffold/setup** command — no pipeline oracle handoff:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
+  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command init \
+  --status <complete|blocked_external> --evidence-json '<envelope>'
+```
+
+- **`complete`** — the tracker config, the scaffold, the plugin enablement, and a **v2 install
+  receipt** all verify. Evidence refs: `tracker_config:"ok"`, `scaffold:"ok"`, `hooks:"ok"`,
+  `receipt_version:2`.
+- **`blocked_external`** — a deterministic init helper or board provisioning step returned a nonzero
+  receipt (e.g. the ≥1-item board STOP, or a scaffold-helper error): `blocker:{helper, exit (nonzero),
+  diagnostic}`.

@@ -144,6 +144,13 @@ loop below). Then the two lanes:
    start-of-run snapshot — the build lane writes files mid-run, so a stale snapshot under-counts any
    uncommitted/untracked artifact), and anything waiting on the operator (the Think-PR requirements
    gate, incl. any open Think PR pending admission).
+   **Close the command contract from the oracle, not from prose.** Call the read-only next-action
+   oracle (`scripts/idc_next_action.py`) and finish the lifecycle record
+   (`scripts/idc_command_contract.py finish --command autorun`): `complete` requires **this session's**
+   drain verdict to read `drain: complete` (`drain:"complete"`, `drain_session:"$CLAUDE_CODE_SESSION_ID"`);
+   otherwise `waiting_gate` (the oracle reports only human gates) or `blocked_external` (the drain
+   reported `unknown`/`rate-limited`). The final prose quotes the oracle's command/reason or states
+   `waiting_gate`/`fixpoint` — never an invented handoff.
 
 ## Staffing estimate, the launch gate & /loop resume
 

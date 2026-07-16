@@ -145,6 +145,28 @@ non-adapter skill; the Recirculator maintains the tier table when models change.
 also carries the `gating:` requirements-gate toggle (`gating.prd` / `gating.trd`), read by the gate
 predicate (`scripts/idc_recirculator_layers.py`) for Plan and the Recirculator — not by tier resolution.
 
+## Command lifecycle envelope
+
+A Pi resident/session loads **no Claude plugins and fires no `UserPromptExpansion`**, so nothing opens
+the command lifecycle record for you. When a Pi role drives a governed `/idc:<command>`, it must call
+`idc_command_contract.py start` **explicitly** at command entry — passing `--plugin-root` so the Task-1
+freshness check runs (a stale runtime is refused with exit 4 and no record) — then verify it with
+`status` and close it with a validated terminal status via `finish` before the run ends:
+```bash
+python3 "$PLUGIN_ROOT/scripts/idc_command_contract.py" start \
+  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command <command> \
+  --plugin-root "$PLUGIN_ROOT" --args "$ARGS" --source pi
+python3 "$PLUGIN_ROOT/scripts/idc_command_contract.py" status \
+  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --json
+# … run the command playbook …
+python3 "$PLUGIN_ROOT/scripts/idc_command_contract.py" finish \
+  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command <command> \
+  --status <validated-status> --evidence-json '<envelope>'
+```
+The evidence matrix and the terminal-status rules are **identical across runtimes** (one
+`scripts/idc_command_contract.py`), and every pipeline command still derives its final handoff from
+`idc_next_action.py`.
+
 ## Authority boundaries
 
 - Maps primitives to coms-net mechanics (residents / child-process fan-out / `/fullauto-goal`)

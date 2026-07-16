@@ -144,6 +144,17 @@ pillar-level *file* clashes among the surviving, de-duplicated pillars.
    It is **not** GitHub `--auto`: auto-merge defers the merge server-side and, with the repo's
    `deleteBranchOnMerge` off, would skip the branch delete and leave an orphaned `plan/*`. Branch
    deletion is **atomic with the merge**, not a separate best-effort step.
+
+   **Advance a consumed intake unit's manifest disposition.** When a consideration being decomposed
+   **originated from a reviewed external-intake unit** — its paused-origin / discovered-scope
+   provenance names a `docs/workflow/intakes/<file>.json#<unit>` reference — record that unit's
+   completion on the exact-once manifest as its Buildables land, so the manifest never goes stale
+   against the board:
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_intake_manifest.py" link \
+     --manifest "$MANIFEST" --unit "$UNIT" --state verified_done --evidence "plan:<planning-pr>"
+   ```
+   A consideration with no intake provenance has no manifest to touch — skip this.
 4. **Report the newly-created Buildable issue numbers on completion.** When this run was spawned by a
    parent orchestrator (Build's larger loop, or Autorun), Plan's closeout **reports the new Buildable
    issues** so the parent re-queries its ready frontier and the still-running kitchen picks up

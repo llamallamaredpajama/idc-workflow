@@ -38,6 +38,17 @@ mode only changes what gets fed in:
    discovered scope to the front of the pipeline so **Plan**
    (unchanged) later decomposes the resulting admitted considerations. Autorun runs this mode at the
    top of the pipeline, before the Buildable wave.
+3. **Reviewed intake unit (`<manifest>#<unit>`).** A single external-intake reference for a unit whose
+   `route` is `recirculate` (validate the manifest + its independent review first; reject any other
+   route — a foreign plan is evidence, never execution authority). Feed the unit's `summary` +
+   `dependencies` through the identical decision flow. **After it lands** (an admitted consideration,
+   a gated Think PR, or a paused ticket), **link the unit on the exact-once manifest** so it is never
+   left stale:
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_intake_manifest.py" link \
+     --manifest "$MANIFEST" --unit "$UNIT" --state materialized \
+     --target-ref "<recirc-ticket | consideration | gate>" --evidence "recirculate:<ref>"
+   ```
 
 ## Procedure
 

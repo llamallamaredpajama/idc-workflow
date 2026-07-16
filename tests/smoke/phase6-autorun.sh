@@ -250,4 +250,17 @@ ord "$AUTORUN" 'inbox first' 'Find approved' 'Build eligible waves' \
 ord "$CMD" 'Recirculation intake' 'Planning lane' 'Build lane' \
   || fail "commands/autorun.md must order Recirculation-intake -> Planning lane -> Build lane (top-of-pipeline) (Lane 5)"
 
+# ---- Task 6: Autorun closes its command contract + surfaces the oracle handoff -----------------
+# Autorun opens+closes its lifecycle record and derives its terminal handoff from the read-only
+# next-action oracle (idc_next_action.py) rather than an improvised "next, run X" — a `complete` close
+# requires this session's drain to read exactly `drain: complete`; otherwise it closes waiting_gate /
+# blocked_external. Both the command entry and the agent playbook must carry the frame consistently.
+for f in "$CMD" "$AUTORUN"; do
+  bn="$(basename "$f")"
+  grep -qF 'idc_command_contract.py' "$f" \
+    || fail "$bn must open+close its command-contract record (idc_command_contract.py) (Task 6)"
+done
+grep -qF 'idc_next_action.py' "$CMD" \
+  || fail "commands/autorun.md must derive its terminal handoff from the oracle (idc_next_action.py) (Task 6)"
+
 echo "PASS: autorun drain predicate green; exit report reconciles the working tree post-build (L2-1); human gate is filesystem-backend portable (PR#72 follow-up); top-of-pipeline order recirculate->plan->drain + human-gate skip/surface preserved (Lane 5)"

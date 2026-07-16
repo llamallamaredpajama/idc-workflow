@@ -436,3 +436,29 @@ Emit a single table, then a one-line verdict. Tally PASS / FAIL / SKIP across th
 
 IDC doctor: N passed, M failed, K skipped
 ```
+
+## Command lifecycle — verify at entry, close out (read-only of the repo)
+
+Doctor is read-only **of the diagnosed repo and board**; it still opens + closes its own **transient**
+lifecycle record (the entry gate opened it at expansion — a gitignored session ledger, never a repo or
+board write, so the strictly-read-only contract holds). Verify at entry, then close it with a validated
+terminal status before your final answer (the Stop closeout gate refuses a walk-away from an open
+command):
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" status \
+  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --json
+# … after the table + verdict …
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
+  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command doctor \
+  --status <complete|blocked_external> --evidence-json '<envelope>'
+```
+
+- **`complete`** — all rows **and** a final verdict were captured (**a FAIL verdict is still a complete
+  doctor run** — doctor completing is not the repo passing). Evidence refs: `rows:[<row results>]`,
+  `verdict:"<PASS|FAIL|…>"`.
+- **`blocked_external`** — doctor could not even establish a row (e.g. the cwd is not a git repo):
+  `blocker:{helper, exit (nonzero), diagnostic}`.
+
+Doctor is a **diagnostic**, not a pipeline stage: it does not call the next-action oracle and never
+claims a pipeline handoff.

@@ -28,5 +28,35 @@ opening the planning PR (body = audit trail) and automerging when green.
 
 Do not write source or tests; never write the PRD/TRD (Think authors + gates them); do not reorder
 `In Progress` issues. Halt only on the conditions in the playbook's §Authority & halt (including a
-consideration that is not yet admitted — an open Think PR). The next stage is `/idc:build` (or
-`/idc:autorun` to drain the whole pipe).
+consideration that is not yet admitted — an open Think PR).
+
+## Command lifecycle — verify at entry, close out through the oracle
+
+The command entry gate opened this command's lifecycle record at expansion; verify it, and **close it
+with a validated terminal status** before your final answer (the Stop closeout gate refuses a
+walk-away from an open command):
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" status \
+  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --json
+```
+
+Before the final answer, call the oracle and finish the contract. The final prose **quotes the
+oracle's next command/reason**; it never invents a different handoff:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_next_action.py" --repo "$PWD" --json
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
+  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command plan \
+  --status <complete|no_action|blocked_external> --evidence-json '<envelope>'
+```
+
+- **`complete`** — every admitted consideration decomposed has a decomposition child; the schema,
+  matrix, and provenance checks pass; the consideration pointers are retired; the planning PR is
+  MERGED. Evidence refs: `planning_pr`, `planning_pr_state:"MERGED"`, `schema:"pass"`,
+  `matrix:"pass"`, `provenance:"pass"`, `decompositions:{<consideration>:<child>}`,
+  `pointers_retired:[…]`.
+- **`no_action`** — the **live oracle** reports no admitted consideration to plan (its
+  `considerations` count is 0). Never claim `no_action` without that fresh oracle result.
+- **`blocked_external`** — a deterministic helper failed: `blocker:{helper, exit (nonzero),
+  diagnostic}`.

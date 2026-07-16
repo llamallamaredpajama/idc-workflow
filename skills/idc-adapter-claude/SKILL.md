@@ -87,6 +87,18 @@ runtime's resolution of the three model-bearing rungs.
 | `standard` | `model_routing.standard.claude` | Opus, incl. risk-flagged escalation (RISKY janitor findings, a recirc consultant on a cascade, review escalations) — think/interview; build implementers; finisher/orchestrator; autorun parent |
 | `reasoning` | `model_routing.reasoning.claude` | Fable, stuck-state escalation only — never a blanket default — planning cognition; review coordinator/verdict + judgment dimensions; recirculation analysis + PRD diffs; clash/matrix + sequencing; merge deconfliction |
 
+## Command lifecycle envelope
+
+A governed `/idc:<command>` opens its lifecycle record **automatically** under this runtime: Claude
+Code's **`UserPromptExpansion`** entry gate binds the runtime to the repo (Task-1 freshness), refuses a
+stale runtime with a `/reload-plugins` instruction, and calls `idc_command_contract.py start` before
+the command body expands. The command body then verifies the record (`idc_command_contract.py status`)
+and closes it with a validated terminal status (`idc_command_contract.py finish`); the `Stop` closeout
+gate refuses a walk-away from an open command, and every pipeline command derives its final handoff
+from `idc_next_action.py`. Under this adapter you do **nothing extra** — the hook opens the record for
+you (the one exception is `/idc:init`, which opens its own record after it scaffolds
+`docs/workflow/tracker-config.yaml`).
+
 ## Authority boundaries
 
 - Maps primitives and resolves tiers only — never authors contracts, makes judgment calls,

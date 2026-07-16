@@ -71,3 +71,24 @@ Relay the scanner's tiered output verbatim, then:
 
 **This command is safe to re-run** — `--apply-safe` is idempotent (a second pass finds 0 SAFE-FIX),
 and the default report mutates nothing.
+
+## Command lifecycle — verify at entry, close out honestly
+
+The command entry gate opened this command's lifecycle record at expansion; verify it, and **close it
+with a validated terminal status** before your final answer (the Stop closeout gate refuses a
+walk-away from an open command). Janitor is a **reconciler/diagnostic** — no pipeline oracle handoff:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" status \
+  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --json
+# … after the scan …
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
+  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command janitor \
+  --status <complete|blocked_external> --evidence-json '<envelope>'
+```
+
+- **`complete`** — the scanner recorded a real verdict: exit **0** (COHERENT) or exit **1** (findings,
+  **without claiming clean**). Evidence refs: `scanner_exit:<0|1>`, and on exit 1
+  `scanner_clean:false` (a findings run may never report clean).
+- **`blocked_external`** — the scanner exited **2** (ground truth could not be established): `blocker:{helper,
+  exit (nonzero), diagnostic}`. Report it as blocked, never as a coherent repo.

@@ -178,4 +178,45 @@ has "$AR" '\[ -z "\$CLAUDE_CODE_SESSION_ID" \]' \
 has "$AR" 'will NOT fire this run|NOT setting the orchestrator_drain marker' \
   || fail "autorun.md must WARN loudly (stderr) when it skips the marker-set on an empty session id — the disabling must be visible"
 
+# --- Task 6: the command-integrity closeout frame -----------------------------------------------
+# Every governed /idc:* command body must VERIFY its active command-contract record at entry
+# (idc_command_contract.py status — the entry gate opened it at expansion) and CLOSE it
+# deterministically at exit (idc_command_contract.py finish), never an improvised walk-away. The six
+# pipeline commands must additionally surface the read-only next-action oracle's machine result
+# (idc_next_action.py) as the final handoff, not a hand-authored "next, run X". Per-file greps only —
+# a bare recursive `grep -r` can hang under this machine's default ugrep, and shipped users get BSD
+# grep, so the suite iterates files explicitly (portability: /usr/bin/grep + /usr/bin/awk).
+for cmd in autorun build doctor init intake janitor plan recirculate think uninstall update; do
+  f="$C/$cmd.md"
+  [ -f "$f" ] || fail "missing command: $cmd"
+  grep -q 'idc_command_contract.py.*status' "$f" \
+    || fail "$cmd does not verify its active command contract (idc_command_contract.py status at entry)"
+  grep -q 'idc_command_contract.py.*finish' "$f" \
+    || fail "$cmd has no deterministic closeout (idc_command_contract.py finish)"
+done
+for cmd in autorun build intake plan recirculate think; do
+  f="$C/$cmd.md"
+  grep -q 'idc_next_action.py' "$f" \
+    || fail "$cmd does not derive its pipeline handoff from the oracle (idc_next_action.py)"
+done
+
+# Shipped prose must not claim Recirculate SEEDS work with no intake/inbox, nor let Build INFER work
+# from a foreign Markdown plan (a foreign plan is evidence, never execution authority). Flag any
+# single line that pairs the referent with the forbidden action. Iterate files explicitly (never a
+# bare `grep -r`, which hangs under ugrep); `.{0,N}` bounded quantifiers are POSIX-ERE portable.
+_seed_offenders=""; _infer_offenders=""
+for f in "$C"/*.md "$PLUGIN"/agents/*.md "$PLUGIN"/skills/*/SKILL.md; do
+  [ -f "$f" ] || continue
+  if grep -qiE 'recirculate.{0,80}(seed|create).{0,40}(ticket|issue)' "$f" 2>/dev/null; then
+    _seed_offenders="$_seed_offenders $f"
+  fi
+  if grep -qiE 'build.{0,80}(infer|derive|read).{0,60}(foreign|external|markdown plan)' "$f" 2>/dev/null; then
+    _infer_offenders="$_infer_offenders $f"
+  fi
+done
+[ -z "$_seed_offenders" ] \
+  || fail "shipped prose still claims Recirculate seeds work without an intake/inbox:$_seed_offenders"
+[ -z "$_infer_offenders" ] \
+  || fail "shipped prose still lets Build infer work from foreign Markdown:$_infer_offenders"
+
 echo "PASS: file-changing command markdown holds its must-never/must-say invariants"

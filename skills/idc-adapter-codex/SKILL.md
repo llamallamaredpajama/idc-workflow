@@ -66,6 +66,28 @@ untiered posture **explicit and documented identically** here, not adopting the 
 `model_routing.overrides` — parity is the contract expressed the same way, never Codex's model
 policy changing to match.
 
+## Command lifecycle envelope
+
+Codex loads **no Claude plugins and fires no `UserPromptExpansion`**, so nothing opens the command
+lifecycle record for you. When a Codex thread drives a governed `/idc:<command>`, it must call
+`idc_command_contract.py start` **explicitly** at command entry — passing `--plugin-root` so the Task-1
+freshness check runs (a stale runtime is refused with exit 4 and no record) — then verify it with
+`status` and close it with a validated terminal status via `finish` before the run ends:
+```bash
+python3 "$PLUGIN_ROOT/scripts/idc_command_contract.py" start \
+  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command <command> \
+  --plugin-root "$PLUGIN_ROOT" --args "$ARGS" --source codex
+python3 "$PLUGIN_ROOT/scripts/idc_command_contract.py" status \
+  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --json
+# … run the command playbook …
+python3 "$PLUGIN_ROOT/scripts/idc_command_contract.py" finish \
+  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command <command> \
+  --status <validated-status> --evidence-json '<envelope>'
+```
+The evidence matrix and the terminal-status rules are **identical across runtimes** (one
+`scripts/idc_command_contract.py`), and every pipeline command still derives its final handoff from
+`idc_next_action.py`.
+
 ## Authority boundaries
 
 - Maps primitives to Codex mechanics only — never authors contracts, makes judgment calls,

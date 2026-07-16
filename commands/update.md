@@ -291,3 +291,25 @@ new optional key(s)` / `restored` / `skipped-already-current`), then:
 
 | File | Status |
 |------|--------|
+
+## Command lifecycle — verify at entry, close out honestly
+
+The command entry gate opened this command's lifecycle record at expansion; verify it, and **close it
+with a validated terminal status** before your final answer (the Stop closeout gate refuses a
+walk-away from an open command). Update is a **resync/maintenance** command — no pipeline oracle
+handoff:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" status \
+  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --json
+# … after Phase 4 rewrites the receipt …
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
+  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command update \
+  --status <complete|blocked_external> --evidence-json '<envelope>'
+```
+
+- **`complete`** — the v2 receipt verifies **and** the running version equals the receipt version.
+  Evidence refs: `receipt_version:2`, `running_version:"<X.Y.Z>"`,
+  `receipt_plugin_version:"<X.Y.Z>"` (the two must match — a mismatch is not complete).
+- **`blocked_external`** — a diff, permission, or update failure (incl. the Phase-0 stale-runtime
+  HALT or an invalid receipt): `blocker:{helper, exit (nonzero), diagnostic}`.

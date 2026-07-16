@@ -34,7 +34,15 @@ WORK="$(mktemp -d)" || gov_fail "mktemp failed"
 trap 'rm -rf "$WORK"' EXIT
 REPO="$WORK/repo"; mkdir -p "$REPO/docs/workflow"
 printf 'backend: filesystem\n' > "$REPO/docs/workflow/tracker-config.yaml"
+# A real empty board so the Task-6 oracle can back a no_action closeout (build no_action must PROVE
+# the ready frontier is empty via a fresh idc_next_action read; without TRACKER.md the oracle reads
+# invalid-tracker and no_action would be refused for the WRONG reason).
+python3 "$GOV_TRK" --tracker "$REPO/TRACKER.md" init >/dev/null || gov_fail "could not init REPO board"
 OUT="$WORK/out.json"
+
+# A valid think waiting_gate evidence envelope (Task 6): the Think PR OPEN, its one gate marker still
+# blocked, the consideration pointer still blocked. Reused by the idempotency + finished-cap cases.
+THINK_WAIT_EV='{"schema_version":1,"refs":{"consideration":"pass","think_pr":706,"think_pr_state":"OPEN","gate":708,"gate_markers":1,"gate_disposition":"blocked","pointer":707,"pointer_state":"blocked"}}'
 # Per-run-unique session ids (the "S1"/"S2" of the contract spec): the Stop closeout gate's anti-nag
 # counter (idc_hook_lib.bounded_block) is a PERSISTENT per-user-tmp file keyed by session+command, so
 # a fixed "S1" would accumulate across reruns and stop blocking after N=3 — the same hermetic-id
@@ -114,9 +122,11 @@ fi
   || gov_fail "rejected envelope finishes must leave the active record intact"
 echo "  ok (3.1) common-envelope guards isolated: schema_version rejects true/1.0, refs must be an object"
 
-# (4) a schema-valid waiting_gate closeout ends the command honestly.
+# (4) a schema-valid, command-specific-valid waiting_gate closeout ends the command honestly. Under
+# Task 6 the think closeout must carry the real artifacts (PR OPEN, one gate marker blocked, pointer
+# blocked) — a bare refs no longer clears it (proven in the Task-6 section below).
 contract finish --repo "$REPO" --session "$S1" --command think --status waiting_gate \
-  --evidence-json '{"schema_version":1,"refs":{"think_pr":706,"gate":708,"pointer":707}}'
+  --evidence-json "$THINK_WAIT_EV"
 stop_payload "$S1" | python3 "$CLOSEOUT_GATE" "$GOV_PLUGIN" > "$OUT"
 [ ! -s "$OUT" ] || gov_fail "valid waiting_gate closeout still blocked Stop"
 echo "  ok (4) a schema-valid waiting_gate closeout ends the command → Stop no longer blocks"
@@ -154,11 +164,11 @@ for i in $(seq -w 1 20); do
   contract start --repo "$REPO2" --session "$SI" --command think --plugin-root "$GOV_PLUGIN" \
     --args "fill $i" --source user >/dev/null
   contract finish --repo "$REPO2" --session "$SI" --command think --status waiting_gate \
-    --evidence-json '{"schema_version":1,"refs":{}}' >/dev/null \
+    --evidence-json "$THINK_WAIT_EV" >/dev/null \
     || gov_fail "(6) could not finish filler record $i"
 done
 contract finish --repo "$REPO2" --session "$KEEP" --command think --status waiting_gate \
-  --evidence-json '{"schema_version":1,"refs":{}}' >/dev/null \
+  --evidence-json "$THINK_WAIT_EV" >/dev/null \
   || gov_fail "(6) could not finish the KEEP record"
 [ "$(contract status --repo "$REPO2" --json | json_count finished)" -eq "$_MAX_FINISHED_EXPECT" ] \
   || gov_fail "(6) finished history is not capped at $_MAX_FINISHED_EXPECT records"
@@ -169,4 +179,138 @@ if contract status --repo "$REPO2" --json | grep -q "n01-$$-"; then
 fi
 echo "  ok (6) the finished cap drops the OLDEST + retains the just-finished NEWEST record"
 
-echo "PASS: the IDC command lifecycle envelope holds — start upserts one obligation, Stop refuses an open command with the exact finish remediation, an unknown/malformed status cannot clear it, a schema-valid closeout ends it, and no foreign session can finish another's record"
+# ============================================================================================
+# (7) Task 6 — the command-specific closeout matrix. Evidence is a set of REFERENCES: a closeout can
+# no longer clear an obligation with a bare valid envelope; the finishing status must be LEGAL for the
+# command, and the command's required artifacts (a MERGED PR, a disposed gate, this session's drain,
+# an independently-reviewed intake manifest, …) must be present. Two facts are re-verified from durable
+# state rather than trusted — intake coverage (re-read from the manifest) and every no_action (a fresh
+# oracle) — so a closeout that MATERIALIZES ONE INTAKE UNIT BUT DROPS THE REST IS BLOCKED.
+INTAKE="$GOV_PLUGIN/scripts/idc_intake_manifest.py"
+[ -f "$INTAKE" ] || gov_fail "scripts/idc_intake_manifest.py not found"
+
+REPO3="$WORK/repo3"; mkdir -p "$REPO3/docs/workflow/intakes"
+printf 'backend: filesystem\n' > "$REPO3/docs/workflow/tracker-config.yaml"
+python3 "$GOV_TRK" --tracker "$REPO3/TRACKER.md" init >/dev/null || gov_fail "could not init REPO3 board"
+S3="s3-$$-$(basename "$WORK")"
+
+# Build a reviewed intake manifest (Drive + U1 + U2) through the real Task-4 helper, then materialize
+# only Drive. U1/U2 stay queued — a valid durable remainder.
+SRC="$REPO3/life-plan.md"
+MANIFEST="$REPO3/docs/workflow/intakes/2026-07-12-life.json"
+MANIFEST_REL="docs/workflow/intakes/2026-07-12-life.json"
+printf '# Drive - foundation\n\nbody\n\n## U1 - first unit\n\nbody\n\n## U2 - second unit\n\nbody\n' > "$SRC"
+python3 "$INTAKE" extract --source "$SRC" --out "$MANIFEST" \
+  --goal 'execute the whole program; Drive first' --plugin-version 4.1.0 >/dev/null \
+  || gov_fail "(7) intake extract failed"
+python3 - "$MANIFEST" <<'PY' || gov_fail "(7) could not classify manifest"
+import json, os, sys, tempfile
+path = sys.argv[1]
+data = json.load(open(path, encoding="utf-8"))
+for unit in data["units"]:
+    unit.update({"class": "new_requirement", "route": "think", "dependencies": [], "operator_stops": []})
+    unit["disposition"] = {"state": "queued", "target_ref": None, "evidence": []}
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".life-", suffix=".json")
+with os.fdopen(fd, "w", encoding="utf-8") as h:
+    json.dump(data, h, indent=2, sort_keys=True); h.write("\n")
+os.replace(tmp, path)
+PY
+SUPPLIED_REVIEW="$REPO3/supplied-review.json"
+python3 - "$INTAKE" "$MANIFEST" "$SUPPLIED_REVIEW" <<'PY' || gov_fail "(7) could not write review"
+import importlib.util, json, sys
+helper_path, manifest_path, review_path = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("idc_intake_for_lifecycle", helper_path)
+helper = importlib.util.module_from_spec(spec); spec.loader.exec_module(helper)
+manifest = json.load(open(manifest_path, encoding="utf-8"))
+review = {"schema_version": 1, "intake_id": manifest["intake_id"],
+          "source_sha256": manifest["source"]["sha256"], "verdict": "PASS",
+          "missing_unit_ids": [], "duplicate_unit_ids": [], "misrouted_unit_ids": [],
+          "notes": [f"manifest_content_sha256={helper._manifest_content_sha256(manifest)}"]}
+json.dump(review, open(review_path, "w", encoding="utf-8"), indent=2, sort_keys=True)
+PY
+python3 "$INTAKE" validate --manifest "$MANIFEST" --review "$SUPPLIED_REVIEW" >/dev/null \
+  || gov_fail "(7) could not validate reviewed manifest"
+python3 "$INTAKE" link --manifest "$MANIFEST" --unit Drive --state materialized \
+  --target-ref "think-pr:706" --evidence "gate:708" --evidence "pointer:707" >/dev/null \
+  || gov_fail "(7) could not materialize Drive"
+
+think_complete_ev() {
+  # $1 = manifest repo-relative locator, $2 = selected JSON array
+  printf '{"schema_version":1,"refs":{"consideration":"pass","think_pr":706,"think_pr_state":"MERGED","gate":708,"gate_markers":1,"gate_disposition":"disposed","pointer":707,"pointer_state":"admitted","intake_manifest":"%s","intake_selected":%s}}' "$1" "$2"
+}
+
+# (7a) a think complete with Drive materialized + U1/U2 durably queued PASSES.
+contract start --repo "$REPO3" --session "$S3" --command think --plugin-root "$GOV_PLUGIN" \
+  --args 'life' --source user >/dev/null
+contract finish --repo "$REPO3" --session "$S3" --command think --status complete \
+  --evidence-json "$(think_complete_ev "$MANIFEST_REL" '["Drive"]')" \
+  || gov_fail "(7a) a complete think with full intake coverage was rejected"
+echo "  ok (7a) think complete accepts full intake coverage (selected materialized, remainder durable)"
+
+# (7b) THE STEP-8 GUARANTEE: a think complete that materializes Drive but DROPS U1/U2 from the
+# exact-once manifest is BLOCKED — the closeout re-reads the manifest and the drop fails validation.
+# Red-when-broken: skip the manifest re-read in _check_intake_coverage and this bogus close succeeds.
+DROP_MANIFEST="$REPO3/docs/workflow/intakes/2026-07-12-drop.json"
+DROP_REL="docs/workflow/intakes/2026-07-12-drop.json"
+python3 - "$MANIFEST" "$DROP_MANIFEST" <<'PY' || gov_fail "(7b) could not build dropped manifest"
+import json, sys
+src, dst = sys.argv[1:]
+data = json.load(open(src, encoding="utf-8"))
+# Drop U1 + U2 from units but KEEP them in expected_unit_ids -> exact-once mismatch (the drop).
+data["units"] = [u for u in data["units"] if u["id"] == "Drive"]
+data["intake_id"] = "2026-07-12-drop"
+json.dump(data, open(dst, "w", encoding="utf-8"), indent=2, sort_keys=True)
+PY
+contract start --repo "$REPO3" --session "$S3" --command think --plugin-root "$GOV_PLUGIN" \
+  --args 'life-drop' --source user >/dev/null
+if contract finish --repo "$REPO3" --session "$S3" --command think --status complete \
+     --evidence-json "$(think_complete_ev "$DROP_REL" '["Drive"]')" 2>/dev/null; then
+  gov_fail "(7b) a think closeout that materialized Drive but dropped U1/U2 was ACCEPTED (intake coverage not re-verified)"
+fi
+[ "$(contract status --repo "$REPO3" --session "$S3" --json | json_count active)" -eq 1 ] \
+  || gov_fail "(7b) the rejected drop-coverage finish must leave the think record active"
+# close it honestly so the record does not leak.
+contract finish --repo "$REPO3" --session "$S3" --command think --status complete \
+  --evidence-json "$(think_complete_ev "$MANIFEST_REL" '["Drive"]')" >/dev/null \
+  || gov_fail "(7b) could not honestly close the drop-case think record"
+echo "  ok (7b) a think closeout that drops units from the exact-once manifest is BLOCKED (Step-8)"
+
+# (7c) legal-status-per-command: a lifecycle/diagnostic command may not claim a pipeline no_action.
+contract start --repo "$REPO3" --session "$S3" --command doctor --plugin-root "$GOV_PLUGIN" \
+  --args 'diag' --source user >/dev/null
+if contract finish --repo "$REPO3" --session "$S3" --command doctor --status no_action \
+     --evidence-json '{"schema_version":1,"refs":{}}' 2>/dev/null; then
+  gov_fail "(7c) doctor no_action (an illegal terminal status for a diagnostic command) was accepted"
+fi
+# doctor's honest complete: rows + a verdict (even a FAIL verdict is a complete doctor run).
+contract finish --repo "$REPO3" --session "$S3" --command doctor --status complete \
+  --evidence-json '{"schema_version":1,"refs":{"rows":["1..10"],"verdict":"FAIL"}}' \
+  || gov_fail "(7c) doctor complete with rows + a FAIL verdict was rejected"
+echo "  ok (7c) legal-status-per-command holds (doctor may not claim no_action; a FAIL verdict still completes)"
+
+# (7d) blocked_external is an HONEST blocked stop, never a disguised success: it must cite a
+# deterministic helper's NONZERO exit + a concise diagnostic. A zero exit is not a blocker.
+contract start --repo "$REPO3" --session "$S3" --command build --plugin-root "$GOV_PLUGIN" \
+  --args 'b' --source user >/dev/null
+if contract finish --repo "$REPO3" --session "$S3" --command build --status blocked_external \
+     --evidence-json '{"schema_version":1,"refs":{"blocker":{"helper":"idc_autorun_drain.py","exit":0,"diagnostic":"ok"}}}' 2>/dev/null; then
+  gov_fail "(7d) a blocked_external with a ZERO helper exit was accepted (a blocker is not a success)"
+fi
+contract finish --repo "$REPO3" --session "$S3" --command build --status blocked_external \
+  --evidence-json '{"schema_version":1,"refs":{"blocker":{"helper":"idc_autorun_drain.py","exit":3,"diagnostic":"github GraphQL rate-limited until reset"}}}' \
+  || gov_fail "(7d) a blocked_external citing a nonzero helper exit + diagnostic was rejected"
+echo "  ok (7d) blocked_external requires a deterministic helper's NONZERO exit + a diagnostic"
+
+# (7e) autorun complete binds to THIS session's drain verdict — a foreign/absent drain_session fails.
+contract start --repo "$REPO3" --session "$S3" --command autorun --plugin-root "$GOV_PLUGIN" \
+  --args 'a' --source user >/dev/null
+if contract finish --repo "$REPO3" --session "$S3" --command autorun --status complete \
+     --evidence-json '{"schema_version":1,"refs":{"drain":"complete","drain_session":"someone-else"}}' 2>/dev/null; then
+  gov_fail "(7e) an autorun complete bound to a FOREIGN drain_session was accepted"
+fi
+contract finish --repo "$REPO3" --session "$S3" --command autorun --status complete \
+  --evidence-json "$(printf '{"schema_version":1,"refs":{"drain":"complete","drain_session":"%s"}}' "$S3")" \
+  || gov_fail "(7e) an autorun complete bound to THIS session's drain: complete was rejected"
+echo "  ok (7e) autorun complete requires THIS session's drain: complete verdict"
+
+echo "PASS: the IDC command lifecycle envelope holds — start upserts one obligation, Stop refuses an open command with the exact finish remediation, an unknown/malformed status cannot clear it, a schema-valid + command-specific closeout ends it, no foreign session can finish another's record, and the Task-6 matrix blocks a think closeout that drops exact-once intake units, an illegal per-command status, a zero-exit blocked_external, and a foreign-session autorun drain"

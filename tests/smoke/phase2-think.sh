@@ -95,4 +95,21 @@ if grep -qiE 'gate (lives|is) in plan|plan owns the gate' "$THINK"; then
   fail "think.md still says the gate lives in Plan — the gate moved to the end of Think"
 fi
 
+# ---- (c) Task 6: Think consumes reviewed intake units + closes out honestly --------------------
+# Think accepts a validated intake manifest (`--doc <manifest> --unit <id>[,<id>]`), materializes each
+# selected unit through the exact-once manifest (idc_intake_manifest.py link → state materialized),
+# binds exactly ONE gate marker to the Think PR (idc-gate-pr), and its deterministic command-contract
+# closeout accounts for the WHOLE manifest — selected units materialized AND every unselected expected
+# unit left in a valid durable disposition (the intake remainder). Each grep is red-when-broken.
+has "$THINK" '\-\-unit' \
+  || fail "think.md must accept --unit to select intake units from a validated manifest (Task 6)"
+has "$THINK" 'idc-gate-pr' \
+  || fail "think.md must bind exactly one idc-gate-pr marker to the Think PR (Task 6 gate binding)"
+has "$THINK" 'idc_intake_manifest\.py' \
+  || fail "think.md must consume/link intake units through idc_intake_manifest.py (Task 6)"
+grep -qiE 'idc_intake_manifest\.py link.*--state materialized|link .*--state materialized' "$THINK" \
+  || fail "think.md must materialize each selected intake unit (idc_intake_manifest.py link --state materialized) (Task 6)"
+grep -qiE 'unselected expected unit|intake remainder|every (other )?expected unit' "$THINK" \
+  || fail "think.md closeout must cover the intake remainder — every unselected expected unit keeps a valid durable disposition (Task 6)"
+
 echo "PASS: Think drives a PRD+TRD-gated consideration and fires the one gate at the end of Think"

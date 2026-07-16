@@ -1435,32 +1435,13 @@ def _claim_build_no_action(refs: dict, repo: str, session: str) -> CloseoutResul
     return _check_no_action("build", repo)
 
 
-def _claim_build_receipts(refs: dict, repo: str, session: str) -> CloseoutResult:
-    receipts = refs.get("receipts")
-    if not isinstance(receipts, dict):
-        receipts = {}
-    # The REQUIRED issue set is STAMPED at start (rule A, wave-4 finding 5): a `/idc:build #1 #2` run
-    # records {1,2}, so `complete` requires ONE verified merged-PR receipt PER requested issue — a
-    # request for two issues cannot close with one receipt.
-    requested = _build_requested_from_record(repo, session)
-    if requested:
-        missing = sorted(str(i) for i in requested if _gate_key(i) not in {_gate_key(k) for k in receipts})
-        if missing:
-            return _fail("build-requested-uncovered",
-                         "build complete: requested issue(s) have no merged-PR receipt: "
-                         f"{', '.join('#' + m for m in missing)} — every requested issue needs one "
-                         "verified merged PR that closes it (a partial close is not complete)")
-        for issue in requested:
-            key = _gate_key(issue)
-            receipt = next((v for k, v in receipts.items() if _gate_key(k) == key), None)
-            result = _valid_build_receipt(issue, receipt, repo)
-            if not result.ok:
-                return result
-        return CloseoutResult(True, "ok", "every requested build issue has a linked merged-PR receipt", {})
-    # WHOLE-FRONTIER build (round-5 finding 4): no explicit issue set. `complete` requires EITHER a
-    # verified merged receipt for EVERY issue stamped in the eligible frontier at start, OR an
-    # oracle-confirmed empty remaining frontier (all eligible Buildable work is drained). An
-    # arbitrary-subset close — receipts for some frontier issues while others remain eligible — refuses.
+def _frontier_coverage(frontier, receipts: dict, repo: str) -> CloseoutResult:
+    """The WHOLE-FRONTIER build obligation (round-5 finding 4): `complete` requires EITHER an
+    oracle-confirmed empty remaining frontier (all eligible Buildable work is drained), OR a verified
+    merged receipt for EVERY issue stamped in the eligible frontier at start. An arbitrary-subset close
+    — receipts for some frontier issues while others remain eligible — refuses; an unstamped frontier
+    while the oracle still reports eligible work cannot prove coverage → refuse (rule B). `frontier` is
+    the stamped set (possibly empty) or None (never stamped)."""
     oracle_empty = _check_no_action("build", repo)
     if oracle_empty.ok:
         # nothing eligible remains: either the frontier was empty, or every eligible item was drained.
@@ -1472,7 +1453,6 @@ def _claim_build_receipts(refs: dict, repo: str, session: str) -> CloseoutResult
         return CloseoutResult(True, "ok", "whole-frontier build: oracle confirms no eligible Buildable remains", {})
     # The oracle still reports eligible Buildable work → require a merged receipt per stamped-frontier
     # issue. Without a stamped frontier the subset coverage cannot be proven → refuse (rule B).
-    frontier = _build_frontier_from_record(repo, session)
     if frontier is None:
         return _fail("build-frontier-unproven",
                      "build complete: no eligible frontier was stamped at start AND the oracle still "
@@ -1492,6 +1472,43 @@ def _claim_build_receipts(refs: dict, repo: str, session: str) -> CloseoutResult
         if not result.ok:
             return result
     return CloseoutResult(True, "ok", "whole-frontier build: every stamped-frontier issue has a linked merged-PR receipt", {})
+
+
+def _claim_build_receipts(refs: dict, repo: str, session: str) -> CloseoutResult:
+    receipts = refs.get("receipts")
+    if not isinstance(receipts, dict):
+        receipts = {}
+    # A (session, build) record ACCUMULATES its obligations across every restart/mode (round-6 BLOCKS 1,
+    # rule A). A cross-mode restart — a whole-frontier start (stamps the eligible frontier) then an
+    # explicit `/idc:build #1`, or the reverse — leaves BOTH a stamped requested set AND a stamped
+    # frontier on the record. `complete` must satisfy the UNION of both: it can neither shed the
+    # frontier obligation by naming a subset, nor shed a named request by draining the frontier.
+    requested = _build_requested_from_record(repo, session)
+    frontier = _build_frontier_from_record(repo, session)
+    # Obligation 1 — explicit request (wave-4 finding 5): ONE verified merged-PR receipt PER requested
+    # issue (no oracle escape — a named request must actually be built).
+    if requested:
+        missing = sorted(str(i) for i in requested if _gate_key(i) not in {_gate_key(k) for k in receipts})
+        if missing:
+            return _fail("build-requested-uncovered",
+                         "build complete: requested issue(s) have no merged-PR receipt: "
+                         f"{', '.join('#' + m for m in missing)} — every requested issue needs one "
+                         "verified merged PR that closes it (a partial close is not complete)")
+        for issue in requested:
+            key = _gate_key(issue)
+            receipt = next((v for k, v in receipts.items() if _gate_key(k) == key), None)
+            result = _valid_build_receipt(issue, receipt, repo)
+            if not result.ok:
+                return result
+        # Cross-mode monotonicity: a whole-frontier obligation stamped on the SAME record must ALSO be
+        # satisfied — a restart that names a subset cannot drop the frontier it was opened against.
+        if frontier is not None:
+            fr = _frontier_coverage(frontier, receipts, repo)
+            if not fr.ok:
+                return fr
+        return CloseoutResult(True, "ok", "every requested build issue has a linked merged-PR receipt", {})
+    # WHOLE-FRONTIER build (no explicit issue set): the frontier obligation alone.
+    return _frontier_coverage(frontier, receipts, repo)
 
 
 def _persisted_drain_verdict(repo: str, session: str):
@@ -1782,8 +1799,20 @@ def _board_absent(repo: str):
     absent), False (present + readable), or None (could not determine — an unreadable board is NEVER
     proof of deletion; rule B). On `filesystem` the board IS `TRACKER.md` at the repo root, so its
     absence is a real board-absence read and a present-but-corrupt one is indeterminate. On `github` the
-    board is the project — a real `gh project view` probe, never a local TRACKER.md."""
-    if _repo_backend(repo) == "github":
+    board is the project — a real `gh project view` probe, never a local TRACKER.md.
+
+    Resolve the backend from the tracker config DIRECTLY, NOT via `_repo_backend` (round-6 BLOCKS 2): a
+    PRESENT-but-unreadable/malformed config must NEVER fall back to `filesystem` — that let a corrupt
+    github config 'prove' the board deleted via a missing local TRACKER.md. `_read_tracker_config`
+    already draws the Task-5 distinction: a GENUINELY-ABSENT config returns `filesystem` cleanly (legacy
+    meaning preserved), a present-but-malformed one RAISES. A raise here is indeterminate → None (the
+    claim refuses; rule B), never a backend fallback."""
+    try:
+        import idc_next_action as NEXT  # noqa: E402
+        backend, _ = NEXT._read_tracker_config(repo)
+    except Exception:  # noqa: BLE001 — a present-but-unreadable/malformed config is indeterminate (rule B)
+        return None
+    if backend == "github":
         return _github_board_absent(repo)
     tracker = _confined_repo_path(repo, "TRACKER.md")
     if tracker is None:
@@ -2257,8 +2286,13 @@ def _cmd_start(args) -> int:
               f"(running {result.running_version}, required {result.required_version}); "
               "run /reload-plugins, then retry.", file=sys.stderr)
         return 4
-    rec = register_start(args.repo, args.session, args.command, result.running_version or "",
-                         args.args or "", args.source or "")
+    try:
+        rec = register_start(args.repo, args.session, args.command, result.running_version or "",
+                             args.args or "", args.source or "")
+    except idc_ledger.ObligationConflict as exc:
+        # A narrowing/replacing restart (rule A) is refused; the prior obligation record is intact.
+        print(f"idc-command-contract: refusing to open the command record — {exc}", file=sys.stderr)
+        return 2
     if rec is None:
         # A governed repo where the ledger write did NOT persist. Never report success for an
         # obligation that was not recorded (Fix 2) — the Stop gate could not enforce its closeout.

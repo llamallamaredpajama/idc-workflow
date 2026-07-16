@@ -81,5 +81,7 @@ is this playbook's.
   `docs/workflow/intakes/`), landed as one `intake/<slug>` PR. Never writes source, tests, the PRD/TRD,
   plans, or tracker state; never executes the source; never routes a unit to Build/Autorun.
 - Halt and surface evidence on: an unreadable/non-UTF-8 source, a source with no extractable units, a
-  review that will not reach PASS, or a helper that returns a nonzero receipt (report it as the
-  command's `blocked_external`, never as a completed intake).
+  review that will not reach PASS, or a helper that returns a nonzero receipt. Intake has **no
+  `blocked_external`** terminal (the extractor / validator / PR helper write no re-derivable failure
+  receipt, so a blocked stop is not claimable) — fix the failing helper or wait; never self-report a
+  blocked intake, and never record a failed extraction as a completed intake.

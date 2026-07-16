@@ -722,6 +722,40 @@ contract finish --repo "$REPO_BFE" --session "$SBFE" --command build --status co
   || gov_fail "(7g-frontier-empty, F4) a whole-frontier build on an oracle-confirmed empty ready frontier was rejected"
 echo "  ok (7g-frontier-empty, F4) a whole-frontier build on an empty ready frontier closes via the oracle (no receipts needed)"
 
+# (7g-crossmode, ROUND-6 F1 — rule A) CROSS-MODE monotonic build obligations. A whole-frontier start
+# (stamps the eligible frontier {1,2}) then a `/idc:build #1` restart (stamps the requested set {1})
+# leaves BOTH obligations on the ONE record; `complete` must satisfy the UNION — a receipt for only #1
+# while #2 is still eligible is REFUSED (the requested branch can no longer shed the frontier). The
+# mirror (requested-first then whole-frontier restart) refuses identically; full coverage is accepted.
+REPO_CM="$WORK/repo-cm"; mkdir -p "$REPO_CM/docs/workflow"
+printf 'backend: filesystem\n' > "$REPO_CM/docs/workflow/tracker-config.yaml"
+python3 "$GOV_TRK" --tracker "$REPO_CM/TRACKER.md" init >/dev/null || gov_fail "(7g-crossmode) could not init REPO_CM"
+python3 "$GOV_TRK" --tracker "$REPO_CM/TRACKER.md" create --title c1 --stage Buildable --status Todo >/dev/null  # #1 eligible
+python3 "$GOV_TRK" --tracker "$REPO_CM/TRACKER.md" create --title c2 --stage Buildable --status Todo >/dev/null  # #2 eligible
+# (a) frontier-first → requested restart: a subset close (#1 only, #2 still eligible) is refused.
+SCM="scm-$$-$(basename "$WORK")"
+contract start --repo "$REPO_CM" --session "$SCM" --command build --plugin-root "$GOV_PLUGIN" --args 'drain the whole ready frontier' --source user >/dev/null
+contract start --repo "$REPO_CM" --session "$SCM" --command build --plugin-root "$GOV_PLUGIN" --args '#1' --source user >/dev/null
+if FAKE_MERGED_PRS="90" FAKE_PR_CLOSES="90:1" gh_finish --repo "$REPO_CM" --session "$SCM" \
+     --command build --status complete --evidence-json '{"schema_version":1,"refs":{"receipts":{"1":{"pr":90}}}}' 2>/dev/null; then
+  gov_fail "(7g-crossmode, F1) a cross-mode build (whole-frontier then #1 restart) closed covering ONLY #1 while #2 stayed eligible (the frontier obligation was dropped)"
+fi
+[ "$(contract status --repo "$REPO_CM" --session "$SCM" --json | json_count active)" -eq 1 ] \
+  || gov_fail "(7g-crossmode, F1) the refused cross-mode subset close must leave the build record active"
+# covering BOTH the requested #1 AND the stamped frontier {1,2} (union satisfied) → accepted.
+FAKE_MERGED_PRS="90 91" FAKE_PR_CLOSES="90:1 91:2" gh_finish --repo "$REPO_CM" --session "$SCM" \
+  --command build --status complete --evidence-json '{"schema_version":1,"refs":{"receipts":{"1":{"pr":90},"2":{"pr":91}}}}' \
+  || gov_fail "(7g-crossmode, F1) a cross-mode build covering BOTH the requested #1 AND the stamped frontier #1,#2 was rejected"
+# (b) mirror: requested-first (#1) then whole-frontier restart → the same subset close is refused.
+SCM2="scm2-$$-$(basename "$WORK")"
+contract start --repo "$REPO_CM" --session "$SCM2" --command build --plugin-root "$GOV_PLUGIN" --args '#1' --source user >/dev/null
+contract start --repo "$REPO_CM" --session "$SCM2" --command build --plugin-root "$GOV_PLUGIN" --args 'drain the whole ready frontier' --source user >/dev/null
+if FAKE_MERGED_PRS="90" FAKE_PR_CLOSES="90:1" gh_finish --repo "$REPO_CM" --session "$SCM2" \
+     --command build --status complete --evidence-json '{"schema_version":1,"refs":{"receipts":{"1":{"pr":90}}}}' 2>/dev/null; then
+  gov_fail "(7g-crossmode, F1) the mirror cross-mode build (#1 then whole-frontier restart) closed covering ONLY #1 while #2 stayed eligible"
+fi
+echo "  ok (7g-crossmode, F1) cross-mode build obligations UNION — a whole-frontier + explicit-#issue record needs both covered; a subset close refused, full coverage accepted"
+
 # ============================================================================================
 # (7f, F3) plan complete re-derives: matrix re-validates, planning PR reads MERGED (real gh), the
 # decomposition children exist, pointers_retired cross-checks the decomposed set, AND the required
@@ -1107,6 +1141,48 @@ if PATH="$FAKE_BIN:$PATH" contract finish --repo "$REPO_DB" --session "$SDB" --c
 fi
 echo "  ok (9-delete-github, F5) --delete-board requires a real board-absence read (an absent local TRACKER.md on a github repo is NOT proof)"
 
+# (9-delete-malformed, ROUND-6 F2) a PRESENT-but-malformed tracker config must REFUSE a board-absence
+# claim — it may NEVER fall back to `filesystem` (that let a corrupt github config 'prove' the board
+# deleted via a missing local TRACKER.md). GENUINE ABSENCE of the config keeps its legacy filesystem
+# meaning. `_board_absent` is probed directly for the three cases, then end-to-end via --delete-board.
+board_absent_probe() {  # $1=repo -> prints True/False/None from the production _board_absent
+  SCRIPTS_DIR="$GOV_PLUGIN/scripts" python3 - "$1" <<'PY'
+import os, sys
+sys.path.insert(0, os.environ["SCRIPTS_DIR"]); sys.path.insert(0, os.path.join(os.environ["SCRIPTS_DIR"], "hooks"))
+import idc_command_contract as cc
+print(cc._board_absent(sys.argv[1]))
+PY
+}
+REPO_MAL="$WORK/repo-mal"; mkdir -p "$REPO_MAL/docs/workflow"
+printf 'backend: github\nbackend: filesystem\nproject_number: 10\n' > "$REPO_MAL/docs/workflow/tracker-config.yaml"  # present + malformed (two backend keys)
+[ "$(board_absent_probe "$REPO_MAL")" = "None" ] \
+  || gov_fail "(9-delete-malformed, F2) a malformed PRESENT tracker config resolved a board-absence verdict (must be indeterminate/None, never a filesystem fallback)"
+# genuine absence keeps legacy filesystem meaning: no config + no TRACKER.md → gone (True); + TRACKER.md → present (False).
+REPO_ABS="$WORK/repo-abs"; mkdir -p "$REPO_ABS/docs/workflow"
+[ "$(board_absent_probe "$REPO_ABS")" = "True" ] \
+  || gov_fail "(9-delete-malformed, F2) a GENUINELY-ABSENT config with no TRACKER.md must keep filesystem meaning (board gone = True)"
+python3 "$GOV_TRK" --tracker "$REPO_ABS/TRACKER.md" init >/dev/null || gov_fail "(9-delete-malformed) could not init REPO_ABS"
+[ "$(board_absent_probe "$REPO_ABS")" = "False" ] \
+  || gov_fail "(9-delete-malformed, F2) a GENUINELY-ABSENT config with a present TRACKER.md must read the filesystem board present (False)"
+# e2e: an uninstall --delete-board on the malformed github config must REFUSE at the closeout (mirror 9-delete-github).
+REPO_DBM="$WORK/repo-dbm"; mkdir -p "$REPO_DBM/docs/workflow" "$REPO_DBM/.claude"
+printf 'backend: github\nbackend: filesystem\nproject_number: 10\n' > "$REPO_DBM/docs/workflow/tracker-config.yaml"
+printf 'wf\n' > "$REPO_DBM/WORKFLOW.md"
+printf '{"enabledPlugins":{"idc@idc-workflow":true}}\n' > "$REPO_DBM/.claude/settings.json"
+python3 "$RECEIPT" stamp --repo "$REPO_DBM" --out "$REPO_DBM/docs/workflow/install-receipt.yaml" \
+  --plugin-version "$RUN_VER" WORKFLOW.md docs/workflow/tracker-config.yaml >/dev/null || gov_fail "(9-delete-malformed) stamp failed"
+DBM_ARCH="idc-archive-dbm.tar.gz"; : > "$REPO_DBM/$DBM_ARCH"
+SDBM="sdbm-$$-$(basename "$WORK")"
+contract start --repo "$REPO_DBM" --session "$SDBM" --command uninstall --plugin-root "$GOV_PLUGIN" \
+  --args 'uninstall --delete-board' --source user >/dev/null
+rm -f "$REPO_DBM/WORKFLOW.md"   # remove the receipt footprint; the malformed tracker-config.yaml stays as the anchor
+python3 "$GOV_PLUGIN/scripts/idc_settings_json.py" disable "$REPO_DBM/.claude/settings.json" idc@idc-workflow >/dev/null
+if PATH="$FAKE_BIN:$PATH" contract finish --repo "$REPO_DBM" --session "$SDBM" --command uninstall --status complete \
+     --evidence-json "$(printf '{"schema_version":1,"refs":{"outcome":"applied","settings":".claude/settings.json","archive":"%s"}}' "$DBM_ARCH")" 2>/dev/null; then
+  gov_fail "(9-delete-malformed, F2) a github --delete-board close PASSED on a MALFORMED tracker config (board 'proven' deleted via a missing local TRACKER.md)"
+fi
+echo "  ok (9-delete-malformed, F2) a present-but-malformed tracker config REFUSES a board-absence claim (never a filesystem fallback); genuine absence keeps filesystem meaning"
+
 # (9-noaction-flags, ROUND-5 F5) a no-action must FIRST verify NO board flags were stamped (a
 # --close-issues/--delete-board run requested board work → not a no-action) AND that runtime artifacts
 # (TRACKER.md) don't need removal.
@@ -1175,10 +1251,13 @@ fi
 echo "  ok (10c) intake coverage is enforced on the waiting_gate path too"
 
 # (10b) an intake-mode record with SATISFIED coverage still closes even when the finish omits the
-# intake fields (they are read from the record). Reuse REPO3's $MANIFEST (Drive materialized).
-contract start --repo "$REPO3" --session "$S5" --command think --plugin-root "$GOV_PLUGIN" \
+# intake fields (they are read from the record). A FRESH session on REPO3's $MANIFEST (Drive
+# materialized): S5 still carries its UNMAT_REL obligation, and a different-manifest restart is now
+# refused (16e, rule A), so this independent scenario opens its own record rather than swapping S5's.
+S5B="s5b-$$-$(basename "$WORK")"
+contract start --repo "$REPO3" --session "$S5B" --command think --plugin-root "$GOV_PLUGIN" \
   --args "--doc $MANIFEST_REL --unit Drive" --source user >/dev/null
-FAKE_MERGED_PRS="706" FAKE_ISSUE_DIR="$REPO3_ISSUES" gh_finish --repo "$REPO3" --session "$S5" \
+FAKE_MERGED_PRS="706" FAKE_ISSUE_DIR="$REPO3_ISSUES" gh_finish --repo "$REPO3" --session "$S5B" \
   --command think --status complete --evidence-json "$think_bare_complete" \
   || gov_fail "(10b) an intake-mode think whose recorded coverage is satisfied was refused even though the finish omitted the intake fields"
 echo "  ok (10b) an intake-mode record with satisfied coverage still closes honestly (coverage from the record)"
@@ -1634,5 +1713,21 @@ RRM="$(rec_field_json "$REPO" "$SM" recirculate recirc_requested)"
 field_has "$RRM" mono.json#U0 && field_has "$RRM" mono.json#U1 \
   || gov_fail "(16d, F1) a recirculate restart with FEWER named items SHED an obligation (recirc_requested=$RRM, expected both)"
 echo "  ok (16d, F1) recirculate requested-set unions across a narrowing restart (both named items still owed)"
+# (16e, ROUND-6 F1) a Think re-start binding a DIFFERENT intake manifest is REFUSED at command_start —
+# a same-manifest restart unions its units (16c), but silently REPLACING the manifest would drop the
+# first manifest's exact-once coverage obligation. The refusal leaves the prior record intact: it STILL
+# owes the FIRST manifest + its units.
+SMT="smt-$$-$(basename "$WORK")"
+contract start --repo "$REPO" --session "$SMT" --command think --plugin-root "$GOV_PLUGIN" --args '--doc first.json --unit U0' --source user >/dev/null
+if contract start --repo "$REPO" --session "$SMT" --command think --plugin-root "$GOV_PLUGIN" --args '--doc second.json --unit V0' --source user >/dev/null 2>&1; then
+  gov_fail "(16e, F1) a Think re-start binding a DIFFERENT manifest was ACCEPTED (it replaced the stamped obligation instead of refusing)"
+fi
+TMAN="$(rec_field_json "$REPO" "$SMT" think intake_manifest)"
+[ "$TMAN" = '"first.json"' ] \
+  || gov_fail "(16e, F1) after the refused different-manifest restart, intake_manifest=$TMAN (must still owe the FIRST manifest first.json, never second.json)"
+TMU="$(rec_field_json "$REPO" "$SMT" think intake_units)"
+field_has "$TMU" U0 \
+  || gov_fail "(16e, F1) the refused restart shed the first manifest's units (intake_units=$TMU, expected U0)"
+echo "  ok (16e, F1) a different-manifest Think restart is refused at command_start; the first manifest's coverage obligation stands"
 
 echo "PASS: the IDC command lifecycle envelope + wave-3 evidence contract hold — every terminal fact is re-derived from durable state (consideration re-run, gate marker/disposal, pointer admission, admitted-consideration set, receipt/report/journal, real gh reads), a forged or omitting claim is refused across all eleven commands, and the 2026-07-12 incident shape is blocked at Think closeout"

@@ -41,6 +41,7 @@ sys.path.insert(0, os.path.dirname(_HERE))      # scripts/ — idc_plugin_freshn
 import idc_hook_lib as H  # noqa: E402
 import idc_plugin_freshness as freshness  # noqa: E402
 import idc_command_contract as C  # noqa: E402
+import idc_ledger as L  # noqa: E402
 
 # Fail-closed on an unverifiable freshness signal (invalid receipt / unreadable manifest / gate bug):
 # the six workflow commands. Running an unverifiable workflow body can re-introduce just-fixed bugs.
@@ -157,8 +158,14 @@ def _register_if_governed(payload, plugin_root, command):
     if not (session_id and H.is_governed_repo(cwd)):
         return _REG_DEFERRED
     running = freshness.read_version(plugin_root) or ""
-    C.register_start(cwd, session_id, command, running,
-                     payload.get("command_args") or "", payload.get("command_source") or "")
+    try:
+        C.register_start(cwd, session_id, command, running,
+                         payload.get("command_args") or "", payload.get("command_source") or "")
+    except L.ObligationConflict:
+        # A narrowing/replacing restart was refused (round-6 BLOCKS 1, rule A): the PRIOR obligation
+        # record is left intact — its stamped obligation stands and the Stop closeout gate still
+        # enforces it. The readback below confirms that record is still open and reports it as such.
+        pass
     # Ground-truth readback: report "opened" ONLY when the record is actually present via the status
     # read path. Trusting the writer's return would let a swallowed write be reported as opened.
     active = C.active_records(cwd, session_id)

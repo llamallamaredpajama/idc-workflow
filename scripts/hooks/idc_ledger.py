@@ -326,6 +326,25 @@ def _union_str_list(old, new):
     return out
 
 
+class ObligationConflict(Exception):
+    """A `command_start` that would REPLACE (not just union) a stamped obligation on the active
+    (session, command) record is refused (round-6 BLOCKS 1, rule A). Raised for a Think re-start that
+    binds a DIFFERENT intake manifest than the one already stamped: the first manifest's exact-once
+    coverage obligation cannot silently vanish under a narrowing/replacing restart. The prior record is
+    left intact (nothing is persisted); the caller surfaces an honest refusal instead of opening a
+    record whose obligation dropped the first manifest's units."""
+
+    def __init__(self, command, prior, incoming):
+        self.command = command
+        self.prior = prior
+        self.incoming = incoming
+        super().__init__(
+            f"/idc:{command} re-start binds a different intake manifest ({incoming!r}) than the one "
+            f"already stamped on the active record ({prior!r}); a restart may only ADD to a stamped "
+            "obligation, never replace it — finish or reset the active run before intaking a different "
+            "manifest, so the first manifest's coverage obligation cannot vanish")
+
+
 def command_start(cwd, session_id, command, plugin_version, args_sha256, source,
                   intake_manifest=None, intake_units=None, recirc_requested=None,
                   build_requested=None, plan_admitted=None, uninstall_flags=None, nonce=None,
@@ -407,9 +426,14 @@ def command_start(cwd, session_id, command, plugin_version, args_sha256, source,
                 # only carried a marker forward when the re-start supplied NONE; a non-empty smaller
                 # value silently shed the difference — the exact regression this closes.)
                 # Intake manifest: keep the prior manifest whenever this re-start binds none OR the
-                # SAME manifest (union its units); a re-start that binds a DIFFERENT manifest is a
-                # genuinely new intake reference and replaces it (already set on `rec`).
+                # SAME manifest (union its units). A re-start that binds a DIFFERENT manifest is
+                # REFUSED (round-6 BLOCKS 1, rule A): silently replacing it would drop the first
+                # manifest's exact-once coverage obligation, letting a closeout succeed while the first
+                # manifest's units never got a durable disposition. Raise BEFORE any state is persisted
+                # so the prior obligation record is left fully intact.
                 prior_manifest = c.get("intake_manifest")
+                if prior_manifest and intake_manifest and str(intake_manifest) != prior_manifest:
+                    raise ObligationConflict(command, prior_manifest, str(intake_manifest))
                 if prior_manifest and (not intake_manifest or str(intake_manifest) == prior_manifest):
                     rec["intake_manifest"] = prior_manifest
                     rec["intake_units"] = _union_str_list(c.get("intake_units"),

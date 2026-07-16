@@ -449,21 +449,28 @@ command):
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" status \
   --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --json   # -> read the active record's `nonce`
 # … after the table + verdict, PERSIST them (bound to this record's nonce) so the closeout re-reads its
-# own report; each row is a MACHINE-CHECKABLE result object, never a bare summary string: …
+# own report. The payload must satisfy the FULL doctor row contract: ALL rows 1..10 (unique ids), each
+# `result` one of PASS|FAIL|SKIP, the script-backed row 10 (janitor scanner) carrying its `script` +
+# integer `exit`, and a `verdict` EQUAL to the derived aggregation (FAIL if any row FAILed, else PASS).
+# A 2-row / arbitrary / inconsistent-verdict payload is refused AT THE WRITE DOOR: …
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/idc_command_report.py" --cwd "$PWD" write \
   --kind doctor --session "$CLAUDE_CODE_SESSION_ID" \
-  --payload-json '{"rows":[{"id":<row#>,"result":"<PASS|FAIL|…>"},…],"verdict":"<PASS|FAIL|…>","nonce":"<nonce from the status record>"}'
+  --payload-json '{"rows":[{"id":1,"result":"PASS"},…,{"id":10,"result":"PASS","script":"idc_git_janitor.py","exit":0}],"verdict":"PASS","nonce":"<nonce from the status record>"}'
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command doctor \
   --status <complete|blocked_external> --evidence-json '<envelope>'
 ```
 
-- **`complete`** — all rows **and** a final verdict were captured (**a FAIL verdict is still a complete
-  doctor run** — doctor completing is not the repo passing). The closeout **re-reads the persisted doctor
-  report** (`.idc-doctor-report.json`) and requires it **bound to this record's nonce**, with each row a
-  machine-checkable `{id, result}` object — forged rows/verdict without a real report, a report not
-  bound to the record, or a bare-string row (no verifiable artifact — rule B) are all refused. Evidence
-  refs: `refs:{}` (the report is the proof).
+- **`complete`** — **all ten rows and a consistent final verdict were captured** (**a FAIL verdict is
+  still a complete doctor run** — doctor completing is not the repo passing). The closeout **re-reads the
+  persisted doctor report** (`.idc-doctor-report.json`), requires it **bound to this record's nonce**, and
+  **re-validates the full row contract**: rows must be **exactly ids 1..10** (unique), each `result` a
+  legal outcome, the **script-backed row 10 carrying `{script, exit}`**, and the **verdict EQUAL to the
+  derived aggregation** of the row outcomes. It also **spot-re-runs a cheap read-only check** (the
+  install-receipt fingerprint verify, row 5) and refuses a reported PASS its re-run contradicts. A
+  forged/absent report, one not bound to the record, a 2-row / arbitrary report, an inconsistent verdict,
+  or a row outcome that disagrees with its re-run are all refused (rule B). Evidence refs: `refs:{}` (the
+  report is the proof).
 - **`blocked_external`** — doctor could not even establish its git-hygiene row (e.g. the cwd is not a
   git repo): run the scanner with `--report-session`/`--report-nonce` so it records `scanner_exit:2`
   bound to this record, then cite `blocker:{helper:"idc_git_janitor.py", exit:2, diagnostic}` (the only

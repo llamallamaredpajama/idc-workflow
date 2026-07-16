@@ -143,11 +143,16 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   run it confirms EVERY footprint in that set (except the governance anchor) is now ABSENT, the settings
   IDC key is stripped, the archive file exists, and the anchor is still present. It ALSO verifies any
   opt-in board flags **stamped at start** were honored by a **real read** BEFORE finish: `--close-issues`
-  ⇒ no open issue remains on the board; `--delete-board` ⇒ the board substrate is gone. Evidence refs
-  for an applied run: `outcome:"applied"`, `settings:".claude/settings.json"`, `archive:"<archive
-  path>"`. For a no-op run: `outcome:"no-action"` — the validator re-reads the receipt and confirms
-  every non-anchor footprint is ALREADY absent (a no-action with any footprint still present, or with no
-  receipt to prove it, is refused).
+  ⇒ the board is present with **no open issue** (or genuinely gone); `--delete-board` ⇒ a **real
+  board-absence read proves the board is genuinely gone** (on `github` a `gh project view` probe of the
+  project — **never** an absent local `TRACKER.md`, which github repos lack). An **unreadable board is a
+  refusal, not a pass** for either flag (rule B). Evidence refs for an applied run: `outcome:"applied"`,
+  `settings:".claude/settings.json"`, `archive:"<archive path>"`. For a no-op run: `outcome:"no-action"`
+  — the validator first confirms **no board flag was stamped** (a --close-issues/--delete-board run
+  requested board work → not a no-action) and that the **runtime artifacts** (`TRACKER.md`) are already
+  absent, then re-reads the receipt and confirms every non-anchor footprint is ALREADY absent (a
+  no-action with a stamped flag, a runtime artifact or footprint still present, or with no receipt to
+  prove it, is refused).
 - **`blocked_external`** — a safety refusal (a dirty tree, an unverifiable board, an invalid receipt):
   `blocker:{helper, exit (nonzero), diagnostic}`. Report it as blocked; do not proceed to remove.
 

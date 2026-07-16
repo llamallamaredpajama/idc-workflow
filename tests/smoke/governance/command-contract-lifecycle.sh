@@ -125,12 +125,39 @@ d=json.load(open(sys.argv[1]+"/.idc-session-state.json"))
 print(next((c.get("nonce","") for c in d["commands"] if c.get("state")=="active" and c.get("session_id")==sys.argv[2] and c.get("command")==sys.argv[3]),""))' "$1" "$2" "$3" 2>/dev/null
 }
 # doctor_report <repo> <session> <verdict> — write THIS session's persisted doctor report the way the
-# doctor RUN does: MACHINE-CHECKABLE rows ({id,result}) + the active record's nonce (wave-4 finding 7).
+# doctor RUN does (round-5 finding 6): the FULL doctor row contract — all rows 1..10 (unique ids), legal
+# outcomes, the script-backed row 10 carrying {script,exit}, a verdict EQUAL to the derived aggregation,
+# bound to the active record's nonce. Row 5 (install receipt) is SKIP (the hermetic repos carry no
+# receipt), so a FAIL verdict is driven by a FAIL row 2.
 doctor_report() {
   local n; n="$(rec_nonce "$1" "$2" doctor)"
-  python3 "$CR" --cwd "$1" write --kind doctor --session "$2" \
-    --payload-json "$(printf '{"rows":[{"id":1,"result":"PASS"},{"id":2,"result":"%s"}],"verdict":"%s","nonce":"%s"}' "$3" "$3" "$n")" >/dev/null \
-    || gov_fail "could not write doctor report"
+  DR_VERDICT="$3" DR_NONCE="$n" python3 - "$CR" "$1" "$2" <<'PY' || gov_fail "could not write doctor report"
+import json, os, subprocess, sys
+cr, repo, sess = sys.argv[1:]
+verdict, nonce = os.environ["DR_VERDICT"], os.environ["DR_NONCE"]
+rows = []
+for i in range(1, 11):
+    if i == 5:
+        rows.append({"id": 5, "result": "SKIP"})          # no install receipt in the hermetic repos
+    elif i == 10:
+        rows.append({"id": 10, "result": "PASS", "script": "idc_git_janitor.py", "exit": 0})
+    elif i == 2 and verdict == "FAIL":
+        rows.append({"id": 2, "result": "FAIL"})
+    else:
+        rows.append({"id": i, "result": "PASS"})
+payload = {"rows": rows, "verdict": verdict, "nonce": nonce}
+subprocess.run([sys.executable, cr, "--cwd", repo, "write", "--kind", "doctor", "--session", sess,
+                "--payload-json", json.dumps(payload)], check=True, stdout=subprocess.DEVNULL)
+PY
+}
+# raw_doctor_report <repo> <session> <payload-json> — write the report file DIRECTLY, BYPASSING the
+# writer's schema gate, so a schema-violating report can reach (and be refused by) the CLOSEOUT's own
+# independent re-validation (round-5 finding 6e).
+raw_doctor_report() {
+  python3 -c 'import json,sys,time
+repo,sess,payload=sys.argv[1:]
+body={"version":1,"kind":"doctor","session_id":sess,"ts":time.time(),"payload":json.loads(payload)}
+open(repo+"/.idc-doctor-report.json","w").write(json.dumps(body))' "$1" "$2" "$3"
 }
 # a consideration file that PASSES idc_consideration_check (H1 + function/PRD/TRD/open-questions).
 write_consideration() {  # $1 = repo, $2 = repo-relative path
@@ -458,32 +485,56 @@ FAKE_MERGED_PRS="706" FAKE_ISSUE_DIR="$REPO3_ISSUES" gh_finish --repo "$REPO3" -
   || gov_fail "(7b-drop) could not honestly close the drop-case think record"
 echo "  ok (7b-drop) a think closeout that drops units from the exact-once manifest is BLOCKED"
 
-# (7c, F6-doctor) doctor complete is re-read from THIS session's persisted doctor report (a FAIL
-# verdict is still a complete doctor run); a forged rows/verdict with NO report is refused; and a
-# lifecycle command may not claim a pipeline no_action.
+# (7c, ROUND-5 F6) doctor complete re-reads THIS session's persisted doctor report, which must satisfy
+# the FULL doctor row contract: all rows 1..10 (unique ids), legal outcomes {PASS,FAIL,SKIP}, the
+# script-backed row 10 carrying {script,exit}, and a verdict EQUAL to the derived aggregation of the row
+# outcomes. A forged/no report, a 2-row / arbitrary report (refused at BOTH the write door and the
+# closeout), an inconsistent verdict, and a script-row PASS whose read-only re-run disagrees are all
+# refused. A FAIL verdict is still a complete doctor run; a diagnostic command may not claim no_action.
 contract start --repo "$REPO3" --session "$S3" --command doctor --plugin-root "$GOV_PLUGIN" --args 'diag' --source user >/dev/null
+# (i) forged rows/verdict with NO persisted report → refused.
 if contract finish --repo "$REPO3" --session "$S3" --command doctor --status complete \
      --evidence-json '{"schema_version":1,"refs":{"rows":["forged"],"verdict":"PASS"}}' 2>/dev/null; then
   gov_fail "(7c) a doctor complete with FORGED rows/verdict but NO persisted report was accepted"
 fi
+# (ii) doctor no_action (an illegal terminal status for a diagnostic command) → refused.
 if contract finish --repo "$REPO3" --session "$S3" --command doctor --status no_action \
      --evidence-json '{"schema_version":1,"refs":{}}' 2>/dev/null; then
   gov_fail "(7c) doctor no_action (an illegal terminal status for a diagnostic command) was accepted"
 fi
-# (F7) a persisted report whose rows are a BARE STRING ("1..10") records no machine-checkable artifact
-# — each row must be a {id, result} object — so it is not claimable as verified (rule B), even nonce-bound.
 DOC_N="$(rec_nonce "$REPO3" "$S3" doctor)"
-python3 "$CR" --cwd "$REPO3" write --kind doctor --session "$S3" \
-  --payload-json "$(printf '{"rows":["1..10"],"verdict":"PASS","nonce":"%s"}' "$DOC_N")" >/dev/null
+# (iii, F6f) the report WRITER refuses a 2-row doctor payload (the doctor schema gate at the write door).
+if python3 "$CR" --cwd "$REPO3" write --kind doctor --session "$S3" \
+     --payload-json "$(printf '{"rows":[{"id":1,"result":"PASS"},{"id":2,"result":"PASS"}],"verdict":"PASS","nonce":"%s"}' "$DOC_N")" 2>/dev/null; then
+  gov_fail "(7c, F6f) the report writer PERSISTED a 2-row doctor payload (the doctor schema is not enforced at the write door)"
+fi
+# (iv, F6e) a raw 2-row report that BYPASSED the writer is refused by the CLOSEOUT's own schema re-check.
+raw_doctor_report "$REPO3" "$S3" "$(printf '{"rows":[{"id":1,"result":"PASS"},{"id":2,"result":"PASS"}],"verdict":"PASS","nonce":"%s"}' "$DOC_N")"
 if contract finish --repo "$REPO3" --session "$S3" --command doctor --status complete \
      --evidence-json '{"schema_version":1,"refs":{}}' 2>/dev/null; then
-  gov_fail "(7c, F7) a doctor complete whose report rows are a bare string (no machine-checkable result) was accepted"
+  gov_fail "(7c, F6e) a doctor complete backed by a raw 2-row report (bypassing the writer) was accepted by the closeout"
 fi
+# (v, F6b) a full 10-row report whose verdict != the derived aggregation (a FAIL row but verdict PASS) → refused.
+raw_doctor_report "$REPO3" "$S3" "$(python3 -c 'import json,sys; rows=[{"id":i,"result":("FAIL" if i==2 else ("SKIP" if i==5 else "PASS"))} for i in range(1,11)]; rows[9]={"id":10,"result":"PASS","script":"idc_git_janitor.py","exit":0}; print(json.dumps({"rows":rows,"verdict":"PASS","nonce":sys.argv[1]}))' "$DOC_N")"
+if contract finish --repo "$REPO3" --session "$S3" --command doctor --status complete \
+     --evidence-json '{"schema_version":1,"refs":{}}' 2>/dev/null; then
+  gov_fail "(7c, F6b) a doctor complete whose verdict (PASS) contradicts a FAIL row (aggregation FAIL) was accepted"
+fi
+# (vi, F6d) a schema-valid report claiming row 5 (install receipt) PASS on a NO-RECEIPT repo → the
+# closeout SPOT-RE-RUNS the cheap read-only receipt verification and refuses the inconsistent PASS.
+python3 "$CR" --cwd "$REPO3" write --kind doctor --session "$S3" \
+  --payload-json "$(python3 -c 'import json,sys; rows=[{"id":i,"result":("PASS" if i!=10 else "PASS")} for i in range(1,11)]; rows[9]={"id":10,"result":"PASS","script":"idc_git_janitor.py","exit":0}; print(json.dumps({"rows":rows,"verdict":"PASS","nonce":sys.argv[1]}))' "$DOC_N")" >/dev/null \
+  || gov_fail "(7c) could not write the row-5-PASS doctor report (schema should accept it; the closeout re-run rejects it)"
+if contract finish --repo "$REPO3" --session "$S3" --command doctor --status complete \
+     --evidence-json '{"schema_version":1,"refs":{}}' 2>/dev/null; then
+  gov_fail "(7c, F6d) a doctor complete claiming row 5 (install receipt) PASS on a no-receipt repo was accepted (spot re-run not enforced)"
+fi
+# (vii) an honest full 10-row FAIL report (schema-valid, verdict==aggregation) → accepted (a FAIL still completes).
 doctor_report "$REPO3" "$S3" FAIL
 contract finish --repo "$REPO3" --session "$S3" --command doctor --status complete \
   --evidence-json '{"schema_version":1,"refs":{}}' \
-  || gov_fail "(7c) doctor complete backed by a persisted FAIL report with machine-checkable rows was rejected"
-echo "  ok (7c, F6/F7) doctor complete re-reads the nonce-bound report (forged/no-report refused; bare-string rows not claimable; a FAIL verdict still completes; no_action illegal)"
+  || gov_fail "(7c) doctor complete backed by an honest full 10-row FAIL report was rejected"
+echo "  ok (7c, F6) doctor complete enforces the full row contract (writer + closeout schema gate; verdict==aggregation; row-5 spot re-run; 2-row/inconsistent refused; a FAIL verdict still completes; no_action illegal)"
 
 # (7d, F1) blocked_external: an allowlisted helper + NONZERO exit + diagnostic; a zero exit, a phantom
 # helper, a helper NOT belonging to the command, and an invented/mismatched drain are all refused.
@@ -519,27 +570,44 @@ contract finish --repo "$REPO3" --session "$S3" --command build --status blocked
   || gov_fail "(7d) a drain blocked_external whose cited exit MATCHES the persisted verdict was rejected"
 echo "  ok (7d, F1) blocked_external requires an ALLOWLISTED helper + nonzero exit + diagnostic; a drain blocker re-derives + MATCHES the durable verdict exit"
 
-# (7d-jan, F1) janitor blocked_external: ONLY the documented blocked exit (2 — ground truth
-# unestablished) grounds it. A persisted scanner_exit of 1 is a COMPLETED scan WITH FINDINGS (that is
-# `complete`, not blocked), so a blocked_external citing exit 1 is refused. The report is nonce-bound.
+# (7d-jan, F1 + ROUND-5 F7) janitor blocked_external: ONLY a report carrying the SCANNER's provenance
+# stamp AND the documented blocked exit (2) grounds it. (a) a HAND-WRITTEN report lacking `produced_by`
+# is refused (impossible to pass off). (b) a scanner-shaped report recording exit 1 (a COMPLETE scan
+# with findings) citing a blocker is refused (exit 1 != blocked). (c) the honest exit-2 path RUNS THE
+# REAL SCANNER in a non-git dir — build_ctx exits 2 and writes the nonce-bound, provenance-stamped report
+# itself (no hand-written report) — and a blocker citing exit 2 re-derives + accepts.
 REPO_JB="$WORK/repo-jb"; mkdir -p "$REPO_JB/docs/workflow"
 printf 'backend: filesystem\n' > "$REPO_JB/docs/workflow/tracker-config.yaml"
 SJB="sjb-$$-$(basename "$WORK")"
 contract start --repo "$REPO_JB" --session "$SJB" --command janitor --plugin-root "$GOV_PLUGIN" --args 'scan' --source user >/dev/null
 JBN="$(rec_nonce "$REPO_JB" "$SJB" janitor)"
+# (a) a hand-written report LACKING the scanner's provenance stamp → refused (cannot be passed off).
 python3 "$CR" --cwd "$REPO_JB" write --kind janitor --session "$SJB" \
-  --payload-json "$(printf '{"scanner_exit":1,"clean":false,"nonce":"%s"}' "$JBN")" >/dev/null
+  --payload-json "$(printf '{"scanner_exit":2,"clean":false,"nonce":"%s"}' "$JBN")" >/dev/null
+if contract finish --repo "$REPO_JB" --session "$SJB" --command janitor --status blocked_external \
+     --evidence-json '{"schema_version":1,"refs":{"blocker":{"helper":"idc_git_janitor.py","exit":2,"diagnostic":"x"}}}' 2>/dev/null; then
+  gov_fail "(7d-jan, F7) a janitor blocked_external backed by a HAND-WRITTEN report (no scanner provenance) was accepted"
+fi
+# (b) a scanner-shaped report recording exit 1 (findings = a COMPLETE scan) → a blocker citing exit 1 refused.
+python3 "$CR" --cwd "$REPO_JB" write --kind janitor --session "$SJB" \
+  --payload-json "$(printf '{"scanner_exit":1,"clean":false,"nonce":"%s","produced_by":"idc_git_janitor.py"}' "$JBN")" >/dev/null
 if contract finish --repo "$REPO_JB" --session "$SJB" --command janitor --status blocked_external \
      --evidence-json '{"schema_version":1,"refs":{"blocker":{"helper":"idc_git_janitor.py","exit":1,"diagnostic":"findings"}}}' 2>/dev/null; then
   gov_fail "(7d-jan, F1) a janitor blocked_external citing scanner_exit 1 (findings, NOT blocked) was accepted"
 fi
-# exit 2 (the documented blocked exit) DOES ground it (cited exit must match the persisted 2).
-python3 "$CR" --cwd "$REPO_JB" write --kind janitor --session "$SJB" \
-  --payload-json "$(printf '{"scanner_exit":2,"clean":false,"nonce":"%s"}' "$JBN")" >/dev/null
-contract finish --repo "$REPO_JB" --session "$SJB" --command janitor --status blocked_external \
-  --evidence-json '{"schema_version":1,"refs":{"blocker":{"helper":"idc_git_janitor.py","exit":2,"diagnostic":"not a git repo"}}}' \
-  || gov_fail "(7d-jan, F1) a janitor blocked_external citing the documented blocked exit 2 was rejected"
-echo "  ok (7d-jan, F1) janitor blocked_external grounds ONLY on the documented blocked exit 2 (exit 1 findings = complete, not blocked)"
+# (c) THE HONEST exit-2 path: RUN THE REAL SCANNER in a non-git dir → build_ctx exits 2 and writes the
+# nonce-bound, provenance-stamped report itself (no hand-written report). A blocker citing exit 2 accepts.
+NONGIT="$WORK/repo-jb-nongit"; mkdir -p "$NONGIT/docs/workflow"
+printf 'backend: filesystem\n' > "$NONGIT/docs/workflow/tracker-config.yaml"
+SJB2="sjb2-$$-$(basename "$WORK")"
+contract start --repo "$NONGIT" --session "$SJB2" --command janitor --plugin-root "$GOV_PLUGIN" --args 'scan' --source user >/dev/null
+JBN2="$(rec_nonce "$NONGIT" "$SJB2" janitor)"
+python3 "$GOV_PLUGIN/scripts/idc_git_janitor.py" --repo "$NONGIT" \
+  --report-session "$SJB2" --report-nonce "$JBN2" >/dev/null 2>&1   # build_ctx: not a git repo → exit 2 → writes report
+contract finish --repo "$NONGIT" --session "$SJB2" --command janitor --status blocked_external \
+  --evidence-json '{"schema_version":1,"refs":{"blocker":{"helper":"idc_git_janitor.py","exit":2,"diagnostic":"not a git repository"}}}' \
+  || gov_fail "(7d-jan, F7) a janitor blocked_external re-derived from the REAL SCANNER's own exit-2 report was rejected"
+echo "  ok (7d-jan, F1/F7) janitor blocked_external needs the scanner's provenance-stamped report; the honest exit-2 path RUNS the real scanner (hand-written/exit-1 refused, scanner exit-2 accepted)"
 
 # (7d-receipt, F1) a blocked_external citing the receipt checker is grounded ONLY when a read-only
 # RE-RUN actually FAILS (an invalid/modified receipt); a clean receipt refuses the blocker (no failure
@@ -621,6 +689,39 @@ FAKE_MERGED_PRS="90 92" FAKE_PR_CLOSES="90:1 92:2" gh_finish --repo "$REPO_BUILD
   || gov_fail "(7g-req, F5) a build complete with a linked merged-PR receipt per requested issue was rejected"
 echo "  ok (7g-req, F5) build stamps the requested issue set; complete needs a linked merged-PR receipt per issue (partial/wrong-issue refused)"
 
+# (7g-frontier, ROUND-5 F4) a WHOLE-FRONTIER build (no explicit #issue) stamps the eligible frontier at
+# START; complete requires a verified merged receipt per stamped-frontier issue OR an oracle-confirmed
+# empty remaining frontier. An arbitrary-subset close is REFUSED.
+REPO_BF="$WORK/repo-bf"; mkdir -p "$REPO_BF/docs/workflow"
+printf 'backend: filesystem\n' > "$REPO_BF/docs/workflow/tracker-config.yaml"
+python3 "$GOV_TRK" --tracker "$REPO_BF/TRACKER.md" init >/dev/null || gov_fail "(7g-frontier) could not init REPO_BF"
+python3 "$GOV_TRK" --tracker "$REPO_BF/TRACKER.md" create --title b1 --stage Buildable --status Todo >/dev/null  # #1 eligible
+python3 "$GOV_TRK" --tracker "$REPO_BF/TRACKER.md" create --title b2 --stage Buildable --status Todo >/dev/null  # #2 eligible
+SBF="sbf-$$-$(basename "$WORK")"
+bf_finish() { PATH="$FAKE_BIN:$PATH" contract finish --repo "$REPO_BF" --session "$SBF" "$@"; }
+# whole-frontier start (no #issue) stamps frontier {1,2}. A subset receipt (only #1, #2 still eligible)
+# → REFUSED (arbitrary-subset close is not a whole-frontier complete).
+contract start --repo "$REPO_BF" --session "$SBF" --command build --plugin-root "$GOV_PLUGIN" --args 'drain the whole ready frontier' --source user >/dev/null
+if FAKE_MERGED_PRS="90" FAKE_PR_CLOSES="90:1" bf_finish --command build --status complete \
+     --evidence-json '{"schema_version":1,"refs":{"receipts":{"1":{"pr":90}}}}' 2>/dev/null; then
+  gov_fail "(7g-frontier, F4) a whole-frontier build complete with a receipt for ONLY #1 (leaving #2 eligible) was accepted (arbitrary subset)"
+fi
+# covering EVERY stamped-frontier issue with a linked merged-PR receipt → accepted.
+FAKE_MERGED_PRS="90 91" FAKE_PR_CLOSES="90:1 91:2" bf_finish --command build --status complete \
+  --evidence-json '{"schema_version":1,"refs":{"receipts":{"1":{"pr":90},"2":{"pr":91}}}}' \
+  || gov_fail "(7g-frontier, F4) a whole-frontier build covering EVERY stamped-frontier issue was rejected"
+echo "  ok (7g-frontier, F4) a whole-frontier build stamps the eligible frontier at start; an arbitrary-subset close is refused, full-frontier coverage accepted"
+# (7g-frontier-empty) a whole-frontier build on an EMPTY ready frontier closes via the oracle (no receipts).
+REPO_BFE="$WORK/repo-bfe"; mkdir -p "$REPO_BFE/docs/workflow"
+printf 'backend: filesystem\n' > "$REPO_BFE/docs/workflow/tracker-config.yaml"
+python3 "$GOV_TRK" --tracker "$REPO_BFE/TRACKER.md" init >/dev/null || gov_fail "(7g-frontier-empty) could not init REPO_BFE"
+SBFE="sbfe-$$-$(basename "$WORK")"
+contract start --repo "$REPO_BFE" --session "$SBFE" --command build --plugin-root "$GOV_PLUGIN" --args 'drain frontier' --source user >/dev/null
+contract finish --repo "$REPO_BFE" --session "$SBFE" --command build --status complete \
+  --evidence-json '{"schema_version":1,"refs":{}}' \
+  || gov_fail "(7g-frontier-empty, F4) a whole-frontier build on an oracle-confirmed empty ready frontier was rejected"
+echo "  ok (7g-frontier-empty, F4) a whole-frontier build on an empty ready frontier closes via the oracle (no receipts needed)"
+
 # ============================================================================================
 # (7f, F3) plan complete re-derives: matrix re-validates, planning PR reads MERGED (real gh), the
 # decomposition children exist, pointers_retired cross-checks the decomposed set, AND the required
@@ -693,29 +794,46 @@ FAKE_MERGED_PRS="42" gh_finish --repo "$REPO_RT" --session "$SRT" --command plan
   || gov_fail "(7f-retire, F3) a plan complete decomposing EVERY admitted consideration was rejected"
 echo "  ok (7f-retire, F3) the retire-then-omit bypass is caught by the start-stamped admitted set (retire #1,#2 + decompose only #1 → refused)"
 
-# (7f-gh-admitted, F3) the FULL admitted-set claim runs on the GITHUB path too: the required set is the
-# rule-A STAMP on the record (the live github board read is unavailable hermetically), so a decompositions
-# set that omits a stamped consideration is REFUSED, and one that covers all is accepted.
-REPO_GHP="$WORK/repo-ghp"; mkdir -p "$REPO_GHP/docs/workflow"
+# (7f-ptr, ROUND-5 F2) pointers_retired is proven by reading each pointer's LIVE board status
+# (genuinely retired = Done), NOT by comparing two caller-supplied maps. A pointer moved to Blocked but
+# CLAIMED retired is REFUSED; only a genuinely-Done pointer is accepted. Fully isolated repo.
+REPO_PTR="$WORK/repo-ptr"; mkdir -p "$REPO_PTR/docs/workflow/pillar-matrices"
+printf 'backend: filesystem\n' > "$REPO_PTR/docs/workflow/tracker-config.yaml"
+python3 "$GOV_TRK" --tracker "$REPO_PTR/TRACKER.md" init >/dev/null || gov_fail "(7f-ptr) could not init REPO_PTR"
+python3 "$GOV_TRK" --tracker "$REPO_PTR/TRACKER.md" create --title "pointer consideration" \
+  --stage Consideration --status Todo >/dev/null || gov_fail "(7f-ptr) could not create consideration #1"
+python3 "$GOV_TRK" --tracker "$REPO_PTR/TRACKER.md" create --title "child of #1" \
+  --stage Buildable --status Todo >/dev/null || gov_fail "(7f-ptr) could not create child #2"
+cp "$REPO_PLAN/$GOODMX" "$REPO_PTR/$GOODMX"
+SPTR="sptr-$$-$(basename "$WORK")"
+ptr_finish() { PATH="$FAKE_BIN:$PATH" contract finish --repo "$REPO_PTR" --session "$SPTR" "$@"; }
+contract start --repo "$REPO_PTR" --session "$SPTR" --command plan --plugin-root "$GOV_PLUGIN" --args 'ptr' --source user >/dev/null
+python3 "$GOV_TRK" --tracker "$REPO_PTR/TRACKER.md" move --num 1 --status Blocked >/dev/null  # #1 → Blocked (NOT retired)
+if FAKE_MERGED_PRS="42" ptr_finish --command plan --status complete \
+     --evidence-json "$(plan_ev "$GOODMX" '{"1":2}' '[1]')" 2>/dev/null; then
+  gov_fail "(7f-ptr, F2) a plan complete claiming pointer #1 retired while the board reads Blocked was ACCEPTED (caller-map comparison, not a live read)"
+fi
+python3 "$GOV_TRK" --tracker "$REPO_PTR/TRACKER.md" move --num 1 --status Done >/dev/null  # genuinely retire it
+FAKE_MERGED_PRS="42" ptr_finish --command plan --status complete \
+  --evidence-json "$(plan_ev "$GOODMX" '{"1":2}' '[1]')" \
+  || gov_fail "(7f-ptr, F2) a plan complete whose pointer #1 is GENUINELY retired (Done) was rejected"
+echo "  ok (7f-ptr, F2) pointers_retired is proven by each pointer's LIVE board status (Blocked-claimed-retired refused; Done accepted)"
+
+# (7f-gh-admitted, ROUND-5 F2) the FULL claim walker runs through the PRODUCTION start path on the
+# github backend (contract start + gh_finish), NOT a private claim call: with the live board unreadable
+# (no gh project hermetically), a plan complete is REFUSED — an unreadable truth is a refusal, never a
+# pass (rule B). The old test manually inserted a stamp and called one private claim, so it could ACCEPT
+# a github completion the production path can never prove. fake-gh serves only the planning-PR read.
+REPO_GHP="$WORK/repo-ghp"; mkdir -p "$REPO_GHP/docs/workflow/pillar-matrices"
 printf 'backend: github\nproject_number: 10\n' > "$REPO_GHP/docs/workflow/tracker-config.yaml"
+cp "$REPO_PLAN/$GOODMX" "$REPO_GHP/$GOODMX"
 SGHP="sghp-$$-$(basename "$WORK")"
-plan_admitted_claim() {  # $1=repo $2=session $3=stamped-csv $4=decompositions-json -> ok / reject:<code>
-  SCRIPTS_DIR="$GOV_PLUGIN/scripts" python3 - "$1" "$2" "$3" "$4" <<'PY'
-import json, os, sys
-sys.path.insert(0, os.environ["SCRIPTS_DIR"]); sys.path.insert(0, os.path.join(os.environ["SCRIPTS_DIR"],"hooks"))
-import idc_ledger, idc_command_contract as cc
-repo, sess, adm, dec = sys.argv[1:]
-idc_ledger.command_start(repo, sess, "plan", "4.1.0", "d"*64, "user",
-                         plan_admitted=[x for x in adm.split(",") if x])
-res = cc._claim_plan_admitted_set_covered({"decompositions": json.loads(dec)}, repo, sess)
-print("ok" if res.ok else f"reject:{res.reason_code}")
-PY
-}
-[ "$(plan_admitted_claim "$REPO_GHP" "$SGHP" '1,3' '{"1":2}')" != "ok" ] \
-  || gov_fail "(7f-gh-admitted, F3) a github plan complete omitting a stamped admitted consideration was accepted"
-[ "$(plan_admitted_claim "$REPO_GHP" "$SGHP" '1,3' '{"1":2,"3":4}')" = "ok" ] \
-  || gov_fail "(7f-gh-admitted, F3) a github plan complete decomposing every stamped consideration was rejected"
-echo "  ok (7f-gh-admitted, F3) the admitted-set claim runs on the github path from the start-stamped set (omission refused)"
+contract start --repo "$REPO_GHP" --session "$SGHP" --command plan --plugin-root "$GOV_PLUGIN" --args 'gh-plan' --source user >/dev/null
+if FAKE_MERGED_PRS="42" gh_finish --repo "$REPO_GHP" --session "$SGHP" --command plan --status complete \
+     --evidence-json "$(plan_ev "$GOODMX" '{"1":2}' '[1]')" 2>/dev/null; then
+  gov_fail "(7f-gh-admitted, F2) a github plan complete driven through the full walker was ACCEPTED while the live board was UNREADABLE (rule B: an unreadable truth must refuse)"
+fi
+echo "  ok (7f-gh-admitted, F2) the full plan walker runs through the production start path on github and REFUSES an unreadable-board completion (rule B; no private-claim crutch)"
 
 # (7f-sabotage) each re-derived claim fails closed independently (children present so the reach is real).
 python3 "$GOV_TRK" --tracker "$REPO_PLAN/TRACKER.md" create --title "second consideration" \
@@ -965,6 +1083,59 @@ contract finish --repo "$REPO_UF2" --session "$SUF2" --command uninstall --statu
   || gov_fail "(9-flags, F6) an uninstall --close-issues whose board is gone (no open issues) was rejected"
 echo "  ok (9-flags, F6) a stamped --close-issues is verified by a real board read (unhonored open issue → refused)"
 
+# (9-delete-github, ROUND-5 F5) on a GITHUB repo, --delete-board must be proven by a REAL board-absence
+# read (the project genuinely gone), NEVER by an absent local TRACKER.md (github repos normally have
+# none). With no board read available, absence cannot be positively confirmed → the close REFUSES
+# (rule B) instead of passing from the missing TRACKER.md.
+REPO_DB="$WORK/repo-db"; mkdir -p "$REPO_DB/docs/workflow" "$REPO_DB/.claude"
+printf 'backend: github\nproject_number: 10\n' > "$REPO_DB/docs/workflow/tracker-config.yaml"
+printf 'wf\n' > "$REPO_DB/WORKFLOW.md"
+printf '{"enabledPlugins":{"idc@idc-workflow":true}}\n' > "$REPO_DB/.claude/settings.json"
+python3 "$RECEIPT" stamp --repo "$REPO_DB" --out "$REPO_DB/docs/workflow/install-receipt.yaml" \
+  --plugin-version "$RUN_VER" WORKFLOW.md docs/workflow/tracker-config.yaml >/dev/null || gov_fail "(9-delete-github) stamp failed"
+DB_ARCH="idc-archive-db.tar.gz"; : > "$REPO_DB/$DB_ARCH"
+SDB="sdb-$$-$(basename "$WORK")"
+db_ev() { printf '{"schema_version":1,"refs":{"outcome":"applied","settings":".claude/settings.json","archive":"%s"}}' "$DB_ARCH"; }
+contract start --repo "$REPO_DB" --session "$SDB" --command uninstall --plugin-root "$GOV_PLUGIN" \
+  --args 'uninstall --delete-board' --source user >/dev/null
+rm -f "$REPO_DB/WORKFLOW.md"   # remove the receipt footprint; a github repo has NO TRACKER.md to begin with
+python3 "$GOV_PLUGIN/scripts/idc_settings_json.py" disable "$REPO_DB/.claude/settings.json" idc@idc-workflow >/dev/null
+# fake gh errors on `repo view`/`project view` → the github board-absence cannot be confirmed → refuse.
+if PATH="$FAKE_BIN:$PATH" contract finish --repo "$REPO_DB" --session "$SDB" --command uninstall --status complete \
+     --evidence-json "$(db_ev)" 2>/dev/null; then
+  gov_fail "(9-delete-github, F5) a github --delete-board close PASSED from an absent local TRACKER.md without a real board-absence read"
+fi
+echo "  ok (9-delete-github, F5) --delete-board requires a real board-absence read (an absent local TRACKER.md on a github repo is NOT proof)"
+
+# (9-noaction-flags, ROUND-5 F5) a no-action must FIRST verify NO board flags were stamped (a
+# --close-issues/--delete-board run requested board work → not a no-action) AND that runtime artifacts
+# (TRACKER.md) don't need removal.
+REPO_NA="$WORK/repo-na"; mkdir -p "$REPO_NA/docs/workflow"
+printf 'backend: filesystem\n' > "$REPO_NA/docs/workflow/tracker-config.yaml"
+python3 "$RECEIPT" stamp --repo "$REPO_NA" --out "$REPO_NA/docs/workflow/install-receipt.yaml" \
+  --plugin-version "$RUN_VER" docs/workflow/tracker-config.yaml >/dev/null || gov_fail "(9-noaction-flags) stamp failed"
+# (i) a no-action while --delete-board was stamped → refused (there WAS board work requested).
+SNA="sna-$$-$(basename "$WORK")"
+contract start --repo "$REPO_NA" --session "$SNA" --command uninstall --plugin-root "$GOV_PLUGIN" --args 'uninstall --delete-board' --source user >/dev/null
+if contract finish --repo "$REPO_NA" --session "$SNA" --command uninstall --status complete \
+     --evidence-json '{"schema_version":1,"refs":{"outcome":"no-action"}}' 2>/dev/null; then
+  gov_fail "(9-noaction-flags, F5) a no-action while --delete-board was stamped (board work requested) was accepted"
+fi
+# (ii) a no-action while a runtime TRACKER.md is still present → refused (a runtime artifact must be removed).
+SNA2="sna2-$$-$(basename "$WORK")"
+printf 'idc data\n' > "$REPO_NA/TRACKER.md"
+contract start --repo "$REPO_NA" --session "$SNA2" --command uninstall --plugin-root "$GOV_PLUGIN" --args 'uninstall' --source user >/dev/null
+if contract finish --repo "$REPO_NA" --session "$SNA2" --command uninstall --status complete \
+     --evidence-json '{"schema_version":1,"refs":{"outcome":"no-action"}}' 2>/dev/null; then
+  gov_fail "(9-noaction-flags, F5) a no-action while a runtime TRACKER.md is still present was accepted"
+fi
+# (iii) no flags stamped + no runtime artifacts + all footprints absent → no-action accepted.
+rm -f "$REPO_NA/TRACKER.md"
+contract finish --repo "$REPO_NA" --session "$SNA2" --command uninstall --status complete \
+  --evidence-json '{"schema_version":1,"refs":{"outcome":"no-action"}}' \
+  || gov_fail "(9-noaction-flags, F5) a clean no-action (no flags, no runtime artifacts, footprints absent) was rejected"
+echo "  ok (9-noaction-flags, F5) no-action verifies stamped flags absent + runtime TRACKER.md removed"
+
 # ============================================================================================
 # (10, F2) intake mode is DURABLE on the record: coverage is re-verified from the RECORD on EVERY path,
 # even a finish that omits the intake fields, and INCLUDING waiting_gate.
@@ -1165,30 +1336,54 @@ contract finish --repo "$REPO_RC" --session "$SR" --command recirculate --status
   || gov_fail "(13-mismatch, F4) could not close the disposition-equality record honestly"
 echo "  ok (13-mismatch, F4) a manifest-unit closeout disposition must EQUAL the durable manifest state ('verified_done' != 'materialized' refused)"
 
-# (13-ticket, F4) a bare `#<ticket>` requested item gets a per-ticket board re-read: the board Status
-# must be consistent with the claimed disposition (a terminal 'drained' needs the ticket Done; a
-# non-terminal 'paused' needs it still open). The inbox is settled (ticket #1 Done → reconciliation complete).
+# (13-ticket, ROUND-5 F3) a bare `#<ticket>` terminal disposition is re-derived from DURABLE evidence:
+# the board Stage AND Status PLUS the transition journal (how the ticket reached Done). The ONLY
+# durably-distinguishable recirc terminal is `drained` — the guarded recirc-retirement door
+# (`dispose disposition=drained`, Stage stays Recirculation). `admitted`/`materialized` cannot be told
+# apart from a plain drained retirement on a bare Done ticket, so a mismatched terminal disposition is
+# refused (rule B); a raw-closed Done (no dispose/drained journal record) is refused too.
 REPO_RCT="$WORK/repo-rct"; mkdir -p "$REPO_RCT/docs/workflow"
 printf 'backend: filesystem\n' > "$REPO_RCT/docs/workflow/tracker-config.yaml"
 python3 "$GOV_TRK" --tracker "$REPO_RCT/TRACKER.md" init >/dev/null || gov_fail "(13-ticket) could not init REPO_RCT"
-python3 "$GOV_TRK" --tracker "$REPO_RCT/TRACKER.md" create --title t1 --stage Recirculation --status Done >/dev/null  # #1 Done
+python3 "$GOV_TRK" --tracker "$REPO_RCT/TRACKER.md" create --title t1 --stage Recirculation --status Done >/dev/null  # #1 Done via the guarded door
+python3 "$GOV_TRK" --tracker "$REPO_RCT/TRACKER.md" create --title t2 --stage Recirculation --status Done >/dev/null  # #2 Done RAW (no journal)
+# the guarded recirc-retirement door journaled `dispose disposition=drained` for #1 (but NOT #2).
+journal_line "$REPO_RCT" '{"op":"dispose","item":1,"disposition":"drained","when":"2026-07-13T00:00:00Z","who":"t","what":"dispose #1 Recirculation -> Done [drained]"}'
 SRT2="srt2-$$-$(basename "$WORK")"
 # (i) omitting the requested ticket's closeout is refused.
 contract start --repo "$REPO_RCT" --session "$SRT2" --command recirculate --plugin-root "$GOV_PLUGIN" --args '#1' --source user >/dev/null
 if contract finish --repo "$REPO_RCT" --session "$SRT2" --command recirculate --status complete \
      --evidence-json '{"schema_version":1,"refs":{"closeouts":{}}}' 2>/dev/null; then
-  gov_fail "(13-ticket, F4) a recirculate complete with closeouts:{} against a NAMED bare ticket was accepted"
+  gov_fail "(13-ticket, F3) a recirculate complete with closeouts:{} against a NAMED bare ticket was accepted"
 fi
-# (ii) a board-inconsistent disposition ('paused' while the ticket reads Done) is refused.
+# (ii) a non-terminal disposition ('paused' while the ticket reads Done) is refused.
 if contract finish --repo "$REPO_RCT" --session "$SRT2" --command recirculate --status complete \
      --evidence-json '{"schema_version":1,"refs":{"closeouts":{"#1":"paused"}}}' 2>/dev/null; then
-  gov_fail "(13-ticket, F4) a bare-ticket closeout claiming 'paused' while the ticket reads Done was accepted"
+  gov_fail "(13-ticket, F3) a bare-ticket closeout claiming 'paused' while the ticket reads Done was accepted"
 fi
-# (iii) the board-consistent disposition ('drained' while the ticket is Done) is accepted.
+# (iii) 'admitted' claimed for a bare Done ticket that was DRAINED is refused (the durable evidence
+# proves a `drained` retirement; admitted/drained/materialized are not interchangeable on a bare Done).
+if contract finish --repo "$REPO_RCT" --session "$SRT2" --command recirculate --status complete \
+     --evidence-json '{"schema_version":1,"refs":{"closeouts":{"#1":"admitted"}}}' 2>/dev/null; then
+  gov_fail "(13-ticket, F3) a bare-ticket closeout claiming 'admitted' for a DRAINED Done ticket was accepted (dispositions interchangeable on a Done)"
+fi
+# (iv) 'materialized' likewise mismatches the durable drained evidence → refused.
+if contract finish --repo "$REPO_RCT" --session "$SRT2" --command recirculate --status complete \
+     --evidence-json '{"schema_version":1,"refs":{"closeouts":{"#1":"materialized"}}}' 2>/dev/null; then
+  gov_fail "(13-ticket, F3) a bare-ticket closeout claiming 'materialized' for a DRAINED Done ticket was accepted"
+fi
+# (v) the durable-evidence-matching disposition ('drained' with a dispose/drained journal record) accepts.
 contract finish --repo "$REPO_RCT" --session "$SRT2" --command recirculate --status complete \
   --evidence-json '{"schema_version":1,"refs":{"closeouts":{"#1":"drained"}}}' \
-  || gov_fail "(13-ticket, F4) a bare-ticket 'drained' closeout consistent with the Done board ticket was rejected"
-echo "  ok (13-ticket, F4) a bare-ticket closeout gets a per-ticket board re-read (omitted / board-inconsistent refused)"
+  || gov_fail "(13-ticket, F3) a bare-ticket 'drained' closeout corroborated by the dispose/drained journal record was rejected"
+# (vi) 'drained' claimed for #2 — Done but RAW-CLOSED (no dispose/drained journal record) → refused (rule B).
+SRT2B="srt2b-$$-$(basename "$WORK")"
+contract start --repo "$REPO_RCT" --session "$SRT2B" --command recirculate --plugin-root "$GOV_PLUGIN" --args '#2' --source user >/dev/null
+if contract finish --repo "$REPO_RCT" --session "$SRT2B" --command recirculate --status complete \
+     --evidence-json '{"schema_version":1,"refs":{"closeouts":{"#2":"drained"}}}' 2>/dev/null; then
+  gov_fail "(13-ticket, F3) a bare-ticket 'drained' closeout for a RAW-CLOSED Done ticket (no guarded-retirement journal record) was accepted (rule B)"
+fi
+echo "  ok (13-ticket, F3) a bare-ticket terminal disposition is re-derived from Stage+Status+journal (interchangeable/raw-closed/non-terminal refused; journal-corroborated drained accepted)"
 
 # (13-gate, F4) recirculate waiting_gate reads the referenced gate for real — an OPEN gate on the board
 # is a valid wait; a nonexistent (hollow) or Done gate is refused.
@@ -1237,10 +1432,18 @@ if contract finish --repo "$REPO_JAN" --session "$S6" --command janitor --status
 fi
 # (ii) a hand-written report NOT bound to the record's nonce is refused (must be written by the scanner run).
 python3 "$CR" --cwd "$REPO_JAN" write --kind janitor --session "$S6" \
-  --payload-json '{"scanner_exit":1,"clean":false,"nonce":"forged-nonce"}' >/dev/null
+  --payload-json '{"scanner_exit":1,"clean":false,"nonce":"forged-nonce","produced_by":"idc_git_janitor.py"}' >/dev/null
 if contract finish --repo "$REPO_JAN" --session "$S6" --command janitor --status complete \
      --evidence-json '{"schema_version":1,"refs":{}}' 2>/dev/null; then
   gov_fail "(14-janitor) a janitor complete backed by a report NOT bound to the record nonce was accepted"
+fi
+# (ii-prov, ROUND-5 F7) a hand-written report bound to the record nonce but LACKING the scanner's
+# provenance stamp is refused — a hand-written report cannot be passed off as a real scan.
+python3 "$CR" --cwd "$REPO_JAN" write --kind janitor --session "$S6" \
+  --payload-json "$(printf '{"scanner_exit":0,"clean":true,"nonce":"%s"}' "$(rec_nonce "$REPO_JAN" "$S6" janitor)")" >/dev/null
+if contract finish --repo "$REPO_JAN" --session "$S6" --command janitor --status complete \
+     --evidence-json '{"schema_version":1,"refs":{}}' 2>/dev/null; then
+  gov_fail "(14-janitor, F7) a janitor complete backed by a HAND-WRITTEN report (no scanner provenance) was accepted"
 fi
 # (iii) the honest path: RUN the real scanner, which writes the report bound to the record's nonce.
 JAN_NONCE="$(rec_nonce "$REPO_JAN" "$S6" janitor)"
@@ -1388,5 +1591,48 @@ FAKE_MERGED_PRS="706" FAKE_ISSUE_DIR="$INC_ISSUES" gh_finish --repo "$REPO_INC" 
   --command think --status complete --evidence-json "$(inc_ev "$INC_REL")" \
   || gov_fail "(15) the HEALTHY incident shape (every one of the 12 units durably disposed) was rejected"
 echo "  ok (15, F7) the incident-sized Think closeout REFUSES until every U0–U8/B1/B2 unit has a durable disposition"
+
+# ============================================================================================
+# (16, ROUND-5 F1 — rule A) MONOTONIC OBLIGATIONS. A second command_start for the same
+# (session, command) may only UNION the stamped obligation, never replace/narrow it. A re-entry with a
+# SMALLER arg set still owes every obligation the record was opened with.
+rec_field_json() {  # $1=repo $2=session $3=command $4=field -> the active record's field as JSON (or null)
+  python3 -c 'import json,sys
+d=json.load(open(sys.argv[1]+"/.idc-session-state.json"))
+r=next((c for c in d["commands"] if c.get("state")=="active" and c.get("session_id")==sys.argv[2] and c.get("command")==sys.argv[3]),{})
+print(json.dumps(r.get(sys.argv[4])))' "$1" "$2" "$3" "$4"
+}
+field_has() {  # $1=json-list $2=needle -> exit 0 iff needle is present (string-compared)
+  python3 -c 'import json,sys; lst=json.loads(sys.argv[1]) or []; sys.exit(0 if sys.argv[2] in [str(x) for x in lst] else 1)' "$1" "$2"
+}
+SM="sm-$$-$(basename "$WORK")"
+# (16a) build `#1 #2` restart as `#1` still owes BOTH issues.
+contract start --repo "$REPO" --session "$SM" --command build --plugin-root "$GOV_PLUGIN" --args '#1 #2' --source user >/dev/null
+contract start --repo "$REPO" --session "$SM" --command build --plugin-root "$GOV_PLUGIN" --args '#1' --source user >/dev/null
+BR="$(rec_field_json "$REPO" "$SM" build build_requested)"
+field_has "$BR" 1 && field_has "$BR" 2 \
+  || gov_fail "(16a, F1) a build restart with FEWER issues SHED an obligation (build_requested=$BR, expected #1 AND #2)"
+echo "  ok (16a, F1) build requested-set unions across a narrowing restart (both #1 and #2 still owed)"
+# (16b) uninstall two-flag restart as one still owes BOTH flags.
+contract start --repo "$REPO" --session "$SM" --command uninstall --plugin-root "$GOV_PLUGIN" --args 'uninstall --close-issues --delete-board' --source user >/dev/null
+contract start --repo "$REPO" --session "$SM" --command uninstall --plugin-root "$GOV_PLUGIN" --args 'uninstall --close-issues' --source user >/dev/null
+UFM="$(rec_field_json "$REPO" "$SM" uninstall uninstall_flags)"
+field_has "$UFM" close-issues && field_has "$UFM" delete-board \
+  || gov_fail "(16b, F1) an uninstall restart with FEWER flags SHED an obligation (uninstall_flags=$UFM, expected close-issues AND delete-board)"
+echo "  ok (16b, F1) uninstall flag-set unions across a narrowing restart (both flags still owed)"
+# (16c) think intake restart with FEWER units still owes BOTH selected units (same manifest).
+contract start --repo "$REPO" --session "$SM" --command think --plugin-root "$GOV_PLUGIN" --args '--doc mono.json --unit U0,U1' --source user >/dev/null
+contract start --repo "$REPO" --session "$SM" --command think --plugin-root "$GOV_PLUGIN" --args '--doc mono.json --unit U0' --source user >/dev/null
+TUM="$(rec_field_json "$REPO" "$SM" think intake_units)"
+field_has "$TUM" U0 && field_has "$TUM" U1 \
+  || gov_fail "(16c, F1) a think intake restart with FEWER units SHED an obligation (intake_units=$TUM, expected U0 AND U1)"
+echo "  ok (16c, F1) think intake unit-set unions across a narrowing restart (both units still owed)"
+# (16d) recirculate named-item restart with FEWER items still owes BOTH.
+contract start --repo "$REPO" --session "$SM" --command recirculate --plugin-root "$GOV_PLUGIN" --args 'mono.json#U0 mono.json#U1' --source user >/dev/null
+contract start --repo "$REPO" --session "$SM" --command recirculate --plugin-root "$GOV_PLUGIN" --args 'mono.json#U0' --source user >/dev/null
+RRM="$(rec_field_json "$REPO" "$SM" recirculate recirc_requested)"
+field_has "$RRM" mono.json#U0 && field_has "$RRM" mono.json#U1 \
+  || gov_fail "(16d, F1) a recirculate restart with FEWER named items SHED an obligation (recirc_requested=$RRM, expected both)"
+echo "  ok (16d, F1) recirculate requested-set unions across a narrowing restart (both named items still owed)"
 
 echo "PASS: the IDC command lifecycle envelope + wave-3 evidence contract hold — every terminal fact is re-derived from durable state (consideration re-run, gate marker/disposal, pointer admission, admitted-consideration set, receipt/report/journal, real gh reads), a forged or omitting claim is refused across all eleven commands, and the 2026-07-12 incident shape is blocked at Think closeout"

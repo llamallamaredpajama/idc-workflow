@@ -265,6 +265,9 @@ def gh_json(args, repo):
 PR_LIST_LIMIT = 1000
 ISSUE_LIST_LIMIT = 2000
 JOURNAL_REL = os.path.join("docs", "workflow", "transition-journal.ndjson")
+# The scanner's provenance stamp on its persisted report (round-5 finding 7): the /idc:janitor closeout
+# requires it, so a hand-written report that omits it is refused (the report must come from the scanner).
+JANITOR_PROVENANCE = "idc_git_janitor.py"
 # The journal's advisory-lock SIDECAR, as a repo-root .gitignore pattern (always forward-slash). A
 # runtime-only token both rotation and journal_append create when they lock — never committed. Derived
 # from JOURNAL_REL so the ignore rule and the lock path can't drift.
@@ -753,6 +756,9 @@ def counts(findings):
 # from it, so the process exit that gates the e2e post-condition can never disagree with the report:
 # indeterminate dimensions win (fail closed); else findings are actionable; else coherent.
 _VERDICT_EXIT = {"findings": 1, "coherent": 0, "indeterminate": 2}
+# The documented ground-truth-unestablished exit (a build_ctx failure or an indeterminate scan). The
+# only exit that grounds a /idc:janitor `blocked_external` — round-5 finding 7 writes the report on it.
+_JANITOR_BLOCKED_EXIT = _VERDICT_EXIT["indeterminate"]
 # The human banner for each verdict. Kept in lockstep with _VERDICT_EXIT so the printed line NEVER
 # disagrees with the exit code (the nit this closes: an indeterminate scan — exit 2 — used to print
 # "COHERENT").
@@ -1187,7 +1193,18 @@ def main():
         ensure_lock_gitignored(os.path.abspath(args.repo))
         sys.exit(0)
 
-    ctx = build_ctx(args)
+    # ROUND-5 finding 7: a ground-truth failure in build_ctx (not a git repo, no default branch,
+    # `git worktree list` failed, github without owner/project, or an unreadable board) exits 2 BEFORE
+    # the normal scan-report write below. Catch that exit-2 and write the nonce-bound report FIRST, so
+    # the /idc:janitor closeout's `blocked_external` can re-derive the honest exit-2 from the artifact
+    # the SCANNER wrote — no hand-written report. The exit code is preserved (re-raised).
+    try:
+        ctx = build_ctx(args)
+    except SystemExit as exc:
+        if exc.code == _JANITOR_BLOCKED_EXIT:
+            _write_scan_report(os.path.abspath(args.repo), args.report_session, args.report_nonce,
+                               _JANITOR_BLOCKED_EXIT)
+        raise
 
     if args.rotate_journal:
         journal_path = os.path.join(ctx["repo"], JOURNAL_REL)
@@ -1254,9 +1271,12 @@ def _write_scan_report(repo, session, nonce, exit_code):
     try:
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "hooks"))
         import idc_command_report as CR  # noqa: E402 — lazy (scripts/hooks on sys.path)
+        # `produced_by` is the scanner's provenance stamp (round-5 finding 7): the /idc:janitor closeout
+        # requires it, so a hand-written report that omits it cannot be passed off as a real scan.
         CR.write_report(repo, "janitor",
                         {"scanner_exit": int(exit_code), "clean": int(exit_code) == 0,
-                         "nonce": str(nonce) if nonce else None},
+                         "nonce": str(nonce) if nonce else None,
+                         "produced_by": JANITOR_PROVENANCE},
                         session_id=session)
     except Exception:  # noqa: BLE001 — persisting the report must never break the scan's exit contract
         pass

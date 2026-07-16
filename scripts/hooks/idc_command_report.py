@@ -68,6 +68,66 @@ def _valid_kind(kind):
     return isinstance(kind, str) and bool(_KIND_RE.fullmatch(kind))
 
 
+# ── the doctor report schema (round-5 finding 6) ──────────────────────────────────────────────────
+# A doctor run's persisted report must record ALL ten checks with a consistent verdict, so a forged
+# 2-row / arbitrary-JSON report cannot pass the closeout. The schema is enforced in ONE place, used
+# BOTH here (the writer refuses to persist a non-conforming doctor payload — finding 6f) AND by the
+# command contract's closeout (which re-reads + re-validates via this same function — finding 6e).
+_DOCTOR_ROW_IDS = list(range(1, 11))                 # rows 1..10, each present exactly once
+_DOCTOR_RESULTS = {"PASS", "FAIL", "SKIP"}
+_DOCTOR_SCRIPT_ROWS = {10}                           # rows doctor drives via a deterministic script + exit
+_DOCTOR_HELPER_RE = re.compile(r"^[A-Za-z0-9_.-]+\.(py|sh)$")
+
+
+def doctor_verdict_aggregate(rows):
+    """The verdict DERIVED from the row outcomes: FAIL if any row FAILed, else PASS. A SKIP row (a check
+    that could not be established) never drives the verdict. A doctor run completing with a FAIL verdict
+    is still a complete run — the verdict describes the REPO, not whether the run finished."""
+    return "FAIL" if any(isinstance(r, dict) and r.get("result") == "FAIL" for r in rows) else "PASS"
+
+
+def validate_doctor_payload(payload):
+    """Validate a doctor report payload against the doctor row contract (round-5 finding 6). Returns
+    (True, "") when it conforms, else (False, reason). Requirements: a non-empty `nonce`; `rows` a list
+    carrying EXACTLY ids 1..10 (each once, unique) with each `result` in {PASS,FAIL,SKIP}; a
+    script-backed row (id in _DOCTOR_SCRIPT_ROWS) additionally carrying a `script` naming a helper
+    basename (.py/.sh) + an integer `exit`; and a `verdict` in {PASS,FAIL,SKIP} EQUAL to the derived
+    aggregation of the row outcomes. A 2-row / arbitrary-JSON report fails."""
+    if not isinstance(payload, dict):
+        return False, "payload must be a JSON object"
+    nonce = payload.get("nonce")
+    if not (isinstance(nonce, str) and nonce.strip()):
+        return False, "doctor payload requires a non-empty `nonce` bound to the command record"
+    rows = payload.get("rows")
+    if not isinstance(rows, list):
+        return False, "doctor payload requires `rows` (a list)"
+    ids = []
+    for row in rows:
+        if not isinstance(row, dict):
+            return False, "each doctor row must be an object {id, result, ...} (a bare string is not a row)"
+        rid = row.get("id")
+        if isinstance(rid, bool) or not isinstance(rid, int):
+            return False, "each doctor row requires an integer `id`"
+        if row.get("result") not in _DOCTOR_RESULTS:
+            return False, f"doctor row {rid}: `result` must be one of {sorted(_DOCTOR_RESULTS)}"
+        if rid in _DOCTOR_SCRIPT_ROWS:
+            script = row.get("script")
+            if not (isinstance(script, str) and _DOCTOR_HELPER_RE.match(script)):
+                return False, f"doctor row {rid} is script-backed and must name its `script` helper (.py/.sh)"
+            if isinstance(row.get("exit"), bool) or not isinstance(row.get("exit"), int):
+                return False, f"doctor row {rid} is script-backed and must record the integer `exit`"
+        ids.append(rid)
+    if sorted(ids) != _DOCTOR_ROW_IDS:
+        return False, f"doctor rows must be EXACTLY ids {_DOCTOR_ROW_IDS} each once (got {sorted(ids)})"
+    verdict = payload.get("verdict")
+    if verdict not in _DOCTOR_RESULTS:
+        return False, f"doctor `verdict` must be one of {sorted(_DOCTOR_RESULTS)}"
+    expected = doctor_verdict_aggregate(rows)
+    if verdict != expected:
+        return False, f"doctor verdict {verdict!r} != the derived aggregation of the row outcomes ({expected!r})"
+    return True, ""
+
+
 # ── paths ──────────────────────────────────────────────────────────────────────────────────────────
 def report_path(cwd, kind):
     """The `.idc-<kind>-report.json` path at the governed workspace root `cwd`."""
@@ -146,6 +206,14 @@ def write_report(cwd, kind, payload, session_id=None, ts=None):
     if not isinstance(payload, dict):
         idc_hook_lib.warn("command-report: refusing a non-object payload")
         return False
+    # A doctor report is the ONLY door to a doctor closeout, so the generic writer enforces the
+    # doctor-specific schema HERE (round-5 finding 6f): a 2-row / arbitrary / inconsistent-verdict
+    # payload is refused at the write door, not merely at the closeout.
+    if kind == "doctor":
+        ok, reason = validate_doctor_payload(payload)
+        if not ok:
+            idc_hook_lib.warn(f"command-report: refusing a doctor payload that fails the doctor schema: {reason}")
+            return False
     if not idc_hook_lib.is_governed_repo(cwd):
         return False
     ensure_gitignored(cwd)

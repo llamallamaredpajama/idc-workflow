@@ -314,9 +314,22 @@ def _prune_finished(commands):
     return active + finished
 
 
+def _union_str_list(old, new):
+    """Order-preserving, de-duplicated UNION of two string lists (round-5 finding 1, rule A —
+    monotonic obligations). Prior obligations come first so a re-start can only ADD to the stamped
+    set, never reorder-away or narrow it. Non-list inputs are treated as empty."""
+    out = []
+    for value in list(old if isinstance(old, list) else []) + list(new if isinstance(new, list) else []):
+        s = str(value)
+        if s not in out:
+            out.append(s)
+    return out
+
+
 def command_start(cwd, session_id, command, plugin_version, args_sha256, source,
                   intake_manifest=None, intake_units=None, recirc_requested=None,
-                  build_requested=None, plan_admitted=None, uninstall_flags=None, nonce=None):
+                  build_requested=None, plan_admitted=None, uninstall_flags=None, nonce=None,
+                  build_frontier=None):
     """Atomic UPSERT of the active command record by (session_id, command) — never duplicates an
     active record (a re-entry of the same command in the same session updates the one record in
     place). REPO-GATED: a silent no-op outside a governed repo (returns `{}`). Preserves the taint
@@ -364,6 +377,12 @@ def command_start(cwd, session_id, command, plugin_version, args_sha256, source,
     # validator compares against the STAMPED set + live reads, never caller-supplied keys.
     if build_requested:
         rec["build_requested"] = [str(b) for b in build_requested]
+    # Durable whole-frontier marker (round-5 finding 4): a Build run with NO explicit issue set records
+    # the eligible-frontier issue set it was started against, so `complete` requires a merged-PR receipt
+    # per stamped-frontier issue OR an oracle-confirmed empty remaining frontier. `[]` (a readable but
+    # empty frontier at start) is stamped too — distinct from None (frontier never read).
+    if build_frontier is not None:
+        rec["build_frontier"] = [str(b) for b in build_frontier]
     if plan_admitted is not None:
         rec["plan_admitted"] = [str(p) for p in plan_admitted]
     if uninstall_flags:
@@ -380,28 +399,43 @@ def command_start(cwd, session_id, command, plugin_version, args_sha256, source,
         for i, c in enumerate(commands):
             if (c.get("session_id") == session_id and c.get("command") == command
                     and c.get("state") == _CMD_ACTIVE):
-                # MONOTONIC intake marker (round-2 F3-r2): a re-start of an ACTIVE intake-mode record
-                # can never silently shed its coverage obligation. If the existing active record
-                # carries an intake manifest and this re-start supplied none, carry the prior marker
-                # FORWARD onto the upsert — so a plain re-entry of the same command cannot make an
-                # intake-mode run look non-intake and slip a dropped-unit close past the coverage
-                # check. (A re-start that DOES supply its own intake ref replaces it as usual.)
-                if not intake_manifest and c.get("intake_manifest"):
-                    rec["intake_manifest"] = c.get("intake_manifest")
-                    rec["intake_units"] = list(c.get("intake_units") or [])
-                # MONOTONIC recirc requested-set marker: a re-start that supplies no requested set
-                # carries the prior one forward, so a plain re-entry cannot shed the coverage obligation.
-                if not recirc_requested and c.get("recirc_requested"):
-                    rec["recirc_requested"] = list(c.get("recirc_requested") or [])
-                # MONOTONIC rule-A markers (wave-4): a plain re-entry carries every prior obligation
-                # marker forward, so it can never silently shed the requested/admitted/flags/nonce it
-                # was opened with.
-                if not build_requested and c.get("build_requested"):
-                    rec["build_requested"] = list(c.get("build_requested") or [])
-                if plan_admitted is None and c.get("plan_admitted") is not None:
-                    rec["plan_admitted"] = list(c.get("plan_admitted") or [])
-                if not uninstall_flags and c.get("uninstall_flags"):
-                    rec["uninstall_flags"] = list(c.get("uninstall_flags") or [])
+                # MONOTONIC OBLIGATIONS (round-5 finding 1, rule A). A re-start of the SAME
+                # (session, command) may only UNION each stamped obligation with the prior record —
+                # NEVER replace or narrow it. So `/build #1 #2` re-entered as `/build #1` still owes
+                # BOTH, an uninstall two-flag run re-entered with one flag still owes BOTH, and an
+                # intake-mode Think re-entered with fewer units still owes every prior unit. (Wave-4
+                # only carried a marker forward when the re-start supplied NONE; a non-empty smaller
+                # value silently shed the difference — the exact regression this closes.)
+                # Intake manifest: keep the prior manifest whenever this re-start binds none OR the
+                # SAME manifest (union its units); a re-start that binds a DIFFERENT manifest is a
+                # genuinely new intake reference and replaces it (already set on `rec`).
+                prior_manifest = c.get("intake_manifest")
+                if prior_manifest and (not intake_manifest or str(intake_manifest) == prior_manifest):
+                    rec["intake_manifest"] = prior_manifest
+                    rec["intake_units"] = _union_str_list(c.get("intake_units"),
+                                                          rec.get("intake_units"))
+                # Recirculate requested set, Build requested set, Uninstall flags: union with the prior.
+                unioned_recirc = _union_str_list(c.get("recirc_requested"), recirc_requested)
+                if unioned_recirc:
+                    rec["recirc_requested"] = unioned_recirc
+                unioned_build = _union_str_list(c.get("build_requested"), build_requested)
+                if unioned_build:
+                    rec["build_requested"] = unioned_build
+                # Build whole-frontier set: union the prior stamp with this re-start's live read (a
+                # frontier issue built between restarts stays in the required coverage set).
+                prior_frontier = c.get("build_frontier")
+                if prior_frontier is not None or build_frontier is not None:
+                    rec["build_frontier"] = _union_str_list(prior_frontier, build_frontier)
+                unioned_flags = _union_str_list(c.get("uninstall_flags"), uninstall_flags)
+                if unioned_flags:
+                    rec["uninstall_flags"] = sorted(set(unioned_flags))
+                # Plan admitted set: union the prior stamp with this re-start's live read (a
+                # consideration the plan itself retires between restarts stays in the required set).
+                prior_admitted = c.get("plan_admitted")
+                if prior_admitted is not None or plan_admitted is not None:
+                    rec["plan_admitted"] = _union_str_list(prior_admitted, plan_admitted)
+                # Nonce is per-record identity, not an obligation set: keep the prior one when this
+                # re-start supplied none, so a diagnostic report stays bound to the same record.
                 if not nonce and c.get("nonce"):
                     rec["nonce"] = c.get("nonce")
                 commands[i] = rec

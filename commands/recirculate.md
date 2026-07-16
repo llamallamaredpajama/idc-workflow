@@ -140,9 +140,14 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   start), EVERY named item must carry a closeout whose disposition is **re-checked against durable
   state**: a `<manifest>#<unit>` closeout's disposition must **EQUAL** the durable manifest disposition
   (`materialized`/`verified_done`/`ignored` — never `queued`); a bare `#<ticket>` closeout's disposition
-  (`admitted`/`drained`/`gated`/`paused`/`materialized`) gets a **per-ticket board re-read** proving the
-  ticket's Status is consistent (a terminal disposition ⇒ the ticket is Done; a paused/gated one ⇒ still
-  open). `closeouts:{}` is valid only for a bare full-inbox drain (no named item).
+  gets a **per-ticket re-derivation from Stage + Status + the transition journal** (how the ticket
+  reached its state). A non-terminal `gated`/`paused` requires the ticket **still open** (not Done). The
+  only durably-distinguishable terminal is **`drained`** — the ticket reached Done through the guarded
+  recirc-retirement door (`dispose --disposition drained`, journal-recorded, Stage still
+  `Recirculation`). A **raw-closed Done** (no `dispose/drained` journal record) is refused, and
+  `admitted`/`materialized` **cannot be told apart from a plain drained retirement on a bare Done ticket**
+  so a mismatched terminal disposition is refused (rule B: an unreadable/undistinguishable truth is a
+  refusal, never a pass). `closeouts:{}` is valid only for a bare full-inbox drain (no named item).
 - **`waiting_gate`** — a valid requirements gate / Think PR is **open** (a gated backflow paused behind
   its gate). Evidence refs: `gate:<ref>` (and `think_pr:<N>` when the gate is a Think PR). The validator
   reads the referenced gate **for real** — a Think PR must read OPEN, a gate issue must be present and

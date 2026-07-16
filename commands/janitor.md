@@ -92,11 +92,14 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
 
 - **`complete`** — the scanner recorded a real verdict: exit **0** (COHERENT) or exit **1** (findings,
   **without claiming clean**). The closeout **re-reads the SCANNER-written janitor report**
-  (`.idc-janitor-report.json`) and requires it **bound to this record's nonce** — a caller `scanner_exit`
-  integer, or a report not bound to the record, is refused; a findings run (exit 1) records
-  `clean:false`. Evidence refs: `refs:{}` (the report is the proof).
+  (`.idc-janitor-report.json`) and requires it **bound to this record's nonce** AND carrying the
+  scanner's own **provenance stamp** (`produced_by`) — a caller `scanner_exit` integer, a report not
+  bound to the record, or a **hand-written report lacking the scanner provenance** is refused (the report
+  must come from the real scanner); a findings run (exit 1) records `clean:false`. Even a ground-truth
+  failure (exit 2) now writes the report BEFORE exiting, so the honest exit-2 path never needs a
+  hand-written report. Evidence refs: `refs:{}` (the report is the proof).
 - **`blocked_external`** — the scanner exited **2** (ground truth could not be established); the
-  scanner-written report records `scanner_exit:2` (nonce-bound) — cite it:
+  scanner-written, provenance-stamped report records `scanner_exit:2` (nonce-bound) — cite it:
   `blocker:{helper:"idc_git_janitor.py", exit:2, diagnostic}` (only the **documented blocked exit 2**
   grounds this — exit 1 is a completed scan with findings, i.e. `complete`, not blocked; the cited exit
   must MATCH the persisted report). Report it as blocked, never as a coherent repo.

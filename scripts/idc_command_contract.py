@@ -130,6 +130,9 @@ _DRAIN_HELPER = "idc_autorun_drain.py"
 # The janitor scanner persists its exit to the durable session-scoped janitor report (idc_command_report),
 # so a janitor blocked_external's cited exit is RE-DERIVED + MATCHED against that artifact too.
 _JANITOR_HELPER = "idc_git_janitor.py"
+# The provenance stamp the janitor SCANNER alone writes on its report (round-5 finding 7). The closeout
+# requires it, so a hand-written report that omits it cannot be passed off as a real scan.
+_JANITOR_PROVENANCE = "idc_git_janitor.py"
 # The receipt checker is safely RE-RUNNABLE read-only (a fingerprint verify), so an init/update/uninstall
 # blocker citing it is RE-DERIVED by re-running it — grounded only when the re-run actually FAILS.
 _RECEIPT_HELPER = "idc_receipt_check.py"
@@ -222,6 +225,11 @@ def _check_blocker(command: str, refs: dict, repo: str, session: str) -> Closeou
             return _fail("blocked-external-janitor-nonce",
                          "blocked_external citing the janitor scanner requires the persisted report bound "
                          "to THIS command record's nonce (written by the scanner run of this invocation)")
+        if report.get("produced_by") != _JANITOR_PROVENANCE:
+            return _fail("blocked-external-janitor-provenance",
+                         "blocked_external citing the janitor scanner requires the persisted report to "
+                         "carry the scanner's provenance stamp (produced_by) — a hand-written report "
+                         "cannot be passed off as a real scan (round-5 finding 7)")
         if rexit != _JANITOR_BLOCKED_EXIT:
             return _fail("blocked-external-janitor-not-blocked",
                          "blocked_external citing the janitor scanner requires the DOCUMENTED blocked "
@@ -402,21 +410,27 @@ def _gh_pr_closes_issue(repo: str, pr: object, issue: object):
     return any(isinstance(r, dict) and r.get("number") == issue_int for r in refs)
 
 
-def _issue_status(repo: str, num: object):
-    """The referenced issue's CURRENT board status (`Todo`/`Blocked`/`Done`/…) via the shared tracker
-    reader, or None when it is absent from the board / the tracker cannot be read (fail closed). Lets a
-    waiting/closeout claim read the LIVE board state (wave-4 findings 2/4: the gate still open, the
-    pointer genuinely Blocked, the recirc ticket in a Stage/Status consistent with its claim) rather
-    than journal-absence alone."""
+def _issue_stage_status(repo: str, num: object):
+    """The referenced issue's CURRENT board (`Stage`, `Status`) via the shared tracker reader, or
+    (None, None) when it is absent from the board / the tracker cannot be read (fail closed). Round-5
+    finding 3: a recirc ticket's closeout is re-derived from BOTH Stage and Status (a drained recirc
+    ticket stays a `Recirculation`-stage Done item), not Status alone."""
     try:
         import idc_next_action as NEXT  # noqa: E402 — reuse the shared, constrained tracker reader
         key = _gate_key(num)
         for issue in NEXT._load_tracker_issues(repo):
             if _gate_key(issue.get("number")) == key:
-                return issue.get("status")
+                return issue.get("stage"), issue.get("status")
     except Exception:  # noqa: BLE001 — any tracker read failure fails the closeout closed
-        return None
-    return None
+        return None, None
+    return None, None
+
+
+def _issue_status(repo: str, num: object):
+    """The referenced issue's CURRENT board status (`Todo`/`Blocked`/`Done`/…), or None when it is
+    absent / the tracker cannot be read (fail closed). Lets a waiting/closeout claim read the LIVE board
+    state (the gate still open, the pointer genuinely Blocked/retired) rather than journal-absence alone."""
+    return _issue_stage_status(repo, num)[1]
 
 
 def _gh_issue_body(repo: str, num: object):
@@ -697,27 +711,83 @@ def _manifest_unit_processed(repo: str, manifest_rel: object, unit: str, claimed
 # board must read Done) vs NON-TERMINAL (paused/gated behind its own gate → the ticket is still open).
 _RECIRC_TERMINAL_DISPOSITIONS = {"admitted", "drained", "materialized"}
 _RECIRC_OPEN_DISPOSITIONS = {"gated", "paused"}
+# The Stage a recirc inbox ticket carries, and the ONE guarded recirc-retirement journal disposition
+# (idc_transition's `dispose --disposition drained` door). Round-5 finding 3: a bare ticket that
+# legitimately reached Done as a recirc item did so THROUGH that door, which the journal records — the
+# only durable evidence that distinguishes a real retirement from a raw-closed Done.
+_RECIRC_STAGE = "Recirculation"
+_RECIRC_RETIREMENT_DISPOSITION = "drained"
+_JOURNAL_UNREADABLE = object()  # sentinel: the journal could not be read (rule B → refuse, never None-pass)
+
+
+def _ticket_dispose_disposition(repo: str, ticket: object):
+    """How ticket `ticket` reached its terminal state, re-derived from the transition journal: the
+    `disposition` of the guarded `dispose` record naming it, or None when no `dispose` record names it
+    (a raw-closed Done). Returns the `_JOURNAL_UNREADABLE` sentinel when the journal cannot be read — an
+    unreadable truth is a refusal (rule B), never a silent None-pass."""
+    scanned = _journal_records(repo)
+    if scanned is None:
+        return _JOURNAL_UNREADABLE
+    entries, RP = scanned
+    try:
+        tnum = int(_gate_key(ticket))
+    except (TypeError, ValueError):
+        return None
+    for e in entries:
+        if e.get("op") == "dispose" and RP.journal_item_id(e) == tnum:
+            return e.get("disposition")
+    return None
 
 
 def _ticket_board_consistent(repo: str, ticket: object, claimed: object) -> CloseoutResult:
-    """Per-ticket board re-read (wave-4 finding 4): a bare `#<ticket>` requested item's CURRENT board
-    Status must be CONSISTENT with the claimed disposition — a terminal disposition
-    (admitted/drained/materialized) requires the ticket Done; a non-terminal one (gated/paused)
-    requires it still open (present, not Done). A ticket absent from the board fails closed."""
-    status = _issue_status(repo, ticket)
+    """Per-ticket re-derivation from DURABLE evidence (round-5 finding 3): a bare `#<ticket>` requested
+    item is re-read against the board Stage AND Status PLUS the transition journal (how it reached its
+    state). A non-terminal disposition (gated/paused) requires the ticket still open (not Done). A
+    terminal disposition requires the ticket Done AND a guarded `dispose disposition=drained` journal
+    record with the ticket still a `Recirculation`-stage item — the ONE recirc-retirement door. Because
+    that door is the only durably-distinguishable terminal, only `drained` is claimable on a bare Done
+    ticket; `admitted`/`materialized` cannot be told apart from a plain drained retirement, so a
+    mismatched terminal disposition is refused. A ticket absent from the board, an unreadable journal,
+    or a raw-closed Done (no dispose/drained record) all fail closed (rule B)."""
+    stage, status = _issue_stage_status(repo, ticket)
     if status is None:
         return _fail("recirc-ticket-board-missing",
                      f"recirculate requested ticket {ticket!r} could not be read from the CURRENT board "
                      "(a nonexistent/unreadable ticket fails closed)")
-    if claimed in _RECIRC_TERMINAL_DISPOSITIONS and status != "Done":
+    if claimed in _RECIRC_OPEN_DISPOSITIONS:
+        if status == "Done":
+            return _fail("recirc-ticket-not-open",
+                         f"recirculate claims disposition {claimed!r} (paused/gated) for ticket {ticket!r} "
+                         "but the board reads Done — a paused/gated ticket must still be open")
+        return CloseoutResult(True, "ok", f"ticket {ticket} still open (consistent with {claimed})", {})
+    # A terminal disposition: the board must read Done AND the guarded recirc-retirement door must have
+    # journaled it (proving how it reached Done — never a raw-closed Done, never a caller assertion).
+    if status != "Done":
         return _fail("recirc-ticket-not-terminal",
-                     f"recirculate claims disposition {claimed!r} for ticket {ticket!r} but the board "
-                     f"reads status {status!r}, not Done — a processed ticket must be closed on the board")
-    if claimed in _RECIRC_OPEN_DISPOSITIONS and status == "Done":
-        return _fail("recirc-ticket-not-open",
-                     f"recirculate claims disposition {claimed!r} (paused/gated) for ticket {ticket!r} but "
-                     "the board reads Done — a paused ticket must still be open")
-    return CloseoutResult(True, "ok", f"ticket {ticket} board state consistent with {claimed}", {})
+                     f"recirculate claims a terminal disposition {claimed!r} for ticket {ticket!r} but the "
+                     f"board reads status {status!r}, not Done — a processed ticket must be closed")
+    disposition = _ticket_dispose_disposition(repo, ticket)
+    if disposition is _JOURNAL_UNREADABLE:
+        return _fail("recirc-ticket-journal-unread",
+                     f"recirculate: the transition journal could not be read to re-derive how ticket "
+                     f"{ticket!r} reached Done — an unreadable truth is a refusal (rule B)")
+    if disposition != _RECIRC_RETIREMENT_DISPOSITION:
+        return _fail("recirc-ticket-unproven-retirement",
+                     f"recirculate claims a terminal disposition {claimed!r} for ticket {ticket!r} but no "
+                     "guarded `dispose disposition=drained` journal record proves it reached Done through "
+                     f"the recirc-retirement door (the journal records {disposition!r}) — a raw-closed Done "
+                     "is not a proven retirement (rule B)")
+    if stage != _RECIRC_STAGE:
+        return _fail("recirc-ticket-not-recirc-stage",
+                     f"recirculate ticket {ticket!r} reads Stage {stage!r}, not {_RECIRC_STAGE!r} — a "
+                     "drained recirc ticket stays a Recirculation-stage Done item")
+    if claimed != _RECIRC_RETIREMENT_DISPOSITION:
+        return _fail("recirc-ticket-disposition-indistinguishable",
+                     f"recirculate claims disposition {claimed!r} for ticket {ticket!r}, but the durable "
+                     "evidence (a guarded `dispose disposition=drained` retirement) proves only `drained` "
+                     "— admitted/materialized cannot be distinguished from a plain drained retirement on a "
+                     "bare Done ticket, so a mismatched terminal disposition is refused (rule B)")
+    return CloseoutResult(True, "ok", f"ticket {ticket} drained (journal-corroborated Recirculation Done)", {})
 
 
 _RECEIPT_RELPATH = "docs/workflow/install-receipt.yaml"
@@ -1095,6 +1165,20 @@ def _claim_plan_decomposition(refs: dict, repo: str, session: str) -> CloseoutRe
                      f"{', '.join('#' + m for m in extra)} — retiring a consideration's pointer without "
                      "decomposing it (the retire-then-omit bypass) drops its child obligation; retired "
                      "must EQUAL the decomposed set")
+    # ROUND-5 F2: each claimed-retired pointer's retirement is proven by reading its LIVE board status
+    # (genuinely retired = Done), NEVER by comparing two caller-supplied maps. A pointer moved to Blocked
+    # (or still Todo) but claimed retired is refused; an unreadable pointer status is a refusal (rule B).
+    for p in sorted(retired):
+        status = _issue_status(repo, p)
+        if status is None:
+            return _fail("plan-pointer-status-unread",
+                         f"plan complete: pointer #{p}'s live board status could not be read to confirm it "
+                         "is genuinely retired — an unreadable pointer status is a refusal (rule B), not a pass")
+        if status != "Done":
+            return _fail("plan-pointer-not-retired",
+                         f"plan complete claims pointer #{p} retired but its LIVE board status is {status!r}, "
+                         "not Done — a pointer moved to Blocked/Todo is not genuinely retired (comparing two "
+                         "caller-supplied maps is not proof of retirement)")
     # Re-verify the decomposition children (existence + schema + provenance) from durable state.
     return _verify_decomposition(repo, refs.get("matrix"), list(decompositions.values()))
 
@@ -1122,14 +1206,16 @@ def _claim_plan_admitted_set_covered(refs: dict, repo: str, session: str) -> Clo
     #   (2) EVERY consideration admitted AT START (the rule-A stamp) must be decomposed — a
     #       retire-then-omit that moves a consideration off the board without decomposing it (its
     #       pointer retired but no child planned) is caught by the stamp, which remembers it.
-    # If neither source can be established, fail closed (unproven completeness is never complete).
-    stamped = _plan_record_admitted(repo, session)
+    # ROUND-5 F2 (rule B): the LIVE board read must SUCCEED — an unreadable board is a refusal, never a
+    # pass, and the start stamp ALONE never suffices. (Wave-4 proceeded on a stamp when the live read
+    # failed; that let a github plan claim completeness with the board unavailable.)
     live = _remaining_admitted_considerations(repo)
-    if stamped is None and live is None:
-        return _fail("plan-admitted-unread",
-                     "plan complete: the admitted-consideration set could not be established (no "
-                     "start-stamped set on the record AND the live tracker is unreadable) — an unproven "
-                     "completeness is never a complete plan")
+    if live is None:
+        return _fail("plan-admitted-live-unread",
+                     "plan complete: the live board could not be read to confirm no admitted consideration "
+                     "remains — an unreadable truth is a refusal (rule B); the start stamp alone never "
+                     "suffices to prove completeness")
+    stamped = _plan_record_admitted(repo, session)
     if live:
         return _fail("plan-admitted-remaining",
                      "plan complete rejected — the tracker still shows admitted consideration(s) not "
@@ -1329,6 +1415,22 @@ def _build_requested_from_record(repo: str, session: str):
     return None
 
 
+def _build_frontier_from_record(repo: str, session: str):
+    """The eligible-frontier issue set STAMPED on THIS session's ACTIVE build record at start (rule A,
+    round-5 finding 4), or None when no frontier was stamped (an explicit `#issue` build, or the board
+    was unreadable at start). A stamped EMPTY set is returned as an empty set (distinct from None). Read
+    tolerantly."""
+    if not _ne_str(repo) or not _ne_str(session):
+        return None
+    try:
+        for rec in idc_ledger.active_commands(repo, session):
+            if rec.get("command") == "build" and rec.get("build_frontier") is not None:
+                return {_gate_key(b) for b in (rec.get("build_frontier") or [])}
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
 def _claim_build_no_action(refs: dict, repo: str, session: str) -> CloseoutResult:
     return _check_no_action("build", repo)
 
@@ -1339,8 +1441,7 @@ def _claim_build_receipts(refs: dict, repo: str, session: str) -> CloseoutResult
         receipts = {}
     # The REQUIRED issue set is STAMPED at start (rule A, wave-4 finding 5): a `/idc:build #1 #2` run
     # records {1,2}, so `complete` requires ONE verified merged-PR receipt PER requested issue — a
-    # request for two issues cannot close with one receipt. A whole-frontier build (no issue named,
-    # nothing stamped) uses the oracle-backed empty-frontier path.
+    # request for two issues cannot close with one receipt.
     requested = _build_requested_from_record(repo, session)
     if requested:
         missing = sorted(str(i) for i in requested if _gate_key(i) not in {_gate_key(k) for k in receipts})
@@ -1356,18 +1457,41 @@ def _claim_build_receipts(refs: dict, repo: str, session: str) -> CloseoutResult
             if not result.ok:
                 return result
         return CloseoutResult(True, "ok", "every requested build issue has a linked merged-PR receipt", {})
-    if receipts:
+    # WHOLE-FRONTIER build (round-5 finding 4): no explicit issue set. `complete` requires EITHER a
+    # verified merged receipt for EVERY issue stamped in the eligible frontier at start, OR an
+    # oracle-confirmed empty remaining frontier (all eligible Buildable work is drained). An
+    # arbitrary-subset close — receipts for some frontier issues while others remain eligible — refuses.
+    oracle_empty = _check_no_action("build", repo)
+    if oracle_empty.ok:
+        # nothing eligible remains: either the frontier was empty, or every eligible item was drained.
+        # Any receipts supplied are still verified for real (a receipt must reference a real merged PR).
         for issue, receipt in receipts.items():
             result = _valid_build_receipt(issue, receipt, repo)
             if not result.ok:
                 return result
-        return CloseoutResult(True, "ok", "build receipts reference merged PRs (re-read + linked)", {})
-    if refs.get("frontier") == "none-eligible":
-        # an empty ready frontier is oracle-backed, never trusted (the same door as no_action).
-        return _check_no_action("build", repo)
-    return _fail("build-receipts",
-                 "build complete requires refs.receipts {issue: {pr}} referencing MERGED PRs that close "
-                 "each requested issue, or refs.frontier == 'none-eligible' (oracle-backed)")
+        return CloseoutResult(True, "ok", "whole-frontier build: oracle confirms no eligible Buildable remains", {})
+    # The oracle still reports eligible Buildable work → require a merged receipt per stamped-frontier
+    # issue. Without a stamped frontier the subset coverage cannot be proven → refuse (rule B).
+    frontier = _build_frontier_from_record(repo, session)
+    if frontier is None:
+        return _fail("build-frontier-unproven",
+                     "build complete: no eligible frontier was stamped at start AND the oracle still "
+                     "reports eligible Buildable work — a whole-frontier build cannot prove it covered "
+                     "the frontier (rule B; drain the frontier to empty or build each stamped issue)")
+    receipt_keys = {_gate_key(k) for k in receipts}
+    missing = sorted(f for f in frontier if f not in receipt_keys)
+    if missing:
+        return _fail("build-frontier-uncovered",
+                     "build complete: the whole ready frontier stamped at start still has eligible "
+                     f"issue(s) with no merged-PR receipt: {', '.join('#' + m for m in missing)} — an "
+                     "arbitrary-subset close is not complete (build every stamped-frontier issue, or "
+                     "drain the frontier to an oracle-confirmed empty)")
+    for issue in sorted(frontier):
+        receipt = next((v for k, v in receipts.items() if _gate_key(k) == issue), None)
+        result = _valid_build_receipt(issue, receipt, repo)
+        if not result.ok:
+            return result
+    return CloseoutResult(True, "ok", "whole-frontier build: every stamped-frontier issue has a linked merged-PR receipt", {})
 
 
 def _persisted_drain_verdict(repo: str, session: str):
@@ -1438,6 +1562,11 @@ def _claim_janitor_report(refs: dict, repo: str, session: str) -> CloseoutResult
         return _fail("janitor-report-nonce",
                      "janitor complete: the persisted janitor report is not bound to THIS command "
                      "record's nonce — the report must be written BY the scanner run of this invocation")
+    if report.get("produced_by") != _JANITOR_PROVENANCE:
+        return _fail("janitor-report-provenance",
+                     "janitor complete: the persisted report lacks the scanner's provenance stamp "
+                     "(produced_by) — a hand-written report cannot be passed off as a real scan "
+                     "(round-5 finding 7); run the real scanner with --report-session/--report-nonce")
     code = report.get("scanner_exit")
     if isinstance(code, bool) or code not in (0, 1):
         return _fail("janitor-scan",
@@ -1491,23 +1620,33 @@ def _claim_doctor_report(refs: dict, repo: str, session: str) -> CloseoutResult:
         return _fail("doctor-report-nonce",
                      "doctor complete: the persisted doctor report is not bound to THIS command "
                      "record's nonce — the report must be written BY the doctor run of this invocation")
-    rows = report.get("rows")
-    # Every doctor row must be a MACHINE-CHECKABLE result (wave-4 finding 7 / rule B): a row object
-    # carrying at least a row id and a result/status. A row with no machine-checkable artifact (the old
-    # bare "1..10" string) is NOT claimable as verified — the report must record the real per-row result.
-    if not isinstance(rows, list) or not rows:
-        return _fail("doctor-rows", "doctor complete requires the persisted report to record the check rows")
-    for row in rows:
-        if not isinstance(row, dict) or not _present(row.get("id")) or not _ne_str(row.get("result")):
-            return _fail("doctor-rows-not-checkable",
-                         "doctor complete requires each persisted row to be a machine-checkable result "
-                         "{id, result, …} — a bare row string (e.g. \"1..10\") records no verifiable "
-                         "artifact and is not claimable (rule B)")
-    if not _ne_str(report.get("verdict")):
-        return _fail("doctor-verdict",
-                     "doctor complete requires the persisted report to record a verdict (a FAIL result "
-                     "is still a complete doctor run)")
-    return CloseoutResult(True, "ok", "doctor rows + verdict re-read from the durable report", {})
+    # ROUND-5 F6: re-validate the persisted report against the FULL doctor row contract (all rows 1..10,
+    # unique ids, legal outcomes, script-backed rows carry {script,exit}, verdict == the derived
+    # aggregation of the row outcomes). A 2-row / arbitrary-JSON / inconsistent-verdict report is refused
+    # by the SAME schema the writer enforces — the closeout re-checks it in case a report reached disk by
+    # a path other than the guarded writer.
+    try:
+        import idc_command_report as CR  # noqa: E402 — lazy (scripts/hooks on sys.path)
+        schema_ok, reason = CR.validate_doctor_payload(report)
+    except Exception:  # noqa: BLE001 — an unvalidatable report fails closed
+        return _fail("doctor-report-schema-unread", "doctor complete: the persisted report could not be schema-validated (fail closed)")
+    if not schema_ok:
+        return _fail("doctor-report-schema",
+                     f"doctor complete requires the persisted report to satisfy the full doctor row "
+                     f"contract (all rows 1..10, legal outcomes, verdict == aggregation): {reason}")
+    # SPOT RE-RUN a cheap, read-only, deterministic doctor check — the install-receipt presence+parse
+    # (doctor row 5) — and cross-check the reported outcome: a forged row 5 PASS on a repo whose receipt
+    # is ABSENT or does NOT parse is refused (rule B — a reported outcome must survive re-derivation).
+    # The re-derivation matches doctor row 5's OWN semantics (presence+parse, NOT fingerprints — that is
+    # update's job), so it never false-refuses a legitimate PASS whose scaffold merely drifted; row 5
+    # SKIP/FAIL is left alone (a non-PASS is consistent with a repo that has no valid receipt).
+    row5 = next((r for r in report["rows"] if isinstance(r, dict) and r.get("id") == 5), None)
+    if row5 is not None and row5.get("result") == "PASS" and _receipt_document(repo, None) is None:
+        return _fail("doctor-row5-inconsistent",
+                     "doctor complete: the persisted report claims row 5 (install receipt) PASS, but a "
+                     "read-only re-run finds no install receipt that parses — a reported row outcome that "
+                     "disagrees with its deterministic re-run is refused (rule B)")
+    return CloseoutResult(True, "ok", "doctor report re-read, schema-validated, row-5 spot-re-run consistent", {})
 
 
 def _claim_update_resynced(refs: dict, repo: str, session: str) -> CloseoutResult:
@@ -1597,13 +1736,65 @@ def _uninstall_flags_from_record(repo: str, session: str):
 
 def _open_issues(repo: str):
     """The set of live NON-Done tracker issue numbers (canonical strings) via the shared reader, or
-    None on any read failure / an unreadable board (which a `--delete-board` verify treats as gone).
-    Used to verify a stamped `--close-issues` was actually honored before an applied uninstall closes."""
+    None on any read failure / an unreadable board (round-5 finding 5: None is UNPROVEN, never "no open
+    issues"). Used to verify a stamped `--close-issues` was actually honored."""
     try:
         import idc_next_action as NEXT  # noqa: E402
         return {_gate_key(i["number"]) for i in NEXT._load_tracker_issues(repo)
                 if i.get("status") != "Done"}
-    except Exception:  # noqa: BLE001 — an unreadable board reads as "no open issues" (board gone)
+    except Exception:  # noqa: BLE001 — an unreadable board is UNPROVEN (the caller fails closed on None)
+        return None
+
+
+def _github_board_absent(repo: str):
+    """github board-absence probe (round-5 finding 5): True (a REAL `gh project view` proves the project
+    genuinely GONE), False (present), or None (indeterminate — no owner/project, gh absent/errored, or an
+    ambiguous failure). NEVER infers deletion from a local `TRACKER.md` (github boards have none). A
+    `--delete-board` is honored ONLY on a positive True."""
+    try:
+        import idc_next_action as NEXT  # noqa: E402
+        backend, project = NEXT._read_tracker_config(repo)
+    except Exception:  # noqa: BLE001
+        return None
+    if backend != "github" or not _ne_str(project):
+        return None
+    owner = _gh_capture(repo, ["repo", "view", "--json", "owner", "-q", ".owner.login"])
+    if not _ne_str(owner):
+        return None
+    try:
+        proc = subprocess.run(["gh", "project", "view", str(project), "--owner", owner.strip(),
+                               "--format", "json"], cwd=repo, capture_output=True, text=True,
+                              timeout=_GH_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode == 0:
+        return False   # a readable project → present
+    err = (proc.stderr or "").lower()
+    # A POSITIVE "the project does not exist" signal → genuinely absent. Any other failure (auth,
+    # network, rate-limit) is ambiguous → None (rule B: an unreadable board is never proof of deletion).
+    if "could not resolve to a projectv2" in err or "not found" in err or "no project" in err:
+        return True
+    return None
+
+
+def _board_absent(repo: str):
+    """Whether the tracker board is GENUINELY GONE (round-5 finding 5): True (a real read proves it
+    absent), False (present + readable), or None (could not determine — an unreadable board is NEVER
+    proof of deletion; rule B). On `filesystem` the board IS `TRACKER.md` at the repo root, so its
+    absence is a real board-absence read and a present-but-corrupt one is indeterminate. On `github` the
+    board is the project — a real `gh project view` probe, never a local TRACKER.md."""
+    if _repo_backend(repo) == "github":
+        return _github_board_absent(repo)
+    tracker = _confined_repo_path(repo, "TRACKER.md")
+    if tracker is None:
+        return None
+    if not os.path.exists(tracker):
+        return True
+    try:
+        import idc_next_action as NEXT  # noqa: E402
+        NEXT._load_tracker_issues(repo)
+        return False
+    except Exception:  # noqa: BLE001 — present on disk but unreadable → indeterminate (rule B)
         return None
 
 
@@ -1613,13 +1804,25 @@ def _claim_uninstall(refs: dict, repo: str, session: str) -> CloseoutResult:
         return _fail("uninstall-outcome", "uninstall complete requires refs.outcome of 'applied' or 'no-action'")
     anchor = _confined_repo_path(repo, _GOVERNANCE_ANCHOR)
     anchor_present = anchor is not None and os.path.exists(anchor)
+    flags = _uninstall_flags_from_record(repo, session)
     if outcome == "no-action":
-        # A no-action must be PROVEN, never asserted (finding 5): there is nothing to remove BESIDES the
-        # governance anchor (which the post-finish step removes regardless). A receipt is REQUIRED to
-        # enumerate the footprints — no receipt means the filesystem cannot be shown clean, so fail
-        # closed — and EVERY non-anchor receipt footprint must already be ABSENT. Any present footprint
-        # means there IS work to remove (this is an 'applied', not a no-action). The finish itself is
-        # repo-gated on the anchor, so a no-action only ever runs while the repo is still governed.
+        # A no-action must be PROVEN, never asserted (finding 5): there is nothing to do. Round-5 finding
+        # 5 adds two gates BEFORE the footprint check: (1) NO board flag may have been stamped — a
+        # --close-issues/--delete-board run REQUESTED board work, so it can never be a no-action; and (2)
+        # the documented runtime artifacts (TRACKER.md) must ALSO already be absent (they are not receipt
+        # footprints, but a no-action means nothing is left to remove). Then a receipt is REQUIRED to
+        # enumerate the footprints and EVERY non-anchor footprint must already be ABSENT.
+        if flags:
+            return _fail("uninstall-no-action-flags-stamped",
+                         "uninstall no-action rejected — this run was invoked with board flag(s) "
+                         f"{sorted(flags)} that requested board work; a run that requested "
+                         "--close-issues/--delete-board is an 'applied', never a no-action")
+        for rel in sorted(_RUNTIME_UNINSTALL_ARTIFACTS):
+            p = _confined_repo_path(repo, rel)
+            if p is not None and os.path.exists(p):
+                return _fail("uninstall-no-action-runtime-artifact",
+                             f"uninstall no-action rejected — a runtime artifact {rel!r} is still present "
+                             "(there IS work to remove; record 'applied', not 'no-action')")
         doc = _receipt_document(repo, refs.get("receipt"))
         if doc is None:
             return _fail("uninstall-no-action-no-receipt",
@@ -1635,25 +1838,39 @@ def _claim_uninstall(refs: dict, repo: str, session: str) -> CloseoutResult:
                 return _fail("uninstall-no-action-footprint",
                              f"uninstall no-action rejected — receipt footprint {e['path']!r} is still "
                              "present (there IS work to remove; record 'applied', not 'no-action')")
-        return CloseoutResult(True, "ok", "uninstall no-action (verified: every receipt footprint already absent)", {})
-    # applied: FIRST verify the stamped opt-in board flags were actually honored by REAL reads (wave-4
-    # finding 6) — `--close-issues` means no open issue may remain on the board; `--delete-board` means
-    # the board substrate is gone. The flags are re-derived from the start record, never caller-supplied.
-    flags = _uninstall_flags_from_record(repo, session)
+        return CloseoutResult(True, "ok", "uninstall no-action (verified: no flags, runtime artifacts + footprints all absent)", {})
+    # applied: FIRST verify the stamped opt-in board flags were actually honored by REAL reads (finding
+    # 6, hardened round-5 finding 5 to fail closed on an unreadable board — rule B). The flags are
+    # re-derived from the start record, never caller-supplied.
     if "close-issues" in flags:
-        open_issues = _open_issues(repo)
-        if open_issues:
-            return _fail("uninstall-close-issues-open",
-                         "uninstall was invoked with --close-issues but the board still shows open "
-                         f"issue(s): {', '.join('#' + n for n in sorted(open_issues))} — the requested "
-                         "close was not honored (close them before finishing)")
+        # Honored iff the board is genuinely GONE (no issues can remain open) OR present with zero open
+        # issues. An unreadable/indeterminate board is a REFUSAL — never "no open issues" (rule B).
+        absent = _board_absent(repo)
+        if absent is None:
+            return _fail("uninstall-close-issues-unread",
+                         "uninstall --close-issues could not confirm the board's open-issue state — the "
+                         "board could not be read (an unreadable board is a refusal, not proof the issues "
+                         "were closed; rule B)")
+        if absent is False:
+            open_issues = _open_issues(repo)
+            if open_issues is None:
+                return _fail("uninstall-close-issues-unread",
+                             "uninstall --close-issues could not read the board to confirm no open issue "
+                             "remains (rule B)")
+            if open_issues:
+                return _fail("uninstall-close-issues-open",
+                             "uninstall was invoked with --close-issues but the board still shows open "
+                             f"issue(s): {', '.join('#' + n for n in sorted(open_issues))} — the requested "
+                             "close was not honored (close them before finishing)")
     if "delete-board" in flags:
-        board_relpath = _confined_repo_path(repo, "TRACKER.md")
-        board_gone = _open_issues(repo) is None or (board_relpath is not None and not os.path.exists(board_relpath))
-        if not board_gone:
+        # Honored ONLY by a REAL board-absence read proving the project is genuinely gone — never an
+        # unreadable board (None) and never a local TRACKER.md absence on a github repo (finding 5).
+        if _board_absent(repo) is not True:
             return _fail("uninstall-delete-board-present",
-                         "uninstall was invoked with --delete-board but the board is still present — the "
-                         "requested board deletion was not honored")
+                         "uninstall was invoked with --delete-board but the board's deletion could not be "
+                         "PROVEN by a real board-absence read (the project is still present, or its "
+                         "absence is indeterminate) — an unreadable board / a missing local TRACKER.md is "
+                         "not proof the remote board was deleted (rule B)")
     # the destructive work must have ACTUALLY HAPPENED — validate it by INDEPENDENT checks against the
     # receipt-DERIVED removal set (never the caller's `removed` list — finding 5).
     footprints, err = _receipt_removal_set(repo, refs)
@@ -1910,6 +2127,31 @@ def _plan_admitted_at_start(command: str, repo: str):
     return sorted(remaining) if remaining is not None else None
 
 
+def _eligible_buildables(repo: str):
+    """The live eligible-Buildable frontier (canonical drain predicate) via the shared oracle reader, or
+    None when the tracker cannot be read (fail closed). The independent 'required frontier' derivation
+    for a whole-frontier build (round-5 finding 4)."""
+    if not _ne_str(repo):
+        return None
+    try:
+        import idc_next_action as NEXT  # noqa: E402 — lazy (reuses the oracle's tracker read)
+        state, _ = NEXT._collect_workflow_state(os.path.realpath(os.path.abspath(repo)))
+        return {_gate_key(n) for n in state.eligible_buildables}
+    except Exception:  # noqa: BLE001 — any tracker read failure yields None (no stamp)
+        return None
+
+
+def _build_frontier_at_start(command: str, repo: str, build_requested):
+    """The eligible-frontier set to STAMP on a WHOLE-FRONTIER Build record at start (rule A, round-5
+    finding 4): the live eligible-Buildable set, sorted, or None. Stamped ONLY when NO explicit issue
+    set was named (a `/idc:build` with `#issues` uses the requested-set path instead). None when the
+    board cannot be read at start."""
+    if command != "build" or build_requested:
+        return None
+    frontier = _eligible_buildables(repo)
+    return sorted(frontier) if frontier is not None else None
+
+
 def validate_closeout(command: str, status: str, evidence: object,
                       repo: str | None = None, session: str | None = None) -> CloseoutResult:
     """Validate a closeout's command, terminal status, COMMON envelope, and per-command EVIDENCE
@@ -1973,11 +2215,12 @@ def register_start(cwd: str, session_id: str, command: str, plugin_version: str,
     build_requested = build_requested_from_args(command, args_text or "")
     uninstall_flags = uninstall_flags_from_args(command, args_text or "")
     plan_admitted = _plan_admitted_at_start(command, cwd)
+    build_frontier = _build_frontier_at_start(command, cwd, build_requested)
     return idc_ledger.command_start(
         cwd, session_id, command, plugin_version, args_digest(args_text or ""), source or "",
         intake_manifest=intake_manifest, intake_units=intake_units, recirc_requested=recirc_requested,
         build_requested=build_requested, plan_admitted=plan_admitted, uninstall_flags=uninstall_flags,
-        nonce=_make_nonce())
+        nonce=_make_nonce(), build_frontier=build_frontier)
 
 
 def active_records(cwd: str, session_id: str) -> list:

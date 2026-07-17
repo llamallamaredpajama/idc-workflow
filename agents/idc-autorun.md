@@ -77,9 +77,10 @@ loop below). Then the two lanes:
    `docs/considerations/` stay the source of truth). Re-check open gates first (per
    `idc:idc-gate-issue`) in case the operator merged a Think PR mid-run — and include the
    interrupted-run recovery: `query` `Status=Blocked` items and, for any whose blocking gate issue
-   is already `Done`, **first verify that gate's journaled guarded dispose** through the one
+   is already `Done`, **first verify that gate's journaled proof** through the one
    deterministic reader — `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gate_proof.py" --repo "$PWD"
-   --gate <gate#>` (see `idc:idc-gate-issue` step 4 for its kinds; never hand-roll a journal scan) —
+   --gate <gate#>` (`guarded-dispose` and `verified-reconciliation` are proven; never hand-roll a
+   journal scan) —
    and only then finish it through the **guarded pointer-finish door**: `python3
    "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gate_repair.py" --repo "$PWD" --finish-pointer --gate <gate#>
    --pointer <dependent#>` (github: add `--owner <owner> --project <n>`; **dry run by default** — add

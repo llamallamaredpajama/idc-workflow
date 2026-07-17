@@ -77,25 +77,27 @@ Decide the file set deterministically, then classify it:
 - **No receipt** (pre-receipt install): use the hardcoded fallback footprint — exactly what
   `/idc:init` scaffolds:
   `WORKFLOW.md`, `WORKFLOW-config.yaml`, `docs/workflow/tracker-config.yaml`,
-  `docs/workflow/workflow-machine.yaml`, `docs/workflow/pillar-matrices/`,
-  `docs/workflow/code-reviews/`, `docs/workflow/intakes/.gitkeep`, and the
-  `docs/workflow/` README. Anything absent → `skipped-absent`. (Keep this list in sync with the
+  `docs/workflow/workflow-machine.yaml`, `docs/workflow/pillar-matrices/.gitkeep`,
+  `docs/workflow/code-reviews/.gitkeep`, `docs/workflow/code-reviews/.gitignore`,
+  `docs/workflow/intakes/.gitkeep`, and `docs/workflow/README.md`. Anything absent →
+  `skipped-absent`. (Keep this list in sync with the
   scaffold under `${CLAUDE_PLUGIN_ROOT}/templates/`: a pre-receipt repo can only be cleaned by
   this fallback, so a scaffold file added there must be added here too. Receipt-driven installs
   don't have this drift — they remove whatever the receipt lists.)
 
-  **The intake home is listed by its `.gitkeep`, never as a directory** — the one deliberate
-  asymmetry in that list. `docs/workflow/intakes/` is scaffold IDC created, but the compiled
-  `/idc:intake` manifests inside it are **operator work products**, and a directory-level
-  `git rm -r docs/workflow/intakes/` would delete them as if they were pristine scaffold. Remove the
-  keepfile; leave every manifest. If manifests remain, the now-non-empty directory survives the
-  removal — that is correct: Phase 2 has already archived them, and an operator's compiled record of
-  a foreign artifact is not IDC's to delete. Report them as `preserved — work product` in the Phase 5
-  summary. (A receipt-driven uninstall gets this for free: a manifest is never receipt-listed, so it
-  never enters the removal manifest.)
+  **All three work-product homes are listed only by their ownership files, never as directories.**
+  Matrix YAML, review reports, and compiled `/idc:intake` manifests are **operator work products**.
+  Remove only `.gitkeep` (plus the shipped review `.gitignore`); preserve every other artifact under
+  `pillar-matrices/`, `code-reviews/`, and `intakes/`. If work products remain, their non-empty
+  directories survive — that is correct. Phase 2 archives them, but the archive is a backup, not
+  permission to delete the originals. Report each as `preserved — work product` in Phase 5. A
+  receipt-driven uninstall follows the same boundary because receipts list ownership files, never
+  generated work products.
 
-Always add two footprints the receipt never lists (see `commands/init.md`): the receipt file
-itself, and — **filesystem backend only** — the runtime-created `TRACKER.md`. The operator-owned
+Track two cleanup files the receipt never lists (see `commands/init.md`): the receipt file itself,
+and — **filesystem backend only** — the runtime-created `TRACKER.md`. A present receipt MUST remain
+in place through the 3b closeout so the validator can re-read the same modern manifest stamped at
+start; remove it with the governance anchor only after finish. The operator-owned
 `.claude/settings.json` is **not** deleted; only its one enablement key is stripped (Phase 3).
 
 ## Phase 2 — Archive work products (always, before any deletion)
@@ -105,27 +107,28 @@ Tar the IDC-managed work products to an untracked repo-root archive and **announ
 ARCHIVE="idc-archive-$(date +%Y%m%d-%H%M%S).tar.gz"
 tar -czf "$ROOT/$ARCHIVE" -C "$ROOT" docs/workflow $( [ -f "$ROOT/TRACKER.md" ] && echo TRACKER.md )
 ```
-This preserves the operator's matrices, code-reviews, compiled intake manifests, tracker history,
-and configs even though
-the removal commit deletes them — a `git revert` restores the tracked files, and the tarball
-covers anything untracked. The archive stays untracked (and is matched by the `idc-archive-*`
+This backs up the operator's matrices, code-reviews, compiled intake manifests, tracker history,
+and configs. The removal itself still preserves every matrix/review/intake work product in place;
+the archive covers them and any other untracked history as a second recovery layer. It stays untracked
+(and is matched by the `idc-archive-*`
 preflight exemption); it is never part of the removal commit.
 
-## Phase 3 — Do the work, then close, then remove the anchor (in that order)
+## Phase 3 — Do the work, then close, then remove receipt + anchor (in that order)
 
 Do the destructive uninstall in **three ordered sub-steps**. The closeout runs in the MIDDLE: it
 **independently verifies the work already happened** (the footprints are gone, the enablement key is
 stripped, the archive exists) before recording `applied` — so the record can never claim `applied`
-before the uninstall ran. The one thing left for AFTER the finish is removing the governance anchor
-(`docs/workflow/tracker-config.yaml`), because that file is what marks the repo IDC-governed; once it
-is gone the session-ledger write is a repo-gated no-op and `finish` can no longer land.
+before the uninstall ran. The two cleanup files left for AFTER finish are the canonical receipt and
+the governance anchor (`docs/workflow/tracker-config.yaml`). The receipt must remain readable through
+verification, and the anchor keeps the repo IDC-governed so the session-ledger finish can land.
 
-**3a — Remove every footprint EXCEPT the governance anchor.** Delete the manifest files (keep
-`docs/workflow/tracker-config.yaml` for now), strip only the enablement key, and remove the
-runtime `TRACKER.md`. Do **not** commit yet:
+**3a — Remove every footprint EXCEPT the canonical receipt and governance anchor.** Delete the
+individual receipt-listed files (keep `docs/workflow/install-receipt.yaml` and
+`docs/workflow/tracker-config.yaml` for now), strip only the enablement key, and remove the runtime
+`TRACKER.md`. Do **not** commit yet:
 ```bash
-# delete the manifest files but KEEP the governance anchor (it stays until sub-step 3c)
-git -C "$ROOT" rm -r --quiet <manifest footprint paths — everything the receipt lists EXCEPT the anchor>
+# keep the canonical receipt + governance anchor until sub-step 3c
+git -C "$ROOT" rm --quiet <individual receipt entries or legacy files, EXCEPT the anchor>
 # strip ONLY the enablement key, preserving every other operator setting (atomic safe-write)
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_settings_json.py" \
   disable .claude/settings.json idc@idc-workflow
@@ -136,7 +139,7 @@ git -C "$ROOT" add .claude/settings.json 2>/dev/null || true
 
 If the operator passed the opt-in GitHub flags (`--close-issues` / `--delete-board`), do that board
 work **HERE, before the finish** — ALL destructive operations must precede the closeout; the only step
-left for after the finish is the governance-anchor removal (sub-step 3c). See Phase 4 for the flag
+left for after the finish is receipt/anchor cleanup (sub-step 3c). See Phase 4 for the flag
 mechanics; run those commands at this point, not after 3b.
 
 **3b — Close the command contract (the work is now verifiable).** The validator derives the removal set
@@ -149,10 +152,13 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   --status <complete|blocked_external> --evidence-json '<envelope>'
 ```
 - **`complete`** — either the footprints were removed, or the run is an explicit no-action. The
-  validator **derives the removal set from the install receipt UNION the documented runtime artifacts**
-  (`TRACKER.md` — runtime-created, not receipt-listed), never a caller `removed` list: for an applied
+  validator **derives the removal set from the install receipt, or the exact legacy-owned-file list
+  when the receipt is genuinely absent, UNION the documented runtime artifacts** (`TRACKER.md` —
+  runtime-created, not receipt-listed), never a caller `removed` list. A present malformed receipt is
+  a hard failure, never permission to fall back. For an applied
   run it confirms EVERY footprint in that set (except the governance anchor) is now ABSENT, the settings
-  IDC key is stripped, the archive file exists, and the anchor is still present. It ALSO verifies any
+  IDC key is stripped, the archive file exists, and the anchor plus any modern receipt are still
+  present. It ALSO verifies any
   opt-in board flags **stamped at start** were honored by a **real read** BEFORE finish: `--close-issues`
   ⇒ the board is present with **no open issue** (or genuinely gone); `--delete-board` ⇒ a **real
   board-absence read proves the board is genuinely gone** (on `github` a `gh project view` probe of the
@@ -161,16 +167,18 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   `settings:".claude/settings.json"`, `archive:"<archive path>"`. For a no-op run: `outcome:"no-action"`
   — the validator first confirms **no board flag was stamped** (a --close-issues/--delete-board run
   requested board work → not a no-action) and that the **runtime artifacts** (`TRACKER.md`) are already
-  absent, then re-reads the receipt and confirms every non-anchor footprint is ALREADY absent (a
-  no-action with a stamped flag, a runtime artifact or footprint still present, or with no receipt to
-  prove it, is refused).
+  absent, then re-reads the receipt or exact legacy fallback and confirms every non-anchor footprint
+  is ALREADY absent (a
+  no-action with a stamped flag or a runtime artifact/footprint still present is refused).
 - **`blocked_external`** — a safety refusal (a dirty tree, an unverifiable board, an invalid receipt):
   `blocker:{helper, exit (nonzero), diagnostic}`. Report it as blocked; do not proceed to remove.
 
-**3c — The single POST-finish step: remove the anchor + commit atomically.** Only after `finish`
-succeeds, remove the governance anchor and land ALL removals as one revertable commit:
+**3c — The single POST-finish step: remove receipt + anchor, then commit atomically.** Only after
+`finish` succeeds, remove the retained canonical receipt (when present) and governance anchor, then
+land ALL removals as one revertable commit:
 ```bash
-git -C "$ROOT" rm --quiet docs/workflow/tracker-config.yaml
+git -C "$ROOT" rm --quiet --ignore-unmatch \
+  docs/workflow/install-receipt.yaml docs/workflow/tracker-config.yaml
 git -C "$ROOT" commit -m "idc: uninstall — remove IDC footprints (revert this commit to reinstate)"
 ```
 Stage only the removed paths and `.claude/settings.json` — **not** the archive tarball (it must
@@ -180,7 +188,7 @@ make no commit and report `skipped-absent` across the board.
 ## Phase 4 — GitHub side (opt-in; default leaves it untouched)
 
 **Ordering:** when these flags are passed, run them in Phase 3a **BEFORE the 3b finish** — every
-destructive operation completes before the closeout; only the governance-anchor removal is post-finish.
+destructive operation completes before the closeout; only retained receipt/anchor cleanup is post-finish.
 This section documents the flag mechanics; it is not a later phase.
 
 Default: the board and all issues are left exactly as they are. Only on the flags:
@@ -212,8 +220,8 @@ say so.
 ## Phase 5 — Summary
 
 Print one table of every footprint (`removed` / `skipped-absent` / `kept (customized)` /
-`preserved — work product`, the last for any compiled `/idc:intake` manifest left in
-`docs/workflow/intakes/`), then:
+`preserved — work product`, the last for every retained matrix, review report, and compiled intake
+manifest), then:
 - the archive path from Phase 2,
 - the single revert command — `git revert <sha>` — to reinstate everything,
 - the board disposition (untouched / N issues closed / board deleted),

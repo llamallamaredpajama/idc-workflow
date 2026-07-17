@@ -54,11 +54,41 @@ REPAIR_DOOR = "idc-gate-repair"
 
 def _positive_int(value):
     """`value` as a positive int, else None — a malformed evidence field must never raise."""
-    try:
-        num = int(value)
-    except (TypeError, ValueError):
+    # Journal reconciliation evidence is written as a JSON integer. Coercion is unsafe here:
+    # bool is an int subclass, and int(77.5) truncates, so either could forge a PR identity.
+    if type(value) is not int:
         return None
-    return num if num > 0 else None
+    return value if value > 0 else None
+
+
+def proof_kinds(entries):
+    """All proven gate ids mapped to their first recognized proof kind, in one linear scan.
+
+    This is the bulk seam for board lint. Keeping validation here preserves one proof definition
+    without forcing a caller to invoke ``proof_kind`` once per gate and rescan the whole journal.
+    """
+    proven = {}
+    for entry in entries or ():
+        if not isinstance(entry, dict):
+            continue
+        gate = JR.journal_item_id(entry)
+        # journal_item_id supports legacy numeric strings, but a structured JSON boolean must not
+        # become gate #1 merely because bool subclasses int.
+        if type(gate) is not int or gate <= 0 or gate in proven:
+            continue
+        if entry.get("op") == "dispose" and entry.get("disposition") == "gate-approved":
+            proven[gate] = GUARDED_DISPOSE
+            continue
+        if entry.get("op") != "gate-reconciliation":
+            continue
+        evidence = entry.get("evidence") or {}
+        if not isinstance(evidence, dict):
+            continue
+        if (evidence.get("approval_state") == "MERGED"
+                and _positive_int(evidence.get("approval_pr")) is not None
+                and evidence.get("door") == REPAIR_DOOR):
+            proven[gate] = VERIFIED_RECONCILIATION
+    return proven
 
 
 def proof_kind(entries, gate):
@@ -73,20 +103,7 @@ def proof_kind(entries, gate):
     gate = _positive_int(gate)
     if gate is None:
         return UNPROVEN
-    for entry in entries or ():
-        if not isinstance(entry, dict) or JR.journal_item_id(entry) != gate:
-            continue
-        if entry.get("op") == "dispose" and entry.get("disposition") == "gate-approved":
-            return GUARDED_DISPOSE
-        if entry.get("op") == "gate-reconciliation":
-            evidence = entry.get("evidence") or {}
-            if not isinstance(evidence, dict):
-                continue
-            if (evidence.get("approval_state") == "MERGED"
-                    and _positive_int(evidence.get("approval_pr")) is not None
-                    and evidence.get("door") == REPAIR_DOOR):
-                return VERIFIED_RECONCILIATION
-    return UNPROVEN
+    return proof_kinds(entries).get(gate, UNPROVEN)
 
 
 def read_proof(repo, gate):

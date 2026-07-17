@@ -65,8 +65,10 @@ four steps over the plain tracker API.
 `createTicket` the gate issue with the plain-terms body above and the `operator-action` label. The
 engine-owned create lands the new issue in `Status=Todo` and applies that label in the **same guarded create**;
 do not issue a follow-on Status write. On **github**, stamp the gate body's
-`<!-- idc-gate-pr: <PR#> -->` marker
-with the just-opened Think PR number — the engine's guarded `dispose --disposition gate-approved`
+`<!-- idc-gate-pr: <PR#> -->` marker and the PR body's reciprocal gate marker only through:
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_pr_gate_bind.py" --repo "$PWD" --pr <PR#> --gate <gate#>`.
+The binder validates both bodies before writing, reads both edits back, and is safe to rerun; never
+use raw `gh pr edit`. The engine's guarded `dispose --disposition gate-approved`
 close binds approval to that recorded PR. One gate issue per admission, no matter how much it gates.
 
 **2 — Chain what's pending.** Block what must wait on admission through the adapter convenience
@@ -124,8 +126,9 @@ gate with still-`Blocked` dependents — the start-of-run re-check finishes the 
 gate does **not** by itself prove the guarded dispose ran: a legacy/manual close, a raw `Status`
 edit, or a janitor repair also mint `Done` — and unblocking a raw-closed **requirements** gate
 whose Think PR never merged would admit **draft** requirements. So the recovery **first verifies
-the gate's journaled guarded dispose** — the `op=dispose`, `disposition=gate-approved` audit line
-the guarded door always writes, naming that gate (re-dispose is NOT a clean re-proof: the terminal
+the gate's journaled proof** through `idc_gate_proof.py` — either `guarded-dispose` (the
+`op=dispose`, `disposition=gate-approved` audit line) or `verified-reconciliation` is proven,
+naming that gate (re-dispose is NOT a clean re-proof: the terminal
 op has no already-terminal guard, so it re-closes and DOUBLE-journals — the journal record is the
 authoritative proof). Verify through the **one** deterministic reader (`idc_gate_proof.py` — it owns
 the archive-aware, lock-safe strict journal scan, so no surface hand-rolls its own and drifts;
@@ -166,16 +169,18 @@ gate was never closed through the guarded door, and its record says so rather th
 safe to finish. **UNPROVEN** → the gate's `Done` is not backed by any verified approval: **leave the
 dependent `Blocked` and surface the anomaly** (the gate reached `Done` outside the guarded door —
 confirm the approval, e.g. its Think PR merged, then reconcile it honestly with
-`idc_gate_repair.py` — dry-run first — which stamps the gate's bound approval marker, repairs
-`Stage`/`Status`, and journals the evidence; never hand-write a `dispose` record to silence it).
+`idc_pr_gate_bind.py` first when reciprocal markers are missing, then `idc_gate_repair.py` — dry-run
+first — which repairs `Stage`/`Status` and journals the evidence but never edits either body; never
+hand-write a `dispose` record to silence it).
 That recovery is wired deterministically: `/idc:autorun`, `/idc:plan`, and
-`/idc:recirculate` carry the Blocked-scan step (verify-the-journaled-guarded-dispose, then unblock),
-and `/idc:doctor` Row 9's board-lint tiers a remaining strand — `stranded-gate` when the guarded
-dispose IS journaled (safe to finish the unblock), `unproven-gate-done` when it is not (do **not**
+`/idc:recirculate` carry the Blocked-scan step (verify the centralized journal proof, then use the
+guarded pointer-finish door), and `/idc:doctor` Row 9's board-lint tiers a remaining strand —
+`stranded-gate` when either `guarded-dispose` or `verified-reconciliation` is journaled (safe to
+finish), `unproven-gate-done` when neither is (do **not**
 auto-unblock). (A **legacy** gate created before the
-`idc-gate-pr` marker existed — no marker in its body — must first be **migrated**: stamp its
-`<!-- idc-gate-pr: <PR#> -->` marker **in the gate BODY** (a one-line body edit) with the Think PR
-you confirmed merged, then dispose. The marker MUST live in the body: the gate body has no adapter
+`idc-gate-pr` marker existed — no marker in its body — must first be **migrated** through
+`idc_pr_gate_bind.py` with the Think PR you confirmed merged, then disposed. The marker MUST live in
+the body: the gate body has no adapter
 door (createTicket stamps it, `setField`/`comment` cannot edit it), so a body marker IS the gate's
 own record; a **comment** is any adapter caller's door, so the engine **refuses** a gate whose only
 `idc-gate-pr` marker rides a comment (codex round-14 P2 — the old comment-migration cross-check was

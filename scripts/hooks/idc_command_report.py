@@ -173,13 +173,14 @@ def current_report(cwd, kind, session_id):
 # ── atomic, best-effort write ────────────────────────────────────────────────────────────────────
 def _atomic_write(path, payload):
     """Write the report atomically (temp-file + os.replace). BEST-EFFORT: an OSError warns and
-    returns (never raises) so persisting a report can never break the diagnostic run."""
+    returns False (never raises) so persisting a report can never break the diagnostic run. Returns
+    True only after the replacement has landed."""
     d = os.path.dirname(path) or "."
     try:
         fd, tmp = tempfile.mkstemp(dir=d, prefix=".idc-command-report.", suffix=".tmp")
     except OSError as e:
         idc_hook_lib.warn(f"command-report: cannot create temp file in {d}: {e}")
-        return
+        return False
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, indent=2, sort_keys=True)
@@ -187,12 +188,14 @@ def _atomic_write(path, payload):
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, path)
+        return True
     except OSError as e:
         idc_hook_lib.warn(f"command-report: atomic write to {path} failed: {e}")
         try:
             os.remove(tmp)
         except OSError:
             pass
+        return False
 
 
 def write_report(cwd, kind, payload, session_id=None, ts=None):
@@ -224,8 +227,7 @@ def write_report(cwd, kind, payload, session_id=None, ts=None):
         "ts": float(ts) if ts is not None else time.time(),
         "payload": payload,
     }
-    _atomic_write(report_path(cwd, kind), body)
-    return True
+    return _atomic_write(report_path(cwd, kind), body)
 
 
 # ── the gitignore scaffold hook (idempotent, non-destructive) ────────────────────────────────────

@@ -116,8 +116,29 @@ grep -qF 'docs/workflow/intakes/' "$UPD" \
   || fail "commands/update.md must name docs/workflow/intakes/ — the intake home it installs into older repos without touching intake contents"
 grep -qF 'docs/workflow/intakes/.gitkeep' "$UNI" \
   || fail "commands/uninstall.md's pre-receipt fallback must remove the intake home by its .gitkeep only — a bare docs/workflow/intakes/ would delete the operator's compiled manifests as pristine scaffold"
+grep -qF 'docs/workflow/pillar-matrices/.gitkeep' "$UNI" \
+  || fail "commands/uninstall.md's pre-receipt fallback must name only the matrix keepfile"
+grep -qF 'docs/workflow/code-reviews/.gitkeep' "$UNI" \
+  || fail "commands/uninstall.md's pre-receipt fallback must name the review keepfile"
+grep -qF 'docs/workflow/code-reviews/.gitignore' "$UNI" \
+  || fail "commands/uninstall.md's pre-receipt fallback must name the review ignore file"
+python3 - "$UNI" <<'PY' \
+  || fail "commands/uninstall.md must never recursively remove or list a work-product directory as a footprint"
+import re, sys
+text = open(sys.argv[1], encoding="utf-8").read()
+if re.search(r"git[^\n]*\brm\b[^\n]*\s-r(?:\s|$)", text):
+    raise SystemExit(1)
+fallback = text.split("- **No receipt**", 1)[1].split("Always add two footprints", 1)[0]
+for directory in ("pillar-matrices", "code-reviews", "intakes"):
+    if f"`docs/workflow/{directory}/`" in fallback:
+        raise SystemExit(1)
+PY
 grep -qi 'work product' "$UNI" \
   || fail "commands/uninstall.md must state the work-product policy that preserves populated intake manifests"
+grep -qF 'receipt MUST remain' "$UNI" \
+  || fail "commands/uninstall.md must retain the canonical receipt through closeout"
+grep -qF 'docs/workflow/install-receipt.yaml docs/workflow/tracker-config.yaml' "$UNI" \
+  || fail "commands/uninstall.md must remove the retained receipt and anchor together only after finish"
 
 echo "PASS: phase7-update-unrecorded-files"
 exit 0

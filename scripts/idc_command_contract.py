@@ -803,7 +803,7 @@ def _receipt_document(repo: str, receipt_rel: object = None):
     try:
         import idc_receipt_check as RC  # noqa: E402 — lazy
         return RC.parse_receipt_document(path)
-    except Exception:  # noqa: BLE001 — an invalid receipt fails the closeout closed (never trusted)
+    except (Exception, SystemExit):  # noqa: BLE001 — an invalid receipt fails closed (never trusted)
         return None
 
 
@@ -1820,6 +1820,10 @@ def _rederive_doctor_row6(repo: str, session: str, row: dict):
         return False, ("row 6 (Pi runtime) claims PASS, but the read-only `install-pi.sh --check` probe "
                        f"exits {proc.returncode} — Pi absent is the row's SKIP and a failing prerequisite "
                        "its FAIL; neither is a PASS")
+    if not re.search(r"(?m)^\s*Pi agent\s+PRESENT(?:\s|$)", proc.stdout or ""):
+        return False, ("row 6 (Pi runtime) claims PASS, but the read-only `install-pi.sh --check` "
+                       "report does not show `Pi agent PRESENT` — an absent Pi agent is the row's "
+                       "SKIP even when Bun and the vendored runtime are healthy")
     return True, ""
 
 
@@ -2032,20 +2036,90 @@ def _plugin_still_enabled(settings_path: str) -> bool:
 # 6): the removal set is the receipt footprints UNION these documented runtime artifacts.
 _RUNTIME_UNINSTALL_ARTIFACTS = {"TRACKER.md"}
 
+# Exact IDC-owned files in installations made before install receipts existed. Directories are
+# deliberately absent: matrices, reviews, and intake manifests are operator work products. Only the
+# ownership keepfiles (and the review ignore file shipped by the scaffold) may be removed.
+_LEGACY_UNINSTALL_OWNED_FILES = frozenset({
+    "WORKFLOW.md",
+    "WORKFLOW-config.yaml",
+    _GOVERNANCE_ANCHOR,
+    "docs/workflow/workflow-machine.yaml",
+    "docs/workflow/README.md",
+    "docs/workflow/pillar-matrices/.gitkeep",
+    "docs/workflow/code-reviews/.gitkeep",
+    "docs/workflow/code-reviews/.gitignore",
+    "docs/workflow/intakes/.gitkeep",
+})
 
-def _receipt_removal_set(repo: str, refs: dict):
+
+def _uninstall_owned_files(repo: str, expected_source: object = None,
+                           expected_sha256: object = None):
+    """Return ``(owned_files, source, error)`` for uninstall verification.
+
+    A genuinely missing receipt selects the fixed legacy list. A receipt that exists but cannot be
+    parsed is a hard failure and never falls back. This distinction keeps old installs removable
+    without letting a damaged modern receipt widen or change the deletion set.
+    """
+    # Uninstall's receipt is canonical, never caller-selectable. Allowing refs.receipt to redirect
+    # this read would let a missing alternate path mask a malformed canonical receipt.
+    rel = _RECEIPT_RELPATH
+    raw_path = os.path.join(os.path.realpath(os.path.abspath(repo)), rel)
+    path = _confined_repo_path(repo, rel)
+    if path is None:
+        return None, None, _fail("uninstall-receipt-bad-ref",
+                                 "the canonical install receipt path is outside the governed repo")
+    if expected_source not in (None, "install-receipt", "legacy-fallback"):
+        return None, None, _fail("uninstall-receipt-source-invalid",
+                                 "the uninstall record carries an unknown receipt-source stamp")
+    if not os.path.lexists(raw_path):
+        if expected_source == "install-receipt":
+            return None, None, _fail(
+                "uninstall-receipt-removed-before-finish",
+                "the canonical install receipt existed when uninstall started but is now absent; "
+                "retain docs/workflow/install-receipt.yaml through finish so the modern removal "
+                "manifest cannot silently downgrade to the legacy fallback")
+        return set(_LEGACY_UNINSTALL_OWNED_FILES), "legacy-fallback", None
+    if expected_source == "legacy-fallback":
+        return None, None, _fail(
+            "uninstall-receipt-source-changed",
+            "the canonical install receipt was absent when uninstall started but appeared before "
+            "finish; restart uninstall so one stable removal manifest governs the whole run")
+    if not os.path.isfile(path):
+        return None, None, _fail("uninstall-invalid-receipt",
+                                 f"the install receipt {rel!r} exists but is not a regular file; "
+                                 "legacy fallback is allowed only when the receipt is absent")
+    if _ne_str(expected_sha256):
+        try:
+            with open(path, "rb") as handle:
+                actual_sha256 = hashlib.sha256(handle.read()).hexdigest()
+        except OSError as exc:
+            return None, None, _fail("uninstall-invalid-receipt",
+                                     f"the canonical install receipt cannot be read: {exc}")
+        if actual_sha256 != expected_sha256:
+            return None, None, _fail(
+                "uninstall-receipt-changed",
+                "the canonical install receipt changed after uninstall started; restore the "
+                "start-time manifest or restart uninstall so one stable owned-file set governs "
+                "the entire removal")
+    doc = _receipt_document(repo, rel)
+    if doc is None:
+        return None, None, _fail("uninstall-invalid-receipt",
+                                 f"the install receipt {rel!r} exists but does not parse; repair or "
+                                 "restore it before uninstalling (never fall back from a malformed receipt)")
+    _top, entries = doc
+    return {e["path"] for e in entries}, "install-receipt", None
+
+
+def _receipt_removal_set(repo: str, session: str):
     """The removal set DERIVED from the install receipt (never the caller's `removed` list — wave-3
     finding 5) UNION the playbook's documented runtime-created artifacts (`TRACKER.md` — wave-4 finding
     6), minus the governance anchor (removed only post-finish). Returns (footprints_set, None) or
     (None, CloseoutResult-failure)."""
-    doc = _receipt_document(repo, refs.get("receipt"))
-    if doc is None:
-        return None, _fail("uninstall-no-receipt",
-                           "an applied uninstall must derive its removal set from the install receipt "
-                           "(docs/workflow/install-receipt.yaml) — none found or it does not parse; the "
-                           "caller's `removed` list is never authoritative")
-    _top, entries = doc
-    footprints = ({e["path"] for e in entries} | _RUNTIME_UNINSTALL_ARTIFACTS) - {_GOVERNANCE_ANCHOR}
+    receipt_source, receipt_sha256 = _uninstall_receipt_stamp_from_record(repo, session)
+    owned, _source, err = _uninstall_owned_files(repo, receipt_source, receipt_sha256)
+    if err is not None:
+        return None, err
+    footprints = (owned | _RUNTIME_UNINSTALL_ARTIFACTS) - {_GOVERNANCE_ANCHOR}
     return footprints, None
 
 
@@ -2061,6 +2135,20 @@ def _uninstall_flags_from_record(repo: str, session: str):
     except Exception:  # noqa: BLE001
         return set()
     return set()
+
+
+def _uninstall_receipt_stamp_from_record(repo: str, session: str):
+    """The canonical receipt source + content digest stamped when this uninstall started, or Nones for an older
+    active-record shape. The stamp distinguishes a genuinely pre-receipt installation from a modern
+    run that deleted, redirected, or narrowed its receipt before finish."""
+    try:
+        for rec in idc_ledger.active_commands(repo, session):
+            if rec.get("command") == "uninstall":
+                return (rec.get("uninstall_receipt_source"),
+                        rec.get("uninstall_receipt_sha256"))
+    except Exception:  # noqa: BLE001 — old/missing state uses the prior live-source behavior
+        pass
+    return None, None
 
 
 def _open_issues(repo: str):
@@ -2152,7 +2240,9 @@ def _claim_uninstall(refs: dict, repo: str, session: str) -> CloseoutResult:
         # --close-issues/--delete-board run REQUESTED board work, so it can never be a no-action; and (2)
         # the documented runtime artifacts (TRACKER.md) must ALSO already be absent (they are not receipt
         # footprints, but a no-action means nothing is left to remove). Then a receipt is REQUIRED to
-        # enumerate the footprints and EVERY non-anchor footprint must already be ABSENT.
+        # enumerate the footprints and EVERY non-anchor footprint must already be ABSENT. A missing
+        # receipt uses the same exact legacy-owned-file list as an applied uninstall; an existing
+        # malformed receipt remains a hard failure.
         if flags:
             return _fail("uninstall-no-action-flags-stamped",
                          "uninstall no-action rejected — this run was invoked with board flag(s) "
@@ -2164,20 +2254,17 @@ def _claim_uninstall(refs: dict, repo: str, session: str) -> CloseoutResult:
                 return _fail("uninstall-no-action-runtime-artifact",
                              f"uninstall no-action rejected — a runtime artifact {rel!r} is still present "
                              "(there IS work to remove; record 'applied', not 'no-action')")
-        doc = _receipt_document(repo, refs.get("receipt"))
-        if doc is None:
-            return _fail("uninstall-no-action-no-receipt",
-                         "uninstall no-action requires an install receipt to prove there is nothing to "
-                         "remove — none found or it does not parse (fail closed; a caller assertion is "
-                         "never proof that the filesystem is clean)")
-        _top, entries = doc
-        for e in entries:
-            if e["path"] == _GOVERNANCE_ANCHOR:
+        receipt_source, receipt_sha256 = _uninstall_receipt_stamp_from_record(repo, session)
+        owned, source, err = _uninstall_owned_files(repo, receipt_source, receipt_sha256)
+        if err is not None:
+            return err
+        for rel in owned:
+            if rel == _GOVERNANCE_ANCHOR:
                 continue
-            p = _confined_repo_path(repo, e["path"])
+            p = _confined_repo_path(repo, rel)
             if p is not None and os.path.exists(p):
                 return _fail("uninstall-no-action-footprint",
-                             f"uninstall no-action rejected — receipt footprint {e['path']!r} is still "
+                             f"uninstall no-action rejected — {source} footprint {rel!r} is still "
                              "present (there IS work to remove; record 'applied', not 'no-action')")
         return CloseoutResult(True, "ok", "uninstall no-action (verified: no flags, runtime artifacts + footprints all absent)", {})
     # applied: FIRST verify the stamped opt-in board flags were actually honored by REAL reads (finding
@@ -2214,7 +2301,7 @@ def _claim_uninstall(refs: dict, repo: str, session: str) -> CloseoutResult:
                          "not proof the remote board was deleted (rule B)")
     # the destructive work must have ACTUALLY HAPPENED — validate it by INDEPENDENT checks against the
     # receipt-DERIVED removal set (never the caller's `removed` list — finding 5).
-    footprints, err = _receipt_removal_set(repo, refs)
+    footprints, err = _receipt_removal_set(repo, session)
     if err is not None:
         return err
     if not footprints:
@@ -2451,6 +2538,28 @@ def uninstall_flags_from_args(command: str, args_text: str):
     return flags or None
 
 
+def _uninstall_receipt_source_at_start(command: str, repo: str):
+    """Stamp whether this uninstall began with the canonical modern receipt or as a genuinely
+    pre-receipt installation. The finish uses this durable fact to refuse source downgrades."""
+    if command != "uninstall":
+        return None
+    path = os.path.join(os.path.realpath(os.path.abspath(repo)), _RECEIPT_RELPATH)
+    return "install-receipt" if os.path.lexists(path) else "legacy-fallback"
+
+
+def _uninstall_receipt_sha256_at_start(command: str, repo: str, source: object):
+    """Hash the exact modern receipt bytes at start so a valid-but-narrower replacement cannot
+    shed owned-file obligations before finish. Pre-receipt installs have no digest."""
+    if command != "uninstall" or source != "install-receipt":
+        return None
+    path = os.path.join(os.path.realpath(os.path.abspath(repo)), _RECEIPT_RELPATH)
+    try:
+        with open(path, "rb") as handle:
+            return hashlib.sha256(handle.read()).hexdigest()
+    except OSError:
+        return None
+
+
 def _make_nonce():
     """A short, unguessable per-invocation nonce (wave-4 finding 7) that binds a diagnostic report to
     the command record it was opened with. Uses os.urandom (available to the deterministic hook), never
@@ -2545,7 +2654,8 @@ def register_start(cwd: str, session_id: str, command: str, plugin_version: str,
     """Open (idempotently upsert) the command's active lifecycle record — the entry gate's helper.
     Computes the argument digest and delegates the single ledger write. Assumes freshness/admission
     was already decided by the caller (the entry gate). Returns the record dict when the write
-    PERSISTED, `{}` outside a governed repo, or None when the ledger write FAILED (Fix 2).
+    PERSISTED, `{}` outside a governed repo, or None when the start cannot be safely persisted
+    (including a modern uninstall receipt that cannot be content-pinned, or a ledger write failure).
 
     A Think run started with `--doc/--unit` durably stamps its intake manifest + selected units on the
     record (finding 2); a recirculate run started with a `<manifest>#<unit>` / `#<ticket>` stamps its
@@ -2555,13 +2665,23 @@ def register_start(cwd: str, session_id: str, command: str, plugin_version: str,
     recirc_requested = recirc_requested_from_args(command, args_text or "")
     build_requested = build_requested_from_args(command, args_text or "")
     uninstall_flags = uninstall_flags_from_args(command, args_text or "")
+    uninstall_receipt_source = _uninstall_receipt_source_at_start(command, cwd)
+    uninstall_receipt_sha256 = _uninstall_receipt_sha256_at_start(
+        command, cwd, uninstall_receipt_source)
+    # Presence alone is not a stable modern removal manifest. If the canonical receipt exists but
+    # its exact bytes cannot be read and hashed, opening an uninstall record without a digest would
+    # let a later valid-but-narrower replacement shed owned-file obligations before finish.
+    if uninstall_receipt_source == "install-receipt" and not uninstall_receipt_sha256:
+        return None
     plan_admitted = _plan_admitted_at_start(command, cwd)
     build_frontier = _build_frontier_at_start(command, cwd, build_requested)
     return idc_ledger.command_start(
         cwd, session_id, command, plugin_version, args_digest(args_text or ""), source or "",
         intake_manifest=intake_manifest, intake_units=intake_units, recirc_requested=recirc_requested,
         build_requested=build_requested, plan_admitted=plan_admitted, uninstall_flags=uninstall_flags,
-        nonce=_make_nonce(), build_frontier=build_frontier)
+        nonce=_make_nonce(), build_frontier=build_frontier,
+        uninstall_receipt_source=uninstall_receipt_source,
+        uninstall_receipt_sha256=uninstall_receipt_sha256)
 
 
 def active_records(cwd: str, session_id: str) -> list:

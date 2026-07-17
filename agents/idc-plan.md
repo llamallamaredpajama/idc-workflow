@@ -22,10 +22,11 @@ Run the phases in order; each phase's evidence gates the next.
   to decompose. While confirming, run the interrupted-run recovery (Plan does not gate — this only
   finishes a recovery the gate's own guarded close already validated): `query` `Status=Blocked`
   items and, for any whose blocking gate issue is already `Done`, **first verify that gate's
-  journaled guarded dispose** through the one deterministic reader —
+  journaled proof** through the one deterministic reader —
   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gate_proof.py" --repo "$PWD" --gate <gate#>` (it owns
-  the archive-aware scan of `docs/workflow/transition-journal.ndjson` + its `journal-archive/`
-  segments; never hand-roll one) — and only then finish it through the **guarded pointer-finish
+  the archive-aware scan of `docs/workflow/transition-journal.ndjson` + its `journal-archive/`;
+  `guarded-dispose` and `verified-reconciliation` are proven; never hand-roll a scan) — and only
+  then finish it through the **guarded pointer-finish
   door**: `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gate_repair.py" --repo "$PWD" --finish-pointer
   --gate <gate#> --pointer <dependent#>` (github: add `--owner <owner> --project <n>`; **dry run by
   default** — add `--apply` after reading the plan). **Never a raw engine `unblock` here**: `unblock

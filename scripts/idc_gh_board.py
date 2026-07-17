@@ -884,8 +884,20 @@ def delete_project(owner, project, confirmation, repo="."):
     node_id = info["id"]
     _gh(["project", "delete", str(int(project)), "--owner", owner], repo)
     query = "query($id:ID!){node(id:$id){id}}"
-    data = _json_object(_gh(["api", "graphql", "-f", "query=" + query, "-f", "id=" + node_id], repo),
-                        "project delete readback")
+    try:
+        raw = _gh(["api", "graphql", "-f", "query=" + query, "-f", "id=" + node_id], repo)
+    except RateLimitError:
+        raise
+    except BoardReadError as exc:
+        # GitHub may answer a lookup of the just-deleted global node with this exact error instead
+        # of a successful null node. It is the only error response that positively identifies THIS
+        # captured node as absent; auth/network/permission/other lookup failures remain failures.
+        missing = ("gh api graphql failed: gh: Could not resolve to a node with the global id of "
+                   f"'{node_id}'.")
+        if str(exc) == missing:
+            return {"action": "deleted", "number": int(project), "id": node_id, "title": info["title"]}
+        raise
+    data = _json_object(raw, "project delete readback")
     try:
         node = data["data"]["node"]
     except (KeyError, TypeError):

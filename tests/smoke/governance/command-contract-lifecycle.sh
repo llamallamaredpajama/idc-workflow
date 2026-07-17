@@ -601,7 +601,8 @@ refuse_row() {
     || gov_fail "(7c-r7, $5) the closeout refused, but NOT about row $3 (an incidental refusal proves nothing): $out"
 }
 # A BARE repo: no scaffold, no settings opt-in, no receipt, no scanner report — so rows 1/2/4/5/10 are
-# each deterministically NOT re-derivable here.
+# each deterministically NOT re-derivable here. Rows 3/6/7/8/9 are contested below by degrading only
+# their own live truth, proving every row's checker independently refuses a forged PASS.
 REPO_D7="$WORK/repo-d7"; mkdir -p "$REPO_D7/docs/workflow"
 printf 'backend: filesystem\n' > "$REPO_D7/docs/workflow/tracker-config.yaml"
 python3 "$GOV_TRK" --tracker "$REPO_D7/TRACKER.md" init >/dev/null || gov_fail "(7c-r7) could not init the REPO_D7 board"
@@ -637,6 +638,72 @@ refuse_row "$REPO_D7" "$SD7" 10 "no janitor scanner report exists for this sessi
 refuse_row "$REPO_D7" "$SD7" 1 "the repo records no project-scope opt-in" "forged row-1 PASS"
 # (r7-e) row 5 (install receipt) PASS on a no-receipt repo → refused (the wave-6 row-5 rule, preserved).
 refuse_row "$REPO_D7" "$SD7" 5 "no install receipt that parses" "forged row-5 PASS (row-5 rule preserved)"
+
+# (r7-e3) row 3 (tracker reachable) PASS while the filesystem board is absent → refused.
+mv "$REPO_D7/TRACKER.md" "$REPO_D7/TRACKER.md.off"
+refuse_row "$REPO_D7" "$SD7" 3 "the filesystem tracker is absent" "forged row-3 PASS"
+mv "$REPO_D7/TRACKER.md.off" "$REPO_D7/TRACKER.md"
+
+# (r7-e6) row 6 (optional Pi runtime) PASS while its own read-only prerequisite probe fails. A
+# minimal system PATH deliberately has no Bun, which install-pi.sh treats as a hard prerequisite.
+one_pass_report "$REPO_D7" "$SD7" 6 || gov_fail "(7c-r7) the writer refused the row-6 payload"
+ROW6_OUT="$(PATH="$FAKE_BIN:/usr/bin:/bin" contract finish --repo "$REPO_D7" --session "$SD7" \
+  --command doctor --status complete --evidence-json '{"schema_version":1,"refs":{}}' 2>&1)" \
+  && gov_fail "(7c-r7) a doctor complete forging row 6 PASS was accepted while install-pi.sh --check fails"
+printf '%s' "$ROW6_OUT" | grep -q 'row 6' \
+  || gov_fail "(7c-r7) the row-6 closeout refusal was incidental: $ROW6_OUT"
+
+# The probe deliberately exits zero when Bun/runtime are healthy but the optional Pi agent is absent;
+# Doctor calls that SKIP, so a forged PASS must still be refused. Isolate that exact state with a
+# fake Bun and a PATH carrying no Pi binary.
+PI_ABSENT_BIN="$WORK/pi-absent-bin"; mkdir -p "$PI_ABSENT_BIN"
+printf '#!/bin/sh\necho 1.2.3\n' > "$PI_ABSENT_BIN/bun"; chmod +x "$PI_ABSENT_BIN/bun"
+one_pass_report "$REPO_D7" "$SD7" 6 || gov_fail "(7c-r7) the writer refused the row-6 absent-Pi payload"
+ROW6_SKIP_OUT="$(PATH="$PI_ABSENT_BIN:/usr/bin:/bin" contract finish --repo "$REPO_D7" --session "$SD7" \
+  --command doctor --status complete --evidence-json '{"schema_version":1,"refs":{}}' 2>&1)" \
+  && gov_fail "(7c-r7) a forged row-6 PASS was accepted while the probe reported Pi agent ABSENT (Doctor SKIP)"
+printf '%s' "$ROW6_SKIP_OUT" | grep -q 'row 6' \
+  || gov_fail "(7c-r7) the absent-Pi row-6 refusal was incidental: $ROW6_SKIP_OUT"
+
+# (r7-e7) row 7 (Codex mirror) PASS with an isolated HOME carrying no mirror state → refused.
+EMPTY_HOME="$WORK/empty-home"; mkdir -p "$EMPTY_HOME"
+HOME="$EMPTY_HOME" refuse_row "$REPO_D7" "$SD7" 7 "the Codex mirror is absent" "forged row-7 PASS"
+
+# (r7-e8) row 8 (running plugin version readable) PASS while THIS closeout's plugin root has no
+# manifest. Import the real contract and change only its live `_HERE` root; the row re-deriver itself
+# is unmodified and must read the resulting missing manifest as SKIP, never PASS.
+one_pass_report "$REPO_D7" "$SD7" 8 || gov_fail "(7c-r7) the writer refused the row-8 payload"
+ROW8_OUT="$(SCRIPTS_DIR="$GOV_PLUGIN/scripts" python3 - "$WORK/no-plugin/scripts/idc_command_contract.py" \
+  "$REPO_D7" "$SD7" 2>&1 <<'PY'
+import os, sys
+sys.path.insert(0, os.environ["SCRIPTS_DIR"])
+sys.path.insert(0, os.path.join(os.environ["SCRIPTS_DIR"], "hooks"))
+import idc_command_contract as contract
+contract._HERE = sys.argv[1]
+raise SystemExit(contract.main(["finish", "--repo", sys.argv[2], "--session", sys.argv[3],
+    "--command", "doctor", "--status", "complete", "--evidence-json",
+    '{"schema_version":1,"refs":{}}']))
+PY
+)" && gov_fail "(7c-r7) a doctor complete forging row 8 PASS was accepted with no readable running manifest"
+printf '%s' "$ROW8_OUT" | grep -q 'row 8' \
+  || gov_fail "(7c-r7) the row-8 closeout refusal was incidental: $ROW8_OUT"
+
+# (r7-e9) row 9 (build-lane hygiene) PASS while the board it claims to scan is unreadable → refused.
+mv "$REPO_D7/TRACKER.md" "$REPO_D7/TRACKER.md.off"
+refuse_row "$REPO_D7" "$SD7" 9 "the filesystem board cannot be read" "forged row-9 PASS"
+mv "$REPO_D7/TRACKER.md.off" "$REPO_D7/TRACKER.md"
+
+# Positive counterweight for row 6: with both Bun and Pi present and runtime files intact, the same
+# one-row PASS report closes successfully.
+PI_PRESENT_BIN="$WORK/pi-present-bin"; mkdir -p "$PI_PRESENT_BIN"
+printf '#!/bin/sh\necho 1.2.3\n' > "$PI_PRESENT_BIN/bun"
+printf '#!/bin/sh\necho 0.42.0\n' > "$PI_PRESENT_BIN/pi"
+chmod +x "$PI_PRESENT_BIN/bun" "$PI_PRESENT_BIN/pi"
+one_pass_report "$REPO_D7" "$SD7" 6 || gov_fail "(7c-r7) the writer refused the valid row-6 PASS"
+PATH="$PI_PRESENT_BIN:/usr/bin:/bin" contract finish --repo "$REPO_D7" --session "$SD7" \
+  --command doctor --status complete --evidence-json '{"schema_version":1,"refs":{}}' \
+  || gov_fail "(7c-r7) a real Pi-present/healthy row-6 PASS was rejected"
+echo "  ok (7c-r7 row6 positive) Pi PRESENT + healthy probe can back PASS"
 
 # (r7-f) NO FALSE-REFUSAL: a FULLY-PROVISIONED repo whose rows are all genuinely re-derivable closes
 #        `complete`. This is the load-bearing counterweight — a re-derivation that refused everything
@@ -714,7 +781,7 @@ if HOME="$FAKE_HOME" PATH="$FAKE_BIN:$PATH" contract finish --repo "$REPO_DL" --
   gov_fail "(7c-r7, r7-g) the SAME report still closed after the row-1 opt-in was removed — the re-derivation is not reading LIVE truth"
 fi
 mv "$REPO_DL/.claude/settings.json.off" "$REPO_DL/.claude/settings.json"
-echo "  ok (7c-r7, BLOCKS 2) EVERY PASS-claiming doctor row is re-derived: forged row 1/2/4/5/10 PASSes are refused (naming the row), a failed/absent/wrong-scope gh read never counts as a pass, a fully-provisioned repo whose PASS rows are all genuinely re-derivable still closes complete, and the same report stops closing once a truth degrades"
+echo "  ok (7c-r7, BLOCKS 2) EVERY PASS-claiming doctor row is re-derived: forged row 1–10 PASSes are refused by their own checker, a failed/absent/wrong-scope read never counts as a pass, a fully-provisioned repo whose PASS rows are all genuinely re-derivable still closes complete, and the same report stops closing once a truth degrades"
 
 # (7d, F1) blocked_external: an allowlisted helper + NONZERO exit + diagnostic; a zero exit, a phantom
 # helper, a helper NOT belonging to the command, and an invented/mismatched drain are all refused.
@@ -1192,6 +1259,14 @@ fi
 rm -f "$REPO4/WORKFLOW.md" "$REPO4/docs/workflow/workflow-machine.yaml" "$REPO4/TRACKER.md"
 python3 "$GOV_PLUGIN/scripts/idc_settings_json.py" disable "$REPO4/.claude/settings.json" idc@idc-workflow >/dev/null \
   || gov_fail "(9) could not strip the enablement key"
+# A modern run must retain its canonical receipt through finish. Removing it after start must not
+# silently downgrade verification to the smaller pre-receipt fallback.
+mv "$REPO4/docs/workflow/install-receipt.yaml" "$REPO4/docs/workflow/install-receipt.yaml.off"
+if contract finish --repo "$REPO4" --session "$S4" --command uninstall --status complete \
+     --evidence-json "$(applied_ev)" 2>/dev/null; then
+  gov_fail "(9-sabotage) a receipt-backed uninstall deleted its receipt before finish and silently downgraded to the legacy fallback"
+fi
+mv "$REPO4/docs/workflow/install-receipt.yaml.off" "$REPO4/docs/workflow/install-receipt.yaml"
 # with the footprints gone but the archive missing, finish still refuses.
 rm -f "$REPO4/$ARCHIVE_REL"
 if contract finish --repo "$REPO4" --session "$S4" --command uninstall --status complete \
@@ -1206,43 +1281,201 @@ contract finish --repo "$REPO4" --session "$S4" --command uninstall --status com
   || gov_fail "(9a) the uninstall record did not close on the verified finish"
 echo "  ok (9, F5) uninstall derives the removal set from the receipt (a dummy-'removed' bypass with a footprint still present is REFUSED)"
 
-# (9b) the governance anchor removal is the single POST-finish step (a post-anchor-removal finish cannot land).
+# (9b) the receipt + governance anchor remain through finish (a post-anchor-removal finish cannot land).
 contract start --repo "$REPO4" --session "$S4" --command uninstall --plugin-root "$GOV_PLUGIN" --args 'u3' --source user >/dev/null
 rm -f "$REPO4/docs/workflow/tracker-config.yaml"
 if contract finish --repo "$REPO4" --session "$S4" --command uninstall --status complete \
      --evidence-json "$(applied_ev)" 2>/dev/null; then
   gov_fail "(9b) an uninstall finish AFTER the anchor was removed unexpectedly succeeded"
 fi
-echo "  ok (9b) the governance anchor removal is the single POST-finish step"
+echo "  ok (9b) the canonical receipt + governance anchor remain until the combined POST-finish cleanup"
 
-# (9c, F5 no-action) a no-action is PROVEN, never asserted: a receipt must enumerate the footprints and
-# EVERY non-anchor footprint be already absent. A no-receipt no-action, and a no-action while a footprint
-# is still present, are both refused; a governed repo whose receipt footprints are all absent accepts it.
+# (9c, F5 no-action) a no-action is PROVEN, never asserted: the start-stamped legacy list or receipt
+# must show every non-anchor footprint absent, and the source cannot change mid-run.
 REPO4B="$WORK/repo4b"; mkdir -p "$REPO4B/docs/workflow"
 printf 'backend: filesystem\n' > "$REPO4B/docs/workflow/tracker-config.yaml"   # governed (finish can run)
 printf 'workflow\n' > "$REPO4B/WORKFLOW.md"
 S4B="s4b-$$-$(basename "$WORK")"
-# (i) NO receipt → no-action cannot prove the filesystem is clean → refused (the RED-probe shape).
+# (i) Pre-receipt source + a legacy footprint present → no-action refused.
 contract start --repo "$REPO4B" --session "$S4B" --command uninstall --plugin-root "$GOV_PLUGIN" --args 'na' --source user >/dev/null
 if contract finish --repo "$REPO4B" --session "$S4B" --command uninstall --status complete \
      --evidence-json '{"schema_version":1,"refs":{"outcome":"no-action"}}' 2>/dev/null; then
-  gov_fail "(9c-i) a uninstall no-action with NO install receipt (cannot prove the filesystem clean) was accepted"
+  gov_fail "(9c-i) a pre-receipt uninstall with a legacy footprint present was accepted as no-action"
 fi
-# (ii) a receipt whose footprint (WORKFLOW.md) is STILL PRESENT → there IS work → no-action refused.
+# (ii) A receipt appearing before same-session re-entry must NOT replace the first legacy source.
 python3 "$RECEIPT" stamp --repo "$REPO4B" --out "$REPO4B/docs/workflow/install-receipt.yaml" \
   --plugin-version "$RUN_VER" WORKFLOW.md docs/workflow/tracker-config.yaml >/dev/null \
   || gov_fail "(9c) could not stamp the REPO4B receipt"
+contract start --repo "$REPO4B" --session "$S4B" --command uninstall --plugin-root "$GOV_PLUGIN" \
+  --args 'na-restart' --source user >/dev/null || gov_fail "(9c-ii) same-session restart failed"
+rm -f "$REPO4B/WORKFLOW.md"
 if contract finish --repo "$REPO4B" --session "$S4B" --command uninstall --status complete \
      --evidence-json '{"schema_version":1,"refs":{"outcome":"no-action"}}' 2>/dev/null; then
-  gov_fail "(9c-ii) a uninstall no-action while a receipt footprint (WORKFLOW.md) is still present was accepted"
+  gov_fail "(9c-ii) same-session restart promoted legacy fallback to a newly appeared receipt"
 fi
-# (iii) the footprint removed → every non-anchor receipt footprint absent → no-action accepted (the repo
-# is still governed, so finish runs; the anchor removal is the post-finish step).
+# (iii) A FRESH modern run uses the present receipt. Its live footprint refuses no-action, then the
+# same start-stamped receipt accepts after that footprint is removed.
+S4BM="s4bm-$$-$(basename "$WORK")"
+printf 'workflow\n' > "$REPO4B/WORKFLOW.md"
+contract start --repo "$REPO4B" --session "$S4BM" --command uninstall --plugin-root "$GOV_PLUGIN" \
+  --args 'na-modern' --source user >/dev/null || gov_fail "(9c-iii) modern start failed"
+if contract finish --repo "$REPO4B" --session "$S4BM" --command uninstall --status complete \
+     --evidence-json '{"schema_version":1,"refs":{"outcome":"no-action"}}' 2>/dev/null; then
+  gov_fail "(9c-iii) modern no-action accepted while WORKFLOW.md was still present"
+fi
 rm -f "$REPO4B/WORKFLOW.md"
-contract finish --repo "$REPO4B" --session "$S4B" --command uninstall --status complete \
+contract finish --repo "$REPO4B" --session "$S4BM" --command uninstall --status complete \
   --evidence-json '{"schema_version":1,"refs":{"outcome":"no-action"}}' \
   || gov_fail "(9c-iii) a uninstall no-action whose receipt footprints are all absent was rejected"
-echo "  ok (9c, F5) uninstall no-action is proven from the receipt (no-receipt + still-present-footprint refused; all-absent accepted)"
+echo "  ok (9c, F5) no-action is source-stable: legacy->receipt re-entry refused; fresh modern footprint present/absent cases verified"
+
+# (9d, deferred #17/#18) A PRE-RECEIPT install uses the exact legacy-owned FILE list. Operator
+# artifacts inside the three work-product directories are not footprints and must survive while the
+# closeout still verifies that every keepfile/runtime-owned file was removed.
+REPO_LEG="$WORK/repo-legacy-uninstall"
+mkdir -p "$REPO_LEG/docs/workflow/pillar-matrices" "$REPO_LEG/docs/workflow/code-reviews" \
+  "$REPO_LEG/docs/workflow/intakes" "$REPO_LEG/.claude"
+printf 'workflow\n' > "$REPO_LEG/WORKFLOW.md"
+printf 'config\n' > "$REPO_LEG/WORKFLOW-config.yaml"
+printf 'backend: filesystem\n' > "$REPO_LEG/docs/workflow/tracker-config.yaml"
+printf 'machine\n' > "$REPO_LEG/docs/workflow/workflow-machine.yaml"
+printf 'readme\n' > "$REPO_LEG/docs/workflow/README.md"
+: > "$REPO_LEG/docs/workflow/pillar-matrices/.gitkeep"
+: > "$REPO_LEG/docs/workflow/code-reviews/.gitkeep"
+: > "$REPO_LEG/docs/workflow/code-reviews/.gitignore"
+: > "$REPO_LEG/docs/workflow/intakes/.gitkeep"
+printf 'operator matrix\n' > "$REPO_LEG/docs/workflow/pillar-matrices/phase-a.yaml"
+printf 'operator review\n' > "$REPO_LEG/docs/workflow/code-reviews/pr-12.md"
+printf '{"schema_version":1}\n' > "$REPO_LEG/docs/workflow/intakes/vendor.intake.json"
+printf 'tracker\n' > "$REPO_LEG/TRACKER.md"
+printf '{"enabledPlugins":{"idc@idc-workflow":true}}\n' > "$REPO_LEG/.claude/settings.json"
+: > "$REPO_LEG/idc-archive-legacy.tar.gz"
+SLEG="sleg-$$-$(basename "$WORK")"
+contract start --repo "$REPO_LEG" --session "$SLEG" --command uninstall --plugin-root "$GOV_PLUGIN" \
+  --args 'uninstall' --source user >/dev/null
+if contract finish --repo "$REPO_LEG" --session "$SLEG" --command uninstall --status complete \
+     --evidence-json '{"schema_version":1,"refs":{"outcome":"applied","settings":".claude/settings.json","archive":"idc-archive-legacy.tar.gz"}}' 2>/dev/null; then
+  gov_fail "(9d) a pre-receipt uninstall closed while legacy-owned files were still present"
+fi
+rm -f "$REPO_LEG/WORKFLOW.md" "$REPO_LEG/WORKFLOW-config.yaml" \
+  "$REPO_LEG/docs/workflow/workflow-machine.yaml" "$REPO_LEG/docs/workflow/README.md" \
+  "$REPO_LEG/docs/workflow/pillar-matrices/.gitkeep" \
+  "$REPO_LEG/docs/workflow/code-reviews/.gitkeep" \
+  "$REPO_LEG/docs/workflow/code-reviews/.gitignore" \
+  "$REPO_LEG/docs/workflow/intakes/.gitkeep" "$REPO_LEG/TRACKER.md"
+python3 "$GOV_PLUGIN/scripts/idc_settings_json.py" disable "$REPO_LEG/.claude/settings.json" idc@idc-workflow >/dev/null
+contract finish --repo "$REPO_LEG" --session "$SLEG" --command uninstall --status complete \
+  --evidence-json '{"schema_version":1,"refs":{"outcome":"applied","settings":".claude/settings.json","archive":"idc-archive-legacy.tar.gz"}}' \
+  || gov_fail "(9d) an exact pre-receipt cleanup was rejected"
+for kept in docs/workflow/pillar-matrices/phase-a.yaml docs/workflow/code-reviews/pr-12.md \
+            docs/workflow/intakes/vendor.intake.json; do
+  [ -f "$REPO_LEG/$kept" ] || gov_fail "(9d) operator work product $kept was deleted"
+done
+echo "  ok (9d) pre-receipt uninstall uses exact legacy-owned files and preserves matrix/review/intake work products"
+
+# (9e) An EXISTING malformed receipt never downgrades to the legacy fallback.
+REPO_BADREC="$WORK/repo-malformed-receipt"; mkdir -p "$REPO_BADREC/docs/workflow" "$REPO_BADREC/.claude"
+printf 'backend: filesystem\n' > "$REPO_BADREC/docs/workflow/tracker-config.yaml"
+printf 'not: [valid receipt\n' > "$REPO_BADREC/docs/workflow/install-receipt.yaml"
+printf '{}\n' > "$REPO_BADREC/.claude/settings.json"
+: > "$REPO_BADREC/idc-archive-badrec.tar.gz"
+SBADREC="sbadrec-$$-$(basename "$WORK")"
+contract start --repo "$REPO_BADREC" --session "$SBADREC" --command uninstall --plugin-root "$GOV_PLUGIN" \
+  --args 'uninstall' --source user >/dev/null
+BADREC_OUT="$(contract finish --repo "$REPO_BADREC" --session "$SBADREC" --command uninstall \
+  --status complete --evidence-json '{"schema_version":1,"refs":{"outcome":"applied","settings":".claude/settings.json","archive":"idc-archive-badrec.tar.gz"}}' 2>&1)" \
+  && gov_fail "(9e) an existing malformed receipt silently fell back to the legacy list"
+printf '%s' "$BADREC_OUT" | grep -qi 'receipt' \
+  || gov_fail "(9e) malformed receipt refusal did not name the receipt: $BADREC_OUT"
+echo "  ok (9e) an existing malformed receipt is a hard failure, never a legacy fallback"
+
+# (9e-alt) The canonical receipt is not caller-selectable. Start against a valid canonical receipt,
+# then corrupt it and point finish at a different missing path: the malformed canonical file must
+# still fail instead of selecting the legacy fallback.
+REPO_ALTREC="$WORK/repo-alternate-receipt"; mkdir -p "$REPO_ALTREC/docs/workflow" "$REPO_ALTREC/.claude"
+printf 'backend: filesystem\n' > "$REPO_ALTREC/docs/workflow/tracker-config.yaml"
+printf 'owned\n' > "$REPO_ALTREC/idc-owned.txt"
+printf '{}\n' > "$REPO_ALTREC/.claude/settings.json"
+python3 "$RECEIPT" stamp --repo "$REPO_ALTREC" --out "$REPO_ALTREC/docs/workflow/install-receipt.yaml" \
+  --plugin-version "$RUN_VER" idc-owned.txt docs/workflow/tracker-config.yaml >/dev/null \
+  || gov_fail "(9e-alt) could not stamp the canonical receipt"
+: > "$REPO_ALTREC/idc-archive-altrec.tar.gz"
+SALTREC="saltrec-$$-$(basename "$WORK")"
+contract start --repo "$REPO_ALTREC" --session "$SALTREC" --command uninstall --plugin-root "$GOV_PLUGIN" \
+  --args 'uninstall' --source user >/dev/null || gov_fail "(9e-alt) valid receipt did not start"
+printf 'not: [valid receipt\n' > "$REPO_ALTREC/docs/workflow/install-receipt.yaml"
+rm -f "$REPO_ALTREC/idc-owned.txt"
+ALTREC_OUT="$(contract finish --repo "$REPO_ALTREC" --session "$SALTREC" --command uninstall \
+  --status complete --evidence-json '{"schema_version":1,"refs":{"outcome":"applied","receipt":"docs/workflow/missing-alternate.yaml","settings":".claude/settings.json","archive":"idc-archive-altrec.tar.gz"}}' 2>&1)" \
+  && gov_fail "(9e-alt) caller-selected missing receipt bypassed a malformed canonical receipt"
+printf '%s' "$ALTREC_OUT" | grep -qi 'receipt' \
+  || gov_fail "(9e-alt) alternate-receipt refusal did not name the canonical receipt: $ALTREC_OUT"
+echo "  ok (9e-alt) uninstall always verifies the canonical receipt; caller evidence cannot select a fallback path"
+
+# (9e-swap) Presence alone is not a stable manifest. Replacing the canonical receipt after start
+# with a valid but narrower one must not let an originally receipt-owned file survive closeout.
+REPO_SWAPREC="$WORK/repo-swapped-receipt"; mkdir -p "$REPO_SWAPREC/docs/workflow" "$REPO_SWAPREC/.claude"
+printf 'backend: filesystem\n' > "$REPO_SWAPREC/docs/workflow/tracker-config.yaml"
+printf 'must be removed\n' > "$REPO_SWAPREC/WORKFLOW.md"
+printf '{}\n' > "$REPO_SWAPREC/.claude/settings.json"
+python3 "$RECEIPT" stamp --repo "$REPO_SWAPREC" --out "$REPO_SWAPREC/docs/workflow/install-receipt.yaml" \
+  --plugin-version "$RUN_VER" WORKFLOW.md docs/workflow/tracker-config.yaml >/dev/null \
+  || gov_fail "(9e-swap) could not stamp the original canonical receipt"
+: > "$REPO_SWAPREC/idc-archive-swaprec.tar.gz"
+SSWAPREC="sswaprec-$$-$(basename "$WORK")"
+contract start --repo "$REPO_SWAPREC" --session "$SSWAPREC" --command uninstall --plugin-root "$GOV_PLUGIN" \
+  --args 'uninstall' --source user >/dev/null || gov_fail "(9e-swap) valid receipt did not start"
+printf 'replacement\n' > "$REPO_SWAPREC/replacement-owned.txt"
+rm -f "$REPO_SWAPREC/docs/workflow/install-receipt.yaml"
+python3 "$RECEIPT" stamp --repo "$REPO_SWAPREC" --out "$REPO_SWAPREC/docs/workflow/install-receipt.yaml" \
+  --plugin-version "$RUN_VER" replacement-owned.txt docs/workflow/tracker-config.yaml >/dev/null \
+  || gov_fail "(9e-swap) could not stamp the narrower replacement receipt"
+rm -f "$REPO_SWAPREC/replacement-owned.txt"
+SWAPREC_OUT="$(contract finish --repo "$REPO_SWAPREC" --session "$SSWAPREC" --command uninstall \
+  --status complete --evidence-json '{"schema_version":1,"refs":{"outcome":"applied","settings":".claude/settings.json","archive":"idc-archive-swaprec.tar.gz"}}' 2>&1)" \
+  && gov_fail "(9e-swap) a narrower replacement receipt hid an original owned file from closeout"
+printf '%s' "$SWAPREC_OUT" | grep -Eqi 'receipt|manifest|changed' \
+  || gov_fail "(9e-swap) receipt-swap refusal was not diagnostic: $SWAPREC_OUT"
+[ -f "$REPO_SWAPREC/WORKFLOW.md" ] || gov_fail "(9e-swap) fixture lost the original owned file"
+echo "  ok (9e-swap) uninstall pins the canonical receipt content at start and rejects a narrower replacement"
+
+# (9e-pin-failure) A modern receipt whose bytes cannot be hashed at start must not open an
+# obligation with a missing content pin. Simulate the read/hash failure at the narrow unit boundary,
+# then replace the receipt with a valid narrower manifest: there must still be no active record for
+# the replacement to close.
+REPO_PINFAIL="$WORK/repo-receipt-pin-failure"; mkdir -p "$REPO_PINFAIL/docs/workflow"
+printf 'backend: filesystem\n' > "$REPO_PINFAIL/docs/workflow/tracker-config.yaml"
+printf 'must remain an obligation\n' > "$REPO_PINFAIL/WORKFLOW.md"
+python3 "$RECEIPT" stamp --repo "$REPO_PINFAIL" \
+  --out "$REPO_PINFAIL/docs/workflow/install-receipt.yaml" --plugin-version "$RUN_VER" \
+  WORKFLOW.md docs/workflow/tracker-config.yaml >/dev/null \
+  || gov_fail "(9e-pin-failure) could not stamp the original receipt"
+SPINFAIL="spinfail-$$-$(basename "$WORK")"
+SCRIPTS_DIR="$GOV_PLUGIN/scripts" python3 - "$REPO_PINFAIL" "$SPINFAIL" "$RUN_VER" <<'PY' \
+  || gov_fail "(9e-pin-failure) a modern uninstall opened without a start-time receipt digest"
+import os, sys
+sys.path.insert(0, os.environ["SCRIPTS_DIR"])
+sys.path.insert(0, os.path.join(os.environ["SCRIPTS_DIR"], "hooks"))
+import idc_command_contract as cc
+
+repo, session, version = sys.argv[1:]
+cc._uninstall_receipt_sha256_at_start = lambda *_args: None
+record = cc.register_start(repo, session, "uninstall", version, "uninstall", "user")
+if record is not None or cc.active_records(repo, session):
+    raise SystemExit(1)
+PY
+printf 'replacement\n' > "$REPO_PINFAIL/replacement-owned.txt"
+rm -f "$REPO_PINFAIL/docs/workflow/install-receipt.yaml"
+python3 "$RECEIPT" stamp --repo "$REPO_PINFAIL" \
+  --out "$REPO_PINFAIL/docs/workflow/install-receipt.yaml" --plugin-version "$RUN_VER" \
+  replacement-owned.txt docs/workflow/tracker-config.yaml >/dev/null \
+  || gov_fail "(9e-pin-failure) could not stamp the narrower replacement receipt"
+if contract finish --repo "$REPO_PINFAIL" --session "$SPINFAIL" --command uninstall \
+     --status complete --evidence-json '{"schema_version":1,"refs":{"outcome":"no-action"}}' \
+     2>/dev/null; then
+  gov_fail "(9e-pin-failure) a replacement receipt closed after the original receipt could not be pinned"
+fi
+echo "  ok (9e-pin-failure) a modern receipt hash failure opens no record, so a replacement cannot close"
 
 # (9-runtime, F6) the removal set is the receipt footprints UNION the documented runtime-created
 # artifacts (TRACKER.md at minimum): an applied uninstall that leaves TRACKER.md behind is REFUSED.

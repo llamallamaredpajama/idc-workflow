@@ -316,11 +316,11 @@ FAIL** (Build still trusts the board; the schema check stays Plan's gate). Branc
     `Recirculation` ticket** (Plan's paused-issue re-link was skipped) — fix hint: "re-point it off
     the retired ticket onto its real new unblockers (re-run `/idc:plan` over the admitted scope)."
     A `stranded-gate` finding means a dependent is still **Blocked behind a gate that is already
-    Done** AND that gate's guarded dispose **is journaled** (`--journal` proved an
-    `op=dispose`/`disposition=gate-approved` record) — an interrupted dispose-then-unblock — fix
-    hint: "finish the unblock through the engine's journaled `unblock` (`idc:idc-gate-issue` step 4
-    recovery), never a raw setField." An `unproven-gate-done` finding means the gate is **Done but
-    its guarded dispose is NOT journaled** — a raw/manual close, a `Status` edit, or a janitor repair
+    Done** AND one recognized proof **is journaled** (`guarded-dispose` or
+    `verified-reconciliation`) — an interrupted proof-then-unblock — fix hint: "finish it through
+    `idc_gate_repair.py --finish-pointer` (`idc:idc-gate-issue` step 4 recovery), never a raw
+    setField." An `unproven-gate-done` finding means the gate is **Done but neither recognized proof
+    is journaled** — a raw/manual close, a `Status` edit, or a janitor repair
     minted the `Done`, none of which validated the approval — fix hint: "do **not** auto-unblock.
     Confirm the proof kind with the one deterministic reader — `python3
     ${CLAUDE_PLUGIN_ROOT}/scripts/idc_gate_proof.py --repo "$PWD" --gate <gate#>` (`guarded-dispose`

@@ -5,12 +5,12 @@
 # THE CORRUPTION (tests/smoke/fixtures/session-b7a93ff6/board-before.json — fixture numbers only,
 # never the live repo): the Think PR #706 MERGED (a real operator approval), but gate #708 was closed
 # OUTSIDE the guarded dispose door. So it carries NO journaled proof, its Stage was never set (""),
-# its Status still reads `Todo` while the issue is CLOSED, and its body never got the `idc-gate-pr`
-# marker that BINDS the approval PR to that gate. Pointer #707 is ALREADY `Todo` — nothing ever
-# blocked it at repair time, so there is no unblock to finish.
+# its Status still reads `Todo` while the issue is CLOSED, and its body never got the reciprocal
+# binding. The fixture is pre-bound the way `idc_pr_gate_bind.py` now requires before full repair;
+# a separate refusal proves repair cannot write a marker itself. Pointer #707 is ALREADY `Todo`.
 #
-# THE HONEST REPAIR (scripts/idc_gate_repair.py): dry-run first; verify the PR really merged; stamp
-# exactly one body marker; repair Stage/Status through the existing board helpers while the issue
+# THE HONEST REPAIR (scripts/idc_gate_repair.py): bind first through idc_pr_gate_bind.py, dry-run the
+# repair, verify the PR really merged; repair Stage/Status through the existing board helpers while the issue
 # stays closed; journal an `op=gate-reconciliation` record carrying the observed-before state and the
 # merged-PR evidence — a record that says "reconciled, here is the evidence", never a back-dated
 # `op=dispose` claiming the guarded door ran. For an already-unblocked pointer it records the
@@ -183,6 +183,8 @@ def journal(repo):
 
 def fresh(mutate=None):
     fx = copy.deepcopy(FIXTURE)
+    fx["gate"]["body"] = fx["gate"]["body"].rstrip() + f"\n\n<!-- idc-gate-pr: {PR} -->"
+    fx["pr"]["body"] = f"Disposable Think PR\n\n<!-- idc-gate-pr: {GATE} -->"
     if mutate:
         mutate(fx)
     return Fake(fx).install(), new_repo()
@@ -218,18 +220,19 @@ def step(plan, sid):
     die(f"the plan carries no {sid!r} step: {json.dumps(plan, indent=2)}")
 
 
-EXPECTED_ORDER = ["verify-pr-merged", "stamp-gate-pr-marker", "repair-gate-fields",
+EXPECTED_ORDER = ["verify-pr-merged", "verify-gate-pr-binding", "repair-gate-fields",
                   "journal-gate-reconciliation", "record-pointer-observed-already-unblocked"]
 
 # ══ 1. DRY RUN — the default — reports the five steps IN ORDER and writes NOTHING ═══════════════
 fake, repo = fresh()
+prebound_body = fake.gate["body"]
 plan = plan_of(repair(repo))
 check(plan.get("mode") == "dry-run", f"a bare run is not a dry run: mode={plan.get('mode')!r}")
 check(ids(plan) == EXPECTED_ORDER,
       f"the dry-run plan's step order is wrong:\n  got      {ids(plan)}\n  expected {EXPECTED_ORDER}")
 check(step(plan, "verify-pr-merged")["status"] == "verified", "the dry run did not VERIFY PR #706 merged")
 check(step(plan, "verify-pr-merged")["pr"] == PR, "the verify step names the wrong PR")
-check(step(plan, "stamp-gate-pr-marker")["marker"] == f"<!-- idc-gate-pr: {PR} -->",
+check(step(plan, "verify-gate-pr-binding")["marker"] == f"<!-- idc-gate-pr: {PR} -->",
       "the dry run does not plan the canonical single body marker for #706")
 rg = step(plan, "repair-gate-fields")
 check(rg["to"] == {"stage": "Buildable", "status": "Done"},
@@ -254,7 +257,7 @@ print("  ok (1) the dry run reports the five repair steps in the brief's order")
 check(fake.wrote() == [], f"the DRY RUN mutated the board: {fake.wrote()}")
 check(not os.path.exists(os.path.join(repo, RP.JOURNAL_REL)),
       "the DRY RUN wrote a journal record (a dry run must never journal)")
-check(fake.gate["body"] == FIXTURE["gate"]["body"], "the DRY RUN edited the gate body")
+check(fake.gate["body"] == prebound_body, "the DRY RUN edited the pre-bound gate body")
 print("  ok (1b) the dry run is the DEFAULT and performs no write of any kind")
 shutil.rmtree(repo)
 
@@ -263,12 +266,13 @@ fake, repo = fresh()
 plan = plan_of(repair(repo, apply=True))
 check(plan.get("mode") == "apply", f"--apply did not report apply mode: {plan.get('mode')!r}")
 
-# 2a. exactly ONE canonical marker, appended to the body (the rest of the body preserved).
+# 2a. exactly ONE canonical marker remains, and full repair never edits either reciprocal body.
 check(fake.gate["body"].count("<!-- idc-gate-pr:") == 1,
       f"the gate body does not carry EXACTLY one idc-gate-pr marker: {fake.gate['body']!r}")
-check(f"<!-- idc-gate-pr: {PR} -->" in fake.gate["body"], "the stamped marker does not bind PR #706")
-check(FIXTURE["gate"]["body"] in fake.gate["body"], "the body stamp DESTROYED the gate's original body")
-print("  ok (2a) --apply appends exactly one canonical idc-gate-pr marker, preserving the body")
+check(f"<!-- idc-gate-pr: {PR} -->" in fake.gate["body"], "the pre-bound marker does not bind PR #706")
+check(not [c for c in fake.calls if c[0] == "gh" and c[1][:2] == ("issue", "edit")],
+      "full repair bypassed idc_pr_gate_bind.py with a direct body edit")
+print("  ok (2a) --apply requires the binder's marker and performs no body edit")
 
 # 2b. Stage/Status repaired through the board helpers; the issue is never re-opened or re-closed.
 check(fake.gate["stage"] == "Buildable" and fake.gate["status"] == "Done",
@@ -293,7 +297,7 @@ check(ev["door"] == "idc-gate-repair" and ev["approval_pr"] == PR and ev["approv
       f"the record's evidence does not name the repair door + merged PR: {ev!r}")
 check(ev["observed_before"]["gate"] == {"stage": "", "status": "Todo", "issue_state": "CLOSED"},
       f"the record does not preserve the observed-before CORRUPT state: {ev['observed_before']!r}")
-check(sorted(ev["repairs_applied"]) == ["gate-pr-marker", "stage", "status"],
+check(sorted(ev["repairs_applied"]) == ["stage", "status"],
       f"repairs_applied does not list what this run actually repaired: {ev['repairs_applied']!r}")
 print("  ok (2c) the gate record carries op=gate-reconciliation, who, to, and the full evidence")
 
@@ -327,7 +331,7 @@ print("  ok (2f) the gate reads verified-reconciliation; the pointer observation
 # ══ 3. RERUN — reconstructs from CURRENT state: a full no-op, never a double-stamp/double-record ══
 before = len(journal(repo))
 plan = plan_of(repair(repo, apply=True))
-check(step(plan, "stamp-gate-pr-marker")["status"] == "satisfied",
+check(step(plan, "verify-gate-pr-binding")["status"] == "satisfied",
       "a rerun re-stamps the body marker instead of reading it satisfied")
 check(step(plan, "repair-gate-fields")["status"] == "satisfied",
       "a rerun re-writes Stage/Status instead of reading them satisfied")
@@ -363,6 +367,14 @@ refuses(lambda fx: fx["gate"].update(title="implement the drive foundation"), "o
         "(4a) a NON-gate title")
 print("  ok (4a) a non-gate title is refused (only an [operator-action] gate is reconciled)")
 
+refuses(lambda fx: fx["gate"].update(title="[operator-action] Decision — choose a data store"),
+        "Requirements change", "(4a-decision) a decision gate")
+print("  ok (4a-decision) a decision gate is refused before any write (full repair is requirements-only)")
+
+refuses(lambda fx: fx["gate"].update(title="[operator-action] Rotate the staging certificate"),
+        "Requirements change", "(4a-arbitrary) an arbitrary operator-action gate")
+print("  ok (4a-arbitrary) an arbitrary operator-action gate is refused before any write")
+
 refuses(lambda fx: fx["pr"].update(state="OPEN"), "not merged", "(4b) an UNMERGED approval PR")
 print("  ok (4b) an unmerged PR is refused (the approval must be real)")
 
@@ -374,6 +386,10 @@ refuses(lambda fx: fx["gate"].update(body=f"<!-- idc-gate-pr: {PR} -->\nx\n<!-- 
         "2 idc-gate-pr markers", "(4d) MORE THAN ONE body marker")
 print("  ok (4d) more than one body marker is refused (an ambiguous binding never resolves silently)")
 
+refuses(lambda fx: fx["gate"].update(body=FIXTURE["gate"]["body"]), "idc_pr_gate_bind.py",
+        "(4d-markerless) a markerless legacy gate")
+print("  ok (4d-markerless) a markerless gate is refused before writes and routed through the reciprocal binder")
+
 refuses(lambda fx: fx["gate"].update(issue_state="OPEN"), "OPEN",
         "(4e) an OPEN gate (the guarded dispose door owns that, not this repair)")
 print("  ok (4e) an OPEN gate is refused — the guarded dispose door owns an open gate")
@@ -381,7 +397,7 @@ print("  ok (4e) an OPEN gate is refused — the guarded dispose door owns an op
 # 4f. a marker ALREADY correctly bound to #706 is NOT a refusal — it is simply satisfied.
 fake, repo = fresh(lambda fx: fx["gate"].update(body=f"TO APPROVE: merge the Think PR.\n<!-- idc-gate-pr: {PR} -->"))
 plan = plan_of(repair(repo, apply=True))
-check(step(plan, "stamp-gate-pr-marker")["status"] == "satisfied",
+check(step(plan, "verify-gate-pr-binding")["status"] == "satisfied",
       "an already-correct marker was not read as satisfied")
 check(fake.gate["body"].count("<!-- idc-gate-pr:") == 1, "an already-correct marker was double-stamped")
 print("  ok (4f) a marker already bound to the right PR is satisfied, not re-stamped")
@@ -436,7 +452,7 @@ print("  ok (6) a diverged readback stops the repair, names the failed readback,
 # 6b. …and the RERUN reconstructs the remaining plan from current state and finishes the job.
 fake.sabotage = None
 plan = plan_of(repair(repo, apply=True))
-check(step(plan, "stamp-gate-pr-marker")["status"] == "satisfied",
+check(step(plan, "verify-gate-pr-binding")["status"] == "satisfied",
       "the rerun after a partial failure re-stamped the already-landed marker")
 check(step(plan, "repair-gate-fields")["status"] == "applied",
       "the rerun after a partial failure did not finish the unlanded Status write")
@@ -462,6 +478,9 @@ for bad, why in (
     ({"door": "idc-gate-repair", "approval_pr": PR, "approval_state": "OPEN"}, "an UNMERGED approval"),
     ({"door": "idc-gate-repair", "approval_pr": PR}, "a missing approval_state"),
     ({"door": "idc-gate-repair", "approval_pr": 0, "approval_state": "MERGED"}, "a zero approval_pr"),
+    ({"door": "idc-gate-repair", "approval_pr": True, "approval_state": "MERGED"}, "a boolean approval_pr"),
+    ({"door": "idc-gate-repair", "approval_pr": 77.5, "approval_state": "MERGED"}, "a float approval_pr"),
+    ({"door": "idc-gate-repair", "approval_pr": "77", "approval_state": "MERGED"}, "a string approval_pr"),
     ({"door": "idc-gate-repair", "approval_state": "MERGED"}, "a missing approval_pr"),
     ({}, "empty evidence"),
 ):

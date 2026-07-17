@@ -5,9 +5,9 @@ THE SHAPE THIS REPAIRS (observed in session b7a93ff6; frozen as
 ``tests/smoke/fixtures/session-b7a93ff6/board-before.json``): the operator really did approve — the
 Think PR MERGED — but the gate issue was closed by hand, so the guarded door never ran. The gate is
 left with no journaled proof, no `Stage`, a `Status` still reading `Todo` while the issue is CLOSED,
-and no `idc-gate-pr` marker binding the approval PR to it. Everything downstream then reads the gate
-as `unproven-gate-done`: `/idc:doctor` Row 9 flags it, and every recovery surface correctly refuses
-to unblock behind it.
+and no reciprocal `idc-gate-pr` binding. The sanctioned binder must establish that binding first;
+this repair then handles only the board/journal corruption. Everything downstream otherwise reads
+the gate as `unproven-gate-done` and correctly refuses to unblock behind it.
 
 THE TEMPTING LIE, AND WHY THIS HELPER REFUSES IT: the "easy" repair is to re-run
 `dispose --disposition gate-approved`, or to hand-write an `op=dispose` journal line, so the gate
@@ -48,7 +48,7 @@ SAFETY POSTURE
     exact readback that failed — it never reports a write that did not land, and never journals a
     proof for a repair that only half-landed.
   * Rerunning is the recovery: the plan is reconstructed from CURRENT state, so already-landed steps
-    read `satisfied` and only the remainder runs. No double-stamp, no duplicate record.
+    read `satisfied` and only the remainder runs. No duplicate record.
 
 Board writes go through the existing helpers (`idc_gh_board.set_single_select` / the engine's own
 `unblock`), and the journal line through `idc_transition.journal_append` — this is the "explicitly
@@ -163,16 +163,19 @@ def _observe(ctx, gate, pointer, pr):
 def _validate(obs, gate, pr):
     """Every precondition, BEFORE the first write — so a refusal is always write-free.
 
-    Returns the gate's currently-bound approval PR (int) or None when the body carries no marker.
+    Returns the gate's currently-bound approval PR. A markerless gate is routed through the one
+    reciprocal binder before this repair may write anything.
     """
-    from idc_board_lint import OPERATOR_GATE_PREFIX   # single-sourced gate marker
+    from idc_board_lint import REQUIREMENTS_GATE_PREFIX, is_requirements_gate_title
 
-    # (1) Only an operator gate is reconciled. Build work closes through a verdict-guarded `close`;
-    # reconciling a non-gate here would mint a Done for work whose verdict was never checked.
-    if not obs["title"].startswith(OPERATOR_GATE_PREFIX):
+    # (1) Only a requirements-change gate is reconciled. Decision gates and arbitrary operator
+    # actions have different approval meaning; this door must not invent a requirements approval for
+    # them. Build work closes through a verdict-guarded `close` and is excluded for the same reason.
+    if not is_requirements_gate_title(obs["title"]):
         raise GateRepairError(
-            f"gate-repair refused: #{gate} is not an {OPERATOR_GATE_PREFIX} gate item (title: "
-            f"{obs['title']!r}) — only an operator gate is reconciled by this door")
+            f"gate-repair refused: #{gate} is not a {REQUIREMENTS_GATE_PREFIX!r} gate (title: "
+            f"{obs['title']!r}) — full repair is requirements-change-only; decision gates and "
+            "arbitrary operator-action items must use their own approval path")
 
     # (2) This door reconciles a gate ALREADY closed outside the guarded door. An OPEN gate has a
     # correct door of its own — the engine's guarded `dispose --disposition gate-approved`, which
@@ -202,6 +205,12 @@ def _validate(obs, gate, pr):
             f"body ({', '.join('#' + p for p in body_prs)}) — the producer stamps exactly ONE. An "
             "ambiguous binding must never be resolved silently; leave exactly one marker, then re-run.")
     bound = int(body_prs[0]) if body_prs else None
+    if bound is None:
+        raise GateRepairError(
+            f"gate-repair refused: gate #{gate} has no idc-gate-pr body marker — bind both reciprocal "
+            "bodies first through `python3 <plugin-root>/scripts/idc_pr_gate_bind.py "
+            f"--repo <repo> --pr {int(pr)} --gate {int(gate)}`, then rerun this repair; full repair "
+            "never writes either marker itself")
     if bound is not None and bound != int(pr):
         raise GateRepairError(
             f"gate-repair refused: gate #{gate}'s body already binds approval PR #{bound}, not the "
@@ -324,28 +333,6 @@ def _journal_pointer_record(ctx, gate, pointer, pr, observed_before):
 
 
 # ── writes (each re-reads its precondition, then reads back) ─────────────────────────────────────
-def _stamp_marker(ctx, gate, pr):
-    """Append the canonical marker to the gate body — the ONLY body edit this helper ever makes."""
-    repo = ctx["repo"]
-    body = (E._gh_issue_json(repo, gate, ["body"]).get("body") or "")   # re-read: the plan may be stale
-    found = E.GATE_PR_MARKER.findall(body)
-    if len(found) == 1 and int(found[0]) == int(pr):
-        return False        # a concurrent stamp landed it — satisfied, not an error
-    if found:
-        raise GateRepairError(
-            f"gate-repair stopped: gate #{gate}'s body changed under the plan — it now carries "
-            f"{len(found)} idc-gate-pr marker(s) ({', '.join('#' + p for p in found)}). Re-run to "
-            "rebuild the plan from current state.")
-    B._gh(["issue", "edit", str(int(gate)), "--body", body.rstrip("\n") + "\n\n" + _marker(pr) + "\n"], repo)
-    after = E.GATE_PR_MARKER.findall(E._gh_issue_json(repo, gate, ["body"]).get("body") or "")
-    if len(after) != 1 or int(after[0]) != int(pr):
-        raise GateRepairError(
-            f"gate-repair stopped: body-marker read-back divergence on gate #{gate} — the body reads "
-            f"{len(after)} idc-gate-pr marker(s) {['#' + p for p in after]} after the edit, expected "
-            f"exactly one binding PR #{pr}. Refusing to report a stamp that did not land.")
-    return True
-
-
 def _set_and_verify(ctx, num, field, value):
     """One single-select write through the existing board helper, then a POSITIVE read-back.
 
@@ -393,16 +380,11 @@ def build_and_run(ctx, gate, pointer, pr, apply_):
     steps.append({"id": "verify-pr-merged", "status": "verified", "pr": int(pr), "state": "MERGED",
                   "action": f"verified PR #{pr} is MERGED — the operator's real approval"})
 
-    # 2 — stamp exactly one body marker binding the approval PR to THIS gate.
-    marker_done = bound == int(pr)
-    step2 = {"id": "stamp-gate-pr-marker", "marker": _marker(pr), "gate": int(gate),
-             "action": (f"gate #{gate}'s body already binds approval PR #{pr}" if marker_done else
-                        f"append exactly one {_marker(pr)} to gate #{gate}'s body, binding the "
-                        "approval PR to this gate (the rest of the body is preserved)")}
-    if apply_ and not marker_done:
-        if _stamp_marker(ctx, gate, pr):
-            repairs_applied.append("gate-pr-marker")
-    step2["status"] = state(marker_done, apply_)
+    # 2 — verify the one reciprocal binder already bound this gate. Full repair owns no body write.
+    step2 = {"id": "verify-gate-pr-binding", "marker": _marker(pr), "gate": int(gate),
+             "action": (f"gate #{gate}'s body already binds approval PR #{pr} through the "
+                        "reciprocal idc_pr_gate_bind.py door"),
+             "status": "satisfied"}
     steps.append(step2)
 
     # 3 — repair the board fields the hand-close skipped; the ISSUE's closed state is left alone.

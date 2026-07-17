@@ -2,6 +2,20 @@
 
 All notable changes for the IDC Workflow plugin are documented in this file.
 
+## 4.1.1 — 2026-07-17
+
+The command-integrity hardening patch closes ten deferred safety and honesty gaps from 4.1.0:
+
+- Report writes now fail honestly, and Doctor closeout has forged-PASS regression coverage for all
+  ten rows.
+- Full gate reconciliation is requirements-change-only; board lint recognizes both centralized
+  proof kinds; reciprocal Think PR/gate markers now go through one validating, idempotent binder.
+- Pre-receipt uninstall uses an exact legacy-owned-file list and preserves every matrix, review, and
+  intake work product; malformed existing receipts remain a hard failure.
+- GitHub project deletion accepts only a null-node readback or GitHub's exact missing-node response;
+  release manifests, changelog, and the single README badge are locked together; the git-finish smoke
+  path is safe on macOS Bash 3.2 when its optional worktree argument array is empty.
+
 ## 4.1.0 — 2026-07-17
 
 The command-integrity + external-intake release (plan:

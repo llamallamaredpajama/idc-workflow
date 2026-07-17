@@ -117,6 +117,12 @@ _FINISH = (
     "`python3 ${CLAUDE_PLUGIN_ROOT}/scripts/idc_pr_finish.py autonomous --repo <repo> --pr <N> "
     "--kind planning|recirculation|intake`."
 )
+_PR_GATE_BIND = (
+    "bind a Think PR and its requirements-change gate through the reciprocal marker door: "
+    "`python3 ${CLAUDE_PLUGIN_ROOT}/scripts/idc_pr_gate_bind.py --repo <repo> --pr <N> "
+    "--gate <M>` — it validates both existing bodies before writing, refuses mismatches, and reads "
+    "each marker back. Raw `gh pr edit` remains denied."
+)
 _CLOSE = (
     "the finisher closes the tracker item as part of `idc_git_finish.py` (above), or use the "
     "transition engine's guarded close directly: "
@@ -241,7 +247,9 @@ def _combo_subject(pos):
         kind = "issue-create" if verb in ("create", "new") else f"issue-{verb}"
         return _mk(f"a raw `gh issue {verb}`", _ENGINE, kind)
     if noun == "pr":
-        return _mk(f"a raw `gh pr {verb}`", _FINISH, "pr-merge" if verb == "merge" else f"pr-{verb}")
+        remediation = _PR_GATE_BIND if verb == "edit" else _FINISH
+        return _mk(f"a raw `gh pr {verb}`", remediation,
+                   "pr-merge" if verb == "merge" else f"pr-{verb}")
     # Keep distinct private kinds for precise diagnostics; policy denies every protected combo.
     kind = {"delete": "project-delete", "item-delete": "project-item-delete",
             "field-create": "project-field-create", "link": "project-link"}.get(verb, "project-mutation")
@@ -402,7 +410,7 @@ def _ws_combos(command):
     if _has(c, "gh pr close"):
         return _mk("a raw `gh pr close`", _FINISH, "pr-close")
     if _has(c, "gh pr edit"):
-        return _mk("a raw `gh pr edit`", _FINISH, "pr-edit")
+        return _mk("a raw `gh pr edit`", _PR_GATE_BIND, "pr-edit")
     if _has(c, "gh project item-delete"):
         return _mk("a raw `gh project item-delete` board mutation", _ENGINE, "project-item-delete")
     if _has(c, "gh project create"):

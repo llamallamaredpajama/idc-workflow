@@ -79,9 +79,17 @@ Write the consideration and the PRD + TRD draft, then open the Think PR:
    consideration + the PRD/TRD draft, plus the operator gate issue (plain-terms summary of what
    the app will do differently + the PRD/TRD diff + push notification), and write the
    consideration pointer (`Stage = Consideration` — open Think PR / pending admission). The Think
-   PR body carries **exactly one** `<!-- idc-gate-pr: <gate#> -->` marker binding the gate issue to
-   THIS PR — the same marker `idc_pr_finish.py requirements` re-verifies at admission (a markerless
-   or double-marked gate fails closed). Approval is **sync or async**: the operator may approve
+   PR body carries **exactly one** `<!-- idc-gate-pr: <gate#> -->` marker naming its gate. The gate
+   body carries the reciprocal marker naming the PR; `idc_pr_finish.py requirements` re-verifies
+   that gate-side approval binding at admission (a markerless or double-marked gate fails closed).
+   Once both numbers exist, write the two reciprocal markers
+   only through the validating binder (safe to rerun; raw `gh pr edit` is denied):
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_pr_gate_bind.py" \
+     --repo "$PWD" --pr "$PR" --gate "$GATE"
+   ```
+   It refuses a mismatched/duplicate marker or a non-requirements gate before any write, and reads
+   each edit back. Approval is **sync or async**: the operator may approve
    in-session, or leave the PR open and approve later from the GitHub web UI. **Merge = approval =
    admission.** Until then the requirements stay draft and nothing downstream proceeds.
 4. **Link each consumed intake unit** (only on a `--doc … --unit …` run). Once the Think PR / gate /

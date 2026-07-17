@@ -110,17 +110,27 @@ has "$UN" 'idc_gh_board\.py' \
   || fail "uninstall.md in-flight count must read the whole board via the paginating idc_gh_board.py (not a truncating gh item-list)"
 grep -E 'gh project item-list.*--format json' "$UN" \
   && fail "uninstall.md must not read the board with a truncating gh project item-list --format json (use the paginating idc_gh_board.py)"
-# Round-2 finding F4-r2: uninstall must DO the destructive work, THEN finish (which independently
-# verifies that work), THEN remove the governance anchor. The finish must NOT record 'applied' before
-# the work happened, and the anchor removal (docs/workflow/tracker-config.yaml — what marks the repo
-# governed; once gone the ledger write is a repo-gated no-op and finish exits 2) must be the single
-# POST-finish step. Assert the ordering: footprint-removal git-rm  <  finish  <  anchor-removal git-rm,
-# and no expected/harmless-failure framing survives. Red-when-broken: finish before the footprint
-# removal (records 'applied' before the work), or the anchor removal before finish (finish can't land),
-# or a no-op finish excused as expected/harmless ⇒ RED.
-python3 - "$UN" <<'PY' || fail "uninstall.md must remove the footprints, THEN finish (validating the work), THEN remove the governance anchor (tracker-config.yaml) as the single post-finish step; and must not call a failing/late finish 'expected'/'harmless'"
+# Round-2 finding F4-r2 + deferred #17: uninstall must DO the destructive work, THEN finish (which
+# independently verifies that work against the still-readable receipt), THEN remove the canonical
+# receipt and governance anchor together. The finish must NOT record 'applied' before the work
+# happened, and neither verification file may disappear before finish. Assert the ordering:
+# footprint-removal git-rm < finish < receipt+anchor cleanup git-rm, and no
+# expected/harmless-failure framing survives. Red-when-broken: finish before footprint removal,
+# either verification file removed before finish, or a no-op finish excused as expected/harmless.
+python3 - "$UN" <<'PY' || fail "uninstall.md must remove the footprints, THEN finish against the retained canonical receipt + governance anchor, THEN remove those two files together; and must not call a failing/late finish 'expected'/'harmless'"
 import re, sys
-lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+physical = open(sys.argv[1], encoding="utf-8").read().splitlines()
+# Treat a backslash-continued shell command as one line so the cleanup command's two paths are
+# checked together even when the Markdown formats them across lines.
+lines = []
+i = 0
+while i < len(physical):
+    command = physical[i]
+    while command.rstrip().endswith("\\") and i + 1 < len(physical):
+        command = command.rstrip()[:-1] + " " + physical[i + 1].strip()
+        i += 1
+    lines.append(command)
+    i += 1
 def first_idx(pred):
     for i, ln in enumerate(lines):
         if pred(ln):
@@ -129,15 +139,19 @@ def first_idx(pred):
 def is_git_rm(l):
     return re.search(r'git .*\brm\b', l) is not None
 finish_i = first_idx(lambda l: "idc_command_contract.py" in l and "finish" in l)
-# the footprint-removal step: a git-rm naming the manifest/footprint paths, NOT the anchor.
-work_rm_i = first_idx(lambda l: is_git_rm(l) and ("manifest" in l.lower() or "footprint" in l.lower())
-                                and "tracker-config" not in l.lower())
-# the anchor removal: the git-rm that deletes docs/workflow/tracker-config.yaml.
-anchor_rm_i = first_idx(lambda l: is_git_rm(l) and "tracker-config" in l.lower())
-if None in (finish_i, work_rm_i, anchor_rm_i):
+# The footprint-removal step names manifest/footprint paths but retains BOTH verification files.
+work_rm_i = first_idx(lambda l: is_git_rm(l) and ("receipt entries" in l.lower()
+                                                  or "manifest" in l.lower()
+                                                  or "footprint" in l.lower())
+                                and "tracker-config" not in l.lower()
+                                and "install-receipt" not in l.lower())
+# The one post-finish cleanup command must remove the canonical receipt + anchor together.
+cleanup_i = first_idx(lambda l: is_git_rm(l) and "tracker-config" in l.lower()
+                                and "install-receipt" in l.lower())
+if None in (finish_i, work_rm_i, cleanup_i):
     sys.exit(1)                 # all three ordered steps must be present
-if not (work_rm_i < finish_i < anchor_rm_i):
-    sys.exit(1)                 # required order: remove footprints -> finish -> remove the anchor
+if not (work_rm_i < finish_i < cleanup_i):
+    sys.exit(1)                 # remove footprints -> verify/finish -> remove receipt + anchor
 text = "\n".join(lines).lower()
 if re.search(r'(no-op|no op|exit ?2|fail\w*)[^.\n]{0,80}(expected|harmless)', text) or \
    re.search(r'(expected|harmless)[^.\n]{0,80}(no-op|no op|exit ?2|fail\w*)', text):

@@ -53,12 +53,12 @@ run_lint "[$GATE_DONE, {\"number\": 12, \"title\": \"blocked dependent\", \"stag
 [ $RC -eq 0 ] || fail "lint exited $RC on the stranded-gate board"
 echo "$OUT" | grep -q 'stranded-gate — Status=Blocked behind gate #9 that is already Done' \
   || fail "a Blocked dependent behind a Done gate was NOT flagged stranded-gate: $OUT"
-echo "$OUT" | grep -q 'journaled `unblock`' \
-  || fail "the stranded-gate finding does not name the engine's journaled unblock remediation: $OUT"
-echo "$OUT" | grep -qi 'VERIFY the gate.s journaled guarded dispose' \
-  || fail "the no-journal stranded-gate finding does not require VERIFYing the journaled guarded dispose first (round-13 P1): $OUT"
-echo "$OUT" | grep -q 'op=dispose/disposition=gate-approved' \
-  || fail "the verify-first remediation does not name the journaled guarded-dispose record shape: $OUT"
+echo "$OUT" | grep -q 'idc_gate_repair.py --finish-pointer' \
+  || fail "the stranded-gate finding does not route recovery through the guarded pointer-finish door: $OUT"
+echo "$OUT" | grep -qi 'VERIFY the gate.s journaled proof' \
+  || fail "the no-journal stranded-gate finding does not require VERIFYing a recognized journal proof first: $OUT"
+echo "$OUT" | grep -q 'guarded-dispose or verified-reconciliation' \
+  || fail "the verify-first remediation does not name both recognized proof kinds: $OUT"
 echo "$OUT" | grep -q 'board-lint: 1 flagged of 0 scanned (0 schema, 0 prose-dep, 1 stranded-gate)' \
   || fail "the summary does not tally the stranded-gate clause: $OUT"
 echo "  ok (1) a Done-gate strand with NO journal flags stranded-gate REQUIRING journal verification first (round-13 P1)"
@@ -102,12 +102,53 @@ echo "  ok (6) zero stranded items leave the summary byte-for-byte unchanged"
 J6="$(newdir)/docs/workflow/transition-journal.ndjson"; write_journal "$J6" "$(DISPOSE_REC 9)"
 run_lint_j "[$GATE_DONE, {\"number\": 12, \"title\": \"blocked dependent\", \"stage\": \"Buildable\", \"status\": \"Blocked\", \"blocked_by\": [9]}]" "$J6"
 [ $RC -eq 0 ] || fail "lint exited $RC on the proven-gate board"
-echo "$OUT" | grep -q 'stranded-gate — Status=Blocked behind gate #9 that is already Done — the gate.s guarded dispose IS journaled (proven)' \
+echo "$OUT" | grep -q 'stranded-gate — Status=Blocked behind gate #9 that is already Done — the gate.s proof IS journaled (guarded-dispose)' \
   || fail "a strand behind a PROVEN Done gate was not flagged stranded-gate(proven): $OUT"
 echo "$OUT" | grep -q 'unproven-gate-done' && fail "a PROVEN gate was mis-tiered as unproven-gate-done: $OUT"
 echo "$OUT" | grep -q 'board-lint: 1 flagged of 0 scanned (0 schema, 0 prose-dep, 1 stranded-gate)' \
   || fail "the proven-gate summary is wrong: $OUT"
 echo "  ok (6a) --journal + a journaled gate-approved dispose → stranded-gate (proven; safe to finish the unblock)"
+
+# ── 6a-r. --journal, PROVEN BY RECONCILIATION: the centralized proof reader accepts both kinds ───
+J6r="$(newdir)/docs/workflow/transition-journal.ndjson"
+write_journal "$J6r" '{"op":"gate-reconciliation","item":9,"what":"reconcile #9","evidence":{"door":"idc-gate-repair","approval_pr":77,"approval_state":"MERGED"}}'
+run_lint_j "[$GATE_DONE, {\"number\": 12, \"title\": \"blocked dependent\", \"stage\": \"Buildable\", \"status\": \"Blocked\", \"blocked_by\": [9]}]" "$J6r"
+[ $RC -eq 0 ] || fail "lint exited $RC on the reconciled-gate board"
+echo "$OUT" | grep -q 'stranded-gate — Status=Blocked behind gate #9 that is already Done — the gate.s proof IS journaled (verified-reconciliation)' \
+  || fail "a valid verified-reconciliation was not recognized as proven by board lint: $OUT"
+echo "$OUT" | grep -q 'unproven-gate-done' && fail "a reconciled gate was mis-tiered as unproven: $OUT"
+echo "  ok (6a-r) --journal + valid verified-reconciliation → stranded-gate (proven; safe to finish)"
+
+# Invalid reconciliation evidence never becomes proof: JSON bool/float are not PR numbers.
+for invalid_pr in true 77.5; do
+  J6bad="$(newdir)/docs/workflow/transition-journal.ndjson"
+  write_journal "$J6bad" "{\"op\":\"gate-reconciliation\",\"item\":9,\"evidence\":{\"door\":\"idc-gate-repair\",\"approval_pr\":$invalid_pr,\"approval_state\":\"MERGED\"}}"
+  run_lint_j "[$GATE_DONE, {\"number\": 12, \"title\": \"blocked dependent\", \"stage\": \"Buildable\", \"status\": \"Blocked\", \"blocked_by\": [9]}]" "$J6bad"
+  echo "$OUT" | grep -q 'unproven-gate-done' \
+    || fail "invalid approval_pr=$invalid_pr was accepted as verified-reconciliation: $OUT"
+done
+echo "  ok (6a-invalid) boolean and float approval_pr evidence remain unproven"
+
+# The bulk proof reader must scan a large journal linearly, not rescan it once per item.
+python3 - "$GOV_PLUGIN/scripts" <<'PY' || fail "board lint's centralized proof scan is not linear"
+import sys
+sys.path.insert(0, sys.argv[1])
+import idc_board_lint as L
+import idc_journal_replay as JR
+
+entries = [{"op": "move", "item": n, "to_status": "Todo"} for n in range(1, 301)]
+calls = 0
+original = JR.journal_item_id
+def counted(entry):
+    global calls
+    calls += 1
+    return original(entry)
+JR.journal_item_id = counted
+JR.scan_journal_strict = lambda _path: (entries, None)
+assert L._proven_gates("unused") == {}
+assert calls <= len(entries) * 2, (calls, len(entries))
+PY
+echo "  ok (6a-linear) board lint scans proof journal entries in linear time"
 
 # ── 6b. --journal, UNPROVEN: the gate is Done but has NO journaled dispose → unproven-gate-done ──────
 # A raw/manual close (or janitor repair) minted the Done — the guard never validated the approval.
@@ -118,9 +159,13 @@ J6b="$(newdir)/docs/workflow/transition-journal.ndjson"
 write_journal "$J6b" '{"op":"create-pointer","item":9,"what":"create #9"}'
 run_lint_j "[$GATE_DONE, {\"number\": 12, \"title\": \"blocked dependent\", \"stage\": \"Buildable\", \"status\": \"Blocked\", \"blocked_by\": [9]}]" "$J6b"
 [ $RC -eq 0 ] || fail "lint exited $RC on the unproven-gate board"
-echo "$OUT" | grep -q 'unproven-gate-done — Status=Blocked behind gate #9 that is Done but has NO journaled guarded dispose' \
+echo "$OUT" | grep -q 'unproven-gate-done — Status=Blocked behind gate #9 that is Done but has NO recognized journal proof' \
   || fail "a strand behind an UNPROVEN Done gate was not flagged unproven-gate-done: $OUT"
 echo "$OUT" | grep -qi 'do NOT auto-unblock' || fail "the unproven-gate-done finding does not warn against auto-unblocking: $OUT"
+echo "$OUT" | grep -q 'idc_gate_repair.py --gate' \
+  || fail "the unproven-gate-done finding does not route proof creation through full gate repair: $OUT"
+echo "$OUT" | grep -q 'never call the engine unblock directly' \
+  || fail "the unproven-gate-done finding still permits a bare engine unblock: $OUT"
 echo "$OUT" | grep -q '1 stranded-gate' && fail "an UNPROVEN gate was mis-tiered as stranded-gate: $OUT"
 echo "$OUT" | grep -q 'board-lint: 1 flagged of 0 scanned (0 schema, 0 prose-dep, 1 unproven-gate-done)' \
   || fail "the unproven-gate summary is wrong: $OUT"
@@ -173,7 +218,7 @@ PY
 # PROVEN: journal the gate's guarded dispose → the canonical interrupted dispose-then-unblock.
 write_journal "$J7" "$(DISPOSE_REC "$gate")"
 OUT=$(fs_feed | python3 "$LINT" --journal "$J7")
-echo "$OUT" | grep -q "stranded-gate — Status=Blocked behind gate #$gate that is already Done — the gate.s guarded dispose IS journaled (proven)" \
+echo "$OUT" | grep -q "stranded-gate — Status=Blocked behind gate #$gate that is already Done — the gate.s proof IS journaled (guarded-dispose)" \
   || fail "the fs index feed did not surface the PROVEN stranded dependent: $OUT"
 # The exact summary proves BOTH properties: index-only (0 scanned — the seeded Buildable+Todo item
 # was excluded, so its body-less record was never schema-scanned) and exactly one stranded flag.
@@ -184,7 +229,7 @@ echo "  ok (7) the fs index feed + --journal surfaces a PROVEN stranded dependen
 # ── 7b. FILESYSTEM UNPROVEN: same feed, but the gate's Done is NOT journaled → unproven-gate-done ───
 write_journal "$J7" '{"op":"create-pointer","item":1,"what":"unrelated"}'   # no dispose for the gate
 OUT=$(fs_feed | python3 "$LINT" --journal "$J7")
-echo "$OUT" | grep -q "unproven-gate-done — Status=Blocked behind gate #$gate that is Done but has NO journaled guarded dispose" \
+echo "$OUT" | grep -q "unproven-gate-done — Status=Blocked behind gate #$gate that is Done but has NO recognized journal proof" \
   || fail "the fs index feed did not tier an UNPROVEN Done gate as unproven-gate-done: $OUT"
 echo "$OUT" | grep -q 'board-lint: 1 flagged of 0 scanned (0 schema, 0 prose-dep, 1 unproven-gate-done)' \
   || fail "the fs feed (unproven) summary is wrong: $OUT"
@@ -239,9 +284,9 @@ echo "  ok (8b) the fs recipe SKIPs (not clean-0-scanned) when the tracker is mi
 
 # ── 9. every recovery surface VERIFIES the gate's journaled proof before unblocking (round-13 P1), ──
 # and does it through the ONE CENTRALIZED reader (Task 7). A Done gate alone does not prove the
-# guarded dispose ran, so each playbook must (a) carry the Blocked-scan step, (b) route the unblock
-# through the engine's journaled `unblock`, (c) require VERIFYing the gate's journaled guarded dispose
-# FIRST — via `idc_gate_proof.py`, never a hand-rolled scan — and (d) name the UNPROVEN posture (leave
+# guarded proof exists, so each playbook must (a) carry the Blocked-scan step, (b) route the unblock
+# through the engine's journaled `unblock`, (c) require VERIFYing the gate's journaled proof FIRST —
+# via `idc_gate_proof.py`, never a hand-rolled scan — and (d) name both proof kinds and the UNPROVEN posture (leave
 # Blocked, do not auto-unblock). Red-when-broken: drop the verify-first clause, or re-inline a private
 # journal scan, in any surface → FAIL.
 python3 - "$GOV_PLUGIN" <<'PY' || fail "a recovery surface lost the verify-the-journaled-proof-first step, or re-inlined a private journal scan (see above)"
@@ -255,8 +300,11 @@ for rel in SURFACES:
         raise SystemExit(f"FAIL: {rel} lost the Blocked-scan recovery step ({PHRASE!r})")
     if "journaled `unblock`" not in text:
         raise SystemExit(f"FAIL: {rel} does not route the recovery through the engine's journaled unblock")
-    if "journaled guarded dispose" not in text:
-        raise SystemExit(f"FAIL: {rel} does not require VERIFYing the gate's journaled guarded dispose first (round-13 P1)")
+    if "journaled proof" not in text:
+        raise SystemExit(f"FAIL: {rel} does not require VERIFYing the gate's journaled proof first")
+    for kind in ("guarded-dispose", "verified-reconciliation"):
+        if kind not in text:
+            raise SystemExit(f"FAIL: {rel} does not recognize the {kind} proof kind")
     if "UNPROVEN" not in text:
         raise SystemExit(f"FAIL: {rel} does not name the UNPROVEN posture (a Done gate whose dispose is not journaled must not auto-unblock)")
     if "idc_gate_proof.py" not in text:
@@ -329,4 +377,4 @@ if "Never hand-write a journal record to silence this finding" not in doctor:
 print("  ok doctor.md Row 9 routes an unproven gate to the dry-run-first repair door and forbids the forgery")
 PY
 
-echo "PASS: a dependent stranded Status=Blocked behind an already-Done gate is deterministically surfaced AND tiered (board-lint stranded-gate when the guarded dispose is journaled, unproven-gate-done when not; doctor Row 9 passes --journal; the fs recipe SKIPs on a tracker-read failure) — never flagged behind an open gate, a non-gate blocker, a live blocker, or an unknown lookup — and the gate skill + autorun/plan/recirculator playbooks each VERIFY the journaled guarded dispose before unblocking (round-13 P1)"
+echo "PASS: a dependent stranded Status=Blocked behind an already-Done gate is deterministically surfaced AND tiered (board-lint stranded-gate when either recognized proof is journaled, unproven-gate-done when not; doctor Row 9 passes --journal; the fs recipe SKIPs on a tracker-read failure) — never flagged behind an open gate, a non-gate blocker, a live blocker, or an unknown lookup — and the gate skill + autorun/plan/recirculator playbooks each VERIFY the centralized proof before unblocking"

@@ -574,6 +574,7 @@ deny "su --command=\"gh issue create --title gate --body-file /tmp/body\" root"
 echo "== the sanctioned write door is never denied =="
 allow "python3 '$GOV_PLUGIN/scripts/idc_transition.py' --repo '$REPO' create-ticket --title safe --stage Buildable --status Todo"
 allow "python3 '$GOV_PLUGIN/scripts/idc_pr_finish.py' autonomous --repo '$REPO' --pr 12 --kind planning"
+allow "python3 '$GOV_PLUGIN/scripts/idc_pr_gate_bind.py' --repo '$REPO' --pr 41 --gate 52"
 allow_under "$SIN" "python3 '$GOV_PLUGIN/scripts/idc_gh_board.py' ensure-project --repo '$REPO' --owner o --title 'x IDC Tracker'"
 allow_under "$SIN" "python3 '$GOV_PLUGIN/scripts/idc_gh_board.py' reconcile-status --repo '$REPO' --owner o --project 5"
 allow_under "$SIN" "python3 '$GOV_PLUGIN/scripts/idc_gh_board.py' ensure-field --repo '$REPO' --owner o --project 5 --name Stage --option Consideration --option Planning --option Buildable --option Recirculation"
@@ -583,6 +584,13 @@ allow_under "$SUN" "python3 '$GOV_PLUGIN/scripts/idc_gh_board.py' delete-project
 # Fix 2: the sanctioned engine doors that REPLACE the now-denied raw item-edit / blocked_by POST.
 allow "python3 '$GOV_PLUGIN/scripts/idc_transition.py' --repo '$REPO' set-field --num 5 --field Wave --value W1"
 allow "python3 '$GOV_PLUGIN/scripts/idc_transition.py' --repo '$REPO' link --parent 7 --child 5 --kind blocks"
+
+echo "== raw PR body edits stay denied and name the reciprocal binder =="
+gate "gh pr edit 41 --body 'manual marker'" "$S1"
+is_deny || gov_fail "raw gh pr edit was not denied during an active command"
+printf '%s' "$OUT" | grep -qF "$GOV_PLUGIN/scripts/idc_pr_gate_bind.py" \
+  || gov_fail "raw gh pr edit denial did not name the sanctioned reciprocal binder: $OUT"
+echo "  ok raw gh pr edit denies with idc_pr_gate_bind.py remediation"
 
 echo "== the denial remediation names the REAL plugin path, never the literal token (Fix 6) =="
 gate "cd wt && gh pr merge 12 --squash" "$S1"

@@ -165,6 +165,52 @@ r = B.delete_project("o", 5, "5", ".")
 assert r["action"] == "deleted" and r["number"] == 5, r
 assert "PVT_5" in deleted_nodes
 
+# Deletion proof is deliberately narrow: only a null node or GitHub's exact missing-node response
+# proves absence. Authentication/network/rate-limit/malformed/non-null failures stay failures.
+def deletion_readback(mode):
+    projects[:] = [{"number": 5, "id": "PVT_5", "title": "demo IDC Tracker",
+                    "url": "https://example.invalid/5", "items": {"totalCount": 0}}]
+    deleted_nodes.clear()
+    def gh(args, repo):
+        if args[:2] == ["project", "list"]:
+            return json.dumps({"projects": projects})
+        if args[:2] == ["project", "view"]:
+            return json.dumps(projects[0])
+        if args[:2] == ["project", "delete"]:
+            deleted_nodes.add("PVT_5"); projects.clear(); return ""
+        if args[:3] == ["api", "graphql", "-f"]:
+            if mode == "exact-missing":
+                raise B.BoardReadError("gh api graphql failed: gh: Could not resolve to a node with the global id of 'PVT_5'.")
+            if mode == "missing-prefix":
+                raise B.BoardReadError("gh api graphql failed: Could not resolve to a node with the global id of 'PVT_5'.")
+            if mode == "rate-limit":
+                raise B.RateLimitError(123)
+            if mode == "auth":
+                raise B.BoardReadError("gh api graphql failed: authentication required")
+            if mode == "network":
+                raise B.BoardReadError("gh api graphql failed: network unreachable")
+            if mode == "malformed":
+                return "not-json"
+            if mode == "nonnull":
+                return json.dumps({"data": {"node": {"id": "PVT_5"}}})
+            return json.dumps({"data": {"node": None}})
+        raise AssertionError((mode, args))
+    B._gh = gh
+
+deletion_readback("exact-missing")
+assert B.delete_project("o", 5, "5", ".")["action"] == "deleted"
+deletion_readback("null")
+assert B.delete_project("o", 5, "5", ".")["action"] == "deleted"
+for mode, error in (("rate-limit", B.RateLimitError), ("auth", B.BoardReadError),
+                    ("network", B.BoardReadError), ("malformed", B.BoardReadError),
+                    ("nonnull", B.BoardWriteError), ("missing-prefix", B.BoardReadError)):
+    deletion_readback(mode)
+    try:
+        B.delete_project("o", 5, "5", ".")
+        raise AssertionError(mode + " readback was accepted as deletion proof")
+    except error:
+        pass
+
 # Shipped role-facing command prose must invoke these adapter doors, never executable raw lifecycle writes.
 init_text = open(os.path.join(plugin, "commands", "init.md"), encoding="utf-8").read()
 uninstall_text = open(os.path.join(plugin, "commands", "uninstall.md"), encoding="utf-8").read()

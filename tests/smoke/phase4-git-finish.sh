@@ -174,7 +174,7 @@ run_close_only() {
   [ "${1:-}" = "--no-worktree" ] && wt_arg=()
   ( cd "$REPO" && \
     env PATH="$WORK/bin:$PATH" WORK="$WORK" ORIGIN="$ORIGIN" BRANCH="$BRANCH" BASE="$BASE" \
-      python3 "$SCRIPT" --pr 501 --issue "$iss" "${wt_arg[@]}" --repo "$REPO" --tracker "$TRACKER" --close-only )
+      python3 "$SCRIPT" --pr 501 --issue "$iss" ${wt_arg[@]+"${wt_arg[@]}"} --repo "$REPO" --tracker "$TRACKER" --close-only )
 }
 out="$(run_close_only 2>&1)"; rc=$?
 [ "$rc" -eq 0 ] || fail "(C) --close-only on a merged PR must succeed, got exit $rc: $out"

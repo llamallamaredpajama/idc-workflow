@@ -29,9 +29,10 @@ mode only changes what gets fed in:
    Items already behind a gate (`Blocked`) or retired (`Done`) are skipped, so a re-run is
    idempotent — except the interrupted-run recovery: a `Blocked` item whose blocking gate issue
    is already `Done` MAY be an interrupted dispose-then-unblock — but **first verify that gate's
-   journaled guarded dispose** through the one deterministic reader —
+   journaled proof** through the one deterministic reader —
    `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gate_proof.py" --repo "$PWD" --gate <gate#>`
-   (`idc:idc-gate-issue` step 4 documents its kinds; never hand-roll a journal scan). Only on a
+   (`guarded-dispose` and `verified-reconciliation` are proven; never hand-roll a journal scan).
+   Only on a
    **proven** kind — `guarded-dispose` (an `op=dispose`/`disposition=gate-approved` record) or
    `verified-reconciliation` (an `op=gate-reconciliation` record from `idc_gate_repair.py`, which
    verified the merged approval PR at repair time) — finish it through the **guarded pointer-finish

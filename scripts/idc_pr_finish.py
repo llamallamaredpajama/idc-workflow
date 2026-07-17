@@ -222,7 +222,8 @@ def _bound_pr(args):
     prs = GATE_PR_MARKER.findall(info.get("body") or "")
     if not prs:
         raise FinishError(f"requirements: gate #{args.gate} carries no idc-gate-pr body marker (markerless) "
-                          "— migrate the legacy gate by stamping the marker in its BODY, then re-run")
+                          "— migrate it through idc_pr_gate_bind.py so both reciprocal bodies are "
+                          "validated and read back, then re-run")
     if len(prs) > 1:
         raise FinishError(f"requirements: gate #{args.gate} carries {len(prs)} idc-gate-pr body markers "
                           "(double-marked) — keep exactly one (the canonical footer)")

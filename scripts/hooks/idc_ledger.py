@@ -348,7 +348,7 @@ class ObligationConflict(Exception):
 def command_start(cwd, session_id, command, plugin_version, args_sha256, source,
                   intake_manifest=None, intake_units=None, recirc_requested=None,
                   build_requested=None, plan_admitted=None, uninstall_flags=None, nonce=None,
-                  build_frontier=None):
+                  build_frontier=None, uninstall_receipt_source=None, uninstall_receipt_sha256=None):
     """Atomic UPSERT of the active command record by (session_id, command) — never duplicates an
     active record (a re-entry of the same command in the same session updates the one record in
     place). REPO-GATED: a silent no-op outside a governed repo (returns `{}`). Preserves the taint
@@ -406,6 +406,10 @@ def command_start(cwd, session_id, command, plugin_version, args_sha256, source,
         rec["plan_admitted"] = [str(p) for p in plan_admitted]
     if uninstall_flags:
         rec["uninstall_flags"] = sorted({str(f) for f in uninstall_flags})
+    if uninstall_receipt_source:
+        rec["uninstall_receipt_source"] = str(uninstall_receipt_source)
+    if uninstall_receipt_sha256:
+        rec["uninstall_receipt_sha256"] = str(uninstall_receipt_sha256)
     # A per-record nonce binds a diagnostic report (doctor/janitor) to THIS command invocation
     # (wave-4 finding 7): the helper that RUNS the scan writes the report carrying this nonce, and the
     # closeout requires the report's nonce to MATCH the active record's — so a stale/foreign report
@@ -453,6 +457,20 @@ def command_start(cwd, session_id, command, plugin_version, args_sha256, source,
                 unioned_flags = _union_str_list(c.get("uninstall_flags"), uninstall_flags)
                 if unioned_flags:
                     rec["uninstall_flags"] = sorted(set(unioned_flags))
+                # Receipt source is monotonic too. Once any start observed the canonical modern
+                # receipt, deleting it before finish cannot downgrade this run to the legacy list.
+                prior_receipt = c.get("uninstall_receipt_source")
+                if prior_receipt:
+                    rec["uninstall_receipt_source"] = prior_receipt
+                elif uninstall_receipt_source:
+                    rec["uninstall_receipt_source"] = str(uninstall_receipt_source)
+                # Keep the FIRST modern receipt digest across re-entry. A changed receipt is an
+                # integrity conflict for finish, not a new manifest that may replace the obligation.
+                prior_receipt_sha = c.get("uninstall_receipt_sha256")
+                if prior_receipt_sha:
+                    rec["uninstall_receipt_sha256"] = prior_receipt_sha
+                elif uninstall_receipt_sha256:
+                    rec["uninstall_receipt_sha256"] = str(uninstall_receipt_sha256)
                 # Plan admitted set: union the prior stamp with this re-start's live read (a
                 # consideration the plan itself retires between restarts stays in the required set).
                 prior_admitted = c.get("plan_admitted")

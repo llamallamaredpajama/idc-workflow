@@ -35,4 +35,5 @@ deconfliction record.
 
 `docs/workflow/tracker-config.yaml` (the tracker contract) is also placed here by
 `/idc:init`. Each directory ships with an empty `.gitkeep` so the scaffold survives a
-fresh clone; delete it once the directory has real content.
+fresh clone. Retain the keepfiles after adding content: they are the exact scaffold-ownership files
+that update and uninstall can safely manage without treating your work products as IDC-owned.

@@ -40,10 +40,10 @@ engine reported a resumable board error (github throttle). Stdlib only; `gh` via
 import argparse
 import json
 import os
-import re
 import subprocess
 import sys
 
+import idc_gate_proof
 import idc_gate_repair as GR
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -52,7 +52,7 @@ GATE_REPAIR = os.path.join(HERE, "idc_gate_repair.py")
 
 # kind -> the head-branch prefix an autonomous merge of that kind must carry.
 KIND_PREFIX = {"planning": "plan/", "recirculation": "recirc/", "intake": "intake/"}
-GATE_PR_MARKER = re.compile(r"<!--\s*idc-gate-pr:\s*(\d+)\s*-->")
+GATE_PR_MARKER = idc_gate_proof.GATE_PR_MARKER_RE
 
 
 class FinishError(Exception):

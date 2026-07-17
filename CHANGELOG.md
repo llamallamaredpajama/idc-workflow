@@ -17,6 +17,13 @@ The final command-integrity hardening pass closes the remaining deferred items f
   terminating process changing HEAD, index, or files before another writer starts.
 - Documentation now reports all nine agents, and clean final-head sandbox receipts cover the normal
   lifecycle and the literal gate-repair CLI against a disposable GitHub board.
+- A cleanup pass (behavior-preserving): the PR↔gate marker regex/format is declared once in
+  `idc_gate_proof` and imported by every reading/writing surface; reference lint now fails if the
+  entry-gate hook matcher ever drifts from the real `commands/*.md` set; the closeout validator
+  caches identical board/journal/`gh` reads within one invocation (one snapshot per source instead
+  of one full board load per referenced item); the interlock reads the session ledger only when a
+  finding exists; ledger mutations decode the state file once per write; dead conditions and a
+  duplicated hook helper were removed.
 
 ## 4.1.1 — 2026-07-17
 

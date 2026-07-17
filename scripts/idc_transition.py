@@ -62,6 +62,7 @@ except ImportError:  # pragma: no cover — non-POSIX
     fcntl = None
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import idc_gate_proof                  # noqa: E402 — owns the shared PR↔gate marker declaration
 import idc_review_verdict_check as VC  # noqa: E402 — the verdict validator (close guard)
 import idc_tracker_fs                  # noqa: E402 — filesystem backend (read-back seam)
 import idc_gh_board                    # noqa: E402 — github backend (referenced by attribute so tests monkeypatch)
@@ -387,7 +388,7 @@ BLOCKED_STATUS = "Blocked"                  # a gate-parked Status (a Blocked re
 BLOCKED_BY_MARKER = re.compile(r"<!--\s*idc-blocked-by:\s*(.*?)\s*-->", re.S)
 # The gate's OWN recorded approval PR (`idc:idc-gate-issue` stamps it in the gate body) — binds the
 # approval artifact to THIS gate so an unrelated merged PR can never terminalize it.
-GATE_PR_MARKER = re.compile(r"<!--\s*idc-gate-pr:\s*(\d+)\s*-->")
+GATE_PR_MARKER = idc_gate_proof.GATE_PR_MARKER_RE
 # A pre-structured link record's `what` line (journal records written before parent/child fields).
 LINK_WHAT_RE = re.compile(r"^link #(\d+) -> #(\d+)$")
 

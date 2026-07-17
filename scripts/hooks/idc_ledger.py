@@ -185,20 +185,22 @@ def _read_raw(cwd):
     return data if isinstance(data, dict) else {}
 
 
-def read_taints(cwd):
+def read_taints(cwd, _raw=None):
     """Every taint dict currently in the ledger (a list). TOLERANT: a missing or corrupt ledger
-    reads as an EMPTY list and NEVER throws — a corrupt ledger must not brick a gate."""
-    taints = _read_raw(cwd).get("taints", [])
+    reads as an EMPTY list and NEVER throws — a corrupt ledger must not brick a gate. `_raw` lets a
+    mutator that already decoded the file under its lock reuse that one read."""
+    taints = (_read_raw(cwd) if _raw is None else _raw).get("taints", [])
     if not isinstance(taints, list):
         return []
     return [t for t in taints if isinstance(t, dict) and t.get("kind")]
 
 
-def _read_commands(cwd):
+def _read_commands(cwd, _raw=None):
     """Every well-formed command lifecycle record currently in the ledger (a list). TOLERANT: a
     missing/corrupt ledger — or a v1 file with no `commands` key — reads as EMPTY, never throws. A
-    record is well-formed iff it carries a session_id and a command (the identity a gate keys on)."""
-    cmds = _read_raw(cwd).get("commands", [])
+    record is well-formed iff it carries a session_id and a command (the identity a gate keys on).
+    `_raw` lets a mutator that already decoded the file under its lock reuse that one read."""
+    cmds = (_read_raw(cwd) if _raw is None else _raw).get("commands", [])
     if not isinstance(cmds, list):
         return []
     return [c for c in cmds if isinstance(c, dict) and c.get("session_id") and c.get("command")]
@@ -260,29 +262,23 @@ def _atomic_write_state(cwd, taints, commands):
     return True
 
 
-def _atomic_write(cwd, taints):
-    """Write `taints` while PRESERVING the existing `commands` array (the v1 taint writers' door).
-    Called under `_write_lock`, so the `_read_commands` read-back is race-free vs concurrent writers.
-    Returns the single-write-door's persisted bool (taint writers are best-effort and ignore it; the
-    command writers propagate it)."""
-    return _atomic_write_state(cwd, taints, _read_commands(cwd))
-
-
 # ── the write API (deterministic callers only) ──────────────────────────────────────────────────
 def set_taint(cwd, kind, key=None, session_id=None, **fields):
     """Add or update the (kind, key) taint. REPO-GATED: a silent no-op outside a governed repo.
     Upserts by identity (kind, key) so a re-set never duplicates. Carries the creating session_id
     (invariant #1 scoping) and any extra `fields`. Recovers a corrupt/missing file (tolerant read
-    → rewrite)."""
+    → rewrite). The write preserves the `commands` array (the v1 taint writers' door); taint
+    writers are best-effort, so the persisted bool is ignored here."""
     if not idc_hook_lib.is_governed_repo(cwd):
         return
     key = None if key is None else str(key)
     if session_id is None:
         session_id = os.environ.get("IDC_SESSION_ID") or None
     with _write_lock(cwd):  # read-modify-write must be atomic vs concurrent writers (no lost taints)
-        taints = [t for t in read_taints(cwd) if not (t.get("kind") == kind and t.get("key") == key)]
+        raw = _read_raw(cwd)
+        taints = [t for t in read_taints(cwd, _raw=raw) if not (t.get("kind") == kind and t.get("key") == key)]
         taints.append({"kind": kind, "key": key, "session_id": session_id, "fields": dict(fields)})
-        _atomic_write(cwd, taints)
+        _atomic_write_state(cwd, taints, _read_commands(cwd, _raw=raw))
 
 
 def clear_taint(cwd, kind, key=None):
@@ -292,10 +288,11 @@ def clear_taint(cwd, kind, key=None):
         return
     key = None if key is None else str(key)
     with _write_lock(cwd):  # read-modify-write must be atomic vs concurrent writers (no lost taints)
-        before = read_taints(cwd)
+        raw = _read_raw(cwd)
+        before = read_taints(cwd, _raw=raw)
         after = [t for t in before if not (t.get("kind") == kind and t.get("key") == key)]
         if len(after) != len(before):
-            _atomic_write(cwd, after)
+            _atomic_write_state(cwd, after, _read_commands(cwd, _raw=raw))
 
 
 # ── the command lifecycle envelope (v2 — Task 2, command integrity) ───────────────────────────────
@@ -417,7 +414,8 @@ def command_start(cwd, session_id, command, plugin_version, args_sha256, source,
     if nonce:
         rec["nonce"] = str(nonce)
     with _write_lock(cwd):  # read-modify-write must be atomic vs concurrent writers (no lost records)
-        commands = _read_commands(cwd)
+        raw = _read_raw(cwd)
+        commands = _read_commands(cwd, _raw=raw)
         replaced = False
         for i, c in enumerate(commands):
             if (c.get("session_id") == session_id and c.get("command") == command
@@ -485,7 +483,7 @@ def command_start(cwd, session_id, command, plugin_version, args_sha256, source,
                 break
         if not replaced:
             commands.append(rec)
-        persisted = _atomic_write_state(cwd, read_taints(cwd), _prune_finished(commands))
+        persisted = _atomic_write_state(cwd, read_taints(cwd, _raw=raw), _prune_finished(commands))
     return rec if persisted else None
 
 
@@ -506,7 +504,8 @@ def command_finish(cwd, session_id, command, status, evidence):
     session_id = str(session_id)
     command = str(command)
     with _write_lock(cwd):  # read-modify-write must be atomic vs concurrent writers
-        commands = _read_commands(cwd)
+        raw = _read_raw(cwd)
+        commands = _read_commands(cwd, _raw=raw)
         target = None
         for c in commands:
             if (c.get("session_id") == session_id and c.get("command") == command
@@ -523,7 +522,7 @@ def command_finish(cwd, session_id, command, status, evidence):
         # front of the list, where the cap would prune it as the "oldest" even though it just closed.
         commands.remove(target)
         commands.append(target)
-        if not _atomic_write_state(cwd, read_taints(cwd), _prune_finished(commands)):
+        if not _atomic_write_state(cwd, read_taints(cwd, _raw=raw), _prune_finished(commands)):
             return None  # the close did not persist → do not report a false close (Fix 2)
     return target
 

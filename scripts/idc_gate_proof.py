@@ -35,6 +35,7 @@ there and the CLI exits 2; only a READABLE journal ever yields a kind.
 import argparse
 import json
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -50,6 +51,17 @@ PROVEN_KINDS = (GUARDED_DISPOSE, VERIFIED_RECONCILIATION)
 # The reconciliation door's name, stamped into every record idc_gate_repair writes. A record whose
 # evidence names any OTHER door is not this door's record and never proves a gate.
 REPAIR_DOOR = "idc-gate-repair"
+
+# The reciprocal PR↔gate binding marker — a cross-surface WIRE CONTRACT. The binder writes it; the
+# engine's dispose guard, the finisher, the repair door, and the closeout validator all read it. The
+# proof chain holds only while every surface agrees byte-for-byte, so both the regex and the exact
+# string a writer emits are declared HERE once and imported everywhere.
+GATE_PR_MARKER_RE = re.compile(r"<!--\s*idc-gate-pr:\s*(\d+)\s*-->")
+
+
+def format_gate_pr_marker(number):
+    """The exact marker string every writing surface emits for PR/gate `number`."""
+    return f"<!-- idc-gate-pr: {int(number)} -->"
 
 
 def _positive_int(value):

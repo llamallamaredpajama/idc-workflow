@@ -8,14 +8,14 @@ correct binding is safe to rerun and writes only the missing side.
 import argparse
 import json
 import os
-import re
 import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from idc_board_lint import REQUIREMENTS_GATE_PREFIX, is_requirements_gate_title  # noqa: E402
+from idc_gate_proof import GATE_PR_MARKER_RE, format_gate_pr_marker  # noqa: E402
 
-MARKER = re.compile(r"<!--\s*idc-gate-pr:\s*(\d+)\s*-->")
+MARKER = GATE_PR_MARKER_RE
 
 
 class BindError(Exception):
@@ -75,7 +75,7 @@ def _marker_state(body, expected, surface):
 
 
 def _append_marker(body, number):
-    marker = f"<!-- idc-gate-pr: {int(number)} -->"
+    marker = format_gate_pr_marker(number)
     return body.rstrip() + ("\n\n" if body.rstrip() else "") + marker
 
 

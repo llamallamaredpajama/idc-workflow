@@ -249,6 +249,44 @@ if [ -f .claude-plugin/plugin.json ]; then
   done < <(grep -nE '"hooks"[[:space:]]*:[[:space:]]*"\.?/?hooks/hooks\.json"' .claude-plugin/plugin.json 2>/dev/null || true)
 fi
 
+# Rule P — the hooks.json UserPromptExpansion matcher must name EXACTLY the real command set.
+# The command entry gate only runs for names the matcher admits; a command added to commands/*.md
+# but not to the matcher would ship with NO freshness gate, NO lifecycle record, and NO closeout
+# enforcement — the whole command-integrity chain silently absent for that one command. Compare the
+# matcher's alternation set against the commands/*.md stems ($COMMANDS above), both sorted.
+if [ -f hooks/hooks.json ]; then
+  MATCHER_CMDS=$(python3 - <<'PY'
+import json, re, sys
+try:
+    with open("hooks/hooks.json", encoding="utf-8") as fh:
+        doc = json.load(fh)
+    matchers = [e.get("matcher", "") for e in doc.get("hooks", {}).get("UserPromptExpansion", [])]
+except Exception as exc:  # noqa: BLE001 — report the parse failure as the finding
+    print(f"PARSE-ERROR: {exc}")
+    sys.exit(0)
+names = set()
+for pat in matchers:
+    m = re.fullmatch(r"\^idc:\(([a-z|-]+)\)\$", pat or "")
+    if m:
+        names.update(m.group(1).split("|"))
+if not names:
+    print(f"PARSE-ERROR: no ^idc:(...)$ UserPromptExpansion matcher found in {matchers!r}")
+    sys.exit(0)
+print("\n".join(sorted(names)))
+PY
+)
+  case "$MATCHER_CMDS" in
+    PARSE-ERROR:*)
+      report "hooks/hooks.json: [entry-gate-matcher] cannot extract the UserPromptExpansion matcher command set ($MATCHER_CMDS)"
+      ;;
+    *)
+      if [ "$MATCHER_CMDS" != "$COMMANDS" ]; then
+        report "hooks/hooks.json: [entry-gate-matcher] the UserPromptExpansion matcher set ($(printf '%s' "$MATCHER_CMDS" | tr '\n' ' ')) differs from commands/*.md ($(printf '%s' "$COMMANDS" | tr '\n' ' ')) — a command missing from the matcher ships with NO entry gate, lifecycle record, or closeout enforcement"
+      fi
+      ;;
+  esac
+fi
+
 # Rule A — dangling namespaced references (ignores lint-allow by design).
 ALL_REFS=$(grep -hoE 'idc:[a-z0-9][a-z0-9-]*' $MD_FILES 2>/dev/null | sort -u)
 for ref in $ALL_REFS; do

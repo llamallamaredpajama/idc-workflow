@@ -65,7 +65,7 @@ def main(argv=None):
         observed.append(fingerprint(repo))
         if n + 1 < args.samples:
             time.sleep(args.interval)
-    if any(sample != baseline for sample in observed) or len({json.dumps(x, sort_keys=True) for x in observed}) != 1:
+    if any(sample != baseline for sample in observed):
         print("worktree-stability: FAIL — HEAD, index, or worktree changed", file=sys.stderr)
         return 1
     print(json.dumps({"stable": True, "samples": args.samples, "fingerprint": baseline}, sort_keys=True))

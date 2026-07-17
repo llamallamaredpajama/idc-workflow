@@ -63,6 +63,15 @@ def is_governed_repo(cwd):
         return False
 
 
+def contract_script(plugin_root):
+    """The REAL absolute path to idc_command_contract.py under the plugin root a gate was handed.
+    `${CLAUDE_PLUGIN_ROOT}` is a markdown-only substitution — it is NOT a shell/Python env var, so a
+    Python-emitted literal would resolve to the broken `/scripts/idc_command_contract.py`. Gates
+    receive the real root as argv[1] and join it here, so every remediation they print is runnable
+    as-is."""
+    return os.path.join(plugin_root or "", "scripts", "idc_command_contract.py")
+
+
 def observe_only():
     return os.environ.get("IDC_HOOKS_OBSERVE_ONLY", "") == "1"
 

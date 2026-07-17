@@ -90,13 +90,7 @@ def _normalize_command(command_name):
     return command if command in C.COMMANDS else None
 
 
-def _contract_script(plugin_root):
-    """The REAL absolute path to idc_command_contract.py under the plugin root the gate was handed.
-    `${CLAUDE_PLUGIN_ROOT}` is a markdown-only substitution — it is NOT a shell/Python env var, so a
-    Python-emitted literal would resolve to the broken `/scripts/idc_command_contract.py`. The gate
-    receives the real root as argv[1] (the hook wrapper passes `${CLAUDE_PLUGIN_ROOT}`); we join that
-    actual path so every remediation the gate prints is runnable as-is."""
-    return os.path.join(plugin_root or "", "scripts", "idc_command_contract.py")
+_contract_script = H.contract_script  # shared with the Stop closeout gate — one declaration
 
 
 def _context(command, plugin_root):
@@ -140,7 +134,7 @@ _REG_WRITE_FAILED = "write-failed"  # a governed, session-bearing repo where the
 _REG_CONFLICT = "conflict"      # the ledger REFUSED this start: it would narrow/replace a stamped obligation.
 
 
-def _register_if_governed(payload, plugin_root, command):
+def _register_if_governed(payload, plugin_root, command, running=None):
     """Open (idempotent upsert) the command's active lifecycle record when this is a governed repo
     with a session to key on — the shared open-a-record path for BOTH the clean admit and the
     allow-on-invalid-receipt fork. Returns `(outcome, detail)`, where outcome is one of `_REG_OPENED` /
@@ -153,14 +147,16 @@ def _register_if_governed(payload, plugin_root, command):
     by a READBACK via the same read path `status` uses (`C.active_records`) — a swallowed/failed ledger
     write returns `_REG_WRITE_FAILED`, never a false "opened" (Fix 2). The running version is read
     receipt-independently, so this works even when the receipt is invalid (the caller has already
-    proven the runtime is NOT positively stale)."""
+    proven the runtime is NOT positively stale); the clean-admit caller passes the version its
+    freshness evaluation already read, so only the recovery fork re-reads the manifest."""
     if command in DEFERS_REGISTRATION:
         return _REG_DEFERRED, ""
     cwd = payload.get("cwd") or os.getcwd()
     session_id = payload.get("session_id")
     if not (session_id and H.is_governed_repo(cwd)):
         return _REG_DEFERRED, ""
-    running = freshness.read_version(plugin_root) or ""
+    if running is None:
+        running = freshness.read_version(plugin_root) or ""
     try:
         C.register_start(cwd, session_id, command, running,
                          payload.get("command_args") or "", payload.get("command_source") or "")
@@ -235,7 +231,8 @@ def _admit(payload, plugin_root, command):
     # Admitted on a clean, non-stale freshness signal. Open the lifecycle record (idempotent upsert)
     # when this is a governed repo with a session; init and non-governed / session-less cases emit the
     # bootstrap context instead (no false "record opened" claim).
-    reg, detail = _register_if_governed(payload, plugin_root, command)
+    reg, detail = _register_if_governed(payload, plugin_root, command,
+                                        running=result.running_version or "")
     if reg == _REG_CONFLICT:
         # The ledger REFUSED to stamp this start because it would narrow/replace the active record's
         # obligation (round-7 BLOCKS 1). REFUSE the expansion with the conflict's OWN remediation — the
@@ -245,14 +242,12 @@ def _admit(payload, plugin_root, command):
         # remedy is to finish or reset that run. Admitting instead would run a command whose obligation
         # was never recorded, which the Stop gate could not enforce.
         _block(detail)
-    if reg == _REG_WRITE_FAILED:
+    if reg == _REG_WRITE_FAILED and command in WORKFLOW_COMMANDS:
         # The obligation could NOT be recorded (Fix 2). A workflow command must not run UNRECORDED —
         # the Stop gate could never enforce its closeout — so it is fail-closed/blocked. A recovery/
-        # diagnostic command may still expand to help the operator, but with the bootstrap context so
-        # it never claims a record that does not exist.
-        if command in WORKFLOW_COMMANDS:
-            _block(WRITE_FAILED_REASON)
-        _emit_context(command, plugin_root, False)
+        # diagnostic command falls through and expands with the bootstrap context below (opened is
+        # False), so it never claims a record that does not exist.
+        _block(WRITE_FAILED_REASON)
     _emit_context(command, plugin_root, reg == _REG_OPENED)
 
 

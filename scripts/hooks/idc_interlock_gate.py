@@ -1231,12 +1231,15 @@ def _gate(payload, plugin_root):
     if not isinstance(command, str) or not command.strip():
         H.pre_tool_allow()
 
+    # Classification is posture-independent (classify() ignores its `active` flag by contract), so
+    # run it first and read the session ledger only once a finding exists — the overwhelmingly
+    # common clean Bash call never pays the ledger read.
+    finding = classify(command, cwd, plugin_root, False)
+    if not finding:
+        H.pre_tool_allow()
     # POSTURE: hard deny while the session owns an ACTIVE /idc:* command; warn otherwise. The deny
     # honors IDC_HOOKS_OBSERVE_ONLY=1 (the ONE debug escape) inside pre_tool_deny().
     active = bool(L.active_commands(cwd, session_id=payload.get("session_id")))
-    finding = classify(command, cwd, plugin_root, active)
-    if not finding:
-        H.pre_tool_allow()
     reason = render_reason(finding, plugin_root)
     if active:
         H.pre_tool_deny(reason)

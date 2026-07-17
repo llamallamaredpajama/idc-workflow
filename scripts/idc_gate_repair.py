@@ -81,7 +81,7 @@ class GateRepairError(Exception):
 
 
 def _marker(pr):
-    return f"<!-- idc-gate-pr: {int(pr)} -->"
+    return P.format_gate_pr_marker(pr)
 
 
 def format_issue_refs(nums):
@@ -211,7 +211,7 @@ def _validate(obs, gate, pr):
             "bodies first through `python3 <plugin-root>/scripts/idc_pr_gate_bind.py "
             f"--repo <repo> --pr {int(pr)} --gate {int(gate)}`, then rerun this repair; full repair "
             "never writes either marker itself")
-    if bound is not None and bound != int(pr):
+    if bound != int(pr):
         raise GateRepairError(
             f"gate-repair refused: gate #{gate}'s body already binds approval PR #{bound}, not the "
             f"--pr #{pr} given — re-binding a gate's recorded approval to a different PR is exactly "

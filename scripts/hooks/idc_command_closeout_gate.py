@@ -28,12 +28,7 @@ import idc_hook_lib as H  # noqa: E402
 import idc_ledger  # noqa: E402
 
 
-def _contract_script(plugin_root):
-    """The REAL absolute path to idc_command_contract.py under the plugin root the gate was handed.
-    `${CLAUDE_PLUGIN_ROOT}` is a markdown-only substitution — NOT a shell/Python env var — so a
-    Python-emitted literal would resolve to the broken `/scripts/idc_command_contract.py`. The gate
-    receives the real root as argv[1], so we join that actual path into every remediation it prints."""
-    return os.path.join(plugin_root or "", "scripts", "idc_command_contract.py")
+_contract_script = H.contract_script  # shared with the entry gate — one declaration
 
 
 def _block_reason(session_id, command, plugin_root):

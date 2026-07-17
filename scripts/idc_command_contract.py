@@ -363,20 +363,50 @@ def _check_no_action(command: str, repo: str) -> CloseoutResult:
 # (the suite's established pattern), including a sabotage where the fake returns UNMERGED. ─────────────
 _GH_TIMEOUT_S = 30
 
+# Per-invocation read cache. This validator is a ONE-SHOT process (a CLI start/finish/status or a
+# single hook event), and a claim walk may consult the same durable source once per referenced item —
+# N identical `gh` reads, journal scans, or full board loads inside one invocation, with no added
+# freshness (each re-read is its own snapshot anyway; on github the board load is a full
+# cursor-paginated GraphQL walk against a ~5000/hr budget). One snapshot per source per invocation is
+# the SAME trust boundary — the claims still re-derive from durable state, never the caller — with
+# O(1) repeat reads. Failures are never cached where the underlying reader raises (board), so
+# fail-closed retry semantics are unchanged there.
+_READ_CACHE: dict = {}
+
+
+def _cache_key(kind: str, repo: str, extra=()):
+    return (kind, os.path.realpath(os.path.abspath(repo)), *extra)
+
 
 def _gh_capture(repo: str, args: list) -> str | None:
     """Run `gh <args>` in `repo`, returning stdout on a zero exit, else None (gh absent, nonzero, or
-    a timeout). Read-only by contract — callers pass only `view`/read subcommands."""
+    a timeout). Read-only by contract — callers pass only `view`/read subcommands. Cached per
+    (repo, args) for the invocation, so validating the same PR for several claims runs gh once."""
     if not _ne_str(repo) or not os.path.isdir(repo):
         return None
+    key = _cache_key("gh", repo, tuple(args))
+    if key in _READ_CACHE:
+        return _READ_CACHE[key]
     try:
         proc = subprocess.run(["gh", *args], cwd=repo, capture_output=True, text=True,
                               timeout=_GH_TIMEOUT_S)
     except (OSError, subprocess.SubprocessError):
+        _READ_CACHE[key] = None
         return None
-    if proc.returncode != 0:
-        return None
-    return proc.stdout
+    out = proc.stdout if proc.returncode == 0 else None
+    _READ_CACHE[key] = out
+    return out
+
+
+def _tracker_issues(repo: str):
+    """One BOARD SNAPSHOT per invocation via the shared, constrained tracker reader. Raises exactly
+    like the underlying reader (callers keep their own fail-closed except blocks); only a successful
+    load is cached, so a failed read stays retryable."""
+    key = _cache_key("board", repo)
+    if key not in _READ_CACHE:
+        import idc_next_action as NEXT  # noqa: E402 — reuse the shared, constrained tracker reader
+        _READ_CACHE[key] = NEXT._load_tracker_issues(repo)
+    return _READ_CACHE[key]
 
 
 def _gh_pr_state(repo: str, pr: object):
@@ -441,9 +471,8 @@ def _issue_stage_status(repo: str, num: object):
     finding 3: a recirc ticket's closeout is re-derived from BOTH Stage and Status (a drained recirc
     ticket stays a `Recirculation`-stage Done item), not Status alone."""
     try:
-        import idc_next_action as NEXT  # noqa: E402 — reuse the shared, constrained tracker reader
         key = _gate_key(num)
-        for issue in NEXT._load_tracker_issues(repo):
+        for issue in _tracker_issues(repo):
             if _gate_key(issue.get("number")) == key:
                 return issue.get("stage"), issue.get("status")
     except Exception:  # noqa: BLE001 — any tracker read failure fails the closeout closed
@@ -484,8 +513,7 @@ def _load_issue_numbers(repo: str):
     """The set of live tracker issue numbers (as canonical strings) via the shared reader, or None on
     any read failure (fail closed). Used to verify decomposition children EXIST on the board."""
     try:
-        import idc_next_action as NEXT  # noqa: E402
-        return {_gate_key(i["number"]) for i in NEXT._load_tracker_issues(repo)}
+        return {_gate_key(i["number"]) for i in _tracker_issues(repo)}
     except Exception:  # noqa: BLE001
         return None
 
@@ -506,7 +534,6 @@ def _confined_repo_path(repo: str, rel: object) -> str | None:
 
 # ── wave-3 derivation sources: each re-derives ONE terminal fact from durable state (never a caller
 # assertion). A caller may supply only REFERENCE KEYS (a path, an issue/PR number, a unit id). ────────
-_GATE_PR_MARKER_RE = re.compile(r"<!--\s*idc-gate-pr:\s*(\d+)\s*-->")
 
 
 def _run_consideration_check(repo: str, rel: object) -> CloseoutResult:
@@ -540,7 +567,8 @@ def _gate_marker_bound(repo: str, gate: object, think_pr: object) -> CloseoutRes
         return _fail("think-gate-unread",
                      "think closeout: the gate body could not be read (a nonexistent/unreadable gate "
                      "fails closed) — the marker count/binding is re-derived from the gate body, never trusted")
-    markers = _GATE_PR_MARKER_RE.findall(body)
+    import idc_gate_proof as GP  # noqa: E402 — lazy; the one shared marker declaration
+    markers = GP.GATE_PR_MARKER_RE.findall(body)
     if len(markers) != 1:
         return _fail("think-gate-markers",
                      f"think closeout requires EXACTLY ONE idc-gate-pr marker in the gate body, found "
@@ -558,18 +586,22 @@ def _gate_marker_bound(repo: str, gate: object, think_pr: object) -> CloseoutRes
 def _journal_records(repo: str):
     """Every parsed transition-journal record (FAIL-CLOSED via idc_journal_replay.scan_journal_strict),
     or None on any read error/corruption — a durable, backend-agnostic source. Used to re-derive a
-    gate disposal / pointer admission from the sanctioned write door's own audit trail."""
+    gate disposal / pointer admission from the sanctioned write door's own audit trail. One strict
+    scan per invocation: several claims (and a per-ticket loop) consult the same journal."""
     if not _ne_str(repo):
         return None
+    key = _cache_key("journal", repo)
+    if key in _READ_CACHE:
+        return _READ_CACHE[key]
     try:
         import idc_journal_replay as RP  # noqa: E402 — lazy
         entries, err = RP.scan_journal_strict(os.path.join(repo, "docs", "workflow",
                                                              "transition-journal.ndjson"))
-        if err:
-            return None
-        return entries, RP
+        scanned = None if err else (entries, RP)
     except Exception:  # noqa: BLE001 — a journal read failure fails the closeout closed
-        return None
+        scanned = None
+    _READ_CACHE[key] = scanned
+    return scanned
 
 
 def _gate_disposed(repo: str, gate: object) -> CloseoutResult:
@@ -2133,8 +2165,8 @@ def _uninstall_owned_files(repo: str, expected_source: object = None,
                                  "legacy fallback is allowed only when the receipt is absent")
     if _ne_str(expected_sha256):
         try:
-            with open(path, "rb") as handle:
-                actual_sha256 = hashlib.sha256(handle.read()).hexdigest()
+            import idc_receipt_check as RC  # noqa: E402 — lazy; the one canonical fingerprint
+            actual_sha256 = RC.fingerprint(path)
         except OSError as exc:
             return None, None, _fail("uninstall-invalid-receipt",
                                      f"the canonical install receipt cannot be read: {exc}")
@@ -2605,8 +2637,8 @@ def _uninstall_receipt_sha256_at_start(command: str, repo: str, source: object):
         return None
     path = os.path.join(os.path.realpath(os.path.abspath(repo)), _RECEIPT_RELPATH)
     try:
-        with open(path, "rb") as handle:
-            return hashlib.sha256(handle.read()).hexdigest()
+        import idc_receipt_check as RC  # noqa: E402 — lazy; the one canonical fingerprint
+        return RC.fingerprint(path)
     except OSError:
         return None
 

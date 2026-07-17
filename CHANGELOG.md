@@ -2,6 +2,105 @@
 
 All notable changes for the IDC Workflow plugin are documented in this file.
 
+## 4.1.0 — 2026-07-17
+
+The command-integrity + external-intake release (plan:
+`docs/dev/2026-07-12-idc-command-integrity-and-external-intake-plan.md`): **a command may not claim
+more than it can prove, and it may not run at all if the code behind it is stale.** Where 4.0.0 made
+the *board's* write path deterministic, this release does the same for the *command's* own
+lifecycle — every `/idc:*` invocation now opens a durable record, and every terminal claim it makes
+at closeout is re-derived from artifacts on disk or a live tracker read rather than believed.
+Minor version because a healthy repo's shape does not change: the additions are refusals, one new
+entry point (`/idc:intake`), and a read-only next-action oracle. **One manual step after upgrading:
+run `/reload-plugins` once** (see the upgrade note below).
+
+- **Stale commands are refused at the door (#106).** A `UserPromptExpansion` hook
+  (`scripts/hooks/idc_command_entry_gate.py`, backed by `scripts/idc_plugin_freshness.py`) compares
+  the *running* plugin's manifest version against the version recorded in the governed repo's
+  install receipt, and blocks the command before it ever expands. This closes the failure mode where
+  Claude Code's version-keyed cache keeps an old command body alive in a live session after an
+  update — the operator sees a governed refusal instead of a silently outdated playbook. The refusal
+  names the real recovery, **`/reload-plugins`**, and states plainly that **`/clear` does not reload
+  plugin commands or hooks** (the wrong reflex, and the one that made this class hard to spot).
+  Staleness blocks *every* command, recovery commands included, so a stale runtime can't diagnose
+  itself with stale code; an unreadable or malformed receipt is its own fail-closed refusal, never a
+  pass. Install receipts gain `receipt_version: 2`, which requires an exact `X.Y.Z` `plugin_version`;
+  `receipt_version: 1` receipts predate the field and are tolerated, and any other value is refused.
+- **The command closeout contract — claims are re-derived, never believed.** Every `/idc:*` opens a
+  lifecycle record (`scripts/idc_command_contract.py`, `start`/`finish`/`status`), and a second
+  `Stop` handler (`scripts/hooks/idc_command_closeout_gate.py`, after 4.0.0's fixpoint gate) refuses
+  to let a session end on an unresolved or unproven one. The governing rule is a **claim table**
+  (`_CLAIM_TABLE`): a command×status pair is only claimable if the validator can independently
+  re-derive it — Autorun's drain status is read back from the persisted `.idc-drain-verdict.json`,
+  Plan re-validates its matrix and re-runs schema/provenance against live child bodies, Build and
+  Think re-read the real merged state of their PR through `gh`, and Intake re-checks its manifest
+  review. **A status that cannot be re-derived is not claimable at all** — the fail-closed direction,
+  so a caller can never talk its way to `complete` with a fabricated receipt string. Obligations
+  stamped at `start` (Build's requested issues, Plan's admitted set, Think's manifest units) are
+  **monotonic**: a restart may only add to them, and a restart pointed at a *different* intake
+  manifest is refused outright at the real entry hook rather than silently replacing the first
+  manifest's obligations — the path by which queued work used to disappear. `/idc:doctor` closes out
+  under the same rule: its rows stay 1–10, but every row claiming **PASS** is independently re-run
+  before the claim stands (FAIL and SKIP rows are never contested).
+- **Raw board mutations are denied while a command is active.** A `PreToolUse` hook on `Bash`
+  (`scripts/hooks/idc_interlock_gate.py`) classifies each command and **hard-denies** raw tracker
+  writes — improvised `gh project`/`gh issue` mutations and GraphQL mutations — whenever the session
+  owns an active IDC command, routing the operator to the sanctioned engine door instead. Outside an
+  active command it warns rather than blocks. Crucially it also follows **script indirection**: a
+  `bash some-script.sh` that mutates the board is inspected and denied *before the script runs*, with
+  bounded depth and read size and a cycle guard, and files that resolve under the plugin's own
+  `scripts/` are sanctioned rather than re-scanned. The posture on anything it cannot statically
+  resolve — a dynamically built endpoint, an opaque `-c` payload, `BASH_ENV`-style startup
+  smuggling, a privilege wrapper — is **fail-closed**: deny and say why. Provably read-only `gh` and
+  GraphQL reads still pass, so Doctor and Update keep working. There are **no command-name
+  exceptions**; Init's and Uninstall's own lifecycle writes go through validating tracker-adapter
+  helpers like everyone else. Sensitive files (`.env`, `.envrc`, keys, credentials) are refused
+  without being opened.
+- **`/idc:intake` — a large external plan, compiled exactly once (new, 11th command).** A foreign
+  artifact (a vendor plan, a consultant's document) is no longer something Build is expected to
+  infer. `/idc:intake` compiles it into a durable manifest at
+  `docs/workflow/intakes/<YYYY-MM-DD>-<slug>.json` (`scripts/idc_intake_manifest.py`:
+  `extract`/`validate`/`link`/`status`), where every unit it found is enumerated **exactly once**,
+  classified, and routed to a real IDC lane — and the artifact itself is never executed. The manifest
+  is bound to its source by `sha256`, so an edited source is refused rather than silently
+  re-interpreted, and `build`/`autorun` are **forbidden** routes: foreign scope must enter through
+  Think or Recirculation like any other work. Reviews are **content-bound** — the approval file is
+  named for the digest of the manifest content it approved
+  (`<intake_id>.review.<manifest_content_sha256>.json`), so quietly dropping a unit and reusing the
+  old PASS doesn't validate. Credential-shaped assignments are redacted out of extracted text and
+  review notes, so compiling someone's plan can't commit their secrets into your repo.
+- **A next-action oracle.** `scripts/idc_next_action.py` (`--repo`, `--json`, read-only) derives the
+  genuinely correct next command from **durable** tracker and intake state, and the commands and
+  runtime adapters hand off through it instead of guessing. It distinguishes the three answers that
+  matter and never conflates them: a real action, a legitimate wait (`waiting-human-gate`), and
+  `fixpoint` (nothing left). Reads fail closed — an unreadable or malformed tracker is exit 2
+  (`invalid-tracker`), a throttled GitHub read is exit 3 (`rate-limited`), and neither is ever
+  flattened into a cheerful "nothing to do".
+- **Honest gate repair and reconciliation.** A corrupt or stranded human gate can now be fixed
+  without inventing history. `scripts/idc_gate_proof.py` reports exactly one of three kinds —
+  **`guarded-dispose`** (the gate genuinely went through the guarded terminal door),
+  **`verified-reconciliation`** (it was repaired, and the repair says so), or **`unproven`** — and
+  only the first two count as proven. `scripts/idc_gate_repair.py` is **dry-run by default**:
+  `--apply` is the only door to a write, and it re-reads every precondition immediately before
+  acting. Repairs journal under their own honest ops (`gate-reconciliation`, `full-repair`,
+  `finish-pointer`) and **never back-date a synthetic `dispose`** — so the journal keeps telling the
+  truth about how a gate reached Done. `--finish-pointer` is the one sanctioned way to complete a
+  pointer whose gate has cleared: it requires the proven gate to be the pointer's **sole remaining
+  blocker**, and every unblock site in the stage playbooks and the PR finisher now routes through
+  that door instead of a raw engine `unblock` that could drop a single edge and release work that
+  was still legitimately blocked.
+- **Upgrade note + intake scaffold ownership.** After updating to 4.1.0, **run `/reload-plugins`
+  once**: the freshness gate ships *inside* this version, so a session already running the old code
+  cannot be handed the hook retroactively — that one command is the bootstrap, and from then on the
+  gate carries itself (`docs/installing.md`). `/idc:init` now creates `docs/workflow/intakes/`, and
+  `/idc:update` gap-fills it into older governed repos **per file** via the `unrecorded` category
+  (`idc_receipt_check.py verify --json`), without touching intake contents. The install receipt lists
+  only the directory's `.gitkeep` — compiled manifests are operator **work product** and are never
+  stamped as scaffold, which is exactly what stops `/idc:uninstall` from deleting a plan you paid to
+  have compiled. Every command inventory (README, architecture, `AGENTS.md`, `llms.txt`, the
+  templates) now reads **11 commands**: `think · intake · plan · build · recirculate · autorun ·
+  janitor · init · doctor · update · uninstall`.
+
 ## 4.0.0 — 2026-07-11
 
 The v4 deterministic-core release (plan: `docs/dev/2026-07-03-deterministic-core-refactor-plan.md`,

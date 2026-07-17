@@ -38,11 +38,29 @@ resolve() { python3 "$PLUGIN_ROOT/scripts/idc_template_for.py" --plugin-root "$P
 # repo-agnostic state machine).
 [ -f docs/workflow/workflow-machine.yaml ] || cp "$(resolve docs/workflow/workflow-machine.yaml)" docs/workflow/workflow-machine.yaml
 
-# docs/workflow tree from docs-tree/ (visible entries only; each absent entry resolved + copied).
+# docs/workflow tree from docs-tree/ (visible top-level entries only; each absent FILE resolved +
+# copied). The gap-fill is per FILE, not per directory: an existing docs/workflow/<dir>/ must still
+# receive any template file it is missing. Guarding at directory granularity was a real defect (the
+# Task-8 incident e2e, run-t8e2e.txt "Setup findings" 2) — a repo whose docs/workflow/pillar-matrices/
+# already existed without its hidden .gitkeep never got the keepfile, while commands/init.md's Phase 7
+# stamps that path BY NAME, so /idc:init died at the receipt with "cannot stamp missing file". The
+# receipt is a per-file contract, so the scaffold must converge per file. This also makes real
+# init.md Phase 2's promise that "a partial tree gets its missing entries filled". Idempotent +
+# non-destructive: an existing file is never re-copied, so operator content (a matrix, an intake
+# manifest) is untouched.
 shopt -s nullglob
 for entry in "$T/docs-tree/"*; do
   name="$(basename "$entry")"
-  [ -e "docs/workflow/$name" ] || cp -R "$(resolve "docs/workflow/$name")" "docs/workflow/$name"
+  if [ -f "$entry" ]; then
+    [ -e "docs/workflow/$name" ] || cp "$(resolve "docs/workflow/$name")" "docs/workflow/$name"
+    continue
+  fi
+  mkdir -p "docs/workflow/$name"
+  while IFS= read -r src; do
+    rel="${src#"$T/docs-tree/"}"
+    dest="docs/workflow/$rel"
+    [ -e "$dest" ] || { mkdir -p "$(dirname "$dest")"; cp "$(resolve "$dest")" "$dest"; }
+  done < <(find "$entry" -type f)
 done
 shopt -u nullglob
 

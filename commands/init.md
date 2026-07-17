@@ -61,9 +61,13 @@ Check each target independently, recording `created` / `skipped-existing`:
 - `WORKFLOW.md`, `WORKFLOW-config.yaml` at repo root
 - `docs/workflow/tracker-config.yaml`
 - each entry of `${CLAUDE_PLUGIN_ROOT}/templates/docs-tree/` inside `docs/workflow/`,
-  checked individually (a partial tree gets its missing entries filled, so `/idc:doctor`
-  converges).
+  checked individually **per file, not per directory** (a partial tree gets its missing entries
+  filled, so `/idc:doctor` converges).
 Anything present is left untouched.
+
+Per-file is the granularity that matters because the Phase 7 receipt stamps each path **by name**: a
+directory that exists but is missing its hidden `.gitkeep` would otherwise abort the run at the
+receipt (`cannot stamp missing file`). The scaffold helper converges at that granularity.
 
 ## Phase 3 — Scaffold from templates
 Run the deterministic scaffold helper. It copies the templates, substitutes

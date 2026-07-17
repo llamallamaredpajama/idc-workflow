@@ -78,8 +78,17 @@ echo "$tsv" | grep -q "unrecorded" && fail "TSV output must not carry unrecorded
 # directory may already hold operator work products (compiled /idc:intake manifests), and those are
 # NOT governed scaffold: update must never classify — and so never refresh, diff-and-ask about, or
 # remove — a manifest. Seed a populated intake home and prove the classifier's blast radius.
+#
+# This is also the UPDATE-side of the directory-exists-but-keepfile-absent class the Task-8 incident
+# e2e hit on the init side (run-t8e2e.txt "Setup findings" 2; the scaffold fix + its regression live
+# in phase1-init-doctor.sh). The shape below is exactly that repo: the intake DIRECTORY exists while
+# its keepfile does not. `unrecorded` is derived from the plugin's TEMPLATE tree, not from what
+# happens to be on disk, so the keepfile must still surface for update to restore — a classifier
+# that inferred expectations from the repo would go quiet here and strand the migration.
 mkdir -p "$WORK/docs/workflow/intakes"
 printf '{"schema_version":1,"intake_id":"legacy"}' > "$WORK/docs/workflow/intakes/vendor.intake.json"
+[ -e "$WORK/docs/workflow/intakes/.gitkeep" ] \
+  && fail "test setup is wrong: this scenario needs the intake DIRECTORY present and its keepfile ABSENT"
 out3="$(python3 "$HELPER" verify --repo "$WORK" --json)" || fail "verify with a populated intakes/ exited non-zero"
 echo "$out3" | python3 -c '
 import json, sys

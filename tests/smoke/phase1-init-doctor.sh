@@ -156,6 +156,52 @@ assert unrec == [], f"an intake manifest must not be governed scaffold: {unrec}"
 ' || fail "populated-intakes receipt assertions failed: $vout2"
 rm -f "$INTK/vendor-plan.intake.json" "$SBX/docs/workflow/install-receipt.yaml"
 
+# --- The scaffold gap-fills FILE-BY-FILE, not all-or-nothing per directory --------------------
+# Found live by the Task-8 incident e2e (_idc-observability/run-t8e2e.txt, "Setup findings" §2):
+# the docs-tree copy was guarded per top-level entry (`[ -e docs/workflow/<name> ] || cp -R`), so a
+# repo whose docs/workflow/<dir>/ already existed WITHOUT its hidden keepfile — a partial scaffold, a
+# re-init, or an operator who made the directory by hand — never received the keepfile, while
+# init.md's Phase 7 stamp list still names it BY PATH. The run died at the receipt with:
+#     idc-receipt: cannot stamp missing file: docs/workflow/pillar-matrices/.gitkeep
+# and the operator had to add the file by hand to proceed. init.md Phase 2 promises the opposite
+# ("checked individually — a partial tree gets its missing entries filled, so /idc:doctor
+# converges"); this asserts that promise at FILE granularity, which is the granularity the receipt
+# stamps at. `intakes/` is the newest instance of the same class, so it is covered here too.
+# Red-when-broken: restore the per-directory guard → the keepfiles stay absent and the stamp exits 2.
+SBX2="$(mktemp -d)"
+trap 'rm -rf "$SBX" "$SBX2"' EXIT
+( cd "$SBX2" && git init -q )
+mkdir -p "$SBX2/docs/workflow/pillar-matrices" "$SBX2/docs/workflow/intakes" \
+         "$SBX2/docs/workflow/code-reviews"
+# Operator content that must survive untouched: the gap-fill is ADDITIVE, never a re-copy.
+printf 'operator-matrix\n'                     > "$SBX2/docs/workflow/pillar-matrices/p1-matrix.yaml"
+printf '{"schema_version":1,"id":"legacy"}\n'  > "$SBX2/docs/workflow/intakes/vendor.intake.json"
+bash "$SCAFFOLD" "$PLUGIN" "$SBX2" "Partial Repo" filesystem >/dev/null \
+  || fail "scaffold helper failed over a pre-existing partial docs/workflow tree"
+for f in pillar-matrices/.gitkeep intakes/.gitkeep code-reviews/.gitkeep code-reviews/.gitignore; do
+  [ -f "$SBX2/docs/workflow/$f" ] \
+    || fail "scaffold skipped docs/workflow/$f because its DIRECTORY already existed — init.md's receipt stamp names that file by path and aborts (run-t8e2e.txt Setup findings 2)"
+done
+grep -qx 'operator-matrix' "$SBX2/docs/workflow/pillar-matrices/p1-matrix.yaml" \
+  || fail "the gap-fill clobbered an operator's matrix — it must add missing template files only"
+grep -qF '"id":"legacy"' "$SBX2/docs/workflow/intakes/vendor.intake.json" \
+  || fail "the gap-fill touched an operator's intake manifest — a work product is never scaffold"
+# The surface that actually broke: the receipt stamp init.md prescribes must now succeed here.
+echo "$STAMP_PATHS" | xargs python3 "$RCHK" stamp \
+  --repo "$SBX2" --out "$SBX2/docs/workflow/install-receipt.yaml" \
+  --plugin-version 9.9.9 --written-by idc:init \
+  --customized WORKFLOW-config.yaml --customized docs/workflow/tracker-config.yaml >/dev/null \
+  || fail "the receipt stamp aborted over a pre-existing partial tree (the run-t8e2e.txt failure: cannot stamp missing file)"
+v3="$(python3 "$RCHK" verify --repo "$SBX2" --json)" || fail "verify over the gap-filled tree exited non-zero"
+echo "$v3" | python3 -c '
+import json, sys
+o = json.load(sys.stdin)
+unrec = o.get("unrecorded")
+assert unrec == [], f"a re-init over a partial tree left governed files unrecorded: {unrec}"
+ok, summary = o.get("ok"), o.get("summary")
+assert ok is True, f"the gap-filled receipt must verify ok, got {ok!r} ({summary})"
+' || fail "partial-tree receipt assertions failed: $v3"
+
 # doctor check 3: filesystem backend selected + TRACKER.md present and valid
 grep -q "^backend: filesystem" "$SBX/docs/workflow/tracker-config.yaml" || fail "backend not set to filesystem"
 [ -f "$SBX/TRACKER.md" ]                          || fail "filesystem backend should init TRACKER.md"

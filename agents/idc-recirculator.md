@@ -34,8 +34,14 @@ mode only changes what gets fed in:
    (`idc:idc-gate-issue` step 4 documents its kinds; never hand-roll a journal scan). Only on a
    **proven** kind — `guarded-dispose` (an `op=dispose`/`disposition=gate-approved` record) or
    `verified-reconciliation` (an `op=gate-reconciliation` record from `idc_gate_repair.py`, which
-   verified the merged approval PR at repair time) — finish its unblock through the engine's
-   journaled `unblock`, then drain it normally. A `Done` gate does NOT alone prove the guarded door
+   verified the merged approval PR at repair time) — finish it through the **guarded pointer-finish
+   door**: `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gate_repair.py" --repo "$PWD" --finish-pointer
+   --gate <gate#> --pointer <item#>` (github: add `--owner <owner> --project <n>`; **dry run by
+   default** — add `--apply` after reading the plan), then drain it normally. **Never a raw engine
+   `unblock` here**: `unblock --by` drops only the NAMED edge before setting `Todo`, so an item held
+   by several gates would sail past the others without their proof. The door re-reads the gate's
+   proof on disk AND refuses unless that gate is the item's SOLE remaining blocker — then finishes
+   the job through the engine's journaled `unblock` itself. A `Done` gate does NOT alone prove the guarded door
    ran (a raw/manual close or janitor repair also mints `Done`): on `unproven` — or exit 2, an
    unreadable journal, which is indeterminate and never a clean negative — the `Done` is UNPROVEN:
    leave the item `Blocked` and surface the anomaly, never auto-unblock. Draining the inbox admits

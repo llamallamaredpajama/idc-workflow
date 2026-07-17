@@ -138,8 +138,23 @@ It prints exactly one **proof kind**, and its exit code carries the fail-closed 
 | `unproven` | 0 | neither record exists | **UNPROVEN** — do **not** unblock |
 | *(error)* | 2 | the journal cannot be read — **indeterminate**, not a negative | treat as UNPROVEN; repair the journal |
 
-Either **PROVEN** kind → `query` the gate's still-`Blocked` dependents and finish the unblock through
-the engine's journaled `unblock`. The two kinds differ in provenance — a `verified-reconciliation`
+Either **PROVEN** kind → `query` the gate's still-`Blocked` dependents and finish each through the
+**guarded pointer-finish door** — never a raw engine `unblock`:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gate_repair.py" --repo "$PWD" --finish-pointer \
+  --gate "$gate" --pointer <dependent#>        # github: add --owner <owner> --project <n>
+```
+
+It is a **dry run by default** (add `--apply` after reading the plan) and works on **both backends**.
+Why the door and not the raw op: the engine's `unblock --by` drops only the **named** edge before
+setting `Todo`, so a dependent blocked by `[gate, other]` would sail past `other` **without `other`'s
+proof** — and Autorun treats an unblocked pointer as approved work. The door re-reads the gate's proof
+on disk AND refuses unless that gate is the dependent's **SOLE remaining blocker** (naming the others,
+so they resolve through their own doors first); only then does it run the engine's journaled
+`unblock` itself. It repairs nothing and takes no `--pr` — an **unproven** gate belongs at the full
+repair door below, not here. A dependent that is already `Todo` is an honest no-op: nothing is
+written. The two kinds differ in provenance — a `verified-reconciliation`
 gate was never closed through the guarded door, and its record says so rather than back-dating an
 `op=dispose` — but both mean a real approval was verified against the merged Think PR, so both are
 safe to finish. **UNPROVEN** → the gate's `Done` is not backed by any verified approval: **leave the

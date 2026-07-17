@@ -293,6 +293,29 @@ if "scan_journal_strict" not in proof:
                      "scan_journal_strict — the centralized reader must keep the archive-aware, lock-safe scan")
 print("  ok no recovery surface re-inlines a private journal scan — scripts/idc_gate_proof.py is the single reader")
 
+# The recovery's FINISH step routes through the guarded pointer-finish door, never a raw engine
+# unblock (Task 7 wave 2). The engine's `unblock --by` drops only the NAMED edge before setting Todo,
+# so the playbook-instructed raw unblock frees a pointer Blocked by [gate, other] past `other`
+# WITHOUT its proof — reviewer probe through the real dispatcher: `status='Todo', blocked_by=[999],
+# journal op='unblock'`. The door re-reads the gate's on-disk proof AND refuses unless the proven gate
+# is the SOLE remaining blocker, so the guard lives in ONE mechanical place instead of being
+# hand-rolled (or forgotten) per playbook. Red-when-broken: restore a bare-unblock instruction, or
+# drop the door, in any surface → FAIL.
+BARE_UNBLOCK = re.compile(r"finish (?:the|its) unblock through the engine's journaled")
+for rel in SURFACES + ("skills/idc-gate-issue/SKILL.md",):
+    text = re.sub(r"\s+", " ", open(f"{root}/{rel}", encoding="utf-8").read())
+    if "--finish-pointer" not in text:
+        raise SystemExit(f"FAIL: {rel} does not route the interrupted-run recovery through the guarded "
+                         "pointer-finish door (idc_gate_repair.py --finish-pointer) — the door is what "
+                         "enforces the gate's on-disk proof AND the sole-remaining-blocker rule (Task 7 "
+                         "wave 2)")
+    if BARE_UNBLOCK.search(text):
+        raise SystemExit(f"FAIL: {rel} still instructs the interrupted-run recovery to finish through a "
+                         "BARE engine `unblock` — `unblock --by` drops only the NAMED edge and then sets "
+                         "Todo, admitting a multiply-blocked pointer past its other gates without their "
+                         "proof; route the finish through `idc_gate_repair.py --finish-pointer`")
+    print(f"  ok {rel} routes the recovery's finish through the guarded pointer-finish door")
+
 # doctor Row 9's unproven-gate-done remediation must point at the HONEST repair door and forbid the
 # tempting forgery (a hand-written dispose record that silences the finding without any verification).
 doctor = re.sub(r"\s+", " ", open(f"{root}/commands/doctor.md", encoding="utf-8").read())

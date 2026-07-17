@@ -25,8 +25,14 @@ Run the phases in order; each phase's evidence gates the next.
   journaled guarded dispose** through the one deterministic reader —
   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gate_proof.py" --repo "$PWD" --gate <gate#>` (it owns
   the archive-aware scan of `docs/workflow/transition-journal.ndjson` + its `journal-archive/`
-  segments; never hand-roll one) — and only then finish the unblock through the engine's journaled
-  `unblock`. Either **proven** kind is safe to finish: `guarded-dispose` (an
+  segments; never hand-roll one) — and only then finish it through the **guarded pointer-finish
+  door**: `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gate_repair.py" --repo "$PWD" --finish-pointer
+  --gate <gate#> --pointer <dependent#>` (github: add `--owner <owner> --project <n>`; **dry run by
+  default** — add `--apply` after reading the plan). **Never a raw engine `unblock` here**: `unblock
+  --by` drops only the NAMED edge before setting `Todo`, so a dependent held by several gates would
+  sail past the others without their proof. The door re-reads the gate's proof on disk AND refuses
+  unless that gate is the dependent's SOLE remaining blocker — then finishes the job through the
+  engine's journaled `unblock` itself. Either **proven** kind is safe to finish: `guarded-dispose` (an
   `op=dispose`/`disposition=gate-approved` record) or `verified-reconciliation` (an
   `op=gate-reconciliation` record from `idc_gate_repair.py`, which verified the merged approval PR at
   repair time). A `Done` gate does NOT alone prove the guarded door ran (a raw/manual close or

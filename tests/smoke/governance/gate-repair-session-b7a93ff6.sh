@@ -604,6 +604,164 @@ check("unblock" in [e.get("op") for e in journal(repo)],
 print("  ok (10c) once the other blockers are resolved, a rerun converges through the engine's unblock")
 shutil.rmtree(repo)
 
+# ══ 11. THE POINTER-FINISH DOOR — the recovery the FOUR stage playbooks instruct ═════════════════
+# Wave 1 sealed THIS helper's own pointer step, but the interrupted-run recovery in agents/idc-plan,
+# idc-recirculator, idc-autorun + skills/idc-gate-issue still said "verify the gate's proof, then
+# finish the unblock through the engine's journaled `unblock`" — and the engine's `unblock --by`
+# drops only the NAMED edge before setting Todo. Reviewer probe (round 2, verbatim): gate #708 proven,
+# pointer #707 Blocked by [708, 999] → the playbook-instructed raw unblock produced
+# `status='Todo', blocked_by=[999], journal op='unblock'` — #707 admitted past gate #999 without its
+# proof, the round-1 incident resurfacing through the normal recovery surface. So the playbooks route
+# that finish through THIS door instead, and the door enforces both halves of the contract: the gate's
+# proof must be ON DISK, and the proven gate must be the SOLE remaining blocker.
+#
+# Red-when-broken: drop the sole-blocker re-read → 11b FAILs (the reviewer's probe goes green again).
+def proven(repo, kind="verified-reconciliation", gate=GATE):
+    """Journal `gate`'s proof through the REAL writer — the state a completed repair leaves on disk."""
+    if kind == "verified-reconciliation":
+        kw = {"num": gate, "agent": "gate-repair", "to_stage": "Buildable", "to_status": "Done",
+              "disposition_evidence": {"door": "idc-gate-repair", "approval_pr": PR,
+                                       "approval_state": "MERGED"}}
+        E.journal_append(repo, "gate-reconciliation", "github", None, kw)
+    else:                                    # the guarded door's own record — the stronger kind
+        E.journal_append(repo, "dispose", "github", None,
+                         {"num": gate, "agent": "gate", "disposition": "gate-approved"})
+    check(P.proof_kind(journal(repo), gate) in P.PROVEN_KINDS, "the probe did not seed a proven gate")
+
+
+def finish_argv(repo, apply=False, gate=GATE, pointer=POINTER, pr=None):
+    argv = ["--repo", repo, "--backend", "github", "--owner", OWNER, "--project", PROJECT,
+            "--finish-pointer", "--gate", str(gate), "--pointer", str(pointer)]
+    if pr is not None:
+        argv += ["--pr", str(pr)]
+    if apply:
+        argv.append("--apply")
+    return argv
+
+
+def finish(repo, apply=False, gate=GATE, pointer=POINTER, pr=None):
+    return R.main(finish_argv(repo, apply=apply, gate=gate, pointer=pointer, pr=pr))
+
+
+# 11a. the sole-blocker case: a DRY RUN plans it and writes nothing; --apply finishes it through the
+#      engine's REAL journaled unblock — and this door journals NO record of its own.
+fake, repo = fresh(still_blocked)
+proven(repo)
+before = len(journal(repo))
+plan = plan_of(finish(repo))
+check(plan.get("mode") == "dry-run", f"(11a) a bare --finish-pointer run is not a dry run: {plan.get('mode')!r}")
+check(step(plan, "verify-gate-proof")["proof_kind"] == "verified-reconciliation",
+      f"(11a) the door does not report the gate's proof kind: {step(plan, 'verify-gate-proof')!r}")
+check(step(plan, "unblock-pointer")["status"] == "planned",
+      f"(11a) the dry run does not PLAN the sole-blocker unblock: {step(plan, 'unblock-pointer')!r}")
+check(fake.wrote() == [] and len(journal(repo)) == before, f"(11a) the DRY RUN wrote: {fake.wrote()}")
+
+plan = plan_of(finish(repo, apply=True))
+check(step(plan, "unblock-pointer")["status"] == "applied", "(11a) --apply did not finish the pointer")
+check(fake.pointer["status"] == "Todo", f"(11a) the pointer was not unblocked: {fake.pointer['status']!r}")
+check(fake.pointer["blocked_by"] == [], "(11a) the gate's dependency edge was not removed")
+entries = journal(repo)
+check([e.get("op") for e in entries if RP.journal_item_id(e) == POINTER] == ["unblock"],
+      f"(11a) the engine's REAL unblock is not the pointer's only record: {[e.get('op') for e in entries]}")
+check(len([e for e in entries if e.get("op") == "gate-reconciliation"]) == 1,
+      "(11a) the pointer-finish door wrote a reconciliation record of its own — it repairs nothing "
+      "and observes nothing new; only the engine's unblock may journal here")
+print("  ok (11a) pointer-finish: dry-run-first, then the engine's REAL unblock on a sole-blocker gate")
+shutil.rmtree(repo)
+
+# 11b. THE REVIEWER'S PROBE: other blockers remain ⇒ REFUSE, naming them. Nothing written.
+fake, repo = fresh(multi_blocked)
+proven(repo)
+before = journal(repo)
+plan = plan_of(finish(repo))
+check(step(plan, "unblock-pointer")["status"] == "refused",
+      f"(11b) the dry run PROMISES an unblock it would refuse on apply: {step(plan, 'unblock-pointer')!r}")
+check(str(SECOND) in json.dumps(step(plan, "unblock-pointer")),
+      "(11b) the dry-run pointer step does not NAME the remaining blocker #999")
+try:
+    finish(repo, apply=True)
+except R.GateRepairError as exc:
+    check(str(SECOND) in str(exc), f"(11b) the refusal does not NAME the remaining blocker #999: {exc}")
+else:
+    die("(11b) the pointer-finish door freed #707 past gate #999 without its proof — the reviewer's "
+        "round-2 probe (status='Todo', blocked_by=[999], journal op='unblock')")
+check(fake.pointer["status"] == "Blocked",
+      f"(11b) the pointer was admitted past #999: {fake.pointer['status']!r}")
+check(SECOND in fake.pointer["blocked_by"], "(11b) the remaining blocker's edge was removed")
+check(not [c for c in fake.calls if c[0] == "remove-dep"],
+      "(11b) the door invented a dependency removal — no sanctioned dependency-only door exists")
+check(journal(repo) == before, f"(11b) the refusal journaled a record: {journal(repo)!r}")
+check(R.cli(finish_argv(repo, apply=True)) != 0, "(11b) the pointer refusal did not exit NONZERO")
+print("  ok (11b) pointer-finish REFUSES while another blocker remains — the reviewer's probe, sealed")
+shutil.rmtree(repo)
+
+# 11c. an UNPROVEN gate is refused, pointing at the full repair door (never a bare unblock).
+fake, repo = fresh(still_blocked)
+open(os.path.join(repo, RP.JOURNAL_REL), "w").close()          # readable, but holds no proof
+try:
+    finish(repo, apply=True)
+except R.GateRepairError as exc:
+    check("unproven" in str(exc), f"(11c) the refusal does not name the UNPROVEN gate: {exc}")
+    check("idc_gate_repair.py" in str(exc) or "--apply" in str(exc),
+          f"(11c) the refusal does not point at the full repair door: {exc}")
+else:
+    die("(11c) the pointer-finish door unblocked behind an UNPROVEN gate")
+check(fake.pointer["status"] == "Blocked", "(11c) the pointer moved behind an unproven gate")
+check(fake.wrote() == [] and journal(repo) == [], f"(11c) the refusal wrote: {fake.wrote()}")
+print("  ok (11c) pointer-finish refuses behind an unproven gate and points at the full repair door")
+shutil.rmtree(repo)
+
+# 11d. an already-Todo pointer is an HONEST NO-OP: exit 0, say so, write NOTHING (this door observes
+#      nothing new — the observation record belongs to the full repair, which reads the corrupt shape).
+fake, repo = fresh()                                            # the fixture's pointer is already Todo
+proven(repo)
+before = journal(repo)
+plan = plan_of(finish(repo, apply=True))
+check(step(plan, "unblock-pointer")["status"] == "satisfied",
+      f"(11d) an already-Todo pointer is not reported satisfied: {step(plan, 'unblock-pointer')!r}")
+check(fake.wrote() == [], f"(11d) the no-op wrote to the board: {fake.wrote()}")
+check(journal(repo) == before, f"(11d) the no-op journaled a record: {journal(repo)!r}")
+check(R.cli(finish_argv(repo, apply=True)) == 0, "(11d) the honest no-op did not exit 0")
+print("  ok (11d) an already-Todo pointer is an honest no-op: exit 0, nothing written")
+shutil.rmtree(repo)
+
+# 11e. an INDETERMINATE journal is never a clean negative — and never an unblock.
+fake, repo = fresh(still_blocked)
+open(os.path.join(repo, RP.JOURNAL_REL), "w").write("NOT-JSON {\n")
+try:
+    finish(repo, apply=True)
+except R.GateRepairError as exc:
+    check("cannot be read" in str(exc) or "INDETERMINATE" in str(exc),
+          f"(11e) an unreadable journal did not raise the indeterminate refusal: {exc}")
+else:
+    die("(11e) the pointer-finish door acted on a journal it could not read")
+check(fake.pointer["status"] == "Blocked", "(11e) the pointer moved on an indeterminate proof")
+print("  ok (11e) pointer-finish fails closed on an unreadable journal — indeterminate is not proof")
+shutil.rmtree(repo)
+
+# 11f. this mode repairs NOTHING, so it takes no --pr: an approval PR here could only mislead.
+fake, repo = fresh(still_blocked)
+proven(repo)
+try:
+    finish(repo, apply=True, pr=PR)
+except R.GateRepairError as exc:
+    check("--pr" in str(exc), f"(11f) the refusal does not name --pr: {exc}")
+else:
+    die("(11f) the pointer-finish door accepted a --pr — it repairs nothing and verifies no approval")
+check(fake.pointer["status"] == "Blocked", "(11f) the rejected invocation still moved the pointer")
+print("  ok (11f) pointer-finish takes no --pr — it finishes an ALREADY-proven gate's pointer")
+shutil.rmtree(repo)
+
+# 11g. the GUARDED-DISPOSE kind is proof too (the fs/github mainline): both proven kinds finish.
+fake, repo = fresh(still_blocked)
+proven(repo, kind="guarded-dispose")
+plan = plan_of(finish(repo, apply=True))
+check(step(plan, "verify-gate-proof")["proof_kind"] == "guarded-dispose",
+      "(11g) the door does not report the guarded-dispose kind")
+check(fake.pointer["status"] == "Todo", "(11g) a guarded-dispose gate's pointer was not finished")
+print("  ok (11g) either proven kind finishes the pointer — guarded-dispose and verified-reconciliation")
+shutil.rmtree(repo)
+
 print("  ok — the session-b7a93ff6 unit is green")
 PY
 
@@ -631,5 +789,50 @@ echo "  ok (8b) a malformed journal fails the proof CLI closed — never a quiet
 python3 "$REPAIR" --help 2>&1 | grep -q -- '--apply' \
   || gov_fail "idc_gate_repair.py exposes no --apply flag (dry-run-first is the whole contract)"
 echo "  ok (8c) idc_gate_repair.py exposes the dry-run-first --apply contract"
+
+# ── 12. the pointer-finish door on the FILESYSTEM backend — no fakes, a REAL TRACKER.md ─────────
+# The four playbooks this door now backs are backend-agnostic, and a filesystem gate earns REAL
+# `guarded-dispose` proof through its own guarded door (on fs the operator's approval signal IS the
+# gate reaching `Done` through `dispose --disposition gate-approved` — idc-gate-issue/SKILL.md,
+# "Approval signal by backend"). So this recovery is reachable on fs, and the sole-blocker guard must
+# hold there too, against the real engine and a real tracker.
+T3="$(gov_new_tracker)" || gov_fail "could not mint the fs tracker"
+FSREPO="$(dirname "$T3")"
+trap 'rm -rf "$TMP" "$FSREPO"' EXIT
+mkdir -p "$FSREPO/docs/workflow"
+FS_GATE="$(gov_seed_item "$T3" --title '[operator-action] Requirements — fs gate' --stage Buildable --status Done)" \
+  || gov_fail "could not seed the fs gate"
+FS_DEP="$(gov_seed_item "$T3" --title 'fs consideration pointer' --stage Consideration --status Blocked \
+  --blocked-by "$FS_GATE,999")" || gov_fail "could not seed the fs dependent"
+# the fs gate's proof, through the engine's REAL journal writer (what its guarded dispose leaves).
+python3 - "$GOV_PLUGIN/scripts" "$FSREPO" "$FS_GATE" <<'PY' || gov_fail "could not journal the fs gate's proof"
+import sys
+sys.path.insert(0, sys.argv[1])
+import idc_transition as E
+ok = E.journal_append(sys.argv[2], "dispose", "filesystem", "TRACKER.md",
+                      {"num": int(sys.argv[3]), "agent": "gate", "disposition": "gate-approved"})
+raise SystemExit(0 if ok else 1)
+PY
+
+# 12a. the sole-blocker guard holds on fs: #999 still blocks → REFUSE, naming it; nothing moves.
+OUT="$(python3 "$REPAIR" --repo "$FSREPO" --backend filesystem --tracker "$T3" --finish-pointer \
+  --gate "$FS_GATE" --pointer "$FS_DEP" --apply 2>&1)"; RC=$?
+[ $RC -ne 0 ] || gov_fail "(12a) the fs pointer-finish freed #$FS_DEP past gate #999 without its proof: $OUT"
+echo "$OUT" | grep -q '999' || gov_fail "(12a) the fs refusal does not NAME the remaining blocker #999: $OUT"
+[ "$(gov_field "$T3" "$FS_DEP" Status)" = "Blocked" ] \
+  || gov_fail "(12a) the fs pointer left Blocked while #999 still blocks it"
+echo "  ok (12a) the fs pointer-finish refuses while another blocker remains, naming #999"
+
+# 12b. …and once #999 is resolved through its own door, the same command converges on fs.
+python3 "$GOV_TRK" --tracker "$T3" unlink --parent 999 --child "$FS_DEP" --kind blocks >/dev/null \
+  || gov_fail "could not resolve the second fs blocker"
+OUT="$(python3 "$REPAIR" --repo "$FSREPO" --backend filesystem --tracker "$T3" --finish-pointer \
+  --gate "$FS_GATE" --pointer "$FS_DEP" --apply 2>&1)"; RC=$?
+[ $RC -eq 0 ] || gov_fail "(12b) the fs pointer-finish did not converge once the gate was sole blocker: $OUT"
+[ "$(gov_field "$T3" "$FS_DEP" Status)" = "Todo" ] \
+  || gov_fail "(12b) the fs pointer was not finished through the engine's unblock: $OUT"
+grep -q '"op": "unblock"' "$FSREPO/docs/workflow/transition-journal.ndjson" \
+  || gov_fail "(12b) the engine's real unblock was not journaled on fs"
+echo "  ok (12b) once the other blocker is resolved, the fs pointer-finish converges through the engine"
 
 echo "PASS: the corrupt session-b7a93ff6 gate shape (merged PR #706, gate #708 closed outside the guarded door with no Stage and a Todo Status, pointer #707 already unblocked) is reconciled dry-run-first through the existing board helpers — one bound body marker, Stage/Status repaired with the issue left closed, an op=gate-reconciliation record carrying the observed-before state + merged-PR evidence that reads back as verified-reconciliation — while FABRICATING nothing: no back-dated op=dispose, and no invented op=unblock for a pointer that was already Todo (only a genuinely still-Blocked pointer gets the engine's real unblock, and only after the proof lands first)"

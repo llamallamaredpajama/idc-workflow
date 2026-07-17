@@ -29,6 +29,15 @@ POINTER — it is not a gate and has no approval of its own). Only a genuinely s
 is finished, through the engine's REAL `unblock` op, and only AFTER the gate's proof is journaled —
 never unblock on a gate that is not yet proven.
 
+TWO DOORS, ONE RULE. The full repair above reconciles the corrupt gate AND finishes its pointer. Its
+sibling `--finish-pointer` finishes a pointer behind a gate that is ALREADY proven (either kind) and
+repairs nothing — it is what the stage playbooks' interrupted-run recovery calls instead of a raw
+engine `unblock`. Both go through the same sole-blocker guard (`_refuse_other_blockers`), because
+`unblock --by` drops only the NAMED edge before setting `Todo`: on a pointer held by `[gate, other]`
+a raw unblock admits it past `other` without `other`'s proof, and Autorun treats an unblocked
+Consideration pointer as approved work. A guard the helper keeps but the four recovery playbooks skip
+is not a guard, so the rule lives HERE, once, and the prose routes through it.
+
 SAFETY POSTURE
   * DRY RUN IS THE DEFAULT. A bare run reads, validates, and prints a stable JSON plan. It writes
     nothing — no board field, no body edit, no journal line. `--apply` is the only door to a write.
@@ -60,6 +69,8 @@ import idc_transition as E          # noqa: E402
 REPAIR_DOOR = P.REPAIR_DOOR         # "idc-gate-repair" — single-sourced from the proof reader
 RECONCILIATION_OP = "gate-reconciliation"
 REPAIR_AGENT = "gate-repair"
+FULL_REPAIR_OP = "full-repair"      # reconcile a corrupt gate, then finish its pointer
+FINISH_OP = "finish-pointer"        # finish a pointer behind an ALREADY-proven gate; repairs nothing
 TARGET_STAGE = "Buildable"
 TARGET_STATUS = "Done"
 
@@ -77,6 +88,18 @@ def _nums(nums):
     return " + ".join(f"#{int(n)}" for n in nums)
 
 
+def _blocked_by(ctx, num):
+    """`num`'s blockers, read through the backend's OWN existing seam — never a new read door.
+
+    github keeps the edge in the native issue-dependencies relation (`_gh_get_item` reads item FIELDS,
+    not dependencies); on filesystem it is a field of the item record, and `_fs_item_full` is the seam
+    the engine's own disposition guards read it through.
+    """
+    if ctx["backend"] == "github":
+        return [int(n) for n in B.blocked_by_numbers(int(num), ctx["repo"])]
+    return [int(n) for n in (E._fs_item_full(ctx["tracker"], int(num)).get("blocked_by") or [])]
+
+
 def _other_blockers(ctx, pointer, gate):
     """The pointer's remaining blockers BESIDES `gate`, re-read from the board.
 
@@ -87,8 +110,35 @@ def _other_blockers(ctx, pointer, gate):
     Consideration pointer as approved work. This door therefore finishes a pointer only when the gate
     it just proved is the SOLE remaining blocker.
     """
-    return sorted({int(n) for n in B.blocked_by_numbers(int(pointer), ctx["repo"])
-                   if int(n) != int(gate)})
+    return sorted({n for n in _blocked_by(ctx, pointer) if n != int(gate)})
+
+
+def _unblock_action(pointer, gate, others, proof, still_land=""):
+    """The pointer step's plan line. ONE wording for both doors: the full repair and the
+    pointer-finish must never describe this rule differently."""
+    if not others:
+        return (f"pointer #{pointer} is genuinely {E.BLOCKED_STATUS} behind gate #{gate} — finish it "
+                f"through the engine's REAL journaled `unblock` ({proof}: never unblock behind an "
+                "unproven gate)")
+    return (f"REFUSE the unblock: pointer #{pointer} is {E.BLOCKED_STATUS} behind gate #{gate} AND "
+            f"{_nums(others)}. The engine's `unblock --by` would drop only gate #{gate}'s edge and "
+            f"then set Todo — admitting the pointer past {_nums(others)} without their proof. "
+            f"{still_land}resolve {_nums(others)} through their own doors, then re-run to converge")
+
+
+def _refuse_other_blockers(gate, pointer, others, preamble, converge):
+    """The sole-blocker REFUSAL — raised by the repair's pointer step and by the pointer-finish door,
+    written ONCE. This is the rule an operator most needs to trust, so the two callers must never
+    drift on what it says or on when it fires."""
+    raise GateRepairError(
+        f"gate-repair stopped at unblock-pointer: {preamble} pointer #{pointer} is still "
+        f"{E.BLOCKED_STATUS} behind {_nums(others)}. This door finishes a pointer ONLY when the proven "
+        f"gate is the SOLE remaining blocker: the engine's `unblock --by` drops only gate #{gate}'s "
+        f"edge and then sets Todo, which would admit #{pointer} past {_nums(others)} without their "
+        "proof. Nothing was invented — no dependency was removed and no observation was recorded. "
+        f"Resolve {_nums(others)} through their own doors (a gate's guarded "
+        "`dispose --disposition gate-approved`, or this repair for a gate closed outside it), then "
+        f"{converge}")
 
 
 # ── reads ────────────────────────────────────────────────────────────────────────────────────────
@@ -395,45 +445,30 @@ def build_and_run(ctx, gate, pointer, pr, apply_):
     # unblock, only now that the gate's proof is on disk), or it is already Todo (record the
     # OBSERVATION; invent nothing).
     if pointer_blocked:
-        def unblock_action(others):
-            if not others:
-                return (f"pointer #{pointer} is genuinely {E.BLOCKED_STATUS} behind gate #{gate} "
-                        "— finish it through the engine's REAL journaled `unblock` (the gate's "
-                        "proof is journaled FIRST, above: never unblock behind an unproven gate)")
-            return (f"REFUSE the unblock: pointer #{pointer} is {E.BLOCKED_STATUS} behind gate "
-                    f"#{gate} AND {_nums(others)}. The engine's `unblock --by` would drop only gate "
-                    f"#{gate}'s edge and then set Todo — admitting the pointer past {_nums(others)} "
-                    f"without their proof. Gate #{gate}'s own repairs above still land (they are "
-                    f"independently true); resolve {_nums(others)} through their own doors, then "
-                    "re-run to converge")
+        proof_clause = "the gate's proof is journaled FIRST, above"
+        still_land = (f"Gate #{gate}'s own repairs above still land (they are independently true); ")
 
         # What the observation saw. `--apply` RE-READS below before acting on it: the sole-blocker
         # condition is a precondition like any other, and the plan may be minutes stale.
         planned_others = [int(b) for b in obs["pointer"]["blocked_by"] if int(b) != int(gate)]
         step5 = {"id": "unblock-pointer", "pointer": int(pointer), "by": int(gate),
                  "via": "idc_transition.run('unblock')", "invents_transition": False,
-                 "other_blockers": planned_others, "action": unblock_action(planned_others)}
+                 "other_blockers": planned_others,
+                 "action": _unblock_action(pointer, gate, planned_others, proof_clause, still_land)}
         if settled:
             step5["status"] = "satisfied"
         elif apply_:
             others = _other_blockers(ctx, pointer, gate)
             if others:
-                raise GateRepairError(
-                    f"gate-repair stopped at unblock-pointer: gate #{gate} is repaired and its "
-                    f"{RECONCILIATION_OP} is journaled, but pointer #{pointer} is still "
-                    f"{E.BLOCKED_STATUS} behind {_nums(others)}. This door finishes a pointer ONLY "
-                    f"when the gate it just proved is the SOLE remaining blocker: the engine's "
-                    f"`unblock --by` drops only gate #{gate}'s edge and then sets Todo, which would "
-                    f"admit #{pointer} past {_nums(others)} without their proof. Nothing was "
-                    "invented — no dependency was removed and no observation was recorded. Resolve "
-                    f"{_nums(others)} through their own doors (a gate's guarded "
-                    "`dispose --disposition gate-approved`, or this repair for a gate closed outside "
-                    "it), then re-run: the plan reconstructs from current state and only the pointer "
-                    "step remains.")
+                _refuse_other_blockers(
+                    gate, pointer, others,
+                    f"gate #{gate} is repaired and its {RECONCILIATION_OP} is journaled, but",
+                    "re-run: the plan reconstructs from current state and only the pointer step "
+                    "remains.")
             E.run("unblock", ctx, num=int(pointer), to_status="Todo", by=int(gate))
             # the re-read agreed the gate was the sole blocker — report what actually happened.
             step5["other_blockers"] = []
-            step5["action"] = unblock_action([])
+            step5["action"] = _unblock_action(pointer, gate, [], proof_clause)
             step5["status"] = "applied"
         else:
             step5["status"] = "refused" if planned_others else "planned"
@@ -449,9 +484,104 @@ def build_and_run(ctx, gate, pointer, pr, apply_):
         step5["status"] = state(settled, apply_)
     steps.append(step5)
 
-    return {"mode": "apply" if apply_ else "dry-run", "gate": int(gate), "pointer": int(pointer),
-            "pr": int(pr), "door": REPAIR_DOOR, "observed_before": observed_before,
-            "repairs_applied": repairs_applied, "steps": steps}
+    return {"mode": "apply" if apply_ else "dry-run", "op": FULL_REPAIR_OP, "gate": int(gate),
+            "pointer": int(pointer), "pr": int(pr), "door": REPAIR_DOOR,
+            "observed_before": observed_before, "repairs_applied": repairs_applied, "steps": steps}
+
+
+# ── the pointer-finish door ──────────────────────────────────────────────────────────────────────
+def finish_pointer(ctx, gate, pointer, apply_):
+    """Finish a pointer behind an ALREADY-proven gate. The ONE door the stage playbooks' recovery
+    calls — so the rule lives in code, not in four prose copies that drift.
+
+    WHY IT EXISTS. `/idc:plan`, `/idc:recirculate`, `/idc:autorun` and `idc:idc-gate-issue` all carry
+    the interrupted-run recovery: a still-`Blocked` pointer whose gate reads `Done` may be a prior
+    run's dispose that never reached its unblock, so the next run finishes the job. Verifying the
+    gate's journaled proof is only HALF of that check. The engine's `unblock --by` removes the NAMED
+    edge and then sets `Todo` — it never looks at what ELSE blocks the pointer — so the recovery's
+    "then finish the unblock through the engine's `unblock`" frees a pointer Blocked by
+    `[gate, other]` past `other` WITHOUT `other`'s proof, and Autorun then treats that unblocked
+    Consideration pointer as approved work. That is precisely the admission the repair's own pointer
+    step refuses; a guard that lives in the helper but not in the recovery the playbooks actually
+    instruct is not a guard. Routing all four through here means it cannot be kept by three surfaces
+    and forgotten by the fourth.
+
+    WHAT IT IS NOT. It repairs NOTHING — hence no `--pr`: the gate must ALREADY be proven ON DISK, by
+    either kind (`guarded-dispose` or `verified-reconciliation`). An unproven gate belongs at the full
+    repair door, which verifies a merged approval PR at repair time and journals that evidence; this
+    door must never become a way to walk past a gate whose approval nobody checked.
+
+    WHAT IT WRITES. Nothing of its own. The engine's `unblock` journals itself (op=unblock), which is
+    the only transition here that ever happens. A pointer that is not `Blocked` is an honest no-op: no
+    unblock was missed, and this door OBSERVED nothing new — the full repair owns the observation
+    record, because it is the one that reads the corrupt shape.
+    """
+    repo = ctx["repo"]
+    kind, err = P.read_proof(repo, int(gate))
+    if err:
+        raise GateRepairError(
+            f"pointer-finish refused: the transition journal cannot be read ({err}) — gate #{gate}'s "
+            f"proof is INDETERMINATE, and 'I cannot tell whether this gate was approved' must never "
+            f"admit #{pointer}. Repair/restore the journal, then re-run.")
+    if kind not in P.PROVEN_KINDS:
+        raise GateRepairError(
+            f"pointer-finish refused: gate #{gate}'s Done reads {kind!r} — this door only finishes a "
+            f"pointer behind a gate whose approval is already journaled "
+            f"({' or '.join(P.PROVEN_KINDS)}). A `Done` gate alone proves nothing: a legacy/manual "
+            f"close, a raw Status edit, or a janitor repair all mint `Done` without ever validating "
+            f"the operator's approval. Leave #{pointer} {E.BLOCKED_STATUS} and surface the anomaly. If "
+            f"the gate really was approved (its Think PR merged), reconcile it honestly FIRST through "
+            f"the full repair door — `idc_gate_repair.py --gate {gate} --pointer {pointer} --pr "
+            f"<merged-PR#>`, dry-run first — which verifies the merged PR at repair time and journals "
+            "the evidence; never hand-write a journal record to make this door pass.")
+
+    cur = E.get_item(ctx, int(pointer))
+    status = cur.get("status") or ""
+    blockers = sorted(_blocked_by(ctx, int(pointer)))
+    planned_others = [n for n in blockers if n != int(gate)]
+    observed_before = {"gate": {"num": int(gate), "proof_kind": kind},
+                       "pointer": {"status": status, "blocked_by": blockers}}
+
+    steps = [{"id": "verify-gate-proof", "gate": int(gate), "proof_kind": kind, "status": "verified",
+              "action": (f"gate #{gate}'s Done is journaled as {kind} — a real approval was verified, "
+                         "so this gate may finish its pointer")}]
+
+    step = {"id": "unblock-pointer", "pointer": int(pointer), "by": int(gate),
+            "via": "idc_transition.run('unblock')", "invents_transition": False,
+            "journals_own_record": False, "other_blockers": planned_others,
+            "action": _unblock_action(pointer, gate, planned_others,
+                                      f"gate #{gate}'s proof is on disk — {kind}")}
+    if status != E.BLOCKED_STATUS:
+        # Nothing to finish, so nothing is written — not even an observation. Whatever moved this
+        # pointer did so before this run; this door watched none of it and must claim none of it.
+        step["status"] = "satisfied"
+        step["action"] = (f"pointer #{pointer} already reads Status={status!r}, not "
+                          f"{E.BLOCKED_STATUS} — no unblock was missed, so there is nothing to finish "
+                          "and NOTHING is recorded (this door observed no transition of its own)")
+    elif apply_:
+        others = _other_blockers(ctx, pointer, gate)   # re-read: the plan may be minutes stale
+        if others:
+            _refuse_other_blockers(
+                gate, pointer, others, f"gate #{gate}'s Done is proven ({kind}), but",
+                "re-run this pointer-finish: it converges once the proven gate is the last blocker "
+                "standing.")
+        E.run("unblock", ctx, num=int(pointer), to_status="Todo", by=int(gate))
+        observed = E.get_item(ctx, int(pointer))
+        if (observed.get("status") or "") != "Todo":
+            raise GateRepairError(
+                f"pointer-finish stopped: read-back divergence on #{pointer} — Status reads "
+                f"{observed.get('status')!r} after the engine's unblock, expected 'Todo'. Refusing to "
+                "report a finish that did not land; re-run to reconstruct from current state.")
+        step["other_blockers"] = []
+        step["action"] = _unblock_action(pointer, gate, [], f"gate #{gate}'s proof is on disk — {kind}")
+        step["status"] = "applied"
+    else:
+        step["status"] = "refused" if planned_others else "planned"
+    steps.append(step)
+
+    return {"mode": "apply" if apply_ else "dry-run", "op": FINISH_OP, "gate": int(gate),
+            "pointer": int(pointer), "pr": None, "door": REPAIR_DOOR,
+            "observed_before": observed_before, "repairs_applied": [], "steps": steps}
 
 
 def build_parser():
@@ -460,14 +590,25 @@ def build_parser():
                     "without fabricating history (never a back-dated op=dispose, never an invented "
                     "unblock).")
     p.add_argument("--repo", default=".", help="the governed repo root")
-    p.add_argument("--backend", choices=["github"], default="github",
-                   help="github only: the corrupt shape (a merged PR + a closed issue) is a github "
-                        "artifact; the filesystem backend has neither")
+    p.add_argument("--backend", choices=["github", "filesystem"], default=None,
+                   help="default: read from tracker-config.yaml, else filesystem. The full repair is "
+                        "github-only (the corrupt shape it reconciles — a merged PR + a hand-closed "
+                        "issue — is a github artifact); --finish-pointer works on both backends")
+    p.add_argument("--tracker", default=None,
+                   help="TRACKER.md path (filesystem; default <repo>/TRACKER.md)")
     p.add_argument("--owner", default=None, help="github project owner")
     p.add_argument("--project", default=None, help="github project number")
     p.add_argument("--gate", type=int, required=True, help="the gate issue number")
     p.add_argument("--pointer", type=int, required=True, help="the pointer the gate blocked")
-    p.add_argument("--pr", type=int, required=True, help="the merged approval (Think) PR")
+    p.add_argument("--pr", type=int, default=None,
+                   help="the merged approval (Think) PR — the full repair only")
+    p.add_argument("--finish-pointer", dest="finish_pointer", action="store_true",
+                   help="POINTER-FINISH mode: finish a pointer behind an ALREADY-proven gate (repairs "
+                        "nothing, takes no --pr). Requires the gate's journaled proof on disk AND the "
+                        "proven gate to be the pointer's SOLE remaining blocker — the guarded door the "
+                        "stage playbooks' interrupted-run recovery calls instead of a raw engine "
+                        "`unblock`, which would drop only the named edge and admit the pointer past "
+                        "its other gates without their proof")
     p.add_argument("--apply", action="store_true",
                    help="perform the plan (default: DRY RUN — read, validate, print the plan, write "
                         "nothing)")
@@ -479,15 +620,50 @@ def main(argv=None):
     """Run the repair and RETURN the plan dict (raises GateRepairError). `cli` owns the exit codes."""
     args = build_parser().parse_args(argv)
     repo = os.path.abspath(args.repo)
-    if not (args.owner and args.project):
-        raise GateRepairError("gate-repair refused: --owner and --project are required (github backend)")
-    ctx = E.github_ctx(repo, args.owner, args.project, E.load_machine(E.machine_path_for(repo)))
-    plan = build_and_run(ctx, args.gate, args.pointer, args.pr, args.apply)
+    backend = E.resolve_backend(args)         # the engine's own resolver: --backend, else the config
+    machine = E.load_machine(E.machine_path_for(repo))
+    if backend == "github":
+        if not (args.owner and args.project):
+            raise GateRepairError(
+                "gate-repair refused: --owner and --project are required (github backend)")
+        ctx = E.github_ctx(repo, args.owner, args.project, machine)
+    else:
+        ctx = E.fs_ctx(repo, args.tracker or os.path.join(repo, "TRACKER.md"), machine)
+
+    if args.finish_pointer:
+        if args.pr is not None:
+            raise GateRepairError(
+                f"gate-repair refused: --finish-pointer takes no --pr. This mode REPAIRS NOTHING and "
+                f"verifies no approval of its own — it finishes a pointer behind a gate whose approval "
+                f"is ALREADY journaled ({' or '.join(P.PROVEN_KINDS)}), so an approval PR here could "
+                f"only imply a verification that never happened. To reconcile an unproven gate AND "
+                f"finish its pointer, run the full repair: --gate {args.gate} --pointer "
+                f"{args.pointer} --pr {args.pr} (dry-run first).")
+        plan = finish_pointer(ctx, args.gate, args.pointer, args.apply)
+    else:
+        if backend != "github":
+            raise GateRepairError(
+                f"gate-repair refused: the full repair is github-only (--backend {backend}) — the "
+                "corrupt shape it reconciles (a MERGED approval PR + a hand-CLOSED gate issue) is a "
+                "github artifact and the filesystem backend has neither. A filesystem gate is approved "
+                "through the engine's guarded `dispose --disposition gate-approved`, which earns real "
+                "`guarded-dispose` proof. (`--finish-pointer` runs on both backends.)")
+        if args.pr is None:
+            raise GateRepairError(
+                "gate-repair refused: --pr is required — the full repair records the approval PR it "
+                "verified MERGED at repair time, and that evidence IS the gate's proof. To finish a "
+                "pointer behind an ALREADY-proven gate, use --finish-pointer (it repairs nothing and "
+                "takes no --pr).")
+        plan = build_and_run(ctx, args.gate, args.pointer, args.pr, args.apply)
+
     if args.json:
         print(json.dumps(plan, indent=2, sort_keys=True))
     else:
-        print(f"gate-repair [{plan['mode']}] gate #{plan['gate']} / pointer #{plan['pointer']} "
-              f"/ approval PR #{plan['pr']}")
+        head = (f"gate-repair [{plan['mode']}] {plan['op']}: gate #{plan['gate']} "
+                f"/ pointer #{plan['pointer']}")
+        if plan.get("pr"):
+            head += f" / approval PR #{plan['pr']}"
+        print(head)
         for step in plan["steps"]:
             print(f"  [{step['status']:>9}] {step['id']}: {step['action']}")
     return plan

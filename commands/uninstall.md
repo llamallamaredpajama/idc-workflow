@@ -78,11 +78,21 @@ Decide the file set deterministically, then classify it:
   `/idc:init` scaffolds:
   `WORKFLOW.md`, `WORKFLOW-config.yaml`, `docs/workflow/tracker-config.yaml`,
   `docs/workflow/workflow-machine.yaml`, `docs/workflow/pillar-matrices/`,
-  `docs/workflow/code-reviews/`, and the
+  `docs/workflow/code-reviews/`, `docs/workflow/intakes/.gitkeep`, and the
   `docs/workflow/` README. Anything absent → `skipped-absent`. (Keep this list in sync with the
   scaffold under `${CLAUDE_PLUGIN_ROOT}/templates/`: a pre-receipt repo can only be cleaned by
   this fallback, so a scaffold file added there must be added here too. Receipt-driven installs
   don't have this drift — they remove whatever the receipt lists.)
+
+  **The intake home is listed by its `.gitkeep`, never as a directory** — the one deliberate
+  asymmetry in that list. `docs/workflow/intakes/` is scaffold IDC created, but the compiled
+  `/idc:intake` manifests inside it are **operator work products**, and a directory-level
+  `git rm -r docs/workflow/intakes/` would delete them as if they were pristine scaffold. Remove the
+  keepfile; leave every manifest. If manifests remain, the now-non-empty directory survives the
+  removal — that is correct: Phase 2 has already archived them, and an operator's compiled record of
+  a foreign artifact is not IDC's to delete. Report them as `preserved — work product` in the Phase 5
+  summary. (A receipt-driven uninstall gets this for free: a manifest is never receipt-listed, so it
+  never enters the removal manifest.)
 
 Always add two footprints the receipt never lists (see `commands/init.md`): the receipt file
 itself, and — **filesystem backend only** — the runtime-created `TRACKER.md`. The operator-owned
@@ -95,7 +105,8 @@ Tar the IDC-managed work products to an untracked repo-root archive and **announ
 ARCHIVE="idc-archive-$(date +%Y%m%d-%H%M%S).tar.gz"
 tar -czf "$ROOT/$ARCHIVE" -C "$ROOT" docs/workflow $( [ -f "$ROOT/TRACKER.md" ] && echo TRACKER.md )
 ```
-This preserves the operator's matrices, code-reviews, tracker history, and configs even though
+This preserves the operator's matrices, code-reviews, compiled intake manifests, tracker history,
+and configs even though
 the removal commit deletes them — a `git revert` restores the tracked files, and the tarball
 covers anything untracked. The archive stays untracked (and is matched by the `idc-archive-*`
 preflight exemption); it is never part of the removal commit.
@@ -200,7 +211,9 @@ say so.
 
 ## Phase 5 — Summary
 
-Print one table of every footprint (`removed` / `skipped-absent` / `kept (customized)`), then:
+Print one table of every footprint (`removed` / `skipped-absent` / `kept (customized)` /
+`preserved — work product`, the last for any compiled `/idc:intake` manifest left in
+`docs/workflow/intakes/`), then:
 - the archive path from Phase 2,
 - the single revert command — `git revert <sha>` — to reinstate everything,
 - the board disposition (untouched / N issues closed / board deleted),

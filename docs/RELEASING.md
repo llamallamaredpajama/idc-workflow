@@ -14,7 +14,22 @@ for the reasoning.
 ```bash
 bash scripts/lint-references.sh   # exit 0 — reference integrity + version lockstep (idc_release_check.py)
 bash tests/smoke/run-all.sh       # ALL GREEN — the full hermetic suite
+bash scripts/run-evals.sh --all   # clean exit — headless eval runner
+python3 scripts/idc_release_check.py --governance   # ALL GREEN — release governance
 ```
+
+**The PyYAML governance lane.** The engine's parsing paths must hold whether or not a governed repo
+has PyYAML installed, so run the governance suite once *with* it — proving no parser-dependent
+regression in the existing engine paths:
+
+```bash
+uv run --python 3.13 --with pyyaml bash tests/smoke/phase-governance.sh   # ALL GREEN
+```
+
+**Pin the Python.** `--python 3.13` is not optional. Without it, `uv` may base the throwaway venv on
+the system Python (3.9 on stock macOS), and the plugin's helpers require **3.10 or newer** — so the
+unpinned form fails for an environmental reason that looks exactly like a real regression. Any
+modern interpreter (≥ 3.10) works; 3.13 is the known-good pin.
 
 These run in CI (`.github/workflows/ci.yml`) on every push/PR. The smoke suite now includes the
 **realistic-input + quiet/no-op-default** tests (`phase7-file-commands-noop-default.sh`) and the

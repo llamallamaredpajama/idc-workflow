@@ -93,6 +93,14 @@ run**, so a half-finished update can never masquerade as complete.
     removal — no leave-removed default). Present on disk → provenance unknown: show-diff-and-ask
     like `modified`, never silently overwrite. An `unrecorded` data-bearing config follows §A as
     always. Phase 4's fresh stamp records every one that landed.
+
+    **The intake home (`docs/workflow/intakes/`) migrates this way.** A pre-4.1.0 receipt has no
+    `docs/workflow/intakes/.gitkeep`, so an older repo gets the intake home installed here — the
+    keepfile, and nothing else. **Never touch intake contents.** A compiled `/idc:intake` manifest
+    in that directory is an operator work product, not governed scaffold: it has no template (the
+    resolver rejects it by design), it is never receipt-listed, and it therefore appears in **no**
+    classification bucket. Adding the home to an older repo must leave every manifest already in it
+    byte-for-byte untouched.
   If the receipt is present but **invalid** (the helper exits non-zero), STOP and report the parse
   error — do not silently treat files as untouched.
 - **No receipt (pre-receipt install):** this is the one-time graduation. **Diff-and-ask for every
@@ -148,7 +156,7 @@ mapping can't drift between scaffold and resync. It encodes exactly:
 | `WORKFLOW-config.yaml` | `templates/WORKFLOW-config.yaml` |
 | `docs/workflow/tracker-config.yaml` | `templates/tracker-config.yaml` |
 | `docs/workflow/workflow-machine.yaml` | `templates/workflow-machine.yaml` |
-| `docs/workflow/<rest>` (e.g. `README.md`, `code-reviews/…`, `pillar-matrices/…`) | `templates/docs-tree/<rest>` |
+| `docs/workflow/<rest>` (e.g. `README.md`, `code-reviews/…`, `pillar-matrices/…`, `intakes/.gitkeep`) | `templates/docs-tree/<rest>` |
 
 This closes the docs-tree ambiguity: `docs/workflow/README.md` resolves to
 `templates/docs-tree/README.md`, **never** the unrelated `templates/README.md` (which documents the

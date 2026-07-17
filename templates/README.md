@@ -22,7 +22,11 @@ text and, for numeric values, drops the surrounding quotes.
 | `WORKFLOW.md` | `<repo>/WORKFLOW.md` | The governance contract. Hard requirement — marks the repo as IDC-governed; section numbers are stable for citation. |
 | `WORKFLOW-config.yaml` | `<repo>/WORKFLOW-config.yaml` | IDC contract sidecar: `project.name` (hard requirement), the codebase-derived `domains`, and the tier-symbolic `model_routing` table. |
 | `tracker-config.yaml` | `<repo>/docs/workflow/tracker-config.yaml` | The live tracker contract (4-field board). Fill `field_ids` after `gh project create` (github backend) or switch `backend: filesystem`. |
-| `docs-tree/` | `<repo>/docs/workflow/` | The lean v2 process-artifact tree (`pillar-matrices/`, `code-reviews/`, each with a `.gitkeep`) plus a README. See `docs-tree/README.md`. |
+| `docs-tree/` | `<repo>/docs/workflow/` | The lean v2 process-artifact tree (`pillar-matrices/`, `code-reviews/`, `intakes/`, each with a `.gitkeep`) plus a README. See `docs-tree/README.md`. |
+
+`intakes/` is the durable home for the exact-once manifests `/idc:intake` compiles from a foreign
+artifact. Only its `.gitkeep` is scaffold: a compiled manifest is an operator **work product**, so
+it is never receipt-listed, never refreshed from a template, and never removed by `/idc:uninstall`.
 
 After `/idc:init`, run `/idc:doctor` to verify the scaffold resolves and the tracker
 backend is reachable.

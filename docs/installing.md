@@ -142,8 +142,18 @@ Run `/idc:update` from the repo to refresh it:
 - A pre-receipt repo (initialized before receipts existed) is asked about every scaffold file once,
   then graduated to a receipt so future updates are automatic.
 
-If a newly-shipped `/idc:*` command doesn't appear right after an update, restart your Claude Code
-session — that's a client-side plugin-cache refresh, not an update failure.
+**After any plugin update, run `/reload-plugins` (or restart the session) once.** A session loads
+plugin commands, agents, and skills at start-up and keeps running the versions it loaded, so a
+newly-shipped `/idc:*` command won't appear — and an existing one will keep running its **old**
+logic — until the runtime reloads. That's a client-side refresh, not an update failure.
+
+**`/clear` is not a plugin reload.** It clears conversation context and leaves the loaded command
+bodies exactly as they were. If IDC refuses a command as stale-runtime, `/reload-plugins` or a full
+session restart is the fix; `/clear` is insufficient and will leave you in the same state.
+
+This is why upgrading to the version that introduces the stale-runtime gate needs one explicit
+`/reload-plugins` afterward: an already-running older session can't be given a hook retroactively.
+After that one-time bootstrap, every future version carries the gate itself.
 
 ## 6. Uninstall IDC from a project
 

@@ -111,6 +111,53 @@ umbrella (provider-qualified) boots every role, no per-role pinning required —
 pool and a Pi-side autorun drain remain pending (#66 L1/L4), which is why the runtime stays
 experimental.
 
+## The eleven commands — one altitude each
+
+IDC ships **11 slash entry points**:
+
+```text
+think | intake | plan | build | recirculate | autorun | janitor | init | doctor | update | uninstall
+```
+
+Six of them admit or move scope, and the boundary between them is the load-bearing part — each
+admits scope at exactly one altitude, and none may do another's job:
+
+- **Think** shapes one new requirement and opens its human gate.
+- **Intake** compiles a large foreign artifact into complete routes; it does not execute the artifact.
+- **Recirculation** admits already-covered but unplanned scope.
+- **Plan** decomposes admitted considerations only.
+- **Build** consumes eligible schema-checked Buildables only.
+- **Autorun** drains durable tracker/intake state only.
+
+The remaining five are operational, not scope-bearing: `janitor` reconciles, `init` scaffolds,
+`doctor` diagnoses, and `update` / `uninstall` are the lifecycle pair.
+
+Read that list as the write-authority table's twin. A foreign plan — a vendor spec, a migration
+doc, a hand-written roadmap — is **evidence, never execution authority**: Intake compiles it into
+routes, and each route still enters the pipe through Think's gate or Recirculation's admission. It
+may never mint a Buildable directly, which is why Build "infer the foreign plan" is not a step that
+exists anywhere in the rig.
+
+## Stale runtime — `/reload-plugins`, not `/clear`
+
+A Claude Code session loads a plugin's commands, agents, and skills **once, at session start**.
+Editing this repo (or installing a new IDC version) does not change what an already-running session
+executes: it keeps running the component bodies it loaded. That is the stale-runtime hazard — a
+session silently running old command logic against a newer governed repo.
+
+Recovery is **`/reload-plugins`** (or a full session restart). **`/clear` does not reload plugin
+components** — it clears conversation context and leaves the loaded command/agent/skill bodies
+exactly as they were, so a refusal that says "run `/clear`" would send an operator in a circle.
+Every stale-runtime refusal IDC emits therefore names `/reload-plugins` and states explicitly that
+`/clear` is insufficient. The install receipt's `plugin_version` is what makes the refusal
+possible: `scripts/idc_plugin_freshness.py` reads it as the running plugin's *required* version, so
+a session older than the version that stamped the repo is refused rather than trusted.
+
+One consequence is unavoidable and is part of the release procedure rather than a bug: an upgrade
+cannot retroactively add a hook to an already-running older session, so the **first** session after
+installing a version that introduces the gate needs one explicit `/reload-plugins` or restart. After
+that bootstrap, every future loaded version carries the gate itself.
+
 ## Composition + naming
 
 - **Commands** (`commands/*.md`) are the slash entry points; `/idc:plan` tells the session to

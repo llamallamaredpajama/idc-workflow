@@ -7,7 +7,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/version-3.3.0-e8e7df?style=flat-square&labelColor=1a1a1a" alt="version 3.3.0">
   <img src="https://img.shields.io/badge/Claude%20Code-plugin-e8e7df?style=flat-square&labelColor=1a1a1a" alt="Claude Code plugin">
-  <img src="https://img.shields.io/badge/commands-10-e8e7df?style=flat-square&labelColor=1a1a1a" alt="10 commands">
+  <img src="https://img.shields.io/badge/commands-11-e8e7df?style=flat-square&labelColor=1a1a1a" alt="11 commands">
   <img src="https://img.shields.io/badge/runtime-Claude%20%C2%B7%20Codex%20%C2%B7%20Pi-e8e7df?style=flat-square&labelColor=1a1a1a" alt="runtimes">
   <img src="https://img.shields.io/badge/guardrails-5-c8dc00?style=flat-square&labelColor=1a1a1a" alt="5 guardrails">
   <img src="https://img.shields.io/badge/license-MIT-e8e7df?style=flat-square&labelColor=1a1a1a" alt="MIT license">
@@ -322,8 +322,17 @@ wires Pi.
 
 This repo is the plugin **and** its own marketplace:
 
-- **10 commands** — the pipeline (`think · plan · build · recirculate · autorun`) plus the
+- **11 commands** — the pipeline (`think · intake · plan · build · recirculate · autorun`) plus the
   `janitor` reconciler, `init`, `doctor`, and the lifecycle pair `update` / `uninstall`.
+
+  Each entry point admits scope at exactly one altitude, and none of them may do another's job:
+
+  - **Think** shapes one new requirement and opens its human gate.
+  - **Intake** compiles a large foreign artifact into complete routes; it does not execute the artifact.
+  - **Recirculation** admits already-covered but unplanned scope.
+  - **Plan** decomposes admitted considerations only.
+  - **Build** consumes eligible schema-checked Buildables only.
+  - **Autorun** drains durable tracker/intake state only.
 - **8 agents** — the per-stage orchestrator playbooks, the durable-worker implementer + finisher,
   and the review coordinator + review agent.
 - **13 skills** — the runtime adapters (Claude · Codex · Pi), the tracker adapter + its two
@@ -355,7 +364,7 @@ bash tests/smoke/run-all.sh
 .claude-plugin/   plugin.json (manifest) + marketplace.json (self-hosted marketplace)
 agents/           8 agents — stage playbooks + implementer + finisher + review coordinator/agent
 skills/           13 reusable procedures (runtime adapters, tracker, review engine, …)
-commands/         10 slash commands (think|plan|build|recirculate|autorun|janitor|init|doctor|update|uninstall)
+commands/         11 slash commands (think|intake|plan|build|recirculate|autorun|janitor|init|doctor|update|uninstall)
 templates/        per-project scaffold copied by /idc:init
 scripts/          lint-references.sh, release check, the filesystem tracker + stage helpers,
                   install-codex.sh / install-pi.sh, run-evals.sh

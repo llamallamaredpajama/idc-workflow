@@ -72,5 +72,43 @@ assert "docs/workflow/workflow-machine.yaml" not in u, \
 tsv="$(python3 "$HELPER" verify --repo "$WORK" 2>/dev/null)" || fail "TSV verify exited non-zero"
 echo "$tsv" | grep -q "unrecorded" && fail "TSV output must not carry unrecorded rows: $tsv"
 
+# --- Task 8 Step 1: /idc:update installs the intake home into an older repo, and never touches ---
+# intake CONTENTS. Same migration shape as workflow-machine.yaml above: a pre-4.1.0 receipt has no
+# docs/workflow/intakes/.gitkeep, so update must surface it as `unrecorded` and restore it. But the
+# directory may already hold operator work products (compiled /idc:intake manifests), and those are
+# NOT governed scaffold: update must never classify — and so never refresh, diff-and-ask about, or
+# remove — a manifest. Seed a populated intake home and prove the classifier's blast radius.
+mkdir -p "$WORK/docs/workflow/intakes"
+printf '{"schema_version":1,"intake_id":"legacy"}' > "$WORK/docs/workflow/intakes/vendor.intake.json"
+out3="$(python3 "$HELPER" verify --repo "$WORK" --json)" || fail "verify with a populated intakes/ exited non-zero"
+echo "$out3" | python3 -c '
+import json, sys
+o = json.load(sys.stdin)
+u = o.get("unrecorded", [])
+assert "docs/workflow/intakes/.gitkeep" in u, \
+    f"the intake home must surface as unrecorded so /idc:update installs it into an older repo: {u}"
+listed = u + o["unchanged"] + o["modified"] + o["missing"]
+stray = sorted(p for p in listed if p.startswith("docs/workflow/intakes/")
+               and p != "docs/workflow/intakes/.gitkeep")
+assert not stray, \
+    f"/idc:update classified intake CONTENTS as governed files — it would touch an operator work product: {stray}"
+' || fail "populated-intake-home assertions failed: $out3"
+
+# The same guarantee on the uninstall side: the TSV removal manifest must never carry a manifest.
+tsv3="$(python3 "$HELPER" verify --repo "$WORK" 2>/dev/null)" || fail "TSV verify with a populated intakes/ exited non-zero"
+echo "$tsv3" | grep -q "intakes/vendor.intake.json" \
+  && fail "an intake manifest entered the TSV removal manifest — /idc:uninstall would delete an operator work product: $tsv3"
+
+# The prose half of the contract: the receipt mechanics above only hold if the command bodies an
+# agent actually follows name the intake home and its work-product rule.
+UPD="$PLUGIN/commands/update.md"
+UNI="$PLUGIN/commands/uninstall.md"
+grep -qF 'docs/workflow/intakes/' "$UPD" \
+  || fail "commands/update.md must name docs/workflow/intakes/ — the intake home it installs into older repos without touching intake contents"
+grep -qF 'docs/workflow/intakes/.gitkeep' "$UNI" \
+  || fail "commands/uninstall.md's pre-receipt fallback must remove the intake home by its .gitkeep only — a bare docs/workflow/intakes/ would delete the operator's compiled manifests as pristine scaffold"
+grep -qi 'work product' "$UNI" \
+  || fail "commands/uninstall.md must state the work-product policy that preserves populated intake manifests"
+
 echo "PASS: phase7-update-unrecorded-files"
 exit 0

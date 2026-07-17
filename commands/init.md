@@ -68,8 +68,11 @@ Anything present is left untouched.
 ## Phase 3 — Scaffold from templates
 Run the deterministic scaffold helper. It copies the templates, substitutes
 `{{PROJECT_NAME}}`, lays down the lean `docs/workflow/` tree (`pillar-matrices/`,
-`code-reviews/`, README), selects the backend, and — for the `filesystem` backend —
+`code-reviews/`, `intakes/`, README), selects the backend, and — for the `filesystem` backend —
 initializes `TRACKER.md`. It is idempotent: it never clobbers an existing operator file.
+`intakes/` is the durable home for the manifests `/idc:intake` compiles; it ships as a tracked
+`.gitkeep` so an empty intake home survives a fresh clone, and it is **not** gitignored — a manifest
+is a durable record of what a foreign artifact compiled to, like a pillar matrix.
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/idc_init_scaffold.sh" \
   "${CLAUDE_PLUGIN_ROOT}" "$(git rev-parse --show-toplevel)" "$PROJECT_NAME" <github|filesystem>
@@ -313,8 +316,15 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_receipt_check.py" stamp \
   WORKFLOW.md WORKFLOW-config.yaml \
   docs/workflow/tracker-config.yaml docs/workflow/workflow-machine.yaml docs/workflow/README.md \
   docs/workflow/pillar-matrices/.gitkeep docs/workflow/code-reviews/.gitkeep \
-  docs/workflow/code-reviews/.gitignore
+  docs/workflow/code-reviews/.gitignore docs/workflow/intakes/.gitkeep
 ```
+Pass **every** file the scaffold laid down: a governed file the stamp list omits is left `unrecorded`
+(`idc_receipt_check.py verify --json`), which is the migration gap `/idc:update` §B then has to
+clean up after — at install time it is simply a bug. `docs/workflow/intakes/.gitkeep` is the durable
+home `/idc:intake` writes its manifests into; the **keepfile is the only intake path the receipt ever
+lists**. A compiled intake manifest is a work product, not scaffold IDC installed, so it is never
+stamped — which is exactly what keeps `/idc:uninstall` (whose removal manifest *is* this receipt)
+from deleting an operator's manifest as if it were pristine scaffold.
 `docs/workflow/workflow-machine.yaml` is the transition engine's legal-transition table (v4 Phase 2),
 scaffolded so it is operator-visible + update-managed. It is **pristine** (no operator data written
 into it — unlike the two `--customized` files below), so it is stamped plain and `/idc:update`

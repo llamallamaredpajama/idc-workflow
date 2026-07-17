@@ -48,6 +48,16 @@ got="$(resolve docs/workflow/README.md)" || fail "resolver exited non-zero for d
 # 3. Nested docs-tree entries map under docs-tree/.
 [ "$(resolve docs/workflow/code-reviews/.gitkeep)" = "$PLUGIN/templates/docs-tree/code-reviews/.gitkeep" ] \
   || fail "docs/workflow/code-reviews/.gitkeep must map under docs-tree/"
+# The intake home (Task 8 Step 1): /idc:update installs docs/workflow/intakes/ into an older repo
+# by resolving its keepfile through THIS resolver, so the intake home must map under docs-tree/ like
+# any other governed subtree — never to a top-level special case.
+[ "$(resolve docs/workflow/intakes/.gitkeep)" = "$PLUGIN/templates/docs-tree/intakes/.gitkeep" ] \
+  || fail "docs/workflow/intakes/.gitkeep must map under docs-tree/ (the intake home is governed scaffold /idc:update installs)"
+# An intake MANIFEST is a work product /idc:intake writes, not governed scaffold: it has no
+# template, so the resolver must REJECT it rather than let a caller guess one and clobber it.
+if resolve docs/workflow/intakes/vendor-plan.intake.json >/dev/null 2>&1; then
+  fail "resolver must reject an intake manifest (a work product with no template — never refresh it from templates/)"
+fi
 
 # 4. Every resolved source actually exists (resolver validates against disk under --plugin-root).
 for d in WORKFLOW.md WORKFLOW-config.yaml docs/workflow/tracker-config.yaml docs/workflow/README.md; do

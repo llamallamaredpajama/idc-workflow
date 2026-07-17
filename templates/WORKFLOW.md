@@ -28,13 +28,31 @@ the glass wall (§1.2). Everything else flows autonomously.
 ### 1.1 The pipeline
 
 `Think → Plan → Build`, with the `Recirculator` as the only retrograde path and `Autorun` as the
-one-shot drainer that traverses the whole pipe. Slash surfaces: `/idc:think`,
-`/idc:plan`, `/idc:build`, `/idc:recirculate`, `/idc:autorun`, plus `/idc:init` (per-project
-scaffold) and `/idc:doctor` (read-only health check).
+one-shot drainer that traverses the whole pipe.
+
+IDC ships **11 slash surfaces**:
+
+```text
+think | intake | plan | build | recirculate | autorun | janitor | init | doctor | update | uninstall
+```
+
+The pipeline is `/idc:think`, `/idc:intake`, `/idc:plan`, `/idc:build`, `/idc:recirculate`,
+`/idc:autorun`; the rest are operational — `/idc:janitor` (reconciler), `/idc:init` (per-project
+scaffold), `/idc:doctor` (read-only health check), and `/idc:update` / `/idc:uninstall` (lifecycle).
+
+**Each entry point admits scope at exactly one altitude, and none may do another's job:**
+
+- **Think** shapes one new requirement and opens its human gate.
+- **Intake** compiles a large foreign artifact into complete routes; it does not execute the artifact.
+- **Recirculation** admits already-covered but unplanned scope.
+- **Plan** decomposes admitted considerations only.
+- **Build** consumes eligible schema-checked Buildables only.
+- **Autorun** drains durable tracker/intake state only.
 
 | Stage | Slash surface | Surface it writes |
 |---|---|---|
 | Think | `/idc:think` | `docs/considerations/` + the gated **PRD** (`docs/prd/`) and **TRD** (`docs/specs/`) draft, opened on the Think PR (§2) |
+| Intake | `/idc:intake` | `docs/workflow/intakes/` — a reviewed exact-once manifest of routes compiled from a foreign artifact; it routes units to Think or Recirculation and never mints a Buildable |
 | Plan | `/idc:plan` | `docs/plans/` (master + subphases + pillars), pillar matrices, and tracker issues — pure decomposition, no requirements docs |
 | Build | `/idc:build` | source surfaces (per issue `BOUNDARIES`), tests, review reports, and tracker status |
 | Recirculator | `/idc:recirculate` | every affected canonical doc, synchronized in one PR |

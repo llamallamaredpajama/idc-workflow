@@ -65,6 +65,97 @@ git -C "$SBX" status --porcelain | grep -q 'code-reviews/pr-9-' \
   && fail "review report/verdict showed up as an untracked/added change — gitignore not effective"
 git -C "$SBX" ls-files --error-unmatch "docs/workflow/code-reviews/.gitkeep" >/dev/null 2>&1 \
   || fail "code-reviews/.gitkeep must stay tracked so the scaffold survives a fresh clone"
+
+# --- Task 8 Step 1: /idc:init owns docs/workflow/intakes/, the durable home for /idc:intake ----
+# manifests. The scaffold must create it; its .gitkeep must be tracked (an empty dir does not
+# survive a clone); and — unlike code-reviews/ — it must NOT be gitignored: an intake manifest is a
+# durable record of what a foreign artifact compiled to, like a pillar matrix, not review litter.
+INTK="$SBX/docs/workflow/intakes"
+[ -d "$INTK" ] \
+  || fail "docs/workflow/intakes/ not scaffolded — /idc:intake has no durable manifest home"
+[ -f "$INTK/.gitkeep" ] \
+  || fail "docs/workflow/intakes/.gitkeep not scaffolded (the empty intake home would not survive a fresh clone)"
+[ -f "$INTK/.gitignore" ] \
+  && fail "docs/workflow/intakes must NOT be gitignored — an intake manifest is a durable record, not review litter"
+git -C "$SBX" ls-files --error-unmatch "docs/workflow/intakes/.gitkeep" >/dev/null 2>&1 \
+  || fail "docs/workflow/intakes/.gitkeep must stay tracked so the intake home survives a fresh clone"
+
+# The receipt contract: init.md's Phase 7 stamp list must account for EVERY file the scaffold lays
+# down. Parse the REAL command body's stamp invocation (no hardcoded copy of the list here, so the
+# test and the command can never drift), then stamp the freshly-scaffolded repo with exactly those
+# paths and let the SHIPPED verifier judge. Red-when-broken: drop any path from init.md's stamp
+# block and the fresh receipt leaves that governed file `unrecorded` — precisely the 4.0.0-shaped
+# migration gap phase7-update-unrecorded-files.sh exists to catch, but at install time.
+INIT_MD="$PLUGIN/commands/init.md"
+STAMP_PATHS="$(python3 - "$INIT_MD" <<'PY'
+import re, shlex, sys
+text = open(sys.argv[1], encoding="utf-8").read()
+m = re.search(r'idc_receipt_check\.py"?\s+stamp\b(.*?)```', text, re.S)
+if not m:
+    sys.exit("could not find the idc_receipt_check.py stamp block in commands/init.md")
+body = m.group(1).replace("\\\n", " ")
+toks = shlex.split(body, comments=True)
+VALUED = {"--repo", "--out", "--plugin-version", "--written-by", "--customized"}
+paths, i = [], 0
+while i < len(toks):
+    tok = toks[i]
+    if tok in VALUED:
+        i += 2
+        continue
+    if tok.startswith("--"):
+        i += 1
+        continue
+    paths.append(tok)
+    i += 1
+if not paths:
+    sys.exit("parsed no positional stamp paths out of init.md's Phase 7 block")
+print("\n".join(paths))
+PY
+)" || fail "could not parse commands/init.md's Phase 7 stamp path list"
+echo "$STAMP_PATHS" | grep -qxF 'docs/workflow/intakes/.gitkeep' \
+  || fail "init.md Phase 7 stamp list omits docs/workflow/intakes/.gitkeep — a fresh /idc:init would leave the intake home unrecorded"
+
+RCHK="$PLUGIN/scripts/idc_receipt_check.py"
+stamp_scaffold() {
+  echo "$STAMP_PATHS" | xargs python3 "$RCHK" stamp \
+    --repo "$SBX" --out "$SBX/docs/workflow/install-receipt.yaml" \
+    --plugin-version 9.9.9 --written-by idc:init \
+    --customized WORKFLOW-config.yaml --customized docs/workflow/tracker-config.yaml
+}
+stamp_scaffold >/dev/null || fail "stamping the fresh scaffold with init.md's own path list failed"
+vout="$(python3 "$RCHK" verify --repo "$SBX" --json)" || fail "verify of the fresh receipt exited non-zero"
+echo "$vout" | python3 -c '
+import json, sys
+o = json.load(sys.stdin)
+u = o.get("unrecorded")
+assert u == [], f"a fresh /idc:init left governed files unrecorded (init.md stamp list incomplete): {u}"
+ok, summary = o.get("ok"), o.get("summary")
+assert ok is True, f"the fresh receipt must verify ok, got {ok!r} ({summary})"
+listed = o["unchanged"] + o["modified"] + o["missing"]
+intake = sorted(p for p in listed if p.startswith("docs/workflow/intakes/"))
+assert intake == ["docs/workflow/intakes/.gitkeep"], \
+    f"an EMPTY docs/workflow/intakes/ must be receipt-listed by its .gitkeep only, got {intake}"
+' || fail "fresh-init receipt assertions failed: $vout"
+
+# A POPULATED intakes/ must not change the receipt: an intake manifest is a work product
+# /idc:intake writes, never scaffold /idc:init installed. The receipt is /idc:uninstall's removal
+# manifest ("only delete what IDC created") — listing a manifest there would let uninstall delete
+# the operator's compiled intake as if it were pristine scaffold.
+printf '{"schema_version":1,"intake_id":"smoke"}' > "$INTK/vendor-plan.intake.json"
+stamp_scaffold >/dev/null || fail "re-stamping with a populated intakes/ failed"
+vout2="$(python3 "$RCHK" verify --repo "$SBX" --json)" || fail "verify with a populated intakes/ exited non-zero"
+echo "$vout2" | python3 -c '
+import json, sys
+o = json.load(sys.stdin)
+listed = o["unchanged"] + o["modified"] + o["missing"] + o.get("unrecorded", [])
+stray = sorted(p for p in listed if p.startswith("docs/workflow/intakes/")
+               and p != "docs/workflow/intakes/.gitkeep")
+assert not stray, f"an intake manifest entered the receipt/removal manifest as scaffold: {stray}"
+unrec = o.get("unrecorded")
+assert unrec == [], f"an intake manifest must not be governed scaffold: {unrec}"
+' || fail "populated-intakes receipt assertions failed: $vout2"
+rm -f "$INTK/vendor-plan.intake.json" "$SBX/docs/workflow/install-receipt.yaml"
+
 # doctor check 3: filesystem backend selected + TRACKER.md present and valid
 grep -q "^backend: filesystem" "$SBX/docs/workflow/tracker-config.yaml" || fail "backend not set to filesystem"
 [ -f "$SBX/TRACKER.md" ]                          || fail "filesystem backend should init TRACKER.md"

@@ -31,7 +31,7 @@ deconfliction record.
 |---|---|
 | `pillar-matrices/` | Polished phase matrices (`<phase-tag>-matrix.yaml`) — Plan's pairwise-clash deconfliction output: the Dependency-DAG / Parallel-Safety / Wave-Ordering substrate the board's `Wave` field is assigned from. |
 | `code-reviews/` | Merged-review-engine reports for build PRs and phase-close deltas (referenced from issues, never inlined). |
-| `intakes/` | Reviewed exact-once manifests compiled from external Markdown. Intake records durable routes only; foreign units never enter Build or Autorun directly. |
+| `intakes/` | Reviewed exact-once manifests compiled from external Markdown. Intake records durable routes only; foreign units never enter Build or Autorun directly. A compiled manifest is **your** work product, not IDC scaffold: `/idc:update` never touches it, and `/idc:uninstall` archives and preserves it rather than deleting it. |
 
 `docs/workflow/tracker-config.yaml` (the tracker contract) is also placed here by
 `/idc:init`. Each directory ships with an empty `.gitkeep` so the scaffold survives a

@@ -31,14 +31,24 @@ dishonest closeout (`idc_command_contract.py:2360`) · unsafe gate ordering
 - **Incident e2e (Task 8 Step 5), install sandbox, Codex driver per operator policy:** A1–A7 ALL PASS on a real GitHub board (new sandbox Project #16) — exact-once intake 12/12, tamper refusal, interlock + script-indirection denials (SYNTHETIC hook invocations, disclosed — Codex cannot fire Claude hooks), single-unit Think with 11 units durably queued, honest oracle, janitor coherent, all lifecycle records closed honestly. Capture: `/Users/jeremy/dev/sandbox/_idc-observability/run-t8e2e.txt` + `ke-snap` post-snapshot `041-t8e2e-post-live`.
 - **Gate-repair fixture (Step 6):** `.superpowers/sdd/task-8-step6-fixture-receipt.txt` (42 assertions; real journal writer + proof reader; disclosed harness-vs-literal-CLI deviation).
 
-## The ONE open item — operator decision required
+## The hook-fidelity proof — COMPLETE (2026-07-17 morning, operator-approved spend)
 
-**Task 8 Step 4, the real Claude `UserPromptExpansion` hook proof, was NOT run.** The runbook
-requires explicit operator confirmation of Anthropic spend headroom for a nested Claude session;
-per its own instruction the release verification is reported **blocked on this single proof** and
-no synthetic substitute is claimed anywhere (the changelog makes no hook-fidelity claim). The
-recipe is staged in `CLAUDE.md`/`docs/dev/local-e2e-testing.md`; it is one headless `claude -p`
-run in the update sandbox once spend is confirmed.
+**Task 8 Step 4 ran with the REAL Claude `UserPromptExpansion` hook** (nested `claude -p` in the
+update sandbox, candidate loaded via `--plugin-dir`):
+
+- **Stale case** (receipt seeded to require `4.1.1` vs running `4.1.0`): Claude Code reported
+  `UserPromptExpansion operation blocked by hook:` with the gate's verbatim refusal (names
+  `/reload-plugins`; states `/clear does not reload plugin commands or hooks`); the command never
+  expanded and **no lifecycle record was opened**. The original receipt was restored byte-exact.
+- **Current case** (the sandbox's legacy v1 receipt): the command **expanded**, the real hook
+  opened a **nonce-stamped lifecycle record**, doctor ran all ten rows (10 PASS with honest ⚠
+  notes), the report persisted nonce-bound, **every PASS row survived its per-row re-derivation
+  at closeout** (row 10 via the scanner's nonce-bound report), and the record closed `complete` —
+  the entire Task-2 + Task-6 chain live, end-to-end, in a genuine Claude session.
+
+Receipts: `_idc-observability/run-t8hook-stale.txt`, `run-t8hook-current.txt`, snapshots
+`029-t8hook-baseline`/`030-t8hook-post`, receipt backup `t8hook-original-receipt.yaml.bak`.
+**With this, every verification item in the completion boundary is met.**
 
 ## Operator ratification items (rulings made under the 2026-07-17 overnight authorization, all ledger-recorded)
 
@@ -62,7 +72,7 @@ the engine's re-dispose double-journal (pre-existing, matches the known memory).
 
 ## What the operator can do next (each needs separate authorization)
 
-1. Confirm spend → run the hook-fidelity proof → close the last Task 8 item.
+1. ~~Confirm spend → run the hook-fidelity proof~~ **DONE 2026-07-17 morning** (see above).
 2. Merge/push/publish 4.1.0 (release = bump+CHANGELOG+push in this repo; no tags).
 3. Authorize the live knowledge-engine gate repair (#706/#707/#708) using the now-shipped
    `idc_gate_proof.py`/`idc_gate_repair.py` — dry-run first, exactly as the tool enforces.

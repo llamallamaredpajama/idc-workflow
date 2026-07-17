@@ -137,12 +137,15 @@ def _emit_context(command, plugin_root, opened):
 _REG_OPENED = "opened"          # the record is persisted (confirmed by a readback via the status path).
 _REG_DEFERRED = "deferred"      # no record was attempted — init defers, or non-governed / session-less.
 _REG_WRITE_FAILED = "write-failed"  # a governed, session-bearing repo where the ledger write did NOT persist.
+_REG_CONFLICT = "conflict"      # the ledger REFUSED this start: it would narrow/replace a stamped obligation.
 
 
 def _register_if_governed(payload, plugin_root, command):
     """Open (idempotent upsert) the command's active lifecycle record when this is a governed repo
     with a session to key on — the shared open-a-record path for BOTH the clean admit and the
-    allow-on-invalid-receipt fork. Returns one of `_REG_OPENED` / `_REG_DEFERRED` / `_REG_WRITE_FAILED`.
+    allow-on-invalid-receipt fork. Returns `(outcome, detail)`, where outcome is one of `_REG_OPENED` /
+    `_REG_DEFERRED` / `_REG_WRITE_FAILED` / `_REG_CONFLICT` and `detail` carries the refusal message
+    the caller must surface (empty for the non-refusal outcomes).
 
     `init` defers its start to commands/init.md (Task 6), and a non-governed repo / missing session has
     nothing to key on, so those return `_REG_DEFERRED` and the caller emits the bootstrap context
@@ -152,26 +155,37 @@ def _register_if_governed(payload, plugin_root, command):
     receipt-independently, so this works even when the receipt is invalid (the caller has already
     proven the runtime is NOT positively stale)."""
     if command in DEFERS_REGISTRATION:
-        return _REG_DEFERRED
+        return _REG_DEFERRED, ""
     cwd = payload.get("cwd") or os.getcwd()
     session_id = payload.get("session_id")
     if not (session_id and H.is_governed_repo(cwd)):
-        return _REG_DEFERRED
+        return _REG_DEFERRED, ""
     running = freshness.read_version(plugin_root) or ""
     try:
         C.register_start(cwd, session_id, command, running,
                          payload.get("command_args") or "", payload.get("command_source") or "")
-    except L.ObligationConflict:
-        # A narrowing/replacing restart was refused (round-6 BLOCKS 1, rule A): the PRIOR obligation
-        # record is left intact — its stamped obligation stands and the Stop closeout gate still
-        # enforces it. The readback below confirms that record is still open and reports it as such.
-        pass
+    except L.ObligationConflict as exc:
+        # A narrowing/replacing restart was REFUSED by the ledger (round-6 BLOCKS 1, rule A): the PRIOR
+        # obligation record is left fully intact (the ledger raises BEFORE persisting anything), and the
+        # caller REFUSES the expansion with this message.
+        #
+        # Round-7 BLOCKS 1: this used to be SWALLOWED (`pass`), and the readback below then found the OLD
+        # record and reported `_REG_OPENED` — so the gate ADMITTED the very restart the contract refuses.
+        # A second `/idc:think --doc second.json --unit V0` ran with its manifest never stamped, Think
+        # coverage at finish checked only the FIRST manifest, and the second manifest's units dropped
+        # silently (the 2026-07-12 incident class). Surfacing the conflict as a DISTINCT outcome is what
+        # makes the refusal reach the operator. It mirrors this file's OWN established principle: a
+        # workflow command whose obligation cannot be RECORDED is refused (`_REG_WRITE_FAILED` below) —
+        # an obligation that CONFLICTS is the same class, so it is refused the same way, with the honest
+        # remediation the direct CLI already gives ("finish or reset the active run before intaking a
+        # different manifest").
+        return _REG_CONFLICT, str(exc)
     # Ground-truth readback: report "opened" ONLY when the record is actually present via the status
     # read path. Trusting the writer's return would let a swallowed write be reported as opened.
     active = C.active_records(cwd, session_id)
     if any(c.get("command") == command for c in active):
-        return _REG_OPENED
-    return _REG_WRITE_FAILED
+        return _REG_OPENED, ""
+    return _REG_WRITE_FAILED, ""
 
 
 def _block(reason):
@@ -191,7 +205,12 @@ def _fail_closed_or_allow(payload, command, why, plugin_root):
     context claims a record exists, so one must actually be opened (Fix 2)."""
     if command in ALLOW_ON_INVALID:
         H.warn(f"idc-entry-gate: allowing recovery command /idc:{command} despite: {why}")
-        reg = _register_if_governed(payload, plugin_root, command)
+        reg, detail = _register_if_governed(payload, plugin_root, command)
+        if reg == _REG_CONFLICT:
+            # Defensive mirror of `_admit` (round-7 BLOCKS 1): a conflicting obligation is refused on
+            # THIS fork too. Expanding here would run the command against an obligation the ledger
+            # refused to stamp — the same unenforceable state the write-failure path already blocks.
+            _block(detail)
         # A recovery command may still expand to help the operator even if the record write failed —
         # but it must NOT claim a record exists (opened iff genuinely persisted). `_emit_context` is
         # terminal, so a `_REG_WRITE_FAILED` here still expands, just with the bootstrap context.
@@ -216,7 +235,16 @@ def _admit(payload, plugin_root, command):
     # Admitted on a clean, non-stale freshness signal. Open the lifecycle record (idempotent upsert)
     # when this is a governed repo with a session; init and non-governed / session-less cases emit the
     # bootstrap context instead (no false "record opened" claim).
-    reg = _register_if_governed(payload, plugin_root, command)
+    reg, detail = _register_if_governed(payload, plugin_root, command)
+    if reg == _REG_CONFLICT:
+        # The ledger REFUSED to stamp this start because it would narrow/replace the active record's
+        # obligation (round-7 BLOCKS 1). REFUSE the expansion with the conflict's OWN remediation — the
+        # same honest refusal the direct `contract start` CLI gives. This is not command-class-scoped:
+        # unlike an unverifiable receipt (where a recovery command must still run to DIAGNOSE), there is
+        # nothing here to diagnose — the prior record is intact and still enforced, and the operator's
+        # remedy is to finish or reset that run. Admitting instead would run a command whose obligation
+        # was never recorded, which the Stop gate could not enforce.
+        _block(detail)
     if reg == _REG_WRITE_FAILED:
         # The obligation could NOT be recorded (Fix 2). A workflow command must not run UNRECORDED —
         # the Stop gate could never enforce its closeout — so it is fail-closed/blocked. A recovery/

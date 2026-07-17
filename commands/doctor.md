@@ -396,13 +396,23 @@ merged-but-surviving branches (local + remote), and board↔issue drift, tiered 
 / RISKY / COHERENT. This is the same scanner `/idc:janitor` drives; doctor only ever *reports* it
 (**never** `--apply-safe`), so the strictly-read-only contract holds. Reuses `$num` / `$owner` from
 check 3 on github:
+Pass `--report-session` + `--report-nonce` (the `nonce` from this command's active record — read it
+with the `status` call in the lifecycle section below, BEFORE this row runs). That makes the SCANNER
+itself persist `{scanner_exit, produced_by}` bound to this record, which is what the closeout
+re-derives this row's PASS from — a row-10 PASS the scan never recorded is refused, so the flags are
+not optional:
 ```bash
+nonce=$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" status \
+  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --json \
+  | python3 -c 'import json,sys; print(next((r.get("nonce","") for r in json.load(sys.stdin)["active"] if r.get("command")=="doctor"),""))')
 backend=$(grep -E '^backend:' docs/workflow/tracker-config.yaml | awk '{print $2}')
 if [ "$backend" = "github" ]; then
   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_janitor.py" \
-    --repo "$PWD" --backend github --owner "$owner" --project "$num" --check-journal-divergence
+    --repo "$PWD" --backend github --owner "$owner" --project "$num" --check-journal-divergence \
+    --report-session "$CLAUDE_CODE_SESSION_ID" --report-nonce "$nonce"
 else
-  python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_janitor.py" --repo "$PWD" --tracker "$PWD/TRACKER.md" --check-journal-divergence
+  python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_janitor.py" --repo "$PWD" --tracker "$PWD/TRACKER.md" \
+    --check-journal-divergence --report-session "$CLAUDE_CODE_SESSION_ID" --report-nonce "$nonce"
 fi
 ```
 Read the scanner's exit code + its `janitor: N safe-fix, M risky, K report-only` summary:
@@ -466,11 +476,19 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   persisted doctor report** (`.idc-doctor-report.json`), requires it **bound to this record's nonce**, and
   **re-validates the full row contract**: rows must be **exactly ids 1..10** (unique), each `result` a
   legal outcome, the **script-backed row 10 carrying `{script, exit}`**, and the **verdict EQUAL to the
-  derived aggregation** of the row outcomes. It also **spot-re-runs a cheap read-only check** (the
-  install-receipt fingerprint verify, row 5) and refuses a reported PASS its re-run contradicts. A
-  forged/absent report, one not bound to the record, a 2-row / arbitrary report, an inconsistent verdict,
-  or a row outcome that disagrees with its re-run are all refused (rule B). Evidence refs: `refs:{}` (the
-  report is the proof).
+  derived aggregation** of the row outcomes.
+  **Then EVERY row claiming `PASS` is re-derived** — the closeout independently re-runs that row's own
+  cheap, read-only check (rows 1–9 directly: the settings opt-in, `gh auth status`, the tracker/board
+  probe, the scaffold `ls`, the receipt parse, `install-pi.sh --check`, the mirror links, the running
+  version, board readability; row 10 via the scanner's own `--report-session`/`--report-nonce` report,
+  whose `scanner_exit` must equal the row's recorded `exit`). **Report the truth and this costs you
+  nothing** — a `FAIL` or `SKIP` row is *never* contested, so an honest run on a broken repo still closes
+  `complete`. But a `PASS` the closeout **cannot re-establish is refused, not assumed** (rule B): a check
+  that could not run — `gh` absent, a board that would not read — is a `SKIP`, never a pass. If your
+  environment degraded between the run and the closeout (you lost `gh` auth, the board went away), just
+  **re-run `/idc:doctor`**. A forged/absent report, one not bound to the record, a 2-row / arbitrary
+  report, an inconsistent verdict, or any PASS row its re-run does not corroborate are all refused.
+  Evidence refs: `refs:{}` (the report is the proof).
 - **`blocked_external`** — doctor could not even establish its git-hygiene row (e.g. the cwd is not a
   git repo): run the scanner with `--report-session`/`--report-nonce` so it records `scanner_exit:2`
   bound to this record, then cite `blocker:{helper:"idc_git_janitor.py", exit:2, diagnostic}` (the only

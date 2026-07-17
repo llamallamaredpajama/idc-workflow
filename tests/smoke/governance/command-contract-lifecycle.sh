@@ -65,6 +65,9 @@ stop_payload() {
 #     (space list of `pr:issue` pairs — the PR↔issue linkage a build receipt is proven against).
 #   * `gh issue view <N> --json body -q .body` → prints $FAKE_ISSUE_DIR/<N>.body, or EXITS NONZERO when
 #     absent (a nonexistent gate/pointer/child).
+#   * `gh auth status` → the real gh reports on STDERR, so this does too: a token-scope line carrying
+#     'project' (doctor row 2's PASS condition). $FAKE_GH_NO_PROJECT=1 drops the project scope (logged
+#     in, wrong scope); $FAKE_GH_AUTH_ERROR=1 EXITS NONZERO (not logged in).
 write_fake_gh() {  # $1 = path to the fake gh
   python3 - "$1" <<'PY'
 import os, sys
@@ -72,6 +75,14 @@ path = sys.argv[1]
 src = r'''#!/usr/bin/env python3
 import json, os, sys
 args = sys.argv[1:]
+if args[:2] == ["auth", "status"]:
+    if os.environ.get("FAKE_GH_AUTH_ERROR") == "1":
+        sys.stderr.write("fake gh: You are not logged into any GitHub hosts\n"); raise SystemExit(1)
+    scopes = "'gist', 'read:org', 'repo'" if os.environ.get("FAKE_GH_NO_PROJECT") == "1" \
+        else "'gist', 'project', 'read:org', 'repo'"
+    sys.stderr.write("github.com\n  - Logged in to github.com account fake-user\n"
+                     "  - Token scopes: %s\n" % scopes)
+    raise SystemExit(0)
 if args[:2] == ["pr", "view"] and len(args) >= 3:
     if os.environ.get("FAKE_PR_ERROR") == "1":
         sys.stderr.write("fake gh: pr read failed\n"); raise SystemExit(2)
@@ -127,8 +138,14 @@ print(next((c.get("nonce","") for c in d["commands"] if c.get("state")=="active"
 # doctor_report <repo> <session> <verdict> — write THIS session's persisted doctor report the way the
 # doctor RUN does (round-5 finding 6): the FULL doctor row contract — all rows 1..10 (unique ids), legal
 # outcomes, the script-backed row 10 carrying {script,exit}, a verdict EQUAL to the derived aggregation,
-# bound to the active record's nonce. Row 5 (install receipt) is SKIP (the hermetic repos carry no
-# receipt), so a FAIL verdict is driven by a FAIL row 2.
+# bound to the active record's nonce.
+#
+# The rows are HONEST for a BARE hermetic repo (round-7 BLOCKS 2): every check is SKIP ("could not
+# determine") because none of them can be established here — no settings opt-in, no gh, no scaffold, no
+# receipt, no Pi/Codex mirror, no scanner run. That is exactly what a real doctor would report, and a
+# SKIP row is never contested by the closeout (only a claimed PASS is). A FAIL verdict is driven by a
+# FAIL row 2 (a FAIL row is likewise never contested — doctor completing is not the repo passing).
+# The all-rows-PASS path is proven separately, against a FULLY-PROVISIONED fixture, in case (7c-r7).
 doctor_report() {
   local n; n="$(rec_nonce "$1" "$2" doctor)"
   DR_VERDICT="$3" DR_NONCE="$n" python3 - "$CR" "$1" "$2" <<'PY' || gov_fail "could not write doctor report"
@@ -137,14 +154,14 @@ cr, repo, sess = sys.argv[1:]
 verdict, nonce = os.environ["DR_VERDICT"], os.environ["DR_NONCE"]
 rows = []
 for i in range(1, 11):
-    if i == 5:
-        rows.append({"id": 5, "result": "SKIP"})          # no install receipt in the hermetic repos
-    elif i == 10:
-        rows.append({"id": 10, "result": "PASS", "script": "idc_git_janitor.py", "exit": 0})
+    if i == 10:
+        # script-backed: the schema requires {script,exit} whatever the result. Exit 2 = the scanner
+        # could not establish ground truth, which is doctor's own SKIP for this row.
+        rows.append({"id": 10, "result": "SKIP", "script": "idc_git_janitor.py", "exit": 2})
     elif i == 2 and verdict == "FAIL":
         rows.append({"id": 2, "result": "FAIL"})
     else:
-        rows.append({"id": i, "result": "PASS"})
+        rows.append({"id": i, "result": "SKIP"})
 payload = {"rows": rows, "verdict": verdict, "nonce": nonce}
 subprocess.run([sys.executable, cr, "--cwd", repo, "write", "--kind", "doctor", "--session", sess,
                 "--payload-json", json.dumps(payload)], check=True, stdout=subprocess.DEVNULL)
@@ -535,6 +552,169 @@ contract finish --repo "$REPO3" --session "$S3" --command doctor --status comple
   --evidence-json '{"schema_version":1,"refs":{}}' \
   || gov_fail "(7c) doctor complete backed by an honest full 10-row FAIL report was rejected"
 echo "  ok (7c, F6) doctor complete enforces the full row contract (writer + closeout schema gate; verdict==aggregation; row-5 spot re-run; 2-row/inconsistent refused; a FAIL verdict still completes; no_action illegal)"
+
+# (7c-r7, ROUND-7 BLOCKS 2) EVERY row claiming PASS must survive a read-only re-derivation — not just
+# row 5. Wave 6 contested row 5 alone, so a report forging PASS on any other row closed clean: the
+# reviewer's probe forged row 2 (a gh read that never ran) and the lead's went further with row 4 (a
+# governance scaffold deterministically ABSENT in the repo) — both `writer=ACCEPTED
+# doctor_closeout_ok=True`. That is the terminal posture's named incident class: forged closeout
+# evidence, a failed read counted as a pass.
+#
+# Each negative below forges exactly ONE PASS row (every other row SKIP) and asserts the refusal names
+# THAT row — a blanket/incidental refusal would otherwise pass these vacuously. The positive proves no
+# false-refusal: a fully-provisioned repo whose rows are ALL genuinely re-derivable still closes.
+# Red-when-broken (MANDATORY, reviewed): make any one re-deriver unconditionally corroborate (e.g.
+# `_rederive_doctor_row4` → `return True, ""`) ⇒ that row's negative goes GREEN. Receipts in the report.
+#
+# one_pass_report <repo> <session> <row-id> — a schema-valid report where every row is SKIP except
+# <row-id>, which claims PASS (row 10 always carries its {script,exit}). It goes through the REAL
+# WRITER, which ACCEPTS it: `validate_doctor_payload` is schema-only BY DESIGN (the closeout is the
+# single guarded truth door — the row-5 precedent), so the closeout is what is under test here.
+one_pass_report() {
+  local n; n="$(rec_nonce "$1" "$2" doctor)"
+  DR_ROW="$3" DR_NONCE="$n" python3 - "$CR" "$1" "$2" <<'PY'
+import json, os, subprocess, sys
+cr, repo, sess = sys.argv[1:]
+want, nonce = int(os.environ["DR_ROW"]), os.environ["DR_NONCE"]
+rows = []
+for i in range(1, 11):
+    row = {"id": i, "result": "PASS" if i == want else "SKIP"}
+    if i == 10:
+        row["script"], row["exit"] = "idc_git_janitor.py", 0
+    rows.append(row)
+payload = {"rows": rows, "verdict": "PASS", "nonce": nonce}
+p = subprocess.run([sys.executable, cr, "--cwd", repo, "write", "--kind", "doctor", "--session", sess,
+                    "--payload-json", json.dumps(payload)], stdout=subprocess.DEVNULL)
+sys.exit(p.returncode)
+PY
+}
+# refuse_row <repo> <session> <row-id> <why> <label> — forge that row's PASS, assert the closeout
+# REFUSES, and assert the refusal is ABOUT that row (not an incidental failure elsewhere).
+refuse_row() {
+  one_pass_report "$1" "$2" "$3" \
+    || gov_fail "(7c-r7) the report WRITER refused a schema-valid row-$3-PASS payload (it must stay schema-only; the closeout is the truth door)"
+  local out
+  out="$(PATH="$FAKE_BIN:$PATH" contract finish --repo "$1" --session "$2" --command doctor \
+          --status complete --evidence-json '{"schema_version":1,"refs":{}}' 2>&1)" \
+    && gov_fail "(7c-r7, $5) a doctor complete forging row $3 PASS was ACCEPTED — $4"
+  printf '%s' "$out" | grep -q "row $3" \
+    || gov_fail "(7c-r7, $5) the closeout refused, but NOT about row $3 (an incidental refusal proves nothing): $out"
+}
+# A BARE repo: no scaffold, no settings opt-in, no receipt, no scanner report — so rows 1/2/4/5/10 are
+# each deterministically NOT re-derivable here.
+REPO_D7="$WORK/repo-d7"; mkdir -p "$REPO_D7/docs/workflow"
+printf 'backend: filesystem\n' > "$REPO_D7/docs/workflow/tracker-config.yaml"
+python3 "$GOV_TRK" --tracker "$REPO_D7/TRACKER.md" init >/dev/null || gov_fail "(7c-r7) could not init the REPO_D7 board"
+SD7="sd7-$$-$(basename "$WORK")"
+contract start --repo "$REPO_D7" --session "$SD7" --command doctor --plugin-root "$GOV_PLUGIN" --args 'diag' --source user >/dev/null \
+  || gov_fail "(7c-r7) could not open the REPO_D7 doctor record"
+# (r7-a) THE LEAD'S PROBE: row 4 (governance scaffold) PASS on a repo with no WORKFLOW.md and no
+#        pillar-matrices — locally, deterministically FALSE.
+refuse_row "$REPO_D7" "$SD7" 4 "the scaffold is deterministically ABSENT (no WORKFLOW.md, no pillar-matrices)" "lead probe: forged row-4 PASS"
+# (r7-b) THE REVIEWER'S PROBE: row 2 (gh auth + project scope) PASS with a FAILING fake gh (logged out).
+one_pass_report "$REPO_D7" "$SD7" 2 || gov_fail "(7c-r7) the writer refused the row-2 payload"
+if FAKE_GH_AUTH_ERROR=1 PATH="$FAKE_BIN:$PATH" contract finish --repo "$REPO_D7" --session "$SD7" \
+     --command doctor --status complete --evidence-json '{"schema_version":1,"refs":{}}' >/dev/null 2>&1; then
+  gov_fail "(7c-r7, reviewer probe) a doctor complete forging row-2 PASS was ACCEPTED while a real gh auth read FAILS (a failed read counted as a pass)"
+fi
+# (r7-b2) row 2 PASS with gh ABSENT from PATH entirely → refused (an unrunnable read never proves a pass).
+one_pass_report "$REPO_D7" "$SD7" 2 || gov_fail "(7c-r7) the writer refused the row-2 payload"
+EMPTY_BIN="$WORK/empty-bin"; mkdir -p "$EMPTY_BIN"
+if PATH="$EMPTY_BIN" contract finish --repo "$REPO_D7" --session "$SD7" --command doctor \
+     --status complete --evidence-json '{"schema_version":1,"refs":{}}' >/dev/null 2>&1; then
+  gov_fail "(7c-r7) a doctor complete forging row-2 PASS was ACCEPTED with gh ABSENT from PATH (rule B)"
+fi
+# (r7-b3) row 2 PASS while gh is logged in WITHOUT the project scope → refused (the row's own probe).
+one_pass_report "$REPO_D7" "$SD7" 2 || gov_fail "(7c-r7) the writer refused the row-2 payload"
+if FAKE_GH_NO_PROJECT=1 PATH="$FAKE_BIN:$PATH" contract finish --repo "$REPO_D7" --session "$SD7" \
+     --command doctor --status complete --evidence-json '{"schema_version":1,"refs":{}}' >/dev/null 2>&1; then
+  gov_fail "(7c-r7) a doctor complete forging row-2 PASS was ACCEPTED while the token carries NO project scope"
+fi
+# (r7-c) row 10 (board↔git reconciliation) PASS with NO nonce-bound scanner report → refused: the row's
+#        exit must come from the SCAN itself (--report-session/--report-nonce), never a caller integer.
+refuse_row "$REPO_D7" "$SD7" 10 "no janitor scanner report exists for this session" "forged row-10 PASS, no scanner report"
+# (r7-d) row 1 (plugin scoping) PASS with no project-scope opt-in in the repo's settings → refused.
+refuse_row "$REPO_D7" "$SD7" 1 "the repo records no project-scope opt-in" "forged row-1 PASS"
+# (r7-e) row 5 (install receipt) PASS on a no-receipt repo → refused (the wave-6 row-5 rule, preserved).
+refuse_row "$REPO_D7" "$SD7" 5 "no install receipt that parses" "forged row-5 PASS (row-5 rule preserved)"
+
+# (r7-f) NO FALSE-REFUSAL: a FULLY-PROVISIONED repo whose rows are all genuinely re-derivable closes
+#        `complete`. This is the load-bearing counterweight — a re-derivation that refused everything
+#        would satisfy every negative above and still be worthless.
+REPO_DL="$WORK/repo-dl"
+mkdir -p "$REPO_DL/docs/workflow/pillar-matrices" "$REPO_DL/docs/workflow/code-reviews" "$REPO_DL/.claude"
+printf 'backend: filesystem\n' > "$REPO_DL/docs/workflow/tracker-config.yaml"
+printf '# workflow\n' > "$REPO_DL/WORKFLOW.md"                    # row 4
+printf 'version: 2\n' > "$REPO_DL/WORKFLOW-config.yaml"           # row 4
+printf '{"enabledPlugins":{"idc@idc-workflow":true}}\n' > "$REPO_DL/.claude/settings.json"   # row 1
+python3 "$GOV_TRK" --tracker "$REPO_DL/TRACKER.md" init >/dev/null || gov_fail "(7c-r7) could not init the REPO_DL board"  # rows 3 + 9
+python3 "$RECEIPT" stamp --repo "$REPO_DL" --out "$REPO_DL/docs/workflow/install-receipt.yaml" \
+  --plugin-version "$RUN_VER" WORKFLOW.md docs/workflow/tracker-config.yaml >/dev/null \
+  || gov_fail "(7c-r7) could not stamp the REPO_DL install receipt"                          # row 5
+# A real git repo with a commit, so the row-10 scanner can establish ground truth (exit 0/1, not 2).
+( cd "$REPO_DL" && git init -q . && git config user.email t@example.com && git config user.name t \
+    && git add -A && git commit -qm init ) >/dev/null 2>&1 \
+  || gov_fail "(7c-r7) could not make REPO_DL a git repo for the row-10 scanner"
+# A fake $HOME: the Codex mirror INSTALLED with a resolving adapter (row 7), and NO user-scope
+# settings.json — so row 1's global-leak half is satisfied (absent is not `true`).
+FAKE_HOME="$WORK/fake-home"
+mkdir -p "$FAKE_HOME/.agents/skills/idc-adapter-codex"
+: > "$FAKE_HOME/.agents/.idc-install-state"
+printf '# codex adapter\n' > "$FAKE_HOME/.agents/skills/idc-adapter-codex/SKILL.md"
+SDL="sdl-$$-$(basename "$WORK")"
+contract start --repo "$REPO_DL" --session "$SDL" --command doctor --plugin-root "$GOV_PLUGIN" --args 'diag' --source user >/dev/null \
+  || gov_fail "(7c-r7) could not open the REPO_DL doctor record"
+DL_N="$(rec_nonce "$REPO_DL" "$SDL" doctor)"
+[ -n "$DL_N" ] || gov_fail "(7c-r7) the REPO_DL doctor record carries no nonce"
+# Run the REAL row-10 scanner the way commands/doctor.md now specifies — it writes the nonce-bound
+# report the closeout re-derives row 10 from. Its OWN exit is what the row must record.
+python3 "$GOV_PLUGIN/scripts/idc_git_janitor.py" --repo "$REPO_DL" --tracker "$REPO_DL/TRACKER.md" \
+  --check-journal-divergence --report-session "$SDL" --report-nonce "$DL_N" >/dev/null 2>&1
+DL_SCAN=$?
+case "$DL_SCAN" in
+  0|1) ;;
+  *) gov_fail "(7c-r7) the row-10 scanner could not establish ground truth in REPO_DL (exit $DL_SCAN) — a PASS row 10 needs a completed scan; fixture broken" ;;
+esac
+# Row 6 (Pi runtime) is honestly SKIP: Pi is genuinely not installed in the hermetic suite, which IS
+# doctor's own SKIP for that row (and a SKIP is never contested). Every other row claims PASS and is
+# genuinely re-derivable in this fixture.
+legit_report() {  # $1 = nonce
+  DR_NONCE="$1" DR_EXIT="$DL_SCAN" python3 - "$CR" "$REPO_DL" "$SDL" <<'PY'
+import json, os, subprocess, sys
+cr, repo, sess = sys.argv[1:]
+nonce, scan = os.environ["DR_NONCE"], int(os.environ["DR_EXIT"])
+rows = []
+for i in range(1, 11):
+    if i == 6:
+        rows.append({"id": 6, "result": "SKIP"})       # Pi genuinely not installed → doctor's own SKIP
+    elif i == 10:
+        rows.append({"id": 10, "result": "PASS", "script": "idc_git_janitor.py", "exit": scan})
+    else:
+        rows.append({"id": i, "result": "PASS"})
+p = subprocess.run([sys.executable, cr, "--cwd", repo, "write", "--kind", "doctor", "--session", sess,
+                    "--payload-json", json.dumps({"rows": rows, "verdict": "PASS", "nonce": nonce})],
+                   stdout=subprocess.DEVNULL)
+sys.exit(p.returncode)
+PY
+}
+legit_report "$DL_N" || gov_fail "(7c-r7) could not write the legitimate doctor report"
+OUT_DL="$(HOME="$FAKE_HOME" PATH="$FAKE_BIN:$PATH" contract finish --repo "$REPO_DL" --session "$SDL" \
+  --command doctor --status complete --evidence-json '{"schema_version":1,"refs":{}}' 2>&1)" \
+  || gov_fail "(7c-r7, no-false-refusal) a doctor complete whose PASS rows are ALL genuinely re-derivable was REJECTED: $OUT_DL"
+# (r7-g) LIVE truth, not a one-time blessing: the SAME legitimate report is refused once a re-derivable
+#        truth degrades (the row-1 opt-in is removed between the run and the closeout).
+contract start --repo "$REPO_DL" --session "$SDL" --command doctor --plugin-root "$GOV_PLUGIN" --args 'diag' --source user >/dev/null
+DL_N2="$(rec_nonce "$REPO_DL" "$SDL" doctor)"
+python3 "$GOV_PLUGIN/scripts/idc_git_janitor.py" --repo "$REPO_DL" --tracker "$REPO_DL/TRACKER.md" \
+  --check-journal-divergence --report-session "$SDL" --report-nonce "$DL_N2" >/dev/null 2>&1
+legit_report "$DL_N2" || gov_fail "(7c-r7) could not re-write the legitimate doctor report"
+mv "$REPO_DL/.claude/settings.json" "$REPO_DL/.claude/settings.json.off"   # the row-1 opt-in degrades
+if HOME="$FAKE_HOME" PATH="$FAKE_BIN:$PATH" contract finish --repo "$REPO_DL" --session "$SDL" \
+     --command doctor --status complete --evidence-json '{"schema_version":1,"refs":{}}' >/dev/null 2>&1; then
+  gov_fail "(7c-r7, r7-g) the SAME report still closed after the row-1 opt-in was removed — the re-derivation is not reading LIVE truth"
+fi
+mv "$REPO_DL/.claude/settings.json.off" "$REPO_DL/.claude/settings.json"
+echo "  ok (7c-r7, BLOCKS 2) EVERY PASS-claiming doctor row is re-derived: forged row 1/2/4/5/10 PASSes are refused (naming the row), a failed/absent/wrong-scope gh read never counts as a pass, a fully-provisioned repo whose PASS rows are all genuinely re-derivable still closes complete, and the same report stops closing once a truth degrades"
 
 # (7d, F1) blocked_external: an allowlisted helper + NONZERO exit + diagnostic; a zero exit, a phantom
 # helper, a helper NOT belonging to the command, and an invented/mismatched drain are all refused.

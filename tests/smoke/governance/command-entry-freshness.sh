@@ -318,4 +318,62 @@ no_active "$REPO_G3" S-finishfail doctor \
   && gov_fail "(g3) the command is NO LONGER active after a FAILED finish write (closeout falsely recorded)"
 echo "  ok (g3) a failed command_finish write reports failure (non-zero) AND leaves the command active"
 
-echo "PASS: the command entry gate refuses a stale runtime with an actionable reload instruction, admits a current runtime while opening its lifecycle record, opens a record for a recovery command allowed on an invalid receipt, blocks a stale runtime even when the receipt is invalid (positive-stale precedence), does not crash on a wrong-shape plugin manifest (Fix 1), and honestly handles a failed ledger write (Fix 2): a workflow command is BLOCKED and unrecorded (g1), a recovery command still expands with bootstrap context and no false 'record opened' claim (g2), and a failed command_finish reports failure while leaving the command active (g3); plus the admission-category matrix (workflow fail-closed on an invalid receipt; recovery/janitor/init may expand; all blocked when positively stale)"
+# (h, ROUND-7 BLOCKS 1) the REAL entry hook must surface an ObligationConflict as a DENY. A Think
+#      re-start binding a DIFFERENT intake manifest is refused by the ledger (rule A: obligations are
+#      monotonic — a restart may only ADD). The gate used to SWALLOW that refusal, then read back the
+#      OLD record and report it as "opened" → the expansion was ADMITTED, the second manifest was never
+#      stamped, and Think's finish-time coverage checked only the FIRST manifest — so the second
+#      manifest's units dropped silently (the 2026-07-12 incident class). Regression 16e covers the
+#      direct `contract start` CLI only; THIS drives the hook that admits actual Claude commands.
+#      Red-when-broken: restore the `except L.ObligationConflict: pass` swallow ⇒ (h2)'s block assertion
+#      FAILs (the gate admits the cross-manifest restart again).
+REPO_H="$WORK/repo-h"; mkdir -p "$REPO_H/docs/workflow"
+printf 'backend: filesystem\n' > "$REPO_H/docs/workflow/tracker-config.yaml"
+printf 'receipt_version: 2\nplugin_version: 4.0.0\n' > "$REPO_H/docs/workflow/install-receipt.yaml"
+# think_field <repo> <session> <field> — one field off the ACTIVE think record (intake_manifest /
+# intake_units), so the assertions read the ledger's ground truth, not the hook's stdout.
+think_field() {
+  python3 -c 'import json,sys
+d=json.load(open(sys.argv[1]+"/.idc-session-state.json"))
+r=next((c for c in d["commands"] if c.get("state")=="active" and c.get("session_id")==sys.argv[2] and c.get("command")=="think"),{})
+v=r.get(sys.argv[3])
+print(",".join(v) if isinstance(v,list) else (v or ""))' "$1" "$2" "$3" 2>/dev/null
+}
+# (h1) the FIRST intake-mode think is admitted and stamps its manifest + unit.
+OUT="$(emit_expansion_g idc:think '--doc first.json --unit U0' "$REPO_H" S-conflict | python3 "$ENTRY_GATE" "$CURRENT_PLUGIN")"
+printf '%s' "$OUT" | grep -q 'additionalContext' \
+  || gov_fail "(h1) the first intake-mode think was not admitted"
+[ "$(think_field "$REPO_H" S-conflict intake_manifest)" = "first.json" ] \
+  || gov_fail "(h1) the first think did not stamp intake_manifest=first.json"
+[ "$(think_field "$REPO_H" S-conflict intake_units)" = "U0" ] \
+  || gov_fail "(h1) the first think did not stamp intake_units=U0"
+# (h2) a SAME-session restart binding a DIFFERENT manifest → BLOCKED, carrying the conflict's own
+#      remediation (the same honest refusal the direct CLI gives), and NO admission context.
+OUT="$(emit_expansion_g idc:think '--doc second.json --unit V0' "$REPO_H" S-conflict | python3 "$ENTRY_GATE" "$CURRENT_PLUGIN")"; RC=$?
+[ "$RC" -eq 0 ] \
+  || gov_fail "(h2) the entry gate did NOT exit 0 on a cross-manifest restart (a crash, not a clean block)"
+printf '%s' "$OUT" | grep -q '"decision": "block"' \
+  || gov_fail "(h2) a cross-manifest think restart was ADMITTED by the entry hook (the ObligationConflict was swallowed — round-7 BLOCKS 1)"
+printf '%s' "$OUT" | grep -q 'finish or reset the active run before intaking a different manifest' \
+  || gov_fail "(h2) the refusal did not carry the ObligationConflict's own remediation message"
+if printf '%s' "$OUT" | grep -q 'additionalContext'; then
+  gov_fail "(h2) a blocked cross-manifest restart still emitted admission context"
+fi
+# (h3) the PRIOR obligation is intact: the record still owes first.json#U0, and NO second manifest was
+#      stamped (the ledger raises BEFORE persisting anything).
+[ "$(think_field "$REPO_H" S-conflict intake_manifest)" = "first.json" ] \
+  || gov_fail "(h3) the refused restart REPLACED the stamped manifest (the prior obligation was not left intact)"
+[ "$(think_field "$REPO_H" S-conflict intake_units)" = "U0" ] \
+  || gov_fail "(h3) the refused restart altered the stamped intake_units"
+python3 "$CONTRACT" status --repo "$REPO_H" --session S-conflict --json \
+  | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if sum(1 for r in d["active"] if r.get("command")=="think")==1 else 1)' \
+  || gov_fail "(h3) the refused restart opened a SECOND think record (one active record per session+command)"
+# (h4) NO OVER-BLOCK: a benign SAME-manifest restart still admits and UNIONS its units (rule A adds).
+OUT="$(emit_expansion_g idc:think '--doc first.json --unit U1' "$REPO_H" S-conflict | python3 "$ENTRY_GATE" "$CURRENT_PLUGIN")"
+printf '%s' "$OUT" | grep -q 'additionalContext' \
+  || gov_fail "(h4) a benign SAME-manifest think restart was BLOCKED (the conflict deny over-blocks)"
+[ "$(think_field "$REPO_H" S-conflict intake_units)" = "U0,U1" ] \
+  || gov_fail "(h4) a same-manifest restart did not UNION its units (got '$(think_field "$REPO_H" S-conflict intake_units)', want 'U0,U1')"
+echo "  ok (h) the entry hook DENIES a cross-manifest think restart with the conflict's remediation, leaves the prior obligation intact, and still admits a benign same-manifest restart (unioning units)"
+
+echo "PASS: the command entry gate refuses a stale runtime with an actionable reload instruction, admits a current runtime while opening its lifecycle record, opens a record for a recovery command allowed on an invalid receipt, blocks a stale runtime even when the receipt is invalid (positive-stale precedence), does not crash on a wrong-shape plugin manifest (Fix 1), and honestly handles a failed ledger write (Fix 2): a workflow command is BLOCKED and unrecorded (g1), a recovery command still expands with bootstrap context and no false 'record opened' claim (g2), and a failed command_finish reports failure while leaving the command active (g3); DENIES a cross-manifest think restart with the ObligationConflict's own remediation while leaving the prior obligation intact and still admitting a benign same-manifest restart (h); plus the admission-category matrix (workflow fail-closed on an invalid receipt; recovery/janitor/init may expand; all blocked when positively stale)"

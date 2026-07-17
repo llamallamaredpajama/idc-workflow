@@ -1625,6 +1625,310 @@ def _claim_init_scaffolded(refs: dict, repo: str, session: str) -> CloseoutResul
     return CloseoutResult(True, "ok", "init scaffold re-derived (v2 receipt + anchor + enablement)", {})
 
 
+# ── doctor per-row re-derivation (round-7 BLOCKS 2) ───────────────────────────────────────────────
+# EVERY doctor row claiming PASS is cross-checked against a cheap, READ-ONLY re-derivation of that
+# row's OWN semantics (commands/doctor.md defines each check; keeping each re-run faithful to its row
+# is what stops a legitimate PASS from false-refusing). Row 5's precedent, generalized to the table:
+#
+#   * only a CLAIMED PASS is contested — a FAIL or SKIP row is NEVER refused (doctor completing is not
+#     the repo passing, so an honest run that reports a broken repo still closes `complete`);
+#   * a PASS whose re-derivation cannot be ESTABLISHED is REFUSED, not assumed (rule B — an unreadable
+#     truth is a refusal; a read that never ran can never prove a pass).
+#
+# Wave 6 spot-re-ran ONLY row 5, so a report forging PASS on any other row closed clean — including a
+# governance scaffold that is deterministically absent and a gh read that never ran: the terminal
+# posture's named incident class (forged closeout evidence; a failed read counted as a pass).
+#
+# The WRITER (`idc_command_report.validate_doctor_payload`) deliberately stays SCHEMA-ONLY: the
+# closeout is the single guarded truth door (the row-5 precedent), so an environment-dependent probe
+# never runs at two doors and drifts between them.
+_PLUGIN_ROOT = os.path.dirname(_HERE)          # the plugin root: this contract lives in <root>/scripts/
+_PROBE_TIMEOUT_S = 60                          # a read-only shell probe (install-pi.sh --check)
+_GH_PROJECT_SCOPE_RE = re.compile(r"Token scopes:.*'project'")
+
+
+def _json_document(path: str):
+    """A parsed JSON document at `path`, or None (absent/unreadable/unparseable — the caller fails
+    closed). Read tolerantly: a settings file that cannot be read never silently reads as a pass."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, UnicodeError, ValueError):
+        return None
+
+
+def _strict_backend(repo: str):
+    """`(backend, project)` resolved STRICTLY from the repo's tracker config, or `(None, None)` when the
+    config is ABSENT or present-but-unreadable/malformed.
+
+    Unlike `_repo_backend` this NEVER falls back to `filesystem` on a read failure (round-6 BLOCKS 2,
+    rule B). It also refuses a GENUINELY-ABSENT config, because doctor row 3's OWN semantics are
+    "missing → FAIL": a row-3 PASS must be backed by a config that is actually there (the legacy
+    absent-config-means-filesystem meaning belongs to `_board_absent`, not to this row)."""
+    cfg = _confined_repo_path(repo, _GOVERNANCE_ANCHOR)
+    if cfg is None or not os.path.isfile(cfg):
+        return None, None
+    try:
+        import idc_next_action as NEXT  # noqa: E402 — the one constrained config reader
+        return NEXT._read_tracker_config(repo)
+    except Exception:  # noqa: BLE001 — a present-but-malformed config is indeterminate (rule B)
+        return None, None
+
+
+def _gh_auth_status_text(repo: str):
+    """The combined stdout+stderr of a REAL `gh auth status`, or None (gh absent, or a nonzero exit —
+    not logged in). `gh auth status` reports on STDERR, which is why doctor row 2's own recipe reads
+    `2>&1`; this mirrors it rather than reusing `_gh_capture` (stdout-only)."""
+    try:
+        proc = subprocess.run(["gh", "auth", "status"],
+                              cwd=repo if _ne_str(repo) and os.path.isdir(repo) else None,
+                              capture_output=True, text=True, timeout=_GH_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return (proc.stdout or "") + (proc.stderr or "")
+
+
+def _filesystem_board_loads(repo: str) -> bool:
+    """True iff the filesystem tracker (`TRACKER.md` at the repo root) LOADS via the shared reader —
+    doctor row 9's own producer (`idc_tracker_fs.load`) exits nonzero on a missing/corrupt file, which
+    is exactly the outage the row must SKIP on. Any read failure → False (never a clean scan)."""
+    try:
+        import idc_next_action as NEXT  # noqa: E402
+        NEXT._load_tracker_issues(repo)
+        return True
+    except Exception:  # noqa: BLE001 — an unreadable board is never a readable one
+        return False
+
+
+def _rederive_doctor_row1(repo: str, session: str, row: dict):
+    """Row 1 — plugin scoped to THIS repo (no global leak). PASS requires the repo's merged
+    `.claude/settings.json` + `.claude/settings.local.json` opt-in (`enabledPlugins["idc@idc-workflow"]
+    == true`) AND the user-scope switch NOT `true`. `$HOME` is honored (expanduser), so the re-run reads
+    the same user settings doctor read. The merge mirrors the row's own `jq -s 'add // {}'` — a SHALLOW
+    top-level merge where the later file wins."""
+    merged = {}
+    for rel in (".claude/settings.json", ".claude/settings.local.json"):
+        path = _confined_repo_path(repo, rel)
+        if path is None or not os.path.isfile(path):
+            continue                                   # missing is fine (the row says so)
+        data = _json_document(path)
+        if data is None:
+            return False, f"row 1 (plugin scoping) claims PASS, but the repo's {rel} could not be read/parsed"
+        if isinstance(data, dict):
+            merged.update(data)
+    plugins = merged.get("enabledPlugins")
+    if not isinstance(plugins, dict) or plugins.get(_IDC_PLUGIN_NAME) is not True:
+        return False, ("row 1 (plugin scoping) claims PASS, but the repo's .claude settings record no "
+                       f"project-scope opt-in (enabledPlugins[\"{_IDC_PLUGIN_NAME}\"] == true) — that is "
+                       "the row's SKIP, not a PASS")
+    user_settings = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
+    if os.path.isfile(user_settings):
+        data = _json_document(user_settings)
+        if data is None:
+            return False, ("row 1 (plugin scoping) claims PASS, but the user-scope ~/.claude/settings.json "
+                           "could not be read/parsed — the global-leak half of the row cannot be "
+                           "re-established (rule B)")
+        plugins = data.get("enabledPlugins") if isinstance(data, dict) else None
+        if isinstance(plugins, dict) and plugins.get(_IDC_PLUGIN_NAME) is True:
+            return False, ("row 1 (plugin scoping) claims PASS, but the USER-scope switch is true — IDC is "
+                           "leaked to every repo on the machine (the row's own FAIL condition)")
+    return True, ""
+
+
+def _rederive_doctor_row2(repo: str, session: str, row: dict):
+    """Row 2 — gh authenticated WITH the `project` scope. Re-runs the row's OWN probe (`gh auth status`
+    matched against `Token scopes:.*'project'`). gh absent/erroring ⇒ the PASS is REFUSED (fail closed):
+    a read that could not run never proves the token carries the scope — the reviewer's exact incident
+    shape (a failed gh read counted as a pass)."""
+    text = _gh_auth_status_text(repo)
+    if text is None:
+        return False, ("row 2 (gh auth + project scope) claims PASS, but `gh auth status` could not be "
+                       "re-run (gh absent, or it exited nonzero — not logged in); an unestablishable read "
+                       "never proves the `project` scope (rule B)")
+    if not _GH_PROJECT_SCOPE_RE.search(text):
+        return False, ("row 2 (gh auth + project scope) claims PASS, but a real `gh auth status` re-run "
+                       "shows no `project` token scope")
+    return True, ""
+
+
+def _rederive_doctor_row3(repo: str, session: str, row: dict):
+    """Row 3 — tracker contract present + reachable. The config must EXIST and PARSE (missing → the row's
+    FAIL; present-but-malformed → indeterminate, refuse — never a filesystem fallback). `filesystem` ⇒
+    `TRACKER.md` at the repo root; `github` ⇒ the row's own real `gh project view <num> --owner <owner>`
+    probe must read the project back."""
+    backend, _project = _strict_backend(repo)
+    if backend is None:
+        return False, ("row 3 (tracker reachable) claims PASS, but the tracker config "
+                       f"({_GOVERNANCE_ANCHOR}) is missing or does not parse — missing is the row's own "
+                       "FAIL, and an unreadable config is indeterminate (rule B)")
+    if backend == "github":
+        if _github_board_absent(repo) is not False:
+            return False, ("row 3 (tracker reachable) claims PASS, but the row's own github probe "
+                           "(`gh project view <num> --owner <owner>`) did not read the project back — it "
+                           "is absent, or the read could not be established (rule B)")
+        return True, ""
+    tracker = _confined_repo_path(repo, "TRACKER.md")
+    if tracker is None or not os.path.exists(tracker):
+        return False, ("row 3 (tracker reachable) claims PASS on the filesystem backend, but there is no "
+                       "TRACKER.md at the repo root (the row's own FAIL)")
+    return True, ""
+
+
+def _rederive_doctor_row4(repo: str, session: str, row: dict):
+    """Row 4 — governance scaffold present: `WORKFLOW.md`, `WORKFLOW-config.yaml`, and the two v2
+    `docs/workflow/` subdirectories. doctor's own `ls` re-run; a partial tree is its FAIL."""
+    missing = []
+    for rel, want_dir in (("WORKFLOW.md", False), ("WORKFLOW-config.yaml", False),
+                          ("docs/workflow/pillar-matrices", True), ("docs/workflow/code-reviews", True)):
+        path = _confined_repo_path(repo, rel)
+        if path is None or not (os.path.isdir(path) if want_dir else os.path.isfile(path)):
+            missing.append(rel)
+    if missing:
+        return False, ("row 4 (governance scaffold) claims PASS, but a read-only re-run finds the scaffold "
+                       f"INCOMPLETE — missing: {', '.join(missing)}")
+    return True, ""
+
+
+def _rederive_doctor_row5(repo: str, session: str, row: dict):
+    """Row 5 — install receipt present + parses. The pre-round-7 spot-re-run, unchanged, now one row of
+    the full table. Deliberately presence+parse and NOT a fingerprint verify (that is update's job), so a
+    legitimate PASS whose scaffold merely drifted is never false-refused."""
+    if _receipt_document(repo, None) is None:
+        return False, ("row 5 (install receipt) claims PASS, but a read-only re-run finds no install "
+                       "receipt that parses")
+    return True, ""
+
+
+def _rederive_doctor_row6(repo: str, session: str, row: dict):
+    """Row 6 — Pi runtime (optional). Re-runs the row's OWN read-only probe (`install-pi.sh --check`, a
+    dry run that mutates nothing) against the plugin root this contract itself ships in, and requires
+    exit 0 — the row's PASS condition. Pi absent is the row's SKIP, and a nonzero probe its FAIL, so
+    neither can back a PASS."""
+    script = os.path.join(_PLUGIN_ROOT, "scripts", "install-pi.sh")
+    if not os.path.isfile(script):
+        return False, ("row 6 (Pi runtime) claims PASS, but the plugin's own install-pi.sh probe is not "
+                       "present to re-run it (rule B)")
+    try:
+        proc = subprocess.run(["bash", script, "--check"], cwd=_PLUGIN_ROOT, capture_output=True,
+                              text=True, timeout=_PROBE_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError):
+        return False, ("row 6 (Pi runtime) claims PASS, but the read-only `install-pi.sh --check` probe "
+                       "could not be re-run (rule B)")
+    if proc.returncode != 0:
+        return False, ("row 6 (Pi runtime) claims PASS, but the read-only `install-pi.sh --check` probe "
+                       f"exits {proc.returncode} — Pi absent is the row's SKIP and a failing prerequisite "
+                       "its FAIL; neither is a PASS")
+    return True, ""
+
+
+def _rederive_doctor_row7(repo: str, session: str, row: dict):
+    """Row 7 — Codex skill-mirror (optional). PASS requires the mirror INSTALLED
+    (`$HOME/.agents/.idc-install-state`) AND the load-bearing adapter link RESOLVING to a SKILL.md
+    (`isfile` follows the symlink, so a dangling link fails). `$HOME` is honored so the re-run inspects
+    the same mirror doctor did. An absent mirror is the row's SKIP; a broken adapter its FAIL."""
+    home = os.path.expanduser("~")
+    if not os.path.exists(os.path.join(home, ".agents", ".idc-install-state")):
+        return False, ("row 7 (Codex skill-mirror) claims PASS, but there is no mirror install-state at "
+                       "$HOME/.agents/.idc-install-state — an absent mirror is the row's SKIP, not a PASS")
+    if not os.path.isfile(os.path.join(home, ".agents", "skills", "idc-adapter-codex", "SKILL.md")):
+        return False, ("row 7 (Codex skill-mirror) claims PASS, but the load-bearing Codex adapter link "
+                       "($HOME/.agents/skills/idc-adapter-codex/SKILL.md) does not resolve — the row's own "
+                       "`adapter-broken` FAIL")
+    return True, ""
+
+
+def _rederive_doctor_row8(repo: str, session: str, row: dict):
+    """Row 8 — plugin cache freshness (advisory: only ever PASS or SKIP). Its PASS minimally requires a
+    READABLE running version, and an unreadable one is precisely its SKIP — so re-reading the running
+    plugin's own `.claude-plugin/plugin.json` is the row's whole PASS precondition. The marketplace-clone
+    comparison is best-effort in the row itself (a differing clone is still PASS), so it is not contested."""
+    if _running_plugin_version() is None:
+        return False, ("row 8 (plugin cache freshness) claims PASS, but the running plugin's version could "
+                       "not be re-read from its own .claude-plugin/plugin.json — an unreadable running "
+                       "version is the row's SKIP, not a PASS")
+    return True, ""
+
+
+def _rederive_doctor_row9(repo: str, session: str, row: dict):
+    """Row 9 — build-lane hygiene (advisory: only ever PASS or SKIP). Corroborates READABILITY: the board
+    must be readable NOW (`filesystem` ⇒ the tracker loads; `github` ⇒ the same real project probe as row
+    3). This kills the demonstrated incident shape — an UNREADABLE board reported as a clean PASS, which
+    is the row's own SKIP ("could not determine"), and which the row's recipe goes out of its way to keep
+    from printing a hollow `clean (0 scanned)`.
+
+    BOUNDARY (deliberate, disclosed): re-running the FULL lint at closeout is disproportionate for a
+    corroboration, so a lint FINDING (the row's `PASS with ⚠`) is not contested — only the readability
+    the row's PASS depends on."""
+    backend, _project = _strict_backend(repo)
+    if backend is None:
+        return False, ("row 9 (build-lane hygiene) claims PASS, but the tracker config is missing or does "
+                       "not parse, so the board this row scans cannot be read back (rule B)")
+    if backend == "github":
+        if _github_board_absent(repo) is not False:
+            return False, ("row 9 (build-lane hygiene) claims PASS, but the github board could not be read "
+                           "back — an unreadable board is the row's SKIP (`could not determine`), never a "
+                           "clean PASS")
+        return True, ""
+    if not _filesystem_board_loads(repo):
+        return False, ("row 9 (build-lane hygiene) claims PASS, but the filesystem tracker (TRACKER.md) "
+                       "does not load — an unreadable board is the row's SKIP (`could not determine`), "
+                       "never a clean PASS")
+    return True, ""
+
+
+def _rederive_doctor_row10(repo: str, session: str, row: dict):
+    """Row 10 — board↔git reconciliation. The one row whose truth is not cheaply re-runnable (the scanner
+    is a full board+git sweep), so it is re-derived from the SCANNER'S OWN durable report instead:
+    doctor.md's row-10 recipe passes `--report-session`/`--report-nonce`, so the scan of THIS invocation
+    persists `{scanner_exit, produced_by}` bound to THIS doctor record's nonce. The row's recorded `exit`
+    must MATCH that persisted `scanner_exit`, which must itself be a COMPLETED scan (0 coherent / 1
+    findings — the row's PASS conditions; exit 2 is its SKIP). Same durable-artifact mechanism the doctor
+    `blocked_external` path already uses, so a caller-typed row `exit` is never proof."""
+    report = _command_report(repo, "janitor", session)
+    if not isinstance(report, dict):
+        return False, ("row 10 (board↔git reconciliation) claims PASS, but no janitor scanner report "
+                       "exists for THIS session — run the row's scanner with --report-session/"
+                       "--report-nonce so the SCAN itself records its exit (a caller-typed row exit is "
+                       "not proof)")
+    if not _report_nonce_bound(repo, "doctor", session, report):
+        return False, ("row 10 (board↔git reconciliation) claims PASS, but the janitor scanner report is "
+                       "not bound to THIS doctor record's nonce — it must be written BY the scan of this "
+                       "invocation, not a stale/foreign one")
+    if report.get("produced_by") != _JANITOR_PROVENANCE:
+        return False, ("row 10 (board↔git reconciliation) claims PASS, but the janitor report carries no "
+                       "scanner provenance stamp (produced_by) — a hand-written report cannot be passed "
+                       "off as a real scan")
+    code = report.get("scanner_exit")
+    if isinstance(code, bool) or code not in (0, 1):
+        return False, ("row 10 (board↔git reconciliation) claims PASS, but the scanner report records "
+                       f"scanner_exit {code!r} — a PASS requires a COMPLETED scan (0 coherent / 1 "
+                       "findings); exit 2 is the row's SKIP (could not determine)")
+    if row.get("exit") != code:
+        return False, (f"row 10 (board↔git reconciliation) claims PASS with exit {row.get('exit')!r}, but "
+                       f"the SCANNER persisted scanner_exit {code!r} — the row's exit must MATCH the "
+                       "durable artifact, not the caller's typed value")
+    return True, ""
+
+
+# The per-row dispatch. EVERY row id the doctor schema requires (1..10) must have a re-derivation here:
+# a PASS row with no re-derivation is REFUSED (fail closed) rather than waved through, so adding a row
+# to the schema without a re-run cannot silently re-open the forged-PASS hole.
+_DOCTOR_ROW_REDERIVERS = {
+    1: _rederive_doctor_row1,
+    2: _rederive_doctor_row2,
+    3: _rederive_doctor_row3,
+    4: _rederive_doctor_row4,
+    5: _rederive_doctor_row5,
+    6: _rederive_doctor_row6,
+    7: _rederive_doctor_row7,
+    8: _rederive_doctor_row8,
+    9: _rederive_doctor_row9,
+    10: _rederive_doctor_row10,
+}
+
+
 def _claim_doctor_report(refs: dict, repo: str, session: str) -> CloseoutResult:
     # Re-read the run's OWN report (idc_command_report) — the DURABLE artifact the doctor RUN wrote —
     # never a caller-forged rows/verdict (wave-3 finding 6). A FAIL verdict is still a complete run.
@@ -1651,19 +1955,27 @@ def _claim_doctor_report(refs: dict, repo: str, session: str) -> CloseoutResult:
         return _fail("doctor-report-schema",
                      f"doctor complete requires the persisted report to satisfy the full doctor row "
                      f"contract (all rows 1..10, legal outcomes, verdict == aggregation): {reason}")
-    # SPOT RE-RUN a cheap, read-only, deterministic doctor check — the install-receipt presence+parse
-    # (doctor row 5) — and cross-check the reported outcome: a forged row 5 PASS on a repo whose receipt
-    # is ABSENT or does NOT parse is refused (rule B — a reported outcome must survive re-derivation).
-    # The re-derivation matches doctor row 5's OWN semantics (presence+parse, NOT fingerprints — that is
-    # update's job), so it never false-refuses a legitimate PASS whose scaffold merely drifted; row 5
-    # SKIP/FAIL is left alone (a non-PASS is consistent with a repo that has no valid receipt).
-    row5 = next((r for r in report["rows"] if isinstance(r, dict) and r.get("id") == 5), None)
-    if row5 is not None and row5.get("result") == "PASS" and _receipt_document(repo, None) is None:
-        return _fail("doctor-row5-inconsistent",
-                     "doctor complete: the persisted report claims row 5 (install receipt) PASS, but a "
-                     "read-only re-run finds no install receipt that parses — a reported row outcome that "
-                     "disagrees with its deterministic re-run is refused (rule B)")
-    return CloseoutResult(True, "ok", "doctor report re-read, schema-validated, row-5 spot-re-run consistent", {})
+    # ROUND-7 BLOCKS 2: RE-DERIVE EVERY ROW CLAIMING PASS against its own cheap, read-only re-run (the
+    # `_DOCTOR_ROW_REDERIVERS` table above documents each row's source). Only a claimed PASS is
+    # contested; a FAIL/SKIP row is never refused; a PASS the closeout cannot re-establish is refused
+    # (rule B). Wave 6 contested row 5 alone, so a report forging PASS on any of the other nine rows —
+    # a scaffold that is deterministically absent, a gh read that never ran — closed clean.
+    for row in report["rows"]:
+        if not isinstance(row, dict) or row.get("result") != "PASS":
+            continue
+        rederive = _DOCTOR_ROW_REDERIVERS.get(row.get("id"))
+        if rederive is None:
+            return _fail("doctor-row-unrederivable",
+                         f"doctor complete: row {row.get('id')!r} claims PASS but the closeout has no "
+                         "read-only re-derivation for it — an unverifiable PASS is refused (rule B)")
+        ok, why = rederive(repo, session, row)
+        if not ok:
+            return _fail("doctor-row-inconsistent",
+                         f"doctor complete: {why}. A reported row outcome its deterministic read-only "
+                         "re-run does not corroborate is refused (rule B) — if the environment changed "
+                         "between the run and this closeout, re-run /idc:doctor.")
+    return CloseoutResult(True, "ok",
+                          "doctor report re-read, schema-validated, every PASS row re-derived", {})
 
 
 def _claim_update_resynced(refs: dict, repo: str, session: str) -> CloseoutResult:

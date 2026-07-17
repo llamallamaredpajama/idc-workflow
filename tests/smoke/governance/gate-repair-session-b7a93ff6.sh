@@ -33,6 +33,8 @@
 #   * skip a readback after a write                                 → case 6 FAILs
 #   * journal the gate proof AFTER the unblock (not before)         → case 5b FAILs
 #   * double-stamp / re-journal on a rerun                          → case 3 FAILs
+#   * ignore journal_append's False (a proof that never landed)     → case 9 FAILs
+#   * unblock a pointer while ANOTHER blocker remains               → case 10 FAILs
 #
 # Usage: bash tests/smoke/governance/gate-repair-session-b7a93ff6.sh   (exit 0 = pass)
 set -uo pipefail
@@ -186,14 +188,18 @@ def fresh(mutate=None):
     return Fake(fx).install(), new_repo()
 
 
-def repair(repo, apply=False, gate=GATE, pointer=POINTER, pr=PR):
-    # main() RETURNS the plan dict (the CLI's --json is the same object serialized), so the unit
-    # asserts on structure rather than re-parsing stdout.
+def repair_argv(repo, apply=False, gate=GATE, pointer=POINTER, pr=PR):
     argv = ["--repo", repo, "--backend", "github", "--owner", OWNER, "--project", PROJECT,
             "--gate", str(gate), "--pointer", str(pointer), "--pr", str(pr)]
     if apply:
         argv.append("--apply")
-    return R.main(argv)
+    return argv
+
+
+def repair(repo, apply=False, gate=GATE, pointer=POINTER, pr=PR):
+    # main() RETURNS the plan dict (the CLI's --json is the same object serialized), so the unit
+    # asserts on structure rather than re-parsing stdout.
+    return R.main(repair_argv(repo, apply=apply, gate=gate, pointer=pointer, pr=pr))
 
 
 def plan_of(result):
@@ -476,6 +482,126 @@ kind, err = P.read_proof(repo, GATE)
 check(err is not None and kind is None,
       f"a MALFORMED journal did not ERROR: kind={kind!r} err={err!r} (it must never read as unproven)")
 print("  ok (7e) a malformed journal is an ERROR, never a silent `unproven`")
+shutil.rmtree(repo)
+
+# ══ 9. A PROOF THAT DID NOT LAND DURABLY STOPS THE REPAIR ════════════════════════════════════════
+# `journal_append` is FAIL-SOFT BY DESIGN — it returns False when durability fails and the ENGINE
+# ignores that (a journal failure must never fail a board op; reconciliation is the engine's
+# detector). For THIS helper the record IS the product: the gate's only proof. Ignoring the False
+# would leave the gate `unproven` ON DISK while its pointer is admitted — and report success.
+# Probe (real writer, real failure): make the journal file unwritable, so the append genuinely
+# fails and returns False. A still-Blocked pointer makes a wrongly-run unblock OBSERVABLE.
+fake, repo = fresh(still_blocked)
+jpath = os.path.join(repo, RP.JOURNAL_REL)
+open(jpath, "w").close()
+os.chmod(jpath, 0o444)
+if os.geteuid() == 0 or os.access(jpath, os.W_OK):
+    # root ignores the mode bits, so the failure cannot be staged — say so LOUDLY rather than
+    # reporting a pass that never exercised the guard.
+    print("  SKIP (9) journal-durability: the journal is STILL WRITABLE after chmod 444 "
+          "(running as root?) — the failed-append probe could not be staged in this environment")
+else:
+    try:
+        repair(repo, apply=True)
+    except R.GateRepairError as exc:
+        msg = str(exc)
+        check("transition-journal" in msg,
+              f"(9) the stop does not name the JOURNAL that failed: {msg}")
+        check("gate-reconciliation" in msg,
+              f"(9) the stop does not name the STEP that failed: {msg}")
+    else:
+        die("(9) a gate proof that did NOT land durably did not stop the repair — the gate is "
+            "unproven on disk while the helper reports success")
+    # the unblock NEVER ran: the pointer is untouched behind its still-unproven gate.
+    check(fake.pointer["status"] == "Blocked",
+          f"(9) the pointer was UNBLOCKED behind a gate whose proof never landed: "
+          f"{fake.pointer['status']!r}")
+    check(fake.pointer["blocked_by"] == [GATE],
+          f"(9) the gate dependency edge was removed despite the unlanded proof: "
+          f"{fake.pointer['blocked_by']!r}")
+    check(not [c for c in fake.calls if c[0] == "remove-dep"],
+          "(9) the repair removed a dependency behind a gate whose proof never landed")
+    check(journal(repo) == [],
+          f"(9) a record landed in a journal that cannot be written: {journal(repo)!r}")
+    check(R.cli(repair_argv(repo, apply=True)) != 0, "(9) the stopped repair did not exit NONZERO")
+    print("  ok (9) a gate proof that did not land durably STOPS the repair before the unblock")
+
+    # 9b. restore write permission → the rerun converges (the stop is recoverable, per the brief's
+    #     partial-failure contract: a rerun reconstructs the remainder from current state).
+    os.chmod(jpath, 0o644)
+    plan = plan_of(repair(repo, apply=True))
+    check(P.proof_kind(journal(repo), GATE) == "verified-reconciliation",
+          "(9b) the rerun did not journal the gate proof once the journal was writable again")
+    check(fake.pointer["status"] == "Todo", "(9b) the rerun did not finish the unblock")
+    check(fake.gate["body"].count("<!-- idc-gate-pr:") == 1, "(9b) the rerun double-stamped the marker")
+    print("  ok (9b) once the journal is writable again, a rerun converges")
+shutil.rmtree(repo)
+
+# ══ 10. OTHER BLOCKERS REMAIN — the gate-side repairs land, the POINTER step REFUSES ═════════════
+# The engine's `unblock --by` removes the NAMED dependency and then sets Todo; it does not check
+# whether OTHER blockers remain (engine internals are out of scope here). So repairing one gate of a
+# multi-gate pointer would sail the pointer past gate #999 without its proof — and Autorun treats an
+# unblocked Consideration pointer as approved work. This helper must never mint that.
+SECOND = 999
+
+
+def multi_blocked(fx):
+    fx["pointer"].update(status="Blocked", blocked_by=[GATE, SECOND])
+
+
+# 10a. the DRY RUN must SHOW the refusal — a dry run must never promise an apply that would refuse.
+fake, repo = fresh(multi_blocked)
+plan = plan_of(repair(repo))
+s5 = step(plan, "unblock-pointer")
+check(str(SECOND) in json.dumps(s5),
+      f"(10a) the dry-run pointer step does not NAME the remaining blocker #999: {s5!r}")
+check(s5.get("status") == "refused",
+      f"(10a) the dry run PROMISES an unblock it would refuse on apply: status={s5.get('status')!r}")
+check(fake.wrote() == [], f"(10a) the dry run mutated the board: {fake.wrote()}")
+print("  ok (10a) the dry run SHOWS the pointer refusal pending the other blockers")
+shutil.rmtree(repo)
+
+# 10b. --apply: the gate-side repairs land (independently true), the pointer step REFUSES.
+fake, repo = fresh(multi_blocked)
+try:
+    repair(repo, apply=True)
+except R.GateRepairError as exc:
+    msg = str(exc)
+    check(str(SECOND) in msg, f"(10b) the refusal does not NAME the remaining blocker #999: {msg}")
+else:
+    die("(10b) the repair proceeded on a pointer that gate #999 still blocks — it would sail past "
+        "#999 without its proof")
+check(fake.pointer["status"] == "Blocked",
+      f"(10b) the pointer left Blocked while #999 still blocks it: {fake.pointer['status']!r}")
+check(SECOND in fake.pointer["blocked_by"],
+      f"(10b) the remaining blocker's dependency edge was removed: {fake.pointer['blocked_by']!r}")
+check(not [c for c in fake.calls if c[0] == "remove-dep"],
+      "(10b) the repair invented a dependency removal — no sanctioned dependency-only door exists")
+entries = journal(repo)
+check(not [e for e in entries if e.get("op") == "unblock"],
+      "(10b) the repair journaled an unblock for a pointer another gate still blocks")
+check(not [e for e in entries if (e.get("evidence") or {}).get("observed_already_unblocked")],
+      "(10b) the repair recorded observed_already_unblocked for a pointer that is still BLOCKED — "
+      "nothing was observed unblocked")
+# …while the gate-side repairs DID land: they are independently true, and a rerun converges.
+check(fake.gate["stage"] == "Buildable" and fake.gate["status"] == "Done",
+      f"(10b) the gate-side repairs did not land: {fake.gate['stage']!r}/{fake.gate['status']!r}")
+check(P.proof_kind(entries, GATE) == "verified-reconciliation",
+      "(10b) the gate's own reconciliation record did not land — it is true regardless of the pointer")
+check(R.cli(repair_argv(repo, apply=True)) != 0, "(10b) the pointer refusal did not exit NONZERO")
+print("  ok (10b) other blockers ⇒ gate repairs land, the pointer step refuses naming #999, exit nonzero")
+
+# 10c. once #999 is resolved through its OWN door (its edge removed, the pointer still Blocked), a
+#      rerun converges — the gate is now the SOLE remaining blocker.
+fake.pointer["blocked_by"] = [GATE]
+plan = plan_of(repair(repo, apply=True))
+check(fake.pointer["status"] == "Todo",
+      f"(10c) the rerun did not finish the unblock once the gate was the sole blocker: "
+      f"{fake.pointer['status']!r}")
+check(fake.pointer["blocked_by"] == [], "(10c) the gate's dependency edge was not removed")
+check("unblock" in [e.get("op") for e in journal(repo)],
+      "(10c) the engine's real unblock was not journaled on the converging rerun")
+print("  ok (10c) once the other blockers are resolved, a rerun converges through the engine's unblock")
 shutil.rmtree(repo)
 
 print("  ok — the session-b7a93ff6 unit is green")

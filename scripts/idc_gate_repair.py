@@ -73,6 +73,24 @@ def _marker(pr):
     return f"<!-- idc-gate-pr: {int(pr)} -->"
 
 
+def _nums(nums):
+    return " + ".join(f"#{int(n)}" for n in nums)
+
+
+def _other_blockers(ctx, pointer, gate):
+    """The pointer's remaining blockers BESIDES `gate`, re-read from the board.
+
+    The engine's `unblock --by` removes the NAMED dependency edge and then sets `Todo` — it does not
+    check whether anything ELSE still blocks the pointer (engine internals are out of scope for this
+    door). So on a pointer held by several gates, repairing ONE of them and calling `unblock` would
+    sail the pointer past the others WITHOUT their proof — and Autorun treats an unblocked
+    Consideration pointer as approved work. This door therefore finishes a pointer only when the gate
+    it just proved is the SOLE remaining blocker.
+    """
+    return sorted({int(n) for n in B.blocked_by_numbers(int(pointer), ctx["repo"])
+                   if int(n) != int(gate)})
+
+
 # ── reads ────────────────────────────────────────────────────────────────────────────────────────
 def _observe(ctx, gate, pointer, pr):
     """Everything the plan is derived from, read once, before any decision."""
@@ -175,16 +193,65 @@ def _tracker_rel(ctx):
     return os.path.relpath(ctx["tracker"], ctx["repo"]) if ctx.get("tracker") else None
 
 
+def _journal_path(ctx):
+    return os.path.join(ctx["repo"], JR.JOURNAL_REL)
+
+
+def _journal_or_stop(ctx, step_id, num, kw):
+    """Append ONE record through the engine's structured writer, and STOP unless it landed DURABLY.
+
+    `journal_append` is FAIL-SOFT BY DESIGN: it returns False when durability fails (permissions, a
+    full disk, a lock/write error, an append that kept racing the janitor's rotation) and the ENGINE
+    deliberately ignores that — a journal failure must never fail a board op, because reconciliation
+    is the engine's own detector.
+
+    This helper is the INVERSE case, and that is why it checks. Here the record IS the product: for
+    the gate it is the ONLY proof that its `Done` was ever validated. Discarding the False would let
+    a routine journal failure leave the gate `unproven` ON DISK while the run marches on to admit its
+    pointer and reports success — breaking the one invariant this door exists to hold ("never unblock
+    behind an unproven gate"). Proof must mean a proof that LANDED, not an append that was attempted.
+    """
+    if E.journal_append(ctx["repo"], RECONCILIATION_OP, ctx["backend"], _tracker_rel(ctx), kw):
+        return
+    raise GateRepairError(
+        f"gate-repair stopped at {step_id}: the op={RECONCILIATION_OP} record for #{num} did NOT land "
+        f"durably in {_journal_path(ctx)} — the journal writer reported the append failed or could "
+        "not be confirmed (check the journal's permissions, disk space, and the janitor's rotation). "
+        "Nothing beyond this step was attempted: a gate whose proof is not on disk must never admit "
+        "its pointer. Board repairs already applied are idempotent and honest — fix the journal, then "
+        "re-run to reconstruct the remaining plan from current state.")
+
+
 def _journal_gate_record(ctx, gate, pr, observed_before, repairs_applied):
     """The gate's reconciliation record — the evidence `idc_gate_proof.proof_kind` reads back as
-    ``verified-reconciliation``. Written through the engine's own structured writer, never by hand."""
-    E.journal_append(
-        ctx["repo"], RECONCILIATION_OP, ctx["backend"], _tracker_rel(ctx),
+    ``verified-reconciliation``. Written through the engine's own structured writer, never by hand.
+
+    Then READ BACK, the same positive-readback discipline every board write in this helper follows: a
+    True return says the WRITER believes the line landed, while re-scanning the journal through the
+    centralized reader makes "the gate's proof is on disk" LITERAL — which is the condition the
+    unblock below actually depends on.
+    """
+    _journal_or_stop(
+        ctx, "journal-gate-reconciliation", gate,
         {"num": int(gate), "agent": REPAIR_AGENT, "to_stage": TARGET_STAGE, "to_status": TARGET_STATUS,
          "disposition_evidence": {"door": REPAIR_DOOR, "approval_pr": int(pr),
                                   "approval_state": "MERGED", "observed_before": observed_before,
                                   "repairs_applied": repairs_applied}},
     )
+    kind, err = P.read_proof(ctx["repo"], gate)
+    if err:
+        raise GateRepairError(
+            f"gate-repair stopped at journal-gate-reconciliation: the {RECONCILIATION_OP} record for "
+            f"gate #{gate} was appended, but {_journal_path(ctx)} cannot be re-read to CONFIRM it "
+            f"({err}) — the gate's proof is INDETERMINATE, which is not proof. Repair/restore the "
+            "journal, then re-run.")
+    if kind not in P.PROVEN_KINDS:
+        raise GateRepairError(
+            f"gate-repair stopped at journal-gate-reconciliation: the journal writer reported the "
+            f"{RECONCILIATION_OP} record for gate #{gate} appended OK, but re-reading "
+            f"{_journal_path(ctx)} still reads the gate as {kind!r} — the append was CLAIMED but the "
+            "proof is not on disk, so the gate is not proven and its pointer must not be admitted. "
+            "Re-run once the journal is healthy to reconstruct the remaining plan.")
 
 
 def _journal_pointer_record(ctx, gate, pointer, pr, observed_before):
@@ -197,8 +264,8 @@ def _journal_pointer_record(ctx, gate, pointer, pr, observed_before):
         never prove the POINTER. The pointer is not a gate and holds no approval of its own; the
         approving PR is recorded as `gate_approval_pr` — true provenance, unmistakable for approval.
     """
-    E.journal_append(
-        ctx["repo"], RECONCILIATION_OP, ctx["backend"], _tracker_rel(ctx),
+    _journal_or_stop(
+        ctx, "record-pointer-observed-already-unblocked", pointer,
         {"num": int(pointer), "agent": REPAIR_AGENT,
          "disposition_evidence": {"door": REPAIR_DOOR, "gate": int(gate), "gate_approval_pr": int(pr),
                                   "observed_already_unblocked": True,
@@ -328,14 +395,48 @@ def build_and_run(ctx, gate, pointer, pr, apply_):
     # unblock, only now that the gate's proof is on disk), or it is already Todo (record the
     # OBSERVATION; invent nothing).
     if pointer_blocked:
+        def unblock_action(others):
+            if not others:
+                return (f"pointer #{pointer} is genuinely {E.BLOCKED_STATUS} behind gate #{gate} "
+                        "— finish it through the engine's REAL journaled `unblock` (the gate's "
+                        "proof is journaled FIRST, above: never unblock behind an unproven gate)")
+            return (f"REFUSE the unblock: pointer #{pointer} is {E.BLOCKED_STATUS} behind gate "
+                    f"#{gate} AND {_nums(others)}. The engine's `unblock --by` would drop only gate "
+                    f"#{gate}'s edge and then set Todo — admitting the pointer past {_nums(others)} "
+                    f"without their proof. Gate #{gate}'s own repairs above still land (they are "
+                    f"independently true); resolve {_nums(others)} through their own doors, then "
+                    "re-run to converge")
+
+        # What the observation saw. `--apply` RE-READS below before acting on it: the sole-blocker
+        # condition is a precondition like any other, and the plan may be minutes stale.
+        planned_others = [int(b) for b in obs["pointer"]["blocked_by"] if int(b) != int(gate)]
         step5 = {"id": "unblock-pointer", "pointer": int(pointer), "by": int(gate),
                  "via": "idc_transition.run('unblock')", "invents_transition": False,
-                 "action": (f"pointer #{pointer} is genuinely {E.BLOCKED_STATUS} behind gate #{gate} "
-                            "— finish it through the engine's REAL journaled `unblock` (the gate's "
-                            "proof is journaled FIRST, above: never unblock behind an unproven gate)")}
-        if apply_ and not settled:
+                 "other_blockers": planned_others, "action": unblock_action(planned_others)}
+        if settled:
+            step5["status"] = "satisfied"
+        elif apply_:
+            others = _other_blockers(ctx, pointer, gate)
+            if others:
+                raise GateRepairError(
+                    f"gate-repair stopped at unblock-pointer: gate #{gate} is repaired and its "
+                    f"{RECONCILIATION_OP} is journaled, but pointer #{pointer} is still "
+                    f"{E.BLOCKED_STATUS} behind {_nums(others)}. This door finishes a pointer ONLY "
+                    f"when the gate it just proved is the SOLE remaining blocker: the engine's "
+                    f"`unblock --by` drops only gate #{gate}'s edge and then sets Todo, which would "
+                    f"admit #{pointer} past {_nums(others)} without their proof. Nothing was "
+                    "invented — no dependency was removed and no observation was recorded. Resolve "
+                    f"{_nums(others)} through their own doors (a gate's guarded "
+                    "`dispose --disposition gate-approved`, or this repair for a gate closed outside "
+                    "it), then re-run: the plan reconstructs from current state and only the pointer "
+                    "step remains.")
             E.run("unblock", ctx, num=int(pointer), to_status="Todo", by=int(gate))
-        step5["status"] = state(settled, apply_)
+            # the re-read agreed the gate was the sole blocker — report what actually happened.
+            step5["other_blockers"] = []
+            step5["action"] = unblock_action([])
+            step5["status"] = "applied"
+        else:
+            step5["status"] = "refused" if planned_others else "planned"
     else:
         step5 = {"id": "record-pointer-observed-already-unblocked", "pointer": int(pointer),
                  "gate": int(gate), "observed_already_unblocked": True, "invents_transition": False,

@@ -30,7 +30,7 @@ Identical across backends; the adapter routes without reshaping signatures.
 | Op | Signature |
 |---|---|
 | `createTicket` | `(title, body, type, labels) → ticket_id` |
-| `setField` | `(ticket_id, field ∈ {Status, Stage, Wave, Phase, Domain}, value)` |
+| `setField` | `(ticket_id, field ∈ {Wave, Phase, Domain}, value)` — non-machine fields only; Stage/Status are machine-governed (see below) |
 | `link` | `(parent_id, child_id, kind ∈ {sub, blocks})` |
 | `move` | `(ticket_id, status ∈ {Blocked, Todo, In Progress, Done})` |
 | `query` | `(filter) → [ticket_id, …]` |
@@ -42,15 +42,46 @@ verdict-guarded path to Done; idempotent), and `dispose(ticket, disposition)` (t
 guarded path to Done — gate approval / pointer retirement / recirc-drain retirement). A seventh
 core op is a contract change requiring a recirculation.
 
-**Status-changing ops route through the transition engine.** `setField(…, Status, …)`, `move`,
-`claim`, `block`, `close`, `dispose`, and `unblock` are transitions: dispatch them via
-`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_transition.py"` (both backends), which validates
-machine-legality, verifies the write's read-back, and journals every op to
-`docs/workflow/transition-journal.ndjson` — the record the janitor's board↔journal reconciliation
-replays. `Done` is reachable ONLY through a guarded terminal op — `close` (a passing, item-owning
+**Every board mutation routes through the transition engine.** `createTicket`, `setField` (the
+non-machine fields Wave/Phase/Domain via `set-field`; a Status change via `move`; Stage owned by the
+create/terminal ops), `link`, `move`, `claim`,
+`block`, `close`, `dispose`, and `unblock` are engine ops: dispatch them via `python3
+"${CLAUDE_PLUGIN_ROOT}/scripts/idc_transition.py"` (both backends), which validates machine-legality,
+verifies the write's read-back, and journals every op to `docs/workflow/transition-journal.ndjson` —
+the record the janitor's board↔journal reconciliation replays. The backend skills' raw `gh` recipes
+are engine-internal mechanics — a role never runs a raw `gh project item-edit` / `gh api
+…/dependencies/blocked_by` (the mutation interlock denies them during an active command).
+
+- **Minting an item** — `createTicket` (a Buildable), the **consideration pointer**, and a
+  **Recirculation intake** ticket dispatch through the engine's create ops — `create-ticket`
+  (`Stage=Buildable`), `create-pointer` (`Stage=Consideration`), and `recirculate-intake`
+  (`Stage=Recirculation`) — which own the **complete** create + board-add + Stage + Status + marker
+  comment + read-back sequence atomically, so every minted item lands normalized (never
+  Stage-without-Status) and journaled. The engine is the only create door.
+  A role **never** hand-mints an item with a raw `gh issue create` / `gh project item-add` / filesystem `create`.
+- **Setting a non-machine field** — `setField(ticket, Wave|Phase|Domain, value)` dispatches to
+  the engine's `set-field` op (resolves ids, writes the single-select value, journals it); never a raw `gh project item-edit`.
+  Stage and Status are machine-governed and `set-field` refuses BOTH. A **Status** change is a
+  transition — use `move --to-status`. A **Stage** advance is also a transition, through the guarded
+  Stage door **`move --to-stage <Stage> --to-status <Status>`** (both backends): it writes Stage AND
+  Status together, validated as a machine-legal pair (an illegal pair — e.g. `In Progress` on a
+  Consideration pointer — is refused), reads both back, and **journals `to_stage`** so
+  replay/reconciliation see the move. Plan advances a decomposition pointer `Consideration → Planning`
+  through exactly this door. The create ops (`create-ticket`/`create-pointer`/`recirculate-intake`)
+  still write the *initial* Stage and the terminal dispositions (`dispose --disposition
+  retired`/`drained`) record the *final* Stage. **No role writes Stage through a raw path**:
+  never a raw `gh project item-edit` or `set --field Stage` — the mutation interlock denies those during a command.
+- **Creating a block** — `link(parent, child, blocks)` dispatches to the engine's `link` op, which
+  writes BOTH the native GitHub blocked-by edge (what the drain reads) AND the marker, fail-closing if
+  the native edge does not land; never a raw `dependencies/blocked_by` POST.
+- **Removing a block** — `unblock --num <blocked> --by <gate>` removes the `gate blocks <blocked>`
+  dependency (verified absent) and then moves the blocked item `Blocked → Todo` in one guarded op;
+  never a raw dependency edit.
+
+`Done` is reachable ONLY through a guarded terminal op — `close` (a passing, item-owning
 verdict) for built work, or `dispose --disposition {gate-approved|retired|drained}` (its
 deterministic evidence guard) for the non-verdict terminal dispositions. The backend skills' raw
-helpers stay the mechanics for reads and non-Status fields only.
+helpers stay the mechanics for **reads only** — every board *mutation* goes through an engine op.
 
 ### Merge lease (single-holder serialization)
 

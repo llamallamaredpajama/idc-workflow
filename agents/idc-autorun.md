@@ -77,12 +77,24 @@ loop below). Then the two lanes:
    `docs/considerations/` stay the source of truth). Re-check open gates first (per
    `idc:idc-gate-issue`) in case the operator merged a Think PR mid-run — and include the
    interrupted-run recovery: `query` `Status=Blocked` items and, for any whose blocking gate issue
-   is already `Done`, **first verify that gate's journaled guarded dispose** (an
-   `op=dispose`/`disposition=gate-approved` record naming it — see `idc:idc-gate-issue` step 4 for
-   the deterministic check) and only then finish the unblock through the engine's journaled
-   `unblock`. A `Done` gate does NOT alone prove the guarded door ran (a raw/manual close or janitor
-   repair also mints `Done`): if the guarded dispose is **not** journaled the gate's `Done` is
-   UNPROVEN — leave the dependent `Blocked` and surface the anomaly, never auto-unblock. A `Done`
+   is already `Done`, **first verify that gate's journaled proof** through the one
+   deterministic reader — `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gate_proof.py" --repo "$PWD"
+   --gate <gate#>` (`guarded-dispose` and `verified-reconciliation` are proven; never hand-roll a
+   journal scan) —
+   and only then finish it through the **guarded pointer-finish door**: `python3
+   "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gate_repair.py" --repo "$PWD" --finish-pointer --gate <gate#>
+   --pointer <dependent#>` (github: add `--owner <owner> --project <n>`; **dry run by default** — add
+   `--apply` after reading the plan). **Never a raw engine `unblock` here**: `unblock --by` drops only
+   the NAMED edge before setting `Todo`, so a dependent held by several gates would sail past the
+   others without their proof. The door re-reads the gate's proof on disk AND refuses unless that gate
+   is the dependent's SOLE remaining blocker — then finishes the job through the engine's journaled
+   `unblock` itself. Either **proven** kind
+   is safe to finish: `guarded-dispose` (an `op=dispose`/`disposition=gate-approved` record) or
+   `verified-reconciliation` (an `op=gate-reconciliation` record from `idc_gate_repair.py`, which
+   verified the merged approval PR at repair time). A `Done` gate does NOT alone prove the guarded
+   door ran (a raw/manual close or janitor repair also mints `Done`): on `unproven` — or exit 2, an
+   unreadable journal, which is indeterminate and never a clean negative — the gate's `Done` is
+   UNPROVEN: leave the dependent `Blocked` and surface the anomaly, never auto-unblock. A `Done`
    gate must never strand its dependents — `/idc:doctor` Row 9 tiers a remaining strand
    (`stranded-gate` when proven, `unproven-gate-done` when not). A pointer still **Blocked** behind an
    **open** gate issue is an **open Think PR** (pending admission) — **report it and
@@ -144,6 +156,13 @@ loop below). Then the two lanes:
    start-of-run snapshot — the build lane writes files mid-run, so a stale snapshot under-counts any
    uncommitted/untracked artifact), and anything waiting on the operator (the Think-PR requirements
    gate, incl. any open Think PR pending admission).
+   **Close the command contract from the oracle, not from prose.** Call the read-only next-action
+   oracle (`scripts/idc_next_action.py`) and finish the lifecycle record
+   (`scripts/idc_command_contract.py finish --command autorun`): `complete` requires **this session's**
+   drain verdict to read `drain: complete` (`drain:"complete"`, `drain_session:"$CLAUDE_CODE_SESSION_ID"`);
+   otherwise `waiting_gate` (the oracle reports only human gates) or `blocked_external` (the drain
+   reported `unknown`/`rate-limited`). The final prose quotes the oracle's command/reason or states
+   `waiting_gate`/`fixpoint` — never an invented handoff.
 
 ## Staffing estimate, the launch gate & /loop resume
 

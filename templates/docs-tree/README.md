@@ -22,7 +22,7 @@ gate when a requirements layer (PRD, or the TRD when gated) changes.
 
 ## Directories
 
-v2 keeps the process tree lean — only the two artifact stores the guardrails actually
+v2 keeps the process tree lean — only the three artifact stores the guardrails actually
 produce. Everything else (audit ledgers, change-order files, planning manifests, clash
 files, handoffs) is gone: a PR body is the audit trail, and the matrix YAML is the durable
 deconfliction record.
@@ -31,7 +31,9 @@ deconfliction record.
 |---|---|
 | `pillar-matrices/` | Polished phase matrices (`<phase-tag>-matrix.yaml`) — Plan's pairwise-clash deconfliction output: the Dependency-DAG / Parallel-Safety / Wave-Ordering substrate the board's `Wave` field is assigned from. |
 | `code-reviews/` | Merged-review-engine reports for build PRs and phase-close deltas (referenced from issues, never inlined). |
+| `intakes/` | Reviewed exact-once manifests compiled from external Markdown. Intake records durable routes only; foreign units never enter Build or Autorun directly. A compiled manifest is **your** work product, not IDC scaffold: `/idc:update` never touches it, and `/idc:uninstall` archives and preserves it rather than deleting it. |
 
 `docs/workflow/tracker-config.yaml` (the tracker contract) is also placed here by
 `/idc:init`. Each directory ships with an empty `.gitkeep` so the scaffold survives a
-fresh clone; delete it once the directory has real content.
+fresh clone. Retain the keepfiles after adding content: they are the exact scaffold-ownership files
+that update and uninstall can safely manage without treating your work products as IDC-owned.

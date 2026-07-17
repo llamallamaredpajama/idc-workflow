@@ -48,7 +48,7 @@ Model allocation:
 | Tasks 1, 4, and 5 | Sonnet, `high` |
 | Tasks 2, 3, 6, and 7 | Opus, `xhigh` |
 | Task 8 | Opus, `xhigh`, with the lead closely supervising integration and release proof |
-| Every Codex review | Explicitly use the current configured strongest reviewer model; on this machine at authoring time, `gpt-5.6-sol` with maximum reasoning |
+| Every Codex review | Explicitly use the current configured strongest reviewer model with `xhigh` reasoning effort — NOT `max` (operator directive 2026-07-16: max overthinks on review work); on this machine at authoring time, `gpt-5.6-sol` |
 
 Do not keep eight teammates alive. Create one implementer for the current task, review that task, close or release the task panes, then create the next fresh implementer. More simultaneous writers would increase merge risk and weaken the exact task boundaries.
 
@@ -194,6 +194,17 @@ review-package "$TASK_BASE" "$TASK_HEAD"
 
 Keep all writers idle until review is clean.
 
+After terminating or releasing any teammate process, run the read-only stability check before the
+next writer starts:
+
+```bash
+python3 scripts/idc_worktree_stability.py --repo "$PWD" --pid <terminated-process-pid>
+```
+
+It waits for that process to exit, then compares HEAD, index, and worktree fingerprints across three
+samples. A change is a hard stop for inspection; the checker never resets, restores, or rewrites the
+worktree.
+
 ### 4. Launch one independent Codex reviewer, detached and read-only
 
 Write a reviewer prompt file under `.superpowers/sdd/`. It must tell Codex to read:
@@ -223,7 +234,7 @@ Launch it in its own cmux workspace. The command shape is:
 cmux new-workspace \
   --name "idc-review-task-${TASK_NUMBER}" \
   --cwd "$WORKTREE" \
-  --command "codex exec --ephemeral --sandbox read-only -m gpt-5.6-sol -c 'model_reasoning_effort=\"max\"' -C '$WORKTREE' -o '$SDD/task-${TASK_NUMBER}-review.md' - < '$SDD/task-${TASK_NUMBER}-review-prompt.md'"
+  --command "codex exec --ephemeral --sandbox read-only -m gpt-5.6-sol -c 'model_reasoning_effort=\"xhigh\"' -C '$WORKTREE' -o '$SDD/task-${TASK_NUMBER}-review.md' - < '$SDD/task-${TASK_NUMBER}-review-prompt.md'"
 ```
 
 This is intentionally a flat, detached launch. Do not run that `codex exec` directly in the lead's foreground shell.
@@ -232,7 +243,17 @@ Monitor it with bounded cmux checks such as `cmux top`, `cmux list-workspaces`, 
 
 ### 5. Resolve findings before moving on
 
-- Any Critical or Important finding, any `Spec compliance: FAIL`, or `Task quality: CHANGES REQUIRED` blocks the next task.
+**Terminal posture (operator directive 2026-07-16, binds Tasks 6–8 and any re-run):** the finish
+line is the incident, not perfection. A finding blocks only if it is a demonstrated, exploitable
+failure of an incident-class behavior (stale runtime admitted; plan units dropped; closeout forged
+with fake evidence; a failed read counted as a pass; a gate closed without proof) with a concrete
+repro an agent would naturally hit. Everything else is deferred hardening — ledger/known-debts,
+no fix wave. Reviewers use exactly two severity buckets (`BLOCKS` with repro / `DEFERRED`), and
+FAIL/CHANGES-REQUIRED verdicts are legal only when a BLOCKS finding exists. Hard cap: two
+posture-governed review rounds per task; if the second still returns BLOCKS findings, stop and
+bring the operator the list with a recommendation — no further wave without sign-off.
+
+- Any `BLOCKS` finding, any `Spec compliance: FAIL`, or `Task quality: CHANGES REQUIRED` blocks the next task (subject to the terminal posture and round cap above).
 - Send the complete finding set back to the same implementer for that task.
 - The fixer must append its fix and focused test receipts to the existing report file and commit the fix.
 - Generate a new review package from the original `TASK_BASE` to the new head.

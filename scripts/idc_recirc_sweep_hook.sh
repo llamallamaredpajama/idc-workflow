@@ -20,6 +20,7 @@ ROOT="${1:-}"
 
 # Plugin root unknown (shouldn't happen via hooks.json) → fail-soft.
 [ -n "$ROOT" ] && [ -f "$ROOT/scripts/idc_recirc_sweep.py" ] || exit 0
+sh "$ROOT/scripts/idc_python_runtime.sh" || exit 0
 
 python3 "$ROOT/scripts/idc_recirc_sweep.py" --repo "$PWD" --auto-correct >/dev/null 2>&1 || true
 

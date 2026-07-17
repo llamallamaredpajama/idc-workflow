@@ -283,8 +283,20 @@ def reconstruct_state_from_journal(journal_path):
                         # the same item can still establish state.
                         continue
 
-                    expected_state.setdefault(item_id, {})
                     state = _entry_to_state(entry)
+                    if not state:
+                        # A FIELD-ONLY record (a `set-field` Wave/Phase/Domain write, or a `link`
+                        # edge) carries NEITHER to_stage NOR to_status, so it establishes no Stage/
+                        # Status expectation. It must NOT seed an expected-state entry (round-5 Fix
+                        # 3): an empty `{item: {}}` seed compares clean against ANY board item, so a
+                        # field-only write for an item with NO create/transition history would mask
+                        # the missing history and look falsely reconciled. Skipping it leaves such an
+                        # item ABSENT from expected state → reported as a real divergence (present on
+                        # board, not in journal history). A record that DOES carry Stage/Status still
+                        # seeds/updates the entry below, so a genuinely-created item is unaffected.
+                        continue
+
+                    expected_state.setdefault(item_id, {})
                     expected_state[item_id].update(state)
             except UnicodeDecodeError as exc:
                 # Undecodable bytes raise during line iteration, BEFORE json.loads — without this

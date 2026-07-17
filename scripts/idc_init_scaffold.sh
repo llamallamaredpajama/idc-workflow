@@ -38,11 +38,29 @@ resolve() { python3 "$PLUGIN_ROOT/scripts/idc_template_for.py" --plugin-root "$P
 # repo-agnostic state machine).
 [ -f docs/workflow/workflow-machine.yaml ] || cp "$(resolve docs/workflow/workflow-machine.yaml)" docs/workflow/workflow-machine.yaml
 
-# docs/workflow tree from docs-tree/ (visible entries only; each absent entry resolved + copied).
+# docs/workflow tree from docs-tree/ (visible top-level entries only; each absent FILE resolved +
+# copied). The gap-fill is per FILE, not per directory: an existing docs/workflow/<dir>/ must still
+# receive any template file it is missing. Guarding at directory granularity was a real defect (the
+# Task-8 incident e2e, run-t8e2e.txt "Setup findings" 2) — a repo whose docs/workflow/pillar-matrices/
+# already existed without its hidden .gitkeep never got the keepfile, while commands/init.md's Phase 7
+# stamps that path BY NAME, so /idc:init died at the receipt with "cannot stamp missing file". The
+# receipt is a per-file contract, so the scaffold must converge per file. This also makes real
+# init.md Phase 2's promise that "a partial tree gets its missing entries filled". Idempotent +
+# non-destructive: an existing file is never re-copied, so operator content (a matrix, an intake
+# manifest) is untouched.
 shopt -s nullglob
 for entry in "$T/docs-tree/"*; do
   name="$(basename "$entry")"
-  [ -e "docs/workflow/$name" ] || cp -R "$(resolve "docs/workflow/$name")" "docs/workflow/$name"
+  if [ -f "$entry" ]; then
+    [ -e "docs/workflow/$name" ] || cp "$(resolve "docs/workflow/$name")" "docs/workflow/$name"
+    continue
+  fi
+  mkdir -p "docs/workflow/$name"
+  while IFS= read -r src; do
+    rel="${src#"$T/docs-tree/"}"
+    dest="docs/workflow/$rel"
+    [ -e "$dest" ] || { mkdir -p "$(dirname "$dest")"; cp "$(resolve "$dest")" "$dest"; }
+  done < <(find "$entry" -type f)
 done
 shopt -u nullglob
 
@@ -74,6 +92,12 @@ python3 "$PLUGIN_ROOT/scripts/hooks/idc_ledger.py" --cwd "$REPO_ROOT" ensure-git
 # fixpoint gate can read the github board conjunct locally (zero GraphQL on the stop path); it is
 # working state, never committed. Module owns the filename + ignore rule; idempotent + append-only.
 python3 "$PLUGIN_ROOT/scripts/hooks/idc_drain_verdict.py" --cwd "$REPO_ROOT" ensure-gitignore
+
+# Gitignore the persisted per-command diagnostic reports (.idc-<kind>-report.json, Task 6 wave 3): the
+# same transient per-session sidecar treatment. /idc:doctor + /idc:janitor write their run's result
+# there so the command contract's finish re-reads the run's OWN report instead of a caller integer;
+# working state, never committed. Module owns the filename glob + ignore rule; idempotent + append-only.
+python3 "$PLUGIN_ROOT/scripts/hooks/idc_command_report.py" --cwd "$REPO_ROOT" ensure-gitignore
 
 # Gitignore the transition-journal advisory-lock sidecar (docs/workflow/transition-journal.ndjson.lock,
 # v4 Phase 4 #150): the runtime-only flock token rotation + journal_append create on a stable sidecar so

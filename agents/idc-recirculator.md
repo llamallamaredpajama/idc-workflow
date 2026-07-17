@@ -29,15 +29,37 @@ mode only changes what gets fed in:
    Items already behind a gate (`Blocked`) or retired (`Done`) are skipped, so a re-run is
    idempotent — except the interrupted-run recovery: a `Blocked` item whose blocking gate issue
    is already `Done` MAY be an interrupted dispose-then-unblock — but **first verify that gate's
-   journaled guarded dispose** (an `op=dispose`/`disposition=gate-approved` record naming it —
-   `idc:idc-gate-issue` step 4 has the deterministic check). Only if it is journaled, finish its
-   unblock through the engine's journaled `unblock`, then drain it normally. A `Done` gate does NOT
-   alone prove the guarded door ran (a raw/manual close or janitor repair also mints `Done`): if it
-   is **not** journaled the `Done` is UNPROVEN — leave the item `Blocked` and surface the anomaly,
-   never auto-unblock. Draining the inbox admits
+   journaled proof** through the one deterministic reader —
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gate_proof.py" --repo "$PWD" --gate <gate#>`
+   (`guarded-dispose` and `verified-reconciliation` are proven; never hand-roll a journal scan).
+   Only on a
+   **proven** kind — `guarded-dispose` (an `op=dispose`/`disposition=gate-approved` record) or
+   `verified-reconciliation` (an `op=gate-reconciliation` record from `idc_gate_repair.py`, which
+   verified the merged approval PR at repair time) — finish it through the **guarded pointer-finish
+   door**: `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gate_repair.py" --repo "$PWD" --finish-pointer
+   --gate <gate#> --pointer <item#>` (github: add `--owner <owner> --project <n>`; **dry run by
+   default** — add `--apply` after reading the plan), then drain it normally. **Never a raw engine
+   `unblock` here**: `unblock --by` drops only the NAMED edge before setting `Todo`, so an item held
+   by several gates would sail past the others without their proof. The door re-reads the gate's
+   proof on disk AND refuses unless that gate is the item's SOLE remaining blocker — then finishes
+   the job through the engine's journaled `unblock` itself. A `Done` gate does NOT alone prove the guarded door
+   ran (a raw/manual close or janitor repair also mints `Done`): on `unproven` — or exit 2, an
+   unreadable journal, which is indeterminate and never a clean negative — the `Done` is UNPROVEN:
+   leave the item `Blocked` and surface the anomaly, never auto-unblock. Draining the inbox admits
    discovered scope to the front of the pipeline so **Plan**
    (unchanged) later decomposes the resulting admitted considerations. Autorun runs this mode at the
    top of the pipeline, before the Buildable wave.
+3. **Reviewed intake unit (`<manifest>#<unit>`).** A single external-intake reference for a unit whose
+   `route` is `recirculate` (validate the manifest + its independent review first; reject any other
+   route — a foreign plan is evidence, never execution authority). Feed the unit's `summary` +
+   `dependencies` through the identical decision flow. **After it lands** (an admitted consideration,
+   a gated Think PR, or a paused ticket), **link the unit on the exact-once manifest** so it is never
+   left stale:
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_intake_manifest.py" link \
+     --manifest "$MANIFEST" --unit "$UNIT" --state materialized \
+     --target-ref "<recirc-ticket | consideration | gate>" --evidence "recirculate:<ref>"
+   ```
 
 ## Procedure
 
@@ -52,8 +74,17 @@ mode only changes what gets fed in:
    - **gate: no — not gate-worthy.**
      - *Drift intake:* edit that layer and every layer below it (arch spec, master plan,
        subphases, pillars, the CLAUDE.md tree, affected open issues) **synchronized in one
-       PR**, automerge. The PR description **is** the change order (drift evidence, layers
-       changed, why no gated layer was affected).
+       PR** on a **`recirc/<slug>` branch**, then **automerge it through the sanctioned finisher**
+       (the change-order PR closes no tracker item; a raw `gh pr merge` is denied during an active
+       command):
+       ```bash
+       python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_pr_finish.py" autonomous \
+         --repo "$PWD" --pr <recirc-PR> --kind recirculation
+       ```
+       (the finisher requires the PR's head branch to carry the `recirc/` prefix, does a direct
+       blocking squash-merge, and deletes the branch atomically — never GitHub `--auto`). The PR
+       description **is** the change order (drift evidence, layers changed, why no gated layer was
+       affected).
      - *Inbox-drain:* the discovered scope fits within today's requirements, so **admit it
        directly**. Author a function-first **ADMITTED consideration** per
        `idc:idc-consideration-schema` (`docs/considerations/<YYYY-MM-DD>-<slug>-considerations.md`,

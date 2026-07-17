@@ -45,6 +45,7 @@ make_realistic_repo() {
   _realistic_fill_configs "$dir" || return 1
   ( cd "$dir" && python3 "$PLUGIN/scripts/idc_receipt_check.py" stamp --repo "$dir" \
       --out docs/workflow/install-receipt.yaml --written-by idc:init \
+      --plugin-version 4.0.0 \
       --customized WORKFLOW-config.yaml --customized docs/workflow/tracker-config.yaml \
       WORKFLOW.md WORKFLOW-config.yaml docs/workflow/tracker-config.yaml \
       docs/workflow/README.md docs/workflow/pillar-matrices/.gitkeep \
@@ -63,6 +64,7 @@ PY
   # Pre-guard receipt: re-stamp the two data configs state: stamped (no --customized).
   ( cd "$dir" && python3 "$PLUGIN/scripts/idc_receipt_check.py" stamp --repo "$dir" \
       --out docs/workflow/install-receipt.yaml --written-by idc:init \
+      --plugin-version 4.0.0 \
       WORKFLOW.md WORKFLOW-config.yaml docs/workflow/tracker-config.yaml \
       docs/workflow/README.md docs/workflow/pillar-matrices/.gitkeep \
       docs/workflow/code-reviews/.gitkeep >/dev/null )

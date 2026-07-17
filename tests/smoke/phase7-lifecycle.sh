@@ -31,12 +31,14 @@ printf 'placeholder\n'             > "$RECEIPT"
 
 # --- stamp: compute fingerprints + emit the receipt -----------------------------------------
 python3 "$HELPER" stamp --repo "$SBX" --out "$RECEIPT" --written-by idc:update \
+  --plugin-version 4.1.0 \
   WORKFLOW.md docs/workflow/tracker-config.yaml sub/nested.txt \
   TRACKER.md .claude/settings.json docs/workflow/install-receipt.yaml \
   || fail "stamp exited non-zero"
 
 # receipt shape mirrors commands/init.md:137-151
-grep -Eq '^receipt_version:[[:space:]]*1$'            "$RECEIPT" || fail "receipt_version not 1"
+grep -Eq '^receipt_version:[[:space:]]*2$'            "$RECEIPT" || fail "receipt_version not 2"
+grep -Eq '^plugin_version:[[:space:]]*4\.1\.0$'       "$RECEIPT" || fail "plugin_version missing from v2 receipt"
 grep -Eq '^fingerprint_method:[[:space:]]*sha256$'    "$RECEIPT" || fail "fingerprint_method not sha256"
 grep -Eq '^written_by:[[:space:]]*idc:update$'        "$RECEIPT" || fail "written_by not recorded"
 grep -q  'path: WORKFLOW.md'                          "$RECEIPT" || fail "WORKFLOW.md not stamped"
@@ -73,6 +75,15 @@ echo "$out" | grep -Eq 'missing[[:space:]]+sub/nested.txt' || fail "removed sub/
 printf 'receipt_version: 1\nfingerprint_method: md5\nfiles: not-a-list\n' > "$RECEIPT"
 python3 "$HELPER" verify --repo "$SBX" >/dev/null 2>&1 && fail "verify must exit non-zero on an invalid receipt"
 
+# --- verify: a WELL-FORMED v1 receipt (no plugin_version — predates the repo contract) still ---
+# parses + verifies cleanly — read-compat must survive the v2/plugin_version hardening. Distinct
+# from the intentionally-INVALID v1 receipt directly above (bad fingerprint_method + non-list
+# files:): this one is a legitimate legacy receipt an old /idc:init could have written.
+V1FP="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$SBX/WORKFLOW.md")"
+printf 'receipt_version: 1\nfingerprint_method: sha256\nwritten_by: idc:init\nfiles:\n  - path: WORKFLOW.md\n    fingerprint: %s\n    state: stamped\n' "$V1FP" > "$RECEIPT"
+out="$(python3 "$HELPER" verify --repo "$SBX")" || fail "verify exited non-zero on a well-formed v1 receipt (v1 read-compat broken)"
+echo "$out" | grep -Eq 'unchanged[[:space:]]+WORKFLOW.md' || fail "well-formed v1 receipt: WORKFLOW.md not reported unchanged"
+
 # --- verify: a missing receipt fails loud ---------------------------------------------------
 rm -f "$RECEIPT"
 python3 "$HELPER" verify --repo "$SBX" >/dev/null 2>&1 && fail "verify must exit non-zero on a missing receipt"
@@ -82,6 +93,7 @@ python3 "$HELPER" verify --repo "$SBX" >/dev/null 2>&1 && fail "verify must exit
 printf 'restored\n' > "$SBX/sub/nested.txt"   # re-create the file removed above
 CUSTRECEIPT="$SBX/custom-receipt.yaml"
 python3 "$HELPER" stamp --repo "$SBX" --out "$CUSTRECEIPT" --written-by idc:update \
+  --plugin-version 4.1.0 \
   --customized WORKFLOW.md \
   WORKFLOW.md docs/workflow/tracker-config.yaml sub/nested.txt \
   || fail "stamp --customized exited non-zero"
@@ -90,5 +102,59 @@ awk '/path: WORKFLOW.md/{f=1} f&&/state:/{print; exit}' "$CUSTRECEIPT" | grep -q
   || fail "--customized WORKFLOW.md did not record state: customized"
 awk '/path: sub\/nested.txt/{f=1} f&&/state:/{print; exit}' "$CUSTRECEIPT" | grep -q 'stamped' \
   || fail "non-customized file should keep state: stamped"
+
+# --- doctor.md Row 5's receipt-ok check must enforce the rule it states (Finding 5, round-2
+# Finding 3): a receipt_version: 2 receipt without a valid plugin_version is NOT clean, and a
+# receipt_version outside {1, 2} is NOT clean either. Rather than a hand-copied snippet (which
+# would stay green even if the REAL check in commands/doctor.md were weakened or removed), extract
+# the actual fenced bash block from doctor.md's Row 5 and evaluate it verbatim — this test is
+# bound to the shipped prose itself.
+D="$PLUGIN/commands/doctor.md"
+[ -f "$D" ] || fail "commands/doctor.md missing"
+DOCTOR_CHECK_SRC="$(python3 - "$D" <<'PY'
+import re, sys
+text = open(sys.argv[1], encoding="utf-8").read()
+for block in re.findall(r"```bash\n(.*?)```", text, re.S):
+    if "echo receipt-ok" in block:
+        sys.stdout.write(block)
+        break
+PY
+)"
+[ -n "$DOCTOR_CHECK_SRC" ] || fail "doctor.md Row 5's receipt-ok check block was not found (removed or renamed?) — this test must bind to the real check, not a copy"
+
+receipt_ok() {
+  ( cd "$SBX" && eval "$DOCTOR_CHECK_SRC" )
+}
+
+printf 'receipt_version: 2\nplugin_version: 4.1.0\nfingerprint_method: sha256\nwritten_by: test\nfiles:\n' > "$RECEIPT"
+[ "$(receipt_ok)" = "receipt-ok" ] \
+  || fail "doctor.md Row 5 check must print receipt-ok for a well-formed v2 receipt"
+
+printf 'receipt_version: 2\nfingerprint_method: sha256\nwritten_by: test\nfiles:\n' > "$RECEIPT"
+[ -z "$(receipt_ok)" ] \
+  || fail "doctor.md Row 5 check must NOT print receipt-ok for a v2 receipt missing plugin_version (Finding 5 regression)"
+
+printf 'receipt_version: 2\nplugin_version: not-semver\nfingerprint_method: sha256\nwritten_by: test\nfiles:\n' > "$RECEIPT"
+[ -z "$(receipt_ok)" ] \
+  || fail "doctor.md Row 5 check must NOT print receipt-ok for a v2 receipt with a non-semver plugin_version"
+
+printf 'receipt_version: 1\nfingerprint_method: sha256\nwritten_by: test\nfiles:\n' > "$RECEIPT"
+[ "$(receipt_ok)" = "receipt-ok" ] \
+  || fail "doctor.md Row 5 check must still print receipt-ok for a v1 receipt (no plugin_version required)"
+
+printf 'receipt_version: 3\nplugin_version: 4.1.0\nfingerprint_method: sha256\nwritten_by: test\nfiles:\n' > "$RECEIPT"
+[ -z "$(receipt_ok)" ] \
+  || fail "doctor.md Row 5 check must NOT print receipt-ok for a receipt_version outside {1,2} (round-2 Finding 2/doctor gap)"
+
+# --- stamp: --plugin-version is REQUIRED — omitting it must fail loud, not silently write a
+# receipt with a guessed version (round-2 Finding 4: every OTHER smoke stamp call supplies the
+# flag, so a silently-restored auto-resolve fallback would otherwise stay invisible).
+NOFLAG_RECEIPT="$SBX/no-plugin-version-receipt.yaml"
+rm -f "$NOFLAG_RECEIPT"
+python3 "$HELPER" stamp --repo "$SBX" --out "$NOFLAG_RECEIPT" --written-by idc:update \
+  WORKFLOW.md >/dev/null 2>&1
+rc=$?
+[ "$rc" -ne 0 ] || fail "stamp without --plugin-version must exit non-zero (it is a required flag)"
+[ ! -f "$NOFLAG_RECEIPT" ] || fail "stamp without --plugin-version must not write a receipt file"
 
 echo "PASS: receipt helper stamps an init-compatible receipt + verify classifies drift (fail-loud)"

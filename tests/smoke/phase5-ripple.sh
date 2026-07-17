@@ -164,4 +164,18 @@ grep -qiE 'only requirements-admission gate' "$GATE_SKILL" \
 grep -qiE 'operator-decision' "$WORKFLOW" \
   || fail "WORKFLOW.md must document the strategic operator-decision gate as a distinct board state (P2-2, append-only §2.1)"
 
+# ---- Task 6: Recirculation consumes a route=recirculate intake unit + links it ----------------
+# Recirculate accepts `<manifest>#<unit>` (only for a unit whose route is `recirculate`), processes it
+# through the SAME layer decision, and links the unit to the resulting ticket/consideration/gate via
+# the exact-once manifest helper — never leaving the manifest stale. It also closes its command
+# contract and surfaces the oracle handoff (the command frame pinned across all commands in phase7).
+RECIRC_CMD="$PLUGIN/commands/recirculate.md"
+[ -f "$RECIRC_CMD" ] || fail "commands/recirculate.md missing"
+grep -qF 'idc_intake_manifest.py' "$RECIRC" \
+  || fail "agents/idc-recirculator.md must link a consumed route=recirculate intake unit through idc_intake_manifest.py link (Task 6)"
+grep -qiE '<manifest>#<unit>|manifest.{0,6}#.{0,6}unit|\$MANIFEST#\$UNIT|route[ =]*recirculate' "$RECIRC_CMD" \
+  || fail "commands/recirculate.md must accept a <manifest>#<unit> intake reference for a route=recirculate unit (Task 6)"
+grep -qF 'idc_intake_manifest.py' "$RECIRC_CMD" \
+  || fail "commands/recirculate.md must link a consumed intake unit through idc_intake_manifest.py (Task 6)"
+
 echo "PASS: recirculation downstream-sync + requirements-only gate doctrine + Think-PR gate reuse + strategic decision gate green"

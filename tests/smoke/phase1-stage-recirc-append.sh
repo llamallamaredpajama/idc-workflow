@@ -87,4 +87,115 @@ JSON
 python3 "$H" append --ensure-option Recirculation --options-json "$WORK/field_noid.json" >/dev/null 2>&1
 [ $? = 2 ] || fail "missing field id (no JSON id, no --field-id) must fail closed with exit 2"
 
-echo "PASS: Recirculation Stage-option append is non-destructive, idempotent, and fail-closed"
+# ---- (4) round-7 Fix 1: the `apply` mode RUNS the mutation itself (a sanctioned Python door) --------
+# The mutation must NOT be executed by a raw `gh api graphql -f query="$MUT"` in command prose — the
+# mutation interlock hard-DENIES a raw GraphQL mutation during an active /idc:init or /idc:update.
+# `apply` assembles AND runs the mutation via a python subprocess `gh`, which the interlock never sees.
+# Stub `gh` on PATH so this stays hermetic (no network). The stub logs its args AND emits a mutation
+# response on stdout (read from $WORK/gh-response.json), so `apply`'s round-15 POSITIVE READBACK has a
+# real server echo to confirm against — exactly the `projectV2Field{ options{ id name } }` shape GitHub
+# returns for the append mutation.
+BIN="$WORK/bin"; mkdir -p "$BIN"
+cat > "$BIN/gh" <<SH
+#!/bin/bash
+printf '%s\n' "\$*" >> "$WORK/gh-calls.txt"
+cat "$WORK/gh-response.json"
+exit 0
+SH
+chmod +x "$BIN/gh"
+
+# A successful append response: the field's post-write options DO contain Recirculation.
+cat > "$WORK/gh-response.json" <<'JSON'
+{"data":{"updateProjectV2Field":{"projectV2Field":{"id":"PVTSSF_OLD","options":[
+  {"id":"aaa111","name":"Consideration"},
+  {"id":"bbb222","name":"Planning"},
+  {"id":"ccc333","name":"Buildable"},
+  {"id":"eee555","name":"Recirculation"}
+]}}}}
+JSON
+
+: > "$WORK/gh-calls.txt"
+PATH="$BIN:$PATH" python3 "$H" apply --ensure-option Recirculation --options-json "$WORK/field3.json" --repo "$WORK"
+rc_apply=$?
+[ "$rc_apply" = "0" ] || fail "apply on a 3-option field must run the mutation and exit 0 (got $rc_apply)"
+grep -q 'api graphql' "$WORK/gh-calls.txt" || fail "apply must invoke \`gh api graphql\` to run the mutation"
+grep -q 'updateProjectV2Field' "$WORK/gh-calls.txt" || fail "apply must run the updateProjectV2Field append mutation"
+
+# ---- (4b) round-16: a SUCCESSFUL apply must leave a DURABLE schema-reconciliation journal record ---
+# (the finding: cmd_apply used to decline journaling entirely, only a transient stderr receipt). The
+# record must NOT fake an item-transition shape (no `item`, no `to`), or replay would either ignore it
+# (harmless) or, worse, a future change could make it look like a real item's state.
+JRNL="$WORK/docs/workflow/transition-journal.ndjson"
+[ -f "$JRNL" ] || fail "a successful apply must append a durable schema-reconciliation record to docs/workflow/transition-journal.ndjson (a stderr receipt alone is not durable)"
+LAST="$(tail -n1 "$JRNL")"
+echo "$LAST" | python3 -c '
+import json, sys
+rec = json.loads(sys.stdin.read())
+op = rec.get("op"); field = rec.get("field"); option = rec.get("option"); door = rec.get("door")
+assert op == "schema-reconciliation", "op=%r, want schema-reconciliation" % (op,)
+assert field == "Stage", "field=%r, want Stage" % (field,)
+assert option == "Recirculation", "option=%r, want Recirculation" % (option,)
+assert door, "door marker missing — record must disclose which sanctioned helper wrote it"
+assert "item" not in rec, "must NOT carry an item field — would misread as an item transition on replay"
+assert "to" not in rec, "must NOT carry a to (stage/status) field — this is a SCHEMA change, not an item transition"
+' || fail "schema-reconciliation journal record missing/malformed (op/field/option/door, and must omit item/to)"
+JLINES_AFTER_SUCCESS="$(wc -l < "$JRNL" | tr -d ' ')"
+
+# ---- (4a) round-15 Fix 2: apply POSITIVELY READS BACK the write — a rc=0 mutation whose returned
+# option set does NOT contain Recirculation must FAIL (not silently report success). This is the
+# red-when-broken proof for the readback: drop the `_readback_has_option` check and this case passes
+# wrongly (exit 0). The stub still exits 0 and logs the call — only its response omits Recirculation.
+cat > "$WORK/gh-response.json" <<'JSON'
+{"data":{"updateProjectV2Field":{"projectV2Field":{"id":"PVTSSF_OLD","options":[
+  {"id":"aaa111","name":"Consideration"},
+  {"id":"bbb222","name":"Planning"},
+  {"id":"ccc333","name":"Buildable"}
+]}}}}
+JSON
+: > "$WORK/gh-calls.txt"
+PATH="$BIN:$PATH" python3 "$H" apply --ensure-option Recirculation --options-json "$WORK/field3.json" --repo "$WORK" >/dev/null 2>&1
+rc_readback=$?
+[ "$rc_readback" = "2" ] || fail "apply must FAIL closed (exit 2) when the mutation response's option set lacks Recirculation on readback (got $rc_readback)"
+grep -q 'api graphql' "$WORK/gh-calls.txt" || fail "the readback-failure case must still have RUN the mutation (gh invoked) before failing on the readback"
+JLINES_AFTER_READBACK_FAIL="$(wc -l < "$JRNL" 2>/dev/null | tr -d ' ')"
+[ "$JLINES_AFTER_READBACK_FAIL" = "$JLINES_AFTER_SUCCESS" ] || fail "a readback-failed apply (option missing from the mutation's own echo) must NOT append a schema-reconciliation journal record — nothing was actually reconciled"
+
+# an empty / unparseable mutation response is likewise treated as unconfirmed → apply fails closed.
+printf '' > "$WORK/gh-response.json"
+PATH="$BIN:$PATH" python3 "$H" apply --ensure-option Recirculation --options-json "$WORK/field3.json" --repo "$WORK" >/dev/null 2>&1
+[ $? = 2 ] || fail "an empty/unparseable mutation response must make apply fail closed (readback unconfirmed)"
+JLINES_AFTER_EMPTY_RESPONSE="$(wc -l < "$JRNL" 2>/dev/null | tr -d ' ')"
+[ "$JLINES_AFTER_EMPTY_RESPONSE" = "$JLINES_AFTER_SUCCESS" ] || fail "an unparseable-readback apply must NOT append a schema-reconciliation journal record"
+
+# restore the SUCCESS response for the remaining apply cases below.
+cat > "$WORK/gh-response.json" <<'JSON'
+{"data":{"updateProjectV2Field":{"projectV2Field":{"id":"PVTSSF_OLD","options":[
+  {"id":"aaa111","name":"Consideration"},
+  {"id":"bbb222","name":"Planning"},
+  {"id":"ccc333","name":"Buildable"},
+  {"id":"eee555","name":"Recirculation"}
+]}}}}
+JSON
+
+# idempotent: an already-present option → exit 3, and gh is NEVER called (no duplicate option, no write).
+: > "$WORK/gh-calls.txt"
+PATH="$BIN:$PATH" python3 "$H" apply --ensure-option Recirculation --options-json "$WORK/field4.json" --repo "$WORK"
+rc_apply2=$?
+[ "$rc_apply2" = "3" ] || fail "apply on an already-present option must be a no-op (exit 3, got $rc_apply2)"
+[ ! -s "$WORK/gh-calls.txt" ] || fail "apply must NOT invoke gh when the option is already present"
+JLINES_AFTER_NOOP="$(wc -l < "$JRNL" 2>/dev/null | tr -d ' ')"
+[ "$JLINES_AFTER_NOOP" = "$JLINES_AFTER_SUCCESS" ] || fail "an already-present no-op must NOT append a schema-reconciliation journal record — nothing changed on the board"
+
+# fail-closed: a failing gh mutation must surface as exit 2 (never a silent success).
+cat > "$BIN/gh" <<'SH'
+#!/bin/bash
+echo "boom" >&2
+exit 1
+SH
+chmod +x "$BIN/gh"
+PATH="$BIN:$PATH" python3 "$H" apply --ensure-option Recirculation --options-json "$WORK/field3.json" --repo "$WORK" >/dev/null 2>&1
+[ $? = 2 ] || fail "a failing gh mutation must make apply fail closed with exit 2"
+JLINES_AFTER_GH_FAIL="$(wc -l < "$JRNL" 2>/dev/null | tr -d ' ')"
+[ "$JLINES_AFTER_GH_FAIL" = "$JLINES_AFTER_SUCCESS" ] || fail "a rejected gh mutation must NOT append a schema-reconciliation journal record"
+
+echo "PASS: Recirculation Stage-option append is non-destructive, idempotent, and fail-closed, and journals schema-reconciliation durably"

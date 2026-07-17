@@ -22,12 +22,24 @@ Run the phases in order; each phase's evidence gates the next.
   to decompose. While confirming, run the interrupted-run recovery (Plan does not gate — this only
   finishes a recovery the gate's own guarded close already validated): `query` `Status=Blocked`
   items and, for any whose blocking gate issue is already `Done`, **first verify that gate's
-  journaled guarded dispose** — an `op=dispose`/`disposition=gate-approved` record naming it in
-  `docs/workflow/transition-journal.ndjson` (+ its `journal-archive/` segments) — and only then
-  finish the unblock through the engine's journaled `unblock`. A `Done` gate does NOT alone prove the
-  guarded door ran (a raw/manual close or janitor repair also mints `Done`): if it is **not**
-  journaled the `Done` is UNPROVEN — leave the dependent `Blocked` and surface it, never
-  auto-unblock. A `Done` gate must never strand its dependents.
+  journaled proof** through the one deterministic reader —
+  `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gate_proof.py" --repo "$PWD" --gate <gate#>` (it owns
+  the archive-aware scan of `docs/workflow/transition-journal.ndjson` + its `journal-archive/`;
+  `guarded-dispose` and `verified-reconciliation` are proven; never hand-roll a scan) — and only
+  then finish it through the **guarded pointer-finish
+  door**: `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gate_repair.py" --repo "$PWD" --finish-pointer
+  --gate <gate#> --pointer <dependent#>` (github: add `--owner <owner> --project <n>`; **dry run by
+  default** — add `--apply` after reading the plan). **Never a raw engine `unblock` here**: `unblock
+  --by` drops only the NAMED edge before setting `Todo`, so a dependent held by several gates would
+  sail past the others without their proof. The door re-reads the gate's proof on disk AND refuses
+  unless that gate is the dependent's SOLE remaining blocker — then finishes the job through the
+  engine's journaled `unblock` itself. Either **proven** kind is safe to finish: `guarded-dispose` (an
+  `op=dispose`/`disposition=gate-approved` record) or `verified-reconciliation` (an
+  `op=gate-reconciliation` record from `idc_gate_repair.py`, which verified the merged approval PR at
+  repair time). A `Done` gate does NOT alone prove the guarded door ran (a raw/manual close or
+  janitor repair also mints `Done`): on `unproven` — or exit 2, an unreadable journal, which is
+  indeterminate and never a clean negative — the `Done` is UNPROVEN: leave the dependent `Blocked`
+  and surface it, never auto-unblock. A `Done` gate must never strand its dependents.
 - Read each admitted consideration's requirements (the PRD + TRD) and the master plan, plus the live
   board through `idc:idc-tracker-adapter` (`query`) — including the open Buildable / in-flight
   issues. Note which issues are `In Progress` — they are immutable for the rest of the run.
@@ -121,14 +133,44 @@ pillar-level *file* clashes among the surviving, de-duplicated pillars.
    to step 3. Plan **cannot report Phase 5 done while this check fails** — a dropped stamp used to
    silently disarm the Recirculator's provenance regime (`idc_recirc_sweep.py`); this converts that
    gap from PROSE-ONLY to a verified post-condition.
-3. Advance the consideration pointer (`Consideration → Planning`, retired via the engine's guarded
-   `dispose --disposition retired` — a decomposition child as the receipt — as its buildable issues
-   land); open the planning PR whose **body is the audit trail** (what was planned, the matrix,
-   the trace) and **automerge when green, deleting the merged branch as part of the merge**:
-   a **direct, blocking** `gh pr merge --squash --delete-branch` (no human touchpoint; pick the
-   method the repo allows) — **not** GitHub `--auto`. Auto-merge defers the merge server-side and,
-   with the repo's `deleteBranchOnMerge` off, would skip the branch delete and leave an orphaned
-   `plan/*`. Branch deletion is **atomic with the merge**, not a separate best-effort step.
+3. Advance the consideration pointer `Consideration → Planning` through the **guarded Stage door**
+   (the only sanctioned Stage-write — it validates the Stage/Status pair against the machine and
+   journals the transition; a raw `set --field Stage` is denied by the mutation interlock):
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_transition.py" --repo "$PWD" move \
+     --num <pointer> --to-stage Planning --to-status Todo
+   ```
+   Then retire it via the engine's guarded `dispose --disposition retired` — a decomposition child as
+   the receipt — as its buildable issues land; open the planning PR whose **body is the audit trail**
+   (what was planned, the matrix,
+   the trace) and **automerge when green** through the sanctioned finisher, which does a **direct,
+   blocking** squash-merge and **deletes the merged branch as part of the merge** (no human
+   touchpoint):
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_pr_finish.py" autonomous \
+     --repo "$PWD" --pr <planning-pr> --kind planning
+   ```
+   The finisher runs `gh pr merge --squash --delete-branch` **internally** (never a raw merge typed
+   into the Bash tool — the mutation interlock denies that during an active command) and re-reads
+   `state=MERGED`; the planning PR closes no tracker item, so this is the sanctioned door for it.
+   It is **not** GitHub `--auto`: auto-merge defers the merge server-side and, with the repo's
+   `deleteBranchOnMerge` off, would skip the branch delete and leave an orphaned `plan/*`. Branch
+   deletion is **atomic with the merge**, not a separate best-effort step.
+
+   **Advance a consumed intake unit's manifest disposition.** When a consideration being decomposed
+   **originated from a reviewed external-intake unit** — its paused-origin / discovered-scope
+   provenance names a `docs/workflow/intakes/<file>.json#<unit>` reference — record the decomposition
+   on the exact-once manifest as its Buildables land, so the manifest never goes stale against the
+   board. A recirculate-origin unit's class is `admitted_unplanned` / `discovered_drift`, so the
+   manifest state machine's ONLY legal durable disposition for it is **`materialized`**
+   (`verified_done` is reserved for `class=already_done` and the helper rejects it here). Recirculation
+   already materialized the unit against its recirculation ticket; append the planning-PR evidence and
+   keep it materialized:
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_intake_manifest.py" link \
+     --manifest "$MANIFEST" --unit "$UNIT" --state materialized --evidence "plan:<planning-pr>"
+   ```
+   A consideration with no intake provenance has no manifest to touch — skip this.
 4. **Report the newly-created Buildable issue numbers on completion.** When this run was spawned by a
    parent orchestrator (Build's larger loop, or Autorun), Plan's closeout **reports the new Buildable
    issues** so the parent re-queries its ready frontier and the still-running kitchen picks up

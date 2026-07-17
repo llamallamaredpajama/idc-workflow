@@ -44,7 +44,8 @@ def node(num, status=None, stage=None, title=None):
     if status: fvs.append(ss("Status", status))
     if stage:  fvs.append(ss("Stage", stage))
     return {"id": f"PVTI_{num}", "fieldValues": {"nodes": fvs},
-            "content": {"__typename": "Issue", "number": num, "title": title or f"issue {num}"}}
+            "content": {"__typename": "Issue", "number": num, "title": title or f"issue {num}",
+                        "repository": {"nameWithOwner": "tester/repo"}}}
 
 # page 1: 100 Done/Buildable NOISE (#101..#200) — none eligible (not Todo). #101 is a Done blocker
 # referenced cross-page by #203, proving the predicate resolves a page-1 blocker for a page-2 issue.
@@ -79,6 +80,7 @@ cat > "$WORK/bin/gh" <<'STUB'
 #!/bin/bash
 sub="$1"
 if [ "$sub" = "project" ] && [ "$2" = "view" ]; then echo "PVT_test"; exit 0; fi
+if [ "$sub" = "repo" ] && [ "$2" = "view" ]; then echo "tester/repo"; exit 0; fi
 if [ "$sub" = "api" ] && [ "$2" = "graphql" ]; then
   cursor_val=""; has_pid=0
   for a in "$@"; do case "$a" in cursor=*) cursor_val="${a#cursor=}" ;; pid=PVT_test) has_pid=1 ;; esac; done
@@ -101,7 +103,15 @@ if [ "$sub" = "api" ]; then
   if [ -n "$path" ]; then
     n="$(printf '%s' "$path" | sed -E 's#.*/issues/([0-9]+)/dependencies/blocked_by#\1#')"
     if [ "$n" = "210" ]; then echo "dependencies API boom" >&2; exit 1; fi   # simulate a FAILED lookup
-    jq -c --arg n "$n" '.[$n] // []' "$FIX/blocked_by.json"
+    paginate=0; jq_flag=0; jq_expression=0
+    for a in "$@"; do
+      [ "$a" = "--paginate" ] && paginate=1
+      [ "$a" = "--jq" ] && jq_flag=1
+      [ "$a" = ".[].number" ] && jq_expression=1
+    done
+    [ "$paginate" = 1 ] && [ "$jq_flag" = 1 ] && [ "$jq_expression" = 1 ] \
+      || { echo "dependency reader omitted --paginate --jq .[].number" >&2; exit 9; }
+    jq -r --arg n "$n" '.[$n][]?' "$FIX/blocked_by.json"
     exit 0
   fi
 fi
@@ -221,11 +231,11 @@ printf '%s' "$DR" | grep -qE '(^| )203( |$)' \
 # legacy default (red-when-broken on the python side): #209 (no Stage) MUST be eligible via (stage or "Buildable")
 printf '%s' "$DR" | grep -qE '(^| )209( |$)' \
   || fail "#209 MUST be eligible — an absent Stage reads as Buildable (legacy 4-field default)"
-# per-issue FAIL-CLOSED (red-when-broken): #210's blocked_by lookup FAILED → fail-closed [0] sentinel
-# excludes it (never claim work whose blockers we couldn't verify). Flip [0]→[] (fail-open) and #210
-# wrongly becomes eligible — this assertion catches it.
+# per-issue FAIL-CLOSED (red-when-broken): #210's blocked_by lookup FAILED → a positive self-block
+# excludes it (never claim work whose blockers we couldn't verify). Flip that self-block to []
+# (fail-open) and #210 wrongly becomes eligible — this assertion catches it.
 printf '%s' "$DR" | grep -qE '(^| )210( |$)' \
-  && fail "#210 must NOT be eligible — its blocked_by lookup FAILED, so the fail-closed [0] sentinel must exclude it"
+  && fail "#210 must NOT be eligible — its blocked_by lookup FAILED, so the fail-closed self-block must exclude it"
 
 # ============================================================================================
 # 3b. AGGREGATE fail-closed (the Blocker): the board read SUCCEEDS but EVERY Buildable/Todo
@@ -241,6 +251,7 @@ cat > "$WORK/binunverif/gh" <<'STUB'
 #!/bin/bash
 sub="$1"
 if [ "$sub" = "project" ] && [ "$2" = "view" ]; then echo "PVT_test"; exit 0; fi
+if [ "$sub" = "repo" ] && [ "$2" = "view" ]; then echo "tester/repo"; exit 0; fi
 if [ "$sub" = "api" ] && [ "$2" = "graphql" ]; then
   has_cursor=0
   for a in "$@"; do case "$a" in cursor=*) has_cursor=1 ;; esac; done

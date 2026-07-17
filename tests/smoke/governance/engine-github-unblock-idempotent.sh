@@ -1,0 +1,214 @@
+#!/bin/bash
+# engine-github-unblock-idempotent.sh — governance scenario: a github `unblock --by` rerun after a
+# partial failure ("edge removed but the Status write failed") is IDEMPOTENT (Task 3, Fix 5).
+#
+# _gh_remove_dep must check ABSENCE FIRST: if the native blocked_by edge is already gone, it SKIPS the
+# DELETE (which GitHub may 404) and proceeds to the Blocked->Todo Status move, so the rerun
+# deterministically completes the remaining transition. Red-when-broken: revert to an unconditional
+# DELETE-before-check → the absent-first rerun re-issues the DELETE (the 404 risk) → this FAILs.
+#
+# Usage: bash tests/smoke/governance/engine-github-unblock-idempotent.sh   (exit 0 = pass)
+set -uo pipefail
+. "$(dirname "$0")/lib.sh"
+gov_engine_env
+
+python3 - "$GOV_PLUGIN/scripts" "$REPO" <<'PY' || fail "github unblock-idempotent unit failed (see above)"
+import sys
+sys.path.insert(0, sys.argv[1])
+repo = sys.argv[2]
+import idc_transition as E, idc_gh_board as B
+
+# A native dependency or comment/API parse failure is UNKNOWN state, never verified absence. Exercise
+# the real parsers (not replacement lambdas): malformed representations must raise BoardReadError so
+# the transition engine cannot advance Status from Blocked to Todo on an unreadable dependency set.
+assert issubclass(B.MalformedBoardDataError, B.BoardReadError), (
+    "malformed durable data must retain BoardReadError compatibility")
+real_gh = B._gh
+malformed_native_reads = {
+    "JSON null": "null\n",
+    "mixed valid and invalid tokens": "7\nbogus\n",
+    "multiple issue numbers in one record": "7 11\n",
+    "Python-only underscore numeric": "7_0\n",
+    "zero issue number": "0\n",
+    "negative issue number": "-7\n",
+}
+for name, output in malformed_native_reads.items():
+    B._gh = lambda *args, _output=output, **kwargs: _output
+    try:
+        B.blocked_by_numbers(5, repo)
+        raise AssertionError(f"{name} was treated as a verified native dependency set")
+    except B.MalformedBoardDataError:
+        pass
+B._gh = lambda *args, **kwargs: ""
+assert B.blocked_by_numbers(5, repo) == [], "a genuinely empty native dependency read was rejected"
+B._gh = lambda *args, **kwargs: "7\n11\n"
+assert B.blocked_by_numbers(5, repo) == [7, 11], "valid native issue numbers did not parse"
+B._gh = lambda *args, **kwargs: (_ for _ in ()).throw(B.BoardReadError("transient read failure"))
+try:
+    B.blocked_by_numbers(5, repo)
+    raise AssertionError("a transient dependency read failure was treated as verified data")
+except B.MalformedBoardDataError:
+    raise AssertionError("a transient dependency read failure was mislabeled as malformed data")
+except B.BoardReadError:
+    pass
+
+malformed_marker_reads = {
+    "non-JSON comment record": "not-json\n",
+    "non-object comment record": "[]\n",
+    "non-positive comment id": '{"id":0,"body":"ordinary comment"}\n',
+    "non-text comment body": '{"id":501,"body":[]}\n',
+    "malformed IDC marker JSON": '{"id":501,"body":"<!-- idc-blocked-by: not-json -->"}\n',
+    "non-object IDC marker JSON": '{"id":501,"body":"<!-- idc-blocked-by: [] -->"}\n',
+    "missing IDC marker field": '{"id":501,"body":"<!-- idc-blocked-by: '
+                                '{\\"child\\":5,\\"parent\\":7} -->"}\n',
+    "wrong-typed IDC marker endpoint": '{"id":501,"body":"<!-- idc-blocked-by: '
+                                       '{\\"child\\":\\"5\\",\\"parent\\":7,'
+                                       '\\"kind\\":\\"blocks\\"} -->"}\n',
+    "non-positive IDC marker endpoint": '{"id":501,"body":"<!-- idc-blocked-by: '
+                                          '{\\"child\\":5,\\"parent\\":0,'
+                                          '\\"kind\\":\\"blocks\\"} -->"}\n',
+    "unknown IDC marker kind": '{"id":501,"body":"<!-- idc-blocked-by: '
+                               '{\\"child\\":5,\\"parent\\":7,'
+                               '\\"kind\\":\\"mystery\\"} -->"}\n',
+}
+for name, output in malformed_marker_reads.items():
+    B._gh = lambda *args, _output=output, **kwargs: _output
+    try:
+        B.blocked_by_comment_ids(5, 7, repo)
+        raise AssertionError(f"{name} was treated as a verified empty marker set")
+    except B.BoardReadError:
+        pass
+
+# Paired controls: valid unrelated data is an empty set; a valid matching marker returns its REST id.
+B._gh = lambda *args, **kwargs: (
+    '{"id":400,"body":"ordinary comment"}\n'
+    '{"id":450,"body":"<!-- idc-blocked-by: '
+    '{\\"child\\":5,\\"parent\\":7,\\"kind\\":\\"sub\\"} -->"}\n'
+    '{"id":501,"body":"<!-- idc-blocked-by: '
+    '{\\"child\\":5,\\"parent\\":7,\\"kind\\":\\"blocks\\"} -->"}\n'
+)
+assert B.blocked_by_comment_ids(5, 8, repo) == [], "unrelated valid marker was not ignored"
+assert B.blocked_by_comment_ids(5, 7, repo) == [501], "matching valid marker was not returned"
+B._gh = real_gh
+print("  ok malformed dependency reads fail closed while valid native and marker records still parse")
+
+# The rerun state: the edge is ALREADY ABSENT (removed on the first, partially-failed run).
+deletes = []
+B.blocked_by_numbers = lambda child, r: []          # #7 no longer blocks #5
+B.remove_blocked_by = lambda child, parent, r: deletes.append((child, parent))
+B.blocked_by_comment_ids = lambda child, parent, r: []   # no marker comments left
+ctx = E.github_ctx(repo, "o", "1", itemid_cache={5: "PVTI_5"})
+
+# The absent-first branch of _gh_remove_dep: must NOT DELETE, must NOT raise, must return cleanly.
+E._gh_remove_dep(ctx, child=5, parent=7)
+assert deletes == [], f"absent-first rerun re-issued the DELETE (404 risk): {deletes}"
+print("  ok github unblock rerun skips the DELETE when the edge is already absent (idempotent, no 404)")
+
+# Sanity: when the edge IS present, the DELETE fires (the normal first-run path).
+present = {5: {7}}
+B.blocked_by_numbers = lambda child, r: sorted(present.get(int(child), set()))
+def _remove(child, parent, r):
+    deletes.append((child, parent)); present.get(int(child), set()).discard(int(parent))
+B.remove_blocked_by = _remove
+E._gh_remove_dep(ctx, child=5, parent=7)
+assert deletes == [(5, 7)], f"present-edge path did not DELETE exactly once: {deletes}"
+print("  ok github unblock DELETEs exactly once when the edge is present")
+
+# ---- Fix 5: the DISPATCHER always removes-and-verifies the dependency FIRST, even when the pointer is
+#      ALREADY Todo. The old dispatcher early-returned on Status==Todo BEFORE the removal, stranding a
+#      stale blocked_by edge. Red-when-broken: revert the reorder → removal is never called → this FAILs.
+present = {5: {7}}
+removed = []
+def _remove2(child, parent, r):
+    removed.append((child, parent)); present.get(int(child), set()).discard(int(parent))
+B.blocked_by_numbers = lambda child, r: sorted(present.get(int(child), set()))
+B.remove_blocked_by = _remove2
+B.blocked_by_comment_ids = lambda child, parent, r: []
+# The pointer #5 is ALREADY Todo (Status change is a no-op) but the #7->#5 edge is STILL PRESENT.
+B.fetch_item = lambda item_id, r: {"stage": "Buildable", "status": "Todo"}
+def _no_status_write(*a, **k):
+    raise AssertionError("set_status must NOT be called — the pointer is already Todo")
+B.set_status = _no_status_write
+E.run("unblock", ctx, num=5, to_status="Todo", by=7)
+assert removed == [(5, 7)], f"dispatcher did NOT remove the dependency on an already-Todo pointer: {removed}"
+assert 7 not in present.get(5, set()), f"the #7->#5 edge is still present after unblock: {present}"
+print("  ok dispatcher unblock --by removes the stale edge even when the pointer is already Todo (Fix 5)")
+
+# ---- round-7 Fix 3: an ILLEGAL unblock source (Status=In Progress) must refuse with NO removal ------
+#      The source-Status legality check (Blocked, plus the idempotent Todo rerun) must run BEFORE the
+#      dependency removal, so a refused unblock never leaves an UNJOURNALED partial mutation (the edge
+#      gone but the op refused). Red-when-broken: move the from_status check back AFTER
+#      remove_dependency → the removal fires before the raise → removed3 is non-empty → this FAILs.
+present = {5: {7}}
+removed3 = []
+def _remove4(child, parent, r):
+    removed3.append((child, parent)); present.get(int(child), set()).discard(int(parent))
+B.blocked_by_numbers = lambda child, r: sorted(present.get(int(child), set()))
+B.remove_blocked_by = _remove4
+B.blocked_by_comment_ids = lambda child, parent, r: []
+B.fetch_item = lambda item_id, r: {"stage": "Buildable", "status": "In Progress"}   # illegal source
+try:
+    E.run("unblock", ctx, num=5, to_status="Todo", by=7)
+    print("FAIL: unblock from an In Progress source was NOT refused"); sys.exit(1)
+except E.TransitionError:
+    pass
+assert removed3 == [], f"an illegal unblock REMOVED the dependency before refusing (unjournaled partial mutation): {removed3}"
+assert 7 in present.get(5, set()), f"the #7->#5 edge was removed by a REFUSED unblock: {present}"
+print("  ok an illegal unblock source (In Progress) refuses with NO dependency removal (Fix 3)")
+
+# ---- rubber-stamp Fix 4: BOTH dependency representations are blocking + positively read back -------
+# A marker lookup/delete/readback failure is a dependency-removal failure, not a non-fatal cleanup.
+# The dispatcher must therefore leave Status Blocked. After a partial native-edge success, a rerun
+# skips that already-absent native DELETE, resumes marker cleanup, and only then advances Status.
+present = {5: {7}}
+marker_ids = [501]
+status_writes = []
+status = ["Blocked"]
+native_deletes = []
+def _remove_native(child, parent, r):
+    native_deletes.append((child, parent)); present.get(int(child), set()).discard(int(parent))
+B.blocked_by_numbers = lambda child, r: sorted(present.get(int(child), set()))
+B.remove_blocked_by = _remove_native
+def _marker_read_fail(child, parent, r):
+    raise B.BoardReadError("marker read unavailable")
+B.blocked_by_comment_ids = _marker_read_fail
+B.fetch_item = lambda item_id, r: {"stage": "Consideration", "status": status[0]}
+def _set_status(*args):
+    status_writes.append(args); status[0] = args[-1]
+B.set_status = _set_status
+try:
+    E.run("unblock", ctx, num=5, to_status="Todo", by=7)
+    print("FAIL: marker-read failure did NOT fail the unblock"); sys.exit(1)
+except B.BoardReadError:
+    pass
+assert native_deletes == [(5, 7)], native_deletes
+assert status_writes == [], f"Status advanced despite an unverified marker representation: {status_writes}"
+assert marker_ids == [501]
+
+# Rerun: native is already absent (no second DELETE); marker deletion lands and its second read proves
+# absence before the Status write is permitted.
+marker_reads = []
+def _marker_ids(child, parent, r):
+    marker_reads.append(tuple(marker_ids)); return list(marker_ids)
+def _delete_marker(comment_id, r):
+    marker_ids.remove(comment_id)
+B.blocked_by_comment_ids = _marker_ids
+B.delete_comment = _delete_marker
+E.run("unblock", ctx, num=5, to_status="Todo", by=7)
+assert native_deletes == [(5, 7)], f"rerun re-deleted already-absent native edge: {native_deletes}"
+assert marker_reads == [(501,), ()], f"marker removal lacked positive absence readback: {marker_reads}"
+assert len(status_writes) == 1, f"Status did not advance after BOTH representations were absent: {status_writes}"
+
+# A delete that returns without removing the marker must still fail closed on readback.
+marker_ids[:] = [777]
+B.delete_comment = lambda comment_id, r: None
+try:
+    E._gh_remove_dep(ctx, child=5, parent=7)
+    print("FAIL: a marker still present after delete was reported as removed"); sys.exit(1)
+except E.TransitionError:
+    pass
+assert marker_ids == [777]
+print("  ok marker cleanup is blocking, read-back verified, and resumable before Status changes")
+PY
+
+echo "PASS: github unblock --by is idempotent — the absent-first rerun skips the DELETE and completes, a present edge is removed exactly once"

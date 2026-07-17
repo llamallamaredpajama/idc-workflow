@@ -56,12 +56,91 @@ for block, name in blocks:
     print(f"  ok {name}: guarded dispose precedes the dependent unblock, and the unblock is "
           "conditioned on it succeeding")
 
+# Task 7 wave 2b: in BOTH step-4 blocks the NORMAL path's finish routes through the guarded
+# pointer-finish door — never a bare engine `unblock`. The engine's `unblock --by` drops only the
+# NAMED edge before setting Todo, so a bare-unblock instruction frees a dependent Blocked by
+# `[gate, other]` past `other` WITHOUT `other`'s proof — and Autorun treats an unblocked Consideration
+# pointer as approved work. The door re-reads the gate's on-disk proof AND refuses unless the proven
+# gate is the dependent's SOLE remaining blocker, so the rule lives in ONE mechanical place rather
+# than being hand-rolled (or forgotten) per spot. Wave 2 sealed the interrupted-run RECOVERY prose
+# (board-lint-stranded-gate.sh); this seals the NORMAL path, the other half of the same class.
+for block, name in blocks:
+    if "--finish-pointer" not in block:
+        raise SystemExit(f"FAIL: {name} step 4 does not route the dependent finish through the guarded "
+                         "pointer-finish door (idc_gate_repair.py --finish-pointer) — that door is what "
+                         "enforces the gate's on-disk proof AND the sole-remaining-blocker rule "
+                         "(Task 7 wave 2b)")
+    if "sole remaining blocker" not in block:
+        raise SystemExit(f"FAIL: {name} step 4 never states the sole-remaining-blocker rule — a reader "
+                         "must know a dependent held by OTHER blockers stays Blocked until they "
+                         "resolve through their own doors (Task 7 wave 2b)")
+    print(f"  ok {name}: the dependent finish routes through the guarded pointer-finish door, "
+          "stating the sole-remaining-blocker rule")
+
+# …and nowhere may the skill INSTRUCT a bare engine unblock for a gate's dependents. (Explanatory
+# prose about `unblock --by` — why the door exists — is the point, and stays.)
+bare = re.findall(r"`unblock --num[^`]*`", text)
+if bare:
+    raise SystemExit("FAIL: the gate skill instructs a BARE engine unblock for gate dependents ("
+                     + ", ".join(bare) + ") — it drops only the NAMED edge and then sets Todo, "
+                     "admitting a multiply-blocked dependent past its other gates without their "
+                     "proof; route the finish through `idc_gate_repair.py --finish-pointer` "
+                     "(Task 7 wave 2b)")
+print("  ok the skill nowhere instructs a bare engine `unblock --num` for a gate's dependents")
+
 # dispose-first must not strand dependents when a run dies between the dispose and the unblock:
 # the recovery (a Done gate whose dependents are still Blocked → finish the unblock) must be named.
 if "still-`Blocked` dependents" not in text:
     raise SystemExit("FAIL: the skill never names the interrupted-run recovery (a Done gate with "
                      "still-Blocked dependents must have its unblock finished on the next re-check)")
 print("  ok interrupted-run recovery (Done gate, still-Blocked dependents) is named")
+
+# Status is machine-governed. The gate playbook must never send it through setField, and both gate
+# procedures must name the same real public routes: createTicket owns the initial Todo state and the
+# adapter's block convenience owns the guarded Blocked transition plus dependency edge.
+illegal_status_writes = re.findall(r"`setField`\s+`Status=(?:Todo|Blocked)`", text)
+if illegal_status_writes:
+    raise SystemExit("FAIL: gate skill still routes machine-governed Status through setField: " +
+                     ", ".join(illegal_status_writes))
+
+def bounded(start_pat, end_pat, name):
+    start = re.search(start_pat, text)
+    if not start:
+        raise SystemExit(f"FAIL: could not locate {name} start")
+    end = re.search(end_pat, text[start.end():])
+    if not end:
+        raise SystemExit(f"FAIL: could not locate {name} end")
+    return text[start.start():start.end() + end.start()]
+
+open_blocks = [
+    (bounded(r"\*\*1 — Open the Think PR \+ the gate\.\*\*", r"\*\*2 —", "requirements open"),
+     "requirements-gate"),
+    (bounded(r"1\. \*\*Open the gate\.\*\*", r"2\. \*\*Chain", "decision open"),
+     "decision-gate"),
+]
+for block, name in open_blocks:
+    required = ("`createTicket`", "`Status=Todo`", "`operator-action` label",
+                "same guarded create")
+    missing = [phrase for phrase in required if phrase not in block]
+    if missing:
+        raise SystemExit(f"FAIL: {name} open step does not describe the atomic initial-status route; "
+                         f"missing {missing}")
+    print(f"  ok {name}: createTicket owns initial Todo state and label in the same guarded create")
+
+chain_blocks = [
+    (bounded(r"\*\*2 — Chain what's pending\.\*\*", r"\*\*3 —", "requirements chain"),
+     "requirements-gate"),
+    (bounded(r"2\. \*\*Chain only its dependents\.\*\*", r"3\. \*\*Notify", "decision chain"),
+     "decision-gate"),
+]
+for block, name in chain_blocks:
+    required = ("`block(<dependent>, by=<gate>)`", "`move --to-status Blocked`",
+                "`link --parent <gate> --child <dependent> --kind blocks`")
+    missing = [phrase for phrase in required if phrase not in block]
+    if missing:
+        raise SystemExit(f"FAIL: {name} chain step does not name the guarded block route; "
+                         f"missing {missing}")
+    print(f"  ok {name}: adapter block routes through guarded move then link")
 PY
 
-echo "PASS: idc:idc-gate-issue step 4 (both gate kinds) runs the guarded dispose FIRST and unblocks dependents only after it succeeds, with the interrupted-run recovery named — a revoked approval can no longer leave dependents unblocked"
+echo "PASS: idc:idc-gate-issue step 4 (both gate kinds) runs the guarded dispose FIRST and finishes dependents only after it succeeds — through the guarded pointer-finish door, never a bare engine unblock (so a dependent held by other blockers stays Blocked) — with the interrupted-run recovery named; a revoked approval can no longer leave dependents unblocked"

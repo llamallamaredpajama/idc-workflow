@@ -40,6 +40,7 @@ grep -q "$SENTINEL" "$CFG" || fail "could not inject operator domains"
 # 3. LEGACY (pre-guard) receipt: the two configs marked state: stamped (NO --customized), as a
 #    receipt written before the init.md Phase 7 guard existed would record them.
 ( cd "$SBX" && python3 "$HELPER" stamp --repo "$SBX" --out "$RECEIPT" --written-by idc:init \
+    --plugin-version 4.0.0 \
     WORKFLOW.md WORKFLOW-config.yaml \
     docs/workflow/tracker-config.yaml docs/workflow/README.md \
     docs/workflow/pillar-matrices/.gitkeep docs/workflow/code-reviews/.gitkeep ) \

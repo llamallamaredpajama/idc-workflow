@@ -3,13 +3,15 @@
 
 Catches the 2026-06-14 stale-cache release bug — shipped changes that never got a version
 bump, so Claude Code's version-keyed cache never refreshes (see
-docs/dev/2026-06-14-install-test-pr37-audit.md F1/F1b). Two deterministic, dependency-free
+docs/dev/2026-06-14-install-test-pr37-audit.md F1/F1b). Four deterministic, dependency-free
 checks (stdlib only — the plugin ships to repos without PyYAML):
 
   1. Lockstep — `.claude-plugin/plugin.json` `version` must equal the `idc` plugin entry's
      `version` in `.claude-plugin/marketplace.json`. (`claude plugin tag` validates the same
      agreement at release time; this fails earlier, on every commit/CI run.)
-  2. Bump-on-ship — if `CHANGELOG.md`'s `## Unreleased` section has content while
+  2. Changelog lockstep — the latest dated release heading must equal both manifest versions.
+  3. README lockstep — exactly one version badge must carry matching alt text and shields URL.
+  4. Bump-on-ship — if `CHANGELOG.md`'s `## Unreleased` section has content while
      `plugin.json` `version` still equals the latest dated release heading, the shipped
      changes were never given a new version. FAIL: convert `## Unreleased` to a dated
      release heading and bump `plugin.json` (+ `marketplace.json`) in lockstep.
@@ -23,15 +25,43 @@ from __future__ import annotations
 
 import argparse
 import glob
+from html.parser import HTMLParser
 import json
 import os
+import re
 import subprocess
 import sys
+from urllib.parse import unquote
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PLUGIN_JSON = os.path.join(ROOT, ".claude-plugin", "plugin.json")
 MARKETPLACE_JSON = os.path.join(ROOT, ".claude-plugin", "marketplace.json")
 CHANGELOG = os.path.join(ROOT, "CHANGELOG.md")
+README = os.path.join(ROOT, "README.md")
+
+
+class _VersionBadgeParser(HTMLParser):
+    """Collect images that identify themselves as the README version badge."""
+
+    def __init__(self):
+        super().__init__()
+        self.badges = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() != "img":
+            return
+        values = dict(attrs)
+        alt, src = values.get("alt", ""), values.get("src", "")
+        if (str(alt).strip().lower().startswith("version ")
+                or str(src).startswith("https://img.shields.io/badge/version-")):
+            self.badges.append({"alt": str(alt), "src": str(src)})
+
+
+def readme_version_badges(path: str) -> list[dict[str, str]]:
+    parser = _VersionBadgeParser()
+    with open(path, "r", encoding="utf-8") as handle:
+        parser.feed(handle.read())
+    return parser.badges
 
 
 def run_governance_lane() -> int:
@@ -162,6 +192,32 @@ def main() -> int:
             f"version is still {plugin_version!r} (the latest released heading) — convert "
             "'## Unreleased' to a dated release heading and bump plugin.json + marketplace.json"
         )
+    if plugin_version and latest_released != plugin_version:
+        findings.append(
+            "CHANGELOG.md: [release-discipline] latest released heading "
+            f"{latest_released!r} != plugin.json {plugin_version!r} (close release metadata together)"
+        )
+
+    badges = readme_version_badges(README)
+    if len(badges) != 1:
+        findings.append(
+            f"README.md: [release-discipline] expected exactly one version badge, found {len(badges)}"
+        )
+    elif plugin_version:
+        badge = badges[0]
+        expected_alt = f"version {plugin_version}"
+        if badge["alt"] != expected_alt:
+            findings.append(
+                "README.md: [release-discipline] version badge alt text "
+                f"{badge['alt']!r} != {expected_alt!r}"
+            )
+        match = re.match(r"^https://img\.shields\.io/badge/version-([^-/?]+)-", badge["src"])
+        url_version = unquote(match.group(1)) if match else None
+        if url_version != plugin_version:
+            findings.append(
+                "README.md: [release-discipline] version badge URL names "
+                f"{url_version!r}, expected {plugin_version!r}: {badge['src']!r}"
+            )
 
     for f in findings:
         print(f, file=sys.stderr)

@@ -75,7 +75,7 @@ from idc_journal_replay import reconstruct_state_from_journal, journal_item_id, 
 # REQUIRES a `-`/`/` separator (`build-*`/`build/*`) so a foreign name that merely starts with the
 # letters "build" — buildbot, buildkite, builder-x — is NOT misread as IDC. (`worktree-build-*` is still
 # covered by the `worktree-` alternative.)
-IDC_NAME_RE = re.compile(r"^(idc-|build[-/]|plan/|recirculate/|worktree-)")
+IDC_NAME_RE = re.compile(r"^(idc-|build[-/]|plan/|recirculate/|recirc/|worktree-)")
 # Known non-IDC tooling, labelled for a readable REPORT-ONLY line (the tier is binary IDC/not — this
 # only annotates WHICH foreign tool, so the operator can route it; an unmatched foreign name is "unknown").
 FOREIGN_TOOLS = (
@@ -265,6 +265,9 @@ def gh_json(args, repo):
 PR_LIST_LIMIT = 1000
 ISSUE_LIST_LIMIT = 2000
 JOURNAL_REL = os.path.join("docs", "workflow", "transition-journal.ndjson")
+# The scanner's provenance stamp on its persisted report (round-5 finding 7): the /idc:janitor closeout
+# requires it, so a hand-written report that omits it is refused (the report must come from the scanner).
+JANITOR_PROVENANCE = "idc_git_janitor.py"
 # The journal's advisory-lock SIDECAR, as a repo-root .gitignore pattern (always forward-slash). A
 # runtime-only token both rotation and journal_append create when they lock — never committed. Derived
 # from JOURNAL_REL so the ignore rule and the lock path can't drift.
@@ -597,14 +600,16 @@ def scan(ctx):
     # composes from data already in hand — the loaded board + the branch scans' cached merge verdicts —
     # so it adds NO board read or gh call (the single-board-read promise).
     #   OPEN inbox  = a board item with stage == "Recirculation" and status != "Done".
-    #   OPEN branch = a `recirculate/*` branch (local or remote) that is NOT merged (an open-PR proxy on
-    #                 the filesystem backend). Judged via branch_merged (server tip for remotes).
+    #   OPEN branch = a `recirculate/*` OR `recirc/*` branch (local or remote) that is NOT merged (an
+    #                 open-PR proxy on the filesystem backend). Judged via branch_merged (server tip for
+    #                 remotes). BOTH prefixes are IDC recirc branches (IDC_NAME_RE), so both must resume.
+    _recirc_pfx = ("recirculate/", "recirc/")
     open_inbox = [bi for bi in board
                   if bi.get("stage") == "Recirculation" and bi.get("status") != "Done"]
     open_recirc = [b for b in locals_
-                   if b.startswith("recirculate/") and not branch_merged(b, remote=False)[0]]
+                   if b.startswith(_recirc_pfx) and not branch_merged(b, remote=False)[0]]
     open_recirc += [b for b in remotes_
-                    if b.startswith("recirculate/") and not branch_merged(b, remote=True)[0]]
+                    if b.startswith(_recirc_pfx) and not branch_merged(b, remote=True)[0]]
     if open_inbox and open_recirc:
         b0 = sorted(open_recirc)[0]
         n_inbox = len(open_inbox)
@@ -751,6 +756,9 @@ def counts(findings):
 # from it, so the process exit that gates the e2e post-condition can never disagree with the report:
 # indeterminate dimensions win (fail closed); else findings are actionable; else coherent.
 _VERDICT_EXIT = {"findings": 1, "coherent": 0, "indeterminate": 2}
+# The documented ground-truth-unestablished exit (a build_ctx failure or an indeterminate scan). The
+# only exit that grounds a /idc:janitor `blocked_external` — round-5 finding 7 writes the report on it.
+_JANITOR_BLOCKED_EXIT = _VERDICT_EXIT["indeterminate"]
 # The human banner for each verdict. Kept in lockstep with _VERDICT_EXIT so the printed line NEVER
 # disagrees with the exit code (the nit this closes: an indeterminate scan — exit 2 — used to print
 # "COHERENT").
@@ -1171,6 +1179,13 @@ def main():
     ap.add_argument("--ensure-gitignore", action="store_true",
                     help="idempotently add the journal's advisory-lock sidecar to the repo-root "
                          ".gitignore, then exit (scaffold/update step; append-only, non-destructive)")
+    ap.add_argument("--report-session",
+                    help="write THIS run's scan result (scanner_exit + clean) to the session-scoped "
+                         "janitor command report so the /idc:janitor closeout can re-read it — the "
+                         "honest path where the SCANNER, not the caller, records the exit code")
+    ap.add_argument("--report-nonce",
+                    help="bind the written janitor report to the active command record's nonce "
+                         "(the closeout requires the report's nonce to match)")
     args = ap.parse_args()
 
     # Scaffold/update step: no board read needed — ensure the sidecar is ignored and exit.
@@ -1178,7 +1193,18 @@ def main():
         ensure_lock_gitignored(os.path.abspath(args.repo))
         sys.exit(0)
 
-    ctx = build_ctx(args)
+    # ROUND-5 finding 7: a ground-truth failure in build_ctx (not a git repo, no default branch,
+    # `git worktree list` failed, github without owner/project, or an unreadable board) exits 2 BEFORE
+    # the normal scan-report write below. Catch that exit-2 and write the nonce-bound report FIRST, so
+    # the /idc:janitor closeout's `blocked_external` can re-derive the honest exit-2 from the artifact
+    # the SCANNER wrote — no hand-written report. The exit code is preserved (re-raised).
+    try:
+        ctx = build_ctx(args)
+    except SystemExit as exc:
+        if exc.code == _JANITOR_BLOCKED_EXIT:
+            _write_scan_report(os.path.abspath(args.repo), args.report_session, args.report_nonce,
+                               _JANITOR_BLOCKED_EXIT)
+        raise
 
     if args.rotate_journal:
         journal_path = os.path.join(ctx["repo"], JOURNAL_REL)
@@ -1200,7 +1226,9 @@ def main():
         else:
             print_report(findings, ctx)
             print("janitor: " + _VERDICT_BANNER[verdict(findings, indeterminate)])
-        sys.exit(_exit_code(findings, indeterminate))
+        code = _exit_code(findings, indeterminate)
+        _write_scan_report(ctx["repo"], args.report_session, args.report_nonce, code)
+        sys.exit(code)
 
     # --apply-safe: execute SAFE-FIX, re-scan, report the delta.
     if not args.json:
@@ -1224,11 +1252,29 @@ def main():
         v2 = verdict(findings2, indeterminate2)
         print("janitor: " + ("findings remain (RISKY/REPORT-ONLY need review)"
                              if v2 == "findings" else _VERDICT_BANNER[v2]))
-    sys.exit(_exit_code(findings2, indeterminate2))
+    code2 = _exit_code(findings2, indeterminate2)
+    _write_scan_report(ctx2["repo"], args.report_session, args.report_nonce, code2)
+    sys.exit(code2)
 
 
 def _exit_code(findings, indeterminate):
     return _VERDICT_EXIT[verdict(findings, indeterminate)]
+
+
+def _write_scan_report(repo, session, nonce, exit_code):
+    """Persist THIS scan's verdict to the session-scoped janitor command report (wave-4 finding 7): the
+    /idc:janitor closeout re-reads `{scanner_exit, clean, nonce}` from it, so the SCANNER — not a
+    caller integer — records the exit, bound to the active command record's nonce. BEST-EFFORT + a
+    no-op without `--report-session` (a plain scan / --json consumer is unaffected)."""
+    if not session:
+        return
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "hooks"))
+        import idc_command_report as CR  # noqa: E402 — lazy (scripts/hooks on sys.path)
+        CR.write_janitor_report(repo, int(exit_code), session,
+                                str(nonce) if nonce else None)
+    except Exception:  # noqa: BLE001 — persisting the report must never break the scan's exit contract
+        pass
 
 
 if __name__ == "__main__":

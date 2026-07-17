@@ -93,7 +93,13 @@ def _persist_verdict(root, sid, verdict, exit_code):
     governed, write error) degrades silently to a stderr note so it can't break the drain. Backend-
     agnostic: written on both backends (the filesystem gate ignores it and keeps re-draining live; only
     the github gate consumes it). Last-write-wins: every pass overwrites, so the final `complete`
-    supersedes any earlier `recirc-pending`."""
+    supersedes any earlier `recirc-pending`.
+
+    `root=None` is the explicit read-only observer mode used by the next-action oracle. Return before
+    importing or entering any verdict/gitignore write path; observing state must never emit persistence
+    diagnostics or mutate the caller's governed current directory."""
+    if root is None:
+        return
     try:
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "hooks"))
         import idc_drain_verdict  # noqa: E402 — sidecar in scripts/hooks/, imported lazily
@@ -142,13 +148,13 @@ def load_filesystem(path):
     github bug that drops it), not an empty board, so fail closed rather than read it as zero issues
     and print `drain: complete`; an explicit `issues: []` is still a legitimate empty board. Every
     entry must be a dict (membership tests, `.get()`, the sort key, and `.startswith()` all assume
-    it), `number` must be an int (it is a dict key AND a sort key — an unhashable/unsortable value
-    would crash instead of exiting 2), and `blocked_by` must be a list (the predicate iterates it).
-    A scalar entry, a non-int number, or a non-list blocked_by exits 2 with a clean diagnostic — the
-    same fail-closed contract the sibling idc_acceptance_check.py applies to its own fields."""
+    it), `number` must be a true positive int (it is a durable issue identity AND a sort key), and
+    `blocked_by` must be a list of true positive integers. A scalar entry, a non-positive/non-int
+    number, or a non-list/non-positive/non-int blocked_by exits 2 with a clean diagnostic — the same
+    fail-closed contract the sibling idc_acceptance_check.py applies to its own fields."""
     try:
         state = load(path)
-    except (OSError, json.JSONDecodeError) as e:
+    except (OSError, UnicodeError, json.JSONDecodeError) as e:
         sys.stderr.write(f"idc-autorun-drain: cannot read {path}: {e}\n")
         sys.exit(2)
     if "issues" not in state:
@@ -165,14 +171,23 @@ def load_filesystem(path):
         if "number" not in it:
             sys.stderr.write("idc-autorun-drain: corrupt tracker — an issue is missing `number`\n")
             sys.exit(2)
-        if not isinstance(it["number"], int):
-            sys.stderr.write("idc-autorun-drain: corrupt tracker — an issue `number` must be an int\n")
-            sys.exit(2)
-        if not isinstance(it.get("blocked_by", []), list):
+        if type(it["number"]) is not int or it["number"] <= 0:
             sys.stderr.write(
-                f"idc-autorun-drain: corrupt tracker — issue {it['number']} `blocked_by` must be a list\n")
+                "idc-autorun-drain: corrupt tracker — an issue `number` must be a positive int\n")
+            sys.exit(2)
+        blocked_by = it.get("blocked_by", [])
+        if not isinstance(blocked_by, list) or any(
+                type(value) is not int or value <= 0 for value in blocked_by):
+            sys.stderr.write(
+                f"idc-autorun-drain: corrupt tracker — issue {it['number']} "
+                "`blocked_by` must be a list of positive ints\n")
             sys.exit(2)
     return issues
+
+
+def _is_operator_gate(it):
+    """Whether an item is a human-owned gate, never an automated pipeline lane."""
+    return str(it.get("title", "")).strip().startswith("[operator-action]")
 
 
 def _is_build_candidate(it):
@@ -186,7 +201,7 @@ def _is_build_candidate(it):
     Shared by `compute_eligible` and the github loader's candidate pre-filter so the two can't drift."""
     return (it.get("status") == "Todo"
             and (it.get("stage") or "Buildable") == "Buildable"
-            and not str(it.get("title", "")).strip().startswith("[operator-action]"))
+            and not _is_operator_gate(it))
 
 
 def _inbox_count(issues, stage):
@@ -198,7 +213,8 @@ def _inbox_count(issues, stage):
     list (no second board read — the GraphQL-budget constraint), symmetric with
     `_is_build_candidate` so the build-lane and inbox predicates read the same source of truth."""
     return sum(1 for it in issues
-               if it.get("stage") == stage and it.get("status") == "Todo")
+               if it.get("stage") == stage and it.get("status") == "Todo"
+               and not _is_operator_gate(it))
 
 
 def compute_eligible(issues):
@@ -221,28 +237,30 @@ def compute_eligible(issues):
 def _blocked_by_numbers(repo, number):
     """The native blocked-by issue numbers for one issue, via the GitHub dependencies API.
 
-    Uses gh's literal `{owner}/{repo}` placeholders (resolved from the repo in `cwd`), the same read
-    counterpart of the documented write endpoint that doctor Row 9 uses. Returns (numbers, ok). On
-    any gh failure ok is False — the caller fail-CLOSES (treats the issue as still-blocked this pass)
-    so the drain never claims work whose blockers it could not verify; the next /loop iteration
-    re-checks. Mirrors doctor Row 9's tri-state (a failed lookup ≠ no link)."""
+    Reuses `idc_gh_board.blocked_by_numbers()` verbatim: that sanctioned reader paginates and rejects
+    every malformed/non-positive dependency record. Returns (numbers, ok). On a non-rate read failure
+    ok is False — the caller fail-CLOSES (treats the issue as still-blocked this pass). A rate limit
+    remains the shared reader's distinct resumable exception and dominates the whole snapshot."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import idc_gh_board  # noqa: E402 — reuse the strict paginated dependency reader
     try:
-        p = subprocess.run(
-            ["gh", "api", f"repos/{{owner}}/{{repo}}/issues/{number}/dependencies/blocked_by",
-             "--jq", "[.[].number]"],
-            cwd=repo, capture_output=True, text=True)
-    except (OSError, ValueError):
+        return idc_gh_board.blocked_by_numbers(number, repo), True
+    except idc_gh_board.RateLimitError:
+        raise
+    except idc_gh_board.MalformedBoardDataError:
+        raise
+    except idc_gh_board.BoardReadError:
         return [], False
-    if p.returncode != 0:
-        return [], False
-    try:
-        nums = json.loads(p.stdout or "[]")
-    except json.JSONDecodeError:
-        return [], False
-    return [n for n in nums if isinstance(n, int)], True
 
 
-def load_github(owner, project_number, repo, root=None, sid=None):
+def _reject_malformed_github_item(root, sid, detail):
+    """Fail closed at the shared item-normalization boundary with one stable diagnostic."""
+    _persist_verdict(root, sid, "board-read-error", 2)
+    sys.stderr.write(f"idc-autorun-drain: malformed github board item: {detail}\n")
+    sys.exit(2)
+
+
+def load_github(owner, project_number, repo, root=None, sid=None, repository=None):
     """Build the predicate's issues list from the github board (ALL pages via idc_gh_board).
 
     Returns `(issues, unverified)` where `unverified` is the count of build candidates whose native
@@ -253,12 +271,15 @@ def load_github(owner, project_number, repo, root=None, sid=None):
     (an unresolvable sentinel blocker) so it is excluded this pass, never claimed unverified — AND is
     tallied into `unverified` so the AGGREGATE verdict (main) can refuse a false `drain: complete` when
     nothing is eligible only because every candidate's blockers were unverifiable. Exits 2 on an
-    unreadable board (fail-closed, never a hollow empty drain), or 3 on a RATE-LIMITED board read (see
-    below) — never a hollow empty drain, and never conflated with a hard failure either."""
+    unreadable board (fail-closed, never a hollow empty drain), or 3 on a RATE-LIMIT anywhere in the
+    complete board/dependency read (see below) — never a hollow empty drain, and never conflated with
+    a hard failure either."""
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import idc_gh_board  # noqa: E402 — github-only dependency, imported lazily
     try:
         items = idc_gh_board.fetch_items(owner, project_number, repo)
+        if repository is None and items:
+            repository = idc_gh_board._current_repository(repo)
     except idc_gh_board.RateLimitError as e:
         # Resumable pause (#99, design §C.3) — CAUGHT BEFORE the generic BoardReadError branch below
         # (RateLimitError is a subclass; order matters). A DISTINCT verdict from both `drain: unknown`
@@ -279,30 +300,69 @@ def load_github(owner, project_number, repo, root=None, sid=None):
         _persist_verdict(root, sid, "board-read-error", 2)
         sys.stderr.write(f"idc-autorun-drain: could not read the github board: {e}\n")
         sys.exit(2)
+    except (AttributeError, TypeError) as e:
+        # The shared reader predates this boundary guard and may raise on a successful-but-wrong JSON
+        # top-level shape. Translate that implementation exception into the drain/oracle's stable
+        # invalid-board contract instead of leaking a traceback/exit 1.
+        _persist_verdict(root, sid, "board-read-error", 2)
+        sys.stderr.write(f"idc-autorun-drain: malformed github board response: {e}\n")
+        sys.exit(2)
     issues = []
     for it in items:
         content = it.get("content") or {}
-        number = content.get("number")
-        if number is None:                  # a draft item carries no issue number
+        if content.get("type") != "Issue":
             continue
+        item_repository = content.get("repository")
+        if not isinstance(item_repository, str) \
+                or not re.fullmatch(r"[^/\s]+/[^/\s]+", item_repository):
+            _reject_malformed_github_item(
+                root, sid, "Issue repository identity is missing or invalid")
+        if item_repository != repository:
+            continue
+        title = content.get("title")
+        if not isinstance(title, str) or not title.strip():
+            _reject_malformed_github_item(
+                root, sid, "local Issue title is missing or invalid")
+        number = content.get("number")
+        if type(number) is not int or number <= 0:
+            _persist_verdict(root, sid, "board-read-error", 2)
+            sys.stderr.write(
+                "idc-autorun-drain: local github issue has a non-positive/invalid number\n")
+            sys.exit(2)
         issues.append({
             "number": number,
             "status": it.get("status"),
             "stage": it.get("stage"),
-            "title": content.get("title") or "",
+            "title": title,
         })
     unverified = 0
     for it in issues:
         if not _is_build_candidate(it):
             it["blocked_by"] = []
             continue
-        nums, ok = _blocked_by_numbers(repo, it["number"])
+        try:
+            nums, ok = _blocked_by_numbers(repo, it["number"])
+        except idc_gh_board.RateLimitError as e:
+            # Dependency reads are part of this SAME state snapshot. A throttle here dominates even
+            # if an earlier candidate looked eligible; returning that provisional frontier would hide
+            # an incomplete board read and violate the shared resumable exit-3 contract.
+            _persist_verdict(root, sid, "rate-limited", 3)
+            print(f"drain: rate-limited until {e.reset}")
+            sys.exit(3)
+        except idc_gh_board.MalformedBoardDataError as e:
+            _persist_verdict(root, sid, "board-read-error", 2)
+            sys.stderr.write(
+                f"idc-autorun-drain: malformed github dependency data for "
+                f"#{it['number']}: {e}\n")
+            sys.exit(2)
         if not ok:
             unverified += 1
             sys.stderr.write(
                 f"idc-autorun-drain: blocked_by lookup failed for #{it['number']} — "
                 "excluded this pass (will retry next /loop)\n")
-            it["blocked_by"] = [0]          # 0 is never a real issue number → never Done → excluded
+            # Self-block with the candidate's own positive Todo identity. It is guaranteed not Done,
+            # excludes only this unverified item, and cannot collide with a durable issue sentinel.
+            it["blocked_by"] = [it["number"]]
         else:
             it["blocked_by"] = nums
     return issues, unverified

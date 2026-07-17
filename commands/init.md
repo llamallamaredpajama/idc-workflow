@@ -61,15 +61,22 @@ Check each target independently, recording `created` / `skipped-existing`:
 - `WORKFLOW.md`, `WORKFLOW-config.yaml` at repo root
 - `docs/workflow/tracker-config.yaml`
 - each entry of `${CLAUDE_PLUGIN_ROOT}/templates/docs-tree/` inside `docs/workflow/`,
-  checked individually (a partial tree gets its missing entries filled, so `/idc:doctor`
-  converges).
+  checked individually **per file, not per directory** (a partial tree gets its missing entries
+  filled, so `/idc:doctor` converges).
 Anything present is left untouched.
+
+Per-file is the granularity that matters because the Phase 7 receipt stamps each path **by name**: a
+directory that exists but is missing its hidden `.gitkeep` would otherwise abort the run at the
+receipt (`cannot stamp missing file`). The scaffold helper converges at that granularity.
 
 ## Phase 3 — Scaffold from templates
 Run the deterministic scaffold helper. It copies the templates, substitutes
 `{{PROJECT_NAME}}`, lays down the lean `docs/workflow/` tree (`pillar-matrices/`,
-`code-reviews/`, README), selects the backend, and — for the `filesystem` backend —
+`code-reviews/`, `intakes/`, README), selects the backend, and — for the `filesystem` backend —
 initializes `TRACKER.md`. It is idempotent: it never clobbers an existing operator file.
+`intakes/` is the durable home for the manifests `/idc:intake` compiles; it ships as a tracked
+`.gitkeep` so an empty intake home survives a fresh clone, and it is **not** gitignored — a manifest
+is a durable record of what a foreign artifact compiled to, like a pillar matrix.
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/idc_init_scaffold.sh" \
   "${CLAUDE_PLUGIN_ROOT}" "$(git rev-parse --show-toplevel)" "$PROJECT_NAME" <github|filesystem>
@@ -97,18 +104,39 @@ Phase 4. For **github**, the `{{TRACKER_PROJECT_NUMBER}}` token stays until Phas
 it. (The helper does only the mechanical, testable scaffold; domain derivation, board
 provisioning, and the receipt are this command's agent-driven phases.)
 
+### Phase 3b — Open this command's lifecycle record (init registers itself)
+
+Now that `docs/workflow/tracker-config.yaml` exists, the repo is **governed** — so open init's
+lifecycle record here. The command entry gate **deferred** init's registration (at expansion the repo
+was not yet governed and had no ledger), so init calls `start` itself, then verifies it:
+```bash
+PLUGIN_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' \
+  "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json")"
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" start \
+  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command init \
+  --plugin-root "${CLAUDE_PLUGIN_ROOT}" --args "$ARGUMENTS" --source user
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" status \
+  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --json
+```
+A stale runtime is refused here too (`start` exits 4) — do not scaffold further on stale logic; run
+`/reload-plugins`. From here init owes an honest closeout (Phase 8).
+
 ## Phase 4 — Provision (or link) the board (github backend)
 Decide create-vs-link:
 - `tracker-config.yaml` already carries a real integer `project_number` → **link**: reuse,
-  verify reachable with `gh project view <n> --owner <owner>`.
-- Else find an existing board titled `"<PROJECT_NAME> IDC Tracker"` via
-  `gh project list --owner <owner> --format json --limit 200` (always pass `--limit`; the
-  default 30 can silently truncate and create a duplicate). Otherwise **create**:
+  assign it to `TRACKER_PROJECT_NUMBER`, set `PROJECT_ACTION=configured`, and verify it is reachable
+  with `gh project view <n> --owner <owner>`.
+- Otherwise use the GitHub tracker adapter's exact-title create/reuse door. It lists all boards
+  (with an explicit 200-board limit), refuses duplicate title matches, creates only when none exists,
+  and positively reads the selected board back:
   ```bash
-  gh project create --owner "$OWNER" --title "$PROJECT_NAME IDC Tracker" --format json
+  PROJECT_RECEIPT=$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gh_board.py" ensure-project \
+    --repo "$PWD" --owner "$OWNER" --title "$PROJECT_NAME IDC Tracker") || exit $?
+  TRACKER_PROJECT_NUMBER=$(printf '%s' "$PROJECT_RECEIPT" | jq -er '.number') || exit $?
+  PROJECT_ACTION=$(printf '%s' "$PROJECT_RECEIPT" | jq -er '.action') || exit $?
   ```
-  Capture `number` (→ `TRACKER_PROJECT_NUMBER`) and the node `id`/`url`. Derive
-  `OWNER=$(gh repo view --json owner -q .owner.login)`.
+  Keep the receipt's `number`, node `id`, `url`, and `action` (`created` or
+  `skipped-existing`). Derive `OWNER=$(gh repo view --json owner -q .owner.login)`.
 
 Provision the **five** v2 fields — but **gate every board mutation behind the provenance check
 first**. The destructive risk is concentrated in one place (reconciling the built-in single-select
@@ -127,9 +155,14 @@ found — no fields added, not linked. Single-selects need ≥1 option at creati
 **Provenance gate (run first — it decides whether this board is safe to provision at all).**
 Reconcile the built-in `Status` to the four v2 values — **gated by board provenance** (the
 option-replacement mutation is destructive: it re-IDs every option and wipes item values;
-see `idc:idc-tracker-github`). Get the `Status` field node id + current options from
-`gh project field-list <n> --owner "$OWNER" --format json --limit 50`, then take exactly one:
-- **Board created this run** → safe: replace the option set with the full desired list
+see `idc:idc-tracker-github`). Run the adapter door before every other board mutation:
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gh_board.py" reconcile-status \
+  --repo "$PWD" --owner "$OWNER" --project "$TRACKER_PROJECT_NUMBER" || exit $?
+```
+The helper reads the current field and item count itself; it accepts no caller-supplied "created"
+bypass. It then takes exactly one path:
+- **Board created this run** (therefore still observed empty) → safe: replace the option set with the full desired list
   (`Blocked`, `Todo`, `In Progress`, `Done`) via the `updateProjectV2Field` GraphQL mutation.
 - **Linked board, options already exactly those four** → no-op (`skipped-existing`); never
   re-send (same-name replacement still re-IDs + wipes).
@@ -138,21 +171,23 @@ see `idc:idc-tracker-github`). Get the `Status` field node id + current options 
   proceed; ≥1 → **STOP** before any further mutation — leave the board untouched **and unlinked**
   (no fields added, not linked), record an operator action pointing at the snapshot→mutate→rebuild
   SOP in `idc:idc-tracker-github`.
-If the built-in field cannot be updated by your gh version, do not delete it (the API forbids
-deleting the built-in `Status`); record an operator action to set the four options in the web UI,
-then continue (not a STOP — the board is conformant enough to provision).
+After any update, the helper re-reads the options and accepts only the exact four-option result.
+If the field cannot be updated or read back, **STOP** and record an operator action; never delete
+the built-in `Status` or bypass the helper with a raw GraphQL mutation.
 
 **Past the gate — add the other four fields** (`Stage`, `Wave`, `Phase`, `Domain`). **Idempotent —
-create only what's missing:** `gh project field-create` does *not* dedupe, so on a linked board that
-already carries these a blind re-create would add a second same-named field. Re-read the field list
-and skip names that already exist:
+create only what's missing.** The adapter refuses duplicate same-named fields and positively reads
+every create back. Repeat `--option "<domain>"` once for each Phase-1 derived domain:
 ```bash
-existing=$(gh project field-list <n> --owner "$OWNER" --format json --limit 50 --jq '.fields[].name')
-have() { printf '%s\n' "$existing" | grep -qx "$1"; }
-have Stage  || gh project field-create <n> --owner "$OWNER" --name "Stage"  --data-type SINGLE_SELECT --single-select-options "Consideration,Planning,Buildable,Recirculation"
-have Wave   || gh project field-create <n> --owner "$OWNER" --name "Wave"   --data-type SINGLE_SELECT --single-select-options "Wave 1"
-have Phase  || gh project field-create <n> --owner "$OWNER" --name "Phase"  --data-type SINGLE_SELECT --single-select-options "Phase 1"
-have Domain || gh project field-create <n> --owner "$OWNER" --name "Domain" --data-type SINGLE_SELECT --single-select-options "<domain1>,<domain2>,..."
+BOARD_DOOR="${CLAUDE_PLUGIN_ROOT}/scripts/idc_gh_board.py"
+python3 "$BOARD_DOOR" ensure-field --repo "$PWD" --owner "$OWNER" --project "$TRACKER_PROJECT_NUMBER" \
+  --name Stage --option Consideration --option Planning --option Buildable --option Recirculation || exit $?
+python3 "$BOARD_DOOR" ensure-field --repo "$PWD" --owner "$OWNER" --project "$TRACKER_PROJECT_NUMBER" \
+  --name Wave --option "Wave 1" || exit $?
+python3 "$BOARD_DOOR" ensure-field --repo "$PWD" --owner "$OWNER" --project "$TRACKER_PROJECT_NUMBER" \
+  --name Phase --option "Phase 1" || exit $?
+python3 "$BOARD_DOOR" ensure-field --repo "$PWD" --owner "$OWNER" --project "$TRACKER_PROJECT_NUMBER" \
+  --name Domain --option "<domain1>" --option "<domain2>" || exit $?
 ```
 
 **Reconcile the `Stage` options — append `Recirculation` to a pre-3.1.0 board (additive,
@@ -167,16 +202,20 @@ option set** (a replace re-IDs every option and wipes existing item values; see
 operator action):
 ```bash
 PID=$(gh project view <n> --owner "$OWNER" --format json --jq '.id')   # PVT_… project node id
-# Read the Stage field via GraphQL (not `field-list`): the non-destructive append must re-send each
-# existing option's color + description, which `gh project field-list` omits (it returns only id+name).
+# Read the Stage field via GraphQL (a read query — ALLOWED by the mutation interlock; not `field-list`):
+# the non-destructive append must re-send each existing option's color + description, which
+# `gh project field-list` omits (it returns only id+name).
 STAGE_FIELD=$(gh api graphql -f query='query($p:ID!){node(id:$p){... on ProjectV2{field(name:"Stage"){... on ProjectV2SingleSelectField{id options{id name color description}}}}}}' -f p="$PID" --jq '.data.node.field')
 if [ -n "$STAGE_FIELD" ]; then
-  # The helper reads the field id straight out of $STAGE_FIELD; no separate extraction needed.
-  MUT=$(printf '%s' "$STAGE_FIELD" | python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_stage_options.py" append --ensure-option Recirculation --options-json -); RC=$?
+  # APPLY the append through the SANCTIONED PYTHON DOOR — `idc_stage_options.py apply` reads the field
+  # id straight out of $STAGE_FIELD, assembles AND runs the `updateProjectV2Field` mutation via its OWN
+  # gh subprocess. Do NOT run the mutation with a raw `gh api graphql -f query="$MUT"`: the interlock
+  # hard-DENIES a raw GraphQL mutation during this active /idc:init command.
+  printf '%s' "$STAGE_FIELD" | python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_stage_options.py" apply --ensure-option Recirculation --options-json - --repo "$(pwd)"; RC=$?
   case "$RC" in
-    0) gh api graphql -f query="$MUT" >/dev/null ;;   # appended → existing option ids + item values preserved
-    3) : ;;                                            # already present → idempotent no-op
-    *) echo "Stage reconcile: could not assemble the append (fail-closed) — record an operator action to add the Recirculation option" ;;
+    0) : ;;   # appended → existing option ids + item values preserved
+    3) : ;;   # already present → idempotent no-op
+    *) echo "Stage reconcile: could not apply the append (fail-closed) — record an operator action to add the Recirculation option" ;;
   esac
 fi
 ```
@@ -187,18 +226,14 @@ This is the **last** post-gate mutation — linking is what publishes the board 
 the ≥1-item STOP the board is deliberately left *unlinked*: init couldn't complete the tracker
 contract, so it must not publish a half-provisioned, non-conforming board to the repo. The board number is resolved by now regardless of create-vs-link, so one idempotent
 step covers both. Check first; skip if already linked (re-link errors on some `gh` versions);
-report `linked` / `skipped-existing`:
+report `linked` / `skipped-existing`. The adapter verifies the project, reads the repo's links,
+writes only when absent, and reads the link back:
 ```bash
 OWNER=$(gh repo view --json owner -q .owner.login)
 REPO=$(gh repo view --json name -q .name)
-# Repo-rooted probe: is THIS board already among the repo's linked projects?
-linked=$(gh api graphql -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){projectsV2(first:100){nodes{number}}}}' \
-  -f o="$OWNER" -f r="$REPO" --jq '.data.repository.projectsV2.nodes[].number' 2>/dev/null)
-if printf '%s\n' "$linked" | grep -qx "$TRACKER_PROJECT_NUMBER"; then
-  :  # already linked → skipped-existing
-else
-  gh project link "$TRACKER_PROJECT_NUMBER" --owner "$OWNER" --repo "$OWNER/$REPO"  # → linked
-fi
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gh_board.py" ensure-link \
+  --repo "$PWD" --owner "$OWNER" --project "$TRACKER_PROJECT_NUMBER" \
+  --repository "$OWNER/$REPO" || exit $?
 ```
 
 Cache the contract: substitute the project number, then write each field's node `id` into
@@ -270,17 +305,30 @@ YAML or compute fingerprints by hand: call the shipped deterministic writer, whi
 path, fingerprints each file's final on-disk bytes (after token substitution) with SHA-256,
 excludes the receipt itself / `TRACKER.md` / `.claude/settings.json`, and atomic-writes. Pass
 exactly the scaffold files Phase 2/3 created or gap-filled, marking the two operator-data files
-`--customized` (see the data-loss guard below):
+`--customized` (see the data-loss guard below). The receipt is v2: it records `plugin_version`
+— the version stamping this repo right now — so a later stale session can be caught before it
+runs old logic against a newer repo (see `/idc:update` Phase 0). Resolve the version from the
+running plugin's own manifest and pass it explicitly:
 ```bash
+PLUGIN_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' \
+  "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json")"
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_receipt_check.py" stamp \
   --repo "$(git rev-parse --show-toplevel)" \
   --out docs/workflow/install-receipt.yaml \
+  --plugin-version "$PLUGIN_VERSION" --written-by idc:init \
   --customized WORKFLOW-config.yaml --customized docs/workflow/tracker-config.yaml \
   WORKFLOW.md WORKFLOW-config.yaml \
   docs/workflow/tracker-config.yaml docs/workflow/workflow-machine.yaml docs/workflow/README.md \
   docs/workflow/pillar-matrices/.gitkeep docs/workflow/code-reviews/.gitkeep \
-  docs/workflow/code-reviews/.gitignore
+  docs/workflow/code-reviews/.gitignore docs/workflow/intakes/.gitkeep
 ```
+Pass **every** file the scaffold laid down: a governed file the stamp list omits is left `unrecorded`
+(`idc_receipt_check.py verify --json`), which is the migration gap `/idc:update` §B then has to
+clean up after — at install time it is simply a bug. `docs/workflow/intakes/.gitkeep` is the durable
+home `/idc:intake` writes its manifests into; the **keepfile is the only intake path the receipt ever
+lists**. A compiled intake manifest is a work product, not scaffold IDC installed, so it is never
+stamped — which is exactly what keeps `/idc:uninstall` (whose removal manifest *is* this receipt)
+from deleting an operator's manifest as if it were pristine scaffold.
 `docs/workflow/workflow-machine.yaml` is the transition engine's legal-transition table (v4 Phase 2),
 scaffolded so it is operator-visible + update-managed. It is **pristine** (no operator data written
 into it — unlike the two `--customized` files below), so it is stamped plain and `/idc:update`
@@ -318,3 +366,27 @@ suggesting `/idc:doctor`, and — if any scope/probe was skipped — name exactl
 
 | Item | Status |
 |------|--------|
+
+## Closeout — finish the init lifecycle record
+
+Close the record opened in Phase 3b with a validated terminal status (the Stop closeout gate refuses a
+walk-away from an open command). Init is a **scaffold/setup** command — no pipeline oracle handoff:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
+  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command init \
+  --status <complete|blocked_external> --evidence-json '<envelope>'
+```
+
+- **`complete`** — the tracker config, the scaffold, the plugin enablement, and a **v2 install
+  receipt** all verify. The closeout **re-derives** this from durable state — it parses the install
+  receipt (must be `receipt_version: 2`), **RUNS the real fingerprint verification** (every stamped
+  file's current bytes match its recorded SHA-256 — a modified or missing scaffold file fails closed,
+  not just a syntax parse), confirms the governance anchor (`docs/workflow/tracker-config.yaml`) exists,
+  and confirms the settings file has the IDC plugin enabled — **never three caller `"ok"` strings**.
+  Evidence refs: `refs:{}` (optionally `receipt:"<repo-rel receipt path>"` /
+  `settings:"<repo-rel settings path>"` if non-default).
+- **`blocked_external`** — a deterministic init helper failure the validator can RE-DERIVE by a
+  read-only re-run: cite `idc_receipt_check.py` (the receipt fingerprint re-run must actually find drift
+  — an invalid receipt or a modified/missing stamped file): `blocker:{helper:"idc_receipt_check.py",
+  exit (nonzero), diagnostic}`. A caller exit/diagnostic alone is never accepted.

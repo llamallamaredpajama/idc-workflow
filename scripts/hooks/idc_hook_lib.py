@@ -63,6 +63,15 @@ def is_governed_repo(cwd):
         return False
 
 
+def contract_script(plugin_root):
+    """The REAL absolute path to idc_command_contract.py under the plugin root a gate was handed.
+    `${CLAUDE_PLUGIN_ROOT}` is a markdown-only substitution — it is NOT a shell/Python env var, so a
+    Python-emitted literal would resolve to the broken `/scripts/idc_command_contract.py`. Gates
+    receive the real root as argv[1] and join it here, so every remediation they print is runnable
+    as-is."""
+    return os.path.join(plugin_root or "", "scripts", "idc_command_contract.py")
+
+
 def observe_only():
     return os.environ.get("IDC_HOOKS_OBSERVE_ONLY", "") == "1"
 
@@ -110,17 +119,38 @@ def block(reason):
     sys.exit(0)
 
 
+# ── UserPromptExpansion family (the command entry gate, Task 2 — command integrity) ───────────────
+# A UserPromptExpansion hook decides whether a `/idc:*` command is allowed to expand into its body,
+# BEFORE the command runs. Two model-visible postures (both exit 0 — a hook signals via its JSON):
+#   * prompt_expansion_block(reason)   — REFUSE the expansion; `reason` is surfaced to the model.
+#   * prompt_expansion_context(context) — ALLOW + inject `context` alongside the expanded command.
+# The gate's observe-only downgrade is applied at the gate (it wraps block in its own observe check),
+# so these primitives stay minimal — the exact shape Claude Code's UserPromptExpansion contract expects.
+def prompt_expansion_block(reason):
+    sys.stdout.write(json.dumps({"decision": "block", "reason": reason}))
+    raise SystemExit(0)
+
+
+def prompt_expansion_context(context):
+    sys.stdout.write(json.dumps({"additionalContext": context}))
+    raise SystemExit(0)
+
+
 # ── PreToolUse family (the terminal-action interlocks, v4 Phase 2 §3.2) ───────────────────────────
 # A PreToolUse gate decides on a tool call BEFORE it runs. Three postures, all exit 0 (a hook signals
 # via its JSON, not its exit code):
 #   * pre_tool_allow()        — say nothing; the normal permission flow proceeds (the hot path).
 #   * pre_tool_warn(reason)   — WARN-INJECT: surface the remediation on stderr but DO NOT decide, so
-#                               the action still proceeds through the normal flow. This is the SHIPPED
-#                               rollout posture — it can never brick a real workflow (§6 over-blocking).
+#                               the action still proceeds through the normal flow. The interlock uses
+#                               this OUTSIDE an active /idc:* command, so ordinary governed-repo work
+#                               is never bricked (§6 over-blocking).
 #   * pre_tool_deny(reason)   — HARD DENY: emit permissionDecision=deny with the remediation as the
 #                               reason (Claude Code feeds it back to the model → self-healing denial).
 #                               Honors IDC_HOOKS_OBSERVE_ONLY=1 → downgrade to warn-inject (§6).
-# Deny is the PROMOTED posture (a later operator decision, §6 decision 1); warn-inject ships first.
+# POSTURE (Task 3): the interlock HARD-DENIES while the session owns an ACTIVE /idc:* command (the
+# window where a raw mutation is the forbidden improvisation) and WARN-INJECTS otherwise; there is no
+# opt-in promotion step — the active-command deny is the shipped enforcement. IDC_HOOKS_OBSERVE_ONLY=1
+# is the one debug escape (downgrades any deny back to warn-inject).
 def pre_tool_allow():
     """Proceed: emit nothing, exit 0. The normal permission flow is untouched."""
     sys.exit(0)
@@ -128,9 +158,9 @@ def pre_tool_allow():
 
 def pre_tool_warn(reason):
     """Warn-inject: surface the remediation (stderr) but make NO permission decision, so the action
-    still proceeds. The shipped, non-bricking rollout posture. NOTE: exit-0 stderr is transcript/
-    telemetry only — it is NOT injected into the model context (the observe-first phase); the
-    model-visible self-heal is pre_tool_deny()."""
+    still proceeds. The non-bricking posture the interlock uses OUTSIDE an active /idc:* command. NOTE:
+    exit-0 stderr is transcript/telemetry only — it is NOT injected into the model context; the
+    model-visible self-heal is the active-command pre_tool_deny()."""
     warn(reason)
     sys.exit(0)
 

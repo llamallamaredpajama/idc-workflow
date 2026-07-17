@@ -1,13 +1,13 @@
 ---
-description: IDC health check — verify plugin scoping (no global leak), gh auth + project scope, the tracker board, the v2 scaffold, and plugin-cache freshness (read-only)
+description: IDC health check — verify plugin scoping, gh/project access, tracker health, runtime, scaffold, and cache freshness
 argument-hint: (no arguments)
 ---
 
-`/idc:doctor` diagnoses whether the current repository is correctly set up for IDC v2. **It
-is strictly read-only** — it never creates, edits, or deletes a file, and never mutates
-`gh`/board state. Run every check below from the governed repo root, then print ONE results
+`/idc:doctor` diagnoses whether the current repository is correctly set up for IDC v2. Its probes
+are **read-only for source files and tracker/board state**. Lifecycle closeout writes only transient,
+gitignored command evidence and may add its report glob to `.gitignore`. Run every check below from the governed repo root, then print ONE results
 table with `PASS`/`FAIL`/`SKIP` and a one-line fix hint per row, ending with a one-line
-verdict. Make NO changes. See `WORKFLOW.md §3`.
+verdict. Make no source or tracker changes. See `WORKFLOW.md §3`.
 
 ## Checks
 
@@ -68,8 +68,7 @@ Missing → FAIL (hint: run `/idc:init`). Otherwise branch on `backend:`:
   ```
   - `board-linked` → no note.
   - `board-not-linked` → **PASS with ⚠**, note: "board not linked to this repo — it won't appear
-    on the repo's Projects tab; run `/idc:init` to link it (or `gh project link <num> --owner
-    <owner> --repo <owner>/<repo>`)."
+    on the repo's Projects tab; run `/idc:init` to link it through the validating tracker adapter."
   - GraphQL call itself errors (transient / auth) → could-not-determine note, **never FAIL**.
 
 **4 — Governance scaffold present.** PASS only if all of these exist: `WORKFLOW.md` at the
@@ -81,16 +80,32 @@ ls WORKFLOW.md WORKFLOW-config.yaml docs/workflow/pillar-matrices docs/workflow/
 A partial tree is a FAIL that lists the missing paths. Fix hint: run `/idc:init`.
 
 **5 — Install receipt present.** PASS if `docs/workflow/install-receipt.yaml` exists and
-parses with the expected keys (`receipt_version`, `fingerprint_method: sha256`, `files[]`):
+parses with the expected keys (`receipt_version` — exactly `1` legacy or `2`, no other value,
+`fingerprint_method: sha256`, `files[]`, and — for a `2` receipt — a valid `plugin_version`, the
+version that last stamped this repo and the value `/idc:update`'s stale-runtime guard reads as
+this repo's required version). A `2` receipt is **not clean** without a `plugin_version`
+matching `X.Y.Z`, and a receipt whose `receipt_version` is anything other than `1` or `2`
+(including absent or blank) is **not clean** either — the check below enforces both rules
+rather than only checking `fingerprint_method`:
 ```bash
 test -f docs/workflow/install-receipt.yaml \
   && grep -Eq '^fingerprint_method:[[:space:]]*sha256' docs/workflow/install-receipt.yaml \
+  && grep -Eq '^receipt_version:[[:space:]]*(1|2)$' docs/workflow/install-receipt.yaml \
+  && { ! grep -Eq '^receipt_version:[[:space:]]*2$' docs/workflow/install-receipt.yaml \
+       || grep -Eq '^plugin_version:[[:space:]]*[0-9]+\.[0-9]+\.[0-9]+$' docs/workflow/install-receipt.yaml; } \
   && echo receipt-ok
 ```
 If absent → **SKIP** with the note "pre-receipt install — run `/idc:init` to graduate a
-receipt" (a filesystem-only or pre-receipt repo is valid; do not hard-FAIL). Do **not**
-recompute or verify fingerprints here — that is update's job; doctor only checks presence
-and parse.
+receipt" (a filesystem-only or pre-receipt repo is valid; do not hard-FAIL). A `receipt_version:
+1` receipt (no `plugin_version`) still PASSes here — it has no recorded required-version yet
+and is migrated to `2` the next time `/idc:init` or `/idc:update` stamps a fresh one; do not
+treat it as drift. A `receipt_version: 2` receipt with a missing or malformed `plugin_version`,
+or any receipt whose `receipt_version` is not `1` or `2` (including absent or blank) — anything
+the check above does not print `receipt-ok` for — → **FAIL** with the note "invalid receipt —
+receipt_version must be 1 or 2, and a `2` receipt requires a valid plugin_version; this is the
+same invalid-receipt state `/idc:update`'s freshness guard refuses to run against (exit 2) —
+repair or re-stamp it (`/idc:init` or `/idc:update`) before continuing." Do **not** recompute or
+verify fingerprints here — that is update's job; doctor only checks presence and parse.
 
 **6 — Pi runtime (optional).** The IDC Pi runtime (`runtime/pi/`, vendored) needs **Bun** to
 boot the coms-net hub + role harness; the **Pi agent** itself (the `pi` binary / npm package
@@ -137,7 +152,9 @@ fi
   (`~/.agents/skills/idc-adapter-codex`) does not resolve, so IDC will not load under Codex. Same
   fix: re-run the installer above.
 
-**8 — Plugin cache freshness (advisory; never FAIL).** The code `/idc:*` runs from Claude
+**8 — Runtime + plugin cache freshness.** First run `python3 --version`: Python **3.10 or newer** is
+required; an older or missing runtime is **FAIL** with a plain upgrade/select-Python fix. Then check
+the advisory cache freshness. The code `/idc:*` runs from Claude
 Code's **version-keyed cache** (`${CLAUDE_PLUGIN_ROOT}`), rebuilt **only when `plugin.json`'s
 `version` changes** — so a `claude plugin marketplace update` that pulled new commits under an
 unchanged version leaves the session running **stale cached code**. Surface the running version
@@ -152,9 +169,10 @@ echo "running ${run_ver:-unknown}; marketplace ${clone_ver:-absent}"
 - **PASS** — `run_ver` is readable and the clone is `absent` or equals it. Note the running
   version, e.g. "running 2.1.0".
 - **PASS with ⚠** — clone version differs from the running version: the cache is **stale**. Fix
-  hint: `claude plugin update idc@idc-workflow --scope project`, then re-enable (or restart the
-  session) to rebuild the cache. (Still counts as PASS — a stale cache is a heads-up, not a
-  broken repo.)
+  hint: `claude plugin update idc@idc-workflow --scope project`, then run `/reload-plugins` (or
+  restart the session) to rebuild the cache. **`/clear` does not reload plugin commands or
+  hooks** and will not fix this — it only clears conversation context. (Still counts as PASS — a
+  stale cache is a heads-up, not a broken repo.)
 - **SKIP** — `run_ver` unreadable (a managed / `--plugin-dir` load with no manifest on the cache
   path). This row is **advisory and is never FAIL.**
 
@@ -300,15 +318,28 @@ FAIL** (Build still trusts the board; the schema check stays Plan's gate). Branc
     `Recirculation` ticket** (Plan's paused-issue re-link was skipped) — fix hint: "re-point it off
     the retired ticket onto its real new unblockers (re-run `/idc:plan` over the admitted scope)."
     A `stranded-gate` finding means a dependent is still **Blocked behind a gate that is already
-    Done** AND that gate's guarded dispose **is journaled** (`--journal` proved an
-    `op=dispose`/`disposition=gate-approved` record) — an interrupted dispose-then-unblock — fix
-    hint: "finish the unblock through the engine's journaled `unblock` (`idc:idc-gate-issue` step 4
-    recovery), never a raw setField." An `unproven-gate-done` finding means the gate is **Done but
-    its guarded dispose is NOT journaled** — a raw/manual close, a `Status` edit, or a janitor repair
-    minted the `Done`, none of which validated the approval — fix hint: "do **not** auto-unblock;
-    confirm the gate was legitimately approved (its Think PR merged), then unblock through the engine
-    (`idc:idc-gate-issue` step 4). Unblocking a raw-closed requirements gate whose Think PR never
-    merged would admit draft requirements."
+    Done** AND one recognized proof **is journaled** (`guarded-dispose` or
+    `verified-reconciliation`) — an interrupted proof-then-unblock — fix hint: "finish it through
+    `idc_gate_repair.py --finish-pointer` (`idc:idc-gate-issue` step 4 recovery), never a raw
+    setField." An `unproven-gate-done` finding means the gate is **Done but neither recognized proof
+    is journaled** — a raw/manual close, a `Status` edit, or a janitor repair
+    minted the `Done`, none of which validated the approval — fix hint: "do **not** auto-unblock.
+    Confirm the proof kind with the one deterministic reader — `python3
+    ${CLAUDE_PLUGIN_ROOT}/scripts/idc_gate_proof.py --repo "$PWD" --gate <gate#>` (`guarded-dispose`
+    or `verified-reconciliation` = proven and safe to finish; `unproven` = not; **exit 2** = the
+    journal is unreadable, which is *indeterminate*, never a clean negative). If it is genuinely
+    `unproven`, confirm the gate was legitimately approved (its Think PR merged), then **reconcile it
+    honestly** — `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/idc_gate_repair.py --repo "$PWD" --owner
+    <owner> --project <n> --gate <gate#> --pointer <dependent#> --pr <merged-think-PR>` (**dry run by
+    default**; add `--apply` only after reading the plan). It verifies the PR really merged, stamps
+    the gate's bound `idc-gate-pr` marker, repairs `Stage`/`Status` through the board helpers with the
+    issue left closed, and journals an `op=gate-reconciliation` record carrying the observed-before
+    state and the merged-PR evidence — after which the gate reads `verified-reconciliation`. It never
+    back-dates an `op=dispose` (the guarded door did not run, and no record may claim it did) and
+    never invents an `unblock` for a pointer that is already `Todo`. **Never hand-write a journal
+    record to silence this finding** — that forges the one signal that distinguishes a validated
+    approval from a closed browser tab. Unblocking a raw-closed requirements gate whose Think PR
+    never merged would admit draft requirements."
   - summary contains `dependency lookups indeterminate` → annotate the row **PASS with ⚠** (still
     **PASS, never FAIL**), independent of clean/flagged: note "the GitHub dependencies API looked
     degraded — the native blocked-by lookup failed for N issue(s), so a dependency check
@@ -380,13 +411,23 @@ merged-but-surviving branches (local + remote), and board↔issue drift, tiered 
 / RISKY / COHERENT. This is the same scanner `/idc:janitor` drives; doctor only ever *reports* it
 (**never** `--apply-safe`), so the strictly-read-only contract holds. Reuses `$num` / `$owner` from
 check 3 on github:
+Pass `--report-session` + `--report-nonce` (the `nonce` from this command's active record — read it
+with the `status` call in the lifecycle section below, BEFORE this row runs). That makes the SCANNER
+itself persist `{scanner_exit}` in its source-owned provenance envelope bound to this record, which is what the closeout
+re-derives this row's PASS from — a row-10 PASS the scan never recorded is refused, so the flags are
+not optional:
 ```bash
+nonce=$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" status \
+  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --json \
+  | python3 -c 'import json,sys; print(next((r.get("nonce","") for r in json.load(sys.stdin)["active"] if r.get("command")=="doctor"),""))')
 backend=$(grep -E '^backend:' docs/workflow/tracker-config.yaml | awk '{print $2}')
 if [ "$backend" = "github" ]; then
   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_janitor.py" \
-    --repo "$PWD" --backend github --owner "$owner" --project "$num" --check-journal-divergence
+    --repo "$PWD" --backend github --owner "$owner" --project "$num" --check-journal-divergence \
+    --report-session "$CLAUDE_CODE_SESSION_ID" --report-nonce "$nonce"
 else
-  python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_janitor.py" --repo "$PWD" --tracker "$PWD/TRACKER.md" --check-journal-divergence
+  python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_janitor.py" --repo "$PWD" --tracker "$PWD/TRACKER.md" \
+    --check-journal-divergence --report-session "$CLAUDE_CODE_SESSION_ID" --report-nonce "$nonce"
 fi
 ```
 Read the scanner's exit code + its `janitor: N safe-fix, M risky, K report-only` summary:
@@ -401,8 +442,8 @@ Read the scanner's exit code + its `janitor: N safe-fix, M risky, K report-only`
 ## Output
 
 Emit a single table, then a one-line verdict. Tally PASS / FAIL / SKIP across the ten rows (rows
-8, 9, and 10 — plugin cache freshness, build-lane hygiene, and board↔git reconciliation — are
-**advisory**: each is only ever PASS or SKIP, never FAIL):
+9 and 10 — build-lane hygiene and board↔git reconciliation — are advisory. Row 8 may FAIL only for
+an unsupported Python runtime; its cache comparison remains advisory):
 
 ```
 | # | Check | Result | Fix hint |
@@ -414,9 +455,57 @@ Emit a single table, then a one-line verdict. Tally PASS / FAIL / SKIP across th
 | 5 | Install receipt | SKIP | run /idc:init to graduate a receipt |
 | 6 | Pi runtime (optional) | SKIP | Pi runtime not installed — optional |
 | 7 | Codex skill-mirror (optional) | SKIP | Codex mirror not installed — optional |
-| 8 | Plugin cache freshness | PASS | running 2.1.0 |
+| 8 | Runtime + plugin cache freshness | PASS | Python 3.13; running 2.1.0 |
 | 9 | Build-lane hygiene (advisory) | PASS | 4 scanned, clean |
 | 10 | Board↔git reconciliation (advisory) | PASS | board↔git coherent |
 
 IDC doctor: N passed, M failed, K skipped
 ```
+
+## Command lifecycle — verify at entry, close out
+
+Doctor never changes source files or tracker/board state. It does write transient, gitignored command
+evidence and may append `.idc-*-report.json*` to `.gitignore` once. Verify at entry, then close it with
+a validated terminal status before your final answer:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" status \
+  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --json   # -> read the active record's `nonce`
+# … after the table + verdict, PERSIST them (bound to this record's nonce) so the closeout re-reads its
+# own report. The payload must satisfy the FULL doctor row contract: ALL rows 1..10 (unique ids), each
+# `result` one of PASS|FAIL|SKIP, the script-backed row 10 (janitor scanner) carrying its `script` +
+# integer `exit`, and a `verdict` EQUAL to the derived aggregation (FAIL if any row FAILed, else PASS).
+# A 2-row / arbitrary / inconsistent-verdict payload is refused AT THE WRITE DOOR: …
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/idc_command_report.py" --cwd "$PWD" write-doctor \
+  --session "$CLAUDE_CODE_SESSION_ID" --nonce "<nonce from the status record>" \
+  --rows-json '[{"id":1,"result":"PASS"},…,{"id":10,"result":"PASS","script":"idc_git_janitor.py","exit":0}]'
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
+  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command doctor \
+  --status <complete|blocked_external> --evidence-json '<envelope>'
+```
+
+- **`complete`** — **all ten rows and a consistent final verdict were captured** (**a FAIL verdict is
+  still a complete doctor run** — doctor completing is not the repo passing). The closeout **re-reads the
+  persisted doctor report** (`.idc-doctor-report.json`), requires it **bound to this record's nonce**, and
+  **re-validates the full row contract**: rows must be **exactly ids 1..10** (unique), each `result` a
+  legal outcome, the **script-backed row 10 carrying `{script, exit}`**, and the **verdict EQUAL to the
+  derived aggregation** of the row outcomes.
+  **Then EVERY row claiming `PASS` is re-derived** — the closeout independently re-runs that row's own
+  cheap, read-only check (rows 1–9 directly: the settings opt-in, `gh auth status`, the tracker/board
+  probe, the scaffold `ls`, the receipt parse, `install-pi.sh --check`, the mirror links, the running
+  version, board readability; row 10 via the scanner's own `--report-session`/`--report-nonce` report,
+  whose `scanner_exit` must equal the row's recorded `exit`). **Report the truth and this costs you
+  nothing** — a `FAIL` or `SKIP` row is *never* contested, so an honest run on a broken repo still closes
+  `complete`. But a `PASS` the closeout **cannot re-establish is refused, not assumed** (rule B): a check
+  that could not run — `gh` absent, a board that would not read — is a `SKIP`, never a pass. If your
+  environment degraded between the run and the closeout (you lost `gh` auth, the board went away), just
+  **re-run `/idc:doctor`**. A forged/absent report, one not bound to the record, a 2-row / arbitrary
+  report, an inconsistent verdict, or any PASS row its re-run does not corroborate are all refused.
+  Evidence refs: `refs:{}` (the report is the proof).
+- **`blocked_external`** — doctor could not even establish its git-hygiene row (e.g. the cwd is not a
+  git repo): run the scanner with `--report-session`/`--report-nonce` so it records `scanner_exit:2`
+  bound to this record, then cite `blocker:{helper:"idc_git_janitor.py", exit:2, diagnostic}` (the only
+  re-derivable doctor blocker; the cited exit must MATCH the report).
+
+Doctor is a **diagnostic**, not a pipeline stage: it does not call the next-action oracle and never
+claims a pipeline handoff.

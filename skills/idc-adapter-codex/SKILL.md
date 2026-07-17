@@ -66,6 +66,39 @@ untiered posture **explicit and documented identically** here, not adopting the 
 `model_routing.overrides` — parity is the contract expressed the same way, never Codex's model
 policy changing to match.
 
+## Command lifecycle envelope
+
+Codex loads **no Claude plugins and fires no `UserPromptExpansion`**, so nothing opens the command
+lifecycle record for you. When a Codex thread drives a governed `/idc:<command>`, it must call
+`idc_command_contract.py start` **explicitly** at command entry — passing `--plugin-root` so the Task-1
+freshness check runs (a stale runtime is refused with exit 4 and no record) — then verify it with
+`status` and close it with a validated terminal status via `finish` before the run ends.
+
+Codex sets **no `CLAUDE_CODE_SESSION_ID`** (no UserPromptExpansion), so **bind a real, stable Codex
+session identity yourself** — the driving **thread name** (`codex exec resume <thread>` / app-server
+`thread/start`), or the **run label** the sandbox-e2e contract exports — and **refuse a blank one**:
+two anonymous Codex runs must never collide on `(session="", command)` (the contract layer also
+rejects an empty `--session` fail-closed, so a bare `$CLAUDE_CODE_SESSION_ID` would just hard-fail).
+```bash
+SESSION="${IDC_CODEX_SESSION:-${CLAUDE_CODE_SESSION_ID:-}}"   # thread name / run label
+if [ -z "$SESSION" ]; then
+  echo "idc: no Codex session identity — export IDC_CODEX_SESSION (the driving thread name / run label)" >&2
+  exit 2
+fi
+python3 "$PLUGIN_ROOT/scripts/idc_command_contract.py" start \
+  --repo "$PWD" --session "$SESSION" --command <command> \
+  --plugin-root "$PLUGIN_ROOT" --args "$ARGS" --source codex
+python3 "$PLUGIN_ROOT/scripts/idc_command_contract.py" status \
+  --repo "$PWD" --session "$SESSION" --json
+# … run the command playbook …
+python3 "$PLUGIN_ROOT/scripts/idc_command_contract.py" finish \
+  --repo "$PWD" --session "$SESSION" --command <command> \
+  --status <validated-status> --evidence-json '<envelope>'
+```
+The evidence matrix and the terminal-status rules are **identical across runtimes** (one
+`scripts/idc_command_contract.py`), and every pipeline command still derives its final handoff from
+`idc_next_action.py`.
+
 ## Authority boundaries
 
 - Maps primitives to Codex mechanics only — never authors contracts, makes judgment calls,

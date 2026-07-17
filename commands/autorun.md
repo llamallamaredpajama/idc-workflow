@@ -13,6 +13,14 @@ whole repo.
 Autorun is **full-pipeline autonomy that pauses only at human gates**: it **never forces** a gate — a gate-worthy item just **pauses behind its gate** (reported + skipped), exactly like an `[operator-action]` gate issue.
 It drains the pipe in one fixed top-to-bottom order — **recirculate** the Recirculation inbox, then **plan** approved considerations, then **drain** the Buildable waves — and exits when nothing actionable remains.
 
+**Command lifecycle (verify at entry).** The command entry gate opened this command's lifecycle record
+at expansion; verify it before the drain, and **close it with a validated terminal status** at exit
+(the Stop closeout gate refuses a walk-away from an open command):
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" status \
+  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --json
+```
+
 **Mark this session as a drain orchestrator (deterministic liveness — run ONCE, at drain start).**
 Before the loop below, record in the obligations ledger that THIS session is an active autorun drain,
 so the deterministic **Stop fixpoint gate** (`hooks/hooks.json` → `idc_stop_fixpoint_gate.py`) knows to
@@ -198,6 +206,28 @@ only when a full pass leaves nothing actionable:
    **final working-tree state from a post-build `git status --porcelain`** (run it at exit, never a
    start-of-run snapshot — the build lane writes files mid-run, so a stale snapshot under-counts any
    uncommitted/untracked artifact), and anything waiting on the operator.
+
+   **Close the command contract from the oracle, not from prose.** Call the read-only next-action
+   oracle and finish the record; the final prose quotes the oracle's command/reason or states
+   `waiting_gate`/`fixpoint` — never an invented handoff:
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_next_action.py" --repo "$PWD" --json
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
+     --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command autorun \
+     --status <complete|waiting_gate|blocked_external> --evidence-json '<envelope>'
+   ```
+   - **`complete`** — **this session's** PERSISTED drain verdict (`.idc-drain-verdict.json`, written by
+     `idc_autorun_drain.py --session-id "$CLAUDE_CODE_SESSION_ID"`) reads exactly `drain: complete`. The
+     validator reads that DURABLE artifact directly (session-scoped), so **no caller-supplied `drain`
+     string clears it** — the evidence refs may be empty (`refs:{}`); just ensure the drain ran with
+     `--session-id` for THIS session.
+   - **`waiting_gate`** — the oracle reports only human gates (an open Think PR / `[operator-action]`
+     gate). Evidence refs: `gates:[<refs>]` (non-empty). The validator **re-runs the oracle** and
+     refuses the claim unless it reports a human-gate wait as the live blocking state (no actionable
+     pipeline work ahead of it) and every named gate is one of the oracle's live gates — a nonempty
+     caller list alone is not proof, and a nonexistent/unreadable repo fails closed.
+   - **`blocked_external`** — the drain reported `unknown`/`rate-limited`: `blocker:{helper, exit
+     (nonzero), diagnostic}`. Report it as blocked, never as a drained run.
 
 **Drain everything; one launch gate, never self-narrow.** `/idc:autorun` drains the **whole** repo —
 every phase, every eligible wave. Before draining, size a **staffing estimate** from the

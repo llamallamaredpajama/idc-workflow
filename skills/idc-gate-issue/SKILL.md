@@ -56,19 +56,24 @@ recorded PR has merged, so an unrelated merged PR can never terminalize an unapp
 
 ## Procedure (identical for Think and the Recirculator)
 
-All tracker ops route through `idc:idc-tracker-adapter` (`createTicket`, `setField`,
-`link`, `comment`, `query`) — **never hard-code github vs filesystem semantics**; the
+All tracker ops route through `idc:idc-tracker-adapter` (`createTicket`, `setField`, `move`,
+`block`, `link`, `comment`, `query`) — **never hard-code github vs filesystem semantics**; the
 adapter reads the backend from config and dispatches. An outside or cloud agent runs these
 four steps over the plain tracker API.
 
 **1 — Open the Think PR + the gate.** Open the (draft) Think PR carrying the PRD/TRD diff, then
-`createTicket` the gate issue with the plain-terms body above; `setField` `Status=Todo` and the
-`operator-action` label. On **github**, stamp the gate body's `<!-- idc-gate-pr: <PR#> -->` marker
-with the just-opened Think PR number — the engine's guarded `dispose --disposition gate-approved`
+`createTicket` the gate issue with the plain-terms body above and the `operator-action` label. The
+engine-owned create lands the new issue in `Status=Todo` and applies that label in the **same guarded create**;
+do not issue a follow-on Status write. On **github**, stamp the gate body's
+`<!-- idc-gate-pr: <PR#> -->` marker and the PR body's reciprocal gate marker only through:
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_pr_gate_bind.py" --repo "$PWD" --pr <PR#> --gate <gate#>`.
+The binder validates both bodies before writing, reads both edits back, and is safe to rerun; never
+use raw `gh pr edit`. The engine's guarded `dispose --disposition gate-approved`
 close binds approval to that recorded PR. One gate issue per admission, no matter how much it gates.
 
-**2 — Chain what's pending.** Block what must wait on admission, via `setField` `Status=Blocked`
-+ `link kind=blocks` from the gate issue:
+**2 — Chain what's pending.** Block what must wait on admission through the adapter convenience
+`block(<dependent>, by=<gate>)`. Its guarded engine route is `move --to-status Blocked`, then
+`link --parent <gate> --child <dependent> --kind blocks`; never write Status through `setField`:
 - **At Think** — the **consideration pointer** (`Stage = Consideration`): it is pending admission
   while the Think PR is open.
 - **At the Recirculator** — each affected work issue (the requirements-touching set only). Work
@@ -89,8 +94,30 @@ open gates at the start of a run: `query` for `operator-action` issues and confi
 **Think PR has merged**. Only once it has: **first close the gate** through the engine's guarded
 `dispose --disposition gate-approved --num <gate#>` — it re-verifies the gate's own recorded
 approval artifact (the merged `idc-gate-pr`) before minting `Done`, so the close *records* the
-operator's approval rather than *being* it. Then, **only after the dispose succeeds**, for each
-thing the gate blocked: remove the blocks link via the adapter and `setField` `Status=Todo`.
+operator's approval rather than *being* it. Then, **only after the dispose succeeds**, finish each
+thing the gate blocked through the guarded **pointer-finish door** (below) — never a bare engine
+`unblock`: the door re-reads the gate's journaled proof **and** refuses unless that gate is the
+dependent's **sole remaining blocker** before running the engine's own journaled op to move the
+dependent to `Status=Todo` (never a raw dependency edit), so a dependent held by other blockers stays
+`Blocked` until they resolve through their own doors.
+
+> **Mechanized tail — `idc_pr_finish.py requirements`.** Steps "confirm the Think PR merged → guarded
+> dispose → finish the dependent" are exactly the sanctioned PR finisher's `requirements` mode
+> (github — the Think PR is a github artifact; forward the same backend flags the engine tail needs):
+> `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_pr_finish.py" requirements --repo "$PWD" --backend github
+> --owner "$OWNER" --project "$PROJ" --pr <think-PR> --gate <gate#> --pointer <dependent#>` (the
+> subcommand comes FIRST — the shared flags live on it). On an **already-merged** Think PR (the async/web-merge
+> path) it re-verifies the gate's single bound `idc-gate-pr` marker, runs the guarded
+> `dispose --disposition gate-approved`, then finishes the dependent through the same guarded
+> pointer-finish door — dispose FIRST, and if the dispose fails it never unblocks. If the dependent is
+> held by **other** blockers the dispose **stands** (that approval was verified — the `Done` is real)
+> while the door refuses, and the finisher exits **non-zero** naming them with the dependent left
+> `Blocked`; resolve them through their own doors and re-run to converge. For an
+> **in-session** approval where the operator has given an unambiguous GO but
+> the Think PR is still open, add `--operator-approved` — the finisher then merges the bound PR before
+> the same dispose-before-unblock tail. **IDC never infers human approval**: pass `--operator-approved`
+> ONLY after an unambiguous user instruction in the current session; absent it, an open Think PR leaves
+> the chain `Blocked` and the run moves on.
 **Never unblock first**: the guarded dispose IS the validation — an approval revoked between
 detection and the dispose would otherwise leave already-unblocked dependents proceeding with no
 current approval; a refused dispose leaves the chain `Blocked`. And dispose-first must not strand
@@ -99,38 +126,61 @@ gate with still-`Blocked` dependents — the start-of-run re-check finishes the 
 gate does **not** by itself prove the guarded dispose ran: a legacy/manual close, a raw `Status`
 edit, or a janitor repair also mint `Done` — and unblocking a raw-closed **requirements** gate
 whose Think PR never merged would admit **draft** requirements. So the recovery **first verifies
-the gate's journaled guarded dispose** — the `op=dispose`, `disposition=gate-approved` audit line
-the guarded door always writes, naming that gate (re-dispose is NOT a clean re-proof: the terminal
+the gate's journaled proof** through `idc_gate_proof.py` — either `guarded-dispose` (the
+`op=dispose`, `disposition=gate-approved` audit line) or `verified-reconciliation` is proven,
+naming that gate (re-dispose is NOT a clean re-proof: the terminal
 op has no already-terminal guard, so it re-closes and DOUBLE-journals — the journal record is the
-authoritative proof). Verify deterministically (archive-aware + lock-safe; per candidate gate
-`$gate`):
+authoritative proof). Verify through the **one** deterministic reader (`idc_gate_proof.py` — it owns
+the archive-aware, lock-safe strict journal scan, so no surface hand-rolls its own and drifts;
+per candidate gate `$gate`):
 
 ```bash
-python3 - "${CLAUDE_PLUGIN_ROOT}/scripts" "$gate" <<'PY'
-import os, sys
-sys.path.insert(0, sys.argv[1])
-import idc_journal_replay as RP
-gate = int(sys.argv[2])
-entries, err = RP.scan_journal_strict(os.path.join(os.getcwd(), RP.JOURNAL_REL))
-if err:
-    raise SystemExit(f"UNPROVEN: journal unreadable ({err}) — do not unblock")
-print("PROVEN" if any(e.get("op") == "dispose" and e.get("disposition") == "gate-approved"
-                      and RP.journal_item_id(e) == gate for e in entries) else "UNPROVEN")
-PY
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gate_proof.py" --repo "$PWD" --gate "$gate"
 ```
 
-`PROVEN` → the gate's guarded dispose landed; `query` its still-`Blocked` dependents and finish the
-unblock through the engine's journaled `unblock`. `UNPROVEN` → the gate's `Done` is not backed by a
-guarded dispose: **leave the dependent `Blocked` and surface the anomaly** (the gate reached `Done`
-outside the guarded door — confirm the approval, e.g. its Think PR merged, before any manual
-unblock). That recovery is wired deterministically: `/idc:autorun`, `/idc:plan`, and
-`/idc:recirculate` carry the Blocked-scan step (verify-the-journaled-guarded-dispose, then unblock),
-and `/idc:doctor` Row 9's board-lint tiers a remaining strand — `stranded-gate` when the guarded
-dispose IS journaled (safe to finish the unblock), `unproven-gate-done` when it is not (do **not**
+It prints exactly one **proof kind**, and its exit code carries the fail-closed distinction:
+
+| kind | exit | meaning | recovery |
+|------|------|---------|----------|
+| `guarded-dispose` | 0 | the guarded door ran: an `op=dispose`/`disposition=gate-approved` record names the gate — the approval was validated *before* `Done` was minted | **PROVEN** — finish the unblock |
+| `verified-reconciliation` | 0 | the gate was closed outside the door and later reconciled by `idc_gate_repair.py`, which verified the merged approval PR **at repair time** and journaled the evidence (`op=gate-reconciliation`, `door=idc-gate-repair`) | **PROVEN** — finish the unblock |
+| `unproven` | 0 | neither record exists | **UNPROVEN** — do **not** unblock |
+| *(error)* | 2 | the journal cannot be read — **indeterminate**, not a negative | treat as UNPROVEN; repair the journal |
+
+Either **PROVEN** kind → `query` the gate's still-`Blocked` dependents and finish each through the
+**guarded pointer-finish door** — never a raw engine `unblock`:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gate_repair.py" --repo "$PWD" --finish-pointer \
+  --gate "$gate" --pointer <dependent#>        # github: add --owner <owner> --project <n>
+```
+
+It is a **dry run by default** (add `--apply` after reading the plan) and works on **both backends**.
+Why the door and not the raw op: the engine's `unblock --by` drops only the **named** edge before
+setting `Todo`, so a dependent blocked by `[gate, other]` would sail past `other` **without `other`'s
+proof** — and Autorun treats an unblocked pointer as approved work. The door re-reads the gate's proof
+on disk AND refuses unless that gate is the dependent's **SOLE remaining blocker** (naming the others,
+so they resolve through their own doors first); only then does it run the engine's journaled
+`unblock` itself. It repairs nothing and takes no `--pr` — an **unproven** gate belongs at the full
+repair door below, not here. A dependent that is already `Todo` is an honest no-op: nothing is
+written. The two kinds differ in provenance — a `verified-reconciliation`
+gate was never closed through the guarded door, and its record says so rather than back-dating an
+`op=dispose` — but both mean a real approval was verified against the merged Think PR, so both are
+safe to finish. **UNPROVEN** → the gate's `Done` is not backed by any verified approval: **leave the
+dependent `Blocked` and surface the anomaly** (the gate reached `Done` outside the guarded door —
+confirm the approval, e.g. its Think PR merged, then reconcile it honestly with
+`idc_pr_gate_bind.py` first when reciprocal markers are missing, then `idc_gate_repair.py` — dry-run
+first — which repairs `Stage`/`Status` and journals the evidence but never edits either body; never
+hand-write a `dispose` record to silence it).
+That recovery is wired deterministically: `/idc:autorun`, `/idc:plan`, and
+`/idc:recirculate` carry the Blocked-scan step (verify the centralized journal proof, then use the
+guarded pointer-finish door), and `/idc:doctor` Row 9's board-lint tiers a remaining strand —
+`stranded-gate` when either `guarded-dispose` or `verified-reconciliation` is journaled (safe to
+finish), `unproven-gate-done` when neither is (do **not**
 auto-unblock). (A **legacy** gate created before the
-`idc-gate-pr` marker existed — no marker in its body — must first be **migrated**: stamp its
-`<!-- idc-gate-pr: <PR#> -->` marker **in the gate BODY** (a one-line body edit) with the Think PR
-you confirmed merged, then dispose. The marker MUST live in the body: the gate body has no adapter
+`idc-gate-pr` marker existed — no marker in its body — must first be **migrated** through
+`idc_pr_gate_bind.py` with the Think PR you confirmed merged, then disposed. The marker MUST live in
+the body: the gate body has no adapter
 door (createTicket stamps it, `setField`/`comment` cannot edit it), so a body marker IS the gate's
 own record; a **comment** is any adapter caller's door, so the engine **refuses** a gate whose only
 `idc-gate-pr` marker rides a comment (codex round-14 P2 — the old comment-migration cross-check was
@@ -196,12 +246,16 @@ so the engine binds approval to that PR's merge.
 
 **Procedure** (mirrors the requirements gate, different approval signal):
 
-1. **Open the gate.** `createTicket` the decision issue with the body above; `setField`
-   `Status=Todo` + the `operator-action` label. Optionally open a lightweight **decision-PR** (a
+1. **Open the gate.** `createTicket` the decision issue with the body above and the
+   `operator-action` label. The engine-owned create lands it in `Status=Todo` and applies that label
+   in the **same guarded create**; do not issue a follow-on Status write. Optionally open a lightweight
+   **decision-PR** (a
    one-line entry in a decisions log) when a durable artifact is wanted — its **merge** is then a
    second valid GO signal, identical in spirit to the Think-PR merge.
-2. **Chain only its dependents.** For each issue this decision gates, `setField` `Status=Blocked` +
-   `link kind=blocks` from the gate issue. Everything the decision does **not** gate is left alone
+2. **Chain only its dependents.** For each issue this decision gates, use
+   `block(<dependent>, by=<gate>)`: its guarded engine route is `move --to-status Blocked`, then
+   `link --parent <gate> --child <dependent> --kind blocks`; never write Status through `setField`.
+   Everything the decision does **not** gate is left alone
    and keeps flowing — the gate pauses *only its dependents*, never the whole pipe.
 3. **Notify** the operator once (the push fallback below), with a "Decision needed" message. Never
    block the run on delivery.
@@ -213,11 +267,17 @@ so the engine binds approval to that PR's merge.
    never waiting**. On a detected GO: **first close the decision gate as a journaled cleanup** via
    `dispose --disposition gate-approved --num <gate#>` — it re-verifies the GO artifact (the merged
    `idc-gate-pr` decision-PR, or the `decision`+`decision-approved` label pair on this
-   decision-titled gate) before minting `Done`. Then, **only after the dispose succeeds**, for each
-   gated dependent: remove the blocks link and `setField` `Status=Todo` — never unblock first, so a
-   GO revoked between detection and the dispose (label pulled, `decision-rejected` added) can never
-   leave dependents unblocked; the same interrupted-run recovery applies (a `Done` gate with
-   still-`Blocked` dependents → finish the unblock on the next re-check). On a
+   decision-titled gate) before minting `Done`. Then, **only after the dispose succeeds**, finish each
+   gated dependent through the guarded **pointer-finish door**
+   (`idc_gate_repair.py --finish-pointer`, exactly as the requirements gate above) — never a bare
+   engine `unblock`: it requires the gate's journaled proof **and** that gate to be the dependent's
+   **sole remaining blocker** before moving it to `Status=Todo`, so a dependent held by other blockers
+   stays `Blocked` until they resolve through their own doors — never unblock first,
+   so a GO revoked between detection and the dispose (label pulled, `decision-rejected` added) can
+   never leave dependents unblocked; the same interrupted-run recovery applies (a `Done` gate with
+   still-`Blocked` dependents → finish the unblock on the next re-check). (An in-session decision-PR
+   approval can be mechanized with `idc_pr_finish.py requirements … --operator-approved`, exactly as
+   the requirements gate above.) On a
    `decision-rejected` (NO-GO): drop or re-sequence the dependents per the
    operator's note via the adapter — never silently proceed. `/idc:autorun`, `/idc:build`, and
    `/idc:plan` re-check open `operator-decision` gates at the start of a run via `query`, the same
@@ -282,12 +342,15 @@ push is only a convenience nudge.
   only that decision's dependents). It does not create or modify any other issue.
 - **Never edits canonical docs.** The PRD/TRD diff is authored upstream (by `/idc:think` or
   `/idc:recirculate`) and only referenced here; this skill writes the gate issue, not the PRD/TRD.
-- **Never approves on the operator's behalf** — never merges the Think PR, never adds the
-  `decision-approved` label or merges a decision-PR. Approval is the operator's act; this skill only
-  *detects* it, closes the gate as a **journaled cleanup** via the guarded `dispose --disposition
-  gate-approved` op — which **re-verifies the operator's own approval artifact** before minting
-  `Done` — and only then clears the resulting blocks. The close *records* approval, and can never
-  *be* it (a gate with no merged approval artifact is refused, fail-closed, and its dependents stay
-  `Blocked`).
+- **Never approves on the operator's behalf** — never *infers* human approval. It does not add the
+  `decision-approved` label, and it merges the Think/decision PR **only** when the operator has given
+  an unambiguous in-session GO (the `idc_pr_finish.py requirements --operator-approved` path is the
+  one door that carries out such an explicit instruction; absent it, an open PR leaves the chain
+  `Blocked` and the run moves on). Approval is the operator's act; this skill only *detects* it (or
+  carries out an explicit GO), closes the gate as a **journaled cleanup** via the guarded `dispose
+  --disposition gate-approved` op — which **re-verifies the operator's own approval artifact** before
+  minting `Done` — and only then clears the resulting blocks. The close *records* approval, and can
+  never *be* it (a gate with no merged approval artifact is refused, fail-closed, and its dependents
+  stay `Blocked`).
 - All tracker mutation goes through `idc:idc-tracker-adapter`; this skill holds no
   backend-specific logic.

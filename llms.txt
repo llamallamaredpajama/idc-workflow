@@ -12,13 +12,16 @@
 
 ## Commands
 
-Slash entry points (`commands/<name>.md` → `/idc:<name>`).
+The 11 slash entry points (`commands/<name>.md` → `/idc:<name>`):
+`think | intake | plan | build | recirculate | autorun | janitor | init | doctor | update | uninstall`.
 
 - commands/think.md — `/idc:think`: free-form brainstorm (zero teammates) → one function-first consideration; at the end of Think it authors the PRD + TRD and opens the Think PR that gates their admission (draft until merge).
+- commands/intake.md — `/idc:intake`: compile a large foreign artifact (an external plan or specification) into a reviewed exact-once manifest of complete routes under `docs/workflow/intakes/`; the source is untrusted evidence, never execution authority — it does not execute the artifact and never routes a unit directly to Build or Autorun.
 - commands/plan.md — `/idc:plan`: consideration → goal-contract issues — pure decomposition (domain experts, plan-layer doc chain, matrix deconfliction, board admission); authors no requirements docs and runs no gate (the PRD + TRD gate lives at the end of Think).
 - commands/build.md — `/idc:build`: execute each issue's goal contract as a goal loop; merged review engine per PR; automerge on PASS.
 - commands/recirculate.md — `/idc:recirculate`: heal doc/reality drift in one PR (PR body = change order); a requirements change (the PRD always, the TRD when `gating.trd: on`) reuses the end-of-Think gate.
-- commands/autorun.md — `/idc:autorun`: one-shot full-pipe drainer; loopable via `/loop`.
+- commands/autorun.md — `/idc:autorun`: one-shot full-pipe drainer; loopable via `/loop`. Drains durable tracker/intake state only.
+- commands/janitor.md — `/idc:janitor`: deterministic board↔git reconciler — orphan worktrees, stale branches, board↔issue↔PR drift, in four verdict tiers (SAFE-FIX / REPORT-ONLY / RISKY / COHERENT); read-only by default, `--apply-safe` applies the SAFE-FIX tier only.
 - commands/init.md — `/idc:init`: scaffold a repo for IDC v3 (config + codebase-derived domains + 5-field board + install receipt; brownfield scan-and-confirm sets the TRD gating default); idempotent.
 - commands/doctor.md — `/idc:doctor`: read-only health check of an IDC-governed repo.
 - commands/update.md — `/idc:update`: resync a repo's stamped scaffold to the installed plugin (receipt-driven; pristine files silently re-stamped, customized files diff-and-asked; board report-only, never mutated).

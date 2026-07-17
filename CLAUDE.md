@@ -22,7 +22,7 @@ Live-loading the EDITED plugin against a sandbox is the e2e loop below.
 | Path | What |
 |------|------|
 | `.claude-plugin/` | `plugin.json` (manifest) + `marketplace.json` (self-hosted marketplace) |
-| `commands/*.md` | 10 slash entry points (`think · plan · build · recirculate · autorun · janitor · init · doctor · update · uninstall`) |
+| `commands/*.md` | 11 slash entry points (`think · intake · plan · build · recirculate · autorun · janitor · init · doctor · update · uninstall`) |
 | `agents/*.md` | stage orchestrators + the durable-worker implementer + finisher + review coordinator/agent |
 | `skills/<name>/SKILL.md` | reusable procedures — runtime adapters (claude/codex/pi), tracker adapter + backends, review engine, gate-issue, goal-contract, matrix, schema, recirculator-sync |
 | `templates/` | per-project scaffold `/idc:init` copies into a governed repo |

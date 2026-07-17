@@ -201,4 +201,76 @@ grep -qiE 'every other pending consideration' "$MX" \
 grep -qiE 'one unified assessment' "$MX" \
   || fail "idc-matrix-analysis pre-pass must synthesize ONE unified assessment (P2)"
 
+# ---- (g) Task 6: Plan closes its command contract + records a consumed intake unit -------------
+# Plan closes its lifecycle record and surfaces the oracle handoff (command frame — pinned across all
+# commands in phase7). When Plan decomposes a consideration that ORIGINATED from an intake unit (a
+# recirculation-admitted consideration whose paused-origin traces to a manifest#unit), it must record
+# that unit's durable disposition through the exact-once manifest — never leave the manifest stale.
+grep -qF 'idc_next_action.py' "$PLAN_CMD" \
+  || fail "commands/plan.md must derive its next-stage handoff from the oracle (idc_next_action.py) (Task 6)"
+grep -qF 'idc_command_contract.py' "$PLAN_CMD" \
+  || fail "commands/plan.md must open+close its command-contract record (Task 6)"
+grep -qF 'idc_intake_manifest.py' "$PLAN" \
+  || fail "agents/idc-plan.md must record a consumed intake unit's disposition via idc_intake_manifest.py link (Task 6)"
+
+# ---- (h) Task 6 / Finding 3: Plan records a consumed intake unit through the REAL helper with a
+# LEGAL disposition. A consideration Plan decomposes originated (via Recirculation) from an intake
+# unit whose class is discovered_drift / admitted_unplanned (route=recirculate) — NOT already_done —
+# and the manifest state machine reserves `verified_done` for class=already_done ONLY. So the ONLY
+# legal durable disposition for a plan-consumed recirculate-origin unit is `materialized`. This runs
+# the EXACT `--state` transition agents/idc-plan.md prescribes against a real reviewed manifest fixture:
+# it must SUCCEED. Red-when-broken: prescribe `--state verified_done` and the real helper REJECTS it
+# (class mismatch) → exit 2 → this section goes RED.
+INTAKE="$PLUGIN/scripts/idc_intake_manifest.py"
+[ -f "$INTAKE" ] || fail "(h) scripts/idc_intake_manifest.py not found"
+FX="$WORK/intake"; mkdir -p "$FX"
+FSRC="$FX/drift.md"; FMAN="$FX/2026-07-12-drift.json"
+printf '# U1 - discovered drift unit\n\nbody text\n' > "$FSRC"
+python3 "$INTAKE" extract --source "$FSRC" --out "$FMAN" \
+  --goal 'reconcile discovered drift' --plugin-version 4.1.0 >/dev/null \
+  || fail "(h) intake extract failed"
+python3 - "$FMAN" <<'PY' || fail "(h) could not classify the drift manifest"
+import json, os, sys, tempfile
+path = sys.argv[1]
+data = json.load(open(path, encoding="utf-8"))
+for u in data["units"]:
+    u.update({"class": "discovered_drift", "route": "recirculate", "dependencies": [], "operator_stops": []})
+    u["disposition"] = {"state": "queued", "target_ref": None, "evidence": []}
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".drift-", suffix=".json")
+with os.fdopen(fd, "w", encoding="utf-8") as h:
+    json.dump(data, h, indent=2, sort_keys=True); h.write("\n")
+os.replace(tmp, path)
+PY
+FREV="$FX/review.json"
+python3 - "$INTAKE" "$FMAN" "$FREV" <<'PY' || fail "(h) could not write the drift review"
+import importlib.util, json, sys
+helper_path, manifest_path, review_path = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("idc_intake_h", helper_path)
+helper = importlib.util.module_from_spec(spec); spec.loader.exec_module(helper)
+m = json.load(open(manifest_path, encoding="utf-8"))
+review = {"schema_version": 1, "intake_id": m["intake_id"], "source_sha256": m["source"]["sha256"],
+          "verdict": "PASS", "missing_unit_ids": [], "duplicate_unit_ids": [], "misrouted_unit_ids": [],
+          "notes": [f"manifest_content_sha256={helper._manifest_content_sha256(m)}"]}
+json.dump(review, open(review_path, "w", encoding="utf-8"), indent=2, sort_keys=True)
+PY
+python3 "$INTAKE" validate --manifest "$FMAN" --review "$FREV" >/dev/null \
+  || fail "(h) could not validate the drift manifest"
+# Recirculation materialized the unit (target_ref = its recirculation ticket).
+python3 "$INTAKE" link --manifest "$FMAN" --unit U1 --state materialized \
+  --target-ref "recirc:5" --evidence "recirc:5" >/dev/null \
+  || fail "(h) could not materialize the recirculate unit (the Recirculation step)"
+# The disposition agents/idc-plan.md prescribes for a plan-consumed intake unit, parsed from its REAL
+# link command (the command wraps across lines; bound the scan to the code fence, never a backtick).
+PLAN_STATE="$(python3 - "$PLAN" <<'PY'
+import re, sys
+text = open(sys.argv[1], encoding="utf-8").read()
+m = re.search(r'idc_intake_manifest\.py"?\s+link\b[^`]{0,400}?--state\s+([A-Za-z_]+)', text, re.S)
+print(m.group(1) if m else "")
+PY
+)"
+[ -n "$PLAN_STATE" ] || fail "(h) could not parse the --state agents/idc-plan.md prescribes on its idc_intake_manifest.py link"
+python3 "$INTAKE" link --manifest "$FMAN" --unit U1 --state "$PLAN_STATE" --evidence "plan:99" >/dev/null 2>&1 \
+  || fail "(h) the plan-prescribed intake link (--state $PLAN_STATE) is REJECTED by the real state machine for a recirculate-origin unit — Plan must use the LEGAL disposition (materialized), not verified_done (valid only for class=already_done)"
+echo "  ok (h) Plan's prescribed intake link uses a LEGAL disposition (--state $PLAN_STATE); the real helper accepts it"
+
 echo "PASS: schema check + matrix deconfliction green; Plan is pure decomposition; plan PR direct-merges (not --auto) and deletes its branch; contract requires an outcome test; Plan batch dedup/deconflict (scoop-all -> 3 read-only comparisons -> one unified deconflicted plan, quality layer)"

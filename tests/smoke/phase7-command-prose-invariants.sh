@@ -84,7 +84,9 @@ has "$I" 'customized .*tracker-config\.yaml|--customized docs/workflow/tracker-c
 # Board provisioning must carry the 3.1.0 4th Stage option on a fresh create AND reconcile an
 # existing pre-3.1.0 board by appending it non-destructively (the regression: init seeded only 3
 # options and skipped an existing field, so /idc:recirculate had no stage to file into).
-has "$I" 'single-select-options "Consideration,Planning,Buildable,Recirculation"' \
+has "$I" 'ensure-field.*--repo|ensure-field' \
+  || fail "init.md must create missing board fields through the validating adapter"
+has "$I" 'name Stage --option Consideration --option Planning --option Buildable --option Recirculation' \
   || fail "init.md must create the Stage field with all FOUR options incl. Recirculation"
 has "$I" 'idc_stage_options\.py' \
   || fail "init.md must reconcile an existing Stage field via the idc_stage_options.py append helper"
@@ -108,6 +110,54 @@ has "$UN" 'idc_gh_board\.py' \
   || fail "uninstall.md in-flight count must read the whole board via the paginating idc_gh_board.py (not a truncating gh item-list)"
 grep -E 'gh project item-list.*--format json' "$UN" \
   && fail "uninstall.md must not read the board with a truncating gh project item-list --format json (use the paginating idc_gh_board.py)"
+# Round-2 finding F4-r2 + deferred #17: uninstall must DO the destructive work, THEN finish (which
+# independently verifies that work against the still-readable receipt), THEN remove the canonical
+# receipt and governance anchor together. The finish must NOT record 'applied' before the work
+# happened, and neither verification file may disappear before finish. Assert the ordering:
+# footprint-removal git-rm < finish < receipt+anchor cleanup git-rm, and no
+# expected/harmless-failure framing survives. Red-when-broken: finish before footprint removal,
+# either verification file removed before finish, or a no-op finish excused as expected/harmless.
+python3 - "$UN" <<'PY' || fail "uninstall.md must remove the footprints, THEN finish against the retained canonical receipt + governance anchor, THEN remove those two files together; and must not call a failing/late finish 'expected'/'harmless'"
+import re, sys
+physical = open(sys.argv[1], encoding="utf-8").read().splitlines()
+# Treat a backslash-continued shell command as one line so the cleanup command's two paths are
+# checked together even when the Markdown formats them across lines.
+lines = []
+i = 0
+while i < len(physical):
+    command = physical[i]
+    while command.rstrip().endswith("\\") and i + 1 < len(physical):
+        command = command.rstrip()[:-1] + " " + physical[i + 1].strip()
+        i += 1
+    lines.append(command)
+    i += 1
+def first_idx(pred):
+    for i, ln in enumerate(lines):
+        if pred(ln):
+            return i
+    return None
+def is_git_rm(l):
+    return re.search(r'git .*\brm\b', l) is not None
+finish_i = first_idx(lambda l: "idc_command_contract.py" in l and "finish" in l)
+# The footprint-removal step names manifest/footprint paths but retains BOTH verification files.
+work_rm_i = first_idx(lambda l: is_git_rm(l) and ("receipt entries" in l.lower()
+                                                  or "manifest" in l.lower()
+                                                  or "footprint" in l.lower())
+                                and "tracker-config" not in l.lower()
+                                and "install-receipt" not in l.lower())
+# The one post-finish cleanup command must remove the canonical receipt + anchor together.
+cleanup_i = first_idx(lambda l: is_git_rm(l) and "tracker-config" in l.lower()
+                                and "install-receipt" in l.lower())
+if None in (finish_i, work_rm_i, cleanup_i):
+    sys.exit(1)                 # all three ordered steps must be present
+if not (work_rm_i < finish_i < cleanup_i):
+    sys.exit(1)                 # remove footprints -> verify/finish -> remove receipt + anchor
+text = "\n".join(lines).lower()
+if re.search(r'(no-op|no op|exit ?2|fail\w*)[^.\n]{0,80}(expected|harmless)', text) or \
+   re.search(r'(expected|harmless)[^.\n]{0,80}(no-op|no op|exit ?2|fail\w*)', text):
+    sys.exit(1)                 # a failing/no-op finish must not be excused as expected/harmless
+sys.exit(0)
+PY
 
 # --- doctor.md: read-only (it must never mutate the repo or board) ------------------------------
 D="$C/doctor.md"
@@ -175,5 +225,46 @@ has "$AR" '\[ -z "\$CLAUDE_CODE_SESSION_ID" \]' \
   || fail "autorun.md must guard the orchestrator_drain marker-set with an empty-id check ([ -z \"\$CLAUDE_CODE_SESSION_ID\" ]) so an empty session id fails VISIBLY, not by silently disabling the gate"
 has "$AR" 'will NOT fire this run|NOT setting the orchestrator_drain marker' \
   || fail "autorun.md must WARN loudly (stderr) when it skips the marker-set on an empty session id — the disabling must be visible"
+
+# --- Task 6: the command-integrity closeout frame -----------------------------------------------
+# Every governed /idc:* command body must VERIFY its active command-contract record at entry
+# (idc_command_contract.py status — the entry gate opened it at expansion) and CLOSE it
+# deterministically at exit (idc_command_contract.py finish), never an improvised walk-away. The six
+# pipeline commands must additionally surface the read-only next-action oracle's machine result
+# (idc_next_action.py) as the final handoff, not a hand-authored "next, run X". Per-file greps only —
+# a bare recursive `grep -r` can hang under this machine's default ugrep, and shipped users get BSD
+# grep, so the suite iterates files explicitly (portability: /usr/bin/grep + /usr/bin/awk).
+for cmd in autorun build doctor init intake janitor plan recirculate think uninstall update; do
+  f="$C/$cmd.md"
+  [ -f "$f" ] || fail "missing command: $cmd"
+  grep -q 'idc_command_contract.py.*status' "$f" \
+    || fail "$cmd does not verify its active command contract (idc_command_contract.py status at entry)"
+  grep -q 'idc_command_contract.py.*finish' "$f" \
+    || fail "$cmd has no deterministic closeout (idc_command_contract.py finish)"
+done
+for cmd in autorun build intake plan recirculate think; do
+  f="$C/$cmd.md"
+  grep -q 'idc_next_action.py' "$f" \
+    || fail "$cmd does not derive its pipeline handoff from the oracle (idc_next_action.py)"
+done
+
+# Shipped prose must not claim Recirculate SEEDS work with no intake/inbox, nor let Build INFER work
+# from a foreign Markdown plan (a foreign plan is evidence, never execution authority). Flag any
+# single line that pairs the referent with the forbidden action. Iterate files explicitly (never a
+# bare `grep -r`, which hangs under ugrep); `.{0,N}` bounded quantifiers are POSIX-ERE portable.
+_seed_offenders=""; _infer_offenders=""
+for f in "$C"/*.md "$PLUGIN"/agents/*.md "$PLUGIN"/skills/*/SKILL.md; do
+  [ -f "$f" ] || continue
+  if grep -qiE 'recirculate.{0,80}(seed|create).{0,40}(ticket|issue)' "$f" 2>/dev/null; then
+    _seed_offenders="$_seed_offenders $f"
+  fi
+  if grep -qiE 'build.{0,80}(infer|derive|read).{0,60}(foreign|external|markdown plan)' "$f" 2>/dev/null; then
+    _infer_offenders="$_infer_offenders $f"
+  fi
+done
+[ -z "$_seed_offenders" ] \
+  || fail "shipped prose still claims Recirculate seeds work without an intake/inbox:$_seed_offenders"
+[ -z "$_infer_offenders" ] \
+  || fail "shipped prose still lets Build infer work from foreign Markdown:$_infer_offenders"
 
 echo "PASS: file-changing command markdown holds its must-never/must-say invariants"

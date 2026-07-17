@@ -92,21 +92,38 @@ and `OWNER` from config; never hardcode.
 
 ## Six core ops (the portable interface)
 
-**Status transitions route through the transition engine** — the single sanctioned write door on
-this backend too:
+**Create AND status transitions route through the transition engine** — the single sanctioned write
+door on this backend too:
 `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_transition.py" --backend github --owner "$OWNER" --project "$PROJ" <op>`
-(`create-ticket` / `claim` / `move` / `unblock` / `close` / `dispose` / `link`). It validates
-machine-legality, verifies the write's read-back, and journals every op to
-`docs/workflow/transition-journal.ndjson` — the record the janitor's board↔journal reconciliation
-replays. `Done` is reachable ONLY through a guarded terminal op — the verdict-guarded `close`, or
-`dispose --disposition {gate-approved|retired|drained}` for the non-verdict terminal dispositions
-(each with its own deterministic evidence guard). The raw recipes below are the *mechanics* that
-door drives; invoke them directly only for non-Status fields and reads.
+(`create-ticket` / `create-pointer` / `recirculate-intake` / `claim` / `move` / `unblock` / `close` /
+`dispose` / `link`). It validates machine-legality, verifies the write's read-back, and journals
+every op to `docs/workflow/transition-journal.ndjson` — the record the janitor's board↔journal
+reconciliation replays. `Done` is reachable ONLY through a guarded terminal op — the verdict-guarded
+`close`, or `dispose --disposition {gate-approved|retired|drained}` for the non-verdict terminal
+dispositions (each with its own deterministic evidence guard). **Every board mutation an IDC agent
+performs — create, Status move, non-Status field write, and native blocked-by edge — goes through the
+engine; the raw `gh`/GraphQL recipes below are the *mechanics* that door drives internally, shown only
+so the backend is legible. Never run a raw `gh issue create`/`gh project item-add`/`gh project
+item-edit`/`gh api …/dependencies/blocked_by` by hand** — the mutation interlock denies those during
+an active `/idc:*` command, and improvised writes desync the journal. Reads (`gh project item-list`,
+`gh api … GET`) stay fine to run directly.
 
-**createTicket(title, body, type, labels) -> issue#** — create the issue, add it to the
-board, then set initial fields via `setField`/`move` (or mint through the engine's
-`create-ticket`, which journals the create). Returns the issue number on stdout.
+**createTicket(title, body, type, labels) -> issue#** — dispatch through the engine, which owns the
+complete create + board-add + Stage + Status + read-back + journal sequence atomically. It prints the
+integer **issue number** on stdout (never the `PVTI_…` project-item id — the door resolves the number,
+journaling the PVTI internally). `--type` (applied as a `type:<T>` label) and `--labels` (repeatable or
+a comma-list) are how a gate carries its `operator-action` label through the door:
 ```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_transition.py" --backend github \
+  --owner "$OWNER" --project "$PROJ" create-ticket --title "$T" --body "$B" \
+  ${TYPE:+--type "$TYPE"} ${LABELS:+--labels "$LABELS"}   # -> issue# on stdout
+```
+(Use `create-pointer` for a Consideration pointer and `recirculate-intake` for a Recirculation inbox
+ticket.) The engine drives this raw `gh` mechanic **internally** — it is shown here only so the
+backend is legible; a role **never** runs it by hand (a raw `gh issue create` + `gh project item-add`
+mints an UNjournaled, possibly Stage-without-Status item and reads as replay divergence):
+```bash
+# ── engine-internal mechanic — NOT a role-facing recipe; do not run by hand ──
 URL=$(gh issue create --title "$T" --body "$B" \
         ${TYPE:+--label "type:$TYPE"} ${LABELS:+--label "$LABELS"}) || die_gh
 NUM=$(printf '%s\n' "$URL" | grep -oE '[0-9]+$')
@@ -114,16 +131,26 @@ gh project item-add "$PROJ" --owner "$OWNER" --url "$URL" || die_gh
 printf '%s\n' "$NUM"
 ```
 
-**setField(ticket, field, value)** — for the **non-Status fields** (`Stage`/`Wave`/`Phase`/
-`Domain`; a `Status` write is a transition — route it through the engine's `move`, which journals
-it; a raw Status `item-edit` bypasses the journal and reads as divergence): resolve the cached
-field node id, the option id (by name), and the project **node id** (`item-edit --project-id`
-needs the node id, NOT the integer `$PROJ`), then write the single-select value. Pre-seed the option first if it is new (see provisioning
-caveat). **Guard every resolved id before the mutation** — an empty item, option, or project-node
-id (issue not on the board, no such option, or an unresolvable project) would otherwise reach
-`updateProjectV2ItemFieldValue` as `''` (`Could not resolve to a node with the global id of ''`),
-so `die_gh` first rather than mutating with a blank id:
+**setField(ticket, field, value)** — for the **non-machine fields** (`Wave`/`Phase`/`Domain`),
+dispatch through the engine's `set-field` op, which resolves the ids, writes the single-select value,
+and journals it. `Stage` and `Status` are machine-governed and `set-field` refuses BOTH: a `Status`
+change is a transition — route it through `move --to-status`; a `Stage` advance is also a transition,
+through the guarded Stage door `move --to-stage <Stage> --to-status <Status>` (it validates the
+Stage/Status pair against the machine and journals `to_stage`). The create ops still write the initial
+Stage and the terminal dispositions the final Stage; a raw `set --field Stage` is never a role path:
 ```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_transition.py" --backend github \
+  --owner "$OWNER" --project "$PROJ" set-field --num "$NUM" --field "$FIELD" --value "$VALUE"
+```
+The engine drives this raw `gh` mechanic **internally** — it is shown here only so the backend is
+legible; a role **never** runs it by hand (a raw `gh project item-edit` is denied by the mutation
+interlock during a command and bypasses the journal). It resolves the cached field node id, the option
+id (by name), and the project **node id** (`item-edit --project-id` needs the node id, NOT the integer
+`$PROJ`), guards every id (an empty item/option/project-node id would otherwise reach
+`updateProjectV2ItemFieldValue` as `''` → `Could not resolve to a node with the global id of ''`), and
+pre-seeds a new option first (see provisioning caveat):
+```bash
+# ── engine-internal mechanic — NOT a role-facing recipe; do not run by hand ──
 IID="$(itemid "$NUM")";            [ -n "$IID" ] || die_gh     # #NUM not on the board → never mutate with ''
 OID="$(optid "$FIELD" "$VALUE")";  [ -n "$OID" ] || die_gh     # no such option for $FIELD=$VALUE → never mutate with ''
 PNODE="$(projnode)";               [ -n "$PNODE" ] || die_gh   # project NODE id (PVT_…) — item-edit --project-id needs it, NOT the integer $PROJ
@@ -163,35 +190,42 @@ above (existing boards keep surfacing under `--stage Buildable` with no migratio
 
 **comment(ticket, body)** — `gh issue comment "$NUM" --body "$BODY" || die_gh`.
 
-## Blocked-by mechanism (native, with documented fallback)
+## Blocked-by mechanism (native, engine-owned)
 
-`blocks` uses the native GitHub **issue dependencies** "blocked by" relation through the REST
-API, so the dependency is first-class on the issue and surfaces in the §2 requirements gate chain.
-The endpoint keys the blocking issue by its **database id** (`issue_id`), **not** its issue number —
-passing the number returns a `422`, so resolve the number to the id first:
+A `blocks` edge is created through the engine's `link` op, which writes BOTH representations — the
+native GitHub **issue dependencies** "blocked by" relation (the ONLY one the autorun drain reads) and
+the engine's parseable comment marker on the child — and fail-closes if the native edge does not land:
 ```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_transition.py" --backend github \
+  --owner "$OWNER" --project "$PROJ" link --parent "$PARENT" --child "$CHILD" --kind blocks
+```
+The engine drives the native REST mechanic **internally** (never a raw `gh api …/dependencies/blocked_by`
+POST typed into Bash — the mutation interlock denies that during a command). The endpoint keys the
+blocking issue by its **database id** (`issue_id`), **not** its issue number (passing the number returns
+a `422`), so the engine resolves number → id first:
+```bash
+# ── engine-internal mechanic — NOT a role-facing recipe; do not run by hand ──
 PARENT_ID=$(gh api "repos/{owner}/{repo}/issues/$PARENT" --jq '.id')  # number → database id
 gh api --method POST \
   "repos/{owner}/{repo}/issues/$CHILD/dependencies/blocked_by" \
-  -F issue_id="$PARENT_ID" || blocks_fallback "$CHILD" "$PARENT"
+  -F issue_id="$PARENT_ID"
 ```
-**Fallback** (`blocks_fallback`) — if the dependencies endpoint is unavailable (404/501),
-record the relation as a tracked `blocks-on:#<parent>` line appended to the child's body and
-a `blocks-on:#<parent>` label, so the link is still queryable. The fallback is a documented
-degradation of the *link representation only* — it never silently drops the dependency.
+The dependency is first-class on the issue and surfaces in the §2 requirements gate chain. To clear an
+edge, use the engine's `unblock --num <child> --by <parent>` (removes the native edge + marker, verifies
+absence, then moves the child `Blocked → Todo`) — never a raw `blocked_by` DELETE.
 
 ## Convenience ops
 
 - **claim(issue, agent)** — `idc_transition.py … claim --num "$NUM" --agent "$AGENT"`
   (Status→In Progress + the claim comment, journaled). No lock; the Build merge-queue serializes
   merges.
-- **block(issue, by)** — `idc_transition.py … move --num "$NUM" --to-status Blocked` + the
-  **native `link "$BY" "$NUM" blocks` recipe above** (the REST issue-dependencies edge, with its
-  documented fallback). The native relation is the ONLY representation the autorun drain's
-  dependency gate reads (`idc_autorun_drain._blocked_by_numbers`); the engine's
-  `link --kind blocks` records the journaled marker edge but does **not** create it (#158) —
-  substituting the engine link here leaves the child looking unblocked, claimable before its
-  parent finishes.
+- **block(issue, by)** — `idc_transition.py … move --num "$NUM" --to-status Blocked` + the engine's
+  `link --parent "$BY" --child "$NUM" --kind blocks`. That single sanctioned `link` op writes BOTH
+  representations — the **native** GitHub blocked-by edge (the ONLY representation the autorun drain's
+  dependency gate reads, `idc_autorun_drain._blocked_by_numbers`) AND the journaled marker — and
+  fail-closes if the native edge does not land, so the child is genuinely blocked (not claimable before
+  its parent finishes). Never a raw `dependencies/blocked_by` POST (the interlock denies it during a
+  command).
 - **close(issue)** — a verdict-backed close routes through the engine:
   `idc_transition.py … close --num "$NUM" --verdict <verdict.json> --pr <PR>` — the guarded,
   journaled path to `Done` (verdict must validate, pass, own the item and the PR, with every
@@ -228,7 +262,7 @@ degradation of the *link representation only* — it never silently drops the de
   surfaces non-zero instead.
   *Stage on a retired pointer is intentionally left at its last value (`Planning`), not cleared or
   advanced* — clearing was evaluated and rejected as NOT a clean fix: (1) the sibling **filesystem**
-  backend's `setField Stage` rejects any non-enum value (`scripts/idc_tracker_fs.py`), so a
+  backend's raw `set --field Stage` primitive rejects any non-enum value (`scripts/idc_tracker_fs.py`), so a
   cleared/empty `Stage` is not expressible there — clearing would make `retire` diverge by backend
   and break the adapter's backend-blindness; (2) a cleared `Stage` reads as `Buildable` via the
   `(.stage // "Buildable")` legacy default shared by both backends, so it drops the drain's

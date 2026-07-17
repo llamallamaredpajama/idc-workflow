@@ -122,6 +122,11 @@ ops:
   move:
     kind: transition
     to_status: any
+  # `set-field` writes a NON-machine single-select field (Wave/Phase/Domain) through the single
+  # write door, so no role runs a raw `gh project item-edit` (denied by the mutation interlock during
+  # an active command). Status is NOT settable here — a Status change is a transition (`move`).
+  set-field:
+    kind: field
   unblock:
     kind: transition
     to_status: Todo

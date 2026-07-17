@@ -1,0 +1,26 @@
+{
+  "_comment": [
+    "The exact CORRUPT gate shape observed in session b7a93ff6, frozen as a HERMETIC fixture.",
+    "Numbers 706/707/708 are fixture identifiers ONLY — this file drives an in-process unit with a",
+    "faked github layer (tests/smoke/governance/gate-repair-session-b7a93ff6.sh); it never reaches a",
+    "real repo, board, or GitHub issue. The live knowledge-engine equivalents are OFF LIMITS per the",
+    "plan's global constraints (live repair is a separately authorized follow-up).",
+    "",
+    "The corruption: the Think PR MERGED (the operator's real approval), but the gate was closed",
+    "OUTSIDE the guarded dispose door — so it carries no journaled proof, its Stage was never set,",
+    "its Status still reads Todo while the issue is CLOSED, and its body never got the idc-gate-pr",
+    "marker that BINDS the approval PR to this gate. The pointer is already unblocked (Todo), so no",
+    "unblock transition was ever missed — inventing one would be false history."
+  ],
+  "pr": {"number": 706, "state": "MERGED"},
+  "pointer": {"number": 707, "stage": "Consideration", "status": "Todo", "blocked_by": []},
+  "gate": {
+    "number": 708,
+    "title": "[operator-action] Requirements change - Drive foundation",
+    "issue_state": "CLOSED",
+    "stage": "",
+    "status": "Todo",
+    "body": "TO APPROVE: merge the Think PR."
+  },
+  "journal": []
+}

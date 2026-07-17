@@ -9,9 +9,30 @@ It is the file-backed-labels half of Omnigent's stateful-policy pattern; the gat
 THE FILE. One JSON file, `.idc-session-state.json`, at the **governed workspace root**
 (`ledger_path(cwd)`). It is transient working state, gitignored via the scaffold
 (`ensure_gitignored()`, wired into idc_init_scaffold.sh + /idc:update) so a clean autorun/build exit
-never leaves committed litter. Shape:
+never leaves committed litter. PRIMARY FORMAT — v2 (Task 2, command integrity), carrying BOTH the v1
+`taints` array AND a `commands` array (the universal IDC command lifecycle envelope):
 
-    {"version": 1, "taints": [ {"kind": ..., "key": ..., "session_id": ..., "fields": {...}}, ... ]}
+    {
+      "version": 2,
+      "taints":  [ {"kind": ..., "key": ..., "session_id": ..., "fields": {...}}, ... ],
+      "commands": [
+        {
+          "session_id":   "S1",              # the session that owns this command obligation
+          "command":      "think",           # one of idc_command_contract.COMMANDS
+          "state":        "active",          # "active" (open) → "finished" (closed)
+          "plugin_version": "4.1.0",         # the running plugin version that opened the record
+          "args_sha256":  "<64-lowercase-hex>",  # digest of the raw arg text (never the text itself)
+          "source":       "user",            # command_source (user | plugin | ...)
+          "closeout":     null               # null while active; the validated terminal envelope once finished
+        }
+      ]
+    }
+
+BACKWARD COMPATIBILITY. A v1 file — `{"version": 1, "taints": [...]}` with no `commands` — is read
+tolerantly and normalized to the v2 shape on read (see `read_state`); it is only rewritten with
+`version: 2` on the next write. Every write preserves BOTH arrays: a taint write never drops
+`commands`, and a command write never drops `taints`. The finished-command history is capped
+(`_MAX_FINISHED`, newest-finish order) while an active record is NEVER pruned.
 
 TAINT KINDS (at minimum; a taint's identity is the (kind, key) pair):
   - `unfiled_findings`         — reviewer nits/deferrals not yet routed to the board (drop A/B).
@@ -87,7 +108,15 @@ LEDGER_FILENAME = ".idc-session-state.json"
 # The scaffold ignores the state file AND its sidecar write-lock (`.idc-session-state.json.lock`)
 # with ONE glob line — in gitignore `*` matches the empty string, so it still ignores the file itself.
 GITIGNORE_LINE = LEDGER_FILENAME + "*"
-_LEDGER_VERSION = 1
+# v2 (Task 2 — command integrity): the state file now carries a `commands` array (the universal IDC
+# command lifecycle envelope) ALONGSIDE the v1 `taints`. v1 files are read tolerantly and normalized
+# to v2 on read (see read_state); a v1 file is only rewritten with `version: 2` when the next write
+# happens. Every write preserves BOTH arrays — a taint write never drops commands, and vice versa.
+_LEDGER_VERSION = 2
+# Command lifecycle record states + the finished-history cap (never prunes an active record).
+_CMD_ACTIVE = "active"
+_CMD_FINISHED = "finished"
+_MAX_FINISHED = 20
 
 try:
     import fcntl  # POSIX advisory file locks (macOS/Linux — IDC's platforms)
@@ -144,20 +173,45 @@ def ledger_path(cwd):
 
 
 # ── tolerant read ────────────────────────────────────────────────────────────────────────────────
-def read_taints(cwd):
-    """Every taint dict currently in the ledger (a list). TOLERANT: a missing or corrupt ledger
-    reads as an EMPTY list and NEVER throws — a corrupt ledger must not brick a gate."""
+def _read_raw(cwd):
+    """The raw ledger dict (both `taints` and `commands`). TOLERANT: a missing or corrupt ledger
+    reads as an EMPTY dict and NEVER throws — a corrupt ledger must not brick a gate. The ONE decode
+    point both the v1 taint readers and the v2 command readers share, so tolerance is defined once."""
     try:
         with open(ledger_path(cwd), encoding="utf-8") as fh:
             data = json.load(fh)
     except (OSError, ValueError):
-        return []
-    if not isinstance(data, dict):
-        return []
-    taints = data.get("taints", [])
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def read_taints(cwd, _raw=None):
+    """Every taint dict currently in the ledger (a list). TOLERANT: a missing or corrupt ledger
+    reads as an EMPTY list and NEVER throws — a corrupt ledger must not brick a gate. `_raw` lets a
+    mutator that already decoded the file under its lock reuse that one read."""
+    taints = (_read_raw(cwd) if _raw is None else _raw).get("taints", [])
     if not isinstance(taints, list):
         return []
     return [t for t in taints if isinstance(t, dict) and t.get("kind")]
+
+
+def _read_commands(cwd, _raw=None):
+    """Every well-formed command lifecycle record currently in the ledger (a list). TOLERANT: a
+    missing/corrupt ledger — or a v1 file with no `commands` key — reads as EMPTY, never throws. A
+    record is well-formed iff it carries a session_id and a command (the identity a gate keys on).
+    `_raw` lets a mutator that already decoded the file under its lock reuse that one read."""
+    cmds = (_read_raw(cwd) if _raw is None else _raw).get("commands", [])
+    if not isinstance(cmds, list):
+        return []
+    return [c for c in cmds if isinstance(c, dict) and c.get("session_id") and c.get("command")]
+
+
+def read_state(cwd):
+    """The whole ledger as a normalized v2 dict: {'version': 2, 'taints': [...], 'commands': [...]}.
+    TOLERANT. A v1 file (`{'version': 1, 'taints': [...]}`) is normalized in-memory to v2 with an
+    empty `commands` list — it is NOT rewritten on disk until the next write, so a read never mutates
+    the file."""
+    return {"version": _LEDGER_VERSION, "taints": read_taints(cwd), "commands": _read_commands(cwd)}
 
 
 def pending_taints(cwd, session_id=None):
@@ -174,17 +228,23 @@ def pending_taints(cwd, session_id=None):
 
 
 # ── atomic, best-effort write ────────────────────────────────────────────────────────────────────
-def _atomic_write(cwd, taints):
-    """Write the ledger atomically (temp-file + os.replace). BEST-EFFORT: an OSError warns and
-    returns (never raises) so recording a taint can never break the user's command."""
+def _atomic_write_state(cwd, taints, commands):
+    """Write the WHOLE ledger (both arrays) atomically (temp-file + os.replace). BEST-EFFORT for the
+    caller's control flow — an OSError WARNS and RETURNS (never raises), so recording state can never
+    break the user's command — but the outcome is SURFACED as a bool: True iff the state actually
+    PERSISTED to disk, False if the temp-file create / write / os.replace failed. A caller that reports
+    a record as opened (the entry gate, command_start) MUST check this so a swallowed write is never
+    mistaken for a persisted one (Fix 2). This is the single write door — every taint write AND every
+    command write funnels through here, so neither array can ever silently drop the other (the v1→v2
+    co-existence invariant)."""
     path = ledger_path(cwd)
     d = os.path.dirname(path) or "."
-    payload = {"version": _LEDGER_VERSION, "taints": taints}
+    payload = {"version": _LEDGER_VERSION, "commands": commands, "taints": taints}
     try:
         fd, tmp = tempfile.mkstemp(dir=d, prefix=".idc-ledger.", suffix=".tmp")
     except OSError as e:
         idc_hook_lib.warn(f"ledger: cannot create temp file in {d}: {e}")
-        return
+        return False
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, indent=2, sort_keys=True)
@@ -198,6 +258,8 @@ def _atomic_write(cwd, taints):
             os.remove(tmp)
         except OSError:
             pass
+        return False
+    return True
 
 
 # ── the write API (deterministic callers only) ──────────────────────────────────────────────────
@@ -205,16 +267,18 @@ def set_taint(cwd, kind, key=None, session_id=None, **fields):
     """Add or update the (kind, key) taint. REPO-GATED: a silent no-op outside a governed repo.
     Upserts by identity (kind, key) so a re-set never duplicates. Carries the creating session_id
     (invariant #1 scoping) and any extra `fields`. Recovers a corrupt/missing file (tolerant read
-    → rewrite)."""
+    → rewrite). The write preserves the `commands` array (the v1 taint writers' door); taint
+    writers are best-effort, so the persisted bool is ignored here."""
     if not idc_hook_lib.is_governed_repo(cwd):
         return
     key = None if key is None else str(key)
     if session_id is None:
         session_id = os.environ.get("IDC_SESSION_ID") or None
     with _write_lock(cwd):  # read-modify-write must be atomic vs concurrent writers (no lost taints)
-        taints = [t for t in read_taints(cwd) if not (t.get("kind") == kind and t.get("key") == key)]
+        raw = _read_raw(cwd)
+        taints = [t for t in read_taints(cwd, _raw=raw) if not (t.get("kind") == kind and t.get("key") == key)]
         taints.append({"kind": kind, "key": key, "session_id": session_id, "fields": dict(fields)})
-        _atomic_write(cwd, taints)
+        _atomic_write_state(cwd, taints, _read_commands(cwd, _raw=raw))
 
 
 def clear_taint(cwd, kind, key=None):
@@ -224,10 +288,253 @@ def clear_taint(cwd, kind, key=None):
         return
     key = None if key is None else str(key)
     with _write_lock(cwd):  # read-modify-write must be atomic vs concurrent writers (no lost taints)
-        before = read_taints(cwd)
+        raw = _read_raw(cwd)
+        before = read_taints(cwd, _raw=raw)
         after = [t for t in before if not (t.get("kind") == kind and t.get("key") == key)]
         if len(after) != len(before):
-            _atomic_write(cwd, after)
+            _atomic_write_state(cwd, after, _read_commands(cwd, _raw=raw))
+
+
+# ── the command lifecycle envelope (v2 — Task 2, command integrity) ───────────────────────────────
+# A `commands[]` record is the durable obligation that a governed `/idc:*` command was ENTERED and
+# must be CLOSED with a valid terminal status. Its identity is the (session_id, command) pair. The
+# deterministic entry gate opens it (command_start); the deterministic command tail closes it
+# (command_finish); the Stop closeout gate reads active_commands to refuse an un-closed command.
+def _prune_finished(commands):
+    """Cap the finished-record history at `_MAX_FINISHED`, newest write order, NEVER pruning an
+    active record. Active records are always retained in place; only the OLDEST finished records past
+    the cap are dropped."""
+    active = [c for c in commands if c.get("state") == _CMD_ACTIVE]
+    finished = [c for c in commands if c.get("state") != _CMD_ACTIVE]
+    if len(finished) > _MAX_FINISHED:
+        finished = finished[-_MAX_FINISHED:]
+    return active + finished
+
+
+def _union_str_list(old, new):
+    """Order-preserving, de-duplicated UNION of two string lists (round-5 finding 1, rule A —
+    monotonic obligations). Prior obligations come first so a re-start can only ADD to the stamped
+    set, never reorder-away or narrow it. Non-list inputs are treated as empty."""
+    out = []
+    for value in list(old if isinstance(old, list) else []) + list(new if isinstance(new, list) else []):
+        s = str(value)
+        if s not in out:
+            out.append(s)
+    return out
+
+
+class ObligationConflict(Exception):
+    """A `command_start` that would REPLACE (not just union) a stamped obligation on the active
+    (session, command) record is refused (round-6 BLOCKS 1, rule A). Raised for a Think re-start that
+    binds a DIFFERENT intake manifest than the one already stamped: the first manifest's exact-once
+    coverage obligation cannot silently vanish under a narrowing/replacing restart. The prior record is
+    left intact (nothing is persisted); the caller surfaces an honest refusal instead of opening a
+    record whose obligation dropped the first manifest's units."""
+
+    def __init__(self, command, prior, incoming):
+        self.command = command
+        self.prior = prior
+        self.incoming = incoming
+        super().__init__(
+            f"/idc:{command} re-start binds a different intake manifest ({incoming!r}) than the one "
+            f"already stamped on the active record ({prior!r}); a restart may only ADD to a stamped "
+            "obligation, never replace it — finish or reset the active run before intaking a different "
+            "manifest, so the first manifest's coverage obligation cannot vanish")
+
+
+def command_start(cwd, session_id, command, plugin_version, args_sha256, source,
+                  intake_manifest=None, intake_units=None, recirc_requested=None,
+                  build_requested=None, plan_admitted=None, uninstall_flags=None, nonce=None,
+                  build_frontier=None, uninstall_receipt_source=None, uninstall_receipt_sha256=None):
+    """Atomic UPSERT of the active command record by (session_id, command) — never duplicates an
+    active record (a re-entry of the same command in the same session updates the one record in
+    place). REPO-GATED: a silent no-op outside a governed repo (returns `{}`). Preserves the taint
+    array. Returns the record dict ONLY when the write actually PERSISTED; returns None when the
+    ledger write FAILED (Fix 2) — a caller must never report an obligation as opened on a failed
+    write, or the Stop gate would try to enforce a closeout for a record that does not exist.
+
+    An EMPTY/blank session identity is REFUSED fail-closed (returns None, no write): a runtime that
+    fires no Claude UserPromptExpansion (Codex/Pi) can leave `$CLAUDE_CODE_SESSION_ID` empty, and an
+    anonymous record keyed on session="" would let two session-less runs collide on (session="",
+    command) — finishing or overwriting each other's obligation. The identity is load-bearing, so a
+    blank one is never stored (finding 5)."""
+    if not idc_hook_lib.is_governed_repo(cwd):
+        return {}
+    if not str(session_id).strip():
+        return None
+    session_id = str(session_id)
+    command = str(command)
+    rec = {
+        "session_id": session_id,
+        "command": command,
+        "state": _CMD_ACTIVE,
+        "plugin_version": plugin_version or "",
+        "args_sha256": args_sha256 or "",
+        "source": source or "",
+        "closeout": None,
+    }
+    # Durable intake-mode marker (finding 2): a Think run started with `--doc/--unit` records its
+    # intake manifest (repo-relative) + selected units on the record, so the Think closeout re-verifies
+    # exact-once coverage from the RECORD — never inferable only from caller-supplied finish input.
+    if intake_manifest:
+        rec["intake_manifest"] = str(intake_manifest)
+        rec["intake_units"] = [str(u) for u in (intake_units or [])]
+    # Durable recirculate requested-set marker (wave-3 finding 4): a /idc:recirculate run started with
+    # a named `<manifest>#<unit>` (or a bare `#<ticket>`) records the requested item(s) on the record,
+    # so the recirculate closeout re-verifies that EVERY requested item got a validated, tracker-checked
+    # disposition — never inferable only from caller-supplied finish input. A bare full-inbox drain
+    # (`/idc:recirculate` with no named item) records an empty requested set.
+    if recirc_requested:
+        rec["recirc_requested"] = [str(r) for r in recirc_requested]
+    # Durable rule-A obligation markers stamped at command START, re-derived at finish (wave-4). A
+    # Build run records its requested issue set; a Plan run records the admitted-consideration set it
+    # was started against (so a consideration the command itself retires stays in the required set); an
+    # Uninstall run records the requested opt-in flags (--close-issues / --delete-board). The finish
+    # validator compares against the STAMPED set + live reads, never caller-supplied keys.
+    if build_requested:
+        rec["build_requested"] = [str(b) for b in build_requested]
+    # Durable whole-frontier marker (round-5 finding 4): a Build run with NO explicit issue set records
+    # the eligible-frontier issue set it was started against, so `complete` requires a merged-PR receipt
+    # per stamped-frontier issue OR an oracle-confirmed empty remaining frontier. `[]` (a readable but
+    # empty frontier at start) is stamped too — distinct from None (frontier never read).
+    if build_frontier is not None:
+        rec["build_frontier"] = [str(b) for b in build_frontier]
+    if plan_admitted is not None:
+        rec["plan_admitted"] = [str(p) for p in plan_admitted]
+    if uninstall_flags:
+        rec["uninstall_flags"] = sorted({str(f) for f in uninstall_flags})
+    if uninstall_receipt_source:
+        rec["uninstall_receipt_source"] = str(uninstall_receipt_source)
+    if uninstall_receipt_sha256:
+        rec["uninstall_receipt_sha256"] = str(uninstall_receipt_sha256)
+    # A per-record nonce binds a diagnostic report (doctor/janitor) to THIS command invocation
+    # (wave-4 finding 7): the helper that RUNS the scan writes the report carrying this nonce, and the
+    # closeout requires the report's nonce to MATCH the active record's — so a stale/foreign report
+    # cannot back a new run.
+    if nonce:
+        rec["nonce"] = str(nonce)
+    with _write_lock(cwd):  # read-modify-write must be atomic vs concurrent writers (no lost records)
+        raw = _read_raw(cwd)
+        commands = _read_commands(cwd, _raw=raw)
+        replaced = False
+        for i, c in enumerate(commands):
+            if (c.get("session_id") == session_id and c.get("command") == command
+                    and c.get("state") == _CMD_ACTIVE):
+                # MONOTONIC OBLIGATIONS (round-5 finding 1, rule A). A re-start of the SAME
+                # (session, command) may only UNION each stamped obligation with the prior record —
+                # NEVER replace or narrow it. So `/build #1 #2` re-entered as `/build #1` still owes
+                # BOTH, an uninstall two-flag run re-entered with one flag still owes BOTH, and an
+                # intake-mode Think re-entered with fewer units still owes every prior unit. (Wave-4
+                # only carried a marker forward when the re-start supplied NONE; a non-empty smaller
+                # value silently shed the difference — the exact regression this closes.)
+                # Intake manifest: keep the prior manifest whenever this re-start binds none OR the
+                # SAME manifest (union its units). A re-start that binds a DIFFERENT manifest is
+                # REFUSED (round-6 BLOCKS 1, rule A): silently replacing it would drop the first
+                # manifest's exact-once coverage obligation, letting a closeout succeed while the first
+                # manifest's units never got a durable disposition. Raise BEFORE any state is persisted
+                # so the prior obligation record is left fully intact.
+                prior_manifest = c.get("intake_manifest")
+                if prior_manifest and intake_manifest and str(intake_manifest) != prior_manifest:
+                    raise ObligationConflict(command, prior_manifest, str(intake_manifest))
+                if prior_manifest and (not intake_manifest or str(intake_manifest) == prior_manifest):
+                    rec["intake_manifest"] = prior_manifest
+                    rec["intake_units"] = _union_str_list(c.get("intake_units"),
+                                                          rec.get("intake_units"))
+                # Recirculate requested set, Build requested set, Uninstall flags: union with the prior.
+                unioned_recirc = _union_str_list(c.get("recirc_requested"), recirc_requested)
+                if unioned_recirc:
+                    rec["recirc_requested"] = unioned_recirc
+                unioned_build = _union_str_list(c.get("build_requested"), build_requested)
+                if unioned_build:
+                    rec["build_requested"] = unioned_build
+                # Build whole-frontier set: union the prior stamp with this re-start's live read (a
+                # frontier issue built between restarts stays in the required coverage set).
+                prior_frontier = c.get("build_frontier")
+                if prior_frontier is not None or build_frontier is not None:
+                    rec["build_frontier"] = _union_str_list(prior_frontier, build_frontier)
+                unioned_flags = _union_str_list(c.get("uninstall_flags"), uninstall_flags)
+                if unioned_flags:
+                    rec["uninstall_flags"] = sorted(set(unioned_flags))
+                # Receipt source is monotonic too. Once any start observed the canonical modern
+                # receipt, deleting it before finish cannot downgrade this run to the legacy list.
+                prior_receipt = c.get("uninstall_receipt_source")
+                if prior_receipt:
+                    rec["uninstall_receipt_source"] = prior_receipt
+                elif uninstall_receipt_source:
+                    rec["uninstall_receipt_source"] = str(uninstall_receipt_source)
+                # Keep the FIRST modern receipt digest across re-entry. A changed receipt is an
+                # integrity conflict for finish, not a new manifest that may replace the obligation.
+                prior_receipt_sha = c.get("uninstall_receipt_sha256")
+                if prior_receipt_sha:
+                    rec["uninstall_receipt_sha256"] = prior_receipt_sha
+                elif uninstall_receipt_sha256:
+                    rec["uninstall_receipt_sha256"] = str(uninstall_receipt_sha256)
+                # Plan admitted set: union the prior stamp with this re-start's live read (a
+                # consideration the plan itself retires between restarts stays in the required set).
+                prior_admitted = c.get("plan_admitted")
+                if prior_admitted is not None or plan_admitted is not None:
+                    rec["plan_admitted"] = _union_str_list(prior_admitted, plan_admitted)
+                # Nonce is per-record identity, not an obligation set: keep the prior one when this
+                # re-start supplied none, so a diagnostic report stays bound to the same record.
+                if not nonce and c.get("nonce"):
+                    rec["nonce"] = c.get("nonce")
+                commands[i] = rec
+                replaced = True
+                break
+        if not replaced:
+            commands.append(rec)
+        persisted = _atomic_write_state(cwd, read_taints(cwd, _raw=raw), _prune_finished(commands))
+    return rec if persisted else None
+
+
+def command_finish(cwd, session_id, command, status, evidence):
+    """Finish ONLY an existing ACTIVE record owned by `session_id` — a foreign session cannot finish
+    or inherit another session's record, and a missing active record is a no-op. Records the terminal
+    `status` + normalized `evidence` in the record's `closeout` and flips its state to finished.
+    REPO-GATED (no-op outside a governed repo). Returns the finished record dict, or None when there
+    was no matching active record owned by this session OR the closeout write did not PERSIST (Fix 2)
+    — either way the caller surfaces the non-close as a failure rather than reporting a false close.
+
+    An EMPTY/blank session identity is REFUSED fail-closed (returns None): a session="" finish could
+    otherwise close another anonymous session's record (finding 5)."""
+    if not idc_hook_lib.is_governed_repo(cwd):
+        return None
+    if not str(session_id).strip():
+        return None
+    session_id = str(session_id)
+    command = str(command)
+    with _write_lock(cwd):  # read-modify-write must be atomic vs concurrent writers
+        raw = _read_raw(cwd)
+        commands = _read_commands(cwd, _raw=raw)
+        target = None
+        for c in commands:
+            if (c.get("session_id") == session_id and c.get("command") == command
+                    and c.get("state") == _CMD_ACTIVE):
+                target = c
+                break
+        if target is None:
+            return None
+        target["state"] = _CMD_FINISHED
+        target["closeout"] = {"status": status, "evidence": evidence}
+        # Move the just-finished record to the NEWEST write position so the finished-history cap
+        # (_prune_finished keeps the last _MAX_FINISHED in write order) drops the OLDEST finished
+        # record — never this one. Finishing in place would leave an early-started record at the
+        # front of the list, where the cap would prune it as the "oldest" even though it just closed.
+        commands.remove(target)
+        commands.append(target)
+        if not _atomic_write_state(cwd, read_taints(cwd, _raw=raw), _prune_finished(commands)):
+            return None  # the close did not persist → do not report a false close (Fix 2)
+    return target
+
+
+def active_commands(cwd, session_id=None):
+    """The state=active command records, optionally scoped to one session. TOLERANT (a corrupt/missing
+    ledger reads as empty). session_id=None → every active record; session_id=X → only X's active
+    records, so the Stop closeout gate never traps an unrelated session with another's open command."""
+    active = [c for c in _read_commands(cwd) if c.get("state") == _CMD_ACTIVE]
+    if session_id is None:
+        return active
+    return [c for c in active if c.get("session_id") == str(session_id)]
 
 
 # ── the gitignore scaffold hook (idempotent, non-destructive) ────────────────────────────────────

@@ -8,6 +8,7 @@
 # Usage: bash tests/smoke/run-all.sh   (exit 0 = all green)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
+. "$HERE/smoke-path-preflight.sh"
 
 # Preflight: fail once, clearly, if TMPDIR is unwritable — otherwise every phase's `WORK="$(mktemp -d)"`
 # comes back empty, writes fall through to bogus root paths, and the cascade looks like N broken tests
@@ -30,6 +31,7 @@ unset _tdir _probe
 fails=0
 n_behavior=0; n_doc=0; n_mixed=0; unclassified=""
 for t in \
+  phase1-smoke-path-preflight \
   phase1-tracker-fs \
   phase1-tracker-stage \
   phase1-stage-recirc-append \

@@ -27,16 +27,27 @@ run**, so a half-finished update can never masquerade as complete.
 2. **Stale-session guard (HALT if stale).** Claude Code caches this command's markdown at session
    start and runs it from a **version-keyed cache** dir. If the plugin was updated *this session*,
    a newer version sits in the cache but the body executing now may be the OLD one — running stale
-   update logic against a newer install can re-introduce just-fixed bugs. Check before doing
-   anything:
+   update logic against a newer install can re-introduce just-fixed bugs. This is now a **repo
+   contract, not just a cache check**: pass `--repo` so the running version is also compared
+   against this repo's own install receipt (`plugin_version` — the version that last stamped it),
+   never just the installed-cache siblings. Check before doing anything:
    ```bash
-   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_plugin_freshness.py" --plugin-root "${CLAUDE_PLUGIN_ROOT}"
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_plugin_freshness.py" \
+     --plugin-root "${CLAUDE_PLUGIN_ROOT}" --repo "$ROOT" --json
    ```
-   If it prints `verdict stale` (exit 4), **STOP immediately** and tell the operator: a newer IDC
-   version is installed than the one this session loaded — run `/reload-plugins` (or restart the
-   session) and re-run `/idc:update`. Do **not** proceed on stale logic. `verdict current` or
-   `unknown` (e.g. a `--plugin-dir` dev load) → proceed. A plugin update may also ship new
-   commands/skills an already-running session won't see until reload — same fix.
+   If `"verdict": "stale"` (exit 4), **STOP immediately** and tell the operator: this session's
+   IDC version is older than either this repo's install receipt or the installed plugin cache —
+   run `/reload-plugins` (or restart the session) and re-run `/idc:update`. **`/clear` does not
+   reload plugin commands or hooks** — it only clears conversation context, not the cached plugin
+   bundle — so `/clear` alone will NOT fix a stale session; only `/reload-plugins` or a full
+   restart re-reads the plugin. Do **not** proceed on stale logic. `"current"` or
+   `"development-current"` (e.g. a `--plugin-dir` dev load newer than the repo's receipt) →
+   proceed. A plugin update may also ship new commands/skills an already-running session won't see
+   until reload — same fix. If the command instead exits `2` (invalid receipt — a
+   `receipt_version: 2` receipt whose `plugin_version` is missing or malformed), **STOP**: the
+   repo's install receipt is corrupt or hand-edited, not stale — report this to the operator and do
+   not guess a version or proceed; the receipt needs manual repair (or deletion, to graduate a
+   fresh one) before `/idc:update` can run safely.
 3. **Scope-aware plugin update (terminal step, done before this command).** `/idc:update` only
    resyncs this repo's scaffold files; pulling the new *plugin* version itself is a terminal
    command — `claude plugin update idc@idc-workflow --scope project`. The bare
@@ -82,6 +93,14 @@ run**, so a half-finished update can never masquerade as complete.
     removal — no leave-removed default). Present on disk → provenance unknown: show-diff-and-ask
     like `modified`, never silently overwrite. An `unrecorded` data-bearing config follows §A as
     always. Phase 4's fresh stamp records every one that landed.
+
+    **The intake home (`docs/workflow/intakes/`) migrates this way.** A pre-4.1.0 receipt has no
+    `docs/workflow/intakes/.gitkeep`, so an older repo gets the intake home installed here — the
+    keepfile, and nothing else. **Never touch intake contents.** A compiled `/idc:intake` manifest
+    in that directory is an operator work product, not governed scaffold: it has no template (the
+    resolver rejects it by design), it is never receipt-listed, and it therefore appears in **no**
+    classification bucket. Adding the home to an older repo must leave every manifest already in it
+    byte-for-byte untouched.
   If the receipt is present but **invalid** (the helper exits non-zero), STOP and report the parse
   error — do not silently treat files as untouched.
 - **No receipt (pre-receipt install):** this is the one-time graduation. **Diff-and-ask for every
@@ -137,7 +156,7 @@ mapping can't drift between scaffold and resync. It encodes exactly:
 | `WORKFLOW-config.yaml` | `templates/WORKFLOW-config.yaml` |
 | `docs/workflow/tracker-config.yaml` | `templates/tracker-config.yaml` |
 | `docs/workflow/workflow-machine.yaml` | `templates/workflow-machine.yaml` |
-| `docs/workflow/<rest>` (e.g. `README.md`, `code-reviews/…`, `pillar-matrices/…`) | `templates/docs-tree/<rest>` |
+| `docs/workflow/<rest>` (e.g. `README.md`, `code-reviews/…`, `pillar-matrices/…`, `intakes/.gitkeep`) | `templates/docs-tree/<rest>` |
 
 This closes the docs-tree ambiguity: `docs/workflow/README.md` resolves to
 `templates/docs-tree/README.md`, **never** the unrelated `templates/README.md` (which documents the
@@ -164,6 +183,10 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/idc_ledger.py" --cwd "$ROOT" ensure
 # per-session sidecar (the drain writes it so the Stop gate reads the github board conjunct locally,
 # zero GraphQL on the stop path). Ensure it is ignored too, identically additive + idempotent:
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/idc_drain_verdict.py" --cwd "$ROOT" ensure-gitignore
+# The persisted per-command diagnostic reports (.idc-<kind>-report.json, Task 6 wave 3) — /idc:doctor +
+# /idc:janitor write their run's result there so the command contract re-reads the run's OWN report;
+# transient per-session working state, never committed. Ensure it is ignored too (additive, idempotent):
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/idc_command_report.py" --cwd "$ROOT" ensure-gitignore
 # The transition-journal advisory-lock sidecar (docs/workflow/transition-journal.ndjson.lock, v4
 # Phase 4 #150) — the runtime flock token rotation + journal_append create on a STABLE sidecar so the
 # journal↔rotation lock survives os.replace. Working state, never committed; a repo scaffolded before
@@ -197,15 +220,20 @@ board mutation — appending a missing *required* `Stage` option, which is **non
     `stage-recirc-appended` (or `stage-recirc-already-present` on a re-run).
     ```bash
     PID=$(gh project view <num> --owner "$OWNER" --format json --jq '.id')   # PVT_… project node id
-    # GraphQL read (not field-list): the non-destructive append must re-send each existing option's
-    # color + description, which `gh project field-list` omits (it returns only id+name).
+    # GraphQL READ (a read query — ALLOWED by the mutation interlock; not `field-list`): the
+    # non-destructive append must re-send each existing option's color + description, which
+    # `gh project field-list` omits (it returns only id+name).
     STAGE_FIELD=$(gh api graphql -f query='query($p:ID!){node(id:$p){... on ProjectV2{field(name:"Stage"){... on ProjectV2SingleSelectField{id options{id name color description}}}}}}' -f p="$PID" --jq '.data.node.field')
     if [ -n "$STAGE_FIELD" ]; then
-      MUT=$(printf '%s' "$STAGE_FIELD" | python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_stage_options.py" append --ensure-option Recirculation --options-json -); RC=$?
+      # APPLY the append through the SANCTIONED PYTHON DOOR — `idc_stage_options.py apply` assembles
+      # AND runs the `updateProjectV2Field` mutation via its OWN gh subprocess. Do NOT run the mutation
+      # with a raw `gh api graphql -f query="$MUT"`: the interlock hard-DENIES a raw GraphQL mutation
+      # during this active /idc:update command (only reads and the Python doors are allowed).
+      printf '%s' "$STAGE_FIELD" | python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_stage_options.py" apply --ensure-option Recirculation --options-json - --repo "$(pwd)"; RC=$?
       case "$RC" in
-        0) gh api graphql -f query="$MUT" >/dev/null ;;   # stage-recirc-appended (existing ids + item values preserved)
-        3) : ;;                                            # stage-recirc-already-present (idempotent no-op)
-        *) echo "stage reconcile: could not assemble the append (fail-closed) — record an operator action" ;;
+        0) : ;;   # stage-recirc-appended (existing option ids + item values preserved)
+        3) : ;;   # stage-recirc-already-present (idempotent no-op)
+        *) echo "stage reconcile: could not apply the append (fail-closed) — record an operator action" ;;
       esac
     fi
     ```
@@ -237,19 +265,26 @@ gh repo view --json deleteBranchOnMerge --jq .deleteBranchOnMerge 2>/dev/null
 ## Phase 4 — Rewrite the receipt (end of a successful run only)
 
 Once every approved refresh is applied, write a fresh receipt over the stamped set so the next
-update and `/idc:uninstall` stay accurate. Pass the files the operator **kept customized** via
-`--customized` so the next update asks again instead of silently re-stamping over them — this
-**always includes the two data-bearing configs** (preserved in Phase 2 §A), which keeps a
-pre-guard `state: stamped` receipt from re-appearing:
+update and `/idc:uninstall` stay accurate. The receipt is v2: resolve the running plugin's own
+version and pass it as `--plugin-version` — this is the value the stale-runtime guard in Phase 0
+reads back on the next session, so it must always be **this session's real running version**,
+never a guess. Pass the files the operator **kept customized** via `--customized` so the next
+update asks again instead of silently re-stamping over them — this **always includes the two
+data-bearing configs** (preserved in Phase 2 §A), which keeps a pre-guard `state: stamped`
+receipt from re-appearing:
 ```bash
+PLUGIN_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' \
+  "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json")"
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_receipt_check.py" stamp \
-  --repo "$ROOT" --out docs/workflow/install-receipt.yaml --written-by idc:update \
+  --repo "$ROOT" --out docs/workflow/install-receipt.yaml \
+  --plugin-version "$PLUGIN_VERSION" --written-by idc:update \
   --customized WORKFLOW-config.yaml --customized docs/workflow/tracker-config.yaml \
   [--customized <other-kept-file> ...] <stamped-file> <stamped-file> ...
 ```
-This graduates a pre-receipt repo to receipt-driven, and — because it runs only at the very end —
-guarantees a partial update never leaves a receipt that claims more than was actually done. The
-receipt never lists itself, `TRACKER.md`, or `.claude/settings.json` (the helper drops them).
+This graduates a pre-receipt repo to receipt-driven (and a v1 receipt to v2 — the `plugin_version`
+requirement is satisfied from here on), and — because it runs only at the very end — guarantees a
+partial update never leaves a receipt that claims more than was actually done. The receipt never
+lists itself, `TRACKER.md`, or `.claude/settings.json` (the helper drops them).
 
 If a receipt already existed and nothing changed this run, leave it untouched and report
 `skipped-already-current`.
@@ -268,3 +303,30 @@ new optional key(s)` / `restored` / `skipped-already-current`), then:
 
 | File | Status |
 |------|--------|
+
+## Command lifecycle — verify at entry, close out honestly
+
+The command entry gate opened this command's lifecycle record at expansion; verify it, and **close it
+with a validated terminal status** before your final answer (the Stop closeout gate refuses a
+walk-away from an open command). Update is a **resync/maintenance** command — no pipeline oracle
+handoff:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" status \
+  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --json
+# … after Phase 4 rewrites the receipt …
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
+  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command update \
+  --status <complete|blocked_external> --evidence-json '<envelope>'
+```
+
+- **`complete`** — the v2 receipt verifies **and** the running version equals the receipt version. The
+  closeout **re-derives** this: it parses the install receipt (must be `receipt_version: 2`), reads the
+  **running** plugin version live from `plugin.json` (refusing unless the receipt's `plugin_version`
+  equals it), **and RUNS the real fingerprint verification** (every stamped file's bytes match its
+  recorded SHA-256 — a modified/missing scaffold file fails closed) — **never two caller-typed
+  versions**. Evidence refs: `refs:{}` (optionally `receipt:"<repo-rel receipt path>"` if non-default).
+- **`blocked_external`** — an update failure the validator can RE-DERIVE by a read-only re-run: cite
+  `idc_receipt_check.py` (the fingerprint re-run must actually find drift — an invalid receipt or a
+  modified/missing stamped file): `blocker:{helper:"idc_receipt_check.py", exit (nonzero), diagnostic}`.
+  A caller exit/diagnostic alone is never accepted.

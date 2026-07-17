@@ -47,6 +47,7 @@ inject_domains "$CFG"
 # 3. Stamp exactly as commands/init.md Phase 7 now prescribes: the two operator-data files
 #    flagged --customized, the rest plain.
 ( cd "$SBX" && python3 "$HELPER" stamp --repo "$SBX" --out "$RECEIPT" --written-by idc:init \
+    --plugin-version 4.0.0 \
     --customized WORKFLOW-config.yaml --customized docs/workflow/tracker-config.yaml \
     WORKFLOW.md WORKFLOW-config.yaml \
     docs/workflow/tracker-config.yaml docs/workflow/README.md \
@@ -81,6 +82,7 @@ silently_refreshable WORKFLOW.md \
 #    protects the file (guards against a silent revert of the init.md Phase 7 change).
 inject_domains "$PLUGIN/templates/WORKFLOW-config.yaml"
 ( cd "$SBX" && python3 "$HELPER" stamp --repo "$SBX" --out "$RECEIPT" --written-by idc:init \
+    --plugin-version 4.0.0 \
     WORKFLOW.md WORKFLOW-config.yaml \
     docs/workflow/tracker-config.yaml docs/workflow/README.md \
     docs/workflow/pillar-matrices/.gitkeep docs/workflow/code-reviews/.gitkeep ) \

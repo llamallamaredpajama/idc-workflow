@@ -62,6 +62,7 @@ except ImportError:  # pragma: no cover — non-POSIX
     fcntl = None
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import idc_gate_proof                  # noqa: E402 — owns the shared PR↔gate marker declaration
 import idc_review_verdict_check as VC  # noqa: E402 — the verdict validator (close guard)
 import idc_tracker_fs                  # noqa: E402 — filesystem backend (read-back seam)
 import idc_gh_board                    # noqa: E402 — github backend (referenced by attribute so tests monkeypatch)
@@ -387,7 +388,7 @@ BLOCKED_STATUS = "Blocked"                  # a gate-parked Status (a Blocked re
 BLOCKED_BY_MARKER = re.compile(r"<!--\s*idc-blocked-by:\s*(.*?)\s*-->", re.S)
 # The gate's OWN recorded approval PR (`idc:idc-gate-issue` stamps it in the gate body) — binds the
 # approval artifact to THIS gate so an unrelated merged PR can never terminalize it.
-GATE_PR_MARKER = re.compile(r"<!--\s*idc-gate-pr:\s*(\d+)\s*-->")
+GATE_PR_MARKER = idc_gate_proof.GATE_PR_MARKER_RE
 # A pre-structured link record's `what` line (journal records written before parent/child fields).
 LINK_WHAT_RE = re.compile(r"^link #(\d+) -> #(\d+)$")
 
@@ -967,6 +968,8 @@ def journal_append(repo, op, backend, tracker_rel, kw, cur=None):
             what = f"link #{kw.get('parent')} -> #{kw.get('child')}"
         elif op in ("create-ticket", "recirculate-intake", "create-pointer"):
             what = f"{op} '{kw.get('title')}'"
+        elif op == "schema-reconciliation":
+            what = f"schema-reconciliation: field={kw.get('schema_field')!r} option={kw.get('schema_option')!r}"
 
         guard_hash = None
         if kw.get("verdict"):
@@ -1012,6 +1015,25 @@ def journal_append(repo, op, backend, tracker_rel, kw, cur=None):
         # happened (codex round-11 P2; the sweep's heal_unjournaled_inbox is the only producer).
         if kw.get("heal"):
             record["heal"] = kw["heal"]
+        # `unblock --by GATE` records the gate whose dependency was removed — the audit line that
+        # proves the block was cleared through the guarded door, not a raw dependency DELETE.
+        if op == "unblock" and kw.get("by") is not None:
+            record["unblocked_by"] = _journal_item(kw["by"]) or kw["by"]
+        # A board-SCHEMA reconciliation (op="schema-reconciliation" — currently only the Stage
+        # single-select option append, `idc_stage_options.cmd_apply`) is not an item transition at
+        # all: it has no issue number, so `item` stays absent and `to` is never set below — replay's
+        # `journal_item_id` returns None for it (op not in its ref_ops, `what` does not start with a
+        # ref-op prefix) and reconstruct_state_from_journal skips it outright, so it can never be
+        # misread as a real item's state (round-16 fix — see the Global Constraint's reconciliation
+        # clause). These are its evidence fields: which field, which option, which sanctioned door.
+        if kw.get("schema_field") is not None:
+            record["field"] = kw["schema_field"]
+        if kw.get("schema_field_id") is not None:
+            record["field_id"] = kw["schema_field_id"]
+        if kw.get("schema_option") is not None:
+            record["option"] = kw["schema_option"]
+        if kw.get("door") is not None:
+            record["door"] = kw["door"]
 
         to_state = {}
         if kw.get("to_stage") is not None:
@@ -1123,6 +1145,23 @@ def _fs_set_status(machine, tracker, num, status):
     verify_readback(num, None, status, obs["stage"], obs["status"])   # Stage untouched; verify Status landed
 
 
+def _fs_set_field(tracker, num, field, value):
+    """Set a NON-machine single-select field (`Wave`/`Phase`/`Domain`) on the filesystem tracker via its `set`
+    op, then POSITIVELY READ THE VALUE BACK and confirm it landed — the fs analogue of _gh_set_field
+    (read-back parity). (Field-name / Status validation happens in the dispatcher BEFORE this.)"""
+    r = _trk(tracker, "set", "--num", str(num), "--field", field, "--value", value)
+    if r.returncode != 0:
+        raise TransitionError(f"set-field {field}={value!r} on #{num} failed: {r.stderr.strip()[:160]}")
+    rb = _trk(tracker, "show", "--num", str(num), "--field", field)
+    if rb.returncode != 0:
+        raise TransitionError(f"set-field read-back of #{num} {field} failed: {rb.stderr.strip()[:160]}")
+    got = rb.stdout.strip()
+    if got != value:
+        raise TransitionError(
+            f"set-field read-back divergence: #{num} {field} is {got!r} after the write, "
+            f"expected {value!r} — refusing to report a write that did not land")
+
+
 def _fs_comment(tracker, num, body):
     r = _trk(tracker, "comment", "--num", str(num), "--body", body)
     if r.returncode != 0:
@@ -1135,18 +1174,53 @@ def _fs_link(tracker, parent, child, kind):
         raise TransitionError(f"link #{parent}->#{child} ({kind}) failed: {r.stderr.strip()[:160]}")
 
 
+def _fs_remove_dep(tracker, child, parent):
+    """Remove the `parent blocks child` dependency and VERIFY it is absent (the `unblock --by` first
+    step). Raises on a failed removal or a still-present edge so the caller leaves Status Blocked."""
+    r = _trk(tracker, "unlink", "--parent", str(parent), "--child", str(child), "--kind", "blocks")
+    if r.returncode != 0:
+        raise TransitionError(
+            f"unblock: could not remove the #{parent} blocks #{child} dependency: {r.stderr.strip()[:160]}")
+    it = _fs_item_full(tracker, child)
+    if int(parent) in [int(b) for b in (it.get("blocked_by") or [])]:
+        raise TransitionError(
+            f"unblock: #{parent} still blocks #{child} after removal — refusing to unblock (Status stays Blocked)")
+
+
 # ── github backend ─────────────────────────────────────────────────────────────────────────────
-def _gh_create(machine, op, owner, project, repo, spec, title, body, stage_over, status_over):
+def _gh_create(machine, op, owner, project, repo, spec, title, body, stage_over, status_over,
+               labels=None, issue_type=None):
     target = spec.get("target") or {}
     stage = stage_over or target.get("stage") or ""
     status = status_over or target.get("status") or ""
     validate_target(machine, op, stage, status)  # SAME gate as fs — github stage/terminal/worked checks too
     # create_item is the ATOMIC github primitive: it sets Stage AND Status together and DISCARDS a
-    # partial (Stage-without-Status) create, returning the item id only once both landed. That
+    # partial (Stage-without-Status) create, returning the PROJECT-ITEM id only once both landed. That
     # atomic-verified return IS the create read-back for github — no extra whole-board fetch (which
     # would burn GraphQL budget and defeat the item-id cache).  Referenced by attribute so the
     # verdict-filer unit test's monkeypatch of idc_gh_board.create_item still intercepts it.
-    return idc_gh_board.create_item(owner, project, repo, title, body, stage, status)
+    # labels/type are passed ONLY when present, so a create with neither still calls create_item with
+    # its original 7-positional signature (unchanged for every existing caller/test double).
+    extra = {}
+    if labels:
+        extra["labels"] = labels
+    if issue_type:
+        extra["issue_type"] = issue_type
+    return idc_gh_board.create_item(owner, project, repo, title, body, stage, status, **extra)
+
+
+def _discard_created(ctx, item_id, issue_num):
+    """Tear down a just-created github item that failed its post-return read-back (round-5 Fix 5) —
+    delete the board item + close the backing issue via the SAME sanctioned discard create_item uses,
+    so create is atomic on a mismatch too. Best-effort: a discard failure is reported (never masks the
+    original divergence), and a throttle mid-discard is swallowed (the pause/resume path re-runs)."""
+    try:
+        incomplete = idc_gh_board.discard_partial_item(ctx["owner"], ctx["project"], ctx["repo"],
+                                                       item_id, issue_num)
+        if incomplete:
+            sys.stderr.write(f"idc-transition: create read-back discard INCOMPLETE: {incomplete}\n")
+    except idc_gh_board.BoardReadError as e:
+        sys.stderr.write(f"idc-transition: create read-back discard failed (item may survive): {e}\n")
 
 
 def _gh_item_id(ctx, num):
@@ -1184,13 +1258,70 @@ def _gh_close(ctx, num):
 
 
 def _gh_link(ctx, parent, child, kind):
-    """Record a dependency on github durably as a parseable comment marker on the CHILD (github has no
-    first-class blocks field on the project board; this mirrors the filer's Blocks-parent body line
-    and is read by the recirculator/acceptance). A native GitHub issue-dependency edge is a further
-    enhancement — the dependency IS recorded today."""
+    """Record a `parent blocks child` dependency on github durably, through BOTH representations of a
+    blocks edge: (1) the NATIVE GitHub issue-dependencies `blocked_by` relation — the ONLY one the
+    autorun drain's dependency gate reads — created + verified-present FIRST (fail-closed on a
+    still-absent edge so the caller never believes a block landed when it didn't); (2) the engine's
+    parseable comment marker on the CHILD (read by the dispose guards / recirculator). Every REST call
+    runs through idc_gh_board (the engine subprocess), never the Bash tool — so no role-facing recipe
+    runs a raw `blocked_by` POST and the interlock's deny of that raw command never bricks Plan. A
+    non-blocks kind (`sub`) records only the marker (grouping, no dependency edge)."""
+    if kind == "blocks":
+        idc_gh_board.add_blocked_by(int(child), int(parent), ctx["repo"])
+        if int(parent) not in idc_gh_board.blocked_by_numbers(int(child), ctx["repo"]):
+            raise TransitionError(
+                f"link: native blocked-by edge #{parent}->#{child} did not land after the POST "
+                "— refusing to record a block that the drain would not see")
     marker = json.dumps({"child": int(child), "parent": int(parent), "kind": kind}, ensure_ascii=False)
     idc_gh_board.add_comment(int(child), f"Blocked-by: #{int(parent)} ({kind})\n"
                              f"<!-- idc-blocked-by: {marker} -->", ctx["repo"])
+
+
+def _gh_set_field(ctx, num, field, value):
+    """Set a NON-machine single-select field (`Wave`/`Phase`/`Domain`) on github, then POSITIVELY
+    READ THE VALUE BACK and confirm it landed — the sanctioned `set-field` write primitive (replaces the
+    raw `gh project item-edit` recipe the interlock now denies), with the same read-back parity as
+    `move`. (Field-name / Status validation happens in the backend-agnostic dispatcher BEFORE this.) The
+    option value is validated board-side by set_single_select (an option not defined for the field
+    raises). A read-back that cannot be read (BoardReadError) propagates → resumable, never a blind
+    success; a read-back that does not equal the request is a hard divergence."""
+    iid = _gh_item_id(ctx, num)
+    idc_gh_board.set_single_select(ctx["owner"], ctx["project"], ctx["repo"], iid, field, value)
+    obs = idc_gh_board.fetch_item(iid, ctx["repo"])
+    got = obs.get(field.lower())
+    if got != value:
+        raise TransitionError(
+            f"set-field read-back divergence: #{num} {field} is {got!r} after the write, "
+            f"expected {value!r} — refusing to report a write that did not land")
+
+
+def _gh_remove_dep(ctx, child, parent):
+    """Remove the `parent blocks child` dependency and VERIFY it is absent (the `unblock --by` first
+    step). Removes the NATIVE GitHub blocked_by edge first, verifies it absent, then removes EVERY
+    engine marker comment and verifies those absent too. BOTH representations are authoritative parts
+    of the engine edge; any read/delete/readback failure raises so the caller leaves Status Blocked.
+    Every REST call runs through
+    idc_gh_board (the engine subprocess), never the Bash tool — the interlock never sees a raw
+    dependency DELETE.
+
+    IDEMPOTENT rerun (Fix 5): checks ABSENCE FIRST — if the edge is already gone (a rerun after "edge
+    removed but the Status write failed"), it SKIPS the DELETE (which GitHub may 404) and proceeds, so
+    the rerun deterministically completes the remaining Blocked->Todo Status move. Only a still-present
+    edge is DELETEd. Marker cleanup is likewise resumable: a rerun reads the remaining marker ids,
+    deletes only those, then completes the Status move after a final empty readback."""
+    if int(parent) in idc_gh_board.blocked_by_numbers(int(child), ctx["repo"]):
+        idc_gh_board.remove_blocked_by(int(child), int(parent), ctx["repo"])
+    if int(parent) in idc_gh_board.blocked_by_numbers(int(child), ctx["repo"]):
+        raise TransitionError(
+            f"unblock: #{parent} still blocks #{child} after removal — refusing to unblock (Status stays Blocked)")
+    marker_ids = idc_gh_board.blocked_by_comment_ids(int(child), int(parent), ctx["repo"])
+    for cid in marker_ids:
+        idc_gh_board.delete_comment(cid, ctx["repo"])
+    remaining = idc_gh_board.blocked_by_comment_ids(int(child), int(parent), ctx["repo"])
+    if remaining:
+        raise TransitionError(
+            f"unblock: #{parent} still has {len(remaining)} idc-blocked-by marker(s) on #{child} "
+            "after removal — refusing to unblock (Status stays Blocked)")
 
 
 # ── backend-agnostic dispatch (the guard path is SHARED; only the read/write primitives differ) ──
@@ -1207,6 +1338,54 @@ def set_status(ctx, machine, num, status):
         _fs_set_status(machine, ctx["tracker"], num, status)
 
 
+# The NON-machine single-select fields set-field owns. Stage AND Status are MACHINE-governed
+# (the machine table enforces the legal Stage/Status pairing + terminal/worked invariants), so
+# set-field must NEVER write them — a raw Stage write reads neither the item's current Status nor
+# those invariants and can mint the machine-illegal pair the shared guard forbids (Fix 2). Both are
+# routed to `move`, the transition door that enforces the invariants and journals to_stage/to_status.
+SETTABLE_FIELDS = ("Wave", "Phase", "Domain")
+MACHINE_FIELDS = ("Stage", "Status")
+
+
+def set_field(ctx, num, field, value):
+    """Set a NON-machine single-select field (Wave/Phase/Domain) — the `set-field` op, both backends.
+    VALIDATES the field name BEFORE any write, then writes and positively reads the value back.
+
+    Stage and Status are MACHINE-governed and REFUSED (a Stage/Status change is a transition — use
+    `move`, which enforces the machine invariants and journals to_stage/to_status); an unknown field
+    is refused before touching the board. set-field's journal record therefore never carries a
+    to_stage/to_status, so replay/reconciliation never sees a field-only write as a transition."""
+    if field in MACHINE_FIELDS:
+        door = "move --to-stage <Stage> --to-status <Status>" if field == "Stage" else "move --to-status <Status>"
+        raise TransitionError(
+            f"set-field: {field} is a machine-governed field — a {field} change is a transition. Use "
+            f"`{door}` (it enforces the legal Stage/Status pairing and journals it), not set-field.")
+    if field not in SETTABLE_FIELDS:
+        raise TransitionError(
+            f"set-field: {field!r} is not a settable single-select field "
+            f"(expected one of {list(SETTABLE_FIELDS)}) — refusing before any write")
+    if ctx["backend"] == "github":
+        _gh_set_field(ctx, num, field, value)
+    else:
+        _fs_set_field(ctx["tracker"], num, field, value)
+
+
+def set_stage(ctx, num, stage):
+    """Write the MACHINE-governed Stage field — the guarded `move --to-stage` primitive (round-6 Fix 6 /
+    #151), both backends. This is the ONLY sanctioned Stage-write door for a mid-lifecycle transition
+    (Plan's Consideration -> Planning); the caller (`run`, `move` branch) validates the target
+    Stage/Status PAIR against the machine and reads BOTH fields back around this write. The fs `set`
+    op validates the Stage value against its enum; github's set_single_select validates the option
+    board-side."""
+    if ctx["backend"] == "github":
+        iid = _gh_item_id(ctx, num)
+        idc_gh_board.set_single_select(ctx["owner"], ctx["project"], ctx["repo"], iid, "Stage", stage)
+    else:
+        r = _trk(ctx["tracker"], "set", "--num", str(num), "--field", "Stage", "--value", stage)
+        if r.returncode != 0:
+            raise TransitionError(f"stage write failed for #{num}: {r.stderr.strip()[:160]}")
+
+
 def record_owner(ctx, num, agent):
     if ctx["backend"] == "github":
         idc_gh_board.add_comment(int(num), f"claimed by {agent}", ctx["repo"])
@@ -1221,11 +1400,40 @@ def do_link(ctx, parent, child, kind):
         _fs_link(ctx["tracker"], parent, child, kind)
 
 
+def remove_dependency(ctx, child, parent):
+    """Remove the `parent blocks child` dependency and verify it is absent (the `unblock --by` first
+    step, both backends). Raises TransitionError if the edge cannot be removed / still present."""
+    if ctx["backend"] == "github":
+        _gh_remove_dep(ctx, child, parent)
+    else:
+        _fs_remove_dep(ctx["tracker"], child, parent)
+
+
 def close_terminal(ctx, machine, num, to_status):
     if ctx["backend"] == "github":
         _gh_close(ctx, num)
     else:
         _fs_set_status(machine, ctx["tracker"], num, to_status)
+
+
+def _already_done_disposition(repo, num, requested):
+    """Return None for an exact prior disposition; otherwise a refusal reason.
+
+    The journal read is strict and covers rotated segments. Ambiguous or missing history is never
+    converted into a second terminal write.
+    """
+    import idc_journal_replay as RP
+    entries, err = RP.scan_journal_strict(os.path.join(repo, JOURNAL_REL))
+    if err:
+        return f"the transition journal is unreadable ({err})"
+    prior = {entry.get("disposition") for entry in entries
+             if entry.get("op") == "dispose" and RP.journal_item_id(entry) == int(num)}
+    prior.discard(None)
+    if prior == {requested}:
+        return None
+    if not prior:
+        return "no prior dispose record names this already-Done item"
+    return f"prior dispose history conflicts with {requested!r} (recorded: {sorted(prior)!r})"
 
 
 # ── the op dispatcher ──────────────────────────────────────────────────────────────────────────
@@ -1247,18 +1455,60 @@ def run(op, ctx, **kw):
         to_stage = kw.get("stage") or target.get("stage") or ""
         to_status = kw.get("status") or target.get("status") or ""
         if backend == "github":
-            result = _gh_create(machine, op, ctx["owner"], ctx["project"], ctx["repo"], spec,
-                                 kw["title"], kw.get("body", ""), kw.get("stage"), kw.get("status"))
-        else:
-            result = _fs_create(machine, op, ctx["tracker"], spec, kw["title"], kw.get("body", ""),
-                                kw.get("stage"), kw.get("status"))
-        journal_num = result
-        journal_extra = {}
-        if backend == "github":
-            journal_num = _github_created_issue_number(result, ctx["repo"])
-            journal_extra["project_item_id"] = result
+            # The door RETURNS the integer ISSUE NUMBER (the adapter contract), not the PVTI
+            # project-item id. create_item mints the item (applying labels/type) and returns the PVTI;
+            # we resolve number → journal (keeping the PVTI internally) → return the number. A board
+            # error while resolving propagates (resumable exit 3); a genuinely absent number refuses.
+            item_id = _gh_create(machine, op, ctx["owner"], ctx["project"], ctx["repo"], spec,
+                                 kw["title"], kw.get("body", ""), kw.get("stage"), kw.get("status"),
+                                 labels=kw.get("labels"), issue_type=kw.get("type"))
+            # The post-create read-back can itself RAISE (round-6 Fix 5): the board item already exists,
+            # so a fetch failure must still DISCARD it (delete the board item + close the backing issue)
+            # before failing — never leak an unverified orphan. We can't resolve the issue number from a
+            # failed read-back, so discard_partial_item fails LOUD about the possibly-surviving issue.
+            try:
+                item = idc_gh_board.fetch_item(item_id, ctx["repo"])
+            except idc_gh_board.BoardReadError as e:
+                _discard_created(ctx, item_id, None)
+                raise TransitionError(
+                    f"create read-back failed for new item {item_id} ({e}) — discarded the board item; "
+                    "the backing issue could not be resolved to close (verify no orphan issue survives)")
+            content_num = (item.get("content") or {}).get("number")
+            issue_num = _journal_item(content_num)
+            if issue_num is None:
+                # ATOMIC on failure (round-5/6 Fix 5): a create whose number cannot be resolved is a
+                # partial item — delete the board item + close the backing issue before raising, so no
+                # orphan survives. content_num (may be None) is the best issue handle we have to close;
+                # when it is None, discard_partial_item reports the possibly-surviving issue LOUDLY
+                # (it can only delete the board item), so this raises rather than reporting a clean create.
+                _discard_created(ctx, item_id, content_num)
+                raise TransitionError(
+                    f"create: could not resolve the issue number for new item {item_id} "
+                    "— discarded the board item and FAILED (the door's contract is the issue number; "
+                    "verify no orphan issue survives)")
+            # POSITIVE Stage/Status read-back (Fix 3): confirm the created item actually carries the
+            # REQUESTED Stage AND Status — the same read-back parity every other op has. A no-op field
+            # setter (or a partial create the discard missed) must never be journaled as a successful
+            # create. fetch_item already surfaced these fields; comparing them here is the whole read-back.
+            obs_stage, obs_status = item.get("stage"), item.get("status")
+            if obs_stage != to_stage or obs_status != to_status:
+                # ATOMIC on a post-return readback mismatch (round-5 Fix 5): the create_item discard
+                # only covers failures INSIDE create_item; a mismatch surfaced AFTER it returned used
+                # to raise leaving the malformed item alive. Delete the board item + close the issue
+                # through the SAME sanctioned cleanup before raising, so create stays atomic.
+                _discard_created(ctx, item_id, issue_num)
+                raise TransitionError(
+                    f"create read-back divergence: new item #{issue_num} is "
+                    f"Stage={obs_stage!r}/Status={obs_status!r}, expected {to_stage!r}/{to_status!r} "
+                    "— refusing to journal a create whose fields did not land (item discarded)")
+            journal_append(ctx["repo"], op, backend, tracker_rel,
+                           dict(kw, num=issue_num, to_stage=to_stage, to_status=to_status,
+                                project_item_id=item_id))
+            return issue_num
+        result = _fs_create(machine, op, ctx["tracker"], spec, kw["title"], kw.get("body", ""),
+                            kw.get("stage"), kw.get("status"))
         journal_append(ctx["repo"], op, backend, tracker_rel,
-                       dict(kw, num=journal_num, to_stage=to_stage, to_status=to_status, **journal_extra))
+                       dict(kw, num=result, to_stage=to_stage, to_status=to_status))
         return result
 
     elif kind == "transition":
@@ -1269,8 +1519,57 @@ def run(op, ctx, **kw):
             if not to_status:
                 raise TransitionError(f"{op}: --to-status is required")
         cur = get_item(ctx, num)
+        to_stage = kw.get("to_stage")   # only `move` carries it; None for every other transition op
+        # Guarded STAGE transition (round-6 Fix 6 / #151): `move --to-stage` is the ONLY sanctioned door
+        # that advances an item's machine-governed Stage (Plan's Consideration -> Planning). It writes
+        # Stage AND Status together, validated as a machine-LEGAL pair (an illegal pair — e.g.
+        # Consideration + a worked Status — is refused), reads BOTH back, and journals to_stage so
+        # replay/reconciliation see the move (no unjournaled raw Stage flip). Handled BEFORE the
+        # idempotent-Status short-circuit so a Stage advance that keeps Status is never no-op'd away.
+        if to_stage is not None:
+            if cur["status"] == machine.get("terminal_status"):
+                raise TransitionError(
+                    f"illegal transition: #{num} is {cur['status']!r} (terminal) — {op} cannot resurrect it")
+            validate_target(machine, op, to_stage, to_status)   # rejects a machine-illegal Stage/Status pair
+            set_stage(ctx, num, to_stage)
+            if cur["status"] != to_status:
+                set_status(ctx, machine, num, to_status)
+            obs = get_item(ctx, num)
+            verify_readback(num, to_stage, to_status, obs["stage"], obs["status"])
+            journal_append(ctx["repo"], op, backend, tracker_rel,
+                           dict(kw, to_stage=to_stage, to_status=to_status), cur=cur)
+            return
+        is_unblock_by = (op == "unblock" and kw.get("by") is not None)
+        # `unblock --by GATE`: ALWAYS remove-and-verify the `GATE blocks #num` dependency FIRST
+        # (idempotent — already-absent is treated as done), regardless of the pointer's current Status,
+        # and BEFORE the idempotent-Status short-circuit below — so a pointer that is already Todo but
+        # still carries a STALE blocked_by edge still gets the edge removed (the Fix-5 gap: the old
+        # dispatcher early-returned on Status==Todo before ever removing the dependency). A terminal
+        # (Done) item is never unblockable, so guard that before the removal. If removal (or its verify)
+        # fails, it raises BEFORE any Status write (the pointer stays Blocked); a rerun re-removes
+        # (no-op) and completes the remaining Blocked->Todo move.
+        if is_unblock_by:
+            if cur["status"] == machine.get("terminal_status"):
+                raise TransitionError(
+                    f"illegal transition: #{num} is {cur['status']!r} (terminal) — {op} cannot resurrect it")
+            # round-7 Fix 3: validate the SOURCE Status is a LEGAL unblock source BEFORE removing the
+            # dependency — else an illegal unblock (e.g. Status=In Progress) removes the edge and THEN
+            # raises, leaving an unjournaled partial mutation from a refused op. Legal sources: an
+            # allowed_from Status (Blocked), or the intentional idempotent already-Todo rerun
+            # (cur.status == to_status) that clears a stale edge on an already-unblocked pointer.
+            allowed_from = spec.get("from_status")
+            if cur["status"] != to_status and allowed_from and cur["status"] not in allowed_from:
+                raise TransitionError(
+                    f"illegal transition: {op} requires source Status in {allowed_from}, "
+                    f"but #{num} is {cur['status']!r}")
+            remove_dependency(ctx, num, kw["by"])
         if cur["status"] == to_status:
-            return # Idempotent transition is a no-op, do not journal
+            # Idempotent Status: a plain transition already at target is a silent no-op. For unblock --by
+            # the guarded dependency removal above DID run, so journal the real operation (unblocked_by).
+            if is_unblock_by:
+                journal_append(ctx["repo"], op, backend, tracker_rel,
+                               dict(kw, to_status=to_status), cur=cur)
+            return
         if cur["status"] == machine.get("terminal_status"):
             raise TransitionError(
                 f"illegal transition: #{num} is {cur['status']!r} (terminal) — {op} cannot resurrect it")
@@ -1297,6 +1596,13 @@ def run(op, ctx, **kw):
                 f"{op}: refused — a verdict-free terminal op cannot reach the terminal Status "
                 "(only a guarded `close`, or a `dispose` with a valid --disposition, may reach Done).")
         cur = get_item(ctx, num)
+        if disposition is not None and cur.get("status") == machine.get("terminal_status"):
+            problem = _already_done_disposition(ctx["repo"], num, disposition)
+            if problem is None:
+                return None
+            raise TransitionError(
+                f"{op} refused for already-Done #{num}: {problem}. Only an exact, strictly-read "
+                "matching disposition is an idempotent no-op; repair/restore the journal before retrying.")
         evidence = {}   # a close records none; each disposition guard returns what it verified
         if disposition is None:
             check_close_guards(spec, num, kw.get("verdict"), kw.get("pr"))
@@ -1337,6 +1643,15 @@ def run(op, ctx, **kw):
         term_stage = evidence.get("stage") or None
         journal_append(ctx["repo"], op, backend, tracker_rel,
                        dict(kw, to_status=spec.get("to_status"), to_stage=term_stage), cur=cur)
+
+    elif kind == "field":
+        num = kw["num"]
+        field = kw["field"]
+        value = kw["value"]
+        # A non-machine single-select field write (Wave/Phase/Domain) through the sanctioned door,
+        # so no role runs a raw `gh project item-edit` (now denied by the interlock during a command).
+        set_field(ctx, num, field, value)
+        journal_append(ctx["repo"], op, backend, tracker_rel, kw)
 
     elif kind == "link":
         do_link(ctx, kw["parent"], kw["child"], kw.get("kind", "blocks"))
@@ -1413,6 +1728,11 @@ def build_parser():
         c.add_argument("--body", default="")
         c.add_argument("--stage", default=None, help="override the machine default target Stage")
         c.add_argument("--status", default=None, help="override the machine default target Status")
+        c.add_argument("--type", default=None, dest="type",
+                       help="issue type — applied as a `type:<T>` label (adapter's `type` input)")
+        c.add_argument("--labels", action="append", default=None,
+                       help="label(s) to apply to the created issue (repeatable or a comma-list, "
+                            "e.g. --labels operator-action)")
 
     cl = sub.add_parser("claim")
     cl.add_argument("--num", type=int, required=True)
@@ -1421,9 +1741,24 @@ def build_parser():
     mv = sub.add_parser("move")
     mv.add_argument("--num", type=int, required=True)
     mv.add_argument("--to-status", dest="to_status", required=True)
+    mv.add_argument("--to-stage", dest="to_stage", default=None,
+                    help="the guarded Stage-transition door (#151): advance an item's machine-governed "
+                         "Stage (e.g. Plan's Consideration -> Planning). Writes Stage AND Status "
+                         "together as a machine-legal pair and journals to_stage. Omit for a plain "
+                         "Status-only move.")
+
+    # `set-field` — the sanctioned NON-machine single-select field write (Wave/Phase/Domain). Stage/
+    # Status change is a transition — use `move`; set-field refuses Status.
+    sf = sub.add_parser("set-field")
+    sf.add_argument("--num", type=int, required=True)
+    sf.add_argument("--field", required=True, help="Wave | Phase | Domain (NOT Stage/Status — use move)")
+    sf.add_argument("--value", required=True)
 
     ub = sub.add_parser("unblock")
     ub.add_argument("--num", type=int, required=True)
+    ub.add_argument("--by", type=int, default=None,
+                    help="the GATE whose `GATE blocks <num>` dependency to remove before unblocking "
+                         "(removed + verified absent FIRST, then Status Blocked -> Todo)")
 
     cls = sub.add_parser("close")
     cls.add_argument("--num", type=int, required=True)
@@ -1473,13 +1808,16 @@ def main():
     kw = {}
     op = args.op
     if op in ("create-ticket", "create-pointer", "recirculate-intake"):
-        kw = {"title": args.title, "body": args.body, "stage": args.stage, "status": args.status}
+        kw = {"title": args.title, "body": args.body, "stage": args.stage, "status": args.status,
+              "type": args.type, "labels": args.labels}
     elif op == "claim":
         kw = {"num": args.num, "agent": args.agent}
     elif op == "move":
-        kw = {"num": args.num, "to_status": args.to_status}
+        kw = {"num": args.num, "to_status": args.to_status, "to_stage": args.to_stage}
+    elif op == "set-field":
+        kw = {"num": args.num, "field": args.field, "value": args.value}
     elif op == "unblock":
-        kw = {"num": args.num, "to_status": "Todo"}
+        kw = {"num": args.num, "to_status": "Todo", "by": args.by}
     elif op == "close":
         kw = {"num": args.num, "verdict": args.verdict, "pr": args.pr}
     elif op == "dispose":

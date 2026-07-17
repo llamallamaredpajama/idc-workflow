@@ -10,9 +10,12 @@ more than it can prove, and it may not run at all if the code behind it is stale
 the *board's* write path deterministic, this release does the same for the *command's* own
 lifecycle — every `/idc:*` invocation now opens a durable record, and every terminal claim it makes
 at closeout is re-derived from artifacts on disk or a live tracker read rather than believed.
-Minor version because a healthy repo's shape does not change: the additions are refusals, one new
-entry point (`/idc:intake`), and a read-only next-action oracle. **One manual step after upgrading:
-run `/reload-plugins` once** (see the upgrade note below).
+Minor version because the changes are additive: refusals, one new entry point (`/idc:intake`), a
+read-only next-action oracle, and **one additive scaffold migration** — `docs/workflow/intakes/`
+(with its receipt-listed `.gitkeep`) joins the governed tree, and `/idc:update` offers it to
+pre-4.1 repos as an `unrecorded` install (nothing else moves, and operator content is never
+touched). **One manual step after upgrading: run `/reload-plugins` once** (see the upgrade note
+below).
 
 - **Stale commands are refused at the door (#106).** A `UserPromptExpansion` hook
   (`scripts/hooks/idc_command_entry_gate.py`, backed by `scripts/idc_plugin_freshness.py`) compares
@@ -82,12 +85,15 @@ run `/reload-plugins` once** (see the upgrade note below).
   **`verified-reconciliation`** (it was repaired, and the repair says so), or **`unproven`** — and
   only the first two count as proven. `scripts/idc_gate_repair.py` is **dry-run by default**:
   `--apply` is the only door to a write, and it re-reads every precondition immediately before
-  acting. Repairs journal under their own honest ops (`gate-reconciliation`, `full-repair`,
-  `finish-pointer`) and **never back-date a synthetic `dispose`** — so the journal keeps telling the
-  truth about how a gate reached Done. `--finish-pointer` is the one sanctioned way to complete a
-  pointer whose gate has cleared: it requires the proven gate to be the pointer's **sole remaining
-  blocker**, and every unblock site in the stage playbooks and the PR finisher now routes through
-  that door instead of a raw engine `unblock` that could drop a single edge and release work that
+  acting. Repairs journal under the honest `op=gate-reconciliation` record (the gate's evidence,
+  plus a separate no-transition observation record for an already-unblocked pointer) and **never
+  back-date a synthetic `dispose`** — so the journal keeps telling the truth about how a gate
+  reached Done. (`full-repair` and `finish-pointer` are the tool's two *modes*, not journal ops; a
+  pointer the tool completes is journaled by the engine's own real `unblock`.) `--finish-pointer`
+  is the one sanctioned way to complete a pointer whose gate has cleared: it requires the proven
+  gate to be the pointer's **sole remaining blocker**, and every unblock site in the stage
+  playbooks and the PR finisher now routes through that door instead of a raw engine `unblock`
+  that could drop a single edge and release work that
   was still legitimately blocked.
 - **Upgrade note + intake scaffold ownership.** After updating to 4.1.0, **run `/reload-plugins`
   once**: the freshness gate ships *inside* this version, so a session already running the old code

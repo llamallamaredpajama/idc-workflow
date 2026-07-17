@@ -26,9 +26,14 @@ below).
   names the real recovery, **`/reload-plugins`**, and states plainly that **`/clear` does not reload
   plugin commands or hooks** (the wrong reflex, and the one that made this class hard to spot).
   Staleness blocks *every* command, recovery commands included, so a stale runtime can't diagnose
-  itself with stale code; an unreadable or malformed receipt is its own fail-closed refusal, never a
-  pass. Install receipts gain `receipt_version: 2`, which requires an exact `X.Y.Z` `plugin_version`;
-  `receipt_version: 1` receipts predate the field and are tolerated, and any other value is refused.
+  itself with stale code. An unreadable or malformed receipt fail-closes the six **workflow**
+  commands (`think|intake|plan|build|recirculate|autorun`) — never a pass — while the
+  recovery/diagnostic commands (`doctor|update|uninstall|janitor`) and `init` may still expand on
+  an invalid or unknown receipt so the operator can diagnose or migrate the repo (they too are
+  blocked the moment the runtime is positively stale). Install receipts gain `receipt_version: 2`,
+  which requires an exact `X.Y.Z` `plugin_version`; `receipt_version: 1` receipts predate the
+  field and are tolerated, and any other value is invalid — refusing workflow commands and leaving
+  only the diagnose/migrate path open.
 - **The command closeout contract — claims are re-derived, never believed.** Every `/idc:*` opens a
   lifecycle record (`scripts/idc_command_contract.py`, `start`/`finish`/`status`), and a second
   `Stop` handler (`scripts/hooks/idc_command_closeout_gate.py`, after 4.0.0's fixpoint gate) refuses

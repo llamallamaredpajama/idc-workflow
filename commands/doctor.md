@@ -1,13 +1,13 @@
 ---
-description: IDC health check — verify plugin scoping (no global leak), gh auth + project scope, the tracker board, the v2 scaffold, and plugin-cache freshness (read-only)
+description: IDC health check — verify plugin scoping, gh/project access, tracker health, runtime, scaffold, and cache freshness
 argument-hint: (no arguments)
 ---
 
-`/idc:doctor` diagnoses whether the current repository is correctly set up for IDC v2. **It
-is strictly read-only** — it never creates, edits, or deletes a file, and never mutates
-`gh`/board state. Run every check below from the governed repo root, then print ONE results
+`/idc:doctor` diagnoses whether the current repository is correctly set up for IDC v2. Its probes
+are **read-only for source files and tracker/board state**. Lifecycle closeout writes only transient,
+gitignored command evidence and may add its report glob to `.gitignore`. Run every check below from the governed repo root, then print ONE results
 table with `PASS`/`FAIL`/`SKIP` and a one-line fix hint per row, ending with a one-line
-verdict. Make NO changes. See `WORKFLOW.md §3`.
+verdict. Make no source or tracker changes. See `WORKFLOW.md §3`.
 
 ## Checks
 
@@ -152,7 +152,9 @@ fi
   (`~/.agents/skills/idc-adapter-codex`) does not resolve, so IDC will not load under Codex. Same
   fix: re-run the installer above.
 
-**8 — Plugin cache freshness (advisory; never FAIL).** The code `/idc:*` runs from Claude
+**8 — Runtime + plugin cache freshness.** First run `python3 --version`: Python **3.10 or newer** is
+required; an older or missing runtime is **FAIL** with a plain upgrade/select-Python fix. Then check
+the advisory cache freshness. The code `/idc:*` runs from Claude
 Code's **version-keyed cache** (`${CLAUDE_PLUGIN_ROOT}`), rebuilt **only when `plugin.json`'s
 `version` changes** — so a `claude plugin marketplace update` that pulled new commits under an
 unchanged version leaves the session running **stale cached code**. Surface the running version
@@ -411,7 +413,7 @@ merged-but-surviving branches (local + remote), and board↔issue drift, tiered 
 check 3 on github:
 Pass `--report-session` + `--report-nonce` (the `nonce` from this command's active record — read it
 with the `status` call in the lifecycle section below, BEFORE this row runs). That makes the SCANNER
-itself persist `{scanner_exit, produced_by}` bound to this record, which is what the closeout
+itself persist `{scanner_exit}` in its source-owned provenance envelope bound to this record, which is what the closeout
 re-derives this row's PASS from — a row-10 PASS the scan never recorded is refused, so the flags are
 not optional:
 ```bash
@@ -440,8 +442,8 @@ Read the scanner's exit code + its `janitor: N safe-fix, M risky, K report-only`
 ## Output
 
 Emit a single table, then a one-line verdict. Tally PASS / FAIL / SKIP across the ten rows (rows
-8, 9, and 10 — plugin cache freshness, build-lane hygiene, and board↔git reconciliation — are
-**advisory**: each is only ever PASS or SKIP, never FAIL):
+9 and 10 — build-lane hygiene and board↔git reconciliation — are advisory. Row 8 may FAIL only for
+an unsupported Python runtime; its cache comparison remains advisory):
 
 ```
 | # | Check | Result | Fix hint |
@@ -453,20 +455,18 @@ Emit a single table, then a one-line verdict. Tally PASS / FAIL / SKIP across th
 | 5 | Install receipt | SKIP | run /idc:init to graduate a receipt |
 | 6 | Pi runtime (optional) | SKIP | Pi runtime not installed — optional |
 | 7 | Codex skill-mirror (optional) | SKIP | Codex mirror not installed — optional |
-| 8 | Plugin cache freshness | PASS | running 2.1.0 |
+| 8 | Runtime + plugin cache freshness | PASS | Python 3.13; running 2.1.0 |
 | 9 | Build-lane hygiene (advisory) | PASS | 4 scanned, clean |
 | 10 | Board↔git reconciliation (advisory) | PASS | board↔git coherent |
 
 IDC doctor: N passed, M failed, K skipped
 ```
 
-## Command lifecycle — verify at entry, close out (read-only of the repo)
+## Command lifecycle — verify at entry, close out
 
-Doctor is read-only **of the diagnosed repo and board**; it still opens + closes its own **transient**
-lifecycle record (the entry gate opened it at expansion — a gitignored session ledger, never a repo or
-board write, so the strictly-read-only contract holds). Verify at entry, then close it with a validated
-terminal status before your final answer (the Stop closeout gate refuses a walk-away from an open
-command):
+Doctor never changes source files or tracker/board state. It does write transient, gitignored command
+evidence and may append `.idc-*-report.json*` to `.gitignore` once. Verify at entry, then close it with
+a validated terminal status before your final answer:
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" status \
@@ -476,9 +476,9 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" status \
 # `result` one of PASS|FAIL|SKIP, the script-backed row 10 (janitor scanner) carrying its `script` +
 # integer `exit`, and a `verdict` EQUAL to the derived aggregation (FAIL if any row FAILed, else PASS).
 # A 2-row / arbitrary / inconsistent-verdict payload is refused AT THE WRITE DOOR: …
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/idc_command_report.py" --cwd "$PWD" write \
-  --kind doctor --session "$CLAUDE_CODE_SESSION_ID" \
-  --payload-json '{"rows":[{"id":1,"result":"PASS"},…,{"id":10,"result":"PASS","script":"idc_git_janitor.py","exit":0}],"verdict":"PASS","nonce":"<nonce from the status record>"}'
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/idc_command_report.py" --cwd "$PWD" write-doctor \
+  --session "$CLAUDE_CODE_SESSION_ID" --nonce "<nonce from the status record>" \
+  --rows-json '[{"id":1,"result":"PASS"},…,{"id":10,"result":"PASS","script":"idc_git_janitor.py","exit":0}]'
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command doctor \
   --status <complete|blocked_external> --evidence-json '<envelope>'

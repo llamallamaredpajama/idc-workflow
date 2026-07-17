@@ -93,7 +93,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
 - **`complete`** — the scanner recorded a real verdict: exit **0** (COHERENT) or exit **1** (findings,
   **without claiming clean**). The closeout **re-reads the SCANNER-written janitor report**
   (`.idc-janitor-report.json`) and requires it **bound to this record's nonce** AND carrying the
-  scanner's own **provenance stamp** (`produced_by`) — a caller `scanner_exit` integer, a report not
+  scanner's own **source-owned provenance envelope** — a caller `scanner_exit` integer, a report not
   bound to the record, or a **hand-written report lacking the scanner provenance** is refused (the report
   must come from the real scanner); a findings run (exit 1) records `clean:false`. Even a ground-truth
   failure (exit 2) now writes the report BEFORE exiting, so the honest exit-2 path never needs a

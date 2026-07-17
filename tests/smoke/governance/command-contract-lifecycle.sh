@@ -2143,4 +2143,84 @@ field_has "$TMU" U0 \
   || gov_fail "(16e, F1) the refused restart shed the first manifest's units (intake_units=$TMU, expected U0)"
 echo "  ok (16e, F1) a different-manifest Think restart is refused at command_start; the first manifest's coverage obligation stands"
 
+# (17) Intake helper failures are durable, exact, nonce-bound receipts.  A caller cannot invent or
+# alter the helper/exit/diagnostic, and a successful retry clears the old failure.
+REPO_IF="$WORK/repo-intake-failure"; mkdir -p "$REPO_IF/docs/workflow"
+printf 'backend: filesystem\n' > "$REPO_IF/docs/workflow/tracker-config.yaml"
+python3 "$GOV_TRK" --tracker "$REPO_IF/TRACKER.md" init >/dev/null \
+  || gov_fail "could not init intake-failure board"
+SIF="sif-$$-$(basename "$WORK")"
+contract start --repo "$REPO_IF" --session "$SIF" --command intake --plugin-root "$GOV_PLUGIN" --args x --source user >/dev/null
+IF_NONCE="$(contract status --repo "$REPO_IF" --session "$SIF" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["active"][0]["nonce"])')"
+SCRIPTS_DIR="$GOV_PLUGIN/scripts" python3 - "$REPO_IF" "$SIF" "$IF_NONCE" <<'PY' \
+  || gov_fail "could not write the Intake helper failure receipt"
+import os, sys
+sys.path.insert(0, os.path.join(os.environ["SCRIPTS_DIR"], "hooks"))
+import idc_command_report as report
+assert report.write_intake_failure(sys.argv[1], sys.argv[2], sys.argv[3],
+    "idc_intake_manifest.py", "extract", 2, "idc-intake: FAIL — source unavailable")
+PY
+IF_EVIDENCE='{"schema_version":1,"refs":{"blocker":{"helper":"idc_intake_manifest.py","exit":2,"diagnostic":"idc-intake: FAIL — source unavailable"}}}'
+contract finish --repo "$REPO_IF" --session "$SIF" --command intake --status blocked_external \
+  --evidence-json "$IF_EVIDENCE" >/dev/null \
+  || gov_fail "(17) Intake rejected its own exact nonce-bound helper failure receipt"
+
+SIF2="sif2-$$-$(basename "$WORK")"
+contract start --repo "$REPO_IF" --session "$SIF2" --command intake --plugin-root "$GOV_PLUGIN" --args x --source user >/dev/null
+IF_NONCE2="$(contract status --repo "$REPO_IF" --session "$SIF2" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["active"][0]["nonce"])')"
+SCRIPTS_DIR="$GOV_PLUGIN/scripts" python3 - "$REPO_IF" "$SIF2" "$IF_NONCE2" <<'PY'
+import os, sys
+sys.path.insert(0, os.path.join(os.environ["SCRIPTS_DIR"], "hooks"))
+import idc_command_report as report
+assert report.write_intake_failure(sys.argv[1], sys.argv[2], sys.argv[3],
+    "idc_intake_manifest.py", "extract", 2, "idc-intake: FAIL — source unavailable")
+PY
+if contract finish --repo "$REPO_IF" --session "$SIF2" --command intake --status blocked_external \
+     --evidence-json '{"schema_version":1,"refs":{"blocker":{"helper":"idc_intake_manifest.py","exit":2,"diagnostic":"forged replacement"}}}' >/dev/null 2>&1; then
+  gov_fail "(17) Intake accepted a caller diagnostic that did not exactly match its helper receipt"
+fi
+SCRIPTS_DIR="$GOV_PLUGIN/scripts" python3 - "$REPO_IF" "$SIF2" "$IF_NONCE2" <<'PY'
+import os, sys
+sys.path.insert(0, os.path.join(os.environ["SCRIPTS_DIR"], "hooks"))
+import idc_command_report as report
+assert report.clear_intake_failure(sys.argv[1], sys.argv[2], sys.argv[3])
+PY
+if contract finish --repo "$REPO_IF" --session "$SIF2" --command intake --status blocked_external \
+     --evidence-json "$IF_EVIDENCE" >/dev/null 2>&1; then
+  gov_fail "(17) Intake accepted a failure receipt that a successful retry had cleared"
+fi
+
+# Legacy nonce-less records must restart; malformed tracker config is indeterminate; bare Recirculation
+# tickets only claim the journal-backed `drained` terminal vocabulary.
+SCRIPTS_DIR="$GOV_PLUGIN/scripts" python3 - <<'PY' \
+  || gov_fail "(17) strict nonce/backend/Recirculation invariants are not enforced"
+import os, sys
+sys.path.insert(0, os.environ["SCRIPTS_DIR"])
+import idc_command_contract as contract
+old = contract._record_nonce
+contract._record_nonce = lambda *a: None
+try:
+    assert contract._report_nonce_bound("/tmp", "doctor", "s", {"nonce": "legacy"}) is False
+finally:
+    contract._record_nonce = old
+assert contract._RECIRC_TERMINAL_DISPOSITIONS == {"drained"}
+import idc_next_action as next_action
+real_config = next_action._read_tracker_config
+next_action._read_tracker_config = lambda repo: (_ for _ in ()).throw(ValueError("malformed"))
+try:
+    assert contract._repo_backend("/tmp") is None
+finally:
+    next_action._read_tracker_config = real_config
+exact = "GraphQL: Could not resolve to a ProjectV2 with the number 2147483647. (user.projectV2)"
+assert contract._github_project_absence_error(exact, "2147483647")
+for ambiguous in (
+    "GraphQL: Could not resolve to a ProjectV2 with the number 17. (user.projectV2)",
+    "authentication failed: project not found",
+    "rate limit exceeded: no project data",
+    "network error: not found",
+):
+    assert not contract._github_project_absence_error(ambiguous, "2147483647")
+PY
+echo "  ok (17) Intake failure receipts, nonce binding, and bare-ticket vocabulary fail closed"
+
 echo "PASS: the IDC command lifecycle envelope + wave-3 evidence contract hold — every terminal fact is re-derived from durable state (consideration re-run, gate marker/disposal, pointer admission, admitted-consideration set, receipt/report/journal, real gh reads), a forged or omitting claim is refused across all eleven commands, and the 2026-07-12 incident shape is blocked at Think closeout"

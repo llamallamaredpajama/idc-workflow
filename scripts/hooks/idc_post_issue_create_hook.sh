@@ -31,5 +31,6 @@ ROOT="${1:-}"
 # preserving: the observer re-checks the command precisely, so this only trims wasted process spawns.
 PAYLOAD="$(cat)"
 printf '%s' "$PAYLOAD" | grep -qF 'issue' || exit 0
+sh "$ROOT/scripts/idc_python_runtime.sh" || exit 0
 
 printf '%s' "$PAYLOAD" | python3 "$ROOT/scripts/hooks/idc_post_issue_create.py" "$ROOT"

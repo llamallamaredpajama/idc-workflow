@@ -23,4 +23,9 @@ ROOT="${1:-}"
 # Plugin root unknown (shouldn't happen via hooks.json) or gate missing → fail-soft allow.
 [ -n "$ROOT" ] && [ -f "$ROOT/scripts/hooks/idc_command_entry_gate.py" ] || exit 0
 
+if ! sh "$ROOT/scripts/idc_python_runtime.sh"; then
+  printf '%s\n' '{"decision":"block","reason":"IDC requires Python 3.10 or newer. Install or select a supported python3, then retry the command."}'
+  exit 0
+fi
+
 exec python3 "$ROOT/scripts/hooks/idc_command_entry_gate.py" "$ROOT"

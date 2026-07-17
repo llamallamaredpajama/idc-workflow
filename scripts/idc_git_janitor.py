@@ -1271,13 +1271,8 @@ def _write_scan_report(repo, session, nonce, exit_code):
     try:
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "hooks"))
         import idc_command_report as CR  # noqa: E402 — lazy (scripts/hooks on sys.path)
-        # `produced_by` is the scanner's provenance stamp (round-5 finding 7): the /idc:janitor closeout
-        # requires it, so a hand-written report that omits it cannot be passed off as a real scan.
-        CR.write_report(repo, "janitor",
-                        {"scanner_exit": int(exit_code), "clean": int(exit_code) == 0,
-                         "nonce": str(nonce) if nonce else None,
-                         "produced_by": JANITOR_PROVENANCE},
-                        session_id=session)
+        CR.write_janitor_report(repo, int(exit_code), session,
+                                str(nonce) if nonce else None)
     except Exception:  # noqa: BLE001 — persisting the report must never break the scan's exit contract
         pass
 

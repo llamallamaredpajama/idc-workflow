@@ -14,8 +14,10 @@ and **close it with a validated terminal status** before your final answer (the 
 refuses a walk-away from an open command):
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" status \
+INTAKE_STATUS=$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" status \
   --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --json
+)
+INTAKE_NONCE=$(printf '%s' "$INTAKE_STATUS" | python3 -c 'import json,sys; print(next(r["nonce"] for r in json.load(sys.stdin)["active"] if r["command"]=="intake"))')
 ```
 
 Pass `$ARGUMENTS` straight to the intake agent. Intake **compiles**; it does not run Think, Plan,
@@ -29,7 +31,8 @@ command is active):
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_pr_finish.py" autonomous \
-  --repo "$PWD" --pr <intake-pr> --kind intake
+  --repo "$PWD" --pr <intake-pr> --kind intake \
+  --report-repo "$PWD" --report-session "$CLAUDE_CODE_SESSION_ID" --report-nonce "$INTAKE_NONCE"
 ```
 
 The finisher requires the PR's head branch to carry the `intake/` prefix, squash-merges with branch
@@ -45,13 +48,13 @@ a different handoff:
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_next_action.py" --repo "$PWD" --json
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command intake \
-  --status <complete> --evidence-json '<envelope>'
+  --status <complete|blocked_external> --evidence-json '<envelope>'
 ```
 
 - **`complete`** — the manifest + independent review validate and the intake PR reads `MERGED`.
   Evidence refs: `manifest:"<repo-rel>"`, `review:"<review-basename>"`, `intake_pr` (the PR **number** —
   the validator **re-reads its merged-state for real (`gh pr view`)**, never a caller `state` string).
 
-Intake has **no `blocked_external`** terminal: the extractor / validator / PR helper write no durable
-failure receipt the validator can re-derive, so a blocked stop is not claimable — fix the failing
-helper or wait; never self-report a blocked intake as a completed terminal.
+- **`blocked_external`** — an Intake helper failed after being invoked with `--report-repo`,
+  `--report-session`, and `--report-nonce`. Cite its exact `{helper, exit, diagnostic}`; the closeout
+  accepts only the current nonce-bound receipt. A successful retry clears the old failure.

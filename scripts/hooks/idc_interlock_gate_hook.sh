@@ -23,5 +23,6 @@ ROOT="${1:-}"
 
 # Plugin root unknown (shouldn't happen via hooks.json) or gate missing → fail-soft allow.
 [ -n "$ROOT" ] && [ -f "$ROOT/scripts/hooks/idc_interlock_gate.py" ] || exit 0
+sh "$ROOT/scripts/idc_python_runtime.sh" || exit 0
 
 exec python3 "$ROOT/scripts/hooks/idc_interlock_gate.py" "$ROOT"

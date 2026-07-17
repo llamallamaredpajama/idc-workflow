@@ -24,6 +24,32 @@ set -uo pipefail
 ENTRY_GATE="$GOV_PLUGIN/scripts/hooks/idc_command_entry_gate.py"
 [ -f "$ENTRY_GATE" ] || gov_fail "scripts/hooks/idc_command_entry_gate.py not found (not implemented yet)"
 
+# The shell wrapper must reject Python older than 3.10 before importing any IDC Python.  Other hook
+# wrappers quietly skip on the same unsupported runtime so normal non-command events are not crashed.
+RUNTIME_BIN="$(mktemp -d)" || gov_fail "could not make runtime fake-bin"
+RUNTIME_MARKER="$RUNTIME_BIN/launched"
+cat > "$RUNTIME_BIN/python3" <<'SH'
+#!/bin/sh
+if [ "${1:-}" = "-c" ]; then exit 1; fi
+: > "$RUNTIME_MARKER"
+exit 9
+SH
+chmod +x "$RUNTIME_BIN/python3"
+export RUNTIME_MARKER
+RUNTIME_OUT="$(PATH="$RUNTIME_BIN:/usr/bin:/bin" bash "$GOV_PLUGIN/scripts/hooks/idc_command_entry_gate_hook.sh" "$GOV_PLUGIN" </dev/null)"; RUNTIME_RC=$?
+[ "$RUNTIME_RC" -eq 0 ] && printf '%s' "$RUNTIME_OUT" | grep -q 'Python 3.10 or newer' \
+  || gov_fail "entry wrapper did not plainly refuse an unsupported Python before importing the gate"
+[ ! -e "$RUNTIME_MARKER" ] || gov_fail "entry wrapper launched IDC Python after runtime preflight failed"
+mkdir -p "$RUNTIME_BIN/repo/docs/workflow"
+printf 'backend: filesystem\n' > "$RUNTIME_BIN/repo/docs/workflow/tracker-config.yaml"
+for wrapper in scripts/hooks/idc_command_closeout_gate_hook.sh scripts/idc_recirc_sweep_hook.sh; do
+  rm -f "$RUNTIME_MARKER"
+  OTHER_OUT="$(cd "$RUNTIME_BIN/repo" && PATH="$RUNTIME_BIN:/usr/bin:/bin" bash "$GOV_PLUGIN/$wrapper" "$GOV_PLUGIN" </dev/null)"; OTHER_RC=$?
+  [ "$OTHER_RC" -eq 0 ] && [ -z "$OTHER_OUT" ] && [ ! -e "$RUNTIME_MARKER" ] \
+    || gov_fail "$wrapper did not quietly skip an unsupported Python runtime"
+done
+rm -rf "$RUNTIME_BIN"
+
 WORK="$(mktemp -d)" || gov_fail "mktemp failed"
 trap 'rm -rf "$WORK"' EXIT
 # A governed repo (so is_governed_repo() is true → the admit path registers the command).

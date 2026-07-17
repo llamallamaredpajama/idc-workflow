@@ -84,7 +84,7 @@ def _marker(pr):
     return f"<!-- idc-gate-pr: {int(pr)} -->"
 
 
-def _nums(nums):
+def format_issue_refs(nums):
     return " + ".join(f"#{int(n)}" for n in nums)
 
 
@@ -121,9 +121,9 @@ def _unblock_action(pointer, gate, others, proof, still_land=""):
                 f"through the engine's REAL journaled `unblock` ({proof}: never unblock behind an "
                 "unproven gate)")
     return (f"REFUSE the unblock: pointer #{pointer} is {E.BLOCKED_STATUS} behind gate #{gate} AND "
-            f"{_nums(others)}. The engine's `unblock --by` would drop only gate #{gate}'s edge and "
-            f"then set Todo — admitting the pointer past {_nums(others)} without their proof. "
-            f"{still_land}resolve {_nums(others)} through their own doors, then re-run to converge")
+            f"{format_issue_refs(others)}. The engine's `unblock --by` would drop only gate #{gate}'s edge and "
+            f"then set Todo — admitting the pointer past {format_issue_refs(others)} without their proof. "
+            f"{still_land}resolve {format_issue_refs(others)} through their own doors, then re-run to converge")
 
 
 def _refuse_other_blockers(gate, pointer, others, preamble, converge):
@@ -132,11 +132,11 @@ def _refuse_other_blockers(gate, pointer, others, preamble, converge):
     drift on what it says or on when it fires."""
     raise GateRepairError(
         f"gate-repair stopped at unblock-pointer: {preamble} pointer #{pointer} is still "
-        f"{E.BLOCKED_STATUS} behind {_nums(others)}. This door finishes a pointer ONLY when the proven "
+        f"{E.BLOCKED_STATUS} behind {format_issue_refs(others)}. This door finishes a pointer ONLY when the proven "
         f"gate is the SOLE remaining blocker: the engine's `unblock --by` drops only gate #{gate}'s "
-        f"edge and then sets Todo, which would admit #{pointer} past {_nums(others)} without their "
+        f"edge and then sets Todo, which would admit #{pointer} past {format_issue_refs(others)} without their "
         "proof. Nothing was invented — no dependency was removed and no observation was recorded. "
-        f"Resolve {_nums(others)} through their own doors (a gate's guarded "
+        f"Resolve {format_issue_refs(others)} through their own doors (a gate's guarded "
         "`dispose --disposition gate-approved`, or this repair for a gate closed outside it), then "
         f"{converge}")
 
@@ -357,6 +357,13 @@ def _set_and_verify(ctx, num, field, value):
 def build_and_run(ctx, gate, pointer, pr, apply_):
     obs = _observe(ctx, gate, pointer, pr)
     bound = _validate(obs, gate, pr)          # every refusal happens here — before any write
+    if obs["pointer"]["status"] != E.BLOCKED_STATUS:
+        if obs["pointer"]["status"] != "Todo" or obs["pointer"]["blocked_by"]:
+            raise GateRepairError(
+                f"gate-repair refused: pointer #{pointer} reads Status={obs['pointer']['status']!r} "
+                f"with blocked_by={obs['pointer']['blocked_by']!r}. Only Blocked may transition and "
+                "only blocker-free Todo may be recorded as already unblocked; repair the inconsistent "
+                "dependency state, then re-run.")
 
     observed_before = {
         "gate": {"stage": obs["gate"]["stage"], "status": obs["gate"]["status"],
@@ -520,6 +527,11 @@ def finish_pointer(ctx, gate, pointer, apply_):
     cur = E.get_item(ctx, int(pointer))
     status = cur.get("status") or ""
     blockers = sorted(_blocked_by(ctx, int(pointer)))
+    if status != E.BLOCKED_STATUS and (status != "Todo" or blockers):
+        raise GateRepairError(
+            f"pointer-finish refused: pointer #{pointer} reads Status={status!r} with "
+            f"blocked_by={blockers!r}. Only Blocked may transition and only blocker-free Todo is an "
+            "honest no-op; repair the inconsistent dependency state, then re-run.")
     planned_others = [n for n in blockers if n != int(gate)]
     observed_before = {"gate": {"num": int(gate), "proof_kind": kind},
                        "pointer": {"status": status, "blocked_by": blockers}}

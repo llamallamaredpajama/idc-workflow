@@ -2,6 +2,22 @@
 
 All notable changes for the IDC Workflow plugin are documented in this file.
 
+## 4.1.2 — 2026-07-17
+
+The final command-integrity hardening pass closes the remaining deferred items from 4.1.1:
+
+- Intake helper failures are source-owned, exact, nonce-bound receipts; successful retries clear
+  stale failures. Plan backend reads, bare Recirculation vocabulary, and diagnostic report writers
+  now fail closed without legacy/session-only fallbacks.
+- Doctor recognizes only GitHub's exact configured-project missing response, reruns its advisory
+  probes at closeout, accurately discloses transient writes, and checks the Python 3.10 minimum.
+- Gate repair refuses inconsistent Todo pointers; repeated Done disposal is idempotent only with an
+  exact strict-journal match; gate-reference formatting is single-sourced.
+- Smoke runs repair restricted PATHs, and the new read-only worktree stability checker detects a
+  terminating process changing HEAD, index, or files before another writer starts.
+- Documentation now reports all nine agents, and clean final-head sandbox receipts cover the normal
+  lifecycle and the literal gate-repair CLI against a disposable GitHub board.
+
 ## 4.1.1 — 2026-07-17
 
 The command-integrity hardening patch closes ten deferred safety and honesty gaps from 4.1.0:

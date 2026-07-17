@@ -1415,6 +1415,26 @@ def close_terminal(ctx, machine, num, to_status):
         _fs_set_status(machine, ctx["tracker"], num, to_status)
 
 
+def _already_done_disposition(repo, num, requested):
+    """Return None for an exact prior disposition; otherwise a refusal reason.
+
+    The journal read is strict and covers rotated segments. Ambiguous or missing history is never
+    converted into a second terminal write.
+    """
+    import idc_journal_replay as RP
+    entries, err = RP.scan_journal_strict(os.path.join(repo, JOURNAL_REL))
+    if err:
+        return f"the transition journal is unreadable ({err})"
+    prior = {entry.get("disposition") for entry in entries
+             if entry.get("op") == "dispose" and RP.journal_item_id(entry) == int(num)}
+    prior.discard(None)
+    if prior == {requested}:
+        return None
+    if not prior:
+        return "no prior dispose record names this already-Done item"
+    return f"prior dispose history conflicts with {requested!r} (recorded: {sorted(prior)!r})"
+
+
 # ── the op dispatcher ──────────────────────────────────────────────────────────────────────────
 def run(op, ctx, **kw):
     """Execute one typed op end-to-end (validate → mutate → read-back → normalize → journal).
@@ -1575,6 +1595,13 @@ def run(op, ctx, **kw):
                 f"{op}: refused — a verdict-free terminal op cannot reach the terminal Status "
                 "(only a guarded `close`, or a `dispose` with a valid --disposition, may reach Done).")
         cur = get_item(ctx, num)
+        if disposition is not None and cur.get("status") == machine.get("terminal_status"):
+            problem = _already_done_disposition(ctx["repo"], num, disposition)
+            if problem is None:
+                return None
+            raise TransitionError(
+                f"{op} refused for already-Done #{num}: {problem}. Only an exact, strictly-read "
+                "matching disposition is an idempotent no-op; repair/restore the journal before retrying.")
         evidence = {}   # a close records none; each disposition guard returns what it verified
         if disposition is None:
             check_close_guards(spec, num, kw.get("verdict"), kw.get("pr"))

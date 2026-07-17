@@ -194,6 +194,17 @@ review-package "$TASK_BASE" "$TASK_HEAD"
 
 Keep all writers idle until review is clean.
 
+After terminating or releasing any teammate process, run the read-only stability check before the
+next writer starts:
+
+```bash
+python3 scripts/idc_worktree_stability.py --repo "$PWD" --pid <terminated-process-pid>
+```
+
+It waits for that process to exit, then compares HEAD, index, and worktree fingerprints across three
+samples. A change is a hard stop for inspection; the checker never resets, restores, or rewrites the
+worktree.
+
 ### 4. Launch one independent Codex reviewer, detached and read-only
 
 Write a reviewer prompt file under `.superpowers/sdd/`. It must tell Codex to read:

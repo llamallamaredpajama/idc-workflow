@@ -13,8 +13,7 @@ Codex support, and a second machine — then troubleshooting with `/idc:doctor`.
   gh auth status      # confirm "Token scopes: ... project"
   ```
   (Or use the `filesystem` backend — a root `TRACKER.md`, zero external setup.)
-- **`jq`** and **`python3`** — used by `/idc:init` and the shipped tracker/check helpers;
-  usually preinstalled.
+- **`jq`** and **Python 3.10 or newer** — used by `/idc:init` and the shipped tracker/check helpers.
 
 ## 1. Register the marketplace (once per machine)
 

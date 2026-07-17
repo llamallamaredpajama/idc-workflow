@@ -781,6 +781,34 @@ check(fake.pointer["status"] == "Todo", "(11g) a guarded-dispose gate's pointer 
 print("  ok (11g) either proven kind finishes the pointer — guarded-dispose and verified-reconciliation")
 shutil.rmtree(repo)
 
+# 11h. Todo plus residual blocked_by is internally inconsistent, not an honest no-op/observation.
+def todo_with_stale_edges(fx):
+    fx["pointer"].update(status="Todo", blocked_by=[GATE, SECOND])
+
+fake, repo = fresh(todo_with_stale_edges)
+proven(repo)
+before = journal(repo)
+try:
+    finish(repo, apply=True)
+except R.GateRepairError as exc:
+    check("Todo" in str(exc) and "block" in str(exc), f"(11h) unclear pointer-finish refusal: {exc}")
+else:
+    die("(11h) pointer-finish accepted Todo with residual blocked_by edges")
+check(journal(repo) == before and fake.wrote() == [], "(11h) pointer-finish wrote despite inconsistent state")
+shutil.rmtree(repo)
+
+fake, repo = fresh(todo_with_stale_edges)
+try:
+    repair(repo, apply=True)
+except R.GateRepairError as exc:
+    check("Todo" in str(exc) and "block" in str(exc), f"(11h) unclear full-repair refusal: {exc}")
+else:
+    die("(11h) full repair recorded an observation for Todo with residual blockers")
+check(not any((e.get("evidence") or {}).get("observed_already_unblocked") for e in journal(repo)),
+      "(11h) full repair journaled a false already-unblocked observation")
+print("  ok (11h) Todo with residual blockers is refused; only blocker-free Todo is observable/no-op")
+shutil.rmtree(repo)
+
 print("  ok — the session-b7a93ff6 unit is green")
 PY
 

@@ -928,15 +928,46 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--manifest", required=True)
     status.add_argument("--json", action="store_true")
     status.set_defaults(func=cmd_status)
+    for command in (extract, validate, link, status):
+        command.add_argument("--report-repo", help="governed repo for a source-owned failure receipt")
+        command.add_argument("--report-session", help="active Intake command session")
+        command.add_argument("--report-nonce", help="active Intake command nonce")
     return parser
+
+
+def _report_module():
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "hooks"))
+    import idc_command_report as report  # noqa: E402
+    return report
+
+
+def _report_args(args: argparse.Namespace) -> tuple[str, str, str] | None:
+    values = (args.report_repo, args.report_session, args.report_nonce)
+    if not any(values):
+        return None
+    if not all(values):
+        raise IntakeError("failure reporting requires --report-repo, --report-session, and --report-nonce together")
+    return os.path.abspath(values[0]), values[1], values[2]
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        return int(args.func(args))
+        reporting = _report_args(args)
+        result = int(args.func(args))
+        if result == 0 and reporting:
+            _report_module().clear_intake_failure(*reporting)
+        return result
     except IntakeError as exc:
-        print(f"idc-intake: FAIL — {exc}", file=sys.stderr)
+        diagnostic = f"idc-intake: FAIL — {exc}"
+        try:
+            reporting = _report_args(args)
+            if reporting:
+                _report_module().write_intake_failure(
+                    *reporting, os.path.basename(__file__), args.command, 2, diagnostic)
+        except Exception:  # noqa: BLE001 — reporting never hides the helper's original failure
+            pass
+        print(diagnostic, file=sys.stderr)
         return 2
 
 

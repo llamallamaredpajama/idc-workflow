@@ -136,6 +136,7 @@ _JANITOR_PROVENANCE = "idc_git_janitor.py"
 # The receipt checker is safely RE-RUNNABLE read-only (a fingerprint verify), so an init/update/uninstall
 # blocker citing it is RE-DERIVED by re-running it — grounded only when the re-run actually FAILS.
 _RECEIPT_HELPER = "idc_receipt_check.py"
+_INTAKE_HELPERS = {"idc_intake_manifest.py", "idc_pr_finish.py"}
 # The janitor scanner's DOCUMENTED blocked exit (ground truth could not be established). Exit 1 is a
 # COMPLETED scan with findings (a `complete`, not blocked); only exit 2 grounds `blocked_external`
 # (wave-4 finding 1 — fix the exit map).
@@ -150,6 +151,7 @@ _JANITOR_BLOCKED_EXIT = 2
 # manufacture a blocked stop. Commands with NO re-derivable helper carry no `blocked_external` claim at
 # all (see _CLAIM_TABLE — not claimable, fail closed).
 _BLOCKER_HELPERS = {
+    "intake":      _INTAKE_HELPERS,
     "build":       {_DRAIN_HELPER},
     "autorun":     {_DRAIN_HELPER},
     "janitor":     {_JANITOR_HELPER},
@@ -225,10 +227,11 @@ def _check_blocker(command: str, refs: dict, repo: str, session: str) -> Closeou
             return _fail("blocked-external-janitor-nonce",
                          "blocked_external citing the janitor scanner requires the persisted report bound "
                          "to THIS command record's nonce (written by the scanner run of this invocation)")
-        if report.get("produced_by") != _JANITOR_PROVENANCE:
+        record = _command_report_record(repo, "janitor", session)
+        if not isinstance(record, dict) or record.get("producer") != _JANITOR_PROVENANCE:
             return _fail("blocked-external-janitor-provenance",
                          "blocked_external citing the janitor scanner requires the persisted report to "
-                         "carry the scanner's provenance stamp (produced_by) — a hand-written report "
+                         "carry the scanner's source-owned provenance envelope — a hand-written report "
                          "cannot be passed off as a real scan (round-5 finding 7)")
         if rexit != _JANITOR_BLOCKED_EXIT:
             return _fail("blocked-external-janitor-not-blocked",
@@ -239,6 +242,18 @@ def _check_blocker(command: str, refs: dict, repo: str, session: str) -> Closeou
             return _fail("blocked-external-janitor-exit-mismatch",
                          f"blocked_external cites exit {code} but the janitor report PERSISTED "
                          f"scanner_exit {rexit!r} — the cited exit must MATCH the durable artifact")
+    elif base in _INTAKE_HELPERS:
+        report = _command_report(repo, "intake-failure", session)
+        if not _report_nonce_bound(repo, command, session, report):
+            return _fail("blocked-external-intake-nonce",
+                         "Intake helper failure receipt is absent, stale, foreign, or not bound to THIS nonce")
+        expected = {"helper": base, "exit": code, "diagnostic": blocker.get("diagnostic")}
+        for key, value in expected.items():
+            if report.get(key) != value:
+                return _fail("blocked-external-intake-mismatch",
+                             f"Intake blocker {key} must exactly match the source-owned helper receipt")
+        if not _ne_str(report.get("operation")) or report.get("session_id") != session:
+            return _fail("blocked-external-intake-invalid", "Intake failure receipt is incomplete")
     elif base == _RECEIPT_HELPER:
         # RE-RUN the receipt fingerprint checker READ-ONLY (safely re-runnable): the blocker is grounded
         # ONLY when the re-run actually FAILS (an invalid receipt, or a modified/missing stamped file).
@@ -272,6 +287,17 @@ def _command_report(repo: str, kind: str, session: str):
         return None
 
 
+def _command_report_record(repo: str, kind: str, session: str):
+    """The complete source-owned report envelope, or None."""
+    if not _ne_str(repo) or not _ne_str(session):
+        return None
+    try:
+        import idc_command_report as CR  # noqa: E402
+        return CR.current_report_record(repo, kind, session)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _record_nonce(repo: str, command: str, session: str):
     """The per-invocation nonce stamped on THIS session's ACTIVE record for `command` at start
     (wave-4 finding 7), or None. A diagnostic report (doctor/janitor) must carry this nonce for its
@@ -289,12 +315,11 @@ def _record_nonce(repo: str, command: str, session: str):
 
 def _report_nonce_bound(repo: str, command: str, session: str, report: dict) -> bool:
     """True iff the persisted report's `nonce` matches the active record's stamped nonce (wave-4
-    finding 7). When the record carries NO nonce (an older record shape / a runtime with no record
-    readback), fall back to session scoping alone (the report is already session-scoped) so a
-    nonce-less honest run is not falsely refused — the nonce is defense-in-depth, not the only gate."""
+    finding 7). A legacy record without a nonce must restart and acquire one; session-only evidence
+    is never enough to close a current command."""
     record_nonce = _record_nonce(repo, command, session)
     if record_nonce is None:
-        return True
+        return False
     return isinstance(report, dict) and report.get("nonce") == record_nonce
 
 
@@ -445,16 +470,14 @@ def _gh_issue_body(repo: str, num: object):
     return _gh_capture(repo, ["issue", "view", str(num_int), "--json", "body", "-q", ".body"])
 
 
-def _repo_backend(repo: str) -> str:
-    """The repo's tracker backend (`github`/`filesystem`), tolerant: any read problem defaults to
-    `filesystem` (the historical default) so a github-only re-verification is only DEMANDED where the
-    config actually says github."""
+def _repo_backend(repo: str) -> str | None:
+    """The configured backend, or None when an existing config cannot be read or parsed."""
     try:
         import idc_next_action as NEXT  # noqa: E402 — reuse the one constrained config reader
         backend, _ = NEXT._read_tracker_config(repo)
         return backend
     except Exception:  # noqa: BLE001
-        return "filesystem"
+        return None
 
 
 def _load_issue_numbers(repo: str):
@@ -709,7 +732,7 @@ def _manifest_unit_processed(repo: str, manifest_rel: object, unit: str, claimed
 
 # The claimed bare-#ticket dispositions that are TERMINAL (the ticket was processed + closed → the
 # board must read Done) vs NON-TERMINAL (paused/gated behind its own gate → the ticket is still open).
-_RECIRC_TERMINAL_DISPOSITIONS = {"admitted", "drained", "materialized"}
+_RECIRC_TERMINAL_DISPOSITIONS = {"drained"}
 _RECIRC_OPEN_DISPOSITIONS = {"gated", "paused"}
 # The Stage a recirc inbox ticket carries, and the ONE guarded recirc-retirement journal disposition
 # (idc_transition's `dispose --disposition drained` door). Round-5 finding 3: a bare ticket that
@@ -1078,6 +1101,9 @@ def _verify_decomposition(repo: str, matrix_rel: object, children: list) -> Clos
     verified to EXIST via the shared tracker reader. Either way a caller can no longer assert
     'children exist / schema+provenance pass' — the validator re-derives it."""
     backend = _repo_backend(repo)
+    if backend is None:
+        return _fail("plan-backend-indeterminate",
+                     "Plan could not establish the tracker backend from tracker-config.yaml (fail closed)")
     if backend == "github":
         matrix_path = _confined_repo_path(repo, matrix_rel)
         if matrix_path is None or not os.path.isfile(matrix_path):
@@ -1579,10 +1605,11 @@ def _claim_janitor_report(refs: dict, repo: str, session: str) -> CloseoutResult
         return _fail("janitor-report-nonce",
                      "janitor complete: the persisted janitor report is not bound to THIS command "
                      "record's nonce — the report must be written BY the scanner run of this invocation")
-    if report.get("produced_by") != _JANITOR_PROVENANCE:
+    record = _command_report_record(repo, "janitor", session)
+    if not isinstance(record, dict) or record.get("producer") != _JANITOR_PROVENANCE:
         return _fail("janitor-report-provenance",
-                     "janitor complete: the persisted report lacks the scanner's provenance stamp "
-                     "(produced_by) — a hand-written report cannot be passed off as a real scan "
+                     "janitor complete: the persisted report lacks the scanner's source-owned provenance — "
+                     "a hand-written report cannot be passed off as a real scan "
                      "(round-5 finding 7); run the real scanner with --report-session/--report-nonce")
     code = report.get("scanner_exit")
     if isinstance(code, bool) or code not in (0, 1):
@@ -1844,10 +1871,9 @@ def _rederive_doctor_row7(repo: str, session: str, row: dict):
 
 
 def _rederive_doctor_row8(repo: str, session: str, row: dict):
-    """Row 8 — plugin cache freshness (advisory: only ever PASS or SKIP). Its PASS minimally requires a
-    READABLE running version, and an unreadable one is precisely its SKIP — so re-reading the running
-    plugin's own `.claude-plugin/plugin.json` is the row's whole PASS precondition. The marketplace-clone
-    comparison is best-effort in the row itself (a differing clone is still PASS), so it is not contested."""
+    """Row 8 — supported runtime + plugin cache freshness."""
+    if sys.version_info < (3, 10):
+        return False, "row 8 (runtime) claims PASS, but IDC requires Python 3.10 or newer"
     if _running_plugin_version() is None:
         return False, ("row 8 (plugin cache freshness) claims PASS, but the running plugin's version could "
                        "not be re-read from its own .claude-plugin/plugin.json — an unreadable running "
@@ -1862,10 +1888,10 @@ def _rederive_doctor_row9(repo: str, session: str, row: dict):
     is the row's own SKIP ("could not determine"), and which the row's recipe goes out of its way to keep
     from printing a hollow `clean (0 scanned)`.
 
-    BOUNDARY (deliberate, disclosed): re-running the FULL lint at closeout is disproportionate for a
-    corroboration, so a lint FINDING (the row's `PASS with ⚠`) is not contested — only the readability
-    the row's PASS depends on."""
-    backend, _project = _strict_backend(repo)
+    Closeout also re-runs the read-only Recirculation sweep. On GitHub it performs the Stage-field
+    metadata read used by the advisory option check; missing findings/options remain advisory, but a
+    failed probe cannot back PASS."""
+    backend, project = _strict_backend(repo)
     if backend is None:
         return False, ("row 9 (build-lane hygiene) claims PASS, but the tracker config is missing or does "
                        "not parse, so the board this row scans cannot be read back (rule B)")
@@ -1874,11 +1900,27 @@ def _rederive_doctor_row9(repo: str, session: str, row: dict):
             return False, ("row 9 (build-lane hygiene) claims PASS, but the github board could not be read "
                            "back — an unreadable board is the row's SKIP (`could not determine`), never a "
                            "clean PASS")
-        return True, ""
-    if not _filesystem_board_loads(repo):
+        owner = _gh_capture(repo, ["repo", "view", "--json", "owner", "-q", ".owner.login"])
+        if not _ne_str(owner):
+            return False, "row 9 claims PASS, but the GitHub project owner probe failed"
+        try:
+            import idc_gh_board as BOARD  # noqa: E402
+            BOARD._fields(owner.strip(), project, repo)
+        except Exception:  # noqa: BLE001
+            return False, "row 9 claims PASS, but the GitHub Stage-field metadata probe failed"
+    elif not _filesystem_board_loads(repo):
         return False, ("row 9 (build-lane hygiene) claims PASS, but the filesystem tracker (TRACKER.md) "
                        "does not load — an unreadable board is the row's SKIP (`could not determine`), "
                        "never a clean PASS")
+    try:
+        import idc_recirc_sweep as SWEEP  # noqa: E402
+        tracker = os.path.join(repo, "TRACKER.md")
+        matrices = os.path.join(repo, "docs", "workflow", "pillar-matrices")
+        sweep_exit, _lines = SWEEP.run(repo, "report", tracker, matrices)
+    except Exception:  # noqa: BLE001
+        return False, "row 9 claims PASS, but the read-only Recirculation sweep could not run"
+    if sweep_exit != 0:
+        return False, f"row 9 claims PASS, but the read-only Recirculation sweep exited {sweep_exit}"
     return True, ""
 
 
@@ -1886,7 +1928,7 @@ def _rederive_doctor_row10(repo: str, session: str, row: dict):
     """Row 10 — board↔git reconciliation. The one row whose truth is not cheaply re-runnable (the scanner
     is a full board+git sweep), so it is re-derived from the SCANNER'S OWN durable report instead:
     doctor.md's row-10 recipe passes `--report-session`/`--report-nonce`, so the scan of THIS invocation
-    persists `{scanner_exit, produced_by}` bound to THIS doctor record's nonce. The row's recorded `exit`
+    persists `{scanner_exit}` in a source-owned envelope bound to THIS doctor record's nonce. The row's recorded `exit`
     must MATCH that persisted `scanner_exit`, which must itself be a COMPLETED scan (0 coherent / 1
     findings — the row's PASS conditions; exit 2 is its SKIP). Same durable-artifact mechanism the doctor
     `blocked_external` path already uses, so a caller-typed row `exit` is never proof."""
@@ -1900,9 +1942,10 @@ def _rederive_doctor_row10(repo: str, session: str, row: dict):
         return False, ("row 10 (board↔git reconciliation) claims PASS, but the janitor scanner report is "
                        "not bound to THIS doctor record's nonce — it must be written BY the scan of this "
                        "invocation, not a stale/foreign one")
-    if report.get("produced_by") != _JANITOR_PROVENANCE:
+    record = _command_report_record(repo, "janitor", session)
+    if not isinstance(record, dict) or record.get("producer") != _JANITOR_PROVENANCE:
         return False, ("row 10 (board↔git reconciliation) claims PASS, but the janitor report carries no "
-                       "scanner provenance stamp (produced_by) — a hand-written report cannot be passed "
+                       "scanner source-owned provenance — a hand-written report cannot be passed "
                        "off as a real scan")
     code = report.get("scanner_exit")
     if isinstance(code, bool) or code not in (0, 1):
@@ -2163,6 +2206,16 @@ def _open_issues(repo: str):
         return None
 
 
+def _github_project_absence_error(stderr: str, project: object) -> bool:
+    """Match only gh's exact ProjectV2 missing-node error for the configured project number."""
+    if not isinstance(stderr, str) or not _ne_str(project):
+        return False
+    number = re.escape(str(project).strip())
+    pattern = (r"GraphQL: Could not resolve to a ProjectV2 with the number " + number +
+               r"\. \((?:user|organization)\.projectV2\)")
+    return re.fullmatch(pattern, stderr.strip()) is not None
+
+
 def _github_board_absent(repo: str):
     """github board-absence probe (round-5 finding 5): True (a REAL `gh project view` proves the project
     genuinely GONE), False (present), or None (indeterminate — no owner/project, gh absent/errored, or an
@@ -2186,10 +2239,9 @@ def _github_board_absent(repo: str):
         return None
     if proc.returncode == 0:
         return False   # a readable project → present
-    err = (proc.stderr or "").lower()
     # A POSITIVE "the project does not exist" signal → genuinely absent. Any other failure (auth,
     # network, rate-limit) is ambiguous → None (rule B: an unreadable board is never proof of deletion).
-    if "could not resolve to a projectv2" in err or "not found" in err or "no project" in err:
+    if _github_project_absence_error(proc.stderr or "", project):
         return True
     return None
 
@@ -2368,14 +2420,13 @@ def _claim_blocker_for(command: str):
 
 # A `blocked_external` claim is enumerated ONLY for commands with a RE-DERIVABLE deterministic-helper
 # blocker (a durable receipt or a safe read-only re-run — see _BLOCKER_HELPERS): build/autorun (drain
-# verdict), janitor/doctor (janitor report), init/update/uninstall (receipt fingerprint re-run). The
-# pipeline commands intake/think/plan/recirculate have NO such helper (their would-be blockers are PR
-# finishers / board mutators / arg-hungry checkers that write no receipt and cannot be re-run), so per
-# rule B they carry NO `blocked_external` entry — it is not claimable (fail closed), never a self-report.
+# verdict), janitor/doctor (janitor report), init/update/uninstall (receipt fingerprint re-run), and
+# Intake (its helper-owned nonce-bound failure receipt). Think/plan/recirculate have no such helper.
 _CLAIM_TABLE = {
     "intake": {
         "complete": (Claim("intake-manifest-reviewed", _claim_intake_manifest_reviewed),
                      Claim("intake-pr-merged", _claim_intake_pr_merged)),
+        "blocked_external": (_claim_blocker_for("intake"),),
     },
     "think": {
         "complete": (Claim("think-refs-present", _claim_think_refs_present),

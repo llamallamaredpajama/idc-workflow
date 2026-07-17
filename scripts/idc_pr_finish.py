@@ -44,6 +44,8 @@ import re
 import subprocess
 import sys
 
+import idc_gate_repair as GR
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 TRANSITION = os.path.join(HERE, "idc_transition.py")
 GATE_REPAIR = os.path.join(HERE, "idc_gate_repair.py")
@@ -199,10 +201,6 @@ def cmd_autonomous(args):
 
 
 # ── requirements: merge the bound gate PR (with approval) then dispose-before-unblock ─────────────
-def _nums(nums):
-    return " + ".join(f"#{int(n)}" for n in nums)
-
-
 def _receipt(args, branch_deleted, unblock, remaining):
     """The requirements receipt. `unblock` carries the pointer step's REAL outcome (applied /
     satisfied / refused) and `remaining_blockers` names why a refusal held — a receipt that reported
@@ -267,9 +265,9 @@ def cmd_requirements(args):
         raise FinishError(
             f"requirements: gate #{args.gate} is disposed (its approval was verified — that Done is "
             f"real and stands), but the pointer-finish door REFUSED #{args.pointer}: it is also "
-            f"blocked by {_nums(remaining)}, and the engine's `unblock --by` would drop only gate "
-            f"#{args.gate}'s edge and then set Todo — admitting it past {_nums(remaining)} without "
-            f"their proof. #{args.pointer} is left Blocked. Resolve {_nums(remaining)} through their "
+            f"blocked by {GR.format_issue_refs(remaining)}, and the engine's `unblock --by` would drop only gate "
+            f"#{args.gate}'s edge and then set Todo — admitting it past {GR.format_issue_refs(remaining)} without "
+            f"their proof. #{args.pointer} is left Blocked. Resolve {GR.format_issue_refs(remaining)} through their "
             "own doors, then re-run this command to converge.")
     outcome = _pointer_step(_finish_pointer(args, True)).get("status") or "applied"
     print(json.dumps(_receipt(args, branch_deleted, outcome, []), sort_keys=True))
@@ -290,6 +288,9 @@ def build_parser():
     common.add_argument("--tracker", default=None, help="TRACKER.md path (filesystem backend)")
     common.add_argument("--owner", default=None, help="github project owner (for the engine tail)")
     common.add_argument("--project", default=None, help="github project number (for the engine tail)")
+    common.add_argument("--report-repo", help="governed repo for an Intake failure receipt")
+    common.add_argument("--report-session", help="active Intake command session")
+    common.add_argument("--report-nonce", help="active Intake command nonce")
     sub = p.add_subparsers(dest="mode", required=True)
 
     a = sub.add_parser("autonomous", parents=[common],
@@ -311,11 +312,32 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     args.repo = os.path.abspath(args.repo)
     try:
+        report_values = (args.report_repo, args.report_session, args.report_nonce)
+        if any(report_values) and not all(report_values):
+            raise FinishError(
+                "failure reporting requires --report-repo, --report-session, and --report-nonce together")
         if args.mode == "autonomous":
-            return cmd_autonomous(args)
+            result = cmd_autonomous(args)
+            if args.kind == "intake" and all((args.report_repo, args.report_session, args.report_nonce)):
+                sys.path.insert(0, os.path.join(HERE, "hooks"))
+                import idc_command_report as report  # noqa: E402
+                report.clear_intake_failure(os.path.abspath(args.report_repo), args.report_session,
+                                            args.report_nonce)
+            return result
         return cmd_requirements(args)
     except FinishError as e:
-        sys.stderr.write(f"idc-pr-finish: {e}\n")
+        diagnostic = f"idc-pr-finish: {e}"
+        if (getattr(args, "kind", None) == "intake" and
+                all((args.report_repo, args.report_session, args.report_nonce))):
+            try:
+                sys.path.insert(0, os.path.join(HERE, "hooks"))
+                import idc_command_report as report  # noqa: E402
+                report.write_intake_failure(os.path.abspath(args.report_repo), args.report_session,
+                                            args.report_nonce, os.path.basename(__file__),
+                                            "autonomous", e.code, diagnostic)
+            except Exception:  # noqa: BLE001 — reporting never masks the finisher refusal
+                pass
+        sys.stderr.write(diagnostic + "\n")
         return e.code
 
 

@@ -381,4 +381,33 @@ print("  ok (13) a lock that APPEARS mid-scan is detected — the scan retries t
 PY
 [ $? -eq 0 ] || exit 1
 
+# ── 14. Already-Done disposal is idempotent only when strict journal proof matches ───────────────
+T8="$(new_tracker)"; REPO8="$(dirname "$T8")"
+eng8() { python3 "$GOV_PLUGIN/scripts/idc_transition.py" --repo "$REPO8" --backend filesystem --tracker "$T8" "$@"; }
+g8="$(gov_seed_item "$T8" --title '[operator-action] Requirements — idempotent gate' --stage Buildable --status Todo)" \
+  || fail "could not seed idempotent gate"
+eng8 dispose --disposition gate-approved --num "$g8" >/dev/null \
+  || fail "first gate disposition failed"
+j8="$REPO8/docs/workflow/transition-journal.ndjson"
+before8="$(grep -c '"op": "dispose"' "$j8")"
+eng8 dispose --disposition gate-approved --num "$g8" >/dev/null \
+  || fail "matching already-Done disposition was not an idempotent success"
+after8="$(grep -c '"op": "dispose"' "$j8")"
+[ "$before8" -eq "$after8" ] || fail "matching already-Done disposition appended a duplicate journal record"
+
+raw8="$(gov_seed_item "$T8" --title '[operator-action] Requirements — raw Done' --stage Buildable --status Done)" \
+  || fail "could not seed raw Done gate"
+if eng8 dispose --disposition gate-approved --num "$raw8" >/dev/null 2>&1; then
+  fail "already-Done item with no matching disposition proof was accepted"
+fi
+printf '%s\n' "{\"op\":\"dispose\",\"item\":$raw8,\"disposition\":\"drained\"}" >> "$j8"
+if eng8 dispose --disposition gate-approved --num "$raw8" >/dev/null 2>&1; then
+  fail "already-Done item with conflicting disposition proof was accepted"
+fi
+printf 'NOT-JSON {\n' >> "$j8"
+if eng8 dispose --disposition gate-approved --num "$g8" >/dev/null 2>&1; then
+  fail "already-Done disposition accepted an unreadable journal"
+fi
+echo "  ok (14) already-Done disposal is a no-op only for matching strict journal proof"
+
 echo "PASS: drained/retired are journal-CORROBORATED — a sanctioned record (sweep re-stage, engine intake, engine link; rotation-archive segments included) must name the item, marker-only forgeries are refused with remediation-naming denials, a corrupt journal fails closed, pre-journal legacy items keep marker-only semantics and DISCLOSE it, github's numberless-create gap is bridged by project_item_id, and scan_journal_strict is read-only (never mints the lock sidecar) AND absent-lock race-safe (residual: producer authenticity — #151)"

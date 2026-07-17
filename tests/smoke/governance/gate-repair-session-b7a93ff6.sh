@@ -1,0 +1,509 @@
+#!/bin/bash
+# gate-repair-session-b7a93ff6.sh — governance scenario: the CORRUPT gate shape observed in session
+# b7a93ff6 is reconciled WITHOUT fabricating history.
+#
+# THE CORRUPTION (tests/smoke/fixtures/session-b7a93ff6/board-before.json — fixture numbers only,
+# never the live repo): the Think PR #706 MERGED (a real operator approval), but gate #708 was closed
+# OUTSIDE the guarded dispose door. So it carries NO journaled proof, its Stage was never set (""),
+# its Status still reads `Todo` while the issue is CLOSED, and its body never got the `idc-gate-pr`
+# marker that BINDS the approval PR to that gate. Pointer #707 is ALREADY `Todo` — nothing ever
+# blocked it at repair time, so there is no unblock to finish.
+#
+# THE HONEST REPAIR (scripts/idc_gate_repair.py): dry-run first; verify the PR really merged; stamp
+# exactly one body marker; repair Stage/Status through the existing board helpers while the issue
+# stays closed; journal an `op=gate-reconciliation` record carrying the observed-before state and the
+# merged-PR evidence — a record that says "reconciled, here is the evidence", never a back-dated
+# `op=dispose` claiming the guarded door ran. For an already-unblocked pointer it records the
+# OBSERVATION (`observed_already_unblocked`) and invents no transition; only a genuinely still-Blocked
+# pointer gets the engine's REAL `unblock`, and only after the gate proof is journaled first.
+#
+# github isn't hermetic, so this is an in-process unit: idc_gh_board._gh / fetch_item /
+# set_single_select / the dependency mutators and idc_gh_close._resolve_item_id are faked from the
+# fixture; the JOURNAL WRITER (idc_transition.journal_append) and the PROOF READER
+# (idc_gate_proof/idc_journal_replay.scan_journal_strict) are the REAL code against a real temp repo.
+#
+# Red-when-broken (each sabotage FAILs a named case):
+#   * make proof_kind() always return "unproven"                    → cases 2f/3a FAIL
+#   * let proof_kind() accept evidence without door/approval_state  → case 7c FAIL
+#   * journal `op=dispose`/`disposition=gate-approved` instead of gate-reconciliation → case 2e FAILs
+#   * invent an `unblock` for the already-Todo pointer              → case 2e FAILs
+#   * append the pointer record WITH a `to` state                   → case 2d FAILs
+#   * drop the dry-run default (write on a bare run)                → case 1b FAILs
+#   * drop the >1-marker / foreign-marker / unmerged-PR / non-gate-title refusals → case 4* FAIL
+#   * skip a readback after a write                                 → case 6 FAILs
+#   * journal the gate proof AFTER the unblock (not before)         → case 5b FAILs
+#   * double-stamp / re-journal on a rerun                          → case 3 FAILs
+#
+# Usage: bash tests/smoke/governance/gate-repair-session-b7a93ff6.sh   (exit 0 = pass)
+set -uo pipefail
+. "$(dirname "$0")/lib.sh"
+
+REPAIR="$GOV_PLUGIN/scripts/idc_gate_repair.py"
+PROOF="$GOV_PLUGIN/scripts/idc_gate_proof.py"
+FIXTURE="$GOV_PLUGIN/tests/smoke/fixtures/session-b7a93ff6/board-before.json"
+
+[ -f "$FIXTURE" ] || gov_fail "tests/smoke/fixtures/session-b7a93ff6/board-before.json not found"
+[ -f "$REPAIR" ] || gov_fail "scripts/idc_gate_repair.py not found"
+[ -f "$PROOF" ] || gov_fail "scripts/idc_gate_proof.py not found"
+
+python3 - "$GOV_PLUGIN/scripts" "$FIXTURE" <<'PY' || gov_fail "the session-b7a93ff6 gate-repair unit failed (see above)"
+import copy, json, os, shutil, sys, tempfile
+
+sys.path.insert(0, sys.argv[1])
+FIXTURE = json.load(open(sys.argv[2], encoding="utf-8"))
+
+import idc_gh_board as B
+import idc_gh_close as GC
+import idc_transition as E
+import idc_journal_replay as RP
+import idc_gate_proof as P
+import idc_gate_repair as R
+
+OWNER, PROJECT = "fixture-owner", "77"
+GATE, POINTER, PR = 708, 707, 706
+
+
+def die(msg):
+    raise SystemExit(f"FAIL: {msg}")
+
+
+def check(cond, msg):
+    if not cond:
+        die(msg)
+
+
+class Fake:
+    """The github surface, driven by the fixture. Every mutation is recorded in `calls` (ordered)."""
+
+    def __init__(self, fx):
+        self.pr = dict(fx["pr"])
+        self.gate = dict(fx["gate"])
+        self.pointer = dict(fx["pointer"])
+        self.pointer.setdefault("title", "consideration pointer — Drive foundation")
+        self.pointer.setdefault("body", "")
+        self.pointer.setdefault("issue_state", "OPEN")
+        self.calls = []
+        self.sabotage = None   # (num, Field) whose write silently does not land
+
+    # ── reads/writes ──────────────────────────────────────────────────────────────────────────
+    def item(self, num):
+        num = int(num)
+        if num == self.gate["number"]:
+            return self.gate
+        if num == self.pointer["number"]:
+            return self.pointer
+        die(f"the unit asked for unknown issue #{num}")
+
+    def gh(self, args, repo):
+        self.calls.append(("gh", tuple(str(a) for a in args)))
+        if args[0] == "pr" and args[1] == "view":
+            check(int(args[2]) == self.pr["number"], f"repair read an unexpected PR #{args[2]}")
+            merged = self.pr["state"] == "MERGED"
+            return json.dumps({"state": self.pr["state"],
+                               "mergedAt": "2026-07-09T00:00:00Z" if merged else None})
+        if args[0] == "issue" and args[1] == "view":
+            it = self.item(args[2])
+            if "--jq" in args:                       # idc_gh_board._issue_state
+                return it["issue_state"] + "\n"
+            fields = args[args.index("--json") + 1].split(",")
+            out = {}
+            for f in fields:
+                if f == "labels":
+                    out["labels"] = []
+                elif f == "comments":
+                    out["comments"] = []
+                elif f == "state":
+                    out["state"] = it["issue_state"]
+                else:
+                    out[f] = it.get(f, "")
+            return json.dumps(out)
+        if args[0] == "issue" and args[1] == "edit":
+            it = self.item(args[2])
+            it["body"] = args[args.index("--body") + 1]
+            return ""
+        die(f"the repair made an unexpected gh call: {list(args)} "
+            "(every board read/write must go through the existing helpers)")
+
+    def fetch_item(self, item_id, repo="."):
+        num = int(str(item_id).rsplit("_", 1)[-1])
+        it = self.item(num)
+        return {"stage": it.get("stage") or "", "status": it.get("status") or "",
+                "id": item_id, "content": {"number": num}}
+
+    def set_single_select(self, owner, project, repo, item_id, field, option):
+        num = int(str(item_id).rsplit("_", 1)[-1])
+        self.calls.append(("set", num, field, option))
+        if self.sabotage == (num, field):
+            return          # the write silently does not land → the readback must catch it
+        self.item(num)[field.lower()] = option
+
+    def blocked_by_numbers(self, child, repo="."):
+        return list(self.item(child).get("blocked_by") or [])
+
+    def remove_blocked_by(self, child, parent, repo="."):
+        self.calls.append(("remove-dep", int(child), int(parent)))
+        bb = self.item(child).get("blocked_by") or []
+        self.item(child)["blocked_by"] = [b for b in bb if int(b) != int(parent)]
+
+    def add_comment(self, num, body, repo="."):
+        self.calls.append(("comment", int(num), body))
+
+    def install(self):
+        B._gh = self.gh
+        B.fetch_item = self.fetch_item
+        B.set_single_select = self.set_single_select
+        B.blocked_by_numbers = self.blocked_by_numbers
+        B.remove_blocked_by = self.remove_blocked_by
+        B.blocked_by_comment_ids = lambda child, parent, repo=".": []
+        B.add_comment = self.add_comment
+        GC._resolve_item_id = lambda owner, project, issue, repo: f"PVTI_{int(issue)}"
+        GC.close_issue = lambda *a, **k: die("the repair called close_issue — the gate issue is "
+                                             "already CLOSED; the repair must never re-close it")
+        return self
+
+    def wrote(self):
+        return [c for c in self.calls
+                if c[0] in ("set", "remove-dep", "comment")
+                or (c[0] == "gh" and c[1][:2] == ("issue", "edit"))]
+
+
+def new_repo():
+    d = tempfile.mkdtemp()
+    os.makedirs(os.path.join(d, "docs", "workflow"), exist_ok=True)
+    return d
+
+
+def journal(repo):
+    entries, err = RP.scan_journal_strict(os.path.join(repo, RP.JOURNAL_REL))
+    check(err is None, f"the journal written by the repair is unreadable: {err}")
+    return entries
+
+
+def fresh(mutate=None):
+    fx = copy.deepcopy(FIXTURE)
+    if mutate:
+        mutate(fx)
+    return Fake(fx).install(), new_repo()
+
+
+def repair(repo, apply=False, gate=GATE, pointer=POINTER, pr=PR):
+    # main() RETURNS the plan dict (the CLI's --json is the same object serialized), so the unit
+    # asserts on structure rather than re-parsing stdout.
+    argv = ["--repo", repo, "--backend", "github", "--owner", OWNER, "--project", PROJECT,
+            "--gate", str(gate), "--pointer", str(pointer), "--pr", str(pr)]
+    if apply:
+        argv.append("--apply")
+    return R.main(argv)
+
+
+def plan_of(result):
+    check(isinstance(result, dict), f"the repair did not return a plan object: {result!r}")
+    return result
+
+
+def ids(plan):
+    return [s["id"] for s in plan["steps"]]
+
+
+def step(plan, sid):
+    for s in plan["steps"]:
+        if s["id"] == sid:
+            return s
+    die(f"the plan carries no {sid!r} step: {json.dumps(plan, indent=2)}")
+
+
+EXPECTED_ORDER = ["verify-pr-merged", "stamp-gate-pr-marker", "repair-gate-fields",
+                  "journal-gate-reconciliation", "record-pointer-observed-already-unblocked"]
+
+# ══ 1. DRY RUN — the default — reports the five steps IN ORDER and writes NOTHING ═══════════════
+fake, repo = fresh()
+plan = plan_of(repair(repo))
+check(plan.get("mode") == "dry-run", f"a bare run is not a dry run: mode={plan.get('mode')!r}")
+check(ids(plan) == EXPECTED_ORDER,
+      f"the dry-run plan's step order is wrong:\n  got      {ids(plan)}\n  expected {EXPECTED_ORDER}")
+check(step(plan, "verify-pr-merged")["status"] == "verified", "the dry run did not VERIFY PR #706 merged")
+check(step(plan, "verify-pr-merged")["pr"] == PR, "the verify step names the wrong PR")
+check(step(plan, "stamp-gate-pr-marker")["marker"] == f"<!-- idc-gate-pr: {PR} -->",
+      "the dry run does not plan the canonical single body marker for #706")
+rg = step(plan, "repair-gate-fields")
+check(rg["to"] == {"stage": "Buildable", "status": "Done"},
+      f"the dry run does not plan Stage=Buildable + Status=Done: {rg.get('to')!r}")
+check(rg.get("issue_state") == "CLOSED" and rg.get("keeps_issue_closed") is True,
+      "the dry run does not state that the gate issue STAYS closed")
+jr = step(plan, "journal-gate-reconciliation")
+check(jr["evidence"]["observed_before"]["gate"] == {"stage": "", "status": "Todo", "issue_state": "CLOSED"},
+      f"the planned record does not carry the OBSERVED-BEFORE gate state: {jr['evidence']['observed_before']!r}")
+check(jr["evidence"]["approval_pr"] == PR and jr["evidence"]["approval_state"] == "MERGED"
+      and jr["evidence"]["door"] == "idc-gate-repair",
+      f"the planned record does not carry the merged-PR evidence: {jr['evidence']!r}")
+po = step(plan, "record-pointer-observed-already-unblocked")
+check(po.get("observed_already_unblocked") is True and po.get("invents_transition") is False,
+      f"the dry run does not record #707 as observed-already-unblocked with NO invented transition: {po!r}")
+check("unblock-pointer" not in ids(plan), "the dry run plans a FAKE unblock for an already-Todo pointer")
+# The plan is the helper's STABLE contract — it must survive the --json surface intact.
+check(json.loads(json.dumps(plan)) == plan, "the plan is not JSON-serializable (the --json contract)")
+print("  ok (1) the dry run reports the five repair steps in the brief's order")
+
+# 1b. …and it is a TRUE dry run: no board write, no body edit, no journal file.
+check(fake.wrote() == [], f"the DRY RUN mutated the board: {fake.wrote()}")
+check(not os.path.exists(os.path.join(repo, RP.JOURNAL_REL)),
+      "the DRY RUN wrote a journal record (a dry run must never journal)")
+check(fake.gate["body"] == FIXTURE["gate"]["body"], "the DRY RUN edited the gate body")
+print("  ok (1b) the dry run is the DEFAULT and performs no write of any kind")
+shutil.rmtree(repo)
+
+# ══ 2. --apply — the honest repair ══════════════════════════════════════════════════════════════
+fake, repo = fresh()
+plan = plan_of(repair(repo, apply=True))
+check(plan.get("mode") == "apply", f"--apply did not report apply mode: {plan.get('mode')!r}")
+
+# 2a. exactly ONE canonical marker, appended to the body (the rest of the body preserved).
+check(fake.gate["body"].count("<!-- idc-gate-pr:") == 1,
+      f"the gate body does not carry EXACTLY one idc-gate-pr marker: {fake.gate['body']!r}")
+check(f"<!-- idc-gate-pr: {PR} -->" in fake.gate["body"], "the stamped marker does not bind PR #706")
+check(FIXTURE["gate"]["body"] in fake.gate["body"], "the body stamp DESTROYED the gate's original body")
+print("  ok (2a) --apply appends exactly one canonical idc-gate-pr marker, preserving the body")
+
+# 2b. Stage/Status repaired through the board helpers; the issue is never re-opened or re-closed.
+check(fake.gate["stage"] == "Buildable" and fake.gate["status"] == "Done",
+      f"the gate was not repaired to Buildable/Done: {fake.gate['stage']!r}/{fake.gate['status']!r}")
+check(fake.gate["issue_state"] == "CLOSED", "the repair changed the gate's issue close state")
+check(("set", GATE, "Stage", "Buildable") in fake.calls and ("set", GATE, "Status", "Done") in fake.calls,
+      f"Stage/Status were not written through the board helpers: {fake.calls}")
+print("  ok (2b) --apply repairs Stage/Status through the existing helpers, issue stays CLOSED")
+
+# 2c. the gate's journal record: op/who/to/evidence exactly per the contract.
+entries = journal(repo)
+grecs = [e for e in entries if e.get("op") == "gate-reconciliation" and RP.journal_item_id(e) == GATE]
+check(len(grecs) == 1, f"expected exactly ONE gate-reconciliation record for #708, got {len(grecs)}")
+g = grecs[0]
+check(g.get("who") == "gate-repair", f"the record's who is {g.get('who')!r}, expected 'gate-repair'")
+check(g.get("to") == {"stage": "Buildable", "status": "Done"},
+      f"the record's `to` is {g.get('to')!r}, expected Buildable/Done")
+ev = g.get("evidence") or {}
+for k in ("door", "approval_pr", "approval_state", "observed_before", "repairs_applied"):
+    check(k in ev, f"the record's evidence lacks {k!r}: {ev!r}")
+check(ev["door"] == "idc-gate-repair" and ev["approval_pr"] == PR and ev["approval_state"] == "MERGED",
+      f"the record's evidence does not name the repair door + merged PR: {ev!r}")
+check(ev["observed_before"]["gate"] == {"stage": "", "status": "Todo", "issue_state": "CLOSED"},
+      f"the record does not preserve the observed-before CORRUPT state: {ev['observed_before']!r}")
+check(sorted(ev["repairs_applied"]) == ["gate-pr-marker", "stage", "status"],
+      f"repairs_applied does not list what this run actually repaired: {ev['repairs_applied']!r}")
+print("  ok (2c) the gate record carries op=gate-reconciliation, who, to, and the full evidence")
+
+# 2d. the pointer's record: an OBSERVATION — no `to` state, so replay can read no invented transition.
+precs = [e for e in entries if e.get("op") == "gate-reconciliation" and RP.journal_item_id(e) == POINTER]
+check(len(precs) == 1, f"expected exactly ONE gate-reconciliation record for pointer #707, got {len(precs)}")
+p = precs[0]
+check((p.get("evidence") or {}).get("observed_already_unblocked") is True,
+      f"the pointer record does not carry observed_already_unblocked: {p.get('evidence')!r}")
+check("to" not in p, f"the pointer record carries a `to` state — an INVENTED transition: {p.get('to')!r}")
+check(RP._entry_to_state(p) == {},
+      "replay can read a state transition out of the pointer record (it must establish none)")
+print("  ok (2d) the pointer record is a pure observation — no `to`, no invented transition")
+
+# 2e. NO fabricated history: no op=dispose, no op=unblock anywhere.
+check(not [e for e in entries if e.get("op") == "dispose"],
+      "the repair FABRICATED an op=dispose record (it must never claim the guarded door ran)")
+check(not [e for e in entries if e.get("op") == "unblock"],
+      "the repair FABRICATED an op=unblock for a pointer that was ALREADY Todo")
+check(not [c for c in fake.calls if c[0] == "remove-dep"],
+      "the repair removed a dependency for an already-unblocked pointer")
+print("  ok (2e) no fabricated op=dispose and no fabricated op=unblock for the already-Todo pointer")
+
+# 2f. the record is now the gate's PROOF — and the pointer's observation proves nothing.
+check(P.proof_kind(entries, GATE) == "verified-reconciliation",
+      f"the repaired gate does not read as verified-reconciliation: {P.proof_kind(entries, GATE)!r}")
+check(P.proof_kind(entries, POINTER) == "unproven",
+      "the POINTER's observation record launders a gate proof for #707 — an observation is not an approval")
+print("  ok (2f) the gate reads verified-reconciliation; the pointer observation proves nothing")
+
+# ══ 3. RERUN — reconstructs from CURRENT state: a full no-op, never a double-stamp/double-record ══
+before = len(journal(repo))
+plan = plan_of(repair(repo, apply=True))
+check(step(plan, "stamp-gate-pr-marker")["status"] == "satisfied",
+      "a rerun re-stamps the body marker instead of reading it satisfied")
+check(step(plan, "repair-gate-fields")["status"] == "satisfied",
+      "a rerun re-writes Stage/Status instead of reading them satisfied")
+check(step(plan, "journal-gate-reconciliation")["status"] == "satisfied",
+      "a rerun re-journals the reconciliation instead of reading the existing proof satisfied")
+check(fake.gate["body"].count("<!-- idc-gate-pr:") == 1,
+      f"a rerun DOUBLE-STAMPED the body marker: {fake.gate['body']!r}")
+check(len(journal(repo)) == before, "a rerun appended duplicate journal records")
+print("  ok (3) a rerun reconstructs the remaining plan from current state — a clean no-op")
+
+# 3a. a gate already proven by the GUARDED door needs no reconciliation record at all.
+entries = journal(repo) + [{"op": "dispose", "disposition": "gate-approved", "item": 4242,
+                            "what": "dispose #4242 Todo -> Done [gate-approved]"}]
+check(P.proof_kind(entries, 4242) == "guarded-dispose",
+      "a journaled guarded dispose no longer reads as guarded-dispose")
+print("  ok (3a) a guarded dispose still reads guarded-dispose (the reconciliation kind is additive)")
+shutil.rmtree(repo)
+
+# ══ 4. REFUSALS — every precondition, and NOT ONE write on any of them ══════════════════════════
+def refuses(mutate, needle, why, **kw):
+    fake, repo = fresh(mutate)
+    try:
+        repair(repo, apply=True, **kw)
+    except R.GateRepairError as exc:
+        check(needle in str(exc), f"{why}: refused with the wrong reason: {exc}")
+    else:
+        die(f"{why}: the repair did NOT refuse")
+    check(fake.wrote() == [], f"{why}: the repair mutated the board before refusing: {fake.wrote()}")
+    check(not os.path.exists(os.path.join(repo, RP.JOURNAL_REL)), f"{why}: the refusal still journaled")
+    shutil.rmtree(repo)
+
+refuses(lambda fx: fx["gate"].update(title="implement the drive foundation"), "operator-action",
+        "(4a) a NON-gate title")
+print("  ok (4a) a non-gate title is refused (only an [operator-action] gate is reconciled)")
+
+refuses(lambda fx: fx["pr"].update(state="OPEN"), "not merged", "(4b) an UNMERGED approval PR")
+print("  ok (4b) an unmerged PR is refused (the approval must be real)")
+
+refuses(lambda fx: fx["gate"].update(body="body\n<!-- idc-gate-pr: 999 -->"), "999",
+        "(4c) a marker bound to a FOREIGN PR")
+print("  ok (4c) an existing marker for another PR is refused (never re-bind an approval)")
+
+refuses(lambda fx: fx["gate"].update(body=f"<!-- idc-gate-pr: {PR} -->\nx\n<!-- idc-gate-pr: {PR} -->"),
+        "2 idc-gate-pr markers", "(4d) MORE THAN ONE body marker")
+print("  ok (4d) more than one body marker is refused (an ambiguous binding never resolves silently)")
+
+refuses(lambda fx: fx["gate"].update(issue_state="OPEN"), "OPEN",
+        "(4e) an OPEN gate (the guarded dispose door owns that, not this repair)")
+print("  ok (4e) an OPEN gate is refused — the guarded dispose door owns an open gate")
+
+# 4f. a marker ALREADY correctly bound to #706 is NOT a refusal — it is simply satisfied.
+fake, repo = fresh(lambda fx: fx["gate"].update(body=f"TO APPROVE: merge the Think PR.\n<!-- idc-gate-pr: {PR} -->"))
+plan = plan_of(repair(repo, apply=True))
+check(step(plan, "stamp-gate-pr-marker")["status"] == "satisfied",
+      "an already-correct marker was not read as satisfied")
+check(fake.gate["body"].count("<!-- idc-gate-pr:") == 1, "an already-correct marker was double-stamped")
+print("  ok (4f) a marker already bound to the right PR is satisfied, not re-stamped")
+shutil.rmtree(repo)
+
+# ══ 5. A STILL-BLOCKED pointer: the gate proof is journaled FIRST, then the ENGINE's real unblock ═
+def still_blocked(fx):
+    fx["pointer"].update(status="Blocked", blocked_by=[GATE])
+
+fake, repo = fresh(still_blocked)
+plan = plan_of(repair(repo, apply=True))
+check("unblock-pointer" in ids(plan),
+      f"a still-Blocked pointer did not get the engine's real unblock step: {ids(plan)}")
+check("record-pointer-observed-already-unblocked" not in ids(plan),
+      "a still-BLOCKED pointer was recorded as observed-already-unblocked (a false observation)")
+check(fake.pointer["status"] == "Todo", "the still-Blocked pointer was not unblocked to Todo")
+check(fake.pointer["blocked_by"] == [], "the gate dependency edge was not removed by the engine unblock")
+
+entries = journal(repo)
+ops = [e.get("op") for e in entries]
+check("unblock" in ops, f"the engine's REAL unblock was not journaled: {ops}")
+check(not [e for e in entries if e.get("op") == "dispose"], "the repair fabricated an op=dispose")
+print("  ok (5) a still-Blocked pointer is finished through the engine's REAL journaled unblock")
+
+# 5b. ORDER: the gate's proof record precedes the unblock — never unblock on an unproven gate.
+gate_at = next(i for i, e in enumerate(entries)
+               if e.get("op") == "gate-reconciliation" and RP.journal_item_id(e) == GATE)
+unblock_at = next(i for i, e in enumerate(entries) if e.get("op") == "unblock")
+check(gate_at < unblock_at,
+      f"the unblock (index {unblock_at}) was journaled BEFORE the gate proof (index {gate_at}) — "
+      "the proof must be written FIRST")
+print("  ok (5b) the gate proof is journaled BEFORE the unblock, never after")
+shutil.rmtree(repo)
+
+# ══ 6. PARTIAL FAILURE — a write whose readback diverges STOPS the run and NAMES the readback ════
+fake, repo = fresh()
+fake.sabotage = (GATE, "Status")          # the Status write silently does not land
+try:
+    repair(repo, apply=True)
+except R.GateRepairError as exc:
+    msg = str(exc)
+    check("read-back" in msg or "readback" in msg, f"the partial failure does not name a readback: {msg}")
+    check("Status" in msg, f"the partial failure does not name WHICH readback failed: {msg}")
+    check("#708" in msg or "708" in msg, f"the partial failure does not name the item: {msg}")
+else:
+    die("(6) a write whose readback diverged did NOT stop the repair")
+# The proof must NOT exist: we stopped before the record, so nothing claims a repair that half-landed.
+check(P.proof_kind(journal(repo), GATE) == "unproven",
+      "a PARTIAL repair still journaled a gate proof — a half-landed repair must never read as proven")
+print("  ok (6) a diverged readback stops the repair, names the failed readback, and journals no proof")
+
+# 6b. …and the RERUN reconstructs the remaining plan from current state and finishes the job.
+fake.sabotage = None
+plan = plan_of(repair(repo, apply=True))
+check(step(plan, "stamp-gate-pr-marker")["status"] == "satisfied",
+      "the rerun after a partial failure re-stamped the already-landed marker")
+check(step(plan, "repair-gate-fields")["status"] == "applied",
+      "the rerun after a partial failure did not finish the unlanded Status write")
+check(fake.gate["status"] == "Done", "the rerun did not land Status=Done")
+check(P.proof_kind(journal(repo), GATE) == "verified-reconciliation",
+      "the rerun did not journal the gate proof once the repair genuinely completed")
+check(fake.gate["body"].count("<!-- idc-gate-pr:") == 1, "the rerun double-stamped the marker")
+print("  ok (6b) the rerun reconstructs the remaining plan from current state and completes the repair")
+shutil.rmtree(repo)
+
+# ══ 7. proof_kind — the centralized reader's contract ════════════════════════════════════════════
+REC = lambda **kw: dict({"op": "gate-reconciliation", "item": GATE,
+                         "evidence": {"door": "idc-gate-repair", "approval_pr": PR,
+                                      "approval_state": "MERGED"}}, **kw)
+check(P.proof_kind([REC()], GATE) == "verified-reconciliation", "(7a) a full reconciliation record")
+check(P.proof_kind([], GATE) == "unproven", "(7b) an empty journal must be unproven")
+print("  ok (7a/7b) a complete record proves; an empty journal is unproven")
+
+# 7c. every evidence field is LOAD-BEARING — drop or corrupt any one and the proof collapses.
+for bad, why in (
+    ({"door": "somewhere-else", "approval_pr": PR, "approval_state": "MERGED"}, "a foreign door"),
+    ({"approval_pr": PR, "approval_state": "MERGED"}, "a missing door"),
+    ({"door": "idc-gate-repair", "approval_pr": PR, "approval_state": "OPEN"}, "an UNMERGED approval"),
+    ({"door": "idc-gate-repair", "approval_pr": PR}, "a missing approval_state"),
+    ({"door": "idc-gate-repair", "approval_pr": 0, "approval_state": "MERGED"}, "a zero approval_pr"),
+    ({"door": "idc-gate-repair", "approval_state": "MERGED"}, "a missing approval_pr"),
+    ({}, "empty evidence"),
+):
+    got = P.proof_kind([REC(evidence=bad)], GATE)
+    check(got == "unproven", f"(7c) {why} still proved the gate: {got!r}")
+print("  ok (7c) every evidence field is load-bearing — a partial/forged record proves nothing")
+
+# 7d. a record for ANOTHER gate never proves this one.
+check(P.proof_kind([REC(item=4242)], GATE) == "unproven",
+      "(7d) a reconciliation record for another gate proved this gate")
+print("  ok (7d) a record naming another gate never proves this one")
+
+# 7e. a MALFORMED journal is an ERROR, never `unproven` (a damaged journal must not read as a clean
+#     negative either — the caller must distinguish "no proof" from "cannot tell").
+repo = new_repo()
+open(os.path.join(repo, RP.JOURNAL_REL), "w").write("NOT-JSON {\n")
+kind, err = P.read_proof(repo, GATE)
+check(err is not None and kind is None,
+      f"a MALFORMED journal did not ERROR: kind={kind!r} err={err!r} (it must never read as unproven)")
+print("  ok (7e) a malformed journal is an ERROR, never a silent `unproven`")
+shutil.rmtree(repo)
+
+print("  ok — the session-b7a93ff6 unit is green")
+PY
+
+# ── 8. the CLI contracts the brief names (the surfaces the playbooks call) ──────────────────────
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+mkdir -p "$TMP/docs/workflow"
+
+# 8a. proof CLI on a journal with NO proof → unproven, exit 0 (a clean, readable negative).
+: > "$TMP/docs/workflow/transition-journal.ndjson"
+OUT="$(python3 "$PROOF" --repo "$TMP" --gate 708 --json)"; RC=$?
+[ $RC -eq 0 ] || gov_fail "idc_gate_proof.py exited $RC on a readable journal: $OUT"
+echo "$OUT" | grep -q '"proof_kind": *"unproven"' \
+  || gov_fail "the proof CLI did not report unproven on a journal with no proof: $OUT"
+echo "  ok (8a) idc_gate_proof.py --repo R --gate G --json reports unproven on a readable journal"
+
+# 8b. proof CLI on a MALFORMED journal → non-zero + an explicit error, NEVER a quiet `unproven`.
+printf 'NOT-JSON {\n' > "$TMP/docs/workflow/transition-journal.ndjson"
+OUT="$(python3 "$PROOF" --repo "$TMP" --gate 708 --json 2>&1)"; RC=$?
+[ $RC -ne 0 ] || gov_fail "the proof CLI exited 0 on a MALFORMED journal (it must fail closed): $OUT"
+echo "$OUT" | grep -q 'unproven' \
+  && gov_fail "the proof CLI reported 'unproven' for a MALFORMED journal (an error is not a negative): $OUT"
+echo "  ok (8b) a malformed journal fails the proof CLI closed — never a quiet 'unproven'"
+
+# 8c. the repair CLI defaults to a DRY RUN: no --apply anywhere in its own usage default.
+python3 "$REPAIR" --help 2>&1 | grep -q -- '--apply' \
+  || gov_fail "idc_gate_repair.py exposes no --apply flag (dry-run-first is the whole contract)"
+echo "  ok (8c) idc_gate_repair.py exposes the dry-run-first --apply contract"
+
+echo "PASS: the corrupt session-b7a93ff6 gate shape (merged PR #706, gate #708 closed outside the guarded door with no Stage and a Todo Status, pointer #707 already unblocked) is reconciled dry-run-first through the existing board helpers — one bound body marker, Stage/Status repaired with the issue left closed, an op=gate-reconciliation record carrying the observed-before state + merged-PR evidence that reads back as verified-reconciliation — while FABRICATING nothing: no back-dated op=dispose, and no invented op=unblock for a pointer that was already Todo (only a genuinely still-Blocked pointer gets the engine's real unblock, and only after the proof lands first)"

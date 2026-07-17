@@ -321,10 +321,23 @@ FAIL** (Build still trusts the board; the schema check stays Plan's gate). Branc
     hint: "finish the unblock through the engine's journaled `unblock` (`idc:idc-gate-issue` step 4
     recovery), never a raw setField." An `unproven-gate-done` finding means the gate is **Done but
     its guarded dispose is NOT journaled** — a raw/manual close, a `Status` edit, or a janitor repair
-    minted the `Done`, none of which validated the approval — fix hint: "do **not** auto-unblock;
-    confirm the gate was legitimately approved (its Think PR merged), then unblock through the engine
-    (`idc:idc-gate-issue` step 4). Unblocking a raw-closed requirements gate whose Think PR never
-    merged would admit draft requirements."
+    minted the `Done`, none of which validated the approval — fix hint: "do **not** auto-unblock.
+    Confirm the proof kind with the one deterministic reader — `python3
+    ${CLAUDE_PLUGIN_ROOT}/scripts/idc_gate_proof.py --repo "$PWD" --gate <gate#>` (`guarded-dispose`
+    or `verified-reconciliation` = proven and safe to finish; `unproven` = not; **exit 2** = the
+    journal is unreadable, which is *indeterminate*, never a clean negative). If it is genuinely
+    `unproven`, confirm the gate was legitimately approved (its Think PR merged), then **reconcile it
+    honestly** — `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/idc_gate_repair.py --repo "$PWD" --owner
+    <owner> --project <n> --gate <gate#> --pointer <dependent#> --pr <merged-think-PR>` (**dry run by
+    default**; add `--apply` only after reading the plan). It verifies the PR really merged, stamps
+    the gate's bound `idc-gate-pr` marker, repairs `Stage`/`Status` through the board helpers with the
+    issue left closed, and journals an `op=gate-reconciliation` record carrying the observed-before
+    state and the merged-PR evidence — after which the gate reads `verified-reconciliation`. It never
+    back-dates an `op=dispose` (the guarded door did not run, and no record may claim it did) and
+    never invents an `unblock` for a pointer that is already `Todo`. **Never hand-write a journal
+    record to silence this finding** — that forges the one signal that distinguishes a validated
+    approval from a closed browser tab. Unblocking a raw-closed requirements gate whose Think PR
+    never merged would admit draft requirements."
   - summary contains `dependency lookups indeterminate` → annotate the row **PASS with ⚠** (still
     **PASS, never FAIL**), independent of clean/flagged: note "the GitHub dependencies API looked
     degraded — the native blocked-by lookup failed for N issue(s), so a dependency check

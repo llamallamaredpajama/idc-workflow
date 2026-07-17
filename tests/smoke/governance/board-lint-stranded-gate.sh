@@ -237,16 +237,19 @@ printf '%s' "$SKIP_OUT" | grep -q 'clean (0 scanned)' \
   && fail "the fs recipe printed the hollow 'clean (0 scanned)' on a MISSING tracker (finding 3 regressed — reads as PASS): $SKIP_OUT"
 echo "  ok (8b) the fs recipe SKIPs (not clean-0-scanned) when the tracker is missing/corrupt (finding 3)"
 
-# ── 9. every recovery surface VERIFIES the journaled guarded dispose before unblocking (round-13 P1) ─
-# A Done gate alone does not prove the guarded dispose ran, so each playbook must (a) carry the
-# Blocked-scan step, (b) route the unblock through the engine's journaled `unblock`, (c) require
-# VERIFYing the gate's journaled guarded dispose FIRST, and (d) name the UNPROVEN posture (leave
-# Blocked, do not auto-unblock). Red-when-broken: drop the verify-first clause from any surface → FAIL.
-python3 - "$GOV_PLUGIN" <<'PY' || fail "a recovery surface lost the verify-the-journaled-dispose-first step (see above)"
+# ── 9. every recovery surface VERIFIES the gate's journaled proof before unblocking (round-13 P1), ──
+# and does it through the ONE CENTRALIZED reader (Task 7). A Done gate alone does not prove the
+# guarded dispose ran, so each playbook must (a) carry the Blocked-scan step, (b) route the unblock
+# through the engine's journaled `unblock`, (c) require VERIFYing the gate's journaled guarded dispose
+# FIRST — via `idc_gate_proof.py`, never a hand-rolled scan — and (d) name the UNPROVEN posture (leave
+# Blocked, do not auto-unblock). Red-when-broken: drop the verify-first clause, or re-inline a private
+# journal scan, in any surface → FAIL.
+python3 - "$GOV_PLUGIN" <<'PY' || fail "a recovery surface lost the verify-the-journaled-proof-first step, or re-inlined a private journal scan (see above)"
 import re, sys
 root = sys.argv[1]
 PHRASE = "whose blocking gate issue is already `Done`"
-for rel in ("agents/idc-autorun.md", "agents/idc-plan.md", "agents/idc-recirculator.md"):
+SURFACES = ("agents/idc-autorun.md", "agents/idc-plan.md", "agents/idc-recirculator.md")
+for rel in SURFACES:
     text = re.sub(r"\s+", " ", open(f"{root}/{rel}", encoding="utf-8").read())
     if PHRASE not in text:
         raise SystemExit(f"FAIL: {rel} lost the Blocked-scan recovery step ({PHRASE!r})")
@@ -256,15 +259,51 @@ for rel in ("agents/idc-autorun.md", "agents/idc-plan.md", "agents/idc-recircula
         raise SystemExit(f"FAIL: {rel} does not require VERIFYing the gate's journaled guarded dispose first (round-13 P1)")
     if "UNPROVEN" not in text:
         raise SystemExit(f"FAIL: {rel} does not name the UNPROVEN posture (a Done gate whose dispose is not journaled must not auto-unblock)")
-    print(f"  ok {rel} verifies the journaled guarded dispose before unblocking (round-13 P1)")
+    if "idc_gate_proof.py" not in text:
+        raise SystemExit(f"FAIL: {rel} does not verify through the CENTRALIZED reader (idc_gate_proof.py) — "
+                         "a per-surface scan is how these four drift apart (Task 7)")
+    print(f"  ok {rel} verifies the gate's proof through the centralized idc_gate_proof.py reader")
 
-# The gate skill is the authoritative recovery source: it must carry the DETERMINISTIC verification
-# command (archive-aware scan for an op=dispose/gate-approved record), not vibes.
+# The gate skill is the authoritative recovery source: it must name the DETERMINISTIC verification
+# command and BOTH proven kinds — recovery may finish a still-blocked pointer on either, never on
+# `unproven` (and an unreadable journal is indeterminate, not a clean negative).
 gate = open(f"{root}/skills/idc-gate-issue/SKILL.md", encoding="utf-8").read()
-for token in ("scan_journal_strict", "idc_journal_replay", '"gate-approved"', "PROVEN", "UNPROVEN"):
+# `disposition=gate-approved` is the RECORD SHAPE the guarded door writes: the skill must still name
+# it (that is what `guarded-dispose` means), independent of how any code spells it.
+for token in ("idc_gate_proof.py", "guarded-dispose", "verified-reconciliation", "unproven",
+              "disposition=gate-approved", "PROVEN", "UNPROVEN"):
     if token not in gate:
-        raise SystemExit(f"FAIL: idc-gate-issue/SKILL.md lacks the deterministic verification command token {token!r}")
-print("  ok idc-gate-issue/SKILL.md carries the deterministic journal-verification command (scan_journal_strict → PROVEN/UNPROVEN)")
+        raise SystemExit(f"FAIL: idc-gate-issue/SKILL.md lacks the deterministic verification token {token!r}")
+print("  ok idc-gate-issue/SKILL.md names the centralized reader + both proven kinds (guarded-dispose | "
+      "verified-reconciliation) and the UNPROVEN posture")
+
+# ANTI-DRIFT (Task 7): the centralized reader is the ONLY place the raw journal-scan primitives are
+# named. A surface that re-inlines `scan_journal_strict`/`idc_journal_replay` has forked the proof
+# logic again — exactly the duplication Task 7 removed — so the four surfaces could silently disagree
+# about whether a gate is proven. The reader itself is the sanctioned home.
+for rel in SURFACES + ("skills/idc-gate-issue/SKILL.md",):
+    text = open(f"{root}/{rel}", encoding="utf-8").read()
+    for banned in ("scan_journal_strict", "idc_journal_replay"):
+        if banned in text:
+            raise SystemExit(f"FAIL: {rel} re-inlines the raw journal-scan primitive {banned!r} — the proof "
+                             "logic is centralized in scripts/idc_gate_proof.py; call it instead (Task 7)")
+proof = open(f"{root}/scripts/idc_gate_proof.py", encoding="utf-8").read()
+if "scan_journal_strict" not in proof:
+    raise SystemExit("FAIL: scripts/idc_gate_proof.py no longer reads the journal through the fail-closed "
+                     "scan_journal_strict — the centralized reader must keep the archive-aware, lock-safe scan")
+print("  ok no recovery surface re-inlines a private journal scan — scripts/idc_gate_proof.py is the single reader")
+
+# doctor Row 9's unproven-gate-done remediation must point at the HONEST repair door and forbid the
+# tempting forgery (a hand-written dispose record that silences the finding without any verification).
+doctor = re.sub(r"\s+", " ", open(f"{root}/commands/doctor.md", encoding="utf-8").read())
+for token in ("idc_gate_proof.py", "idc_gate_repair.py", "dry run by default"):
+    if token not in doctor:
+        raise SystemExit(f"FAIL: doctor.md Row 9's unproven-gate-done remediation lacks {token!r} — an "
+                         "unproven gate must route to the dry-run-first reconciliation door")
+if "Never hand-write a journal record to silence this finding" not in doctor:
+    raise SystemExit("FAIL: doctor.md Row 9 no longer forbids hand-writing a journal record to silence an "
+                     "unproven-gate-done finding (the forgery this repair path exists to replace)")
+print("  ok doctor.md Row 9 routes an unproven gate to the dry-run-first repair door and forbids the forgery")
 PY
 
 echo "PASS: a dependent stranded Status=Blocked behind an already-Done gate is deterministically surfaced AND tiered (board-lint stranded-gate when the guarded dispose is journaled, unproven-gate-done when not; doctor Row 9 passes --journal; the fs recipe SKIPs on a tracker-read failure) — never flagged behind an open gate, a non-gate blocker, a live blocker, or an unknown lookup — and the gate skill + autorun/plan/recirculator playbooks each VERIFY the journaled guarded dispose before unblocking (round-13 P1)"

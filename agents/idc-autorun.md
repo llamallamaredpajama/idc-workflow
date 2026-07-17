@@ -77,12 +77,16 @@ loop below). Then the two lanes:
    `docs/considerations/` stay the source of truth). Re-check open gates first (per
    `idc:idc-gate-issue`) in case the operator merged a Think PR mid-run — and include the
    interrupted-run recovery: `query` `Status=Blocked` items and, for any whose blocking gate issue
-   is already `Done`, **first verify that gate's journaled guarded dispose** (an
-   `op=dispose`/`disposition=gate-approved` record naming it — see `idc:idc-gate-issue` step 4 for
-   the deterministic check) and only then finish the unblock through the engine's journaled
-   `unblock`. A `Done` gate does NOT alone prove the guarded door ran (a raw/manual close or janitor
-   repair also mints `Done`): if the guarded dispose is **not** journaled the gate's `Done` is
-   UNPROVEN — leave the dependent `Blocked` and surface the anomaly, never auto-unblock. A `Done`
+   is already `Done`, **first verify that gate's journaled guarded dispose** through the one
+   deterministic reader — `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gate_proof.py" --repo "$PWD"
+   --gate <gate#>` (see `idc:idc-gate-issue` step 4 for its kinds; never hand-roll a journal scan) —
+   and only then finish the unblock through the engine's journaled `unblock`. Either **proven** kind
+   is safe to finish: `guarded-dispose` (an `op=dispose`/`disposition=gate-approved` record) or
+   `verified-reconciliation` (an `op=gate-reconciliation` record from `idc_gate_repair.py`, which
+   verified the merged approval PR at repair time). A `Done` gate does NOT alone prove the guarded
+   door ran (a raw/manual close or janitor repair also mints `Done`): on `unproven` — or exit 2, an
+   unreadable journal, which is indeterminate and never a clean negative — the gate's `Done` is
+   UNPROVEN: leave the dependent `Blocked` and surface the anomaly, never auto-unblock. A `Done`
    gate must never strand its dependents — `/idc:doctor` Row 9 tiers a remaining strand
    (`stranded-gate` when proven, `unproven-gate-done` when not). A pointer still **Blocked** behind an
    **open** gate issue is an **open Think PR** (pending admission) — **report it and

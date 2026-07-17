@@ -29,12 +29,16 @@ mode only changes what gets fed in:
    Items already behind a gate (`Blocked`) or retired (`Done`) are skipped, so a re-run is
    idempotent — except the interrupted-run recovery: a `Blocked` item whose blocking gate issue
    is already `Done` MAY be an interrupted dispose-then-unblock — but **first verify that gate's
-   journaled guarded dispose** (an `op=dispose`/`disposition=gate-approved` record naming it —
-   `idc:idc-gate-issue` step 4 has the deterministic check). Only if it is journaled, finish its
-   unblock through the engine's journaled `unblock`, then drain it normally. A `Done` gate does NOT
-   alone prove the guarded door ran (a raw/manual close or janitor repair also mints `Done`): if it
-   is **not** journaled the `Done` is UNPROVEN — leave the item `Blocked` and surface the anomaly,
-   never auto-unblock. Draining the inbox admits
+   journaled guarded dispose** through the one deterministic reader —
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gate_proof.py" --repo "$PWD" --gate <gate#>`
+   (`idc:idc-gate-issue` step 4 documents its kinds; never hand-roll a journal scan). Only on a
+   **proven** kind — `guarded-dispose` (an `op=dispose`/`disposition=gate-approved` record) or
+   `verified-reconciliation` (an `op=gate-reconciliation` record from `idc_gate_repair.py`, which
+   verified the merged approval PR at repair time) — finish its unblock through the engine's
+   journaled `unblock`, then drain it normally. A `Done` gate does NOT alone prove the guarded door
+   ran (a raw/manual close or janitor repair also mints `Done`): on `unproven` — or exit 2, an
+   unreadable journal, which is indeterminate and never a clean negative — the `Done` is UNPROVEN:
+   leave the item `Blocked` and surface the anomaly, never auto-unblock. Draining the inbox admits
    discovered scope to the front of the pipeline so **Plan**
    (unchanged) later decomposes the resulting admitted considerations. Autorun runs this mode at the
    top of the pipeline, before the Buildable wave.

@@ -22,12 +22,17 @@ Run the phases in order; each phase's evidence gates the next.
   to decompose. While confirming, run the interrupted-run recovery (Plan does not gate — this only
   finishes a recovery the gate's own guarded close already validated): `query` `Status=Blocked`
   items and, for any whose blocking gate issue is already `Done`, **first verify that gate's
-  journaled guarded dispose** — an `op=dispose`/`disposition=gate-approved` record naming it in
-  `docs/workflow/transition-journal.ndjson` (+ its `journal-archive/` segments) — and only then
-  finish the unblock through the engine's journaled `unblock`. A `Done` gate does NOT alone prove the
-  guarded door ran (a raw/manual close or janitor repair also mints `Done`): if it is **not**
-  journaled the `Done` is UNPROVEN — leave the dependent `Blocked` and surface it, never
-  auto-unblock. A `Done` gate must never strand its dependents.
+  journaled guarded dispose** through the one deterministic reader —
+  `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gate_proof.py" --repo "$PWD" --gate <gate#>` (it owns
+  the archive-aware scan of `docs/workflow/transition-journal.ndjson` + its `journal-archive/`
+  segments; never hand-roll one) — and only then finish the unblock through the engine's journaled
+  `unblock`. Either **proven** kind is safe to finish: `guarded-dispose` (an
+  `op=dispose`/`disposition=gate-approved` record) or `verified-reconciliation` (an
+  `op=gate-reconciliation` record from `idc_gate_repair.py`, which verified the merged approval PR at
+  repair time). A `Done` gate does NOT alone prove the guarded door ran (a raw/manual close or
+  janitor repair also mints `Done`): on `unproven` — or exit 2, an unreadable journal, which is
+  indeterminate and never a clean negative — the `Done` is UNPROVEN: leave the dependent `Blocked`
+  and surface it, never auto-unblock. A `Done` gate must never strand its dependents.
 - Read each admitted consideration's requirements (the PRD + TRD) and the master plan, plus the live
   board through `idc:idc-tracker-adapter` (`query`) — including the open Buildable / in-flight
   issues. Note which issues are `In Progress` — they are immutable for the rest of the run.

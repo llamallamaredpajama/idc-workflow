@@ -121,28 +121,33 @@ whose Think PR never merged would admit **draft** requirements. So the recovery 
 the gate's journaled guarded dispose** — the `op=dispose`, `disposition=gate-approved` audit line
 the guarded door always writes, naming that gate (re-dispose is NOT a clean re-proof: the terminal
 op has no already-terminal guard, so it re-closes and DOUBLE-journals — the journal record is the
-authoritative proof). Verify deterministically (archive-aware + lock-safe; per candidate gate
-`$gate`):
+authoritative proof). Verify through the **one** deterministic reader (`idc_gate_proof.py` — it owns
+the archive-aware, lock-safe strict journal scan, so no surface hand-rolls its own and drifts;
+per candidate gate `$gate`):
 
 ```bash
-python3 - "${CLAUDE_PLUGIN_ROOT}/scripts" "$gate" <<'PY'
-import os, sys
-sys.path.insert(0, sys.argv[1])
-import idc_journal_replay as RP
-gate = int(sys.argv[2])
-entries, err = RP.scan_journal_strict(os.path.join(os.getcwd(), RP.JOURNAL_REL))
-if err:
-    raise SystemExit(f"UNPROVEN: journal unreadable ({err}) — do not unblock")
-print("PROVEN" if any(e.get("op") == "dispose" and e.get("disposition") == "gate-approved"
-                      and RP.journal_item_id(e) == gate for e in entries) else "UNPROVEN")
-PY
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gate_proof.py" --repo "$PWD" --gate "$gate"
 ```
 
-`PROVEN` → the gate's guarded dispose landed; `query` its still-`Blocked` dependents and finish the
-unblock through the engine's journaled `unblock`. `UNPROVEN` → the gate's `Done` is not backed by a
-guarded dispose: **leave the dependent `Blocked` and surface the anomaly** (the gate reached `Done`
-outside the guarded door — confirm the approval, e.g. its Think PR merged, before any manual
-unblock). That recovery is wired deterministically: `/idc:autorun`, `/idc:plan`, and
+It prints exactly one **proof kind**, and its exit code carries the fail-closed distinction:
+
+| kind | exit | meaning | recovery |
+|------|------|---------|----------|
+| `guarded-dispose` | 0 | the guarded door ran: an `op=dispose`/`disposition=gate-approved` record names the gate — the approval was validated *before* `Done` was minted | **PROVEN** — finish the unblock |
+| `verified-reconciliation` | 0 | the gate was closed outside the door and later reconciled by `idc_gate_repair.py`, which verified the merged approval PR **at repair time** and journaled the evidence (`op=gate-reconciliation`, `door=idc-gate-repair`) | **PROVEN** — finish the unblock |
+| `unproven` | 0 | neither record exists | **UNPROVEN** — do **not** unblock |
+| *(error)* | 2 | the journal cannot be read — **indeterminate**, not a negative | treat as UNPROVEN; repair the journal |
+
+Either **PROVEN** kind → `query` the gate's still-`Blocked` dependents and finish the unblock through
+the engine's journaled `unblock`. The two kinds differ in provenance — a `verified-reconciliation`
+gate was never closed through the guarded door, and its record says so rather than back-dating an
+`op=dispose` — but both mean a real approval was verified against the merged Think PR, so both are
+safe to finish. **UNPROVEN** → the gate's `Done` is not backed by any verified approval: **leave the
+dependent `Blocked` and surface the anomaly** (the gate reached `Done` outside the guarded door —
+confirm the approval, e.g. its Think PR merged, then reconcile it honestly with
+`idc_gate_repair.py` — dry-run first — which stamps the gate's bound approval marker, repairs
+`Stage`/`Status`, and journals the evidence; never hand-write a `dispose` record to silence it).
+That recovery is wired deterministically: `/idc:autorun`, `/idc:plan`, and
 `/idc:recirculate` carry the Blocked-scan step (verify-the-journaled-guarded-dispose, then unblock),
 and `/idc:doctor` Row 9's board-lint tiers a remaining strand — `stranded-gate` when the guarded
 dispose IS journaled (safe to finish the unblock), `unproven-gate-done` when it is not (do **not**

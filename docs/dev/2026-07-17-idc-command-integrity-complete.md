@@ -3,8 +3,16 @@
 **Branch:** `feat/idc-command-integrity` in the isolated
 `.worktrees/idc-command-integrity` worktree.
 
-**State:** implementation complete and retained for operator disposition. **Not merged, pushed,
-published, or tagged.** No live knowledge-engine item was changed; #706/#707/#708 remain untouched.
+**State:** **MERGED to `main` and pushed 2026-07-17** (operator-directed: fresh e2e re-runs green →
+final simplify pass re-gated ALL GREEN → merge). Release 4.1.2 is live for `claude plugin update`;
+no git tag (this plugin releases by version bump + push). No live knowledge-engine item was changed;
+#706/#707/#708 remain untouched — the live gate repair is still a separate operator decision.
+
+The pre-merge finale: both sandbox e2e suites were re-run at the final head with zero plugin
+defects (install lifecycle + literal gate-repair proof on disposable Project #20; update path with
+byte-preserved operator configs), and a four-lens cleanup pass landed as the branch's last commit
+(marker wire-contract single-sourced, entry-gate matcher lint guard proven red-when-broken,
+per-invocation read caches; skips recorded in `.superpowers/sdd/simplify-pass-2026-07-17.md`).
 
 The original eight-task command-integrity package passed its whole-branch review at 4.1.0. The
 follow-up 4.1.1 pass closed ten deferred findings. This 4.1.2 pass closes every remaining entry in

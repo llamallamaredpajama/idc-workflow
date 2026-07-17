@@ -19,15 +19,20 @@ Two modes:
 
   requirements --repo R --pr N --gate G --pointer P [--operator-approved]
       The requirements-admission tail: merge the bound Think/decision PR (only with explicit operator
-      approval when still open) and then run the guarded dispose-before-unblock through the engine.
+      approval when still open) and then run the guarded dispose-before-unblock.
       Two legal paths:
         * PR already MERGED — re-verify the gate carries EXACTLY ONE idc-gate-pr body marker naming
-          THIS PR, then `idc_transition.py dispose --disposition gate-approved --num G`, then
-          `idc_transition.py unblock --num P --by G` (readback-verified by the engine).
+          THIS PR, then `idc_transition.py dispose --disposition gate-approved --num G`, then finish
+          pointer P through the guarded `idc_gate_repair.py --finish-pointer` door.
         * PR OPEN — require --operator-approved (IDC never infers human approval), merge the bound PR,
           re-verify MERGED, then the SAME dispose-before-unblock tail.
       It EXITS before any tracker mutation if the PR is unmerged (no --operator-approved), markerless,
       double-marked, or bound to another PR; and if the dispose fails it does NOT unblock.
+      The pointer step is the guarded DOOR, never the engine's raw `unblock`: `unblock --by` drops
+      only the NAMED edge before setting Todo, so a pointer Blocked by [gate, other] would sail past
+      `other` without `other`'s proof. When other blockers remain the dispose STANDS (the approval was
+      verified — that Done is honest) but the unblock is REFUSED, and this exits NONZERO naming the
+      remainders, with the pointer left Blocked; re-run once they resolve and it converges.
 
 Exit: 0 = done (+ JSON receipt on stdout); 2 = a guard refused / a gh or engine failure; 3 = the
 engine reported a resumable board error (github throttle). Stdlib only; `gh` via subprocess.
@@ -41,6 +46,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TRANSITION = os.path.join(HERE, "idc_transition.py")
+GATE_REPAIR = os.path.join(HERE, "idc_gate_repair.py")
 
 # kind -> the head-branch prefix an autonomous merge of that kind must carry.
 KIND_PREFIX = {"planning": "plan/", "recirculation": "recirc/", "intake": "intake/"}
@@ -104,12 +110,10 @@ def _merge_pr(repo, pr):
     return after, branch_deleted
 
 
-def _transition(args, extra):
-    """Run the engine (idc_transition.py) as the single write door for the dispose/unblock tail.
-    Forwards --repo and any backend/owner/project/tracker the caller passed. A non-zero engine exit
-    raises FinishError carrying the engine's exit code (2 denied / 3 resumable), so a refused dispose
-    stops the tail BEFORE the unblock."""
-    cmd = [sys.executable, TRANSITION, "--repo", args.repo]
+def _forward(script, args):
+    """The shared flag-forwarding for the sibling doors this finisher shells out to: the governed repo
+    plus whatever backend/tracker/owner/project the caller passed."""
+    cmd = [sys.executable, script, "--repo", args.repo]
     if args.backend:
         cmd += ["--backend", args.backend]
     if args.tracker:
@@ -118,12 +122,59 @@ def _transition(args, extra):
         cmd += ["--owner", args.owner]
     if args.project:
         cmd += ["--project", str(args.project)]
-    cmd += extra
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    return cmd
+
+
+def _transition(args, extra):
+    """Run the engine (idc_transition.py) as the single write door for the dispose. A non-zero engine
+    exit raises FinishError carrying the engine's exit code (2 denied / 3 resumable), so a refused
+    dispose stops the tail BEFORE the pointer is finished."""
+    r = subprocess.run(_forward(TRANSITION, args) + extra, capture_output=True, text=True)
     if r.returncode != 0:
         raise FinishError(f"engine op {' '.join(extra)} failed (exit {r.returncode}): "
                           f"{r.stderr.strip()[:200]}", code=r.returncode if r.returncode in (2, 3) else 2)
     return r.stdout
+
+
+def _finish_pointer(args, apply_):
+    """Finish the gate's pointer through the GUARDED pointer-finish door — never the engine's raw
+    `unblock`. Returns the door's plan dict.
+
+    WHY THE DOOR. The engine's `unblock --by` removes the NAMED edge and then sets Todo; it never
+    looks at what ELSE blocks the pointer. This tail is the mechanized executor that
+    `idc:idc-gate-issue`'s step 4 recommends, so a raw unblock HERE would admit a pointer Blocked by
+    `[gate, other]` past `other` WITHOUT `other`'s proof — and Autorun treats an unblocked
+    Consideration pointer as approved work. That is exactly the admission
+    `idc_gate_repair.py --finish-pointer` refuses (it re-reads the gate's on-disk proof AND requires
+    the proven gate to be the SOLE remaining blocker). The rule lives in that ONE door; a guard the
+    door keeps but its recommended executor skips is not a guard, so this routes through it instead of
+    re-implementing the check here.
+
+    DRY RUN FIRST, THEN `--apply` — the door's own documented contract. The dry run is ADVISORY only:
+    it yields the structured plan whose `other_blockers` this finisher's receipt reports, while
+    `--apply` re-reads every precondition itself. The door stays the only decider.
+    """
+    cmd = _forward(GATE_REPAIR, args) + ["--finish-pointer", "--gate", str(int(args.gate)),
+                                         "--pointer", str(int(args.pointer)), "--json"]
+    if apply_:
+        cmd.append("--apply")
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise FinishError(f"pointer-finish refused for #{args.pointer}: {r.stderr.strip()[:400]}",
+                          code=r.returncode if r.returncode in (2, 3) else 2)
+    try:
+        return json.loads(r.stdout)
+    except ValueError as e:
+        raise FinishError(f"could not parse the pointer-finish plan for #{args.pointer} ({e})")
+
+
+def _pointer_step(plan):
+    """The door's pointer step: its `status` is the real outcome (applied / satisfied / refused) and
+    its `other_blockers` name the remainders a refusal is protecting."""
+    for step in plan.get("steps") or []:
+        if step.get("id") == "unblock-pointer":
+            return step
+    return {}
 
 
 # ── autonomous: merge a planning/recirculation/intake PR that closes NO tracker item ──────────────
@@ -148,6 +199,22 @@ def cmd_autonomous(args):
 
 
 # ── requirements: merge the bound gate PR (with approval) then dispose-before-unblock ─────────────
+def _nums(nums):
+    return " + ".join(f"#{int(n)}" for n in nums)
+
+
+def _receipt(args, branch_deleted, unblock, remaining):
+    """The requirements receipt. `unblock` carries the pointer step's REAL outcome (applied /
+    satisfied / refused) and `remaining_blockers` names why a refusal held — a receipt that reported
+    only the dispose would read as a finished admission while the pointer sits Blocked."""
+    return {"op": "pr-finish", "mode": "requirements", "pr": int(args.pr), "gate": int(args.gate),
+            "pointer": int(args.pointer), "state": "MERGED", "branch_deleted": branch_deleted,
+            "tracker_mutation": ("dispose(gate-approved)+unblock" if unblock == "applied"
+                                 else "dispose(gate-approved)"),
+            "unblock": unblock, "remaining_blockers": remaining,
+            "operator_approved": bool(args.operator_approved)}
+
+
 def _bound_pr(args):
     """The gate's own recorded approval PR: EXACTLY ONE idc-gate-pr body marker, naming THIS --pr.
     Refuses a markerless / double-marked / other-PR-bound gate BEFORE any tracker mutation."""
@@ -182,12 +249,29 @@ def cmd_requirements(args):
         _, branch_deleted = _merge_pr(args.repo, args.pr)
     # MERGED confirmed → the guarded dispose-before-unblock tail (dispose FIRST; if it fails, no unblock).
     _transition(args, ["dispose", "--disposition", "gate-approved", "--num", str(int(args.gate))])
-    _transition(args, ["unblock", "--num", str(int(args.pointer)), "--by", str(int(args.gate))])
-    receipt = {"op": "pr-finish", "mode": "requirements", "pr": int(args.pr), "gate": int(args.gate),
-               "pointer": int(args.pointer), "state": "MERGED", "branch_deleted": branch_deleted,
-               "tracker_mutation": "dispose(gate-approved)+unblock",
-               "operator_approved": bool(args.operator_approved)}
-    print(json.dumps(receipt, sort_keys=True))
+
+    # The pointer goes through the guarded door (see _finish_pointer): read its plan, then apply.
+    # The branch turns on the door's OWN verdict, never on a re-reading of its inputs — a pointer that
+    # is already Todo reads `satisfied` (an honest no-op) even if a stale edge lingers, and only the
+    # door decides that.
+    planned = _pointer_step(_finish_pointer(args, False))
+    remaining = ([int(n) for n in (planned.get("other_blockers") or [])]
+                 if planned.get("status") == "refused" else [])
+    if remaining:
+        # The dispose STANDS — its approval was verified, so the gate's Done is honest and rolling it
+        # back to hide this would itself be false history. Only the unblock is refused. Report exactly
+        # that (naming the remainders) and exit NONZERO: reporting success would hide a pointer left
+        # Blocked, and the caller must surface undone work.
+        print(json.dumps(_receipt(args, branch_deleted, "refused", remaining), sort_keys=True))
+        raise FinishError(
+            f"requirements: gate #{args.gate} is disposed (its approval was verified — that Done is "
+            f"real and stands), but the pointer-finish door REFUSED #{args.pointer}: it is also "
+            f"blocked by {_nums(remaining)}, and the engine's `unblock --by` would drop only gate "
+            f"#{args.gate}'s edge and then set Todo — admitting it past {_nums(remaining)} without "
+            f"their proof. #{args.pointer} is left Blocked. Resolve {_nums(remaining)} through their "
+            "own doors, then re-run this command to converge.")
+    outcome = _pointer_step(_finish_pointer(args, True)).get("status") or "applied"
+    print(json.dumps(_receipt(args, branch_deleted, outcome, []), sort_keys=True))
     return 0
 
 

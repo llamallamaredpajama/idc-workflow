@@ -92,20 +92,26 @@ open gates at the start of a run: `query` for `operator-action` issues and confi
 **Think PR has merged**. Only once it has: **first close the gate** through the engine's guarded
 `dispose --disposition gate-approved --num <gate#>` — it re-verifies the gate's own recorded
 approval artifact (the merged `idc-gate-pr`) before minting `Done`, so the close *records* the
-operator's approval rather than *being* it. Then, **only after the dispose succeeds**, for each
-thing the gate blocked, run the engine's `unblock --num <dependent#> --by <gate#>` — one guarded,
-journaled op that removes the `gate blocks <dependent>` dependency (verified absent) and moves the
-dependent to `Status=Todo` (never a raw dependency edit).
+operator's approval rather than *being* it. Then, **only after the dispose succeeds**, finish each
+thing the gate blocked through the guarded **pointer-finish door** (below) — never a bare engine
+`unblock`: the door re-reads the gate's journaled proof **and** refuses unless that gate is the
+dependent's **sole remaining blocker** before running the engine's own journaled op to move the
+dependent to `Status=Todo` (never a raw dependency edit), so a dependent held by other blockers stays
+`Blocked` until they resolve through their own doors.
 
 > **Mechanized tail — `idc_pr_finish.py requirements`.** Steps "confirm the Think PR merged → guarded
-> dispose → unblock the dependents" are exactly the sanctioned PR finisher's `requirements` mode
+> dispose → finish the dependent" are exactly the sanctioned PR finisher's `requirements` mode
 > (github — the Think PR is a github artifact; forward the same backend flags the engine tail needs):
 > `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_pr_finish.py" requirements --repo "$PWD" --backend github
 > --owner "$OWNER" --project "$PROJ" --pr <think-PR> --gate <gate#> --pointer <dependent#>` (the
 > subcommand comes FIRST — the shared flags live on it). On an **already-merged** Think PR (the async/web-merge
 > path) it re-verifies the gate's single bound `idc-gate-pr` marker, runs the guarded
-> `dispose --disposition gate-approved`, then the `unblock` — dispose FIRST, and if the dispose fails
-> it never unblocks. For an **in-session** approval where the operator has given an unambiguous GO but
+> `dispose --disposition gate-approved`, then finishes the dependent through the same guarded
+> pointer-finish door — dispose FIRST, and if the dispose fails it never unblocks. If the dependent is
+> held by **other** blockers the dispose **stands** (that approval was verified — the `Done` is real)
+> while the door refuses, and the finisher exits **non-zero** naming them with the dependent left
+> `Blocked`; resolve them through their own doors and re-run to converge. For an
+> **in-session** approval where the operator has given an unambiguous GO but
 > the Think PR is still open, add `--operator-approved` — the finisher then merges the bound PR before
 > the same dispose-before-unblock tail. **IDC never infers human approval**: pass `--operator-approved`
 > ONLY after an unambiguous user instruction in the current session; absent it, an open Think PR leaves
@@ -256,9 +262,12 @@ so the engine binds approval to that PR's merge.
    never waiting**. On a detected GO: **first close the decision gate as a journaled cleanup** via
    `dispose --disposition gate-approved --num <gate#>` — it re-verifies the GO artifact (the merged
    `idc-gate-pr` decision-PR, or the `decision`+`decision-approved` label pair on this
-   decision-titled gate) before minting `Done`. Then, **only after the dispose succeeds**, for each
-   gated dependent, run the engine's `unblock --num <dependent#> --by <gate#>` — the one guarded op
-   that removes the blocks dependency and moves the dependent to `Status=Todo` — never unblock first,
+   decision-titled gate) before minting `Done`. Then, **only after the dispose succeeds**, finish each
+   gated dependent through the guarded **pointer-finish door**
+   (`idc_gate_repair.py --finish-pointer`, exactly as the requirements gate above) — never a bare
+   engine `unblock`: it requires the gate's journaled proof **and** that gate to be the dependent's
+   **sole remaining blocker** before moving it to `Status=Todo`, so a dependent held by other blockers
+   stays `Blocked` until they resolve through their own doors — never unblock first,
    so a GO revoked between detection and the dispose (label pulled, `decision-rejected` added) can
    never leave dependents unblocked; the same interrupted-run recovery applies (a `Done` gate with
    still-`Blocked` dependents → finish the unblock on the next re-check). (An in-session decision-PR

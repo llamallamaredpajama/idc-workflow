@@ -69,11 +69,21 @@ sys.stderr.write("gh stub: unhandled " + repr(args) + "\n"); sys.exit(99)
 STUB
 chmod +x "$WORK/bin/gh"
 
-git init -q --bare "$ORIGIN"
+# PIN the fixture's base branch to `main`. A bare `git init` takes its branch name from ambient
+# `init.defaultBranch`, which is NOT the same everywhere: this repo's dev machines resolve `main`,
+# while a stock Ubuntu CI runner still resolves `master`. The gh stub above pushes each merge to
+# `main`, so under an ambient `master` wave 1 CREATED a stray `main` and wave 2's push of a
+# master-based merge onto it was a non-fast-forward — the stub died mid-merge and finish of #2 never
+# reported ok. That is why this suite passed locally and was red on CI for months. Pinning removes
+# the ambient dependency; it narrows nothing, because branch-name agnosticism is not what this phase
+# asserts (idc_git_janitor.default_branch already resolves main OR master, per phase1-git-janitor).
+git init -q --bare -b main "$ORIGIN"
 git clone -q "$ORIGIN" "$REPO" 2>/dev/null
+gitc symbolic-ref HEAD refs/heads/main   # clone of an EMPTY origin: pin the unborn HEAD explicitly
 gitc config user.email t@example.com; gitc config user.name tester
 echo hello > "$REPO/README.md"; gitc add -A; gitc commit -qm init
 BASE="$(gitc symbolic-ref --short HEAD)"
+[ "$BASE" = "main" ] || fail "fixture invariant: the base branch must be 'main' (the gh stub merges into main), got '$BASE' — restore the branch pin above"
 gitc push -q origin "HEAD:$BASE"
 mkdir -p "$REPO/docs/workflow"; printf 'backend: filesystem\n' > "$REPO/docs/workflow/tracker-config.yaml"
 TRACKER="$REPO/TRACKER.md"

@@ -153,6 +153,16 @@ Nothing noticed: the acceptance check audits only merged-`Done` items and the dr
 `idc_finish_coherence.py` asks the missing question, reusing the janitor's existing coherence verdict
 rather than minting a second definition of it.
 
+**A handoff is not a data-loss event.** Detecting the stale board afterwards is the net; the hole
+itself is closed by making the finish tail *stateful* across sessions. It writes the obligations
+ledger's own `mid_finish:<item>` taint immediately before the merge and clears it only after the board
+flip has been verified — the recipe that ledger documented from the start and nothing had yet used.
+`idc_finish_recover.py`, run from autorun's preflight on every pass, reads that taint **unscoped**
+(kill-recovery spans sessions, the same reason `idc_recirc_reconcile.py` reads unscoped), consults the
+board before the ledger — a stale taint on an already-`Done` item is cleared, not re-closed, so a
+second pass never double-records — and completes the rest through the existing `--close-only` door
+rather than minting a write path. Nothing it cannot discharge is dropped: those stay owed and named.
+
 **Green code is not a working product.** Every guardrail above verifies code, and the things that
 most often break a deployment are not in the reviewed diff at all — an uncreated bucket, an unset env
 var, a hand-granted role. IDC cannot know how to deploy an arbitrary product, so the project declares

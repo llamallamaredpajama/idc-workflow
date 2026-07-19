@@ -66,6 +66,7 @@ for t in \
   phase4-recirc-caps \
   phase4-atomic-close \
   phase4-git-finish \
+  phase4-mid-finish-recovery \
   phase4-itemid-cache \
   phase4-marker-emit \
   phase5-ripple \

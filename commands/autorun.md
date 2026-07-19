@@ -99,6 +99,25 @@ only when a full pass leaves nothing actionable:
    NOT on the stop path, so the Stop gate's 0-GraphQL guarantee is unaffected. It is **fail-soft** (a
    reconciliation error never halts the drain) and **repo-gated**; its `reconcile:` verdict is advisory
    — surface a `reconcile: unknown` (an unreadable board) in the exit report, never as a clean state.
+   **Then complete any finish a dead session left in flight (handoff safety — run at the top of
+   EVERY pass).** The finish tail merges the PR — which also closes the linked issue, via the
+   mandated closing keyword — several steps before it flips the board. A session that died in that
+   window left the item **shipped, closed, and still `In Progress`**; the tail records that window as
+   a `mid_finish:<item>` obligation in the session ledger, and a LATER session is the only thing that
+   can discharge it:
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_finish_recover.py" --repo "$PWD" --session-id "$CLAUDE_CODE_SESSION_ID"
+   ```
+   It reads the ledger **across sessions** (the taint belongs to a session that is already dead),
+   asks the **board** about each item first — an item already `Done` just has its stale taint cleared,
+   never re-closed — and completes the rest through the existing idempotent
+   `idc_git_finish.py --close-only` door, which journals the close exactly once. Costs **no** board
+   read at all when there is nothing to recover (a local ledger read), is **fail-soft** (never halts
+   the drain), **repo-gated**, and safe to run repeatedly. Its verdict is advisory: relay
+   `recovered:` / `cleared:` in the exit report, and treat **`unresolved:`** as a live obligation the
+   run still owes — those taints are deliberately PRESERVED, never dropped, and the item is named
+   with the reason the door refused (most often: the finish died *before* the merge, so nothing
+   shipped and the item is simply still open).
    **Then synthesize any phantom-idle implementer (drop H — run at the top of EVERY pass, beside the
    reconcile above).** An implementer teammate can go IDLE without reporting: its item sits
    `Stage = Buildable ∧ Status = In Progress` (claimed) but is never advanced, and the drain is BLIND

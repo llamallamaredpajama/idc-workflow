@@ -204,12 +204,25 @@ def main(argv=None):
 
     if stale:
         print("finish-coherence: gap " + " ".join(f"#{n}" for n in stale))
-        # The remediation names the EXISTING idempotent doors — this module mints no new write path.
+        # The remediation names EXISTING doors only — this module mints no write path of its own.
+        #
+        # IT MUST BE BACKEND-CORRECT. `idc_git_finish.py --close-only` resolves the merged PR's head
+        # branch through `gh`, so it exists ONLY on the github backend; naming it to a filesystem repo
+        # hands the operator a command that dies on a missing `gh` before it does anything. A gate that
+        # reports a real problem and then points at a door that cannot open is worse than one that says
+        # nothing, because the operator burns their trust on the instruction rather than the finding.
+        batch = ("/idc:janitor --apply-safe (the batch door; it re-derives the same findings, so "
+                 "running it twice applies nothing the second time and writes no second record)")
+        if args.backend == "github":
+            door = (f"per item: idc_git_finish.py --close-only --pr <N> --issue {stale[0]} — or "
+                    f"{batch}")
+        else:
+            door = (f"{batch}. The per-item --close-only door needs a merged pull request, so it does "
+                    f"not apply on the filesystem backend")
         sys.stderr.write(
-            "idc-finish-coherence: these items shipped but the board never advanced. Repair each "
-            "through the existing door — `idc_git_finish.py --close-only --pr <N> --issue <M>` (per "
-            "item, idempotent, journaled) — or `/idc:janitor --apply-safe` for the batch. Re-run this "
-            "check afterwards; it is safe to re-run.\n")
+            f"idc-finish-coherence: {len(stale)} item(s) shipped but the board never advanced. "
+            f"Repair through the existing door — {door}. Then re-run this check; it is read-only and "
+            f"safe to re-run.\n")
         sys.exit(1)
     print("finish-coherence: ok")
     sys.exit(0)

@@ -138,6 +138,24 @@ run python3 "$DRAIN" --tracker "$NG/TRACKER.md" --coherence --live
 printf '%s' "$out" | grep -q '^drain: complete' \
   || fail "A2c: an inapplicable coherence check must not block completion, got: $out"
 
+# A2d — THE REMEDIATION MUST BE A DOOR THAT OPENS. `idc_git_finish.py --close-only` resolves the
+# merged PR's head branch through `gh`, so it exists only on the github backend — naming it to a
+# filesystem repo hands the operator a command that dies before doing anything. A gate that reports a
+# real problem and then points nowhere useful spends the operator's trust on the instruction instead
+# of the finding. (Verified by running --close-only on a filesystem repo: it fails on a missing `gh`.)
+git -C "$R" checkout -q -b worktree-build-3 2>/dev/null || true
+python3 "$TRK" --tracker "$R/TRACKER.md" create --title again --stage Buildable >/dev/null   # #3
+python3 "$TRK" --tracker "$R/TRACKER.md" claim --num 3 --agent bot >/dev/null
+echo y > "$R/y"; git -C "$R" add -A; git -C "$R" commit -qm w3
+git -C "$R" checkout -q main; git -C "$R" merge -q --no-ff worktree-build-3 -m "merge 3"
+rem="$(python3 "$COH" --repo "$R" --tracker "$R/TRACKER.md" 2>&1 >/dev/null)"
+printf '%s' "$rem" | grep -q 'apply-safe' \
+  || fail "A2d: the filesystem remediation must name the batch door, got: $rem"
+printf '%s' "$rem" | grep -q 'does not apply on the filesystem backend' \
+  || fail "A2d: the filesystem remediation must say the per-item --close-only door does NOT apply here, got: $rem"
+# Restore the honest board so the later assertions start from a known state.
+python3 "$TRK" --tracker "$R/TRACKER.md" close --num 3 >/dev/null
+
 # A3 — GROUND TRUTH FIRST: with no board arguments the gate cannot prove anything and must be
 # INDETERMINATE. Reading "I did not look" as "ok" is the hollow clean this whole suite exists over.
 run python3 "$COH" --repo "$R"

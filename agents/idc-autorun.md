@@ -122,8 +122,11 @@ loop below). Then the two lanes:
      `--coherence` catches items whose work SHIPPED (PR merged, issue closed) while the board still
      advertises them as in flight — the drain counts only `Todo`, so it never saw them and printed a
      clean terminal `complete` over a board that was lying; `--live` catches a project-DECLARED live
-     surface whose evidence is missing or has expired. A repo that declares no live surface reports
-     `live: not-declared` and is never gated, so both flags are safe to pass everywhere.
+     surface whose own `verify:` command failed, or was never executed against the code running now.
+     The drain AUDITS (read-only — it executes nothing, so the stop path stays fast); the EXECUTION
+     happens in `idc:idc-build`'s wave close and in the live-gap remediation below. A repo that declares
+     no live surface reports `live: not-declared` and is never gated, so both flags are safe to pass
+     everywhere.
    Both apply the **identical** Buildable-eligibility predicate over the **whole board** — the drain
    helper is the predicate's single source of truth (never re-derive it in prose or by hand), and
    the github mode pages **every** item, so **never** substitute a bare
@@ -137,8 +140,12 @@ loop below). Then the two lanes:
    `drain: coherence-gap` (exit 4, `--coherence` — the named items shipped but the board never advanced;
    repair each via the idempotent `idc_git_finish.py --close-only --pr <N> --issue <M>`, or
    `/idc:janitor --apply-safe` for the batch, then re-check), `drain: live-gap` (exit 4, `--live` — a
-   declared live surface has missing or expired evidence; drive it and commit the evidence record, and
-   if you genuinely cannot, report that plainly rather than reporting the phase done),
+   declared live surface has no current passing verification; run
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_live_check.py" --repo "$PWD" --run`, which executes the
+   surface's own `verify:` command and regenerates its evidence from the real result. A non-zero exit is
+   a **finding you work**, not a page: read the captured output, fix it or recirculate it, re-run.
+   Escalate to the operator only when the pipeline truly cannot proceed — an `attested: true` surface,
+   or a missing credential no agent holds),
    and a hard board-read failure (exit 2, no `drain:` line). Do not exit on it; treat the lane as
    possibly-unfinished and let the next `/loop` iteration re-check.
 5. **Re-loop to a fixpoint, then exit.** The pipe is **not one-shot**: a build triplet can surface a

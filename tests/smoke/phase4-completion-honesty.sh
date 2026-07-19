@@ -13,22 +13,42 @@
 #
 # THE TWO GUARDS UNDER TEST
 #   scripts/idc_finish_coherence.py — does the board still claim work that already shipped?
-#   scripts/idc_live_check.py       — was the project's DECLARED live surface actually driven, on the
-#                                     code that is running now?
+#   scripts/idc_live_check.py       — does the project's DECLARED live surface actually WORK, measured
+#                                     by running the project's own verify command against the code
+#                                     that is running now?
 # plus their wiring into idc_autorun_drain.py's wave close, where exit 4 is already the code the Stop
 # fixpoint gate refuses a stop on (so enforcement needs no new hook).
 #
-# RED-WHEN-BROKEN. Every guard below was broken in the real source, one at a time, and observed to
-# turn this suite RED before it was committed (16 mutations; receipts on the branch). Three test
-# defects were found that way and fixed — two file-wide greps that passed with the real command
-# deleted, and the board_scanned guard, which no CLI path could reach until section F existed.
+# THE SECOND GATE WAS REBUILT (section G). Its first cut required a HUMAN to drive the deployed app and
+# hand-write an evidence note. That is wrong twice: it wakes an operator in the middle of an unattended
+# run to answer a question the pipeline can answer itself, and a typed claim is not a measurement — the
+# same optimism that read "merged" as "works" reads "I tested it" as "it works". The project now
+# declares a `verify:` COMMAND per surface and IDC RUNS it; the verdict is that command's real exit
+# code and the evidence is a machine-generated receipt. Sections B and G split along that seam: B
+# audits the RECORD's rules, G proves the record comes from a real execution (every case there uses a
+# verify script that leaves a filesystem sentinel, so "it ran" is observed, never inferred).
 #
-# ONE HONEST EXCEPTION, stated rather than glossed: the commit-EXISTENCE rule in idc_live_check.py
-# cannot be shown red on its own, because any commit that fails `rev-parse` also fails the
-# `merge-base --is-ancestor` rule right after it. It was verified functional in isolation (with the
-# ancestor rule disabled it still rejects a fabricated sha), and the ancestor rule IS individually
-# proven by B7b. Treat the existence check as a better error message for a case the ancestor rule
-# already catches — not as an independent guard.
+# RED-WHEN-BROKEN. Every guard below was broken in the real source, one at a time, and observed to turn
+# this suite RED before it was committed (16 mutations for the original two gates; 19 more for the
+# executable rebuild). That discipline paid again: G5 was written for a bounded-output rule and instead
+# exposed a real hang — redaction ran over the WHOLE capture with an unbounded quantifier, so a verify
+# script printing 400 KB wedged the gate for minutes AFTER its timeout could no longer save it. Fixed
+# by truncating before redacting and bounding every quantifier.
+#
+# THREE HONEST EXCEPTIONS, stated rather than glossed:
+#   1. The commit-EXISTENCE rule in idc_live_check.py cannot be shown red on its own, because any
+#      commit that fails `rev-parse` also fails the `merge-base --is-ancestor` rule right after it. It
+#      was verified functional in isolation (with the ancestor rule disabled it still rejects a
+#      fabricated sha), and the ancestor rule IS individually proven by B7b. Treat the existence check
+#      as a better error message for a case the ancestor rule already catches, not an independent guard.
+#   2. G2 (the default AUDIT path must execute nothing) is NOT isolated. Making the audit execute turns
+#      the suite red at B3 first, because section B's fixture declares a verify script that does not
+#      exist on disk — the same defect, caught one section earlier. G2 states the property by mechanism
+#      (the sentinel), and the mutation IS caught; it is simply not caught by G2's own line.
+#   3. G0 (an undeclared repo executes nothing even under --run) cannot be shown red by a single edit:
+#      with zero declared surfaces there is nothing to iterate over, so no one-line change makes it
+#      execute. It is a guard against a future regression that synthesizes a default surface, and it is
+#      asserted by mechanism — but nobody should read it as having been proven red.
 #
 # The single edit that makes each assertion fail:
 #   * A1/A2  delete the `if f.get("op") not in STALE_OPS: continue` filter in idc_finish_coherence.py
@@ -56,6 +76,31 @@
 #            (a slow scan would then wedge a stop instead of degrading to "allow and retry").
 #   * E2     drop `--coherence`/`--live` from the Stop gate's drain re-run → E2 goes RED (the
 #            filesystem stop path stops enforcing what the drain loop enforces).
+#
+# The executable rebuild's mutations (all run, all observed RED at the named assertion unless noted):
+#   * G1      make `--run` skip run_verify/write_evidence → G1 RED (nothing is ever executed).
+#   * G3      write the receipt only when the command passed → G3 RED (yesterday's PASS survives
+#             today's failure, so the audit keeps reporting ok while the product is broken).
+#   * G4      turn `redact()` into a passthrough → G4 RED (a real token lands in a COMMITTED file).
+#   * G5      turn `_tail()` into a passthrough → G5 RED (an 800 KB evidence record).
+#   * G6      drop the `timeout=` from the verify subprocess → G6 RED (a hung probe never returns).
+#   * G7      delete the shell-126/127 branch → G7 RED (a deleted verify script starts reading as
+#             "the product is broken" instead of "the check is broken").
+#   * G8      print `live: ok` for an attested surface → G8 RED (an attestation becomes
+#             indistinguishable from a measured run).
+#   * G9      drop `live: ok (attested)` from the drain's clean set → G9 RED (an attesting repo can
+#             never reach `drain: complete`).
+#   * C3b     add `--run` to the drain's live-check argv → C3b RED (the stop path starts executing
+#             browser suites inside two nested timeouts).
+#   * B10     delete the `mode != executed` branch → B10 RED (a hand-written claim satisfies the gate
+#             again — the exact behaviour this rebuild removes).
+#   * B11     delete the recorded-vs-declared command comparison → B11 RED (swap the real probe for
+#             `true` and inherit its green).
+#   * B12/B12b/B12c  delete the no-`verify:` refusal / the both-declared refusal / the strict boolean
+#             → each RED (an unverifiable declaration stops being INDETERMINATE).
+#   * E4b     revert the Stop gate's live-gap cure to the human instruction → E4b RED.
+#   * E5      put "drive the journey" back into commands/autorun.md → E5 RED.
+#   * B2/B4   re-verified after the rebuild: still individually RED.
 #
 # Usage: bash tests/smoke/phase4-completion-honesty.sh   (exit 0 = pass)
 set -uo pipefail
@@ -192,27 +237,34 @@ run python3 "$LIVE" --repo "$L"
 [ "$rc" = 0 ] && [ "$out" = "live: not-declared" ] \
   || fail "B2: the shipped template must be inert (not-declared), got rc=$rc out=$out"
 
-# Now DECLARE a surface — opting in is the only way to be gated.
+# Now DECLARE a surface — opting in is the only way to be gated. The declaration names the COMMAND that
+# drives the real deployment; IDC runs it and never learns what a browser or an HTTP client is.
 cat > "$L/WORKFLOW-config.yaml" <<'EOF'
 project:
   name: demo
 live_verification:
   surfaces:
     - name: web
+      verify: bash scripts/verify-live-web.sh
       journey: sign in -> ingest text -> open the item -> chat
       paths: [services/, infra/]
 EOF
 git -C "$L" add -A; git -C "$L" commit -qm declare
 
-# B3 — declared but never driven is a GAP. This is the state the real repo shipped in.
+# B3 — declared but never verified is a GAP. This is the state the real repo shipped in.
 run python3 "$LIVE" --repo "$L"
 [ "$rc" = 1 ] && [ "$out" = "live: gap web" ] \
   || fail "B3: a declared surface with no evidence must be a gap, got rc=$rc out=$out"
 
-# Record honest evidence for exactly what is running now.
+# Section B audits the RECORD's rules, so it writes receipts of exactly the shape `--run` generates
+# (section G is what proves `--run` really produces this shape, by running a real command). A receipt
+# that is missing the executed provenance is B10's case, not this one.
 SHA="$(git -C "$L" rev-parse HEAD)"
 ev() { printf '<!-- idc-live-evidence: %s -->\n' "$1" > "$L/docs/workflow/live-verification/web.md"; }
-ev "{\"surface\":\"web\",\"commit\":\"$SHA\",\"observed\":\"ingest 200; open 200 signed URL; chat 200\"}"
+ev_ok() { # $1 = commit, $2 = observed
+  ev "{\"surface\":\"web\",\"mode\":\"executed\",\"command\":\"bash scripts/verify-live-web.sh\",\"exit_code\":0,\"commit\":\"$1\",\"observed\":\"$2\"}"
+}
+ev_ok "$SHA" "ingest 200; open 200 signed URL; chat 200"
 git -C "$L" add -A; git -C "$L" commit -qm evidence
 run python3 "$LIVE" --repo "$L"
 [ "$rc" = 0 ] && [ "$out" = "live: ok" ] \
@@ -229,7 +281,7 @@ run python3 "$LIVE" --repo "$L"
 
 # B5 — but an UNRELATED change must not. Evidence that expires on every commit is noise, and noise
 # gets suppressed.
-ev "{\"surface\":\"web\",\"commit\":\"$(git -C "$L" rev-parse HEAD)\",\"observed\":\"re-driven: all green\"}"
+ev_ok "$(git -C "$L" rev-parse HEAD)" "re-run: all green"
 git -C "$L" add -A; git -C "$L" commit -qm re-evidence
 mkdir -p "$L/docs/notes"; echo note > "$L/docs/notes/x.md"
 git -C "$L" add -A; git -C "$L" commit -qm unrelated
@@ -245,7 +297,7 @@ run python3 "$LIVE" --repo "$L"
 [ "$rc" = 2 ] || fail "B6: a corrupt evidence marker must be indeterminate (exit 2), got rc=$rc out=$out"
 
 # B7 — evidence naming a commit that does not exist proves nothing.
-ev '{"surface":"web","commit":"0123456789abcdef0123456789abcdef01234567","observed":"x"}'
+ev_ok "0123456789abcdef0123456789abcdef01234567" "x"
 run python3 "$LIVE" --repo "$L"
 [ "$rc" = 1 ] && [ "$out" = "live: gap web" ] \
   || fail "B7: a fabricated commit must not satisfy the gate, got rc=$rc out=$out"
@@ -257,21 +309,191 @@ git -C "$L" checkout -q -b side
 echo experiment >> "$L/services/app.py"; git -C "$L" add -A; git -C "$L" commit -qm side
 SIDE="$(git -C "$L" rev-parse HEAD)"
 git -C "$L" checkout -q main
-ev "{\"surface\":\"web\",\"commit\":\"$SIDE\",\"observed\":\"looked fine on my branch\"}"
+ev_ok "$SIDE" "looked fine on my branch"
 run python3 "$LIVE" --repo "$L"
 [ "$rc" = 1 ] && [ "$out" = "live: gap web" ] \
   || fail "B7b: evidence from an unmerged commit must not satisfy the gate, got rc=$rc out=$out"
 
 # B8 — an empty `observed` is not evidence.
-ev "{\"surface\":\"web\",\"commit\":\"$SHA\",\"observed\":\"   \"}"
+ev "{\"surface\":\"web\",\"mode\":\"executed\",\"command\":\"bash scripts/verify-live-web.sh\",\"exit_code\":0,\"commit\":\"$SHA\",\"observed\":\"   \"}"
 run python3 "$LIVE" --repo "$L"
 [ "$rc" = 2 ] || fail "B8: a blank observed field must fail closed (exit 2), got rc=$rc out=$out"
 
+# B10 — THE CENTRAL RULE OF THIS GATE: A TYPED CLAIM IS NOT A RUN. A record with no executed
+# provenance — the exact shape a human (or an agent taking the cheap path) hand-writes — must be
+# reported as never executed, however confident its prose. Before this rule, "I drove it and it worked"
+# in a committed file WAS the gate's pass condition, which is the same optimism that read "merged" as
+# "works" one layer up.
+ev "{\"surface\":\"web\",\"commit\":\"$(git -C "$L" rev-parse HEAD)\",\"observed\":\"I signed in and drove the whole journey, all green\"}"
+run python3 "$LIVE" --repo "$L"
+[ "$rc" = 1 ] && [ "$out" = "live: gap web" ] \
+  || fail "B10: a hand-written record must NOT satisfy a surface that declares a verify command, got rc=$rc out=$out"
+det="$(python3 "$LIVE" --repo "$L" 2>&1 >/dev/null)"
+printf '%s' "$det" | grep -q 'no EXECUTED verification' \
+  || fail "B10: the gap must say the surface was never executed, got: $det"
+
+# B11 — SWAPPING THE CHECK EXPIRES ITS RECEIPTS. Without this, a surface could be re-declared to run
+# `true` — or any weaker probe — and inherit the green of the real command it replaced, with no commit
+# landing on any watched path to expire it.
+ev_ok "$(git -C "$L" rev-parse HEAD)" "all green"
+run python3 "$LIVE" --repo "$L"
+[ "$rc" = 0 ] || fail "B11: precondition — the current receipt must pass, got rc=$rc out=$out"
+sed -i.bak 's|verify: bash scripts/verify-live-web.sh|verify: true|' "$L/WORKFLOW-config.yaml"
+run python3 "$LIVE" --repo "$L"
+[ "$rc" = 1 ] && [ "$out" = "live: gap web" ] \
+  || fail "B11: changing the declared verify command must expire its receipts, got rc=$rc out=$out"
+git -C "$L" checkout -q -- WORKFLOW-config.yaml 2>/dev/null || true
+rm -f "$L/WORKFLOW-config.yaml.bak"
+
 # B9 — a surface declared WITHOUT paths would have evidence that never expires, so the declaration
 # itself is refused rather than silently accepted as a permanent pass.
-printf 'live_verification:\n  surfaces:\n    - name: web\n' > "$L/WORKFLOW-config.yaml"
+printf 'live_verification:\n  surfaces:\n    - name: web\n      verify: true\n' > "$L/WORKFLOW-config.yaml"
 run python3 "$LIVE" --repo "$L"
 [ "$rc" = 2 ] || fail "B9: a surface with no paths must be refused (exit 2), got rc=$rc out=$out"
+
+# B12 — AND A SURFACE WITH NO WAY TO DRIVE IT IS INDETERMINATE, NEVER A PASS. This is the fail-closed
+# half of "verification is executed": a declaration IDC cannot execute must not resolve to silence.
+printf 'live_verification:\n  surfaces:\n    - name: web\n      paths: [services/]\n' > "$L/WORKFLOW-config.yaml"
+run python3 "$LIVE" --repo "$L"
+[ "$rc" = 2 ] || fail "B12: a surface with no verify command must be refused (exit 2), got rc=$rc out=$out"
+# B12b — and declaring BOTH is an ambiguity the gate refuses rather than resolving in either direction.
+printf 'live_verification:\n  surfaces:\n    - name: web\n      verify: true\n      attested: true\n      paths: [services/]\n' \
+  > "$L/WORKFLOW-config.yaml"
+run python3 "$LIVE" --repo "$L"
+[ "$rc" = 2 ] || fail "B12b: declaring both verify and attested must be refused (exit 2), got rc=$rc out=$out"
+# B12c — a mistyped `attested:` must not be read as either answer. Declared WITH a `verify:` command on
+# purpose, so this case can only be reached through the boolean rule: without the `verify:` it would
+# also trip B12's no-command refusal and would prove nothing on its own.
+printf 'live_verification:\n  surfaces:\n    - name: web\n      verify: true\n      attested: yep\n      paths: [services/]\n' \
+  > "$L/WORKFLOW-config.yaml"
+run python3 "$LIVE" --repo "$L"
+[ "$rc" = 2 ] || fail "B12c: a non-boolean attested value must be refused (exit 2), got rc=$rc out=$out"
+
+echo "== G. idc_live_check.py --run — the gate EXECUTES the project's own check"
+# WHY THIS SECTION EXISTS. Section B audits RECORDS; this one proves the records come from a real
+# execution. The gate's first cut asked a HUMAN to drive the app and type up what they saw — which
+# wakes an operator at 2am and accepts a claim in place of a measurement. Everything below asserts the
+# replacement: the project declares a COMMAND, IDC runs it, and the verdict is that command's real exit
+# code. Each case uses a verify script that leaves a filesystem SENTINEL, so "it ran" is observed, not
+# inferred from the verdict the run is supposed to produce.
+G="$WORK/run"; mkrepo "$G"; mkdir -p "$G/scripts"
+declare_surface() { # $1 = verify command, $2 = extra key line (may be empty)
+  { printf 'live_verification:\n  surfaces:\n    - name: web\n'
+    [ -n "$1" ] && printf '      verify: %s\n' "$1"
+    [ -n "${2:-}" ] && printf '      %s\n' "$2"
+    printf '      paths: [services/]\n'
+  } > "$G/WORKFLOW-config.yaml"
+}
+verify_script() { # $1 = body
+  printf '#!/bin/bash\ntouch "$PWD/ran.sentinel"\n%s\n' "$1" > "$G/scripts/verify.sh"
+}
+
+# G0 — THE FREE PATH IS FREE EVEN UNDER --run. A repo that declares nothing must not execute anything,
+# ever. Asserted by MECHANISM: the sentinel a run would leave is absent afterwards.
+verify_script 'exit 0'
+rm -f "$G/ran.sentinel"
+run python3 "$LIVE" --repo "$G" --run
+[ "$rc" = 0 ] && [ "$out" = "live: not-declared" ] \
+  || fail "G0: an undeclared repo must be not-declared even under --run, got rc=$rc out=$out"
+[ -e "$G/ran.sentinel" ] && fail "G0: --run executed something in a repo that declares no surface"
+
+# G1 — THE CORE: --run executes the declared command and the verdict is its real exit code.
+declare_surface 'bash scripts/verify.sh'
+git -C "$G" add -A; git -C "$G" commit -qm declare
+run python3 "$LIVE" --repo "$G" --run
+[ "$rc" = 0 ] && [ "$out" = "live: ok" ] || fail "G1: a passing verify command must be ok, got rc=$rc out=$out"
+[ -e "$G/ran.sentinel" ] || fail "G1: the verify command was never actually executed (no sentinel)"
+EV="$G/docs/workflow/live-verification/web.md"
+[ -f "$EV" ] || fail "G1: --run must generate the evidence record at $EV"
+for k in '"mode": "executed"' '"command": "bash scripts/verify.sh"' '"exit_code": 0' '"ran_at"'; do
+  grep -q "$k" "$EV" || fail "G1: the generated record must carry $k; got: $(cat "$EV")"
+done
+grep -q "\"commit\": \"$(git -C "$G" rev-parse HEAD)\"" "$EV" \
+  || fail "G1: the record must name the commit it ran against"
+
+# G2 — the fast AUDIT path then passes on that record and EXECUTES NOTHING. This is what the drain and
+# the Stop hook call; if it re-ran the command, every stop attempt would sit through a browser suite.
+rm -f "$G/ran.sentinel"
+run python3 "$LIVE" --repo "$G"
+[ "$rc" = 0 ] && [ "$out" = "live: ok" ] || fail "G2: the audit must pass on a fresh receipt, got rc=$rc out=$out"
+[ -e "$G/ran.sentinel" ] && fail "G2: the default (audit) path must NEVER execute the verify command"
+
+# G3 — A FAILING COMMAND IS A FINDING, and it INVALIDATES the green receipt it replaces. Writing only
+# on success would leave yesterday's passing record in place after today's run failed — the audit would
+# keep reporting ok while the command that just ran said the product was broken.
+verify_script 'exit 7'
+run python3 "$LIVE" --repo "$G" --run
+[ "$rc" = 1 ] && [ "$out" = "live: gap web" ] \
+  || fail "G3: a failing verify command must be a gap (exit 1), got rc=$rc out=$out"
+grep -q '"exit_code": 7' "$EV" || fail "G3: the record must be regenerated with the FAILING exit code"
+run python3 "$LIVE" --repo "$G"
+[ "$rc" = 1 ] || fail "G3: the audit must agree with the failing run, got rc=$rc out=$out"
+
+# G4 — NO SECRET EVER REACHES THE COMMITTED RECORD. A verify script drives a real deployment, so it
+# holds real credentials; the evidence file is committed. Redaction is asserted against the literal
+# values, in the file AND on the operator-facing stderr.
+verify_script 'echo "Authorization: Bearer ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"
+echo "API_KEY=sk-abcdefghijklmnopqrstuvwxyz012345"
+echo "url=https://user:hunter2@example.test/x"
+exit 0'
+err="$(python3 "$LIVE" --repo "$G" --run 2>&1 >/dev/null)"
+for secret in 'ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345' 'sk-abcdefghijklmnopqrstuvwxyz012345' 'hunter2'; do
+  grep -q "$secret" "$EV" && fail "G4: the generated evidence record leaked a credential ($secret)"
+  printf '%s' "$err" | grep -q "$secret" && fail "G4: stderr leaked a credential ($secret)"
+done
+grep -q 'REDACTED' "$EV" || fail "G4: the record must show the redaction, not silently drop the output"
+
+# G5 — the record stays BOUNDED. An unbounded capture is both a review burden and more surface for a
+# leak to hide in.
+verify_script 'head -c 400000 /dev/zero | tr "\0" "x"
+exit 0'
+run python3 "$LIVE" --repo "$G" --run
+[ "$rc" = 0 ] || fail "G5: precondition — the noisy command must still pass, got rc=$rc out=$out"
+sz="$(wc -c < "$EV" | tr -d ' ')"
+[ "$sz" -lt 20000 ] || fail "G5: the evidence record must be bounded, got $sz bytes"
+
+# G6 — A HUNG PROBE IS INDETERMINATE, NOT A PASS, and it must not leave the child running. An
+# unbounded verify command would hang the wave close forever; an orphaned browser/dev-server would
+# outlive the run on the operator's machine.
+declare_surface 'bash scripts/verify.sh' 'timeout: 2'
+verify_script 'sleep 43'
+t0=$SECONDS
+run python3 "$LIVE" --repo "$G" --run
+el=$(( SECONDS - t0 ))
+[ "$rc" = 2 ] || fail "G6: a verify command that overruns its timeout must be indeterminate, got rc=$rc out=$out"
+[ "$el" -lt 25 ] || fail "G6: the timeout was not enforced (took ${el}s for a 2s ceiling)"
+sleep 1
+pgrep -f 'sleep 43' >/dev/null 2>&1 && fail "G6: the timed-out verify command's child process was orphaned"
+
+# G7 — A CHECK THAT CANNOT RUN AT ALL IS INDETERMINATE, NEVER A GAP AND NEVER A PASS. Deleting the
+# verify script must not read as "the product is broken" (which would send the pipeline to fix the
+# wrong thing) and must certainly not read as clean.
+declare_surface 'bash scripts/definitely-not-here.sh'
+run python3 "$LIVE" --repo "$G" --run
+[ "$rc" = 2 ] || fail "G7: an unexecutable verify command must be indeterminate (exit 2), got rc=$rc out=$out"
+
+# G8 — THE ATTESTED ESCAPE HATCH IS VISIBLE. Some surfaces genuinely cannot be automated, so the
+# hand-written path survives — but on its OWN verdict line, so a typed claim can never be read as a
+# measurement by anything downstream.
+declare_surface '' 'attested: true'
+git -C "$G" add -A; git -C "$G" commit -qm attested
+printf '<!-- idc-live-evidence: {"surface":"web","mode":"attested","commit":"%s","observed":"drove the kiosk by hand"} -->\n' \
+  "$(git -C "$G" rev-parse HEAD)" > "$EV"
+rm -f "$G/ran.sentinel"
+run python3 "$LIVE" --repo "$G" --run
+[ "$rc" = 0 ] && [ "$out" = "live: ok (attested)" ] \
+  || fail "G8: an attested surface must report its own clean line, got rc=$rc out=$out"
+[ "$out" = "live: ok" ] && fail "G8: an attestation must never print the same verdict as an executed run"
+[ -e "$G/ran.sentinel" ] && fail "G8: an attested surface must execute nothing"
+
+# G9 — and the drain must ACCEPT that distinct line as clean. A verdict the gate calls clean but the
+# shared classifier calls unrecognized would pin an attesting repo at `drain: unknown` forever — the
+# cry-wolf failure that gets a gate switched off.
+python3 "$TRK" --tracker "$G/TRACKER.md" init >/dev/null 2>&1 || true
+run python3 "$DRAIN" --tracker "$G/TRACKER.md" --coherence --live
+[ "$rc" = 0 ] || fail "G9: an attested-clean repo must reach a terminal drain verdict, got rc=$rc out=$out"
+printf '%s' "$out" | grep -q '^drain: complete' \
+  || fail "G9: the drain must accept `live: ok (attested)` as clean, got: $out"
 
 echo "== C. drain wiring — the gates must change the pipe's verdict, not just print a line"
 D="$WORK/drain"; mkrepo "$D"
@@ -307,14 +529,28 @@ printf '%s' "$out" | grep -q '^live: not-declared' \
   || fail "C2: --live on a repo declaring no surface must report not-declared (free), got: $out"
 
 # C3 — declaring a live surface with no evidence makes the SAME clean board non-terminal.
+mkdir -p "$D/scripts"
+printf '#!/bin/bash\ntouch "$PWD/drain-executed.sentinel"\nexit 0\n' > "$D/scripts/verify.sh"
 cat > "$D/WORKFLOW-config.yaml" <<'EOF'
 live_verification:
   surfaces:
     - name: web
+      verify: bash scripts/verify.sh
       paths: [services/]
 EOF
 git -C "$D" add -A; git -C "$D" commit -qm declare
 run python3 "$DRAIN" --tracker "$T" --coherence --live
+
+# C3b — THE DRAIN AUDITS, IT DOES NOT EXECUTE. Asserted FIRST, before the verdict, deliberately: the
+# Stop fixpoint gate re-runs this very drain on the stop path, so if `--live` executed the surface's
+# verify command, every stop attempt would sit through a browser suite inside two nested timeouts, and
+# a slow probe would become `drain: unknown` instead of an honest verdict. Asserted by MECHANISM (the
+# sentinel the command would leave behind), not by reading the flag list — and asserted ahead of C3 so
+# that the mechanism, not a downstream verdict, is what names the defect.
+# The single edit that makes this fail: add `--run` to the drain's `_run_wave_close_live` argv.
+[ -e "$D/drain-executed.sentinel" ] \
+  && fail "C3b: the drain's --live must NEVER execute a verify command (the stop path must stay fast)"
+
 [ "$rc" = 4 ] || fail "C3: a live gap must be non-terminal exit 4, got rc=$rc out=$out"
 printf '%s' "$out" | grep -q '^drain: live-gap' \
   || fail "C3: expected the drain: live-gap verdict token, got: $out"
@@ -441,8 +677,26 @@ done
 # assert the real invocation form, not a bare mention of the filename.
 grep -q 'python3 "\${CLAUDE_PLUGIN_ROOT}/scripts/idc_finish_coherence\.py"' "$PLUGIN/agents/idc-build.md" \
   || fail "E3: agents/idc-build.md wave close must INVOKE idc_finish_coherence.py"
-grep -q 'python3 "\${CLAUDE_PLUGIN_ROOT}/scripts/idc_live_check\.py"' "$PLUGIN/agents/idc-build.md" \
-  || fail "E3: agents/idc-build.md wave close must INVOKE idc_live_check.py"
+grep -q 'python3 "\${CLAUDE_PLUGIN_ROOT}/scripts/idc_live_check\.py"[^`]*--run' "$PLUGIN/agents/idc-build.md" \
+  || fail "E3: agents/idc-build.md wave close must INVOKE idc_live_check.py WITH --run (the seam where the declared command is actually executed)"
+
+# E5 — VERIFICATION IS EXECUTED, AND FAILURE IS PIPELINE WORK. The playbooks are the only thing that
+# tells an agent what to DO about `drain: live-gap`, and the first cut of this gate told it to go and
+# drive the app by hand and, failing that, to report that it could not — which either stalls an
+# unattended run or wakes the operator. Both halves are asserted: the executable cure must be ON the
+# remediation line, and no shipped file may still hand the journey to a human.
+#
+# The single edit that makes this fail: put "drive the journey" back into either autorun playbook, or
+# drop `--run` from the live-gap remediation.
+for f in "$PLUGIN/commands/autorun.md" "$PLUGIN/agents/idc-autorun.md" "$PLUGIN/agents/idc-build.md"; do
+  grep -q 'idc_live_check\.py[^`]*--run' "$f" \
+    || fail "E5: $(basename "$f") must name the EXECUTABLE cure \`idc_live_check.py … --run\` on the command line"
+done
+for f in "$PLUGIN/commands/autorun.md" "$PLUGIN/agents/idc-autorun.md" "$PLUGIN/agents/idc-build.md" \
+         "$PLUGIN/templates/WORKFLOW.md" "$PLUGIN/templates/WORKFLOW-config.yaml"; do
+  grep -niE 'drive the (declared )?journey|drive it and commit|if you cannot drive' "$f" \
+    && fail "E5: $(basename "$f") still instructs a HUMAN to drive the live surface — the pipeline executes the project's verify command instead"
+done
 
 # E4 — A BLOCK MUST NAME A CURE THAT CAN ACTUALLY CLEAR IT. The four non-terminal verdicts share one
 # block/allow decision but NOT one remedy, and the reason string is the operator's ONLY instruction.
@@ -473,6 +727,11 @@ printf '%s' "$live_reason" | grep -q 'evidence' \
   || fail "E4: a live-gap block must tell the operator to record fresh evidence, got: $live_reason"
 printf '%s' "$live_reason" | grep -q '/idc:recirculate' \
   && fail "E4: a live-gap block must NOT prescribe /idc:recirculate — it cannot produce live evidence"
+# E4b — AND THE CURE MUST BE A COMMAND THE PIPELINE RUNS, NOT AN ERRAND FOR A PERSON. This gate fires
+# in the middle of an unattended overnight drain. "Go and drive the app" there is not a remedy, it is a
+# phone call at 2am — and the pipeline is perfectly capable of running the project's own check itself.
+printf '%s' "$live_reason" | grep -q -- '--run' \
+  || fail "E4b: a live-gap block must name the executable cure (idc_live_check.py --run), got: $live_reason"
 
 # The two inbox-class verdicts must still prescribe the recirculate door — proving the branching above
 # narrowed the advice rather than simply deleting it.

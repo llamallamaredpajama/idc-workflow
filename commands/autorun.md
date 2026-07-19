@@ -159,8 +159,12 @@ only when a full pass leaves nothing actionable:
    #                the board, so a session dying in that window strands a SHIPPED item at `In Progress`
    #                forever. The drain counts only `Todo`, so it never saw those items and printed a
    #                clean terminal `complete` over them. Gap ⇒ `drain: coherence-gap` exit 4.
-   #   --live       every other gate verifies code, not the running product. Gap ⇒ `drain: live-gap`
-   #                exit 4. A repo that declares no live surface reports `live: not-declared` — free.
+   #   --live       every other gate verifies code, not the running product. The project declares each
+   #                live surface AND the `verify:` command that drives it; the drain AUDITS the receipt
+   #                (read-only, executes nothing, so the stop path stays fast) while `idc:idc-build`'s
+   #                wave close RUNS it. Gap ⇒ `drain: live-gap` exit 4, cured by
+   #                `idc_live_check.py --repo "$PWD" --run`. A repo that declares no live surface
+   #                reports `live: not-declared` — free, and nothing is ever executed.
    python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --tracker <TRACKER.md> --acceptance --coherence --live
    # github — pages the WHOLE board, same predicate (github wave-close acceptance runs in idc:idc-build Phase 4).
    # `--session-id` attributes the persisted drain verdict (.idc-drain-verdict.json) to THIS session so the
@@ -201,8 +205,14 @@ only when a full pass leaves nothing actionable:
    SHIPPED but the board never advanced; repair each through the idempotent
    `idc_git_finish.py --close-only --pr <N> --issue <M>`, or `/idc:janitor --apply-safe` for the batch,
    then re-check — the check is safe to re-run), **`drain: live-gap`** (exit 4, `--live` — a declared
-   live surface has missing or expired evidence; drive the journey and commit the evidence record, and
-   if you cannot, say so plainly in the exit report rather than reporting the phase done), a hard
+   live surface has no current passing verification; **run
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_live_check.py" --repo "$PWD" --run`**, which EXECUTES each
+   declared surface's own `verify:` command and regenerates its evidence record from the real result.
+   A non-zero exit is a **finding about the product, and it is yours to work**: read the captured output
+   in the evidence record, fix it (or file it as a recirculation) exactly as you would a failing test,
+   and re-run. Escalate to the operator ONLY when the pipeline genuinely cannot proceed — a surface
+   declared `attested: true`, or a failure that needs a credential or permission no agent holds — and
+   say which, never "go and check the app"), a hard
    board-read failure (exit 2, no `drain:` line), and
    `drain: rate-limited until <reset>` (exit 3, github only, #99 §C.3). Treat the lane as possibly-unfinished and let the next `/loop`
    iteration re-check; never report the run drained on a non-zero drain exit. The **Stop fixpoint gate**

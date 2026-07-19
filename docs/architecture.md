@@ -155,11 +155,17 @@ rather than minting a second definition of it.
 
 **Green code is not a working product.** Every guardrail above verifies code, and the things that
 most often break a deployment are not in the reviewed diff at all — an uncreated bucket, an unset env
-var, a hand-granted role. IDC cannot know how to deploy an arbitrary product, so the project
-**declares** its live surfaces and IDC enforces the obligation: `idc_live_check.py` requires committed
-evidence that each declared surface was driven, and that evidence expires the moment anything lands
-on the paths behind it (its infrastructure included). A repo that declares no live surface is never
-gated — opting in is the only way to be gated.
+var, a hand-granted role. IDC cannot know how to deploy an arbitrary product, so the project declares
+each live surface **and the shell command that drives it**, and IDC runs that command:
+`idc_live_check.py --run` executes it at wave close and writes a machine-generated receipt (command,
+exit code, commit, timestamp, bounded credential-redacted output), which the drain then audits
+read-only on the fast path. Verification is **executed, not attested** — the first cut of this gate
+asked a human to drive the app and type up what they saw, which both wakes an operator at 2am and
+accepts a claim in place of a measurement; the project owns the technology, IDC owns the execution.
+The receipt expires the moment anything lands on the paths behind it (its infrastructure included) or
+the declared command changes. A repo that declares no live surface is never gated and never executes
+anything — opting in is the only way to be gated. `attested: true` is the one hand-written escape
+hatch, for surfaces that genuinely cannot be automated, and it rides its own visible verdict line.
 
 ## Stale runtime — `/reload-plugins`, not `/clear`
 

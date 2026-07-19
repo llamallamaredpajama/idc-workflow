@@ -57,36 +57,58 @@ autorun:
 # all — a bucket nobody created, an env var nobody set, an IAM role granted by hand. That is how a
 # phase ships "100% merged, every gate green" and still cannot serve a single user.
 #
-# IDC cannot know how to deploy or drive YOUR product, and hardcoding that would be wrong for the next
-# repo. So you declare the surfaces; IDC enforces the obligation. For each surface below, a wave cannot
-# close until a committed evidence record shows the journey was actually driven — and that evidence
-# EXPIRES BY ITSELF the moment anything lands on the paths behind it. That expiry is the point: it is
-# what makes a Terraform change invalidate yesterday's "I tested it", so provisioning drift cannot hide
-# behind a green build.
+# IDC cannot know how to deploy or drive YOUR product, and hardcoding a browser, an HTTP client or a
+# cloud SDK here would be wrong for the next repo. So YOU supply the command and IDC runs it: each
+# surface names a `verify:` shell command that drives the REAL deployed thing and exits 0 only if it
+# genuinely worked. At wave close IDC EXECUTES that command and writes a machine-generated receipt —
+# the command, its exit code, the commit it ran against, when, and a bounded excerpt of the output.
+# Nobody is asked to type "I tested it", and nobody is woken up to go and look.
+#
+# THE VERIFY SCRIPT IS BUILD WORK — THE AGENT WRITES IT. `scripts/verify-live-<surface>.sh` is written
+# by whoever implements the surface, exactly like its tests: authenticated HTTP calls against the
+# deployed endpoints, a browser driver, a CLI probe, whatever actually exercises the journey. It is
+# never an errand for the operator. Make it exit non-zero on any failed step, print what it saw, and
+# terminate on its own (it runs with no stdin under a timeout).
+#
+# NEVER PRINT A SECRET. Your script will hold real credentials. IDC redacts what it captures before
+# writing anything, but redaction is a backstop, not a licence: do not echo tokens, headers, signed
+# URLs, or the environment. The evidence record is COMMITTED.
+#
+# The evidence EXPIRES BY ITSELF the moment anything lands on the paths behind it. That expiry is the
+# point: it is what makes a Terraform change invalidate yesterday's passing run, so provisioning drift
+# cannot hide behind a green build. Changing the `verify:` command expires it too.
 #
 # EMPTY BY DEFAULT AND FREE. `surfaces: []` means this repo has no deployed surface to drive — a
-# library, a CLI, a plugin — and the gate reports `live: not-declared` and costs you nothing. Opting in
-# is the only way to be gated. Read by `scripts/idc_live_check.py`, which `/idc:autorun` and
-# `/idc:build`'s wave-close run as a blocking gate.
+# library, a CLI, a plugin — and the gate reports `live: not-declared`, executes nothing, and costs you
+# nothing. Opting in is the only way to be gated. Read by `scripts/idc_live_check.py`, which
+# `/idc:build`'s wave close RUNS (`--run`) and `/idc:autorun`'s drain AUDITS.
 #
 # Each surface takes:
 #   name      (required) the surface's short name.
+#   verify    (required) the shell command that drives the real deployment, run from the repo root.
+#             Exit 0 = it genuinely worked. Required unless `attested: true`.
 #   paths     (required) the code+infra paths whose changes invalidate the evidence. Include the
 #             INFRASTRUCTURE paths (terraform/, deploy scripts) — that is what closes the provisioning
 #             hole. A flow list `[a, b]` or a comma-separated value; a block list is not read.
-#   journey   (recommended) plain-English steps for whoever has to drive it. Never interpreted.
+#   journey   (recommended) plain-English steps the verify script must cover. Never interpreted.
 #   evidence  (optional) the record's path. Default: docs/workflow/live-verification/<name>.md
+#   timeout   (optional) seconds the command may take. Default 600. Overrunning is INDETERMINATE.
+#   attested  (optional) `true` ONLY for a surface that genuinely cannot be automated (a physical
+#             device, a third-party console). It replaces `verify:` with a hand-written record, and the
+#             verdict then reads `live: ok (attested)` so a typed claim can never be mistaken for a
+#             real run. Declaring both `verify:` and `attested: true` is refused.
 #
-# The evidence record is an ordinary committed markdown file carrying one marker:
-#   <!-- idc-live-evidence: {"surface": "web", "commit": "<sha>", "observed": "what you saw"} -->
-# `commit` is what was running when you drove it; `observed` is the real result, and must not be empty.
+# The evidence record is generated for you — do not hand-write it. `--run` overwrites it every time,
+# on failure as well as success, so the file always describes the LAST real execution.
 live_verification:
   surfaces: []
   # Delete the `[]` above first, then uncomment — a list can't follow a same-line empty `[]`.
   # - name: web
+  #   verify: bash scripts/verify-live-web.sh
   #   journey: sign in -> ingest text -> open the item -> chat
   #   paths: [services/, web/, infra/]
   #   evidence: docs/workflow/live-verification/web.md
+  #   timeout: 600
 
 # Standing domains for this repo — config-seeded at `/idc:init` from codebase analysis,
 # pruned to touched domains and ad-hoc-extended by each `/idc:plan` run, maintained by

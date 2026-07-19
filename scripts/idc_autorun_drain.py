@@ -86,9 +86,11 @@ drain's whole definition of finished, and that definition is blind in two direct
     `drain: coherence-gap` exit 4; an indeterminate check ⇒ `drain: unknown` exit 2.
   * `--live` (`idc_live_check.py`) — every gate in the pipe verifies CODE. None of them can distinguish
     "all PRs merged and reviewed" from "the deployed product works", which is how a phase shipped with
-    a dead ingest path and every gate green. A repo DECLARES its live surfaces; this gate requires
-    current evidence each was driven. An undeclared repo reports `live: not-declared` and is never
-    gated. A finding ⇒ `drain: live-gap` exit 4; an indeterminate check ⇒ `drain: unknown` exit 2.
+    a dead ingest path and every gate green. A repo DECLARES its live surfaces and the COMMAND that
+    drives each one; the pipeline EXECUTES that command at wave close and this flag audits the receipt
+    — was the declared command run, did it exit 0, on the code that is running now? An undeclared repo
+    reports `live: not-declared` and is never gated. A finding ⇒ `drain: live-gap` exit 4; an
+    indeterminate check ⇒ `drain: unknown` exit 2.
 
 Wiring them HERE rather than as new hooks is the whole point: exit 4 is already the code the Stop
 fixpoint gate refuses a stop on, so both become enforceable without a new hook, a new exit code, or a
@@ -489,12 +491,23 @@ def _run_wave_close_coherence(args, root):
 
 def _run_wave_close_live(root):
     """The wave-close live-surface check (`idc_live_check.py`) — a project-DECLARED deployed surface
-    whose evidence is missing or has expired.
+    whose verify command failed, or whose machine-generated receipt is missing or has expired.
+
+    AUDIT ONLY — deliberately WITHOUT `--run`. The surface's `verify:` command is EXECUTED by the
+    pipeline's own work (`idc:idc-build` Phase 4 wave close, and Autorun's live-gap remediation), where
+    minutes are affordable and a failure can be acted on. The drain's job here is the cheap question —
+    "was that done, on the code that is running now?" — and it must stay sub-second, because the Stop
+    fixpoint gate re-runs this very drain on the stop path: a Stop hook must never sit through a
+    browser suite. Adding `--run` here would move a long, side-effecting execution inside two nested
+    timeouts and turn every slow probe into `drain: unknown`.
 
     Backend-blind (it reads config + git only) and free for any repo that declares no live surface:
-    `live: not-declared` is a recognized CLEAN line, so an undeclared repo can never be gated here."""
+    `live: not-declared` is a recognized CLEAN line, so an undeclared repo can never be gated here.
+    `live: ok (attested)` is clean too — it is the hand-attested escape hatch for a surface that
+    genuinely cannot be automated, and it rides a DISTINCT line precisely so an attestation is never
+    invisible behind a plain `live: ok`."""
     return _run_wave_close_check("idc_live_check.py", ["--repo", root], "live",
-                                 ("live: ok", "live: not-declared"))
+                                 ("live: ok", "live: ok (attested)", "live: not-declared"))
 
 
 def main():
@@ -530,11 +543,13 @@ def main():
                          "in idc_git_finish.py: without it a board still advertising shipped work reads as a "
                          "clean terminal `complete`.")
     ap.add_argument("--live", action="store_true",
-                    help="at wave close, also invoke idc_live_check.py (backend-blind) and GATE a "
-                         "would-be-`complete` verdict on it: a project-DECLARED live surface with missing or "
-                         "expired evidence ⇒ `drain: live-gap` exit 4; an indeterminate check ⇒ "
-                         "`drain: unknown` exit 2. A repo that declares no live surface reports "
-                         "`live: not-declared` and is never gated, so this flag is free to pass anywhere.")
+                    help="at wave close, also invoke idc_live_check.py (backend-blind, AUDIT only — it "
+                         "executes nothing, so the stop path stays fast) and GATE a would-be-`complete` "
+                         "verdict on it: a project-DECLARED live surface whose verify command failed, or "
+                         "whose machine-generated receipt is missing or expired ⇒ `drain: live-gap` exit 4; "
+                         "an indeterminate check ⇒ `drain: unknown` exit 2. A repo that declares no live "
+                         "surface reports `live: not-declared` and is never gated, so this flag is free to "
+                         "pass anywhere.")
     args = ap.parse_args()
 
     # Resolve the persisted-verdict target ONCE (Stage E2): the session id (explicit flag or the env

@@ -222,12 +222,26 @@ the existing idempotent door (`idc_git_finish.py --close-only`), never a hand-ed
 **The live product.** Every other gate in this document verifies **code**. Code can be flawless while
 the running product is dead, because what breaks a deployment usually is not in the reviewed diff: a
 bucket nobody created, an env var nobody set, an IAM role granted by hand. IDC cannot know how to
-deploy or drive your product — so **you declare the surfaces** in
-`WORKFLOW-config.yaml::live_verification` (name, the paths behind it, the journey), and
-`idc_live_check.py` requires a committed evidence record that each was actually driven. The evidence
-**expires by itself**: anything landing on a surface's paths — including its Terraform and deploy
-scripts — invalidates it, so provisioning drift cannot hide behind a green build. A repo that declares
-no live surface reports `live: not-declared` and is never gated; opting in is the only way to be gated.
+deploy or drive your product — so **you declare each surface and the command that drives it** in
+`WORKFLOW-config.yaml::live_verification` (name, `verify:`, the paths behind it, the journey), and
+`idc_live_check.py --run` **executes that command** against the real deployment at every wave close,
+writing a machine-generated receipt: the command, its exit code, the commit it ran against, the time,
+and a bounded, credential-redacted excerpt of the output. **Verification is executed, never attested** —
+nobody types "I tested it", and no autonomous run stops to wake a human up to go and look. A failing
+verify command is a finding the pipeline works like any failing test.
+
+**The verify script is build work.** `scripts/verify-live-<surface>.sh` is written by whoever
+implements the surface — authenticated calls against the deployed endpoints, a browser driver, a CLI
+probe, whatever exercises the journey — exactly as its tests are. It must never print a credential:
+the evidence record is committed.
+
+The evidence **expires by itself**: anything landing on a surface's paths — including its Terraform and
+deploy scripts — invalidates it, and so does changing the `verify:` command, so provisioning drift
+cannot hide behind a green build. A repo that declares no live surface reports `live: not-declared`,
+executes nothing and is never gated; opting in is the only way to be gated. The one escape hatch,
+`attested: true`, is for a surface that genuinely cannot be automated (a physical device, a third-party
+console): it keeps a hand-written record and reports `live: ok (attested)`, on its own distinct verdict
+line, so an attestation can never be mistaken for a measurement.
 
 ### 4.4 Recirculator — drift healing
 

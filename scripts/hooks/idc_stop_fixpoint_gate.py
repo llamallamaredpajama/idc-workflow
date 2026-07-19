@@ -278,11 +278,17 @@ def _block_reason(detail, pending_taints):
         cure = ("repair the named items through the existing door — `/idc:janitor --apply-safe` (batch) "
                 "or `idc_git_finish.py --close-only` per item; both are safe to re-run")
     elif "live-gap" in detail:
-        why = ("The build lane is drained but a live surface this repo DECLARES has missing or expired "
-               "verification evidence (see the `live: gap <name>` line), so the running product is "
+        why = ("The build lane is drained but a live surface this repo DECLARES has no current passing "
+               "verification evidence (see the `live: gap <name>` line) — its verify command failed, or "
+               "was never executed against the code that is running now — so the running product is "
                "unproven and the run is NOT complete.")
-        cure = ("drive the declared journey against the real deployment and commit its evidence record "
-                "(the `live_verification` block in WORKFLOW-config.yaml names the file)")
+        # The cure is a COMMAND THE PIPELINE RUNS, not an errand for a person. Whoever is reading this
+        # is capable of executing the project's own verify command; an instruction to go and drive the
+        # app by hand is how a 2am autorun turns into a phone call.
+        cure = ("run `${CLAUDE_PLUGIN_ROOT}/scripts/idc_live_check.py --repo . --run` — it executes each "
+                "declared surface's own `verify:` command and regenerates the evidence record from the "
+                "real result; a non-zero exit is a finding about the product, so fix it as build work "
+                "and re-run")
     elif "acceptance-gap" in detail:
         why = ("The build lane is drained but the wave-close acceptance check found a merged-Done item "
                "INERT (see the `acceptance: gap <#s>` line), so the run is NOT complete.")

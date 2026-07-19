@@ -17,13 +17,28 @@ non-terminal exit 4 — so the Stop fixpoint gate enforces them with no new hook
   them. `scripts/idc_finish_coherence.py` now asks the question none of the existing gates asked.
   The detector itself already existed inside the janitor — this reuses that verdict rather than
   re-deriving it, and repairs run through the existing idempotent `--close-only` door.
-- **A project can declare its live surfaces, and IDC will require proof they were driven.** Every
-  other gate verifies code, which can be perfect while the deployed product is dead. A repo lists
-  its surfaces in `WORKFLOW-config.yaml::live_verification` (name, the paths behind it, the
-  journey); `scripts/idc_live_check.py` then requires a committed evidence record for each — and
-  that evidence **expires by itself** as soon as anything lands on those paths, including Terraform
-  and deploy scripts. That expiry is what stops provisioning drift hiding behind a green build.
-  A repo that declares no live surface reports `live: not-declared` and is never gated.
+- **A project can declare its live surfaces, and IDC will RUN them.** Every other gate verifies
+  code, which can be perfect while the deployed product is dead. A repo lists each surface in
+  `WORKFLOW-config.yaml::live_verification` together with a `verify:` command that drives the real
+  deployment — the project owns the technology (an authenticated HTTP probe, a browser driver, a
+  CLI call); IDC never hardcodes any of it. `scripts/idc_live_check.py --run` then **executes** that
+  command at wave close and writes a machine-generated receipt: the command, its exit code, the
+  commit it ran against, the timestamp, and a bounded, credential-redacted excerpt of the output.
+  Verification is **executed, never attested**: nobody types "I tested it", and an unattended
+  overnight run never stops to wake somebody up to go and look. A failing verify command is a
+  finding the pipeline works like a failing test.
+  - The receipt **expires by itself** as soon as anything lands on the surface's paths (Terraform
+    and deploy scripts included) or the declared command changes — that expiry is what stops
+    provisioning drift hiding behind a green build.
+  - The drain and the Stop gate **audit** the receipt read-only (sub-second, executing nothing), so
+    a stop attempt never sits through a browser suite. Execution belongs to Build's wave close and
+    to the `live-gap` remediation, where a failure can be acted on.
+  - Writing the verify script is ordinary **build work** for the implementing agent, like writing
+    the surface's tests. It must never print a credential; the receipt is committed.
+  - A repo that declares no live surface reports `live: not-declared`, executes nothing and is never
+    gated. `attested: true` is the one hand-written escape hatch, for a surface that genuinely
+    cannot be automated; it reports on its own `live: ok (attested)` line so an attestation can
+    never be mistaken for a measurement.
 - `--coherence` and `--live` are opt-in flags on `idc_autorun_drain.py`; default output is
   unchanged. New verdicts `drain: coherence-gap` and `drain: live-gap` ride the existing exit 4.
 - `idc_git_janitor.py --json` now exposes each finding's `op` (its machine classification), so a

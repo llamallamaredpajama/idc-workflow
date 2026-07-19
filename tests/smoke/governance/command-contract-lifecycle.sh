@@ -295,11 +295,23 @@ doctor_report "$REPO2" "$KEEP" PASS
 contract finish --repo "$REPO2" --session "$KEEP" --command doctor --status complete \
   --evidence-json '{"schema_version":1,"refs":{}}' >/dev/null \
   || gov_fail "(6) could not finish the KEEP record"
-[ "$(contract status --repo "$REPO2" --json | json_count finished)" -eq "$_MAX_FINISHED_EXPECT" ] \
+# SNAPSHOT ONCE, THEN GREP THE FILE — never `producer | grep -q`. This file runs under `pipefail`, and
+# `grep -q` exits the instant it matches. `print(json.dumps(...))` writes the payload and the trailing
+# newline SEPARATELY, so when grep leaves between the two, the final flush at interpreter shutdown
+# takes EPIPE, python exits 120, and pipefail failed the assertion even though grep had MATCHED.
+# Whether the two writes are separated at all depends on the pipe buffer CPython inherits — 16 KB on
+# macOS, 4 KB on Linux — so at this payload size the assertion passed locally and failed only on the
+# Linux runner. That is not a governance finding, it is a broken test: a green-vs-red that turns on
+# the platform's pipe buffer proves nothing about the cap. Reading a snapshot removes the pipe, and
+# both assertions now read the SAME observation instead of three separate re-runs.
+STATUS6="$WORK/status6.json"
+contract status --repo "$REPO2" --json > "$STATUS6" \
+  || gov_fail "(6) could not read the finished command history"
+[ "$(json_count finished < "$STATUS6")" -eq "$_MAX_FINISHED_EXPECT" ] \
   || gov_fail "(6) finished history is not capped at $_MAX_FINISHED_EXPECT records"
-contract status --repo "$REPO2" --json | grep -q "$KEEP" \
+grep -q "$KEEP" "$STATUS6" \
   || gov_fail "(6) newest-finish-retained: the just-finished record was pruned"
-if contract status --repo "$REPO2" --json | grep -q "n01-$$-"; then
+if grep -q "n01-$$-" "$STATUS6"; then
   gov_fail "(6) oldest-finished-dropped: the oldest finished record survived the cap"
 fi
 echo "  ok (6) the finished cap drops the OLDEST + retains the just-finished NEWEST record"

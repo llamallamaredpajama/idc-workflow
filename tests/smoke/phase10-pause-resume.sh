@@ -412,7 +412,12 @@ for cmd in ("pause", "resume"):
         problems.append(f"/idc:{cmd} is not admitted by the entry-gate matcher — it would ship with NO "
                         "freshness gate, lifecycle record, or closeout enforcement")
 pausable = {c for c, s in C.LEGAL_STATUSES.items() if C.PAUSED in s}
-expected = {"think", "intake", "plan", "build", "recirculate", "autorun"}
+# NOT every pipeline command — only the three whose half-done work the quiescence check can OBSERVE.
+# This narrowed after review: `paused` promises resume never has to reconstruct partial work, and
+# idc_pause_check.py earns that promise from the board and the obligations ledger. Think, Intake and
+# Plan leave their partial work in a branch, which it never reads, so they passed quiescence
+# TRIVIALLY and closed as certified clean stops. See _PAUSABLE_STAGES in idc_command_contract.py.
+expected = {"build", "recirculate", "autorun"}
 if pausable != expected:
     problems.append(f"`paused` is legal for {sorted(pausable)}, expected exactly {sorted(expected)}")
 sys.exit("; ".join(problems) if problems else 0)

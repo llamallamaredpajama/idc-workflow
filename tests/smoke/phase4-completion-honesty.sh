@@ -444,4 +444,42 @@ grep -q 'python3 "\${CLAUDE_PLUGIN_ROOT}/scripts/idc_finish_coherence\.py"' "$PL
 grep -q 'python3 "\${CLAUDE_PLUGIN_ROOT}/scripts/idc_live_check\.py"' "$PLUGIN/agents/idc-build.md" \
   || fail "E3: agents/idc-build.md wave close must INVOKE idc_live_check.py"
 
+# E4 — A BLOCK MUST NAME A CURE THAT CAN ACTUALLY CLEAR IT. The four non-terminal verdicts share one
+# block/allow decision but NOT one remedy, and the reason string is the operator's ONLY instruction.
+# Found live (2026-07-19, autorun sandbox, real board): a coherence-gap block told the operator the
+# inbox owed work and to run `/idc:recirculate` — which cannot flip a stale board card. They would run
+# it, nothing would change, and they would re-block until the anti-nag bound forced the exit, teaching
+# them the gate cries wolf. A gate that fires correctly and misdirects is worse than one that stays
+# quiet, so the remedy is asserted per verdict, not just the decision.
+#
+# The single edit that makes this fail: collapse any branch of _block_reason back into the generic
+# `/idc:recirculate` else-arm → E4 goes RED for that verdict.
+reason_for() { # $1 = detail string → the gate's operator-facing reason
+  python3 -c "
+import sys; sys.path.insert(0, '$PLUGIN/scripts/hooks')
+import idc_stop_fixpoint_gate as G
+print(G._block_reason(sys.argv[1], []))
+" "$1" 2>/dev/null
+}
+coh_reason="$(reason_for 'github (persisted: drain: coherence-gap, exit 4)')"
+[ -n "$coh_reason" ] || fail "E4: could not obtain a block reason from the Stop gate"
+printf '%s' "$coh_reason" | grep -q 'janitor --apply-safe\|--close-only' \
+  || fail "E4: a coherence-gap block must name the board-repair door, got: $coh_reason"
+printf '%s' "$coh_reason" | grep -q '/idc:recirculate' \
+  && fail "E4: a coherence-gap block must NOT prescribe /idc:recirculate — it cannot flip a stale board card"
+
+live_reason="$(reason_for 'github (persisted: drain: live-gap, exit 4)')"
+printf '%s' "$live_reason" | grep -q 'evidence' \
+  || fail "E4: a live-gap block must tell the operator to record fresh evidence, got: $live_reason"
+printf '%s' "$live_reason" | grep -q '/idc:recirculate' \
+  && fail "E4: a live-gap block must NOT prescribe /idc:recirculate — it cannot produce live evidence"
+
+# The two inbox-class verdicts must still prescribe the recirculate door — proving the branching above
+# narrowed the advice rather than simply deleting it.
+for d in 'acceptance-gap' 'recirc-pending'; do
+  r="$(reason_for "github (persisted: drain: $d, exit 4)")"
+  printf '%s' "$r" | grep -q '/idc:recirculate' \
+    || fail "E4: a $d block must still prescribe /idc:recirculate, got: $r"
+done
+
 echo "PASS: phase4-completion-honesty"

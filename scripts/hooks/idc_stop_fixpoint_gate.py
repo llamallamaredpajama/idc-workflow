@@ -265,19 +265,36 @@ def _block_reason(detail, pending_taints):
     obligations = _obligation_labels(pending_taints)
     owed = (f" This session also holds unfinished ledger obligations: {', '.join(obligations)}."
             if obligations else "")
-    # Name the RIGHT pending conjunct: an acceptance-gap block (Stage E3) is an INERT merged-Done item
-    # (the `acceptance: gap <#s>` line names it), not a non-empty inbox — the remediation is still
-    # /idc:recirculate (file a recirculation for the inert items), so only the diagnosis sentence differs.
-    if "acceptance-gap" in detail:
+    # Name the RIGHT pending conjunct AND the remediation that can actually clear it. The four
+    # non-terminal verdicts share one block/allow decision but NOT one cure, and handing the operator a
+    # command that cannot clear their block is worse than saying nothing: they run it, nothing changes,
+    # and they re-block until the anti-nag bound forces the exit — the gate teaches them to distrust it.
+    # (Verified live 2026-07-19: a coherence-gap block advised `/idc:recirculate`, which cannot flip a
+    # stale board card.) Keyed off the verdict token the drain prints; `detail` carries it verbatim.
+    if "coherence-gap" in detail:
+        why = ("The build lane is drained but items whose work already SHIPPED (PR merged, issue closed) "
+               "are still advertised as in flight (see the `finish-coherence: gap <#s>` line) — the "
+               "board is claiming work that is done, so the run is NOT complete.")
+        cure = ("repair the named items through the existing door — `/idc:janitor --apply-safe` (batch) "
+                "or `idc_git_finish.py --close-only` per item; both are safe to re-run")
+    elif "live-gap" in detail:
+        why = ("The build lane is drained but a live surface this repo DECLARES has missing or expired "
+               "verification evidence (see the `live: gap <name>` line), so the running product is "
+               "unproven and the run is NOT complete.")
+        cure = ("drive the declared journey against the real deployment and commit its evidence record "
+                "(the `live_verification` block in WORKFLOW-config.yaml names the file)")
+    elif "acceptance-gap" in detail:
         why = ("The build lane is drained but the wave-close acceptance check found a merged-Done item "
                "INERT (see the `acceptance: gap <#s>` line), so the run is NOT complete.")
+        cure = "drain the inbox with `/idc:recirculate` (file a recirculation for the inert items)"
     else:
         why = ("The build lane is empty but the Recirculation/Consideration inbox still owes upstream "
                "work, so the run is NOT complete.")
+        cure = ("drain the inbox with `/idc:recirculate` (and plan any admitted considerations / "
+                "recirculate the inert items)")
     return (
         "IDC stop-fixpoint gate: this autorun/build drain session is stopping while the pipe is NOT "
-        f"drained ({detail}). {why}{owed} Before you stop: drain the inbox with "
-        "`/idc:recirculate` (and plan any admitted considerations / recirculate the inert items), then "
+        f"drained ({detail}). {why}{owed} Before you stop: {cure}, then "
         "re-check `${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py` — a clean `drain: complete` is "
         "the only honest stop."
     )
@@ -301,9 +318,13 @@ def _annotate_forced_exit_once(cwd, plugin_root, sid, detail):
     num = _first_inbox_item(trk, tracker)
     if num is None:
         return
-    body = (f"[idc-stop-gate] forced exit: an autorun/build drain session stopped with a non-empty "
-            f"inbox after {_STOP_GATE_BOUND} reminders ({detail}). The pipe is NOT at a whole-pipe "
-            f"fixpoint — run /idc:recirculate and plan admitted considerations, then re-drain.")
+    # Verdict-NEUTRAL wording: this annotation fires for any of the four non-terminal verdicts, and the
+    # older "non-empty inbox … run /idc:recirculate" text asserted a cause it had not checked (a
+    # coherence-gap or live-gap forced exit is not an inbox problem and /idc:recirculate cannot clear
+    # it). `detail` already carries the verdict verbatim; let it name the cause.
+    body = (f"[idc-stop-gate] forced exit: an autorun/build drain session stopped while the pipe was "
+            f"NOT drained, after {_STOP_GATE_BOUND} reminders ({detail}). The pipe is NOT at a "
+            f"whole-pipe fixpoint — resolve the condition named above, then re-drain.")
     try:
         subprocess.run([sys.executable, trk, "--tracker", tracker, "comment",
                         "--num", str(num), "--body", body],

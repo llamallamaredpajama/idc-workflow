@@ -108,15 +108,22 @@ loop below). Then the two lanes:
    `Consideration`/`Planning`/`Recirculation` ticket is never scooped (the glass wall). Check the
    build lane's exit condition with the **same deterministic drain helper, by backend** — never
    improvise the predicate or read the board ad-hoc:
-   - **filesystem:** `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --tracker <TRACKER.md> --acceptance`
+   - **filesystem:** `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --tracker <TRACKER.md> --acceptance --coherence --live`
      — `--acceptance` also runs the wave-close acceptance check when the build lane is drained (surfaces
      a Done-but-inert increment as `acceptance: gap <#s>`; file a recirculation on a gap). A gap/error
      GATES the would-be-`complete` wave close (Stage E3): gap ⇒ `drain: acceptance-gap` exit 4, a
      corrupt/unrunnable check ⇒ `drain: unknown` exit 2 — both NON-terminal, so autorun re-loops.
-   - **github:** `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --backend github --project <n> --owner <o> --session-id "$CLAUDE_CODE_SESSION_ID"`
+   - **github:** `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --backend github --project <n> --owner <o> --coherence --live --session-id "$CLAUDE_CODE_SESSION_ID"`
      (github wave-close acceptance runs in `idc:idc-build` Phase 4 — no `--acceptance` here). `--session-id`
      attributes the persisted drain verdict so the Stop fixpoint gate reads the github board conjunct
      locally (0 GraphQL on the stop path, v4 Phase 3 Stage E2; env `$CLAUDE_CODE_SESSION_ID` is the fallback).
+   - **`--coherence` + `--live` ride BOTH backends** — the two completion-honesty gates. An empty build
+     lane was never proof the work was finished, in two directions the drain could not previously see:
+     `--coherence` catches items whose work SHIPPED (PR merged, issue closed) while the board still
+     advertises them as in flight — the drain counts only `Todo`, so it never saw them and printed a
+     clean terminal `complete` over a board that was lying; `--live` catches a project-DECLARED live
+     surface whose evidence is missing or has expired. A repo that declares no live surface reports
+     `live: not-declared` and is never gated, so both flags are safe to pass everywhere.
    Both apply the **identical** Buildable-eligibility predicate over the **whole board** — the drain
    helper is the predicate's single source of truth (never re-derive it in prose or by hand), and
    the github mode pages **every** item, so **never** substitute a bare
@@ -127,6 +134,11 @@ loop below). Then the two lanes:
    board read succeeded but a build candidate's blocked-by lookup could not be verified, or, under
    filesystem `--acceptance`, the wave-close acceptance check was corrupt/unrunnable), `drain:
    acceptance-gap` (exit 4, filesystem `--acceptance` — a merged-Done item is inert; recirculate it),
+   `drain: coherence-gap` (exit 4, `--coherence` — the named items shipped but the board never advanced;
+   repair each via the idempotent `idc_git_finish.py --close-only --pr <N> --issue <M>`, or
+   `/idc:janitor --apply-safe` for the batch, then re-check), `drain: live-gap` (exit 4, `--live` — a
+   declared live surface has missing or expired evidence; drive it and commit the evidence record, and
+   if you genuinely cannot, report that plainly rather than reporting the phase done),
    and a hard board-read failure (exit 2, no `drain:` line). Do not exit on it; treat the lane as
    possibly-unfinished and let the next `/loop` iteration re-check.
 5. **Re-loop to a fixpoint, then exit.** The pipe is **not one-shot**: a build triplet can surface a

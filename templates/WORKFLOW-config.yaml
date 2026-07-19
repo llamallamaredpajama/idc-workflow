@@ -49,6 +49,45 @@ autorun:
 # with this set. Absent (commented out) by default:
 # janitor: auto-safe
 
+# Live-product verification — the ONE thing IDC cannot infer about your project.
+#
+# Every other IDC gate verifies CODE: unit and contract tests, the review dimensions, the
+# architectural fences, each issue's own verification surface. All of them can be green while the
+# DEPLOYED product is broken, because what usually breaks a deployment is not in the reviewed diff at
+# all — a bucket nobody created, an env var nobody set, an IAM role granted by hand. That is how a
+# phase ships "100% merged, every gate green" and still cannot serve a single user.
+#
+# IDC cannot know how to deploy or drive YOUR product, and hardcoding that would be wrong for the next
+# repo. So you declare the surfaces; IDC enforces the obligation. For each surface below, a wave cannot
+# close until a committed evidence record shows the journey was actually driven — and that evidence
+# EXPIRES BY ITSELF the moment anything lands on the paths behind it. That expiry is the point: it is
+# what makes a Terraform change invalidate yesterday's "I tested it", so provisioning drift cannot hide
+# behind a green build.
+#
+# EMPTY BY DEFAULT AND FREE. `surfaces: []` means this repo has no deployed surface to drive — a
+# library, a CLI, a plugin — and the gate reports `live: not-declared` and costs you nothing. Opting in
+# is the only way to be gated. Read by `scripts/idc_live_check.py`, which `/idc:autorun` and
+# `/idc:build`'s wave-close run as a blocking gate.
+#
+# Each surface takes:
+#   name      (required) the surface's short name.
+#   paths     (required) the code+infra paths whose changes invalidate the evidence. Include the
+#             INFRASTRUCTURE paths (terraform/, deploy scripts) — that is what closes the provisioning
+#             hole. A flow list `[a, b]` or a comma-separated value; a block list is not read.
+#   journey   (recommended) plain-English steps for whoever has to drive it. Never interpreted.
+#   evidence  (optional) the record's path. Default: docs/workflow/live-verification/<name>.md
+#
+# The evidence record is an ordinary committed markdown file carrying one marker:
+#   <!-- idc-live-evidence: {"surface": "web", "commit": "<sha>", "observed": "what you saw"} -->
+# `commit` is what was running when you drove it; `observed` is the real result, and must not be empty.
+live_verification:
+  surfaces: []
+  # Delete the `[]` above first, then uncomment — a list can't follow a same-line empty `[]`.
+  # - name: web
+  #   journey: sign in -> ingest text -> open the item -> chat
+  #   paths: [services/, web/, infra/]
+  #   evidence: docs/workflow/live-verification/web.md
+
 # Standing domains for this repo — config-seeded at `/idc:init` from codebase analysis,
 # pruned to touched domains and ad-hoc-extended by each `/idc:plan` run, maintained by
 # the Recirculator. Each entry: a single-select Domain value, a one-line brief, and primary

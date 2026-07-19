@@ -28,12 +28,21 @@ hostage once the pipe is actually drained.
 
 WHAT "the board says pending" MEANS. We read the SANCTIONED drain predicate `idc_autorun_drain.py`
 and key on its EXISTING exit-code contract (Phase 0, unchanged here): exit 4 == a NON-terminal wave
-close — `drain: recirc-pending` (the build lane is drained but the Recirculation/Consideration inbox
-is non-empty) or `drain: acceptance-gap` (v4 Phase 3 Stage E3: the wave-close acceptance check found a
-merged-Done item INERT — the filesystem gate runs the drain WITH `--acceptance` so an inert close is
-board-pending here too, not a dishonest `complete`). Either way the orchestrator's own next action is
-`/idc:recirculate` / plan, NOT stop. That, and only that, is the drop-E signal. Every OTHER drain
-state is allowed to stop:
+close. It carries four verdict tokens, and the gate treats them identically because each one means the
+orchestrator's honest next action is more work, not a stop:
+  * `drain: recirc-pending`  — the build lane is drained but the Recirculation/Consideration inbox is
+    non-empty; next action is `/idc:recirculate` or a planning pass.
+  * `drain: acceptance-gap`  — the wave-close acceptance check found a merged-`Done` item INERT
+    (v4 Phase 3 Stage E3); next action is to recirculate the inert items.
+  * `drain: coherence-gap`   — items whose work SHIPPED (PR merged, issue closed) while the board still
+    advertises them as in flight. This token exists because the session about to stop may be the very
+    one that died between merging a PR and flipping the board — the finish tail does those in that
+    order — and until this gate learned the signal, that session stopped on a `drain: complete` read off
+    a board that was lying. Next action is the idempotent `idc_git_finish.py --close-only` repair.
+  * `drain: live-gap`        — a project-DECLARED live surface has missing or expired evidence; next
+    action is to drive the surface and record it. A repo declaring none never sees this token.
+The filesystem gate runs the drain WITH `--acceptance --coherence --live` so all four are board-pending
+here too, never a dishonest `complete`. Every OTHER drain state is allowed to stop:
   * `drain: complete` (exit 0) — genuinely done (the crux ALLOW).
   * `drain: continue` (exit 0) — eligible build work remains, but that is precisely what the outer
     `/loop` iterates on turn-by-turn; blocking here would fight the /loop model (an orchestrator turn
@@ -89,7 +98,12 @@ import idc_drain_verdict  # noqa: E402  (the persisted-verdict sidecar — Stage
 ORCHESTRATOR_MARKER = "orchestrator_drain"
 DRAIN = "idc_autorun_drain.py"
 ACCEPT = "idc_acceptance_check.py"  # invoked BY the drain when the gate passes --acceptance (Stage E3)
-_RECIRC_PENDING_EXIT = 4  # the drain's NON-terminal exit: recirc-pending OR acceptance-gap (Phase 0 contract)
+# The drain's NON-terminal exit. It now carries FOUR verdict tokens — recirc-pending, acceptance-gap,
+# coherence-gap, live-gap — and this gate deliberately treats them identically: each one means the
+# orchestrator's honest next action is more work, not a stop. Adding a wave-close gate to the drain
+# therefore needs no change here, which is exactly why they were wired into the drain's exit contract
+# rather than as new hooks of their own.
+_RECIRC_PENDING_EXIT = 4
 # The FULL Phase-0 drain exit-code contract: 0 complete/continue · 2 unknown · 3 rate-limited · 4
 # recirc-pending. Any OTHER code means the drain itself CRASHED (an uncaught traceback exits 1) — the
 # verdict is untrustworthy, so a confirmed-orchestrator caller must fail CLOSED (see _board_says_pending).
@@ -98,6 +112,15 @@ _DRAIN_CONTRACT_EXITS = (0, 2, 3, _RECIRC_PENDING_EXIT)
 # `bounded_block` calls AND the one-time forced-exit annotation trigger, so they can never desync if the
 # bound is ever customized (a hardcoded DEFAULT_BOUND at one site would silently drift from the other).
 _STOP_GATE_BOUND = H.DEFAULT_BOUND
+# The ceiling for this gate's live drain re-run. INVARIANT: it must stay strictly GREATER than
+# `idc_autorun_drain.COHERENCE_TIMEOUT`, so a slow coherence scan times out INSIDE the drain (→ the
+# non-terminal `drain: unknown`, which this gate allows) rather than out here (→ a raise, which a
+# confirmed-orchestrator caller turns into a fail-closed block, wedging a stop over a slow git scan
+# instead of over a real finding). Deliberately a literal rather than a cross-directory import — a hook
+# must not grow a fragile sys.path dependency on a sibling package — with the ordering asserted by
+# tests/smoke/phase4-completion-honesty.sh, the same lockstep-by-smoke-parity convention the drain and
+# acceptance check already use.
+_DRAIN_TIMEOUT = 150
 
 
 def _read_backend(cwd):
@@ -189,13 +212,27 @@ def _board_says_pending(cwd, plugin_root, sid):
     drain = os.path.join(plugin_root or "", "scripts", DRAIN)
     if not os.path.isfile(drain):
         raise RuntimeError(f"drain helper not found at {drain}")
-    # `--acceptance` (Stage E3): the SAME predicate the autorun drain loop runs, so an INERT wave close
-    # (`drain: acceptance-gap`, exit 4) is board-pending at the stop too — without it this re-run would
-    # read the same inert board as a dishonest `drain: complete` and clear the marker. A pure local read
-    # (filesystem backend): the acceptance check is the sibling script over the same TRACKER.md — zero
-    # GraphQL, so the stop-path constraint is untouched.
-    r = subprocess.run([sys.executable, drain, "--tracker", tracker, "--acceptance"],
-                       cwd=cwd, capture_output=True, text=True, timeout=30)
+    # Run the SAME predicate, with the SAME wave-close gates, the autorun drain loop runs — otherwise
+    # this re-run would read a board the drain loop calls non-terminal as a dishonest `drain: complete`
+    # and clear the orchestrator marker. All three are pure LOCAL reads on the filesystem backend (the
+    # sibling scripts over the same TRACKER.md, git, and config), so the zero-GraphQL stop-path
+    # constraint is untouched:
+    #   --acceptance (Stage E3) — an INERT wave close (`drain: acceptance-gap`).
+    #   --coherence            — items that SHIPPED while the board still advertises them as in flight
+    #                            (`drain: coherence-gap`). This is the case that matters most here: the
+    #                            session about to stop may be the very one that died between merging a
+    #                            PR and flipping the board.
+    #   --live                 — a project-DECLARED live surface with missing or expired evidence
+    #                            (`drain: live-gap`). Free for a repo that declares none.
+    #
+    # TIMEOUT ORDERING IS LOAD-BEARING (do not lower this below the drain's own ceiling). The drain's
+    # coherence sub-check has its own, strictly SMALLER ceiling, so a slow git scan trips THERE and
+    # degrades to the non-terminal `drain: unknown`, which this gate ALLOWS. If the outer timeout tripped
+    # first it would raise, and a confirmed-orchestrator caller fails CLOSED — wedging a stop over a slow
+    # scan rather than over a real finding. Read from the drain module so the two can never drift.
+    r = subprocess.run([sys.executable, drain, "--tracker", tracker,
+                        "--acceptance", "--coherence", "--live"],
+                       cwd=cwd, capture_output=True, text=True, timeout=_DRAIN_TIMEOUT)
     # The drain's exit code is a CONTRACT (Phase 0): 0 complete/continue · 2 unknown · 3 rate-limited
     # · 4 recirc-pending. A code OUTSIDE that set means the drain itself CRASHED (an uncaught traceback
     # exits 1) — we did NOT get a trustworthy verdict, so we cannot prove the pipe is drained. RAISE so

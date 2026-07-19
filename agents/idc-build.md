@@ -245,6 +245,29 @@ and link it `blocked-by` to its dependents — before dispatching any further re
 `acceptance: ok` clean up the board state it touched and advance the acceptance-reporting wave.
 Autowave is the default behavior, not a flag.
 
+**Two more blocking gates run at the SAME retriggers, and for the same reason** — "the ready frontier
+is empty" is not the same claim as "the work is finished". Both are backend-blind, so unlike the
+acceptance check above they need no materialized tracker on github:
+
+- `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_finish_coherence.py" --repo "$PWD" <board args>` —
+  **does the board still advertise work that already shipped?** The finish tail merges the PR (which
+  auto-closes the issue via the mandated `Closes #N`) several steps *before* it flips the board, so a
+  session that dies in that window strands a shipped item at `In Progress` and nothing downstream ever
+  notices: the acceptance check audits only merged-`Done` items, and the drain counts only `Todo`. On
+  `finish-coherence: gap <#s>` repair each named item through the **existing, idempotent** door —
+  `idc_git_finish.py --close-only --pr <N> --issue <M>` — then re-run the check; it is safe to re-run.
+  Board args are `--tracker <TRACKER.md>` (filesystem) or `--backend github --owner <o> --project <n>`.
+  Never hand-edit a Status to clear this: the door journals the close, a hand edit launders it.
+- `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_live_check.py" --repo "$PWD"` — **was the deployed
+  product actually driven?** Every gate above this line verifies code, and code can be perfect while
+  the running product is dead (an uncreated bucket, an unset env var, a hand-granted IAM role — none of
+  which appear in any reviewed diff). This gate requires committed evidence for each live surface the
+  repo DECLARED in `WORKFLOW-config.yaml::live_verification`, and that evidence expires by itself as
+  soon as anything lands on the paths behind it. `live: not-declared` (exit 0) is the answer for a repo
+  with no deployed surface — a library or CLI is never gated here. On `live: gap <name>` the wave does
+  **not** pass green: drive the declared journey against the real deployment and commit the evidence
+  record. If you cannot drive it, say so — an undriven surface is reported as undriven, never as done.
+
 ## Phase 5 — Phase close
 
 At phase boundary, run one delta review over the phase via the review engine. Most findings are

@@ -790,8 +790,14 @@ def emit_json(findings, ctx, indeterminate, applied=None):
         "counts": {"safe_fix": c[SAFE_FIX], "risky": c[RISKY], "report_only": c[REPORT_ONLY],
                    "total": len(findings)},
         "board_scanned": ctx.get("board") is not None,
+        # `op` rides the JSON (never the human report) because it is the finding's MACHINE
+        # classification — the stable token a programmatic consumer filters on instead of
+        # pattern-matching the prose `detail`. idc_finish_coherence.py selects the board-stale class
+        # (`set-done` / `close-fs`) by exactly this key; without it that consumer would have to grep
+        # English, which drifts the moment a detail string is reworded. Additive: a finding with no
+        # `op` (every non-board dimension) simply omits the key, so existing consumers are unchanged.
         "findings": [{k: v for k, v in f.items() if k in
-                      ("tier", "dim", "name", "detail", "action", "number")} for f in findings],
+                      ("tier", "dim", "name", "detail", "action", "number", "op")} for f in findings],
     }
     if applied is not None:
         out["applied"] = [{"dim": f["dim"], "name": f["name"], "ok": ok, "note": note}

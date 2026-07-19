@@ -152,12 +152,23 @@ only when a full pass leaves nothing actionable:
    # drained (surfaces a Done-but-inert increment as `acceptance: gap <#s>`; file a recirculation on a gap).
    # A gap/error GATES the would-be-`complete` wave close (Stage E3): gap ⇒ `drain: acceptance-gap` exit 4
    # (recirculate the inert items), a corrupt/unrunnable check ⇒ `drain: unknown` exit 2 — both NON-terminal.
-   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --tracker <TRACKER.md> --acceptance
+   # `--coherence` + `--live` are the two completion-honesty gates. Pass them on EVERY drain call, both
+   # backends: an empty build lane was never proof the work was finished.
+   #   --coherence  the board is a DASHBOARD and it can lie. The finish tail merges the PR — which
+   #                auto-closes the issue via the mandated `Closes #N` — several steps before it flips
+   #                the board, so a session dying in that window strands a SHIPPED item at `In Progress`
+   #                forever. The drain counts only `Todo`, so it never saw those items and printed a
+   #                clean terminal `complete` over them. Gap ⇒ `drain: coherence-gap` exit 4.
+   #   --live       every other gate verifies code, not the running product. Gap ⇒ `drain: live-gap`
+   #                exit 4. A repo that declares no live surface reports `live: not-declared` — free.
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --tracker <TRACKER.md> --acceptance --coherence --live
    # github — pages the WHOLE board, same predicate (github wave-close acceptance runs in idc:idc-build Phase 4).
    # `--session-id` attributes the persisted drain verdict (.idc-drain-verdict.json) to THIS session so the
    # Stop fixpoint gate can read the github board conjunct locally (0 GraphQL on the stop path, v4 Phase 3
-   # Stage E2); the drain also falls back to $CLAUDE_CODE_SESSION_ID if the flag is omitted.
-   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --backend github --project <n> --owner <o> --session-id "$CLAUDE_CODE_SESSION_ID"
+   # Stage E2); the drain also falls back to $CLAUDE_CODE_SESSION_ID if the flag is omitted. The two
+   # completion-honesty gates ride here too — on github they are the ONLY path by which the Stop gate
+   # learns about them, because that gate reads this persisted verdict rather than re-scanning the board.
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --backend github --project <n> --owner <o> --coherence --live --session-id "$CLAUDE_CODE_SESSION_ID"
    ```
    Both apply the identical Buildable-eligibility predicate — the drain helper is the predicate's
    single source of truth; never re-derive it in prose or by hand. On the github backend,
@@ -186,7 +197,13 @@ only when a full pass leaves nothing actionable:
    (the board read succeeded but a build candidate's blocked-by lookup could not be verified — or, under
    `--acceptance`, the wave-close acceptance check was corrupt/unrunnable so the wave could not be proven
    clean), `drain: acceptance-gap` (exit 4, filesystem `--acceptance` — a merged-Done item is inert;
-   recirculate it, do not stop), a hard board-read failure (exit 2, no `drain:` line), and
+   recirculate it, do not stop), **`drain: coherence-gap`** (exit 4, `--coherence` — the named items
+   SHIPPED but the board never advanced; repair each through the idempotent
+   `idc_git_finish.py --close-only --pr <N> --issue <M>`, or `/idc:janitor --apply-safe` for the batch,
+   then re-check — the check is safe to re-run), **`drain: live-gap`** (exit 4, `--live` — a declared
+   live surface has missing or expired evidence; drive the journey and commit the evidence record, and
+   if you cannot, say so plainly in the exit report rather than reporting the phase done), a hard
+   board-read failure (exit 2, no `drain:` line), and
    `drain: rate-limited until <reset>` (exit 3, github only, #99 §C.3). Treat the lane as possibly-unfinished and let the next `/loop`
    iteration re-check; never report the run drained on a non-zero drain exit. The **Stop fixpoint gate**
    (set up at drain start above) is the deterministic backstop for this rule on the filesystem backend:

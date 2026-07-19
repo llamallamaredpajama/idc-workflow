@@ -57,6 +57,7 @@ for t in \
   phase4-tracker-github-recipe \
   phase4-github-pagination \
   phase4-acceptance \
+  phase4-completion-honesty \
   phase4-ready-frontier \
   phase4-e2e-merge-train \
   phase4-recirc-deconflict \

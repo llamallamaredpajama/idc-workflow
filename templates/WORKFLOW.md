@@ -205,6 +205,30 @@ when all green → close. **Nothing merges that isn't green on real functional t
 shallow or placeholder suite is a review FAIL.** Builders never edit canonical docs;
 divergence files a recirculation and pauses only the affected issue.
 
+### 4.3a Completion honesty — the two things "green" never proved
+
+Merged and reviewed is not the same claim as finished. Two gates run at every wave close (and at
+Build's Phase-4 retriggers), both fail-closed, both deterministic:
+
+**Board↔reality coherence.** The board is a **dashboard**, and a dashboard can lie. Finishing an item
+merges its PR — which auto-closes the issue via the `Closes #N` keyword — and flips the board Status a
+few steps later; a session that dies in between leaves the item **shipped but still showing
+`In Progress`**, forever. Nothing downstream noticed, because the acceptance check audits only
+merged-`Done` items and the drain counts only `Todo`, so the pipe reported itself **complete** over a
+board advertising work that had already landed. `idc_finish_coherence.py` asks the one question none of
+them asked — *does the board still claim work that already shipped?* — and a gap is repaired through
+the existing idempotent door (`idc_git_finish.py --close-only`), never a hand-edited Status.
+
+**The live product.** Every other gate in this document verifies **code**. Code can be flawless while
+the running product is dead, because what breaks a deployment usually is not in the reviewed diff: a
+bucket nobody created, an env var nobody set, an IAM role granted by hand. IDC cannot know how to
+deploy or drive your product — so **you declare the surfaces** in
+`WORKFLOW-config.yaml::live_verification` (name, the paths behind it, the journey), and
+`idc_live_check.py` requires a committed evidence record that each was actually driven. The evidence
+**expires by itself**: anything landing on a surface's paths — including its Terraform and deploy
+scripts — invalidates it, so provisioning drift cannot hide behind a green build. A repo that declares
+no live surface reports `live: not-declared` and is never gated; opting in is the only way to be gated.
+
 ### 4.4 Recirculator — drift healing
 
 The only retrograde path. Determines the highest affected layer and answers one question:

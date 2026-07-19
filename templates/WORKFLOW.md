@@ -30,7 +30,7 @@ the glass wall (§1.2). Everything else flows autonomously.
 `Think → Plan → Build`, with the `Recirculator` as the only retrograde path and `Autorun` as the
 one-shot drainer that traverses the whole pipe.
 
-IDC ships **11 slash surfaces**:
+IDC ships **13 slash surfaces**:
 
 ```text
 think | intake | plan | build | recirculate | autorun | janitor | init | doctor | update | uninstall

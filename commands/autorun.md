@@ -46,6 +46,26 @@ only ever catches a stop that abandons a non-empty inbox. On a clean `drain: com
 clear the marker (same command with `clear --kind orchestrator_drain`); it is optional hygiene, not
 required for correctness (a drained board is allowed to stop regardless).
 
+**Pick up a paused run (deterministic — run ONCE, at drain start).** A previous session may have
+stopped this repo's pipeline on purpose with `/idc:pause`. That pause is graceful by contract —
+nothing was left half-done — and it holds no work state, so resuming it is exactly: clear the record,
+then drain from the live board as usual. Doing this at the top of the drain is what makes a forgotten
+pause impossible to strand: the operator gets the run back by running `/idc:autorun`, without having
+to remember they paused it. `resume: not-paused` is the normal, silent case, and costs one local file
+stat — it reads no board and adds zero GraphQL.
+
+<!-- autorun-preflight:begin -->
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_pause_state.py" --cwd "$PWD" resume \
+  --session "$CLAUDE_CODE_SESSION_ID"
+```
+<!-- autorun-preflight:end -->
+
+Report it in the exit report when it cleared something: `resume: cleared (paused)` means this run
+continues a deliberately-paused one, and `resume: cleared (pause-requested)` means the previous
+session asked to pause and never achieved it — an ordinary interrupted run, so treat anything the
+normal preflight sweeps surface as that session's unfinished business, not as a clean handover.
+
 **Janitor preflight** — run ONCE, before the drain loop below begins (not on every re-loop pass:
 board↔git debris left by a dead or interrupted **prior** session doesn't regenerate mid-run just
 because the pipe loops back, unlike the rogue-sweep backstop below, which specifically catches a
@@ -248,7 +268,8 @@ only when a full pass leaves nothing actionable:
    iteration's `idc:idc-build` re-verifies its **end-state** via `idc_git_finish.py` (PR merged,
    branches gone, worktree gone, Status=Done) — so a finish that actually completed during the
    outage is never re-attempted.
-   Emit the exit report: recirculated, planned, admitted, built/merged, board state, the
+   Emit the exit report: recirculated, planned, admitted, built/merged, board state, **whether this
+   run resumed a deliberately-paused one** (the `resume:` line from the preflight above), the
    **final working-tree state from a post-build `git status --porcelain`** (run it at exit, never a
    start-of-run snapshot — the build lane writes files mid-run, so a stale snapshot under-counts any
    uncommitted/untracked artifact), and anything waiting on the operator.

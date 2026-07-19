@@ -111,9 +111,9 @@ umbrella (provider-qualified) boots every role, no per-role pinning required —
 pool and a Pi-side autorun drain remain pending (#66 L1/L4), which is why the runtime stays
 experimental.
 
-## The eleven commands — one altitude each
+## The thirteen commands — one altitude each
 
-IDC ships **11 slash entry points**:
+IDC ships **13 slash entry points**:
 
 ```text
 think | intake | plan | build | recirculate | autorun | janitor | init | doctor | update | uninstall

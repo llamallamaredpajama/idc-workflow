@@ -58,6 +58,17 @@ loop below). Then the two lanes:
    when there is nothing to recover. It is **fail-soft** (never halts the drain) and **repo-gated**;
    relay `recovered:` / `cleared:`, and treat `unresolved:` as a live obligation still owed — those
    taints are PRESERVED, never dropped.
+   **Then pick up a deliberately-paused run (run ONCE, at drain start):** a previous session may have
+   stopped this repo's pipeline on purpose with `/idc:pause`. That pause is graceful by contract
+   (nothing half-done) and holds no work state, so resuming is exactly: clear the record, then drain
+   from the live board as usual. Running it here is what stops a FORGOTTEN pause from stranding work —
+   the operator gets the run back with `/idc:autorun`, without having to remember they paused.
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_pause_state.py" --cwd "$PWD" resume --session "$CLAUDE_CODE_SESSION_ID"`
+   costs one local file stat and reads no board (zero GraphQL). `resume: not-paused` is the normal,
+   silent case; relay `resume: cleared (paused)` as "this run continues a deliberately-paused one", and
+   `resume: cleared (pause-requested)` as a previous session that ASKED to pause and never achieved it
+   — an ordinary interrupted run, so whatever the sweeps above surface is that session's unfinished
+   business, not a clean handover.
    **Then synthesize any phantom-idle implementer (drop H — every pass, beside the reconcile above):**
    an implementer teammate can go idle without reporting, leaving its item `Stage = Buildable ∧
    Status = In Progress` (claimed) but never advanced; the drain is blind to it (counts only `Todo` /

@@ -7,7 +7,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/version-4.2.0-e8e7df?style=flat-square&labelColor=1a1a1a" alt="version 4.2.0">
   <img src="https://img.shields.io/badge/Claude%20Code-plugin-e8e7df?style=flat-square&labelColor=1a1a1a" alt="Claude Code plugin">
-  <img src="https://img.shields.io/badge/commands-11-e8e7df?style=flat-square&labelColor=1a1a1a" alt="11 commands">
+  <img src="https://img.shields.io/badge/commands-13-e8e7df?style=flat-square&labelColor=1a1a1a" alt="13 commands">
   <img src="https://img.shields.io/badge/runtime-Claude%20%C2%B7%20Codex%20%C2%B7%20Pi-e8e7df?style=flat-square&labelColor=1a1a1a" alt="runtimes">
   <img src="https://img.shields.io/badge/guardrails-5-c8dc00?style=flat-square&labelColor=1a1a1a" alt="5 guardrails">
   <img src="https://img.shields.io/badge/license-MIT-e8e7df?style=flat-square&labelColor=1a1a1a" alt="MIT license">
@@ -322,7 +322,7 @@ wires Pi.
 
 This repo is the plugin **and** its own marketplace:
 
-- **11 commands** — the pipeline (`think · intake · plan · build · recirculate · autorun`) plus the
+- **13 commands** — the pipeline (`think · intake · plan · build · recirculate · autorun`), the run controls (`pause · resume`), plus the
   `janitor` reconciler, `init`, `doctor`, and the lifecycle pair `update` / `uninstall`.
 
   Each entry point admits scope at exactly one altitude, and none of them may do another's job:
@@ -364,7 +364,7 @@ bash tests/smoke/run-all.sh
 .claude-plugin/   plugin.json (manifest) + marketplace.json (self-hosted marketplace)
 agents/           9 agents — stage playbooks + implementer + finisher + review coordinator/agent
 skills/           13 reusable procedures (runtime adapters, tracker, review engine, …)
-commands/         11 slash commands (think|intake|plan|build|recirculate|autorun|janitor|init|doctor|update|uninstall)
+commands/         13 slash commands (think|intake|plan|build|recirculate|autorun|pause|resume|janitor|init|doctor|update|uninstall)
 templates/        per-project scaffold copied by /idc:init
 scripts/          lint-references.sh, release check, the filesystem tracker + stage helpers,
                   install-codex.sh / install-pi.sh, run-evals.sh

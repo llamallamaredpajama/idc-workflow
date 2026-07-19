@@ -418,4 +418,24 @@ if pausable != expected:
 sys.exit("; ".join(problems) if problems else 0)
 PY
 
+# A10 — THE INTEGRATION IS ACTUALLY APPLIED, not merely documented. A9 proves the block in
+# docs/dev/pause-resume-autorun-integration.md WORKS by executing it; it says nothing about whether
+# the playbooks a real run reads have it. Without this, the whole second resume path could be deleted
+# from both files and every other assertion here would stay green — the exact "documented but not
+# wired" trap E3 in phase4-completion-honesty.sh locks for the drain flags.
+#
+# BOTH files, deliberately: `/idc:autorun` tells the session to read the AGENT file and run its steps,
+# so a step present only in the command markdown is not live in a real run.
+#
+# Scoped to the real invocation, never a file-wide grep: the surrounding prose in both files names the
+# script too, so a bare `grep idc_pause_state.py` would pass with the command deleted.
+#
+# The single edit that makes this fail: delete the resume preflight command line from either playbook.
+for f in "$PLUGIN/commands/autorun.md" "$PLUGIN/agents/idc-autorun.md"; do
+  grep -qE 'idc_pause_state\.py"? --cwd "\$PWD" resume' "$f" \
+    || fail "A10: $(basename "$f") must INVOKE the resume preflight (idc_pause_state.py … resume) on a
+real command line — a forgotten pause is only picked up automatically if this step is in the playbook
+the run actually reads"
+done
+
 echo "PASS: a run can be paused on purpose without the board ever lying, and both resume paths continue it"

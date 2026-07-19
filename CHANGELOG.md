@@ -50,10 +50,31 @@ non-terminal exit 4 — so the Stop fixpoint gate enforces them with no new hook
   idempotent `--close-only` door. Autorun's preflight runs it on every pass; it costs no board read
   when there is nothing to recover. An obligation it cannot discharge is preserved and reported —
   never silently dropped.
+- **A run can be stopped on purpose and picked back up: `/idc:pause` and `/idc:resume`.** The two
+  fixes above make an UNPLANNED interruption survivable; these make a PLANNED one first-class, so
+  stopping a long run no longer means killing it. `/idc:pause` is graceful by contract: it finishes
+  whatever is in flight, then proves nothing is half-done — did anything ship while the board still
+  shows it in flight, does the board still claim an item is being worked, did a multi-step action
+  start and never finish — before it records anything. Each finding prints the command that clears
+  it. There is no override flag: a pause that cannot prove quiescence reports `NOT paused`, names
+  what is in flight, and leaves the record as `pause-requested`.
+  - `scripts/idc_pause_state.py` writes one gitignored local record holding exactly one fact — this
+    run is paused. It deliberately holds **no work state**: the board stays the single source of
+    truth, which is why resume has nothing to reconstruct.
+  - `paused` is a fifth terminal status in `idc_command_contract.py`, because none of the existing
+    four could close a deliberate stop honestly. Its evidence is the strictest in the contract: a
+    CONFIRMED record **plus** a fresh re-derivation that nothing is half-done — so hand-writing a
+    record buys nothing, since the closeout re-checks the repo rather than reading the record's claim.
+  - Both resume paths work: `/idc:resume`, and the next `/idc:autorun`, whose preflight clears the
+    record in one local file read (zero GraphQL). A pause the operator forgets can never strand work.
+  - The Stop fixpoint gate now ALLOWS a stop on a confirmed pause — otherwise the gate that exists to
+    catch dishonest exits would refuse the one honest way to stop, and pausing would degrade back into
+    the hard kill it replaces. An unconfirmed `pause-requested` buys nothing.
 - `--coherence` and `--live` are opt-in flags on `idc_autorun_drain.py`; default output is
   unchanged. New verdicts `drain: coherence-gap` and `drain: live-gap` ride the existing exit 4.
 - `idc_git_janitor.py --json` now exposes each finding's `op` (its machine classification), so a
   consumer can select a finding class without pattern-matching English prose.
+- The command surface grows from 11 to 13 (`pause`, `resume`).
 
 ## 4.1.2 — 2026-07-17
 

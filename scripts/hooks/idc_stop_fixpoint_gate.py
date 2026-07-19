@@ -80,8 +80,21 @@ orchestrator, and the unscoped taint set could otherwise let a DEAD session's st
 it. `IDC_HOOKS_OBSERVE_ONLY=1` downgrades the block to a stderr warning (allow). Repo-gated: an instant
 no-op outside an IDC-governed repo.
 
+A DELIBERATE PAUSE IS ALLOWED (the pause/resume work). This gate refuses a stop that LIES about being
+done. A confirmed `/idc:pause` lies about nothing: `scripts/idc_pause_check.py` proved nothing was
+half-done before the record was written, the run's open command records were closed with the truthful
+`paused` terminal status, and both resume paths (`/idc:resume`, and the next `/idc:autorun`'s
+preflight) pick the run back up from the board. So a CONFIRMED pause record (`.idc-pause-state.json`,
+state `paused` — a mere `pause-requested` does NOT count) allows the stop, checked BEFORE the drain
+runs. Without this, the only way to stop a long run on purpose would be a hard kill — the exact
+ungraceful interruption pause exists to replace. The record is TRUSTED here rather than re-derived, for
+the same reason the github path trusts `.idc-drain-verdict.json`: re-running the quiescence check would
+put a coherence scan (and on github a board read) on the stop path. Re-derivation happens where it can
+afford to — at `confirm` time, and again in the `paused` closeout claim.
+
 Invocation: idc_stop_fixpoint_gate.py <PLUGIN_ROOT>   (Stop payload on stdin).
 """
+import json
 import os
 import re
 import subprocess
@@ -121,6 +134,25 @@ _STOP_GATE_BOUND = H.DEFAULT_BOUND
 # tests/smoke/phase4-completion-honesty.sh, the same lockstep-by-smoke-parity convention the drain and
 # acceptance check already use.
 _DRAIN_TIMEOUT = 150
+# The durable pause record `scripts/idc_pause_state.py` writes, read INLINE here for the same reason
+# `_read_backend` parses the tracker config inline: a hook must not grow a sys.path dependency on a
+# sibling package outside its own directory. The filename is the shared contract, held in lockstep by
+# tests/smoke/phase10-pause-resume.sh (the same lockstep-by-smoke-parity convention `_DRAIN_TIMEOUT`
+# uses), and `_PAUSE_CONFIRMED` is the ONE state that counts as a real pause.
+_PAUSE_FILENAME = ".idc-pause-state.json"
+_PAUSE_CONFIRMED = "paused"
+
+
+def _is_paused(cwd):
+    """True iff this repo carries a CONFIRMED pause record. TOLERANT by construction: a missing,
+    unreadable, corrupt, or merely-`pause-requested` record reads as NOT paused — the fail-closed
+    reading, since anything less than a confirmed pause leaves this gate doing its normal job."""
+    try:
+        with open(os.path.join(cwd or ".", _PAUSE_FILENAME), encoding="utf-8") as fh:
+            rec = json.load(fh)
+    except (OSError, ValueError):
+        return False
+    return isinstance(rec, dict) and rec.get("state") == _PAUSE_CONFIRMED
 
 
 def _read_backend(cwd):
@@ -373,6 +405,29 @@ def _gate(payload, plugin_root):
     # a crashed drain's stale marker owned by a DIFFERENT session is not returned here.
     pending_taints = idc_ledger.pending_taints(cwd, session_id=sid)
     if not any(t.get("kind") == ORCHESTRATOR_MARKER for t in pending_taints):
+        H.allow()
+
+    # DELIBERATE PAUSE — an honest, recorded, resumable stop (the pause/resume work). This gate exists
+    # to refuse a stop that LIES about being done; a confirmed `/idc:pause` lies about nothing. The
+    # record it reads is only ever written after `idc_pause_check.py` PROVED nothing is half-done, the
+    # run's open command records were closed with the truthful `paused` terminal status, and both
+    # resume paths (`/idc:resume` and the next `/idc:autorun`'s preflight) pick the run back up from the
+    # board. Blocking here would leave the operator no way to stop a long run on purpose except a hard
+    # kill — the exact ungraceful interruption the pause work removes.
+    #
+    # A `pause-requested` record is deliberately NOT honored: that state means a pause was asked for and
+    # never achieved, so the stop is still the dishonest kind this gate refuses.
+    #
+    # TRUST BOUNDARY, stated rather than implied: this reads the local record instead of re-deriving
+    # quiescence, exactly as the github path trusts `.idc-drain-verdict.json` instead of re-scanning the
+    # board. Re-running the check here would put a full coherence scan (and, on github, a board read) on
+    # the stop path, which the zero-GraphQL constraint forbids. The re-derivation happens where it can
+    # afford to: at `confirm` time, and again in the `paused` closeout claim.
+    if _is_paused(cwd):
+        H.warn("stop-fixpoint: this repo carries a CONFIRMED pause record — allowing the stop "
+               "(a deliberate pause is not a dishonest exit; /idc:resume or the next /idc:autorun "
+               "picks the run back up from the board)")
+        H.counter_clear(f"stop-fixpoint.{sid}")
         H.allow()
 
     # From here we KNOW this is an orchestrator drain session → fail CLOSED on an internal error.

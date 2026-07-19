@@ -193,6 +193,11 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/idc_command_report.py" --cwd "$ROOT
 # #150 has no ignore for it, so its first rotation would strand an untracked .lock the janitor then
 # flags as debris. Ensure it too (the janitor owns the lock-path convention + ignore rule):
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_janitor.py" --repo "$ROOT" --ensure-gitignore
+# The durable pause record (.idc-pause-state.json) — the local statement that this repo's pipeline run
+# was deliberately paused (`/idc:pause`), cleared by `/idc:resume` or the next `/idc:autorun` preflight.
+# Local run state, never committed; a repo scaffolded before pause/resume has no ignore for it. Ensure
+# it too (the pause-state module owns the filename + ignore rule; additive, idempotent):
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_pause_state.py" --cwd "$ROOT" ensure-gitignore
 ```
 Idempotent: a no-op if the line is already present (report `ledger-gitignore-already-present` /
 `drain-verdict-gitignore-already-present` / `journal-lock-gitignore-already-present`), otherwise

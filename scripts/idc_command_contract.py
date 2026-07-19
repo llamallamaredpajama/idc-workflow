@@ -60,15 +60,25 @@ sys.path.insert(0, os.path.join(_HERE, "hooks"))  # scripts/hooks/ — for idc_l
 import idc_plugin_freshness as freshness  # noqa: E402
 import idc_ledger  # noqa: E402
 
-# The eleven governed `/idc:*` entry points. Kept in lockstep with commands/*.md and the
+# The thirteen governed `/idc:*` entry points. Kept in lockstep with commands/*.md and the
 # UserPromptExpansion matcher in hooks/hooks.json.
 COMMANDS = {
-    "autorun", "build", "doctor", "init", "intake", "janitor",
-    "plan", "recirculate", "think", "uninstall", "update",
+    "autorun", "build", "doctor", "init", "intake", "janitor", "pause",
+    "plan", "recirculate", "resume", "think", "uninstall", "update",
 }
-# The four honest ways a command lifecycle can END (the GLOBAL set). Task 6 narrows the legal subset
+# The honest ways a command lifecycle can END (the GLOBAL set). Task 6 narrows the legal subset
 # PER COMMAND (LEGAL_STATUSES) and attaches command-specific evidence to each.
-TERMINAL_STATUSES = {"complete", "waiting_gate", "no_action", "blocked_external"}
+#
+# `paused` (the pause/resume work) is the fifth, and it exists because none of the other four could
+# tell the truth about a DELIBERATE stop. A long autorun/build run that the operator pauses is not
+# `complete` (the pipe is not drained), not `waiting_gate` (nothing is waiting on a human decision —
+# the human already made one), not `no_action` (there is plenty of action left), and not
+# `blocked_external` (nothing failed). Before this status the only way to close such a run was to
+# claim one of those, i.e. to lie; the Stop closeout gate would otherwise refuse the walk-away
+# forever. Its evidence is the strictest in the table: a CONFIRMED durable pause record PLUS a fresh
+# read-only re-derivation that nothing is half-done — see `_claim_paused`.
+PAUSED = "paused"
+TERMINAL_STATUSES = {"complete", "waiting_gate", "no_action", "blocked_external", PAUSED}
 
 # Per-command legal terminal statuses (Task 6 matrix) are DERIVED from the claim table (`LEGAL_STATUSES`,
 # defined just after `_CLAIM_TABLE` below): a command×status is legal IFF the table enumerates a
@@ -136,6 +146,10 @@ _JANITOR_PROVENANCE = "idc_git_janitor.py"
 # The receipt checker is safely RE-RUNNABLE read-only (a fingerprint verify), so an init/update/uninstall
 # blocker citing it is RE-DERIVED by re-running it — grounded only when the re-run actually FAILS.
 _RECEIPT_HELPER = "idc_receipt_check.py"
+# The pause quiescence reader is safely RE-RUNNABLE read-only (it scans, it never mutates), so a
+# pause/resume blocker citing it is RE-DERIVED by re-running it — grounded only when the re-run
+# actually fails, with the cited exit MATCHED against the re-run's own exit.
+_PAUSE_HELPER = "idc_pause_check.py"
 _INTAKE_HELPERS = {"idc_intake_manifest.py", "idc_pr_finish.py"}
 # The janitor scanner's DOCUMENTED blocked exit (ground truth could not be established). Exit 1 is a
 # COMPLETED scan with findings (a `complete`, not blocked); only exit 2 grounds `blocked_external`
@@ -159,6 +173,8 @@ _BLOCKER_HELPERS = {
     "init":        {_RECEIPT_HELPER},
     "update":      {_RECEIPT_HELPER},
     "uninstall":   {_RECEIPT_HELPER},
+    "pause":       {_PAUSE_HELPER},
+    "resume":      {_PAUSE_HELPER},
 }
 
 
@@ -264,6 +280,22 @@ def _check_blocker(command: str, refs: dict, repo: str, session: str) -> Closeou
                          "blocked_external citing the receipt checker requires a re-run to actually FAIL "
                          "(an invalid receipt or a modified/missing stamped file); the read-only re-run "
                          "passed — there is no deterministic failure to ground a blocked stop")
+    elif base == _PAUSE_HELPER:
+        # RE-RUN the pause quiescence reader READ-ONLY. A pause/resume blocker is grounded ONLY when the
+        # re-run actually FAILS, and the cited exit must MATCH the re-run's own exit — so "I could not
+        # pause" is proven the same way at closeout as it was at the attempt. A clean re-run refuses the
+        # blocker outright: if nothing is half-done, the honest close is the pause itself, not a blocker.
+        code, _verdict, _findings = _pause_check_result(repo)
+        if code == 0:
+            return _fail("blocked-external-pause-not-failing",
+                         "blocked_external citing the pause quiescence check requires a re-run to "
+                         "actually FAIL; the read-only re-run passed (nothing is half-done) — close the "
+                         "pause honestly instead of reporting a blocker")
+        if code != blocker.get("exit"):
+            return _fail("blocked-external-pause-exit-mismatch",
+                         f"blocked_external cites exit {blocker.get('exit')} but a read-only re-run of "
+                         f"the pause quiescence check exits {code} — the cited exit must MATCH what the "
+                         "helper actually does now")
     else:
         # A helper on no re-derivation path (no durable receipt, not safely re-runnable) cannot ground a
         # blocked stop — a caller exit/diagnostic is never accepted as ground truth (wave-4 finding 1).
@@ -337,6 +369,106 @@ def _oracle_action(repo: str):
     if action.verdict == "invalid" or action.reason_code == "rate-limited":
         return None
     return action
+
+
+def _pause_record(repo: str):
+    """THIS repo's durable pause record (`.idc-pause-state.json`), or None. Read tolerantly: a missing,
+    corrupt, or shape-invalid record reads as "no pause is proven", which is the fail-closed reading
+    for every claim below."""
+    if not _ne_str(repo):
+        return None
+    try:
+        import idc_pause_state as PAUSE  # noqa: E402 — lazy
+        return PAUSE.read_record(repo)
+    except Exception:  # noqa: BLE001 — an unreadable record is never a proven pause
+        return None
+
+
+def _pause_check_result(repo: str):
+    """A fresh READ-ONLY re-derivation of "is anything half-done?" → `(exit, verdict, findings)`.
+
+    This is the load-bearing re-derivation behind every pause claim: the durable record says a pause
+    was taken, and THIS says whether that is still true of the repo right now. A caller can supply no
+    parameter that skips it. Cached per invocation (the same trust boundary as every other cached
+    read here — one snapshot per source per process), because closing several open pipeline records as
+    `paused` in one pass would otherwise re-run a whole coherence scan per record. An import/crash is
+    reported as exit 2 (indeterminate), never a pass."""
+    key = _cache_key("pause-check", repo)
+    if key in _READ_CACHE:
+        return _READ_CACHE[key]
+    try:
+        import idc_pause_check as PAUSE_CHECK  # noqa: E402 — lazy
+        result = PAUSE_CHECK.check(repo)
+    except Exception as exc:  # noqa: BLE001 — an unrunnable check is INDETERMINATE, never clean
+        result = (2, "error", [{"kind": "error", "ref": f"the quiescence check could not run ({exc})",
+                                "cure": "repair the helper, then re-run /idc:pause"}])
+    _READ_CACHE[key] = result
+    return result
+
+
+def _claim_paused(refs: dict, repo: str, session: str) -> CloseoutResult:
+    """The `paused` terminal status: this run was DELIBERATELY stopped, and stopped CLEANLY.
+
+    Two independent facts, both re-derived, neither supplied by the caller:
+      1. a CONFIRMED durable pause record exists for this repo (a bare `pause-requested` is explicitly
+         NOT enough — that state means the pause was asked for and never achieved); and
+      2. a fresh read-only re-derivation says NOTHING is half-done, right now.
+    (2) is what stops the obvious forgery: hand-writing a `paused` record while an item is mid-finish
+    buys nothing, because the closeout re-checks the repo rather than reading the record's own stored
+    proof. It also stops a real pause from being re-used later as a free pass — the record alone can
+    never close a command once the repo has moved on."""
+    rec = _pause_record(repo)
+    if rec is None:
+        return _fail("paused-no-record",
+                     "a `paused` closeout requires this repo's durable pause record "
+                     "(.idc-pause-state.json) — none found (absent, unreadable, or invalid). Run "
+                     "/idc:pause, which records it only after proving nothing is half-done.")
+    if rec.get("state") != PAUSED:
+        return _fail("paused-not-confirmed",
+                     f"the pause record reads state {rec.get('state')!r}, not {PAUSED!r} — a pause that "
+                     "was REQUESTED but never confirmed is not a clean stop, and must not close a "
+                     "command as paused (resolve what is in flight, then re-run /idc:pause)")
+    code, verdict, findings = _pause_check_result(repo)
+    if code != 0:
+        detail = "; ".join(f"{f['kind']}:{f['ref']}" for f in findings) or verdict
+        return _fail("paused-not-quiescent",
+                     f"a `paused` closeout requires a fresh re-derivation that nothing is half-done; the "
+                     f"read-only re-run reports {verdict!r} (exit {code}): {detail}. A pause recorded "
+                     "over half-done work is exactly the corruption this status exists to prevent.")
+    return CloseoutResult(True, "ok", "deliberate pause: confirmed record + fresh quiescence proof", {})
+
+
+def _claim_pause_recorded(refs: dict, repo: str, session: str) -> CloseoutResult:
+    """`/idc:pause complete` — the pause command's own closeout. It proves the SAME two facts as
+    `_claim_paused`, which is exactly right: the command completed iff the repo is now provably,
+    durably paused. Nothing weaker would mean anything."""
+    return _claim_paused(refs, repo, session)
+
+
+def _claim_resume_cleared(refs: dict, repo: str, session: str) -> CloseoutResult:
+    """`/idc:resume complete` (1/2) — the pause record is GONE, re-read from disk. This is the whole
+    observable effect of resuming: the repo no longer claims to be paused, so the next drain (and the
+    Stop fixpoint gate) treat it as a live run again. Resuming when nothing was paused satisfies this
+    trivially and honestly — an already-unpaused repo IS the intended end state."""
+    rec = _pause_record(repo)
+    if rec is not None:
+        return _fail("resume-still-paused",
+                     f"/idc:resume complete requires the pause record to be CLEARED, but it still reads "
+                     f"state {rec.get('state')!r} — the run is still recorded as paused, so nothing was "
+                     "resumed (clear it through `idc_pause_state.py resume`)")
+    return CloseoutResult(True, "ok", "no pause record remains — the run is live again", {})
+
+
+def _claim_resume_oracle(refs: dict, repo: str, session: str) -> CloseoutResult:
+    """`/idc:resume complete` (2/2) — a fresh, VALID next-action oracle read backs the handoff. Resume's
+    product is "here is where the run stands now", and that has to be re-derived from the live board,
+    not remembered. An unreadable/invalid board or a rate-limited read fails this closed: a resume that
+    cannot see the board has not resumed anything, and must report `blocked_external` instead."""
+    if _oracle_action(repo) is None:
+        return _fail("resume-oracle-unread",
+                     "/idc:resume complete requires a fresh, valid next-action oracle read for this repo "
+                     "(the board is what the run resumes FROM) — it could not be established")
+    return CloseoutResult(True, "ok", "resume handoff re-derived from a live oracle read", {})
 
 
 def _check_no_action(command: str, repo: str) -> CloseoutResult:
@@ -2454,11 +2586,20 @@ def _claim_blocker_for(command: str):
 # blocker (a durable receipt or a safe read-only re-run — see _BLOCKER_HELPERS): build/autorun (drain
 # verdict), janitor/doctor (janitor report), init/update/uninstall (receipt fingerprint re-run), and
 # Intake (its helper-owned nonce-bound failure receipt). Think/plan/recirculate have no such helper.
+# THE `paused` CLAIM, shared by every pipeline command. Deliberately identical everywhere: what makes
+# a paused /idc:build honest is exactly what makes a paused /idc:autorun honest — the repo carries a
+# confirmed pause record AND a fresh re-derivation says nothing is half-done. It is enumerated for the
+# six PIPELINE commands only. A lifecycle/diagnostic command (doctor/init/update/uninstall/janitor)
+# never gets it, on the table's existing principle that such a command may not claim a pipeline
+# terminal it does not own — and there is no long autonomous run inside one to pause.
+_CLAIM_PAUSED = (Claim("deliberate-pause", _claim_paused),)
+
 _CLAIM_TABLE = {
     "intake": {
         "complete": (Claim("intake-manifest-reviewed", _claim_intake_manifest_reviewed),
                      Claim("intake-pr-merged", _claim_intake_pr_merged)),
         "blocked_external": (_claim_blocker_for("intake"),),
+        PAUSED: _CLAIM_PAUSED,
     },
     "think": {
         "complete": (Claim("think-refs-present", _claim_think_refs_present),
@@ -2475,6 +2616,7 @@ _CLAIM_TABLE = {
                          Claim("think-gate-marker-bound", _claim_think_gate_marker),
                          Claim("think-gate-not-disposed", _claim_think_gate_not_disposed),
                          Claim("think-pointer-blocked", _claim_think_pointer_blocked)),
+        PAUSED: _CLAIM_PAUSED,
     },
     "plan": {
         "complete": (Claim("plan-matrix-revalidated", _claim_plan_matrix),
@@ -2482,21 +2624,37 @@ _CLAIM_TABLE = {
                      Claim("plan-decomposition-children", _claim_plan_decomposition),
                      Claim("plan-admitted-set-covered", _claim_plan_admitted_set_covered)),
         "no_action": (Claim("plan-oracle-no-admitted", _claim_plan_no_action),),
+        PAUSED: _CLAIM_PAUSED,
     },
     "recirculate": {
         "complete": (Claim("recirc-reconciled", _claim_recirc_reconciled),
                      Claim("recirc-requested-closeouts", _claim_recirc_closeouts)),
         "waiting_gate": (Claim("recirc-gate", _claim_recirc_gate),),
+        PAUSED: _CLAIM_PAUSED,
     },
     "build": {
         "complete": (Claim("build-receipts-merged", _claim_build_receipts),),
         "no_action": (Claim("build-oracle-no-eligible", _claim_build_no_action),),
         "blocked_external": (_claim_blocker_for("build"),),
+        PAUSED: _CLAIM_PAUSED,
     },
     "autorun": {
         "complete": (Claim("autorun-drain-complete", _claim_autorun_drain),),
         "waiting_gate": (Claim("autorun-oracle-human-gate", _claim_autorun_waiting_gate),),
         "blocked_external": (_claim_blocker_for("autorun"),),
+        PAUSED: _CLAIM_PAUSED,
+    },
+    # /idc:pause and /idc:resume are the two lifecycle surfaces for a deliberate stop. Neither may
+    # claim `paused` itself (a pause command that closed as "paused" would be recording its own
+    # instruction as its own outcome), and neither claims a pipeline `waiting_gate`/`no_action`.
+    "pause": {
+        "complete": (Claim("pause-recorded", _claim_pause_recorded),),
+        "blocked_external": (_claim_blocker_for("pause"),),
+    },
+    "resume": {
+        "complete": (Claim("resume-cleared", _claim_resume_cleared),
+                     Claim("resume-oracle-handoff", _claim_resume_oracle)),
+        "blocked_external": (_claim_blocker_for("resume"),),
     },
     "janitor": {
         "complete": (Claim("janitor-report", _claim_janitor_report),),

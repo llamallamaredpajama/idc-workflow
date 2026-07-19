@@ -102,6 +102,7 @@ for t in \
   phase8-model-ladder \
   phase9-realgit-lifecycle \
   phase9-multiwave-accumulation \
+  phase10-pause-resume \
   phase-governance; do
   # Assertion-class rollup (design §E.4 / audit RC6): tally each phase by WHAT its green proves, so
   # "all green" can never be silently over-read as end-to-end behavioral proof. The class is declared

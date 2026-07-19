@@ -105,4 +105,10 @@ python3 "$PLUGIN_ROOT/scripts/hooks/idc_command_report.py" --cwd "$REPO_ROOT" en
 # lock-path convention + ignore rule (single source); idempotent + append-only, same as the ledger.
 python3 "$PLUGIN_ROOT/scripts/idc_git_janitor.py" --repo "$REPO_ROOT" --ensure-gitignore
 
+# Gitignore the durable pause record (.idc-pause-state.json): the local statement that this repo's
+# pipeline run was deliberately paused, written only by /idc:pause and cleared by /idc:resume (or the
+# next /idc:autorun's preflight). Local run state, never committed — the WORK's durable state stays the
+# board. Module owns the filename + ignore rule; idempotent + append-only, same as the ledger.
+python3 "$PLUGIN_ROOT/scripts/idc_pause_state.py" --cwd "$REPO_ROOT" ensure-gitignore
+
 echo "idc-init scaffold complete (backend=$BACKEND, project=$PROJECT_NAME)"

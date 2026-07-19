@@ -214,6 +214,18 @@ run python3 "$LIVE" --repo "$L"
 [ "$rc" = 1 ] && [ "$out" = "live: gap web" ] \
   || fail "B7: a fabricated commit must not satisfy the gate, got rc=$rc out=$out"
 
+# B7b — evidence taken on an UNMERGED branch proves nothing about what shipped. This is the case that
+# independently exercises the ancestor rule: B7's fabricated sha is caught by the existence check AND
+# would be caught by this one, so B7 alone cannot prove the ancestor rule is live.
+git -C "$L" checkout -q -b side
+echo experiment >> "$L/services/app.py"; git -C "$L" add -A; git -C "$L" commit -qm side
+SIDE="$(git -C "$L" rev-parse HEAD)"
+git -C "$L" checkout -q main
+ev "{\"surface\":\"web\",\"commit\":\"$SIDE\",\"observed\":\"looked fine on my branch\"}"
+run python3 "$LIVE" --repo "$L"
+[ "$rc" = 1 ] && [ "$out" = "live: gap web" ] \
+  || fail "B7b: evidence from an unmerged commit must not satisfy the gate, got rc=$rc out=$out"
+
 # B8 — an empty `observed` is not evidence.
 ev "{\"surface\":\"web\",\"commit\":\"$SHA\",\"observed\":\"   \"}"
 run python3 "$LIVE" --repo "$L"
@@ -290,6 +302,71 @@ for pair in "idc_acceptance_check.py:acceptance" "idc_finish_coherence.py:finish
     || fail "D1: scripts/$s must emit the shared verdict token $t: gap"
 done
 
+echo "== F. the coherence gate's fail-closed contract against a HOSTILE janitor report"
+# The gate trusts one input: the janitor's JSON. These cases drive that input directly, via a stub
+# janitor placed next to a copy of the gate (it resolves its sibling by directory), because the real
+# janitor cannot be made to emit these shapes on demand — and a guard no test can reach is a guard
+# nobody knows is broken.
+#
+# THE CASE THAT MATTERS MOST: `idc_git_janitor.py --json` with no board arguments really does exit 0
+# with `{"verdict": "coherent", "board_scanned": false}`. Without the board_scanned guard the gate
+# would read that as "ok" — a clean bill of health from a scan that never looked at a board. That is
+# precisely the hollow clean this whole change set exists to remove.
+STUB="$WORK/stub"; mkdir -p "$STUB"
+cp "$COH" "$STUB/idc_finish_coherence.py"
+# The stub replays a payload + exit code from sidecar files, so no shell quoting ever touches the JSON.
+cat > "$STUB/idc_git_janitor.py" <<'PYEOF'
+#!/usr/bin/env python3
+import os, sys
+d = os.path.dirname(os.path.abspath(__file__))
+sys.stdout.write(open(os.path.join(d, "payload")).read())
+sys.exit(int(open(os.path.join(d, "code")).read().strip()))
+PYEOF
+stub_says() { printf '%s' "$1" > "$STUB/payload"; printf '%s' "$2" > "$STUB/code"; }
+stub_run() { run python3 "$STUB/idc_finish_coherence.py" --repo "$WORK/coh" --tracker "$WORK/coh/TRACKER.md"; }
+
+# F1 — coherent + exit 0 but NO board was scanned ⇒ INDETERMINATE, never ok.
+stub_says '{"verdict": "coherent", "counts": {}, "board_scanned": false, "findings": []}' 0
+stub_run
+[ "$rc" = 2 ] || fail "F1: a report with board_scanned=false must be indeterminate, got rc=$rc out=$out"
+
+# F2 — the same report WITH a board scanned is legitimately clean (proves F1 fails for the right
+# reason, not because the stub path is broken).
+stub_says '{"verdict": "coherent", "counts": {}, "board_scanned": true, "findings": []}' 0
+stub_run
+[ "$rc" = 0 ] && [ "$out" = "finish-coherence: ok" ] \
+  || fail "F2: a scanned, coherent board must be ok, got rc=$rc out=$out"
+
+# F3 — the janitor's own INDETERMINATE verdict must never be downgraded to clean: a capped or degraded
+# read may be masking exactly the stale items this gate is looking for.
+stub_says '{"verdict": "indeterminate", "counts": {}, "board_scanned": true, "findings": []}' 2
+stub_run
+[ "$rc" = 2 ] || fail "F3: an indeterminate janitor verdict must stay indeterminate, got rc=$rc out=$out"
+
+# F4 — a stale-class finding with no usable item number cannot be named, and dropping it would
+# UNDER-report staleness. Fail closed rather than silently skip it.
+stub_says '{"verdict": "findings", "counts": {}, "board_scanned": true, "findings": [{"tier": "SAFE-FIX", "dim": "board", "op": "set-done", "detail": "x"}]}' 1
+stub_run
+[ "$rc" = 2 ] || fail "F4: a numberless stale finding must fail closed, got rc=$rc out=$out"
+
+# F5 — a janitor that CRASHES (an exit outside its documented 0/1/2 contract) has produced no
+# trustworthy verdict at all.
+stub_says 'Traceback (most recent call last):' 3
+stub_run
+[ "$rc" = 2 ] || fail "F5: an out-of-contract janitor exit must be indeterminate, got rc=$rc out=$out"
+
+# F6 — unparseable output is not an empty findings list.
+stub_says 'not json at all' 0
+stub_run
+[ "$rc" = 2 ] || fail "F6: unparseable janitor JSON must be indeterminate, got rc=$rc out=$out"
+
+# F7 — and the positive control: a well-formed stale finding is reported, so the gate is not simply
+# always-red under the stub.
+stub_says '{"verdict": "findings", "counts": {}, "board_scanned": true, "findings": [{"op": "set-done", "number": 7}, {"op": "reconcile", "number": 9}]}' 1
+stub_run
+[ "$rc" = 1 ] && [ "$out" = "finish-coherence: gap #7" ] \
+  || fail "F7: a well-formed stale finding must be reported, and the RISKY reconcile op excluded; got rc=$rc out=$out"
+
 echo "== E. Stop-gate wiring — the enforcement seam"
 # E1 — TIMEOUT ORDERING. The gate's own ceiling must stay strictly ABOVE the drain's coherence
 # ceiling, so a slow scan times out INSIDE the drain (→ `drain: unknown`, which the gate allows)
@@ -304,18 +381,31 @@ outer="$(grep -oE '^_DRAIN_TIMEOUT = [0-9]+' "$GATE" | grep -oE '[0-9]+')"
 
 # E2 — the Stop gate's live re-run must ask the SAME questions the drain loop asks, or the filesystem
 # stop path silently enforces less than the drain does.
-grep -q -- '--coherence' "$GATE" || fail "E2: the Stop gate's drain re-run must pass --coherence"
-grep -q -- '--live' "$GATE" || fail "E2: the Stop gate's drain re-run must pass --live"
+#
+# ASSERTED AGAINST THE ACTUAL CALL, not the file. A bare `grep -- --coherence "$GATE"` passes on the
+# surrounding comments alone, so it stayed GREEN when the flag was deleted from the real subprocess
+# argv — a test that cannot fail is worse than no test, because it is believed. Scoped to the three
+# lines of the invocation instead.
+gate_call="$(grep -A2 'subprocess\.run(\[sys\.executable, drain' "$GATE")"
+[ -n "$gate_call" ] || fail "E2: could not locate the Stop gate's drain invocation"
+printf '%s' "$gate_call" | grep -q -- '"--coherence"' \
+  || fail "E2: the Stop gate's drain INVOCATION must pass --coherence (not merely mention it in prose)"
+printf '%s' "$gate_call" | grep -q -- '"--live"' \
+  || fail "E2: the Stop gate's drain INVOCATION must pass --live (not merely mention it in prose)"
 
-# E3 — the playbooks that actually invoke the drain must pass both flags on both backends.
+# E3 — the playbooks that actually invoke the drain must pass both flags, on the SAME line as the
+# drain command (same anti-prose-grep discipline as E2: the surrounding explanation names the flags
+# too, so a file-wide grep would pass even with the commands stripped).
 for f in "$PLUGIN/commands/autorun.md" "$PLUGIN/agents/idc-autorun.md"; do
-  grep -q -- '--coherence' "$f" || fail "E3: $(basename "$f") must pass --coherence to the drain"
-  grep -q -- '--live' "$f" || fail "E3: $(basename "$f") must pass --live to the drain"
+  n="$(grep -c 'idc_autorun_drain\.py[^`]*--coherence[^`]*--live' "$f")"
+  [ "${n:-0}" -ge 2 ] \
+    || fail "E3: $(basename "$f") must pass --coherence --live ON the drain command line for BOTH backends (found $n)"
 done
-# Build's wave close is the GitHub backend's own path to both gates (it has no on-disk TRACKER.md).
-grep -q 'idc_finish_coherence\.py' "$PLUGIN/agents/idc-build.md" \
-  || fail "E3: agents/idc-build.md wave close must run idc_finish_coherence.py"
-grep -q 'idc_live_check\.py' "$PLUGIN/agents/idc-build.md" \
-  || fail "E3: agents/idc-build.md wave close must run idc_live_check.py"
+# Build's wave close is the GitHub backend's own path to both gates (it has no on-disk TRACKER.md), so
+# assert the real invocation form, not a bare mention of the filename.
+grep -q 'python3 "\${CLAUDE_PLUGIN_ROOT}/scripts/idc_finish_coherence\.py"' "$PLUGIN/agents/idc-build.md" \
+  || fail "E3: agents/idc-build.md wave close must INVOKE idc_finish_coherence.py"
+grep -q 'python3 "\${CLAUDE_PLUGIN_ROOT}/scripts/idc_live_check\.py"' "$PLUGIN/agents/idc-build.md" \
+  || fail "E3: agents/idc-build.md wave close must INVOKE idc_live_check.py"
 
 echo "PASS: phase4-completion-honesty"

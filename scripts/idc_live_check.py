@@ -111,6 +111,7 @@ Exit contract (the sibling-helper convention — see idc_acceptance_check.py):
 Usage: idc_live_check.py --repo <dir> [--run] [--config <WORKFLOW-config.yaml>]
 """
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -123,13 +124,24 @@ from datetime import datetime, timezone
 # The evidence marker. The sentinel is matched FIRST and the payload captured up to the comment close,
 # so a CORRUPT payload fails closed (exit 2) rather than slipping past a `{…}`-anchored pattern as
 # "no marker at all" (the same discipline as idc_acceptance_check.DEFERRAL_MARKER).
-EVIDENCE_MARKER = re.compile(r"<!--\s*idc-live-evidence:\s*(.*?)\s*-->", re.S)
+MARKER_SENTINEL = "idc-live-evidence"
+EVIDENCE_MARKER = re.compile(r"<!--\s*" + MARKER_SENTINEL + r":\s*(.*?)\s*-->", re.S)
+# A real git object name. The evidence `commit` is matched against this BEFORE it is handed to git,
+# because git happily resolves symbolic names: a forged marker naming `HEAD` passes rev-parse, passes
+# `merge-base --is-ancestor HEAD HEAD`, and produces an empty `HEAD..HEAD` staleness log — i.e. every
+# freshness rule in this file says "current" for a receipt that describes nothing. Only a full object
+# name pins a receipt to one immutable code state.
+_FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 # Present in EVERY record, whatever produced it. `mode` is deliberately NOT here: a record with no
 # `mode` is a legacy/hand-written note, which is an honest "never executed" GAP, not a corrupt file.
 REQUIRED_EVIDENCE_KEYS = ("surface", "commit", "observed")
 
 MODE_EXECUTED = "executed"
 MODE_ATTESTED = "attested"
+# A run that established NOTHING (timeout, unrunnable command). Not a pass and not a product finding —
+# the third answer this gate has always had at the exit-code layer, now durable in the record too, so
+# the read-only audit inherits it instead of reading a receipt the failed run left behind.
+MODE_INDETERMINATE = "indeterminate"
 
 CONFIG_BASENAME = "WORKFLOW-config.yaml"
 BLOCK_KEY = "live_verification"
@@ -196,6 +208,37 @@ def redact(text):
     for pattern, repl in _REDACTORS:
         out = pattern.sub(repl, out)
     return out
+
+
+def _command_sha(command):
+    """A stable digest of the RAW declared command, for identity where the redacted display collides."""
+    return hashlib.sha256((command or "").encode("utf-8", "replace")).hexdigest()
+
+
+def neutralize(text):
+    """Defuse anything in CAPTURED text that could be read back as an evidence marker.
+
+    THE ATTACK THIS CLOSES. The evidence record puts the verify command's own output in the file, and
+    the record's verdict lives in a marker comment in that same file. So a verify script can PRINT a
+    marker. Without this, a failing script that echoes
+
+        <!-- idc-live-evidence: {"surface": "web", "exit_code": 0, "commit": "HEAD", …} -->
+
+    plants a second, forged marker in its own receipt, and the audit reads a pass out of a failed run.
+    Two independent defenses, because one is not enough: the reader anchors to the LAST marker (the
+    generated one is always last — see `read_evidence`), and this defuses the forged one so the file
+    never contains a second parseable marker at all. Either alone would close the reported hole; both
+    means a future edit to one of them cannot silently reopen it.
+
+    Applied at the single WRITE door, to every captured value, so no caller can forget it. The escape
+    is visible on purpose — a reviewer reading the receipt should SEE that the script tried this.
+    """
+    out = text or ""
+    # Break the sentinel: the marker pattern needs `idc-live-evidence` immediately followed by `:`.
+    out = out.replace(f"{MARKER_SENTINEL}:", f"{MARKER_SENTINEL}[escaped]:")
+    # Break the comment delimiters too, so captured text can neither open a comment nor CLOSE the real
+    # marker early (a premature `-->` inside the payload would truncate it into unparseable JSON).
+    return out.replace("<!--", "<![escaped]--").replace("-->", "--[escaped]>")
 
 
 def _tail(text, limit):
@@ -389,9 +432,21 @@ def surface_spec(repo, surface):
         "name": name,
         "paths": paths,
         "attested": attested,
-        # The command is stored REDACTED, because it is what lands in the record and what the audit
-        # compares against. A config that inlines a token still never writes it to disk.
+        # TWO REPRESENTATIONS OF ONE COMMAND, and conflating them was a real bug. `verify_raw` is what
+        # gets EXECUTED — the exact string the project declared, byte for byte. `verify` is the
+        # REDACTED display form, and it is the only one that ever reaches disk or stderr, because a
+        # config may legitimately inline a credential (`API_TOKEN=… ./probe.sh`) and an evidence file
+        # is committed. Executing the redacted form instead — which is what the first cut did — runs a
+        # DIFFERENT command than the one declared: `API_TOKEN=[REDACTED] ./probe.sh` fails, or worse,
+        # quietly succeeds against the wrong target.
+        "verify_raw": verify,
         "verify": redact(verify),
+        # Redaction is lossy and therefore COLLIDES: two distinct declared commands can share one
+        # redacted display string, and the audit's "is the recorded command still the declared one?"
+        # rule compares display strings. The hash is taken over the RAW command, so swapping a real
+        # probe for a different one that redacts identically still invalidates every old receipt. It
+        # is a digest, never a preimage — the raw command is not recoverable from it.
+        "verify_sha256": _command_sha(verify),
         "timeout": timeout,
         "rel": rel,
         "evidence_path": rel if os.path.isabs(rel) else os.path.join(repo, rel),
@@ -407,7 +462,7 @@ def _git(repo, *args):
     return r.returncode, (r.stdout or "").strip()
 
 
-def run_verify(repo, spec):
+def run_verify(repo, spec, commit):
     """EXECUTE one surface's verify command in the repo root. Returns (exit_code, redacted_output, secs).
 
     The command is a project-owned shell string, so it runs through the shell — that is the whole point
@@ -430,24 +485,38 @@ def run_verify(repo, spec):
     A timeout, or a shell that cannot execute the command at all (126 "not executable" / 127 "not
     found"), is INDETERMINATE (exit 2): the CHECK is broken, which is a different fact from the product
     being broken, and reporting it as a product gap would send the pipeline to fix the wrong thing.
+
+    EVERY INDETERMINATE PATH INVALIDATES THE OLD RECEIPT FIRST (`_invalidate`), and this is the whole
+    reason `commit` is a parameter. Exiting 2 without touching the evidence file leaves YESTERDAY'S
+    PASSING receipt on disk — and the fast AUDIT path is a separate process that reads only that file.
+    So a `--run` that timed out, or whose verify script had just been deleted, would exit 2 while the
+    drain and the Stop gate went on reporting `live: ok` from a receipt no longer backed by anything.
+    That is precisely the false-green this gate exists to prevent, and it is worse than no gate,
+    because a stale pass is BELIEVED. The receipt is replaced with an `indeterminate` record, which the
+    audit refuses in its own right (exit 2) until a real run overwrites it.
     """
     started = time.time()
     try:
-        proc = subprocess.Popen(spec["verify"], shell=True, cwd=repo, stdin=subprocess.DEVNULL,
+        # `verify_raw`, never `verify`: the redacted form is for the RECORD, and running it would run a
+        # different command than the project declared (see `surface_spec`).
+        proc = subprocess.Popen(spec["verify_raw"], shell=True, cwd=repo, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                 errors="replace", start_new_session=True)
     except (OSError, ValueError) as e:
+        _invalidate(spec, commit, f"the verify command could not be started ({e})")
         _fail(f"surface {spec['name']!r}: the verify command could not be started ({e})")
     try:
         out, _ = proc.communicate(timeout=spec["timeout"])
         rc = proc.returncode
     except subprocess.TimeoutExpired:
         _kill_group(proc)
+        _invalidate(spec, commit, f"the verify command did not finish within {spec['timeout']}s")
         _fail(f"surface {spec['name']!r}: the verify command did not finish within "
               f"{spec['timeout']}s — a hung probe proves nothing (raise `timeout:` or make the check "
               f"terminate)")
     except (OSError, subprocess.SubprocessError) as e:  # pragma: no cover — defensive
         _kill_group(proc)
+        _invalidate(spec, commit, f"the verify command could not be run ({e})")
         _fail(f"surface {spec['name']!r}: the verify command could not be run ({e})")
     duration = round(time.time() - started, 1)
     # TRUNCATE FIRST, THEN REDACT. Only the bounded tail is ever kept, so redaction runs over a few KB
@@ -455,9 +524,16 @@ def run_verify(repo, spec):
     # anywhere in between. (The full capture lives only in this local, and dies with the call.)
     output = redact(_tail(out or "", MAX_BODY_CHARS))
     if rc in (126, 127):
+        _invalidate(spec, commit,
+                    f"the verify command could not be executed (shell exit {rc} — not found or not "
+                    f"executable)")
         _fail(f"surface {spec['name']!r}: the verify command could not be executed (shell exit {rc} — "
               f"not found or not executable). A missing check is INDETERMINATE, never a pass")
-    return rc, redact(out or ""), duration
+    # `output`, not a second redaction of the WHOLE capture. Re-redacting `out` here undid the bound
+    # that the line above exists to enforce: the command has already exited, so its timeout can no
+    # longer save the gate, and a script that printed 400 KB would pay for a full second pass over all
+    # of it (and hold two copies). The bounded, redacted tail is the only thing anyone wants.
+    return rc, output, duration
 
 
 def _kill_group(proc):
@@ -475,39 +551,60 @@ def _kill_group(proc):
         pass
 
 
-def write_evidence(spec, rc, output, commit, duration):
+def write_evidence(spec, rc, output, commit, duration, mode=MODE_EXECUTED, note=None):
     """Regenerate the surface's evidence record from a REAL run. Written on failure too, deliberately.
 
     Writing only on success would leave yesterday's PASSING receipt in place after today's run failed —
     the audit would keep reporting `live: ok` while the command that just ran said otherwise. The
     record always describes the LAST execution, so the fast audit and a fresh `--run` can never
-    disagree.
+    disagree. `mode=MODE_INDETERMINATE` (with `rc=None`) writes the same record for a run that could
+    not establish anything at all — see `_invalidate`.
+
+    THE SINGLE WRITE DOOR NEUTRALIZES CAPTURED TEXT. Everything derived from the verify command's own
+    output — the body, the one-line `observed` digest — is defused here rather than at the call site,
+    so no caller can forget and reopen the forged-marker hole `neutralize` documents.
     """
-    body = _tail(output.strip(), MAX_BODY_CHARS)
-    observed = " ".join(_tail(output.strip(), MAX_OBSERVED_CHARS).split()) or f"(no output; exit {rc})"
+    body = _tail(neutralize(output.strip()), MAX_BODY_CHARS)
+    observed = (" ".join(_tail(neutralize(output.strip()), MAX_OBSERVED_CHARS).split())
+                or f"(no output; exit {rc})")
+    if note:
+        observed = f"{note} — {observed}" if observed else note
     payload = {
         "surface": spec["name"],
-        "mode": MODE_EXECUTED,
-        "command": spec["verify"],
+        "mode": mode,
+        "command": neutralize(spec["verify"]),
+        # The identity of the command that ran, immune to redaction collisions (see `surface_spec`).
+        "command_sha256": spec["verify_sha256"],
         "exit_code": rc,
         "commit": commit,
         "ran_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "duration_s": duration,
         "observed": observed,
     }
+    if mode == MODE_INDETERMINATE:
+        payload["reason"] = note or "the verify command did not produce a verdict"
+    verdict = ("INDETERMINATE" if mode == MODE_INDETERMINATE
+               else f"{rc} ({'PASS' if rc == 0 else 'FAIL'})")
     doc = (
         f"# Live verification — {spec['name']}\n\n"
         "GENERATED by `idc_live_check.py --run`. Do not hand-edit: the next run overwrites this file, "
         "and a hand-written claim does not satisfy the gate.\n\n"
         f"- **surface:** {spec['name']}\n"
-        f"- **command:** `{spec['verify']}`\n"
-        f"- **exit code:** {rc} ({'PASS' if rc == 0 else 'FAIL'})\n"
+        f"- **command:** `{neutralize(spec['verify'])}`\n"
+        f"- **exit code:** {verdict}\n"
         f"- **commit:** `{commit}`\n"
         f"- **ran at:** {payload['ran_at']}\n"
         f"- **duration:** {duration}s\n\n"
-        "## Output (bounded; credentials redacted)\n\n"
+        + (f"> **This run established nothing.** {payload['reason']}. The previous receipt has been "
+           f"REPLACED rather than left in place, so no stale pass survives an indeterminate run; the "
+           f"audit reports an error until `idc_live_check.py --repo . --run` produces a real "
+           f"verdict.\n\n" if mode == MODE_INDETERMINATE else "")
+        + "## Output (bounded; credentials redacted; marker-like text escaped)\n\n"
         "```\n" + (body if body else "(no output)") + "\n```\n\n"
-        f"<!-- idc-live-evidence: {json.dumps(payload, sort_keys=True)} -->\n"
+        # ALWAYS LAST IN THE FILE, and `read_evidence` anchors to the last marker for exactly that
+        # reason: captured output is printed ABOVE this line, so a marker a verify script planted can
+        # never be the one that is read.
+        f"<!-- {MARKER_SENTINEL}: {json.dumps(payload, sort_keys=True)} -->\n"
     )
     try:
         parent = os.path.dirname(spec["evidence_path"])
@@ -516,8 +613,25 @@ def write_evidence(spec, rc, output, commit, duration):
         with open(spec["evidence_path"], "w", encoding="utf-8") as fh:
             fh.write(doc)
     except OSError as e:
+        # The record could not be replaced. A stale PASSING receipt must not survive that, so remove it
+        # outright — "nobody has verified this yet" is an honest state; "verified, yesterday, by a run
+        # that has since been overwritten by a run that established nothing" is not.
+        try:
+            os.remove(spec["evidence_path"])
+        except OSError:
+            pass
         _fail(f"surface {spec['name']!r}: could not write the evidence record "
               f"{spec['rel']} ({e})")
+
+
+def _invalidate(spec, commit, reason):
+    """Replace a surface's receipt with an INDETERMINATE record, before failing the run.
+
+    Called on every path where the command produced no verdict (see `run_verify`). The old receipt is
+    never simply left alone: the fast audit reads that file in a separate process and would keep
+    answering `live: ok` from it.
+    """
+    write_evidence(spec, None, "", commit, 0, mode=MODE_INDETERMINATE, note=reason)
 
 
 def read_evidence(path):
@@ -532,9 +646,15 @@ def read_evidence(path):
             text = fh.read()
     except OSError:
         return None, f"no evidence record at {path}"
-    m = EVIDENCE_MARKER.search(text)
-    if not m:
-        return None, f"{path} carries no idc-live-evidence marker"
+    # THE LAST MARKER, NEVER THE FIRST. `write_evidence` always emits the generated marker as the final
+    # line, and everything a verify script printed sits ABOVE it. Reading the first match let captured
+    # output shadow the real verdict: a script that failed could print its own marker claiming exit 0,
+    # and the audit would read the forgery and never reach the truth. (`neutralize` defuses such text
+    # at write time as well — two defenses, so neither one silently becomes load-bearing alone.)
+    matches = list(EVIDENCE_MARKER.finditer(text))
+    if not matches:
+        return None, f"{path} carries no {MARKER_SENTINEL} marker"
+    m = matches[-1]
     try:
         payload = json.loads(m.group(1))
     except json.JSONDecodeError as e:
@@ -568,6 +688,17 @@ def audit_surface(repo, spec):
     mode = payload.get("mode")
     mode = mode.strip() if isinstance(mode, str) else ""
 
+    # A run that established nothing stays INDETERMINATE for every later reader. This is what makes the
+    # invalidation in `run_verify` mean something: the fast audit is a separate process that only ever
+    # sees this file, so the record must carry the "no verdict" fact forward itself. Exit 2, never a
+    # gap — the check is broken, which is a different fact from the product being broken.
+    if mode == MODE_INDETERMINATE:
+        why = payload.get("reason")
+        why = why.strip() if isinstance(why, str) and why.strip() else "no reason recorded"
+        _fail(f"surface {spec['name']!r}: the last run established nothing ({why}) — re-run "
+              f"`idc_live_check.py --repo . --run`; until it produces a real verdict this surface is "
+              f"unverified, not verified")
+
     if spec["attested"]:
         # The escape hatch. A record for an attested surface must SAY it is an attestation, so an
         # executed receipt can never be quietly repurposed as one (or the reverse).
@@ -592,12 +723,32 @@ def audit_surface(repo, spec):
         if command.strip() != spec["verify"]:
             return (f"{spec['rel']} records a different command than the surface now declares "
                     f"(recorded {command.strip()!r}, declared {spec['verify']!r}) — re-run it"), None
+        # …and the display strings matching is not enough, because redaction is lossy: two different
+        # declared commands can render to the same redacted text. The digest is over the RAW command,
+        # so it separates them. A receipt with no digest predates this rule and cannot identify what it
+        # ran, which is a reason to re-run, not a reason to trust it.
+        recorded_sha = payload.get("command_sha256")
+        if not isinstance(recorded_sha, str) or not recorded_sha.strip():
+            return (f"{spec['rel']} records no `command_sha256`, so the command it ran cannot be "
+                    f"identified (a redacted command string is not unique) — re-run "
+                    f"`idc_live_check.py --repo . --run`"), None
+        if recorded_sha.strip() != spec["verify_sha256"]:
+            return (f"{spec['rel']} records a different command than the surface now declares (the "
+                    f"recorded command digest does not match) — re-run it"), None
         if exit_code != 0:
             return (f"the verify command FAILED (exit {exit_code}) on the last run — this is a finding "
                     f"about the product; read {spec['rel']} for the captured output, fix it, and "
                     f"re-run"), None
 
     commit = payload["commit"].strip()
+    # A FULL OBJECT NAME, checked before git ever sees it. Git resolves symbolic names, so a receipt
+    # naming `HEAD` (or a branch, or `HEAD~0`) satisfies every freshness rule below by construction:
+    # it exists, it is an ancestor of HEAD, and nothing has landed since. Only a 40-hex sha pins a
+    # receipt to one immutable code state, which is the entire basis of the expiry rule.
+    if not _FULL_SHA.match(commit):
+        return (f"{spec['rel']} names {commit!r} as the verified commit, which is not a full 40-hex "
+                f"object name — a receipt must pin one immutable commit, not a moving reference; "
+                f"re-run `idc_live_check.py --repo . --run`"), None
     rc, _ = _git(repo, "rev-parse", "--verify", "--quiet", f"{commit}^{{commit}}")
     if rc != 0:
         return f"evidence names commit {commit[:12]} which does not exist in this repo", None
@@ -677,7 +828,7 @@ def main(argv=None):
                                  f"(the record is hand-written)\n")
                 continue
             sys.stderr.write(f"idc-live-check: {spec['name']} — running `{spec['verify']}`\n")
-            code, output, duration = run_verify(repo, spec)
+            code, output, duration = run_verify(repo, spec, head)
             write_evidence(spec, code, output, head, duration)
             sys.stderr.write(f"idc-live-check: {spec['name']} — exit {code} in {duration}s; "
                              f"evidence regenerated at {spec['rel']}\n")

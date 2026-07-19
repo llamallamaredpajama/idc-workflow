@@ -260,9 +260,15 @@ run python3 "$LIVE" --repo "$L"
 # (section G is what proves `--run` really produces this shape, by running a real command). A receipt
 # that is missing the executed provenance is B10's case, not this one.
 SHA="$(git -C "$L" rev-parse HEAD)"
+# The declared command's digest, DERIVED (never pasted) so these fixtures cannot drift from the real
+# rule. A receipt must identify the command it ran by hash, because the redacted display string it
+# also carries is lossy and can collide across different commands.
+CMD="bash scripts/verify-live-web.sh"
+CMDSHA="$(printf '%s' "$CMD" | shasum -a 256 2>/dev/null | awk '{print $1}')"
+[ -n "$CMDSHA" ] || CMDSHA="$(printf '%s' "$CMD" | sha256sum | awk '{print $1}')"
 ev() { printf '<!-- idc-live-evidence: %s -->\n' "$1" > "$L/docs/workflow/live-verification/web.md"; }
 ev_ok() { # $1 = commit, $2 = observed
-  ev "{\"surface\":\"web\",\"mode\":\"executed\",\"command\":\"bash scripts/verify-live-web.sh\",\"exit_code\":0,\"commit\":\"$1\",\"observed\":\"$2\"}"
+  ev "{\"surface\":\"web\",\"mode\":\"executed\",\"command\":\"$CMD\",\"command_sha256\":\"$CMDSHA\",\"exit_code\":0,\"commit\":\"$1\",\"observed\":\"$2\"}"
 }
 ev_ok "$SHA" "ingest 200; open 200 signed URL; chat 200"
 git -C "$L" add -A; git -C "$L" commit -qm evidence
@@ -739,6 +745,240 @@ for d in 'acceptance-gap' 'recirc-pending'; do
   r="$(reason_for "github (persisted: drain: $d, exit 4)")"
   printf '%s' "$r" | grep -q '/idc:recirculate' \
     || fail "E4: a $d block must still prescribe /idc:recirculate, got: $r"
+done
+
+echo "== H. the false-green paths an independent review found in this release"
+# WHY THIS SECTION EXISTS. Sections B/G prove the gate says the right thing when everything WORKS. An
+# independent read-only review of this branch found the opposite class: seven ways the gate could be
+# talked into saying "fine". Three of them let a failed or unrunnable verification read as `live: ok`;
+# one let a pause that was never lifted excuse an undrained stop. A gate that can be talked into a
+# clean answer is worse than no gate, because it is believed — so each of those paths gets a case
+# here, and each was observed RED against the real source before it was committed (the mutation is
+# named on the case).
+
+echo "-- H1/H2: a run that established NOTHING must invalidate the receipt it could not replace"
+# THE HOLE. Every indeterminate path (timeout, a verify command that cannot be executed) exited 2
+# BEFORE write_evidence ran, so yesterday's PASSING receipt stayed on disk untouched. The fast AUDIT
+# is a separate process that reads only that file — so the drain and the Stop gate went on certifying
+# `live: ok` from a receipt whose command had just failed to produce any verdict at all.
+# MUTATION (both cases): drop the `_invalidate(...)` call from that branch of run_verify → RED.
+H="$WORK/indeterminate"; mkrepo "$H"; mkdir -p "$H/scripts"
+printf '#!/bin/bash\nexit 0\n' > "$H/scripts/verify.sh"
+printf 'live_verification:\n  surfaces:\n    - name: web\n      verify: bash scripts/verify.sh\n      timeout: 5\n      paths: [services/]\n' \
+  > "$H/WORKFLOW-config.yaml"
+git -C "$H" add -A; git -C "$H" commit -qm declare
+run python3 "$LIVE" --repo "$H" --run
+[ "$rc" = 0 ] && [ "$out" = "live: ok" ] || fail "H1 setup: the passing baseline run must be ok, got rc=$rc out=$out"
+run python3 "$LIVE" --repo "$H"
+[ "$rc" = 0 ] || fail "H1 setup: the audit must pass on the fresh receipt, got rc=$rc out=$out"
+
+# H1 — TIMEOUT. The declared command is unchanged, so nothing else can explain a changed verdict.
+printf '#!/bin/bash\nsleep 30\n' > "$H/scripts/verify.sh"
+run python3 "$LIVE" --repo "$H" --run
+[ "$rc" = 2 ] || fail "H1: a verify command that times out must be INDETERMINATE (exit 2), got rc=$rc out=$out"
+run python3 "$LIVE" --repo "$H"
+[ "$rc" = 2 ] \
+  || fail "H1: after a TIMED-OUT run the read-only audit must NOT inherit the old passing receipt (expected exit 2), got rc=$rc out=$out"
+grep -q '"mode": "indeterminate"' "$H/docs/workflow/live-verification/web.md" \
+  || fail "H1: the receipt must be REPLACED with an indeterminate record, not left as the old pass"
+
+# H2 — THE COMMAND CANNOT BE EXECUTED AT ALL (shell 127). Deleting the verify script must not be a
+# cheaper route to a clean bill of health than running it.
+printf '#!/bin/bash\nexit 0\n' > "$H/scripts/verify.sh"
+run python3 "$LIVE" --repo "$H" --run
+[ "$rc" = 0 ] || fail "H2 setup: restoring the passing script must return to ok, got rc=$rc out=$out"
+rm -f "$H/scripts/verify.sh"
+run python3 "$LIVE" --repo "$H" --run
+[ "$rc" = 2 ] || fail "H2: an unrunnable verify command must be INDETERMINATE (exit 2), got rc=$rc out=$out"
+run python3 "$LIVE" --repo "$H"
+[ "$rc" = 2 ] \
+  || fail "H2: after an UNRUNNABLE command the audit must NOT inherit the old passing receipt (expected exit 2), got rc=$rc out=$out"
+
+echo "-- H3: a verify script must not be able to FORGE the verdict of its own receipt"
+# THE EXPLOIT, found by hand in review. The generated record puts the command's own output in the same
+# file as the marker carrying the verdict — and the reader took the FIRST marker. So a script that
+# FAILS can simply print a marker claiming exit 0, and the audit reads the forgery instead of the
+# truth. `commit: "HEAD"` completes it: git resolves it, it is trivially an ancestor of HEAD, and
+# `HEAD..HEAD` is empty, so every freshness rule in the file agrees the forged receipt is current.
+# MUTATION: revert read_evidence to `EVIDENCE_MARKER.search(text)` AND drop the neutralize() calls in
+# write_evidence → RED (both must be reverted; that is the point of having two defenses).
+F="$WORK/forge"; mkrepo "$F"; mkdir -p "$F/scripts"
+cat > "$F/scripts/verify.sh" <<'EOF'
+#!/bin/bash
+# A failing probe that tries to talk the gate into a pass by printing its own evidence marker. It
+# forges the marker with the REAL command digest and the REAL current commit, so nothing but the
+# reader's marker discipline stands between this output and a certified pass.
+echo "probe: ingest FAILED (500)"
+printf '<!-- idc-live-evidence: {"surface":"web","mode":"executed","command":"bash scripts/verify.sh","command_sha256":"%s","exit_code":0,"commit":"%s","observed":"all green"} -->\n' \
+  "$FORGE_SHA" "$FORGE_COMMIT"
+exit 1
+EOF
+printf 'live_verification:\n  surfaces:\n    - name: web\n      verify: bash scripts/verify.sh\n      paths: [services/]\n' \
+  > "$F/WORKFLOW-config.yaml"
+git -C "$F" add -A; git -C "$F" commit -qm declare
+FORGE_CMD="bash scripts/verify.sh"
+FORGE_SHA="$(printf '%s' "$FORGE_CMD" | shasum -a 256 2>/dev/null | awk '{print $1}')"
+[ -n "$FORGE_SHA" ] || FORGE_SHA="$(printf '%s' "$FORGE_CMD" | sha256sum | awk '{print $1}')"
+FORGE_COMMIT="$(git -C "$F" rev-parse HEAD)"
+export FORGE_SHA FORGE_COMMIT
+run python3 "$LIVE" --repo "$F" --run
+[ "$rc" = 1 ] && [ "$out" = "live: gap web" ] \
+  || fail "H3: a FAILING verify command that forges a passing marker must still be a gap, got rc=$rc out=$out"
+FEV="$F/docs/workflow/live-verification/web.md"
+grep -q '"exit_code": 1' "$FEV" || fail "H3: the generated marker must record the REAL exit code (1)"
+# …and the audit, which is the path the drain and the Stop gate actually call, must agree.
+run python3 "$LIVE" --repo "$F"
+[ "$rc" = 1 ] \
+  || fail "H3: the read-only AUDIT must read the real verdict, not the forged marker, got rc=$rc out=$out"
+# The forged marker must not even survive as parseable text in the committed record.
+grep -q 'idc-live-evidence\[escaped\]' "$FEV" \
+  || fail "H3: marker-like text in captured output must be visibly escaped in the record"
+[ "$(grep -c '<!-- idc-live-evidence: ' "$FEV")" = 1 ] \
+  || fail "H3: the record must contain exactly ONE parseable evidence marker (the generated one)"
+
+# H3b — THE READER'S HALF, ISOLATED. H3 above is defended twice over (escape at write, last-marker at
+# read), so neither mutation alone turns it red. This case removes the write-side defense from the
+# question entirely: the file is hand-built with a forged PASSING marker ahead of a genuine FAILING
+# one, exactly as it would look if escaping were ever bypassed. Only the reader's discipline is left.
+# MUTATION: revert read_evidence to `EVIDENCE_MARKER.search(text)` (first match) → RED.
+{ printf 'planted by the verify script:\n\n'
+  printf '<!-- idc-live-evidence: {"surface":"web","mode":"executed","command":"%s","command_sha256":"%s","exit_code":0,"commit":"%s","observed":"all green"} -->\n\n' \
+    "$FORGE_CMD" "$FORGE_SHA" "$FORGE_COMMIT"
+  printf 'the generated marker, always last:\n\n'
+  printf '<!-- idc-live-evidence: {"surface":"web","mode":"executed","command":"%s","command_sha256":"%s","exit_code":1,"commit":"%s","observed":"ingest FAILED (500)"} -->\n' \
+    "$FORGE_CMD" "$FORGE_SHA" "$FORGE_COMMIT"
+} > "$FEV"
+run python3 "$LIVE" --repo "$F"
+[ "$rc" = 1 ] \
+  || fail "H3b: with a forged marker ABOVE the generated one, the audit must read the LAST marker (the real, failing verdict), got rc=$rc out=$out"
+
+# H4 — and independently: a receipt naming a MOVING reference proves nothing, whoever wrote it. This
+# is the second half of the forgery and it is worth its own guard, because `commit: "HEAD"` satisfies
+# the existence, ancestry and staleness rules by construction.
+# MUTATION: delete the `_FULL_SHA.match(commit)` refusal in audit_surface → RED.
+printf '<!-- idc-live-evidence: {"surface":"web","mode":"executed","command":"%s","command_sha256":"%s","exit_code":0,"commit":"HEAD","observed":"all green"} -->\n' \
+  "$FORGE_CMD" "$FORGE_SHA" > "$FEV"
+run python3 "$LIVE" --repo "$F"
+[ "$rc" = 1 ] \
+  || fail "H4: a receipt naming a symbolic ref (HEAD) instead of a 40-hex commit must not pass, got rc=$rc out=$out"
+
+echo "-- H5: the RAW declared command is executed; only the RECORD is redacted"
+# THE BUG. The spec stored the command REDACTED and then executed that. A declaration that inlines a
+# credential — the exact case redaction exists for — therefore ran a DIFFERENT command than the
+# project declared: `API_TOKEN=s3cr3t-value ./probe.sh` became `API_TOKEN=[REDACTED] ./probe.sh`.
+# MUTATION: change run_verify's Popen back to `spec["verify"]` → RED.
+S="$WORK/rawcmd"; mkrepo "$S"; mkdir -p "$S/scripts"
+cat > "$S/scripts/probe.sh" <<'EOF'
+#!/bin/bash
+# Passes ONLY if it received the real declared value — i.e. only if the RAW command was executed.
+[ "$API_TOKEN" = "s3cr3t-value-not-a-real-key" ] || { echo "probe: wrong token: $API_TOKEN"; exit 9; }
+echo "probe: authenticated; ingest 200"
+EOF
+printf 'live_verification:\n  surfaces:\n    - name: web\n      verify: API_TOKEN=s3cr3t-value-not-a-real-key bash scripts/probe.sh\n      paths: [services/]\n' \
+  > "$S/WORKFLOW-config.yaml"
+git -C "$S" add -A; git -C "$S" commit -qm declare
+run python3 "$LIVE" --repo "$S" --run
+[ "$rc" = 0 ] && [ "$out" = "live: ok" ] \
+  || fail "H5: the RAW declared command must be executed (a redacted command runs a different check), got rc=$rc out=$out"
+SEV="$S/docs/workflow/live-verification/web.md"
+grep -q 's3cr3t-value-not-a-real-key' "$SEV" \
+  && fail "H5: the committed record must still REDACT the credential the raw command carried"
+grep -q 'REDACTED' "$SEV" || fail "H5: the record must show the command in its redacted form"
+
+# H5b — and because redaction is lossy, the receipt must identify the command by DIGEST. Two different
+# declared commands can render to the same redacted display string, which is all the old rule compared.
+# MUTATION: delete the `command_sha256` comparison in audit_surface → RED.
+run python3 "$LIVE" --repo "$S"
+[ "$rc" = 0 ] || fail "H5b setup: the fresh receipt must audit clean, got rc=$rc out=$out"
+sed -i.bak 's/API_TOKEN=s3cr3t-value-not-a-real-key bash scripts\/probe.sh/API_TOKEN=a-completely-different-value bash scripts\/probe.sh/' \
+  "$S/WORKFLOW-config.yaml" && rm -f "$S/WORKFLOW-config.yaml.bak"
+run python3 "$LIVE" --repo "$S"
+[ "$rc" = 1 ] \
+  || fail "H5b: two commands that REDACT identically must not share a receipt (digest mismatch), got rc=$rc out=$out"
+
+echo "-- H6: run_verify returns the BOUNDED capture, not a second pass over the whole thing"
+# The truncation on the line above the return was being discarded by the return itself, which
+# re-redacted the ENTIRE capture. By then the command has exited, so its timeout can no longer save
+# the gate from a script that printed a novel. MUTATION: restore `return rc, redact(out or ""), …` → RED.
+python3 - "$PLUGIN" <<'PY' || fail "H6: run_verify must return output bounded by MAX_BODY_CHARS"
+import sys, os
+sys.path.insert(0, os.path.join(sys.argv[1], "scripts"))
+import idc_live_check as L
+spec = {"name": "web", "verify_raw": "python3 -c \"print('x'*400000)\"",
+        "verify": "python3 -c \"print('x'*400000)\"", "timeout": 60}
+rc, out, _ = L.run_verify(os.getcwd(), spec, "0" * 40)
+# _tail prepends a short truncation marker, hence the small allowance.
+sys.exit(0 if rc == 0 and len(out) <= L.MAX_BODY_CHARS + 64 else 1)
+PY
+
+echo "-- H7: only stages whose half-done work is OBSERVABLE may close as \`paused\`"
+# THE HOLE. `paused` promises resume never has to reconstruct partial work, and it was granted to
+# Think, Intake, Plan and Recirculate too — but the quiescence check reads the board and the
+# obligations ledger only. A mid-Think run's half-written requirements live in a branch, which it
+# never looks at, so quiescence passed TRIVIALLY and the run closed as a certified clean stop.
+# MUTATION: add `PAUSED: _CLAIM_PAUSED` back to the think/intake/plan entries in _CLAIM_TABLE → RED
+# (the module-level assertion fires, and this case reports it).
+python3 - "$PLUGIN" <<'PY' || fail "H7: the \`paused\` status must be claimable ONLY by build/autorun/recirculate"
+import sys, os
+sys.path.insert(0, os.path.join(sys.argv[1], "scripts"))
+import idc_command_contract as C
+pausable = {c for c, s in C.LEGAL_STATUSES.items() if C.PAUSED in s}
+if pausable != {"build", "autorun", "recirculate"}:
+    print("paused-claimable is", sorted(pausable)); sys.exit(1)
+# …and the enforcing door must actually refuse the unobservable ones, not merely omit them. Either
+# refusal code is correct — the legality gate fires before the claim walker — but a refusal is not
+# optional, and it must not be an unrelated failure.
+REFUSALS = {"status-not-legal-for-command", "status-not-claimable"}
+for cmd in ("think", "intake", "plan"):
+    v = C.validate_closeout(cmd, C.PAUSED, {"schema_version": 1, "refs": {}}, repo=os.getcwd(), session="s")
+    if v.ok or v.reason_code not in REFUSALS:
+        print(cmd, "closed as paused:", v.ok, v.reason_code); sys.exit(1)
+sys.exit(0)
+PY
+# The pause command's own door must SAY why, rather than skipping those records in silence.
+grep -q 'paused-stage-unobservable' "$PLUGIN/scripts/idc_pause_state.py" \
+  || fail "H7: close_open_commands must REFUSE an unpausable stage by name, not skip it silently"
+
+echo "-- H8: a pause record that could not be removed is an ERROR, never \"not-paused\""
+# THE HOLE. `clear()` returned None both when nothing was paused and when os.remove FAILED, and
+# `_cmd_resume` read that as "not paused" and exited 0. Autorun sets its drain marker before this
+# call, so the run starts working again — while the surviving record lets the Stop gate believe the
+# run is cleanly stopped and allow an undrained walk-away.
+# MUTATION: restore the `except OSError: warn(...); return None` arm in clear() → RED.
+PS="$PLUGIN/scripts/idc_pause_state.py"
+if [ "$(id -u)" = "0" ]; then
+  echo "   (skipped: running as root, which can remove files regardless of directory permissions)"
+else
+  P="$WORK/pauseclear"; mkrepo "$P"
+  printf 'backend: filesystem\n' > "$P/docs/workflow/tracker-config.yaml"
+  python3 "$PS" --cwd "$P" request --session s1 >/dev/null 2>&1
+  python3 -c "
+import json,sys
+p='$P/.idc-pause-state.json'
+d=json.load(open(p)); d['state']='paused'; d['confirmed_ts']=1.0; d['confirmed_by']='s1'
+json.dump(d, open(p,'w'))
+" || fail "H8 setup: could not write a confirmed pause record"
+  chmod 500 "$P"                       # the record survives: the directory is not writable
+  run python3 "$PS" --cwd "$P" resume --session s1
+  chmod 700 "$P"
+  [ "$rc" != 0 ] \
+    || fail "H8: a resume whose record could not be removed must NOT exit 0, got rc=$rc out=$out"
+  printf '%s' "$out" | grep -q 'not-paused' \
+    && fail "H8: a FAILED removal must never be reported as \"not-paused\", got: $out"
+  [ -f "$P/.idc-pause-state.json" ] || fail "H8 setup: the record should still be present"
+fi
+
+echo "-- H9: the advertised command lists must name every shipped command"
+# A governed repo receives WORKFLOW.md as its canonical contract. It claimed 13 commands while listing
+# 11, so /idc:pause and /idc:resume — the two surfaces that make a deliberate stop possible — were
+# invisible to every repo that reads it. Derived from commands/*.md, so it cannot go stale again.
+# MUTATION: delete `pause | resume |` from either list → RED.
+for doc in "$PLUGIN/templates/WORKFLOW.md" "$PLUGIN/docs/architecture.md"; do
+  for cmd in "$PLUGIN"/commands/*.md; do
+    stem="$(basename "$cmd" .md)"
+    grep -qE "(^|[|[:space:]])${stem}([|[:space:]]|$)" "$doc" \
+      || fail "H9: $(basename "$doc") does not list the shipped command '${stem}' — a governed repo gets a command contract that omits it"
+  done
 done
 
 echo "PASS: phase4-completion-honesty"

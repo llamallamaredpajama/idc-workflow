@@ -36,6 +36,11 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_pause_state.py" --cwd "$PWD" resume \
   treat this as an ordinary interrupted run: the checks below will surface anything left half-done.
 - `resume: not-paused` — nothing was paused. That is a **safe, honest no-op**, not an error. Carry on;
   the handoff below still tells the operator where the run stands.
+- `resume: error …` (exit 2) — the pause record could **not** be removed, so this repo is **still
+  paused**. STOP HERE: do not run step 2, and do not dispatch any work. Resuming over a surviving
+  pause record is the worst of both worlds — the run starts working again while the Stop gate, reading
+  that record, still believes the run is cleanly stopped and will allow an undrained walk-away. Relay
+  the printed cure (make the record path writable) and end the session.
 
 ## 2 — Re-read where the run actually stands
 

@@ -116,7 +116,8 @@ experimental.
 IDC ships **13 slash entry points**:
 
 ```text
-think | intake | plan | build | recirculate | autorun | janitor | init | doctor | update | uninstall
+think | intake | plan | build | recirculate | autorun
+pause | resume | janitor | init | doctor | update | uninstall
 ```
 
 Six of them admit or move scope, and the boundary between them is the load-bearing part — each
@@ -129,8 +130,9 @@ admits scope at exactly one altitude, and none may do another's job:
 - **Build** consumes eligible schema-checked Buildables only.
 - **Autorun** drains durable tracker/intake state only.
 
-The remaining five are operational, not scope-bearing: `janitor` reconciles, `init` scaffolds,
-`doctor` diagnoses, and `update` / `uninstall` are the lifecycle pair.
+The remaining seven are operational, not scope-bearing: `pause` / `resume` stop a long autonomous run
+on purpose and pick it back up, `janitor` reconciles, `init` scaffolds, `doctor` diagnoses, and
+`update` / `uninstall` are the lifecycle pair.
 
 Read that list as the write-authority table's twin. A foreign plan — a vendor spec, a migration
 doc, a hand-written roadmap — is **evidence, never execution authority**: Intake compiles it into

@@ -33,12 +33,14 @@ one-shot drainer that traverses the whole pipe.
 IDC ships **13 slash surfaces**:
 
 ```text
-think | intake | plan | build | recirculate | autorun | janitor | init | doctor | update | uninstall
+think | intake | plan | build | recirculate | autorun
+pause | resume | janitor | init | doctor | update | uninstall
 ```
 
 The pipeline is `/idc:think`, `/idc:intake`, `/idc:plan`, `/idc:build`, `/idc:recirculate`,
-`/idc:autorun`; the rest are operational — `/idc:janitor` (reconciler), `/idc:init` (per-project
-scaffold), `/idc:doctor` (read-only health check), and `/idc:update` / `/idc:uninstall` (lifecycle).
+`/idc:autorun`; the rest are operational — `/idc:pause` / `/idc:resume` (stop a long run on purpose
+and pick it back up), `/idc:janitor` (reconciler), `/idc:init` (per-project scaffold), `/idc:doctor`
+(read-only health check), and `/idc:update` / `/idc:uninstall` (lifecycle).
 
 **Each entry point admits scope at exactly one altitude, and none may do another's job:**
 

@@ -2586,12 +2586,37 @@ def _claim_blocker_for(command: str):
 # blocker (a durable receipt or a safe read-only re-run — see _BLOCKER_HELPERS): build/autorun (drain
 # verdict), janitor/doctor (janitor report), init/update/uninstall (receipt fingerprint re-run), and
 # Intake (its helper-owned nonce-bound failure receipt). Think/plan/recirculate have no such helper.
-# THE `paused` CLAIM, shared by every pipeline command. Deliberately identical everywhere: what makes
-# a paused /idc:build honest is exactly what makes a paused /idc:autorun honest — the repo carries a
-# confirmed pause record AND a fresh re-derivation says nothing is half-done. It is enumerated for the
-# six PIPELINE commands only. A lifecycle/diagnostic command (doctor/init/update/uninstall/janitor)
-# never gets it, on the table's existing principle that such a command may not claim a pipeline
-# terminal it does not own — and there is no long autonomous run inside one to pause.
+# THE `paused` CLAIM. What makes a paused /idc:build honest is exactly what makes a paused
+# /idc:autorun honest — the repo carries a confirmed pause record AND a fresh re-derivation says
+# nothing is half-done. A lifecycle/diagnostic command (doctor/init/update/uninstall/janitor) never
+# gets it, on the table's existing principle that such a command may not claim a pipeline terminal it
+# does not own — and there is no long autonomous run inside one to pause.
+#
+# ENUMERATED FOR THREE STAGES, NOT SIX — and the missing three are the honest part.
+# `paused` carries a specific promise: /idc:resume will never have to reconstruct partial work. That
+# promise is worth exactly what `idc_pause_check.py` can OBSERVE, and it observes three things: board
+# coherence, items the board itself marks `In Progress`, and the two ledger taints (`mid_finish`,
+# `recirc_checkpoint`). Map that against what each stage leaves half-done:
+#
+#   build       an item in flight IS an `In Progress` card, and a finish tail that started IS a
+#               `mid_finish` taint.                                            → OBSERVABLE
+#   autorun     drains item by item through those same board transitions and that same finish tail.
+#                                                                              → OBSERVABLE
+#   recirculate stopping mid-drain leaves a `recirc_checkpoint` taint naming the ticket.
+#                                                                              → OBSERVABLE
+#   think       half-written requirements on a branch, a gate not yet opened.   → NOT OBSERVABLE
+#   intake      a manifest compiled partway through a foreign artifact.         → NOT OBSERVABLE
+#   plan        a decomposition partly minted, a branch left mid-edit.          → NOT OBSERVABLE
+#
+# For the bottom three, quiescence passes trivially — there is no card, no taint, nothing to see — so
+# `paused` would certify "stopped cleanly" from a checker that never looked at the work in question.
+# That is the same false-green this whole release exists to close, so the claim is simply not
+# enumerated for them: a mid-think/intake/plan run has no honest `paused` closeout, and the Stop gate
+# says so rather than accepting an unbacked one. (The ambitious alternative — stage-specific
+# checkpoints for think/intake/plan — is real work, not a table edit, and it is the only thing that
+# would earn those three the claim. It is deliberately NOT faked here: see the refusal message in
+# idc_pause_state.close_open_commands, which names this limit out loud instead of hiding it.)
+_PAUSABLE_STAGES = ("build", "autorun", "recirculate")
 _CLAIM_PAUSED = (Claim("deliberate-pause", _claim_paused),)
 
 _CLAIM_TABLE = {
@@ -2599,7 +2624,6 @@ _CLAIM_TABLE = {
         "complete": (Claim("intake-manifest-reviewed", _claim_intake_manifest_reviewed),
                      Claim("intake-pr-merged", _claim_intake_pr_merged)),
         "blocked_external": (_claim_blocker_for("intake"),),
-        PAUSED: _CLAIM_PAUSED,
     },
     "think": {
         "complete": (Claim("think-refs-present", _claim_think_refs_present),
@@ -2616,7 +2640,6 @@ _CLAIM_TABLE = {
                          Claim("think-gate-marker-bound", _claim_think_gate_marker),
                          Claim("think-gate-not-disposed", _claim_think_gate_not_disposed),
                          Claim("think-pointer-blocked", _claim_think_pointer_blocked)),
-        PAUSED: _CLAIM_PAUSED,
     },
     "plan": {
         "complete": (Claim("plan-matrix-revalidated", _claim_plan_matrix),
@@ -2624,7 +2647,6 @@ _CLAIM_TABLE = {
                      Claim("plan-decomposition-children", _claim_plan_decomposition),
                      Claim("plan-admitted-set-covered", _claim_plan_admitted_set_covered)),
         "no_action": (Claim("plan-oracle-no-admitted", _claim_plan_no_action),),
-        PAUSED: _CLAIM_PAUSED,
     },
     "recirculate": {
         "complete": (Claim("recirc-reconciled", _claim_recirc_reconciled),
@@ -2683,6 +2705,16 @@ _CLAIM_TABLE = {
 # never a second source of truth that could drift from the evidence contract.
 assert set(_CLAIM_TABLE) == COMMANDS, "claim table must enumerate exactly the governed commands"
 LEGAL_STATUSES = {cmd: frozenset(statuses) for cmd, statuses in _CLAIM_TABLE.items()}
+
+# The `paused` set is pinned to the stages whose half-done work `idc_pause_check.py` can actually
+# OBSERVE (see `_PAUSABLE_STAGES` above for the per-stage mapping). Asserted rather than merely
+# commented, because the failure mode is silent: adding `PAUSED: _CLAIM_PAUSED` to another command
+# reads like a one-line generalization and would quietly hand that stage a clean-stop certificate the
+# quiescence checker never verified. Widening this set requires giving the new stage a real checkpoint
+# the checker reads FIRST, and updating this line deliberately.
+assert {cmd for cmd, statuses in LEGAL_STATUSES.items() if PAUSED in statuses} == set(_PAUSABLE_STAGES), (
+    "the `paused` status may only be claimable by stages whose in-flight work idc_pause_check.py "
+    "observes — update _PAUSABLE_STAGES and the quiescence checker together, never the table alone")
 
 
 def _walk_claim_table(command: str, status: str, refs: dict, repo: str, session: str) -> CloseoutResult:

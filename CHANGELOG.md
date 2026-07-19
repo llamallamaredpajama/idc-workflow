@@ -65,6 +65,11 @@ non-terminal exit 4 — so the Stop fixpoint gate enforces them with no new hook
     four could close a deliberate stop honestly. Its evidence is the strictest in the contract: a
     CONFIRMED record **plus** a fresh re-derivation that nothing is half-done — so hand-writing a
     record buys nothing, since the closeout re-checks the repo rather than reading the record's claim.
+  - It is claimable by `build`, `autorun` and `recirculate` only — the stages whose half-done work the
+    quiescence check can actually see (an `In Progress` card, a `mid_finish` or `recirc_checkpoint`
+    taint). `think`, `intake` and `plan` leave their partial work in a branch, which that check does
+    not read, so a `paused` closeout there would certify a clean stop nothing had verified. They are
+    refused by name instead, and the refusal says why.
   - Both resume paths work: `/idc:resume`, and the next `/idc:autorun`, whose preflight clears the
     record in one local file read (zero GraphQL). A pause the operator forgets can never strand work.
   - The Stop fixpoint gate now ALLOWS a stop on a confirmed pause — otherwise the gate that exists to

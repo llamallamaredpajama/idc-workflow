@@ -208,10 +208,22 @@ def confirm(cwd, session_id, backend=None, tracker=None, owner=None, project=Non
     return rec, 0, verdict, []
 
 
+class ClearFailed(RuntimeError):
+    """The pause record is still on disk after a resume tried to remove it."""
+
+
 def clear(cwd, session_id=None):
     """Remove the pause record. Returns the record that WAS there (so the caller can report what it
     resumed), or None when nothing was paused — an honest no-op, never an error. Removing an already
-    absent record is a no-op too."""
+    absent record is a no-op too.
+
+    A removal that FAILS raises `ClearFailed`, and that distinction is load-bearing. Returning None
+    there — which is what the first cut did — is indistinguishable from "nothing was paused", so
+    `/idc:resume` printed `not-paused` and exited 0 while the confirmed pause record was still sitting
+    in the repo. The run then starts working again, and the Stop gate, reading that surviving record,
+    trusts it and allows an undrained walk-away: a pause that was never lifted is used to excuse a stop
+    that was never clean. "I could not un-pause this" and "this was not paused" must never collapse
+    into one answer."""
     if not idc_hook_lib.is_governed_repo(cwd):
         return None
     rec = read_record(cwd)
@@ -221,8 +233,7 @@ def clear(cwd, session_id=None):
     except FileNotFoundError:
         return rec
     except OSError as e:
-        idc_hook_lib.warn(f"pause-state: could not remove {path}: {e}")
-        return None
+        raise ClearFailed(f"could not remove the pause record {path}: {e}") from e
     return rec
 
 
@@ -249,6 +260,19 @@ def close_open_commands(cwd, session_id):
     for rec in idc_ledger.active_commands(cwd, session_id):
         command = rec.get("command")
         if command not in pausable:
+            # SAY SO, rather than skipping quietly. `paused` is only claimable by the stages whose
+            # half-done work the quiescence checker can observe (build/autorun/recirculate — see
+            # `_PAUSABLE_STAGES` in idc_command_contract.py). A mid-think/intake/plan run leaves its
+            # partial work in a branch and a document, which nothing here reads, so certifying it as a
+            # clean stop would be a promise with no checker behind it. Reporting it as REFUSED keeps
+            # the record open and honest: the operator sees exactly what the pause did not cover.
+            refused.append((command, f"[paused-stage-unobservable] /idc:{command} has no honest "
+                                     f"`paused` closeout: what it leaves half-done (a partly written "
+                                     f"document, manifest, or decomposition on a branch) is not "
+                                     f"something the quiescence check can observe, so a clean-stop "
+                                     f"claim here would be unbacked. Finish or abandon this run "
+                                     f"deliberately; the pause covers the build/autorun/recirculate "
+                                     f"work only"))
             continue
         evidence = {"schema_version": 1, "refs": {}}
         verdict = CONTRACT.validate_closeout(command, CONTRACT.PAUSED, evidence,
@@ -347,7 +371,17 @@ def _cmd_resume(args) -> int:
     if not idc_hook_lib.is_governed_repo(args.cwd):
         print("idc-pause-state: not an IDC-governed repo — nothing to resume", file=sys.stderr)
         return 2
-    rec = clear(args.cwd, args.session)
+    try:
+        rec = clear(args.cwd, args.session)
+    except ClearFailed as e:
+        # Fail CLOSED and loudly: the record survived, so this repo is still paused. Exiting 0 here
+        # would hand the caller a resume it did not get, and leave a stale pause record behind for the
+        # Stop gate to excuse an undrained stop with.
+        print(f"resume: error {e}", file=sys.stderr)
+        print("resume: error the pause record could not be removed — this repo is STILL PAUSED. "
+              f"cure: make {pause_path(args.cwd)} writable (check permissions and ownership), then "
+              f"re-run /idc:resume")
+        return 2
     if rec is None:
         print("resume: not-paused")          # honest no-op, exit 0
         return 0

@@ -85,6 +85,15 @@ Every close goes through the validating command-contract door, which re-derives 
 record **and** re-runs the quiescence check. A `REFUSED` line means that record could not honestly
 close as paused — report it; do not work around it.
 
+**A pause covers `/idc:build`, `/idc:autorun` and `/idc:recirculate` — not `/idc:think`,
+`/idc:intake` or `/idc:plan`,** and those three are refused with `paused-stage-unobservable`. The
+reason is a limit, stated rather than glossed: `paused` promises that resume never has to reconstruct
+partial work, and the quiescence check earns that promise by reading the board and the obligations
+ledger. A half-built plan or a half-written requirements doc lives in a branch, which nothing there
+reads — so those stages would pass quiescence trivially, and the certificate would mean nothing.
+Finish or abandon such a run deliberately, and say in your report which runs the pause did **not**
+cover.
+
 ## 5 — Closeout
 
 ```bash

@@ -81,11 +81,31 @@ STUB
 chmod +x "$WORK/bin/gh"
 
 # ---- hermetic repo + bare origin + a real build triplet -------------------------------------------
-git init -q --bare "$ORIGIN"
+# PIN the fixture's base branch to `main`. A bare `git init` takes its branch name from ambient
+# `init.defaultBranch`, which is NOT the same everywhere: this repo's dev machines resolve `main`,
+# while a stock Ubuntu CI runner still resolves `master`. The gh stub above merges into `main` and
+# the assertions below reference `origin/main`, so an ambient `master` made the stub push create a
+# SECOND, stray `main` branch that the janitor then (correctly) flagged as a foreign remote branch —
+# exit 1, and a suite that passed locally but was red on CI for months. Pinning removes the ambient
+# dependency; it narrows nothing, because branch-name agnosticism is not what this phase asserts —
+# `idc_git_janitor.default_branch` resolving main OR master is asserted by phase1-git-janitor's
+# "default_branch resolves a master-only repo" case, which exists precisely so this pin costs no coverage.
+#
+# `-c init.defaultBranch=master` makes the ambient default HOSTILE on purpose, so the `-b main` pin is
+# provably the thing doing the work: delete `-b main` and this origin comes up on `master` on EVERY
+# machine — including an Apple-git dev box, whose own `main` default would otherwise hide the regression
+# until CI caught it. Asserting the ORIGIN's HEAD (not the clone's) is what makes this guard real: the
+# clone's HEAD is force-set two lines below, so an assertion on the clone can never fail.
+git -c init.defaultBranch=master init -q --bare -b main "$ORIGIN"
+[ "$(git -C "$ORIGIN" symbolic-ref --short HEAD)" = "main" ] \
+  || fail "fixture invariant: the bare origin must be on 'main' (the gh stub merges into main and the assertions below reference origin/main), got '$(git -C "$ORIGIN" symbolic-ref --short HEAD)' — restore the '-b main' pin on the git init above"
 git clone -q "$ORIGIN" "$REPO" 2>/dev/null
+# Clone of an EMPTY origin: git <2.34 cannot learn the unborn HEAD from the server and falls back to
+# the ambient default, so pin it explicitly too. (Modern git already inherits `main` from the origin.)
+gitc symbolic-ref HEAD refs/heads/main
 gitc config user.email t@example.com; gitc config user.name tester
 echo hello > "$REPO/README.md"; gitc add -A; gitc commit -qm init
-BASE="$(gitc symbolic-ref --short HEAD)"
+BASE="$(gitc symbolic-ref --short HEAD)"   # == main by construction (pinned on both origin and clone)
 gitc push -q origin "HEAD:$BASE"
 mkdir -p "$REPO/docs/workflow"; printf 'backend: filesystem\n' > "$REPO/docs/workflow/tracker-config.yaml"
 TRACKER="$REPO/TRACKER.md"

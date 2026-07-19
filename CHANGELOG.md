@@ -24,6 +24,17 @@ non-terminal exit 4 — so the Stop fixpoint gate enforces them with no new hook
   that evidence **expires by itself** as soon as anything lands on those paths, including Terraform
   and deploy scripts. That expiry is what stops provisioning drift hiding behind a green build.
   A repo that declares no live surface reports `live: not-declared` and is never gated.
+- **A session can now be interrupted mid-finish without corrupting the board.** The gate above
+  detects that damage after the fact; this stops it happening. `scripts/idc_git_finish.py` records
+  an in-flight `mid_finish:<item>` obligation in the session ledger immediately before the merge and
+  clears it only once the board flip has been read back — the recipe `scripts/hooks/idc_ledger.py`
+  documented from the start and nothing had ever set. `scripts/idc_finish_recover.py` (new) lets a
+  LATER session finish what it did not start: it reads that obligation across sessions, asks the
+  board about each item before the ledger (an item already `Done` has its stale record cleared, not
+  re-closed, so a repeat pass never double-records), and completes the rest through the existing
+  idempotent `--close-only` door. Autorun's preflight runs it on every pass; it costs no board read
+  when there is nothing to recover. An obligation it cannot discharge is preserved and reported —
+  never silently dropped.
 - `--coherence` and `--live` are opt-in flags on `idc_autorun_drain.py`; default output is
   unchanged. New verdicts `drain: coherence-gap` and `drain: live-gap` ride the existing exit 4.
 - `idc_git_janitor.py --json` now exposes each finding's `op` (its machine classification), so a

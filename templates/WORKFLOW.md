@@ -219,6 +219,16 @@ board advertising work that had already landed. `idc_finish_coherence.py` asks t
 them asked — *does the board still claim work that already shipped?* — and a gap is repaired through
 the existing idempotent door (`idc_git_finish.py --close-only`), never a hand-edited Status.
 
+**Surviving a handoff.** That gate is the safety net; the corruption is now prevented at the source.
+The finish tail records an in-flight obligation in the session ledger immediately before the merge and
+discharges it only once the board flip has been read back, so a session that is killed, exhausted or
+handed off mid-way leaves a durable record that a close was underway. Autorun's preflight runs
+`idc_finish_recover.py` on every pass: it reads that record **across sessions** (the session that left
+it is, by definition, gone), asks the board about each item first — one already `Done` simply has its
+stale record cleared, never re-closed — and completes the rest through the same `--close-only` door.
+An obligation it cannot discharge is **preserved and reported**, never quietly dropped: the usual
+reason is that the finish died *before* its merge, so nothing shipped and the item is simply still open.
+
 **The live product.** Every other gate in this document verifies **code**. Code can be flawless while
 the running product is dead, because what breaks a deployment usually is not in the reviewed diff: a
 bucket nobody created, an env var nobody set, an IAM role granted by hand. IDC cannot know how to

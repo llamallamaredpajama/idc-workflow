@@ -46,6 +46,18 @@ loop below). Then the two lanes:
    and clears a taint once its ticket leaves the inbox. On github it is one cheap board read per pass in
    the drain loop (not the stop path). It is **fail-soft** (never halts the drain) and **repo-gated**;
    surface a `reconcile: unknown` (unreadable board) as such, never as clean.
+   **Then complete any finish a dead session left in flight (handoff safety — every pass):** the
+   finish tail merges the PR (which also closes the linked issue) several steps before it flips the
+   board, so a session that died in that window left the item shipped, closed and still `In Progress`.
+   The tail records that window as a `mid_finish:<item>` ledger obligation, and only a later session
+   can discharge it.
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_finish_recover.py" --repo "$PWD" --session-id "$CLAUDE_CODE_SESSION_ID"`
+   reads the ledger **across sessions**, asks the board about each item first (an item already `Done`
+   has its stale taint cleared, never re-closed — so a second pass never double-records), and completes
+   the rest through the existing idempotent `idc_git_finish.py --close-only` door. No board read at all
+   when there is nothing to recover. It is **fail-soft** (never halts the drain) and **repo-gated**;
+   relay `recovered:` / `cleared:`, and treat `unresolved:` as a live obligation still owed — those
+   taints are PRESERVED, never dropped.
    **Then synthesize any phantom-idle implementer (drop H — every pass, beside the reconcile above):**
    an implementer teammate can go idle without reporting, leaving its item `Stage = Buildable ∧
    Status = In Progress` (claimed) but never advanced; the drain is blind to it (counts only `Todo` /

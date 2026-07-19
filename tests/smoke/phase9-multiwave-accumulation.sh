@@ -76,14 +76,24 @@ chmod +x "$WORK/bin/gh"
 # master-based merge onto it was a non-fast-forward — the stub died mid-merge and finish of #2 never
 # reported ok. That is why this suite passed locally and was red on CI for months. Pinning removes
 # the ambient dependency; it narrows nothing, because branch-name agnosticism is not what this phase
-# asserts (idc_git_janitor.default_branch already resolves main OR master, per phase1-git-janitor).
-git init -q --bare -b main "$ORIGIN"
+# asserts — `idc_git_janitor.default_branch` resolving main OR master is asserted by phase1-git-janitor's
+# "default_branch resolves a master-only repo" case, which exists precisely so this pin costs no coverage.
+#
+# `-c init.defaultBranch=master` makes the ambient default HOSTILE on purpose, so the `-b main` pin is
+# provably the thing doing the work: delete `-b main` and this origin comes up on `master` on EVERY
+# machine — including an Apple-git dev box, whose own `main` default would otherwise hide the regression
+# until CI caught it. Asserting the ORIGIN's HEAD (not the clone's) is what makes this guard real: the
+# clone's HEAD is force-set two lines below, so an assertion on the clone can never fail.
+git -c init.defaultBranch=master init -q --bare -b main "$ORIGIN"
+[ "$(git -C "$ORIGIN" symbolic-ref --short HEAD)" = "main" ] \
+  || fail "fixture invariant: the bare origin must be on 'main' (the gh stub merges into main), got '$(git -C "$ORIGIN" symbolic-ref --short HEAD)' — restore the '-b main' pin on the git init above"
 git clone -q "$ORIGIN" "$REPO" 2>/dev/null
-gitc symbolic-ref HEAD refs/heads/main   # clone of an EMPTY origin: pin the unborn HEAD explicitly
+# Clone of an EMPTY origin: git <2.34 cannot learn the unborn HEAD from the server and falls back to
+# the ambient default, so pin it explicitly too. (Modern git already inherits `main` from the origin.)
+gitc symbolic-ref HEAD refs/heads/main
 gitc config user.email t@example.com; gitc config user.name tester
 echo hello > "$REPO/README.md"; gitc add -A; gitc commit -qm init
-BASE="$(gitc symbolic-ref --short HEAD)"
-[ "$BASE" = "main" ] || fail "fixture invariant: the base branch must be 'main' (the gh stub merges into main), got '$BASE' — restore the branch pin above"
+BASE="$(gitc symbolic-ref --short HEAD)"   # == main by construction (pinned on both origin and clone)
 gitc push -q origin "HEAD:$BASE"
 mkdir -p "$REPO/docs/workflow"; printf 'backend: filesystem\n' > "$REPO/docs/workflow/tracker-config.yaml"
 TRACKER="$REPO/TRACKER.md"

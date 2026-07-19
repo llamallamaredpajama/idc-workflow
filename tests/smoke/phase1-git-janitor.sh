@@ -18,6 +18,8 @@
 #     → NOT reported as a live remote branch, and --apply-safe never tries to `git push --delete` it.
 #   * a SERVER-RECREATED remote branch (name reused at a NEW live commit; clone tracking ref stale @old)
 #     → classified off the SERVER tip → RISKY, never SAFE-FIX; --apply-safe never deletes the live branch.
+#   * `default_branch` resolves a MASTER-only repo to `master` (the stock-Linux default) with HEAD parked
+#     on a third branch — the one place in the suite that proves the janitor is not main-only.
 #   * an INDETERMINATE scan (exit 2) prints "INDETERMINATE", never "COHERENT".
 #   * `--apply-safe` clears ONLY the SAFE-FIX tier (worktree removed, local+remote branch deleted, board
 #     closed) and re-scan reports the delta; the dirty worktree + unmerged branch + foreign branch are
@@ -221,6 +223,24 @@ bnr="$(python3 "$JAN" --repo "$R2" --tracker "$R2/TRACKER.md")"; brc=$?
 printf '%s\n' "$bnr" | grep -qE '^janitor: INDETERMINATE$' || fail "indeterminate banner must say INDETERMINATE (the nit)" "$bnr"
 printf '%s\n' "$bnr" | grep -qE 'COHERENT' && fail "an indeterminate scan must NOT print COHERENT (the nit)" "$bnr"
 
+# ---- BEHAVIOR: default_branch resolves a master-only repo to `master` (the stock-Linux default) ----
+# `idc_git_janitor.default_branch` falls back origin/HEAD → local main → local master → current branch.
+# Every OTHER fixture in this suite pins `-b main`, so without this case the `master` candidate is dead,
+# untested code — and the phase9 fixtures' branch pin cites THIS phase as the place branch-name
+# agnosticism is covered. This case is what makes that citation true.
+# HEAD is deliberately parked on a THIRD branch: if HEAD sat on master, the current-branch fallback
+# would answer "master" on its own and the assertion would pass even with the candidate removed.
+# Red-when-broken (verified): change the candidate tuple to ("main",) ⇒ this resolves `feature` ⇒ FAIL.
+RMB="$WORK/repo-master"
+git init -q -b master "$RMB"      || fail "master-only repo init failed (git too old for -b?)"
+git -C "$RMB" config user.email t@t.t; git -C "$RMB" config user.name t
+printf base > "$RMB/b.txt"; git -C "$RMB" add -A; git -C "$RMB" commit -qm base
+git -C "$RMB" checkout -q -b feature   # HEAD ≠ master, so the current-branch fallback cannot mask this
+db="$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import idc_git_janitor as J; print(J.default_branch(sys.argv[2]))' "$(dirname "$JAN")" "$RMB")" \
+  || fail "default_branch raised on a master-only repo"
+[ "$db" = "master" ] \
+  || fail "default_branch must resolve a master-only repo to 'master' (the stock-Linux default), got '$db' — the master candidate is what makes the janitor work on a non-main repo"
+
 # ---- github-only fixes: pure decision predicates + a fail-closed board-read (unit-tested here because
 #      the hermetic repo is filesystem-backed — no live gh). Each case is red-when-broken. ----------------
 JANDIR="$(dirname "$JAN")"
@@ -267,4 +287,4 @@ except SystemExit as e:
 print("github-only unit tests: all pass")
 PY
 
-echo "PASS: idc_git_janitor reconciles board↔git over a real hermetic repo — clean repo exits 0; merged branches (local+remote) + clean merged worktree + Status≠Done-with-merged-branch classified SAFE-FIX; dirty worktree + unmerged branch RISKY; foreign branch REPORT-ONLY even when merged; 'buildbot' (no build[-/] separator) + foreign 'xbuild-3' are non-IDC and never drive a fix or a board mutation; a phantom (server-deleted) remote tracking ref on an un-pruned clone is filtered by ls-remote — never reported live, never push --delete'd; a server-recreated branch (name reused at a NEW live commit) is judged off the SERVER tip → RISKY, never deleted; an indeterminate scan prints INDETERMINATE (not COHERENT); --apply-safe clears ONLY SAFE-FIX (RISKY/REPORT-ONLY untouched) + reports the delta; unreadable/corrupt board + non-git dir fail-closed to exit 2; github-only predicates unit-tested (pr_signal_ok tip-match guard, board_coherence_verdict not-planned gate, read_at_cap, unexpected-board-read-crash → exit 2)"
+echo "PASS: idc_git_janitor reconciles board↔git over a real hermetic repo — clean repo exits 0; merged branches (local+remote) + clean merged worktree + Status≠Done-with-merged-branch classified SAFE-FIX; dirty worktree + unmerged branch RISKY; foreign branch REPORT-ONLY even when merged; 'buildbot' (no build[-/] separator) + foreign 'xbuild-3' are non-IDC and never drive a fix or a board mutation; a phantom (server-deleted) remote tracking ref on an un-pruned clone is filtered by ls-remote — never reported live, never push --delete'd; a server-recreated branch (name reused at a NEW live commit) is judged off the SERVER tip → RISKY, never deleted; default_branch resolves a master-only repo to 'master' (the stock-Linux default) even with HEAD parked on a third branch; an indeterminate scan prints INDETERMINATE (not COHERENT); --apply-safe clears ONLY SAFE-FIX (RISKY/REPORT-ONLY untouched) + reports the delta; unreadable/corrupt board + non-git dir fail-closed to exit 2; github-only predicates unit-tested (pr_signal_ok tip-match guard, board_coherence_verdict not-planned gate, read_at_cap, unexpected-board-read-crash → exit 2)"

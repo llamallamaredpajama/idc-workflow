@@ -18,12 +18,30 @@
 # plus their wiring into idc_autorun_drain.py's wave close, where exit 4 is already the code the Stop
 # fixpoint gate refuses a stop on (so enforcement needs no new hook).
 #
-# RED-WHEN-BROKEN (each assertion below names the single edit that makes it fail; all were executed
-# and observed RED before this suite was committed — see the branch's verification receipts):
+# RED-WHEN-BROKEN. Every guard below was broken in the real source, one at a time, and observed to
+# turn this suite RED before it was committed (16 mutations; receipts on the branch). Three test
+# defects were found that way and fixed — two file-wide greps that passed with the real command
+# deleted, and the board_scanned guard, which no CLI path could reach until section F existed.
+#
+# ONE HONEST EXCEPTION, stated rather than glossed: the commit-EXISTENCE rule in idc_live_check.py
+# cannot be shown red on its own, because any commit that fails `rev-parse` also fails the
+# `merge-base --is-ancestor` rule right after it. It was verified functional in isolation (with the
+# ancestor rule disabled it still rejects a fabricated sha), and the ancestor rule IS individually
+# proven by B7b. Treat the existence check as a better error message for a case the ancestor rule
+# already catches — not as an independent guard.
+#
+# The single edit that makes each assertion fail:
 #   * A1/A2  delete the `if f.get("op") not in STALE_OPS: continue` filter in idc_finish_coherence.py
 #            → A2 still passes but A1 goes RED (unrelated janitor debris starts reporting as a gap).
-#   * A3     drop the `board_scanned is not True` guard → A3 goes RED (a board-less scan reads "ok",
-#            the hollow clean this gate exists to prevent).
+#   * F1     drop the `board_scanned is not True` guard → F1 goes RED. The real janitor genuinely
+#            exits 0 with `{"verdict":"coherent","board_scanned":false}` when given no board, so
+#            without this guard a scan that never looked at a board reads as a clean bill of health.
+#   * A2c    turn the not-applicable branch into an error → A2c goes RED (a non-git repo becomes
+#            permanently unable to reach an honest `drain: complete`).
+#   * B7b    disable the `merge-base --is-ancestor` rule → B7b goes RED (evidence taken on an
+#            unmerged branch starts counting as proof of what shipped).
+#   * E2/E3  delete the flags from the Stop gate's real argv / the playbooks' real command lines
+#            → both go RED (they did NOT before these assertions were scoped to the invocation).
 #   * A5     revert the verdict token from `gap` back to any other word → A5 and D1 go RED.
 #   * B4     delete the `git log <commit>..HEAD -- <paths>` staleness branch in idc_live_check.py
 #            → B4 goes RED (evidence never expires; the gate becomes a one-time checkbox).

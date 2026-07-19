@@ -138,6 +138,29 @@ routes, and each route still enters the pipe through Think's gate or Recirculati
 may never mint a Buildable directly, which is why Build "infer the foreign plan" is not a step that
 exists anywhere in the rig.
 
+## Completion honesty — what "green" never proved
+
+The rig's definition of finished used to be "the build lane is empty", and that is blind in two
+directions. Both are closed by fail-closed checks at wave close, wired into the drain's existing
+non-terminal exit — the same exit the Stop fixpoint gate already refuses a stop on, so enforcement
+needed no new hook.
+
+**The dashboard can lie.** The board is a sensor, not plumbing, and sensors drift. Finishing an item
+merges its PR — which auto-closes the issue via the closing keyword — and flips the board Status a
+few steps later; a session dying in between leaves the item shipped but still reading `In Progress`.
+Nothing noticed: the acceptance check audits only merged-`Done` items and the drain counts only
+`Todo`, so the pipe declared itself complete over work it was still advertising as in flight.
+`idc_finish_coherence.py` asks the missing question, reusing the janitor's existing coherence verdict
+rather than minting a second definition of it.
+
+**Green code is not a working product.** Every guardrail above verifies code, and the things that
+most often break a deployment are not in the reviewed diff at all — an uncreated bucket, an unset env
+var, a hand-granted role. IDC cannot know how to deploy an arbitrary product, so the project
+**declares** its live surfaces and IDC enforces the obligation: `idc_live_check.py` requires committed
+evidence that each declared surface was driven, and that evidence expires the moment anything lands
+on the paths behind it (its infrastructure included). A repo that declares no live surface is never
+gated — opting in is the only way to be gated.
+
 ## Stale runtime — `/reload-plugins`, not `/clear`
 
 A Claude Code session loads a plugin's commands, agents, and skills **once, at session start**.

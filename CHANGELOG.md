@@ -2,6 +2,33 @@
 
 All notable changes for the IDC Workflow plugin are documented in this file.
 
+## 4.2.0 — 2026-07-19
+
+Completion honesty.
+
+Closes the failure class where "all PRs merged and reviewed" was read as "the phase is finished".
+Two new fail-closed checks run at every wave close, wired into the drain predicate's existing
+non-terminal exit 4 — so the Stop fixpoint gate enforces them with no new hook and no new exit code.
+
+- **The board can no longer lie about shipped work.** Finishing an item merges its PR (which
+  auto-closes the issue via the mandated closing keyword) several steps before it flips the board
+  Status; a session dying in that window left the item shipped but showing `In Progress` forever.
+  The drain counts only `Todo`, so it never saw those items and reported the pipe complete over
+  them. `scripts/idc_finish_coherence.py` now asks the question none of the existing gates asked.
+  The detector itself already existed inside the janitor — this reuses that verdict rather than
+  re-deriving it, and repairs run through the existing idempotent `--close-only` door.
+- **A project can declare its live surfaces, and IDC will require proof they were driven.** Every
+  other gate verifies code, which can be perfect while the deployed product is dead. A repo lists
+  its surfaces in `WORKFLOW-config.yaml::live_verification` (name, the paths behind it, the
+  journey); `scripts/idc_live_check.py` then requires a committed evidence record for each — and
+  that evidence **expires by itself** as soon as anything lands on those paths, including Terraform
+  and deploy scripts. That expiry is what stops provisioning drift hiding behind a green build.
+  A repo that declares no live surface reports `live: not-declared` and is never gated.
+- `--coherence` and `--live` are opt-in flags on `idc_autorun_drain.py`; default output is
+  unchanged. New verdicts `drain: coherence-gap` and `drain: live-gap` ride the existing exit 4.
+- `idc_git_janitor.py --json` now exposes each finding's `op` (its machine classification), so a
+  consumer can select a finding class without pattern-matching English prose.
+
 ## 4.1.2 — 2026-07-17
 
 The final command-integrity hardening pass closes the remaining deferred items from 4.1.1:

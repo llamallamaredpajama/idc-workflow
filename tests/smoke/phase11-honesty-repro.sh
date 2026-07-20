@@ -422,7 +422,7 @@ echo "== R13. AN EVIDENCE DESTINATION MUST STAY INSIDE THE REPO"
 # TRUNCATE the resolved target, so a typo'd or hostile destination silently destroys a file.
 R13="$WORK/paths"; mkrepo "$R13"
 python3 - "$LIVE" "$R13" <<'PY' || fail "R13: an evidence destination can resolve outside the repo"
-import importlib.util, os, sys, tempfile
+import importlib.util, os, subprocess, sys, tempfile
 spec = importlib.util.spec_from_file_location("L", sys.argv[1])
 L = importlib.util.module_from_spec(spec); spec.loader.exec_module(L)
 repo = os.path.realpath(sys.argv[2])
@@ -458,6 +458,30 @@ for label, surface in cases:
 if bad:
     sys.exit("; ".join(bad))
 
+# THE OTHER HALF OF THE SAME CLAIM (F13, reopened). "Inside the repo directory" is a PROXY for what
+# this check has to ground — *this receipt can be reviewed* — and the proxy is one case short in a
+# direction the row's own text already named: "a receipt written outside the repo, OR GITIGNORED,
+# still reads `live: ok`". A destination under an ignored directory, and anything under `.git/`,
+# resolves inside the repo, passes a containment test, and is committed by nothing — so `--run`
+# writes the receipt and the audit keeps printing `live: ok` over proof no reviewer can ever see.
+subprocess.run(["git", "-C", repo, "init", "-q", "-b", "main"], check=True)
+with open(os.path.join(repo, ".gitignore"), "w", encoding="utf-8") as fh:
+    fh.write(".cache/\nbuild/out.md\n")
+for label, dest in [
+    ("under an ignored DIRECTORY", ".cache/live.md"),
+    ("an ignored FILE by name",    "build/out.md"),
+    ("inside the git directory",   ".git/live.md"),
+]:
+    try:
+        got = L.surface_spec(repo, {"name": "web", "paths": "app.py", "verify": "true",
+                                    "evidence": dest})["evidence_path"]
+    except ValueError:
+        continue                      # refused — the correct behaviour
+    sys.exit(f"an evidence destination {label} ({dest!r}) was ACCEPTED, resolving to {got!r}. Git "
+             f"will never carry it, so the receipt can never be committed or reviewed, and the audit "
+             f"reads `live: ok` off proof nobody can see — confinement has to ask whether a commit "
+             f"can hold the file, not merely where the file sits")
+
 # POSITIVE CONTROL — confinement must not become "refuse every destination", which would take the
 # whole live gate offline while looking like a hardening win. An ordinary in-repo destination, and
 # the shipped DEFAULT, must both still resolve, and must resolve to the file the writer will open.
@@ -466,6 +490,9 @@ for label, surface, expected in [
     ("an ordinary declared destination",
      {"name": "web", "paths": "app.py", "verify": "true", "evidence": "docs/evidence/web.md"},
      os.path.join(repo, "docs", "evidence", "web.md")),
+    ("a destination beside an ignored one",
+     {"name": "web", "paths": "app.py", "verify": "true", "evidence": "build/kept.md"},
+     os.path.join(repo, "build", "kept.md")),
     ("the shipped default destination",
      {"name": "web", "paths": "app.py", "verify": "true"},
      os.path.join(repo, L.DEFAULT_EVIDENCE_DIR, "web.md")),
@@ -1960,6 +1987,61 @@ if PAUSE.is_paused(repo) or G._is_paused(repo):
     sys.exit("the pause survived a successful clear")
 PYR29
 echo "  ok R29: an uncorroborated record is refused by every reader and named by --status; a clear that cannot drop the witness fails loudly; a clean clear still lifts the pause"
+
+echo "== R30. THE FRESHNESS RULE MUST SEE THE WHOLE PROBE, AND NEVER READ 'UNKNOWN' AS 'CLEAN'  [F48, F49]"
+# TWO NEIGHBOURS OF THE ATTRIBUTION FIX, both in the half F34 deliberately left as a scan.
+#   F48 — the verify command is tokenized by a character class that approximates shell splitting, and
+#         the approximation breaks on the one thing quoting exists for. `bash "scripts/check live.sh"`
+#         becomes two tokens, neither of which is a file, so a probe with a space in its name is
+#         watched by NOTHING and its uncommitted edits are attributed to HEAD.
+#   F49 — `git status` exiting NONZERO (a corrupt index, an unreadable object store) returned the same
+#         empty list as a pristine tree, so the verifier ran against unknown state and the receipt was
+#         stamped with HEAD anyway. Same tolerant-read-as-clean class as F5.
+R30="$WORK/probe-tokens"; mkrepo "$R30"
+python3 - "$LIVE" "$R30" <<'PYR30' || fail "R30: a quoted probe path is watched by nothing, or an unreadable git status reads as a clean tree"
+import importlib.util, os, sys, tempfile
+spec = importlib.util.spec_from_file_location("L", sys.argv[1])
+L = importlib.util.module_from_spec(spec); spec.loader.exec_module(L)
+repo = os.path.realpath(sys.argv[2])
+os.makedirs(os.path.join(repo, "scripts"), exist_ok=True)
+for name in ("verify-live-web.sh", "check live.sh"):
+    with open(os.path.join(repo, "scripts", name), "w", encoding="utf-8") as fh:
+        fh.write("exit 0\n")
+
+# F48 — a QUOTED probe path is a real file and must be watched. The unquoted forms are the controls:
+# tokenization must not regress for the ordinary command, for shell operators, or for a pipeline.
+CASES = [
+    ('bash "scripts/check live.sh"',                       ["scripts/check live.sh"]),
+    ("bash 'scripts/check live.sh' | tee out",             ["scripts/check live.sh"]),
+    ("bash scripts/verify-live-web.sh",                    ["scripts/verify-live-web.sh"]),
+    ("curl --fail https://x && bash scripts/verify-live-web.sh", ["scripts/verify-live-web.sh"]),
+    ("bash scripts/verify-live-web.sh; echo done",         ["scripts/verify-live-web.sh"]),
+]
+for raw, expected in CASES:
+    got = L.verifier_paths(repo, {"paths": [], "verify_raw": raw})
+    if got != expected:
+        sys.exit(f"the verify command {raw!r} resolves to {got!r}, expected {expected!r}. A probe the "
+                 f"freshness rule cannot see is a probe that can be weakened without expiring a "
+                 f"single receipt — the command is SHELL, so it has to be tokenized as shell")
+
+# ...and an unparseable command (an unbalanced quote) must still watch what it can rather than throw.
+L.verifier_paths(repo, {"paths": [], "verify_raw": 'bash "scripts/check live.sh'})
+
+# F49 — an unreadable `git status` must be UNATTRIBUTABLE, never the answer a clean tree gives.
+clean = L._status_paths(repo, "no", ["app.py"])
+if clean != []:
+    sys.exit(f"precondition: a clean tree must report no dirty paths, got {clean!r}")
+# A directory OUTSIDE any repository — git exits nonzero there, which is the same class of answer a
+# corrupt index or an unreadable object store gives: "I cannot tell you". (A subdirectory of the repo
+# would not do: git answers about it perfectly well from the enclosing worktree.)
+broken = tempfile.mkdtemp(prefix="idc-repro-nogit-")
+unreadable = L._status_paths(broken, "no", ["app.py"])
+if unreadable == []:
+    sys.exit("a `git status` that FAILED returned the same empty list as a pristine tree, so the "
+             "verifier runs against unknown state and the receipt is stamped with HEAD anyway — an "
+             "unreadable truth is a refusal, never a pass")
+PYR30
+echo "  ok R30: a quoted probe path is watched, ordinary commands still tokenize, and an unreadable git status is unattributable"
 
 echo "== R28. THE CREDENTIAL SCRUB IS A PROPERTY OF THE TEXT, NOT A HABIT OF THE CALLER"
 # THE FINDING THIS CLOSES, and why the previous four fixes could not. F1 → F20 → F33 → F35 → F40 are

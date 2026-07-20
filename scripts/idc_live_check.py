@@ -136,6 +136,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import select
 import signal
 import subprocess
@@ -578,6 +579,21 @@ def _confined_evidence_path(repo, name, rel):
 
     Symlinks are resolved before the check, so a symlinked evidence directory cannot be used to step
     out. The resolved path is what gets returned, so the write lands where the check looked.
+
+    AND "INSIDE THE REPO DIRECTORY" IS NOT THE QUESTION — it is a proxy for the question, and the
+    proxy is one case short. The claim this has to ground is *this receipt can be reviewed*, and the
+    docstring above already names the other way to fail it: a destination that git will never carry.
+    `evidence: .cache/live.md` under an ignored `.cache/`, or anything under `.git/`, resolves inside
+    the repo, passes a directory-containment test, and is committed by nothing — so `--run` writes the
+    receipt and the audit keeps printing `live: ok` over proof no reviewer can ever see. The escape
+    half was built; this is the other half.
+
+    So the predicate asks GIT, which is the authority on what a commit can hold: `check-ignore` for
+    the ignored case, and the resolved git directory for the `.git/` case. Both reduce to one
+    question — *will a commit ever be able to hold this file?* — which has no case structure to be one
+    case short of. A git that cannot answer leaves the destination UNPROVEN and is refused (rule B: an
+    unreadable truth is a refusal, never a pass), because a receipt whose reviewability cannot be
+    established is exactly the false green this whole check exists to remove.
     """
     if not rel:
         raise ValueError(f"surface {name!r} has an empty `evidence:` destination")
@@ -595,7 +611,41 @@ def _confined_evidence_path(repo, name, rel):
     if resolved == root:
         raise ValueError(f"surface {name!r} declares the repo root itself as its `evidence:` "
                          f"destination ({rel!r}) — name a file, not the directory")
+    _refuse_uncommittable(root, name, rel, resolved)
     return resolved
+
+
+def _git_dir_of(root):
+    """The resolved git directory for `root`, or None when git cannot say."""
+    rc, out = _git(root, "rev-parse", "--absolute-git-dir")
+    return os.path.realpath(out) if rc == 0 and out else None
+
+
+def _refuse_uncommittable(root, name, rel, resolved):
+    """Refuse an evidence destination git will never carry — the reviewability half of confinement.
+
+    TWO WAYS TO BE UNCOMMITTABLE, and they are asked of git rather than pattern-matched here: the path
+    lives inside the GIT DIRECTORY (which git tracks nothing under), or it is IGNORED. `check-ignore`
+    exits 0 for an ignored path, 1 for a tracked-or-trackable one, and anything else means git could
+    not answer — which is refused, not waved through."""
+    gitdir = _git_dir_of(root)
+    if gitdir and (resolved == gitdir or resolved.startswith(gitdir + os.sep)):
+        raise ValueError(f"surface {name!r} declares an `evidence:` destination inside the GIT "
+                         f"DIRECTORY ({rel!r} → {resolved!r}). Git carries nothing from there, so the "
+                         f"receipt could never be committed or reviewed — and the audit would keep "
+                         f"reading `live: ok` off proof no reviewer can see. Declare a path under the "
+                         f"working tree (default: {DEFAULT_EVIDENCE_DIR}/<name>.md)")
+    rc, _out = _git(root, "check-ignore", "--quiet", "--no-index", "--", resolved)
+    if rc == 0:
+        raise ValueError(f"surface {name!r} declares a GITIGNORED `evidence:` destination ({rel!r} → "
+                         f"{resolved!r}). A receipt the repo will never carry cannot be reviewed, so "
+                         f"`live: ok` over it is a false green — declare a path git can track, or "
+                         f"un-ignore this one")
+    if rc not in (0, 1):
+        raise ValueError(f"surface {name!r} declares an `evidence:` destination whose ignore status "
+                         f"git could not establish ({rel!r} → {resolved!r}, `git check-ignore` exited "
+                         f"{rc}). An unprovable destination is refused rather than assumed "
+                         f"reviewable")
 
 
 def surface_spec(repo, surface):
@@ -786,6 +836,27 @@ def _witness_gap(repo, spec, payload):
 _TOKEN_SPLIT = re.compile(r"[\s;|&()<>]+")
 
 
+def _command_tokens(raw):
+    """The verify command's tokens, split THE WAY A SHELL WOULD.
+
+    `_TOKEN_SPLIT` approximates shell tokenization with a character class, and the approximation
+    breaks on the one thing quoting exists for: `bash "scripts/check live.sh"` becomes two tokens,
+    neither of which is a file, so a probe with a space in its name is watched by NOTHING and its
+    uncommitted edits are attributed to HEAD. The string IS a shell command, so it is tokenized by the
+    shell's own rules; `punctuation_chars` keeps `;`, `|`, `&`, `<`, `>` and the parens as separators
+    the way the regex did.
+
+    FALLS BACK, DELIBERATELY. `shlex` raises on an unbalanced quote — a command no shell would run
+    either — and refusing to watch anything there would be strictly worse than the old behaviour, so
+    the regex split remains the floor for a string that is not valid shell."""
+    try:
+        lexer = shlex.shlex(raw or "", posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        return list(lexer)
+    except ValueError:
+        return _TOKEN_SPLIT.split(raw or "")
+
+
 def verifier_paths(repo, spec):
     """The repo-relative files the VERIFY COMMAND ITSELF is made of, for the freshness rule.
 
@@ -805,7 +876,7 @@ def verifier_paths(repo, spec):
     """
     root = os.path.realpath(repo)
     found = []
-    for tok in _TOKEN_SPLIT.split(spec.get("verify_raw") or ""):
+    for tok in _command_tokens(spec.get("verify_raw") or ""):
         tok = tok.strip().strip("'\"")
         if not tok or tok.startswith("-"):
             continue
@@ -856,18 +927,25 @@ def watched_paths(repo, spec):
 
 
 def _status_paths(repo, untracked, paths):
-    """The paths under `paths` that `git status` reports as changed, or [] when git could not answer.
+    """The paths under `paths` that `git status` reports as changed.
 
     PARSED BY SPLITTING OFF THE STATUS FIELD, not by a fixed `line[3:]` offset. A porcelain line for an
     unstaged change begins with a SPACE (` M scripts/verify.sh`), and `_git` strips its whole stdout —
     so the first line arrives one character shorter than the rest and a fixed slice ate the first
     letter of its path. The refusal then named `cripts/verify.sh`, a file the operator cannot find.
-    """
+
+    A NONZERO `git status` IS NOT A CLEAN TREE. Returning [] there — which is what this did — gave a
+    corrupt index, an unreadable object store and a git that will not run the SAME answer as a
+    pristine checkout, so the verifier ran against unknown state and the receipt was stamped with
+    HEAD anyway. That is the tolerant-read-as-clean class this file removes everywhere else (rule B:
+    an unreadable truth is a refusal, never a pass), left in the declared-paths half. It is now
+    UNATTRIBUTABLE: the declared paths are reported as the reason, which is the fail-closed answer
+    and the one an operator can act on."""
     if not paths:
         return []
     rc, out = _git(repo, "status", "--porcelain", f"--untracked-files={untracked}", "--", *paths)
     if rc != 0:
-        return []
+        return list(paths)
     return [ln.split(None, 1)[-1].strip() for ln in out.splitlines() if ln.split()]
 
 

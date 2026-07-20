@@ -142,6 +142,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
+from typing import NamedTuple
 
 # Same-dir import: the shared credential table lives beside this script in scripts/, so this resolves
 # whether the file is run directly (sys.path[0] is its own dir) or imported by a smoke test that put
@@ -215,14 +216,19 @@ _STRUCTURAL_KEYS = ("name", "paths", "evidence", "attested", "timeout")
 # enough to be right for machine output and wrong for human prose (the named-secret rule matches on
 # substrings, so `TOKENIZER_MODEL=…` is a "token"; the `Basic`/`token` header arms match ordinary
 # English), and intake HARD-REJECTS where this file merely redacts. See that module's docstring.
+# EVERY SEPARATOR HERE IS BOUNDED (`\s{1,64}`, never `\s+`; `\s{0,64}`, never `\s*`) and the label
+# alternation carries no quantified GROUP, so `CS.reach` can measure how far one match spans. That
+# number is what sizes `_HEAD_QUARANTINE_BYTES` below; an unbounded separator would make it infinite
+# and leave the retention cut with nothing to quarantine against. See `CS.reach` for the reasoning.
 _LIVE_ONLY_AUTH_VERBS = (
     # `Authorization: Basic …` / `token …`. The `Bearer` arm is the shared one, applied above.
-    re.compile(r"(?i)\b(basic|token)\s+[A-Za-z0-9._~+/=-]{8,4096}"), r"\1 [REDACTED]",
+    re.compile(r"(?i)\b(basic|token)\s{1,64}[A-Za-z0-9._~+/=-]{8,4096}"), r"\1 [REDACTED]",
 )
 _LIVE_ONLY_NAMED_SECRET = (
     # Anything that NAMES itself a secret: key/token/secret/password/credential/auth = or : value.
     re.compile(r"(?i)([\w.-]{0,32}(?:secret|password|passwd|token|api[_-]?key|apikey|credential|"
-               r"auth(?:orization)?)[\w.-]{0,32})\s*[:=]\s*(\"[^\"]{0,512}\"|'[^']{0,512}'|\S{1,512})"),
+               r"authorization|auth)[\w.-]{0,32})\s{0,64}[:=]\s{0,64}"
+               r"(\"[^\"]{0,512}\"|'[^']{0,512}'|\S{1,512})"),
     r"\1=[REDACTED]",
 )
 _LIVE_ONLY_OPAQUE_RUN_BACKSTOP = (
@@ -297,44 +303,100 @@ def _tail(text, limit):
 
 _LEADING_WS = re.compile(r"\s")
 _LEADING_WS_BYTES = re.compile(rb"\s")
+_PEM_OPEN_BYTES = re.compile(CS.PEM_BLOCK_OPEN.pattern.encode("ascii"))
+_PEM_CLOSE_BYTES = re.compile(CS.PEM_BLOCK_CLOSE.pattern.encode("ascii"))
+
+# Rules whose REACH is unbounded, each mapped to the structural family that closes it in the head
+# quarantine below. A rule that is neither measurable nor registered here makes this module refuse to
+# load, on purpose: that is the check that keeps "the quarantine covers every rule" a property of the
+# code rather than a claim in a comment.
+_UNBOUNDED_RULE_FAMILY = {
+    CS.PEM_PRIVATE_KEY_BLOCK[0]: "delimited-block",   # closed by its own BEGIN/END delimiters
+    CS.KNOWN_CREDENTIAL_SHAPES[0]: "bare-token-run",  # closed by the whitespace boundary
+}
 
 
-def _redact_severed_head(buf):
-    """REDACT the partial leading token a cut through un-redacted bytes leaves behind.
+def _head_quarantine_bytes():
+    """How many leading bytes of a cut buffer are unattributable — the longest match ANY redactor
+    applied here can produce, computed from the patterns themselves (`CS.reach`).
 
-    THE RULE, stated once so a future cut cannot re-open this: **a cut taken over bytes that have not
-    been redacted yet must never sever a token.** Every redaction rule in this file is left-anchored —
-    the named-secret rule needs the label (`password`, `api_key`), the URL rule needs the scheme, the
-    PEM rule needs its BEGIN line. A cut that lands inside a label destroys exactly the context the
-    rule matches on, and the surviving remainder (`word=hunter2xyzzy`) is a credential that no rule can
-    see any more. It then lands in the COMMITTED evidence file, where the cost is a rotation and the
-    exposure is permanent.
-
-    That is why redacting on both sides of the DISPLAY cut (`_redacted_tail`) was not enough on its
-    own: `_drain_bounded` takes an EARLIER cut, over raw bytes, before any redaction has run. This is
-    the guard for that cut — and it is the only cut in this file taken over un-redacted input, which is
-    what keeps the rule checkable. (`_redacted_tail`'s cut does not need it: redaction has already run
-    over the WHOLE retained buffer by then, so anything that cut can sever is something no rule
-    matched, and its own second pass catches what the cut newly makes matchable.)
-
-    REDACTED, NOT DELETED, and the difference matters twice. A severed token is unattributable, so it
-    must not be displayed — but silently deleting it would remove the evidence that anything was there,
-    and where the retained buffer is ONE long token (a probe that prints a single huge line) deleting
-    would empty the receipt entirely. Replacing it with the ordinary marker keeps the receipt readable
-    and says the honest thing: something was here and this run cannot vouch for what.
-
-    The boundary is the first WHITESPACE — not the first newline — because a token is
-    whitespace-delimited and a chatty probe can emit a very long single line. A cut that happened to
-    land ON whitespace severed nothing, and the buffer is returned untouched.
+    Derived rather than typed so that adding a rule with a longer bound raises this guard by itself.
+    A rule `CS.reach` cannot measure must be registered in `_UNBOUNDED_RULE_FAMILY`; otherwise this
+    raises at import, which is the fail-closed answer — a redactor nobody has sized is a redactor the
+    quarantine cannot promise to cover, and shipping it silently is how F1, F20 and F33 each happened.
     """
-    ws = _LEADING_WS_BYTES if isinstance(buf, bytes) else _LEADING_WS
-    marker = b"[REDACTED]" if isinstance(buf, bytes) else "[REDACTED]"
-    m = ws.search(buf)
-    if m is None:
-        return marker              # the whole tail is one severed token
-    if m.start() == 0:
-        return buf                 # the cut landed on whitespace — nothing was severed
-    return marker + buf[m.start():]
+    bounded = []
+    for pattern, _ in _REDACTORS:
+        span = CS.reach(pattern)
+        if span is None:
+            if pattern not in _UNBOUNDED_RULE_FAMILY:
+                raise RuntimeError(
+                    f"redaction rule {pattern.pattern[:60]!r} has no measurable reach and is not "
+                    "registered in _UNBOUNDED_RULE_FAMILY — a cut through un-redacted bytes cannot "
+                    "be quarantined against it. Bound its quantifiers, or register the structural "
+                    "family (delimited block / bare token run) that closes it.")
+        else:
+            bounded.append(span)
+    return max(bounded)
+
+
+_HEAD_QUARANTINE_BYTES = _head_quarantine_bytes()
+
+
+def _quarantine_severed_head(buf):
+    """QUARANTINE the head of a buffer that a cut through un-redacted bytes left without context.
+
+    THE RULE, stated as a derivation rather than a list of cases, because the list was twice one case
+    short. Every redaction rule in this file is LEFT-ANCHORED — the named-secret rule needs its label,
+    the URL rule its scheme, the auth rule its verb, the PEM rule its BEGIN line. `_drain_bounded`
+    keeps only the last `_MAX_RETAINED_BYTES`, so the cut DESTROYS left context, and a rule whose
+    anchor was discarded cannot see the secret that follows it. A regex match is contiguous, so the
+    surviving remnant of a straddling match is always a PREFIX of the retained buffer. Therefore:
+
+        **nothing in that prefix can be vouched for, whatever the rules happen to be** —
+        so the prefix is replaced wholesale, sized to the longest match any rule can produce.
+
+    That is what makes this different from the repair it replaces. The old one cut back to the first
+    WHITESPACE, which is exactly right for one anchor shape (the named-secret rule, where label and
+    value are one token) and wrong for every rule whose anchor is a separate WORD or a separate LINE:
+    `Authorization: Basic <secret>` severed inside `Basic` left the credential standing as the next
+    token, and a PEM block severed inside its BEGIN line kept 43% of the key body AND lost the
+    "a private key was here" marker. Sizing a repair to an anchor is an enumeration of anchors.
+
+    TWO FAMILIES the byte count alone cannot close, handled by their STRUCTURE (see
+    `_UNBOUNDED_RULE_FAMILY`):
+
+      * BARE TOKEN RUNS (`ghp_…`, JWTs, the opaque backstop). Every arm is whitespace-free, so the
+        quarantine is extended forward to the next whitespace: no partial token can outlive it,
+        however long the token is.
+      * DELIMITED BLOCKS (the PEM key). A closing delimiter with NO opening delimiter before it proves
+        the block began in the discarded bytes — so everything above that close is key material and
+        goes with it, under the PEM marker, so the receipt still says WHAT was here.
+
+    REDACTED, NOT DELETED. A quarantined head is unattributable, so it must not be displayed — but
+    silently deleting it would remove the evidence that anything was there, and where the retained
+    buffer is one long token deleting would empty the receipt entirely. The marker keeps the receipt
+    honest: something was here and this run cannot vouch for what.
+    """
+    if isinstance(buf, bytes):
+        ws, marker, pem_marker = _LEADING_WS_BYTES, b"[REDACTED]", b"[REDACTED PRIVATE KEY]"
+        pem_open, pem_close = _PEM_OPEN_BYTES, _PEM_CLOSE_BYTES
+    else:
+        ws, marker, pem_marker = _LEADING_WS, "[REDACTED]", "[REDACTED PRIVATE KEY]"
+        pem_open, pem_close = CS.PEM_BLOCK_OPEN, CS.PEM_BLOCK_CLOSE
+    boundary = ws.search(buf, _HEAD_QUARANTINE_BYTES)
+    cut = len(buf) if boundary is None else boundary.start()
+    # The block family EXTENDS the same quarantine rather than running after it, so the two cannot
+    # eat each other's work: a footer with no header before it is a block that began in the discarded
+    # bytes, everything above it is key material, and the region carries the PEM marker so the receipt
+    # still says WHAT was here instead of losing that with the header.
+    close = pem_close.search(buf)
+    if close is not None:
+        opened = pem_open.search(buf)
+        if opened is None or opened.start() > close.start():
+            cut = max(cut, close.end())
+            marker = pem_marker
+    return marker + buf[cut:]
 
 
 def _redacted_tail(text, limit, truncated=False):
@@ -775,6 +837,16 @@ def verifier_paths(repo, spec):
     return found
 
 
+class Watched(NamedTuple):
+    """The two halves of "the files this receipt's meaning depends on", and their union."""
+    declared: list      # the surface's `paths:` — the code the surface is made of
+    probe: list         # the verify command's own files — the code that decided it works
+
+    @property
+    def all(self):
+        return self.declared + self.probe
+
+
 def watched_paths(repo, spec):
     """THE ONE DEFINITION of "the files this receipt's meaning depends on": the surface's declared
     `paths:` plus the verify command's own files.
@@ -786,9 +858,17 @@ def watched_paths(repo, spec):
     the dirtiness rule was not. The result was a receipt reading `live: ok` for a probe that HEAD had
     never contained: weaken the verify script, leave the edit UNCOMMITTED, and `git log` (freshness)
     cannot see it while `git status` (dirtiness) was not looking at it.
+
+    IT RETURNS THE TWO HALVES, not one flat list, because the claim above has to be TRUE of the code
+    and not merely of a docstring. The first version of this function had exactly one caller and the
+    attribution rule re-derived the identical composition inline — so the two agreed by coincidence of
+    authorship, which is the very drift it was introduced to end. The halves matter more now than they
+    did then: the two consumers apply genuinely DIFFERENT rules to them (expiry asks `git log` about
+    the union; attribution asks a tracked-only status of the declared half and content identity with
+    HEAD of the probe half), and inline re-derivation would be a live drift rather than a latent one.
     """
     declared = list(spec["paths"])
-    return declared + [p for p in verifier_paths(repo, spec) if p not in declared]
+    return Watched(declared, [p for p in verifier_paths(repo, spec) if p not in declared])
 
 
 def _status_paths(repo, untracked, paths):
@@ -807,6 +887,37 @@ def _status_paths(repo, untracked, paths):
     return [ln.split(None, 1)[-1].strip() for ln in out.splitlines() if ln.split()]
 
 
+def _unattributable_probe_paths(repo, probe):
+    """The verify command's own files whose CONTENT is not the content HEAD holds at that path.
+
+    THE QUESTION, ASKED DIRECTLY. The receipt claims: *this probe, at commit C, produced this exit
+    code*. That is true iff the bytes that ran ARE the bytes commit C holds at that path. So compare
+    them — the blob HEAD names against the blob the working file hashes to — and ask nothing else.
+
+    THIS REPLACED A `git status` SCAN, and that is the whole point. Asking `git status` is asking
+    about GIT'S REPORTING POLICY, which is a moving target with its own exceptions:
+    `--untracked-files=no` hid a probe replaced wholesale by an untracked file, and
+    `--untracked-files=all` still hides an IGNORED one, because `git status` does not report ignored
+    files AT ALL — so one `.gitignore` line, or simply a probe living under an already-ignored
+    `node_modules/.bin` or `.venv/bin`, restored the identical false green: a receipt reading
+    `live: ok` at a commit containing no probe, while the honest probe exits 1. Each fix added the
+    reporting mode somebody had just been bitten by, and the next one was always waiting. Content
+    identity has no case structure to be one case short of: ignored, untracked, staged,
+    `assume-unchanged`, `skip-worktree` and wholesale replacement all reduce to the same comparison.
+
+    A path git cannot answer for — absent from HEAD, unhashable, a git that will not run — is
+    UNATTRIBUTABLE, never clean: an unreadable truth is a refusal (rule B), and "HEAD holds no such
+    file" is exactly the wholesale-replacement case this has to catch.
+    """
+    out = []
+    for rel in probe:
+        rc_head, head_oid = _git(repo, "rev-parse", f"HEAD:{rel}")
+        rc_work, work_oid = _git(repo, "hash-object", "--", os.path.join(repo, rel))
+        if rc_head != 0 or rc_work != 0 or not head_oid or head_oid != work_oid:
+            out.append(rel)
+    return out
+
+
 def _dirty_paths(repo, spec):
     """The files this receipt's meaning depends on that differ from HEAD right now, if any.
 
@@ -816,22 +927,24 @@ def _dirty_paths(repo, spec):
     commits, while what actually passed was an uncommitted edit that may never be committed at all.
     That is a false green with a real deployment behind it.
 
-    THE PROBE IS PART OF THE SET (`watched_paths`), and the two halves get different UNTRACKED rules
-    for a reason that is not symmetry:
+    THE PROBE IS PART OF THE SET (`watched_paths`), and the two halves are asked DIFFERENT
+    QUESTIONS for a reason that is not symmetry:
 
-      * The DECLARED paths are checked TRACKED-ONLY. A run inevitably dirties the tree by writing its
-        own evidence receipt, and repos carry all sorts of unrelated scratch; neither says anything
-        about whether the code backing this surface was the code that ran. Including untracked files
-        here would make the second run of every surface refuse.
-      * The VERIFY COMMAND'S OWN FILES are checked INCLUDING UNTRACKED, because `-uno` hides the
-        wholesale replacement — delete the committed probe, drop an untracked file at the same path,
-        and a tracked-only scan reports a clean tree while the thing that ran is code no commit
-        contains. There is no evidence-receipt case to protect here: the probe is source.
+      * The DECLARED paths get a TRACKED-ONLY `git status`. A run inevitably dirties the tree by
+        writing its own evidence receipt, and repos carry all sorts of unrelated scratch; neither says
+        anything about whether the code backing this surface was the code that ran. Including
+        untracked files here would make the second run of every surface refuse. That is a POLICY, and
+        it is written down here so it is not mistaken for a missed case: an untracked file appearing
+        under `services/` is not evidence that the code behind the surface changed. (Ignored files are
+        a strict subset of untracked and sit outside the same policy for the same reason; and ignoring
+        a TRACKED file is a no-op in git, so no declared file can hide that way.)
+      * The VERIFY COMMAND'S OWN FILES are asked for CONTENT IDENTITY with HEAD — see
+        `_unattributable_probe_paths`. The probe is source, there is no evidence-receipt case to
+        protect, and every way of hiding a changed probe from `git status` reduces to one comparison.
     """
-    declared = list(spec["paths"])
-    probe = [p for p in verifier_paths(repo, spec) if p not in declared]
-    dirty = _status_paths(repo, "no", declared)
-    for p in _status_paths(repo, "all", probe):
+    watched = watched_paths(repo, spec)
+    dirty = _status_paths(repo, "no", watched.declared)
+    for p in _unattributable_probe_paths(repo, watched.probe):
         if p not in dirty:
             dirty.append(p)
     return dirty
@@ -872,15 +985,15 @@ def _drain_bounded(proc, timeout):
     `subprocess.TimeoutExpired` on the deadline, so the caller's existing timeout arm — kill the process
     group, invalidate the stale receipt, report INDETERMINATE — is reached unchanged.
 
-    THE RETENTION CUT IS A REDACTION BOUNDARY, and that is why `_redact_severed_head` is here. Keeping
-    only the last N bytes means the buffer's FIRST LINE is a fragment whenever the child printed more
-    than N — and this cut happens BEFORE anything is redacted, so a cut that lands inside a
-    `password=` label leaves `word=hunter2xyzzy`, which the named-secret rule can no longer match and
-    the opaque-run backstop is too short to catch. The credential then reaches the committed receipt.
+    THE RETENTION CUT IS A REDACTION BOUNDARY, and that is why `_quarantine_severed_head` is here.
+    Keeping only the last N bytes means the buffer's HEAD has no left-hand context whenever the child
+    printed more than N — and this cut happens BEFORE anything is redacted, so every rule in the file,
+    all of them left-anchored, is blind to whatever the cut severed: a `password=` label, an
+    `Authorization: Basic` verb, a PEM BEGIN line. The credential then reaches the committed receipt.
     Redacting at every trim instead would put a whole-buffer pass on every 64 KB chunk — for a child
     that prints a gigabyte that is ~16k passes over 17 KB, which is the same "a check that hangs is a
-    check that gets removed" failure the bound exists to prevent. Dropping the severed head is O(1) and
-    closes it for good: see `_redact_severed_head` for the rule.
+    check that gets removed" failure the bound exists to prevent. Quarantining the head is O(1) and
+    does not depend on which rules exist: see `_quarantine_severed_head` for the derivation.
 
     Returns the decoded tail; the caller applies `_redacted_tail` to it as before."""
     deadline = time.time() + timeout
@@ -912,9 +1025,9 @@ def _drain_bounded(proc, timeout):
     # Only when the retention cut actually fired: with nothing discarded there is no severed head, and
     # redacting the first token of a SHORT capture would throw away output the reader needs.
     if overflowed:
-        kept = _redact_severed_head(kept)
+        kept = _quarantine_severed_head(kept)
     # The overflow travels WITH the text, because it is a fact about the capture that the text can no
-    # longer be asked for — `_redact_severed_head` may have shrunk 17 KB to ten characters.
+    # longer be asked for — `_quarantine_severed_head` may have shrunk 17 KB to ten characters.
     return kept.decode("utf-8", "replace"), overflowed
 
 
@@ -1223,7 +1336,7 @@ def audit_surface(repo, spec):
     # probe that has been weakened since the run proves nothing about the run, and `command_sha256`
     # only notices a change to the declared STRING, never to the script that string executes. The
     # dirty-tree refusal reads the SAME set from the SAME function, so the two can never drift again.
-    watched = watched_paths(repo, spec)
+    watched = watched_paths(repo, spec).all
     rc, out = _git(repo, "log", "--format=%H", f"{commit}..HEAD", "--", *watched)
     if rc != 0:
         _fail(f"git log over surface {spec['name']!r} paths failed")

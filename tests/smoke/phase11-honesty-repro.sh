@@ -1114,7 +1114,7 @@ echo "== R18. THE RETENTION CUT MUST NOT SEVER A CREDENTIAL'S LABEL  [F20]"
 # full of long tokens REDACTS below MAX_BODY_CHARS, so no second cut ever happens and the whole
 # fragment-headed buffer is written to the COMMITTED receipt.
 python3 - "$LIVE" "$WORK" <<'PY' || fail "R18: a credential whose label the RETENTION cut severed reaches the committed receipt"
-import importlib.util, os, sys
+import importlib.util, os, shlex, sys
 spec = importlib.util.spec_from_file_location("L", sys.argv[1])
 L = importlib.util.module_from_spec(spec); spec.loader.exec_module(L)
 work = sys.argv[2]
@@ -1138,10 +1138,14 @@ with open(probe, "w", encoding="utf-8") as fh:
         "line = 'Z' * 64 + sep\n"
         "after = sep + (line * (keep // len(line) + 2))\n"
         "after = after[:keep - sever - len(marker)] + marker\n"
-        "sys.stdout.write(('startup noise' + sep) * 40 + cred + after)\n")
+        # The leading noise must be LARGER THAN THE WHOLE RETAINED WINDOW, or a `sever` past the head
+        # quarantine makes the total output shorter than `keep`, nothing overflows, and the case
+        # silently stops exercising the retention cut it was written for.
+        "sys.stdout.write(('startup noise' + sep) * (keep // 13 + 40) + cred + after)\n")
 
 def body(sever, cred, sep="NL"):
-    s = {"name": "web", "verify_raw": f"python3 {probe} {keep} {sever} {cred} {sep!r}",
+    # SHELL-QUOTED: an auth header carries spaces, and unquoted it would arrive as three argv words.
+    s = {"name": "web", "verify_raw": f"python3 {probe} {keep} {sever} {shlex.quote(cred)} {sep!r}",
          "verify": "probe", "timeout": 60}
     rc, out, _ = L.run_verify(work, s, "0" * 40)
     if rc != 0:
@@ -1170,15 +1174,72 @@ if "hunter2xyzzy" in dense:
 if "[REDACTED]" not in dense:
     sys.exit(f"the unattributable tail was silently deleted rather than marked: {dense[:200]!r}")
 
-# POSITIVE CONTROL 1 — an INTACT label WELL INSIDE the retained window is still redacted by name, so
-# this is not "the whole head is always redacted" passing for a fix. (`sever` is padded past the
-# credential's own length so the cut lands in the noise BEFORE it: a credential sitting exactly at
-# offset 0 of the buffer is indistinguishable from a severed `MY_password=…` and is treated as one.)
-intact = body(len("password=hunter2xyzzy") + 50, "password=hunter2xyzzy")
+# ...AND A CREDENTIAL WHOSE ANCHOR IS A SEPARATE WORD, not part of the same token. This is the case
+# the token-sized repair could not reach: severing `Basic` destroys the rule's anchor and leaves the
+# credential standing as the very next token, verbatim, in the COMMITTED receipt. One case per rule
+# family whose anchor is whitespace-separated, each with the anchor-INTACT control below.
+AUTH_SECRET = "QWxhZGRpbjpvcGVuc2VzYW1l"          # 24 chars: too short for the 40-char backstop
+for verb in ("Basic", "token", "Bearer"):
+    header = f"Authorization: {verb} {AUTH_SECRET}"
+    # keep the last `len(secret) + 4` bytes of the header, so the cut lands INSIDE the verb
+    cut_inside_verb = body(len(AUTH_SECRET) + 4, header)
+    if AUTH_SECRET in cut_inside_verb:
+        sys.exit(f"a credential whose `{verb}` anchor the retention cut severed reached the receipt "
+                 f"verbatim: {cut_inside_verb[:160]!r}")
+    # the anchor-INTACT control for the same rule, beyond the quarantine: still redacted, by its rule
+    whole = body(len(header) + L._HEAD_QUARANTINE_BYTES + 50, header)
+    if AUTH_SECRET in whole:
+        sys.exit(f"an INTACT `{verb}` header was not redacted by its own rule: {whole[:200]!r}")
+
+# ...and a PEM block cut through its BEGIN line: the header the rule anchors on is gone, so the key
+# body survives as base64 the opaque backstop cannot fully match — and the receipt loses the one
+# thing a reviewer needs, which is that a PRIVATE KEY was here rather than an unnamed token.
+KEY_LINE = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQ+/"
+pem_probe = os.path.join(work, "r18-pem.py")
+with open(pem_probe, "w", encoding="utf-8") as fh:
+    fh.write(
+        "import sys\n"
+        "keep, line = int(sys.argv[1]), sys.argv[2]\n"
+        "pem = ('-----BEGIN RSA PRIVATE KEY-----\\n' + (line + '\\n') * 30\n"
+        "       + '-----END RSA PRIVATE KEY-----\\n')\n"
+        # Size everything AFTER the BEGIN line to exactly `keep + 8`, so the retention cut lands 8
+        # bytes into the header: the rule's anchor is destroyed and its footer is still in the buffer.
+        # The filler is long opaque runs so the retained buffer REDACTS below MAX_BODY_CHARS and no
+        # display cut happens — otherwise the receipt shown to a reviewer is the last 4 KB and the
+        # marker at the head of the buffer is never in it, which is not what this case is asking.
+        "marker = 'PEM-TAIL-MARKER\\n'\n"
+        "filler = 'Z' * 64 + '\\n'\n"
+        "rest = (pem + filler * (keep // len(filler) + 2))[:keep + 8]\n"
+        "sys.stdout.write('n' * 5000 + rest[:-len(marker)] + marker)\n")
+s_pem = {"name": "web", "verify_raw": f"python3 {pem_probe} {keep} {KEY_LINE}",
+         "verify": "probe", "timeout": 60}
+rc, pem_body, _ = L.run_verify(work, s_pem, "0" * 40)
+if rc != 0:
+    sys.exit(f"precondition: the PEM probe must succeed, got rc={rc}")
+if KEY_LINE in pem_body:
+    sys.exit(f"private-key body survived a cut through the BEGIN line: {pem_body[:200]!r}")
+if "[REDACTED PRIVATE KEY]" not in pem_body:
+    sys.exit("a severed PEM block lost the one fact a reviewer needs — that a PRIVATE KEY was here, "
+             f"not an unnamed token: {pem_body[:200]!r}")
+if "PEM-TAIL-MARKER" not in pem_body:
+    sys.exit(f"the severed-block rule ate the output AFTER the key: {pem_body[:200]!r}")
+
+# POSITIVE CONTROL 1 — an INTACT label BEYOND THE HEAD QUARANTINE is still redacted by name, so this
+# is not "everything is always redacted" passing for a fix. The boundary is the module's own derived
+# constant, not a magic number: past `_HEAD_QUARANTINE_BYTES` no straddling match can reach, so the
+# left context is genuinely restored and the named rule is expected to do its own work.
+intact = body(len("password=hunter2xyzzy") + L._HEAD_QUARANTINE_BYTES + 50, "password=hunter2xyzzy")
 if "hunter2xyzzy" in intact:
     sys.exit(f"an intact `password=` was not redacted: {intact[:200]!r}")
 if "password=[REDACTED]" not in intact:
     sys.exit(f"the intact credential was not redacted BY NAME (its label should survive): {intact[:200]!r}")
+
+# ...and the converse, which is the F33 rule itself: an INTACT credential sitting INSIDE the
+# quarantine is destroyed anyway, because the cut could equally have severed the anchor of a rule
+# that would have matched it, and nothing in that region can be told apart.
+inside = body(len("password=hunter2xyzzy") + 50, "password=hunter2xyzzy")
+if "hunter2xyzzy" in inside:
+    sys.exit(f"a credential inside the head quarantine survived: {inside[:200]!r}")
 
 # POSITIVE CONTROL 2 — the truncation signal must SURVIVE the head redaction. A capture that is one
 # huge token redacts to a handful of characters, so deciding the marker from what is left declares a
@@ -1253,7 +1314,34 @@ out19d="$(python3 "$LIVE" --repo "$R19" --run 2>&1)"; rc19d=$?
   && fail "R19: an UNTRACKED verify script produced a passing receipt — the -uno scan hid a wholesale probe replacement. Got: $out19d"
 [ "$rc19d" = 2 ] \
   || fail "R19: an untracked probe must be INDETERMINATE (exit 2), got rc=$rc19d out=$out19d"
-echo "  ok R19: an uncommitted or untracked probe cannot be attributed to HEAD"
+
+# THE IGNORED PROBE — `git status` NEVER reports an ignored file, in ANY untracked mode, so scanning
+# harder could not have caught this: one `.gitignore` line (or a probe living under an already-ignored
+# `node_modules/.bin`, which is where half of them live) reproduces the wholesale replacement with the
+# tree reading perfectly clean. The receipt would say `live: ok` at a commit that contains no probe.
+printf 'scripts/verify.sh\n' >> "$R19/.gitignore"
+git -C "$R19" add .gitignore; git -C "$R19" commit -qm "ignore the probe"
+git -C "$R19" status --porcelain --untracked-files=all -- scripts/verify.sh | grep -q . \
+  && fail "R19: precondition — an ignored probe must be INVISIBLE to git status, or this case is not testing what it claims"
+out19e="$(python3 "$LIVE" --repo "$R19" --run 2>&1)"; rc19e=$?
+[ "$rc19e" = 0 ] \
+  && fail "R19: a GITIGNORED verify script produced a passing receipt — git status cannot see an ignored file, so attribution must not be asking it. Got: $out19e"
+[ "$rc19e" = 2 ] \
+  || fail "R19: an ignored probe must be INDETERMINATE (exit 2), got rc=$rc19e out=$out19e"
+printf '%s' "$out19e" | grep -q 'scripts/verify.sh' \
+  || fail "R19: the refusal must NAME the ignored probe, got: $out19e"
+
+# POSITIVE CONTROL — the same repo, probe COMMITTED and matching HEAD byte for byte, must run clean.
+# Without this, "refuse everything" passes every case above while silently disabling the live gate.
+printf '#!/bin/bash\nexit 0\n' > "$R19/scripts/verify.sh"
+git -C "$R19" rm -q --cached .gitignore >/dev/null 2>&1 || true
+rm -f "$R19/.gitignore"
+git -C "$R19" add -f scripts/verify.sh; git -C "$R19" add -A
+git -C "$R19" commit -qm "re-commit the probe"
+out19f="$(python3 "$LIVE" --repo "$R19" --run 2>&1)"; rc19f=$?
+[ "$rc19f" = 0 ] \
+  || fail "R19: POSITIVE CONTROL — a probe COMMITTED and identical to HEAD must audit clean, got rc=$rc19f out=$out19f"
+echo "  ok R19: an uncommitted, untracked or ignored probe cannot be attributed to HEAD; a committed one runs"
 
 echo "== R20. THE RUN WITNESS BELONGS TO THE REPOSITORY, NOT THE CHECKOUT  [F22]"
 # `--absolute-git-dir` resolves inside a LINKED WORKTREE to `<main>/.git/worktrees/<name>`, which is

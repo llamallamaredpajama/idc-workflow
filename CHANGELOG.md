@@ -92,6 +92,16 @@ non-terminal exit 4 — so the Stop fixpoint gate enforces them with no new hook
 - `idc_git_janitor.py --json` now exposes each finding's `op` (its machine classification), so a
   consumer can select a finding class without pattern-matching English prose.
 - The command surface grows from 11 to 13 (`pause`, `resume`).
+- **A child process's diagnostics are redacted before anything persists them.** Every place a helper
+  reads a subprocess's `stderr` now scrubs it at the read, keyed on the text's provenance rather than
+  on a per-call-site rule — because a rule written at one call site is correct there and missing at
+  the next, which is how the same credential reached a committed receipt at four different
+  boundaries. A census test fails the suite both when a new unscrubbed read appears and when a
+  registered exemption goes stale. Two consequences for operators: a `gh`/`git` failure may now read
+  `[REDACTED]` where a token-bearing URL or key block used to be, costing one re-run to diagnose; and
+  commit shas and node ids are deliberately **not** redacted, since destroying them would turn
+  `fatal: bad object <sha>` into a message that says nothing. This is redaction at the persistence
+  boundary, not proof against a process that has the secret in memory.
 
 ## 4.1.2 — 2026-07-17
 

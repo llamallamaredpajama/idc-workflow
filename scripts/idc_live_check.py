@@ -178,11 +178,15 @@ _STRUCTURAL_KEYS = ("name", "paths", "evidence", "attested", "timeout")
 # by the catch-all before its own rule sees it. Over-redaction is the correct bias here; an unreadable
 # excerpt costs a re-run, a leaked token costs a rotation.
 #
-# EVERY QUANTIFIER IS BOUNDED, and the input is TRUNCATED BEFORE these ever run (see run_verify). Both
-# are load-bearing, not tidiness: the first draft had an unbounded `[\w.-]*` around the named-secret
-# rule and redacted the whole capture, and a verify script that printed 400 KB on one line wedged the
-# gate for minutes with no timeout left to save it (the command had already exited). A check that hangs
-# is a check that gets removed. `tests/smoke/phase4-completion-honesty.sh` G5 is that regression.
+# EVERY QUANTIFIER IS BOUNDED, and the input these run over is BOUNDED BY CAPTURE, not by the display
+# cut. Both are load-bearing, not tidiness: the first draft had an unbounded `[\w.-]*` around the
+# named-secret rule and redacted the whole capture, and a verify script that printed 400 KB on one line
+# wedged the gate for minutes with no timeout left to save it (the command had already exited). A check
+# that hangs is a check that gets removed. `tests/smoke/phase4-completion-honesty.sh` G5 is that
+# regression. The 400 KB is what `_drain_bounded` now prevents: it retains at most
+# `_MAX_RETAINED_BYTES` (17 KB), so the whole-capture pass these rules make is bounded at ~28 ms
+# worst case. That is why `_redacted_tail` can afford to redact on BOTH sides of the display cut —
+# see its docstring for why one side is never enough.
 #
 # The SELF-IDENTIFYING shapes come from the shared `idc_credential_shapes` table, which this file and
 # `idc_intake_manifest.py` both consume — they had drifted in both directions, each catching real
@@ -268,6 +272,39 @@ def _tail(text, limit):
     if len(text) <= limit:
         return text
     return "…[truncated]…\n" + text[-limit:]
+
+
+def _redacted_tail(text, limit):
+    """The bounded display tail of a capture, REDACTED ON BOTH SIDES OF THE CUT.
+
+    ONE SIDE IS NEVER ENOUGH, and this is not a reorder of the old `redact(_tail(...))`:
+
+      * Cut first, redact second (what this replaces) — the cut can fall through the middle of a
+        `password=hunter2` label, and the surviving `word=hunter2` matches neither the named-secret
+        rule (its label was cut away) nor the opaque-run backstop (the value is 7 characters). The
+        credential then lands in the COMMITTED evidence file, where the cost is a rotation and the
+        exposure is permanent.
+      * Redact first, cut second — closes that, but reopens the other end. The backstop is
+        `\\b[A-Za-z0-9_-]{40,4096}\\b`, and a run LONGER than 4096 characters has no internal word
+        boundary, so the pattern cannot match it at all. Cutting used to shrink such a run back into
+        range by accident; redacting only before the cut lets a 17 KB opaque token through intact.
+
+    So: redact the whole capture, cut to `limit`, redact again. Redaction is idempotent, so the
+    second pass cannot change anything the first already handled — it exists only to catch what the
+    cut newly made matchable. The cost is bounded because `_drain_bounded` caps the capture at
+    `_MAX_RETAINED_BYTES` (17 KB) before this ever runs; the second pass is over `limit` characters.
+
+    THE TRUNCATION MARKER IS DECIDED FROM THE PRE-REDACTION LENGTH. Redaction SHRINKS text, so a
+    capture that really was cut can fall under `limit` once redacted. Deciding from the redacted
+    length would silently drop the `…[truncated]…` signal from a receipt that is genuinely partial,
+    and a reviewer would read a fragment as the whole story.
+    """
+    raw = text or ""
+    truncated = len(raw) > limit
+    kept = redact(raw)
+    if len(kept) > limit:
+        kept = redact(kept[-limit:])
+    return "…[truncated]…\n" + kept if truncated else kept
 
 
 def _indent(line):
@@ -595,20 +632,19 @@ def run_verify(repo, spec, commit):
         _invalidate(spec, commit, f"the verify command could not be run ({e})")
         _fail(f"surface {spec['name']!r}: the verify command could not be run ({e})")
     duration = round(time.time() - started, 1)
-    # TRUNCATE FIRST, THEN REDACT. Only the bounded tail is ever kept, so redaction runs over a few KB
-    # instead of whatever the script decided to print — and nothing un-redacted is written or printed
-    # anywhere in between. (The full capture lives only in this local, and dies with the call.)
-    output = redact(_tail(out or "", MAX_BODY_CHARS))
+    # REDACT ON BOTH SIDES OF THE DISPLAY CUT. Neither order alone is safe — cutting first can sever a
+    # credential's own label, and redacting only first cannot see an opaque run too long to carry a word
+    # boundary. `_redacted_tail` does both passes and explains why. (The full capture lives only in this
+    # local, is already bounded by `_drain_bounded`, and dies with the call.)
+    output = _redacted_tail(out or "", MAX_BODY_CHARS)
     if rc in (126, 127):
         _invalidate(spec, commit,
                     f"the verify command could not be executed (shell exit {rc} — not found or not "
                     f"executable)")
         _fail(f"surface {spec['name']!r}: the verify command could not be executed (shell exit {rc} — "
               f"not found or not executable). A missing check is INDETERMINATE, never a pass")
-    # `output`, not a second redaction of the WHOLE capture. Re-redacting `out` here undid the bound
-    # that the line above exists to enforce: the command has already exited, so its timeout can no
-    # longer save the gate, and a script that printed 400 KB would pay for a full second pass over all
-    # of it (and hold two copies). The bounded, redacted tail is the only thing anyone wants.
+    # `output` — the bounded, twice-redacted tail — is the only thing any caller gets. `out` itself is
+    # never returned, printed, or written; it dies with this frame.
     return rc, output, duration
 
 

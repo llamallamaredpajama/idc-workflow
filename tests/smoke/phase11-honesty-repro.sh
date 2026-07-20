@@ -103,6 +103,17 @@ huge = body_of(f"print('x' * {L._MAX_RETAINED_BYTES})")
 if "[REDACTED]" not in huge:
     sys.exit(f"a {L._MAX_RETAINED_BYTES}-char opaque run reached the receipt unredacted "
              f"({len(huge)} chars kept) — redaction must ALSO run after the display cut")
+
+# ...and the fix must not silently drop the `…[truncated]…` signal. Redaction SHRINKS text, so a
+# capture that really WAS cut can fall under MAX_BODY_CHARS once redacted. 200 lines of
+# `token=<41 opaque chars>` is ~9.6 KB raw but ~3.4 KB redacted: deciding truncation from the
+# redacted length marks a genuinely partial receipt as complete, and a reviewer reads a fragment as
+# the whole story. The decision has to come from the PRE-redaction length.
+shrunk = body_of("print(200 * ('token=' + 'A' * 41 + chr(10)), end='')")
+if "…[truncated]…" not in shrunk:
+    sys.exit(f"a capture that WAS truncated lost its `…[truncated]…` marker because redaction shrank "
+             f"it back under the bound ({len(shrunk)} chars kept) — decide truncation from the "
+             f"pre-redaction length")
 PY
 echo "  ok R1: credentials survive neither the display cut nor the opaque-run bound"
 

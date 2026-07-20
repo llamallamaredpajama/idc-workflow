@@ -185,6 +185,64 @@ def _read_raw(cwd):
     return data if isinstance(data, dict) else {}
 
 
+# THE IDENTITY EVERY ENTRY MUST CARRY TO BE SEEN AT ALL — defined once, because the tolerant readers
+# and the strict probe are two views of ONE predicate and had drifted apart. The readers below SKIP an
+# entry missing these fields; `probe` therefore has to REJECT a ledger containing one, or a real
+# obligation that lost its `kind` (a hand-edited file) is invisible to the readers and pronounced
+# trustworthy by the probe — which is exactly the hidden-obligation false-clean the probe exists to
+# catch, arriving through the probe itself.
+#
+# THE INVARIANT, so this stops being a field list somebody has to remember to extend:
+#
+#     anything `probe()` vouches for must be VISIBLE TO EVERY READER — and a field a reader
+#     PARTITIONS ON must carry a value that partition recognizes.
+#
+# The first clause gives the field set: the UNION of every field any reader keys on, not the fields
+# the two readers that were reported happened to use. `state` is here because `active_commands` (the
+# reader the Stop closeout gate consults) skips on it.
+#
+# THE SECOND CLAUSE IS THE HALF THAT WAS MISSING, and leaving it out reopened the finding one field
+# value over. `active_commands` does not key on the PRESENCE of `state`, it compares it to a constant
+# — and so does `_prune_finished`. So `{"state": "actve"}` is present, truthy, and invisible to both,
+# while `probe()` called the ledger readable: the same hidden obligation, reached through the value
+# domain instead of the field list. A reader that partitions on a value keys on that value's DOMAIN,
+# and a value outside it is one no reader can classify.
+#
+# So identity is a field → DOMAIN mapping, and the domain is not typed by hand: it is this module's
+# own lifecycle constants, the only values a writer here can ever produce. A field with no closed
+# domain (`session_id`, `command`, `kind` are free-form) declares None and keeps the presence check,
+# which is the honest answer for a value nothing compares.
+#
+# `tests/smoke/phase11-honesty-repro.sh` R26 asserts the implication directly against every reader,
+# mutating by DELETION, VALUE-CORRUPTION and SUBSTITUTION — because the version that mutated only by
+# dropping fields is exactly why the value domain went unnoticed.
+_TAINT_IDENTITY = {"kind": None}
+_COMMAND_IDENTITY = {"session_id": None, "command": None, "state": (_CMD_ACTIVE, _CMD_FINISHED)}
+
+
+def _identity_fault(entry, fields):
+    """The first reason `entry` is invisible to a reader, phrased for an operator repairing the file
+    by hand — or None when it has none. `probe` quotes this; the tolerant readers just drop the entry.
+
+    Naming the fault rather than returning a bool is load-bearing: the ledger's failure mode is a
+    hand-edited file, so the refusal has to say WHICH field and WHY, or the operator is told the
+    ledger is untrustworthy with no way to make it trustworthy."""
+    if not isinstance(entry, dict):
+        return "a non-object entry"
+    for field, domain in fields.items():
+        value = entry.get(field)
+        if not value:
+            return f"no {field}"
+        if domain is not None and value not in domain:
+            return (f"a {field} of {value!r}, which is not one of "
+                    f"{', '.join(repr(d) for d in domain)} — no reader can classify it")
+    return None
+
+
+def _has_identity(entry, fields):
+    return _identity_fault(entry, fields) is None
+
+
 def read_taints(cwd, _raw=None):
     """Every taint dict currently in the ledger (a list). TOLERANT: a missing or corrupt ledger
     reads as an EMPTY list and NEVER throws — a corrupt ledger must not brick a gate. `_raw` lets a
@@ -192,7 +250,7 @@ def read_taints(cwd, _raw=None):
     taints = (_read_raw(cwd) if _raw is None else _raw).get("taints", [])
     if not isinstance(taints, list):
         return []
-    return [t for t in taints if isinstance(t, dict) and t.get("kind")]
+    return [t for t in taints if _has_identity(t, _TAINT_IDENTITY)]
 
 
 def _read_commands(cwd, _raw=None):
@@ -203,7 +261,7 @@ def _read_commands(cwd, _raw=None):
     cmds = (_read_raw(cwd) if _raw is None else _raw).get("commands", [])
     if not isinstance(cmds, list):
         return []
-    return [c for c in cmds if isinstance(c, dict) and c.get("session_id") and c.get("command")]
+    return [c for c in cmds if _has_identity(c, _COMMAND_IDENTITY)]
 
 
 def read_state(cwd):
@@ -211,7 +269,64 @@ def read_state(cwd):
     TOLERANT. A v1 file (`{'version': 1, 'taints': [...]}`) is normalized in-memory to v2 with an
     empty `commands` list — it is NOT rewritten on disk until the next write, so a read never mutates
     the file."""
+    # (identity-filtered by the two readers below, so a caller of this cannot see a record that the
+    # gates cannot — the probe refuses such a ledger outright rather than letting the views diverge.)
     return {"version": _LEDGER_VERSION, "taints": read_taints(cwd), "commands": _read_commands(cwd)}
+
+
+def probe(cwd):
+    """`(ok, detail)` — can this ledger's contents be TRUSTED as a complete account?
+
+    THE ONE STRICT READER, and why it has to exist next to the tolerant ones. Every reader above is
+    deliberately tolerant: a corrupt ledger reads as empty so a damaged file can never brick a gate.
+    That is right for a HINT (`pending_taints` scoping a block) and wrong for a PROOF. `/idc:pause`
+    asks "is anything half-done?" and reports `pause-ready: ok` on an empty answer — so against an
+    unreadable ledger the tolerant read turns "I cannot tell" into "nothing is wrong", and the pause
+    certificate is written over a hidden `mid_finish` obligation. That is the exact false-green this
+    codebase refuses everywhere else.
+
+    So callers that CERTIFY something ask here first, and treat a False as INDETERMINATE rather than
+    clean. A ledger that is absent is honestly empty (nothing has ever been recorded) and is `ok`;
+    only a file that EXISTS and cannot be parsed into the expected shape is untrustworthy.
+    """
+    path = ledger_path(cwd)
+    if not os.path.exists(path):
+        return True, "no ledger yet"
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except OSError as e:
+        return False, f"the obligations ledger {path} could not be read ({e})"
+    except ValueError as e:
+        return False, f"the obligations ledger {path} is not valid JSON ({e})"
+    if not isinstance(data, dict):
+        return False, (f"the obligations ledger {path} is a {type(data).__name__}, not an object — "
+                       f"its contents cannot be trusted")
+    for field, identity in (("taints", _TAINT_IDENTITY), ("commands", _COMMAND_IDENTITY)):
+        val = data.get(field)
+        if val is not None and not isinstance(val, list):
+            return False, (f"the obligations ledger {path} has a non-list `{field}` "
+                           f"({type(val).__name__}) — its contents cannot be trusted")
+        for entry in (val or []):
+            if not isinstance(entry, dict):
+                return False, (f"the obligations ledger {path} has a non-object entry in `{field}` "
+                               f"({type(entry).__name__}) — the tolerant readers SKIP such entries, "
+                               f"so a real obligation could be hiding behind one")
+            # ...and the SAME question for the shape the readers actually key on. Rejecting only
+            # non-dicts asked the wrong question: the tolerant readers skip on a MISSING IDENTITY
+            # FIELD, not on non-dict-ness, so a `mid_finish` entry that had lost its `kind` was
+            # skipped by every reader and certified readable here — a half-done obligation hidden
+            # behind a probe that said the ledger could be trusted. And they skip on an
+            # UNRECOGNIZED VALUE too (`state: "actve"` is dropped by `active_commands`, which
+            # compares the field to a constant), so this asks `_has_identity`'s own question through
+            # `_identity_fault` rather than re-deriving half of it here — the two had already
+            # drifted once, which is what F37 is.
+            fault = _identity_fault(entry, identity)
+            if fault:
+                return False, (f"the obligations ledger {path} has an entry in `{field}` with "
+                               f"{fault} — the tolerant readers SKIP such entries, so a real "
+                               f"obligation could be hiding behind one")
+    return True, "readable"
 
 
 def pending_taints(cwd, session_id=None):
@@ -267,10 +382,23 @@ def set_taint(cwd, kind, key=None, session_id=None, **fields):
     """Add or update the (kind, key) taint. REPO-GATED: a silent no-op outside a governed repo.
     Upserts by identity (kind, key) so a re-set never duplicates. Carries the creating session_id
     (invariant #1 scoping) and any extra `fields`. Recovers a corrupt/missing file (tolerant read
-    → rewrite). The write preserves the `commands` array (the v1 taint writers' door); taint
-    writers are best-effort, so the persisted bool is ignored here."""
+    → rewrite). The write preserves the `commands` array (the v1 taint writers' door).
+
+    RETURNS whether the taint is now DURABLE — persisted to disk AND readable back. Still
+    best-effort for control flow (it never raises), but the outcome is surfaced rather than
+    discarded, because for some callers the taint IS the safety property: a `mid_finish` obligation
+    is the only record that an irreversible merge is underway, so a caller about to take that step
+    must be able to tell whether the record it is relying on actually exists. A caller that does not
+    care can keep ignoring the result exactly as before.
+
+    The READBACK is not paranoia about `os.replace`. `_atomic_write_state` returns True the moment
+    the rename succeeds, which does not prove the bytes parse back into the taint just written — a
+    full disk, a truncating filesystem or a racing writer all produce a "successful" write whose
+    result is not there. Since the whole point is to survive a process that dies seconds later, the
+    only useful question is whether a LATER, DIFFERENT reader would find it.
+    """
     if not idc_hook_lib.is_governed_repo(cwd):
-        return
+        return False
     key = None if key is None else str(key)
     if session_id is None:
         session_id = os.environ.get("IDC_SESSION_ID") or None
@@ -278,7 +406,9 @@ def set_taint(cwd, kind, key=None, session_id=None, **fields):
         raw = _read_raw(cwd)
         taints = [t for t in read_taints(cwd, _raw=raw) if not (t.get("kind") == kind and t.get("key") == key)]
         taints.append({"kind": kind, "key": key, "session_id": session_id, "fields": dict(fields)})
-        _atomic_write_state(cwd, taints, _read_commands(cwd, _raw=raw))
+        if not _atomic_write_state(cwd, taints, _read_commands(cwd, _raw=raw)):
+            return False
+        return any(t.get("kind") == kind and t.get("key") == key for t in read_taints(cwd))
 
 
 def clear_taint(cwd, kind, key=None):
@@ -345,7 +475,8 @@ class ObligationConflict(Exception):
 def command_start(cwd, session_id, command, plugin_version, args_sha256, source,
                   intake_manifest=None, intake_units=None, recirc_requested=None,
                   build_requested=None, plan_admitted=None, uninstall_flags=None, nonce=None,
-                  build_frontier=None, uninstall_receipt_source=None, uninstall_receipt_sha256=None):
+                  build_frontier=None, uninstall_receipt_source=None, uninstall_receipt_sha256=None,
+                  entry_conditions=None):
     """Atomic UPSERT of the active command record by (session_id, command) — never duplicates an
     active record (a re-entry of the same command in the same session updates the one record in
     place). REPO-GATED: a silent no-op outside a governed repo (returns `{}`). Preserves the taint
@@ -413,6 +544,16 @@ def command_start(cwd, session_id, command, plugin_version, args_sha256, source,
     # cannot back a new run.
     if nonce:
         rec["nonce"] = str(nonce)
+    # WHICH BLOCKING CONDITIONS ALREADY HELD WHEN THIS RECORD OPENED. A `blocked_external` grounded by
+    # a repo CONDITION (a dirty tree, an unwritable pause path) is re-derived read-only at closeout,
+    # which proves the condition holds NOW and says nothing about whether the command found it or
+    # MADE it: /idc:uninstall can start clean, dirty a tracked file as part of its own work, and the
+    # finish-time re-derivation then sees its own changes. The claim is about an ATTEMPT, so it needs
+    # a fact about the attempt, and that fact cannot be re-derived afterwards — it has to be captured
+    # here, before the command does anything. The closeout requires the cited condition to have been
+    # true at entry AND to still hold.
+    if entry_conditions is not None:
+        rec["entry_conditions"] = {str(k): bool(v) for k, v in dict(entry_conditions).items()}
     with _write_lock(cwd):  # read-modify-write must be atomic vs concurrent writers (no lost records)
         raw = _read_raw(cwd)
         commands = _read_commands(cwd, _raw=raw)
@@ -478,6 +619,12 @@ def command_start(cwd, session_id, command, plugin_version, args_sha256, source,
                 # re-start supplied none, so a diagnostic report stays bound to the same record.
                 if not nonce and c.get("nonce"):
                     rec["nonce"] = c.get("nonce")
+                # THE ENTRY SNAPSHOT IS TAKEN ONCE, at the start of the OBLIGATION — never re-taken on
+                # re-entry. Re-stamping it would hand back the exact loophole it closes: run once,
+                # dirty a tracked file, re-enter, and the "condition at entry" is now the condition
+                # the first run created.
+                if isinstance(c.get("entry_conditions"), dict):
+                    rec["entry_conditions"] = c["entry_conditions"]
                 commands[i] = rec
                 replaced = True
                 break
@@ -544,30 +691,10 @@ def ensure_gitignored(repo_root):
     rewrite or reorder an operator's existing lines). REPO-GATED: a no-op outside a governed repo,
     so a stray call never creates a `.gitignore` in a non-IDC dir. Returns True iff the line is
     present afterward."""
-    if not idc_hook_lib.is_governed_repo(repo_root):
-        return False
-    gi = os.path.join(repo_root, ".gitignore")
-    try:
-        existing = ""
-        if os.path.isfile(gi):
-            with open(gi, encoding="utf-8") as fh:
-                existing = fh.read()
-        # Whole-line presence check (ignore surrounding whitespace; tolerate no trailing newline).
-        if any(ln.strip() == GITIGNORE_LINE for ln in existing.splitlines()):
-            return True
-        with open(gi, "a", encoding="utf-8") as fh:
-            if existing and not existing.endswith("\n"):
-                fh.write("\n")
-            if not existing:
-                fh.write("# IDC obligations ledger — transient per-session state, never committed.\n")
-            elif not existing.rstrip("\n").endswith(("#", ":")):
-                # Separate our entry from prior operator content with one comment for provenance.
-                fh.write("# IDC obligations ledger (per-session state; do not commit)\n")
-            fh.write(GITIGNORE_LINE + "\n")
-        return True
-    except OSError as e:
-        idc_hook_lib.warn(f"ledger: could not ensure .gitignore in {repo_root}: {e}")
-        return False
+    return idc_hook_lib.ensure_gitignored(
+        repo_root, GITIGNORE_LINE, label="ledger",
+        created_comment="# IDC obligations ledger — transient per-session state, never committed.",
+        appended_comment="# IDC obligations ledger (per-session state; do not commit)")
 
 
 # ── CLI (scaffold gitignore step + governance test driver; NOT an LLM-facing surface) ────────────

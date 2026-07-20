@@ -295,11 +295,23 @@ doctor_report "$REPO2" "$KEEP" PASS
 contract finish --repo "$REPO2" --session "$KEEP" --command doctor --status complete \
   --evidence-json '{"schema_version":1,"refs":{}}' >/dev/null \
   || gov_fail "(6) could not finish the KEEP record"
-[ "$(contract status --repo "$REPO2" --json | json_count finished)" -eq "$_MAX_FINISHED_EXPECT" ] \
+# SNAPSHOT ONCE, THEN GREP THE FILE — never `producer | grep -q`. This file runs under `pipefail`, and
+# `grep -q` exits the instant it matches. `print(json.dumps(...))` writes the payload and the trailing
+# newline SEPARATELY, so when grep leaves between the two, the final flush at interpreter shutdown
+# takes EPIPE, python exits 120, and pipefail failed the assertion even though grep had MATCHED.
+# Whether the two writes are separated at all depends on the pipe buffer CPython inherits — 16 KB on
+# macOS, 4 KB on Linux — so at this payload size the assertion passed locally and failed only on the
+# Linux runner. That is not a governance finding, it is a broken test: a green-vs-red that turns on
+# the platform's pipe buffer proves nothing about the cap. Reading a snapshot removes the pipe, and
+# both assertions now read the SAME observation instead of three separate re-runs.
+STATUS6="$WORK/status6.json"
+contract status --repo "$REPO2" --json > "$STATUS6" \
+  || gov_fail "(6) could not read the finished command history"
+[ "$(json_count finished < "$STATUS6")" -eq "$_MAX_FINISHED_EXPECT" ] \
   || gov_fail "(6) finished history is not capped at $_MAX_FINISHED_EXPECT records"
-contract status --repo "$REPO2" --json | grep -q "$KEEP" \
+grep -q "$KEEP" "$STATUS6" \
   || gov_fail "(6) newest-finish-retained: the just-finished record was pruned"
-if contract status --repo "$REPO2" --json | grep -q "n01-$$-"; then
+if grep -q "n01-$$-" "$STATUS6"; then
   gov_fail "(6) oldest-finished-dropped: the oldest finished record survived the cap"
 fi
 echo "  ok (6) the finished cap drops the OLDEST + retains the just-finished NEWEST record"
@@ -884,23 +896,42 @@ contract finish --repo "$REPO_RB" --session "$SRB" --command init --status block
 echo "  ok (7d-receipt, F1) a receipt-checker blocker grounds only on a failing read-only re-run; a non-re-derivable helper never blocks"
 
 # (7e) autorun complete reads THIS session's PERSISTED drain: complete verdict — never a caller string.
+# (7e-ungated) FIRST: a `complete` that does not RECORD the wave-close gates that prove it is refused.
+# The gates are opt-in flags, so the drain persists an identical token whether it checked the board
+# against reality or checked nothing, and a legitimate ungated caller (`idc:idc-build` Phase 0's
+# `--width` frontier query) overwrites this same file. Accepting the bare token would let an autorun
+# close itself `complete` on a pass that verified nothing.
+# Red-when-broken: drop the proves_complete() check in _claim_autorun_drain ⇒ this close is ACCEPTED ⇒ RED.
 python3 "$DV" --cwd "$REPO3" write --verdict complete --exit 0 --session "$S3" \
+  || gov_fail "(7e-ungated) could not persist an ungated drain verdict"
+contract start --repo "$REPO3" --session "$S3" --command autorun --plugin-root "$GOV_PLUGIN" --args 'a0' --source user >/dev/null
+if contract finish --repo "$REPO3" --session "$S3" --command autorun --status complete \
+     --evidence-json '{"schema_version":1,"refs":{}}' 2>/dev/null; then
+  gov_fail "(7e-ungated) an autorun complete backed by an UNGATED persisted drain verdict (no --coherence/--live recorded) was ACCEPTED — the token alone is not proof"
+fi
+# A verdict recording only PART of the required gate set is equally not proof (no partial credit).
+python3 "$DV" --cwd "$REPO3" write --verdict complete --exit 0 --session "$S3" --gates coherence >/dev/null
+if contract finish --repo "$REPO3" --session "$S3" --command autorun --status complete \
+     --evidence-json '{"schema_version":1,"refs":{}}' 2>/dev/null; then
+  gov_fail "(7e-ungated) an autorun complete recording only SOME of the required wave-close gates was ACCEPTED (no partial credit)"
+fi
+# Now the SAME close, with the gates that prove it recorded ⇒ accepted.
+python3 "$DV" --cwd "$REPO3" write --verdict complete --exit 0 --session "$S3" --gates coherence,live \
   || gov_fail "(7e) could not persist a drain verdict"
-contract start --repo "$REPO3" --session "$S3" --command autorun --plugin-root "$GOV_PLUGIN" --args 'a' --source user >/dev/null
 contract finish --repo "$REPO3" --session "$S3" --command autorun --status complete \
   --evidence-json '{"schema_version":1,"refs":{}}' \
-  || gov_fail "(7e) an autorun complete backed by THIS session's persisted drain: complete verdict was rejected"
-python3 "$DV" --cwd "$REPO3" write --verdict complete --exit 0 --session "someone-else" >/dev/null
+  || gov_fail "(7e) an autorun complete backed by THIS session's persisted, GATED drain: complete verdict was rejected"
+python3 "$DV" --cwd "$REPO3" write --verdict complete --exit 0 --session "someone-else" --gates coherence,live >/dev/null
 contract start --repo "$REPO3" --session "$S3" --command autorun --plugin-root "$GOV_PLUGIN" --args 'a2' --source user >/dev/null
 if contract finish --repo "$REPO3" --session "$S3" --command autorun --status complete \
      --evidence-json "$(printf '{"schema_version":1,"refs":{"drain":"complete","drain_session":"%s"}}' "$S3")" 2>/dev/null; then
   gov_fail "(7e-sabotage) an autorun complete with a FORGED caller drain claim but a FOREIGN persisted verdict was ACCEPTED"
 fi
-python3 "$DV" --cwd "$REPO3" write --verdict complete --exit 0 --session "$S3" >/dev/null
+python3 "$DV" --cwd "$REPO3" write --verdict complete --exit 0 --session "$S3" --gates coherence,live >/dev/null
 contract finish --repo "$REPO3" --session "$S3" --command autorun --status complete \
   --evidence-json '{"schema_version":1,"refs":{}}' >/dev/null \
   || gov_fail "(7e-sabotage) could not honestly close the autorun record"
-echo "  ok (7e) autorun complete is cleared only by THIS session's durable drain: complete verdict (forged/foreign refused)"
+echo "  ok (7e) autorun complete is cleared only by THIS session's durable, GATED drain: complete verdict (forged/foreign/ungated refused)"
 
 # (7g-req, F5) Build stamps its REQUESTED issue set at start; complete requires ONE verified merged-PR
 # receipt PER requested issue, with the PR↔issue linkage proven from the PR's OWN closing references.

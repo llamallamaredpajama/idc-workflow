@@ -68,7 +68,7 @@ def _validate(plugin_root, path):
     checker = os.path.join(plugin_root, "scripts", "idc_review_verdict_check.py")
     try:
         r = subprocess.run([sys.executable, checker, path], capture_output=True, text=True, timeout=30)
-        return (r.returncode == 0, (r.stdout + r.stderr).strip())
+        return (r.returncode == 0, H.scrub((r.stdout + r.stderr).strip()))
     except (OSError, subprocess.SubprocessError) as e:
         return (False, f"validator could not run: {e}")
 
@@ -118,13 +118,17 @@ def _gate(payload, plugin_root):
         H.allow()
 
     detail = detail or "no verdict file was produced this review run"
+    # `${CLAUDE_PLUGIN_ROOT}` resolves only in command/agent/skill MARKDOWN; from Python it is an unset
+    # shell variable, so the blocked agent is told to run `python3 /scripts/idc_review_verdict_check.py`
+    # and gets "No such file". The token stays in the literal so `lint-references.sh` rule B keeps
+    # proving it names a real helper, and is resolved against the root this gate already holds.
     reason = (
         "IDC verdict gate: a review agent may not stop without a validated verdict JSON for this "
         f"review under docs/workflow/code-reviews/. Problem: {detail}. Write the structured JSON "
         "verdict, then validate it with "
         "`python3 ${CLAUDE_PLUGIN_ROOT}/scripts/idc_review_verdict_check.py <verdict.json>` "
         "(exit 0) before you stop."
-    )
+    ).replace("${CLAUDE_PLUGIN_ROOT}", plugin_root or "${CLAUDE_PLUGIN_ROOT}")
     H.bounded_block(key, reason)
 
 

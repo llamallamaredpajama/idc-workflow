@@ -58,17 +58,47 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)                       # scripts/ — for idc_plugin_freshness
 sys.path.insert(0, os.path.join(_HERE, "hooks"))  # scripts/hooks/ — for idc_ledger
 import idc_plugin_freshness as freshness  # noqa: E402
+import idc_stdio  # noqa: E402
 import idc_ledger  # noqa: E402
 
-# The eleven governed `/idc:*` entry points. Kept in lockstep with commands/*.md and the
+# THE CREDENTIAL SCRUB DOOR — see `idc_credential_shapes.scrub`. Every read of a CHILD PROCESS's
+# stderr in this module passes through it AT THE READ, and `tests/smoke/phase11-honesty-repro.sh` R28
+# is the census that keeps that true across every module in scripts/.
+#
+# THE IMPORT IS TOLERANT BECAUSE SEVERAL MODULES HERE RUN AS LONE RELOCATED COPIES. The smoke and
+# governance suites copy a single script to a temp directory and execute it there to prove a deleted
+# guard was the one doing the work (`phase1-pipe-safety` F, `governance/external-intake-completeness`,
+# `phase4-completion-honesty` F) — a hard sibling import makes those copies die on ImportError. The
+# fallback FAILS CLOSED: with no table to scrub with, a child's stderr is WITHHELD, never passed
+# through. This block is byte-identical everywhere it appears and R28 asserts that, so no copy of it
+# can drift into a pass-through.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import idc_credential_shapes as CS  # noqa: E402
+except ImportError:                                      # a lone relocated copy — fail closed
+    class CS:                                            # noqa: N801 — stand-in for the shared table
+        scrub = staticmethod(
+            lambda text: text and "[child output withheld — the credential table is not importable]")
+
+# The thirteen governed `/idc:*` entry points. Kept in lockstep with commands/*.md and the
 # UserPromptExpansion matcher in hooks/hooks.json.
 COMMANDS = {
-    "autorun", "build", "doctor", "init", "intake", "janitor",
-    "plan", "recirculate", "think", "uninstall", "update",
+    "autorun", "build", "doctor", "init", "intake", "janitor", "pause",
+    "plan", "recirculate", "resume", "think", "uninstall", "update",
 }
-# The four honest ways a command lifecycle can END (the GLOBAL set). Task 6 narrows the legal subset
+# The honest ways a command lifecycle can END (the GLOBAL set). Task 6 narrows the legal subset
 # PER COMMAND (LEGAL_STATUSES) and attaches command-specific evidence to each.
-TERMINAL_STATUSES = {"complete", "waiting_gate", "no_action", "blocked_external"}
+#
+# `paused` (the pause/resume work) is the fifth, and it exists because none of the other four could
+# tell the truth about a DELIBERATE stop. A long autorun/build run that the operator pauses is not
+# `complete` (the pipe is not drained), not `waiting_gate` (nothing is waiting on a human decision —
+# the human already made one), not `no_action` (there is plenty of action left), and not
+# `blocked_external` (nothing failed). Before this status the only way to close such a run was to
+# claim one of those, i.e. to lie; the Stop closeout gate would otherwise refuse the walk-away
+# forever. Its evidence is the strictest in the table: a CONFIRMED durable pause record PLUS a fresh
+# read-only re-derivation that nothing is half-done — see `_claim_paused`.
+PAUSED = "paused"
+TERMINAL_STATUSES = {"complete", "waiting_gate", "no_action", "blocked_external", PAUSED}
 
 # Per-command legal terminal statuses (Task 6 matrix) are DERIVED from the claim table (`LEGAL_STATUSES`,
 # defined just after `_CLAIM_TABLE` below): a command×status is legal IFF the table enumerates a
@@ -136,6 +166,20 @@ _JANITOR_PROVENANCE = "idc_git_janitor.py"
 # The receipt checker is safely RE-RUNNABLE read-only (a fingerprint verify), so an init/update/uninstall
 # blocker citing it is RE-DERIVED by re-running it — grounded only when the re-run actually FAILS.
 _RECEIPT_HELPER = "idc_receipt_check.py"
+# The pause quiescence reader is safely RE-RUNNABLE read-only (it scans, it never mutates), so a
+# pause/resume blocker citing it is RE-DERIVED by re-running it — grounded only when the re-run
+# actually fails, with the cited exit MATCHED against the re-run's own exit.
+_PAUSE_HELPER = "idc_pause_check.py"
+# The pause LIFECYCLE helper (the record writer/clearer), distinct from the quiescence READER above.
+# A resume blocker comes from this one — "the pause record could not be removed" — and is grounded by
+# re-reading the record, not by re-running the quiescence check, which is a different question.
+_PAUSE_STATE_HELPER = "idc_pause_state.py"
+# WHICH pause-state operation each command performs, so its blocker is re-derived against the right
+# one. `/idc:pause` drives the WRITE (request/confirm); `/idc:resume` and `/idc:autorun`'s preflight
+# drive the same CLEAR — which is why autorun carries this helper too: `commands/autorun.md` tells a
+# run whose preflight resume exits 2 to close on exactly this blocker, and a table that did not list
+# it made that instruction unfollowable.
+_PAUSE_STATE_OP_FOR = {"pause": "write", "resume": "clear", "autorun": "clear"}
 _INTAKE_HELPERS = {"idc_intake_manifest.py", "idc_pr_finish.py"}
 # The janitor scanner's DOCUMENTED blocked exit (ground truth could not be established). Exit 1 is a
 # COMPLETED scan with findings (a `complete`, not blocked); only exit 2 grounds `blocked_external`
@@ -153,13 +197,153 @@ _JANITOR_BLOCKED_EXIT = 2
 _BLOCKER_HELPERS = {
     "intake":      _INTAKE_HELPERS,
     "build":       {_DRAIN_HELPER},
-    "autorun":     {_DRAIN_HELPER},
+    # The drain is autorun's own blocker; the pause-state helper is the PREFLIGHT's. `commands/autorun.md`
+    # ("`resume: error …` (exit 2) — ABORT THE DRAIN … close this command as `blocked_external` citing
+    # `idc_pause_state.py` and its exit") prescribes a close this table used to reject, so on the exact
+    # failure path that instruction was written for, /idc:autorun could not close at all and its
+    # lifecycle record stayed open. Grounded by the same durable receipt as pause and resume.
+    "autorun":     {_DRAIN_HELPER, _PAUSE_STATE_HELPER},
     "janitor":     {_JANITOR_HELPER},
     "doctor":      {_JANITOR_HELPER},
     "init":        {_RECEIPT_HELPER},
     "update":      {_RECEIPT_HELPER},
     "uninstall":   {_RECEIPT_HELPER},
+    "pause":       {_PAUSE_HELPER, _PAUSE_STATE_HELPER},
+    # `/idc:resume`'s two ways of being genuinely blocked are DIFFERENT helpers, and listing only the
+    # quiescence reader left the commoner one with no legal terminal outcome at all: when the pause
+    # RECORD cannot be removed, `commands/resume.md` step 1 rightly says stop, but `complete` needs
+    # the record gone and no blocker could cite the helper that actually failed. Each is re-derived on
+    # its own terms in `_check_blocker` — the helper's own durable failure receipt for the state
+    # helper, a failing read-only re-run for the quiescence reader — so widening the list adds no way
+    # to invent a blocker. (The first cut grounded the state helper on the RECORD'S STATE instead, and
+    # that DID add one: the state a failed attempt leaves is the same state an ordinary run leaves.)
+    "resume":      {_PAUSE_HELPER, _PAUSE_STATE_HELPER},
 }
+
+
+# ── BLOCKING CAUSES THAT ARE NOT A HELPER'S FAILURE ──────────────────────────────────────────────
+# Some MANDATED stops are repo CONDITIONS, and no helper citation can honestly ground one: a dirty
+# working tree is not any helper's exit code. `commands/uninstall.md` Phase 0 makes it a hard stop
+# ("Any remaining output → STOP"), and by then the entry gate has already opened the lifecycle
+# record — so the playbook mandated a stop whose prescribed close the allowlist refused BY NAME, and
+# the record was stranded open with nothing recording why. That is the deadlock this release exists
+# to delete, arriving through the closeout itself.
+#
+# THE GROUNDING IS THE ONE THIS FILE ALREADY USES for the receipt checker and the quiescence reader:
+# RE-DERIVE READ-ONLY, and accept the blocker only when the condition STILL holds right now. It needs
+# no durable artifact — which matters, because the class of failure being claimed is often that
+# nothing could be written — and it is impossible to satisfy in a healthy repo, so an invented
+# blocker is refused exactly as an invented helper failure is.
+#
+# THE PER-COMMAND NARROWING STAYS. Without it any command could touch a file and manufacture a
+# blocked stop. A command may cite only a condition its own shipped playbook mandates a stop for, and
+# `tests/smoke/phase11-honesty-repro.sh` checks that correspondence for EVERY command, not for the
+# ones that happened to be reported — which is how the same drift reached a fourth command.
+def _dirty_tree_still_holds(repo: str):
+    """(holds, detail) — is the working tree still dirty, by the rule `commands/uninstall.md` prints?
+
+    The archive exemption is the playbook's, verbatim: a previous run's untracked
+    `idc-archive-*.tar.gz` does not count, so a re-run cannot self-block on its own backup. A git that
+    cannot answer leaves the claim UNPROVEN (rule B: an unreadable truth is a refusal, never a pass)."""
+    if not _ne_str(repo) or not os.path.isdir(repo):
+        return False, "the repo path is missing or unreadable, so the tree state cannot be re-derived"
+    try:
+        proc = subprocess.run(["git", "-C", repo, "status", "--porcelain"],
+                              capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, f"git status could not be run to re-derive the tree state ({e})"
+    if proc.returncode != 0:
+        return False, "git status exited nonzero, so the tree state cannot be re-derived"
+    remaining = [ln for ln in (proc.stdout or "").splitlines()
+                 if ln.strip() and not _ARCHIVE_EXEMPT.match(ln)]
+    if not remaining:
+        return False, "the working tree is CLEAN right now — there is nothing blocking this command"
+    return True, f"{len(remaining)} path(s) still differ from HEAD"
+
+
+_ARCHIVE_EXEMPT = re.compile(r"^\?\? idc-archive-.*\.tar\.gz$")
+_REPO_CONDITIONS = {"dirty_tree": _dirty_tree_still_holds}
+
+
+def entry_conditions(cwd: str) -> dict:
+    """Which blocking conditions ALREADY HELD when this invocation opened — `{name: bool}`, over the
+    WHOLE condition table rather than the conditions somebody remembered to snapshot.
+
+    THE FACT RE-DERIVATION CANNOT SUPPLY. Re-deriving a condition read-only at closeout proves it
+    holds NOW, which is what refuses an invented blocker. It says nothing about whether the command
+    FOUND that condition or MADE it: `/idc:uninstall` can start in a clean repo, dirty a tracked file
+    as part of its own work, and the finish-time re-derivation then sees its own changes and accepts
+    `blocked_external`. Per-command narrowing does not help — the command really is allowed to cite
+    this condition; what it is not allowed to do is manufacture it.
+
+    A blocked stop is a claim about an ATTEMPT, so it needs a fact about the attempt, and that fact
+    is not recoverable afterwards. It is captured HERE, before the command has done anything, and
+    stamped on the lifecycle record the entry gate opens. An unestablished condition records False:
+    a command that could not be shown to be blocked at entry cannot cite that block at finish."""
+    snapshot = {}
+    for name, still_holds in _REPO_CONDITIONS.items():
+        try:
+            holds, _detail = still_holds(cwd)
+        except Exception:  # noqa: BLE001 — an unestablished entry condition is never a citable one
+            holds = False
+        snapshot[name] = bool(holds)
+    return snapshot
+
+
+def _entry_conditions_at_start(repo: str, command: str, session: str):
+    """The `entry_conditions` snapshot on THIS session's ACTIVE record for `command`, or None when
+    there is no such record or it carries no snapshot. Read tolerantly — an unreadable snapshot is
+    "not proven at entry", which fails the claim CLOSED."""
+    try:
+        for rec in idc_ledger.active_commands(repo, session):
+            if rec.get("command") == command and isinstance(rec.get("entry_conditions"), dict):
+                return rec["entry_conditions"]
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+# Which commands may cite which condition — taken from the Phase-0 stops their playbooks MANDATE.
+_CONDITIONS_FOR_COMMAND = {"uninstall": {"dirty_tree"}}
+
+
+def _check_blocking_condition(command: str, condition: str, blocker: dict,
+                              repo: str, session: str) -> CloseoutResult:
+    """`blocked_external` grounded by a REPO CONDITION re-derived read-only — see the block above."""
+    if condition not in _REPO_CONDITIONS:
+        return _fail("blocked-external-unknown-condition",
+                     f"refs.blocker.condition {condition!r} is not a known blocking condition "
+                     f"(known: {sorted(_REPO_CONDITIONS)})")
+    if condition not in _CONDITIONS_FOR_COMMAND.get(command, set()):
+        return _fail("blocked-external-condition-not-for-command",
+                     f"{condition!r} is not a blocking condition /idc:{command} may cite — only a "
+                     "condition this command's own playbook mandates a stop for can close it "
+                     f"(citable: {sorted(_CONDITIONS_FOR_COMMAND.get(command, set()))})")
+    if not _ne_str(blocker.get("diagnostic")):
+        return _fail("blocked-external-no-diagnostic", "refs.blocker.diagnostic must be a concise reason")
+    # BOTH FACTS, and neither is sufficient alone. The re-derivation refuses an INVENTED blocker; the
+    # entry snapshot refuses a MANUFACTURED one — a command that started clean and dirtied the tree
+    # itself. Without the snapshot, "the condition holds now" is equally consistent with the command
+    # having FOUND it and with the command having CAUSED it. Re-derivation runs first because it
+    # answers the more basic question, and its refusal is the one an operator in a healthy repo needs.
+    holds, detail = _REPO_CONDITIONS[condition](repo)
+    if not holds:
+        return _fail("blocked-external-condition-not-blocked",
+                     f"blocked_external citing the condition {condition!r} is RE-DERIVED read-only at "
+                     f"closeout and it does not hold: {detail}")
+    at_entry = _entry_conditions_at_start(repo, command, session)
+    if at_entry is None:
+        return _fail("blocked-external-condition-no-entry-snapshot",
+                     f"blocked_external citing the condition {condition!r} requires THIS session's "
+                     f"ACTIVE /idc:{command} record carrying the entry-condition snapshot the entry "
+                     "gate stamps — none found (no record, a foreign session's, or a record opened "
+                     "before the snapshot existed). Without it there is nothing distinguishing a "
+                     "condition the command found from one it created")
+    if not at_entry.get(condition):
+        return _fail("blocked-external-condition-not-at-entry",
+                     f"the condition {condition!r} did NOT hold when this /idc:{command} run opened "
+                     "its record, so whatever makes it hold now arrived DURING the run — a command "
+                     "cannot manufacture the condition it then closes as blocked by. Undo what this "
+                     "run changed and close honestly, or cite the cause that is actually external")
+    return CloseoutResult(True, "ok", "closeout valid", {"blocked_condition": condition})
 
 
 def _check_blocker(command: str, refs: dict, repo: str, session: str) -> CloseoutResult:
@@ -173,6 +357,11 @@ def _check_blocker(command: str, refs: dict, repo: str, session: str) -> Closeou
     if not isinstance(blocker, dict):
         return _fail("blocked-external-no-blocker",
                      "blocked_external requires refs.blocker = {helper, exit, diagnostic}")
+    # A CONDITION-grounded blocker takes the branch above: the cause is a repo state, not a helper's
+    # exit, so there is no helper to name and no exit to match. A blocker carrying NEITHER a condition
+    # nor a helper still falls through to the helper refusals below, unchanged.
+    if _ne_str(blocker.get("condition")):
+        return _check_blocking_condition(command, str(blocker["condition"]), blocker, repo, session)
     if not _ne_str(blocker.get("helper")):
         return _fail("blocked-external-no-helper", "refs.blocker.helper must name the failing helper")
     if not _known_helper(blocker.get("helper")):
@@ -264,6 +453,95 @@ def _check_blocker(command: str, refs: dict, repo: str, session: str) -> Closeou
                          "blocked_external citing the receipt checker requires a re-run to actually FAIL "
                          "(an invalid receipt or a modified/missing stamped file); the read-only re-run "
                          "passed — there is no deterministic failure to ground a blocked stop")
+    elif base == _PAUSE_STATE_HELPER:
+        # THE DEADLOCK THIS RESOLVES. `/idc:resume` clears the pause record; when the REMOVAL fails
+        # (an unwritable path), `commands/resume.md` step 1 correctly says STOP — resuming over a
+        # surviving record is the worst case, because the run starts working again while the Stop gate
+        # still reads that record and allows an undrained walk-away. But `complete` requires the record
+        # to be GONE, and the only other terminal status had no grounding path for this helper, so the
+        # honest outcome was unreachable: three Stop blocks, then the anti-nag bound loud-fail-allows,
+        # and the record is left stranded with nothing recording why. `/idc:pause` has the mirror
+        # deadlock when the record (or its confirmation witness) cannot be WRITTEN.
+        #
+        # WHY THE RECORD'S STATE CANNOT GROUND THIS BY ITSELF, which is what the first cut used. A
+        # pause record is present before every ordinary resume and absent before every ordinary pause,
+        # so "the record is still there" is equally consistent with an attempted-and-failed clear and
+        # with a session that never ran the helper — and `commands/pause.md` step 1 writes the record
+        # before anything can fail, so the pause side was satisfied for the whole life of every
+        # invocation. That certifies "I was blocked" for a session that simply walked away from a
+        # pause it could have taken honestly. The failure must therefore be re-derived from something
+        # THE FAILED ATTEMPT PRODUCED — the same durable-receipt grounding the drain, the janitor and
+        # the intake helpers already use.
+        # SO THE OPERATION IS RE-DERIVED, read-only, exactly as the receipt checker and the quiescence
+        # reader above are: the blocker is grounded ONLY when the operation THIS command performs would
+        # STILL fail right now. A durable receipt cannot do this job here, and that is worth saying: the
+        # failure being claimed is that the record could not be written or removed, which is almost
+        # always an unwritable directory — the same directory a receipt would have to be written to.
+        operation = _PAUSE_STATE_OP_FOR.get(command)
+        rec = _pause_record(repo)
+        if operation == "clear":
+            # `/idc:resume`, and `/idc:autorun`'s preflight, which runs the identical clear.
+            if rec is None:
+                return _fail("blocked-external-pause-state-not-failing",
+                             "blocked_external citing a failed pause-record CLEAR requires the record "
+                             "to still be present (that is what 'the record could not be cleared' "
+                             "means); no record remains, so the clear succeeded — close as complete")
+            if not _pause_state_would_fail(repo, operation):
+                return _fail("blocked-external-pause-state-not-failing",
+                             "blocked_external citing a failed pause-record CLEAR requires the removal "
+                             "to actually be impossible; the record's directory is writable, so the "
+                             "clear can succeed — run it (`idc_pause_state.py resume`) and close as "
+                             "complete instead of reporting a blocker nothing is causing")
+        else:
+            # `/idc:pause` — the mirror case: the pause could not be RECORDED.
+            if isinstance(rec, dict) and rec.get("state") == PAUSED:
+                return _fail("blocked-external-pause-state-not-failing",
+                             "blocked_external citing a failed pause-record WRITE requires the pause to "
+                             "be unrecorded; this repo carries a CONFIRMED pause, so the write "
+                             "succeeded — close as complete instead")
+            # …AND THE ATTEMPT MUST HAVE HAPPENED. Permissions alone are a fact about the REPO, not
+            # about this run: with the git directory unwritable, any /idc:pause could skip
+            # `idc_pause_state.py confirm` entirely and submit a typed exit + diagnostic, closing an
+            # UNATTEMPTED pause as blocked. `commands/pause.md` step 1 runs `request` before anything
+            # can fail, and `confirm` leaves the record at `pause-requested` when it cannot finish —
+            # so a run that genuinely tried leaves exactly that record behind, owned by this session.
+            # It is the one artifact the attempt produces in the very state being claimed, which is
+            # why the grounding is here rather than in a receipt that could not be written either.
+            if not isinstance(rec, dict) or rec.get("state") != _pause_state_const(
+                    "REQUESTED", "pause-requested"):
+                return _fail("blocked-external-pause-not-attempted",
+                             "blocked_external citing a failed pause-record WRITE requires THIS "
+                             "repo to carry the `pause-requested` record the attempt leaves behind "
+                             "(`idc_pause_state.py request`, then a `confirm` that could not finish). "
+                             "There is none, so nothing shows this run tried to pause at all — an "
+                             "unattempted pause is not a denied one")
+            if _ne_str(rec.get("session_id")) and str(rec.get("session_id")) != str(session):
+                return _fail("blocked-external-pause-not-attempted",
+                             f"the `pause-requested` record in this repo was left by session "
+                             f"{rec.get('session_id')!r}, not by {session!r} — another session's "
+                             "abandoned attempt cannot ground this run's blocked stop")
+            if not _pause_state_would_fail(repo, operation):
+                return _fail("blocked-external-pause-state-not-failing",
+                             "blocked_external citing a failed pause-record WRITE requires recording to "
+                             "actually be impossible; the repo root and the git directory are both "
+                             "writable, so the pause can be recorded — take it, and close as complete. "
+                             "A pause you could have taken honestly is not a pause you were denied")
+    elif base == _PAUSE_HELPER:
+        # RE-RUN the pause quiescence reader READ-ONLY. A pause/resume blocker is grounded ONLY when the
+        # re-run actually FAILS, and the cited exit must MATCH the re-run's own exit — so "I could not
+        # pause" is proven the same way at closeout as it was at the attempt. A clean re-run refuses the
+        # blocker outright: if nothing is half-done, the honest close is the pause itself, not a blocker.
+        code, _verdict, _findings = _pause_check_result(repo)
+        if code == 0:
+            return _fail("blocked-external-pause-not-failing",
+                         "blocked_external citing the pause quiescence check requires a re-run to "
+                         "actually FAIL; the read-only re-run passed (nothing is half-done) — close the "
+                         "pause honestly instead of reporting a blocker")
+        if code != blocker.get("exit"):
+            return _fail("blocked-external-pause-exit-mismatch",
+                         f"blocked_external cites exit {blocker.get('exit')} but a read-only re-run of "
+                         f"the pause quiescence check exits {code} — the cited exit must MATCH what the "
+                         "helper actually does now")
     else:
         # A helper on no re-derivation path (no durable receipt, not safely re-runnable) cannot ground a
         # blocked stop — a caller exit/diagnostic is never accepted as ground truth (wave-4 finding 1).
@@ -337,6 +615,230 @@ def _oracle_action(repo: str):
     if action.verdict == "invalid" or action.reason_code == "rate-limited":
         return None
     return action
+
+
+def _pause_record(repo: str):
+    """THIS repo's durable pause record (`.idc-pause-state.json`), or None. Read tolerantly: a missing,
+    corrupt, or shape-invalid record reads as "no pause is proven", which is the fail-closed reading
+    for every claim below."""
+    if not _ne_str(repo):
+        return None
+    try:
+        import idc_pause_state as PAUSE  # noqa: E402 — lazy
+        return PAUSE.read_record(repo)
+    except Exception:  # noqa: BLE001 — an unreadable record is never a proven pause
+        return None
+
+
+def _dir_writable(path: str) -> bool:
+    """Whether entries can be created/removed in `path`, walking up to the first directory that
+    exists — the target of a write may not have been created yet."""
+    d = os.path.abspath(path or ".")
+    while not os.path.isdir(d):
+        parent = os.path.dirname(d)
+        if parent == d:
+            return False
+        d = parent
+    return os.access(d, os.W_OK | os.X_OK)
+
+
+def _pause_state_const(name: str, fallback: str) -> str:
+    """A state string read from `idc_pause_state` itself, never re-typed here. The pause writer owns
+    these values; a copy in the reader is how a writer and a reader come to disagree about the same
+    record, which is the whole of F28 and F51."""
+    try:
+        import idc_pause_state as PAUSE  # noqa: E402 — lazy
+        return getattr(PAUSE, name, fallback)
+    except Exception:  # noqa: BLE001 — the fallback is this file's last-resort literal
+        return fallback
+
+
+def _pause_state_would_fail(repo: str, operation: str) -> bool:
+    """True only when the pause-state `operation` can be POSITIVELY established as still impossible.
+
+    The read-only re-derivation behind a pause-state blocker, in the same family as re-running the
+    receipt checker or the quiescence reader: a blocked claim is grounded only when the thing it
+    claims was blocked actually is. Anything we cannot establish returns False, which REFUSES the
+    blocker — an unprovable blocker is never a proven one.
+
+      * `clear`  — removing the record needs write permission on the directory holding it, AND, when
+                   this checkout carries a confirmation witness, the ability to delete THAT too: a
+                   clear that leaves the witness behind re-arms the replay it exists to prevent, so
+                   `idc_pause_state.clear` raises rather than reporting success.
+      * `write`  — recording a pause needs the record's directory, AND a git directory the
+                   confirmation mark can be written to (a pause whose mark cannot be recorded is
+                   refused by `confirm`, so it is a genuine blocker even when the repo root is fine).
+
+    WHY THE WITNESS ARM IS NOT A DETAIL. Without it the clear blocker was satisfiable ONLY when the
+    repo root was unwritable — and the accepted closeout is then persisted by `command_finish` into
+    that same root, where it fails. The one state that granted the blocker was the state that made
+    recording it impossible, so the legal close this branch exists to provide was unreachable and the
+    record stayed open anyway. A witness that cannot be deleted while the root is fine is a real
+    blocked clear whose closeout CAN be written down."""
+    try:
+        import idc_pause_state as PAUSE  # noqa: E402 — lazy
+        if not _dir_writable(os.path.dirname(os.path.abspath(PAUSE.pause_path(repo)))):
+            return True
+        witness = PAUSE.witness_path(repo)
+        if operation != "write":
+            # A witness that exists and cannot be removed makes the clear fail — see clear/_finish_clear.
+            return bool(witness) and os.path.exists(witness) and not _dir_writable(
+                os.path.dirname(witness))
+        return witness is None or not _dir_writable(os.path.dirname(witness))
+    except Exception:  # noqa: BLE001 — an unestablished blocker is refused, never granted
+        return False
+
+
+def _pause_corroborated(repo: str, rec: object) -> bool:
+    """True iff `rec` is the exact record a REAL `idc_pause_state.confirm` wrote in THIS checkout.
+
+    The same provenance the Stop gate's `_is_paused` demands, asked here for the same reason: a pause
+    record is made entirely of caller-typeable values, so reading its shape can never establish that a
+    pause was taken. `confirm` records a digest of the record it wrote in the git directory — which git
+    never carries — as a side-effect of doing the work. Read tolerantly: anything unreadable is "not
+    corroborated", which fails the claim CLOSED."""
+    try:
+        import idc_pause_state as PAUSE  # noqa: E402 — lazy
+        witness = PAUSE.read_witness(repo)
+        return bool(witness) and witness == PAUSE.record_digest(rec)
+    except Exception:  # noqa: BLE001 — an unprovable pause is never a proven one
+        return False
+
+
+def _pause_check_result(repo: str):
+    """A fresh READ-ONLY re-derivation of "is anything half-done?" → `(exit, verdict, findings)`.
+
+    This is the load-bearing re-derivation behind every pause claim: the durable record says a pause
+    was taken, and THIS says whether that is still true of the repo right now. A caller can supply no
+    parameter that skips it. Cached per invocation (the same trust boundary as every other cached
+    read here — one snapshot per source per process), because closing several open pipeline records as
+    `paused` in one pass would otherwise re-run a whole coherence scan per record. An import/crash is
+    reported as exit 2 (indeterminate), never a pass."""
+    key = _cache_key("pause-check", repo)
+    if key in _READ_CACHE:
+        return _READ_CACHE[key]
+    try:
+        import idc_pause_check as PAUSE_CHECK  # noqa: E402 — lazy
+        result = PAUSE_CHECK.check(repo)
+    except Exception as exc:  # noqa: BLE001 — an unrunnable check is INDETERMINATE, never clean
+        result = (2, "error", [{"kind": "error", "ref": f"the quiescence check could not run ({exc})",
+                                "cure": "repair the helper, then re-run /idc:pause"}])
+    _READ_CACHE[key] = result
+    return result
+
+
+def _claim_paused(refs: dict, repo: str, session: str) -> CloseoutResult:
+    """The `paused` terminal status: this run was DELIBERATELY stopped, and stopped CLEANLY.
+
+    Two independent facts, both re-derived, neither supplied by the caller:
+      1. a CONFIRMED durable pause record exists for this repo (a bare `pause-requested` is explicitly
+         NOT enough — that state means the pause was asked for and never achieved); and
+      2. a fresh read-only re-derivation says NOTHING is half-done, right now.
+    (2) is what stops the obvious forgery: hand-writing a `paused` record while an item is mid-finish
+    buys nothing, because the closeout re-checks the repo rather than reading the record's own stored
+    proof. It also stops a real pause from being re-used later as a free pass — the record alone can
+    never close a command once the repo has moved on."""
+    rec = _pause_record(repo)
+    if rec is None:
+        return _fail("paused-no-record",
+                     "a `paused` closeout requires this repo's durable pause record "
+                     "(.idc-pause-state.json) — none found (absent, unreadable, or invalid). Run "
+                     "/idc:pause, which records it only after proving nothing is half-done.")
+    if rec.get("state") != PAUSED:
+        return _fail("paused-not-confirmed",
+                     f"the pause record reads state {rec.get('state')!r}, not {PAUSED!r} — a pause that "
+                     "was REQUESTED but never confirmed is not a clean stop, and must not close a "
+                     "command as paused (resolve what is in flight, then re-run /idc:pause)")
+    code, verdict, findings = _pause_check_result(repo)
+    if code != 0:
+        detail = "; ".join(f"{f['kind']}:{f['ref']}" for f in findings) or verdict
+        return _fail("paused-not-quiescent",
+                     f"a `paused` closeout requires a fresh re-derivation that nothing is half-done; the "
+                     f"read-only re-run reports {verdict!r} (exit {code}): {detail}. A pause recorded "
+                     "over half-done work is exactly the corruption this status exists to prevent.")
+    # THE PROVENANCE CHECK, LAST — the same ordering `idc_live_check.audit_surface` uses for its run
+    # witness, and for the same reason. Every rule above interrogates a fact a reader can act on (the
+    # record is missing, unconfirmed, or the repo is not quiescent); this one asks the question the
+    # record cannot answer about itself. Running it first would mask all of those behind a provenance
+    # complaint, so a repo with real half-done work would be told about the wrong problem.
+    if not _pause_corroborated(repo, rec):
+        return _fail("paused-not-corroborated",
+                     "the pause record is not corroborated by a confirmation recorded in this "
+                     "checkout's git directory — every field in that record is a value a caller can "
+                     "type, so the record alone cannot show a pause was ever taken here. Run "
+                     "/idc:pause, which records the confirmation as a side-effect of doing the work.")
+    return CloseoutResult(True, "ok", "deliberate pause: confirmed record + fresh quiescence proof", {})
+
+
+def _claim_pause_recorded(refs: dict, repo: str, session: str) -> CloseoutResult:
+    """`/idc:pause complete` — the pause command's own closeout. It proves the SAME two facts as
+    `_claim_paused`, which is exactly right: the command completed iff the repo is now provably,
+    durably paused. Nothing weaker would mean anything."""
+    return _claim_paused(refs, repo, session)
+
+
+def _claim_resume_cleared(refs: dict, repo: str, session: str) -> CloseoutResult:
+    """`/idc:resume complete` (1/2) — the pause record is GONE, re-read from disk. This is the whole
+    observable effect of resuming: the repo no longer claims to be paused, so the next drain (and the
+    Stop fixpoint gate) treat it as a live run again. Resuming when nothing was paused satisfies this
+    trivially and honestly — an already-unpaused repo IS the intended end state."""
+    rec = _pause_record(repo)
+    if rec is not None:
+        return _fail("resume-still-paused",
+                     f"/idc:resume complete requires the pause record to be CLEARED, but it still reads "
+                     f"state {rec.get('state')!r} — the run is still recorded as paused, so nothing was "
+                     "resumed (clear it through `idc_pause_state.py resume`)")
+    return CloseoutResult(True, "ok", "no pause record remains — the run is live again", {})
+
+
+def _claim_resume_oracle(refs: dict, repo: str, session: str) -> CloseoutResult:
+    """`/idc:resume complete` (2/2) — a fresh, VALID next-action oracle read backs the handoff. Resume's
+    product is "here is where the run stands now", and that has to be re-derived from the live board,
+    not remembered. An unreadable/invalid board or a rate-limited read fails this closed: a resume that
+    cannot see the board has not resumed anything, and must report `blocked_external` instead."""
+    if _oracle_action(repo) is None:
+        return _fail("resume-oracle-unread",
+                     "/idc:resume complete requires a fresh, valid next-action oracle read for this repo "
+                     "(the board is what the run resumes FROM) — it could not be established")
+    return CloseoutResult(True, "ok", "resume handoff re-derived from a live oracle read", {})
+
+
+def _claim_resume_survey(refs: dict, repo: str, session: str) -> CloseoutResult:
+    """`/idc:resume complete` (3/3) — the half-done survey was actually RUN, and its verdict is durable.
+
+    THE GAP THIS CLOSES. `commands/resume.md` step 2 instructs the agent to run the same read-only
+    quiescence reader `/idc:pause` uses and relay its findings before dispatching new work — because
+    a resume can legitimately pick up a run that did NOT stop cleanly (a hard kill, or a pause that
+    was requested and never achieved), and the operator has to be told which. Nothing enforced it:
+    `complete` required only that the record was gone and the oracle was readable, both of which hold
+    whether or not the survey ever happened. An instruction with no check behind it is the same shape
+    as the hand-written evidence record this release exists to refuse.
+
+    RE-DERIVED, NOT TRUSTED. This does not look for a claim that the agent ran the check; it RUNS the
+    reader here, read-only, and records the verdict in the closeout evidence. So `complete` carries
+    proof of the survey rather than a promise of one, and the result is durable for whoever reads the
+    ledger later.
+
+    IN-FLIGHT IS NOT A FAILURE HERE, deliberately. `pause-ready: in-flight` means the previous stop
+    was not clean, which is precisely a state resume exists to pick up; failing the closeout on it
+    would leave a genuinely-resumable run with no legal way to close. Only INDETERMINATE (exit 2)
+    fails: there the survey did not establish anything, so claiming it ran would be the false green.
+    """
+    code, verdict, findings = _pause_check_result(repo)
+    if code == 2:
+        detail = (findings[0].get("ref") if findings and isinstance(findings[0], dict) else "") or "no detail"
+        return _fail("resume-survey-unprovable",
+                     f"/idc:resume complete requires the half-done survey to actually establish "
+                     f"something; it could not ({detail}). A resume that cannot tell whether the "
+                     f"previous stop left work half-done has not surveyed anything — fix the board or "
+                     f"ledger read and re-run, or close as blocked_external")
+    return CloseoutResult(
+        True, "ok",
+        f"half-done survey re-derived at closeout: {verdict}"
+        + (f" ({len(findings)} finding(s) to relay)" if code == 1 else ""),
+        {"resume_survey": {"verdict": verdict, "exit": code,
+                           "findings": [f.get("ref") for f in findings
+                                        if isinstance(f, dict) and f.get("ref")]}})
 
 
 def _check_no_action(command: str, repo: str) -> CloseoutResult:
@@ -1583,6 +2085,18 @@ def _persisted_drain_verdict(repo: str, session: str):
         return None
 
 
+def _DV_PROVES_COMPLETE(verdict) -> bool:
+    """Does this persisted verdict PROVE an honest whole-pipe fixpoint? Delegates to the sidecar's own
+    `proves_complete` so the definition of a provable completion lives in ONE place (the Stop fixpoint
+    gate asks the same question of the same artifact). Fail-CLOSED: if the sidecar cannot be imported we
+    cannot establish proof, so the `complete` claim is refused rather than waved through."""
+    try:
+        import idc_drain_verdict as DV  # noqa: E402 — lazy (scripts/hooks is already on sys.path)
+        return bool(DV.proves_complete(verdict))
+    except Exception:  # noqa: BLE001 — unprovable is the fail-closed reading for a completion claim
+        return False
+
+
 def _gate_key(ref: object) -> str:
     """Canonicalize a gate reference for comparison: an int, `708`, or `#708` all key on `708`."""
     return str(ref).lstrip("#").strip()
@@ -1611,8 +2125,8 @@ def _claim_autorun_waiting_gate(refs: dict, repo: str, session: str) -> Closeout
 
 
 def _claim_autorun_drain(refs: dict, repo: str, session: str) -> CloseoutResult:
-    # complete: THIS session's PERSISTED drain verdict must read exactly `complete` (the DURABLE
-    # artifact, never a caller-supplied drain string).
+    # complete: THIS session's PERSISTED drain verdict must PROVE `complete` (the DURABLE artifact,
+    # never a caller-supplied drain string).
     verdict = _persisted_drain_verdict(repo, session)
     if verdict is None:
         return _fail("autorun-drain",
@@ -1622,6 +2136,17 @@ def _claim_autorun_drain(refs: dict, repo: str, session: str) -> CloseoutResult:
         return _fail("autorun-drain-incomplete",
                      f"autorun complete requires the persisted drain verdict to be 'complete', "
                      f"got {verdict.get('verdict')!r}")
+    # A `complete` TOKEN IS NOT PROOF — the wave-close gates are opt-in flags, so the drain persists the
+    # same token whether it checked the board against reality or checked nothing, and a legitimate
+    # ungated caller (`idc:idc-build` Phase 0's `--width` frontier query) overwrites this file too. The
+    # record must NAME the gates that ran. This is the same door the Stop fixpoint gate uses, so the two
+    # readers of this artifact cannot disagree about what "complete" is worth.
+    if not _DV_PROVES_COMPLETE(verdict):
+        return _fail("autorun-drain-ungated",
+                     "autorun complete requires the persisted drain verdict to record the wave-close "
+                     "gates that prove it (gates: "
+                     f"{verdict.get('gates', 'unrecorded')!r}) — re-run the drain with --coherence "
+                     "--live (and --session-id for THIS session) so the completion is provable")
     return CloseoutResult(True, "ok", "autorun drained to fixpoint this session (persisted verdict)", {})
 
 
@@ -1746,7 +2271,7 @@ def _gh_auth_status_text(repo: str):
         return None
     if proc.returncode != 0:
         return None
-    return (proc.stdout or "") + (proc.stderr or "")
+    return CS.scrub((proc.stdout or "") + (proc.stderr or ""))
 
 
 def _filesystem_board_loads(repo: str) -> bool:
@@ -2454,6 +2979,39 @@ def _claim_blocker_for(command: str):
 # blocker (a durable receipt or a safe read-only re-run — see _BLOCKER_HELPERS): build/autorun (drain
 # verdict), janitor/doctor (janitor report), init/update/uninstall (receipt fingerprint re-run), and
 # Intake (its helper-owned nonce-bound failure receipt). Think/plan/recirculate have no such helper.
+# THE `paused` CLAIM. What makes a paused /idc:build honest is exactly what makes a paused
+# /idc:autorun honest — the repo carries a confirmed pause record AND a fresh re-derivation says
+# nothing is half-done. A lifecycle/diagnostic command (doctor/init/update/uninstall/janitor) never
+# gets it, on the table's existing principle that such a command may not claim a pipeline terminal it
+# does not own — and there is no long autonomous run inside one to pause.
+#
+# ENUMERATED FOR THREE STAGES, NOT SIX — and the missing three are the honest part.
+# `paused` carries a specific promise: /idc:resume will never have to reconstruct partial work. That
+# promise is worth exactly what `idc_pause_check.py` can OBSERVE, and it observes three things: board
+# coherence, items the board itself marks `In Progress`, and the two ledger taints (`mid_finish`,
+# `recirc_checkpoint`). Map that against what each stage leaves half-done:
+#
+#   build       an item in flight IS an `In Progress` card, and a finish tail that started IS a
+#               `mid_finish` taint.                                            → OBSERVABLE
+#   autorun     drains item by item through those same board transitions and that same finish tail.
+#                                                                              → OBSERVABLE
+#   recirculate stopping mid-drain leaves a `recirc_checkpoint` taint naming the ticket.
+#                                                                              → OBSERVABLE
+#   think       half-written requirements on a branch, a gate not yet opened.   → NOT OBSERVABLE
+#   intake      a manifest compiled partway through a foreign artifact.         → NOT OBSERVABLE
+#   plan        a decomposition partly minted, a branch left mid-edit.          → NOT OBSERVABLE
+#
+# For the bottom three, quiescence passes trivially — there is no card, no taint, nothing to see — so
+# `paused` would certify "stopped cleanly" from a checker that never looked at the work in question.
+# That is the same false-green this whole release exists to close, so the claim is simply not
+# enumerated for them: a mid-think/intake/plan run has no honest `paused` closeout, and the Stop gate
+# says so rather than accepting an unbacked one. (The ambitious alternative — stage-specific
+# checkpoints for think/intake/plan — is real work, not a table edit, and it is the only thing that
+# would earn those three the claim. It is deliberately NOT faked here: see the refusal message in
+# idc_pause_state.close_open_commands, which names this limit out loud instead of hiding it.)
+_PAUSABLE_STAGES = ("build", "autorun", "recirculate")
+_CLAIM_PAUSED = (Claim("deliberate-pause", _claim_paused),)
+
 _CLAIM_TABLE = {
     "intake": {
         "complete": (Claim("intake-manifest-reviewed", _claim_intake_manifest_reviewed),
@@ -2487,16 +3045,32 @@ _CLAIM_TABLE = {
         "complete": (Claim("recirc-reconciled", _claim_recirc_reconciled),
                      Claim("recirc-requested-closeouts", _claim_recirc_closeouts)),
         "waiting_gate": (Claim("recirc-gate", _claim_recirc_gate),),
+        PAUSED: _CLAIM_PAUSED,
     },
     "build": {
         "complete": (Claim("build-receipts-merged", _claim_build_receipts),),
         "no_action": (Claim("build-oracle-no-eligible", _claim_build_no_action),),
         "blocked_external": (_claim_blocker_for("build"),),
+        PAUSED: _CLAIM_PAUSED,
     },
     "autorun": {
         "complete": (Claim("autorun-drain-complete", _claim_autorun_drain),),
         "waiting_gate": (Claim("autorun-oracle-human-gate", _claim_autorun_waiting_gate),),
         "blocked_external": (_claim_blocker_for("autorun"),),
+        PAUSED: _CLAIM_PAUSED,
+    },
+    # /idc:pause and /idc:resume are the two lifecycle surfaces for a deliberate stop. Neither may
+    # claim `paused` itself (a pause command that closed as "paused" would be recording its own
+    # instruction as its own outcome), and neither claims a pipeline `waiting_gate`/`no_action`.
+    "pause": {
+        "complete": (Claim("pause-recorded", _claim_pause_recorded),),
+        "blocked_external": (_claim_blocker_for("pause"),),
+    },
+    "resume": {
+        "complete": (Claim("resume-cleared", _claim_resume_cleared),
+                     Claim("resume-oracle-handoff", _claim_resume_oracle),
+                     Claim("resume-survey", _claim_resume_survey)),
+        "blocked_external": (_claim_blocker_for("resume"),),
     },
     "janitor": {
         "complete": (Claim("janitor-report", _claim_janitor_report),),
@@ -2526,6 +3100,16 @@ _CLAIM_TABLE = {
 assert set(_CLAIM_TABLE) == COMMANDS, "claim table must enumerate exactly the governed commands"
 LEGAL_STATUSES = {cmd: frozenset(statuses) for cmd, statuses in _CLAIM_TABLE.items()}
 
+# The `paused` set is pinned to the stages whose half-done work `idc_pause_check.py` can actually
+# OBSERVE (see `_PAUSABLE_STAGES` above for the per-stage mapping). Asserted rather than merely
+# commented, because the failure mode is silent: adding `PAUSED: _CLAIM_PAUSED` to another command
+# reads like a one-line generalization and would quietly hand that stage a clean-stop certificate the
+# quiescence checker never verified. Widening this set requires giving the new stage a real checkpoint
+# the checker reads FIRST, and updating this line deliberately.
+assert {cmd for cmd, statuses in LEGAL_STATUSES.items() if PAUSED in statuses} == set(_PAUSABLE_STAGES), (
+    "the `paused` status may only be claimable by stages whose in-flight work idc_pause_check.py "
+    "observes — update _PAUSABLE_STAGES and the quiescence checker together, never the table alone")
+
 
 def _walk_claim_table(command: str, status: str, refs: dict, repo: str, session: str) -> CloseoutResult:
     """Walk the enumerated claim list for (command, status): evaluate each claim's derivation in order,
@@ -2537,11 +3121,20 @@ def _walk_claim_table(command: str, status: str, refs: dict, repo: str, session:
         return CloseoutResult(
             False, "status-not-claimable",
             f"/idc:{command} {status!r} has no evidence-derivation contract — not claimable (fail closed)", {})
+    # A claim may return FACTS it re-derived, not just a pass/fail. Those were being dropped, so a
+    # closeout that proved something at validation time left no trace of what it proved. Collecting
+    # them lets a claim make its derivation DURABLE (see `_claim_resume_survey`, whose whole point is
+    # that the half-done survey provably ran and its verdict is on the record afterwards). Additive:
+    # a claim that returns nothing contributes nothing, exactly as before.
+    derived: dict = {}
     for claim in claims:
         result = claim.derive(refs, repo, session)
         if not result.ok:
             return result
-    return CloseoutResult(True, "ok", f"{command} {status} closeout re-derived from durable state", {})
+        if isinstance(result.normalized_evidence, dict):
+            derived.update(result.normalized_evidence)
+    return CloseoutResult(True, "ok", f"{command} {status} closeout re-derived from durable state",
+                          derived)
 
 
 def args_digest(text: str) -> str:
@@ -2729,6 +3322,19 @@ def validate_closeout(command: str, status: str, evidence: object,
     result = _walk_claim_table(command, status, refs, repo or "", session or "")
     if not result.ok:
         return result
+    # Carry anything the claims RE-DERIVED into the persisted evidence, under its own key so it can
+    # never be confused with what the caller asserted. `derived` is the record's own account of what
+    # was proven at closeout; `refs` remains what the command claimed on the way in.
+    #
+    # THE CALLER'S OWN `derived` IS STRIPPED ON EVERY PATH, not only when re-derivation produced
+    # something to overwrite it with. `derived` means "this was proven here"; a claim list that
+    # produced nothing used to return the caller's evidence unchanged, so a hand-written `derived`
+    # block was persisted verbatim into the lifecycle record — the exact confusion the separate key
+    # exists to make impossible. No consumer reads it yet, which is precisely why now is the time.
+    evidence = {k: v for k, v in evidence.items() if k != "derived"}
+    if result.normalized_evidence:
+        return CloseoutResult(True, "ok", "closeout valid",
+                              {**evidence, "derived": dict(result.normalized_evidence)})
     return CloseoutResult(True, "ok", "closeout valid", evidence)
 
 
@@ -2764,7 +3370,8 @@ def register_start(cwd: str, session_id: str, command: str, plugin_version: str,
         build_requested=build_requested, plan_admitted=plan_admitted, uninstall_flags=uninstall_flags,
         nonce=_make_nonce(), build_frontier=build_frontier,
         uninstall_receipt_source=uninstall_receipt_source,
-        uninstall_receipt_sha256=uninstall_receipt_sha256)
+        uninstall_receipt_sha256=uninstall_receipt_sha256,
+        entry_conditions=entry_conditions(cwd))
 
 
 def active_records(cwd: str, session_id: str) -> list:
@@ -2895,4 +3502,7 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # `status --json` on a busy repo prints far more than a pipe buffer holds, and an operator pipes
+    # it to `head`/`less` as a matter of course — unguarded, that crashed with a traceback. See
+    # idc_stdio for why the guard needs the flush and the /dev/null redirect, not just the except.
+    raise SystemExit(idc_stdio.run_guarded(main))

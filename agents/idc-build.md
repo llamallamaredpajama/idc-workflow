@@ -245,6 +245,46 @@ and link it `blocked-by` to its dependents — before dispatching any further re
 `acceptance: ok` clean up the board state it touched and advance the acceptance-reporting wave.
 Autowave is the default behavior, not a flag.
 
+**Two more blocking gates run at the SAME retriggers, and for the same reason** — "the ready frontier
+is empty" is not the same claim as "the work is finished". Both are backend-blind, so unlike the
+acceptance check above they need no materialized tracker on github:
+
+- `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_finish_coherence.py" --repo "$PWD" <board args>` —
+  **does the board still advertise work that already shipped?** The finish tail merges the PR (which
+  auto-closes the issue via the mandated `Closes #N`) several steps *before* it flips the board, so a
+  session that dies in that window strands a shipped item at `In Progress` and nothing downstream ever
+  notices: the acceptance check audits only merged-`Done` items, and the drain counts only `Todo`. On
+  `finish-coherence: gap <#s>` repair each named item through the **existing, idempotent** door —
+  `idc_git_finish.py --close-only --pr <N> --issue <M>` — then re-run the check; it is safe to re-run.
+  Board args are `--tracker <TRACKER.md>` (filesystem) or `--backend github --owner <o> --project <n>`.
+  Never hand-edit a Status to clear this: the door journals the close, a hand edit launders it.
+- `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_live_check.py" --repo "$PWD" --run` — **does the deployed
+  product actually work?** Every gate above this line verifies code, and code can be perfect while the
+  running product is dead (an uncreated bucket, an unset env var, a hand-granted IAM role — none of
+  which appear in any reviewed diff). For each live surface the repo DECLARED in
+  `WORKFLOW-config.yaml::live_verification`, `--run` **executes that surface's own `verify:` command**
+  against the real deployment and regenerates its evidence record from the real exit code — the
+  command, the code, the commit, the time, a bounded and credential-redacted excerpt of the output.
+  Nothing is attested; it is measured. That evidence then expires by itself as soon as anything lands
+  on the paths behind it (the drain re-checks it, read-only, at every wave close).
+  `live: not-declared` (exit 0) is the answer for a repo with no deployed surface — a library or CLI is
+  never gated here, and nothing is executed. On `live: gap <name>` the wave does **not** pass green:
+  the verify command reported the product broken, so **treat it exactly like a failing test** — read
+  the captured output in the evidence record, fix it, re-run. It is build work, not an operator page.
+  - **You write the verify script.** If a declared surface has no `verify:` command yet — or the check
+    refuses the declaration for lacking one — writing it is part of *this* issue's implementation, the
+    same as writing its tests. Authenticated HTTP calls against the deployed endpoints, a browser
+    driver, a CLI probe: whatever genuinely exercises the declared `journey`, exiting non-zero on any
+    failed step. Never hand that back to the operator, and never hand-write an evidence record —
+    a typed claim does not satisfy this gate. That is ENFORCED, not merely asked: `--run` records
+    each real execution inside the repo's **git directory**, which git never carries, and the audit
+    refuses a receipt no run in this working copy backs. Hand-writing the markdown produces
+    `live: gap <name>` naming the receipt as unbacked. (It is not proof against someone editing the
+    git directory itself — nothing local could be — but typing the evidence file is not enough.)
+  - **Never print a secret from it.** The script holds real credentials; the evidence record is
+    committed. IDC redacts what it captures, but do not echo tokens, headers, signed URLs, or the
+    environment in the first place.
+
 ## Phase 5 — Phase close
 
 At phase boundary, run one delta review over the phase via the review engine. Most findings are

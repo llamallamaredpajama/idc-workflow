@@ -128,7 +128,7 @@ oracle's next command/reason**, never an improvised handoff:
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_next_action.py" --repo "$PWD" --json
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command recirculate \
-  --status <complete|waiting_gate> --evidence-json '<envelope>'
+  --status <complete|waiting_gate|paused> --evidence-json '<envelope>'
 ```
 
 - **`complete`** — every requested ticket/unit has a valid closeout **and** the deterministic
@@ -156,6 +156,13 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
 Recirculate has **no `blocked_external`** terminal: its deterministic helpers write no durable failure
 receipt and cannot be re-run read-only, so a blocked stop cannot be re-derived and is not claimable —
 fix the failing helper or wait; never self-report a blocked stop as a completed terminal.
+
+- **`paused`** — this run was stopped by a deliberate `/idc:pause`, and `idc_pause_state.py
+  close-open` is what closes it (never a hand-written `finish`). The validator re-derives the
+  confirmed pause record **and** re-runs the quiescence check, so the status cannot be claimed
+  by a run that merely stopped. Listed here because it IS a legal terminal for this command:
+  an agent reading only this playbook could not otherwise discover the outcome its own
+  lifecycle record can take.
 
 No verdict taxonomy, no change-order files — they are deleted; the PR body is the record. Do
 not write source or tests; never admit a requirements (PRD/TRD) change without the gate; never

@@ -111,12 +111,13 @@ umbrella (provider-qualified) boots every role, no per-role pinning required —
 pool and a Pi-side autorun drain remain pending (#66 L1/L4), which is why the runtime stays
 experimental.
 
-## The eleven commands — one altitude each
+## The thirteen commands — one altitude each
 
-IDC ships **11 slash entry points**:
+IDC ships **13 slash entry points**:
 
 ```text
-think | intake | plan | build | recirculate | autorun | janitor | init | doctor | update | uninstall
+think | intake | plan | build | recirculate | autorun
+pause | resume | janitor | init | doctor | update | uninstall
 ```
 
 Six of them admit or move scope, and the boundary between them is the load-bearing part — each
@@ -129,14 +130,59 @@ admits scope at exactly one altitude, and none may do another's job:
 - **Build** consumes eligible schema-checked Buildables only.
 - **Autorun** drains durable tracker/intake state only.
 
-The remaining five are operational, not scope-bearing: `janitor` reconciles, `init` scaffolds,
-`doctor` diagnoses, and `update` / `uninstall` are the lifecycle pair.
+The remaining seven are operational, not scope-bearing: `pause` / `resume` stop a long autonomous run
+on purpose and pick it back up, `janitor` reconciles, `init` scaffolds, `doctor` diagnoses, and
+`update` / `uninstall` are the lifecycle pair.
 
 Read that list as the write-authority table's twin. A foreign plan — a vendor spec, a migration
 doc, a hand-written roadmap — is **evidence, never execution authority**: Intake compiles it into
 routes, and each route still enters the pipe through Think's gate or Recirculation's admission. It
 may never mint a Buildable directly, which is why Build "infer the foreign plan" is not a step that
 exists anywhere in the rig.
+
+## Completion honesty — what "green" never proved
+
+The rig's definition of finished used to be "the build lane is empty", and that is blind in two
+directions. Both are closed by fail-closed checks at wave close, wired into the drain's existing
+non-terminal exit — the same exit the Stop fixpoint gate already refuses a stop on, so enforcement
+needed no new hook.
+
+**The dashboard can lie.** The board is a sensor, not plumbing, and sensors drift. Finishing an item
+merges its PR — which auto-closes the issue via the closing keyword — and flips the board Status a
+few steps later; a session dying in between leaves the item shipped but still reading `In Progress`.
+Nothing noticed: the acceptance check audits only merged-`Done` items and the drain counts only
+`Todo`, so the pipe declared itself complete over work it was still advertising as in flight.
+`idc_finish_coherence.py` asks the missing question, reusing the janitor's existing coherence verdict
+rather than minting a second definition of it.
+
+**A handoff is not a data-loss event.** Detecting the stale board afterwards is the net; the hole
+itself is closed by making the finish tail *stateful* across sessions. It writes the obligations
+ledger's own `mid_finish:<item>` taint immediately before the merge and clears it only after the board
+flip has been verified — the recipe that ledger documented from the start and nothing had yet used.
+`idc_finish_recover.py`, run from autorun's preflight on every pass, reads that taint **unscoped**
+(kill-recovery spans sessions, the same reason `idc_recirc_reconcile.py` reads unscoped), consults the
+board before the ledger — a stale taint on an already-`Done` item is cleared, not re-closed, so a
+second pass never double-records — and completes the rest through the existing `--close-only` door
+rather than minting a write path. Nothing it cannot discharge is dropped: those stay owed and named.
+
+**Green code is not a working product.** Every guardrail above verifies code, and the things that
+most often break a deployment are not in the reviewed diff at all — an uncreated bucket, an unset env
+var, a hand-granted role. IDC cannot know how to deploy an arbitrary product, so the project declares
+each live surface **and the shell command that drives it**, and IDC runs that command:
+`idc_live_check.py --run` executes it at wave close and writes a machine-generated receipt (command,
+exit code, commit, timestamp, bounded credential-redacted output), which the drain then audits
+read-only on the fast path. Verification is **executed, not attested** — the first cut of this gate
+asked a human to drive the app and type up what they saw, which both wakes an operator at 2am and
+accepts a claim in place of a measurement; the project owns the technology, IDC owns the execution.
+The receipt expires the moment anything lands on the paths behind it (its infrastructure included),
+on the verify script itself, or the declared command changes. A receipt is also only trusted where a
+run actually happened: every value in a committed receipt is one a reader can recompute, so the
+receipt alone could never separate a real run from a typed one, and each `--run` therefore records the
+execution inside the repo's git directory — which git never carries — with the audit refusing any
+receipt no local run backs. A run started over uncommitted surface code is refused outright, since it
+could not be attributed to the commit the receipt would name. A repo that declares no live surface is never gated and never executes
+anything — opting in is the only way to be gated. `attested: true` is the one hand-written escape
+hatch, for surfaces that genuinely cannot be automated, and it rides its own visible verdict line.
 
 ## Stale runtime — `/reload-plugins`, not `/clear`
 

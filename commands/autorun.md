@@ -43,8 +43,47 @@ fi
 ```
 The gate **never blocks a clean board** — a `drain: complete` always wins over the ledger hint, so it
 only ever catches a stop that abandons a non-empty inbox. On a clean `drain: complete` exit you may
-clear the marker (same command with `clear --kind orchestrator_drain`); it is optional hygiene, not
-required for correctness (a drained board is allowed to stop regardless).
+clear the marker with the command below; it is optional hygiene, not required for correctness (a
+drained board is allowed to stop regardless). Note `clear` takes **no `--session`** — a taint's
+identity is its `(kind, key)` pair, and clearing is deliberately NOT session-scoped so a later session
+can discharge a dead one's marker. (Written out in full because "the same command with `clear`" read
+as "keep the `--session` flag too": two independent agent runs did exactly that and hit
+`unrecognized arguments: --session`.)
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/idc_ledger.py" --cwd "$PWD" clear \
+  --kind orchestrator_drain
+```
+
+**Pick up a paused run (deterministic — run ONCE, at drain start).** A previous session may have
+stopped this repo's pipeline on purpose with `/idc:pause`. That pause is graceful by contract —
+nothing was left half-done — and it holds no work state, so resuming it is exactly: clear the record,
+then drain from the live board as usual. Doing this at the top of the drain is what makes a forgotten
+pause impossible to strand: the operator gets the run back by running `/idc:autorun`, without having
+to remember they paused it. `resume: not-paused` is the normal, silent case, and costs one local file
+stat — it reads no board and adds zero GraphQL.
+
+<!-- autorun-preflight:begin -->
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_pause_state.py" --cwd "$PWD" resume \
+  --session "$CLAUDE_CODE_SESSION_ID"
+```
+<!-- autorun-preflight:end -->
+
+Report it in the exit report when it cleared something: `resume: cleared (paused)` means this run
+continues a deliberately-paused one, and `resume: cleared (pause-requested)` means the previous
+session asked to pause and never achieved it — an ordinary interrupted run, so treat anything the
+normal preflight sweeps surface as that session's unfinished business, not as a clean handover.
+
+**`resume: error …` (exit 2) — ABORT THE DRAIN. Do not start work.** The pause record could not be
+removed, so this repo is **still paused**. Draining over it is the worst of both worlds: the run
+starts working again while the Stop fixpoint gate, reading that surviving record, still believes the
+run is cleanly stopped and will allow an undrained walk-away. Relay the printed cure (make the record
+path writable), close this command as `blocked_external` citing
+`blocker:{helper:"idc_pause_state.py", exit:2, diagnostic:"<the printed cure>"}`, and end the session.
+The helper wrote a durable failure receipt when the removal actually failed, and the validator requires
+**that receipt** — bound to this invocation — so this close is only reachable when the preflight really
+did fail, never as a way out of a drain you did not want to run. This matches `commands/resume.md` step 1, which stops on the same condition — the
+preflight is the same clear, so it cannot have a weaker rule.
 
 **Janitor preflight** — run ONCE, before the drain loop below begins (not on every re-loop pass:
 board↔git debris left by a dead or interrupted **prior** session doesn't regenerate mid-run just
@@ -99,6 +138,25 @@ only when a full pass leaves nothing actionable:
    NOT on the stop path, so the Stop gate's 0-GraphQL guarantee is unaffected. It is **fail-soft** (a
    reconciliation error never halts the drain) and **repo-gated**; its `reconcile:` verdict is advisory
    — surface a `reconcile: unknown` (an unreadable board) in the exit report, never as a clean state.
+   **Then complete any finish a dead session left in flight (handoff safety — run at the top of
+   EVERY pass).** The finish tail merges the PR — which also closes the linked issue, via the
+   mandated closing keyword — several steps before it flips the board. A session that died in that
+   window left the item **shipped, closed, and still `In Progress`**; the tail records that window as
+   a `mid_finish:<item>` obligation in the session ledger, and a LATER session is the only thing that
+   can discharge it:
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_finish_recover.py" --repo "$PWD" --session-id "$CLAUDE_CODE_SESSION_ID"
+   ```
+   It reads the ledger **across sessions** (the taint belongs to a session that is already dead),
+   asks the **board** about each item first — an item already `Done` just has its stale taint cleared,
+   never re-closed — and completes the rest through the existing idempotent
+   `idc_git_finish.py --close-only` door, which journals the close exactly once. Costs **no** board
+   read at all when there is nothing to recover (a local ledger read), is **fail-soft** (never halts
+   the drain), **repo-gated**, and safe to run repeatedly. Its verdict is advisory: relay
+   `recovered:` / `cleared:` in the exit report, and treat **`unresolved:`** as a live obligation the
+   run still owes — those taints are deliberately PRESERVED, never dropped, and the item is named
+   with the reason the door refused (most often: the finish died *before* the merge, so nothing
+   shipped and the item is simply still open).
    **Then synthesize any phantom-idle implementer (drop H — run at the top of EVERY pass, beside the
    reconcile above).** An implementer teammate can go IDLE without reporting: its item sits
    `Stage = Buildable ∧ Status = In Progress` (claimed) but is never advanced, and the drain is BLIND
@@ -152,12 +210,27 @@ only when a full pass leaves nothing actionable:
    # drained (surfaces a Done-but-inert increment as `acceptance: gap <#s>`; file a recirculation on a gap).
    # A gap/error GATES the would-be-`complete` wave close (Stage E3): gap ⇒ `drain: acceptance-gap` exit 4
    # (recirculate the inert items), a corrupt/unrunnable check ⇒ `drain: unknown` exit 2 — both NON-terminal.
-   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --tracker <TRACKER.md> --acceptance
+   # `--coherence` + `--live` are the two completion-honesty gates. Pass them on EVERY drain call, both
+   # backends: an empty build lane was never proof the work was finished.
+   #   --coherence  the board is a DASHBOARD and it can lie. The finish tail merges the PR — which
+   #                auto-closes the issue via the mandated `Closes #N` — several steps before it flips
+   #                the board, so a session dying in that window strands a SHIPPED item at `In Progress`
+   #                forever. The drain counts only `Todo`, so it never saw those items and printed a
+   #                clean terminal `complete` over them. Gap ⇒ `drain: coherence-gap` exit 4.
+   #   --live       every other gate verifies code, not the running product. The project declares each
+   #                live surface AND the `verify:` command that drives it; the drain AUDITS the receipt
+   #                (read-only, executes nothing, so the stop path stays fast) while `idc:idc-build`'s
+   #                wave close RUNS it. Gap ⇒ `drain: live-gap` exit 4, cured by
+   #                `idc_live_check.py --repo "$PWD" --run`. A repo that declares no live surface
+   #                reports `live: not-declared` — free, and nothing is ever executed.
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --tracker <TRACKER.md> --acceptance --coherence --live
    # github — pages the WHOLE board, same predicate (github wave-close acceptance runs in idc:idc-build Phase 4).
    # `--session-id` attributes the persisted drain verdict (.idc-drain-verdict.json) to THIS session so the
    # Stop fixpoint gate can read the github board conjunct locally (0 GraphQL on the stop path, v4 Phase 3
-   # Stage E2); the drain also falls back to $CLAUDE_CODE_SESSION_ID if the flag is omitted.
-   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --backend github --project <n> --owner <o> --session-id "$CLAUDE_CODE_SESSION_ID"
+   # Stage E2); the drain also falls back to $CLAUDE_CODE_SESSION_ID if the flag is omitted. The two
+   # completion-honesty gates ride here too — on github they are the ONLY path by which the Stop gate
+   # learns about them, because that gate reads this persisted verdict rather than re-scanning the board.
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --backend github --project <n> --owner <o> --coherence --live --session-id "$CLAUDE_CODE_SESSION_ID"
    ```
    Both apply the identical Buildable-eligibility predicate — the drain helper is the predicate's
    single source of truth; never re-derive it in prose or by hand. On the github backend,
@@ -186,7 +259,19 @@ only when a full pass leaves nothing actionable:
    (the board read succeeded but a build candidate's blocked-by lookup could not be verified — or, under
    `--acceptance`, the wave-close acceptance check was corrupt/unrunnable so the wave could not be proven
    clean), `drain: acceptance-gap` (exit 4, filesystem `--acceptance` — a merged-Done item is inert;
-   recirculate it, do not stop), a hard board-read failure (exit 2, no `drain:` line), and
+   recirculate it, do not stop), **`drain: coherence-gap`** (exit 4, `--coherence` — the named items
+   SHIPPED but the board never advanced; repair each through the idempotent
+   `idc_git_finish.py --close-only --pr <N> --issue <M>`, or `/idc:janitor --apply-safe` for the batch,
+   then re-check — the check is safe to re-run), **`drain: live-gap`** (exit 4, `--live` — a declared
+   live surface has no current passing verification; **run
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_live_check.py" --repo "$PWD" --run`**, which EXECUTES each
+   declared surface's own `verify:` command and regenerates its evidence record from the real result.
+   A non-zero exit is a **finding about the product, and it is yours to work**: read the captured output
+   in the evidence record, fix it (or file it as a recirculation) exactly as you would a failing test,
+   and re-run. Escalate to the operator ONLY when the pipeline genuinely cannot proceed — a surface
+   declared `attested: true`, or a failure that needs a credential or permission no agent holds — and
+   say which, never "go and check the app"), a hard
+   board-read failure (exit 2, no `drain:` line), and
    `drain: rate-limited until <reset>` (exit 3, github only, #99 §C.3). Treat the lane as possibly-unfinished and let the next `/loop`
    iteration re-check; never report the run drained on a non-zero drain exit. The **Stop fixpoint gate**
    (set up at drain start above) is the deterministic backstop for this rule on the filesystem backend:
@@ -202,7 +287,8 @@ only when a full pass leaves nothing actionable:
    iteration's `idc:idc-build` re-verifies its **end-state** via `idc_git_finish.py` (PR merged,
    branches gone, worktree gone, Status=Done) — so a finish that actually completed during the
    outage is never re-attempted.
-   Emit the exit report: recirculated, planned, admitted, built/merged, board state, the
+   Emit the exit report: recirculated, planned, admitted, built/merged, board state, **whether this
+   run resumed a deliberately-paused one** (the `resume:` line from the preflight above), the
    **final working-tree state from a post-build `git status --porcelain`** (run it at exit, never a
    start-of-run snapshot — the build lane writes files mid-run, so a stale snapshot under-counts any
    uncommitted/untracked artifact), and anything waiting on the operator.
@@ -214,13 +300,20 @@ only when a full pass leaves nothing actionable:
    python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_next_action.py" --repo "$PWD" --json
    python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
      --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command autorun \
-     --status <complete|waiting_gate|blocked_external> --evidence-json '<envelope>'
+     --status <complete|waiting_gate|blocked_external|paused> --evidence-json '<envelope>'
    ```
    - **`complete`** — **this session's** PERSISTED drain verdict (`.idc-drain-verdict.json`, written by
-     `idc_autorun_drain.py --session-id "$CLAUDE_CODE_SESSION_ID"`) reads exactly `drain: complete`. The
-     validator reads that DURABLE artifact directly (session-scoped), so **no caller-supplied `drain`
-     string clears it** — the evidence refs may be empty (`refs:{}`); just ensure the drain ran with
-     `--session-id` for THIS session.
+     `idc_autorun_drain.py --session-id "$CLAUDE_CODE_SESSION_ID"`) reads exactly `drain: complete`
+     **and records the wave-close gates that prove it**. The validator reads that DURABLE artifact
+     directly (session-scoped), so **no caller-supplied `drain` string clears it** — the evidence refs
+     may be empty (`refs:{}`). So the drain that closes this run must have been invoked with
+     `--session-id` for THIS session **AND with `--coherence --live`** (exactly as step 4 above spells
+     it out for both backends). A bare `complete` token is NOT proof of completion: the gates are
+     opt-in flags, so an ungated pass — including `idc:idc-build` Phase 0's `--width` frontier query,
+     which overwrites this same file — persists an identical `complete` having verified nothing. The
+     drain therefore records WHICH gates ran, and a `complete` that names none is refused here
+     (`autorun-drain-ungated`) and does not clear the orchestrator marker at the Stop gate either.
+     The cure is always the same: re-run the drain with the gates, then close.
    - **`waiting_gate`** — the oracle reports only human gates (an open Think PR / `[operator-action]`
      gate). Evidence refs: `gates:[<refs>]` (non-empty). The validator **re-runs the oracle** and
      refuses the claim unless it reports a human-gate wait as the live blocking state (no actionable
@@ -228,6 +321,12 @@ only when a full pass leaves nothing actionable:
      caller list alone is not proof, and a nonexistent/unreadable repo fails closed.
    - **`blocked_external`** — the drain reported `unknown`/`rate-limited`: `blocker:{helper, exit
      (nonzero), diagnostic}`. Report it as blocked, never as a drained run.
+   - **`paused`** — this run was stopped by a deliberate `/idc:pause`, and
+     `idc_pause_state.py close-open` is what closes it (never a hand-written `finish`). The
+     validator re-derives the confirmed pause record **and** re-runs the quiescence check, so
+     the status cannot be claimed by a run that merely stopped. Listed here because it IS a
+     legal terminal for this command: an agent reading only this playbook could not otherwise
+     discover the outcome its own lifecycle record can take.
 
 **Drain everything; one launch gate, never self-narrow.** `/idc:autorun` drains the **whole** repo —
 every phase, every eligible wave. Before draining, size a **staffing estimate** from the

@@ -2,6 +2,107 @@
 
 All notable changes for the IDC Workflow plugin are documented in this file.
 
+## 4.2.0 — 2026-07-19
+
+Completion honesty.
+
+Closes the failure class where "all PRs merged and reviewed" was read as "the phase is finished".
+Two new fail-closed checks run at every wave close, wired into the drain predicate's existing
+non-terminal exit 4 — so the Stop fixpoint gate enforces them with no new hook and no new exit code.
+
+- **The board can no longer lie about shipped work.** Finishing an item merges its PR (which
+  auto-closes the issue via the mandated closing keyword) several steps before it flips the board
+  Status; a session dying in that window left the item shipped but showing `In Progress` forever.
+  The drain counts only `Todo`, so it never saw those items and reported the pipe complete over
+  them. `scripts/idc_finish_coherence.py` now asks the question none of the existing gates asked.
+  The detector itself already existed inside the janitor — this reuses that verdict rather than
+  re-deriving it, and repairs run through the existing idempotent `--close-only` door.
+- **A project can declare its live surfaces, and IDC will RUN them.** Every other gate verifies
+  code, which can be perfect while the deployed product is dead. A repo lists each surface in
+  `WORKFLOW-config.yaml::live_verification` together with a `verify:` command that drives the real
+  deployment — the project owns the technology (an authenticated HTTP probe, a browser driver, a
+  CLI call); IDC never hardcodes any of it. `scripts/idc_live_check.py --run` then **executes** that
+  command at wave close and writes a machine-generated receipt: the command, its exit code, the
+  commit it ran against, the timestamp, and a bounded, credential-redacted excerpt of the output.
+  Verification is **executed, never attested**: nobody types "I tested it", and an unattended
+  overnight run never stops to wake somebody up to go and look. A failing verify command is a
+  finding the pipeline works like a failing test.
+  - The receipt **expires by itself** as soon as anything lands on the surface's paths (Terraform
+    and deploy scripts included), on the verify script itself, or the declared command changes —
+    that expiry is what stops provisioning drift hiding behind a green build.
+  - **A hand-written receipt does not pass.** Every field in a committed receipt is one any reader
+    can recompute — the declared command, its digest, the HEAD sha — so checking the receipt alone
+    could never separate a real run from a typed one. Each `--run` therefore also records the
+    execution inside the repo's **git directory**, which git never carries, and the audit refuses a
+    receipt no run in this working copy backs. Two consequences: writing the markdown by hand
+    reports `live: gap`, and a fresh clone must run the check once before its committed receipt is
+    trusted there (the receipt records that the surface passed *somewhere*; that clone has not seen
+    it happen). This is not proof against editing the git directory by hand — nothing local could
+    be — but typing the evidence file is no longer enough.
+  - A run started while the surface's **own code is uncommitted** is refused as indeterminate: the
+    command executes the working tree while the receipt would name HEAD, so it could not be
+    attributed to any commit. `evidence:` destinations are confined to the repo, symlinks resolved.
+  - The drain and the Stop gate **audit** the receipt read-only (sub-second, executing nothing), so
+    a stop attempt never sits through a browser suite. Execution belongs to Build's wave close and
+    to the `live-gap` remediation, where a failure can be acted on.
+  - Writing the verify script is ordinary **build work** for the implementing agent, like writing
+    the surface's tests. It must never print a credential; the receipt is committed.
+  - A repo that declares no live surface reports `live: not-declared`, executes nothing and is never
+    gated. `attested: true` is the one hand-written escape hatch, for a surface that genuinely
+    cannot be automated; it reports on its own `live: ok (attested)` line so an attestation can
+    never be mistaken for a measurement.
+- **A session can now be interrupted mid-finish without corrupting the board.** The gate above
+  detects that damage after the fact; this stops it happening. `scripts/idc_git_finish.py` records
+  an in-flight `mid_finish:<item>` obligation in the session ledger immediately before the merge and
+  clears it only once the board flip has been read back — the recipe `scripts/hooks/idc_ledger.py`
+  documented from the start and nothing had ever set. `scripts/idc_finish_recover.py` (new) lets a
+  LATER session finish what it did not start: it reads that obligation across sessions, asks the
+  board about each item before the ledger (an item already `Done` has its stale record cleared, not
+  re-closed, so a repeat pass never double-records), and completes the rest through the existing
+  idempotent `--close-only` door. Autorun's preflight runs it on every pass; it costs no board read
+  when there is nothing to recover. An obligation it cannot discharge is preserved and reported —
+  never silently dropped.
+- **A run can be stopped on purpose and picked back up: `/idc:pause` and `/idc:resume`.** The two
+  fixes above make an UNPLANNED interruption survivable; these make a PLANNED one first-class, so
+  stopping a long run no longer means killing it. `/idc:pause` is graceful by contract: it finishes
+  whatever is in flight, then proves nothing is half-done — did anything ship while the board still
+  shows it in flight, does the board still claim an item is being worked, did a multi-step action
+  start and never finish — before it records anything. Each finding prints the command that clears
+  it. There is no override flag: a pause that cannot prove quiescence reports `NOT paused`, names
+  what is in flight, and leaves the record as `pause-requested`.
+  - `scripts/idc_pause_state.py` writes one gitignored local record holding exactly one fact — this
+    run is paused. It deliberately holds **no work state**: the board stays the single source of
+    truth, which is why resume has nothing to reconstruct.
+  - `paused` is a fifth terminal status in `idc_command_contract.py`, because none of the existing
+    four could close a deliberate stop honestly. Its evidence is the strictest in the contract: a
+    CONFIRMED record **plus** a fresh re-derivation that nothing is half-done — so hand-writing a
+    record buys nothing, since the closeout re-checks the repo rather than reading the record's claim.
+  - It is claimable by `build`, `autorun` and `recirculate` only — the stages whose half-done work the
+    quiescence check can actually see (an `In Progress` card, a `mid_finish` or `recirc_checkpoint`
+    taint). `think`, `intake` and `plan` leave their partial work in a branch, which that check does
+    not read, so a `paused` closeout there would certify a clean stop nothing had verified. They are
+    refused by name instead, and the refusal says why.
+  - Both resume paths work: `/idc:resume`, and the next `/idc:autorun`, whose preflight clears the
+    record in one local file read (zero GraphQL). A pause the operator forgets can never strand work.
+  - The Stop fixpoint gate now ALLOWS a stop on a confirmed pause — otherwise the gate that exists to
+    catch dishonest exits would refuse the one honest way to stop, and pausing would degrade back into
+    the hard kill it replaces. An unconfirmed `pause-requested` buys nothing.
+- `--coherence` and `--live` are opt-in flags on `idc_autorun_drain.py`; default output is
+  unchanged. New verdicts `drain: coherence-gap` and `drain: live-gap` ride the existing exit 4.
+- `idc_git_janitor.py --json` now exposes each finding's `op` (its machine classification), so a
+  consumer can select a finding class without pattern-matching English prose.
+- The command surface grows from 11 to 13 (`pause`, `resume`).
+- **A child process's diagnostics are redacted before anything persists them.** Every place a helper
+  reads a subprocess's `stderr` now scrubs it at the read, keyed on the text's provenance rather than
+  on a per-call-site rule — because a rule written at one call site is correct there and missing at
+  the next, which is how the same credential reached a committed receipt at four different
+  boundaries. A census test fails the suite both when a new unscrubbed read appears and when a
+  registered exemption goes stale. Two consequences for operators: a `gh`/`git` failure may now read
+  `[REDACTED]` where a token-bearing URL or key block used to be, costing one re-run to diagnose; and
+  commit shas and node ids are deliberately **not** redacted, since destroying them would turn
+  `fatal: bad object <sha>` into a message that says nothing. This is redaction at the persistence
+  boundary, not proof against a process that has the secret in memory.
+
 ## 4.1.2 — 2026-07-17
 
 The final command-integrity hardening pass closes the remaining deferred items from 4.1.1:

@@ -65,6 +65,25 @@ import idc_gh_board      # noqa: E402  — shared paginating board reader + atom
 import idc_board_lint    # noqa: E402  — OPERATOR_GATE_PREFIX (single-sourced marker)
 import idc_transition as TE  # noqa: E402  — the engine's canonical journal_append (journal every door, #150)
 
+# THE CREDENTIAL SCRUB DOOR — see `idc_credential_shapes.scrub`. Every read of a CHILD PROCESS's
+# stderr in this module passes through it AT THE READ, and `tests/smoke/phase11-honesty-repro.sh` R28
+# is the census that keeps that true across every module in scripts/.
+#
+# THE IMPORT IS TOLERANT BECAUSE SEVERAL MODULES HERE RUN AS LONE RELOCATED COPIES. The smoke and
+# governance suites copy a single script to a temp directory and execute it there to prove a deleted
+# guard was the one doing the work (`phase1-pipe-safety` F, `governance/external-intake-completeness`,
+# `phase4-completion-honesty` F) — a hard sibling import makes those copies die on ImportError. The
+# fallback FAILS CLOSED: with no table to scrub with, a child's stderr is WITHHELD, never passed
+# through. This block is byte-identical everywhere it appears and R28 asserts that, so no copy of it
+# can drift into a pass-through.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import idc_credential_shapes as CS  # noqa: E402
+except ImportError:                                      # a lone relocated copy — fail closed
+    class CS:                                            # noqa: N801 — stand-in for the shared table
+        scrub = staticmethod(
+            lambda text: text and "[child output withheld — the credential table is not importable]")
+
 # ── markers ──────────────────────────────────────────────────────────────────
 # Plan stamps provenance; the finisher posts discovery/deferral. The sentinel is matched first and
 # the payload captured up to the comment close (re.S), so a corrupt payload is skipped, not slipped
@@ -538,7 +557,7 @@ def gh(args, repo):
         p = subprocess.run(["gh"] + args, cwd=repo, capture_output=True, text=True)
     except (OSError, ValueError) as e:
         return False, "", str(e)
-    return (p.returncode == 0), p.stdout, p.stderr
+    return (p.returncode == 0), p.stdout, CS.scrub(p.stderr)
 
 
 def gh_owner(repo):
@@ -1025,4 +1044,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # Broken-pipe guard: `--report` prints one line per finding, unbounded in board size, and it is
+    # the path a human runs while debugging a drifted board. See scripts/idc_stdio.py.
+    import idc_stdio
+    raise SystemExit(idc_stdio.run_guarded(main))

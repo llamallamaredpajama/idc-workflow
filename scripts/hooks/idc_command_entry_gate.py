@@ -44,12 +44,18 @@ import idc_command_contract as C  # noqa: E402
 import idc_ledger as L  # noqa: E402
 
 # Fail-closed on an unverifiable freshness signal (invalid receipt / unreadable manifest / gate bug):
-# the six workflow commands. Running an unverifiable workflow body can re-introduce just-fixed bugs.
-WORKFLOW_COMMANDS = {"think", "intake", "plan", "build", "recirculate", "autorun"}
+# the workflow commands. Running an unverifiable workflow body can re-introduce just-fixed bugs.
+# `resume` belongs here because resuming puts the PIPELINE back in motion — the same reason /idc:build
+# does.
+WORKFLOW_COMMANDS = {"think", "intake", "plan", "build", "recirculate", "autorun", "resume"}
 # May still expand on an unknown/invalid legacy receipt so the operator can diagnose or migrate the
 # repo. `janitor` is a recovery/diagnostic sweep (not the primary guard), so it lives here — blocked
 # only on a POSITIVELY stale runtime, never on a merely-unverifiable receipt.
-RECOVERY_COMMANDS = {"doctor", "update", "uninstall", "janitor"}
+# `pause` lives here for a related reason, and the asymmetry with `resume` is deliberate: pause STOPS
+# work rather than starting it, writes no board state, and is the operator's graceful alternative to a
+# hard kill. Refusing to let someone pause a running pipe because the install receipt has drifted would
+# force exactly the ungraceful interruption this command exists to replace.
+RECOVERY_COMMANDS = {"doctor", "update", "uninstall", "janitor", "pause"}
 # `init` bootstraps a not-yet-governed repo: it is ALLOWED to expand but does NOT open a record in the
 # entry gate — commands/init.md opens its own lifecycle record right after it writes
 # tracker-config.yaml (Task 6). So init is the one governed command whose registration the entry gate
@@ -94,12 +100,16 @@ _contract_script = H.contract_script  # shared with the Stop closeout gate — o
 
 
 def _context(command, plugin_root):
+    # The offered statuses are DERIVED from the claim table (`LEGAL_STATUSES`), never hardcoded: a
+    # fixed list would offer a command statuses it cannot legally claim (and, once `paused` existed,
+    # would hide the only honest way to close a deliberately-paused run).
+    statuses = "|".join(sorted(C.LEGAL_STATUSES.get(command, C.TERMINAL_STATUSES)))
     return (
         f"IDC command lifecycle: `/idc:{command}` opened a governed command record. Before this "
         "session stops you MUST close it with a valid terminal status via "
         f"`{_contract_script(plugin_root)} finish --repo <repo> "
-        f"--session <session-id> --command {command} --status <complete|waiting_gate|no_action|"
-        "blocked_external> --evidence-json '<envelope>'`. The Stop closeout gate will refuse a stop "
+        f"--session <session-id> --command {command} --status <{statuses}>"
+        " --evidence-json '<envelope>'`. The Stop closeout gate will refuse a stop "
         "that leaves this command open."
     )
 

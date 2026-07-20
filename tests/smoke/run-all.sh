@@ -43,6 +43,7 @@ for t in \
   phase1-brownfield-scan \
   phase1-settings-json \
   phase1-lint-rules \
+  phase1-pipe-safety \
   phase1-codex-mirror-sync \
   phase1-git-janitor \
   phase1-janitor-preflight \
@@ -57,6 +58,7 @@ for t in \
   phase4-tracker-github-recipe \
   phase4-github-pagination \
   phase4-acceptance \
+  phase4-completion-honesty \
   phase4-ready-frontier \
   phase4-e2e-merge-train \
   phase4-recirc-deconflict \
@@ -65,6 +67,7 @@ for t in \
   phase4-recirc-caps \
   phase4-atomic-close \
   phase4-git-finish \
+  phase4-mid-finish-recovery \
   phase4-itemid-cache \
   phase4-marker-emit \
   phase5-ripple \
@@ -100,6 +103,8 @@ for t in \
   phase8-model-ladder \
   phase9-realgit-lifecycle \
   phase9-multiwave-accumulation \
+  phase10-pause-resume \
+  phase11-honesty-repro \
   phase-governance; do
   # Assertion-class rollup (design §E.4 / audit RC6): tally each phase by WHAT its green proves, so
   # "all green" can never be silently over-read as end-to-end behavioral proof. The class is declared

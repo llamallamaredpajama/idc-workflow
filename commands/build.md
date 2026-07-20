@@ -52,7 +52,7 @@ oracle's next command/reason**, never an improvised handoff:
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_next_action.py" --repo "$PWD" --json
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command build \
-  --status <complete|no_action|blocked_external> --evidence-json '<envelope>'
+  --status <complete|no_action|blocked_external|paused> --evidence-json '<envelope>'
 ```
 
 - **`complete`** — the requested issue receipts pass, or the whole ready frontier had no eligible
@@ -73,6 +73,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   count is 0). Never claim `no_action` without that fresh oracle result.
 - **`blocked_external`** — an existing drain error or rate-limit receipt: `blocker:{helper, exit
   (nonzero), diagnostic}` (e.g. `idc_autorun_drain.py` exit 3 = github GraphQL rate-limited).
+- **`paused`** — this run was stopped by a deliberate `/idc:pause`, and `idc_pause_state.py close-open` is what closes it (never a hand-written `finish`). The validator re-derives the confirmed pause record **and** re-runs the quiescence check, so the status cannot be claimed by a run that simply stopped. Listed here because it IS a legal terminal for this command: an agent reading only this playbook could not otherwise discover the outcome its own lifecycle record can take.
 
 Builders never edit canonical docs — divergence files a recirculation (`/idc:recirculate`) and pauses
 only the affected issue. The **one precise exception** is the consultant-authorized **`grant-build`

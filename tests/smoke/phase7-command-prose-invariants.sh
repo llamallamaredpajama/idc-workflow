@@ -234,7 +234,7 @@ has "$AR" 'will NOT fire this run|NOT setting the orchestrator_drain marker' \
 # (idc_next_action.py) as the final handoff, not a hand-authored "next, run X". Per-file greps only —
 # a bare recursive `grep -r` can hang under this machine's default ugrep, and shipped users get BSD
 # grep, so the suite iterates files explicitly (portability: /usr/bin/grep + /usr/bin/awk).
-for cmd in autorun build doctor init intake janitor plan recirculate think uninstall update; do
+for cmd in autorun build doctor init intake janitor pause plan recirculate resume think uninstall update; do
   f="$C/$cmd.md"
   [ -f "$f" ] || fail "missing command: $cmd"
   grep -q 'idc_command_contract.py.*status' "$f" \
@@ -242,7 +242,7 @@ for cmd in autorun build doctor init intake janitor plan recirculate think unins
   grep -q 'idc_command_contract.py.*finish' "$f" \
     || fail "$cmd has no deterministic closeout (idc_command_contract.py finish)"
 done
-for cmd in autorun build intake plan recirculate think; do
+for cmd in autorun build intake pause plan recirculate resume think; do
   f="$C/$cmd.md"
   grep -q 'idc_next_action.py' "$f" \
     || fail "$cmd does not derive its pipeline handoff from the oracle (idc_next_action.py)"

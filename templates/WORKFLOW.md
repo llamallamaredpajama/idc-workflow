@@ -30,15 +30,17 @@ the glass wall (§1.2). Everything else flows autonomously.
 `Think → Plan → Build`, with the `Recirculator` as the only retrograde path and `Autorun` as the
 one-shot drainer that traverses the whole pipe.
 
-IDC ships **11 slash surfaces**:
+IDC ships **13 slash surfaces**:
 
 ```text
-think | intake | plan | build | recirculate | autorun | janitor | init | doctor | update | uninstall
+think | intake | plan | build | recirculate | autorun
+pause | resume | janitor | init | doctor | update | uninstall
 ```
 
 The pipeline is `/idc:think`, `/idc:intake`, `/idc:plan`, `/idc:build`, `/idc:recirculate`,
-`/idc:autorun`; the rest are operational — `/idc:janitor` (reconciler), `/idc:init` (per-project
-scaffold), `/idc:doctor` (read-only health check), and `/idc:update` / `/idc:uninstall` (lifecycle).
+`/idc:autorun`; the rest are operational — `/idc:pause` / `/idc:resume` (stop a long run on purpose
+and pick it back up), `/idc:janitor` (reconciler), `/idc:init` (per-project scaffold), `/idc:doctor`
+(read-only health check), and `/idc:update` / `/idc:uninstall` (lifecycle).
 
 **Each entry point admits scope at exactly one altitude, and none may do another's job:**
 
@@ -204,6 +206,62 @@ deferred). Review is fresh-context **bounded fan-out** — iterate → reverify 
 when all green → close. **Nothing merges that isn't green on real functional tests; a
 shallow or placeholder suite is a review FAIL.** Builders never edit canonical docs;
 divergence files a recirculation and pauses only the affected issue.
+
+### 4.3a Completion honesty — the two things "green" never proved
+
+Merged and reviewed is not the same claim as finished. Two gates run at every wave close (and at
+Build's Phase-4 retriggers), both fail-closed, both deterministic:
+
+**Board↔reality coherence.** The board is a **dashboard**, and a dashboard can lie. Finishing an item
+merges its PR — which auto-closes the issue via the `Closes #N` keyword — and flips the board Status a
+few steps later; a session that dies in between leaves the item **shipped but still showing
+`In Progress`**, forever. Nothing downstream noticed, because the acceptance check audits only
+merged-`Done` items and the drain counts only `Todo`, so the pipe reported itself **complete** over a
+board advertising work that had already landed. `idc_finish_coherence.py` asks the one question none of
+them asked — *does the board still claim work that already shipped?* — and a gap is repaired through
+the existing idempotent door (`idc_git_finish.py --close-only`), never a hand-edited Status.
+
+**Surviving a handoff.** That gate is the safety net; the corruption is now prevented at the source.
+The finish tail records an in-flight obligation in the session ledger immediately before the merge and
+discharges it only once the board flip has been read back, so a session that is killed, exhausted or
+handed off mid-way leaves a durable record that a close was underway. Autorun's preflight runs
+`idc_finish_recover.py` on every pass: it reads that record **across sessions** (the session that left
+it is, by definition, gone), asks the board about each item first — one already `Done` simply has its
+stale record cleared, never re-closed — and completes the rest through the same `--close-only` door.
+An obligation it cannot discharge is **preserved and reported**, never quietly dropped: the usual
+reason is that the finish died *before* its merge, so nothing shipped and the item is simply still open.
+
+**The live product.** Every other gate in this document verifies **code**. Code can be flawless while
+the running product is dead, because what breaks a deployment usually is not in the reviewed diff: a
+bucket nobody created, an env var nobody set, an IAM role granted by hand. IDC cannot know how to
+deploy or drive your product — so **you declare each surface and the command that drives it** in
+`WORKFLOW-config.yaml::live_verification` (name, `verify:`, the paths behind it, the journey), and
+`idc_live_check.py --run` **executes that command** against the real deployment at every wave close,
+writing a machine-generated receipt: the command, its exit code, the commit it ran against, the time,
+and a bounded, credential-redacted excerpt of the output. **Verification is executed, never attested** —
+nobody types "I tested it", and no autonomous run stops to wake a human up to go and look. A failing
+verify command is a finding the pipeline works like any failing test.
+
+**A hand-written receipt does not pass.** Every field in the committed receipt is one a reader can
+recompute, so checking the receipt alone could never tell a real run from a typed one. Each `--run`
+therefore also records the execution inside the repo's **git directory** — which git never carries,
+so nothing can commit or push it — and the audit refuses a receipt no run in this working copy backs.
+Two consequences worth knowing: writing the markdown by hand yields `live: gap`, and a fresh clone
+that has never run the check reports a gap naming that reason until `--run` clears it (the receipt
+records that the surface passed *somewhere*; this working copy has not seen it happen).
+
+**The verify script is build work.** `scripts/verify-live-<surface>.sh` is written by whoever
+implements the surface — authenticated calls against the deployed endpoints, a browser driver, a CLI
+probe, whatever exercises the journey — exactly as its tests are. It must never print a credential:
+the evidence record is committed.
+
+The evidence **expires by itself**: anything landing on a surface's paths — including its Terraform and
+deploy scripts — invalidates it, and so does changing the `verify:` command, so provisioning drift
+cannot hide behind a green build. A repo that declares no live surface reports `live: not-declared`,
+executes nothing and is never gated; opting in is the only way to be gated. The one escape hatch,
+`attested: true`, is for a surface that genuinely cannot be automated (a physical device, a third-party
+console): it keeps a hand-written record and reports `live: ok (attested)`, on its own distinct verdict
+line, so an attestation can never be mistaken for a measurement.
 
 ### 4.4 Recirculator — drift healing
 

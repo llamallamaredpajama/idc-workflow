@@ -46,6 +46,35 @@ loop below). Then the two lanes:
    and clears a taint once its ticket leaves the inbox. On github it is one cheap board read per pass in
    the drain loop (not the stop path). It is **fail-soft** (never halts the drain) and **repo-gated**;
    surface a `reconcile: unknown` (unreadable board) as such, never as clean.
+   **Then complete any finish a dead session left in flight (handoff safety — every pass):** the
+   finish tail merges the PR (which also closes the linked issue) several steps before it flips the
+   board, so a session that died in that window left the item shipped, closed and still `In Progress`.
+   The tail records that window as a `mid_finish:<item>` ledger obligation, and only a later session
+   can discharge it.
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_finish_recover.py" --repo "$PWD" --session-id "$CLAUDE_CODE_SESSION_ID"`
+   reads the ledger **across sessions**, asks the board about each item first (an item already `Done`
+   has its stale taint cleared, never re-closed — so a second pass never double-records), and completes
+   the rest through the existing idempotent `idc_git_finish.py --close-only` door. No board read at all
+   when there is nothing to recover. It is **fail-soft** (never halts the drain) and **repo-gated**;
+   relay `recovered:` / `cleared:`, and treat `unresolved:` as a live obligation still owed — those
+   taints are PRESERVED, never dropped.
+   **Then pick up a deliberately-paused run (run ONCE, at drain start):** a previous session may have
+   stopped this repo's pipeline on purpose with `/idc:pause`. That pause is graceful by contract
+   (nothing half-done) and holds no work state, so resuming is exactly: clear the record, then drain
+   from the live board as usual. Running it here is what stops a FORGOTTEN pause from stranding work —
+   the operator gets the run back with `/idc:autorun`, without having to remember they paused.
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_pause_state.py" --cwd "$PWD" resume --session "$CLAUDE_CODE_SESSION_ID"`
+   costs one local file stat and reads no board (zero GraphQL). `resume: not-paused` is the normal,
+   silent case; relay `resume: cleared (paused)` as "this run continues a deliberately-paused one", and
+   `resume: cleared (pause-requested)` as a previous session that ASKED to pause and never achieved it
+   — an ordinary interrupted run, so whatever the sweeps above surface is that session's unfinished
+   business, not a clean handover.
+   **`resume: error …` (exit 2) ABORTS the drain — do not start work.** The record could not be
+   removed, so the repo is STILL paused, and draining over it is the worst of both worlds: the run
+   works again while the Stop fixpoint gate, reading that surviving record, believes the run is
+   cleanly stopped and allows an undrained walk-away. Relay the printed cure (make the record path
+   writable), close this command `blocked_external` citing `idc_pause_state.py` and its exit, and end
+   the session — the same rule `commands/resume.md` step 1 applies to the same clear.
    **Then synthesize any phantom-idle implementer (drop H — every pass, beside the reconcile above):**
    an implementer teammate can go idle without reporting, leaving its item `Stage = Buildable ∧
    Status = In Progress` (claimed) but never advanced; the drain is blind to it (counts only `Todo` /
@@ -108,15 +137,25 @@ loop below). Then the two lanes:
    `Consideration`/`Planning`/`Recirculation` ticket is never scooped (the glass wall). Check the
    build lane's exit condition with the **same deterministic drain helper, by backend** — never
    improvise the predicate or read the board ad-hoc:
-   - **filesystem:** `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --tracker <TRACKER.md> --acceptance`
+   - **filesystem:** `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --tracker <TRACKER.md> --acceptance --coherence --live`
      — `--acceptance` also runs the wave-close acceptance check when the build lane is drained (surfaces
      a Done-but-inert increment as `acceptance: gap <#s>`; file a recirculation on a gap). A gap/error
      GATES the would-be-`complete` wave close (Stage E3): gap ⇒ `drain: acceptance-gap` exit 4, a
      corrupt/unrunnable check ⇒ `drain: unknown` exit 2 — both NON-terminal, so autorun re-loops.
-   - **github:** `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --backend github --project <n> --owner <o> --session-id "$CLAUDE_CODE_SESSION_ID"`
+   - **github:** `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py" --backend github --project <n> --owner <o> --coherence --live --session-id "$CLAUDE_CODE_SESSION_ID"`
      (github wave-close acceptance runs in `idc:idc-build` Phase 4 — no `--acceptance` here). `--session-id`
      attributes the persisted drain verdict so the Stop fixpoint gate reads the github board conjunct
      locally (0 GraphQL on the stop path, v4 Phase 3 Stage E2; env `$CLAUDE_CODE_SESSION_ID` is the fallback).
+   - **`--coherence` + `--live` ride BOTH backends** — the two completion-honesty gates. An empty build
+     lane was never proof the work was finished, in two directions the drain could not previously see:
+     `--coherence` catches items whose work SHIPPED (PR merged, issue closed) while the board still
+     advertises them as in flight — the drain counts only `Todo`, so it never saw them and printed a
+     clean terminal `complete` over a board that was lying; `--live` catches a project-DECLARED live
+     surface whose own `verify:` command failed, or was never executed against the code running now.
+     The drain AUDITS (read-only — it executes nothing, so the stop path stays fast); the EXECUTION
+     happens in `idc:idc-build`'s wave close and in the live-gap remediation below. A repo that declares
+     no live surface reports `live: not-declared` and is never gated, so both flags are safe to pass
+     everywhere.
    Both apply the **identical** Buildable-eligibility predicate over the **whole board** — the drain
    helper is the predicate's single source of truth (never re-derive it in prose or by hand), and
    the github mode pages **every** item, so **never** substitute a bare
@@ -127,6 +166,15 @@ loop below). Then the two lanes:
    board read succeeded but a build candidate's blocked-by lookup could not be verified, or, under
    filesystem `--acceptance`, the wave-close acceptance check was corrupt/unrunnable), `drain:
    acceptance-gap` (exit 4, filesystem `--acceptance` — a merged-Done item is inert; recirculate it),
+   `drain: coherence-gap` (exit 4, `--coherence` — the named items shipped but the board never advanced;
+   repair each via the idempotent `idc_git_finish.py --close-only --pr <N> --issue <M>`, or
+   `/idc:janitor --apply-safe` for the batch, then re-check), `drain: live-gap` (exit 4, `--live` — a
+   declared live surface has no current passing verification; run
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_live_check.py" --repo "$PWD" --run`, which executes the
+   surface's own `verify:` command and regenerates its evidence from the real result. A non-zero exit is
+   a **finding you work**, not a page: read the captured output, fix it or recirculate it, re-run.
+   Escalate to the operator only when the pipeline truly cannot proceed — an `attested: true` surface,
+   or a missing credential no agent holds),
    and a hard board-read failure (exit 2, no `drain:` line). Do not exit on it; treat the lane as
    possibly-unfinished and let the next `/loop` iteration re-check.
 5. **Re-loop to a fixpoint, then exit.** The pipe is **not one-shot**: a build triplet can surface a

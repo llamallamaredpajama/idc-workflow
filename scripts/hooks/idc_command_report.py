@@ -47,7 +47,6 @@ import json
 import os
 import re
 import sys
-import tempfile
 import time
 
 # Same-dir import: idc_command_report lives beside idc_hook_lib in scripts/hooks/.
@@ -180,30 +179,11 @@ def current_report_record(cwd, kind, session_id):
 
 # ── atomic, best-effort write ────────────────────────────────────────────────────────────────────
 def _atomic_write(path, payload):
-    """Write the report atomically (temp-file + os.replace). BEST-EFFORT: an OSError warns and
+    """Write the report atomically via the shared sidecar writer. BEST-EFFORT: a failure warns and
     returns False (never raises) so persisting a report can never break the diagnostic run. Returns
     True only after the replacement has landed."""
-    d = os.path.dirname(path) or "."
-    try:
-        fd, tmp = tempfile.mkstemp(dir=d, prefix=".idc-command-report.", suffix=".tmp")
-    except OSError as e:
-        idc_hook_lib.warn(f"command-report: cannot create temp file in {d}: {e}")
-        return False
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh, indent=2, sort_keys=True)
-            fh.write("\n")
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
-        return True
-    except OSError as e:
-        idc_hook_lib.warn(f"command-report: atomic write to {path} failed: {e}")
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-        return False
+    return idc_hook_lib.atomic_write_json(path, payload, prefix=".idc-command-report.",
+                                          label="command-report")
 
 
 def _write_report(cwd, kind, payload, session_id, producer, ts=None):
@@ -278,28 +258,10 @@ def ensure_gitignored(repo_root):
     """Ensure the repo-root `.gitignore` contains `.idc-*-report.json*`, idempotently and
     NON-DESTRUCTIVELY (create if absent; else APPEND only if missing). REPO-GATED. Returns True iff
     the line is present afterward. Mirrors idc_drain_verdict.ensure_gitignored exactly."""
-    if not idc_hook_lib.is_governed_repo(repo_root):
-        return False
-    gi = os.path.join(repo_root, ".gitignore")
-    try:
-        existing = ""
-        if os.path.isfile(gi):
-            with open(gi, encoding="utf-8") as fh:
-                existing = fh.read()
-        if any(ln.strip() == GITIGNORE_GLOB for ln in existing.splitlines()):
-            return True
-        with open(gi, "a", encoding="utf-8") as fh:
-            if existing and not existing.endswith("\n"):
-                fh.write("\n")
-            if not existing:
-                fh.write("# IDC command reports — transient per-session diagnostics, never committed.\n")
-            elif not existing.rstrip("\n").endswith(("#", ":")):
-                fh.write("# IDC command reports (per-session diagnostics; do not commit)\n")
-            fh.write(GITIGNORE_GLOB + "\n")
-        return True
-    except OSError as e:
-        idc_hook_lib.warn(f"command-report: could not ensure .gitignore in {repo_root}: {e}")
-        return False
+    return idc_hook_lib.ensure_gitignored(
+        repo_root, GITIGNORE_GLOB, label="command-report",
+        created_comment="# IDC command reports — transient per-session diagnostics, never committed.",
+        appended_comment="# IDC command reports (per-session diagnostics; do not commit)")
 
 
 # ── CLI (command markdown tail + governance test driver; NOT an LLM-facing judgement surface) ─────

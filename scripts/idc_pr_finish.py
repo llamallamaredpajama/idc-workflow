@@ -46,6 +46,25 @@ import sys
 import idc_gate_proof
 import idc_gate_repair as GR
 
+# THE CREDENTIAL SCRUB DOOR — see `idc_credential_shapes.scrub`. Every read of a CHILD PROCESS's
+# stderr in this module passes through it AT THE READ, and `tests/smoke/phase11-honesty-repro.sh` R28
+# is the census that keeps that true across every module in scripts/.
+#
+# THE IMPORT IS TOLERANT BECAUSE SEVERAL MODULES HERE RUN AS LONE RELOCATED COPIES. The smoke and
+# governance suites copy a single script to a temp directory and execute it there to prove a deleted
+# guard was the one doing the work (`phase1-pipe-safety` F, `governance/external-intake-completeness`,
+# `phase4-completion-honesty` F) — a hard sibling import makes those copies die on ImportError. The
+# fallback FAILS CLOSED: with no table to scrub with, a child's stderr is WITHHELD, never passed
+# through. This block is byte-identical everywhere it appears and R28 asserts that, so no copy of it
+# can drift into a pass-through.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import idc_credential_shapes as CS  # noqa: E402
+except ImportError:                                      # a lone relocated copy — fail closed
+    class CS:                                            # noqa: N801 — stand-in for the shared table
+        scrub = staticmethod(
+            lambda text: text and "[child output withheld — the credential table is not importable]")
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 TRANSITION = os.path.join(HERE, "idc_transition.py")
 GATE_REPAIR = os.path.join(HERE, "idc_gate_repair.py")
@@ -67,7 +86,7 @@ class FinishError(Exception):
 def _gh(args, repo):
     r = subprocess.run(["gh", *args], cwd=repo, capture_output=True, text=True)
     if r.returncode != 0:
-        raise FinishError(f"gh {' '.join(args)} failed: {r.stderr.strip()[:200]}")
+        raise FinishError(f"gh {' '.join(args)} failed: {CS.scrub(r.stderr).strip()[:200]}")
     return r.stdout
 
 
@@ -134,7 +153,8 @@ def _transition(args, extra):
     r = subprocess.run(_forward(TRANSITION, args) + extra, capture_output=True, text=True)
     if r.returncode != 0:
         raise FinishError(f"engine op {' '.join(extra)} failed (exit {r.returncode}): "
-                          f"{r.stderr.strip()[:200]}", code=r.returncode if r.returncode in (2, 3) else 2)
+                          f"{CS.scrub(r.stderr).strip()[:200]}",
+                          code=r.returncode if r.returncode in (2, 3) else 2)
     return r.stdout
 
 
@@ -162,7 +182,8 @@ def _finish_pointer(args, apply_):
         cmd.append("--apply")
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
-        raise FinishError(f"pointer-finish refused for #{args.pointer}: {r.stderr.strip()[:400]}",
+        raise FinishError(f"pointer-finish refused for #{args.pointer}: "
+                          f"{CS.scrub(r.stderr).strip()[:400]}",
                           code=r.returncode if r.returncode in (2, 3) else 2)
     try:
         return json.loads(r.stdout)

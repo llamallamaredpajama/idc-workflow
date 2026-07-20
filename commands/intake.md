@@ -57,4 +57,6 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
 
 - **`blocked_external`** — an Intake helper failed after being invoked with `--report-repo`,
   `--report-session`, and `--report-nonce`. Cite its exact `{helper, exit, diagnostic}`; the closeout
-  accepts only the current nonce-bound receipt. A successful retry clears the old failure.
+  accepts only the current nonce-bound receipt. A successful retry clears the old failure. The two
+  helpers whose failure this command may cite are `idc_intake_manifest.py` and `idc_pr_finish.py`;
+  any other helper is refused, because a blocked stop must name one of the command's own.

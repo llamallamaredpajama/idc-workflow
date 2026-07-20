@@ -28,6 +28,13 @@ Usage: idc_git_finish.py --pr N --issue M --worktree PATH [--repo DIR] [--tracke
   exit 0  every step verified — prints `finish: ok`.
   exit 1  the first unverifiable step — prints `finish: <step> failed: <detail>` to stderr.
 
+HANDOFF-SAFE: the tail records an in-flight `mid_finish:<item>` obligation in the session ledger
+immediately BEFORE the merge (the point of no return, which also auto-closes the issue) and clears it
+only AFTER the board flip has been read back and verified. A session that dies in that window
+therefore leaves a durable record that a close was underway, which `scripts/idc_finish_recover.py`
+completes from a LATER session through the `--close-only` door below. The recording is best-effort by
+contract — bookkeeping never fails a finish.
+
 CLOSE-ONLY recovery (`--close-only`): an ALREADY-MERGED PR whose board was never advanced — the
 phantom-idle `synthesized-complete` shape (v4 Phase 3 Stage E4). The normal `gh pr merge` step would
 hard-fail on a merged PR, so this mode SKIPS the merge (and the verdict receipt gate); the proven
@@ -43,14 +50,42 @@ import subprocess
 import sys
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, SCRIPT_DIR)
+sys.path.insert(0, os.path.join(SCRIPT_DIR, "hooks"))   # the ledger lives one level down
+sys.path.insert(0, SCRIPT_DIR)                          # …but scripts/ stays FIRST: this file's own
+# siblings must never be shadowed by a same-named module added to hooks/ later.
 import idc_review_verdict_check as VC   # noqa: E402 — the verdict validator + PASSING set (reuse)
 import idc_transition as TE             # noqa: E402 — load_verdict + unmet_merge_conditions (reuse)
 import idc_file_findings as FF          # noqa: E402 — work_items + existing-keys readers (reuse)
 import idc_gh_board                     # noqa: E402 — BoardReadError for fail-closed github routing
+import idc_ledger                       # noqa: E402 — the obligations ledger (the mid_finish taint)
+
+# THE CREDENTIAL SCRUB DOOR — see `idc_credential_shapes.scrub`. Every read of a CHILD PROCESS's
+# stderr in this module passes through it AT THE READ, and `tests/smoke/phase11-honesty-repro.sh` R28
+# is the census that keeps that true across every module in scripts/.
+#
+# THE IMPORT IS TOLERANT BECAUSE SEVERAL MODULES HERE RUN AS LONE RELOCATED COPIES. The smoke and
+# governance suites copy a single script to a temp directory and execute it there to prove a deleted
+# guard was the one doing the work (`phase1-pipe-safety` F, `governance/external-intake-completeness`,
+# `phase4-completion-honesty` F) — a hard sibling import makes those copies die on ImportError. The
+# fallback FAILS CLOSED: with no table to scrub with, a child's stderr is WITHHELD, never passed
+# through. This block is byte-identical everywhere it appears and R28 asserts that, so no copy of it
+# can drift into a pass-through.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import idc_credential_shapes as CS  # noqa: E402
+except ImportError:                                      # a lone relocated copy — fail closed
+    class CS:                                            # noqa: N801 — stand-in for the shared table
+        scrub = staticmethod(
+            lambda text: text and "[child output withheld — the credential table is not importable]")
 
 REMOTE = "origin"
 MERGE_METHODS = ("squash", "merge", "rebase")
+# The obligations ledger's own documented taint kind (scripts/hooks/idc_ledger.py, TAINT KINDS):
+# `mid_finish:<item>` — "the finish tail STARTED closing <item> but has not completed it". The kind
+# was specified there from the start and the recipe spelled out; this file is where it finally gets
+# set, so a session that dies inside the merge→board-flip window leaves a record that it was in
+# flight. `scripts/idc_finish_recover.py` is the cross-session consumer.
+MID_FINISH_TAINT = "mid_finish"
 
 # Branch → item resolution for the close-only OWNERSHIP accident-guard (reviewer P2-1 + P2-A). An
 # INDEPENDENT copy of idc_teammate_idle_synth._resolve_ref_item, kept local per this helper's
@@ -122,7 +157,85 @@ def _run(cmd, cwd):
         p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
     except OSError as e:
         return 1, "", str(e)
-    return p.returncode, p.stdout, p.stderr
+    return p.returncode, p.stdout, CS.scrub(p.stderr)
+
+
+# ── the mid-finish obligation (handoff safety) ──────────────────────────────────────────────────
+# THE WINDOW THIS CLOSES. `gh pr merge` is a point of no return that ALSO closes the linked issue as
+# a side effect (IDC mandates an unbackticked `Closes #N`, so GitHub auto-closes it), while the board
+# flip is a separate call several steps later in the same process. A session that dies in between —
+# a kill, context exhaustion, a handoff — leaves the item merged, its issue closed, and the board
+# still showing `In Progress`, with NOTHING recording that a close was ever underway. Seven items in
+# one governed repo ended a session in exactly that state.
+#
+# The record is the ledger's own `mid_finish:<item>` taint, set BEFORE the irreversible action and
+# cleared ONLY when the action COMPLETES, exactly as scripts/hooks/idc_ledger.py prescribes. The
+# fields carry what a LATER, DIFFERENT session needs to finish the job through the existing
+# idempotent `--close-only` door; `scripts/idc_finish_recover.py` is that consumer.
+def _mid_finish_set(repo, issue, session_id, **fields):
+    """Record that this finish has STARTED closing <issue> and has not completed it.
+
+    RETURNS whether the obligation is DURABLE. It never raises — bookkeeping must not break a finish
+    by throwing — but the answer is no longer thrown away, because of WHERE this is called from.
+
+    THE DISTINCTION THAT WAS MISSING. "Best-effort" is right for bookkeeping that merely helps
+    someone reconstruct history later. It is wrong for the one record that makes the NEXT step
+    survivable. This taint is written immediately before `pr_merge`, an irreversible action that also
+    closes the linked issue; if the session dies between the merge and the board flip, this record is
+    the ONLY thing that tells a later session there is a half-finished close to finish. Merging
+    anyway after failing to write it re-opens exactly the window the taint exists to close — and
+    silently, because the warning scrolls past in a log nobody reads. The caller now refuses to cross
+    the point of no return without it.
+    """
+    try:
+        if idc_ledger.set_taint(repo, MID_FINISH_TAINT, key=issue, session_id=session_id,
+                                **{k: str(v) for k, v in fields.items()}):
+            return True
+        _warn(f"the mid-finish obligation for #{issue} did not persist to the ledger")
+        return False
+    except Exception as e:  # noqa: BLE001 — bookkeeping must never break the finish by raising
+        _warn(f"could not record the mid-finish obligation for #{issue}: {e}")
+        return False
+
+
+def _require_mid_finish_obligation(repo, issue, session_id, **fields):
+    """Set the mid-finish obligation and REFUSE TO CONTINUE unless it is durable.
+
+    Called at BOTH points of no return: immediately before `pr_merge` on the normal finish, and before
+    the first deletion in `close_only_recover` — which does not merge, but destroys the branch its own
+    ownership guard reads, so dying there without the record leaves the item unrecoverable too.
+
+    On the merge path everything before it is reversible
+    and has shipped nothing; the merge is irreversible AND closes the linked issue as a side effect.
+    The obligation is the only record that tells a later session a close is half-done, so merging
+    after failing to write it re-opens the exact window the obligation exists to close — the
+    seven-item stale-board failure — and does it silently, behind a warning in a log nobody reads.
+
+    Stopping HERE is cheap and completely recoverable: nothing has shipped, and re-running the finish
+    once the ledger is writable does the whole job. This is a separate function so the refusal is
+    directly executable in a test: it exits the process, which is what proves the merge on the next
+    line is never reached.
+    """
+    if _mid_finish_set(repo, issue, session_id, **fields):
+        return
+    _fail("mid-finish obligation",
+          f"the recovery record for #{issue} could not be persisted to the obligations ledger, so "
+          f"the merge has NOT been attempted. Merging without it would risk a merged PR, a closed "
+          f"issue and a board still showing In Progress with nothing recording that a close was "
+          f"underway. Make the repo root writable (check disk space and permissions on "
+          f"{os.path.basename(idc_ledger.ledger_path(repo))}), then re-run this finish — nothing has "
+          f"shipped yet.")
+
+
+def _mid_finish_clear(repo, issue):
+    """Clear the `mid_finish:<item>` obligation — called ONLY after the board flip has been VERIFIED
+    (`verify_tracker_closed`), never merely after the close call returned. Clearing on "the call did
+    not raise" would reopen the very window this closes: the obligation must outlive anything that
+    could still leave the board un-flipped. Best-effort, same contract as the set."""
+    try:
+        idc_ledger.clear_taint(repo, MID_FINISH_TAINT, key=issue)
+    except Exception as e:  # noqa: BLE001 — bookkeeping must never break the finish
+        _warn(f"could not clear the mid-finish obligation for #{issue}: {e}")
 
 
 # ── tracker-config.yaml (grep/sed parse — the repo's no-yq convention; mirrors
@@ -604,7 +717,8 @@ def enforce_receipt_gate(args, backend, repo, tracker_path, owner, project_numbe
               "that is not satisfied; refusing to merge (resolve it, re-review, retry)")
 
 
-def close_only_recover(args, repo, worktree_abs, tracker_path, backend, project_number, field_ids, owner, name):
+def close_only_recover(args, repo, worktree_abs, tracker_path, backend, project_number, field_ids,
+                       owner, name, session_id=None):
     """CLOSE-ONLY recovery for an ALREADY-MERGED PR whose board was never advanced — the phantom-idle
     `synthesized-complete` shape (v4 Phase 3 Stage E4 / codex P2). The normal finish runs `gh pr merge`,
     which HARD-FAILS on an already-merged PR, so this mode SKIPS the merge. Its RECEIPT is the provable
@@ -638,6 +752,16 @@ def close_only_recover(args, repo, worktree_abs, tracker_path, backend, project_
     # fail closed BEFORE any worktree/branch deletion.
     refuse_if_head_advanced(repo, branch, args.pr)
 
+    # RECORD IN-FLIGHT STATE for this path too, and REQUIRE it to be durable — the same rule the merge
+    # path uses, for the same reason its own comment gives here. Close-only does not merge, so it
+    # cannot CREATE the shipped-but-not-flipped state, but it can DIE inside it, having deleted the
+    # branch its own ownership guard needs, before the board flip lands. A best-effort write left that
+    # window open behind a warning that scrolls past. Refusing costs nothing on this path: everything
+    # before the first deletion is reversible, and the PR is already merged, so nothing ships either way.
+    _require_mid_finish_obligation(repo, args.issue, session_id, pr=args.pr, branch=branch,
+                                   worktree=worktree_abs or "", backend=backend,
+                                   tracker=(tracker_path if backend == "filesystem" else ""))
+
     # Explicit --worktree override first (idempotent), THEN auto-detect a worktree still on this branch
     # (the idle teammate's) so `git branch -D` won't fail on a checked-out branch (P2b). Safe to remove:
     # the branch is PROVEN merged + ownership-verified.
@@ -665,6 +789,7 @@ def close_only_recover(args, repo, worktree_abs, tracker_path, backend, project_
         verify_worktree_gone(repo, worktree_abs)
     verify_tracker_closed(backend, repo, args.issue, tracker_path, project_number, owner, name)
 
+    _mid_finish_clear(repo, args.issue)   # discharged only after the board flip was read back
     print("finish: ok (close-only)")
     sys.exit(0)
 
@@ -693,6 +818,10 @@ def main():
                      help="path to the review verdict JSON (the finish RECEIPT) — validated + its "
                           "findings must be routed to the board + its merge_conditions met before any "
                           "merge/close. Required: the finish is a receipt gate.")
+    ap.add_argument("--session-id", dest="session_id", default=None,
+                     help="session id recorded on the mid-finish obligation (default: "
+                          "$CLAUDE_CODE_SESSION_ID) — it attributes the in-flight record, and a "
+                          "LATER session recovers it regardless of whose id is on it")
     ap.add_argument("--no-require-routed-findings", dest="require_routed", action="store_false",
                      help="escape hatch (debug only): skip the routed-findings sub-check; the verdict "
                           "is still validated, must own the item, and its merge_conditions still enforced")
@@ -707,6 +836,7 @@ def main():
     if args.worktree:
         worktree_abs = args.worktree if os.path.isabs(args.worktree) else os.path.join(repo, args.worktree)
     tracker_path = args.tracker or os.path.join(repo, "TRACKER.md")
+    session_id = args.session_id or os.environ.get("CLAUDE_CODE_SESSION_ID") or None
 
     backend = read_backend(repo)
     if backend not in ("filesystem", "github"):
@@ -718,7 +848,7 @@ def main():
     # receipt gate: its receipt is the proven merged state, not the verdict — see close_only_recover.
     if args.close_only:
         close_only_recover(args, repo, worktree_abs, tracker_path, backend,
-                           project_number, field_ids, owner, name)
+                           project_number, field_ids, owner, name, session_id=session_id)
 
     # RECEIPT GATE — refuse before ANY mutation if the review verdict isn't a clean, routed, condition-
     # met receipt for THIS PR/issue (the finish is a P5 receipt gate; mirrors the engine's close guard).
@@ -726,6 +856,13 @@ def main():
 
     branch = resolve_branch(repo, args.pr)
     worktree_remove(repo, worktree_abs)
+    # RECORD IN-FLIGHT STATE, immediately before the point of no return. Set here rather than at the
+    # top of the tail on purpose: everything above this line is reversible and leaves no shipped
+    # work, so a taint set earlier would describe an item that never merged — an obligation no
+    # recovery could ever discharge. The window that actually corrupts the board opens at `pr_merge`.
+    _require_mid_finish_obligation(repo, args.issue, session_id, pr=args.pr, branch=branch,
+                                   worktree=worktree_abs or "", backend=backend,
+                                   tracker=(tracker_path if backend == "filesystem" else ""))
     pr_merge(repo, args.pr, args.merge_method)
     verify_remote_branch_gone(repo, branch)
     branch_delete_local(repo, branch)
@@ -740,6 +877,8 @@ def main():
     verify_worktree_gone(repo, worktree_abs)
     verify_tracker_closed(backend, repo, args.issue, tracker_path, project_number, owner, name)
 
+    # The obligation is discharged only now — after the board flip was READ BACK and confirmed.
+    _mid_finish_clear(repo, args.issue)
     print("finish: ok")
     sys.exit(0)
 

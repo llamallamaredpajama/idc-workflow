@@ -872,7 +872,7 @@ def _drain_bounded(proc, timeout):
     `subprocess.TimeoutExpired` on the deadline, so the caller's existing timeout arm — kill the process
     group, invalidate the stale receipt, report INDETERMINATE — is reached unchanged.
 
-    THE RETENTION CUT IS A REDACTION BOUNDARY, and that is why `_drop_severed_head` is here. Keeping
+    THE RETENTION CUT IS A REDACTION BOUNDARY, and that is why `_redact_severed_head` is here. Keeping
     only the last N bytes means the buffer's FIRST LINE is a fragment whenever the child printed more
     than N — and this cut happens BEFORE anything is redacted, so a cut that lands inside a
     `password=` label leaves `word=hunter2xyzzy`, which the named-secret rule can no longer match and
@@ -880,7 +880,7 @@ def _drain_bounded(proc, timeout):
     Redacting at every trim instead would put a whole-buffer pass on every 64 KB chunk — for a child
     that prints a gigabyte that is ~16k passes over 17 KB, which is the same "a check that hangs is a
     check that gets removed" failure the bound exists to prevent. Dropping the severed head is O(1) and
-    closes it for good: see `_drop_severed_head` for the rule.
+    closes it for good: see `_redact_severed_head` for the rule.
 
     Returns the decoded tail; the caller applies `_redacted_tail` to it as before."""
     deadline = time.time() + timeout

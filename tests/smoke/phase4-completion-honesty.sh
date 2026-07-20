@@ -267,8 +267,23 @@ CMD="bash scripts/verify-live-web.sh"
 CMDSHA="$(printf '%s' "$CMD" | shasum -a 256 2>/dev/null | awk '{print $1}')"
 [ -n "$CMDSHA" ] || CMDSHA="$(printf '%s' "$CMD" | sha256sum | awk '{print $1}')"
 ev() { printf '<!-- idc-live-evidence: %s -->\n' "$1" > "$L/docs/workflow/live-verification/web.md"; }
+# THE RUN WITNESS, written alongside every ok-shaped receipt these fixtures plant. A committed receipt
+# is portable, so every field in it is one a reader can recompute — and therefore one a forger can
+# type. `idc_live_check.py` consequently requires a second record, in the GIT DIRECTORY, that this
+# working copy really executed the command (see its run-witness block). Section B tests the RECORD's
+# rules, so its fixtures must construct the state a REAL run leaves, not half of it; genuineness
+# itself — that a receipt without this witness is refused — is proven separately by phase11::R14.
+# Deliberately mirrors the receipt's own commit/exit/digest, so every case below still fails for its
+# own reason rather than for a provenance mismatch.
+wit() { # $1 = commit, $2 = exit_code (default 0)
+  local gd; gd="$(git -C "$L" rev-parse --absolute-git-dir)"
+  mkdir -p "$gd/idc"
+  printf '{"version":1,"runs":{"web":{"command_sha256":"%s","commit":"%s","exit_code":%s,"ran_at":"2026-01-01T00:00:00Z"}}}\n' \
+    "$CMDSHA" "$1" "${2:-0}" > "$gd/idc/live-runs.json"
+}
 ev_ok() { # $1 = commit, $2 = observed
   ev "{\"surface\":\"web\",\"mode\":\"executed\",\"command\":\"$CMD\",\"command_sha256\":\"$CMDSHA\",\"exit_code\":0,\"commit\":\"$1\",\"observed\":\"$2\"}"
+  wit "$1"
 }
 ev_ok "$SHA" "ingest 200; open 200 signed URL; chat 200"
 git -C "$L" add -A; git -C "$L" commit -qm evidence

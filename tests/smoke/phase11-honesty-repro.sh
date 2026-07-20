@@ -348,4 +348,74 @@ if problems:
 PY
 echo "  ok R17: the README table matches the shipped command set exactly, and states the right count"
 
+echo "== R14. A FORGED RECEIPT THAT MIMICS A REAL ONE MUST BE REFUSED"
+# `agents/idc-build.md` tells the implementing agent "never hand-write an evidence record — a typed
+# claim does not satisfy this gate, by construction". That was FALSE as written: every field the audit
+# read is one anyone can type. The declared command and its sha256 come straight out of the config,
+# the commit is `git rev-parse HEAD`, and `exit_code: 0` is just a character. A receipt carrying all
+# of them passed with `live: ok` WHILE THE SURFACE'S REAL VERIFY COMMAND EXITED 1 — the gate built to
+# refuse "I tested it" accepting exactly that, about itself.
+#
+# It cannot be fixed by checking the receipt harder: the receipt is committed and portable, so every
+# value in it must be recomputable by any reader, and whatever a reader can recompute a forger can
+# write. The proof of a run therefore lives where git cannot carry it (the git directory), and the
+# audit requires the two to agree.
+R14="$WORK/forged-receipt"; mkrepo "$R14"; mkdir -p "$R14/scripts" "$R14/services"
+echo x > "$R14/services/app.py"
+cat > "$R14/WORKFLOW-config.yaml" <<'EOF'
+project:
+  name: demo
+live_verification:
+  surfaces:
+    - name: web
+      verify: bash scripts/verify.sh
+      paths: [services/]
+EOF
+# THE PRODUCT IS BROKEN: the real verify command exits 1. Any verdict other than a refusal is the gate
+# telling a lie about a deployment that does not work.
+printf '#!/bin/bash\necho "journey failed: open returned 500"\nexit 1\n' > "$R14/scripts/verify.sh"
+git -C "$R14" add -A; git -C "$R14" commit -qm declare
+SHA14="$(git -C "$R14" rev-parse HEAD)"
+CMD14="bash scripts/verify.sh"
+CMDSHA14="$(printf '%s' "$CMD14" | shasum -a 256 2>/dev/null | awk '{print $1}')"
+[ -n "$CMDSHA14" ] || CMDSHA14="$(printf '%s' "$CMD14" | sha256sum | awk '{print $1}')"
+
+# The forgery: precisely the record a successful run would have produced, hand-written.
+mkdir -p "$R14/docs/workflow/live-verification"
+printf '<!-- idc-live-evidence: {"surface":"web","mode":"executed","command":"%s","command_sha256":"%s","exit_code":0,"commit":"%s","ran_at":"2026-07-19T04:11:07Z","duration_s":12.4,"observed":"signed in; ingest 200; open 200; chat 200"} -->\n' \
+  "$CMD14" "$CMDSHA14" "$SHA14" > "$R14/docs/workflow/live-verification/web.md"
+git -C "$R14" add -A; git -C "$R14" commit -qm "evidence"
+out14="$(python3 "$LIVE" --repo "$R14" 2>&1)"; rc14=$?
+[ "$rc14" = 0 ] \
+  && fail "R14: a hand-written receipt mimicking a real run was ACCEPTED (rc=0) while the surface's own verify command exits 1 — a typed claim satisfied the gate. Got: $out14"
+printf '%s' "$out14" | grep -qE 'live: (gap|error)' \
+  || fail "R14: the forged receipt was refused, but not with a live: gap/error verdict. Got: $out14"
+
+# POSITIVE CONTROL — MANDATORY. A gate that refuses every receipt is the same false verdict pointed
+# the other way: it would silently disable the live gate while looking like a hardening win. A receipt
+# produced by a REAL `--run` must still audit clean, through the ordinary read-only audit path.
+printf '#!/bin/bash\necho "signed in; ingest 200; open 200; chat 200"\nexit 0\n' > "$R14/scripts/verify.sh"
+git -C "$R14" add -A; git -C "$R14" commit -qm "fix the product"
+run14="$(python3 "$LIVE" --repo "$R14" --run 2>&1)"; rrc14=$?
+[ "$rrc14" = 0 ] || fail "R14 positive control: a real --run over a PASSING verify command must be clean, got rc=$rrc14 out=$run14"
+git -C "$R14" add -A; git -C "$R14" commit -qm "real evidence"
+aud14="$(python3 "$LIVE" --repo "$R14" 2>&1)"; arc14=$?
+[ "$arc14" = 0 ] && [ "$aud14" = "live: ok" ] \
+  || fail "R14 positive control: the receipt a REAL --run just produced must audit clean, got rc=$arc14 out=$aud14"
+
+# ...and the forgery must still be refused in the very repo where a genuine run has happened, so the
+# refusal is about the RECEIPT's provenance and not about the repo being untouched. Re-plant the
+# forged exit_code over the genuine receipt: the run this working copy really did says exit 1.
+printf '#!/bin/bash\necho "journey failed again"\nexit 1\n' > "$R14/scripts/verify.sh"
+git -C "$R14" add -A; git -C "$R14" commit -qm "product breaks again"
+python3 "$LIVE" --repo "$R14" --run >/dev/null 2>&1   # a real run; records exit 1 both places
+SHA14B="$(git -C "$R14" rev-parse HEAD)"
+printf '<!-- idc-live-evidence: {"surface":"web","mode":"executed","command":"%s","command_sha256":"%s","exit_code":0,"commit":"%s","ran_at":"2026-07-19T04:11:07Z","duration_s":12.4,"observed":"all green, honest"} -->\n' \
+  "$CMD14" "$CMDSHA14" "$SHA14B" > "$R14/docs/workflow/live-verification/web.md"
+git -C "$R14" add -A; git -C "$R14" commit -qm "overwrite the receipt with a passing claim"
+out14b="$(python3 "$LIVE" --repo "$R14" 2>&1)"; rc14b=$?
+[ "$rc14b" = 0 ] \
+  && fail "R14: overwriting a genuine receipt's exit_code with 0 was ACCEPTED — the audit trusts the receipt over what this working copy actually ran. Got: $out14b"
+echo "  ok R14: a shape-mimicking forged receipt is refused; a receipt from a real --run still audits clean"
+
 echo "phase11-honesty-repro: OK"

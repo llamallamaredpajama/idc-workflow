@@ -549,6 +549,109 @@ def surface_spec(repo, surface):
     }
 
 
+# ── the run witness: what makes "a typed claim does not satisfy this gate" TRUE ──────────────────
+# THE HOLE THIS CLOSES. Every field the audit checked — `mode`, the command, its sha256, `exit_code`,
+# the commit — is data anyone can TYPE. The declared command and its digest are derivable from the
+# config, and the commit is `git rev-parse HEAD`. So a hand-written receipt that merely MIMICKED the
+# shape of a real one passed the audit with `live: ok` while the surface's actual verify command
+# exited 1 — the exact "typed claim read as a measurement" failure this whole gate exists to refuse,
+# reproduced inside the gate itself.
+#
+# WHY NO AMOUNT OF CHECKING THE RECEIPT COULD FIX IT. The receipt is a COMMITTED, portable file, so
+# every value in it must be one any reader can recompute — and anything a reader can recompute, a
+# forger can write. A signature does not help either: the key would have to travel with the repo to
+# stay verifiable, and a key in the repo is not a secret. The receipt alone can therefore never
+# establish that a run happened. That is a property of committed evidence, not an oversight.
+#
+# SO THE PROOF LIVES WHERE IT CANNOT BE COMMITTED. A real `--run` also records the run in the repo's
+# GIT DIRECTORY, which git itself never tracks and no diff or PR can carry. The audit requires the
+# receipt and this witness to AGREE. A receipt that arrived by being typed — into the working tree, or
+# into a branch someone pushed — has no witness behind it and is refused by name.
+#
+# THE BOUNDARY, STATED. This proves "this working copy really executed that command against that
+# commit". It is not a defence against someone who edits the git directory by hand; nothing local
+# could be. It is exactly the defence the shipped instruction needs: writing the evidence file is no
+# longer sufficient, so `agents/idc-build.md`'s "never hand-write an evidence record — a typed claim
+# does not satisfy this gate" is now a true statement about behaviour rather than a request.
+#
+# THE COST, STATED. A receipt is only trusted in a working copy that ran it. A fresh clone that has a
+# committed receipt but has never run the check reports a GAP naming that reason, and `--run` clears
+# it. That is the honest answer: the receipt records that the surface passed somewhere, and this
+# working copy has not seen it happen.
+_WITNESS_REL = os.path.join("idc", "live-runs.json")
+_WITNESS_VERSION = 1
+
+
+def _witness_path(repo):
+    """`<git-dir>/idc/live-runs.json` — inside the git directory, so git can never carry it."""
+    rc, git_dir = _git(repo, "rev-parse", "--absolute-git-dir")
+    if rc != 0 or not git_dir:
+        _fail(f"{repo}: the git directory could not be resolved, so a real run cannot be "
+              f"distinguished from a typed receipt")
+    return os.path.join(git_dir, _WITNESS_REL)
+
+
+def _read_witnesses(repo):
+    """Every recorded run in this working copy, keyed by surface name. Unreadable/corrupt reads as
+    EMPTY — which withholds trust rather than granting it, so damaging this file can only ever cost a
+    re-run, never manufacture a pass."""
+    try:
+        with open(_witness_path(repo), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict) or data.get("version") != _WITNESS_VERSION:
+        return {}
+    runs = data.get("runs")
+    return runs if isinstance(runs, dict) else {}
+
+
+def record_witness(repo, spec, rc, commit):
+    """Record that THIS working copy really executed this surface's command. Called only by `--run`.
+
+    A failure to record is an ERROR, not a shrug: the run happened but cannot be proven later, and the
+    audit would report a gap with a misleading reason. Better to say so now, while the operator is
+    still watching the run they started.
+    """
+    path = _witness_path(repo)
+    runs = _read_witnesses(repo)
+    runs[spec["name"]] = {
+        "command_sha256": spec["verify_sha256"],
+        "commit": commit,
+        "exit_code": rc,
+        "ran_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"version": _WITNESS_VERSION, "runs": runs}, fh, sort_keys=True)
+        os.replace(tmp, path)
+    except OSError as e:
+        _fail(f"surface {spec['name']!r}: the run could not be recorded in the git directory "
+              f"({e}) — the command ran, but nothing would be able to tell that receipt apart from a "
+              f"hand-written one")
+
+
+def _witness_gap(repo, spec, payload):
+    """The reason this receipt is not corroborated by a real run here, or None when it is."""
+    entry = _read_witnesses(repo).get(spec["name"])
+    if not isinstance(entry, dict):
+        return (f"{spec['rel']} claims an executed run, but this working copy has no record of ever "
+                f"running `{spec['verify']}` — a receipt that was hand-written, or that arrived in a "
+                f"commit, is not a measurement; run `idc_live_check.py --repo . --run`")
+    for field, claimed in (("command_sha256", payload.get("command_sha256")),
+                           ("commit", payload.get("commit")),
+                           ("exit_code", payload.get("exit_code"))):
+        recorded = entry.get(field)
+        claimed = claimed.strip() if isinstance(claimed, str) else claimed
+        if recorded != claimed:
+            return (f"{spec['rel']} disagrees with what this working copy actually ran: the receipt "
+                    f"says {field}={claimed!r}, the recorded run says {recorded!r} — re-run "
+                    f"`idc_live_check.py --repo . --run`")
+    return None
+
+
 def _git(repo, *args):
     """(rc, stdout) for a git call in `repo`; a git that cannot be run at all is an ERROR."""
     try:
@@ -919,6 +1022,16 @@ def audit_surface(repo, spec):
         cure = ("re-attest it" if spec["attested"] else "re-run `idc_live_check.py --repo . --run`")
         return (f"evidence is STALE — {n} commit(s) have landed on {', '.join(spec['paths'])} since "
                 f"{commit[:12]}; {cure}"), None
+    # THE GENUINENESS CHECK, LAST. Every rule above interrogates what the receipt SAYS, and each has
+    # its own reason a reader can act on; this one asks the question the receipt cannot answer about
+    # itself — did a run actually happen here? It runs last on purpose, so a receipt that is stale, or
+    # names a dead commit, or records a failing exit still reports THAT, rather than being masked by a
+    # provenance complaint. An `attested: true` surface is exempt by definition: its record is
+    # hand-written on purpose, and the verdict line already says so out loud.
+    if not spec["attested"]:
+        witness_gap = _witness_gap(repo, spec, payload)
+        if witness_gap:
+            return witness_gap, None
     return None, (MODE_ATTESTED if spec["attested"] else MODE_EXECUTED)
 
 
@@ -980,6 +1093,10 @@ def main(argv=None):
             sys.stderr.write(f"idc-live-check: {spec['name']} — running `{spec['verify']}`\n")
             code, output, duration = run_verify(repo, spec, head)
             write_evidence(spec, code, output, head, duration)
+            # Recorded AFTER the receipt, so a crash between the two leaves an uncorroborated receipt
+            # (a gap, which re-running clears) rather than a witness vouching for a receipt that was
+            # never written.
+            record_witness(repo, spec, code, head)
             sys.stderr.write(f"idc-live-check: {spec['name']} — exit {code} in {duration}s; "
                              f"evidence regenerated at {spec['rel']}\n")
 

@@ -43,8 +43,16 @@ fi
 ```
 The gate **never blocks a clean board** — a `drain: complete` always wins over the ledger hint, so it
 only ever catches a stop that abandons a non-empty inbox. On a clean `drain: complete` exit you may
-clear the marker (same command with `clear --kind orchestrator_drain`); it is optional hygiene, not
-required for correctness (a drained board is allowed to stop regardless).
+clear the marker with the command below; it is optional hygiene, not required for correctness (a
+drained board is allowed to stop regardless). Note `clear` takes **no `--session`** — a taint's
+identity is its `(kind, key)` pair, and clearing is deliberately NOT session-scoped so a later session
+can discharge a dead one's marker. (Written out in full because "the same command with `clear`" read
+as "keep the `--session` flag too": two independent agent runs did exactly that and hit
+`unrecognized arguments: --session`.)
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/idc_ledger.py" --cwd "$PWD" clear \
+  --kind orchestrator_drain
+```
 
 **Pick up a paused run (deterministic — run ONCE, at drain start).** A previous session may have
 stopped this repo's pipeline on purpose with `/idc:pause`. That pause is graceful by contract —

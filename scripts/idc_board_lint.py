@@ -550,4 +550,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # Broken-pipe guard: prints one line per flagged item, and this CLI already reads board JSON on
+    # stdin — it lives mid-pipeline, where an early-exiting reader is the norm, not the exception.
+    import idc_stdio
+    raise SystemExit(idc_stdio.run_guarded(main))

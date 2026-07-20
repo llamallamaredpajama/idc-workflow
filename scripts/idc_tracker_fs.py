@@ -462,4 +462,16 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # Broken-pipe guard: `show` dumps an item with its whole accumulated comment history, which
+    # outgrows a pipe buffer on any long-lived item. Imported here, not at module scope — this file
+    # is an import-graph root that other code loads as a library.
+    # The import is TOLERANT because importing no sibling at module scope is a property this file
+    # HAS — a lone copy of it, sitting anywhere, still runs, and the governance suite relies on that
+    # for other roots. A relocated copy therefore runs unguarded (its previous behaviour) instead of
+    # dying on ImportError. In its real home the guard always loads.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    try:
+        import idc_stdio
+    except ImportError:
+        raise SystemExit(main())
+    raise SystemExit(idc_stdio.run_guarded(main))

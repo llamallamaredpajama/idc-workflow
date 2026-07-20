@@ -1022,4 +1022,19 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # Broken-pipe guard. The whole-board dump is the report operators most often pipe (`| jq`,
+    # `| head`), and it far exceeds any pipe buffer — unguarded, the reader leaving early crashed the
+    # writer with a traceback. Imported HERE rather than at module scope on purpose: this file is a
+    # library for fourteen other scripts, and none of them should inherit an import (or any
+    # process-wide stdout behavior) that only the command-line entry point needs.
+    #
+    # The import is TOLERANT because importing no sibling at module scope is a property this file
+    # HAS — a lone copy of it, sitting anywhere, still runs, and the governance suite relies on that
+    # for other roots. A relocated copy therefore runs unguarded (its previous behaviour) instead of
+    # dying on ImportError. In its real home the guard always loads.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    try:
+        import idc_stdio
+    except ImportError:
+        raise SystemExit(main())
+    raise SystemExit(idc_stdio.run_guarded(main))

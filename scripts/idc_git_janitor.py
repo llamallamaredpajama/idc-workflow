@@ -1284,4 +1284,7 @@ def _write_scan_report(repo, session, nonce, exit_code):
 
 
 if __name__ == "__main__":
-    main()
+    # Broken-pipe guard: `--json` prints every finding, and this is the hand-run verification command
+    # an operator routinely pipes to `jq`/`head`. See scripts/idc_stdio.py.
+    import idc_stdio
+    raise SystemExit(idc_stdio.run_guarded(main))

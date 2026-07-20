@@ -1025,4 +1025,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # Broken-pipe guard: `--report` prints one line per finding, unbounded in board size, and it is
+    # the path a human runs while debugging a drifted board. See scripts/idc_stdio.py.
+    import idc_stdio
+    raise SystemExit(idc_stdio.run_guarded(main))

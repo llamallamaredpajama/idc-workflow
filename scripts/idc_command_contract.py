@@ -58,6 +58,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)                       # scripts/ — for idc_plugin_freshness
 sys.path.insert(0, os.path.join(_HERE, "hooks"))  # scripts/hooks/ — for idc_ledger
 import idc_plugin_freshness as freshness  # noqa: E402
+import idc_stdio  # noqa: E402
 import idc_ledger  # noqa: E402
 
 # The thirteen governed `/idc:*` entry points. Kept in lockstep with commands/*.md and the
@@ -3085,4 +3086,7 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # `status --json` on a busy repo prints far more than a pipe buffer holds, and an operator pipes
+    # it to `head`/`less` as a matter of course — unguarded, that crashed with a traceback. See
+    # idc_stdio for why the guard needs the flush and the /dev/null redirect, not just the except.
+    raise SystemExit(idc_stdio.run_guarded(main))

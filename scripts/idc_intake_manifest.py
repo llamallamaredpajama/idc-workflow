@@ -972,4 +972,18 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # Broken-pipe guard: `status --json` embeds an unbounded `units[]` list. Imported here, not at
+    # module scope — this file is an import-graph root that other code loads as a library.
+    #
+    # THE IMPORT IS TOLERANT ON PURPOSE. Importing no sibling at module scope is a property this file
+    # HAS: a lone copy of it, sitting anywhere, still runs. The governance suite depends on exactly
+    # that — external-intake-completeness.sh copies this file to a temp dir with one validator
+    # deleted and executes the copy to prove the gate it removed was the one doing the work. A hard
+    # import would kill that copy with ImportError, so a relocated copy runs UNGUARDED (its previous
+    # behaviour) rather than not running at all. In its real home the guard always loads.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    try:
+        import idc_stdio
+    except ImportError:
+        raise SystemExit(main())
+    raise SystemExit(idc_stdio.run_guarded(main))

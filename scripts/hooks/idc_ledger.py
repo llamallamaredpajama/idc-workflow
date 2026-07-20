@@ -191,8 +191,18 @@ def _read_raw(cwd):
 # obligation that lost its `kind` (a hand-edited file) is invisible to the readers and pronounced
 # trustworthy by the probe — which is exactly the hidden-obligation false-clean the probe exists to
 # catch, arriving through the probe itself.
+#
+# THE INVARIANT, so this stops being a field list somebody has to remember to extend:
+#
+#     anything `probe()` vouches for must be VISIBLE TO EVERY READER.
+#
+# So the tuple is the UNION of every field any reader keys on — not the fields the two readers that
+# were reported happened to use. `state` is here because `active_commands` (the reader the Stop
+# closeout gate consults) skips on it, and a command record without one was therefore invisible to
+# that gate while the probe called the ledger trustworthy: the same hidden obligation, one field over.
+# `tests/smoke/phase11-honesty-repro.sh` asserts the implication directly against every reader.
 _TAINT_IDENTITY = ("kind",)
-_COMMAND_IDENTITY = ("session_id", "command")
+_COMMAND_IDENTITY = ("session_id", "command", "state")
 
 
 def _has_identity(entry, fields):
@@ -225,6 +235,8 @@ def read_state(cwd):
     TOLERANT. A v1 file (`{'version': 1, 'taints': [...]}`) is normalized in-memory to v2 with an
     empty `commands` list — it is NOT rewritten on disk until the next write, so a read never mutates
     the file."""
+    # (identity-filtered by the two readers below, so a caller of this cannot see a record that the
+    # gates cannot — the probe refuses such a ledger outright rather than letting the views diverge.)
     return {"version": _LEDGER_VERSION, "taints": read_taints(cwd), "commands": _read_commands(cwd)}
 
 

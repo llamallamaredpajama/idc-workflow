@@ -170,8 +170,22 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   absent, then re-reads the receipt or exact legacy fallback and confirms every non-anchor footprint
   is ALREADY absent (a
   no-action with a stamped flag or a runtime artifact/footprint still present is refused).
-- **`blocked_external`** — a safety refusal (a dirty tree, an unverifiable board, an invalid receipt):
-  `blocker:{helper, exit (nonzero), diagnostic}`. Report it as blocked; do not proceed to remove.
+- **`blocked_external`** — a safety refusal. Two causes can close this command, and they are cited
+  **differently** because they are different kinds of fact. Report either as blocked; do not proceed
+  to remove.
+  - **The working tree is dirty** — the Phase-0 stop above, which is mandatory. This is a repo
+    CONDITION, not a helper's failure, so there is no helper to name: cite
+    `blocker:{condition:"dirty_tree", diagnostic:"<what is uncommitted>"}`. The validator re-derives
+    the tree state read-only, under the same `idc-archive-*.tar.gz` exemption Phase 0 prints, and
+    **refuses the close if the tree is clean by then** — so this cannot be claimed by a run that
+    simply chose to stop.
+  - **The install receipt is invalid** — the Phase-1 stop (`idc_receipt_check.py verify` exits
+    nonzero). Cite `blocker:{helper:"idc_receipt_check.py", exit:<its nonzero exit>, diagnostic}`;
+    the validator re-runs the fingerprint check read-only and requires it to still fail.
+
+  An **unverifiable board is NOT a blocked stop** for this command: Phase 0 step 3 is
+  warn-and-confirm — report that the in-flight count could not be verified and proceed on an explicit
+  `yes`. Closing as blocked for that reason would report a refusal the playbook never made.
 
 **3c — The single POST-finish step: remove receipt + anchor, then commit atomically.** Only after
 `finish` succeeds, remove the retained canonical receipt (when present) and governance anchor, then

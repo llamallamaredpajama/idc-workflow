@@ -300,7 +300,7 @@ only when a full pass leaves nothing actionable:
    python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_next_action.py" --repo "$PWD" --json
    python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
      --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command autorun \
-     --status <complete|waiting_gate|blocked_external> --evidence-json '<envelope>'
+     --status <complete|waiting_gate|blocked_external|paused> --evidence-json '<envelope>'
    ```
    - **`complete`** — **this session's** PERSISTED drain verdict (`.idc-drain-verdict.json`, written by
      `idc_autorun_drain.py --session-id "$CLAUDE_CODE_SESSION_ID"`) reads exactly `drain: complete`
@@ -321,6 +321,12 @@ only when a full pass leaves nothing actionable:
      caller list alone is not proof, and a nonexistent/unreadable repo fails closed.
    - **`blocked_external`** — the drain reported `unknown`/`rate-limited`: `blocker:{helper, exit
      (nonzero), diagnostic}`. Report it as blocked, never as a drained run.
+   - **`paused`** — this run was stopped by a deliberate `/idc:pause`, and
+     `idc_pause_state.py close-open` is what closes it (never a hand-written `finish`). The
+     validator re-derives the confirmed pause record **and** re-runs the quiescence check, so
+     the status cannot be claimed by a run that merely stopped. Listed here because it IS a
+     legal terminal for this command: an agent reading only this playbook could not otherwise
+     discover the outcome its own lifecycle record can take.
 
 **Drain everything; one launch gate, never self-narrow.** `/idc:autorun` drains the **whole** repo —
 every phase, every eligible wave. Before draining, size a **staffing estimate** from the

@@ -202,6 +202,74 @@ _BLOCKER_HELPERS = {
 }
 
 
+# ── BLOCKING CAUSES THAT ARE NOT A HELPER'S FAILURE ──────────────────────────────────────────────
+# Some MANDATED stops are repo CONDITIONS, and no helper citation can honestly ground one: a dirty
+# working tree is not any helper's exit code. `commands/uninstall.md` Phase 0 makes it a hard stop
+# ("Any remaining output → STOP"), and by then the entry gate has already opened the lifecycle
+# record — so the playbook mandated a stop whose prescribed close the allowlist refused BY NAME, and
+# the record was stranded open with nothing recording why. That is the deadlock this release exists
+# to delete, arriving through the closeout itself.
+#
+# THE GROUNDING IS THE ONE THIS FILE ALREADY USES for the receipt checker and the quiescence reader:
+# RE-DERIVE READ-ONLY, and accept the blocker only when the condition STILL holds right now. It needs
+# no durable artifact — which matters, because the class of failure being claimed is often that
+# nothing could be written — and it is impossible to satisfy in a healthy repo, so an invented
+# blocker is refused exactly as an invented helper failure is.
+#
+# THE PER-COMMAND NARROWING STAYS. Without it any command could touch a file and manufacture a
+# blocked stop. A command may cite only a condition its own shipped playbook mandates a stop for, and
+# `tests/smoke/phase11-honesty-repro.sh` checks that correspondence for EVERY command, not for the
+# ones that happened to be reported — which is how the same drift reached a fourth command.
+def _dirty_tree_still_holds(repo: str):
+    """(holds, detail) — is the working tree still dirty, by the rule `commands/uninstall.md` prints?
+
+    The archive exemption is the playbook's, verbatim: a previous run's untracked
+    `idc-archive-*.tar.gz` does not count, so a re-run cannot self-block on its own backup. A git that
+    cannot answer leaves the claim UNPROVEN (rule B: an unreadable truth is a refusal, never a pass)."""
+    if not _ne_str(repo) or not os.path.isdir(repo):
+        return False, "the repo path is missing or unreadable, so the tree state cannot be re-derived"
+    try:
+        proc = subprocess.run(["git", "-C", repo, "status", "--porcelain"],
+                              capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, f"git status could not be run to re-derive the tree state ({e})"
+    if proc.returncode != 0:
+        return False, "git status exited nonzero, so the tree state cannot be re-derived"
+    remaining = [ln for ln in (proc.stdout or "").splitlines()
+                 if ln.strip() and not _ARCHIVE_EXEMPT.match(ln)]
+    if not remaining:
+        return False, "the working tree is CLEAN right now — there is nothing blocking this command"
+    return True, f"{len(remaining)} path(s) still differ from HEAD"
+
+
+_ARCHIVE_EXEMPT = re.compile(r"^\?\? idc-archive-.*\.tar\.gz$")
+_REPO_CONDITIONS = {"dirty_tree": _dirty_tree_still_holds}
+# Which commands may cite which condition — taken from the Phase-0 stops their playbooks MANDATE.
+_CONDITIONS_FOR_COMMAND = {"uninstall": {"dirty_tree"}}
+
+
+def _check_blocking_condition(command: str, condition: str, blocker: dict,
+                              repo: str) -> CloseoutResult:
+    """`blocked_external` grounded by a REPO CONDITION re-derived read-only — see the block above."""
+    if condition not in _REPO_CONDITIONS:
+        return _fail("blocked-external-unknown-condition",
+                     f"refs.blocker.condition {condition!r} is not a known blocking condition "
+                     f"(known: {sorted(_REPO_CONDITIONS)})")
+    if condition not in _CONDITIONS_FOR_COMMAND.get(command, set()):
+        return _fail("blocked-external-condition-not-for-command",
+                     f"{condition!r} is not a blocking condition /idc:{command} may cite — only a "
+                     "condition this command's own playbook mandates a stop for can close it "
+                     f"(citable: {sorted(_CONDITIONS_FOR_COMMAND.get(command, set()))})")
+    if not _ne_str(blocker.get("diagnostic")):
+        return _fail("blocked-external-no-diagnostic", "refs.blocker.diagnostic must be a concise reason")
+    holds, detail = _REPO_CONDITIONS[condition](repo)
+    if not holds:
+        return _fail("blocked-external-condition-not-blocked",
+                     f"blocked_external citing the condition {condition!r} is RE-DERIVED read-only at "
+                     f"closeout and it does not hold: {detail}")
+    return CloseoutResult(True, "ok", "closeout valid", {"blocked_condition": condition})
+
+
 def _check_blocker(command: str, refs: dict, repo: str, session: str) -> CloseoutResult:
     """`blocked_external` proof: a real shipped deterministic helper that BELONGS to THIS command (the
     per-command allowlist, finding 1a), its NONZERO exit, and a concise diagnostic. This is an honest
@@ -213,6 +281,11 @@ def _check_blocker(command: str, refs: dict, repo: str, session: str) -> Closeou
     if not isinstance(blocker, dict):
         return _fail("blocked-external-no-blocker",
                      "blocked_external requires refs.blocker = {helper, exit, diagnostic}")
+    # A CONDITION-grounded blocker takes the branch above: the cause is a repo state, not a helper's
+    # exit, so there is no helper to name and no exit to match. A blocker carrying NEITHER a condition
+    # nor a helper still falls through to the helper refusals below, unchanged.
+    if _ne_str(blocker.get("condition")):
+        return _check_blocking_condition(command, str(blocker["condition"]), blocker, repo)
     if not _ne_str(blocker.get("helper")):
         return _fail("blocked-external-no-helper", "refs.blocker.helper must name the failing helper")
     if not _known_helper(blocker.get("helper")):

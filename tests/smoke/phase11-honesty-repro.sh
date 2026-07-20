@@ -695,7 +695,57 @@ out4d="$(python3 "$PC" --repo "$R4" --tracker "$R4/TRACKER.md" 2>&1)"; rc4d=$?
 printf '%s' "$out4d" | grep -q 'pause-ready: error' \
   || fail "R4: an entry with no identity must be INDETERMINATE (pause-ready: error), got rc=$rc4d out=$out4d"
 rm -f "$LEDGER4"
-echo "  ok R4: an unreadable ledger, and one hiding an identity-less entry, are both indeterminate"
+
+# R26 — THE INVARIANT ITSELF, over every reader, rather than the two fields that were reported. The
+# identity tuple was written from the readers somebody had looked at, and `active_commands` — the
+# reader the Stop CLOSEOUT gate consults — skips on a THIRD field (`state`). So a command record with
+# no `state` was invisible to that gate while the probe vouched for the ledger: the same hidden
+# obligation as the `kind`-less taint above, one field over. What has to hold is the implication, and
+# this asserts it directly in both directions.
+python3 - "$PLUGIN" "$R4" <<'PY' || fail "R26: the strict probe vouches for a ledger whose records a reader cannot see"
+import json, os, sys
+plugin, repo = sys.argv[1], sys.argv[2]
+sys.path.insert(0, os.path.join(plugin, "scripts", "hooks"))
+import idc_ledger as L
+
+path = L.ledger_path(repo)
+
+def write(ledger):
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(ledger, fh)
+
+# (1) NEGATIVE — drop each identity field in turn; every one must make the probe REFUSE, because
+#     every one makes some reader skip the record.
+full_cmd = {"session_id": "s1", "command": "/idc:build", "issue": 42, "state": "active"}
+for field in L._COMMAND_IDENTITY:
+    rec = {k: v for k, v in full_cmd.items() if k != field}
+    write({"version": 2, "taints": [], "commands": [rec]})
+    ok, detail = L.probe(repo)
+    if ok:
+        sys.exit(f"a command record with no {field!r} is skipped by a reader, yet probe() called the "
+                 f"ledger trustworthy ({detail!r}) — a real open command can hide behind it")
+    if field not in detail:
+        sys.exit(f"the refusal must NAME the missing field so an operator can repair the file; "
+                 f"dropping {field!r} said: {detail!r}")
+
+# (2) POSITIVE — a record carrying exactly the identity is VISIBLE TO EVERY READER. This is the half
+#     that keeps the predicate honest: a tuple that refused everything would pass (1) trivially.
+write({"version": 2, "taints": [{"kind": "mid_finish", "key": "42"}], "commands": [full_cmd]})
+ok, detail = L.probe(repo)
+if not ok:
+    sys.exit(f"a well-formed ledger was refused: {detail!r}")
+if not L.read_taints(repo):
+    sys.exit("probe() vouched for a ledger whose taint `read_taints` cannot see")
+if not L.pending_taints(repo):
+    sys.exit("probe() vouched for a ledger whose taint `pending_taints` cannot see")
+if not L.read_state(repo)["commands"]:
+    sys.exit("probe() vouched for a ledger whose command `read_state` cannot see")
+if not L.active_commands(repo, "s1"):
+    sys.exit("probe() vouched for a ledger whose ACTIVE command `active_commands` cannot see — that "
+             "is the reader the Stop closeout gate uses, so the obligation is hidden from the gate")
+os.remove(path)
+PY
+echo "  ok R4/R26: an unreadable ledger and an identity-less entry are indeterminate; what the probe vouches for, every reader sees"
 
 echo "== R5. AN OPERATIONAL GIT FAILURE IS NOT \"NOT APPLICABLE\"  [T8]"
 # `git rev-parse --git-dir` exits nonzero for far more than "there is no repo here": dubious
@@ -876,8 +926,42 @@ if "exit 3" not in (line or ""):
     sys.exit(f"the checker's return code is lost: {line!r}")
 if "DISTINCTIVE-CAUSE" not in (line or ""):
     sys.exit(f"the checker's stderr tail — the only thing naming the cause — is lost: {line!r}")
+
+# R23 — …AND THAT TAIL MUST NOT CARRY A CREDENTIAL. The tail is built from raw child output and then
+# travels: the drain prints it, the Stop gate scrapes it back with `_drain_detail`, and
+# `_annotate_board` interpolates it into a TRACKER.md comment — an ordinary TRACKED file, so the
+# destination is committed git history. A checker most plausibly leaks by dying on a git remote whose
+# URL carries a token, which is exactly the shape below. `ghp_` is a shape the SHARED table already
+# knows, so the door existed and this sink simply did not route through it.
+SECRET = "ghp_" + "A1b2C3d4E5f6G7h8I9j0"
+with open(path, "w", encoding="utf-8") as fh:
+    fh.write("import sys\n"
+             f"sys.stderr.write(\"fatal: unable to access "
+             f"'https://git-user:{SECRET}@github.com/o/r': 403\\n\")\n"
+             "sys.exit(3)\n")
+try:
+    verdict, line = D._run_wave_close_check(name, [], "acceptance", ("acceptance: ok",), 60)
+finally:
+    os.remove(path)
+if verdict != "error":
+    sys.exit(f"precondition: the leaking checker must still classify as error, got {verdict!r}")
+if SECRET in (line or ""):
+    sys.exit(f"a credential on a crashed checker's stderr reached the drain verdict line, which is "
+             f"printed, scraped by the Stop gate and committed into a TRACKER.md comment: {line!r}")
+if "unable to access" not in (line or ""):
+    sys.exit(f"the scrub ate the diagnostic instead of the credential — the tail exists to name the "
+             f"cause: {line!r}")
+
+# ...and the same string at the sink the gate actually writes: `_drain_detail` scrapes the drain's
+# stdout, and its output is what lands in the board comment body.
+gate_spec = importlib.util.spec_from_file_location(
+    "G", os.path.join(plugin, "scripts", "hooks", "idc_stop_fixpoint_gate.py"))
+G = importlib.util.module_from_spec(gate_spec); gate_spec.loader.exec_module(G)
+detail = G._drain_detail("drain: unknown\n" + (line or "") + "\n")
+if SECRET in (detail or ""):
+    sys.exit(f"the credential survived into the Stop gate's board-comment detail: {detail!r}")
 PY
-echo "  ok R16: a crashed checker reports its exit code and the stderr tail that names the cause"
+echo "  ok R16/R23: a crashed checker names its cause, and a credential on its stderr is scrubbed at the door"
 
 echo "== R7/R8. /idc:resume MUST HAVE A LEGAL OUTCOME, AND MUST PROVE ITS OWN SURVEY  [T4]"
 # R7 — when the pause record cannot be REMOVED, resume.md correctly says STOP. But `complete` requires
@@ -1384,5 +1468,122 @@ out20c="$(python3 "$LIVE" --repo "$R20" 2>&1)"; rc20c=$?
 [ "$rc20c" = 0 ] \
   || fail "R20: the run witness was DESTROYED by worktree teardown, so a verified wave became unprovable. Got: $out20c"
 echo "  ok R20: the witness lives in the shared git dir, is visible from main, and survives teardown"
+
+echo "== R24. THE ENFORCING TABLE AND THE SHIPPED PLAYBOOK, FOR EVERY COMMAND  [F36, F39]"
+# THE THIRD INSTANCE of one defect. A command's terminal statuses live in TWO artifacts — the claim
+# table the validator enforces, and the `--status <…>` menu the agent reads — and they were compared
+# only where a drift had been REPORTED: `autorun`/`pause`/`resume` were brought back into line, and
+# nothing looked at the other ten. `/idc:uninstall` documented a `blocked_external` its allowlist
+# refused BY NAME, so on the exact Phase-0 stop the playbook makes MANDATORY the prescribed close was
+# rejected and the lifecycle record stayed open. `build`/`autorun`/`recirculate` had the mirror
+# defect: a legal `paused` terminal an agent reading only its own playbook could never discover.
+#
+# So this case is EXHAUSTIVE over the commands rather than over the drifts somebody noticed. It is
+# the only durable answer to "why are the two artifacts duplicated": both are real (one validates,
+# one instructs) and neither can be deleted, so the check has to cover all of them.
+python3 - "$PLUGIN" <<'PY' || fail "R24: a shipped playbook and the enforcing table disagree about a command's closeout"
+import os, re, sys
+plugin = sys.argv[1]
+sys.path.insert(0, os.path.join(plugin, "scripts", "hooks"))
+sys.path.insert(0, os.path.join(plugin, "scripts"))
+import idc_command_contract as C
+
+problems = []
+for cmd in sorted(C.COMMANDS):
+    path = os.path.join(plugin, "commands", f"{cmd}.md")
+    if not os.path.isfile(path):
+        problems.append(f"/idc:{cmd} has no shipped playbook at commands/{cmd}.md")
+        continue
+    md = open(path, encoding="utf-8").read()
+    menu = re.search(r"--status <([^>]+)>", md)
+    if not menu:
+        problems.append(f"/idc:{cmd} prints no `--status <…>` menu, so an agent cannot discover its "
+                        f"legal terminals at all")
+        continue
+    documented, enforced = set(menu.group(1).split("|")), set(C.LEGAL_STATUSES[cmd])
+    for extra in sorted(documented - enforced):
+        problems.append(f"/idc:{cmd} DOCUMENTS the terminal {extra!r} that the claim table refuses — "
+                        f"the playbook prescribes a close the validator rejects, so that stop has no "
+                        f"legal outcome and its lifecycle record stays open")
+    for missing in sorted(enforced - documented):
+        problems.append(f"/idc:{cmd} may legally close as {missing!r} and its own playbook never says "
+                        f"so — an agent reading it cannot discover an outcome its record can take")
+    # ...and the same question for HOW a blocked stop is cited. Every helper the allowlist grants must
+    # be NAMED in the command's own playbook, and every condition it may cite likewise: a citation the
+    # agent cannot look up is a close it will not make.
+    for helper in sorted(C._BLOCKER_HELPERS.get(cmd, set())):
+        if helper not in md:
+            problems.append(f"/idc:{cmd} may cite the blocking helper {helper!r} and its playbook "
+                            f"never names it")
+    for cond in sorted(C._CONDITIONS_FOR_COMMAND.get(cmd, set())):
+        if cond not in md:
+            problems.append(f"/idc:{cmd} may cite the blocking condition {cond!r} and its playbook "
+                            f"never names it")
+    if "blocked_external" in enforced and not (C._BLOCKER_HELPERS.get(cmd)
+                                               or C._CONDITIONS_FOR_COMMAND.get(cmd)):
+        problems.append(f"/idc:{cmd} may close as blocked_external with nothing it is allowed to "
+                        f"cite — every blocked stop would be refused")
+if problems:
+    sys.exit("\n".join("  - " + p for p in problems))
+PY
+echo "  ok R24: all 13 playbooks and the claim table agree on terminals and on what a blocker may cite"
+
+echo "== R25. A MANDATED PHASE-0 STOP MUST HAVE A LEGAL CLOSE  [F36]"
+# The substance behind R24 for the case that was actually deadlocked: `/idc:uninstall` Phase 0 makes a
+# dirty working tree a hard STOP, and the entry gate has already opened the lifecycle record by then.
+# A dirty tree is not any helper's exit code, so no helper citation could ground it honestly — the
+# close is grounded by RE-DERIVING the condition read-only, and refused when it no longer holds.
+R25="$WORK/uninstall-dirty"; mkrepo "$R25"
+python3 - "$PLUGIN" "$R25" <<'PY' || fail "R25: uninstall's mandated dirty-tree stop has no legal close"
+import os, subprocess, sys
+plugin, repo = sys.argv[1], sys.argv[2]
+sys.path.insert(0, os.path.join(plugin, "scripts", "hooks"))
+sys.path.insert(0, os.path.join(plugin, "scripts"))
+import idc_command_contract as C
+
+def ev(**blocker):
+    return {"schema_version": 1, "refs": {"blocker": blocker}}
+
+# A CLEAN repo: the claim is refused, because the condition it names does not hold. This is the half
+# that keeps the new door from becoming a way to invent a blocked stop.
+clean = C.validate_closeout("uninstall", "blocked_external",
+                            ev(condition="dirty_tree", diagnostic="uncommitted operator changes"),
+                            repo=repo, session="s1")
+if clean.ok:
+    sys.exit("an invented dirty-tree blocker CLOSED a uninstall run in a clean repo — the condition "
+             "must be re-derived, not asserted")
+if clean.reason_code != "blocked-external-condition-not-blocked":
+    sys.exit(f"the refusal must name the re-derivation, got {clean.reason_code!r}: {clean.message}")
+
+# ...now the real stop the playbook mandates.
+with open(os.path.join(repo, "app.py"), "w", encoding="utf-8") as fh:
+    fh.write("edited by the operator\n")
+blocked = C.validate_closeout("uninstall", "blocked_external",
+                              ev(condition="dirty_tree", diagnostic="uncommitted operator changes"),
+                              repo=repo, session="s1")
+if not blocked.ok:
+    sys.exit(f"the Phase-0 dirty-tree stop the playbook MANDATES has no legal close: "
+             f"{blocked.reason_code} — {blocked.message}")
+
+# The archive exemption Phase 0 prints: a re-run must not self-block on its own backup tarball.
+subprocess.run(["git", "-C", repo, "checkout", "--", "app.py"], check=True)
+with open(os.path.join(repo, "idc-archive-2026.tar.gz"), "w", encoding="utf-8") as fh:
+    fh.write("backup")
+exempt = C.validate_closeout("uninstall", "blocked_external",
+                             ev(condition="dirty_tree", diagnostic="uncommitted operator changes"),
+                             repo=repo, session="s1")
+if exempt.ok:
+    sys.exit("a previous run's untracked idc-archive tarball counted as a dirty tree, so a re-run "
+             "self-blocks — Phase 0 exempts it by name")
+
+# ...and the condition is not a skeleton key: a command whose playbook mandates no such stop is refused.
+for other in ("build", "janitor", "init"):
+    r = C.validate_closeout(other, "blocked_external",
+                            ev(condition="dirty_tree", diagnostic="d"), repo=repo, session="s1")
+    if r.ok:
+        sys.exit(f"/idc:{other} closed as blocked citing a condition its playbook does not mandate a "
+                 f"stop for — any command could then touch a file and manufacture a blocked stop")
+PY
+echo "  ok R25: uninstall's mandated dirty-tree stop closes; an invented one, an exempt one and a foreign one do not"
 
 echo "phase11-honesty-repro: OK"

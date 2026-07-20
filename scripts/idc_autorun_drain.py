@@ -407,6 +407,31 @@ def load_github(owner, project_number, repo, root=None, sid=None, repository=Non
     return issues, unverified
 
 
+def _scrub(text):
+    """Strip credential shapes out of text that came from a CHILD PROCESS, before it can be printed,
+    scraped, or committed.
+
+    THE SHARED TABLE, not a fourth private pattern list. `idc_credential_shapes` exists because two
+    surfaces had each learned about credential shapes the other missed; a third copy here would
+    guarantee the same drift. This module has no context-sensitive rules of its own to add — a
+    checker's stderr is machine output, and the self-identifying shapes are exactly what belongs in it.
+
+    FAIL CLOSED. If the shared table cannot be imported, the text is WITHHELD rather than passed
+    through: an unscrubbed credential in a committed board comment costs a rotation, and a withheld
+    diagnostic costs one re-run by hand."""
+    if not text:
+        return text
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import idc_credential_shapes as CS  # noqa: E402
+    except ImportError:
+        return "[checker output withheld — the credential-shape table could not be loaded]"
+    out = text
+    for pattern, repl in CS.bake(CS.SHAPES, "[REDACTED]"):
+        out = pattern.sub(repl, out)
+    return out
+
+
 def _run_wave_close_check(script, extra_argv, token, clean_lines, timeout=30):
     """Run a sibling wave-close checker and CLASSIFY its result — the ONE classifier all three share.
 
@@ -442,9 +467,17 @@ def _run_wave_close_check(script, extra_argv, token, clean_lines, timeout=30):
         r = subprocess.run([sys.executable, checker, *extra_argv],
                            capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.SubprocessError) as e:
-        return "error", f"{token}: error ({e})"
+        return "error", _scrub(f"{token}: error ({e})")
+    # THE DOOR. Every byte a child process printed enters this program HERE and nowhere else (this is
+    # the drain's only `subprocess.run`), and everything below travels: the verdict line is printed on
+    # stdout, the Stop gate scrapes it back out with `_drain_detail`, and `_annotate_board`
+    # interpolates it into a TRACKER.md comment — an ordinary TRACKED file. So a checker that crashes
+    # printing `fatal: unable to access 'https://git-user:ghp_…'` used to commit that token to git
+    # history, where the cost is a rotation and the exposure is permanent. Scrubbing at the door
+    # covers every one of those sinks by construction instead of by three more call-site fixes.
+    stdout, stderr = _scrub(r.stdout or ""), _scrub(r.stderr or "")
     line = None
-    for ln in (r.stdout or "").splitlines():
+    for ln in stdout.splitlines():
         if ln.startswith(token + ":"):
             line = ln.strip()
             break
@@ -465,7 +498,7 @@ def _run_wave_close_check(script, extra_argv, token, clean_lines, timeout=30):
         # line verbatim — it is the checker's own words about its own finding, and the drain's
         # contract with the governance suite is that it passes it through unedited.
         return "error", line
-    tail = " ".join((r.stderr or r.stdout or "").split())[-400:]
+    tail = " ".join((stderr or stdout).split())[-400:]
     detail = f"exit {r.returncode}, no `{token}:` line"
     return "error", f"{token}: error ({detail}{'; ' + tail if tail else ''})"
 

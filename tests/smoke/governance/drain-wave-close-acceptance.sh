@@ -37,6 +37,11 @@ WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 # writes a marker + a distinctive verdict line. This proves invocation without mutating the shipped repo.
 SPYDIR="$WORK/scripts"; mkdir -p "$SPYDIR"
 cp "$DRAIN" "$SPYDIR/idc_autorun_drain.py"
+# The drain scrubs credential shapes out of child-process output at the door, through the SHARED
+# table, which it resolves beside itself exactly as it resolves the checker. Copy it too, or this
+# fixture models an install that cannot exist — and the drain, fail-closed by design, withholds every
+# checker line rather than risk emitting an unscrubbed one.
+cp "$GOV_PLUGIN/scripts/idc_credential_shapes.py" "$SPYDIR/idc_credential_shapes.py"
 MARKER="$WORK/spy-was-invoked"
 cat > "$SPYDIR/idc_acceptance_check.py" <<PY
 #!/usr/bin/env python3

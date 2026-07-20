@@ -149,18 +149,55 @@ _DRAIN_TIMEOUT = 150
 # uses), and `_PAUSE_CONFIRMED` is the ONE state that counts as a real pause.
 _PAUSE_FILENAME = ".idc-pause-state.json"
 _PAUSE_CONFIRMED = "paused"
+# The record schema `idc_pause_state.confirm` writes (its `_VERSION`), held in lockstep by
+# tests/smoke/phase11-honesty-repro.sh R9, which builds a REAL record through `confirm` rather than
+# hand-writing one — so a schema change breaks the test instead of silently loosening this gate.
+_PAUSE_VERSION = 1
+_PAUSE_QUIESCENCE_OK = "ok"
 
 
 def _is_paused(cwd):
-    """True iff this repo carries a CONFIRMED pause record. TOLERANT by construction: a missing,
-    unreadable, corrupt, or merely-`pause-requested` record reads as NOT paused — the fail-closed
-    reading, since anything less than a confirmed pause leaves this gate doing its normal job."""
+    """True iff this repo carries a record that PROVES a confirmed pause.
+
+    THIS IS A BYPASS, SO IT VALIDATES THE WHOLE RECORD, NOT ONE FIELD. Returning True here allows a
+    stop BEFORE the drain check runs — it is the one path out of this gate that skips the proof of a
+    drained pipe. Consulting only `state` meant a two-key file an agent could write in a single
+    `Write` call — `{"state": "paused"}` — bought an undrained walk-away from an autorun. That is the
+    same false verdict this whole gate exists to refuse, just pointed at the gate itself.
+
+    A GENUINE record cannot be typed, because `idc_pause_state.confirm` only writes one after
+    `idc_pause_check` RE-DERIVED quiescence and returned clean: it carries the schema version, the
+    session that asked, the session that confirmed, the confirmation timestamp, and the quiescence
+    verdict that earned it. Every field below is a field a real confirmation produces as a
+    side-effect of doing the work, so requiring them all costs a forger the actual work.
+
+    NO NEW I/O. This is pure shape validation of a file already being read — nothing is re-derived,
+    no board is contacted, so the zero-GraphQL constraint on the stop path is untouched.
+
+    Still TOLERANT in the safe direction: a missing, unreadable, corrupt, merely-`pause-requested`,
+    or shape-invalid record reads as NOT paused, which leaves this gate doing its normal job.
+    """
     try:
         with open(os.path.join(cwd or ".", _PAUSE_FILENAME), encoding="utf-8") as fh:
             rec = json.load(fh)
     except (OSError, ValueError):
         return False
-    return isinstance(rec, dict) and rec.get("state") == _PAUSE_CONFIRMED
+    if not isinstance(rec, dict):
+        return False
+    if rec.get("state") != _PAUSE_CONFIRMED or rec.get("version") != _PAUSE_VERSION:
+        return False
+    # The identity of the pause: who asked, who confirmed, and when it was confirmed.
+    if not (isinstance(rec.get("session_id"), str) and rec["session_id"].strip()):
+        return False
+    if not (isinstance(rec.get("confirmed_by"), str) and rec["confirmed_by"].strip()):
+        return False
+    if not isinstance(rec.get("confirmed_ts"), (int, float)) or isinstance(rec.get("confirmed_ts"), bool):
+        return False
+    # The proof that earned it: a clean quiescence verdict, timestamped.
+    q = rec.get("quiescence")
+    if not isinstance(q, dict) or q.get("verdict") != _PAUSE_QUIESCENCE_OK:
+        return False
+    return isinstance(q.get("checked_ts"), (int, float)) and not isinstance(q.get("checked_ts"), bool)
 
 
 def _read_backend(cwd):
@@ -321,7 +358,20 @@ def _obligation_labels(pending_taints):
     return sorted(out)
 
 
-def _block_reason(detail, pending_taints):
+def _render_root(text, plugin_root):
+    """Resolve `${CLAUDE_PLUGIN_ROOT}` in an operator-facing string so the cure is runnable as written.
+
+    `${CLAUDE_PLUGIN_ROOT}` text-substitutes only inside command/agent/skill MARKDOWN. Emitted from a
+    Python hook it is a shell expansion of an UNSET variable, so the blocked operator is handed
+    `/scripts/idc_autorun_drain.py` and told it does not exist — and a gate whose escape hatch does not
+    run is a gate that gets switched off. The token stays in the strings so `lint-references.sh` rule B
+    keeps proving each one names a real shipped helper; it is resolved here, against the real root the
+    gate already receives as argv[1]. Same shape as `idc_interlock_gate.render_reason` ("Fix 6").
+    """
+    return (text or "").replace("${CLAUDE_PLUGIN_ROOT}", plugin_root) if plugin_root else (text or "")
+
+
+def _block_reason(detail, pending_taints, plugin_root=""):
     obligations = _obligation_labels(pending_taints)
     owed = (f" This session also holds unfinished ledger obligations: {', '.join(obligations)}."
             if obligations else "")
@@ -358,11 +408,12 @@ def _block_reason(detail, pending_taints):
                "work, so the run is NOT complete.")
         cure = ("drain the inbox with `/idc:recirculate` (and plan any admitted considerations / "
                 "recirculate the inert items)")
-    return (
+    return _render_root(
         "IDC stop-fixpoint gate: this autorun/build drain session is stopping while the pipe is NOT "
         f"drained ({detail}). {why}{owed} Before you stop: {cure}, then "
         "re-check `${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py` — a clean `drain: complete` is "
-        "the only honest stop."
+        "the only honest stop.",
+        plugin_root,
     )
 
 
@@ -471,10 +522,12 @@ def _gate(payload, plugin_root):
     except Exception as e:  # noqa: BLE001 — cannot verify the pipe is drained → prefer a clear block
         H.bounded_block(
             key,
-            "IDC stop-fixpoint gate: could not verify the drain state of this autorun/build session "
-            f"({e}). Failing closed (an honest stop must be provable): re-run "
-            "`${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py` and confirm `drain: complete`. "
-            "(Bounded — this will not block indefinitely.)",
+            _render_root(
+                "IDC stop-fixpoint gate: could not verify the drain state of this autorun/build "
+                f"session ({e}). Failing closed (an honest stop must be provable): re-run "
+                "`${CLAUDE_PLUGIN_ROOT}/scripts/idc_autorun_drain.py` and confirm `drain: complete`. "
+                "(Bounded — this will not block indefinitely.)",
+                plugin_root),
             bound=_STOP_GATE_BOUND)
         return  # unreachable (bounded_block exits); defensive
 
@@ -493,7 +546,7 @@ def _gate(payload, plugin_root):
     # (it documents "block needs the board"), not a second, independent must-pass condition.
     ledger_pending = bool(pending_taints)
     if board_pending and ledger_pending:
-        reason = _block_reason(detail, pending_taints)
+        reason = _block_reason(detail, pending_taints, plugin_root)
         if H.observe_only():
             H.warn(f"OBSERVE-ONLY (would block stop): {reason}")
             H.allow()

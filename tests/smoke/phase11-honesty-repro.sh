@@ -141,39 +141,95 @@ done || exit 1
 echo "  ok R3: emitted cures resolve to real helper paths"
 
 echo "== R9. THE STOP GATE MUST NOT TRUST A HANDWRITTEN PAUSE RECORD"
-# A real confirmed record carries version/session_id/confirmed_by/confirmed_ts and the quiescence
-# proof that earned it. The gate consulted only `state`, and it does so BEFORE the drain check, so a
-# two-key file bought an undrained walk-away. Validating the full shape costs no I/O and does not
-# re-derive anything, so the zero-GraphQL constraint on the stop path is untouched.
-R9="$WORK/forged"; mkrepo "$R9"
-printf '{"state":"paused"}' > "$R9/.idc-pause-state.json"
-python3 - "$GATE" "$R9" <<'PY' || fail "R9: the Stop gate accepted a forged one-key pause record"
-import importlib.util, sys, os
-plugin = os.environ["IDC_PLUGIN"]
-sys.path.insert(0, os.path.join(plugin, "scripts", "hooks"))
-sys.path.insert(0, os.path.join(plugin, "scripts"))
-spec = importlib.util.spec_from_file_location("G", sys.argv[1])
-G = importlib.util.module_from_spec(spec); spec.loader.exec_module(G)
-if G._is_paused(sys.argv[2]):
-    sys.exit("a handwritten {\"state\":\"paused\"} file was accepted as a CONFIRMED pause")
-PY
-# ...and a genuine confirmed record must still be honoured (the guard must not be a blanket refusal).
+# `_is_paused` is a BYPASS: True allows the stop BEFORE the drain check runs. The gate consulted only
+# `state`, so a two-key file an agent can emit in a single Write bought an undrained walk-away. A real
+# confirmed record carries the schema version, who asked, who confirmed, when, and the quiescence
+# proof that earned it — all produced as a side-effect of `confirm` doing the actual work. Validating
+# that shape costs no I/O and re-derives nothing, so the zero-GraphQL constraint is untouched.
+#
+# THE FORGERIES ARE DERIVED FROM A GENUINE RECORD, one broken field at a time, rather than
+# hand-written. Two reasons. A forger who has SEEN a real record copies its shape, so the lazy one-key
+# file is the LEAST interesting attack. And a hand-written "bad" record can fail for an accidental
+# reason, which would leave the guard it is supposed to cover untested — an untested guard is one a
+# later edit deletes with nothing going red. Every required field gets its own case, and the genuine
+# record itself is the positive control on both ends.
 R9B="$WORK/genuine"; mkrepo "$R9B"
 SID9=repro9
 open_record "$R9B" "$SID9" autorun
-python3 "$PS" --cwd "$R9B" request --session "$SID9" >/dev/null || fail "R9b: request failed"
-python3 "$PS" --cwd "$R9B" confirm --session "$SID9" >/dev/null || fail "R9b: a quiescent repo must be pausable"
-python3 - "$GATE" "$R9B" <<'PY' || fail "R9b: the Stop gate rejected a GENUINE confirmed pause record"
-import importlib.util, sys, os
+python3 "$PS" --cwd "$R9B" request --session "$SID9" >/dev/null || fail "R9: request failed"
+python3 "$PS" --cwd "$R9B" confirm --session "$SID9" >/dev/null || fail "R9: a quiescent repo must be pausable"
+R9="$WORK/forged"; mkrepo "$R9"
+python3 - "$GATE" "$R9B" "$R9" <<'PY' || fail "R9: the Stop gate mis-graded a pause record"
+import copy, importlib.util, json, os, sys
 plugin = os.environ["IDC_PLUGIN"]
 sys.path.insert(0, os.path.join(plugin, "scripts", "hooks"))
 sys.path.insert(0, os.path.join(plugin, "scripts"))
 spec = importlib.util.spec_from_file_location("G", sys.argv[1])
 G = importlib.util.module_from_spec(spec); spec.loader.exec_module(G)
-if not G._is_paused(sys.argv[2]):
-    sys.exit("a real confirmed pause record was refused — the guard is too strict")
+genuine_repo, forged_repo = sys.argv[2], sys.argv[3]
+name = ".idc-pause-state.json"
+
+# POSITIVE CONTROL 1 — the record a REAL `/idc:pause` just wrote must be honoured. A gate that
+# refuses everything is the same false verdict pointed the other way: it would silently disable the
+# deliberate-pause path and make every honest pause look like a dishonest exit.
+if not G._is_paused(genuine_repo):
+    sys.exit("a real confirmed pause record was REFUSED — the guard is too strict")
+with open(os.path.join(genuine_repo, name), encoding="utf-8") as fh:
+    genuine = json.load(fh)
+
+def plant(rec):
+    with open(os.path.join(forged_repo, name), "w", encoding="utf-8") as fh:
+        json.dump(rec, fh)
+
+# POSITIVE CONTROL 2 — the SAME bytes in the other repo are still honoured. Without this, a forgery
+# could be "refused" merely because this harness put it somewhere the gate never looks, and every
+# assertion below would pass for the wrong reason.
+plant(genuine)
+if not G._is_paused(forged_repo):
+    sys.exit("harness fault: a byte-identical copy of the genuine record was refused, so the "
+             "forgery cases below would prove nothing")
+
+def broken(label, mutate):
+    rec = copy.deepcopy(genuine)
+    mutate(rec)
+    return (label, rec)
+
+def drop(key):
+    return lambda r: r.pop(key, None)
+
+FORGERIES = [
+    ("the lazy forgery — one key, one Write call", {"state": "paused"}),
+    # One required field removed from an otherwise PERFECT copy. Each of these is the minimal
+    # deviation that must still be refused, so each names exactly one guard.
+    broken("no schema version",            drop("version")),
+    broken("no session_id (who asked)",    drop("session_id")),
+    broken("no confirmed_by (who confirmed)", drop("confirmed_by")),
+    broken("no confirmed_ts (when)",       drop("confirmed_ts")),
+    broken("no quiescence proof at all",   drop("quiescence")),
+    # ...and the proof present but not actually a proof.
+    broken("quiescence RECORDS ITS OWN REFUSAL (verdict: in-flight)",
+           lambda r: r["quiescence"].update({"verdict": "in-flight"})),
+    broken("quiescence block empty",       lambda r: r.update({"quiescence": {}})),
+    broken("quiescence has no checked_ts", lambda r: r["quiescence"].pop("checked_ts", None)),
+    broken("quiescence is not a mapping",  lambda r: r.update({"quiescence": "ok"})),
+    # Wrong-typed identity: JSON `true` is an int in Python, so a bare isinstance check would pass it.
+    broken("confirmed_ts is a boolean",    lambda r: r.update({"confirmed_ts": True})),
+    broken("session_id is blank",          lambda r: r.update({"session_id": "   "})),
+    broken("an unknown future schema version", lambda r: r.update({"version": 99})),
+    # Not a forgery — the honest intermediate state. It must not read as a confirmed pause either.
+    broken("merely pause-requested",       lambda r: r.update({"state": "pause-requested"})),
+]
+bad = [label for label, rec in FORGERIES if (plant(rec) or G._is_paused(forged_repo))]
+if bad:
+    sys.exit("these records bought an undrained stop: " + "; ".join(bad))
+
+# POSITIVE CONTROL 3 — after all that, the genuine record is STILL honoured. Proves the loop above
+# did not simply drive the gate into refusing everything.
+plant(genuine)
+if not G._is_paused(forged_repo):
+    sys.exit("the genuine record stopped being honoured once the forgeries had been tried")
 PY
-echo "  ok R9: forged pause record refused, genuine one still honoured"
+echo "  ok R9: 14 forged/incomplete records refused, the genuine one still honoured"
 
 echo "== R10. THE NORMAL PAUSE JOURNEY MUST NOT REFUSE ITSELF"
 # The entry gate opens a lifecycle record for EVERY command but `init`, so a real `/idc:pause` has an

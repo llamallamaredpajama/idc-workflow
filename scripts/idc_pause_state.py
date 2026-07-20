@@ -225,19 +225,41 @@ def _pausable_commands():
     return {cmd for cmd, statuses in CONTRACT.LEGAL_STATUSES.items() if CONTRACT.PAUSED in statuses}
 
 
-def close_open_commands(cwd, session_id):
+# The command that DRIVES this walk. `/idc:pause` is the one running `close-open`, so its own
+# lifecycle record is not interrupted work — it is the driver, and it closes itself through its own
+# closeout gate (`complete`, or `blocked_external` on a refused pause) once the walk is done.
+_DRIVER_COMMAND = "pause"
+
+
+def close_open_commands(cwd, session_id, driver=_DRIVER_COMMAND):
     """Close every still-open PIPELINE command record owned by `session_id` with the `paused` terminal
     status, through the validating command-contract door (never a raw ledger write).
 
     This is what makes a pause honest at the lifecycle layer: the run the operator stopped was holding
     an open obligation (`/idc:autorun`, `/idc:build`, …) and the Stop closeout gate refuses a walk-away
     from one. Before `paused` existed there was no truthful way to close it — `complete` would have
-    claimed a drained pipe. Returns `(closed, refused)` lists of `(command, message)`."""
+    claimed a drained pipe. Returns `(closed, refused)` lists of `(command, message)`.
+
+    THE DRIVER'S OWN RECORD IS SKIPPED, and that is not a special case bolted on. The command entry
+    gate opens a lifecycle record for every command but `init`, so a REAL `/idc:pause` always has an
+    open `pause` record when `commands/pause.md` step 4 runs this walk. `pause` is not a pausable
+    stage, so the walk used to refuse the very command doing the pausing: every honest pause printed
+    `/idc:pause REFUSED [paused-stage-unobservable] …` — telling the operator to "finish or abandon"
+    the pause they were in the middle of taking — and exited 1, which `commands/pause.md` reads as a
+    failed pause. A refusal that fires on the success path is noise, and noise on a success path is
+    how an operator learns to ignore a real refusal.
+
+    The skip is narrow on purpose: only the driving command, only in this session's own records. Every
+    other unpausable stage (`think`/`intake`/`plan`) is still REFUSED BY NAME, which is the honest
+    report of what the pause did not cover (`phase4-completion-honesty.sh` H7 holds that).
+    """
     import idc_command_contract as CONTRACT  # noqa: E402 — lazy
     pausable = _pausable_commands()
     closed, refused = [], []
     for rec in idc_ledger.active_commands(cwd, session_id):
         command = rec.get("command")
+        if command == driver:
+            continue
         if command not in pausable:
             # SAY SO, rather than skipping quietly. `paused` is only claimable by the stages whose
             # half-done work the quiescence checker can observe (build/autorun/recirculate — see

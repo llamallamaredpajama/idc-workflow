@@ -102,6 +102,23 @@ _CURES = {
                           "--session-id <sid> clears the taint once the ticket has left the inbox"),
 }
 
+# THE TOKEN ABOVE IS A TEMPLATE, NOT A STRING TO PRINT. `${CLAUDE_PLUGIN_ROOT}` text-substitutes only
+# inside command/agent/skill MARKDOWN; emitted from Python it is an ordinary shell expansion of an
+# UNSET variable, so an operator who pastes the cure runs `python3 /scripts/idc_git_finish.py` and is
+# told the file does not exist — a block with an unrunnable escape is a block with no escape.
+#
+# It stays in the table so `scripts/lint-references.sh` rule B keeps proving every cure names a real
+# shipped helper, and is resolved HERE, at render time. This file lives at `<plugin>/scripts/`, so it
+# can derive its own root from `__file__` and needs no new argument. Same shape as
+# `idc_interlock_gate.render_reason` ("Fix 6") — one pattern for this, not two.
+PLUGIN_ROOT = os.path.dirname(_HERE)
+
+
+def render_cure(text: str, plugin_root: str = "") -> str:
+    """An operator-facing cure with `${CLAUDE_PLUGIN_ROOT}` resolved, so it is runnable as written."""
+    root = plugin_root or PLUGIN_ROOT
+    return (text or "").replace("${CLAUDE_PLUGIN_ROOT}", root) if root else (text or "")
+
 
 class Indeterminate(Exception):
     """Ground truth could not be established — the caller reports exit 2, never a clean pause."""
@@ -212,13 +229,13 @@ def check(repo: str, backend=None, tracker=None, owner=None, project=None, timeo
         resolved_backend, board = _resolve_board_args(args)
         findings = []
         for num in _coherence_findings(args, resolved_backend, board):
-            findings.append({"kind": "coherence", "ref": f"#{num}", "cure": _CURES["coherence"]})
+            findings.append({"kind": "coherence", "ref": f"#{num}", "cure": render_cure(_CURES["coherence"])})
         for num in _claimed_items(args.repo):
-            findings.append({"kind": "claimed", "ref": f"#{num}", "cure": _CURES["claimed"]})
+            findings.append({"kind": "claimed", "ref": f"#{num}", "cure": render_cure(_CURES["claimed"])})
         for taint in _half_done_taints(args.repo):
             kind, _, key = taint.partition(":")
             findings.append({"kind": kind, "ref": f"#{key}" if key.isdigit() else (key or kind),
-                             "cure": _CURES[kind]})
+                             "cure": render_cure(_CURES[kind])})
     except Indeterminate as exc:
         return 2, "error", [{"kind": "error", "ref": str(exc), "cure":
                              "establish ground truth first (fix the board/config read, then re-run "

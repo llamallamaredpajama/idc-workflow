@@ -652,6 +652,63 @@ def _witness_gap(repo, spec, payload):
     return None
 
 
+_TOKEN_SPLIT = re.compile(r"[\s;|&()<>]+")
+
+
+def verifier_paths(repo, spec):
+    """The repo-relative files the VERIFY COMMAND ITSELF is made of, for the freshness rule.
+
+    THE GAP THIS CLOSES. `paths:` names the code the surface is made of, and the expiry rule watches
+    it. But the verify command is code too, and it was watched by nothing: the shipped example
+    declares `paths: [services/, web/, infra/]` and `verify: bash scripts/verify-live-web.sh`, so
+    editing the PROBE — weakening an assertion, deleting a step, commenting out the chat check —
+    left every receipt it had produced looking current. The receipt says "this command passed", and
+    the command silently became a different command. `command_sha256` catches a change to the
+    declared STRING; nothing caught a change to the file that string runs.
+
+    Derived rather than declared, because asking projects to list their probe's files again would
+    just be a second thing to forget. Any token in the raw command that resolves to a real file
+    inside the repo counts — that is `scripts/verify-live-web.sh` in the example, and a bare `curl`
+    or `--fail` resolves to nothing and is ignored. Deliberately shallow: it does not chase what the
+    script itself sources, so it is a floor on freshness, not a proof of closure.
+    """
+    root = os.path.realpath(repo)
+    found = []
+    for tok in _TOKEN_SPLIT.split(spec.get("verify_raw") or ""):
+        tok = tok.strip().strip("'\"")
+        if not tok or tok.startswith("-"):
+            continue
+        cand = tok if os.path.isabs(tok) else os.path.join(root, tok)
+        try:
+            if not os.path.isfile(cand):
+                continue
+            rel = os.path.relpath(os.path.realpath(cand), root)
+        except (OSError, ValueError):
+            continue
+        if not rel.startswith(".." + os.sep) and rel != ".." and rel not in found:
+            found.append(rel)
+    return found
+
+
+def _dirty_paths(repo, spec):
+    """The surface's own tracked files that differ from HEAD right now, if any.
+
+    WHY A RUN OVER A DIRTY TREE CANNOT BE ATTRIBUTED TO HEAD. The verify command executes against the
+    WORKING TREE, and the receipt records `commit: <HEAD>`. When the two disagree, the receipt claims
+    a code state that was never the one exercised: the audit's whole expiry rule then reasons about
+    commits, while what actually passed was an uncommitted edit that may never be committed at all.
+    That is a false green with a real deployment behind it.
+
+    SCOPED TO THE SURFACE'S OWN PATHS, and only tracked files, on purpose. A run inevitably dirties
+    the tree by writing its own evidence receipt, and repos carry all sorts of unrelated scratch;
+    neither says anything about whether the code backing this surface was the code that ran.
+    """
+    rc, out = _git(repo, "status", "--porcelain", "--untracked-files=no", "--", *spec["paths"])
+    if rc != 0:
+        return []
+    return [ln[3:].strip() for ln in out.splitlines() if ln.strip()]
+
+
 def _git(repo, *args):
     """(rc, stdout) for a git call in `repo`; a git that cannot be run at all is an ERROR."""
     try:
@@ -1014,13 +1071,17 @@ def audit_surface(repo, spec):
                 f"(unmerged or rewritten) — it does not describe what shipped"), None
     # THE EXPIRY. Anything landing on the surface's own paths since the run invalidates it, because the
     # thing that was proven working is no longer the thing that is deployed.
-    rc, out = _git(repo, "log", "--format=%H", f"{commit}..HEAD", "--", *spec["paths"])
+    # The freshness set is the surface's declared paths PLUS the verify command's own files: a probe
+    # that has been weakened since the run proves nothing about the run, and `command_sha256` only
+    # notices a change to the declared STRING, never to the script that string executes.
+    watched = list(spec["paths"]) + [p for p in verifier_paths(repo, spec) if p not in spec["paths"]]
+    rc, out = _git(repo, "log", "--format=%H", f"{commit}..HEAD", "--", *watched)
     if rc != 0:
         _fail(f"git log over surface {spec['name']!r} paths failed")
     if out:
         n = len(out.splitlines())
         cure = ("re-attest it" if spec["attested"] else "re-run `idc_live_check.py --repo . --run`")
-        return (f"evidence is STALE — {n} commit(s) have landed on {', '.join(spec['paths'])} since "
+        return (f"evidence is STALE — {n} commit(s) have landed on {', '.join(watched)} since "
                 f"{commit[:12]}; {cure}"), None
     # THE GENUINENESS CHECK, LAST. Every rule above interrogates what the receipt SAYS, and each has
     # its own reason a reader can act on; this one asks the question the receipt cannot answer about
@@ -1090,6 +1151,20 @@ def main(argv=None):
                 sys.stderr.write(f"idc-live-check: {spec['name']} — attested: true, nothing to execute "
                                  f"(the record is hand-written)\n")
                 continue
+            # A RUN IS ATTRIBUTED TO A COMMIT, so it may not start from a tree that is not that
+            # commit. The command executes against the WORKING TREE while the receipt records HEAD;
+            # if the surface's own code is uncommitted, the receipt would claim a code state that was
+            # never exercised, and every expiry rule downstream reasons about commits. Refusing here
+            # is INDETERMINATE, not a gap: nothing is known about the product, only that the run
+            # could not be honestly attributed. Committing the work and re-running clears it.
+            dirty = _dirty_paths(repo, spec)
+            if dirty:
+                shown = ", ".join(dirty[:5]) + (f" (+{len(dirty) - 5} more)" if len(dirty) > 5 else "")
+                _invalidate(spec, head,
+                            f"the surface's own files are uncommitted at run time ({shown})")
+                _fail(f"surface {spec['name']!r}: {shown} differ from HEAD, so a run now could not be "
+                      f"attributed to any commit — the command would execute the working tree while "
+                      f"the receipt named {head[:12]}. Commit the surface's code, then re-run")
             sys.stderr.write(f"idc-live-check: {spec['name']} — running `{spec['verify']}`\n")
             code, output, duration = run_verify(repo, spec, head)
             write_evidence(spec, code, output, head, duration)

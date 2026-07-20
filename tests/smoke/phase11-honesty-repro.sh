@@ -536,4 +536,59 @@ chmod 755 "$R5B/.git"
   || fail "R5: an unreadable git repo must be INDETERMINATE (exit 2), got rc=$rc5b out=$out5b"
 echo "  ok R5: a non-git dir is not-applicable, an unreadable one is indeterminate"
 
+echo "== R11/R12. A RECEIPT MUST NAME THE CODE THAT ACTUALLY RAN  [T7]"
+# R11 — the command executes the WORKING TREE while the receipt records HEAD, so a run started over
+# uncommitted surface code claims a code state that was never exercised.
+# R12 — the expiry rule watched `paths:` only. The verify SCRIPT is code too: weakening the probe
+# (deleting a step, commenting out an assertion) left every receipt it had produced looking current.
+# `command_sha256` only notices a change to the declared STRING, never to the file that string runs.
+R11="$WORK/attribution"; mkrepo "$R11"; mkdir -p "$R11/scripts" "$R11/services"
+echo v1 > "$R11/services/app.py"
+cat > "$R11/WORKFLOW-config.yaml" <<'EOF'
+project:
+  name: demo
+live_verification:
+  surfaces:
+    - name: web
+      verify: bash scripts/verify.sh
+      paths: [services/]
+EOF
+printf '#!/bin/bash\necho "journey ok"\nexit 0\n' > "$R11/scripts/verify.sh"
+git -C "$R11" add -A; git -C "$R11" commit -qm declare
+# Baseline: a clean tree runs and audits clean, so the refusals below are not simply "always red".
+out11="$(python3 "$LIVE" --repo "$R11" --run 2>&1)"; rc11=$?
+[ "$rc11" = 0 ] || fail "R11: precondition — a clean tree must run and pass, got rc=$rc11 out=$out11"
+git -C "$R11" add -A; git -C "$R11" commit -qm evidence
+[ "$(python3 "$LIVE" --repo "$R11" 2>&1)" = "live: ok" ] \
+  || fail "R11: precondition — the receipt from that run must audit clean"
+
+# R11 — dirty the SURFACE'S OWN code and re-run. The run cannot be attributed to any commit.
+echo v2-uncommitted >> "$R11/services/app.py"
+out11b="$(python3 "$LIVE" --repo "$R11" --run 2>&1)"; rc11b=$?
+[ "$rc11b" = 0 ] \
+  && fail "R11: a run over UNCOMMITTED surface code was recorded against HEAD — the receipt names a code state that was never exercised. Got: $out11b"
+[ "$rc11b" = 2 ] \
+  || fail "R11: an unattributable run is INDETERMINATE (exit 2), not a product finding, got rc=$rc11b out=$out11b"
+git -C "$R11" checkout -- services/app.py
+# ...and unrelated dirt must NOT block a run: the scope is the surface's own paths, and a run always
+# dirties the tree by writing its own receipt.
+echo scratch > "$R11/notes.txt"
+out11c="$(python3 "$LIVE" --repo "$R11" --run 2>&1)"; rc11c=$?
+[ "$rc11c" = 0 ] \
+  || fail "R11: unrelated uncommitted files blocked a run — the dirty check must be scoped to the surface's own paths, got rc=$rc11c out=$out11c"
+rm -f "$R11/notes.txt"; git -C "$R11" add -A; git -C "$R11" commit -qm evidence2 2>/dev/null
+
+# R12 — change ONLY the verify script and commit it. `paths:` is untouched and the declared command
+# string is identical, so nothing but the probe itself has changed.
+[ "$(python3 "$LIVE" --repo "$R11" 2>&1)" = "live: ok" ] \
+  || fail "R12: precondition — the receipt must be clean before the verifier is weakened"
+printf '#!/bin/bash\n# the chat step was deleted\nexit 0\n' > "$R11/scripts/verify.sh"
+git -C "$R11" add -A; git -C "$R11" commit -qm "weaken the probe"
+out12="$(python3 "$LIVE" --repo "$R11" 2>&1)"; rc12=$?
+[ "$rc12" = 0 ] \
+  && fail "R12: the verify SCRIPT was rewritten and committed, and its old receipt still audits clean — a receipt outlived the probe that produced it. Got: $out12"
+printf '%s' "$out12" | grep -q 'live: gap' \
+  || fail "R12: a weakened verifier must expire its receipt as a GAP, got rc=$rc12 out=$out12"
+echo "  ok R11/R12: an unattributable run is refused; editing the probe expires its receipts"
+
 echo "phase11-honesty-repro: OK"

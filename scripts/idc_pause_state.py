@@ -69,8 +69,10 @@ repo, or (on `confirm`) the quiescence check REFUSED the pause — its own exit 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import subprocess
 import sys
 import time
 
@@ -109,6 +111,103 @@ def read_record(cwd):
     if not isinstance(data, dict) or data.get("state") not in _ACTIVE_STATES:
         return None
     return data
+
+
+# ── the confirmation witness: proof that a REAL confirm ran in THIS working copy ──────────────────
+# WHY THE RECORD ALONE CANNOT CARRY THIS. `.idc-pause-state.json` sits at the workspace root and every
+# field in it is a value a caller can type: `version`/`state`/`quiescence.verdict` are constants, the
+# two ids are arbitrary strings, the two timestamps arbitrary numbers. The Stop fixpoint gate treats a
+# confirmed record as a BYPASS — it allows a stop WITHOUT proving the pipe is drained — so validating
+# that record's shape, however many fields, only raises the cost of forgery from one `Write` to one
+# slightly longer `Write`. It is the same argument `idc_live_check.py` makes about a portable receipt
+# ("every value in a portable record must be one any reader can recompute — and anything a reader can
+# recompute, a forger can write"), and it takes the same answer: leave a corroborating mark where the
+# honest path leaves one and a typed file does not.
+#
+# THIS CHECKOUT'S GIT DIRECTORY, deliberately NOT the shared one `idc_live_check` uses. What each
+# witness vouches for has a different scope: a live receipt is a COMMITTED artifact that travels
+# between checkouts, so its witness belongs to the repository (and must survive worktree teardown);
+# the pause record is a per-workspace sidecar that never travels, so its witness belongs to the same
+# workspace and should die with it. A linked worktree's pause is its own.
+#
+# WHAT THIS PROVES, stated plainly rather than overclaimed: that a real `confirm` ran in this working
+# copy and produced EXACTLY this record. It does NOT prove that nobody edited the git directory.
+# Nothing local can prove that, and a signature would not help — the key would have to live here too.
+_WITNESS_REL = os.path.join("idc", "pause-confirmations.json")
+_WITNESS_VERSION = 1
+
+
+def _git_dir(cwd):
+    """This checkout's git directory (absolute), or None when git cannot answer."""
+    try:
+        r = subprocess.run(["git", "-C", cwd or ".", "rev-parse", "--absolute-git-dir"],
+                           capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    out = (r.stdout or "").strip()
+    return out if r.returncode == 0 and out else None
+
+
+def record_digest(rec) -> str:
+    """A digest over the record's CANONICAL form, so the witness names one exact record.
+
+    Canonical (sorted keys, no whitespace) rather than the file's bytes, because the on-disk
+    formatting is the writer's business and a reader must reach the same answer from the parsed dict.
+    """
+    return hashlib.sha256(
+        json.dumps(rec, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def witness_path(cwd):
+    """`<git-dir>/idc/pause-confirmations.json`, or None when there is no git directory."""
+    d = _git_dir(cwd)
+    return os.path.join(d, _WITNESS_REL) if d else None
+
+
+def read_witness(cwd):
+    """The digest this checkout recorded for its confirmed pause, or None. TOLERANT: anything
+    unreadable reads as "no confirmation is proven", which withholds the bypass rather than granting
+    it — damaging this file can only ever cost a re-pause."""
+    path = witness_path(cwd)
+    if path is None:
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("version") != _WITNESS_VERSION:
+        return None
+    digest = data.get("digest")
+    return digest if isinstance(digest, str) and digest.strip() else None
+
+
+def _record_confirmation(cwd, rec) -> bool:
+    """Record that THIS working copy really confirmed exactly `rec`. Returns whether it persisted."""
+    path = witness_path(cwd)
+    if path is None:
+        return False
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+    except OSError:
+        return False
+    return idc_hook_lib.atomic_write_json(
+        path, {"version": _WITNESS_VERSION, "digest": record_digest(rec),
+               "session_id": str(rec.get("confirmed_by") or ""),
+               "confirmed_ts": rec.get("confirmed_ts")},
+        prefix=".idc-pause-witness.", label="pause-witness")
+
+
+def _clear_confirmation(cwd) -> None:
+    """Drop the witness when the pause is lifted. Best-effort: a witness with no record grants
+    nothing (every reader looks at the record first), so a failure here cannot manufacture a pause."""
+    path = witness_path(cwd)
+    if path is None:
+        return
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 def is_paused(cwd) -> bool:
@@ -160,6 +259,15 @@ def confirm(cwd, session_id, backend=None, tracker=None, owner=None, project=Non
     if not idc_hook_lib.is_governed_repo(cwd):
         return None, 2, "error", [{"kind": "error", "ref": "not a governed IDC repo", "cure":
                                    "run /idc:init first — a pause is a statement about a governed pipeline"}]
+    # THE SAME GUARD `request` HAS, and it belongs here rather than in the CLI arm. The strictest
+    # reader of this record — the Stop gate's `_is_paused` — refuses a blank `session_id`/`confirmed_by`,
+    # so a writer that accepts one produces a record the operator is told succeeded and the gate then
+    # treats as dishonest, blocking the stop three times before loud-fail-allowing it. The writer must
+    # enforce what its strictest reader requires.
+    if not str(session_id or "").strip():
+        return None, 2, "error", [{"kind": "error", "ref": "a pause must name the session confirming it",
+                                   "cure": "pass --session \"$CLAUDE_CODE_SESSION_ID\"; a pause with no "
+                                           "session identity cannot be attributed to any run"}]
     code, verdict, findings = idc_pause_check.check(cwd, backend=backend, tracker=tracker, owner=owner,
                                                     project=project, timeout=timeout)
     existing = read_record(cwd)
@@ -175,7 +283,20 @@ def confirm(cwd, session_id, backend=None, tracker=None, owner=None, project=Non
     rec.update({"version": _VERSION, "state": PAUSED, "confirmed_ts": now,
                 "confirmed_by": str(session_id),
                 "quiescence": {"verdict": verdict, "checked_ts": now}})
+    # THE WITNESS IS WRITTEN FIRST, and the order is the safe one. A witness with no `paused` record
+    # grants nothing — every reader looks at the record first — whereas a `paused` record with no
+    # witness is a pause the operator believes they took and the Stop gate will not honour. So a crash
+    # between the two leaves the WEAKER state (still `pause-requested`), which re-running clears.
+    if not _record_confirmation(cwd, rec):
+        return None, 1, "witness-failed", [
+            {"kind": "error",
+             "ref": "the confirmation could not be recorded in the git directory",
+             "cure": "the pause was NOT recorded. Check that this is a git repository and that its "
+                     "git directory is writable, then re-run /idc:pause — without this mark nothing "
+                     "can tell your pause apart from a hand-written one, and the Stop gate would "
+                     "refuse the stop it is supposed to allow"}]
     if not _atomic_write(cwd, rec):
+        _clear_confirmation(cwd)   # no record to vouch for; leave nothing behind
         return None, 1, "write-failed", [{"kind": "error", "ref": "the pause record did not persist",
                                           "cure": "check that the repo root is writable, then re-run "
                                                   "/idc:pause"}]
@@ -210,9 +331,13 @@ def clear(cwd):
     try:
         os.remove(path)
     except FileNotFoundError:
+        _clear_confirmation(cwd)
         return rec
     except OSError as e:
         raise ClearFailed(f"could not remove the pause record {path}: {e}") from e
+    # Only after the record is gone: the witness alone proves nothing, but leaving it behind would let
+    # a later hand-written copy of the SAME record be honoured again.
+    _clear_confirmation(cwd)
     return rec
 
 

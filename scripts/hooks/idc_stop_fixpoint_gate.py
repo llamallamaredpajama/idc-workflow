@@ -87,13 +87,17 @@ half-done before the record was written, the run's open command records were clo
 preflight) pick the run back up from the board. So a CONFIRMED pause record (`.idc-pause-state.json`,
 state `paused` — a mere `pause-requested` does NOT count) allows the stop, checked BEFORE the drain
 runs. Without this, the only way to stop a long run on purpose would be a hard kill — the exact
-ungraceful interruption pause exists to replace. The record is TRUSTED here rather than re-derived, for
-the same reason the github path trusts `.idc-drain-verdict.json`: re-running the quiescence check would
-put a coherence scan (and on github a board read) on the stop path. Re-derivation happens where it can
-afford to — at `confirm` time, and again in the `paused` closeout claim.
+ungraceful interruption pause exists to replace. The quiescence check is not RE-RUN here, for the same
+reason the github path does not re-scan the board: it would put a coherence scan (and on github a board
+read) on the stop path. But the record is not simply TRUSTED either — that made the bypass forgeable in
+a single `Write`, since every field in the record is a value a caller can type. It must be corroborated
+by the digest `confirm` recorded in this checkout's GIT DIRECTORY, which git never carries and which
+only the real confirmation writes (`_is_paused`). Re-derivation still happens where it can afford to —
+at `confirm` time, and again in the `paused` closeout claim.
 
 Invocation: idc_stop_fixpoint_gate.py <PLUGIN_ROOT>   (Stop payload on stdin).
 """
+import hashlib
 import json
 import os
 import re
@@ -154,28 +158,71 @@ _PAUSE_CONFIRMED = "paused"
 # hand-writing one — so a schema change breaks the test instead of silently loosening this gate.
 _PAUSE_VERSION = 1
 _PAUSE_QUIESCENCE_OK = "ok"
+# The CONFIRMATION WITNESS `idc_pause_state.confirm` leaves in this checkout's git directory, and the
+# canonical digest it is taken over. Held in lockstep by phase11 R9, which builds its records through
+# the REAL `confirm` — so a change to either side reds the test instead of silently loosening this
+# gate. Read inline, for the same reason the record is: a hook must not grow a sys.path dependency on
+# a sibling package outside its own directory.
+_PAUSE_WITNESS_REL = os.path.join("idc", "pause-confirmations.json")
+_PAUSE_WITNESS_VERSION = 1
+
+
+def _pause_witness_digest(cwd):
+    """The digest THIS checkout recorded when a real `confirm` ran here, or None."""
+    try:
+        r = subprocess.run(["git", "-C", cwd or ".", "rev-parse", "--absolute-git-dir"],
+                           capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0 or not (r.stdout or "").strip():
+        return None
+    try:
+        with open(os.path.join(r.stdout.strip(), _PAUSE_WITNESS_REL), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("version") != _PAUSE_WITNESS_VERSION:
+        return None
+    digest = data.get("digest")
+    return digest if isinstance(digest, str) and digest.strip() else None
+
+
+def _record_digest(rec):
+    """The canonical digest of a pause record — the same function `idc_pause_state.record_digest` is."""
+    return hashlib.sha256(
+        json.dumps(rec, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 def _is_paused(cwd):
     """True iff this repo carries a record that PROVES a confirmed pause.
 
-    THIS IS A BYPASS, SO IT VALIDATES THE WHOLE RECORD, NOT ONE FIELD. Returning True here allows a
-    stop BEFORE the drain check runs — it is the one path out of this gate that skips the proof of a
-    drained pipe. Consulting only `state` meant a two-key file an agent could write in a single
-    `Write` call — `{"state": "paused"}` — bought an undrained walk-away from an autorun. That is the
-    same false verdict this whole gate exists to refuse, just pointed at the gate itself.
+    THIS IS A BYPASS, SO IT DEMANDS A WITNESS, NOT A SHAPE. Returning True here allows a stop BEFORE
+    the drain check runs — it is the one path out of this gate that skips the proof of a drained pipe.
 
-    A GENUINE record cannot be typed, because `idc_pause_state.confirm` only writes one after
-    `idc_pause_check` RE-DERIVED quiescence and returned clean: it carries the schema version, the
-    session that asked, the session that confirmed, the confirmation timestamp, and the quiescence
-    verdict that earned it. Every field below is a field a real confirmation produces as a
-    side-effect of doing the work, so requiring them all costs a forger the actual work.
+    WHY SHAPE VALIDATION WAS NOT ENOUGH, since that is what this used to do. Consulting only `state`
+    meant `{"state": "paused"}` in a single `Write` bought an undrained walk-away. Requiring six
+    fields raised the cost of that forgery from one `Write` to one slightly longer `Write` and no
+    further: `version`, `state` and `quiescence.verdict` are constants, the two ids are arbitrary
+    strings and the two timestamps arbitrary numbers, so EVERY validated field is a value a forger can
+    type. A record made only of assertions grounds nothing, however many assertions it carries.
 
-    NO NEW I/O. This is pure shape validation of a file already being read — nothing is re-derived,
-    no board is contacted, so the zero-GraphQL constraint on the stop path is untouched.
+    SO THE RECORD MUST BE CORROBORATED. `idc_pause_state.confirm` — which only writes a `paused`
+    record after `idc_pause_check` RE-DERIVED quiescence and returned clean — also records a digest of
+    the exact record it wrote in THIS CHECKOUT'S GIT DIRECTORY, which git never carries in a commit, a
+    diff, a PR or a clone, and which no shipped instruction tells anyone to write. A record that does
+    not match that digest is not honoured, so a typed record buys nothing, and neither does a genuine
+    record copied out of another repo.
+
+    The honest limit, stated rather than implied: this proves a real `confirm` ran HERE and produced
+    exactly this record. It does not prove nobody edited the git directory — nothing local could.
+
+    NO NEW BOARD I/O. A `rev-parse` and a small local read; nothing is re-derived and no board is
+    contacted, so the zero-GraphQL constraint on the stop path is untouched. (Re-running the
+    quiescence check instead would put a coherence scan — and on github a board read — right here.)
 
     Still TOLERANT in the safe direction: a missing, unreadable, corrupt, merely-`pause-requested`,
-    or shape-invalid record reads as NOT paused, which leaves this gate doing its normal job.
+    shape-invalid or uncorroborated record reads as NOT paused, which leaves this gate doing its
+    normal job.
     """
     try:
         with open(os.path.join(cwd or ".", _PAUSE_FILENAME), encoding="utf-8") as fh:
@@ -183,6 +230,11 @@ def _is_paused(cwd):
     except (OSError, ValueError):
         return False
     if not isinstance(rec, dict):
+        return False
+    # THE PROVENANCE CHECK, FIRST: everything below interrogates what the record SAYS, and no amount
+    # of that can distinguish a real confirmation from a typed one.
+    witness = _pause_witness_digest(cwd)
+    if not witness or witness != _record_digest(rec):
         return False
     if rec.get("state") != _PAUSE_CONFIRMED or rec.get("version") != _PAUSE_VERSION:
         return False
@@ -518,10 +570,11 @@ def _gate(payload, plugin_root):
     # A `pause-requested` record is deliberately NOT honored: that state means a pause was asked for and
     # never achieved, so the stop is still the dishonest kind this gate refuses.
     #
-    # TRUST BOUNDARY, stated rather than implied: this reads the local record instead of re-deriving
-    # quiescence, exactly as the github path trusts `.idc-drain-verdict.json` instead of re-scanning the
-    # board. Re-running the check here would put a full coherence scan (and, on github, a board read) on
-    # the stop path, which the zero-GraphQL constraint forbids. The re-derivation happens where it can
+    # TRUST BOUNDARY, stated rather than implied: this does not RE-DERIVE quiescence — that would put a
+    # full coherence scan (and, on github, a board read) on the stop path, which the zero-GraphQL
+    # constraint forbids — but it does not merely believe the record either. The record must match the
+    # digest the real `confirm` left in this checkout's git directory, so a hand-written record, or a
+    # genuine one copied from another repo, buys nothing. The re-derivation itself happens where it can
     # afford to: at `confirm` time, and again in the `paused` closeout claim.
     if _is_paused(cwd):
         H.warn("stop-fixpoint: this repo carries a CONFIRMED pause record — allowing the stop "

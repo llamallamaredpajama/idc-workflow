@@ -38,6 +38,22 @@
 #     a. state-only (the original defect)  b. drop the schema-version check  c. drop session_id
 #     d. drop confirmed_by  e. drop confirmed_ts  f. accept any quiescence verdict
 #     g. drop the checked_ts requirement  h. drop the whole quiescence-proof block
+#     …and the PROVENANCE guard the shape checks could never provide (F9, reopened: six typed
+#     constants cost a forger no more than two, so the record had to be corroborated):
+#     i. drop the witness comparison entirely       ⇒ RED: "a byte-identical COPY of a genuine pause
+#                                                      record bought the bypass in a repo that never
+#                                                      confirmed a pause".
+#     j. require a witness but not a MATCHING one   ⇒ RED: "a confirmation recorded for a DIFFERENT
+#                                                      record vouched for this one".
+#     k. stop recording the witness in `confirm`    ⇒ RED at POSITIVE CONTROL 1 — "a real confirmed
+#                                                      pause record was REFUSED" — which is what
+#                                                      proves the guard is not simply refusing all.
+#   R21 (idc_pause_state.confirm / idc_command_contract — writer ⇔ strictest reader)
+#     a. drop confirm's non-empty-session guard     ⇒ RED: `confirm --session ""` reports
+#                                                      `pause: paused` while the Stop gate reads the
+#                                                      same record as dishonest.
+#     b. drop the closeout's corroboration check    ⇒ RED: an uncorroborated record closes a run as
+#                                                      `paused`.
 #   R10 a. drop the driver-record skip in close_open_commands ⇒ RED: every honest pause self-refuses.
 #   R11 a. drop the dirty-tree refusal                     ⇒ RED: a run over uncommitted code is
 #                                                             recorded against HEAD.
@@ -225,6 +241,7 @@ sys.path.insert(0, os.path.join(plugin, "scripts", "hooks"))
 sys.path.insert(0, os.path.join(plugin, "scripts"))
 spec = importlib.util.spec_from_file_location("G", sys.argv[1])
 G = importlib.util.module_from_spec(spec); spec.loader.exec_module(G)
+import idc_pause_state as PS
 genuine_repo, forged_repo = sys.argv[2], sys.argv[3]
 name = ".idc-pause-state.json"
 
@@ -236,16 +253,40 @@ if not G._is_paused(genuine_repo):
 with open(os.path.join(genuine_repo, name), encoding="utf-8") as fh:
     genuine = json.load(fh)
 
-def plant(rec):
+def plant(rec, witness=True):
+    """Put `rec` in the forged repo — and, unless we are testing provenance itself, give it a
+    MATCHING witness. Without that every case below would be refused for the same one reason (no
+    confirmation was recorded here) and not one of the shape guards would be under test."""
     with open(os.path.join(forged_repo, name), "w", encoding="utf-8") as fh:
         json.dump(rec, fh)
+    if witness:
+        PS._record_confirmation(forged_repo, rec)
+    else:
+        PS._clear_confirmation(forged_repo)
 
-# POSITIVE CONTROL 2 — the SAME bytes in the other repo are still honoured. Without this, a forgery
-# could be "refused" merely because this harness put it somewhere the gate never looks, and every
-# assertion below would pass for the wrong reason.
+# THE PROVENANCE GUARD (F9 reopened). A record whose every field is a caller-typed value — the
+# version and state are constants, the ids arbitrary strings, the timestamps arbitrary numbers — is
+# not evidence, however many fields it has. So a byte-identical copy of the GENUINE record must be
+# REFUSED in a repo where no confirmation was ever recorded: this is the case that used to pass, and
+# passing it is what let one `Write` buy an undrained walk-away.
+plant(genuine, witness=False)
+if G._is_paused(forged_repo):
+    sys.exit("a byte-identical COPY of a genuine pause record bought the bypass in a repo that never "
+             "confirmed a pause — the record is typeable, so shape alone can never ground it")
+
+# ...and a witness for a DIFFERENT record must not vouch for this one either.
+other = copy.deepcopy(genuine); other["confirmed_ts"] = genuine["confirmed_ts"] + 1
+plant(genuine, witness=False); PS._record_confirmation(forged_repo, other)
+if G._is_paused(forged_repo):
+    sys.exit("a confirmation recorded for a DIFFERENT record vouched for this one — the witness must "
+             "name one exact record")
+
+# POSITIVE CONTROL 2 — with a MATCHING witness the same bytes are honoured again. Without this, every
+# forgery below could be "refused" merely because the harness left it uncorroborated, and not one of
+# the shape guards would actually be under test.
 plant(genuine)
 if not G._is_paused(forged_repo):
-    sys.exit("harness fault: a byte-identical copy of the genuine record was refused, so the "
+    sys.exit("harness fault: a corroborated copy of the genuine record was refused, so the "
              "forgery cases below would prove nothing")
 
 def broken(label, mutate):
@@ -288,7 +329,7 @@ plant(genuine)
 if not G._is_paused(forged_repo):
     sys.exit("the genuine record stopped being honoured once the forgeries had been tried")
 PY
-echo "  ok R9: 14 forged/incomplete records refused, the genuine one still honoured"
+echo "  ok R9: an uncorroborated copy and 14 forged/incomplete records refused, the genuine one honoured"
 
 echo "== R10. THE NORMAL PAUSE JOURNEY MUST NOT REFUSE ITSELF"
 # The entry gate opens a lifecycle record for EVERY command but `init`, so a real `/idc:pause` has an
@@ -776,6 +817,51 @@ if survey.get("exit") != 1 or "#99" not in (survey.get("findings") or []):
     sys.exit(f"the recorded survey does not reflect the real half-done work: {survey!r}")
 PY
 echo "  ok R7/R8: a failed record-clear is a grounded blocker; complete carries a re-derived survey"
+
+echo "== R21. THE PAUSE WRITER MUST ENFORCE WHAT ITS STRICTEST READER REQUIRES  [F28]"
+# `_is_paused` refuses a record with a blank `session_id`/`confirmed_by`, but `confirm` — unlike
+# `request` — had no such guard. `confirm --session ""` therefore printed `pause: paused` /
+# `pause-ready: ok` and exited 0 while writing a record the Stop gate reads as dishonest: the operator
+# is told the pause succeeded, and the gate then blocks their stop three times before loud-failing.
+R21="$WORK/writer-reader"; mkrepo "$R21"
+out21="$(python3 "$PS" --cwd "$R21" confirm --session "" 2>&1)"; rc21=$?
+[ "$rc21" = 0 ] \
+  && fail "R21: confirm --session \"\" reported a successful pause, but the Stop gate refuses a record with no session identity. Got: $out21"
+printf '%s' "$out21" | grep -q 'pause-ready: ok' \
+  && fail "R21: a refused pause must not print a clean readiness line. Got: $out21"
+python3 "$PS" --cwd "$R21" status | grep -q '^pause: none' \
+  || fail "R21: a refused confirm must leave NO pause record, got: $(python3 "$PS" --cwd "$R21" status)"
+# ...and after a REAL confirm the writer and the strictest reader must agree, in both directions.
+python3 - "$PS" "$GATE" "$R21" <<'PY' || fail "R21: the pause writer and the Stop gate disagree about the same record"
+import importlib.util, os, sys
+plugin = os.environ["IDC_PLUGIN"]
+sys.path.insert(0, os.path.join(plugin, "scripts", "hooks"))
+sys.path.insert(0, os.path.join(plugin, "scripts"))
+import idc_pause_state as PS
+gspec = importlib.util.spec_from_file_location("G", sys.argv[2])
+G = importlib.util.module_from_spec(gspec); gspec.loader.exec_module(G)
+repo = sys.argv[3]
+rec, code, verdict, findings = PS.confirm(repo, "r21-session")
+if code != 0:
+    sys.exit(f"precondition: a quiescent repo must be pausable, got exit {code} ({verdict})")
+if not PS.is_paused(repo):
+    sys.exit("the writer does not consider its own confirmed record a pause")
+if not G._is_paused(repo):
+    sys.exit("the writer recorded a pause the Stop gate refuses — the operator would be told the "
+             "pause succeeded and then blocked from stopping")
+# The closeout is the third reader of the same record, and it must agree too.
+import idc_command_contract as C
+v = C.validate_closeout("build", "paused", {"schema_version": 1, "refs": {}}, repo=repo, session="r21-session")
+if not v.ok:
+    sys.exit(f"a real pause cannot close a run as paused: {v.reason_code} ({v.message})")
+# ...and a record with no confirmation behind it cannot, even in a perfectly quiescent repo — which is
+# the case that makes the corroboration a guard rather than a formality.
+PS._clear_confirmation(repo)
+v = C.validate_closeout("build", "paused", {"schema_version": 1, "refs": {}}, repo=repo, session="r21-session")
+if v.ok:
+    sys.exit("an uncorroborated pause record closed a run as `paused` — a typed record is not a pause")
+PY
+echo "  ok R21: a session-less confirm is refused; writer, Stop gate and closeout agree on a real one"
 
 echo "== R18. THE RETENTION CUT MUST NOT SEVER A CREDENTIAL'S LABEL  [F20]"
 # R1 fixed the DISPLAY cut. `_drain_bounded` takes an EARLIER cut, over raw bytes, before any

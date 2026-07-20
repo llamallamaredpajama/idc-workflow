@@ -413,6 +413,22 @@ def _pause_record(repo: str):
         return None
 
 
+def _pause_corroborated(repo: str, rec: object) -> bool:
+    """True iff `rec` is the exact record a REAL `idc_pause_state.confirm` wrote in THIS checkout.
+
+    The same provenance the Stop gate's `_is_paused` demands, asked here for the same reason: a pause
+    record is made entirely of caller-typeable values, so reading its shape can never establish that a
+    pause was taken. `confirm` records a digest of the record it wrote in the git directory — which git
+    never carries — as a side-effect of doing the work. Read tolerantly: anything unreadable is "not
+    corroborated", which fails the claim CLOSED."""
+    try:
+        import idc_pause_state as PAUSE  # noqa: E402 — lazy
+        witness = PAUSE.read_witness(repo)
+        return bool(witness) and witness == PAUSE.record_digest(rec)
+    except Exception:  # noqa: BLE001 — an unprovable pause is never a proven one
+        return False
+
+
 def _pause_check_result(repo: str):
     """A fresh READ-ONLY re-derivation of "is anything half-done?" → `(exit, verdict, findings)`.
 
@@ -464,6 +480,17 @@ def _claim_paused(refs: dict, repo: str, session: str) -> CloseoutResult:
                      f"a `paused` closeout requires a fresh re-derivation that nothing is half-done; the "
                      f"read-only re-run reports {verdict!r} (exit {code}): {detail}. A pause recorded "
                      "over half-done work is exactly the corruption this status exists to prevent.")
+    # THE PROVENANCE CHECK, LAST — the same ordering `idc_live_check.audit_surface` uses for its run
+    # witness, and for the same reason. Every rule above interrogates a fact a reader can act on (the
+    # record is missing, unconfirmed, or the repo is not quiescent); this one asks the question the
+    # record cannot answer about itself. Running it first would mask all of those behind a provenance
+    # complaint, so a repo with real half-done work would be told about the wrong problem.
+    if not _pause_corroborated(repo, rec):
+        return _fail("paused-not-corroborated",
+                     "the pause record is not corroborated by a confirmation recorded in this "
+                     "checkout's git directory — every field in that record is a value a caller can "
+                     "type, so the record alone cannot show a pause was ever taken here. Run "
+                     "/idc:pause, which records the confirmation as a side-effect of doing the work.")
     return CloseoutResult(True, "ok", "deliberate pause: confirmed record + fresh quiescence proof", {})
 
 

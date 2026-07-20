@@ -749,31 +749,61 @@ def write(ledger):
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(ledger, fh)
 
-# (1) NEGATIVE — derived from the READERS, deliberately NOT from the identity tuple. Reading the
-#     tuple would make this test grade itself: shrink the tuple and the loop simply stops asking
-#     about the field that was dropped, which is a GREEN that proves nothing. So: drop each field of
-#     a full record in turn, ASK THE READERS whether they can still see it, and require probe() to
+# (1) NEGATIVE — derived from the READERS, deliberately NOT from the identity declaration. Reading
+#     the declaration would make this test grade itself: shrink it and the loop simply stops asking
+#     about the field that was damaged, which is a GREEN that proves nothing. So: DAMAGE each field
+#     of a full record in turn, ASK THE READERS whether they can still see it, and require probe() to
 #     refuse whenever any of them cannot.
+#
+#     THREE DAMAGE CLASSES, and that is the second half of this case's history. The first version
+#     mutated ONE WAY — it dropped whole fields — so it could only ever discover a PRESENCE bug. The
+#     readers do not key on presence: `active_commands` and `_prune_finished` compare `state` to a
+#     constant. `{"state": "actve"}` is present, truthy, invisible to both, and sailed through a
+#     probe that called the ledger readable (F37, reopened). A one-shape mutation set manufactures
+#     false confidence, so the shapes here are derived from the damage a HAND-EDITED JSON file can
+#     actually take: a field DELETED, a value CORRUPTED into a near-miss of a legal one, and a value
+#     SUBSTITUTED for a different type that is still truthy.
 full_cmd = {"session_id": "s1", "command": "/idc:build", "issue": 42, "state": "active"}
+#     THE READERS ARE ASKED UNSCOPED. `active_commands(repo, "s1")` also returns [] when the record
+#     names a DIFFERENT session — which is the reader doing its job, not an obligation hiding — so
+#     scoping the query here would report a fault for a free-form field that has no fault. The
+#     session-scoped view is asserted in the POSITIVE half below, where the record really is s1's.
 READERS = {
     "read_state.commands": lambda: L.read_state(repo)["commands"],
-    "active_commands (the Stop closeout gate's reader)": lambda: L.active_commands(repo, "s1"),
+    "active_commands (the Stop closeout gate's reader)": lambda: L.active_commands(repo),
 }
 write({"version": 2, "taints": [], "commands": [dict(full_cmd)]})
 if any(len(fn()) != 1 for fn in READERS.values()):
     sys.exit("precondition: every reader must see a FULL command record before this can discriminate")
+
+
+def typo(value):
+    """A plausible near-miss of `value` — the shape a hand-edit produces, not a wild value."""
+    if isinstance(value, str) and len(value) > 4:
+        return value[:3] + value[4:]        # "active" -> "actve"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value + 1
+    return f"{value}-typo"
+
+
+DAMAGE = {
+    "deleted": lambda rec, f: {k: v for k, v in rec.items() if k != f},
+    "corrupted to a near-miss value": lambda rec, f: {**rec, f: typo(rec[f])},
+    "substituted for a truthy value of another type": lambda rec, f: {**rec, f: True},
+}
 for field in sorted(full_cmd):
-    write({"version": 2, "taints": [],
-           "commands": [{k: v for k, v in full_cmd.items() if k != field}]})
-    blind = sorted(name for name, fn in READERS.items() if len(fn()) == 0)
-    ok, detail = L.probe(repo)
-    if blind and ok:
-        sys.exit(f"a command record with no {field!r} is INVISIBLE to {', '.join(blind)}, yet probe() "
-                 f"called the ledger trustworthy ({detail!r}) — a real open command hides behind it "
-                 f"while the gate that must close it is told there is nothing to close")
-    if blind and field not in detail:
-        sys.exit(f"the refusal must NAME the missing field so an operator can repair the file; "
-                 f"dropping {field!r} said: {detail!r}")
+    for how, damage in sorted(DAMAGE.items()):
+        write({"version": 2, "taints": [], "commands": [damage(dict(full_cmd), field)]})
+        blind = sorted(name for name, fn in READERS.items() if len(fn()) == 0)
+        ok, detail = L.probe(repo)
+        if blind and ok:
+            sys.exit(f"a command record whose {field!r} was {how} is INVISIBLE to "
+                     f"{', '.join(blind)}, yet probe() called the ledger trustworthy ({detail!r}) — "
+                     f"a real open command hides behind it while the gate that must close it is told "
+                     f"there is nothing to close")
+        if blind and field not in detail:
+            sys.exit(f"the refusal must NAME the field so an operator can repair the file by hand; "
+                     f"{field!r} {how} said: {detail!r}")
 
 # (2) POSITIVE — a record carrying exactly the identity is VISIBLE TO EVERY READER. This is the half
 #     that keeps the predicate honest: a tuple that refused everything would pass (1) trivially.

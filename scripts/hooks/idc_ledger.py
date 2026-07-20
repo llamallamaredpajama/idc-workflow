@@ -194,19 +194,53 @@ def _read_raw(cwd):
 #
 # THE INVARIANT, so this stops being a field list somebody has to remember to extend:
 #
-#     anything `probe()` vouches for must be VISIBLE TO EVERY READER.
+#     anything `probe()` vouches for must be VISIBLE TO EVERY READER — and a field a reader
+#     PARTITIONS ON must carry a value that partition recognizes.
 #
-# So the tuple is the UNION of every field any reader keys on — not the fields the two readers that
-# were reported happened to use. `state` is here because `active_commands` (the reader the Stop
-# closeout gate consults) skips on it, and a command record without one was therefore invisible to
-# that gate while the probe called the ledger trustworthy: the same hidden obligation, one field over.
-# `tests/smoke/phase11-honesty-repro.sh` asserts the implication directly against every reader.
-_TAINT_IDENTITY = ("kind",)
-_COMMAND_IDENTITY = ("session_id", "command", "state")
+# The first clause gives the field set: the UNION of every field any reader keys on, not the fields
+# the two readers that were reported happened to use. `state` is here because `active_commands` (the
+# reader the Stop closeout gate consults) skips on it.
+#
+# THE SECOND CLAUSE IS THE HALF THAT WAS MISSING, and leaving it out reopened the finding one field
+# value over. `active_commands` does not key on the PRESENCE of `state`, it compares it to a constant
+# — and so does `_prune_finished`. So `{"state": "actve"}` is present, truthy, and invisible to both,
+# while `probe()` called the ledger readable: the same hidden obligation, reached through the value
+# domain instead of the field list. A reader that partitions on a value keys on that value's DOMAIN,
+# and a value outside it is one no reader can classify.
+#
+# So identity is a field → DOMAIN mapping, and the domain is not typed by hand: it is this module's
+# own lifecycle constants, the only values a writer here can ever produce. A field with no closed
+# domain (`session_id`, `command`, `kind` are free-form) declares None and keeps the presence check,
+# which is the honest answer for a value nothing compares.
+#
+# `tests/smoke/phase11-honesty-repro.sh` R26 asserts the implication directly against every reader,
+# mutating by DELETION, VALUE-CORRUPTION and SUBSTITUTION — because the version that mutated only by
+# dropping fields is exactly why the value domain went unnoticed.
+_TAINT_IDENTITY = {"kind": None}
+_COMMAND_IDENTITY = {"session_id": None, "command": None, "state": (_CMD_ACTIVE, _CMD_FINISHED)}
+
+
+def _identity_fault(entry, fields):
+    """The first reason `entry` is invisible to a reader, phrased for an operator repairing the file
+    by hand — or None when it has none. `probe` quotes this; the tolerant readers just drop the entry.
+
+    Naming the fault rather than returning a bool is load-bearing: the ledger's failure mode is a
+    hand-edited file, so the refusal has to say WHICH field and WHY, or the operator is told the
+    ledger is untrustworthy with no way to make it trustworthy."""
+    if not isinstance(entry, dict):
+        return "a non-object entry"
+    for field, domain in fields.items():
+        value = entry.get(field)
+        if not value:
+            return f"no {field}"
+        if domain is not None and value not in domain:
+            return (f"a {field} of {value!r}, which is not one of "
+                    f"{', '.join(repr(d) for d in domain)} — no reader can classify it")
+    return None
 
 
 def _has_identity(entry, fields):
-    return isinstance(entry, dict) and all(entry.get(f) for f in fields)
+    return _identity_fault(entry, fields) is None
 
 
 def read_taints(cwd, _raw=None):
@@ -282,12 +316,16 @@ def probe(cwd):
             # non-dicts asked the wrong question: the tolerant readers skip on a MISSING IDENTITY
             # FIELD, not on non-dict-ness, so a `mid_finish` entry that had lost its `kind` was
             # skipped by every reader and certified readable here — a half-done obligation hidden
-            # behind a probe that said the ledger could be trusted.
-            missing = [f for f in identity if not entry.get(f)]
-            if missing:
-                return False, (f"the obligations ledger {path} has an entry in `{field}` with no "
-                               f"{', '.join(missing)} — the tolerant readers SKIP such entries, so a "
-                               f"real obligation could be hiding behind one")
+            # behind a probe that said the ledger could be trusted. And they skip on an
+            # UNRECOGNIZED VALUE too (`state: "actve"` is dropped by `active_commands`, which
+            # compares the field to a constant), so this asks `_has_identity`'s own question through
+            # `_identity_fault` rather than re-deriving half of it here — the two had already
+            # drifted once, which is what F37 is.
+            fault = _identity_fault(entry, identity)
+            if fault:
+                return False, (f"the obligations ledger {path} has an entry in `{field}` with "
+                               f"{fault} — the tolerant readers SKIP such entries, so a real "
+                               f"obligation could be hiding behind one")
     return True, "readable"
 
 

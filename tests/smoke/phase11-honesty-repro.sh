@@ -418,4 +418,122 @@ out14b="$(python3 "$LIVE" --repo "$R14" 2>&1)"; rc14b=$?
   && fail "R14: overwriting a genuine receipt's exit_code with 0 was ACCEPTED — the audit trusts the receipt over what this working copy actually ran. Got: $out14b"
 echo "  ok R14: a shape-mimicking forged receipt is refused; a receipt from a real --run still audits clean"
 
+echo "== R2. A MERGE MUST NOT PROCEED ON AN UNPERSISTED RECOVERY OBLIGATION  [T1]"
+# The `mid_finish` taint is written immediately before `pr_merge` — an irreversible action that also
+# closes the linked issue. It is the ONLY record telling a later session that a close is half-done.
+# The write was best-effort AND its result discarded (`set_taint`'s own docstring said "the persisted
+# bool is ignored here"), so a ledger that could not be written produced a warning and the merge went
+# ahead anyway, re-opening the exact window the taint exists to close.
+R2="$WORK/obligation"; mkrepo "$R2"
+python3 - "$PLUGIN" "$R2" <<'PY' || fail "R2: the finish crossed the point of no return without a durable obligation"
+import importlib.util, os, stat, sys
+plugin, repo = sys.argv[1], sys.argv[2]
+sys.path.insert(0, os.path.join(plugin, "scripts", "hooks"))
+sys.path.insert(0, os.path.join(plugin, "scripts"))
+import idc_ledger
+spec = importlib.util.spec_from_file_location("GF", os.path.join(plugin, "scripts", "idc_git_finish.py"))
+GF = importlib.util.module_from_spec(spec); spec.loader.exec_module(GF)
+
+# PRECONDITION — a writable repo really does persist the obligation, so the refusal below cannot be
+# passing merely because this helper never works.
+if not idc_ledger.set_taint(repo, "mid_finish", key="1", session_id="s1", pr="7"):
+    sys.exit("precondition: a writable repo must persist the obligation and report that it did")
+if not any(t.get("kind") == "mid_finish" for t in idc_ledger.pending_taints(repo)):
+    sys.exit("precondition: the persisted obligation must be readable back")
+
+# THE FAILURE: the ledger cannot be written. A read-only repo root is the realistic shape of it (a
+# full disk and a permissions problem land in the same place).
+idc_ledger.clear_taint(repo, "mid_finish", key="1")
+mode = os.stat(repo).st_mode
+os.chmod(repo, mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+try:
+    if idc_ledger.set_taint(repo, "mid_finish", key="2", session_id="s1", pr="7"):
+        sys.exit("set_taint reported a DURABLE obligation on a ledger it could not write")
+    if GF._mid_finish_set(repo, "2", "s1", pr="7", branch="b"):
+        sys.exit("_mid_finish_set reported success when the obligation did not persist")
+    # ...and the finish must REFUSE. `_require_mid_finish_obligation` is the statement immediately
+    # before `pr_merge`, so exiting the process here is exactly what proves the merge is never
+    # reached — there is no path from a raised SystemExit to the next line.
+    try:
+        GF._require_mid_finish_obligation(repo, "2", "s1", pr="7", branch="b")
+    except SystemExit as e:
+        if e.code in (0, None):
+            sys.exit(f"the finish stopped, but reported SUCCESS (exit {e.code})")
+    else:
+        sys.exit("the finish continued to the merge with no durable recovery record")
+finally:
+    os.chmod(repo, mode)
+
+# THE READBACK, covered on its own. A successful `os.replace` is not proof that a LATER reader will
+# find the taint — a full disk, a truncating filesystem or a racing writer all produce a "successful"
+# write whose result is not there — and surviving a process that dies seconds later is the entire
+# point of this record. That failure cannot be produced with permissions, so it is INJECTED: the
+# atomic write reports success and writes nothing.
+real_write = idc_ledger._atomic_write_state
+idc_ledger._atomic_write_state = lambda *a, **k: True
+try:
+    if idc_ledger.set_taint(repo, "mid_finish", key="3", session_id="s1", pr="7"):
+        sys.exit("set_taint reported a DURABLE obligation that is not readable back — a write that "
+                 "returns success is not proof the record survived")
+finally:
+    idc_ledger._atomic_write_state = real_write
+# ...and the positive control for the injection itself: with the real writer restored, the same call
+# succeeds. Otherwise the assertion above could be passing because set_taint is simply broken.
+if not idc_ledger.set_taint(repo, "mid_finish", key="3", session_id="s1", pr="7"):
+    sys.exit("harness fault: set_taint failed even with the real writer restored")
+PY
+echo "  ok R2: an unpersistable obligation stops the finish BEFORE the irreversible merge"
+
+echo "== R4. A CORRUPT OBLIGATIONS LEDGER MUST NOT CERTIFY A CLEAN PAUSE  [T5]"
+# Every ledger reader is deliberately tolerant — a corrupt file reads as empty so a damaged ledger
+# cannot brick a gate. That is right for a hint and wrong for a CERTIFICATE: `/idc:pause` reports its
+# empty answer as `pause-ready: ok` and writes a durable pause record on it, so the tolerant read
+# turned "I cannot tell" into "nothing is half-done" directly over a live mid_finish obligation.
+R4="$WORK/corrupt-ledger"; mkrepo "$R4"
+python3 - "$R4" <<'PY' || fail "R4: could not plant the half-done obligation"
+import sys, os
+sys.path.insert(0, os.path.join(os.environ["IDC_PLUGIN"], "scripts", "hooks"))
+import idc_ledger
+idc_ledger.set_taint(sys.argv[1], "mid_finish", key="42", session_id="s1", pr="7", branch="b")
+PY
+out4="$(python3 "$PC" --repo "$R4" --tracker "$R4/TRACKER.md" 2>&1)"; rc4=$?
+[ "$rc4" = 1 ] || fail "R4: precondition — a live mid_finish must report in-flight (exit 1), got rc=$rc4 out=$out4"
+# Now DAMAGE the ledger that held it. The obligation is still real; the file just cannot be read.
+LEDGER4="$(python3 -c 'import sys,os; sys.path.insert(0, os.path.join(os.environ["IDC_PLUGIN"], "scripts", "hooks")); import idc_ledger; print(idc_ledger.ledger_path(sys.argv[1]))' "$R4")"
+[ -f "$LEDGER4" ] || fail "R4: precondition — the ledger file must exist at $LEDGER4"
+printf '{"version": 2, "taints": [ THIS IS NOT JSON' > "$LEDGER4"
+out4b="$(python3 "$PC" --repo "$R4" --tracker "$R4/TRACKER.md" 2>&1)"; rc4b=$?
+[ "$rc4b" = 0 ] \
+  && fail "R4: an UNREADABLE obligations ledger was certified as a clean stopping point (exit 0) — the half-done work is still there, it just cannot be seen. Got: $out4b"
+printf '%s' "$out4b" | grep -q 'pause-ready: error' \
+  || fail "R4: an unreadable ledger must be INDETERMINATE (pause-ready: error), not a gap or a pass. Got: $out4b"
+# ...and an ABSENT ledger is honestly empty, so it must still be clean — the strictness must not
+# collapse into "every repo without a ledger cannot pause".
+rm -f "$LEDGER4"
+out4c="$(python3 "$PC" --repo "$R4" --tracker "$R4/TRACKER.md" 2>&1)"; rc4c=$?
+[ "$rc4c" = 0 ] || fail "R4: a repo with NO ledger has nothing half-done and must pause cleanly, got rc=$rc4c out=$out4c"
+echo "  ok R4: an unreadable ledger is indeterminate, an absent one is still clean"
+
+echo "== R5. AN OPERATIONAL GIT FAILURE IS NOT \"NOT APPLICABLE\"  [T8]"
+# `git rev-parse --git-dir` exits nonzero for far more than "there is no repo here": dubious
+# ownership, an unreadable .git, a permission error, a broken worktree link. Those are states where
+# work CAN have shipped and the board CAN be stale about it, and mapping them to exit 0
+# `not-applicable` silently switched the shipped-vs-board check off.
+COH="$PLUGIN/scripts/idc_finish_coherence.py"
+R5="$WORK/nongit"; mkdir -p "$R5/docs/workflow"; printf 'backend: filesystem\n' > "$R5/docs/workflow/tracker-config.yaml"
+out5="$(python3 "$COH" --repo "$R5" --tracker "$R5/TRACKER.md" 2>&1)"; rc5=$?
+[ "$rc5" = 0 ] && printf '%s' "$out5" | grep -q 'not-applicable' \
+  || fail "R5: precondition — a genuinely non-git directory must be not-applicable (exit 0), got rc=$rc5 out=$out5"
+# THE OPERATIONAL FAILURE: a repo whose .git exists but cannot be read. git exits nonzero with a
+# message that is NOT "not a git repository".
+R5B="$WORK/brokengit"; mkrepo "$R5B"
+chmod 000 "$R5B/.git"
+out5b="$(python3 "$COH" --repo "$R5B" --tracker "$R5B/TRACKER.md" 2>&1)"; rc5b=$?
+chmod 755 "$R5B/.git"
+[ "$rc5b" = 0 ] \
+  && fail "R5: a repo git could not read was reported as \`not-applicable\` (exit 0), disabling the shipped-vs-board check. Got: $out5b"
+[ "$rc5b" = 2 ] \
+  || fail "R5: an unreadable git repo must be INDETERMINATE (exit 2), got rc=$rc5b out=$out5b"
+echo "  ok R5: a non-git dir is not-applicable, an unreadable one is indeterminate"
+
 echo "phase11-honesty-repro: OK"

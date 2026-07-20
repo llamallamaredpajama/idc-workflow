@@ -175,12 +175,30 @@ def main(argv=None):
     try:
         r = subprocess.run(["git", "-C", args.repo, "rev-parse", "--git-dir"],
                            capture_output=True, text=True, timeout=30)
-        is_git = r.returncode == 0
     except (OSError, subprocess.SubprocessError) as e:
         _fail(f"git could not be run in {args.repo} ({e})")
-    if not is_git:
-        print("finish-coherence: not-applicable")
-        sys.exit(0)
+    if r.returncode != 0:
+        # A NONZERO EXIT IS NOT THE SAME FACT AS "THERE IS NO REPO HERE", and collapsing the two
+        # disabled this gate wherever git was merely UNHAPPY. `rev-parse` also exits nonzero for
+        # `detected dubious ownership`, an unreadable/corrupt .git, a permission error, or a broken
+        # worktree link — operational failures where work certainly CAN have shipped and the board
+        # certainly CAN be stale about it. Reading those as not-applicable turned an unprovable
+        # answer into a clean one, which is precisely the hollow clean this gate exists to prevent.
+        # Only git's own "not a git repository" is inapplicability; everything else is INDETERMINATE.
+        detail = " ".join((r.stderr or r.stdout or "").split()) or f"git exited {r.returncode}"
+        # GIT'S MESSAGE ALONE CANNOT SETTLE IT. `not a git repository` is what git prints both when
+        # there genuinely is no repo AND when a `.git` it cannot read makes it walk past one — so
+        # trusting the text would send an unreadable repo straight back to `not-applicable`. The
+        # presence of `.git` is the fact that separates them: something IS here, git just could not
+        # use it, which is unprovable rather than inapplicable.
+        if os.path.exists(os.path.join(args.repo, ".git")):
+            _fail(f"{args.repo} has a .git that git could not use ({detail}) — whether anything "
+                  f"shipped is unprovable, which is not the same as there being nothing to check")
+        if "not a git repository" in detail.lower():
+            print("finish-coherence: not-applicable")
+            sys.exit(0)
+        _fail(f"git could not describe {args.repo} ({detail}) — whether anything shipped is "
+              f"unprovable, which is not the same as there being nothing to check")
 
     report = run_janitor(args)
 

@@ -156,15 +156,52 @@ def _run(cmd, cwd):
 def _mid_finish_set(repo, issue, session_id, **fields):
     """Record that this finish has STARTED closing <issue> and has not completed it.
 
-    BEST-EFFORT, per the ledger's own write discipline: recording state must NEVER break a finish.
-    A missed taint costs a stale board that the coherence gate (`idc_finish_coherence.py`) still
-    catches after the fact; an exception raised here would cost a finish failing for a bookkeeping
-    reason, which is strictly worse. So every failure is swallowed to a warning."""
+    RETURNS whether the obligation is DURABLE. It never raises — bookkeeping must not break a finish
+    by throwing — but the answer is no longer thrown away, because of WHERE this is called from.
+
+    THE DISTINCTION THAT WAS MISSING. "Best-effort" is right for bookkeeping that merely helps
+    someone reconstruct history later. It is wrong for the one record that makes the NEXT step
+    survivable. This taint is written immediately before `pr_merge`, an irreversible action that also
+    closes the linked issue; if the session dies between the merge and the board flip, this record is
+    the ONLY thing that tells a later session there is a half-finished close to finish. Merging
+    anyway after failing to write it re-opens exactly the window the taint exists to close — and
+    silently, because the warning scrolls past in a log nobody reads. The caller now refuses to cross
+    the point of no return without it.
+    """
     try:
-        idc_ledger.set_taint(repo, MID_FINISH_TAINT, key=issue, session_id=session_id,
-                             **{k: str(v) for k, v in fields.items()})
-    except Exception as e:  # noqa: BLE001 — bookkeeping must never break the finish
+        if idc_ledger.set_taint(repo, MID_FINISH_TAINT, key=issue, session_id=session_id,
+                                **{k: str(v) for k, v in fields.items()}):
+            return True
+        _warn(f"the mid-finish obligation for #{issue} did not persist to the ledger")
+        return False
+    except Exception as e:  # noqa: BLE001 — bookkeeping must never break the finish by raising
         _warn(f"could not record the mid-finish obligation for #{issue}: {e}")
+        return False
+
+
+def _require_mid_finish_obligation(repo, issue, session_id, **fields):
+    """Set the mid-finish obligation and REFUSE TO CONTINUE unless it is durable.
+
+    Called immediately before `pr_merge`, the point of no return. Everything before it is reversible
+    and has shipped nothing; the merge is irreversible AND closes the linked issue as a side effect.
+    The obligation is the only record that tells a later session a close is half-done, so merging
+    after failing to write it re-opens the exact window the obligation exists to close — the
+    seven-item stale-board failure — and does it silently, behind a warning in a log nobody reads.
+
+    Stopping HERE is cheap and completely recoverable: nothing has shipped, and re-running the finish
+    once the ledger is writable does the whole job. This is a separate function so the refusal is
+    directly executable in a test: it exits the process, which is what proves the merge on the next
+    line is never reached.
+    """
+    if _mid_finish_set(repo, issue, session_id, **fields):
+        return
+    _fail("mid-finish obligation",
+          f"the recovery record for #{issue} could not be persisted to the obligations ledger, so "
+          f"the merge has NOT been attempted. Merging without it would risk a merged PR, a closed "
+          f"issue and a board still showing In Progress with nothing recording that a close was "
+          f"underway. Make the repo root writable (check disk space and permissions on "
+          f"{os.path.basename(idc_ledger.ledger_path(repo))}), then re-run this finish — nothing has "
+          f"shipped yet.")
 
 
 def _mid_finish_clear(repo, issue):
@@ -798,9 +835,9 @@ def main():
     # top of the tail on purpose: everything above this line is reversible and leaves no shipped
     # work, so a taint set earlier would describe an item that never merged — an obligation no
     # recovery could ever discharge. The window that actually corrupts the board opens at `pr_merge`.
-    _mid_finish_set(repo, args.issue, session_id, pr=args.pr, branch=branch,
-                    worktree=worktree_abs or "", backend=backend,
-                    tracker=(tracker_path if backend == "filesystem" else ""))
+    _require_mid_finish_obligation(repo, args.issue, session_id, pr=args.pr, branch=branch,
+                                   worktree=worktree_abs or "", backend=backend,
+                                   tracker=(tracker_path if backend == "filesystem" else ""))
     pr_merge(repo, args.pr, args.merge_method)
     verify_remote_branch_gone(repo, branch)
     branch_delete_local(repo, branch)

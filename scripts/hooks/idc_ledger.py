@@ -214,6 +214,47 @@ def read_state(cwd):
     return {"version": _LEDGER_VERSION, "taints": read_taints(cwd), "commands": _read_commands(cwd)}
 
 
+def probe(cwd):
+    """`(ok, detail)` — can this ledger's contents be TRUSTED as a complete account?
+
+    THE ONE STRICT READER, and why it has to exist next to the tolerant ones. Every reader above is
+    deliberately tolerant: a corrupt ledger reads as empty so a damaged file can never brick a gate.
+    That is right for a HINT (`pending_taints` scoping a block) and wrong for a PROOF. `/idc:pause`
+    asks "is anything half-done?" and reports `pause-ready: ok` on an empty answer — so against an
+    unreadable ledger the tolerant read turns "I cannot tell" into "nothing is wrong", and the pause
+    certificate is written over a hidden `mid_finish` obligation. That is the exact false-green this
+    codebase refuses everywhere else.
+
+    So callers that CERTIFY something ask here first, and treat a False as INDETERMINATE rather than
+    clean. A ledger that is absent is honestly empty (nothing has ever been recorded) and is `ok`;
+    only a file that EXISTS and cannot be parsed into the expected shape is untrustworthy.
+    """
+    path = ledger_path(cwd)
+    if not os.path.exists(path):
+        return True, "no ledger yet"
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except OSError as e:
+        return False, f"the obligations ledger {path} could not be read ({e})"
+    except ValueError as e:
+        return False, f"the obligations ledger {path} is not valid JSON ({e})"
+    if not isinstance(data, dict):
+        return False, (f"the obligations ledger {path} is a {type(data).__name__}, not an object — "
+                       f"its contents cannot be trusted")
+    for field in ("taints", "commands"):
+        val = data.get(field)
+        if val is not None and not isinstance(val, list):
+            return False, (f"the obligations ledger {path} has a non-list `{field}` "
+                           f"({type(val).__name__}) — its contents cannot be trusted")
+        for entry in (val or []):
+            if not isinstance(entry, dict):
+                return False, (f"the obligations ledger {path} has a non-object entry in `{field}` "
+                               f"({type(entry).__name__}) — the tolerant readers SKIP such entries, "
+                               f"so a real obligation could be hiding behind one")
+    return True, "readable"
+
+
 def pending_taints(cwd, session_id=None):
     """The pending taints (invariant #1 scoping).
 
@@ -267,10 +308,23 @@ def set_taint(cwd, kind, key=None, session_id=None, **fields):
     """Add or update the (kind, key) taint. REPO-GATED: a silent no-op outside a governed repo.
     Upserts by identity (kind, key) so a re-set never duplicates. Carries the creating session_id
     (invariant #1 scoping) and any extra `fields`. Recovers a corrupt/missing file (tolerant read
-    → rewrite). The write preserves the `commands` array (the v1 taint writers' door); taint
-    writers are best-effort, so the persisted bool is ignored here."""
+    → rewrite). The write preserves the `commands` array (the v1 taint writers' door).
+
+    RETURNS whether the taint is now DURABLE — persisted to disk AND readable back. Still
+    best-effort for control flow (it never raises), but the outcome is surfaced rather than
+    discarded, because for some callers the taint IS the safety property: a `mid_finish` obligation
+    is the only record that an irreversible merge is underway, so a caller about to take that step
+    must be able to tell whether the record it is relying on actually exists. A caller that does not
+    care can keep ignoring the result exactly as before.
+
+    The READBACK is not paranoia about `os.replace`. `_atomic_write_state` returns True the moment
+    the rename succeeds, which does not prove the bytes parse back into the taint just written — a
+    full disk, a truncating filesystem or a racing writer all produce a "successful" write whose
+    result is not there. Since the whole point is to survive a process that dies seconds later, the
+    only useful question is whether a LATER, DIFFERENT reader would find it.
+    """
     if not idc_hook_lib.is_governed_repo(cwd):
-        return
+        return False
     key = None if key is None else str(key)
     if session_id is None:
         session_id = os.environ.get("IDC_SESSION_ID") or None
@@ -278,7 +332,9 @@ def set_taint(cwd, kind, key=None, session_id=None, **fields):
         raw = _read_raw(cwd)
         taints = [t for t in read_taints(cwd, _raw=raw) if not (t.get("kind") == kind and t.get("key") == key)]
         taints.append({"kind": kind, "key": key, "session_id": session_id, "fields": dict(fields)})
-        _atomic_write_state(cwd, taints, _read_commands(cwd, _raw=raw))
+        if not _atomic_write_state(cwd, taints, _read_commands(cwd, _raw=raw)):
+            return False
+        return any(t.get("kind") == kind and t.get("key") == key for t in read_taints(cwd))
 
 
 def clear_taint(cwd, kind, key=None):

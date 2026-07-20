@@ -206,9 +206,19 @@ def _claimed_items(repo: str):
 
 def _half_done_taints(repo: str):
     """Ledger taints that mean a deterministic action started and never completed, UNSCOPED (a dead
-    session's un-cleared obligation is still this repo's half-done work). Tolerant by construction:
-    the ledger reader treats a missing/corrupt file as empty, which is the honest reading — an absent
-    ledger records no started-and-unfinished action."""
+    session's un-cleared obligation is still this repo's half-done work).
+
+    STRICT, unlike every other reader of this ledger. The tolerant readers treat a corrupt or
+    unreadable file as EMPTY so a damaged ledger can never brick a gate — right for a hint, wrong
+    here. This function's empty answer is reported to the operator as `pause-ready: ok` and written
+    into a durable pause certificate, so collapsing "I cannot read the ledger" into "nothing is
+    half-done" would record a clean stop directly over a hidden `mid_finish` obligation. An absent
+    ledger IS honestly empty and stays clean; an unreadable one is INDETERMINATE.
+    """
+    ok, detail = idc_ledger.probe(repo)
+    if not ok:
+        raise Indeterminate(f"{detail} — a pause cannot be certified over an unreadable "
+                            f"obligations ledger")
     out = []
     for t in idc_ledger.pending_taints(repo):
         kind = t.get("kind")

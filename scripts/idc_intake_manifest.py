@@ -20,6 +20,23 @@ import tempfile
 from collections import Counter
 from typing import Any
 
+# The shared credential table, imported from beside this script. See idc_credential_shapes.py for what
+# is shared with idc_live_check.py and what deliberately is not.
+#
+# TOLERANT IMPORT, FAIL-CLOSED USE. This file is an import-graph ROOT on purpose: a lone copy of it
+# must still RUN, because tests/smoke/phase1-pipe-safety.sh section F asserts exactly that and
+# governance/external-intake-completeness.sh relies on it (it copies this script with one validator
+# deleted, to prove the deleted gate was the one doing the work). So a missing sibling must not be an
+# import-time crash. But it must not be a silent downgrade either: this table is a SCRUBBER, and a
+# relocated copy that quietly redacts less than the original is precisely the failure this file exists
+# to prevent. So the import degrades to None here and `_sensitive_text_patterns()` refuses to scan —
+# loudly, through the normal IntakeError path — rather than scanning with a weaker rule set.
+try:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import idc_credential_shapes as CS  # noqa: E402
+except ImportError:  # pragma: no cover — only a relocated copy reaches this
+    CS = None
+
 
 SCHEMA_VERSION = 1
 CLASS_ROUTES = {
@@ -86,17 +103,21 @@ CREDENTIAL_ASSIGNMENT_RE = re.compile(
     r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
     re.IGNORECASE,
 )
+# Broader than the shared `BEARER_HEADER` (any non-delimiter run, not just token characters), so it is
+# kept alongside it rather than replaced — dropping it would narrow what intake catches today.
 CREDENTIAL_BEARER_RE = re.compile(r"\bBearer\s+[^\s,;]+", re.IGNORECASE)
-CREDENTIAL_TOKEN_RE = re.compile(
-    r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}"
-    r"|sk-(?:proj-)?[A-Za-z0-9_-]{20,}|sk_[A-Za-z0-9]+_[A-Za-z0-9_]{20,}"
-    r"|AKIA[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{10,})\b"
-)
-SENSITIVE_TEXT_PATTERNS = {
-    "credential": (CREDENTIAL_BEARER_RE, CREDENTIAL_TOKEN_RE),
-    "machine_specific_path": (MACHINE_PATH_RE,),
-    "private_url": (PRIVATE_URL_RE,),
-}
+# The self-identifying credential shapes come from the SHARED table (`idc_credential_shapes`), which
+# this file and `idc_live_check.py` both consume. They had drifted in both directions: intake knew
+# `github_pat_…` and Stripe-style `sk_<env>_<key>`, while the live check knew Google API keys, Google
+# OAuth tokens, JWTs, PEM private-key blocks and `scheme://user:pass@host` — and those last five
+# therefore rode through intake UNREDACTED. The union closes that; a future "we learned about
+# credential shape X" now lands in one place.
+#
+# ONLY the self-identifying shapes are shared. The live check's broad rules (its `…token…=value`
+# substring rule and its "any 40+ character opaque run" backstop) are deliberately NOT imported: this
+# file REJECTS rather than redacts, its review binding note IS a 64-character hex digest, and its
+# name-segment logic below exists specifically so `KEYBOARD_LAYOUT` / `TOKENIZER_MODEL` survive. See
+# that module's docstring for the full split.
 REDACTION_MARKERS = {
     "credential": "[REDACTED_CREDENTIAL]",
     "machine_specific_path": "[REDACTED_MACHINE_PATH]",
@@ -134,10 +155,30 @@ def _expect_string_list(value: Any, label: str, *, allow_empty: bool = True) -> 
     return value
 
 
+def _sensitive_text_patterns() -> dict[str, tuple[re.Pattern[str], ...]]:
+    """The category → patterns map, resolved at USE time so a missing shared table fails CLOSED.
+
+    Built per call rather than held as a module constant for exactly one reason: `CS` may be None in a
+    relocated lone copy of this script (see the import at the top), and the only safe response to "my
+    credential table is missing" is to refuse the scan, not to run a narrower one. Refusing here routes
+    through the normal IntakeError path, so every caller — redact and reject alike — surfaces it as a
+    clean exit-2 failure with a reason, never a traceback and never a quiet under-redaction."""
+    if CS is None:
+        raise IntakeError(
+            "the shared credential table (idc_credential_shapes.py) is not importable from this "
+            "script's directory — refusing to scan text with a weaker scrubber than this file was "
+            "written against (a relocated copy must carry its sibling modules)")
+    return {
+        "credential": (CREDENTIAL_BEARER_RE,) + CS.PATTERNS,
+        "machine_specific_path": (MACHINE_PATH_RE,),
+        "private_url": (PRIVATE_URL_RE,),
+    }
+
+
 def _sensitive_categories(value: str) -> list[str]:
     categories = {
         category
-        for category, patterns in SENSITIVE_TEXT_PATTERNS.items()
+        for category, patterns in _sensitive_text_patterns().items()
         if any(pattern.search(value) for pattern in patterns)
     }
     if any(
@@ -161,11 +202,12 @@ def _redact_credential_assignment(match: re.Match[str]) -> str:
 
 def _redact_human_text(value: str) -> tuple[str, list[str]]:
     categories = _sensitive_categories(value)
+    patterns_by_category = _sensitive_text_patterns()
     redacted = value
     for category in categories:
         if category == "credential":
             redacted = CREDENTIAL_ASSIGNMENT_RE.sub(_redact_credential_assignment, redacted)
-        for pattern in SENSITIVE_TEXT_PATTERNS[category]:
+        for pattern in patterns_by_category[category]:
             redacted = pattern.sub(REDACTION_MARKERS[category], redacted)
     return redacted, categories
 

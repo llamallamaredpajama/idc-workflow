@@ -284,10 +284,17 @@ only when a full pass leaves nothing actionable:
      --status <complete|waiting_gate|blocked_external> --evidence-json '<envelope>'
    ```
    - **`complete`** — **this session's** PERSISTED drain verdict (`.idc-drain-verdict.json`, written by
-     `idc_autorun_drain.py --session-id "$CLAUDE_CODE_SESSION_ID"`) reads exactly `drain: complete`. The
-     validator reads that DURABLE artifact directly (session-scoped), so **no caller-supplied `drain`
-     string clears it** — the evidence refs may be empty (`refs:{}`); just ensure the drain ran with
-     `--session-id` for THIS session.
+     `idc_autorun_drain.py --session-id "$CLAUDE_CODE_SESSION_ID"`) reads exactly `drain: complete`
+     **and records the wave-close gates that prove it**. The validator reads that DURABLE artifact
+     directly (session-scoped), so **no caller-supplied `drain` string clears it** — the evidence refs
+     may be empty (`refs:{}`). So the drain that closes this run must have been invoked with
+     `--session-id` for THIS session **AND with `--coherence --live`** (exactly as step 4 above spells
+     it out for both backends). A bare `complete` token is NOT proof of completion: the gates are
+     opt-in flags, so an ungated pass — including `idc:idc-build` Phase 0's `--width` frontier query,
+     which overwrites this same file — persists an identical `complete` having verified nothing. The
+     drain therefore records WHICH gates ran, and a `complete` that names none is refused here
+     (`autorun-drain-ungated`) and does not clear the orchestrator marker at the Stop gate either.
+     The cure is always the same: re-run the drain with the gates, then close.
    - **`waiting_gate`** — the oracle reports only human gates (an open Think PR / `[operator-action]`
      gate). Evidence refs: `gates:[<refs>]` (non-empty). The validator **re-runs the oracle** and
      refuses the claim unless it reports a human-gate wait as the live blocking state (no actionable

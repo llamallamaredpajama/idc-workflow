@@ -179,8 +179,14 @@ def close_only(repo, rec, timeout):
     return False, (detail[-1][:300] if detail else f"exit {r.returncode}")
 
 
-def recover(repo, session_id, timeout):
-    """The deterministic recovery. Returns (verdict, recovered, cleared, unresolved, n_taints)."""
+def recover(repo, timeout):
+    """The deterministic recovery. Returns (verdict, recovered, cleared, unresolved, n_taints).
+
+    Takes NO session id, and that absence is the design: recovery is cross-session by construction (the
+    taint belongs to a session that is already dead — see the module header), so there is nothing here
+    a session id could correctly filter. It used to accept one and never read it, which read as though
+    recovery might be session-scoped. The RUNNING session's id is reported by `main`, where it is
+    genuinely just provenance for the operator."""
     if not H.is_governed_repo(repo):
         return "ungoverned", [], [], [], 0
 
@@ -256,8 +262,13 @@ def main(argv=None):
 
     repo = os.path.abspath(args.repo)
     sid = args.session_id or os.environ.get("CLAUDE_CODE_SESSION_ID") or None
-    verdict, recovered, cleared, unresolved, n = recover(repo, sid, args.timeout)
+    verdict, recovered, cleared, unresolved, n = recover(repo, args.timeout)
 
+    # `--session-id` says "reporting only" — so REPORT it. Until now nothing printed it, which made the
+    # flag's own help false and left an operator reading a recovery trace with no record of which
+    # session performed it. Printed first and always (`-` when unattributed) so the line's presence is
+    # not itself a signal.
+    print("session: " + (sid or "-"))
     print(f"mid_finish: {n}")
     print("recover: " + verdict)
     print("recovered: " + " ".join(str(i) for i in recovered))

@@ -308,11 +308,15 @@ try:
     data = json.load(open(path, encoding="utf-8"))
 except (OSError, UnicodeError, json.JSONDecodeError):
     raise SystemExit(2)
-assert set(data) == {"version", "verdict", "exit", "session_id", "ts"}, data
-assert data["version"] == 1, data
+assert set(data) == {"version", "verdict", "exit", "session_id", "gates", "ts"}, data
+assert data["version"] == 2, data
 assert data["verdict"] == "complete", data
 assert data["exit"] == 0, data
 assert data["session_id"] == session, data
+# This drain ran with NO wave-close gate flags, so the record must say so — an empty list, not a
+# missing key and not a fabricated one. That honest empty is what stops this ungated pass from
+# laundering into a provable completion for the Stop gate / the autorun complete claim.
+assert data["gates"] == [], data
 assert isinstance(data["ts"], (int, float)), data
 PY
   json_rc=$?

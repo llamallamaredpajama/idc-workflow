@@ -31,6 +31,26 @@ EXIT CODE. `BROKEN_PIPE_EXIT = 141` — the 128+SIGPIPE code a shell reports for
 same `| head` kills, so IDC's CLIs read like the rest of the system. It is deliberately NOT 0, 1, 2,
 or 4: those are load-bearing IDC verdicts (persisted / could-not-persist / rejected / stale runtime),
 and a truncated report must never be mistaken for one of them by a caller reading the exit code.
+
+WHICH CLIs GET THE GUARD (the selection criterion — write it down, because "we thought about it and
+decided no" and "nobody thought about it" look identical in a diff). A shipped `scripts/*.py` needs
+`run_guarded` in its `__main__` block if EITHER is true:
+
+  * it has a `--json` mode (JSON is what gets piped to `jq`, and `jq` closes the pipe early on
+    `first(...)`, `head -1`, or any error); or
+  * any of its output is UNBOUNDED IN LENGTH — one line per issue, per finding, per board item, per
+    cure. Bounded output (a fixed handful of verdict lines) is the ONLY safe exemption, and it is safe
+    only because it fits in the smallest pipe buffer (4 KB on Linux), not because it is short-looking.
+
+That second clause is why the criterion is written in terms of the payload rather than "is this
+operator-facing": whether an unguarded CLI crashes depends on how much fits in the kernel's pipe
+buffer before the reader leaves, so a report that is usually short but occasionally long is exactly
+the case that passes review and then fails in CI. When in doubt, add the guard — it costs two lines
+and changes nothing about a CLI whose reader stays.
+
+Deliberately NOT guarded: modules that are only ever imported (they must not install process-wide
+stdout behavior — see `run_guarded`'s own note), and hooks under `scripts/hooks/`, which talk to
+Claude Code over a JSON protocol on a pipe that is never a human's `| head`.
 """
 from __future__ import annotations
 

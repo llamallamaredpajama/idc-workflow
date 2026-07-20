@@ -112,10 +112,18 @@ ORCHESTRATOR_MARKER = "orchestrator_drain"
 DRAIN = "idc_autorun_drain.py"
 ACCEPT = "idc_acceptance_check.py"  # invoked BY the drain when the gate passes --acceptance (Stage E3)
 # The drain's NON-terminal exit. It now carries FOUR verdict tokens — recirc-pending, acceptance-gap,
-# coherence-gap, live-gap — and this gate deliberately treats them identically: each one means the
-# orchestrator's honest next action is more work, not a stop. Adding a wave-close gate to the drain
-# therefore needs no change here, which is exactly why they were wired into the drain's exit contract
-# rather than as new hooks of their own.
+# coherence-gap, live-gap — and the BLOCK/ALLOW DECISION treats them identically: each one means the
+# orchestrator's honest next action is more work, not a stop. That is why they were wired into the
+# drain's exit contract rather than as new hooks of their own.
+#
+# ADDING A WAVE-CLOSE GATE DOES, HOWEVER, NEED THREE EDITS HERE (this note used to claim it needed
+# none, which was never true and would have shipped a gate the stop path silently ignored):
+#   1. `_board_says_pending` — the filesystem re-run's argv is HARDCODED, so a new gate's flag must be
+#      added there or the gate never runs on the stop path.
+#   2. `_block_reason` — the block/allow decision is shared, but the CURE is not; a new token with no
+#      branch falls into the inbox default and advises a remediation that cannot clear it.
+#   3. `idc_drain_verdict.COMPLETION_HONESTY_GATES` — decide whether a `complete` should be unprovable
+#      without the new gate. Only add a gate that runs on BOTH backends (see that module's docstring).
 _RECIRC_PENDING_EXIT = 4
 # The FULL Phase-0 drain exit-code contract: 0 complete/continue · 2 unknown · 3 rate-limited · 4
 # recirc-pending. Any OTHER code means the drain itself CRASHED (an uncaught traceback exits 1) — the
@@ -200,9 +208,20 @@ def _github_says_pending(cwd, sid):
     exactly the pre-Stage-E2 behavior: you can only gate on data you have, never a guess.
 
     When a fresh same-session verdict IS present, its exit code maps to the SAME semantics the live
-    filesystem drain yields: exit 4 (`recirc-pending`) → board_pending; `complete` → board_complete;
-    everything else (continue / unknown / rate-limited / board-read-error) → allow, don't clear (a
-    resumable pause or eligible build work — never fight /loop, never a stale block)."""
+    filesystem drain yields: exit 4 (`recirc-pending`) → board_pending; a PROVEN `complete` →
+    board_complete; everything else (continue / unknown / rate-limited / board-read-error) → allow,
+    don't clear (a resumable pause or eligible build work — never fight /loop, never a stale block).
+
+    A `complete` TOKEN IS NOT PROOF OF COMPLETION, and this is the one path where that matters most.
+    The wave-close gates are opt-in FLAGS: the drain persists an identical `complete` whether it ran
+    them or not, and sanctioned callers legitimately run it with none (`idc:idc-build` Phase 0 uses
+    `--width` alone to size the ready frontier). The FILESYSTEM branch has a backstop — it re-runs the
+    drain itself with `--acceptance --coherence --live` — but github CANNOT (the zero-GraphQL
+    constraint), so here the gates are enforced only by whatever the last writer happened to pass, and
+    last-write-wins lets an ungated pass overwrite a gated one. So we ask `proves_complete`, which
+    requires the record to NAME the gates that ran. An unproven `complete` is not an error and not a
+    block: it falls into the EXISTING no-fresh-verdict path — warn, allow the stop, but leave the
+    orchestrator marker in place, so nothing is laundered and nothing is wedged."""
     v = idc_drain_verdict.current_verdict(cwd, sid)
     if v is None:
         H.warn("stop-fixpoint: github backend — no persisted drain verdict for this session; "
@@ -210,7 +229,16 @@ def _github_says_pending(cwd, sid):
         return False, False, "github (no persisted verdict — deferred)"
     verdict = v.get("verdict")
     board_pending = (v.get("exit") == _RECIRC_PENDING_EXIT)
-    board_complete = (verdict == "complete")
+    board_complete = idc_drain_verdict.proves_complete(v)
+    if verdict == "complete" and not board_complete:
+        ran = idc_drain_verdict.gates_ran(v)
+        H.warn("stop-fixpoint: github backend — the persisted verdict says `complete` but does not "
+               f"record the wave-close gates that prove it (ran: {sorted(ran) if ran is not None else 'unrecorded'}; "
+               f"required: {sorted(idc_drain_verdict.COMPLETION_HONESTY_GATES)}). Allowing the stop, but "
+               "NOT clearing the orchestrator marker — re-run the drain with --coherence --live to "
+               "record a provable completion.")
+        return board_pending, False, (f"github (persisted: drain: {verdict}, exit {v.get('exit')} — "
+                                      "ungated, not proof of completion)")
     return board_pending, board_complete, f"github (persisted: drain: {verdict}, exit {v.get('exit')})"
 
 

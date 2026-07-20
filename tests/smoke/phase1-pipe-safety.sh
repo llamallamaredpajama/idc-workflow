@@ -45,6 +45,11 @@
 #   6. idc_intake_manifest.py's tolerant guard import made hard again → F RED. This one is not
 #      hypothetical: it is the defect the first cut of the fix actually shipped, caught by
 #      governance/external-intake-completeness.sh going red before any of this was committed.
+#   7/8/9. idc_pause_check.py, idc_live_check.py and idc_finish_coherence.py each reverted, one at a
+#      time, to the bare `main()` / `raise SystemExit(main())` they shipped with → that CLI's own G
+#      case RED (124 bytes of shutdown-flush noise on stderr). Each was ALSO run with its name removed
+#      from section E's census list, so the behavioural case was proven to fire on its own rather than
+#      being masked by the grep — which is why section G now runs BEFORE the census.
 #
 # ONE FALSE GREEN WAS FOUND AND FIXED IN THIS SUITE ITSELF, and is called out because it is the exact
 # class this repo keeps getting burned by: B1's first cut ordered its cases (0, 1, 2, 4), so under
@@ -309,6 +314,55 @@ fi
 [ "$TF_RC" -eq 141 ] || fail "D2: tracker-fs show writer exit code was ${TF_RC}, expected 141"
 
 # ================================================================================================
+# G. The completion-honesty CLIs — BEHAVIOURAL, not census
+#
+# idc_pause_check, idc_finish_coherence and idc_live_check all shipped ending in a bare `main()`
+# while seven siblings used the guard. Each matches the selection criterion written into
+# scripts/idc_stdio.py: idc_pause_check has a `--json` mode AND prints one unbounded `cure:` line per
+# finding; the other two print one line per stale item / per declared surface.
+#
+# WHY THESE GET A REAL CASE AND SECTION E's FOUR DO NOT. Sections A–D need a payload bigger than the
+# pipe buffer, because their reader exits AFTER reading some — and these three cannot be driven to
+# 64 KB of output in a hermetic repo. But size only matters when the reader leaves mid-stream. Pipe
+# to a reader that has ALREADY exited (`| true`, which returns before python has even booted) and the
+# writer's very first flush hits a pipe with no reader, whatever the payload size. So these get the
+# real assertion — the shipped script, spawned, piped into a dead reader — and not a source grep.
+#
+# The assertions are the same three the rest of this suite makes, and each is load-bearing: exit 141
+# (not 120, the shutdown-flush failure; not 1, an uncaught BrokenPipeError), and EMPTY stderr (a guard
+# that catches the exception but skips the /dev/null redirect still prints `Exception ignored in:
+# <_io.TextIOWrapper ...>` on the way out).
+#
+# RED-WHEN-BROKEN: reverting any one of the three __main__ blocks to its shipped-bare form
+# (`main()` / `raise SystemExit(main())`) turns its own case red — verified per CLI, one at a time.
+# ================================================================================================
+GREPO="$WORK/gov-repo"
+mkdir -p "$GREPO/docs/workflow"
+printf 'backend: filesystem\n' > "$GREPO/docs/workflow/tracker-config.yaml"
+printf '# tracker\n' > "$GREPO/TRACKER.md"
+git -C "$GREPO" init -q .
+git -C "$GREPO" add -A >/dev/null 2>&1
+git -C "$GREPO" -c user.email=t@e -c user.name=t commit -qm init >/dev/null 2>&1
+
+# Each entry: <script> <args…>. All three are read-only here; none needs a board or a network.
+pipe_case() {
+  local label="$1"; shift
+  local errf="$WORK/g-$label.err"
+  ( cd "$GREPO" && "$@" ) 2>"$errf" | true
+  local rc="${PIPESTATUS[0]}"
+  local eb; eb="$(wc -c < "$errf" | tr -d ' ')"
+  if [ "$eb" -ne 0 ]; then
+    echo "--- stderr from $label (should have been empty) ---"; cat "$errf"
+    fail "G[$label]: piping to an already-exited reader wrote ${eb} bytes to stderr — the guard is missing or incomplete (a caught BrokenPipeError without the /dev/null redirect still leaks the shutdown-flush message)"
+  fi
+  [ "$rc" -eq 141 ] \
+    || fail "G[$label]: writer exit code was ${rc}, expected the guard's 141 (120 = shutdown-flush failure, 1 = uncaught BrokenPipeError, 0 = the write never reached the dead pipe)"
+}
+pipe_case pause-check       python3 "$PLUGIN/scripts/idc_pause_check.py" --repo . --json
+pipe_case finish-coherence  python3 "$PLUGIN/scripts/idc_finish_coherence.py" --repo . --tracker TRACKER.md
+pipe_case live-check        python3 "$PLUGIN/scripts/idc_live_check.py" --repo .
+
+# ================================================================================================
 # E. Wiring census — a SUPPLEMENT to sections A–D, never a substitute
 #
 # Stated plainly because this repo has been burned by source-grepping tests: on its own this section
@@ -320,7 +374,8 @@ fi
 # case above too.
 # ================================================================================================
 for s in idc_gh_board idc_git_janitor idc_board_lint idc_tracker_fs idc_recirc_sweep \
-         idc_intake_manifest idc_command_contract; do
+         idc_intake_manifest idc_command_contract \
+         idc_pause_check idc_finish_coherence idc_live_check; do
   f="$PLUGIN/scripts/$s.py"
   [ -f "$f" ] || fail "E: $s.py not found"
   grep -q 'idc_stdio.run_guarded(main)' "$f" \

@@ -458,6 +458,54 @@ run python3 "$LIVE" --repo "$G" --run
 sz="$(wc -c < "$EV" | tr -d ' ')"
 [ "$sz" -lt 20000 ] || fail "G5: the evidence record must be bounded, got $sz bytes"
 
+# G5b — the bound is on the READ, not only on what gets WRITTEN.
+#
+# G5 above proves the RECORD is small. That is a weaker property than it looks: it was satisfied by
+# reading the child's entire output into memory with `communicate()` and then truncating. So a verify
+# script that printed a gigabyte was a gigabyte resident in this process — and by then the timeout
+# could not help either, because the command had already exited. A check that can be made to exhaust
+# memory is a check that gets removed.
+#
+# This case drives 300 MB through the gate and asserts PEAK RSS stays flat. It measures the reader
+# directly (in-process, via getrusage) rather than the record, because the record is small either way
+# — which is exactly how the unbounded read hid behind G5. The child's output carries a unique tail
+# marker, so the assertion also proves the retained slice is the END of the stream (a reader that
+# bounded the read by simply stopping early would keep the HEAD and lose the failure reason, which is
+# always at the end).
+#
+# Red-when-broken (verified by mutation): replace the `_drain_bounded(proc, spec["timeout"])` call with
+# `proc.communicate(timeout=spec["timeout"])[0]` and RSS grows by ~300 MB ⇒ RED.
+python3 - "$LIVE" <<'PY' || fail "G5b: the verify command's output is not bounded ON THE READ"
+import resource, sys, os, tempfile
+sys.path.insert(0, os.path.dirname(os.path.abspath(sys.argv[1])))
+import idc_live_check as L
+L._invalidate = lambda *a, **k: None          # the record is G5's business, not this case's
+
+work = tempfile.mkdtemp()
+big = os.path.join(work, "big.py")
+with open(big, "w") as fh:
+    fh.write("import sys\n"
+             "line = 'noisy output line with plenty of readable words %07d\\n'\n"
+             "for i in range(4_000_000): sys.stdout.write(line % i)\n"
+             "sys.stdout.write('UNIQUE_TAIL_MARKER\\n')\n")
+
+# ru_maxrss is BYTES on macOS and KILOBYTES on Linux; normalise before comparing.
+scale = 1 if sys.platform == "darwin" else 1024
+before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * scale
+rc, out, _secs = L.run_verify(work, {"name": "s", "verify_raw": f"python3 {big}", "timeout": 300}, "HEAD")
+after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * scale
+grew_mb = (after - before) / 1e6
+
+produced_mb = 4_000_000 * 55 / 1e6
+assert rc == 0, f"precondition: the noisy command must still succeed, got rc={rc}"
+assert produced_mb > 200, f"precondition: fixture too small ({produced_mb:.0f}MB) to distinguish"
+assert len(out) <= L.MAX_BODY_CHARS + 64, f"the returned capture is unbounded: {len(out)} chars"
+assert "UNIQUE_TAIL_MARKER" in out, "the retained slice is not the TAIL of the stream"
+assert grew_mb < 50, (f"UNBOUNDED READ: peak RSS grew {grew_mb:.0f}MB while the child printed "
+                      f"{produced_mb:.0f}MB — the whole capture was held in memory")
+print(f"  ok G5b: {produced_mb:.0f}MB streamed, tail retained, peak RSS +{grew_mb:.1f}MB")
+PY
+
 # G6 — A HUNG PROBE IS INDETERMINATE, NOT A PASS, and it must not leave the child running. An
 # unbounded verify command would hang the wave close forever; an orphaned browser/dev-server would
 # outlive the run on the operator's machine.
@@ -533,6 +581,62 @@ run python3 "$DRAIN" --tracker "$T" --coherence --live
 printf '%s' "$out" | grep -q '^drain: complete' || fail "C2: expected drain: complete, got: $out"
 printf '%s' "$out" | grep -q '^live: not-declared' \
   || fail "C2: --live on a repo declaring no surface must report not-declared (free), got: $out"
+
+# C2b — THE PERSISTED VERDICT RECORDS WHICH GATES RAN, and only those.
+#
+# WHY THIS EXISTS. `drain: complete` is printed and persisted identically whether the wave-close gates
+# ran or not — they are opt-in FLAGS. On the github backend the Stop fixpoint gate cannot re-run the
+# drain (the zero-GraphQL constraint), so it believes the persisted verdict; combined with
+# last-write-wins, an ungated pass (`idc:idc-build` Phase 0 runs the drain with only `--width` to size
+# the ready frontier) could overwrite a properly gated `complete` with an indistinguishable one and
+# launder an unchecked pipe into a cleared orchestrator marker. So the record must name the gates.
+#
+# THE SHARP EDGE IS "OPTED IN" vs "ACTUALLY RAN" — a flag that was passed but whose gate did not run
+# (inapplicable to this backend, or its checker absent) must NOT be recorded. That is what makes the
+# record evidence rather than an echo of the command line.
+#
+# Red-when-broken (verified by mutation): record the gate on the flag instead of on the result
+# (`gates_ran.append(name)` unconditionally, dropping the `if cls is not None` guard) ⇒ C2b RED,
+# because --acceptance is passed here but cannot run without a tracker.
+gates_of() { python3 -c 'import json,sys; print(",".join(json.load(open(sys.argv[1]))["gates"]))' "$1/.idc-drain-verdict.json"; }
+# The verdict sidecar is REPO-GATED (`is_governed_repo` keys on this file), and mkrepo does not write
+# it — without it the drain persists nothing and every assertion below would read an empty string,
+# passing the "no gates" case for entirely the wrong reason.
+printf 'backend: filesystem\n' > "$D/docs/workflow/tracker-config.yaml"
+
+CLAUDE_CODE_SESSION_ID=c2b python3 "$DRAIN" --tracker "$T" --coherence --live >/dev/null 2>&1
+[ -f "$D/.idc-drain-verdict.json" ] \
+  || fail "C2b: precondition — the drain must have persisted a verdict at all (repo not governed?)"
+[ "$(gates_of "$D")" = "coherence,live" ] \
+  || fail "C2b: a --coherence --live drain must record BOTH gates, got '$(gates_of "$D")'"
+
+CLAUDE_CODE_SESSION_ID=c2b python3 "$DRAIN" --tracker "$T" --width >/dev/null 2>&1
+[ "$(gates_of "$D")" = "" ] \
+  || fail "C2b: an ungated (--width only) drain must record NO gates — the honest empty is what stops it laundering into a provable completion, got '$(gates_of "$D")'"
+
+# The discriminating case: --acceptance is PASSED but is filesystem-only and there is no --tracker on
+# a github board, so it does not run and must not be recorded. A fake gh keeps this hermetic.
+GHB="$WORK/c2b-bin"; mkdir -p "$GHB"
+cat > "$GHB/gh" <<'GHEOF'
+#!/usr/bin/env python3
+import json, sys
+a = sys.argv[1:]
+if a[:2] == ["api", "rate_limit"]:
+    print(json.dumps({"resources": {"graphql": {"remaining": 100, "reset": 1999999999}}})); raise SystemExit(0)
+if a[:2] == ["project", "view"]:
+    print("PVT_c2b"); raise SystemExit(0)
+if a[:2] == ["api", "graphql"]:
+    print(json.dumps({"data": {"node": {"items": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []}}}})); raise SystemExit(0)
+print("unexpected gh call: " + " ".join(a), file=sys.stderr); raise SystemExit(99)
+GHEOF
+chmod +x "$GHB/gh"
+GH="$WORK/c2b-repo"; mkrepo "$GH"
+printf 'backend: github\nproject_number: 10\n' > "$GH/docs/workflow/tracker-config.yaml"
+( cd "$GH" && PATH="$GHB:$PATH" CLAUDE_CODE_SESSION_ID=c2b python3 "$DRAIN" --backend github \
+    --owner owner --project 10 --repo "$GH" --acceptance --coherence --live ) >/dev/null 2>&1
+got="$(gates_of "$GH")"
+[ "$got" = "coherence,live" ] \
+  || fail "C2b: --acceptance was PASSED but cannot run on a github board (no local TRACKER.md), so it must NOT be recorded as a gate that ran; expected 'coherence,live', got '$got' [record on the flag instead of the result ⇒ RED]"
 
 # C3 — declaring a live surface with no evidence makes the SAME clean board non-terminal.
 mkdir -p "$D/scripts"

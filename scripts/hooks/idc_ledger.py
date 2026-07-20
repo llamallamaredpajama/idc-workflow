@@ -544,30 +544,10 @@ def ensure_gitignored(repo_root):
     rewrite or reorder an operator's existing lines). REPO-GATED: a no-op outside a governed repo,
     so a stray call never creates a `.gitignore` in a non-IDC dir. Returns True iff the line is
     present afterward."""
-    if not idc_hook_lib.is_governed_repo(repo_root):
-        return False
-    gi = os.path.join(repo_root, ".gitignore")
-    try:
-        existing = ""
-        if os.path.isfile(gi):
-            with open(gi, encoding="utf-8") as fh:
-                existing = fh.read()
-        # Whole-line presence check (ignore surrounding whitespace; tolerate no trailing newline).
-        if any(ln.strip() == GITIGNORE_LINE for ln in existing.splitlines()):
-            return True
-        with open(gi, "a", encoding="utf-8") as fh:
-            if existing and not existing.endswith("\n"):
-                fh.write("\n")
-            if not existing:
-                fh.write("# IDC obligations ledger — transient per-session state, never committed.\n")
-            elif not existing.rstrip("\n").endswith(("#", ":")):
-                # Separate our entry from prior operator content with one comment for provenance.
-                fh.write("# IDC obligations ledger (per-session state; do not commit)\n")
-            fh.write(GITIGNORE_LINE + "\n")
-        return True
-    except OSError as e:
-        idc_hook_lib.warn(f"ledger: could not ensure .gitignore in {repo_root}: {e}")
-        return False
+    return idc_hook_lib.ensure_gitignored(
+        repo_root, GITIGNORE_LINE, label="ledger",
+        created_comment="# IDC obligations ledger — transient per-session state, never committed.",
+        appended_comment="# IDC obligations ledger (per-session state; do not commit)")
 
 
 # ── CLI (scaffold gitignore step + governance test driver; NOT an LLM-facing surface) ────────────

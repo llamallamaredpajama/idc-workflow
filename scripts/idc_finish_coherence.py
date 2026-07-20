@@ -229,4 +229,18 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    main()
+    # Broken-pipe guard: the gap path prints one line per stale item, which is unbounded in the board's
+    # size — the criterion in scripts/idc_stdio.py. (Its `main` exits via sys.exit deep inside, which is
+    # precisely the SystemExit case run_guarded exists to carry through unchanged.)
+    #
+    # TOLERANT IMPORT, exactly as the three import-graph roots do it. This script is RELOCATABLE on
+    # purpose: it resolves its janitor sibling by directory, and phase4-completion-honesty.sh section F
+    # copies it next to a stub janitor to drive shapes the real one cannot be made to emit. A hard
+    # import would kill that copy with ImportError; a relocated copy instead runs UNGUARDED (its
+    # previous behaviour), which costs only pipe hygiene. In its real home the guard always loads.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    try:
+        import idc_stdio
+    except ImportError:
+        raise SystemExit(main())
+    raise SystemExit(idc_stdio.run_guarded(main))

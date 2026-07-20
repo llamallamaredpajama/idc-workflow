@@ -100,7 +100,8 @@ echo "  ok (1) persisted recirc-pending (exit 4) for THIS session ⇒ blocks 3×
 # Fresh session id so the anti-nag counter is clean; last-write-wins overwrites nothing (new session).
 SID2="ghsess2-$$-$(basename "$WORK")"
 led    set --kind orchestrator_drain --session "$SID2" >/dev/null || fail "(2) marker set failed"
-vwrite --verdict complete --exit 0 --session "$SID2"              || fail "(2) could not persist the complete verdict"
+vwrite --verdict complete --exit 0 --session "$SID2" --gates coherence,live \
+                                                                  || fail "(2) could not persist the complete verdict"
 run_gate "$SID2"; no_trip
 blocks "$GATE_OUT" && fail "(2) THE CRUX FAILED: a persisted drain: complete must ALLOW the stop (board conjunct false) — got a block [re-map exit/verdict ⇒ RED]"
 [ "$GATE_RC" -eq 0 ] || fail "(2) a complete-verdict stop must exit 0 (allow), got $GATE_RC"
@@ -136,13 +137,49 @@ echo "  ok (4) a foreign-session persisted verdict is invisible ⇒ DEFER/allow 
 SID5="ghsess5-$$-$(basename "$WORK")"
 led    set --kind orchestrator_drain --session "$SID5" >/dev/null || fail "(5) marker set failed"
 led    set --kind mid_finish --key 7 --session "$SID5"  >/dev/null || fail "(5) could not set the lingering mid_finish taint"
-vwrite --verdict complete --exit 0 --session "$SID5"              || fail "(5) could not persist the complete verdict"
+vwrite --verdict complete --exit 0 --session "$SID5" --gates coherence,live \
+                                                                  || fail "(5) could not persist the complete verdict"
 run_gate "$SID5"; no_trip
 blocks "$GATE_OUT" && fail "(5) LEDGER-ALONE broke on github: a clean persisted drain: complete must ALLOW even with a lingering mid_finish taint — the ledger alone never blocks a clean board"
 [ "$GATE_RC" -eq 0 ] || fail "(5) a clean-board github stop must allow exit 0, got $GATE_RC"
 led pending --session "$SID5" | grep -qx 'mid_finish:7' \
   || fail "(5) the mid_finish:7 obligation must survive (m5 clears ONLY the orchestrator marker on a clean complete)"
 echo "  ok (5) ledger-alone-never-blocks holds on github (persisted complete + lingering taint ⇒ allow; the taint survives)"
+
+# ══ Case 5b — AN UNGATED `complete` IS NOT PROOF OF COMPLETION ══════════════════════════════════════
+# THE HOLE THIS CLOSES. The wave-close gates (--coherence/--live) are opt-in FLAGS, so the drain prints
+# and persists an IDENTICAL `complete` whether it checked the board against reality or checked nothing.
+# Sanctioned callers legitimately run it ungated — `idc:idc-build` Phase 0 uses `--width` alone to size
+# the ready frontier — and last-write-wins means that pass OVERWRITES a properly gated verdict. On the
+# filesystem backend the gate re-runs the drain itself with all three flags, so it has a backstop; on
+# GITHUB it cannot (the zero-GraphQL constraint), so it believes this file. Before the fix, an ungated
+# frontier query could therefore launder an unchecked pipe into a cleared orchestrator marker — on the
+# very backend where the seven-stale-card incident happened.
+#
+# THE CONTRACT: an ungated `complete` is neither a block (it proves no pending work either) nor a clean
+# bill of health. It lands in the EXISTING no-fresh-verdict path — allow the stop, warn, and LEAVE THE
+# MARKER — so nothing is laundered and nothing is wedged.
+#
+# Red-when-broken (verified by mutation): make _github_says_pending read `verdict == "complete"` again
+# instead of proves_complete(), and the marker is cleared ⇒ this case FAILS.
+SID6="ghsess6-$$-$(basename "$WORK")"
+led    set --kind orchestrator_drain --session "$SID6" >/dev/null || fail "(5b) marker set failed"
+vwrite --verdict complete --exit 0 --session "$SID6"              || fail "(5b) could not persist the ungated complete verdict"
+run_gate "$SID6"; no_trip
+blocks "$GATE_OUT" && fail "(5b) an ungated complete must ALLOW the stop (it proves no pending work either) — got a block; the fix must not wedge a stop, only refuse to call it proven"
+[ "$GATE_RC" -eq 0 ] || fail "(5b) an ungated-complete stop must allow exit 0, got $GATE_RC"
+led pending --session "$SID6" | grep -qx 'orchestrator_drain' \
+  || fail "(5b) LAUNDERING: an UNGATED persisted complete (no --coherence/--live recorded) must NOT clear the orchestrator marker — only a verdict that NAMES the gates that ran is proof of completion [read verdict=='complete' instead of proves_complete ⇒ RED]"
+grep -qi 'does not record the wave-close gates' "$ERRLOG" \
+  || fail "(5b) the ungated-complete defer must WARN why it is not proof (got stderr: $(cat "$ERRLOG"))"
+# And a verdict recording only PART of the required set is equally not proof (no partial credit).
+SID7="ghsess7-$$-$(basename "$WORK")"
+led    set --kind orchestrator_drain --session "$SID7" >/dev/null || fail "(5b) marker set failed for the partial-gates case"
+vwrite --verdict complete --exit 0 --session "$SID7" --gates live || fail "(5b) could not persist the partial-gates verdict"
+run_gate "$SID7"; no_trip
+led pending --session "$SID7" | grep -qx 'orchestrator_drain' \
+  || fail "(5b) a complete recording only SOME of the required wave-close gates must NOT clear the marker (no partial credit)"
+echo "  ok (5b) an ungated (or partially gated) persisted complete allows the stop but is NOT proof — the orchestrator marker survives"
 
 # ══ Case 6 — GITIGNORE SELF-HEAL: persisting a verdict must never leave committed litter ═════════════
 # A repo installed BEFORE Stage E2 can run autorun before it ever updates, so the drain's FIRST verdict

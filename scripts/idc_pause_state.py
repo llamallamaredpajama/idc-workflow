@@ -72,7 +72,6 @@ import argparse
 import json
 import os
 import sys
-import tempfile
 import time
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -112,11 +111,6 @@ def read_record(cwd):
     return data
 
 
-def active_pause(cwd):
-    """The record if a pause is recorded in ANY active state (requested or confirmed), else None."""
-    return read_record(cwd)
-
-
 def is_paused(cwd) -> bool:
     """True ONLY for a CONFIRMED pause. A `pause-requested` record is not a pause: it means the pause
     was asked for and never proven honest, so nothing may treat it as a clean stop."""
@@ -129,28 +123,8 @@ def _atomic_write(cwd, payload) -> bool:
     """Write the record atomically (temp-file + os.replace, so a concurrent reader never sees a
     half-written file). Returns True iff it actually PERSISTED — the caller SURFACES a False rather
     than reporting a pause that was never recorded."""
-    path = pause_path(cwd)
-    d = os.path.dirname(path) or "."
-    try:
-        fd, tmp = tempfile.mkstemp(dir=d, prefix=".idc-pause.", suffix=".tmp")
-    except OSError as e:
-        idc_hook_lib.warn(f"pause-state: cannot create temp file in {d}: {e}")
-        return False
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh, indent=2, sort_keys=True)
-            fh.write("\n")
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
-    except OSError as e:
-        idc_hook_lib.warn(f"pause-state: atomic write to {path} failed: {e}")
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-        return False
-    return True
+    return idc_hook_lib.atomic_write_json(pause_path(cwd), payload, prefix=".idc-pause.",
+                                          label="pause-state")
 
 
 def request(cwd, session_id, command=None, note=None, ts=None):
@@ -212,10 +186,15 @@ class ClearFailed(RuntimeError):
     """The pause record is still on disk after a resume tried to remove it."""
 
 
-def clear(cwd, session_id=None):
+def clear(cwd):
     """Remove the pause record. Returns the record that WAS there (so the caller can report what it
     resumed), or None when nothing was paused — an honest no-op, never an error. Removing an already
     absent record is a no-op too.
+
+    DELIBERATELY NOT SESSION-SCOPED, which is why this takes no session id. The session that paused a
+    run is, by the time anyone resumes it, usually gone — that is the whole point of a durable pause
+    record — so a dead session's pause MUST be clearable by whoever comes next. This once accepted a
+    `session_id` it never used, which implied the opposite of the design.
 
     A removal that FAILS raises `ClearFailed`, and that distinction is load-bearing. Returning None
     there — which is what the first cut did — is indistinguishable from "nothing was paused", so
@@ -291,26 +270,13 @@ def close_open_commands(cwd, session_id):
 # ── the gitignore scaffold hook (idempotent, non-destructive) ─────────────────────────────────────
 def ensure_gitignored(repo_root) -> bool:
     """Ensure the repo-root `.gitignore` ignores the pause record, idempotently and NON-destructively.
-    REPO-GATED. Delegates the append to the ledger's shared implementation shape."""
-    if not idc_hook_lib.is_governed_repo(repo_root):
-        return False
-    gi = os.path.join(repo_root, ".gitignore")
-    try:
-        existing = ""
-        if os.path.isfile(gi):
-            with open(gi, encoding="utf-8") as fh:
-                existing = fh.read()
-        if any(ln.strip() == GITIGNORE_LINE for ln in existing.splitlines()):
-            return True
-        with open(gi, "a", encoding="utf-8") as fh:
-            if existing and not existing.endswith("\n"):
-                fh.write("\n")
-            fh.write("# IDC pause record (deliberate run pause; local state, do not commit)\n")
-            fh.write(GITIGNORE_LINE + "\n")
-        return True
-    except OSError as e:
-        idc_hook_lib.warn(f"pause-state: could not ensure .gitignore in {repo_root}: {e}")
-        return False
+    REPO-GATED. Now genuinely DELEGATES to the shared sidecar implementation — the docstring here used
+    to claim that while carrying its own copy, which had already drifted from its three siblings (it
+    appended a provenance comment even when the existing file ended in a comment or a colon)."""
+    return idc_hook_lib.ensure_gitignored(
+        repo_root, GITIGNORE_LINE, label="pause-state",
+        created_comment="# IDC pause record (deliberate run pause; local state, do not commit)",
+        appended_comment="# IDC pause record (deliberate run pause; local state, do not commit)")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────────────────────────
@@ -372,7 +338,8 @@ def _cmd_resume(args) -> int:
         print("idc-pause-state: not an IDC-governed repo — nothing to resume", file=sys.stderr)
         return 2
     try:
-        rec = clear(args.cwd, args.session)
+        # No session id: resume is deliberately unscoped — see `clear`.
+        rec = clear(args.cwd)
     except ClearFailed as e:
         # Fail CLOSED and loudly: the record survived, so this repo is still paused. Exiting 0 here
         # would hand the caller a resume it did not get, and leave a stale pause record behind for the
@@ -428,6 +395,9 @@ def main(argv=None) -> int:
     cp.add_argument("--timeout", type=int, default=180)
 
     up = sub.add_parser("resume", help="clear the pause record (honest no-op when nothing is paused)")
+    # Accepted (the shipped /idc:resume and /idc:autorun preflight both pass it) and used ONLY for the
+    # caller's own attribution — resume NEVER filters the pause record by session. A pause outlives the
+    # session that set it, so scoping the removal would strand exactly the records resume exists to lift.
     up.add_argument("--session", default=None)
 
     op = sub.add_parser("close-open", help="close this session's open pipeline records as `paused`")

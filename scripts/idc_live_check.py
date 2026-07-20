@@ -115,11 +115,18 @@ import hashlib
 import json
 import os
 import re
+import select
 import signal
 import subprocess
 import sys
 import time
 from datetime import datetime, timezone
+
+# Same-dir import: the shared credential table lives beside this script in scripts/, so this resolves
+# whether the file is run directly (sys.path[0] is its own dir) or imported by a smoke test that put
+# scripts/ on sys.path. See idc_credential_shapes.py for what is shared and what deliberately is not.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import idc_credential_shapes as CS  # noqa: E402
 
 # The evidence marker. The sentinel is matched FIRST and the payload captured up to the comment close,
 # so a CORRUPT payload fails closed (exit 2) rather than slipping past a `{…}`-anchored pattern as
@@ -176,23 +183,37 @@ _STRUCTURAL_KEYS = ("name", "paths", "evidence", "attested", "timeout")
 # rule and redacted the whole capture, and a verify script that printed 400 KB on one line wedged the
 # gate for minutes with no timeout left to save it (the command had already exited). A check that hangs
 # is a check that gets removed. `tests/smoke/phase4-completion-honesty.sh` G5 is that regression.
-_REDACTORS = (
-    (re.compile(r"-----BEGIN[^-]*PRIVATE KEY-----.*?-----END[^-]*PRIVATE KEY-----", re.S),
-     "[REDACTED PRIVATE KEY]"),
-    # `scheme://user:pass@host` — credentials smuggled in a URL.
-    (re.compile(r"(?i)\b([a-z][a-z0-9+.-]{0,32}://)[^/\s:@]{1,256}:[^/\s@]{1,256}@"), r"\1[REDACTED]@"),
-    # `Authorization: Bearer …`, `Basic …`, `token …`.
-    (re.compile(r"(?i)\b(bearer|basic|token)\s+[A-Za-z0-9._~+/=-]{8,4096}"), r"\1 [REDACTED]"),
+#
+# The SELF-IDENTIFYING shapes come from the shared `idc_credential_shapes` table, which this file and
+# `idc_intake_manifest.py` both consume — they had drifted in both directions, each catching real
+# credential shapes the other missed. The two rules below are NOT shared, on purpose: both are broad
+# enough to be right for machine output and wrong for human prose (the named-secret rule matches on
+# substrings, so `TOKENIZER_MODEL=…` is a "token"; the `Basic`/`token` header arms match ordinary
+# English), and intake HARD-REJECTS where this file merely redacts. See that module's docstring.
+_LIVE_ONLY_AUTH_VERBS = (
+    # `Authorization: Basic …` / `token …`. The `Bearer` arm is the shared one, applied above.
+    re.compile(r"(?i)\b(basic|token)\s+[A-Za-z0-9._~+/=-]{8,4096}"), r"\1 [REDACTED]",
+)
+_LIVE_ONLY_NAMED_SECRET = (
     # Anything that NAMES itself a secret: key/token/secret/password/credential/auth = or : value.
-    (re.compile(r"(?i)([\w.-]{0,32}(?:secret|password|passwd|token|api[_-]?key|apikey|credential|"
-                r"auth(?:orization)?)[\w.-]{0,32})\s*[:=]\s*(\"[^\"]{0,512}\"|'[^']{0,512}'|\S{1,512})"),
-     r"\1=[REDACTED]"),
-    # Known credential shapes, even bare in a log line.
-    (re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{16,}|sk-[A-Za-z0-9_-]{16,}|xox[baprs]-[A-Za-z0-9-]{10,}|"
-                r"AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|ya29\.[0-9A-Za-z_-]{10,}|"
-                r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,})"), "[REDACTED]"),
-    # The backstop: any long opaque run is treated as a credential we do not have a name for.
-    (re.compile(r"\b[A-Za-z0-9_\-]{40,4096}\b"), "[REDACTED]"),
+    re.compile(r"(?i)([\w.-]{0,32}(?:secret|password|passwd|token|api[_-]?key|apikey|credential|"
+               r"auth(?:orization)?)[\w.-]{0,32})\s*[:=]\s*(\"[^\"]{0,512}\"|'[^']{0,512}'|\S{1,512})"),
+    r"\1=[REDACTED]",
+)
+_LIVE_ONLY_OPAQUE_RUN_BACKSTOP = (
+    # The backstop: any long opaque run is treated as a credential we do not have a name for. Strictly
+    # live-check-only — intake's review binding note IS a 64-character hex digest, so this rule would
+    # make every stamped review unvalidatable there.
+    re.compile(r"\b[A-Za-z0-9_\-]{40,4096}\b"), "[REDACTED]",
+)
+_REDACTORS = (
+    # The PEM block keeps its own, more informative marker: a reviewer reading a receipt should be able
+    # to tell "a private key was here" from "an opaque token was here".
+    CS.bake((CS.PEM_PRIVATE_KEY_BLOCK,), "[REDACTED PRIVATE KEY]")
+    + CS.bake((CS.URL_USERINFO, CS.BEARER_HEADER), "[REDACTED]")
+    + (_LIVE_ONLY_AUTH_VERBS, _LIVE_ONLY_NAMED_SECRET)
+    + CS.bake((CS.KNOWN_CREDENTIAL_SHAPES,), "[REDACTED]")
+    + (_LIVE_ONLY_OPAQUE_RUN_BACKSTOP,)
 )
 
 
@@ -462,6 +483,58 @@ def _git(repo, *args):
     return r.returncode, (r.stdout or "").strip()
 
 
+# How much of the child's output is ever HELD IN MEMORY at once. Deliberately a little larger than
+# MAX_BODY_CHARS (and in bytes, so multi-byte characters cannot smuggle the character count past the
+# bound) so that `_tail` still sees an over-limit input and adds its own truncation marker exactly as
+# before — the retained slack is what keeps the "…[truncated]…" signal honest.
+_MAX_RETAINED_BYTES = MAX_BODY_CHARS * 4 + 1024
+_READ_CHUNK = 65536
+
+
+def _drain_bounded(proc, timeout):
+    """Drain the child's merged stdout/stderr to EOF, RETAINING ONLY THE LAST `_MAX_RETAINED_BYTES`.
+
+    WHY NOT `communicate()`. `communicate` returns EVERYTHING the child printed, so a verify script
+    that emits a gigabyte is a gigabyte in this process's memory. The existing bounds (`_tail`,
+    MAX_BODY_CHARS) apply only to what gets WRITTEN — by the time they run the whole capture is already
+    resident, and the timeout can no longer help either, because the command has exited. The bound has
+    to be on the READ.
+
+    WHY IT STILL DRAINS. Retaining a tail is not the same as reading less: the pipe must keep being
+    emptied or the child BLOCKS on a full pipe buffer and dies on the timeout instead of finishing.
+    So this reads everything and forgets all but the tail — memory is bounded, behavior is not changed.
+
+    The deadline is enforced with `select` rather than a blocking read, so a child that goes silent
+    without exiting still times out (a plain `read()` would wait for output that never comes). Raises
+    `subprocess.TimeoutExpired` on the deadline, so the caller's existing timeout arm — kill the process
+    group, invalidate the stale receipt, report INDETERMINATE — is reached unchanged.
+
+    Returns the decoded tail; the caller applies `_tail` + `redact` to it as before."""
+    deadline = time.time() + timeout
+    kept = b""
+    try:
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(proc.args, timeout)
+            ready, _, _ = select.select([proc.stdout], [], [], remaining)
+            if not ready:
+                raise subprocess.TimeoutExpired(proc.args, timeout)
+            chunk = proc.stdout.read1(_READ_CHUNK)
+            if not chunk:
+                break  # EOF — every writer on the pipe has closed it
+            kept = (kept + chunk)[-_MAX_RETAINED_BYTES:]
+    finally:
+        try:
+            proc.stdout.close()
+        except OSError:  # pragma: no cover — defensive
+            pass
+    # EOF does not by itself mean the child has reaped; wait for the real exit status within whatever
+    # is left of the same deadline, so `proc.returncode` is never read as None.
+    proc.wait(timeout=max(0.1, deadline - time.time()))
+    return kept.decode("utf-8", "replace")
+
+
 def run_verify(repo, spec, commit):
     """EXECUTE one surface's verify command in the repo root. Returns (exit_code, redacted_output, secs).
 
@@ -499,14 +572,17 @@ def run_verify(repo, spec, commit):
     try:
         # `verify_raw`, never `verify`: the redacted form is for the RECORD, and running it would run a
         # different command than the project declared (see `surface_spec`).
+        # BINARY pipe on purpose: `_drain_bounded` selects on the raw fd and retains a byte tail, then
+        # decodes once at the end. A text-mode wrapper would buffer decoded characters where `select`
+        # cannot see them.
         proc = subprocess.Popen(spec["verify_raw"], shell=True, cwd=repo, stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                                errors="replace", start_new_session=True)
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                start_new_session=True)
     except (OSError, ValueError) as e:
         _invalidate(spec, commit, f"the verify command could not be started ({e})")
         _fail(f"surface {spec['name']!r}: the verify command could not be started ({e})")
     try:
-        out, _ = proc.communicate(timeout=spec["timeout"])
+        out = _drain_bounded(proc, spec["timeout"])
         rc = proc.returncode
     except subprocess.TimeoutExpired:
         _kill_group(proc)
@@ -859,4 +935,7 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    main()
+    # Broken-pipe guard: `--run` streams a per-surface report whose length is the project's, not ours —
+    # the unbounded-output half of the criterion in scripts/idc_stdio.py.
+    import idc_stdio
+    raise SystemExit(idc_stdio.run_guarded(main))

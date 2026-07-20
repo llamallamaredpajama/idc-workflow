@@ -266,4 +266,8 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # Broken-pipe guard: this CLI has a --json mode AND prints one unbounded `cure:` line per finding —
+    # both halves of the criterion in scripts/idc_stdio.py, and exactly the shape an operator pipes to
+    # `jq` or `head` while deciding whether a pause is safe.
+    import idc_stdio
+    raise SystemExit(idc_stdio.run_guarded(main))

@@ -702,7 +702,12 @@ ROUND3_SABOTAGE_MANIFEST="$ROUND3_SABOTAGE_DIR/2026-07-12-example.json"
 cp "$COMPLETE" "$ROUND3_SABOTAGE_MANIFEST" \
   || gov_fail "could not copy exact-set sabotage manifest"
 drop_unit B2 "$ROUND3_SABOTAGE_MANIFEST"
-ROUND3_SABOTAGED_INTAKE="$WORK/idc-intake-without-exact-set.py"
+ROUND3_SABOTAGED_INTAKE="$ROUND3_SABOTAGE_DIR/idc-intake-without-exact-set.py"
+# The sabotaged copy is run from a temp dir, so it must carry the same-dir siblings the real script
+# imports (`idc_credential_shapes` — the credential table shared with idc_live_check.py). Without this
+# the copy dies on ImportError and the probe would "pass" for the wrong reason.
+cp "$(dirname "$INTAKE")/idc_credential_shapes.py" "$ROUND3_SABOTAGE_DIR/" \
+  || gov_fail "could not stage the shared credential table beside the sabotage copy"
 python3 - "$INTAKE" "$ROUND3_SABOTAGED_INTAKE" <<'PY' \
   || gov_fail "could not prepare exact-set sabotage helper"
 import sys

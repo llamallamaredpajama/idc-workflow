@@ -1716,6 +1716,18 @@ def _persisted_drain_verdict(repo: str, session: str):
         return None
 
 
+def _DV_PROVES_COMPLETE(verdict) -> bool:
+    """Does this persisted verdict PROVE an honest whole-pipe fixpoint? Delegates to the sidecar's own
+    `proves_complete` so the definition of a provable completion lives in ONE place (the Stop fixpoint
+    gate asks the same question of the same artifact). Fail-CLOSED: if the sidecar cannot be imported we
+    cannot establish proof, so the `complete` claim is refused rather than waved through."""
+    try:
+        import idc_drain_verdict as DV  # noqa: E402 — lazy (scripts/hooks is already on sys.path)
+        return bool(DV.proves_complete(verdict))
+    except Exception:  # noqa: BLE001 — unprovable is the fail-closed reading for a completion claim
+        return False
+
+
 def _gate_key(ref: object) -> str:
     """Canonicalize a gate reference for comparison: an int, `708`, or `#708` all key on `708`."""
     return str(ref).lstrip("#").strip()
@@ -1744,8 +1756,8 @@ def _claim_autorun_waiting_gate(refs: dict, repo: str, session: str) -> Closeout
 
 
 def _claim_autorun_drain(refs: dict, repo: str, session: str) -> CloseoutResult:
-    # complete: THIS session's PERSISTED drain verdict must read exactly `complete` (the DURABLE
-    # artifact, never a caller-supplied drain string).
+    # complete: THIS session's PERSISTED drain verdict must PROVE `complete` (the DURABLE artifact,
+    # never a caller-supplied drain string).
     verdict = _persisted_drain_verdict(repo, session)
     if verdict is None:
         return _fail("autorun-drain",
@@ -1755,6 +1767,17 @@ def _claim_autorun_drain(refs: dict, repo: str, session: str) -> CloseoutResult:
         return _fail("autorun-drain-incomplete",
                      f"autorun complete requires the persisted drain verdict to be 'complete', "
                      f"got {verdict.get('verdict')!r}")
+    # A `complete` TOKEN IS NOT PROOF — the wave-close gates are opt-in flags, so the drain persists the
+    # same token whether it checked the board against reality or checked nothing, and a legitimate
+    # ungated caller (`idc:idc-build` Phase 0's `--width` frontier query) overwrites this file too. The
+    # record must NAME the gates that ran. This is the same door the Stop fixpoint gate uses, so the two
+    # readers of this artifact cannot disagree about what "complete" is worth.
+    if not _DV_PROVES_COMPLETE(verdict):
+        return _fail("autorun-drain-ungated",
+                     "autorun complete requires the persisted drain verdict to record the wave-close "
+                     "gates that prove it (gates: "
+                     f"{verdict.get('gates', 'unrecorded')!r}) — re-run the drain with --coherence "
+                     "--live (and --session-id for THIS session) so the completion is provable")
     return CloseoutResult(True, "ok", "autorun drained to fixpoint this session (persisted verdict)", {})
 
 

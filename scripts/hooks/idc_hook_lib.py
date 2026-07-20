@@ -322,3 +322,91 @@ def guard_post_observer(fn):
         sys.exit(0)
     # fn should have called post_tool_inject()/post_tool_allow(), or simply returned (== allow).
     sys.exit(0)
+
+
+# ── transient-sidecar plumbing (the ONE copy, shared by every .idc-*.json sidecar) ─────────────────
+# IDC keeps several local, gitignored per-session sidecars — the obligations ledger, the drain verdict,
+# the command reports, the pause record. Each one needs the same two things, and each one had grown its
+# own copy of both: an ATOMIC JSON write, and an IDEMPOTENT non-destructive `.gitignore` append. Four
+# copies is four chances to drift, and they HAD drifted — the newest copy silently dropped the
+# "existing file already ends in a comment or a colon" branch below, so it appended a provenance
+# comment where its three siblings deliberately do not.
+#
+# Both helpers live here because all four sidecars already import this module for `is_governed_repo`,
+# so sharing them adds no new dependency edge to anything.
+
+
+def atomic_write_json(path, payload, *, prefix, label) -> bool:
+    """Write `payload` as JSON to `path` atomically (temp file in the SAME directory + `os.replace`),
+    so a concurrent reader never observes a half-written sidecar.
+
+    BEST-EFFORT BY CONTRACT: every failure warns and returns False, and NOTHING here raises. These
+    sidecars are written on paths that must not be breakable by their own bookkeeping — the drain
+    persists its verdict just before exiting, the pause record is written mid-command — so a full disk
+    must degrade to "not persisted", never to a traceback that takes the real work down with it.
+    Returns True only after the replacement has actually landed; callers that must not report success
+    on a write that did not happen (the pause record) key off exactly that.
+
+    `prefix` names the temp file so a stray `.tmp` is traceable to its writer; `label` prefixes the
+    warning so an operator can tell which sidecar complained."""
+    d = os.path.dirname(path) or "."
+    try:
+        fd, tmp = tempfile.mkstemp(dir=d, prefix=prefix, suffix=".tmp")
+    except OSError as e:
+        warn(f"{label}: cannot create temp file in {d}: {e}")
+        return False
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        return True
+    except OSError as e:
+        warn(f"{label}: atomic write to {path} failed: {e}")
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return False
+
+
+def ensure_gitignored(repo_root, line, *, created_comment, appended_comment, label) -> bool:
+    """Ensure the repo-root `.gitignore` contains `line`, idempotently and NON-DESTRUCTIVELY.
+
+    Creates the file if absent; otherwise APPENDS only when the line is missing — it never rewrites,
+    reorders, or deduplicates an operator's existing lines. The presence test is whole-line and
+    whitespace-tolerant, so an entry that is already there in any formatting is left alone.
+
+    REPO-GATED: a no-op returning False outside an IDC-governed repo, so a stray call can never create
+    a `.gitignore` in a directory that is none of IDC's business. Returns True iff the line is present
+    afterward.
+
+    THE COMMENT RULE, which is the part that had drifted. A fresh file gets `created_comment` (it is
+    ours entirely, so it should say what it is for). An EXISTING file gets `appended_comment` only when
+    it does not already end in a comment or a `:` — appending a provenance header directly under
+    someone else's section heading reads as though our entry belongs to their section. One of the four
+    copies of this function had lost that branch."""
+    if not is_governed_repo(repo_root):
+        return False
+    gi = os.path.join(repo_root, ".gitignore")
+    try:
+        existing = ""
+        if os.path.isfile(gi):
+            with open(gi, encoding="utf-8") as fh:
+                existing = fh.read()
+        if any(ln.strip() == line for ln in existing.splitlines()):
+            return True
+        with open(gi, "a", encoding="utf-8") as fh:
+            if existing and not existing.endswith("\n"):
+                fh.write("\n")
+            if not existing:
+                fh.write(created_comment + "\n")
+            elif not existing.rstrip("\n").endswith(("#", ":")):
+                fh.write(appended_comment + "\n")
+            fh.write(line + "\n")
+        return True
+    except OSError as e:
+        warn(f"{label}: could not ensure .gitignore in {repo_root}: {e}")
+        return False

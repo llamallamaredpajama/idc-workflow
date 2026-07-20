@@ -68,6 +68,25 @@ sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(_HERE, "hooks"))
 import idc_ledger  # noqa: E402
 
+# THE CREDENTIAL SCRUB DOOR — see `idc_credential_shapes.scrub`. Every read of a CHILD PROCESS's
+# stderr in this module passes through it AT THE READ, and `tests/smoke/phase11-honesty-repro.sh` R28
+# is the census that keeps that true across every module in scripts/.
+#
+# THE IMPORT IS TOLERANT BECAUSE SEVERAL MODULES HERE RUN AS LONE RELOCATED COPIES. The smoke and
+# governance suites copy a single script to a temp directory and execute it there to prove a deleted
+# guard was the one doing the work (`phase1-pipe-safety` F, `governance/external-intake-completeness`,
+# `phase4-completion-honesty` F) — a hard sibling import makes those copies die on ImportError. The
+# fallback FAILS CLOSED: with no table to scrub with, a child's stderr is WITHHELD, never passed
+# through. This block is byte-identical everywhere it appears and R28 asserts that, so no copy of it
+# can drift into a pass-through.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import idc_credential_shapes as CS  # noqa: E402
+except ImportError:                                      # a lone relocated copy — fail closed
+    class CS:                                            # noqa: N801 — stand-in for the shared table
+        scrub = staticmethod(
+            lambda text: text and "[child output withheld — the credential table is not importable]")
+
 COHERENCE = "idc_finish_coherence.py"
 # `idc_finish_coherence.py`'s documented exit contract: 0 ok/not-applicable · 1 gap · 2 error. Anything
 # outside it means that helper itself crashed, so its verdict cannot be trusted (fail closed).
@@ -183,7 +202,7 @@ def _coherence_findings(args, backend: str, board: dict):
         raise Indeterminate(f"{COHERENCE} exited {r.returncode}, outside its documented contract "
                             f"{_COHERENCE_EXITS} — its verdict cannot be trusted")
     if r.returncode == 2:
-        detail = (r.stdout or r.stderr or "").strip().splitlines()
+        detail = CS.scrub(r.stdout or r.stderr or "").strip().splitlines()
         raise Indeterminate(f"coherence is unprovable ({detail[-1] if detail else 'no detail'})")
     if r.returncode == 0:
         return []

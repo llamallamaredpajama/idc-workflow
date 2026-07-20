@@ -974,41 +974,94 @@ if "exit 3" not in (line or ""):
 if "DISTINCTIVE-CAUSE" not in (line or ""):
     sys.exit(f"the checker's stderr tail — the only thing naming the cause — is lost: {line!r}")
 
-# R23 — …AND THAT TAIL MUST NOT CARRY A CREDENTIAL. The tail is built from raw child output and then
-# travels: the drain prints it, the Stop gate scrapes it back with `_drain_detail`, and
-# `_annotate_board` interpolates it into a TRACKER.md comment — an ordinary TRACKED file, so the
-# destination is committed git history. A checker most plausibly leaks by dying on a git remote whose
-# URL carries a token, which is exactly the shape below. `ghp_` is a shape the SHARED table already
-# knows, so the door existed and this sink simply did not route through it.
-SECRET = "ghp_" + "A1b2C3d4E5f6G7h8I9j0"
+PY
+echo "  ok R16: a crashed checker's verdict line names its exit code and the cause on its stderr"
+
+echo "== R23. AND THAT TAIL MUST NOT CARRY A CREDENTIAL — WHICHEVER SHAPE IT IS"
+# ITS OWN CASE AND ITS OWN BANNER, deliberately. R23 used to live inside R16's heredoc, so both were
+# guarded by one shell `fail` string: dropping the scrub at the drain door printed "a crashed
+# checker's return code and stderr are lost", while what had actually tripped was a token reaching
+# the verdict line. An operator was told the wrong thing about the wrong defect.
+#
+# THE FIXTURE SET IS THE POINT. The first version of this case used ONLY `ghp_…` — the one shape the
+# PROSE-SAFE table already knew — so it passed against a door wired to the wrong profile and proved
+# nothing: `password=…`, `Authorization: Basic …` and `Authorization: token …` all walked straight
+# through. Every shape in the MACHINE-OUTPUT profile is driven here, from LITERAL samples — never
+# derived from the patterns, which is what would make the case grade itself.
+#
+# The tail travels: the drain prints it, the Stop gate scrapes it back with `_drain_detail`, and
+# `_annotate_forced_exit_once` interpolates it into a TRACKER.md comment — an ordinary TRACKED file,
+# so the destination is committed git history.
+R23="$WORK/leaking-checker"; mkrepo "$R23"
+python3 - "$PLUGIN" "$R23" <<'PYR23' || fail "R23: a credential on a crashed checker's stderr reaches the drain verdict line and the Stop gate's board comment"
+import importlib.util, os, sys
+plugin, repo = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("D", os.path.join(plugin, "scripts", "idc_autorun_drain.py"))
+D = importlib.util.module_from_spec(spec); spec.loader.exec_module(D)
+gate_spec = importlib.util.spec_from_file_location(
+    "G", os.path.join(plugin, "scripts", "hooks", "idc_stop_fixpoint_gate.py"))
+G = importlib.util.module_from_spec(gate_spec); gate_spec.loader.exec_module(G)
+
+name = "idc_zz_repro_leaking_checker.py"
+path = os.path.join(plugin, "scripts", name)
+
+# (label, the stderr line the checker dies printing, the exact substring that must NOT survive).
+# Every one is a LITERAL. The `ghs_` token is deliberately too short for the bare-token rule, so the
+# `token <secret>` header arm is the only thing that can catch it.
+CASES = [
+    ("a git remote whose URL carries a token",
+     "fatal: unable to access 'https://git-user:{s}@github.com/o/r': 403",
+     "ghp_" + "A1b2C3d4E5f6G7h8I9j0"),
+    ("a named secret in the config the checker dumped",
+     "KeyError while reading config: password={s} DISTINCTIVE-CAUSE",
+     "hunter2xyzzy"),
+    ("a Basic auth header echoed by a failing request",
+     "request failed: Authorization: Basic {s} DISTINCTIVE-CAUSE",
+     "QWxhZGRpbjpvcGVuc2VzYW1l"),
+    ("a `token` auth header echoed by a failing request",
+     "request failed: Authorization: token {s} DISTINCTIVE-CAUSE",
+     "ghs_shortonehere"),
+    ("a bearer header echoed by a failing request",
+     "request failed: Authorization: Bearer {s} DISTINCTIVE-CAUSE",
+     "abcdefghijklmnop"),
+]
+for label, template, secret in CASES:
+    body = "import sys\nsys.stderr.write(%r)\nsys.exit(3)\n" % (template.format(s=secret) + "\n")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(body)
+    try:
+        verdict, line = D._run_wave_close_check(name, [], "acceptance", ("acceptance: ok",), 60)
+    finally:
+        os.remove(path)
+    if verdict != "error":
+        sys.exit(f"precondition [{label}]: the leaking checker must still classify as error, "
+                 f"got {verdict!r}")
+    if secret in (line or ""):
+        sys.exit(f"[{label}] a credential on a crashed checker's stderr reached the drain verdict "
+                 f"line, which is printed, scraped by the Stop gate and committed into a TRACKER.md "
+                 f"comment: {line!r}")
+    # …and the same string at the sink the gate actually writes: `_drain_detail` scrapes the drain's
+    # stdout, and its output is what lands in the board comment body.
+    detail = G._drain_detail("drain: unknown\n" + (line or "") + "\n")
+    if secret in (detail or ""):
+        sys.exit(f"[{label}] the credential survived into the Stop gate's board-comment detail: "
+                 f"{detail!r}")
+
+# FALSE-POSITIVE CONTROL — the scrub must not eat the diagnostic. A tail that names nothing is the
+# defect R16 exists to prevent, so "redact everything" would trade one finding for the other.
 with open(path, "w", encoding="utf-8") as fh:
     fh.write("import sys\n"
-             f"sys.stderr.write(\"fatal: unable to access "
-             f"'https://git-user:{SECRET}@github.com/o/r': 403\\n\")\n"
+             "sys.stderr.write('fatal: DISTINCTIVE-CAUSE while opening TRACKER.md\\n')\n"
              "sys.exit(3)\n")
 try:
     verdict, line = D._run_wave_close_check(name, [], "acceptance", ("acceptance: ok",), 60)
 finally:
     os.remove(path)
-if verdict != "error":
-    sys.exit(f"precondition: the leaking checker must still classify as error, got {verdict!r}")
-if SECRET in (line or ""):
-    sys.exit(f"a credential on a crashed checker's stderr reached the drain verdict line, which is "
-             f"printed, scraped by the Stop gate and committed into a TRACKER.md comment: {line!r}")
-if "unable to access" not in (line or ""):
-    sys.exit(f"the scrub ate the diagnostic instead of the credential — the tail exists to name the "
-             f"cause: {line!r}")
-
-# ...and the same string at the sink the gate actually writes: `_drain_detail` scrapes the drain's
-# stdout, and its output is what lands in the board comment body.
-gate_spec = importlib.util.spec_from_file_location(
-    "G", os.path.join(plugin, "scripts", "hooks", "idc_stop_fixpoint_gate.py"))
-G = importlib.util.module_from_spec(gate_spec); gate_spec.loader.exec_module(G)
-detail = G._drain_detail("drain: unknown\n" + (line or "") + "\n")
-if SECRET in (detail or ""):
-    sys.exit(f"the credential survived into the Stop gate's board-comment detail: {detail!r}")
-PY
-echo "  ok R16/R23: a crashed checker names its cause, and a credential on its stderr is scrubbed at the door"
+if "DISTINCTIVE-CAUSE" not in (line or "") or "TRACKER.md" not in (line or ""):
+    sys.exit(f"the scrub ate the diagnostic instead of a credential — the tail exists to name the "
+             f"cause an operator has to act on: {line!r}")
+PYR23
+echo "  ok R23: five credential shapes on a crashed checker's stderr are scrubbed at the door; the diagnostic survives"
 
 echo "== R7/R8. /idc:resume MUST HAVE A LEGAL OUTCOME, AND MUST PROVE ITS OWN SURVEY  [T4]"
 # R7 — when the pause record cannot be REMOVED, resume.md correctly says STOP. But `complete` requires
@@ -1701,5 +1754,180 @@ for other in ("build", "janitor", "init"):
                  f"stop for — any command could then touch a file and manufacture a blocked stop")
 PY
 echo "  ok R25: uninstall's mandated dirty-tree stop closes; an invented one, an exempt one and a foreign one do not"
+
+echo "== R28. THE CREDENTIAL SCRUB IS A PROPERTY OF THE TEXT, NOT A HABIT OF THE CALLER"
+# THE FINDING THIS CLOSES, and why the previous four fixes could not. F1 → F20 → F33 → F35 → F40 are
+# one finding reported five times: a credential reaches a persisted artifact because the module that
+# read it did not scrub it. Each round scrubbed the site that had just been reported. The reason the
+# next site always existed is that `idc_credential_shapes.py` told every caller to "keep its own
+# context-sensitive rules" — so which rules ran was an unaided judgement call taken once per caller,
+# with nothing checking the answer. The drain answered it wrong (it wired the PROSE profile through a
+# door built for machine output, F46) and `idc_pr_finish.py` never answered it at all (F40).
+#
+# So this case asserts the two halves that make "every producer is covered" checkable:
+#   (1) the MACHINE-OUTPUT profile really redacts every shape it claims to, at all three consumers —
+#       driven by LITERAL samples, never derived from the patterns, which is what made the old R23
+#       grade itself; and the PROSE profile is genuinely still the narrower one.
+#   (2) a CENSUS over every module in scripts/: each read of a child process's stderr passes through
+#       the scrub at the read, or is named in the registry below with a reason. Fail-closed BOTH
+#       ways — a new unscrubbed read fails, and a registry entry that no longer matches a real line
+#       fails too, so the list cannot rot into a blanket exemption.
+python3 - "$PLUGIN" <<'PYR28' || fail "R28: a child process's stderr can reach a persisted artifact unscrubbed, or the machine-output profile does not cover what it claims"
+import glob, importlib.util, os, re, shutil, subprocess, sys, tempfile
+plugin = sys.argv[1]
+sys.path.insert(0, os.path.join(plugin, "scripts"))
+import idc_credential_shapes as CS
+
+
+def load(rel, name):
+    spec = importlib.util.spec_from_file_location(name, os.path.join(plugin, rel))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+# ── (1) THE PROFILE, DRIVEN BY LITERAL SAMPLES ───────────────────────────────────────────────────
+D = load("scripts/idc_autorun_drain.py", "D")
+L = load("scripts/idc_live_check.py", "L")
+# (rule it exercises, a sample line, the substring that must not survive)
+SAMPLES = [
+    ("url userinfo",   "fatal: unable to access 'https://u:{s}@github.com/o/r': 403",
+     "ghp_" + "A1b2C3d4E5f6G7h8I9j0"),
+    ("bearer header",  "request failed: Authorization: Bearer {s} while reading",
+     "abcdefghijklmnop"),
+    ("basic header",   "request failed: Authorization: Basic {s} while reading",
+     "QWxhZGRpbjpvcGVuc2VzYW1l"),
+    ("token header",   "request failed: Authorization: token {s} while reading",
+     "ghs_shortonehere"),
+    ("named secret",   "config load failed: password={s} at line 3",
+     "hunter2xyzzy"),
+    ("bare token run", "gh: bad credentials for {s} (401)",
+     "github_pat_" + "11ABCDEFG0abcdefghijklmno"),
+    ("pem block",
+     "-----BEGIN RSA PRIVATE KEY-----\n{s}\n-----END RSA PRIVATE KEY-----",
+     "MIIEowIBAAKCAQEAsecretkeymaterialhere"),
+]
+CONSUMERS = {
+    "idc_credential_shapes.scrub (the door)": CS.scrub,
+    "idc_autorun_drain._scrub (the drain's checker output)": D._scrub,
+    "idc_live_check.redact (the committed evidence receipt)": L.redact,
+}
+for rule, template, secret in SAMPLES:
+    text = template.format(s=secret)
+    for who, fn in CONSUMERS.items():
+        if secret in (fn(text) or ""):
+            sys.exit(f"the {rule} rule does not cover {who}: {secret!r} survived {fn(text)!r}. "
+                     f"A door is only as good as the profile wired through it — see F46, where the "
+                     f"drain's door was real and its rule set was the prose-safe one.")
+
+# …and the PROSE profile must still be the NARROWER one, or "two profiles" is a distinction with no
+# difference and intake has silently inherited rules that mangle a human-authored document. These are
+# intake's own documented false-positive controls.
+def prose_scrub(text):
+    for pattern, repl in CS.bake(CS.SHAPES, "[REDACTED]"):
+        text = pattern.sub(repl, text)
+    return text
+
+for survivor in ("TOKENIZER_MODEL=gpt-4", "KEYBOARD_LAYOUT=dvorak", "COMPASS_MODE=true",
+                 "Authorization: Basic understanding of the pipeline"):
+    if prose_scrub(survivor) != survivor:
+        sys.exit(f"the PROSE-safe profile now mangles {survivor!r} — intake's false-positive controls "
+                 f"exist because a human-authored document is not machine output, and intake HARD "
+                 f"REJECTS where the live check merely redacts")
+# …and the widening is real, on the two samples that separate the profiles: a substring "token", and
+# an auth verb that is also an ordinary English word.
+for widened in ("TOKENIZER_MODEL=gpt-4", "Authorization: Basic understanding of the pipeline"):
+    if CS.scrub(widened) == widened:
+        sys.exit(f"the MACHINE-OUTPUT profile left {widened!r} intact, so it is not actually wider "
+                 f"than the prose floor — the named-secret rule or the Basic/token arms are missing "
+                 f"from it, which is exactly the gap F46 found inside the drain's own door")
+
+# ── (2) THE CENSUS ───────────────────────────────────────────────────────────────────────────────
+# A read of a completed child process's stderr. `sys.stderr`, a `stderr=` keyword and comments are not
+# reads of child output.
+READ = re.compile(r"(?<![\w.])(\w+)\.stderr\b")
+# (module, the exact stripped source line) -> why this read may stay raw. Both entries CLASSIFY the
+# text (a substring match that decides which exception to raise); neither puts it into a message, and
+# both feed sites that DO scrub before the text escapes.
+ALLOWED_RAW = {
+    ("scripts/idc_gh_board.py", "if _is_rate_limit_stderr(p.stderr):"):
+        "rate-limit detection: matches fixed markers to choose RateLimitError over BoardReadError; "
+        "the message built two lines down is scrubbed",
+    ("scripts/idc_command_contract.py",
+     'if _github_project_absence_error(proc.stderr or "", project):'):
+        "absence detection: decides present/absent/indeterminate from fixed gh wording; the text is "
+        "never carried into the result",
+}
+bare, seen_allowed = [], set()
+for path in sorted(glob.glob(os.path.join(plugin, "scripts", "*.py"))
+                   + glob.glob(os.path.join(plugin, "scripts", "hooks", "*.py"))):
+    rel = os.path.relpath(path, plugin)
+    for lineno, raw in enumerate(open(path, encoding="utf-8"), 1):
+        line = raw.strip()
+        if line.startswith("#") or "stderr=" in line:
+            continue
+        m = READ.search(line)
+        if not m or m.group(1) == "sys":
+            continue
+        if (rel, line) in ALLOWED_RAW:
+            seen_allowed.add((rel, line))
+            continue
+        if "scrub" not in line:
+            bare.append(f"{rel}:{lineno}: {line}")
+if bare:
+    sys.exit("a child process's stderr is read WITHOUT passing through the scrub at the read. Every "
+             "one of these travels into a message that is printed, persisted, or committed — which "
+             "is the whole of F1/F20/F33/F35/F40. Scrub it at the read (`CS.scrub` in scripts/, "
+             "`H.scrub` in scripts/hooks/), or register it in ALLOWED_RAW with a reason:\n  "
+             + "\n  ".join(bare))
+stale = sorted(set(ALLOWED_RAW) - seen_allowed)
+if stale:
+    sys.exit("ALLOWED_RAW names a line that no longer exists — an exemption that outlives its site is "
+             "how an allowlist rots into a blanket pass. Remove or re-point it:\n  "
+             + "\n  ".join(f"{mod}: {ln}" for mod, ln in stale))
+
+# ── (3) THE FALLBACK CANNOT DRIFT INTO A PASS-THROUGH ────────────────────────────────────────────
+# The scrub-door import is TOLERANT (several of these modules run as lone relocated copies — see
+# phase1-pipe-safety F) and therefore carries a fallback. A fallback that returns the text unchanged
+# would disable the scrub everywhere the table is missing, silently. So every copy must be BYTE
+# IDENTICAL to the canonical one, and the canonical one must WITHHOLD.
+MARK = "# THE CREDENTIAL SCRUB DOOR"
+blocks = {}
+for path in sorted(glob.glob(os.path.join(plugin, "scripts", "*.py"))):
+    text = open(path, encoding="utf-8").read()
+    if MARK not in text:
+        continue
+    start = text.index(MARK)
+    end = text.index("is not importable]", start)
+    blocks[os.path.relpath(path, plugin)] = text[start:end]
+if len(blocks) < 2:
+    sys.exit(f"expected the tolerant scrub-door import in several modules, found {sorted(blocks)}")
+canon_name, canon = sorted(blocks.items())[0]
+for name, block in sorted(blocks.items()):
+    if block != canon:
+        sys.exit(f"the scrub-door import block in {name} differs from {canon_name}. It is duplicated "
+                 f"on purpose (these modules must stay runnable as lone relocated copies), and the "
+                 f"only thing keeping that duplication safe is that every copy is identical — a "
+                 f"divergent fallback is a silent pass-through")
+# …and the fallback is asserted by BEHAVIOUR, not by reading it: relocate a module away from the
+# table exactly as the governance suites do, and ask it what it does with a credential. This runs in a
+# SUBPROCESS with cwd at the temp directory, because this process already has scripts/ on sys.path and
+# would import the real table and prove nothing.
+probe = os.path.join(tempfile.mkdtemp(prefix="idc-r28-reloc-"), "idc_gh_board.py")
+shutil.copyfile(os.path.join(plugin, "scripts", "idc_gh_board.py"), probe)
+proc = subprocess.run(
+    [sys.executable, "-c",
+     "import idc_gh_board as M; print(M.CS.scrub('password=hunter2xyzzy'))"],
+    cwd=os.path.dirname(probe), capture_output=True, text=True,
+    env={**os.environ, "PYTHONPATH": ""})
+if proc.returncode != 0:
+    sys.exit(f"a lone RELOCATED copy of idc_gh_board.py no longer imports — the scrub-door import "
+             f"must stay tolerant (phase1-pipe-safety F): {proc.stderr.strip()[:300]}")
+if "hunter2xyzzy" in proc.stdout:
+    sys.exit("with the credential table absent, the tolerant import's fallback PASSED THE TEXT "
+             "THROUGH. It must WITHHOLD: a withheld diagnostic costs one re-run by hand, an "
+             f"unscrubbed one costs a credential rotation. Got: {proc.stdout.strip()!r}")
+PYR28
+echo "  ok R28: the machine-output profile covers all three consumers, the prose floor stays narrower, and no module reads a child's stderr unscrubbed"
 
 echo "phase11-honesty-repro: OK"

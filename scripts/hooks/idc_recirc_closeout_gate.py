@@ -392,7 +392,7 @@ def _fs_query(trk, tracker, stage, status):
         return None
     if r.returncode != 0:
         H.warn(f"recirc-checkpoint: tracker query ({stage}/{status}) failed (rc={r.returncode}): "
-               f"{(r.stderr or '').strip()[:200]}")
+               f"{H.scrub((r.stderr or '').strip()[:200])}")
         return None
     return [int(x) for x in r.stdout.split() if x.strip().isdigit()]
 
@@ -411,7 +411,7 @@ def _fs_comment(trk, tracker, cwd, num, body):
         return
     if r.returncode != 0:
         H.warn(f"recirc-checkpoint: checkpoint comment on #{num} failed (rc={r.returncode}): "
-               f"{(r.stderr or '').strip()[:200]}")
+               f"{H.scrub((r.stderr or '').strip()[:200])}")
 
 
 def _fs_still_open_and_handled(plugin_root, cwd):

@@ -78,6 +78,25 @@ import idc_hook_lib as H       # noqa: E402  (is_governed_repo / observe_only / 
 import idc_ledger              # noqa: E402  (the taint API — import, never edit)
 import idc_git_finish as GF    # noqa: E402  (MID_FINISH_TAINT + read_backend/read_config/board read)
 
+# THE CREDENTIAL SCRUB DOOR — see `idc_credential_shapes.scrub`. Every read of a CHILD PROCESS's
+# stderr in this module passes through it AT THE READ, and `tests/smoke/phase11-honesty-repro.sh` R28
+# is the census that keeps that true across every module in scripts/.
+#
+# THE IMPORT IS TOLERANT BECAUSE SEVERAL MODULES HERE RUN AS LONE RELOCATED COPIES. The smoke and
+# governance suites copy a single script to a temp directory and execute it there to prove a deleted
+# guard was the one doing the work (`phase1-pipe-safety` F, `governance/external-intake-completeness`,
+# `phase4-completion-honesty` F) — a hard sibling import makes those copies die on ImportError. The
+# fallback FAILS CLOSED: with no table to scrub with, a child's stderr is WITHHELD, never passed
+# through. This block is byte-identical everywhere it appears and R28 asserts that, so no copy of it
+# can drift into a pass-through.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import idc_credential_shapes as CS  # noqa: E402
+except ImportError:                                      # a lone relocated copy — fail closed
+    class CS:                                            # noqa: N801 — stand-in for the shared table
+        scrub = staticmethod(
+            lambda text: text and "[child output withheld — the credential table is not importable]")
+
 MID_FINISH_TAINT = GF.MID_FINISH_TAINT   # "mid_finish" — defined once, in the finisher
 FINISHER = os.path.join(SCRIPT_DIR, "idc_git_finish.py")
 TRACKER_FS = os.path.join(SCRIPT_DIR, "idc_tracker_fs.py")
@@ -175,7 +194,7 @@ def close_only(repo, rec, timeout):
         return False, f"--close-only could not be run ({e})"
     if r.returncode == 0:
         return True, (r.stdout or "").strip()[:200]
-    detail = (r.stderr or r.stdout or "").strip().splitlines()
+    detail = CS.scrub(r.stderr or r.stdout or "").strip().splitlines()
     return False, (detail[-1][:300] if detail else f"exit {r.returncode}")
 
 

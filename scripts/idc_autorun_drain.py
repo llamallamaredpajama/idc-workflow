@@ -411,10 +411,14 @@ def _scrub(text):
     """Strip credential shapes out of text that came from a CHILD PROCESS, before it can be printed,
     scraped, or committed.
 
-    THE SHARED TABLE, not a fourth private pattern list. `idc_credential_shapes` exists because two
-    surfaces had each learned about credential shapes the other missed; a third copy here would
-    guarantee the same drift. This module has no context-sensitive rules of its own to add — a
-    checker's stderr is machine output, and the self-identifying shapes are exactly what belongs in it.
+    THE SHARED TABLE'S MACHINE-OUTPUT PROFILE — `CS.scrub`, not a private pattern list and not the
+    prose floor. The first cut of this function called `CS.bake(CS.SHAPES, …)`, which is the profile
+    deliberately trimmed for HUMAN-AUTHORED documents: it omits the named-secret rule and the
+    `Basic`/`token` header arms because those match ordinary English. A checker's stderr is not
+    English, so a checker dying on `password=…` or `Authorization: Basic …` walked straight through a
+    door that had just been built to stop it. The door was real; the rule set behind it was the wrong
+    one. Provenance selects the profile now, and `CS.scrub` is the only machine-output entry point
+    there is — see `idc_credential_shapes.py`.
 
     FAIL CLOSED. If the shared table cannot be imported, the text is WITHHELD rather than passed
     through: an unscrubbed credential in a committed board comment costs a rotation, and a withheld
@@ -426,10 +430,7 @@ def _scrub(text):
         import idc_credential_shapes as CS  # noqa: E402
     except ImportError:
         return "[checker output withheld — the credential-shape table could not be loaded]"
-    out = text
-    for pattern, repl in CS.bake(CS.SHAPES, "[REDACTED]"):
-        out = pattern.sub(repl, out)
-    return out
+    return CS.scrub(text)
 
 
 def _run_wave_close_check(script, extra_argv, token, clean_lines, timeout=30):
@@ -468,13 +469,22 @@ def _run_wave_close_check(script, extra_argv, token, clean_lines, timeout=30):
                            capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.SubprocessError) as e:
         return "error", _scrub(f"{token}: error ({e})")
-    # THE DOOR. Every byte a child process printed enters this program HERE and nowhere else (this is
-    # the drain's only `subprocess.run`), and everything below travels: the verdict line is printed on
-    # stdout, the Stop gate scrapes it back out with `_drain_detail`, and `_annotate_board`
-    # interpolates it into a TRACKER.md comment — an ordinary TRACKED file. So a checker that crashes
-    # printing `fatal: unable to access 'https://git-user:ghp_…'` used to commit that token to git
-    # history, where the cost is a rotation and the exposure is permanent. Scrubbing at the door
-    # covers every one of those sinks by construction instead of by three more call-site fixes.
+    # THIS MODULE'S DOOR. Every byte a checker printed enters this program HERE — this is the drain's
+    # only `subprocess.run` — and everything below travels: the verdict line is printed on stdout, the
+    # Stop gate scrapes it back out with `_drain_detail`, and `_annotate_forced_exit_once`
+    # (`scripts/hooks/idc_stop_fixpoint_gate.py`) interpolates it into a TRACKER.md comment — an
+    # ordinary TRACKED file. So a checker that crashes printing
+    # `fatal: unable to access 'https://git-user:ghp_…'` used to commit that token to git history,
+    # where the cost is a rotation and the exposure is permanent. Scrubbing here covers every one of
+    # those sinks by construction instead of by three more call-site fixes.
+    #
+    # WHAT THIS COMMENT USED TO CLAIM, AND WHY THAT WAS FALSE. It said every byte a child process
+    # printed enters "this program" here and nowhere else. That is true of `subprocess.run` LEXICALLY
+    # IN THIS FILE and false of the PROCESS: `load_github` imports `idc_gh_board`, which runs `gh`
+    # children of its own, and its `BoardReadError` carries their raw stderr. A single door only holds
+    # if nothing else spawns. So the scrub is applied where each module READS its own child, and
+    # `tests/smoke/phase11-honesty-repro.sh` R28 is what makes "all of them" checkable rather than
+    # claimed — it walks every module in `scripts/` and fails on an unscrubbed read.
     stdout, stderr = _scrub(r.stdout or ""), _scrub(r.stderr or "")
     line = None
     for ln in stdout.splitlines():

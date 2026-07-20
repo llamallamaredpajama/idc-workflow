@@ -68,6 +68,25 @@ import idc_tracker_fs                  # noqa: E402 — filesystem backend (read
 import idc_gh_board                    # noqa: E402 — github backend (referenced by attribute so tests monkeypatch)
 import idc_gh_close as GC              # noqa: E402 — atomic github close (Status=Done + close + verify)
 
+# THE CREDENTIAL SCRUB DOOR — see `idc_credential_shapes.scrub`. Every read of a CHILD PROCESS's
+# stderr in this module passes through it AT THE READ, and `tests/smoke/phase11-honesty-repro.sh` R28
+# is the census that keeps that true across every module in scripts/.
+#
+# THE IMPORT IS TOLERANT BECAUSE SEVERAL MODULES HERE RUN AS LONE RELOCATED COPIES. The smoke and
+# governance suites copy a single script to a temp directory and execute it there to prove a deleted
+# guard was the one doing the work (`phase1-pipe-safety` F, `governance/external-intake-completeness`,
+# `phase4-completion-honesty` F) — a hard sibling import makes those copies die on ImportError. The
+# fallback FAILS CLOSED: with no table to scrub with, a child's stderr is WITHHELD, never passed
+# through. This block is byte-identical everywhere it appears and R28 asserts that, so no copy of it
+# can drift into a pass-through.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import idc_credential_shapes as CS  # noqa: E402
+except ImportError:                                      # a lone relocated copy — fail closed
+    class CS:                                            # noqa: N801 — stand-in for the shared table
+        scrub = staticmethod(
+            lambda text: text and "[child output withheld — the credential table is not importable]")
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 BUNDLED_MACHINE = os.path.join(HERE, "..", "templates", "workflow-machine.yaml")
 TRK = os.path.join(HERE, "idc_tracker_fs.py")
@@ -1095,6 +1114,20 @@ def journal_append(repo, op, backend, tracker_rel, kw, cur=None):
         return False
 
 
+def _child_stderr(proc, limit=160):
+    """A child process's stderr, SCRUBBED at the read and bounded — THE ONE PLACE this module turns a
+    subprocess's error output into a message.
+
+    Every `TransitionError` below quotes a child's stderr, and those messages travel: the engine is
+    the single write door, so its refusals reach the caller's diagnostic, the command receipt and (via
+    `idc_pr_finish`) a persisted intake-failure report an agent is then required to quote verbatim
+    into its closeout. `gh` failing on a remote whose URL carries a token prints that token, so the
+    eight raise sites below were eight ways to persist a credential. Reading through one helper — and
+    scrubbing HERE, at the read, not at each raise — is what makes that coverage a property of the
+    module rather than of whoever remembered."""
+    return CS.scrub(proc.stderr or "").strip()[:limit]
+
+
 # ── filesystem backend ───────────────────────────────────────────────────────────────────────────
 def _trk(tracker, *args):
     return subprocess.run([sys.executable, TRK, "--tracker", tracker, *args],
@@ -1123,7 +1156,7 @@ def _fs_create(machine, op, tracker, spec, title, body, stage_over, status_over)
         args += ["--comment", body]
     r = _trk(tracker, *args)
     if r.returncode != 0:
-        raise TransitionError(f"create failed: {r.stderr.strip()[:160]}")
+        raise TransitionError(f"create failed: {_child_stderr(r)}")
     num = r.stdout.strip()
     # Read back the FINAL state — Stage+Status match the target AND (if any) the marker durably landed.
     state = idc_tracker_fs.load(tracker)
@@ -1140,7 +1173,7 @@ def _fs_set_status(machine, tracker, num, status):
     check_status_legal(machine, status)
     r = _trk(tracker, "move", "--num", str(num), "--status", status)
     if r.returncode != 0:
-        raise TransitionError(f"status write failed for #{num}: {r.stderr.strip()[:160]}")
+        raise TransitionError(f"status write failed for #{num}: {_child_stderr(r)}")
     obs = fs_get_item(tracker, num)
     verify_readback(num, None, status, obs["stage"], obs["status"])   # Stage untouched; verify Status landed
 
@@ -1151,10 +1184,10 @@ def _fs_set_field(tracker, num, field, value):
     (read-back parity). (Field-name / Status validation happens in the dispatcher BEFORE this.)"""
     r = _trk(tracker, "set", "--num", str(num), "--field", field, "--value", value)
     if r.returncode != 0:
-        raise TransitionError(f"set-field {field}={value!r} on #{num} failed: {r.stderr.strip()[:160]}")
+        raise TransitionError(f"set-field {field}={value!r} on #{num} failed: {_child_stderr(r)}")
     rb = _trk(tracker, "show", "--num", str(num), "--field", field)
     if rb.returncode != 0:
-        raise TransitionError(f"set-field read-back of #{num} {field} failed: {rb.stderr.strip()[:160]}")
+        raise TransitionError(f"set-field read-back of #{num} {field} failed: {_child_stderr(rb)}")
     got = rb.stdout.strip()
     if got != value:
         raise TransitionError(
@@ -1165,13 +1198,13 @@ def _fs_set_field(tracker, num, field, value):
 def _fs_comment(tracker, num, body):
     r = _trk(tracker, "comment", "--num", str(num), "--body", body)
     if r.returncode != 0:
-        raise TransitionError(f"comment on #{num} failed: {r.stderr.strip()[:160]}")
+        raise TransitionError(f"comment on #{num} failed: {_child_stderr(r)}")
 
 
 def _fs_link(tracker, parent, child, kind):
     r = _trk(tracker, "link", "--parent", str(parent), "--child", str(child), "--kind", kind)
     if r.returncode != 0:
-        raise TransitionError(f"link #{parent}->#{child} ({kind}) failed: {r.stderr.strip()[:160]}")
+        raise TransitionError(f"link #{parent}->#{child} ({kind}) failed: {_child_stderr(r)}")
 
 
 def _fs_remove_dep(tracker, child, parent):
@@ -1180,7 +1213,7 @@ def _fs_remove_dep(tracker, child, parent):
     r = _trk(tracker, "unlink", "--parent", str(parent), "--child", str(child), "--kind", "blocks")
     if r.returncode != 0:
         raise TransitionError(
-            f"unblock: could not remove the #{parent} blocks #{child} dependency: {r.stderr.strip()[:160]}")
+            f"unblock: could not remove the #{parent} blocks #{child} dependency: {_child_stderr(r)}")
     it = _fs_item_full(tracker, child)
     if int(parent) in [int(b) for b in (it.get("blocked_by") or [])]:
         raise TransitionError(
@@ -1383,7 +1416,7 @@ def set_stage(ctx, num, stage):
     else:
         r = _trk(ctx["tracker"], "set", "--num", str(num), "--field", "Stage", "--value", stage)
         if r.returncode != 0:
-            raise TransitionError(f"stage write failed for #{num}: {r.stderr.strip()[:160]}")
+            raise TransitionError(f"stage write failed for #{num}: {_child_stderr(r)}")
 
 
 def record_owner(ctx, num, agent):

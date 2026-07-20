@@ -96,6 +96,29 @@ def warn(msg):
     sys.stderr.write(f"[idc-hook] {msg}\n")
 
 
+def scrub(text):
+    """THE hook-side door for text a CHILD PROCESS produced — delegates to the shared credential
+    table's machine-output profile (`scripts/idc_credential_shapes.py`).
+
+    WHY IT LIVES HERE RATHER THAN BEING IMPORTED PER HOOK. Hooks sit one directory below the table
+    and must never brick the user's session, so each one importing it directly would mean either a
+    hard import that can fail at hook time or the same six-line fail-closed wrapper copied into every
+    gate — which is exactly the drift the shared table was created to end. One wrapper, here, beside
+    the other shared fail modes.
+
+    FAIL CLOSED, and note this is the ONE fail mode in this module that does not fail OPEN: an
+    unloadable table means the text cannot be vouched for, and a withheld diagnostic costs a re-run
+    by hand while an unscrubbed one costs a credential rotation."""
+    if not text:
+        return text
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        import idc_credential_shapes as CS  # noqa: E402
+    except ImportError:
+        return "[child output withheld — the credential-shape table could not be loaded]"
+    return CS.scrub(text)
+
+
 def loud_fail(msg):
     """The bounded gate gave up after N tries — announce it loudly (P8: a governance miss is a
     harness signal, make it visible) but ALLOW the stop so the session is never infinitely nagged."""

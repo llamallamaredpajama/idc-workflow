@@ -1,4 +1,4 @@
-"""idc_credential_shapes.py — the ONE table of self-identifying credential shapes.
+"""idc_credential_shapes.py — the ONE table of credential shapes, in TWO PROVENANCE PROFILES.
 
 WHY THIS EXISTS. Two IDC surfaces scrub credentials out of text before it is written down:
 `idc_live_check.py` (a verify command's captured output, on its way into a committed evidence record)
@@ -9,31 +9,57 @@ happened to walk through. The live check knew Google API keys, Google OAuth toke
 keys and `scheme://user:pass@host` URLs; intake knew `github_pat_…` and Stripe-style `sk_<env>_<key>`.
 Everything in this file is the UNION: learning about a new credential shape now lands once.
 
-WHAT BELONGS HERE — AND WHAT DELIBERATELY DOES NOT. This module holds only shapes that are
-SELF-IDENTIFYING: a run of text that is a credential no matter what surrounds it, in prose or in
-machine output. That is what makes them safe to apply everywhere. Each caller keeps its own
-CONTEXT-SENSITIVE rules, and that split is a finding, not an oversight — cross-applying them was tried
-and each direction breaks something real:
+WHAT SELECTS A RULE SET — AND WHY IT IS NOT THE CALLER. This file used to hold one shared floor and
+tell every caller to "keep its own context-sensitive rules". That sentence was the defect. It made
+choosing a rule set an unaided judgement call taken once per caller, with nothing checking the
+answer — so the autorun drain, arriving third, read it, picked the shared floor for CHILD PROCESS
+STDERR, and `password=…`, `Authorization: Basic …` and `Authorization: token …` walked through a door
+that had just been built to stop exactly them. A fourth caller (`idc_pr_finish.py`) never asked the
+question at all and wrote raw `gh` stderr to a file on disk.
 
-  * The live check's broad "any 40+ character opaque run is a credential we don't have a name for"
-    backstop must NOT run over intake text. Intake's review binding note is literally
+Read the objections that produced the split and they are all objections to ONE THING:
+
+  * The broad "any 40+ character opaque run is a credential we don't have a name for" backstop must
+    NOT run over intake text. Intake's review binding note is literally
     `manifest_content_sha256=<64 hex>` and its review filenames embed the same digest, and intake
     REJECTS (hard error) rather than redacts — so that backstop would make every review IDC has ever
     stamped permanently unvalidatable.
-  * The live check's broad `…secret…|…token…|…key…= value` rule must NOT run over intake text either:
-    it matches on substrings, so `TOKENIZER_MODEL=…` is a "token". Intake replaces it with a
-    name-segment rule specifically so that `KEYBOARD_LAYOUT`, `COMPASS_MODE` and `TOKENIZER_MODEL`
-    survive — deliberate false-positive controls with tests behind them.
+  * The broad `…secret…|…token…|…key…= value` rule must NOT run over intake text either: it matches
+    on substrings, so `TOKENIZER_MODEL=…` is a "token". Intake replaces it with a name-segment rule
+    specifically so that `KEYBOARD_LAYOUT`, `COMPASS_MODE` and `TOKENIZER_MODEL` survive — deliberate
+    false-positive controls with tests behind them.
+  * The `Basic …` / `token …` arms of the auth-header rule are wrong over prose for the same reason
+    ("basic understanding", "token authorization" both match). `Bearer …` is safe enough for prose.
   * Intake's machine-path and private-URL rules must NOT run over live-check output: a live surface is
     a URL, and its verify command's output is expected to name paths. Redacting those would empty the
     evidence record of the only thing it is for.
-  * The `Basic …` / `token …` arms of the live check's auth-header rule stay live-only for the same
-    prose reason ("basic understanding", "token authorization" both match). `Bearer …` is safe enough
-    for prose to be shared.
 
-So the two callers keep OPPOSITE BIASES on purpose — the live check over-redacts (an unreadable
+Every one of those is an objection to **HUMAN-AUTHORED PROSE**, and none is an objection to machine
+output — where `TOKENIZER_MODEL=…` losing its value costs a re-run and keeping it costs a rotation.
+So the discriminator is not who is holding the text, it is WHERE THE TEXT CAME FROM, and it has
+exactly two values. This module publishes both as named profiles:
+
+  * `PROSE_SAFE_SHAPES` (alias `SHAPES`) — the floor that is safe over a document a person wrote.
+  * `MACHINE_OUTPUT_SHAPES` — that floor PLUS the auth-verb arms and the named-secret rule, i.e.
+    exactly the rules whose only objection was a prose objection.
+
+…and one function, `scrub()`, which is THE door for text a child process produced. A new caller no
+longer picks a rule list; it answers one question — *did a human write this, or did a child process
+print it?* — and that answer names the function. `tests/smoke/phase11-honesty-repro.sh` R28 walks
+every module under `scripts/` and fails if a child's stderr is read anywhere without passing through
+that door, so this is a property of the code rather than a convention in a comment.
+
+WHAT STAYS OUT OF BOTH PROFILES, and why that is a derivation rather than a leftover. The live
+check's opaque-run backstop is not a rule, it is a GUESS ("we have no name for this, assume the
+worst"). A guess is affordable where the text is an unpredictable capture — a project's own verify
+probe, whose output nobody can characterise in advance — and unaffordable where the text is a
+STRUCTURED DIAGNOSTIC an operator has to act on: in `gh`/`git` stderr every 40-character opaque run
+is a commit sha or a node id, which is the identifier the message exists to carry. So it stays where
+the guess is affordable, declared in `idc_live_check.py` next to the capture it guards.
+
+The two callers therefore still keep OPPOSITE BIASES — the live check over-redacts (an unreadable
 excerpt costs a re-run; a leaked token costs a rotation), intake protects a human-authored document
-from being mangled or hard-rejected — and this module is the floor they agree on.
+from being mangled or hard-rejected — but the bias now follows the text, not the author of the call.
 
 QUANTIFIERS. Every pattern here is either bounded or a single linear character class. This is not
 tidiness: an unbounded `[\\w.-]*` around a named-secret rule once redacted an entire capture, and a
@@ -49,9 +75,10 @@ a rule with an open-ended one is forced to declare which structural family close
 
 USAGE:
     import idc_credential_shapes as CS
-    for pattern, repl in CS.bake(CS.SHAPES, "[REDACTED]"):   # substitution
+    text = CS.scrub(text)                                    # child-process output — THE door
+    for pattern, repl in CS.bake(CS.SHAPES, "[REDACTED]"):   # human prose — substitution
         text = pattern.sub(repl, text)
-    if any(p.search(text) for p in CS.PATTERNS):             # detection
+    if any(p.search(text) for p in CS.PATTERNS):             # human prose — detection
         ...
 """
 import re
@@ -107,13 +134,57 @@ KNOWN_CREDENTIAL_SHAPES = (
     "{marker}",
 )
 
-# CANONICAL ORDER: the structured, multi-character shapes first, so a PEM block or a URL is recognized
-# whole before a narrower rule can chew a piece out of it.
-SHAPES = (PEM_PRIVATE_KEY_BLOCK, URL_USERINFO, BEARER_HEADER, KNOWN_CREDENTIAL_SHAPES)
+# `Authorization: Basic …` / `token …` — the two arms of the auth-header rule that are WRONG over
+# human prose ("a basic understanding", "token authorization" both match) and exactly right over
+# machine output. Bounded separator for the same REACH reason as `BEARER_HEADER` above.
+AUTH_VERB_HEADER = (
+    re.compile(r"(?i)\b(basic|token)\s{1,64}[A-Za-z0-9._~+/=-]{8,4096}"), r"\1 {marker}",
+)
+
+# Anything that NAMES itself a secret: key/token/secret/password/credential/auth `=` or `:` value.
+# Matches on SUBSTRINGS, which is why it is machine-output-only: over prose it eats `TOKENIZER_MODEL=…`
+# and intake keeps a name-segment rule instead. Over a child's stderr, eating one of those costs a
+# re-run and keeping it costs a rotation — which is the whole trade this module is built on.
+NAMED_SECRET_ASSIGNMENT = (
+    re.compile(r"(?i)([\w.-]{0,32}(?:secret|password|passwd|token|api[_-]?key|apikey|credential|"
+               r"authorization|auth)[\w.-]{0,32})\s{0,64}[:=]\s{0,64}"
+               r"(\"[^\"]{0,512}\"|'[^']{0,512}'|\S{1,512})"),
+    r"\1={marker}",
+)
+
+# ── THE TWO PROFILES ─────────────────────────────────────────────────────────────────────────────
+# CANONICAL ORDER in both: the structured, multi-character shapes first, so a PEM block or a URL is
+# recognized whole before a narrower rule can chew a piece out of it.
+
+# Safe over a document a HUMAN wrote. `SHAPES` is kept as the name the prose callers already use.
+PROSE_SAFE_SHAPES = (PEM_PRIVATE_KEY_BLOCK, URL_USERINFO, BEARER_HEADER, KNOWN_CREDENTIAL_SHAPES)
+SHAPES = PROSE_SAFE_SHAPES
+
+# Safe over anything a CHILD PROCESS printed — the prose floor plus the two rules whose only
+# objection was a prose objection. See the module docstring for why provenance, not caller identity,
+# is what selects between these.
+MACHINE_OUTPUT_SHAPES = (PEM_PRIVATE_KEY_BLOCK, URL_USERINFO, BEARER_HEADER,
+                         AUTH_VERB_HEADER, NAMED_SECRET_ASSIGNMENT, KNOWN_CREDENTIAL_SHAPES)
 
 # The detection-only view: the same patterns without their replacement templates, for a caller that
 # only needs to ask "is there a credential in here?" (intake's reject path) rather than rewrite.
 PATTERNS = tuple(pattern for pattern, _ in SHAPES)
+
+# A reviewer reading a receipt should be able to tell "a private key was here" from "an opaque token
+# was here", so the PEM block carries its own, more informative marker wherever it is redacted.
+PEM_MARKER = "[REDACTED PRIVATE KEY]"
+MARKER = "[REDACTED]"
+
+
+def machine_output_redactors(marker=MARKER, pem_marker=PEM_MARKER):
+    """The MACHINE_OUTPUT profile, baked into (pattern, replacement) pairs in canonical order.
+
+    Exposed as well as used by `scrub` because `idc_live_check` appends its own opaque-run backstop to
+    this list and then MEASURES the whole list (`reach`) to size its head quarantine — so it needs the
+    pairs, not just the substitution. Every consumer that builds a redactor list starts from here, so
+    a rule added to the profile reaches all of them without a second edit."""
+    return (bake((PEM_PRIVATE_KEY_BLOCK,), pem_marker)
+            + bake(MACHINE_OUTPUT_SHAPES[1:], marker))
 
 
 def bake(entries, marker):
@@ -130,6 +201,30 @@ def bake(entries, marker):
 def contains(text):
     """True iff `text` holds any self-identifying credential shape (detection only, no rewrite)."""
     return any(pattern.search(text or "") for pattern in PATTERNS)
+
+
+def scrub(text):
+    """THE DOOR for text a CHILD PROCESS produced — apply the machine-output profile and return it.
+
+    CALL THIS AT THE READ, not at the message. A program reads a child's `stderr` exactly once and
+    then interpolates it into three raises, a diagnostic, a receipt and a board comment; scrubbing at
+    the interpolations is per-site bookkeeping that is always one site short (F1 → F20 → F33 → F35 →
+    F40, five rounds of the same finding). Scrubbing where the bytes are READ covers every downstream
+    use by construction, and there is exactly one read per child, so a census can see them all —
+    which is what `tests/smoke/phase11-honesty-repro.sh` R28 does over every module in `scripts/`.
+
+    WHY `stderr` AND NOT `stdout`. In this repo `stdout` is DATA — JSON, a porcelain listing, a
+    verdict line — and is parsed by its reader; `stderr` is a MESSAGE and is only ever shown or
+    stored. A caller that treats a child's stdout as a message (the autorun drain's verdict line does)
+    passes it here too; a caller that parses it must not, or it would be parsing redaction markers.
+
+    Idempotent, so scrubbing twice on a path that crosses two modules costs nothing but a pass."""
+    out = text or ""
+    if not out:
+        return text
+    for pattern, repl in machine_output_redactors():
+        out = pattern.sub(repl, out)
+    return out
 
 
 # ── REACH ────────────────────────────────────────────────────────────────────────────────────────

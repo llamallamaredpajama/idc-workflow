@@ -68,7 +68,7 @@ def _validate(plugin_root, path):
     checker = os.path.join(plugin_root, "scripts", "idc_review_verdict_check.py")
     try:
         r = subprocess.run([sys.executable, checker, path], capture_output=True, text=True, timeout=30)
-        return (r.returncode == 0, (r.stdout + r.stderr).strip())
+        return (r.returncode == 0, H.scrub((r.stdout + r.stderr).strip()))
     except (OSError, subprocess.SubprocessError) as e:
         return (False, f"validator could not run: {e}")
 

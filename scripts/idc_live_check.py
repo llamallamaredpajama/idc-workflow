@@ -210,42 +210,26 @@ _STRUCTURAL_KEYS = ("name", "paths", "evidence", "attested", "timeout")
 # worst case. That is why `_redacted_tail` can afford to redact on BOTH sides of the display cut —
 # see its docstring for why one side is never enough.
 #
-# The SELF-IDENTIFYING shapes come from the shared `idc_credential_shapes` table, which this file and
-# `idc_intake_manifest.py` both consume — they had drifted in both directions, each catching real
-# credential shapes the other missed. The two rules below are NOT shared, on purpose: both are broad
-# enough to be right for machine output and wrong for human prose (the named-secret rule matches on
-# substrings, so `TOKENIZER_MODEL=…` is a "token"; the `Basic`/`token` header arms match ordinary
-# English), and intake HARD-REJECTS where this file merely redacts. See that module's docstring.
-# EVERY SEPARATOR HERE IS BOUNDED (`\s{1,64}`, never `\s+`; `\s{0,64}`, never `\s*`) and the label
-# alternation carries no quantified GROUP, so `CS.reach` can measure how far one match spans. That
-# number is what sizes `_HEAD_QUARANTINE_BYTES` below; an unbounded separator would make it infinite
-# and leave the retention cut with nothing to quarantine against. See `CS.reach` for the reasoning.
-_LIVE_ONLY_AUTH_VERBS = (
-    # `Authorization: Basic …` / `token …`. The `Bearer` arm is the shared one, applied above.
-    re.compile(r"(?i)\b(basic|token)\s{1,64}[A-Za-z0-9._~+/=-]{8,4096}"), r"\1 [REDACTED]",
-)
-_LIVE_ONLY_NAMED_SECRET = (
-    # Anything that NAMES itself a secret: key/token/secret/password/credential/auth = or : value.
-    re.compile(r"(?i)([\w.-]{0,32}(?:secret|password|passwd|token|api[_-]?key|apikey|credential|"
-               r"authorization|auth)[\w.-]{0,32})\s{0,64}[:=]\s{0,64}"
-               r"(\"[^\"]{0,512}\"|'[^']{0,512}'|\S{1,512})"),
-    r"\1=[REDACTED]",
-)
+# THE RULES COME FROM THE SHARED TABLE, all of them — `CS.MACHINE_OUTPUT_SHAPES`, the profile for
+# text a CHILD PROCESS printed. A verify command's capture is exactly that, so this file no longer
+# keeps a private copy of the two rules that are right for machine output and wrong for human prose
+# (the named-secret rule matches on substrings, so `TOKENIZER_MODEL=…` is a "token"; the
+# `Basic`/`token` header arms match ordinary English). Keeping them here is what let the autorun
+# drain build a scrub door and wire the PROSE profile through it — see that module's docstring on why
+# provenance, not caller identity, selects a rule set. Every separator in the shared profile is
+# BOUNDED (`\s{1,64}`, never `\s+`) and no label alternation carries a quantified GROUP, so `CS.reach`
+# can measure how far one match spans; that number is what sizes `_HEAD_QUARANTINE_BYTES` below.
 _LIVE_ONLY_OPAQUE_RUN_BACKSTOP = (
-    # The backstop: any long opaque run is treated as a credential we do not have a name for. Strictly
-    # live-check-only — intake's review binding note IS a 64-character hex digest, so this rule would
-    # make every stamped review unvalidatable there.
+    # The backstop, and the ONE rule that stays local — because it is not a rule, it is a GUESS: "a
+    # long opaque run is a credential we do not have a name for". A guess is affordable here, where
+    # the text is a project's own probe output and nobody can characterise it in advance, and
+    # unaffordable over a STRUCTURED DIAGNOSTIC, where every 40-character opaque run is the commit sha
+    # or node id the message exists to carry. (It must also never run over intake text: a review
+    # binding note IS a 64-character hex digest, so this rule would make every stamped review
+    # permanently unvalidatable.)
     re.compile(r"\b[A-Za-z0-9_\-]{40,4096}\b"), "[REDACTED]",
 )
-_REDACTORS = (
-    # The PEM block keeps its own, more informative marker: a reviewer reading a receipt should be able
-    # to tell "a private key was here" from "an opaque token was here".
-    CS.bake((CS.PEM_PRIVATE_KEY_BLOCK,), "[REDACTED PRIVATE KEY]")
-    + CS.bake((CS.URL_USERINFO, CS.BEARER_HEADER), "[REDACTED]")
-    + (_LIVE_ONLY_AUTH_VERBS, _LIVE_ONLY_NAMED_SECRET)
-    + CS.bake((CS.KNOWN_CREDENTIAL_SHAPES,), "[REDACTED]")
-    + (_LIVE_ONLY_OPAQUE_RUN_BACKSTOP,)
-)
+_REDACTORS = CS.machine_output_redactors() + (_LIVE_ONLY_OPAQUE_RUN_BACKSTOP,)
 
 
 def _fail(reason):

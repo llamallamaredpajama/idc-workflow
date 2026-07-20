@@ -61,6 +61,25 @@ import idc_plugin_freshness as freshness  # noqa: E402
 import idc_stdio  # noqa: E402
 import idc_ledger  # noqa: E402
 
+# THE CREDENTIAL SCRUB DOOR — see `idc_credential_shapes.scrub`. Every read of a CHILD PROCESS's
+# stderr in this module passes through it AT THE READ, and `tests/smoke/phase11-honesty-repro.sh` R28
+# is the census that keeps that true across every module in scripts/.
+#
+# THE IMPORT IS TOLERANT BECAUSE SEVERAL MODULES HERE RUN AS LONE RELOCATED COPIES. The smoke and
+# governance suites copy a single script to a temp directory and execute it there to prove a deleted
+# guard was the one doing the work (`phase1-pipe-safety` F, `governance/external-intake-completeness`,
+# `phase4-completion-honesty` F) — a hard sibling import makes those copies die on ImportError. The
+# fallback FAILS CLOSED: with no table to scrub with, a child's stderr is WITHHELD, never passed
+# through. This block is byte-identical everywhere it appears and R28 asserts that, so no copy of it
+# can drift into a pass-through.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import idc_credential_shapes as CS  # noqa: E402
+except ImportError:                                      # a lone relocated copy — fail closed
+    class CS:                                            # noqa: N801 — stand-in for the shared table
+        scrub = staticmethod(
+            lambda text: text and "[child output withheld — the credential table is not importable]")
+
 # The thirteen governed `/idc:*` entry points. Kept in lockstep with commands/*.md and the
 # UserPromptExpansion matcher in hooks/hooks.json.
 COMMANDS = {
@@ -2152,7 +2171,7 @@ def _gh_auth_status_text(repo: str):
         return None
     if proc.returncode != 0:
         return None
-    return (proc.stdout or "") + (proc.stderr or "")
+    return CS.scrub((proc.stdout or "") + (proc.stderr or ""))
 
 
 def _filesystem_board_loads(repo: str) -> bool:

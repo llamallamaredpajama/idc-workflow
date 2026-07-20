@@ -59,6 +59,25 @@ import idc_file_findings as FF          # noqa: E402 — work_items + existing-k
 import idc_gh_board                     # noqa: E402 — BoardReadError for fail-closed github routing
 import idc_ledger                       # noqa: E402 — the obligations ledger (the mid_finish taint)
 
+# THE CREDENTIAL SCRUB DOOR — see `idc_credential_shapes.scrub`. Every read of a CHILD PROCESS's
+# stderr in this module passes through it AT THE READ, and `tests/smoke/phase11-honesty-repro.sh` R28
+# is the census that keeps that true across every module in scripts/.
+#
+# THE IMPORT IS TOLERANT BECAUSE SEVERAL MODULES HERE RUN AS LONE RELOCATED COPIES. The smoke and
+# governance suites copy a single script to a temp directory and execute it there to prove a deleted
+# guard was the one doing the work (`phase1-pipe-safety` F, `governance/external-intake-completeness`,
+# `phase4-completion-honesty` F) — a hard sibling import makes those copies die on ImportError. The
+# fallback FAILS CLOSED: with no table to scrub with, a child's stderr is WITHHELD, never passed
+# through. This block is byte-identical everywhere it appears and R28 asserts that, so no copy of it
+# can drift into a pass-through.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import idc_credential_shapes as CS  # noqa: E402
+except ImportError:                                      # a lone relocated copy — fail closed
+    class CS:                                            # noqa: N801 — stand-in for the shared table
+        scrub = staticmethod(
+            lambda text: text and "[child output withheld — the credential table is not importable]")
+
 REMOTE = "origin"
 MERGE_METHODS = ("squash", "merge", "rebase")
 # The obligations ledger's own documented taint kind (scripts/hooks/idc_ledger.py, TAINT KINDS):
@@ -138,7 +157,7 @@ def _run(cmd, cwd):
         p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
     except OSError as e:
         return 1, "", str(e)
-    return p.returncode, p.stdout, p.stderr
+    return p.returncode, p.stdout, CS.scrub(p.stderr)
 
 
 # ── the mid-finish obligation (handoff safety) ──────────────────────────────────────────────────

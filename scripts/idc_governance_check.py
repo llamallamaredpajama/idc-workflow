@@ -28,6 +28,25 @@ import subprocess
 import sys
 import tempfile
 
+# THE CREDENTIAL SCRUB DOOR — see `idc_credential_shapes.scrub`. Every read of a CHILD PROCESS's
+# stderr in this module passes through it AT THE READ, and `tests/smoke/phase11-honesty-repro.sh` R28
+# is the census that keeps that true across every module in scripts/.
+#
+# THE IMPORT IS TOLERANT BECAUSE SEVERAL MODULES HERE RUN AS LONE RELOCATED COPIES. The smoke and
+# governance suites copy a single script to a temp directory and execute it there to prove a deleted
+# guard was the one doing the work (`phase1-pipe-safety` F, `governance/external-intake-completeness`,
+# `phase4-completion-honesty` F) — a hard sibling import makes those copies die on ImportError. The
+# fallback FAILS CLOSED: with no table to scrub with, a child's stderr is WITHHELD, never passed
+# through. This block is byte-identical everywhere it appears and R28 asserts that, so no copy of it
+# can drift into a pass-through.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import idc_credential_shapes as CS  # noqa: E402
+except ImportError:                                      # a lone relocated copy — fail closed
+    class CS:                                            # noqa: N801 — stand-in for the shared table
+        scrub = staticmethod(
+            lambda text: text and "[child output withheld — the credential table is not importable]")
+
 SCHEMA_VERSION = 1
 SIDECAR_RELPATH = "docs/workflow/idc-governance-contract.yaml"
 # The fixed governing source set the compiler pins (idc_governance_compile.py::SOURCES). A valid
@@ -134,7 +153,7 @@ def cmd_check(args: argparse.Namespace) -> int:
             res = subprocess.run([sys.executable, compiler, "--repo", repo, "--out", tmp],
                                  capture_output=True, text=True)
             if res.returncode != 0:
-                die(f"could not recompile for the integrity check: {res.stderr.strip()}")
+                die(f"could not recompile for the integrity check: {CS.scrub(res.stderr).strip()}")
             with open(tmp, "rb") as a, open(sidecar, "rb") as b:
                 if a.read() != b.read():
                     print("DRIFT\tcontent\tsidecar body differs from a fresh deterministic compile", file=sys.stderr)

@@ -15,6 +15,25 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from idc_board_lint import REQUIREMENTS_GATE_PREFIX, is_requirements_gate_title  # noqa: E402
 from idc_gate_proof import GATE_PR_MARKER_RE, format_gate_pr_marker  # noqa: E402
 
+# THE CREDENTIAL SCRUB DOOR — see `idc_credential_shapes.scrub`. Every read of a CHILD PROCESS's
+# stderr in this module passes through it AT THE READ, and `tests/smoke/phase11-honesty-repro.sh` R28
+# is the census that keeps that true across every module in scripts/.
+#
+# THE IMPORT IS TOLERANT BECAUSE SEVERAL MODULES HERE RUN AS LONE RELOCATED COPIES. The smoke and
+# governance suites copy a single script to a temp directory and execute it there to prove a deleted
+# guard was the one doing the work (`phase1-pipe-safety` F, `governance/external-intake-completeness`,
+# `phase4-completion-honesty` F) — a hard sibling import makes those copies die on ImportError. The
+# fallback FAILS CLOSED: with no table to scrub with, a child's stderr is WITHHELD, never passed
+# through. This block is byte-identical everywhere it appears and R28 asserts that, so no copy of it
+# can drift into a pass-through.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import idc_credential_shapes as CS  # noqa: E402
+except ImportError:                                      # a lone relocated copy — fail closed
+    class CS:                                            # noqa: N801 — stand-in for the shared table
+        scrub = staticmethod(
+            lambda text: text and "[child output withheld — the credential table is not importable]")
+
 MARKER = GATE_PR_MARKER_RE
 
 
@@ -39,7 +58,7 @@ def _gh_json(args, repo):
     except (OSError, subprocess.SubprocessError) as exc:
         raise BindError(f"could not run gh: {exc}")
     if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "unknown gh failure").strip()[:300]
+        detail = CS.scrub(proc.stderr or proc.stdout or "unknown gh failure").strip()[:300]
         raise BindError(f"gh {' '.join(args[:2])} failed: {detail}")
     if args[1] == "edit":
         return {}

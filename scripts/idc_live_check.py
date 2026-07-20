@@ -295,8 +295,56 @@ def _tail(text, limit):
     return "…[truncated]…\n" + text[-limit:]
 
 
-def _redacted_tail(text, limit):
+_LEADING_WS = re.compile(r"\s")
+_LEADING_WS_BYTES = re.compile(rb"\s")
+
+
+def _redact_severed_head(buf):
+    """REDACT the partial leading token a cut through un-redacted bytes leaves behind.
+
+    THE RULE, stated once so a future cut cannot re-open this: **a cut taken over bytes that have not
+    been redacted yet must never sever a token.** Every redaction rule in this file is left-anchored —
+    the named-secret rule needs the label (`password`, `api_key`), the URL rule needs the scheme, the
+    PEM rule needs its BEGIN line. A cut that lands inside a label destroys exactly the context the
+    rule matches on, and the surviving remainder (`word=hunter2xyzzy`) is a credential that no rule can
+    see any more. It then lands in the COMMITTED evidence file, where the cost is a rotation and the
+    exposure is permanent.
+
+    That is why redacting on both sides of the DISPLAY cut (`_redacted_tail`) was not enough on its
+    own: `_drain_bounded` takes an EARLIER cut, over raw bytes, before any redaction has run. This is
+    the guard for that cut — and it is the only cut in this file taken over un-redacted input, which is
+    what keeps the rule checkable. (`_redacted_tail`'s cut does not need it: redaction has already run
+    over the WHOLE retained buffer by then, so anything that cut can sever is something no rule
+    matched, and its own second pass catches what the cut newly makes matchable.)
+
+    REDACTED, NOT DELETED, and the difference matters twice. A severed token is unattributable, so it
+    must not be displayed — but silently deleting it would remove the evidence that anything was there,
+    and where the retained buffer is ONE long token (a probe that prints a single huge line) deleting
+    would empty the receipt entirely. Replacing it with the ordinary marker keeps the receipt readable
+    and says the honest thing: something was here and this run cannot vouch for what.
+
+    The boundary is the first WHITESPACE — not the first newline — because a token is
+    whitespace-delimited and a chatty probe can emit a very long single line. A cut that happened to
+    land ON whitespace severed nothing, and the buffer is returned untouched.
+    """
+    ws = _LEADING_WS_BYTES if isinstance(buf, bytes) else _LEADING_WS
+    marker = b"[REDACTED]" if isinstance(buf, bytes) else "[REDACTED]"
+    m = ws.search(buf)
+    if m is None:
+        return marker              # the whole tail is one severed token
+    if m.start() == 0:
+        return buf                 # the cut landed on whitespace — nothing was severed
+    return marker + buf[m.start():]
+
+
+def _redacted_tail(text, limit, truncated=False):
     """The bounded display tail of a capture, REDACTED ON BOTH SIDES OF THE CUT.
+
+    `truncated` carries forward a cut that already happened UPSTREAM (the retention cut in
+    `_drain_bounded`). Without it the marker is decided from this function's own input, which is
+    already the survivor of that earlier cut — and redacting a severed head can shrink a 17 KB buffer
+    to a few characters, so a genuinely partial capture would print as if it were the whole story.
+    Same defect as deciding the marker from the post-redaction length, one boundary earlier.
 
     ONE SIDE IS NEVER ENOUGH, and this is not a reorder of the old `redact(_tail(...))`:
 
@@ -321,7 +369,7 @@ def _redacted_tail(text, limit):
     and a reviewer would read a fragment as the whole story.
     """
     raw = text or ""
-    truncated = len(raw) > limit
+    truncated = truncated or len(raw) > limit
     kept = redact(raw)
     if len(kept) > limit:
         kept = redact(kept[-limit:])
@@ -604,12 +652,28 @@ _WITNESS_VERSION = 1
 
 
 def _witness_path(repo):
-    """`<git-dir>/idc/live-runs.json` — inside the git directory, so git can never carry it."""
-    rc, git_dir = _git(repo, "rev-parse", "--absolute-git-dir")
+    """`<git-common-dir>/idc/live-runs.json` — inside the git directory, so git can never carry it.
+
+    THE COMMON DIR, NOT THIS CHECKOUT'S. `--absolute-git-dir` resolves inside a LINKED WORKTREE to
+    `<main>/.git/worktrees/<name>`, which is private to that worktree and deleted with it. IDC's own
+    build topology makes that the normal case, not an exotic one: the claude adapter pre-creates a
+    worktree per work item, `idc:idc-build` runs the wave-close `--run` inside it, and
+    `idc_autorun_drain.py` audits from the MAIN checkout after the merge. With a per-worktree witness
+    that sequence reported a false `live: gap` on every worktree-built wave — accusing a genuine
+    measurement of being hand-written — and `git worktree remove` then destroyed the proof for good.
+
+    `--git-common-dir` is the SHARED `.git`, which every linked worktree agrees on. The security
+    property is exactly as strong: git never carries `.git` itself in a commit, a diff, a PR or a
+    clone, so a receipt that travels still arrives with no witness. It returns a RELATIVE path (`.git`)
+    when git is run from the repo root, so it is resolved against `repo`.
+    """
+    rc, git_dir = _git(repo, "rev-parse", "--git-common-dir")
     if rc != 0 or not git_dir:
         _fail(f"{repo}: the git directory could not be resolved, so a real run cannot be "
               f"distinguished from a typed receipt")
-    return os.path.join(git_dir, _WITNESS_REL)
+    if not os.path.isabs(git_dir):
+        git_dir = os.path.join(repo, git_dir)
+    return os.path.join(os.path.normpath(git_dir), _WITNESS_REL)
 
 
 def _read_witnesses(repo):
@@ -711,8 +775,40 @@ def verifier_paths(repo, spec):
     return found
 
 
+def watched_paths(repo, spec):
+    """THE ONE DEFINITION of "the files this receipt's meaning depends on": the surface's declared
+    `paths:` plus the verify command's own files.
+
+    ONE CONCEPT, ONE FUNCTION, because two rules read it and they had drifted apart. Both the EXPIRY
+    rule (has anything landed since the run?) and the ATTRIBUTION rule (is the tree the commit the
+    receipt names?) are asking the same question about the same set — "is the code this receipt
+    describes still the code that is here?" — and the freshness rule was taught about the probe while
+    the dirtiness rule was not. The result was a receipt reading `live: ok` for a probe that HEAD had
+    never contained: weaken the verify script, leave the edit UNCOMMITTED, and `git log` (freshness)
+    cannot see it while `git status` (dirtiness) was not looking at it.
+    """
+    declared = list(spec["paths"])
+    return declared + [p for p in verifier_paths(repo, spec) if p not in declared]
+
+
+def _status_paths(repo, untracked, paths):
+    """The paths under `paths` that `git status` reports as changed, or [] when git could not answer.
+
+    PARSED BY SPLITTING OFF THE STATUS FIELD, not by a fixed `line[3:]` offset. A porcelain line for an
+    unstaged change begins with a SPACE (` M scripts/verify.sh`), and `_git` strips its whole stdout —
+    so the first line arrives one character shorter than the rest and a fixed slice ate the first
+    letter of its path. The refusal then named `cripts/verify.sh`, a file the operator cannot find.
+    """
+    if not paths:
+        return []
+    rc, out = _git(repo, "status", "--porcelain", f"--untracked-files={untracked}", "--", *paths)
+    if rc != 0:
+        return []
+    return [ln.split(None, 1)[-1].strip() for ln in out.splitlines() if ln.split()]
+
+
 def _dirty_paths(repo, spec):
-    """The surface's own tracked files that differ from HEAD right now, if any.
+    """The files this receipt's meaning depends on that differ from HEAD right now, if any.
 
     WHY A RUN OVER A DIRTY TREE CANNOT BE ATTRIBUTED TO HEAD. The verify command executes against the
     WORKING TREE, and the receipt records `commit: <HEAD>`. When the two disagree, the receipt claims
@@ -720,14 +816,25 @@ def _dirty_paths(repo, spec):
     commits, while what actually passed was an uncommitted edit that may never be committed at all.
     That is a false green with a real deployment behind it.
 
-    SCOPED TO THE SURFACE'S OWN PATHS, and only tracked files, on purpose. A run inevitably dirties
-    the tree by writing its own evidence receipt, and repos carry all sorts of unrelated scratch;
-    neither says anything about whether the code backing this surface was the code that ran.
+    THE PROBE IS PART OF THE SET (`watched_paths`), and the two halves get different UNTRACKED rules
+    for a reason that is not symmetry:
+
+      * The DECLARED paths are checked TRACKED-ONLY. A run inevitably dirties the tree by writing its
+        own evidence receipt, and repos carry all sorts of unrelated scratch; neither says anything
+        about whether the code backing this surface was the code that ran. Including untracked files
+        here would make the second run of every surface refuse.
+      * The VERIFY COMMAND'S OWN FILES are checked INCLUDING UNTRACKED, because `-uno` hides the
+        wholesale replacement — delete the committed probe, drop an untracked file at the same path,
+        and a tracked-only scan reports a clean tree while the thing that ran is code no commit
+        contains. There is no evidence-receipt case to protect here: the probe is source.
     """
-    rc, out = _git(repo, "status", "--porcelain", "--untracked-files=no", "--", *spec["paths"])
-    if rc != 0:
-        return []
-    return [ln[3:].strip() for ln in out.splitlines() if ln.strip()]
+    declared = list(spec["paths"])
+    probe = [p for p in verifier_paths(repo, spec) if p not in declared]
+    dirty = _status_paths(repo, "no", declared)
+    for p in _status_paths(repo, "all", probe):
+        if p not in dirty:
+            dirty.append(p)
+    return dirty
 
 
 def _git(repo, *args):
@@ -765,9 +872,20 @@ def _drain_bounded(proc, timeout):
     `subprocess.TimeoutExpired` on the deadline, so the caller's existing timeout arm — kill the process
     group, invalidate the stale receipt, report INDETERMINATE — is reached unchanged.
 
-    Returns the decoded tail; the caller applies `_tail` + `redact` to it as before."""
+    THE RETENTION CUT IS A REDACTION BOUNDARY, and that is why `_drop_severed_head` is here. Keeping
+    only the last N bytes means the buffer's FIRST LINE is a fragment whenever the child printed more
+    than N — and this cut happens BEFORE anything is redacted, so a cut that lands inside a
+    `password=` label leaves `word=hunter2xyzzy`, which the named-secret rule can no longer match and
+    the opaque-run backstop is too short to catch. The credential then reaches the committed receipt.
+    Redacting at every trim instead would put a whole-buffer pass on every 64 KB chunk — for a child
+    that prints a gigabyte that is ~16k passes over 17 KB, which is the same "a check that hangs is a
+    check that gets removed" failure the bound exists to prevent. Dropping the severed head is O(1) and
+    closes it for good: see `_drop_severed_head` for the rule.
+
+    Returns the decoded tail; the caller applies `_redacted_tail` to it as before."""
     deadline = time.time() + timeout
     kept = b""
+    overflowed = False
     try:
         while True:
             remaining = deadline - time.time()
@@ -779,7 +897,10 @@ def _drain_bounded(proc, timeout):
             chunk = proc.stdout.read1(_READ_CHUNK)
             if not chunk:
                 break  # EOF — every writer on the pipe has closed it
-            kept = (kept + chunk)[-_MAX_RETAINED_BYTES:]
+            kept += chunk
+            if len(kept) > _MAX_RETAINED_BYTES:
+                overflowed = True
+                kept = kept[-_MAX_RETAINED_BYTES:]
     finally:
         try:
             proc.stdout.close()
@@ -788,7 +909,13 @@ def _drain_bounded(proc, timeout):
     # EOF does not by itself mean the child has reaped; wait for the real exit status within whatever
     # is left of the same deadline, so `proc.returncode` is never read as None.
     proc.wait(timeout=max(0.1, deadline - time.time()))
-    return kept.decode("utf-8", "replace")
+    # Only when the retention cut actually fired: with nothing discarded there is no severed head, and
+    # redacting the first token of a SHORT capture would throw away output the reader needs.
+    if overflowed:
+        kept = _redact_severed_head(kept)
+    # The overflow travels WITH the text, because it is a fact about the capture that the text can no
+    # longer be asked for — `_redact_severed_head` may have shrunk 17 KB to ten characters.
+    return kept.decode("utf-8", "replace"), overflowed
 
 
 def run_verify(repo, spec, commit):
@@ -838,7 +965,7 @@ def run_verify(repo, spec, commit):
         _invalidate(spec, commit, f"the verify command could not be started ({e})")
         _fail(f"surface {spec['name']!r}: the verify command could not be started ({e})")
     try:
-        out = _drain_bounded(proc, spec["timeout"])
+        out, overflowed = _drain_bounded(proc, spec["timeout"])
         rc = proc.returncode
     except subprocess.TimeoutExpired:
         _kill_group(proc)
@@ -855,7 +982,7 @@ def run_verify(repo, spec, commit):
     # credential's own label, and redacting only first cannot see an opaque run too long to carry a word
     # boundary. `_redacted_tail` does both passes and explains why. (The full capture lives only in this
     # local, is already bounded by `_drain_bounded`, and dies with the call.)
-    output = _redacted_tail(out or "", MAX_BODY_CHARS)
+    output = _redacted_tail(out or "", MAX_BODY_CHARS, truncated=overflowed)
     if rc in (126, 127):
         _invalidate(spec, commit,
                     f"the verify command could not be executed (shell exit {rc} — not found or not "
@@ -1092,10 +1219,11 @@ def audit_surface(repo, spec):
                 f"(unmerged or rewritten) — it does not describe what shipped"), None
     # THE EXPIRY. Anything landing on the surface's own paths since the run invalidates it, because the
     # thing that was proven working is no longer the thing that is deployed.
-    # The freshness set is the surface's declared paths PLUS the verify command's own files: a probe
-    # that has been weakened since the run proves nothing about the run, and `command_sha256` only
-    # notices a change to the declared STRING, never to the script that string executes.
-    watched = list(spec["paths"]) + [p for p in verifier_paths(repo, spec) if p not in spec["paths"]]
+    # The freshness set is `watched_paths` — the declared paths PLUS the verify command's own files: a
+    # probe that has been weakened since the run proves nothing about the run, and `command_sha256`
+    # only notices a change to the declared STRING, never to the script that string executes. The
+    # dirty-tree refusal reads the SAME set from the SAME function, so the two can never drift again.
+    watched = watched_paths(repo, spec)
     rc, out = _git(repo, "log", "--format=%H", f"{commit}..HEAD", "--", *watched)
     if rc != 0:
         _fail(f"git log over surface {spec['name']!r} paths failed")

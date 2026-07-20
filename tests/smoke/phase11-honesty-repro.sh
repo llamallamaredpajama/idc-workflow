@@ -57,6 +57,29 @@
 #   R16 a. restore the generic `error (no verdict)`        ⇒ RED: exit code + cause lost.
 #       b. keep the exit code but drop the stderr tail     ⇒ RED.
 #   R17 a. revert the README table to ten entries          ⇒ RED.
+#   R18 (idc_live_check — the RETENTION cut, the boundary R1 could not reach)
+#     a. skip the severed-head redaction (`if False:`)    ⇒ RED: `word=hunter2xyzzy` — a credential
+#                                                            whose label the cut severed — reaches the
+#                                                            COMMITTED receipt.
+#     b. decide truncation from this function's own input ⇒ RED: redacting a severed head shrinks 17 KB
+#                                                            to ten characters, and the fragment then
+#                                                            prints without `…[truncated]…`.
+#     c. return the buffer when it holds NO whitespace    ⇒ RED: the severed head leaks in `;`-separated
+#                                                            output, where there is no boundary to cut
+#                                                            back to and the display cut never fires.
+#   R19 (idc_live_check `_dirty_paths` — attribution must watch the same set freshness does)
+#     a. drop the verifier files from the dirty set       ⇒ RED: an UNCOMMITTED probe edit yields
+#                                                            `live: ok` for code HEAD never contained.
+#     b. scan the probe with `--untracked-files=no`       ⇒ RED: a wholesale UNTRACKED replacement of
+#                                                            the probe passes as a clean tree.
+#     c. restore the fixed `line[3:]` porcelain slice     ⇒ RED: `_git` strips its stdout, so the first
+#                                                            line loses its leading status space and
+#                                                            the refusal names `cripts/verify.sh`.
+#   R20 (idc_live_check `_witness_path` — the witness belongs to the repository)
+#     a. restore `--absolute-git-dir`                     ⇒ RED: the witness is written inside the
+#                                                            LINKED WORKTREE's private git dir, so the
+#                                                            main checkout reports a false gap and
+#                                                            `git worktree remove` destroys the proof.
 #   R7  a. drop the pause-state helper from resume's blocker allowlist ⇒ RED: no legal outcome.
 #       b. ground the blocker without re-deriving          ⇒ RED: "blocked" becomes a free pass.
 #   R8  a. drop the resume survey claim                    ⇒ RED: complete with no survey.
@@ -753,5 +776,197 @@ if survey.get("exit") != 1 or "#99" not in (survey.get("findings") or []):
     sys.exit(f"the recorded survey does not reflect the real half-done work: {survey!r}")
 PY
 echo "  ok R7/R8: a failed record-clear is a grounded blocker; complete carries a re-derived survey"
+
+echo "== R18. THE RETENTION CUT MUST NOT SEVER A CREDENTIAL'S LABEL  [F20]"
+# R1 fixed the DISPLAY cut. `_drain_bounded` takes an EARLIER cut, over raw bytes, before any
+# redaction has run: it keeps only the last `_MAX_RETAINED_BYTES`, so the buffer's first token is a
+# fragment whenever the probe printed more than that. A cut through `password=` leaves
+# `word=hunter2xyzzy`, which the named-secret rule can no longer match (its label is gone) and the
+# opaque-run backstop is too short to catch — and the display cut does not save it, because a buffer
+# full of long tokens REDACTS below MAX_BODY_CHARS, so no second cut ever happens and the whole
+# fragment-headed buffer is written to the COMMITTED receipt.
+python3 - "$LIVE" "$WORK" <<'PY' || fail "R18: a credential whose label the RETENTION cut severed reaches the committed receipt"
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("L", sys.argv[1])
+L = importlib.util.module_from_spec(spec); spec.loader.exec_module(L)
+work = sys.argv[2]
+keep = L._MAX_RETAINED_BYTES
+
+# A probe whose output is built so the retention cut lands at a CHOSEN offset inside `password=`.
+# `sever` is how many bytes of the credential survive the cut: 17 leaves `word=hunter2xyzzy`.
+probe = os.path.join(work, "r18-probe.py")
+with open(probe, "w", encoding="utf-8") as fh:
+    fh.write(
+        "import sys\n"
+        "keep, sever, cred = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]\n"
+        # `sep` is what separates the filler tokens. '\\n' is the ordinary chatty-probe shape; ';' is
+        # the buffer that contains NO WHITESPACE AT ALL, where there is no boundary to cut back to.
+        "sep = sys.argv[4].replace('NL', '\\n')\n"
+        # The leading separator keeps the marker OFF the end of the filler run — glued on, the two
+        # form a 40-char opaque token and the backstop legitimately redacts the marker itself.
+        "marker = sep + 'TAIL-MARKER' + sep\n"
+        # Long opaque runs, so the RETAINED buffer redacts BELOW MAX_BODY_CHARS and no display cut
+        # occurs — which is what lets the severed head reach the receipt in the first place.
+        "line = 'Z' * 64 + sep\n"
+        "after = sep + (line * (keep // len(line) + 2))\n"
+        "after = after[:keep - sever - len(marker)] + marker\n"
+        "sys.stdout.write(('startup noise' + sep) * 40 + cred + after)\n")
+
+def body(sever, cred, sep="NL"):
+    s = {"name": "web", "verify_raw": f"python3 {probe} {keep} {sever} {cred} {sep!r}",
+         "verify": "probe", "timeout": 60}
+    rc, out, _ = L.run_verify(work, s, "0" * 40)
+    if rc != 0:
+        sys.exit(f"precondition: the probe must succeed, got rc={rc} out={out[:200]!r}")
+    return out
+
+# THE LEAK: the cut falls after `pass`, so only `word=hunter2xyzzy` is retained.
+leaked = body(17, "password=hunter2xyzzy")
+if "hunter2xyzzy" in leaked:
+    sys.exit("a credential whose LABEL was severed by the retention cut survived redaction and was "
+             "written to the receipt: " + leaked[:160].replace("\n", " "))
+# ...and the receipt must still be USABLE — dropping the severed head must not empty it.
+if "TAIL-MARKER" not in leaked:
+    sys.exit(f"the receipt lost the end of the capture, which is where a failure's reason is: {leaked[:200]!r}")
+if "…[truncated]…" not in leaked:
+    sys.exit(f"a genuinely partial capture lost its truncation marker: {leaked[:200]!r}")
+
+# THE SAME LEAK WITH NO WHITESPACE ANYWHERE in the retained buffer — `;`-separated output, which a
+# probe piping JSON or a `set -x` trace really does produce. There is no boundary to cut back to, so
+# the whole tail is one severed token and none of it can be attributed. The display cut does not save
+# this either: the filler redacts far below MAX_BODY_CHARS, so no second cut ever happens.
+dense = body(17, "password=hunter2xyzzy", sep=";")
+if "hunter2xyzzy" in dense:
+    sys.exit("a severed credential survived in a capture with NO whitespace boundary — there is "
+             "nothing to cut back to, so the unattributable tail must not be shown: " + dense[:160])
+if "[REDACTED]" not in dense:
+    sys.exit(f"the unattributable tail was silently deleted rather than marked: {dense[:200]!r}")
+
+# POSITIVE CONTROL 1 — an INTACT label WELL INSIDE the retained window is still redacted by name, so
+# this is not "the whole head is always redacted" passing for a fix. (`sever` is padded past the
+# credential's own length so the cut lands in the noise BEFORE it: a credential sitting exactly at
+# offset 0 of the buffer is indistinguishable from a severed `MY_password=…` and is treated as one.)
+intact = body(len("password=hunter2xyzzy") + 50, "password=hunter2xyzzy")
+if "hunter2xyzzy" in intact:
+    sys.exit(f"an intact `password=` was not redacted: {intact[:200]!r}")
+if "password=[REDACTED]" not in intact:
+    sys.exit(f"the intact credential was not redacted BY NAME (its label should survive): {intact[:200]!r}")
+
+# POSITIVE CONTROL 2 — the truncation signal must SURVIVE the head redaction. A capture that is one
+# huge token redacts to a handful of characters, so deciding the marker from what is left declares a
+# 17 KB fragment complete: the same lost-signal defect as deciding it from the post-redaction length,
+# one boundary earlier. The overflow has to travel with the text.
+s = {"name": "web", "verify_raw": f"python3 -c \"print('x' * {keep})\"", "verify": "probe", "timeout": 60}
+rc, one_token, _ = L.run_verify(work, s, "0" * 40)
+if rc != 0:
+    sys.exit(f"precondition: the one-token probe must succeed, got rc={rc}")
+if "[REDACTED]" not in one_token:
+    sys.exit(f"a {keep}-char opaque run reached the receipt unredacted: {one_token[:120]!r}")
+if "…[truncated]…" not in one_token:
+    sys.exit(f"a capture the RETENTION cut truncated lost its `…[truncated]…` marker once the severed "
+             f"head was redacted — a fragment now reads as the whole story: {one_token[:120]!r}")
+
+# POSITIVE CONTROL 3 — a capture that never overflowed must keep its FIRST line: the head redaction
+# fires only when bytes were actually discarded.
+s = {"name": "web", "verify_raw": "python3 -c \"print('FIRST-LINE'); print('second')\"",
+     "verify": "probe", "timeout": 60}
+rc, short, _ = L.run_verify(work, s, "0" * 40)
+if rc != 0 or "FIRST-LINE" not in short:
+    sys.exit(f"a short capture lost its first line — the head-drop must fire only on overflow: {short!r}")
+PY
+echo "  ok R18: a severed credential head is dropped, an intact one is redacted, short output is intact"
+
+echo "== R19. AN UNCOMMITTED PROBE MUST NOT PRODUCE A RECEIPT NAMING HEAD  [F21]"
+# F11 refused a run over a dirty tree but scoped it to `paths:`; F12 added the verifier's own files to
+# the FRESHNESS set only. So the probe itself was unguarded on the ATTRIBUTION side: weaken the verify
+# script, leave the edit UNCOMMITTED, and the run records `live: ok` against a HEAD that never
+# contained that probe — `git log` cannot see an uncommitted change, so freshness never fires either.
+R19="$WORK/probe-attribution"; mkrepo "$R19"; mkdir -p "$R19/scripts" "$R19/services"
+echo v1 > "$R19/services/app.py"
+cat > "$R19/WORKFLOW-config.yaml" <<'EOF'
+project:
+  name: demo
+live_verification:
+  surfaces:
+    - name: web
+      verify: bash scripts/verify.sh
+      paths: [services/]
+EOF
+# The COMMITTED probe reports the product broken, which is the honest verdict for this repo.
+printf '#!/bin/bash\necho "the chat step failed"\nexit 1\n' > "$R19/scripts/verify.sh"
+git -C "$R19" add -A; git -C "$R19" commit -qm declare
+out19a="$(python3 "$LIVE" --repo "$R19" --run 2>&1)"; rc19a=$?
+[ "$rc19a" = 1 ] \
+  || fail "R19: precondition — a committed, FAILING probe must report a product gap (exit 1), got rc=$rc19a out=$out19a"
+git -C "$R19" add -A; git -C "$R19" commit -qm evidence
+
+# Weaken the probe and DO NOT COMMIT IT. The product is untouched and still broken.
+printf '#!/bin/bash\nexit 0\n' > "$R19/scripts/verify.sh"
+out19b="$(python3 "$LIVE" --repo "$R19" --run 2>&1)"; rc19b=$?
+[ "$rc19b" = 0 ] \
+  && fail "R19: an UNCOMMITTED edit to the verify script produced a passing receipt for code HEAD never contained. Got: $out19b"
+[ "$rc19b" = 2 ] \
+  || fail "R19: an unattributable run is INDETERMINATE (exit 2), got rc=$rc19b out=$out19b"
+printf '%s' "$out19b" | grep -q 'scripts/verify.sh' \
+  || fail "R19: the refusal must NAME the probe file that is uncommitted, got: $out19b"
+# ...and the read-only audit must not report the pre-existing receipt as clean either.
+out19c="$(python3 "$LIVE" --repo "$R19" 2>&1)"; rc19c=$?
+[ "$rc19c" = 0 ] \
+  && fail "R19: the read-only audit reported live: ok off a receipt produced by an uncommitted probe. Got: $out19c"
+git -C "$R19" checkout -- scripts/verify.sh
+
+# The WHOLESALE replacement: `--untracked-files=no` hides it. Untrack the probe, leave the file in
+# place — git reports a clean tracked tree while the thing that runs is code no commit contains.
+git -C "$R19" rm -q --cached scripts/verify.sh
+git -C "$R19" commit -qm "untrack the probe"
+printf '#!/bin/bash\nexit 0\n' > "$R19/scripts/verify.sh"
+out19d="$(python3 "$LIVE" --repo "$R19" --run 2>&1)"; rc19d=$?
+[ "$rc19d" = 0 ] \
+  && fail "R19: an UNTRACKED verify script produced a passing receipt — the -uno scan hid a wholesale probe replacement. Got: $out19d"
+[ "$rc19d" = 2 ] \
+  || fail "R19: an untracked probe must be INDETERMINATE (exit 2), got rc=$rc19d out=$out19d"
+echo "  ok R19: an uncommitted or untracked probe cannot be attributed to HEAD"
+
+echo "== R20. THE RUN WITNESS BELONGS TO THE REPOSITORY, NOT THE CHECKOUT  [F22]"
+# `--absolute-git-dir` resolves inside a LINKED WORKTREE to `<main>/.git/worktrees/<name>`, which is
+# private to that worktree and deleted with it. IDC's own build topology makes that the normal case:
+# the wave-close `--run` happens in a per-item worktree and `idc_autorun_drain.py` audits from the
+# MAIN checkout after the merge. The genuine measurement then read as "hand-written, or arrived in a
+# commit", and `git worktree remove` destroyed the proof for good.
+R20="$WORK/worktree-witness"; mkrepo "$R20"; mkdir -p "$R20/scripts" "$R20/services"
+echo v1 > "$R20/services/app.py"
+cat > "$R20/WORKFLOW-config.yaml" <<'EOF'
+project:
+  name: demo
+live_verification:
+  surfaces:
+    - name: web
+      verify: bash scripts/verify.sh
+      paths: [services/]
+EOF
+printf '#!/bin/bash\necho "journey ok"\nexit 0\n' > "$R20/scripts/verify.sh"
+git -C "$R20" add -A; git -C "$R20" commit -qm declare
+WT20="$WORK/worktree-witness-wt"
+git -C "$R20" worktree add -q -b feat "$WT20" || fail "R20: could not create the linked worktree"
+
+# The wave-close run happens INSIDE the linked worktree, exactly as agents/idc-build.md drives it.
+out20="$(python3 "$LIVE" --repo "$WT20" --run 2>&1)"; rc20=$?
+[ "$rc20" = 0 ] || fail "R20: precondition — the run inside the worktree must pass, got rc=$rc20 out=$out20"
+[ -f "$R20/.git/idc/live-runs.json" ] \
+  || fail "R20: the witness was not written to the SHARED git directory — a worktree-private witness dies with the worktree"
+
+# Merge the wave back and audit from the MAIN checkout, which is where the drain audits from.
+git -C "$WT20" add -A; git -C "$WT20" commit -qm evidence
+git -C "$R20" merge -q --no-edit feat || fail "R20: could not merge the wave back"
+out20b="$(python3 "$LIVE" --repo "$R20" 2>&1)"; rc20b=$?
+[ "$rc20b" = 0 ] \
+  || fail "R20: a genuine worktree-built run audits as a GAP from the main checkout — the drain would refuse a wave that really was verified. Got: $out20b"
+
+# ...and it must SURVIVE teardown: `git worktree remove` deletes the worktree's private git dir.
+git -C "$R20" worktree remove --force "$WT20" || fail "R20: could not remove the worktree"
+out20c="$(python3 "$LIVE" --repo "$R20" 2>&1)"; rc20c=$?
+[ "$rc20c" = 0 ] \
+  || fail "R20: the run witness was DESTROYED by worktree teardown, so a verified wave became unprovable. Got: $out20c"
+echo "  ok R20: the witness lives in the shared git dir, is visible from main, and survives teardown"
 
 echo "phase11-honesty-repro: OK"

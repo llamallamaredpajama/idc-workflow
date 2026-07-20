@@ -407,6 +407,11 @@ declare_surface() { # $1 = verify command, $2 = extra key line (may be empty)
 }
 verify_script() { # $1 = body
   printf '#!/bin/bash\ntouch "$PWD/ran.sentinel"\n%s\n' "$1" > "$G/scripts/verify.sh"
+  # COMMITTED, because the probe is source. A run executes the WORKING TREE and records `commit:
+  # <HEAD>`, so a run over an uncommitted probe is refused as unattributable (phase11 R19) — a fixture
+  # that left it dirty was building a state no real repo is in, not exercising a looser rule.
+  git -C "$G" add scripts/verify.sh >/dev/null 2>&1
+  git -C "$G" commit -qm "probe" >/dev/null 2>&1 || true
 }
 
 # G0 — THE FREE PATH IS FREE EVEN UNDER --run. A repo that declares nothing must not execute anything,

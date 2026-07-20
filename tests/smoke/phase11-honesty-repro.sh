@@ -263,12 +263,24 @@ spec = importlib.util.spec_from_file_location("L", sys.argv[1])
 L = importlib.util.module_from_spec(spec); spec.loader.exec_module(L)
 repo = os.path.realpath(sys.argv[2])
 outside = os.path.join(tempfile.gettempdir(), "idc-repro-outside.md")
+# A SYMLINKED evidence directory is the vector a pure string check misses: every component of
+# `docs/workflow/live-verification/web.md` is an innocent relative segment, and only resolving the
+# link shows it landing in /tmp. The link is planted where the DEFAULT destination points, so this
+# case needs no unusual declaration at all.
+linkdir = os.path.join(repo, "docs", "workflow")
+os.makedirs(linkdir, exist_ok=True)
+elsewhere = tempfile.mkdtemp(prefix="idc-repro-symlink-")
+os.symlink(elsewhere, os.path.join(linkdir, "live-verification"))
+
 cases = [
     ("absolute destination",        {"name": "web", "paths": "app.py", "verify": "true", "evidence": outside}),
     ("traversing destination",      {"name": "web", "paths": "app.py", "verify": "true", "evidence": "../../escape.md"}),
     # The default destination is DEFAULT_EVIDENCE_DIR/<name>.md, so a name only escapes once it climbs
     # past that directory — two `..` land in docs/, which is still inside. Four is a real escape.
     ("traversal via surface name",  {"name": "../../../../escape", "paths": "app.py", "verify": "true"}),
+    ("symlinked evidence directory", {"name": "web", "paths": "app.py", "verify": "true"}),
+    ("symlink reached explicitly",  {"name": "web", "paths": "app.py", "verify": "true",
+                                     "evidence": "docs/workflow/live-verification/web.md"}),
 ]
 bad = []
 for label, surface in cases:
@@ -281,17 +293,59 @@ for label, surface in cases:
         bad.append(f"{label}: resolved to {resolved}, outside {repo}")
 if bad:
     sys.exit("; ".join(bad))
+
+# POSITIVE CONTROL — confinement must not become "refuse every destination", which would take the
+# whole live gate offline while looking like a hardening win. An ordinary in-repo destination, and
+# the shipped DEFAULT, must both still resolve, and must resolve to the file the writer will open.
+os.remove(os.path.join(linkdir, "live-verification"))
+for label, surface, expected in [
+    ("an ordinary declared destination",
+     {"name": "web", "paths": "app.py", "verify": "true", "evidence": "docs/evidence/web.md"},
+     os.path.join(repo, "docs", "evidence", "web.md")),
+    ("the shipped default destination",
+     {"name": "web", "paths": "app.py", "verify": "true"},
+     os.path.join(repo, L.DEFAULT_EVIDENCE_DIR, "web.md")),
+]:
+    try:
+        got = L.surface_spec(repo, surface)["evidence_path"]
+    except ValueError as e:
+        sys.exit(f"{label} was REFUSED — confinement must not disable the gate: {e}")
+    if os.path.realpath(got) != os.path.realpath(expected):
+        sys.exit(f"{label} resolved to {got!r}, not the expected {expected!r}")
 PY
-echo "  ok R13: absolute, traversing, and name-derived destinations stay inside the repo or are refused"
+echo "  ok R13: absolute, traversing, name-derived and symlinked destinations refused; in-repo ones still resolve"
 
 echo "== R17. THE PUBLIC COMMAND TABLE MUST MATCH THE SHIPPED COMMAND SET"
-shipped_n="$(ls "$PLUGIN"/commands/*.md | wc -l | tr -d ' ')"
-for c in intake pause resume; do
-  grep -q "/idc:$c" "$PLUGIN/README.md" \
-    || fail "R17: README.md's command table omits /idc:$c, but commands/$c.md ships ($shipped_n commands in all)"
-done
-grep -qi '^Ten slash entry points' "$PLUGIN/README.md" \
-  && fail "R17: README.md still says 'Ten slash entry points' — $shipped_n commands ship"
-echo "  ok R17: the README table covers all $shipped_n shipped commands"
+# Derived from the shipped files BOTH WAYS rather than from a hand-listed set of three, so the next
+# command to ship cannot quietly go undocumented and a removed one cannot linger. The count word is
+# checked against the same source, because "Ten slash entry points" above a 13-row table is exactly
+# the drift this row is about.
+python3 - "$PLUGIN" <<'PY' || fail "R17: the README command table does not match the shipped command set"
+import os, re, sys
+plugin = sys.argv[1]
+shipped = {os.path.splitext(f)[0] for f in os.listdir(os.path.join(plugin, "commands"))
+           if f.endswith(".md")}
+readme = open(os.path.join(plugin, "README.md"), encoding="utf-8").read()
+# The table rows only — `| `/idc:x` | … |` — not every mention of a command in the prose.
+documented = set(re.findall(r"^\|\s*`/idc:([a-z-]+)`\s*\|", readme, re.M))
+missing, extra = sorted(shipped - documented), sorted(documented - shipped)
+problems = []
+if missing:
+    problems.append("the table omits " + ", ".join(f"/idc:{c}" for c in missing)
+                    + f" but commands/{missing[0]}.md ships")
+if extra:
+    problems.append("the table lists " + ", ".join(f"/idc:{c}" for c in extra) + " which ship no command file")
+WORDS = {10: "Ten", 11: "Eleven", 12: "Twelve", 13: "Thirteen", 14: "Fourteen", 15: "Fifteen"}
+want = WORDS.get(len(shipped))
+m = re.search(r"^([A-Z][a-z]+) slash entry points", readme, re.M)
+if not m:
+    problems.append("the `<N> slash entry points` line is gone — the count is no longer stated at all")
+elif want and m.group(1) != want:
+    problems.append(f"the README says {m.group(1)!r} slash entry points but {len(shipped)} commands ship "
+                    f"(expected {want!r})")
+if problems:
+    sys.exit("; ".join(problems))
+PY
+echo "  ok R17: the README table matches the shipped command set exactly, and states the right count"
 
 echo "phase11-honesty-repro: OK"

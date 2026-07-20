@@ -179,15 +179,18 @@ install receipt. `/idc:doctor`'s first check fails loudly if IDC is ever enabled
 
 ## The commands
 
-Ten slash entry points:
+Thirteen slash entry points:
 
 | Command | What it is |
 |---------|------|
 | `/idc:think` | Think → the one gate — brainstorm → crystallize PRD + TRD → the Think PR gate |
+| `/idc:intake` | Intake — capture an idea into the Consideration inbox without derailing the run |
 | `/idc:plan` | Planning — admitted idea → goal-contract issues |
 | `/idc:build` | the build triplet — implementer → review → finisher; issues → merged, reviewed code |
 | `/idc:recirculate` | Recirculator — the controlled return path; heal doc/reality drift in one PR |
 | `/idc:autorun` | Autorun — run the whole pipeline hands-off |
+| `/idc:pause` | pause a run at a proven-clean stopping point (nothing left half-done) |
+| `/idc:resume` | pick a paused run back up from the board |
 | `/idc:janitor` | Janitor — deterministic board↔git reconciler (report-first; `--apply-safe` for the SAFE-FIX tier) |
 | `/idc:init` | install IDC (idempotent) |
 | `/idc:doctor` | health-check IDC (read-only) |

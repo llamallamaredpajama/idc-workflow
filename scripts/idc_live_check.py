@@ -445,6 +445,44 @@ def read_declaration(config_path):
     return surfaces
 
 
+def _confined_evidence_path(repo, name, rel):
+    """Resolve a surface's evidence destination, REFUSING anything that lands outside the repo.
+
+    TWO DISTINCT COSTS, and the second is the one that matters to this file. First, the footgun:
+    `write_evidence` CREATES PARENT DIRECTORIES and opens the target with `"w"`, so a destination
+    that resolves somewhere unintended is silently TRUNCATED — `evidence: ../../notes.md`, or an
+    absolute path with a typo, destroys a file nobody asked this tool to touch. Second, and worse
+    for a completion gate: a receipt written outside the repo — or into a gitignored corner — is
+    never committed, yet the audit re-reads it happily and keeps printing `live: ok`. The proof of a
+    live surface would live somewhere no reviewer can see, which is a false green with extra steps.
+
+    THIS IS NOT A PRIVILEGE BOUNDARY and does not pretend to be one: `verify:` in the same
+    operator-owned config already runs arbitrary shell, so anyone who can edit the declaration can
+    already do anything. It confines the one path THIS FILE truncates on the project's behalf, so a
+    mistake stays inside the repo where git can show it.
+
+    Symlinks are resolved before the check, so a symlinked evidence directory cannot be used to step
+    out. The resolved path is what gets returned, so the write lands where the check looked.
+    """
+    if not rel:
+        raise ValueError(f"surface {name!r} has an empty `evidence:` destination")
+    if os.path.isabs(rel):
+        raise ValueError(f"surface {name!r} declares an ABSOLUTE `evidence:` destination ({rel!r}). "
+                         f"Evidence is a committed receipt, so it must live inside the repo — declare "
+                         f"a path relative to the repo root (default: {DEFAULT_EVIDENCE_DIR}/<name>.md)")
+    root = os.path.realpath(repo)
+    resolved = os.path.realpath(os.path.join(root, rel))
+    if resolved != root and not resolved.startswith(root + os.sep):
+        raise ValueError(f"surface {name!r} declares an `evidence:` destination that resolves OUTSIDE "
+                         f"the repo ({rel!r} → {resolved!r}). Writing there would truncate a file "
+                         f"outside this project, and a receipt the repo does not carry can never be "
+                         f"reviewed — declare a path inside the repo")
+    if resolved == root:
+        raise ValueError(f"surface {name!r} declares the repo root itself as its `evidence:` "
+                         f"destination ({rel!r}) — name a file, not the directory")
+    return resolved
+
+
 def surface_spec(repo, surface):
     """Validate ONE declared surface into the normalized spec the rest of this file uses.
 
@@ -507,7 +545,7 @@ def surface_spec(repo, surface):
         "verify_sha256": _command_sha(verify),
         "timeout": timeout,
         "rel": rel,
-        "evidence_path": rel if os.path.isabs(rel) else os.path.join(repo, rel),
+        "evidence_path": _confined_evidence_path(repo, name, rel),
     }
 
 

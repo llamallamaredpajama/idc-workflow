@@ -69,6 +69,12 @@ loop below). Then the two lanes:
    `resume: cleared (pause-requested)` as a previous session that ASKED to pause and never achieved it
    — an ordinary interrupted run, so whatever the sweeps above surface is that session's unfinished
    business, not a clean handover.
+   **`resume: error …` (exit 2) ABORTS the drain — do not start work.** The record could not be
+   removed, so the repo is STILL paused, and draining over it is the worst of both worlds: the run
+   works again while the Stop fixpoint gate, reading that surviving record, believes the run is
+   cleanly stopped and allows an undrained walk-away. Relay the printed cure (make the record path
+   writable), close this command `blocked_external` citing `idc_pause_state.py` and its exit, and end
+   the session — the same rule `commands/resume.md` step 1 applies to the same clear.
    **Then synthesize any phantom-idle implementer (drop H — every pass, beside the reconcile above):**
    an implementer teammate can go idle without reporting, leaving its item `Stage = Buildable ∧
    Status = In Progress` (claimed) but never advanced; the drain is blind to it (counts only `Todo` /

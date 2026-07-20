@@ -1,13 +1,19 @@
 # Autorun integration for `/idc:pause` and `/idc:resume`
 
-**For the integrator.** `commands/autorun.md` and `agents/idc-autorun.md` were off-limits to the
-teammate that built pause/resume (three concurrent writers). Everything else is wired and green; this
-file holds the one change those two files still need, ready to paste.
+> **STATUS: APPLIED — this is the spec of record, not an open handoff.** The block below is live in
+> `commands/autorun.md` and `agents/idc-autorun.md`. It was written as an integration handoff (those
+> two files were off-limits to the teammate that built pause/resume — three concurrent writers) and
+> was landed before 4.2.0; the framing has been corrected so nobody reads it as outstanding work.
+>
+> **Do not delete this file, and do not reword the fenced block below.**
+> `tests/smoke/phase10-pause-resume.sh` A9 EXTRACTS the block between the
+> `<!-- autorun-preflight:begin -->` / `:end -->` markers and EXECUTES it, which is what keeps the
+> documented preflight and the shipped one from drifting apart. Deleting the file, or editing the
+> block's bytes, turns phase10 red. Prose outside the markers is free to change.
 
-Nothing here is required for `/idc:pause` or `/idc:resume` themselves to work — both are complete and
-tested without it. What it buys is the second resume path: **a pause the operator forgets about must
-never silently strand work.** With this block in place, the next `/idc:autorun` picks a paused run
-back up on its own.
+What the block buys is the second resume path: **a pause the operator forgets about must never
+silently strand work.** With it in place, the next `/idc:autorun` picks a paused run back up on its
+own. Neither `/idc:pause` nor `/idc:resume` depends on it — both are complete and tested without it.
 
 ## What the block does
 
@@ -20,9 +26,9 @@ already assumes — the board, which the drain re-reads every pass anyway.
 It is safe on every path: when nothing is paused it prints `resume: not-paused` and exits 0, so the
 common case costs one local file stat. It performs no board read, so it adds zero GraphQL.
 
-## The block
+## The block (as shipped)
 
-Insert it into `commands/autorun.md` immediately **after** the "Mark this session as a drain
+It sits in `commands/autorun.md` immediately **after** the "Mark this session as a drain
 orchestrator" step and **before** the "Janitor preflight" step, under this heading:
 
 > **Pick up a paused run (deterministic — run ONCE, at drain start).** A previous session may have

@@ -242,6 +242,14 @@ and a bounded, credential-redacted excerpt of the output. **Verification is exec
 nobody types "I tested it", and no autonomous run stops to wake a human up to go and look. A failing
 verify command is a finding the pipeline works like any failing test.
 
+**A hand-written receipt does not pass.** Every field in the committed receipt is one a reader can
+recompute, so checking the receipt alone could never tell a real run from a typed one. Each `--run`
+therefore also records the execution inside the repo's **git directory** — which git never carries,
+so nothing can commit or push it — and the audit refuses a receipt no run in this working copy backs.
+Two consequences worth knowing: writing the markdown by hand yields `live: gap`, and a fresh clone
+that has never run the check reports a gap naming that reason until `--run` clears it (the receipt
+records that the surface passed *somewhere*; this working copy has not seen it happen).
+
 **The verify script is build work.** `scripts/verify-live-<surface>.sh` is written by whoever
 implements the surface — authenticated calls against the deployed endpoints, a browser driver, a CLI
 probe, whatever exercises the journey — exactly as its tests are. It must never print a credential:

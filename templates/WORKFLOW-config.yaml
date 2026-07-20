@@ -99,7 +99,13 @@ autorun:
 #             real run. Declaring both `verify:` and `attested: true` is refused.
 #
 # The evidence record is generated for you — do not hand-write it. `--run` overwrites it every time,
-# on failure as well as success, so the file always describes the LAST real execution.
+# on failure as well as success, so the file always describes the LAST real execution. Hand-writing it
+# does not work: `--run` also records each execution inside the repo's git directory (which git never
+# carries), and the audit refuses a receipt no local run backs, reporting `live: gap`. The same rule
+# means a fresh clone must run the check once before its committed receipt is trusted there.
+#
+# `evidence:` must resolve INSIDE the repo. The writer creates parent directories and truncates the
+# target, and a receipt written outside the repo would never be committed while still reading clean.
 live_verification:
   surfaces: []
   # Delete the `[]` above first, then uncomment — a list can't follow a same-line empty `[]`.

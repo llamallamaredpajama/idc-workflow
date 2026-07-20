@@ -74,6 +74,14 @@ continues a deliberately-paused one, and `resume: cleared (pause-requested)` mea
 session asked to pause and never achieved it — an ordinary interrupted run, so treat anything the
 normal preflight sweeps surface as that session's unfinished business, not as a clean handover.
 
+**`resume: error …` (exit 2) — ABORT THE DRAIN. Do not start work.** The pause record could not be
+removed, so this repo is **still paused**. Draining over it is the worst of both worlds: the run
+starts working again while the Stop fixpoint gate, reading that surviving record, still believes the
+run is cleanly stopped and will allow an undrained walk-away. Relay the printed cure (make the record
+path writable), close this command as `blocked_external` citing `idc_pause_state.py` and its exit, and
+end the session. This matches `commands/resume.md` step 1, which stops on the same condition — the
+preflight is the same clear, so it cannot have a weaker rule.
+
 **Janitor preflight** — run ONCE, before the drain loop below begins (not on every re-loop pass:
 board↔git debris left by a dead or interrupted **prior** session doesn't regenerate mid-run just
 because the pipe loops back, unlike the rogue-sweep backstop below, which specifically catches a

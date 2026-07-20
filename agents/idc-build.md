@@ -276,7 +276,11 @@ acceptance check above they need no materialized tracker on github:
     same as writing its tests. Authenticated HTTP calls against the deployed endpoints, a browser
     driver, a CLI probe: whatever genuinely exercises the declared `journey`, exiting non-zero on any
     failed step. Never hand that back to the operator, and never hand-write an evidence record —
-    a typed claim does not satisfy this gate, by construction.
+    a typed claim does not satisfy this gate. That is ENFORCED, not merely asked: `--run` records
+    each real execution inside the repo's **git directory**, which git never carries, and the audit
+    refuses a receipt no run in this working copy backs. Hand-writing the markdown produces
+    `live: gap <name>` naming the receipt as unbacked. (It is not proof against someone editing the
+    git directory itself — nothing local could be — but typing the evidence file is not enough.)
   - **Never print a secret from it.** The script holds real credentials; the evidence record is
     committed. IDC redacts what it captures, but do not echo tokens, headers, signed URLs, or the
     environment in the first place.

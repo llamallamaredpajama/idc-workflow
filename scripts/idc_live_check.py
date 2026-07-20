@@ -31,6 +31,25 @@ or one that ships the template's `surfaces: []` — gets `live: not-declared` an
 NOTHING is executed. A library, a CLI, a plugin like this one has no deployed surface to drive, and
 this gate must cost it exactly nothing. Opting in is the ONLY way to be gated.
 
+A TYPED RECEIPT DOES NOT PASS, AND THAT IS ENFORCED. Every field in the committed receipt is one any
+reader can recompute — the declared command comes from the config, its digest from the command, the
+commit from `git rev-parse HEAD` — so no amount of checking the receipt could tell a real run from a
+hand-written one, and none of it is fixable with a signature (the key would have to travel with the
+repo to stay verifiable, and a key in the repo is not a secret). The proof therefore lives where git
+cannot carry it: `--run` records each execution under the GIT DIRECTORY, and the audit requires the
+receipt and that witness to agree. Writing the markdown by hand yields `live: gap`. The boundary,
+stated plainly: this proves "this working copy really executed that command against that commit", not
+"nobody tampered with the git directory" — nothing local could prove the latter. Its cost is equally
+plain: a fresh clone carrying a committed receipt reports a gap naming that reason until `--run`
+clears it, which is the honest answer (the receipt says the surface passed somewhere; this working
+copy has not seen it happen).
+
+A RUN IS ATTRIBUTED TO A COMMIT, so it may not start from a tree that is not that commit. The verify
+command executes the WORKING TREE while the receipt records HEAD; if the surface's own files are
+uncommitted the receipt would name a code state that was never exercised, so such a run is refused as
+INDETERMINATE. Scoped to the surface's declared paths and tracked files only — a run always dirties
+the tree by writing its own receipt.
+
 THE TEETH: EVIDENCE EXPIRES BY ITSELF. Each declared surface names the `paths:` whose code backs it,
 and each evidence record names the `commit:` that was checked out when the command ran. If ANY commit
 has landed on those paths since — a code change, a Terraform change, a deploy-script change — the
@@ -38,7 +57,9 @@ evidence is STALE and the surface is a gap again. That single rule is what cover
 a repo that lists `infra/` among a surface's paths cannot merge a Terraform change and still claim the
 app was proven working, because the proof now predates the infrastructure it describes. The recorded
 `command` must also still MATCH the declared one, so weakening or swapping the check invalidates every
-receipt it produced. Evidence ages out on its own; nobody has to remember to invalidate it.
+receipt it produced — and the freshness set includes the VERIFY SCRIPT'S OWN FILES, because editing
+the probe (deleting a step, commenting out an assertion) changes what "passed" meant while leaving the
+declared string identical. Evidence ages out on its own; nobody has to remember to invalidate it.
 
 TWO MODES, ONE EXIT CONTRACT — and the reason they are split:
 

@@ -174,8 +174,13 @@ exit code, commit, timestamp, bounded credential-redacted output), which the dra
 read-only on the fast path. Verification is **executed, not attested** — the first cut of this gate
 asked a human to drive the app and type up what they saw, which both wakes an operator at 2am and
 accepts a claim in place of a measurement; the project owns the technology, IDC owns the execution.
-The receipt expires the moment anything lands on the paths behind it (its infrastructure included) or
-the declared command changes. A repo that declares no live surface is never gated and never executes
+The receipt expires the moment anything lands on the paths behind it (its infrastructure included),
+on the verify script itself, or the declared command changes. A receipt is also only trusted where a
+run actually happened: every value in a committed receipt is one a reader can recompute, so the
+receipt alone could never separate a real run from a typed one, and each `--run` therefore records the
+execution inside the repo's git directory — which git never carries — with the audit refusing any
+receipt no local run backs. A run started over uncommitted surface code is refused outright, since it
+could not be attributed to the commit the receipt would name. A repo that declares no live surface is never gated and never executes
 anything — opting in is the only way to be gated. `attested: true` is the one hand-written escape
 hatch, for surfaces that genuinely cannot be automated, and it rides its own visible verdict line.
 

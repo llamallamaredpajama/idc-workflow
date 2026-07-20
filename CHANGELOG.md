@@ -28,8 +28,20 @@ non-terminal exit 4 — so the Stop fixpoint gate enforces them with no new hook
   overnight run never stops to wake somebody up to go and look. A failing verify command is a
   finding the pipeline works like a failing test.
   - The receipt **expires by itself** as soon as anything lands on the surface's paths (Terraform
-    and deploy scripts included) or the declared command changes — that expiry is what stops
-    provisioning drift hiding behind a green build.
+    and deploy scripts included), on the verify script itself, or the declared command changes —
+    that expiry is what stops provisioning drift hiding behind a green build.
+  - **A hand-written receipt does not pass.** Every field in a committed receipt is one any reader
+    can recompute — the declared command, its digest, the HEAD sha — so checking the receipt alone
+    could never separate a real run from a typed one. Each `--run` therefore also records the
+    execution inside the repo's **git directory**, which git never carries, and the audit refuses a
+    receipt no run in this working copy backs. Two consequences: writing the markdown by hand
+    reports `live: gap`, and a fresh clone must run the check once before its committed receipt is
+    trusted there (the receipt records that the surface passed *somewhere*; that clone has not seen
+    it happen). This is not proof against editing the git directory by hand — nothing local could
+    be — but typing the evidence file is no longer enough.
+  - A run started while the surface's **own code is uncommitted** is refused as indeterminate: the
+    command executes the working tree while the receipt would name HEAD, so it could not be
+    attributed to any commit. `evidence:` destinations are confined to the repo, symlinks resolved.
   - The drain and the Stop gate **audit** the receipt read-only (sub-second, executing nothing), so
     a stop attempt never sits through a browser suite. Execution belongs to Build's wave close and
     to the `live-gap` remediation, where a failure can be acted on.

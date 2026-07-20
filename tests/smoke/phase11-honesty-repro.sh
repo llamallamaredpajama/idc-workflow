@@ -2210,7 +2210,7 @@ ALLOWED_RAW = {
         "absence detection: decides present/absent/indeterminate from fixed gh wording; the text is "
         "never carried into the result",
 }
-bare, seen_allowed = [], set()
+bare, seen_allowed, scrubbed = [], set(), []
 for path in sorted(glob.glob(os.path.join(plugin, "scripts", "*.py"))
                    + glob.glob(os.path.join(plugin, "scripts", "hooks", "*.py"))):
     rel = os.path.relpath(path, plugin)
@@ -2226,6 +2226,8 @@ for path in sorted(glob.glob(os.path.join(plugin, "scripts", "*.py"))
             continue
         if "scrub" not in line:
             bare.append(f"{rel}:{lineno}: {line}")
+        else:
+            scrubbed.append((rel, lineno, line))
 if bare:
     sys.exit("a child process's stderr is read WITHOUT passing through the scrub at the read. Every "
              "one of these travels into a message that is printed, persisted, or committed — which "
@@ -2237,6 +2239,82 @@ if stale:
     sys.exit("ALLOWED_RAW names a line that no longer exists — an exemption that outlives its site is "
              "how an allowlist rots into a blanket pass. Remove or re-point it:\n  "
              + "\n  ".join(f"{mod}: {ln}" for mod, ln in stale))
+
+# ── (2b) THE ORDERING — "AT THE READ" MEANS *BEFORE* THE CUT ─────────────────────────────────────
+# The census above only asks whether the token `scrub` appears on the line, so it cannot tell
+# `CS.scrub(p.stderr).strip()[:200]` from `CS.scrub(p.stderr.strip()[:200])`. The second truncates
+# FIRST and hands the door a fragment. Four rules are prefix-anchored and survive that, but two match
+# on a CLOSING anchor — the PEM `-----END … PRIVATE KEY-----` and the `@host` that terminates a URL
+# userinfo — and a cut landing before that anchor deletes the very thing the rule keys on, so the
+# secret walks through the open door untouched. That is the F1/F20/F33/F35/F40 class re-entering
+# through the one chokepoint the census exists to seal, invisible to a check that greps for a name.
+# So the slice lives OUTSIDE the call, the way all 23 sites spell it.
+SLICE = re.compile(r"\[:\s*\d+\s*\]")
+
+
+def scrub_argument(line):
+    """The text between `scrub(` and its matching `)` — i.e. what the door is actually handed."""
+    start = line.find("scrub(")
+    if start < 0:
+        return ""
+    depth, arg = 0, ""
+    for ch in line[start + len("scrub"):]:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                break
+        if depth >= 1:
+            arg += ch
+    return arg
+
+
+cut_first = [f"{rel}:{lineno}: {line}" for rel, lineno, line in scrubbed
+             if SLICE.search(scrub_argument(line))]
+if cut_first:
+    sys.exit("a child's stderr is TRUNCATED INSIDE the scrub call, so the cut runs BEFORE the door. "
+             "A rule that matches on a closing anchor (the PEM footer, the `@host` ending a URL "
+             "userinfo) cannot fire once the cut has removed that anchor, and the secret survives "
+             "scrubbing. Move the slice outside: `scrub(p.stderr or '').strip()[:200]`:\n  "
+             + "\n  ".join(cut_first))
+# …and the proof that the rule above is load-bearing rather than stylistic, on the two shapes whose
+# anchor sits at the END. Each sample is built so the secret ends EXACTLY at the cut and the closing
+# anchor falls entirely beyond it — the precise geometry a real `git`/`gh` failure produces when it
+# prints progress lines before the URL it could not reach.
+CUT = 200
+NOISE = "remote: Counting objects: 100% (4242/4242), done. "
+
+
+def at_the_cut(head, secret, tail):
+    room = CUT - len(secret) - len(head)
+    if room < 0:
+        sys.exit(f"ordering sample {head!r} does not fit inside the {CUT}-byte cut — it cannot "
+                 f"demonstrate the geometry it claims to")
+    return (NOISE * 20)[:room] + head + secret + tail
+
+
+# The userinfo secret is deliberately OPAQUE, not a `ghp_`/`github_pat_` shape: those are caught by
+# the bare-token rule with or without the `@`, so a fixture built on one would pass whichever order
+# the code used — decoration, not a test (the F46 lesson of this run). This value is reachable ONLY
+# through the URL rule, which is what makes the sample discriminating.
+ORDERING_SAMPLES = [
+    ("url userinfo", at_the_cut("fatal: unable to access 'https://git-user:",
+                                "s3cret-userinfo-value-x9", "@github.com/o/r': 403"),
+     "s3cret-userinfo-value-x9"),
+    ("pem block", at_the_cut("-----BEGIN RSA PRIVATE KEY-----\n",
+                             "MIIEowIBAAKCAQEAs3cretkeymaterial", "\n-----END RSA PRIVATE KEY-----"),
+     "MIIEowIBAAKCAQEAs3cretkeymaterial"),
+]
+for rule, text, secret in ORDERING_SAMPLES:
+    if secret in CS.scrub(text)[:CUT]:
+        sys.exit(f"scrub-then-cut STILL leaks {rule}: {secret!r} survived the door. The ordering the "
+                 f"census now enforces does not actually protect this shape — the rule itself is "
+                 f"broken, which is a bigger finding than the ordering.")
+    if secret not in CS.scrub(text[:CUT]):
+        sys.exit(f"cut-then-scrub no longer leaks {rule}, so this sample no longer demonstrates why "
+                 f"the ordering matters and the check above has quietly become unfalsifiable. The "
+                 f"rule set changed: RE-DERIVE this sample against the new rules — do not delete it.")
 
 # ── (3) THE FALLBACK CANNOT DRIFT INTO A PASS-THROUGH ────────────────────────────────────────────
 # The scrub-door import is TOLERANT (several of these modules run as lone relocated copies — see

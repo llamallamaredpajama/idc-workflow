@@ -20,6 +20,41 @@
 #      behind it. Those were treated as coverage gaps and CLOSED (the truncation marker in R1, the
 #      quiescence proof in R9, the write readback in R2) — not written off as "the test still passes".
 #
+#   ROUND 3 — the boundaries the round-2 fixes still enumerated rather than derived. Every mutation
+#   below was applied to the FIXED source with its anchor asserted to match EXACTLY ONCE, the phase
+#   run, the failure read, and the mutation reverted (tree verified clean afterwards). TWO came back
+#   GREEN first and neither was written off as a pass — both were coverage gaps and both were CLOSED:
+#     * hard-coding the head quarantine to 32 bytes was green, because nothing asserted its SIZE —
+#       only its existence. Closed by an auth header whose verb and token are separated by a run of
+#       whitespace, where a quarantine cut back to the first whitespace hands the credential through.
+#     * dropping `state` from `_COMMAND_IDENTITY` was green, because the case DERIVED ITS FIELD LIST
+#       FROM THE TUPLE IT WAS MUTATING — shrink the tuple and the loop stops asking about the field
+#       that was dropped. Closed by asking the READERS whether they can still see the record.
+#   R18 a. skip the head quarantine entirely   ⇒ RED: `Authorization: Basic <secret>` cut inside the
+#                                                 verb reaches the committed receipt verbatim.
+#       b. cut back to the first whitespace (the token-sized repair) ⇒ RED: same leak — sizing the
+#                                                 repair to an anchor is an enumeration of anchors.
+#       c. drop the delimited-block arm        ⇒ RED: a severed PEM keeps its key body and loses the
+#                                                 "a private key was here" marker.
+#       d. hard-code the quarantine to 32 bytes ⇒ RED: a secret separated from its severed anchor by
+#                                                 whitespace survives (the bound must be DERIVED).
+#       e. accept an unbounded rule that declares no structural family ⇒ RED: a redactor nobody has
+#                                                 sized is one the quarantine silently stops covering.
+#   R19 f. probe attribution always attributable ⇒ RED: an uncommitted probe passes for HEAD.
+#       g. go back to `git status --untracked-files=all` for the probe ⇒ RED: a GITIGNORED probe
+#                                                 produces `live: ok` at a commit containing no probe.
+#   R27 h. re-derive the watched set inline    ⇒ RED: a source added to the one door is watched by
+#                                                 freshness and not by attribution.
+#   R23 i. build the stderr tail from raw child output ⇒ RED: a `ghp_` token on a crashed checker's
+#                                                 stderr reaches the drain line and the board comment.
+#   R25 j. empty the per-command condition table ⇒ RED: uninstall's MANDATORY Phase-0 dirty-tree stop
+#                                                 has no legal close and its record stays open.
+#       k. assert the condition instead of re-deriving it ⇒ RED: an invented blocker closes a clean
+#                                                 repo — the new door becomes a way to fake a stop.
+#   R24 l. restore build.md's old `--status` menu ⇒ RED, naming the command and the missing terminal.
+#   R26 m. drop `state` from the identity tuple ⇒ RED: a command record the Stop closeout gate cannot
+#                                                 see is vouched for as trustworthy.
+#
 #   R1  (idc_live_check)
 #     a. restore `redact(_tail(out, MAX_BODY_CHARS))`      ⇒ RED: `password=` cut mid-label, `hunter2`
 #                                                             reaches the committed receipt.
@@ -714,17 +749,29 @@ def write(ledger):
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(ledger, fh)
 
-# (1) NEGATIVE — drop each identity field in turn; every one must make the probe REFUSE, because
-#     every one makes some reader skip the record.
+# (1) NEGATIVE — derived from the READERS, deliberately NOT from the identity tuple. Reading the
+#     tuple would make this test grade itself: shrink the tuple and the loop simply stops asking
+#     about the field that was dropped, which is a GREEN that proves nothing. So: drop each field of
+#     a full record in turn, ASK THE READERS whether they can still see it, and require probe() to
+#     refuse whenever any of them cannot.
 full_cmd = {"session_id": "s1", "command": "/idc:build", "issue": 42, "state": "active"}
-for field in L._COMMAND_IDENTITY:
-    rec = {k: v for k, v in full_cmd.items() if k != field}
-    write({"version": 2, "taints": [], "commands": [rec]})
+READERS = {
+    "read_state.commands": lambda: L.read_state(repo)["commands"],
+    "active_commands (the Stop closeout gate's reader)": lambda: L.active_commands(repo, "s1"),
+}
+write({"version": 2, "taints": [], "commands": [dict(full_cmd)]})
+if any(len(fn()) != 1 for fn in READERS.values()):
+    sys.exit("precondition: every reader must see a FULL command record before this can discriminate")
+for field in sorted(full_cmd):
+    write({"version": 2, "taints": [],
+           "commands": [{k: v for k, v in full_cmd.items() if k != field}]})
+    blind = sorted(name for name, fn in READERS.items() if len(fn()) == 0)
     ok, detail = L.probe(repo)
-    if ok:
-        sys.exit(f"a command record with no {field!r} is skipped by a reader, yet probe() called the "
-                 f"ledger trustworthy ({detail!r}) — a real open command can hide behind it")
-    if field not in detail:
+    if blind and ok:
+        sys.exit(f"a command record with no {field!r} is INVISIBLE to {', '.join(blind)}, yet probe() "
+                 f"called the ledger trustworthy ({detail!r}) — a real open command hides behind it "
+                 f"while the gate that must close it is told there is nothing to close")
+    if blind and field not in detail:
         sys.exit(f"the refusal must NAME the missing field so an operator can repair the file; "
                  f"dropping {field!r} said: {detail!r}")
 
@@ -1198,7 +1245,7 @@ echo "== R18. THE RETENTION CUT MUST NOT SEVER A CREDENTIAL'S LABEL  [F20]"
 # full of long tokens REDACTS below MAX_BODY_CHARS, so no second cut ever happens and the whole
 # fragment-headed buffer is written to the COMMITTED receipt.
 python3 - "$LIVE" "$WORK" <<'PY' || fail "R18: a credential whose label the RETENTION cut severed reaches the committed receipt"
-import importlib.util, os, shlex, sys
+import importlib.util, os, re, shlex, sys
 spec = importlib.util.spec_from_file_location("L", sys.argv[1])
 L = importlib.util.module_from_spec(spec); spec.loader.exec_module(L)
 work = sys.argv[2]
@@ -1275,6 +1322,17 @@ for verb in ("Basic", "token", "Bearer"):
     if AUTH_SECRET in whole:
         sys.exit(f"an INTACT `{verb}` header was not redacted by its own rule: {whole[:200]!r}")
 
+# THE QUARANTINE'S SIZE IS LOAD-BEARING, not just its existence. A straddling match's remnant can be
+# thousands of bytes long with the secret at the END of it — an auth header whose verb and token are
+# separated by a run of whitespace, which wrapped or pretty-printed header output produces, is the
+# ordinary shape. A quarantine sized by anything other than the rules' own reach cuts back to the
+# first whitespace INSIDE that run and hands the credential straight through.
+padded = "Authorization: Basic" + " " * 40 + AUTH_SECRET
+spread = body(len("sic") + 40 + len(AUTH_SECRET), padded)
+if AUTH_SECRET in spread:
+    sys.exit(f"a credential separated from its severed anchor by whitespace survived — the head "
+             f"quarantine is not sized by the redaction table's own reach: {spread[:200]!r}")
+
 # ...and a PEM block cut through its BEGIN line: the header the rule anchors on is gone, so the key
 # body survives as base64 the opaque backstop cannot fully match — and the receipt loses the one
 # thing a reviewer needs, which is that a PRIVATE KEY was here rather than an unnamed token.
@@ -1346,6 +1404,30 @@ s = {"name": "web", "verify_raw": "python3 -c \"print('FIRST-LINE'); print('seco
 rc, short, _ = L.run_verify(work, s, "0" * 40)
 if rc != 0 or "FIRST-LINE" not in short:
     sys.exit(f"a short capture lost its first line — the head-drop must fire only on overflow: {short!r}")
+
+# THE DERIVATION'S TEETH. The quarantine is only a closed answer if it is COMPUTED from the redaction
+# table — typed, it is one more thing to forget when a rule changes, which is how this defect reached
+# its third boundary. Two properties, asserted rather than asserted-in-a-comment:
+#   (a) a rule with a LONGER bound raises the quarantine by itself;
+#   (b) a rule nobody can MEASURE, and that declares no structural family, refuses to load at all —
+#       fail-closed, because a redactor nobody has sized is one the quarantine cannot promise to cover.
+saved = L._REDACTORS
+try:
+    L._REDACTORS = saved + ((re.compile(r"ZZ-[A-Za-z]{1,9000}"), "[REDACTED]"),)
+    grown = L._head_quarantine_bytes()
+    if grown < 9000:
+        sys.exit(f"a redaction rule that can match 9000 characters did not raise the head quarantine "
+                 f"({grown}) — the bound is not derived from the table, so the next rule with a longer "
+                 f"reach will silently outrun it")
+    L._REDACTORS = saved + ((re.compile(r"ZZ-[A-Za-z]+"), "[REDACTED]"),)
+    try:
+        L._head_quarantine_bytes()
+        sys.exit("a redaction rule with an UNMEASURABLE reach, registered in no structural family, "
+                 "was accepted — the quarantine silently stops covering it and nothing says so")
+    except RuntimeError:
+        pass
+finally:
+    L._REDACTORS = saved
 PY
 echo "  ok R18: a severed credential head is dropped, an intact one is redacted, short output is intact"
 
@@ -1426,6 +1508,40 @@ out19f="$(python3 "$LIVE" --repo "$R19" --run 2>&1)"; rc19f=$?
 [ "$rc19f" = 0 ] \
   || fail "R19: POSITIVE CONTROL — a probe COMMITTED and identical to HEAD must audit clean, got rc=$rc19f out=$out19f"
 echo "  ok R19: an uncommitted, untracked or ignored probe cannot be attributed to HEAD; a committed one runs"
+
+# R27 — `watched_paths` says it is THE ONE DEFINITION both rules read. It had ONE caller, and the
+# attribution rule re-derived the identical composition inline: the two agreed by coincidence of
+# authorship, which is precisely the drift the function was introduced to end. A docstring asserting a
+# property the code does not have is the defect, in a PR about not overstating. So: add a source to
+# the door and require the consumer to see it — an inline re-derivation cannot.
+python3 - "$LIVE" "$R19" <<'PY' || fail "R27: a consumer re-derives the watched set instead of reading it from the one door"
+import importlib.util, os, subprocess, sys
+spec_ = importlib.util.spec_from_file_location("L", sys.argv[1])
+L = importlib.util.module_from_spec(spec_); spec_.loader.exec_module(L)
+repo = sys.argv[2]
+surface = {"name": "web", "paths": ["services/"], "verify_raw": "bash scripts/verify.sh",
+           "verify": "bash scripts/verify.sh", "timeout": 60}
+# a TRACKED, committed file that is now dirty — invisible to the rule unless the door reports it
+extra = os.path.join(repo, "extra_source.py")
+open(extra, "w", encoding="utf-8").write("v1\n")
+subprocess.run(["git", "-C", repo, "add", "extra_source.py"], check=True)
+subprocess.run(["git", "-C", repo, "commit", "-qm", "extra"], check=True)
+open(extra, "w", encoding="utf-8").write("v2 — uncommitted\n")
+if "extra_source.py" in L._dirty_paths(repo, surface):
+    sys.exit("precondition: the extra path must NOT be watched until the door reports it")
+door = L.watched_paths
+L.watched_paths = lambda r, s: L.Watched(door(r, s).declared + ["extra_source.py"], door(r, s).probe)
+try:
+    if "extra_source.py" not in L._dirty_paths(repo, surface):
+        sys.exit("the attribution rule did not see a source ADDED TO `watched_paths` — it is "
+                 "re-deriving the set itself, so the two rules agree only by coincidence and the "
+                 "next source added to the door will be watched by one of them and not the other")
+finally:
+    L.watched_paths = door
+os.remove(extra)
+subprocess.run(["git", "-C", repo, "rm", "-q", "--cached", "extra_source.py"], check=True)
+PY
+echo "  ok R27: both rules read the watched set from the one function that defines it"
 
 echo "== R20. THE RUN WITNESS BELONGS TO THE REPOSITORY, NOT THE CHECKOUT  [F22]"
 # `--absolute-git-dir` resolves inside a LINKED WORKTREE to `<main>/.git/worktrees/<name>`, which is

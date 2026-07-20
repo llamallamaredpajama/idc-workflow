@@ -405,7 +405,7 @@ def _board_says_pending(cwd, plugin_root, sid):
     if r.returncode not in _DRAIN_CONTRACT_EXITS:
         raise RuntimeError(
             f"drain exited {r.returncode} (outside the Phase-0 contract {{0,2,3,4}}); "
-            f"stderr: {H.scrub((r.stderr or '').strip()[:200])!r}")
+            f"stderr: {H.scrub(r.stderr or '').strip()[:200]!r}")
     board_pending = (r.returncode == _RECIRC_PENDING_EXIT)
     # `drain: complete` (exit 0, whole-pipe fixpoint) — distinct from `drain: continue` (also exit 0,
     # but build work still eligible), which must NOT clear the marker (the orchestrator has more to do).

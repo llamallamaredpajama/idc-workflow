@@ -565,7 +565,7 @@ def _fs_comment_ok(trk, tracker, cwd, num, body):
         return False
     if r.returncode != 0:
         H.warn(f"teammate-idle: breadcrumb on #{num} failed (rc={r.returncode}): "
-               f"{CS.scrub((r.stderr or '').strip()[:200])}")
+               f"{CS.scrub(r.stderr or '').strip()[:200]}")
         return False
     return True
 

@@ -80,9 +80,18 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
 - **`complete`** — no pause record remains (re-read from disk) **and** a fresh, valid next-action oracle
   read backs the handoff. Both are re-derived by the validator, so `refs:{}` is enough. Resuming when
   nothing was paused satisfies this honestly — an unpaused repo IS the intended end state.
-- **`blocked_external`** — the board could not be read, so nothing could be resumed from it. Cite
-  `blocker:{helper:"idc_pause_check.py", exit:<its nonzero exit>, diagnostic:"<why>"}`; the validator
-  re-runs that check and requires the cited exit to match what it actually does now.
+- **`blocked_external`** — two different things can block a resume, and they cite **different helpers**.
+  Each is re-derived by the validator, so neither can be asserted:
+  - **The pause record could not be REMOVED** (step 1 printed `resume: error …`, exit 2 — the commoner
+    case, and the one step 1 tells you to stop on). Cite
+    `blocker:{helper:"idc_pause_state.py", exit:2, diagnostic:"<the printed cure>"}`. The helper wrote
+    a durable failure receipt when the removal actually failed; the validator requires **that receipt**,
+    bound to this invocation, with the cited exit matching what the helper persisted — and it refuses
+    the blocker if the record has since gone, because then the clear succeeded and the honest close is
+    `complete`.
+  - **The board could not be read**, so nothing could be resumed from it. Cite
+    `blocker:{helper:"idc_pause_check.py", exit:<its nonzero exit>, diagnostic:"<why>"}`; the validator
+    re-runs that check and requires the cited exit to match what it actually does now.
 
 Then report in plain words: what was paused (and by which session), what you cleared, whether anything
 was left unfinished, and the oracle's next action.

@@ -78,8 +78,11 @@ normal preflight sweeps surface as that session's unfinished business, not as a 
 removed, so this repo is **still paused**. Draining over it is the worst of both worlds: the run
 starts working again while the Stop fixpoint gate, reading that surviving record, still believes the
 run is cleanly stopped and will allow an undrained walk-away. Relay the printed cure (make the record
-path writable), close this command as `blocked_external` citing `idc_pause_state.py` and its exit, and
-end the session. This matches `commands/resume.md` step 1, which stops on the same condition — the
+path writable), close this command as `blocked_external` citing
+`blocker:{helper:"idc_pause_state.py", exit:2, diagnostic:"<the printed cure>"}`, and end the session.
+The helper wrote a durable failure receipt when the removal actually failed, and the validator requires
+**that receipt** — bound to this invocation — so this close is only reachable when the preflight really
+did fail, never as a way out of a drain you did not want to run. This matches `commands/resume.md` step 1, which stops on the same condition — the
 preflight is the same clear, so it cannot have a weaker rule.
 
 **Janitor preflight** — run ONCE, before the drain loop below begins (not on every re-loop pass:

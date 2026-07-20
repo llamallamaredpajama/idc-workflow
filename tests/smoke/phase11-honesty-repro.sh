@@ -98,6 +98,16 @@
 #                                                            `git worktree remove` destroys the proof.
 #   R7  a. drop the pause-state helper from resume's blocker allowlist ⇒ RED: no legal outcome.
 #       b. ground the blocker without re-deriving          ⇒ RED: "blocked" becomes a free pass.
+#       c. stop re-deriving that the CLEAR would still fail ⇒ RED: a resume that never ran the clear
+#                                                             closes as blocked — a surviving record
+#                                                             is the ordinary pre-resume state.
+#   R22 (idc_command_contract — a blocked pause/autorun must prove it was blocked)
+#     a. stop re-deriving that the WRITE would still fail  ⇒ RED: `/idc:pause` closes as blocked in a
+#                                                             repo where the pause was achievable.
+#     b. probe only the repo root, not the git directory   ⇒ RED: a pause whose confirmation mark
+#                                                             cannot be written has no legal outcome.
+#     c. drop the pause-state helper from autorun's allowlist ⇒ RED: the close `commands/autorun.md`
+#                                                             prescribes on `resume: error` is refused.
 #   R8  a. drop the resume survey claim                    ⇒ RED: complete with no survey.
 #       b. keep the claim but stop recording what it derived ⇒ RED: nothing proves it ran.
 
@@ -777,7 +787,9 @@ def blocker_ev(helper, exit_code, diagnostic):
     return {"schema_version": 1,
             "refs": {"blocker": {"helper": helper, "exit": exit_code, "diagnostic": diagnostic}}}
 
-# R7 — a SURVIVING pause record is what "the clear failed" means, so it grounds the blocker.
+# R7 — a resume whose clear FAILED must have a legal outcome, and the blocker must be RE-DERIVED: a
+# surviving pause record is present before EVERY ordinary resume, so grounding on it alone certifies
+# "I was blocked" for a session that never ran the clear at all.
 with open(os.path.join(repo, ".idc-pause-state.json"), "w", encoding="utf-8") as fh:
     fh.write('{"version":1,"state":"paused","session_id":"s1","requested_ts":1.0,'
              '"confirmed_by":"s1","confirmed_ts":2.0,'
@@ -785,12 +797,35 @@ with open(os.path.join(repo, ".idc-pause-state.json"), "w", encoding="utf-8") as
 v = C.validate_closeout("resume", "complete", EV, repo=repo, session="s1")
 if v.ok:
     sys.exit("resume closed COMPLETE while the pause record still exists")
+
+# THE INVENTED BLOCKER — the record is there, and nothing is stopping the clear from succeeding.
 v = C.validate_closeout("resume", "blocked_external",
                         blocker_ev("idc_pause_state.py", 2, "could not remove the pause record"),
                         repo=repo, session="s1")
-if not v.ok:
-    sys.exit(f"a resume whose pause-record clear FAILED has no legal terminal outcome: "
-             f"blocked_external was refused with {v.reason_code!r} ({v.message})")
+if v.ok:
+    sys.exit("a resume closed as blocked_external in a repo where the clear would SUCCEED — the "
+             "surviving record is the ordinary pre-resume state, so it cannot distinguish a failed "
+             "attempt from a session that walked away")
+
+# ...and when the removal really is impossible, the honest outcome is reachable. This is driven
+# through the REAL helper, not a planted artifact: the repo root is made unwritable, which is what
+# makes `os.remove` fail in the first place.
+os.chmod(repo, 0o555)
+try:
+    import subprocess
+    r = subprocess.run([sys.executable, os.path.join(plugin, "scripts", "idc_pause_state.py"),
+                        "--cwd", repo, "resume", "--session", "s1"],
+                       capture_output=True, text=True)
+    if r.returncode != 2:
+        sys.exit(f"precondition: an unremovable pause record must exit 2, got {r.returncode}: {r.stdout}{r.stderr}")
+    v = C.validate_closeout("resume", "blocked_external",
+                            blocker_ev("idc_pause_state.py", 2, "could not remove the pause record"),
+                            repo=repo, session="s1")
+    if not v.ok:
+        sys.exit(f"a resume whose pause-record clear FAILED has no legal terminal outcome: "
+                 f"blocked_external was refused with {v.reason_code!r} ({v.message})")
+finally:
+    os.chmod(repo, 0o755)
 
 # ...and the blocker must be REFUSED once the record is actually gone — otherwise "blocked" becomes a
 # free pass rather than a re-derived fact.
@@ -817,6 +852,69 @@ if survey.get("exit") != 1 or "#99" not in (survey.get("findings") or []):
     sys.exit(f"the recorded survey does not reflect the real half-done work: {survey!r}")
 PY
 echo "  ok R7/R8: a failed record-clear is a grounded blocker; complete carries a re-derived survey"
+
+echo "== R22. A BLOCKED PAUSE/AUTORUN MUST PROVE IT WAS BLOCKED  [F24, F23]"
+# F24 — `/idc:pause` writes its record in step 1, BEFORE anything can fail, so grounding its
+# pause-state blocker on "a record still exists" was satisfied for the entire life of every honest
+# invocation: a session could walk away from a pause it could have taken and call itself blocked.
+# F23 — `commands/autorun.md` tells a run whose preflight resume exits 2 to close as blocked_external
+# citing this helper, but autorun's allowlist did not list it, so on the exact failure path the
+# instruction was written for the command could not close at all.
+R22="$WORK/blocked-proof"; mkrepo "$R22"
+python3 - "$PLUGIN" "$R22" <<'PY' || fail "R22: a blocked pause/autorun closeout is not grounded in what actually failed"
+import os, sys
+plugin, repo = sys.argv[1], sys.argv[2]
+sys.path.insert(0, os.path.join(plugin, "scripts", "hooks"))
+sys.path.insert(0, os.path.join(plugin, "scripts"))
+import idc_command_contract as C
+
+def blocker_ev(exit_code, diagnostic="the pause record did not persist"):
+    return {"schema_version": 1,
+            "refs": {"blocker": {"helper": "idc_pause_state.py", "exit": exit_code,
+                                 "diagnostic": diagnostic}}}
+
+# THE INVENTED BLOCKER: a healthy, quiescent repo where an honest pause was fully achievable, and
+# `commands/pause.md` step 1 has already written the record — which is why the record's own presence
+# could never ground this.
+v = C.validate_closeout("pause", "blocked_external", blocker_ev(1), repo=repo, session="s1")
+if v.ok:
+    sys.exit("/idc:pause closed as blocked_external in a repo where the pause could be recorded — a "
+             "session can walk away from a pause it could have taken honestly, claiming it was denied")
+
+# ...and when recording really IS impossible, the honest outcome is reachable. The git directory is
+# where the confirmation mark goes, so a repo whose git dir cannot be written to genuinely cannot
+# record a pause even though its root is fine.
+gitdir = os.path.join(repo, ".git")
+os.chmod(gitdir, 0o555)
+try:
+    v = C.validate_closeout("pause", "blocked_external", blocker_ev(1), repo=repo, session="s1")
+    if not v.ok:
+        sys.exit(f"a pause whose confirmation could not be recorded has no legal terminal outcome: "
+                 f"{v.reason_code} ({v.message})")
+finally:
+    os.chmod(gitdir, 0o755)
+
+# F23 — /idc:autorun's preflight runs the SAME clear /idc:resume does, so it must be able to close on
+# it. This is the close `commands/autorun.md` prescribes verbatim on `resume: error` (exit 2).
+with open(os.path.join(repo, ".idc-pause-state.json"), "w", encoding="utf-8") as fh:
+    fh.write('{"version":1,"state":"paused","session_id":"s2","requested_ts":1.0,'
+             '"confirmed_by":"s2","confirmed_ts":2.0,"quiescence":{"verdict":"ok","checked_ts":2.0}}')
+ev = blocker_ev(2, "the pause record could not be removed")
+os.chmod(repo, 0o555)
+try:
+    v = C.validate_closeout("autorun", "blocked_external", ev, repo=repo, session="s2")
+    if not v.ok:
+        sys.exit(f"/idc:autorun cannot close with the outcome commands/autorun.md prescribes on "
+                 f"`resume: error`: {v.reason_code} ({v.message})")
+finally:
+    os.chmod(repo, 0o755)
+
+# ...and once the root is writable again the same claim is refused: the clear can simply be run.
+v = C.validate_closeout("autorun", "blocked_external", ev, repo=repo, session="s2")
+if v.ok:
+    sys.exit("/idc:autorun closed as blocked on a pause record it could have cleared")
+PY
+echo "  ok R22: an invented pause blocker is refused; pause and autorun can close on a real one"
 
 echo "== R21. THE PAUSE WRITER MUST ENFORCE WHAT ITS STRICTEST READER REQUIRES  [F28]"
 # `_is_paused` refuses a record with a blank `session_id`/`confirmed_by`, but `confirm` — unlike

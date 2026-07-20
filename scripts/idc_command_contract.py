@@ -155,6 +155,12 @@ _PAUSE_HELPER = "idc_pause_check.py"
 # A resume blocker comes from this one — "the pause record could not be removed" — and is grounded by
 # re-reading the record, not by re-running the quiescence check, which is a different question.
 _PAUSE_STATE_HELPER = "idc_pause_state.py"
+# WHICH pause-state operation each command performs, so its blocker is re-derived against the right
+# one. `/idc:pause` drives the WRITE (request/confirm); `/idc:resume` and `/idc:autorun`'s preflight
+# drive the same CLEAR — which is why autorun carries this helper too: `commands/autorun.md` tells a
+# run whose preflight resume exits 2 to close on exactly this blocker, and a table that did not list
+# it made that instruction unfollowable.
+_PAUSE_STATE_OP_FOR = {"pause": "write", "resume": "clear", "autorun": "clear"}
 _INTAKE_HELPERS = {"idc_intake_manifest.py", "idc_pr_finish.py"}
 # The janitor scanner's DOCUMENTED blocked exit (ground truth could not be established). Exit 1 is a
 # COMPLETED scan with findings (a `complete`, not blocked); only exit 2 grounds `blocked_external`
@@ -172,7 +178,12 @@ _JANITOR_BLOCKED_EXIT = 2
 _BLOCKER_HELPERS = {
     "intake":      _INTAKE_HELPERS,
     "build":       {_DRAIN_HELPER},
-    "autorun":     {_DRAIN_HELPER},
+    # The drain is autorun's own blocker; the pause-state helper is the PREFLIGHT's. `commands/autorun.md`
+    # ("`resume: error …` (exit 2) — ABORT THE DRAIN … close this command as `blocked_external` citing
+    # `idc_pause_state.py` and its exit") prescribes a close this table used to reject, so on the exact
+    # failure path that instruction was written for, /idc:autorun could not close at all and its
+    # lifecycle record stayed open. Grounded by the same durable receipt as pause and resume.
+    "autorun":     {_DRAIN_HELPER, _PAUSE_STATE_HELPER},
     "janitor":     {_JANITOR_HELPER},
     "doctor":      {_JANITOR_HELPER},
     "init":        {_RECEIPT_HELPER},
@@ -183,8 +194,10 @@ _BLOCKER_HELPERS = {
     # quiescence reader left the commoner one with no legal terminal outcome at all: when the pause
     # RECORD cannot be removed, `commands/resume.md` step 1 rightly says stop, but `complete` needs
     # the record gone and no blocker could cite the helper that actually failed. Each is re-derived on
-    # its own terms in `_check_blocker` — a surviving record for the state helper, a failing re-run for
-    # the quiescence reader — so widening the list adds no way to invent a blocker.
+    # its own terms in `_check_blocker` — the helper's own durable failure receipt for the state
+    # helper, a failing read-only re-run for the quiescence reader — so widening the list adds no way
+    # to invent a blocker. (The first cut grounded the state helper on the RECORD'S STATE instead, and
+    # that DID add one: the state a failed attempt leaves is the same state an ordinary run leaves.)
     "resume":      {_PAUSE_HELPER, _PAUSE_STATE_HELPER},
 }
 
@@ -298,17 +311,51 @@ def _check_blocker(command: str, refs: dict, repo: str, session: str) -> Closeou
         # still reads that record and allows an undrained walk-away. But `complete` requires the record
         # to be GONE, and the only other terminal status had no grounding path for this helper, so the
         # honest outcome was unreachable: three Stop blocks, then the anti-nag bound loud-fail-allows,
-        # and the record is left stranded with nothing recording why.
+        # and the record is left stranded with nothing recording why. `/idc:pause` has the mirror
+        # deadlock when the record (or its confirmation witness) cannot be WRITTEN.
         #
-        # The blocker is grounded by RE-DERIVING the same fact, not by trusting the diagnostic: the
-        # record must still be there. If it is gone the clear actually worked, and the honest close is
-        # `complete` — a blocker citing a helper that has since succeeded is refused, exactly as the
-        # pause-quiescence branch below refuses one whose re-run passes.
-        if _pause_record(repo) is None:
-            return _fail("blocked-external-pause-state-not-failing",
-                         "blocked_external citing the pause-state helper requires the pause record to "
-                         "still be present (that is what 'the record could not be cleared' means); no "
-                         "record remains, so the clear succeeded — close as complete instead")
+        # WHY THE RECORD'S STATE CANNOT GROUND THIS BY ITSELF, which is what the first cut used. A
+        # pause record is present before every ordinary resume and absent before every ordinary pause,
+        # so "the record is still there" is equally consistent with an attempted-and-failed clear and
+        # with a session that never ran the helper — and `commands/pause.md` step 1 writes the record
+        # before anything can fail, so the pause side was satisfied for the whole life of every
+        # invocation. That certifies "I was blocked" for a session that simply walked away from a
+        # pause it could have taken honestly. The failure must therefore be re-derived from something
+        # THE FAILED ATTEMPT PRODUCED — the same durable-receipt grounding the drain, the janitor and
+        # the intake helpers already use.
+        # SO THE OPERATION IS RE-DERIVED, read-only, exactly as the receipt checker and the quiescence
+        # reader above are: the blocker is grounded ONLY when the operation THIS command performs would
+        # STILL fail right now. A durable receipt cannot do this job here, and that is worth saying: the
+        # failure being claimed is that the record could not be written or removed, which is almost
+        # always an unwritable directory — the same directory a receipt would have to be written to.
+        operation = _PAUSE_STATE_OP_FOR.get(command)
+        rec = _pause_record(repo)
+        if operation == "clear":
+            # `/idc:resume`, and `/idc:autorun`'s preflight, which runs the identical clear.
+            if rec is None:
+                return _fail("blocked-external-pause-state-not-failing",
+                             "blocked_external citing a failed pause-record CLEAR requires the record "
+                             "to still be present (that is what 'the record could not be cleared' "
+                             "means); no record remains, so the clear succeeded — close as complete")
+            if not _pause_state_would_fail(repo, operation):
+                return _fail("blocked-external-pause-state-not-failing",
+                             "blocked_external citing a failed pause-record CLEAR requires the removal "
+                             "to actually be impossible; the record's directory is writable, so the "
+                             "clear can succeed — run it (`idc_pause_state.py resume`) and close as "
+                             "complete instead of reporting a blocker nothing is causing")
+        else:
+            # `/idc:pause` — the mirror case: the pause could not be RECORDED.
+            if isinstance(rec, dict) and rec.get("state") == PAUSED:
+                return _fail("blocked-external-pause-state-not-failing",
+                             "blocked_external citing a failed pause-record WRITE requires the pause to "
+                             "be unrecorded; this repo carries a CONFIRMED pause, so the write "
+                             "succeeded — close as complete instead")
+            if not _pause_state_would_fail(repo, operation):
+                return _fail("blocked-external-pause-state-not-failing",
+                             "blocked_external citing a failed pause-record WRITE requires recording to "
+                             "actually be impossible; the repo root and the git directory are both "
+                             "writable, so the pause can be recorded — take it, and close as complete. "
+                             "A pause you could have taken honestly is not a pause you were denied")
     elif base == _PAUSE_HELPER:
         # RE-RUN the pause quiescence reader READ-ONLY. A pause/resume blocker is grounded ONLY when the
         # re-run actually FAILS, and the cited exit must MATCH the re-run's own exit — so "I could not
@@ -411,6 +458,43 @@ def _pause_record(repo: str):
         return PAUSE.read_record(repo)
     except Exception:  # noqa: BLE001 — an unreadable record is never a proven pause
         return None
+
+
+def _dir_writable(path: str) -> bool:
+    """Whether entries can be created/removed in `path`, walking up to the first directory that
+    exists — the target of a write may not have been created yet."""
+    d = os.path.abspath(path or ".")
+    while not os.path.isdir(d):
+        parent = os.path.dirname(d)
+        if parent == d:
+            return False
+        d = parent
+    return os.access(d, os.W_OK | os.X_OK)
+
+
+def _pause_state_would_fail(repo: str, operation: str) -> bool:
+    """True only when the pause-state `operation` can be POSITIVELY established as still impossible.
+
+    The read-only re-derivation behind a pause-state blocker, in the same family as re-running the
+    receipt checker or the quiescence reader: a blocked claim is grounded only when the thing it
+    claims was blocked actually is. Anything we cannot establish returns False, which REFUSES the
+    blocker — an unprovable blocker is never a proven one.
+
+      * `clear`  — removing the record needs write permission on the directory holding it.
+      * `write`  — recording a pause needs that too, AND a git directory the confirmation mark can be
+                   written to (a pause whose mark cannot be recorded is refused by `confirm`, so it is
+                   a genuine blocker even when the repo root is fine).
+    """
+    try:
+        import idc_pause_state as PAUSE  # noqa: E402 — lazy
+        if not _dir_writable(os.path.dirname(os.path.abspath(PAUSE.pause_path(repo)))):
+            return True
+        if operation != "write":
+            return False
+        witness = PAUSE.witness_path(repo)
+        return witness is None or not _dir_writable(os.path.dirname(witness))
+    except Exception:  # noqa: BLE001 — an unestablished blocker is refused, never granted
+        return False
 
 
 def _pause_corroborated(repo: str, rec: object) -> bool:

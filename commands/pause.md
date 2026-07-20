@@ -105,9 +105,20 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
 
 - **`complete`** — the repo carries a **confirmed** pause record and a fresh re-derivation says nothing
   is half-done. The validator re-checks both for real, so the evidence refs may be empty (`refs:{}`).
-- **`blocked_external`** — the quiescence check refused the pause. Cite it:
-  `blocker:{helper:"idc_pause_check.py", exit:<its nonzero exit>, diagnostic:"<what is in flight>"}`.
-  The validator **re-runs the check** and requires the cited exit to match what it actually does now.
+- **`blocked_external`** — two different things can block a pause, and they cite **different helpers**:
+  - **The quiescence check refused the pause** (something is half-done). Cite
+    `blocker:{helper:"idc_pause_check.py", exit:<its nonzero exit>, diagnostic:"<what is in flight>"}`.
+    The validator **re-runs the check** and requires the cited exit to match what it actually does now.
+  - **The pause could not be RECORDED** — step 3 printed a write or confirmation failure (an unwritable
+    repo root, or a git directory the confirmation mark cannot be written to), so nothing is paused even
+    though nothing is in flight. Cite
+    `blocker:{helper:"idc_pause_state.py", exit:<its nonzero exit>, diagnostic:"<the printed cure>"}`.
+    The helper wrote a durable failure receipt at the moment it failed; the validator requires **that
+    receipt**, bound to this invocation, and refuses the blocker if this repo now carries a confirmed
+    pause — because then the write succeeded and the honest close is `complete`.
+
+  A pause you did not attempt is never `blocked_external`: with no receipt the validator refuses it,
+  which is the point — a session must not report a pause it could have taken as one it was denied.
 
 Then report, in plain words: what you finished before stopping, that the run is paused, and that
 `/idc:resume` — or simply the next `/idc:autorun` — picks it up from the board. Quote the oracle for

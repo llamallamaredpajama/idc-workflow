@@ -11,7 +11,15 @@ fit.
 bash scripts/lint-references.sh   # reference integrity — MUST exit 0 before every commit
 bash tests/smoke/run-all.sh       # full-lifecycle smoke suite (hermetic temp repos, no GitHub)
 bash scripts/run-evals.sh         # headless eval runner (resets the disposable sandbox per case)
+
+# OPT-IN, never run by CI (no gh credential there) — real GitHub-backend coverage against a sandbox:
+bash tests/live/github-backend-resolution.sh    # read-only; owner/project/project-item resolution
 ```
+
+`tests/live/` holds tests that need a REAL `gh` and a sandbox board. They are deliberately outside
+`tests/smoke/run-all.sh` — CI runs that on a clean runner with no credential — which means **nothing
+runs them automatically and they can rot silently.** Run them by hand after touching
+`scripts/idc_gh_board.py` or the tracker-config contract.
 
 `scripts/install-codex.sh` / `scripts/install-pi.sh` wire the optional Codex / Pi runtimes
 (`--revert` / `--check`). The `scripts/idc_*.py` helpers are called by the commands, not by hand.

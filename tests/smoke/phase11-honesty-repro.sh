@@ -8,23 +8,59 @@
 # failures of the completion-honesty work, so "smoke is green" was not evidence that these hold. Each
 # case here executes a real helper and asserts on its real output — no prose greps.
 #
-# RED-WHEN-BROKEN. Each case states the single source edit that turns it red again once fixed. These
-# were observed red on the base commit BEFORE any fix existed (that is what a repro suite is), so the
-# direction proven here is "red without the fix"; the implementer must additionally observe each case
-# go red under its named mutation AFTER the fix lands, and record that in this header.
+# RED-WHEN-BROKEN — OBSERVED, not asserted. Every mutation below was APPLIED to the fixed source, the
+# suite RUN, the case seen to fail, and the mutation reverted. A guard with no recorded mutation is
+# not finished, and a green test is not evidence until it has been shown to go red.
 #
-#   * R1  restore truncate-then-redact in idc_live_check.run_verify (`redact(_tail(out, …))`)
-#            ⇒ R1 RED (a named credential straddling the 4 KB display cut reaches the receipt).
-#   * R3  drop the plugin-root resolution in idc_pause_check's cure strings
-#            ⇒ R3 RED (the printed recovery command points at `/scripts/...`).
-#   * R9  relax the Stop gate's pause-record check back to `rec.get("state") == "paused"`
-#            ⇒ R9 RED (a one-key handwritten file buys an undrained stop).
-#   * R10 drop the "skip the current pause lifecycle record" rule in close_open_commands
-#            ⇒ R10 RED (every honest pause reports a REFUSED line about itself and exits 1).
-#   * R13 accept an absolute / traversing `evidence:` destination in surface_spec
-#            ⇒ R13 RED (a receipt can truncate a file outside the repo).
-#   * R17 revert the README command table to ten entries
-#            ⇒ R17 RED (the public table disagrees with the shipped command set).
+# Two process notes, because both cost a wrong conclusion during this work:
+#   1. A mutation that does not APPLY reads exactly like a mutation that did not break anything. The
+#      driver asserts its anchor matched exactly once before trusting any result. One "GREEN" here
+#      was a silently-unapplied edit, not a passing guard.
+#   2. Three mutations came back genuinely GREEN, meaning the guard they broke had NO assertion
+#      behind it. Those were treated as coverage gaps and CLOSED (the truncation marker in R1, the
+#      quiescence proof in R9, the write readback in R2) — not written off as "the test still passes".
+#
+#   R1  (idc_live_check)
+#     a. restore `redact(_tail(out, MAX_BODY_CHARS))`      ⇒ RED: `password=` cut mid-label, `hunter2`
+#                                                             reaches the committed receipt.
+#     b. drop the post-cut redaction pass                  ⇒ RED: a 17024-char opaque run survives.
+#     c. decide truncation from the POST-redaction length  ⇒ RED: a truncated receipt loses its
+#                                                             `…[truncated]…` marker.
+#   R2  (idc_ledger / idc_git_finish)
+#     a. `set_taint` discards the persisted bool again     ⇒ RED: the finish merges unprotected.
+#     b. drop the write READBACK                           ⇒ RED (via fault injection: a write that
+#                                                             reports success but stores nothing).
+#     c. warn instead of refusing before `pr_merge`        ⇒ RED: the point of no return is crossed.
+#   R3  a. drop `render_cure` on the mid_finish finding    ⇒ RED: literal `${CLAUDE_PLUGIN_ROOT}`.
+#   R4  a. drop the strict ledger probe                    ⇒ RED: a corrupt ledger certifies a pause.
+#   R5  a. treat any nonzero `rev-parse` as not-applicable ⇒ RED: an unreadable repo reads clean.
+#   R9  (idc_stop_fixpoint_gate `_is_paused` — one mutation per guard line, all eight observed RED)
+#     a. state-only (the original defect)  b. drop the schema-version check  c. drop session_id
+#     d. drop confirmed_by  e. drop confirmed_ts  f. accept any quiescence verdict
+#     g. drop the checked_ts requirement  h. drop the whole quiescence-proof block
+#   R10 a. drop the driver-record skip in close_open_commands ⇒ RED: every honest pause self-refuses.
+#   R11 a. drop the dirty-tree refusal                     ⇒ RED: a run over uncommitted code is
+#                                                             recorded against HEAD.
+#       b. widen the dirty check to the whole repo         ⇒ RED: a run's own receipt blocks the run.
+#   R12 a. watch only the declared `paths:`                ⇒ RED: a weakened probe keeps its receipt.
+#   R13 a. restore the verbatim/join resolution            ⇒ RED: a receipt escapes the repo.
+#       b. drop the absolute-destination refusal           ⇒ RED.
+#       c. compare unresolved paths                        ⇒ RED: a symlinked evidence dir escapes.
+#   R14 a. remove the genuineness check                    ⇒ RED: a forged receipt audits `live: ok`
+#                                                             while the real verify command exits 1.
+#       b. stop recording the witness on a real `--run`    ⇒ RED at the POSITIVE CONTROL — which is
+#                                                             what proves the control has teeth and
+#                                                             the gate is not just refusing all.
+#       c. trust a witness without comparing what it recorded ⇒ RED: a genuine receipt's exit_code
+#                                                             can be overwritten with 0.
+#   R15 a. stop carrying the finding lines in `_drain_detail` ⇒ RED: the block names no items.
+#   R16 a. restore the generic `error (no verdict)`        ⇒ RED: exit code + cause lost.
+#       b. keep the exit code but drop the stderr tail     ⇒ RED.
+#   R17 a. revert the README table to ten entries          ⇒ RED.
+#   R7  a. drop the pause-state helper from resume's blocker allowlist ⇒ RED: no legal outcome.
+#       b. ground the blocker without re-deriving          ⇒ RED: "blocked" becomes a free pass.
+#   R8  a. drop the resume survey claim                    ⇒ RED: complete with no survey.
+#       b. keep the claim but stop recording what it derived ⇒ RED: nothing proves it ran.
 
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

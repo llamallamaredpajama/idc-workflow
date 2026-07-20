@@ -3133,6 +3133,13 @@ def validate_closeout(command: str, status: str, evidence: object,
     # Carry anything the claims RE-DERIVED into the persisted evidence, under its own key so it can
     # never be confused with what the caller asserted. `derived` is the record's own account of what
     # was proven at closeout; `refs` remains what the command claimed on the way in.
+    #
+    # THE CALLER'S OWN `derived` IS STRIPPED ON EVERY PATH, not only when re-derivation produced
+    # something to overwrite it with. `derived` means "this was proven here"; a claim list that
+    # produced nothing used to return the caller's evidence unchanged, so a hand-written `derived`
+    # block was persisted verbatim into the lifecycle record — the exact confusion the separate key
+    # exists to make impossible. No consumer reads it yet, which is precisely why now is the time.
+    evidence = {k: v for k, v in evidence.items() if k != "derived"}
     if result.normalized_evidence:
         return CloseoutResult(True, "ok", "closeout valid",
                               {**evidence, "derived": dict(result.normalized_evidence)})

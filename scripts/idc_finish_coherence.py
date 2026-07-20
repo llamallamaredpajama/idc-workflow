@@ -152,6 +152,24 @@ def run_janitor(args):
     return report
 
 
+def _nearest_git_marker(path):
+    """The first `.git` at or above `path`, or None — the same walk git itself does.
+
+    Reaching this function means git has ALREADY failed to resolve a repository here. So a `.git`
+    found anywhere up the chain is by construction the one git could not use: had it been usable, git
+    would have succeeded and this branch would never run.
+    """
+    d = os.path.abspath(path or ".")
+    while True:
+        candidate = os.path.join(d, ".git")
+        if os.path.exists(candidate):
+            return candidate
+        parent = os.path.dirname(d)
+        if parent == d:
+            return None
+        d = parent
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="idc_finish_coherence.py",
@@ -191,9 +209,15 @@ def main(argv=None):
         # trusting the text would send an unreadable repo straight back to `not-applicable`. The
         # presence of `.git` is the fact that separates them: something IS here, git just could not
         # use it, which is unprovable rather than inapplicable.
-        if os.path.exists(os.path.join(args.repo, ".git")):
-            _fail(f"{args.repo} has a .git that git could not use ({detail}) — whether anything "
-                  f"shipped is unprovable, which is not the same as there being nothing to check")
+        #
+        # LOOKED FOR THE WAY GIT LOOKS — walking UP from `--repo`, not only at it. Git resolves a repo
+        # by walking parents, so `--repo <root>/sub` in a repo whose ROOT holds the unreadable `.git`
+        # produced the same "not a git repository" message with no `.git` beside the subdirectory —
+        # and the hollow clean this branch exists to prevent came straight back, one directory down.
+        marker = _nearest_git_marker(args.repo)
+        if marker:
+            _fail(f"{args.repo} is under {marker}, a .git that git could not use ({detail}) — whether "
+                  f"anything shipped is unprovable, which is not the same as there being nothing to check")
         if "not a git repository" in detail.lower():
             print("finish-coherence: not-applicable")
             sys.exit(0)

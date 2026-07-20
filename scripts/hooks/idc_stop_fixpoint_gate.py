@@ -438,6 +438,24 @@ def _render_root(text, plugin_root):
     return (text or "").replace("${CLAUDE_PLUGIN_ROOT}", plugin_root) if plugin_root else (text or "")
 
 
+def _where(detail, token, example):
+    """How to point the operator at a checker's own finding line — WITHOUT promising output that is
+    not there.
+
+    `_drain_detail` carries the checker lines through on the FILESYSTEM path, where the gate re-runs
+    the drain and has its stdout. The GITHUB path cannot: it reads the persisted verdict
+    (`.idc-drain-verdict.json`), which records `{verdict, exit}` and no checker lines at all, so the
+    detail is `github (persisted: drain: coherence-gap, exit 4)`. Telling that operator to "see the
+    `finish-coherence: gap <#s>` line" points at output they do not have and cannot get — the same
+    class of unrunnable cure as an unresolved `${CLAUDE_PLUGIN_ROOT}`, and it teaches them to distrust
+    the block. So the sentence is derived from what the message is actually carrying."""
+    if re.search(rf"\b{re.escape(token)}:\s*(?:gap|error)\b", detail or ""):
+        return f"see the `{example}` line above"
+    return (f"re-run `${{CLAUDE_PLUGIN_ROOT}}/scripts/idc_autorun_drain.py` with the wave-close gates "
+            f"to get the `{example}` line — this block was raised from a persisted verdict, which "
+            f"records the outcome and not the checker's own output")
+
+
 def _block_reason(detail, pending_taints, plugin_root=""):
     obligations = _obligation_labels(pending_taints)
     owed = (f" This session also holds unfinished ledger obligations: {', '.join(obligations)}."
@@ -450,15 +468,15 @@ def _block_reason(detail, pending_taints, plugin_root=""):
     # stale board card.) Keyed off the verdict token the drain prints; `detail` carries it verbatim.
     if "coherence-gap" in detail:
         why = ("The build lane is drained but items whose work already SHIPPED (PR merged, issue closed) "
-               "are still advertised as in flight (see the `finish-coherence: gap <#s>` line) — the "
+               f"are still advertised as in flight ({_where(detail, 'finish-coherence', 'finish-coherence: gap <#s>')}) — the "
                "board is claiming work that is done, so the run is NOT complete.")
         cure = ("repair the named items through the existing door — `/idc:janitor --apply-safe` (batch) "
                 "or `idc_git_finish.py --close-only` per item; both are safe to re-run")
     elif "live-gap" in detail:
         why = ("The build lane is drained but a live surface this repo DECLARES has no current passing "
-               "verification evidence (see the `live: gap <name>` line) — its verify command failed, or "
-               "was never executed against the code that is running now — so the running product is "
-               "unproven and the run is NOT complete.")
+               f"verification evidence ({_where(detail, 'live', 'live: gap <name>')}) — its verify "
+               "command failed, or was never executed against the code that is running now — so the "
+               "running product is unproven and the run is NOT complete.")
         # The cure is a COMMAND THE PIPELINE RUNS, not an errand for a person. Whoever is reading this
         # is capable of executing the project's own verify command; an instruction to go and drive the
         # app by hand is how a 2am autorun turns into a phone call.
@@ -468,7 +486,8 @@ def _block_reason(detail, pending_taints, plugin_root=""):
                 "and re-run")
     elif "acceptance-gap" in detail:
         why = ("The build lane is drained but the wave-close acceptance check found a merged-Done item "
-               "INERT (see the `acceptance: gap <#s>` line), so the run is NOT complete.")
+               f"INERT ({_where(detail, 'acceptance', 'acceptance: gap <#s>')}), so the run is NOT "
+               "complete.")
         cure = "drain the inbox with `/idc:recirculate` (file a recirculation for the inert items)"
     else:
         why = ("The build lane is empty but the Recirculation/Consideration inbox still owes upstream "

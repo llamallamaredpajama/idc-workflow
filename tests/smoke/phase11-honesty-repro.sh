@@ -31,9 +31,20 @@
 #     b. drop the write READBACK                           ⇒ RED (via fault injection: a write that
 #                                                             reports success but stores nothing).
 #     c. warn instead of refusing before `pr_merge`        ⇒ RED: the point of no return is crossed.
+#     d. restore the best-effort taint in `close_only_recover`
+#                                                          ⇒ RED: close-only deletes the branch its own
+#                                                             ownership guard reads with no durable
+#                                                             recovery record behind it.
 #   R3  a. drop `render_cure` on the mid_finish finding    ⇒ RED: literal `${CLAUDE_PLUGIN_ROOT}`.
 #   R4  a. drop the strict ledger probe                    ⇒ RED: a corrupt ledger certifies a pause.
+#       b. probe non-dict-ness only, not the identity the tolerant readers key on
+#                                                          ⇒ RED: a `mid_finish` entry that lost its
+#                                                             `kind` is skipped by every reader and
+#                                                             the probe still calls it readable.
 #   R5  a. treat any nonzero `rev-parse` as not-applicable ⇒ RED: an unreadable repo reads clean.
+#       b. look for `.git` at `--repo` only, not up the tree ⇒ RED: the hollow clean returns one
+#                                                             directory down, which is where git
+#                                                             itself looks.
 #   R9  (idc_stop_fixpoint_gate `_is_paused` — one mutation per guard line, all eight observed RED)
 #     a. state-only (the original defect)  b. drop the schema-version check  c. drop session_id
 #     d. drop confirmed_by  e. drop confirmed_ts  f. accept any quiescence verdict
@@ -70,6 +81,10 @@
 #       c. trust a witness without comparing what it recorded ⇒ RED: a genuine receipt's exit_code
 #                                                             can be overwritten with 0.
 #   R15 a. stop carrying the finding lines in `_drain_detail` ⇒ RED: the block names no items.
+#       b. word the cure identically on both backends      ⇒ RED: the GITHUB block tells the operator
+#                                                             to "see the `finish-coherence: gap <#s>`
+#                                                             line", which the persisted verdict never
+#                                                             carried and no re-read can produce.
 #   R16 a. restore the generic `error (no verdict)`        ⇒ RED: exit code + cause lost.
 #       b. keep the exit code but drop the stderr tail     ⇒ RED.
 #   R17 a. revert the README table to ten entries          ⇒ RED.
@@ -110,6 +125,10 @@
 #                                                             prescribes on `resume: error` is refused.
 #   R8  a. drop the resume survey claim                    ⇒ RED: complete with no survey.
 #       b. keep the claim but stop recording what it derived ⇒ RED: nothing proves it ran.
+#       c. return the caller's evidence unchanged when a claim re-derived nothing (caught by R21)
+#                                                          ⇒ RED: a hand-written `derived` block is
+#                                                             persisted verbatim under the one key
+#                                                             that exists to be unforgeable.
 
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -591,6 +610,49 @@ finally:
 # succeeds. Otherwise the assertion above could be passing because set_taint is simply broken.
 if not idc_ledger.set_taint(repo, "mid_finish", key="3", session_id="s1", pr="7"):
     sys.exit("harness fault: set_taint failed even with the real writer restored")
+
+# THE CLOSE-ONLY PATH OWES THE SAME OBLIGATION. It does not merge, so it cannot CREATE the
+# shipped-but-not-flipped state — but it DELETES the branch its own ownership guard reads, so dying
+# after that and before the board flip leaves the item unrecoverable. Its taint write was still
+# best-effort, so a ledger that could not be written produced a warning and the deletions went ahead.
+import types
+idc_ledger.clear_taint(repo, "mid_finish", key="3")
+did = []
+def _mark(label, retval=None):
+    def f(*a, **k):
+        did.append(label)
+        return retval
+    return f
+GF.resolve_branch = lambda *a, **k: "feat/2-thing"
+GF.verify_pr_merged = _mark("verify_pr_merged")
+GF._resolve_branch_item = lambda *a, **k: ("2", ["2"])   # must EQUAL args.issue, or the ownership
+                                                         # guard fails first and nothing below runs
+GF.refuse_if_head_advanced = _mark("containment")
+GF.worktree_for_branch = lambda *a, **k: None
+GF.worktree_remove = _mark("DESTRUCTIVE:worktree_remove")
+GF.live_remote_tip_deletable = _mark("DESTRUCTIVE:remote_tip_probe", False)
+GF.branch_delete_local = _mark("DESTRUCTIVE:branch_delete")
+GF.tracker_close = _mark("DESTRUCTIVE:tracker_close")
+args = types.SimpleNamespace(pr=9, issue="2", worktree=None)
+os.chmod(repo, mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+try:
+    try:
+        GF.close_only_recover(args, repo, None, os.path.join(repo, "TRACKER.md"), "filesystem",
+                              None, None, None, None, session_id="s1")
+    except SystemExit as e:
+        if e.code in (0, None):
+            sys.exit(f"close-only stopped, but reported SUCCESS (exit {e.code})")
+    else:
+        sys.exit("close-only ran to completion with no durable recovery record")
+finally:
+    os.chmod(repo, mode)
+destructive = [c for c in did if c.startswith("DESTRUCTIVE")]
+if destructive:
+    sys.exit("close-only destroyed state with no durable recovery record — the branch deletion "
+             "removes the evidence its own ownership guard needs: " + ", ".join(destructive))
+if "containment" not in did:
+    sys.exit(f"harness fault: close-only did not reach its containment gate at all ({did}), so the "
+             f"absence of destructive calls proves nothing")
 PY
 echo "  ok R2: an unpersistable obligation stops the finish BEFORE the irreversible merge"
 
@@ -622,7 +684,18 @@ printf '%s' "$out4b" | grep -q 'pause-ready: error' \
 rm -f "$LEDGER4"
 out4c="$(python3 "$PC" --repo "$R4" --tracker "$R4/TRACKER.md" 2>&1)"; rc4c=$?
 [ "$rc4c" = 0 ] || fail "R4: a repo with NO ledger has nothing half-done and must pause cleanly, got rc=$rc4c out=$out4c"
-echo "  ok R4: an unreadable ledger is indeterminate, an absent one is still clean"
+# ...and the probe must ask the SAME question its tolerant readers answer. They skip an entry that
+# has lost its identity fields, not one that is merely not an object — so a `mid_finish` entry
+# missing its `kind` (a hand-edited ledger) was invisible to every reader AND pronounced readable.
+printf '{"version":2,"taints":[{"key":"42","session_id":"s1","fields":{"pr":"9"}}],"commands":[]}' \
+  > "$LEDGER4"
+out4d="$(python3 "$PC" --repo "$R4" --tracker "$R4/TRACKER.md" 2>&1)"; rc4d=$?
+[ "$rc4d" = 0 ] \
+  && fail "R4: a ledger entry that lost its \`kind\` is skipped by every reader, yet the strict probe called the ledger trustworthy and certified a clean pause over it. Got: $out4d"
+printf '%s' "$out4d" | grep -q 'pause-ready: error' \
+  || fail "R4: an entry with no identity must be INDETERMINATE (pause-ready: error), got rc=$rc4d out=$out4d"
+rm -f "$LEDGER4"
+echo "  ok R4: an unreadable ledger, and one hiding an identity-less entry, are both indeterminate"
 
 echo "== R5. AN OPERATIONAL GIT FAILURE IS NOT \"NOT APPLICABLE\"  [T8]"
 # `git rev-parse --git-dir` exits nonzero for far more than "there is no repo here": dubious
@@ -644,7 +717,24 @@ chmod 755 "$R5B/.git"
   && fail "R5: a repo git could not read was reported as \`not-applicable\` (exit 0), disabling the shipped-vs-board check. Got: $out5b"
 [ "$rc5b" = 2 ] \
   || fail "R5: an unreadable git repo must be INDETERMINATE (exit 2), got rc=$rc5b out=$out5b"
-echo "  ok R5: a non-git dir is not-applicable, an unreadable one is indeterminate"
+# ...and the SAME repo addressed one directory down. Git walks UP to find a repository, so it prints
+# the identical "not a git repository" here while the subdirectory has no `.git` of its own — the
+# hollow clean came straight back for any caller passing a path below the root.
+mkdir -p "$R5B/sub"
+chmod 000 "$R5B/.git"
+out5c="$(python3 "$COH" --repo "$R5B/sub" --tracker "$R5B/TRACKER.md" 2>&1)"; rc5c=$?
+chmod 755 "$R5B/.git"
+[ "$rc5c" = 0 ] \
+  && fail "R5: a SUBDIRECTORY of a repo git could not read was reported as \`not-applicable\` (exit 0) — the unreadable .git is one level up, which is where git looks. Got: $out5c"
+[ "$rc5c" = 2 ] \
+  || fail "R5: an unreadable git repo must be INDETERMINATE (exit 2) from a subdirectory too, got rc=$rc5c out=$out5c"
+# ...and a genuinely non-git subdirectory must still be not-applicable, so this is not "every path is
+# now indeterminate".
+mkdir -p "$R5/sub"
+out5d="$(python3 "$COH" --repo "$R5/sub" --tracker "$R5/TRACKER.md" 2>&1)"; rc5d=$?
+[ "$rc5d" = 0 ] && printf '%s' "$out5d" | grep -q 'not-applicable' \
+  || fail "R5: a genuinely non-git subdirectory must stay not-applicable, got rc=$rc5d out=$out5d"
+echo "  ok R5: a non-git dir is not-applicable; an unreadable one is indeterminate from root and below"
 
 echo "== R11/R12. A RECEIPT MUST NAME THE CODE THAT ACTUALLY RAN  [T7]"
 # R11 — the command executes the WORKING TREE while the receipt records HEAD, so a run started over
@@ -733,6 +823,29 @@ reason = G._block_reason(detail, [], "/plugin/root")
 for needed in ("#41", "#42"):
     if needed not in reason:
         sys.exit(f"the block reason drops {needed!r}: {reason!r}")
+# The FILESYSTEM path re-runs the drain and has its stdout, so when the verdict is the coherence gap
+# the block both carries the checker's line and tells the operator to read it.
+fs_detail = "drain: coherence-gap, recirc_inbox=0, finish-coherence: gap #41 #42"
+fs_reason = G._block_reason(fs_detail, [], "/plugin/root")
+if "#41" not in fs_reason or "see the `finish-coherence: gap <#s>` line above" not in fs_reason:
+    sys.exit(f"the block carries the finding line but does not tell the operator to read it: {fs_reason!r}")
+
+# ...and on the GITHUB path it must not point at output that cannot exist. There the block is raised
+# from the persisted verdict, which records {verdict, exit} and no checker lines at all — so "see the
+# `finish-coherence: gap <#s>` line" sends the operator looking for something they cannot get, the
+# same unrunnable-cure defect as an unresolved ${CLAUDE_PLUGIN_ROOT}.
+gh_detail = "github (persisted: drain: coherence-gap, exit 4)"
+gh_reason = G._block_reason(gh_detail, [], "/plugin/root")
+if "see the `finish-coherence: gap <#s>` line" in gh_reason:
+    sys.exit("the github-path block tells the operator to read a checker line the persisted verdict "
+             "never carried: " + gh_reason)
+if "finish-coherence: gap <#s>" not in gh_reason or "idc_autorun_drain.py" not in gh_reason:
+    sys.exit(f"the github-path block must still name the line AND how to get it: {gh_reason!r}")
+for token, detail_ in (("live", "github (persisted: drain: live-gap, exit 4)"),
+                       ("acceptance", "github (persisted: drain: acceptance-gap, exit 4)")):
+    r = G._block_reason(detail_, [], "/plugin/root")
+    if "line above" in r:
+        sys.exit(f"the github-path {token} block points at output it does not carry: {r!r}")
 PY
 echo "  ok R15: the Stop block names the items the operator is told to inspect"
 
@@ -850,6 +963,25 @@ if not survey:
     sys.exit("resume closed complete with NO record that the half-done survey ever ran")
 if survey.get("exit") != 1 or "#99" not in (survey.get("findings") or []):
     sys.exit(f"the recorded survey does not reflect the real half-done work: {survey!r}")
+
+# ...and a caller cannot smuggle its OWN `derived` block into the record. `derived` means "this was
+# proven at closeout"; a claim list that re-derived nothing used to return the caller's evidence
+# untouched, so a hand-written block was persisted verbatim under the one key that is supposed to be
+# unforgeable by construction.
+forged = {"schema_version": 1, "refs": {},
+          "derived": {"resume_survey": {"exit": 0, "findings": [], "note": "nothing to see here"}}}
+v = C.validate_closeout("resume", "complete", forged, repo=repo, session="s1")
+if not v.ok:
+    sys.exit(f"precondition: this closeout must still be valid, got {v.reason_code}")
+got = (v.normalized_evidence or {}).get("derived", {}).get("resume_survey", {})
+if got.get("note") == "nothing to see here":
+    sys.exit(f"a caller-supplied `derived` block was persisted verbatim: {got!r}")
+# ...and on the path where nothing is re-derived at all, it must be stripped rather than passed through.
+v = C.validate_closeout("janitor", "no_action",
+                        {"schema_version": 1, "refs": {}, "derived": {"anything": 1}},
+                        repo=repo, session="s1")
+if v.ok and "anything" in (v.normalized_evidence or {}).get("derived", {}):
+    sys.exit("a caller-supplied `derived` survived on a closeout that re-derived nothing")
 PY
 echo "  ok R7/R8: a failed record-clear is a grounded blocker; complete carries a re-derived survey"
 
@@ -952,6 +1084,18 @@ import idc_command_contract as C
 v = C.validate_closeout("build", "paused", {"schema_version": 1, "refs": {}}, repo=repo, session="r21-session")
 if not v.ok:
     sys.exit(f"a real pause cannot close a run as paused: {v.reason_code} ({v.message})")
+
+# ...and a caller cannot smuggle its own `derived` block through a claim that re-derives nothing.
+# `derived` means "this was PROVEN at closeout"; when the claim list produced nothing the caller's
+# evidence used to be returned untouched, so a hand-written block was persisted verbatim under the
+# one key that exists to be unforgeable. `/idc:pause complete` is exactly such a claim.
+forged = {"schema_version": 1, "refs": {}, "derived": {"pause": {"note": "nothing to see here"}}}
+v = C.validate_closeout("pause", "complete", forged, repo=repo, session="r21-session")
+if not v.ok:
+    sys.exit(f"precondition: a real pause must close /idc:pause as complete: {v.reason_code} ({v.message})")
+if "derived" in (v.normalized_evidence or {}):
+    sys.exit(f"a caller-supplied `derived` block was persisted verbatim into the lifecycle record: "
+             f"{(v.normalized_evidence or {}).get('derived')!r}")
 # ...and a record with no confirmation behind it cannot, even in a perfectly quiescent repo — which is
 # the case that makes the corroboration a guard rather than a formality.
 PS._clear_confirmation(repo)

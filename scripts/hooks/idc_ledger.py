@@ -185,6 +185,20 @@ def _read_raw(cwd):
     return data if isinstance(data, dict) else {}
 
 
+# THE IDENTITY EVERY ENTRY MUST CARRY TO BE SEEN AT ALL — defined once, because the tolerant readers
+# and the strict probe are two views of ONE predicate and had drifted apart. The readers below SKIP an
+# entry missing these fields; `probe` therefore has to REJECT a ledger containing one, or a real
+# obligation that lost its `kind` (a hand-edited file) is invisible to the readers and pronounced
+# trustworthy by the probe — which is exactly the hidden-obligation false-clean the probe exists to
+# catch, arriving through the probe itself.
+_TAINT_IDENTITY = ("kind",)
+_COMMAND_IDENTITY = ("session_id", "command")
+
+
+def _has_identity(entry, fields):
+    return isinstance(entry, dict) and all(entry.get(f) for f in fields)
+
+
 def read_taints(cwd, _raw=None):
     """Every taint dict currently in the ledger (a list). TOLERANT: a missing or corrupt ledger
     reads as an EMPTY list and NEVER throws — a corrupt ledger must not brick a gate. `_raw` lets a
@@ -192,7 +206,7 @@ def read_taints(cwd, _raw=None):
     taints = (_read_raw(cwd) if _raw is None else _raw).get("taints", [])
     if not isinstance(taints, list):
         return []
-    return [t for t in taints if isinstance(t, dict) and t.get("kind")]
+    return [t for t in taints if _has_identity(t, _TAINT_IDENTITY)]
 
 
 def _read_commands(cwd, _raw=None):
@@ -203,7 +217,7 @@ def _read_commands(cwd, _raw=None):
     cmds = (_read_raw(cwd) if _raw is None else _raw).get("commands", [])
     if not isinstance(cmds, list):
         return []
-    return [c for c in cmds if isinstance(c, dict) and c.get("session_id") and c.get("command")]
+    return [c for c in cmds if _has_identity(c, _COMMAND_IDENTITY)]
 
 
 def read_state(cwd):
@@ -242,7 +256,7 @@ def probe(cwd):
     if not isinstance(data, dict):
         return False, (f"the obligations ledger {path} is a {type(data).__name__}, not an object — "
                        f"its contents cannot be trusted")
-    for field in ("taints", "commands"):
+    for field, identity in (("taints", _TAINT_IDENTITY), ("commands", _COMMAND_IDENTITY)):
         val = data.get(field)
         if val is not None and not isinstance(val, list):
             return False, (f"the obligations ledger {path} has a non-list `{field}` "
@@ -252,6 +266,16 @@ def probe(cwd):
                 return False, (f"the obligations ledger {path} has a non-object entry in `{field}` "
                                f"({type(entry).__name__}) — the tolerant readers SKIP such entries, "
                                f"so a real obligation could be hiding behind one")
+            # ...and the SAME question for the shape the readers actually key on. Rejecting only
+            # non-dicts asked the wrong question: the tolerant readers skip on a MISSING IDENTITY
+            # FIELD, not on non-dict-ness, so a `mid_finish` entry that had lost its `kind` was
+            # skipped by every reader and certified readable here — a half-done obligation hidden
+            # behind a probe that said the ledger could be trusted.
+            missing = [f for f in identity if not entry.get(f)]
+            if missing:
+                return False, (f"the obligations ledger {path} has an entry in `{field}` with no "
+                               f"{', '.join(missing)} — the tolerant readers SKIP such entries, so a "
+                               f"real obligation could be hiding behind one")
     return True, "readable"
 
 

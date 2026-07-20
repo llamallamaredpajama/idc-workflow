@@ -182,7 +182,11 @@ def _mid_finish_set(repo, issue, session_id, **fields):
 def _require_mid_finish_obligation(repo, issue, session_id, **fields):
     """Set the mid-finish obligation and REFUSE TO CONTINUE unless it is durable.
 
-    Called immediately before `pr_merge`, the point of no return. Everything before it is reversible
+    Called at BOTH points of no return: immediately before `pr_merge` on the normal finish, and before
+    the first deletion in `close_only_recover` — which does not merge, but destroys the branch its own
+    ownership guard reads, so dying there without the record leaves the item unrecoverable too.
+
+    On the merge path everything before it is reversible
     and has shipped nothing; the merge is irreversible AND closes the linked issue as a side effect.
     The obligation is the only record that tells a later session a close is half-done, so merging
     after failing to write it re-opens the exact window the obligation exists to close — the
@@ -729,13 +733,15 @@ def close_only_recover(args, repo, worktree_abs, tracker_path, backend, project_
     # fail closed BEFORE any worktree/branch deletion.
     refuse_if_head_advanced(repo, branch, args.pr)
 
-    # RECORD IN-FLIGHT STATE for this path too. Close-only does not merge, so it cannot CREATE the
-    # shipped-but-not-flipped state — but it can DIE inside it, having deleted the branch its own
-    # ownership guard needs, before the board flip lands. The taint keeps the item recoverable by a
-    # later session and is cleared only after this run's board flip is verified, below.
-    _mid_finish_set(repo, args.issue, session_id, pr=args.pr, branch=branch,
-                    worktree=worktree_abs or "", backend=backend,
-                    tracker=(tracker_path if backend == "filesystem" else ""))
+    # RECORD IN-FLIGHT STATE for this path too, and REQUIRE it to be durable — the same rule the merge
+    # path uses, for the same reason its own comment gives here. Close-only does not merge, so it
+    # cannot CREATE the shipped-but-not-flipped state, but it can DIE inside it, having deleted the
+    # branch its own ownership guard needs, before the board flip lands. A best-effort write left that
+    # window open behind a warning that scrolls past. Refusing costs nothing on this path: everything
+    # before the first deletion is reversible, and the PR is already merged, so nothing ships either way.
+    _require_mid_finish_obligation(repo, args.issue, session_id, pr=args.pr, branch=branch,
+                                   worktree=worktree_abs or "", backend=backend,
+                                   tracker=(tracker_path if backend == "filesystem" else ""))
 
     # Explicit --worktree override first (idempotent), THEN auto-detect a worktree still on this branch
     # (the idle teammate's) so `git branch -D` won't fail on a checked-out branch (P2b). Safe to remove:

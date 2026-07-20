@@ -164,6 +164,70 @@
 #                                                          ⇒ RED: a hand-written `derived` block is
 #                                                             persisted verbatim under the one key
 #                                                             that exists to be unforgeable.
+#
+#   ROUND 4 — the two META-DEFECTS this round was called to fix, before its own findings.
+#
+#   (1) A FIXTURE THAT PASSES BEFORE THE FIX IS DECORATION, NOT A TEST. Round 3's scrub-door fix was
+#       verified with case R23, whose only fixture was a `ghp_…` token — the one credential shape the
+#       PROSE-SAFE table already matched. The door was real, the rule set behind it was the wrong one,
+#       and the case could not see that: `password=…`, `Authorization: Basic …` and
+#       `Authorization: token …` all walked straight through a guard that looked proven. So the rule
+#       for this round, applied to every case below that was written or touched:
+#
+#           every fixture is demonstrated RED against the PRE-FIX source before its fix lands.
+#
+#       Each was run against a `git archive` of the pre-fix tree (7abd4d4) and observed to FAIL for
+#       its own reason, then against the fixed tree and observed to pass:
+#         R23  PRE rc=1 "a credential ... reached the drain verdict line" (the `password=` fixture,
+#              NOT the ghp_ one, which passed pre-fix — that is the whole finding) · POST rc=0
+#         R26  PRE rc=1 "a command record whose 'state' was corrupted to a near-miss value is
+#              INVISIBLE to active_commands, yet probe() called the ledger trustworthy" · POST rc=0
+#         R25  PRE rc=1 "a run that started CLEAN and dirtied a tracked file ... closed as
+#              blocked_external on the tree it had just dirtied" · POST rc=0
+#         R22  PRE rc=1 "closed as blocked citing a failed record WRITE it never attempted" · POST rc=0
+#         R29  PRE rc=1 "`is_paused` reports PAUSED for a record the Stop gate refuses" · POST rc=0
+#         R13  PRE rc=1 (the gitignored/.git destinations were ACCEPTED) · POST rc=0
+#         R30  PRE rc=1 "the verify command 'bash \"scripts/check live.sh\"' resolves to []" · POST rc=0
+#         R28  PRE rc=1 (the module has no machine-output profile at all) · POST rc=0
+#
+#   (2) A ONE-SHAPE MUTATION SET MANUFACTURES FALSE CONFIDENCE. R26 mutated only by DROPPING fields,
+#       so it could only ever discover a PRESENCE bug — and the readers key on a VALUE. Every guard
+#       touched this round is damaged in at least three classes: DELETION, VALUE-CORRUPTION (a
+#       plausible near-miss of a legal value) and SUBSTITUTION (a wrong type that is still truthy).
+#
+#   ROUND-4 MUTATIONS — each applied to the FIXED source with its anchor asserted to match EXACTLY
+#   ONCE, the phase run, the failure read, the mutation reverted, and `git diff --quiet` re-verified
+#   clean afterwards. 12 applied · 12 RED · 0 GREEN · 0 refused-to-score.
+#   R23 o. wire the PROSE profile through the drain's door ⇒ RED: `password=…`, `Basic …` and
+#                                                 `token …` reach the drain verdict line and the
+#                                                 board comment. This is F46 exactly: the door was
+#                                                 never the defect, the profile behind it was.
+#   R28 n. drop the scrub at the `gh` producer in idc_pr_finish ⇒ RED, naming the file:line.
+#       p. make the tolerant import's fallback pass text through ⇒ RED: with the credential table
+#                                                 absent every module silently stops scrubbing.
+#   R26 q. accept any `state` value (the round-3 half-fix: presence, never the domain) ⇒ RED:
+#                                                 `state: "actve"` is invisible to the Stop closeout
+#                                                 gate while probe() calls the ledger readable.
+#   R25 r. drop the entry-snapshot requirement    ⇒ RED: a command manufactures its own blocker.
+#       s. re-take the entry snapshot on re-entry ⇒ RED: a second pass inherits the dirty tree its
+#                                                 own first pass created.
+#   R22 t. accept a pause blocker from ambient permissions ⇒ RED: an UNATTEMPTED pause closes as
+#                                                 blocked on facts true of every run in the repo.
+#   R29 u. make the witness clear best-effort again ⇒ RED: a clear reports success while the witness
+#                                                 survives, re-arming the replay F9 closed.
+#       v. read `paused` off the record alone     ⇒ RED: `--status` tells the operator the repo is
+#                                                 paused about a record the Stop gate refuses.
+#   R13 w. skip the reviewability half of confinement ⇒ RED: `.cache/live.md` under an ignored
+#                                                 `.cache/`, and `.git/live.md`, audit `live: ok`.
+#   R30 x. restore the character-class tokenization ⇒ RED: a probe whose filename contains a space
+#                                                 is watched by nothing.
+#       y. read a failed `git status` as a clean tree ⇒ RED: a corrupt index is indistinguishable
+#                                                 from a pristine one.
+#
+#   ONE DIAGNOSIS DEFECT FOUND BY THE MUTATION PASS ITSELF AND FIXED (the F43 class, again): R13's
+#   and R25's shell `fail` banners named only the half of their heredoc that existed before this
+#   round, so breaking the new half printed a sentence about the old one. Both now name every case
+#   they guard — which is the standard R26 already held itself to.
 
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -421,7 +485,7 @@ echo "== R13. AN EVIDENCE DESTINATION MUST STAY INSIDE THE REPO"
 # DEFAULT destination interpolates an unvalidated surface `name`. Later writes create parents and
 # TRUNCATE the resolved target, so a typo'd or hostile destination silently destroys a file.
 R13="$WORK/paths"; mkrepo "$R13"
-python3 - "$LIVE" "$R13" <<'PY' || fail "R13: an evidence destination can resolve outside the repo"
+python3 - "$LIVE" "$R13" <<'PY' || fail "R13: an evidence destination can resolve outside the repo, or land somewhere git will never carry it"
 import importlib.util, os, subprocess, sys, tempfile
 spec = importlib.util.spec_from_file_location("L", sys.argv[1])
 L = importlib.util.module_from_spec(spec); spec.loader.exec_module(L)
@@ -1234,7 +1298,7 @@ echo "== R22. A BLOCKED PAUSE/AUTORUN MUST PROVE IT WAS BLOCKED  [F24, F23]"
 # citing this helper, but autorun's allowlist did not list it, so on the exact failure path the
 # instruction was written for the command could not close at all.
 R22="$WORK/blocked-proof"; mkrepo "$R22"
-python3 - "$PLUGIN" "$R22" <<'PY' || fail "R22: a blocked pause/autorun closeout is not grounded in what actually failed"
+python3 - "$PLUGIN" "$R22" <<'PY' || fail "R22: a blocked pause/autorun closeout is not grounded in what actually failed, or an UNATTEMPTED pause closes as blocked"
 import os, sys
 plugin, repo = sys.argv[1], sys.argv[2]
 sys.path.insert(0, os.path.join(plugin, "scripts", "hooks"))
@@ -1791,7 +1855,7 @@ echo "== R25. A MANDATED PHASE-0 STOP MUST HAVE A LEGAL CLOSE  [F36]"
 # A dirty tree is not any helper's exit code, so no helper citation could ground it honestly — the
 # close is grounded by RE-DERIVING the condition read-only, and refused when it no longer holds.
 R25="$WORK/uninstall-dirty"; mkrepo "$R25"
-python3 - "$PLUGIN" "$R25" <<'PY' || fail "R25: uninstall's mandated dirty-tree stop has no legal close"
+python3 - "$PLUGIN" "$R25" <<'PY' || fail "R25: uninstall's mandated dirty-tree stop has no legal close, or a command can manufacture the condition it then closes as blocked by"
 import os, subprocess, sys
 plugin, repo = sys.argv[1], sys.argv[2]
 sys.path.insert(0, os.path.join(plugin, "scripts", "hooks"))

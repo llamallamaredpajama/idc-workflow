@@ -151,6 +151,10 @@ _RECEIPT_HELPER = "idc_receipt_check.py"
 # pause/resume blocker citing it is RE-DERIVED by re-running it — grounded only when the re-run
 # actually fails, with the cited exit MATCHED against the re-run's own exit.
 _PAUSE_HELPER = "idc_pause_check.py"
+# The pause LIFECYCLE helper (the record writer/clearer), distinct from the quiescence READER above.
+# A resume blocker comes from this one — "the pause record could not be removed" — and is grounded by
+# re-reading the record, not by re-running the quiescence check, which is a different question.
+_PAUSE_STATE_HELPER = "idc_pause_state.py"
 _INTAKE_HELPERS = {"idc_intake_manifest.py", "idc_pr_finish.py"}
 # The janitor scanner's DOCUMENTED blocked exit (ground truth could not be established). Exit 1 is a
 # COMPLETED scan with findings (a `complete`, not blocked); only exit 2 grounds `blocked_external`
@@ -174,8 +178,14 @@ _BLOCKER_HELPERS = {
     "init":        {_RECEIPT_HELPER},
     "update":      {_RECEIPT_HELPER},
     "uninstall":   {_RECEIPT_HELPER},
-    "pause":       {_PAUSE_HELPER},
-    "resume":      {_PAUSE_HELPER},
+    "pause":       {_PAUSE_HELPER, _PAUSE_STATE_HELPER},
+    # `/idc:resume`'s two ways of being genuinely blocked are DIFFERENT helpers, and listing only the
+    # quiescence reader left the commoner one with no legal terminal outcome at all: when the pause
+    # RECORD cannot be removed, `commands/resume.md` step 1 rightly says stop, but `complete` needs
+    # the record gone and no blocker could cite the helper that actually failed. Each is re-derived on
+    # its own terms in `_check_blocker` — a surviving record for the state helper, a failing re-run for
+    # the quiescence reader — so widening the list adds no way to invent a blocker.
+    "resume":      {_PAUSE_HELPER, _PAUSE_STATE_HELPER},
 }
 
 
@@ -281,6 +291,24 @@ def _check_blocker(command: str, refs: dict, repo: str, session: str) -> Closeou
                          "blocked_external citing the receipt checker requires a re-run to actually FAIL "
                          "(an invalid receipt or a modified/missing stamped file); the read-only re-run "
                          "passed — there is no deterministic failure to ground a blocked stop")
+    elif base == _PAUSE_STATE_HELPER:
+        # THE DEADLOCK THIS RESOLVES. `/idc:resume` clears the pause record; when the REMOVAL fails
+        # (an unwritable path), `commands/resume.md` step 1 correctly says STOP — resuming over a
+        # surviving record is the worst case, because the run starts working again while the Stop gate
+        # still reads that record and allows an undrained walk-away. But `complete` requires the record
+        # to be GONE, and the only other terminal status had no grounding path for this helper, so the
+        # honest outcome was unreachable: three Stop blocks, then the anti-nag bound loud-fail-allows,
+        # and the record is left stranded with nothing recording why.
+        #
+        # The blocker is grounded by RE-DERIVING the same fact, not by trusting the diagnostic: the
+        # record must still be there. If it is gone the clear actually worked, and the honest close is
+        # `complete` — a blocker citing a helper that has since succeeded is refused, exactly as the
+        # pause-quiescence branch below refuses one whose re-run passes.
+        if _pause_record(repo) is None:
+            return _fail("blocked-external-pause-state-not-failing",
+                         "blocked_external citing the pause-state helper requires the pause record to "
+                         "still be present (that is what 'the record could not be cleared' means); no "
+                         "record remains, so the clear succeeded — close as complete instead")
     elif base == _PAUSE_HELPER:
         # RE-RUN the pause quiescence reader READ-ONLY. A pause/resume blocker is grounded ONLY when the
         # re-run actually FAILS, and the cited exit must MATCH the re-run's own exit — so "I could not
@@ -470,6 +498,44 @@ def _claim_resume_oracle(refs: dict, repo: str, session: str) -> CloseoutResult:
                      "/idc:resume complete requires a fresh, valid next-action oracle read for this repo "
                      "(the board is what the run resumes FROM) — it could not be established")
     return CloseoutResult(True, "ok", "resume handoff re-derived from a live oracle read", {})
+
+
+def _claim_resume_survey(refs: dict, repo: str, session: str) -> CloseoutResult:
+    """`/idc:resume complete` (3/3) — the half-done survey was actually RUN, and its verdict is durable.
+
+    THE GAP THIS CLOSES. `commands/resume.md` step 2 instructs the agent to run the same read-only
+    quiescence reader `/idc:pause` uses and relay its findings before dispatching new work — because
+    a resume can legitimately pick up a run that did NOT stop cleanly (a hard kill, or a pause that
+    was requested and never achieved), and the operator has to be told which. Nothing enforced it:
+    `complete` required only that the record was gone and the oracle was readable, both of which hold
+    whether or not the survey ever happened. An instruction with no check behind it is the same shape
+    as the hand-written evidence record this release exists to refuse.
+
+    RE-DERIVED, NOT TRUSTED. This does not look for a claim that the agent ran the check; it RUNS the
+    reader here, read-only, and records the verdict in the closeout evidence. So `complete` carries
+    proof of the survey rather than a promise of one, and the result is durable for whoever reads the
+    ledger later.
+
+    IN-FLIGHT IS NOT A FAILURE HERE, deliberately. `pause-ready: in-flight` means the previous stop
+    was not clean, which is precisely a state resume exists to pick up; failing the closeout on it
+    would leave a genuinely-resumable run with no legal way to close. Only INDETERMINATE (exit 2)
+    fails: there the survey did not establish anything, so claiming it ran would be the false green.
+    """
+    code, verdict, findings = _pause_check_result(repo)
+    if code == 2:
+        detail = (findings[0].get("ref") if findings and isinstance(findings[0], dict) else "") or "no detail"
+        return _fail("resume-survey-unprovable",
+                     f"/idc:resume complete requires the half-done survey to actually establish "
+                     f"something; it could not ({detail}). A resume that cannot tell whether the "
+                     f"previous stop left work half-done has not surveyed anything — fix the board or "
+                     f"ledger read and re-run, or close as blocked_external")
+    return CloseoutResult(
+        True, "ok",
+        f"half-done survey re-derived at closeout: {verdict}"
+        + (f" ({len(findings)} finding(s) to relay)" if code == 1 else ""),
+        {"resume_survey": {"verdict": verdict, "exit": code,
+                           "findings": [f.get("ref") for f in findings
+                                        if isinstance(f, dict) and f.get("ref")]}})
 
 
 def _check_no_action(command: str, repo: str) -> CloseoutResult:
@@ -2699,7 +2765,8 @@ _CLAIM_TABLE = {
     },
     "resume": {
         "complete": (Claim("resume-cleared", _claim_resume_cleared),
-                     Claim("resume-oracle-handoff", _claim_resume_oracle)),
+                     Claim("resume-oracle-handoff", _claim_resume_oracle),
+                     Claim("resume-survey", _claim_resume_survey)),
         "blocked_external": (_claim_blocker_for("resume"),),
     },
     "janitor": {
@@ -2751,11 +2818,20 @@ def _walk_claim_table(command: str, status: str, refs: dict, repo: str, session:
         return CloseoutResult(
             False, "status-not-claimable",
             f"/idc:{command} {status!r} has no evidence-derivation contract — not claimable (fail closed)", {})
+    # A claim may return FACTS it re-derived, not just a pass/fail. Those were being dropped, so a
+    # closeout that proved something at validation time left no trace of what it proved. Collecting
+    # them lets a claim make its derivation DURABLE (see `_claim_resume_survey`, whose whole point is
+    # that the half-done survey provably ran and its verdict is on the record afterwards). Additive:
+    # a claim that returns nothing contributes nothing, exactly as before.
+    derived: dict = {}
     for claim in claims:
         result = claim.derive(refs, repo, session)
         if not result.ok:
             return result
-    return CloseoutResult(True, "ok", f"{command} {status} closeout re-derived from durable state", {})
+        if isinstance(result.normalized_evidence, dict):
+            derived.update(result.normalized_evidence)
+    return CloseoutResult(True, "ok", f"{command} {status} closeout re-derived from durable state",
+                          derived)
 
 
 def args_digest(text: str) -> str:
@@ -2943,6 +3019,12 @@ def validate_closeout(command: str, status: str, evidence: object,
     result = _walk_claim_table(command, status, refs, repo or "", session or "")
     if not result.ok:
         return result
+    # Carry anything the claims RE-DERIVED into the persisted evidence, under its own key so it can
+    # never be confused with what the caller asserted. `derived` is the record's own account of what
+    # was proven at closeout; `refs` remains what the command claimed on the way in.
+    if result.normalized_evidence:
+        return CloseoutResult(True, "ok", "closeout valid",
+                              {**evidence, "derived": dict(result.normalized_evidence)})
     return CloseoutResult(True, "ok", "closeout valid", evidence)
 
 

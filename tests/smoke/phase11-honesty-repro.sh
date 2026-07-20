@@ -656,4 +656,66 @@ if "DISTINCTIVE-CAUSE" not in (line or ""):
 PY
 echo "  ok R16: a crashed checker reports its exit code and the stderr tail that names the cause"
 
+echo "== R7/R8. /idc:resume MUST HAVE A LEGAL OUTCOME, AND MUST PROVE ITS OWN SURVEY  [T4]"
+# R7 — when the pause record cannot be REMOVED, resume.md correctly says STOP. But `complete` requires
+# the record to be gone, and `blocked_external` had no grounding path for the pause-state helper, so
+# the honest outcome was unreachable: three Stop blocks, the anti-nag bound loud-fail-allows, and the
+# record is stranded with nothing recording why.
+# R8 — `complete` required only record-absent + oracle-readable, so an agent that skipped the
+# half-done survey resume.md tells it to run closed exactly like one that ran it.
+R7="$WORK/resume-outcomes"; mkrepo "$R7"
+python3 - "$PLUGIN" "$R7" <<'PY' || fail "R7/R8: resume's closeout does not hold"
+import importlib.util, os, sys
+plugin, repo = sys.argv[1], sys.argv[2]
+sys.path.insert(0, os.path.join(plugin, "scripts", "hooks"))
+sys.path.insert(0, os.path.join(plugin, "scripts"))
+import idc_command_contract as C
+
+EV = {"schema_version": 1, "refs": {}}
+
+def blocker_ev(helper, exit_code, diagnostic):
+    return {"schema_version": 1,
+            "refs": {"blocker": {"helper": helper, "exit": exit_code, "diagnostic": diagnostic}}}
+
+# R7 — a SURVIVING pause record is what "the clear failed" means, so it grounds the blocker.
+with open(os.path.join(repo, ".idc-pause-state.json"), "w", encoding="utf-8") as fh:
+    fh.write('{"version":1,"state":"paused","session_id":"s1","requested_ts":1.0,'
+             '"confirmed_by":"s1","confirmed_ts":2.0,'
+             '"quiescence":{"verdict":"ok","checked_ts":2.0}}')
+v = C.validate_closeout("resume", "complete", EV, repo=repo, session="s1")
+if v.ok:
+    sys.exit("resume closed COMPLETE while the pause record still exists")
+v = C.validate_closeout("resume", "blocked_external",
+                        blocker_ev("idc_pause_state.py", 2, "could not remove the pause record"),
+                        repo=repo, session="s1")
+if not v.ok:
+    sys.exit(f"a resume whose pause-record clear FAILED has no legal terminal outcome: "
+             f"blocked_external was refused with {v.reason_code!r} ({v.message})")
+
+# ...and the blocker must be REFUSED once the record is actually gone — otherwise "blocked" becomes a
+# free pass rather than a re-derived fact.
+os.remove(os.path.join(repo, ".idc-pause-state.json"))
+v = C.validate_closeout("resume", "blocked_external",
+                        blocker_ev("idc_pause_state.py", 2, "could not remove the pause record"),
+                        repo=repo, session="s1")
+if v.ok:
+    sys.exit("blocked_external was accepted although the pause record is gone — the clear succeeded, "
+             "so the honest close is complete")
+
+# R8 — the half-done survey must be RE-DERIVED at closeout, not taken on trust. Plant a real
+# obligation: the survey now has a finding, and `complete` must carry it rather than ignore it.
+import idc_ledger
+idc_ledger.set_taint(repo, "mid_finish", key="99", session_id="s1", pr="7", branch="b")
+v = C.validate_closeout("resume", "complete", EV, repo=repo, session="s1")
+survey = ((v.normalized_evidence or {}).get("derived") or {}).get("resume_survey") if v.ok else None
+if not v.ok:
+    sys.exit(f"resume over a NOT-cleanly-stopped run must still be closeable — that is what resume is "
+             f"for — but complete was refused with {v.reason_code!r}")
+if not survey:
+    sys.exit("resume closed complete with NO record that the half-done survey ever ran")
+if survey.get("exit") != 1 or "#99" not in (survey.get("findings") or []):
+    sys.exit(f"the recorded survey does not reflect the real half-done work: {survey!r}")
+PY
+echo "  ok R7/R8: a failed record-clear is a grounded blocker; complete carries a re-derived survey"
+
 echo "phase11-honesty-repro: OK"

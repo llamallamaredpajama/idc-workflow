@@ -263,12 +263,50 @@ def _dirty_tree_still_holds(repo: str):
 
 _ARCHIVE_EXEMPT = re.compile(r"^\?\? idc-archive-.*\.tar\.gz$")
 _REPO_CONDITIONS = {"dirty_tree": _dirty_tree_still_holds}
+
+
+def entry_conditions(cwd: str) -> dict:
+    """Which blocking conditions ALREADY HELD when this invocation opened — `{name: bool}`, over the
+    WHOLE condition table rather than the conditions somebody remembered to snapshot.
+
+    THE FACT RE-DERIVATION CANNOT SUPPLY. Re-deriving a condition read-only at closeout proves it
+    holds NOW, which is what refuses an invented blocker. It says nothing about whether the command
+    FOUND that condition or MADE it: `/idc:uninstall` can start in a clean repo, dirty a tracked file
+    as part of its own work, and the finish-time re-derivation then sees its own changes and accepts
+    `blocked_external`. Per-command narrowing does not help — the command really is allowed to cite
+    this condition; what it is not allowed to do is manufacture it.
+
+    A blocked stop is a claim about an ATTEMPT, so it needs a fact about the attempt, and that fact
+    is not recoverable afterwards. It is captured HERE, before the command has done anything, and
+    stamped on the lifecycle record the entry gate opens. An unestablished condition records False:
+    a command that could not be shown to be blocked at entry cannot cite that block at finish."""
+    snapshot = {}
+    for name, still_holds in _REPO_CONDITIONS.items():
+        try:
+            holds, _detail = still_holds(cwd)
+        except Exception:  # noqa: BLE001 — an unestablished entry condition is never a citable one
+            holds = False
+        snapshot[name] = bool(holds)
+    return snapshot
+
+
+def _entry_conditions_at_start(repo: str, command: str, session: str):
+    """The `entry_conditions` snapshot on THIS session's ACTIVE record for `command`, or None when
+    there is no such record or it carries no snapshot. Read tolerantly — an unreadable snapshot is
+    "not proven at entry", which fails the claim CLOSED."""
+    try:
+        for rec in idc_ledger.active_commands(repo, session):
+            if rec.get("command") == command and isinstance(rec.get("entry_conditions"), dict):
+                return rec["entry_conditions"]
+    except Exception:  # noqa: BLE001
+        return None
+    return None
 # Which commands may cite which condition — taken from the Phase-0 stops their playbooks MANDATE.
 _CONDITIONS_FOR_COMMAND = {"uninstall": {"dirty_tree"}}
 
 
 def _check_blocking_condition(command: str, condition: str, blocker: dict,
-                              repo: str) -> CloseoutResult:
+                              repo: str, session: str) -> CloseoutResult:
     """`blocked_external` grounded by a REPO CONDITION re-derived read-only — see the block above."""
     if condition not in _REPO_CONDITIONS:
         return _fail("blocked-external-unknown-condition",
@@ -281,11 +319,30 @@ def _check_blocking_condition(command: str, condition: str, blocker: dict,
                      f"(citable: {sorted(_CONDITIONS_FOR_COMMAND.get(command, set()))})")
     if not _ne_str(blocker.get("diagnostic")):
         return _fail("blocked-external-no-diagnostic", "refs.blocker.diagnostic must be a concise reason")
+    # BOTH FACTS, and neither is sufficient alone. The re-derivation refuses an INVENTED blocker; the
+    # entry snapshot refuses a MANUFACTURED one — a command that started clean and dirtied the tree
+    # itself. Without the snapshot, "the condition holds now" is equally consistent with the command
+    # having FOUND it and with the command having CAUSED it. Re-derivation runs first because it
+    # answers the more basic question, and its refusal is the one an operator in a healthy repo needs.
     holds, detail = _REPO_CONDITIONS[condition](repo)
     if not holds:
         return _fail("blocked-external-condition-not-blocked",
                      f"blocked_external citing the condition {condition!r} is RE-DERIVED read-only at "
                      f"closeout and it does not hold: {detail}")
+    at_entry = _entry_conditions_at_start(repo, command, session)
+    if at_entry is None:
+        return _fail("blocked-external-condition-no-entry-snapshot",
+                     f"blocked_external citing the condition {condition!r} requires THIS session's "
+                     f"ACTIVE /idc:{command} record carrying the entry-condition snapshot the entry "
+                     "gate stamps — none found (no record, a foreign session's, or a record opened "
+                     "before the snapshot existed). Without it there is nothing distinguishing a "
+                     "condition the command found from one it created")
+    if not at_entry.get(condition):
+        return _fail("blocked-external-condition-not-at-entry",
+                     f"the condition {condition!r} did NOT hold when this /idc:{command} run opened "
+                     "its record, so whatever makes it hold now arrived DURING the run — a command "
+                     "cannot manufacture the condition it then closes as blocked by. Undo what this "
+                     "run changed and close honestly, or cite the cause that is actually external")
     return CloseoutResult(True, "ok", "closeout valid", {"blocked_condition": condition})
 
 
@@ -304,7 +361,7 @@ def _check_blocker(command: str, refs: dict, repo: str, session: str) -> Closeou
     # exit, so there is no helper to name and no exit to match. A blocker carrying NEITHER a condition
     # nor a helper still falls through to the helper refusals below, unchanged.
     if _ne_str(blocker.get("condition")):
-        return _check_blocking_condition(command, str(blocker["condition"]), blocker, repo)
+        return _check_blocking_condition(command, str(blocker["condition"]), blocker, repo, session)
     if not _ne_str(blocker.get("helper")):
         return _fail("blocked-external-no-helper", "refs.blocker.helper must name the failing helper")
     if not _known_helper(blocker.get("helper")):
@@ -442,6 +499,27 @@ def _check_blocker(command: str, refs: dict, repo: str, session: str) -> Closeou
                              "blocked_external citing a failed pause-record WRITE requires the pause to "
                              "be unrecorded; this repo carries a CONFIRMED pause, so the write "
                              "succeeded — close as complete instead")
+            # …AND THE ATTEMPT MUST HAVE HAPPENED. Permissions alone are a fact about the REPO, not
+            # about this run: with the git directory unwritable, any /idc:pause could skip
+            # `idc_pause_state.py confirm` entirely and submit a typed exit + diagnostic, closing an
+            # UNATTEMPTED pause as blocked. `commands/pause.md` step 1 runs `request` before anything
+            # can fail, and `confirm` leaves the record at `pause-requested` when it cannot finish —
+            # so a run that genuinely tried leaves exactly that record behind, owned by this session.
+            # It is the one artifact the attempt produces in the very state being claimed, which is
+            # why the grounding is here rather than in a receipt that could not be written either.
+            if not isinstance(rec, dict) or rec.get("state") != _pause_state_const(
+                    "REQUESTED", "pause-requested"):
+                return _fail("blocked-external-pause-not-attempted",
+                             "blocked_external citing a failed pause-record WRITE requires THIS "
+                             "repo to carry the `pause-requested` record the attempt leaves behind "
+                             "(`idc_pause_state.py request`, then a `confirm` that could not finish). "
+                             "There is none, so nothing shows this run tried to pause at all — an "
+                             "unattempted pause is not a denied one")
+            if _ne_str(rec.get("session_id")) and str(rec.get("session_id")) != str(session):
+                return _fail("blocked-external-pause-not-attempted",
+                             f"the `pause-requested` record in this repo was left by session "
+                             f"{rec.get('session_id')!r}, not by {session!r} — another session's "
+                             "abandoned attempt cannot ground this run's blocked stop")
             if not _pause_state_would_fail(repo, operation):
                 return _fail("blocked-external-pause-state-not-failing",
                              "blocked_external citing a failed pause-record WRITE requires recording to "
@@ -564,6 +642,17 @@ def _dir_writable(path: str) -> bool:
     return os.access(d, os.W_OK | os.X_OK)
 
 
+def _pause_state_const(name: str, fallback: str) -> str:
+    """A state string read from `idc_pause_state` itself, never re-typed here. The pause writer owns
+    these values; a copy in the reader is how a writer and a reader come to disagree about the same
+    record, which is the whole of F28 and F51."""
+    try:
+        import idc_pause_state as PAUSE  # noqa: E402 — lazy
+        return getattr(PAUSE, name, fallback)
+    except Exception:  # noqa: BLE001 — the fallback is this file's last-resort literal
+        return fallback
+
+
 def _pause_state_would_fail(repo: str, operation: str) -> bool:
     """True only when the pause-state `operation` can be POSITIVELY established as still impossible.
 
@@ -572,18 +661,29 @@ def _pause_state_would_fail(repo: str, operation: str) -> bool:
     claims was blocked actually is. Anything we cannot establish returns False, which REFUSES the
     blocker — an unprovable blocker is never a proven one.
 
-      * `clear`  — removing the record needs write permission on the directory holding it.
-      * `write`  — recording a pause needs that too, AND a git directory the confirmation mark can be
-                   written to (a pause whose mark cannot be recorded is refused by `confirm`, so it is
-                   a genuine blocker even when the repo root is fine).
-    """
+      * `clear`  — removing the record needs write permission on the directory holding it, AND, when
+                   this checkout carries a confirmation witness, the ability to delete THAT too: a
+                   clear that leaves the witness behind re-arms the replay it exists to prevent, so
+                   `idc_pause_state.clear` raises rather than reporting success.
+      * `write`  — recording a pause needs the record's directory, AND a git directory the
+                   confirmation mark can be written to (a pause whose mark cannot be recorded is
+                   refused by `confirm`, so it is a genuine blocker even when the repo root is fine).
+
+    WHY THE WITNESS ARM IS NOT A DETAIL. Without it the clear blocker was satisfiable ONLY when the
+    repo root was unwritable — and the accepted closeout is then persisted by `command_finish` into
+    that same root, where it fails. The one state that granted the blocker was the state that made
+    recording it impossible, so the legal close this branch exists to provide was unreachable and the
+    record stayed open anyway. A witness that cannot be deleted while the root is fine is a real
+    blocked clear whose closeout CAN be written down."""
     try:
         import idc_pause_state as PAUSE  # noqa: E402 — lazy
         if not _dir_writable(os.path.dirname(os.path.abspath(PAUSE.pause_path(repo)))):
             return True
-        if operation != "write":
-            return False
         witness = PAUSE.witness_path(repo)
+        if operation != "write":
+            # A witness that exists and cannot be removed makes the clear fail — see clear/_finish_clear.
+            return bool(witness) and os.path.exists(witness) and not _dir_writable(
+                os.path.dirname(witness))
         return witness is None or not _dir_writable(os.path.dirname(witness))
     except Exception:  # noqa: BLE001 — an unestablished blocker is refused, never granted
         return False
@@ -3270,7 +3370,8 @@ def register_start(cwd: str, session_id: str, command: str, plugin_version: str,
         build_requested=build_requested, plan_admitted=plan_admitted, uninstall_flags=uninstall_flags,
         nonce=_make_nonce(), build_frontier=build_frontier,
         uninstall_receipt_source=uninstall_receipt_source,
-        uninstall_receipt_sha256=uninstall_receipt_sha256)
+        uninstall_receipt_sha256=uninstall_receipt_sha256,
+        entry_conditions=entry_conditions(cwd))
 
 
 def active_records(cwd: str, session_id: str) -> list:

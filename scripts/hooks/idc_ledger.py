@@ -475,7 +475,8 @@ class ObligationConflict(Exception):
 def command_start(cwd, session_id, command, plugin_version, args_sha256, source,
                   intake_manifest=None, intake_units=None, recirc_requested=None,
                   build_requested=None, plan_admitted=None, uninstall_flags=None, nonce=None,
-                  build_frontier=None, uninstall_receipt_source=None, uninstall_receipt_sha256=None):
+                  build_frontier=None, uninstall_receipt_source=None, uninstall_receipt_sha256=None,
+                  entry_conditions=None):
     """Atomic UPSERT of the active command record by (session_id, command) — never duplicates an
     active record (a re-entry of the same command in the same session updates the one record in
     place). REPO-GATED: a silent no-op outside a governed repo (returns `{}`). Preserves the taint
@@ -543,6 +544,16 @@ def command_start(cwd, session_id, command, plugin_version, args_sha256, source,
     # cannot back a new run.
     if nonce:
         rec["nonce"] = str(nonce)
+    # WHICH BLOCKING CONDITIONS ALREADY HELD WHEN THIS RECORD OPENED. A `blocked_external` grounded by
+    # a repo CONDITION (a dirty tree, an unwritable pause path) is re-derived read-only at closeout,
+    # which proves the condition holds NOW and says nothing about whether the command found it or
+    # MADE it: /idc:uninstall can start clean, dirty a tracked file as part of its own work, and the
+    # finish-time re-derivation then sees its own changes. The claim is about an ATTEMPT, so it needs
+    # a fact about the attempt, and that fact cannot be re-derived afterwards — it has to be captured
+    # here, before the command does anything. The closeout requires the cited condition to have been
+    # true at entry AND to still hold.
+    if entry_conditions is not None:
+        rec["entry_conditions"] = {str(k): bool(v) for k, v in dict(entry_conditions).items()}
     with _write_lock(cwd):  # read-modify-write must be atomic vs concurrent writers (no lost records)
         raw = _read_raw(cwd)
         commands = _read_commands(cwd, _raw=raw)
@@ -608,6 +619,12 @@ def command_start(cwd, session_id, command, plugin_version, args_sha256, source,
                 # re-start supplied none, so a diagnostic report stays bound to the same record.
                 if not nonce and c.get("nonce"):
                     rec["nonce"] = c.get("nonce")
+                # THE ENTRY SNAPSHOT IS TAKEN ONCE, at the start of the OBLIGATION — never re-taken on
+                # re-entry. Re-stamping it would hand back the exact loophole it closes: run once,
+                # dirty a tracked file, re-enter, and the "condition at entry" is now the condition
+                # the first run created.
+                if isinstance(c.get("entry_conditions"), dict):
+                    rec["entry_conditions"] = c["entry_conditions"]
                 commands[i] = rec
                 replaced = True
                 break

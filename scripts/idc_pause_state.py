@@ -198,23 +198,45 @@ def _record_confirmation(cwd, rec) -> bool:
         prefix=".idc-pause-witness.", label="pause-witness")
 
 
-def _clear_confirmation(cwd) -> None:
-    """Drop the witness when the pause is lifted. Best-effort: a witness with no record grants
-    nothing (every reader looks at the record first), so a failure here cannot manufacture a pause."""
+def _clear_confirmation(cwd) -> bool:
+    """Drop the witness when the pause is lifted. Returns whether the checkout is now witness-FREE.
+
+    NOT BEST-EFFORT, and the earlier claim that it could be was wrong in a way that mattered. It
+    argued a surviving witness "grants nothing, because every reader looks at the record first" —
+    true of the instant after the clear, and false of the next one. The witness is what makes a pause
+    record UNFORGEABLE (`_is_paused` honours a record only when it matches the recorded digest), so a
+    witness that outlives its record means a later hand-written COPY of that same record is honoured
+    again, with no new confirmation and no quiescence check. That is the replay this witness exists to
+    prevent, re-armed by the clear that was supposed to end it.
+
+    An already-absent witness is a success (that is the state the caller wants). Only a removal that
+    FAILED reports False, and the caller raises."""
     path = witness_path(cwd)
     if path is None:
-        return
+        return True                 # no git directory ⇒ no witness can exist here
     try:
         os.remove(path)
+    except FileNotFoundError:
+        return True
     except OSError:
-        pass
+        return False
+    return True
 
 
 def is_paused(cwd) -> bool:
-    """True ONLY for a CONFIRMED pause. A `pause-requested` record is not a pause: it means the pause
-    was asked for and never proven honest, so nothing may treat it as a clean stop."""
+    """True ONLY for a CONFIRMED pause — a `paused` record CORROBORATED by this checkout's witness.
+
+    ONE DEFINITION OF "PAUSED", read by everyone. A `pause-requested` record is not a pause: it means
+    the pause was asked for and never proven honest. Neither is a record whose witness does not match
+    it, and that half used to be missing here while the Stop gate demanded it — so `/idc:pause
+    --status` told the operator the repo was paused about a record Stop would refuse to honour, which
+    is the writer-⇔-reader split F28 named, arriving on the witness axis. A reader that answers a
+    different question from the gate is a reader that lies to whoever asks it."""
     rec = read_record(cwd)
-    return bool(rec) and rec.get("state") == PAUSED
+    if not rec or rec.get("state") != PAUSED:
+        return False
+    witness = read_witness(cwd)
+    return bool(witness) and witness == record_digest(rec)
 
 
 # ── atomic write ─────────────────────────────────────────────────────────────────────────────────
@@ -331,14 +353,29 @@ def clear(cwd):
     try:
         os.remove(path)
     except FileNotFoundError:
-        _clear_confirmation(cwd)
+        _finish_clear(cwd)
         return rec
     except OSError as e:
         raise ClearFailed(f"could not remove the pause record {path}: {e}") from e
     # Only after the record is gone: the witness alone proves nothing, but leaving it behind would let
     # a later hand-written copy of the SAME record be honoured again.
-    _clear_confirmation(cwd)
+    _finish_clear(cwd)
     return rec
+
+
+def _finish_clear(cwd) -> None:
+    """Drop the witness, and RAISE when it survives — the second half of removing a pause.
+
+    A clear that removes the record and silently leaves the witness reports success while re-arming
+    exactly the replay the witness was added to stop: re-plant a copy of the old record and it is
+    honoured again with no new confirmation. The witness is half the pause's identity, so a clear that
+    removes only the other half has not cleared the pause and must not say it did."""
+    if _clear_confirmation(cwd):
+        return
+    raise ClearFailed(
+        f"the pause record was removed but its confirmation witness {witness_path(cwd)} could not be "
+        "deleted, so a re-planted copy of that record would be honoured again with no new "
+        "confirmation. Make the git directory writable and re-run the resume")
 
 
 # ── closing the open pipeline records a pause interrupts ─────────────────────────────────────────
@@ -427,14 +464,22 @@ def ensure_gitignored(repo_root) -> bool:
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────────────────────────
-def _describe(rec) -> str:
+def _describe(cwd, rec) -> str:
+    """The human line `--status` prints. It takes `cwd` as well as the record because "paused" is not
+    a property of the record alone — see `is_paused`. A record that says `paused` without a matching
+    witness is one the Stop gate REFUSES, and printing it as a pause tells the operator the run is
+    safely stopped while the gate is about to block their stop."""
     if rec is None:
         return "pause: none"
     who = rec.get("session_id") or "?"
     what = rec.get("command")
     tail = f" (command {what})" if what else ""
     if rec.get("state") == PAUSED:
-        return f"pause: paused by {who}{tail}"
+        if is_paused(cwd):
+            return f"pause: paused by {who}{tail}"
+        return (f"pause: UNCORROBORATED record from {who}{tail} — it claims a confirmed pause, but "
+                "this checkout recorded no matching confirmation, so no gate will honour it. Re-run "
+                "`idc_pause_state.py confirm` here to take the pause for real")
     return f"pause: requested by {who}{tail} — NOT yet confirmed as a clean stop"
 
 
@@ -443,7 +488,7 @@ def _cmd_status(args) -> int:
     if args.json:
         print(json.dumps({"paused": is_paused(args.cwd), "record": rec}, indent=2, sort_keys=True))
     else:
-        print(_describe(rec))
+        print(_describe(args.cwd, rec))
     return 0
 
 
@@ -459,7 +504,7 @@ def _cmd_request(args) -> int:
         print("idc-pause-state: the pause record did not persist (is the repo root writable?)",
               file=sys.stderr)
         return 1
-    print("pause: requested" if created else f"pause: already-recorded — {_describe(rec)}")
+    print("pause: requested" if created else f"pause: already-recorded — {_describe(args.cwd, rec)}")
     return 0
 
 

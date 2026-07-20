@@ -1227,18 +1227,49 @@ if v.ok:
     sys.exit("/idc:pause closed as blocked_external in a repo where the pause could be recorded — a "
              "session can walk away from a pause it could have taken honestly, claiming it was denied")
 
-# ...and when recording really IS impossible, the honest outcome is reachable. The git directory is
-# where the confirmation mark goes, so a repo whose git dir cannot be written to genuinely cannot
-# record a pause even though its root is fine.
+# THE UNATTEMPTED PAUSE (F45). Making recording impossible is a fact about the REPO, not about this
+# run: if permissions alone grounded the blocker, any /idc:pause could skip `idc_pause_state.py
+# confirm` entirely, type an exit and a diagnostic, and close as blocked without ever trying. So the
+# same unwritable git directory, with NO attempt behind it, must still be refused.
 gitdir = os.path.join(repo, ".git")
 os.chmod(gitdir, 0o555)
 try:
     v = C.validate_closeout("pause", "blocked_external", blocker_ev(1), repo=repo, session="s1")
-    if not v.ok:
-        sys.exit(f"a pause whose confirmation could not be recorded has no legal terminal outcome: "
-                 f"{v.reason_code} ({v.message})")
+    if v.ok:
+        sys.exit("/idc:pause closed as blocked citing a failed record WRITE it never attempted — the "
+                 "repo's permissions were the only evidence, and those are true of every run in this "
+                 "repo, including the ones that walked away")
 finally:
     os.chmod(gitdir, 0o755)
+
+# ...and when the run really DID try and recording really IS impossible, the honest outcome is
+# reachable. `commands/pause.md` step 1 runs `request` before anything can fail, and a `confirm` that
+# cannot write its mark leaves that record at `pause-requested` — the one artifact the attempt
+# produces in the very state being claimed. The git directory is where the confirmation mark goes, so
+# a repo whose git dir cannot be written to genuinely cannot record a pause even though its root is fine.
+sys.path.insert(0, os.path.join(plugin, "scripts"))
+import idc_pause_state as PAUSE
+rec, created = PAUSE.request(repo, "s1", command="pause")
+if not created:
+    sys.exit("precondition: the pause request must be recorded before the attempt can be witnessed")
+os.chmod(gitdir, 0o555)
+try:
+    _rec, code, _verdict, _findings = PAUSE.confirm(repo, "s1")
+    if code == 0:
+        sys.exit("precondition: `confirm` must FAIL with an unwritable git directory, or this case is "
+                 "not testing the state it claims")
+    v = C.validate_closeout("pause", "blocked_external", blocker_ev(1), repo=repo, session="s1")
+    if not v.ok:
+        sys.exit(f"a pause that was really attempted and whose confirmation could not be recorded has "
+                 f"no legal terminal outcome: {v.reason_code} ({v.message})")
+    # ...and another session's abandoned attempt is not this one's evidence.
+    v = C.validate_closeout("pause", "blocked_external", blocker_ev(1), repo=repo, session="s-other")
+    if v.ok:
+        sys.exit("a `pause-requested` record left by a DIFFERENT session grounded this run's blocked "
+                 "stop — an attempt is evidence only for the session that made it")
+finally:
+    os.chmod(gitdir, 0o755)
+os.remove(os.path.join(repo, ".idc-pause-state.json"))
 
 # F23 — /idc:autorun's preflight runs the SAME clear /idc:resume does, so it must be able to close on
 # it. This is the close `commands/autorun.md` prescribes verbatim on `resume: error` (exit 2).
@@ -1743,6 +1774,30 @@ import idc_command_contract as C
 def ev(**blocker):
     return {"schema_version": 1, "refs": {"blocker": blocker}}
 
+
+# The ledger file is transient working state and a governed repo gitignores it (the scaffold wires
+# `idc_ledger.ensure_gitignored`). Do the same here, and COMMIT it, or opening a record would itself
+# dirty the tree — which would make every case below reason about the test harness's own footprint
+# instead of about the operator's changes.
+import idc_ledger
+idc_ledger.ensure_gitignored(repo)
+subprocess.run(["git", "-C", repo, "add", ".gitignore"], check=True)
+subprocess.run(["git", "-C", repo, "commit", "-qm", "ignore the ledger"], check=True)
+
+
+def open_uninstall_record(session):
+    """Open the lifecycle record exactly as the entry gate does — which is what stamps the
+    entry-condition snapshot the closeout reads."""
+    rec = C.register_start(repo, session, "uninstall", "0.0.0", "", "user")
+    if not rec:
+        sys.exit(f"precondition: could not open the /idc:uninstall record for {session!r}")
+    return rec
+
+
+# Session s1 opens its record while the repo is CLEAN — the ordinary case, and the one the
+# self-manufactured blocker below depends on.
+open_uninstall_record("s1")
+
 # A CLEAN repo: the claim is refused, because the condition it names does not hold. This is the half
 # that keeps the new door from becoming a way to invent a blocked stop.
 clean = C.validate_closeout("uninstall", "blocked_external",
@@ -1754,15 +1809,43 @@ if clean.ok:
 if clean.reason_code != "blocked-external-condition-not-blocked":
     sys.exit(f"the refusal must name the re-derivation, got {clean.reason_code!r}: {clean.message}")
 
-# ...now the real stop the playbook mandates.
+# THE SELF-MANUFACTURED BLOCKER (F47). s1 started in a clean repo and now dirties a tracked file — as
+# /idc:uninstall genuinely does while it works. Re-deriving the condition read-only says only that it
+# holds NOW, which is equally true of a tree the operator dirtied and of one the command dirtied
+# itself, so per-command narrowing does not stop a command manufacturing its own stop. The record
+# carries what the re-derivation cannot: whether the condition was already there when the run opened.
 with open(os.path.join(repo, "app.py"), "w", encoding="utf-8") as fh:
-    fh.write("edited by the operator\n")
+    fh.write("edited by the command itself\n")
+selfmade = C.validate_closeout("uninstall", "blocked_external",
+                               ev(condition="dirty_tree", diagnostic="uncommitted changes"),
+                               repo=repo, session="s1")
+if selfmade.ok:
+    sys.exit("a /idc:uninstall run that started CLEAN and dirtied a tracked file as part of its own "
+             "work closed as blocked_external on the tree it had just dirtied — the command "
+             "manufactured the condition it then cited")
+if selfmade.reason_code != "blocked-external-condition-not-at-entry":
+    sys.exit(f"the refusal must name the entry snapshot, got {selfmade.reason_code!r}: "
+             f"{selfmade.message}")
+
+# ...now the real stop the playbook mandates: a run that finds the tree ALREADY dirty when it opens.
+open_uninstall_record("s2")
 blocked = C.validate_closeout("uninstall", "blocked_external",
                               ev(condition="dirty_tree", diagnostic="uncommitted operator changes"),
-                              repo=repo, session="s1")
+                              repo=repo, session="s2")
 if not blocked.ok:
     sys.exit(f"the Phase-0 dirty-tree stop the playbook MANDATES has no legal close: "
              f"{blocked.reason_code} — {blocked.message}")
+
+# ...and the snapshot is taken ONCE, at the start of the obligation. If re-entry re-took it, s1 could
+# simply run /idc:uninstall again and inherit the tree its first pass dirtied.
+open_uninstall_record("s1")
+reentered = C.validate_closeout("uninstall", "blocked_external",
+                                ev(condition="dirty_tree", diagnostic="uncommitted changes"),
+                                repo=repo, session="s1")
+if reentered.ok:
+    sys.exit("re-entering /idc:uninstall RE-TOOK the entry snapshot, so the run inherited the dirty "
+             "tree its own first pass created — the snapshot belongs to the obligation, not to the "
+             "latest invocation")
 
 # The archive exemption Phase 0 prints: a re-run must not self-block on its own backup tarball.
 subprocess.run(["git", "-C", repo, "checkout", "--", "app.py"], check=True)
@@ -1784,6 +1867,99 @@ for other in ("build", "janitor", "init"):
                  f"stop for — any command could then touch a file and manufacture a blocked stop")
 PY
 echo "  ok R25: uninstall's mandated dirty-tree stop closes; an invented one, an exempt one and a foreign one do not"
+
+echo "== R29. LIFTING A PAUSE MEANS LIFTING BOTH HALVES OF IT, AND EVERY READER AGREES  [F50, F51]"
+# TWO NEIGHBOURS OF THE SAME FIX. Round 2 made a pause record UNFORGEABLE by corroborating it against
+# a witness in the git directory, and applied that at ONE writer and ONE reader.
+#   F50 — `clear()` removed the record and dropped the witness BEST-EFFORT, reporting success even
+#         when the witness survived. The witness is what makes the record unforgeable, so one that
+#         outlives its record means a later hand-written COPY of that same record is honoured again,
+#         with no new confirmation and no quiescence check: the replay the witness exists to prevent,
+#         re-armed by the clear that was supposed to end it.
+#   F51 — `is_paused()` and `--status` still answered from the record ALONE, so the operator was told
+#         the repo was paused about a record the Stop gate refuses to honour. A reader that answers a
+#         different question from the gate is a reader that lies to whoever asks it.
+R29="$WORK/pause-witness"; mkrepo "$R29"
+python3 - "$PLUGIN" "$R29" <<'PYR29' || fail "R29: a lifted pause leaves a witness that re-arms the replay, or a reader disagrees with the Stop gate about the same record"
+import importlib.util, json, os, shutil, stat, sys
+plugin, repo = sys.argv[1], sys.argv[2]
+sys.path.insert(0, os.path.join(plugin, "scripts"))
+sys.path.insert(0, os.path.join(plugin, "scripts", "hooks"))
+import idc_pause_state as PAUSE
+gate_spec = importlib.util.spec_from_file_location(
+    "G", os.path.join(plugin, "scripts", "hooks", "idc_stop_fixpoint_gate.py"))
+G = importlib.util.module_from_spec(gate_spec); gate_spec.loader.exec_module(G)
+
+PAUSE.request(repo, "s1", command="pause")
+rec, code, verdict, _findings = PAUSE.confirm(repo, "s1")
+if code != 0 or not rec:
+    sys.exit(f"precondition: a quiescent repo must be pausable, got code={code} verdict={verdict!r}")
+witness = PAUSE.witness_path(repo)
+if not os.path.exists(witness):
+    sys.exit("precondition: a real confirm must record its witness in the git directory")
+
+# (1) EVERY READER AGREES ON THE GENUINE PAUSE — the positive control, first, so a guard that simply
+#     refused everything could not pass this case.
+if not (PAUSE.is_paused(repo) and G._is_paused(repo)):
+    sys.exit(f"a genuinely confirmed pause is not seen as paused by both readers: "
+             f"is_paused={PAUSE.is_paused(repo)} stop_gate={G._is_paused(repo)}")
+
+# (2) F51 — STRIP THE WITNESS, KEEP THE RECORD. The Stop gate refuses it; every other reader must
+#     refuse it too, and `--status` must SAY SO rather than printing a confident "paused".
+saved = open(witness, "rb").read()
+os.remove(witness)
+if G._is_paused(repo):
+    sys.exit("precondition: the Stop gate must refuse an uncorroborated record, or this case cannot "
+             "discriminate")
+if PAUSE.is_paused(repo):
+    sys.exit("`is_paused` reports PAUSED for a record the Stop gate refuses — the operator is told "
+             "the run is safely stopped while the gate is about to block their stop")
+described = PAUSE._describe(repo, PAUSE.read_record(repo))
+if "UNCORROBORATED" not in described:
+    sys.exit(f"`--status` must name the uncorroborated record so the operator can act on it, "
+             f"got: {described!r}")
+with open(witness, "wb") as fh:
+    fh.write(saved)
+
+# (3) F50 — A CLEAR THAT CANNOT REMOVE THE WITNESS MUST NOT REPORT SUCCESS. Make the witness's
+#     directory unwritable, keeping the repo root writable, and lift the pause.
+wdir = os.path.dirname(witness)
+mode = stat.S_IMODE(os.stat(wdir).st_mode)
+os.chmod(wdir, 0o555)
+try:
+    try:
+        PAUSE.clear(repo)
+        failed = False
+    except PAUSE.ClearFailed:
+        failed = True
+    if not failed:
+        sys.exit("`clear` reported the pause LIFTED while its confirmation witness survived. "
+                 "Re-planting a copy of that record is then honoured again with no new confirmation "
+                 "and no quiescence check — the replay the witness exists to prevent, re-armed by "
+                 "the clear that was supposed to end it")
+finally:
+    os.chmod(wdir, mode)
+
+# ...and the replay it protects against is real: with the witness still present, put the record back
+# by hand and the Stop gate honours it — which is why the failed clear had to be reported.
+if os.path.exists(witness):
+    with open(PAUSE.pause_path(repo), "w", encoding="utf-8") as fh:
+        json.dump(rec, fh)
+    if not G._is_paused(repo):
+        sys.exit("precondition: a re-planted record matching a surviving witness must be honoured, "
+                 "or the surviving witness costs nothing and F50 is not a finding")
+
+# (4) POSITIVE CONTROL — an ordinary clear, with both halves writable, still succeeds and leaves the
+#     checkout witness-free. Confinement must not become "refuse every clear".
+lifted = PAUSE.clear(repo)
+if lifted is None:
+    sys.exit("a clean clear reported that nothing was paused")
+if os.path.exists(witness):
+    sys.exit("a successful clear left the witness behind")
+if PAUSE.is_paused(repo) or G._is_paused(repo):
+    sys.exit("the pause survived a successful clear")
+PYR29
+echo "  ok R29: an uncorroborated record is refused by every reader and named by --status; a clear that cannot drop the witness fails loudly; a clean clear still lifts the pause"
 
 echo "== R28. THE CREDENTIAL SCRUB IS A PROPERTY OF THE TEXT, NOT A HABIT OF THE CALLER"
 # THE FINDING THIS CLOSES, and why the previous four fixes could not. F1 → F20 → F33 → F35 → F40 are

@@ -218,8 +218,17 @@ def _read_backend(cwd):
     return None
 
 
+# The wave-close checkers whose GAP LINE names the actual items. `_block_reason` tells the operator
+# to "see the `finish-coherence: gap <#s>` line" / "see the `live: gap <name>` line", so the block has
+# to CARRY those lines — they were being dropped, and the sentence pointed at output the operator
+# could no longer see. Naming the items is the difference between a cure they can run and a re-run
+# they have to do first just to find out what broke.
+_FINDING_TOKENS = ("finish-coherence", "live", "acceptance")
+
+
 def _drain_detail(stdout):
-    """A compact human string of the drain's two always-on counts + its verdict, for the block reason."""
+    """A compact human string of the drain's verdict, its two always-on counts, AND the finding lines
+    the block reason tells the operator to read."""
     parts = []
     v = re.search(r"^drain:\s*(.+)$", stdout, re.M)
     if v:
@@ -230,6 +239,12 @@ def _drain_detail(stdout):
     uc = re.search(r"^unplanned_considerations:\s*(\d+)", stdout, re.M)
     if uc:
         parts.append(f"unplanned_considerations={uc.group(1)}")
+    for token in _FINDING_TOKENS:
+        m = re.search(rf"^{re.escape(token)}:\s*(?:gap|error)\b.*$", stdout, re.M)
+        if m:
+            # Bounded: a gap line naming many items is still one line, but it is the checker's output
+            # and this string ends up in a block message.
+            parts.append(" ".join(m.group(0).split())[:400])
     return ", ".join(parts) or "the pipe is not at a whole-pipe fixpoint"
 
 

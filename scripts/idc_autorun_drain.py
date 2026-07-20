@@ -455,7 +455,19 @@ def _run_wave_close_check(script, extra_argv, token, clean_lines, timeout=30):
         return "ok", line
     if r.returncode == 1 and line is not None and line.startswith(f"{token}: gap"):
         return "gap", line
-    return "error", line or f"{token}: error (no verdict)"
+    # THE ERROR PATH IS THE ONE SOMEBODY HAS TO DEBUG, so it must not throw away the only two facts
+    # that say what went wrong. `r` is in scope here and was being dropped: a checker that crashed
+    # reported the bare `error (no verdict)`, identical whether it hit a traceback, an unreadable
+    # config, or a bad argument — and the operator was left re-running it by hand to find out. The
+    # exit code and a bounded stderr tail cost nothing to carry and usually name the cause outright.
+    if line is not None:
+        # The checker DID print a verdict line, it just disagrees with its exit code. Surface that
+        # line verbatim — it is the checker's own words about its own finding, and the drain's
+        # contract with the governance suite is that it passes it through unedited.
+        return "error", line
+    tail = " ".join((r.stderr or r.stdout or "").split())[-400:]
+    detail = f"exit {r.returncode}, no `{token}:` line"
+    return "error", f"{token}: error ({detail}{'; ' + tail if tail else ''})"
 
 
 def _run_wave_close_acceptance(args, root):

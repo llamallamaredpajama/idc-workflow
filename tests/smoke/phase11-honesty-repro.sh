@@ -591,4 +591,69 @@ printf '%s' "$out12" | grep -q 'live: gap' \
   || fail "R12: a weakened verifier must expire its receipt as a GAP, got rc=$rc12 out=$out12"
 echo "  ok R11/R12: an unattributable run is refused; editing the probe expires its receipts"
 
+echo "== R15/R16. A DIAGNOSTIC MUST CARRY THE FACT SOMEBODY NEEDS TO ACT ON IT"
+# R15 — the Stop block tells the operator to "see the `finish-coherence: gap <#s>` line", but
+# `_drain_detail` kept only the verdict token and the two counts, so the sentence pointed at output
+# that had already been discarded. Naming the items is the difference between a cure they can run and
+# a re-run they must do first just to find out what broke.
+# R16 — a wave-close checker that CRASHES reported the bare `error (no verdict)`, identical whether it
+# hit a traceback, an unreadable config or a bad argument. `r` was in scope and dropped.
+python3 - "$GATE" <<'PY' || fail "R15: the Stop block discards the finding line it tells the operator to read"
+import importlib.util, os, sys
+plugin = os.environ["IDC_PLUGIN"]
+sys.path.insert(0, os.path.join(plugin, "scripts", "hooks"))
+sys.path.insert(0, os.path.join(plugin, "scripts"))
+spec = importlib.util.spec_from_file_location("G", sys.argv[1])
+G = importlib.util.module_from_spec(spec); spec.loader.exec_module(G)
+STDOUT = "\n".join([
+    "eligible: ",
+    "recirc_inbox: 0",
+    "unplanned_considerations: 0",
+    "finish-coherence: gap #41 #42",
+    "live: gap web",
+    "drain: recirc-pending",
+])
+detail = G._drain_detail(STDOUT)
+for needed in ("#41", "#42", "live: gap web"):
+    if needed not in detail:
+        sys.exit(f"the drain detail drops {needed!r}, which the block reason tells the operator to "
+                 f"read: {detail!r}")
+# ...and the reason built from it must actually carry them through to the operator.
+reason = G._block_reason(detail, [], "/plugin/root")
+for needed in ("#41", "#42"):
+    if needed not in reason:
+        sys.exit(f"the block reason drops {needed!r}: {reason!r}")
+PY
+echo "  ok R15: the Stop block names the items the operator is told to inspect"
+
+# R16 — drive the REAL checker runner against a checker that crashes.
+R16="$WORK/crashing-checker"; mkrepo "$R16"
+python3 - "$PLUGIN" "$R16" <<'PY' || fail "R16: a crashed checker's return code and stderr are lost behind a generic 'no verdict'"
+import importlib.util, os, sys, tempfile
+plugin, repo = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("D", os.path.join(plugin, "scripts", "idc_autorun_drain.py"))
+D = importlib.util.module_from_spec(spec); spec.loader.exec_module(D)
+
+# A checker that dies the way a real one does: a traceback on stderr and a nonzero exit, no verdict
+# line at all. Placed beside the drain, which is where `_run_checker` looks for it.
+name = "idc_zz_repro_crashing_checker.py"
+path = os.path.join(plugin, "scripts", name)
+with open(path, "w", encoding="utf-8") as fh:
+    fh.write("import sys\n"
+             "sys.stderr.write('Traceback (most recent call last):\\n"
+             "KeyError: \\'DISTINCTIVE-CAUSE\\'\\n')\n"
+             "sys.exit(3)\n")
+try:
+    verdict, line = D._run_wave_close_check(name, [], "acceptance", ("acceptance: ok",), 60)
+finally:
+    os.remove(path)
+if verdict != "error":
+    sys.exit(f"a crashed checker must classify as error, got {verdict!r}")
+if "exit 3" not in (line or ""):
+    sys.exit(f"the checker's return code is lost: {line!r}")
+if "DISTINCTIVE-CAUSE" not in (line or ""):
+    sys.exit(f"the checker's stderr tail — the only thing naming the cause — is lost: {line!r}")
+PY
+echo "  ok R16: a crashed checker reports its exit code and the stderr tail that names the cause"
+
 echo "phase11-honesty-repro: OK"

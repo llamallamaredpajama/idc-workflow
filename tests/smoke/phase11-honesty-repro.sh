@@ -354,6 +354,11 @@
 #                   hooks module is reported clean. Neither edit alone survives the floors; the pair
 #                   does, which is why the fixture plants the violation under hooks/ rather than
 #                   trusting a count.
+#
+#   Round 5's in-memory walk battery also gained an eleventh mutation this round: skip a module
+#   that cannot be DECODED. A file that is not valid UTF-8 never reaches the parser, so analyze's
+#   refusal cannot catch it; until now it escaped census() as a bare traceback and the sentence
+#   below explaining why an unreadable module is a refusal never printed. 11 applied · 11 RED.
 
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -2290,7 +2295,7 @@ echo "== R28. THE CREDENTIAL SCRUB IS A PROPERTY OF THE TEXT, NOT A HABIT OF THE
 # like good news. So its unit test runs first, and it runs four things: twenty-seven fixtures with
 # the answer written beside each — source shapes through the walk, whole scripts/ trees through the
 # judgement; nine runs of THIS CASE'S OWN CENSUS PROGRAM, lifted verbatim out of the heredoc below,
-# against the real tree with one violation planted in it; and twenty-three deliberate mutations of
+# against the real tree with one violation planted in it; and twenty-four deliberate mutations of
 # the walk, of the judgement and of this file, each of which must be observed to FAIL.
 python3 "$HERE/lib/test_stderr_census.py" \
   || fail "R28: the census's own walk is broken, or is no longer red-when-broken — until this passes, anything the census says about scripts/ below is unfounded"

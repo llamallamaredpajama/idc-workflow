@@ -446,8 +446,10 @@ for label, _why, modules, allowed, want in JUDGEMENTS:
 # R28's sentence — the one that explains why an unreadable module is a refusal and never
 # a skip — never printed. Loud either way; the operator just got a stack trace instead of
 # the reason.
+UNDECODABLE_TREE = tree({"scripts/idc_binary.py":
+                         b"detail = p.stderr  # \xff\xfe not utf-8\n"})
 try:
-    SC.census(tree({"scripts/idc_binary.py": b"detail = p.stderr  # \xff\xfe not utf-8\n"}))
+    SC.census(UNDECODABLE_TREE)
     check(False, "a module that is not valid UTF-8 was not reported as a census failure")
     print("  FAIL a module that cannot be decoded is a named census failure")
 except SC.ParseFailure as exc:
@@ -740,6 +742,20 @@ def floor_trips(mutant):
     return "Python 3.8 was accepted, so `x[:200]`'s shape is no longer the one this walks"
 
 
+def decode_failure_trips(mutant):
+    """The mutant must stop treating an UNDECODABLE module as a failure.
+
+    Separate from the parse refusal on purpose: a file that is not valid UTF-8 never
+    reaches the parser at all, so `analyze`'s refusal cannot catch it and the only thing
+    standing there is the one in `census()`.
+    """
+    try:
+        mutant["census"](UNDECODABLE_TREE)
+    except mutant["ParseFailure"]:
+        raise AssertionError("the read refusal still raised — the mutation changed nothing")
+    return "a module that is not UTF-8 was skipped, so the census clears what it cannot read"
+
+
 def parse_failure_trips(mutant):
     """The mutant must stop treating an unreadable module as a failure."""
     try:
@@ -768,6 +784,12 @@ MUTATIONS = (
      '        raise ParseFailure(module, "%s: %s" % (type(exc).__name__, exc))',
      "        return [], []",
      parse_failure_trips),
+
+    ("deletion", "skip a module that cannot be DECODED instead of failing",
+     '            raise ParseFailure(module, "unreadable: %s: %s" '
+     '% (type(exc).__name__, exc))',
+     "            continue",
+     decode_failure_trips),
 
     ("value", "forget that the drain calls the door `_scrub`",
      'SCRUB_NAMES = frozenset(("scrub", "_scrub"))', 'SCRUB_NAMES = frozenset(("scrub",))',

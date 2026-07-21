@@ -107,6 +107,16 @@ MIN_PYTHON = (3, 9)
 # match is on the callee's simple name and it is EXACT — `_scrub_later` is not the door,
 # and a check that accepted it would be the old "is the word `scrub` on this line?" bug
 # wearing a parse tree as a costume.
+#
+# THE RESIDUAL, because that paragraph is only the half of this that reads well. Matching
+# a bare NAME means any function called `scrub` or `_scrub` is taken to BE the credential
+# door. `def _scrub(s): return s[:400]` in some module would make every read handed to it
+# count as scrubbed, with zero cuts, and the census would report CLEAN — an affirmative
+# certification obtained by naming a function. That shape has precedent here rather than
+# being far-fetched: scripts/idc_autorun_drain.py:410 already defines a module-local
+# `_scrub`, which is a correct one and is why the name is on this list at all. It is the
+# same family as the disclosed "the cut moved into a helper" boundary, and it is disclosed
+# now too, in R28's boundary paragraph where a reviewer will meet it.
 SCRUB_NAMES = frozenset(("scrub", "_scrub"))
 
 
@@ -293,8 +303,13 @@ def analyze(source, module):
             continue
         covered.update(id(n) for n in reads_here)
         for inner in handed:
-            # `xs[:200]` and `xs[0:200]` are SLICES — a cut. `d["k"]` and `xs[0]` are
-            # indexes; they select, they do not shorten, and they must not flag.
+            # `xs[:200]` and `xs[0:200]` are SLICES — a cut. `d["k"]` is an index: it
+            # selects rather than shortens, and flagging it would turn this into noise.
+            # Stated as what it IS rather than as what it is not: this rule recognises a
+            # cut only when the cut is SPELLED as a slice. A cut written another way —
+            # `"%.200s" % p.stderr`, `f"{p.stderr:.200}"` — is not seen here, and both of
+            # those were measured to leak on R28's own ordering samples. Neither occurs
+            # in scripts/ today; the boundary is disclosed in R28, not papered over.
             if isinstance(inner, ast.Subscript) and isinstance(inner.slice, ast.Slice):
                 cut_nodes[id(inner)] = inner
 
@@ -469,8 +484,9 @@ def canary(p, q, r, s, t, u, cmd, table, fake):
     ok_split = CS.scrub(
         r.stderr or ""
     ).strip()[:200]
-    # Correct: an index selects, it does not shorten, so `table["stderr"]` must not
-    # register as a cut even though it sits inside a door handling real stderr.
+    # Correct: `table["stderr"]` selects out of a mapping, so it must not register as a
+    # cut even though it sits inside a door handling real stderr. `s.stderr` beside it is
+    # the read that puts this call in scope for the rule at all.
     ok_index = CS.scrub(table["stderr"] + s.stderr)
     # Correct, inside an f-string — the shape every hook writes its diagnostics in.
     ok_message = f"gh failed: {CS.scrub(s.stderr or '').strip()[:200]}"

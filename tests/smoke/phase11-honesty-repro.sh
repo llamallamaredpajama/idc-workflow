@@ -236,11 +236,19 @@
 #     * PARITY. On the untouched tree the new walk reports the SAME 25 sites as the text census —
 #       same modules, same line numbers, same 23-scrubbed/2-exempt split, 0 cuts, 62 files — and
 #       reports them identically on seven interpreters from 3.9.6 to 3.14.3.
-#     * NOT-ALREADY-CAUGHT. Every fixture in test_stderr_census.py was run against the TEXT census
-#       first and observed to come back CLEAN before it was written down. A fixture the old code
-#       already handled proves nothing; that is round 4's `ghp_` lesson, turned on the check itself.
-#       All seven blind spots confirmed clean-against-old, plus the one FALSE POSITIVE the old census
-#       had — correct, correctly-ordered code that merely spanned three lines, which it rejected.
+#     * NOT-ALREADY-CAUGHT. Every PART ONE SHAPE fixture in test_stderr_census.py — the fifteen that
+#       are a piece of source with its answer written beside it — was run against the TEXT census and
+#       its answer recorded before it was written down. A fixture the old code already handled proves
+#       nothing; that is round 4's `ghp_` lesson, turned on the check itself. THIRTEEN of the fifteen
+#       came back CLEAN from the old census, which is what makes them blind spots. The old census
+#       REJECTED the other two, and both rejections were FALSE POSITIVES this rewrite fixes: correct,
+#       correctly-ordered code that merely spanned three lines, and an attribute WRITE
+#       (`fake.stderr = "no child ran"`) that a regex cannot tell from a read.
+#       THIS BULLET USED TO SAY "every fixture" AND "the one FALSE POSITIVE", and was wrong twice.
+#       The PART TWO/THREE/FOUR fixtures are trees, mutant libraries and hand-made transcripts, which
+#       a text census cannot be run against at all, so the universal could not have been true; and
+#       the second false positive — the attribute write — had been fixed silently and never credited.
+#       Both numbers re-measured in round 7 by running all fifteen through the old logic verbatim.
 #
 #   THE MUTATIONS ARE NOW EXECUTABLE, and run every time this suite does. test_stderr_census.py
 #   breaks the walk ten ways in memory, asserts each anchor matched EXACTLY ONCE, and requires each
@@ -2266,9 +2274,10 @@ echo "== R28. THE CREDENTIAL SCRUB IS A PROPERTY OF THE TEXT, NOT A HABIT OF THE
 #
 # THE BOUNDARY OF THE RULE, said out loud so nobody mistakes this census for full cover. The rule
 # reaches exactly one thing: an expression that reads the attribute `stderr` off something that is
-# not `sys`. FOUR ordinary shapes carry a child's stderr past that rule, and the first three of them
-# ALREADY SHIP in this repo. None is a live leak today; all four were run through this census by an
-# adversarial verifier and came back CLEAN, so what follows is the honest extent of the cover.
+# not `sys`. FIVE ordinary shapes carry a child's stderr past that rule, and three of them ALREADY
+# SHIP in this repo. None is a live leak today; all five were run through this census — the first
+# four by an adversarial verifier, the fifth by an independent reviewer — and came back CLEAN, so
+# what follows is the honest extent of the cover.
 #
 #   stderr=subprocess.STDOUT            the stderr is merged into stdout at the CALL, so there is no
 #                                       `.stderr` anywhere to see. scripts/idc_live_check.py:1137,
@@ -2283,7 +2292,8 @@ echo "== R28. THE CREDENTIAL SCRUB IS A PROPERTY OF THE TEXT, NOT A HABIT OF THE
 #                                       neither is registered anywhere, so the day one of them is put
 #                                       into a message, nothing goes red.
 #   out, err = proc.communicate()       a Popen read with no `.stderr` in the expression at all.
-#                                       scripts/idc_live_check.py:1182 already calls it.
+#                                       scripts/idc_live_check.py:1182 already calls it — there, in
+#                                       a cleanup drain that discards what it returns.
 #   CS.scrub(_tail(p.stderr))           the READ is seen and correctly counted as scrubbed — but the
 #                                       CUT has moved into a helper, so the ordering rule below sees
 #                                       zero cuts and says CLEAN. The verifier built this, and then
@@ -2291,6 +2301,28 @@ echo "== R28. THE CREDENTIAL SCRUB IS A PROPERTY OF THE TEXT, NOT A HABIT OF THE
 #                                       ordering samples. Bounding child output in a named helper is
 #                                       already house style here (scripts/idc_autorun_drain.py:511),
 #                                       so it is one ordinary refactor away, in either direction.
+#   CS.scrub("%.200s" % p.stderr)       a cut that is not spelled as a SLICE. The read is seen and
+#   CS.scrub(f"{p.stderr:.200}")        counted as scrubbed — an affirmative certification, not a
+#                                       silence — and the ordering rule below reports zero cuts,
+#                                       because it recognises a truncation only when it is written
+#                                       as a slice. Measured against this case's OWN two ordering
+#                                       samples and the real scrub: both spellings leak the userinfo
+#                                       secret and the PEM body, exactly as `p.stderr[:200]` inside
+#                                       the door does. There are ZERO uses of either anywhere in
+#                                       scripts/ today and the old text census (`\[:\s*\d+\s*\]`)
+#                                       could not see them either, so this is not a regression — but
+#                                       "an index is not a truncation" was never the whole story,
+#                                       and slice-versus-index is not an exhaustive pair.
+#
+# AND ONE RESIDUAL IN THE OTHER DIRECTION, which deserves more attention than the five above because
+# it CERTIFIES rather than misses: the scrub door is matched by the callee's simple NAME (`scrub` or
+# `_scrub`), so any function called that is treated as the credential door. `def _scrub(s): return
+# s[:400]` in some module would make every read handed to it count as scrubbed, with zero cuts, and
+# this census would say CLEAN. The exactness of the match is a real guard — `_scrub_later` is not the
+# door, which is the old "is the word `scrub` on this line?" bug refusing to come back — and that
+# half was already written down; this half was not. It is not hypothetical either:
+# scripts/idc_autorun_drain.py:410 already defines a module-local `_scrub`, correctly, which is why
+# the name is on the list at all.
 #
 # scripts/ makes 53 subprocess calls across 24 modules and this rule governs 25 reads across 19. The
 # remainder is governed by nothing. Widening the rule — to dict-key reads, to `communicate()`, to a
@@ -2647,10 +2679,13 @@ if stale:
 # class re-entering through the one chokepoint the census exists to seal.
 #
 # So the cut lives OUTSIDE the call, the way all 23 sites spell it. What counts as a cut is a SLICE
-# (`[:200]`, `[:MAX_TAIL]`, `[0:200]`, `[: n ]`) — an index like `d["k"]` selects rather than
-# shortens and must never flag, or the check becomes noise and gets switched off. And the question is
-# only asked of scrub calls that are actually handling a child's stderr; an unrelated
-# `CS.scrub(banner[:80])` truncates nothing these rules care about.
+# (`[:200]`, `[:MAX_TAIL]`, `[0:200]`, `[: n ]`), and the honest statement of the rule is that one:
+# it recognises a cut only when the cut is SPELLED as a slice. An index like `d["k"]` selects rather
+# than shortens, and flagging it would make the check noise and get it switched off — but slice and
+# index are not an exhaustive pair, and the character-precision formats named in the boundary
+# paragraph above are real cuts this rule does not see. And the question is only asked of scrub calls
+# that are actually handling a child's stderr; an unrelated `CS.scrub(banner[:80])` truncates nothing
+# these rules care about.
 if scan.truncations:
     sys.exit("a child's stderr is TRUNCATED INSIDE the scrub call, so the cut runs BEFORE the door. "
              "A rule that matches on a closing anchor (the PEM footer, the `@host` ending a URL "

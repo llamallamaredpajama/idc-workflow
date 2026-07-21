@@ -7,10 +7,15 @@ Run on its own, and run from R28 before the census does any real work. Four part
 they climb: each one watches the layer above the one before it.
 
   PART ONE — the shapes. Every blind spot the census this replaces was measured to have,
-  as a fixture with the answer written next to it. Each of these was RUN AGAINST THE OLD
-  CENSUS FIRST and observed to come back CLEAN; a fixture the old code already handled
-  proves nothing, and this repo has paid for that lesson once already (the `ghp_` sample
-  in R28 that passed whichever order the code used).
+  as a fixture with the answer written next to it. All fifteen were RUN AGAINST THE OLD
+  CENSUS and their answers recorded before they were written down; a fixture the old code
+  already handled proves nothing, and this repo has paid for that lesson once already (the
+  `ghp_` sample in R28 that passed whichever order the code used). Thirteen came back
+  CLEAN from the old census — that is what makes them blind spots. It REJECTED the other
+  two, and both rejections were false positives this walk fixes: the multi-line scrub
+  call, and an attribute WRITE it could not tell from a read. (This paragraph used to
+  claim all of them came back clean. Two did not, and the second false positive had gone
+  uncredited since round 5.)
 
   PART TWO — the judgement. Small fixture trees with a known-bad module in them, pushed
   through `census()` and `judge()` — the code that decides, as opposed to the code that
@@ -242,8 +247,14 @@ CASES = (
      ("return _scrub_later(r.stderr)",), (), ()),
 
     ("an index is not a truncation",
-     "`d[\"k\"]` and `xs[0]` select; they do not shorten. Flagging them would teach the "
-     "reader to ignore the check, which is how a check dies.",
+     "`table[\"stderr\"]` selects a value out of a mapping; flagging it would teach the "
+     "reader to ignore the check, which is how a check dies. The rationale has to be "
+     "stated more carefully than it once was, because this fixture's own second half — "
+     "`p.stderr[0]` — DOES shorten, to one character. What the rule says is narrower "
+     "than \"an index never shortens\": it recognises a cut only when the cut is spelled "
+     "as a SLICE. Nobody writes `p.stderr[0]` and one character carries no credential, "
+     "so leaving it unflagged is right — but the spellings that ARE cuts and are not "
+     "slices leak, and they are named in R28's boundary paragraph, not hidden here.",
      '''
      def detail(p, table):
          return CS.scrub(table["stderr"] + p.stderr[0])
@@ -261,7 +272,10 @@ CASES = (
 
     ("our own stderr, a stderr= keyword and an attribute WRITE are not reads",
      "Three impostors, excluded by structure rather than by substring skips — which is "
-     "what makes it safe to have dropped those skips.",
+     "what makes it safe to have dropped those skips. The WRITE is also the old census's "
+     "SECOND false positive, and it went uncredited for two rounds: `fake.stderr = \"no "
+     "child ran\"` was reported by the old regex as a bare read of a child's stderr, "
+     "because a pattern cannot tell a write from a read. The parse tree can, and does.",
      '''
      def noise(cmd, fake):
          print("x", file=sys.stderr)

@@ -2302,10 +2302,10 @@ echo "== R28. THE CREDENTIAL SCRUB IS A PROPERTY OF THE TEXT, NOT A HABIT OF THE
 # any other and it can break like one — and the way it breaks is by finding LESS, which looks exactly
 # like good news. So its unit test runs first, and it runs four things: twenty-seven fixtures with
 # the answer written beside each — source shapes through the walk, whole scripts/ trees through the
-# judgement; thirteen runs of THIS CASE'S OWN CENSUS PROGRAM, lifted verbatim out of the heredoc
+# judgement; fourteen runs of THIS CASE'S OWN CENSUS PROGRAM, lifted verbatim out of the heredoc
 # below, against the real tree with one violation planted in it; and twenty-six deliberate
 # mutations of the walk, of the judgement and of this file, each of which must be observed to
-# FAIL. Sixty-six assertions in all, and step (0b) below puts a floor under that number.
+# FAIL. Sixty-seven assertions in all, and step (0b) below puts a floor under that number.
 # The transcript is KEPT, not just watched go by: the census program below reads it back and puts a
 # floor under how many assertions it reported. Running the battery and containing a battery are two
 # different facts, and only the second one is worth anything.
@@ -2346,12 +2346,20 @@ suite_lines = open(SUITE, encoding="utf-8").read().splitlines()
 runs_battery = [n for n, line in enumerate(suite_lines)
                 if line.startswith('python3 "$HERE/lib/test_stderr_census.py"')]
 guard = " ".join(suite_lines[runs_battery[0]:runs_battery[0] + 3]) if runs_battery else ""
-if len(runs_battery) != 1 or "|| fail" not in guard or "PIPESTATUS" not in guard:
+# It asks for the LITERAL `${PIPESTATUS[0]}`, not for the word PIPESTATUS, and the difference is the
+# whole thesis of this rewrite applied to the check's own guard: asking about spelling is not asking
+# about structure. `${PIPESTATUS[1]}` is tee's status, which is 0 whatever the battery returned, so an
+# index typo — or a well-meaning edit — turns the `|| fail` below into a no-op while the word is still
+# there. That was measured: with the index changed, this step waved the suite through, exit 0, silent.
+if (len(runs_battery) != 1 or "|| fail" not in guard
+        or "${PIPESTATUS[0]}" not in guard):
     sys.exit("this case no longer runs tests/smoke/lib/test_stderr_census.py, or runs it without "
              "checking what it returned — the invocation is piped through `tee`, so its exit code "
-             "has to be read out of PIPESTATUS and turned into a `fail`, or a battery that reported "
-             "failure would scroll past as ordinary output. That file IS the evidence that the "
-             "census below can still tell a scrubbed read from a raw one; without it this case "
+             "has to be read out of ${PIPESTATUS[0]} SPECIFICALLY and turned into a `fail`. Index 1 "
+             "is tee's own status and is 0 however the battery ended, so reading it would leave a "
+             "battery that reported failure scrolling past as ordinary output. That file IS the "
+             "evidence that the census below can still tell a scrubbed read from a raw one; "
+             "without it this case "
              "walks 62 modules with a walk nobody has watched fail and reports whatever it happens "
              "to find. Restore the invocation. If the battery genuinely has to move, move this "
              "check with it.")
@@ -2379,7 +2387,7 @@ if len(runs_battery) != 1 or "|| fail" not in guard or "PIPESTATUS" not in guard
 # must stay silent (correct work should pass without ceremony) and removing them must go loud.
 # RAISE this in the same commit that adds assertions. NEVER lower it without naming, in that commit,
 # which assertions were deleted and why.
-FLOOR_ASSERTIONS = 66
+FLOOR_ASSERTIONS = 67
 tally = [line for line in open(battery_transcript, encoding="utf-8").read().splitlines()
          if line.startswith("test_stderr_census: assertions_passed=")]
 if len(tally) != 1:

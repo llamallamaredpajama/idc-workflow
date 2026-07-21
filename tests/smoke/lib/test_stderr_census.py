@@ -288,9 +288,12 @@ try:
     check(False, "an unparseable module was accepted — a skipped module reports clean")
     say(False, "an unparseable module is a census failure")
 except SC.ParseFailure as exc:
-    check(exc.module == "scripts/idc_broken.py",
-          "ParseFailure did not name the module it could not read")
-    say(True, "an unparseable module is a census failure, and names itself")
+    # `say` takes the CHECK's answer, not a literal True. Three of these lines used to
+    # announce a pass unconditionally, so the check behind them could fail without moving
+    # the tally R28 floors — a small hole of exactly the kind this file is about.
+    say(check(exc.module == "scripts/idc_broken.py",
+              "ParseFailure did not name the module it could not read"),
+        "an unparseable module is a census failure, and names itself")
 
 # …and not only when the parser calls it a SyntaxError. A stray null byte makes ast.parse
 # raise ValueError, and "the census could not read this module" has to mean the same thing
@@ -300,8 +303,9 @@ try:
     check(False, "a module the parser refused for a non-syntax reason was accepted")
     say(False, "any parser refusal is a census failure, not only a SyntaxError")
 except SC.ParseFailure as exc:
-    check(exc.module == "scripts/idc_nullbyte.py", "ParseFailure did not name the module")
-    say(True, "any parser refusal is a census failure, not only a SyntaxError")
+    say(check(exc.module == "scripts/idc_nullbyte.py",
+              "ParseFailure did not name the module"),
+        "any parser refusal is a census failure, not only a SyntaxError")
 
 # The floor. 3.9 and not 3.8 — but NOT for the reason this comment used to give. It said
 # 3.8 wraps a plain index in an extra node so the truncation rule under-matches; that was
@@ -477,8 +481,9 @@ try:
     check(False, "a module that is not valid UTF-8 was not reported as a census failure")
     say(False, "a module that cannot be decoded is a named census failure")
 except SC.ParseFailure as exc:
-    check(exc.module == "scripts/idc_binary.py", "ParseFailure did not name the module")
-    say(True, "a module that cannot be decoded is a named census failure")
+    say(check(exc.module == "scripts/idc_binary.py",
+              "ParseFailure did not name the module"),
+        "a module that cannot be decoded is a named census failure")
 
 
 # ── PART THREE: R28's own program, over a tree with something planted in it ──────────
@@ -648,6 +653,13 @@ FIXTURES = {
     "battery-off": lambda: mirror(suite_edits=[
         ('python3 "$HERE/lib/test_stderr_census.py" 2>&1 | tee',
          'true "$HERE/lib/test_stderr_census.py" 2>&1 | tee')]),
+    # The quieter way to switch the battery off: leave the invocation exactly where it is
+    # and read the wrong element of PIPESTATUS. Index 1 is tee's status and is 0 however
+    # the battery ended, so `|| fail` never fires and a battery reporting failure scrolls
+    # past as ordinary output. The word PIPESTATUS is still on the line, which is why
+    # step (0) has to ask for the literal `${PIPESTATUS[0]}` and not for the word.
+    "pipestatus": lambda: mirror(suite_edits=[
+        ('[ "${PIPESTATUS[0]}" -eq 0 ]', '[ "${PIPESTATUS[1]}" -eq 0 ]')]),
     # A real unscrubbed read, in a module the NARROWED walk below never visits. On its
     # own this tree is a plain bare-read finding; paired with the narrowed file set it is
     # the only thing the count floors have ever been shown to catch.
@@ -731,6 +743,15 @@ END_TO_END = (
      "One word — `python3` to `true` — switches off every assertion in this file, and "
      "was measured to leave both gates green. R28 now reads its own source and refuses.",
      "battery-off", None, ((BATTERY_SENTENCE, 1),)),
+
+    ("a suite that reads the WRONG element of PIPESTATUS makes R28 REFUSE",
+     "The same switch-off, spelled as a typo. `${PIPESTATUS[1]}` is tee's status and is "
+     "0 however the battery ended, so `|| fail` becomes a no-op — and the word PIPESTATUS "
+     "is still sitting there, which is why step (0) waved this through, exit 0 and "
+     "silent, until it was made to ask for the literal `${PIPESTATUS[0]}`. A guard "
+     "protecting a rewrite whose whole thesis is that spelling is not structure had been "
+     "written as a question about spelling.",
+     "pipestatus", None, ((BATTERY_SENTENCE, 1),)),
 
     ("a census module that refuses this interpreter makes R28 REFUSE",
      "Proves R28 still CALLS check_interpreter: the floor is raised out of reach inside "
@@ -967,8 +988,8 @@ E2E_MUTATIONS = (
      (("if ambiguous:\n    sys.exit(", "if False:\n    sys.exit("),), AMBIGUOUS_SENTENCE),
 
     ("deletion", "R28 stops checking that this battery is still being run", "battery-off",
-     (), (('if len(runs_battery) != 1 or "|| fail" not in guard or "PIPESTATUS" not in guard:',
-           "if False:"),), BATTERY_SENTENCE),
+     (), (('if (len(runs_battery) != 1 or "|| fail" not in guard\n'
+           '        or "${PIPESTATUS[0]}" not in guard):', "if False:"),), BATTERY_SENTENCE),
 
     ("deletion", "R28 stops asking the interpreter floor", "clean",
      (("MIN_PYTHON = (3, 9)", "MIN_PYTHON = (99, 0)"),),

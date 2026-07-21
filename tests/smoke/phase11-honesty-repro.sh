@@ -2302,10 +2302,10 @@ echo "== R28. THE CREDENTIAL SCRUB IS A PROPERTY OF THE TEXT, NOT A HABIT OF THE
 # any other and it can break like one — and the way it breaks is by finding LESS, which looks exactly
 # like good news. So its unit test runs first, and it runs four things: twenty-seven fixtures with
 # the answer written beside each — source shapes through the walk, whole scripts/ trees through the
-# judgement; twelve runs of THIS CASE'S OWN CENSUS PROGRAM, lifted verbatim out of the heredoc
-# below, against the real tree with one violation planted in it; and twenty-five deliberate
+# judgement; thirteen runs of THIS CASE'S OWN CENSUS PROGRAM, lifted verbatim out of the heredoc
+# below, against the real tree with one violation planted in it; and twenty-six deliberate
 # mutations of the walk, of the judgement and of this file, each of which must be observed to
-# FAIL. Sixty-four assertions in all, and step (0b) below puts a floor under that number.
+# FAIL. Sixty-six assertions in all, and step (0b) below puts a floor under that number.
 # The transcript is KEPT, not just watched go by: the census program below reads it back and puts a
 # floor under how many assertions it reported. Running the battery and containing a battery are two
 # different facts, and only the second one is worth anything.
@@ -2379,7 +2379,7 @@ if len(runs_battery) != 1 or "|| fail" not in guard or "PIPESTATUS" not in guard
 # must stay silent (correct work should pass without ceremony) and removing them must go loud.
 # RAISE this in the same commit that adds assertions. NEVER lower it without naming, in that commit,
 # which assertions were deleted and why.
-FLOOR_ASSERTIONS = 64
+FLOOR_ASSERTIONS = 66
 tally = [line for line in open(battery_transcript, encoding="utf-8").read().splitlines()
          if line.startswith("test_stderr_census: assertions_passed=")]
 if len(tally) != 1:
@@ -2548,6 +2548,18 @@ except SCAN.ParseFailure as exc:
 # scrubbed site — correct code should pass without ceremony — and goes loud the moment the walk goes
 # quiet. RAISE these in the same commit that adds sites. NEVER lower one without naming, in that
 # commit, the site that was deleted and why.
+#
+# THESE TWO NUMBERS ARE THE LAST THING BETWEEN A NARROWED WALK AND A CLEAN REPORT, and until round 7
+# nothing had ever watched them fail. A reviewer disabled this arm, ran the whole 64-assertion battery
+# against the change and got 64 green; then narrowed the file set — two globs, one edit — and a real
+# unscrubbed read planted in a module the narrowed walk no longer visits was reported CLEAN, exit 0,
+# with a silent transcript. Nothing else in the case can see that: the bare arm cannot report a read
+# in a file nobody opened, and the canary only ever looks at its own fixture. THAT WAS THE FOURTH TIME
+# IN THIS WORK THAT A GUARD DESCRIBED AS COVERED TURNED OUT TO HAVE NOTHING WATCHING IT — after the
+# ordering rule, the judgement layer and the battery's own contents — and every one of the four was
+# found by somebody who had not built the thing, which is the most useful sentence in this case.
+# The fixture that now watches these numbers is "a walk that has stopped looking at part of scripts/"
+# in the battery above, and the mutation that proves the fixture is load-bearing sits beside it.
 FLOOR_FILES, FLOOR_READS = 62, 25
 if len(scan.modules) < FLOOR_FILES or len(scan.reads) < FLOOR_READS:
     sys.exit(f"the census walked {len(scan.modules)} files and found {len(scan.reads)} reads of a "

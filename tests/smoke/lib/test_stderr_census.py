@@ -22,8 +22,17 @@ they climb: each one watches the layer above the one before it.
   PART THREE — the whole case, end to end. R28's own census program, lifted verbatim out
   of phase11-honesty-repro.sh and run against a tree that IS the real one plus a planted
   violation. Not a copy of R28's logic — R28's logic. This is the only part that can
-  prove R28's verdict arms, its count floors, its registry and its prose actually fire,
+  prove R28's verdict arms, its two floors, its registry and its prose actually fire,
   because on the real tree every one of them is silent by design.
+
+  That sentence used to name the count floors among the things this part proved, and it
+  was false: no fixture here tripped them. A reviewer disabled the floors, watched all 64
+  assertions stay green, then narrowed the file set and watched a real planted credential
+  leak clear R28 with exit 0. That was the FOURTH time in this work that a guard turned
+  out to have been described as covered while nothing watched it — after the ordering
+  rule, the judgement layer and this battery's own contents — and all four were found by
+  somebody who had not built the thing. The floors have a fixture now; the sentence above
+  is now true; and the useful lesson is the one about who found it.
 
   PART FOUR — the mutations. Each guard is broken on purpose and the fixture that watches
   it is required to STOP REFUSING. A guard nobody has watched fail is a guard nobody has
@@ -601,7 +610,11 @@ BARE_SENTENCE = "read WITHOUT passing through the scrub at the read"
 CUT_SENTENCE = "TRUNCATED INSIDE the scrub call"
 STALE_SENTENCE = "names a line that no longer exists"
 AMBIGUOUS_SENTENCE = "covers MORE THAN ONE read"
-FLOOR_SENTENCE = "only proven to give identical answers"
+# Two different floors, and keeping their names apart matters: one refuses an
+# INTERPRETER the walk is not proven on, the other refuses a walk that came back with
+# fewer FILES AND READS than the tree is known to hold.
+INTERPRETER_FLOOR_SENTENCE = "only proven to give identical answers"
+COUNT_FLOOR_SENTENCE = "it has to find at least"
 CANARY_SENTENCE = "no longer answers the way it was hand-counted"
 BATTERY_SENTENCE = "no longer runs tests/smoke/lib/test_stderr_census.py"
 GUTTED_SENTENCE = "it has to pass at least"
@@ -635,6 +648,10 @@ FIXTURES = {
     "battery-off": lambda: mirror(suite_edits=[
         ('python3 "$HERE/lib/test_stderr_census.py" 2>&1 | tee',
          'true "$HERE/lib/test_stderr_census.py" 2>&1 | tee')]),
+    # A real unscrubbed read, in a module the NARROWED walk below never visits. On its
+    # own this tree is a plain bare-read finding; paired with the narrowed file set it is
+    # the only thing the count floors have ever been shown to catch.
+    "unwalked-leak": lambda: mirror(extra={"scripts/idc_fixture_unwalked.py": BARE_READ}),
 }
 ROOTS = {}
 
@@ -645,11 +662,19 @@ def root_for(name):
     return ROOTS[name]
 
 
-# Two fixtures are libraries rather than trees: they prove R28 still CALLS the floor and
-# the canary, by giving it a census module that refuses and requiring R28 to relay the
-# refusal. Deleting either call from R28 was measured green.
+# Three fixtures are libraries rather than trees: they prove R28 still CALLS the
+# interpreter floor and the canary, and that its COUNT floors still stand between a walk
+# that has gone quiet and a clean report — by giving R28 a census module that refuses, or
+# one that has stopped looking at part of scripts/, and requiring R28 to say so.
 FLOORLESS_LIB = lambda: mutant_lib([("MIN_PYTHON = (3, 9)", "MIN_PYTHON = (99, 0)")])
 DRIFTED_LIB = lambda: mutant_lib([('    "scrubbed_reads": 10,', '    "scrubbed_reads": 11,')])
+# The file set, narrowed. Any edit that shrinks it does the same damage; this is the one
+# an independent reviewer used, and it keeps BOTH registry modules (idc_command_contract,
+# idc_gh_board) inside the walk on purpose, so the count floors are what speak and not the
+# stale-exemption arm behind them.
+NARROW_EDITS = (('sorted(glob.glob(os.path.join(root, "scripts", "*.py"))',
+                 'sorted(glob.glob(os.path.join(root, "scripts", "idc_[cg]*.py"))'),)
+NARROWED_LIB = lambda: mutant_lib(NARROW_EDITS)
 LIBS = {}
 
 
@@ -710,13 +735,24 @@ END_TO_END = (
     ("a census module that refuses this interpreter makes R28 REFUSE",
      "Proves R28 still CALLS check_interpreter: the floor is raised out of reach inside "
      "the module, and R28 has to relay the refusal. Deleting that call was measured green.",
-     "clean", ("floorless", FLOORLESS_LIB), ((FLOOR_SENTENCE, 1),)),
+     "clean", ("floorless", FLOORLESS_LIB), ((INTERPRETER_FLOOR_SENTENCE, 1),)),
 
     ("a walk that no longer tells the rules apart makes R28 REFUSE",
      "Same, for the canary — the layer R28's own prose calls load-bearing. Deleting "
      "R28's canary call was measured green, because this file runs the canary too; that "
      "is defence in depth, and defence in depth is not evidence.",
      "clean", ("drifted", DRIFTED_LIB), ((CANARY_SENTENCE, 1),)),
+
+    ("a walk that has stopped looking at part of scripts/ makes R28 REFUSE",
+     "The count floors were the LAST arm of R28 with no positive example, and the prose "
+     "above this table claimed for two rounds that they had one. An independent reviewer "
+     "disabled them and watched all 64 assertions stay green; then, with them off and the "
+     "file set narrowed, a real unscrubbed read planted in a module the narrowed walk no "
+     "longer visits came back CLEAN, exit 0, silent transcript. This is that experiment, "
+     "run forwards: the walk is narrowed, the leak is really there, and the floors are "
+     "the only thing left that can notice. They are not a parity check — finding MORE is "
+     "not a hazard — they are the guard against a walk that has quietly gone quiet.",
+     "unwalked-leak", ("narrowed", NARROWED_LIB), ((COUNT_FLOOR_SENTENCE, 1),)),
 
     ("a battery that has been GUTTED makes R28 REFUSE",
      "The third storey. R28 proves this file still runs; nothing proved it still "
@@ -936,7 +972,17 @@ E2E_MUTATIONS = (
 
     ("deletion", "R28 stops asking the interpreter floor", "clean",
      (("MIN_PYTHON = (3, 9)", "MIN_PYTHON = (99, 0)"),),
-     (("    SCAN.check_interpreter()\n", "    pass\n"),), FLOOR_SENTENCE),
+     (("    SCAN.check_interpreter()\n", "    pass\n"),), INTERPRETER_FLOOR_SENTENCE),
+
+    # The one this round exists for. The lib edit is the SITUATION (a walk that has
+    # stopped looking at part of scripts/, with a real leak sitting in the part it no
+    # longer looks at); the program edit is the MUTATION. Take the floors away and R28
+    # reports that tree clean — which is the reviewer's result, reproduced here so it
+    # runs on every suite run instead of living in a report.
+    ("deletion", "R28 stops flooring how many files and reads the census must find",
+     "unwalked-leak", NARROW_EDITS,
+     (("if len(scan.modules) < FLOOR_FILES or len(scan.reads) < FLOOR_READS:",
+       "if False:"),), COUNT_FLOOR_SENTENCE),
 
     ("deletion", "R28 stops running the canary", "clean",
      (('    "scrubbed_reads": 10,', '    "scrubbed_reads": 11,'),),

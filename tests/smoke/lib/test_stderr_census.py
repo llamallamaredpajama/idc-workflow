@@ -218,6 +218,17 @@ except SC.ParseFailure as exc:
           "ParseFailure did not name the module it could not read")
     print("  ok   an unparseable module is a census failure, and names itself")
 
+# …and not only when the parser calls it a SyntaxError. A stray null byte makes ast.parse
+# raise ValueError, and "the census could not read this module" has to mean the same thing
+# however the parser phrased it — otherwise there is a second, quieter way to be skipped.
+try:
+    SC.analyze("x = 1\0\n", "scripts/idc_nullbyte.py")
+    check(False, "a module the parser refused for a non-syntax reason was accepted")
+    print("  FAIL any parser refusal is a census failure, not only a SyntaxError")
+except SC.ParseFailure as exc:
+    check(exc.module == "scripts/idc_nullbyte.py", "ParseFailure did not name the module")
+    print("  ok   any parser refusal is a census failure, not only a SyntaxError")
+
 # The floor. 3.9 and not 3.8: on 3.8 a plain index arrives wrapped in an extra node, and
 # the truncation rule would look at the wrong thing — quietly finding fewer violations.
 try:
@@ -318,7 +329,7 @@ MUTATIONS = (
      floor_trips),
 
     ("deletion", "drop the parse-failure refusal and skip the module instead",
-     '        raise ParseFailure(module, "%s (line %s)" % (exc.msg, exc.lineno))',
+     '        raise ParseFailure(module, "%s: %s" % (type(exc).__name__, exc))',
      "        return [], []",
      parse_failure_trips),
 

@@ -228,8 +228,12 @@ def analyze(source, module):
     """
     try:
         tree = ast.parse(source)
-    except SyntaxError as exc:
-        raise ParseFailure(module, "%s (line %s)" % (exc.msg, exc.lineno))
+    except Exception as exc:
+        # ANY refusal from the parser, not only SyntaxError — a file carrying a stray
+        # null byte raises ValueError instead. "The census could not read this module"
+        # is the same answer however the parser chose to phrase it, and the one thing
+        # that must never happen is for it to become a skip.
+        raise ParseFailure(module, "%s: %s" % (type(exc).__name__, exc))
     lines = source.splitlines()
 
     # Pass one: the scrub calls. Two facts come out of each — which reads it covers,

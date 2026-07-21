@@ -68,7 +68,8 @@ except ImportError:  # pragma: no cover - non-POSIX fallback
 # Allow importing from sibling scripts
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from idc_journal_replay import reconstruct_state_from_journal, journal_item_id, earliest_journaled_create
+from idc_journal_replay import (reconstruct_state_from_entries, journal_item_id, scan_journal_strict,
+                                watermark_from)
 
 # --- attribution -----------------------------------------------------------------------------------
 # IDC-attributable branch/worktree naming (the design's exact list). Anchored at the START, and `build`
@@ -878,10 +879,20 @@ def check_journal_divergence(ctx, findings, journal_path):
             return True
         return False
 
-    expected_state, error = reconstruct_state_from_journal(journal_path)
+    # ONE locked, fail-closed snapshot feeds the whole pass: the reconstruction, the adoption
+    # watermark, and the carve-out guard below (#154's codex P2). The two INDEPENDENT UNLOCKED reads
+    # this replaces could disagree — a `/idc:doctor` run overlapping an engine append could read a
+    # half-written line and report a corrupt journal, and one overlapping a janitor rotation could
+    # miss records already moved to the archive and report divergence — both false. scan_journal_strict
+    # takes the journal's sidecar lock (the shared convention with journal_append and rotation), so a
+    # concurrent writer is waited out rather than read through.
+    entries, error = scan_journal_strict(journal_path)
     if error:
+        sys.stderr.write("idc-git-janitor: the transition journal could not be read consistently "
+                         "(%s) — journal dimension indeterminate\n" % error)
         return True
-    create_watermark = earliest_journaled_create(journal_path)
+    expected_state = reconstruct_state_from_entries(entries)
+    create_watermark = watermark_from(entries)
 
     actual_state = {}
     for item in board:

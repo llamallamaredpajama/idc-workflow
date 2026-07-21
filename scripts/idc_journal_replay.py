@@ -92,46 +92,25 @@ def _journal_paths(journal_path):
 _CREATE_OPS = ("create-ticket", "create-pointer", "recirculate-intake")
 
 
-def earliest_journaled_create(journal_path):
-    """Smallest item number among journaled create records, or None when there is none.
-
-    Item numbers are monotonic on both backends, so this is a DERIVED adoption watermark: any board
-    item numbered above it was created after create-journaling began and must therefore have journal
-    history — a board-only item above the watermark means its history was lost (truncation) or the
-    create bypassed the engine. Items below the watermark predate the journal (legacy) and are
-    tolerated. Returns None (no watermark → tolerate everything) on any read problem: corruption is
-    reconstruct_state_from_journal's fail-closed job, not this helper's.
-    """
-    watermark = None
-    for path in _journal_paths(journal_path):
-        try:
-            with open(path, "r", encoding="utf-8") as fh:
-                for line in fh:
-                    if not line.strip():
-                        continue
-                    try:
-                        entry = json.loads(line)
-                    except json.JSONDecodeError:
-                        return None
-                    if not isinstance(entry, dict) or entry.get("op") not in _CREATE_OPS:
-                        continue
-                    item_id = _coerce_item_id(entry.get("item"))
-                    if item_id is not None and (watermark is None or item_id < watermark):
-                        watermark = item_id
-        except (OSError, UnicodeDecodeError):
-            return None
-    return watermark
+# NOTE (#155/#154): the path-based, UNLOCKED, lenient watermark reader that used to live here
+# (`earliest_journaled_create`) is deleted. It was the janitor divergence pass's SECOND independent
+# read of the journal, and its lenient contract (any read/parse problem → None → tolerate every
+# board-only item) made it fail OPEN: a numberless github create, or a read racing a rotation,
+# silently granted the pre-journal legacy carve-out to the whole board. The watermark is now derived
+# from the SAME locked, fail-closed snapshot as everything else — `scan_journal_strict` +
+# `watermark_from` + `has_numberless_create`, which is the discipline the engine's dispose
+# corroboration (idc_transition._journal_corroboration) has always used.
 
 
 def scan_journal_strict(journal_path):
     """``(entries, error)``: every parsed record across archived + live segments, FAIL-CLOSED.
 
-    The dispose corroboration guards (idc_transition) consume this: a corrupt or unreadable journal
-    must DENY a corroboration-guarded disposition (``error`` is a reason string), never silently
-    tolerate it — unlike ``earliest_journaled_create``, whose lenient ``None`` is calibrated for
-    replay's own division of labor (corruption is reconstruct's job there). A journal that simply
-    does not exist yet is NOT an error: ``([], None)`` — a pre-adoption board (journaling has not
-    begun) is the caller's principled legacy carve-out, not damage.
+    The dispose corroboration guards (idc_transition) and the janitor's divergence pass consume
+    this: a corrupt or unreadable journal must DENY a corroboration-guarded disposition / mark the
+    janitor's journal dimension indeterminate (``error`` is a reason string), never silently
+    tolerate it. A journal that simply does not exist yet is NOT an error: ``([], None)`` — a
+    pre-adoption board (journaling has not begun) is the caller's principled legacy carve-out, not
+    damage.
     """
     # Take the journal's STABLE sidecar lock (`<journal>.lock` — the shared convention with
     # journal_append and the janitor's rotation) across the path snapshot AND all reads: an
@@ -230,9 +209,14 @@ def has_numberless_create(entries):
 
 def watermark_from(entries):
     """The adoption watermark over already-scanned entries: smallest item number among create
-    records, or None when no NUMBERED create is journaled (see earliest_journaled_create for the
-    semantics — this is the strict-scan twin so corroboration callers do not re-read the segments).
-    None does NOT by itself mean pre-journal: check journal_adopted first (numberless creates)."""
+    records, or None when no NUMBERED create is journaled.
+
+    Item numbers are monotonic on both backends, so this is a DERIVED adoption boundary: a board
+    item numbered ABOVE it was created after create-journaling began and must therefore have
+    journal history — a board-only item above it means its history was lost (truncation) or the
+    create bypassed the engine. Items below it predate the journal (legacy) and are tolerated.
+    None does NOT by itself mean pre-journal: check journal_adopted first (numberless creates),
+    and has_numberless_create before granting anything the below-watermark carve-out."""
     watermark = None
     for entry in entries:
         if isinstance(entry, dict) and entry.get("op") in _CREATE_OPS:
@@ -247,12 +231,16 @@ def reconstruct_state_from_journal(journal_path):
 
     Returns ``(state, None)`` on success.  Returns ``(None, reason)`` when the journal cannot be trusted
     (missing or malformed), because a replay that skips corruption can produce a false clean result.
+
+    The CLI's reader: it keeps its own path-based, unlocked read and its own diagnostics.  The
+    reconstruction itself is ``reconstruct_state_from_entries`` below, which the janitor's divergence
+    pass drives from ONE locked snapshot — so the two surfaces can never drift on what a record means.
     """
-    expected_state = {}
     if not os.path.exists(journal_path):
         print(f"Journal file not found: {journal_path}", file=sys.stderr)
         return None, "journal_not_found"
 
+    entries = []
     for path in _journal_paths(journal_path):
         try:
             fh = open(path, "r", encoding="utf-8")
@@ -275,29 +263,7 @@ def reconstruct_state_from_journal(journal_path):
                         msg = f"Malformed journal line {line_num} in {path}: expected object"
                         print(msg, file=sys.stderr)
                         return None, msg
-
-                    item_id = journal_item_id(entry)
-                    if item_id is None:
-                        # A create-ticket line from the old journal spine did not include the created issue
-                        # number. It cannot contribute to replay, but later structured/move/close lines for
-                        # the same item can still establish state.
-                        continue
-
-                    state = _entry_to_state(entry)
-                    if not state:
-                        # A FIELD-ONLY record (a `set-field` Wave/Phase/Domain write, or a `link`
-                        # edge) carries NEITHER to_stage NOR to_status, so it establishes no Stage/
-                        # Status expectation. It must NOT seed an expected-state entry (round-5 Fix
-                        # 3): an empty `{item: {}}` seed compares clean against ANY board item, so a
-                        # field-only write for an item with NO create/transition history would mask
-                        # the missing history and look falsely reconciled. Skipping it leaves such an
-                        # item ABSENT from expected state → reported as a real divergence (present on
-                        # board, not in journal history). A record that DOES carry Stage/Status still
-                        # seeds/updates the entry below, so a genuinely-created item is unaffected.
-                        continue
-
-                    expected_state.setdefault(item_id, {})
-                    expected_state[item_id].update(state)
+                    entries.append(entry)
             except UnicodeDecodeError as exc:
                 # Undecodable bytes raise during line iteration, BEFORE json.loads — without this
                 # the replay crashes unclassified instead of the documented fail-closed result.
@@ -305,7 +271,48 @@ def reconstruct_state_from_journal(journal_path):
                 print(msg, file=sys.stderr)
                 return None, msg
 
-    return expected_state, None
+    return reconstruct_state_from_entries(entries), None
+
+
+def reconstruct_state_from_entries(entries):
+    """The final known state per item, reconstructed from ALREADY-SCANNED journal records.
+
+    Pure: it never touches the filesystem, so the caller owns the read — which is the point. The
+    janitor's divergence pass feeds it ONE locked ``scan_journal_strict`` snapshot and derives the
+    reconstruction, the adoption watermark and the numberless-create check from that SAME snapshot
+    (#154's codex P2): the two independent unlocked reads it replaces could see a partial line from
+    an in-flight append, or miss records a rotation had already moved to the archive, and report
+    corruption or divergence that was never there. Corruption is the scanner's job, not this
+    function's — malformed input never reaches it.
+    """
+    expected_state = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        item_id = journal_item_id(entry)
+        if item_id is None:
+            # A create-ticket line from the old journal spine did not include the created issue
+            # number. It cannot contribute to replay, but later structured/move/close lines for
+            # the same item can still establish state.
+            continue
+
+        state = _entry_to_state(entry)
+        if not state:
+            # A FIELD-ONLY record (a `set-field` Wave/Phase/Domain write, or a `link`
+            # edge) carries NEITHER to_stage NOR to_status, so it establishes no Stage/
+            # Status expectation. It must NOT seed an expected-state entry (round-5 Fix
+            # 3): an empty `{item: {}}` seed compares clean against ANY board item, so a
+            # field-only write for an item with NO create/transition history would mask
+            # the missing history and look falsely reconciled. Skipping it leaves such an
+            # item ABSENT from expected state → reported as a real divergence (present on
+            # board, not in journal history). A record that DOES carry Stage/Status still
+            # seeds/updates the entry below, so a genuinely-created item is unaffected.
+            continue
+
+        expected_state.setdefault(item_id, {})
+        expected_state[item_id].update(state)
+
+    return expected_state
 
 
 # Board loading is intentionally local to stay inside Issue #142's admitted file surface.  The janitor

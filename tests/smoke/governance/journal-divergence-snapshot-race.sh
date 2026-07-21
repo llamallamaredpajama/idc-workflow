@@ -10,18 +10,22 @@ set -euo pipefail
 #
 #   scenario 1 — a half-written line from an in-flight append → "malformed journal" → the journal
 #                dimension goes INDETERMINATE and Row 10 SKIPs. Nothing is wrong with the journal.
-#   scenario 2 — a rotation caught between "the live segment has been replaced" and "the archive
-#                segment has been written" → the create records are momentarily in NEITHER place →
-#                no watermark → every board-only item is carved out as pre-journal legacy. A real
-#                divergence goes unreported.
+#   scenario 2 — the scanner snapshots the archive paths before rotation publishes its new archive,
+#                then opens the live path after rotation has replaced it → records that moved to the
+#                archive are absent from that stale path list. The first old read loses expected
+#                state; its second, fresh path snapshot sees the archive watermark and reports a
+#                false divergence against a board item whose history is actually in that archive.
 #
 # The fix is one locked, fail-closed snapshot (scan_journal_strict) feeding the reconstruction, the
 # watermark and the carve-out guard. The lock is the journal's sidecar — the same one journal_append
 # and rotation take — so the pass WAITS OUT a concurrent writer instead of reading through it.
 #
-# Both scenarios drive a REAL second process holding the REAL sidecar lock; the only staged part is
-# that the writer holds its window open for a fixed delay instead of by luck. Delete the lock from
-# scan_journal_strict, or go back to two unlocked reads, and both scenarios FAIL.
+# Both scenarios drive a REAL second process holding the REAL sidecar lock. Scenario 1 uses an
+# explicit release handshake (no fixed sleep). Scenario 2 calls the REAL rotate_journal and only
+# inserts a scheduling handoff after the REAL archive-path snapshot, so production's archive-first,
+# live-second replacement order is preserved. Delete the lock from scan_journal_strict, or go back
+# to two unlocked reads, and both scenarios FAIL. The final boundary check removes fcntl from the
+# import table: the strict scanner must return an indeterminate reason, never read unlocked or crash.
 
 . "$(dirname "$0")/lib.sh"
 
@@ -29,14 +33,16 @@ REPO="$(mktemp -d)"; trap 'rm -rf "$REPO"' EXIT
 mkdir -p "$REPO/docs/workflow"
 
 python3 - "$GOV_PLUGIN/scripts" "$REPO" <<'PY' || exit 1
-import json, os, subprocess, sys, time
+import fcntl, json, os, pathlib, subprocess, sys, threading, time
 sys.path.insert(0, sys.argv[1])
 repo = sys.argv[2]
-from idc_git_janitor import check_journal_divergence
+import idc_git_janitor as JANITOR
+import idc_journal_replay as REPLAY
 
 journal = os.path.join(repo, "docs", "workflow", "transition-journal.ndjson")
 archive_dir = os.path.join(repo, "docs", "workflow", "journal-archive")
 ready = os.path.join(repo, "writer-is-in-its-window")
+release = os.path.join(repo, "release-writer")
 
 # The engine's create record: it carries the target state, so a journaled item is reconciled.
 def create(num, status="Todo"):
@@ -44,36 +50,41 @@ def create(num, status="Todo"):
             "what": f"create-ticket 'item {num}'", "backend": "filesystem", "item": num,
             "to": {"stage": "Buildable", "status": status}}
 
-def board(*nums):
-    return [{"number": n, "stage": "Buildable", "status": "Todo"} for n in nums]
+def board(*nums, status="Todo"):
+    return [{"number": n, "stage": "Buildable", "status": status} for n in nums]
 
-WINDOW = 1.5
+def wait_for(path, proc, failure):
+    deadline = time.time() + 20
+    while not os.path.exists(path):
+        if proc.poll() is not None:
+            raise SystemExit(f"{failure}: writer exited {proc.returncode}")
+        if time.time() > deadline:
+            proc.kill()
+            raise SystemExit(failure)
+        time.sleep(0.01)
 
 def run_writer(open_window, close_window):
     """Run a SECOND process that takes the journal's sidecar lock (LOCK_EX — the lock
-    journal_append and the janitor's rotation take), opens its window, touches the ready file,
-    holds the window for WINDOW seconds, then closes it and releases. Returns once the window is
-    open, so the assertion below runs INSIDE it."""
-    if os.path.exists(ready):
-        os.remove(ready)
+    journal_append and the janitor's rotation take), opens its window, touches the ready file, and
+    waits for an explicit release before closing the window and unlocking. Returns once the window
+    is open, so the assertion below runs INSIDE it without relying on a fixed sleep."""
+    for marker in (ready, release):
+        if os.path.exists(marker):
+            os.remove(marker)
     src = ("import fcntl, os, sys, time\n"
-           "journal, archive_dir, ready, window = sys.argv[1], sys.argv[2], sys.argv[3], float(sys.argv[4])\n"
+           "journal, archive_dir, ready, release = sys.argv[1:]\n"
            "lock = open(journal + '.lock', 'a')\n"
            "fcntl.flock(lock.fileno(), fcntl.LOCK_EX)\n"
            + open_window +
            "open(ready, 'w').close()\n"
-           "time.sleep(window)\n"
+           "deadline = time.time() + 20\n"
+           "while not os.path.exists(release):\n"
+           "    if time.time() > deadline: raise SystemExit('reader never released writer')\n"
+           "    time.sleep(0.01)\n"
            + close_window +
            "fcntl.flock(lock.fileno(), fcntl.LOCK_UN)\n")
-    proc = subprocess.Popen([sys.executable, "-c", src, journal, archive_dir, ready, str(WINDOW)])
-    deadline = time.time() + 20
-    while not os.path.exists(ready):
-        if proc.poll() is not None:
-            raise SystemExit("the writer process exited before it opened its window")
-        if time.time() > deadline:
-            proc.kill()
-            raise SystemExit("the writer process never opened its window")
-        time.sleep(0.01)
+    proc = subprocess.Popen([sys.executable, "-c", src, journal, archive_dir, ready, release])
+    wait_for(ready, proc, "the writer process never opened its window")
     return proc
 
 # ── scenario 1: a half-written append must not read as a corrupt journal ───────────────────────────
@@ -85,66 +96,169 @@ if os.path.exists(journal + ".lock"):
     os.remove(journal + ".lock")
 
 proc = run_writer(
-    open_window=("open(journal, 'a').write('{\"op\": \"move\", \"item\": 10, \"to\": {\"stage\": \"Buil')\n"),
-    close_window=("open(journal, 'a').write('dable\", \"status\": \"Todo\"}, \"what\": \"move #10\"}\\n')\n"),
+    open_window=("partial = open(journal, 'a')\n"
+                 "partial.write('{\"op\": \"move\", \"item\": 10, \"to\": {\"stage\": \"Buil')\n"
+                 "partial.flush()\n"),
+    close_window=("partial.write('dable\", \"status\": \"Todo\"}, \"what\": \"move #10\"}\\n')\n"
+                  "partial.close()\n"),
 )
-started = time.time()
-findings = []
-indeterminate = check_journal_divergence({"board": board(10)}, findings, journal)
-waited = time.time() - started
-proc.wait()
+lock_attempt = os.path.join(repo, "reader-attempted-shared-lock")
+observed = {}
+real_flock = fcntl.flock
 
-if indeterminate:
+def observing_flock(fd, operation):
+    if operation == fcntl.LOCK_SH:
+        lock_stat, fd_stat = os.stat(journal + ".lock"), os.fstat(fd)
+        observed["same_sidecar"] = ((lock_stat.st_dev, lock_stat.st_ino) ==
+                                    (fd_stat.st_dev, fd_stat.st_ino))
+        try:
+            real_flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            observed["writer_excluded_reader"] = True
+        else:
+            observed["writer_excluded_reader"] = False
+            real_flock(fd, fcntl.LOCK_UN)
+        pathlib.Path(lock_attempt).touch()
+    return real_flock(fd, operation)
+
+result = {}
+def read_during_append():
+    try:
+        findings = []
+        result["indeterminate"] = JANITOR.check_journal_divergence(
+            {"board": board(10)}, findings, journal)
+        result["findings"] = findings
+    except BaseException as exc:  # keep the writer releasable even if the reader crashes
+        result["error"] = exc
+
+fcntl.flock = observing_flock
+reader = threading.Thread(target=read_during_append, daemon=True)
+try:
+    reader.start()
+    deadline = time.time() + 20
+    while not os.path.exists(lock_attempt):
+        if not reader.is_alive():
+            raise SystemExit("the reader returned before attempting the journal's shared sidecar "
+                             "lock — it read through the writer's half-written line")
+        if proc.poll() is not None:
+            raise SystemExit(f"the append writer exited unexpectedly ({proc.returncode})")
+        if time.time() > deadline:
+            raise SystemExit("the reader never attempted the journal's shared sidecar lock")
+        time.sleep(0.01)
+finally:
+    pathlib.Path(release).touch()
+    proc.wait(timeout=20)
+    reader.join(timeout=20)
+    fcntl.flock = real_flock
+
+if reader.is_alive():
+    raise SystemExit("the reader never completed after the writer released the sidecar lock")
+if result.get("error") is not None:
+    raise result["error"]
+if not observed.get("same_sidecar") or not observed.get("writer_excluded_reader"):
+    raise SystemExit(f"the scan did not contend on the writer's exact sidecar inode: {observed}")
+if result["indeterminate"]:
     raise SystemExit("a half-written line from an in-flight append was read as a CORRUPT journal — "
                      "the pass must take the sidecar lock and wait the writer out, not report the "
                      "journal dimension indeterminate")
-if [f for f in findings if f.get("dim") == "journal"]:
-    raise SystemExit(f"the settled journal agrees with the board; no finding expected, got {findings}")
-if waited < WINDOW / 2:
-    raise SystemExit(f"the pass returned in {waited:.2f}s — it cannot have waited for the writer's "
-                     f"{WINDOW}s window, so it did not read under the lock (non-vacuity check)")
+if [f for f in result["findings"] if f.get("dim") == "journal"]:
+    raise SystemExit(f"the settled journal agrees with the board; no finding expected, got "
+                     f"{result['findings']}")
 with open(journal, encoding="utf-8") as fh:   # the writer's line did land, whole
     if len([l for l in fh if l.strip()]) != 2:
         raise SystemExit("the writer's append did not complete — the scenario staged nothing")
-print(f"  ok (1) an in-flight append is waited out, not reported as corruption (blocked {waited:.2f}s)")
+print("  ok (1) an in-flight append is waited out on the exact sidecar, not reported as corruption")
 
-# ── scenario 2: a rotation caught mid-move must not erase the adoption watermark ───────────────────
-# Rotation archives terminal records: it rewrites the live segment, then writes the archive segment.
-# Between those two writes the create records exist in neither file. An unlocked reader that lands
-# there sees an adoption-free journal and carves out the whole board — including #20, which has no
-# journal history and is numbered ABOVE the real watermark (#10).
-os.makedirs(archive_dir, exist_ok=True)
-for stale in os.listdir(archive_dir):
-    os.remove(os.path.join(archive_dir, stale))
+# ── scenario 2: the REAL rotation must not create a false divergence ───────────────────────────────
+# Production rotation publishes the archive FIRST, then replaces the live journal. The old unlocked
+# reader can snapshot archive paths before the new archive exists, let rotation complete, and then
+# open the now-empty live path from that stale snapshot. Its first read loses BOTH journaled items;
+# its second fresh snapshot sees the archive watermark (#10), so it falsely reports journaled #20 as
+# missing history. The scheduling hook below runs only after the REAL _journal_paths result is built;
+# the writer calls the REAL rotate_journal, preserving production's exact replacement order.
 with open(journal, "w", encoding="utf-8") as fh:
-    fh.write(json.dumps(create(10)) + "\n")
-if os.path.exists(journal + ".lock"):
-    os.remove(journal + ".lock")
+    fh.write(json.dumps(create(10, "Done")) + "\n")
+    fh.write(json.dumps(create(20, "Done")) + "\n")
 
-proc = run_writer(
-    open_window=("open(journal, 'w').close()\n"),                      # live segment replaced, empty
-    close_window=("import json\n"
-                  "rec = json.dumps({'when': '2026-01-01T00:00:00Z', 'who': 'engine', "
-                  "'op': 'create-ticket', 'what': \"create-ticket 'item 10'\", "
-                  "'backend': 'filesystem', 'item': 10, "
-                  "'to': {'stage': 'Buildable', 'status': 'Todo'}})\n"
-                  "os.makedirs(archive_dir, exist_ok=True)\n"
-                  "open(os.path.join(archive_dir, '2026-01.ndjson'), 'w').write(rec + '\\n')\n"),
-)
-findings = []
-indeterminate = check_journal_divergence({"board": board(10, 20)}, findings, journal)
-proc.wait()
+rotate_ready = os.path.join(repo, "rotation-writer-ready")
+rotate_now = os.path.join(repo, "rotate-now")
+rotation_done = os.path.join(repo, "rotation-done")
+rotate_src = ("import os, pathlib, sys, time\n"
+              "scripts, repo, journal, ready, trigger, done = sys.argv[1:]\n"
+              "sys.path.insert(0, scripts)\n"
+              "import idc_git_janitor as janitor\n"
+              "pathlib.Path(ready).touch()\n"
+              "deadline = time.time() + 20\n"
+              "while not os.path.exists(trigger):\n"
+              "    if time.time() > deadline: raise SystemExit('reader never triggered rotation')\n"
+              "    time.sleep(0.01)\n"
+              "janitor.rotate_journal({'repo': repo, 'board': ["
+              "{'number': 10, 'status': 'Done'}, {'number': 20, 'status': 'Done'}]}, journal)\n"
+              "pathlib.Path(done).touch()\n")
+proc = subprocess.Popen([sys.executable, "-c", rotate_src, sys.argv[1], repo, journal,
+                         rotate_ready, rotate_now, rotation_done], stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE, text=True)
+wait_for(rotate_ready, proc, "the real rotation process never became ready")
+
+real_paths = REPLAY._journal_paths
+path_calls = 0
+scan_held_lock = None
+
+def rotate_after_snapshot(path):
+    global path_calls, scan_held_lock
+    paths = real_paths(path)
+    path_calls += 1
+    if path_calls == 1:
+        with open(journal + ".lock", "a") as probe:
+            try:
+                fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                scan_held_lock = True
+            else:
+                scan_held_lock = False
+                fcntl.flock(probe.fileno(), fcntl.LOCK_UN)
+        pathlib.Path(rotate_now).touch()
+        if not scan_held_lock:
+            # Old reader: let the REAL archive-first/live-second rotation finish, then return the
+            # stale pre-archive path snapshot so it opens the newly-empty live journal.
+            wait_for(rotation_done, proc, "the real rotation did not complete")
+    return paths
+
+REPLAY._journal_paths = rotate_after_snapshot
+try:
+    findings = []
+    indeterminate = JANITOR.check_journal_divergence(
+        {"board": board(10, 20, status="Done")}, findings, journal)
+finally:
+    REPLAY._journal_paths = real_paths
+stdout, stderr = proc.communicate(timeout=20)
+if proc.returncode:
+    raise SystemExit(f"the real rotation process failed ({proc.returncode}): {stderr or stdout}")
 
 if indeterminate:
     raise SystemExit(f"the settled journal is readable; indeterminate not expected. findings={findings}")
 journal_findings = [f for f in findings if f.get("dim") == "journal"]
-if not any("#20" == f.get("name") for f in journal_findings):
-    raise SystemExit("the pass read the journal mid-rotation, saw no create record, and carved out "
-                     f"the whole board — #20 has no journal history and is above the watermark (#10), "
-                     f"so it must be reported; got {journal_findings}")
-if any("#10" == f.get("name") for f in journal_findings):
-    raise SystemExit(f"#10's create record is in the archive segment and reconciles; got {journal_findings}")
-print("  ok (2) a rotation's read→replace window cannot erase the adoption watermark")
+if not scan_held_lock:
+    raise SystemExit("the journal path snapshot was not covered by the shared sidecar lock — a real "
+                     f"rotation can invalidate that snapshot (findings={journal_findings})")
+if journal_findings:
+    raise SystemExit(f"both #10 and #20 have create history moved by the real rotation; no false "
+                     f"divergence expected, got {journal_findings}")
+print("  ok (2) a real archive-first/live-second rotation cannot invalidate the locked path snapshot")
+
+# ── boundary: no fcntl means fail closed with a reason, not an unlocked read or a traceback ─────────
+# IDC's supported macOS/Linux platforms provide fcntl. Still, scan_journal_strict's contract is an
+# (entries, error) result on lock failure, and Row 10 maps that error to advisory SKIP. Simulate an
+# unavailable module so a platform gap cannot turn that ordinary fail-closed path into an exception.
+saved_fcntl = sys.modules.get("fcntl")
+sys.modules["fcntl"] = None
+try:
+    entries, error = REPLAY.scan_journal_strict(journal)
+finally:
+    sys.modules["fcntl"] = saved_fcntl
+if entries is not None or not error or "locking unavailable" not in error:
+    raise SystemExit(f"fcntl unavailable must return a fail-closed lock error, got {entries}, {error}")
+print("  ok (3) fcntl unavailable: strict scan returns indeterminate instead of reading unlocked/crashing")
 PY
 
-echo "PASS: the divergence pass takes ONE locked journal snapshot — a concurrent append cannot fake corruption and a concurrent rotation cannot fake a pre-journal board (#154 codex P2)"
+echo "PASS: the divergence pass takes ONE locked journal snapshot — concurrent append/rotation cannot fake a result, and an unavailable lock primitive fails closed (#154 codex P2)"

@@ -130,9 +130,12 @@ def scan_journal_strict(journal_path):
     #     APPEARING is the race signal. On it, loop to read through the now-present shared lock (which
     #     blocks until the writer finishes). No mint; no fail-open — a legitimate lockless legacy board
     #     still reads (never denied), so the dispose corroboration guards keep working on upgraded repos.
-    import fcntl
     if not os.path.isdir(os.path.dirname(journal_path)):
         return [], None   # no workflow dir → no journal, and no rotation to race
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - simulated by governance; absent on non-POSIX Python
+        return None, "journal sidecar locking unavailable: fcntl is not available"
     lock_path = journal_path + ".lock"
     for _ in (1, 2):
         try:

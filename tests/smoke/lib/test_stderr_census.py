@@ -965,35 +965,65 @@ for kind, what, anchor, replacement, must_fail in MUTATIONS:
 # hidden: a downgraded sentence is a real loss even when the exit code is unchanged. The
 # rest come back CLEAN, with the planted leak sitting in the tree, which is exactly the
 # state an independent verifier reached six times before any of this existed.
+#
+# WHICH OF THE TWO HAPPENED IS ASSERTED, not merely printed. The criterion for a good
+# mutation used to be "the sentence stopped being said" and nothing else — so a mutation
+# that broke R28's program for an unrelated reason (a NameError, a stray syntax error)
+# would produce output without the sentence and be recorded as a clean RED. The mutation
+# would have proved nothing about the guard it names, and it would have looked exactly
+# like the ones that do. Every row therefore carries the outcome it is expected to
+# produce, hand-written from what the mutation should mean, and a row that crashes the
+# program can no longer pass at all. All fifteen behaved as written when this was added,
+# so it was latent rather than live — which is the whole family this round is about.
+CRASH_MARKERS = ("Traceback (most recent call last):", 'File "<stdin>", line ')
+
+
 def outcome(code, output):
+    """(tag, the line to print). Three tags, and only two of them may be expected:
+
+    "clean"   — R28 walked the planted tree and reported nothing wrong with it.
+    "refused" — R28 refused anyway: the backstop, or an arm the mutation did not reach.
+    "crashed" — the program never got as far as a verdict, so this mutation says nothing
+                about the guard it was aimed at. Never expected; always a failure.
+    """
+    lines = [line for line in output.strip().splitlines() if line.strip()]
+    if any(marker in output for marker in CRASH_MARKERS):
+        return "crashed", "R28's program did not reach a verdict: %s" % (
+            lines[-1][:96] if lines else "(silent)")
     if code == 0:
-        return "R28 reported the tree CLEAN, and no other layer noticed"
-    first = [line for line in output.strip().splitlines() if line.strip()]
-    return "the backstop refused instead: %s" % (first[0][:96] if first else "(silent)")
+        return "clean", "R28 reported the tree CLEAN, and no other layer noticed"
+    return "refused", "the backstop refused instead: %s" % (
+        lines[0][:96] if lines else "(silent)")
 
 
-# (class, what is broken, the fixture that watches it, edits to the census module,
-#  edits to R28's program, the sentence that must stop being said)
+# (class, what is broken, the fixture that watches it, edits to the census module, edits
+#  to R28's program, the sentence that must stop being said, the outcome that must then
+#  follow — "refused" where R28's backstop still speaks, "clean" where nothing does)
 E2E_MUTATIONS = (
     ("deletion", "R28 stops reporting bare reads", "bare", (),
-     (("if bare:\n    sys.exit(", "if False:\n    sys.exit("),), BARE_SENTENCE),
+     (("if bare:\n    sys.exit(", "if False:\n    sys.exit("),), BARE_SENTENCE, "refused"),
 
     ("deletion", "R28 stops reporting cuts taken inside the door", "cut", (),
-     (("if scan.truncations:\n    sys.exit(", "if False:\n    sys.exit("),), CUT_SENTENCE),
+     (("if scan.truncations:\n    sys.exit(", "if False:\n    sys.exit("),),
+     CUT_SENTENCE, "refused"),
 
     ("deletion", "R28 stops reporting stale exemptions", "stale", (),
-     (("if stale:\n    sys.exit(", "if False:\n    sys.exit("),), STALE_SENTENCE),
+     (("if stale:\n    sys.exit(", "if False:\n    sys.exit("),),
+     STALE_SENTENCE, "refused"),
 
     ("deletion", "R28 stops reporting an exemption that covers two reads", "ambiguous", (),
-     (("if ambiguous:\n    sys.exit(", "if False:\n    sys.exit("),), AMBIGUOUS_SENTENCE),
+     (("if ambiguous:\n    sys.exit(", "if False:\n    sys.exit("),),
+     AMBIGUOUS_SENTENCE, "refused"),
 
     ("deletion", "R28 stops checking that this battery is still being run", "battery-off",
      (), (('if (len(runs_battery) != 1 or "|| fail" not in guard\n'
-           '        or "${PIPESTATUS[0]}" not in guard):', "if False:"),), BATTERY_SENTENCE),
+           '        or "${PIPESTATUS[0]}" not in guard):', "if False:"),),
+     BATTERY_SENTENCE, "clean"),
 
     ("deletion", "R28 stops asking the interpreter floor", "clean",
      (("MIN_PYTHON = (3, 9)", "MIN_PYTHON = (99, 0)"),),
-     (("    SCAN.check_interpreter()\n", "    pass\n"),), INTERPRETER_FLOOR_SENTENCE),
+     (("    SCAN.check_interpreter()\n", "    pass\n"),),
+     INTERPRETER_FLOOR_SENTENCE, "clean"),
 
     # The one this round exists for. The lib edit is the SITUATION (a walk that has
     # stopped looking at part of scripts/, with a real leak sitting in the part it no
@@ -1003,38 +1033,39 @@ E2E_MUTATIONS = (
     ("deletion", "R28 stops flooring how many files and reads the census must find",
      "unwalked-leak", NARROW_EDITS,
      (("if len(scan.modules) < FLOOR_FILES or len(scan.reads) < FLOOR_READS:",
-       "if False:"),), COUNT_FLOOR_SENTENCE),
+       "if False:"),), COUNT_FLOOR_SENTENCE, "clean"),
 
     ("deletion", "R28 stops running the canary", "clean",
      (('    "scrubbed_reads": 10,', '    "scrubbed_reads": 11,'),),
-     (("    SCAN.run_canary()\n", "    pass\n"),), CANARY_SENTENCE),
+     (("    SCAN.run_canary()\n", "    pass\n"),), CANARY_SENTENCE, "clean"),
 
     ("substitution", "the exemption is keyed on the MODULE instead of the line", "bare",
      (("            if read.key not in allowed_raw and not read.scrubbed]",
        "            if read.module not in {m for m, _ in allowed_raw} "
-       "and not read.scrubbed]"),), (), BARE_SENTENCE),
+       "and not read.scrubbed]"),), (), BARE_SENTENCE, "clean"),
 
     ("deletion", "judge() stops noticing an exemption that matched nothing", "stale",
      (("    stale = sorted(set(allowed_raw) - set(matched))", "    stale = []"),), (),
-     STALE_SENTENCE),
+     STALE_SENTENCE, "clean"),
 
     ("deletion", "judge() stops noticing an exemption that matched twice", "ambiguous",
      (("    ambiguous = [(key, matched[key]) for key in sorted(matched) "
-       "if len(matched[key]) > 1]", "    ambiguous = []"),), (), AMBIGUOUS_SENTENCE),
+       "if len(matched[key]) > 1]", "    ambiguous = []"),), (),
+     AMBIGUOUS_SENTENCE, "clean"),
 
     ("deletion", "census() throws away the cuts analyze handed it", "cut",
      (("        truncations.extend(found_cuts)", "        truncations.extend([])"),), (),
-     CUT_SENTENCE),
+     CUT_SENTENCE, "clean"),
 
     ("substitution", "census() reports every read as scrubbed", "bare",
      (("        reads.extend(found_reads)",
        '        reads.extend([setattr(r, "scrubbed", True) or r for r in found_reads])'),),
-     (), BARE_SENTENCE),
+     (), BARE_SENTENCE, "clean"),
 
     ("deletion", "R28 stops putting a floor under how much the battery still contains",
      "clean", (),
      (('if int(fields["assertions_passed"]) < FLOOR_ASSERTIONS:', "if False:"),),
-     GUTTED_SENTENCE, battery_transcript(passed=3)),
+     GUTTED_SENTENCE, "clean", battery_transcript(passed=3)),
 
     ("value", "the file set drops scripts/hooks/ AND the floors are lowered to match",
      "hooks",
@@ -1042,13 +1073,13 @@ E2E_MUTATIONS = (
        '+ glob.glob(os.path.join(root, "scripts", "hooks", "*.py")))',
        '(os.path.join(root, "scripts", "*.py")))'),),
      (("FLOOR_FILES, FLOOR_READS = 62, 25", "FLOOR_FILES, FLOOR_READS = 1, 1"),),
-     BARE_SENTENCE),
+     BARE_SENTENCE, "clean"),
 )
 
 print("  -- the judgement and R28 itself, broken one guard at a time --")
 for entry in E2E_MUTATIONS:
-    kind, what, root_name, lib_edits, program_edits, sentence = entry[:6]
-    transcript = entry[6] if len(entry) > 6 else None
+    kind, what, root_name, lib_edits, program_edits, sentence, expected = entry[:7]
+    transcript = entry[7] if len(entry) > 7 else None
     try:
         lib = mutant_lib(lib_edits) if lib_edits else LIB_DIR
         program = edited(R28_PROGRAM, program_edits, "R28's program") if program_edits \
@@ -1058,7 +1089,13 @@ for entry in E2E_MUTATIONS:
             raise AssertionError("the refusal survived the mutation, so the fixture that "
                                  "is supposed to be watching this guard is not what "
                                  "catches it — the pair proves nothing")
-        say(True, "RED  [%s] %s\n          => %s" % (kind, what, outcome(code, output)))
+        tag, said = outcome(code, output)
+        if tag != expected:
+            raise AssertionError("the sentence stopped, but R28 came back %r where this "
+                                 "mutation is written down as %r — so what was observed "
+                                 "is not what this row claims to demonstrate: %s"
+                                 % (tag, expected, said))
+        say(True, "RED  [%s] %s\n          => %s" % (kind, what, said))
     except AssertionError as exc:
         check(False, "[%s] %s stayed GREEN: %s" % (kind, what, exc))
         say(False, "GREEN [%s] %s — %s" % (kind, what, exc))

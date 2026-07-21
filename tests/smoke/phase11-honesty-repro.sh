@@ -326,15 +326,23 @@
 #     4. THIS CASE CHECKS THAT ITS OWN BATTERY IS STILL BEING RUN (step 0), and a BACKSTOP after the
 #        arms refuses anything the arms let through, so disabling one arm can only downgrade the
 #        sentence, never produce silence.
+#     5. AND THAT THE BATTERY STILL CONTAINS SOMETHING (step 0b). Running is not containing: with
+#        the battery's five fixture tables emptied — one line each — both gates reported success,
+#        measured on the tree as it stood after (1)-(4). So the battery now prints how many
+#        assertions it passed and this case puts a FLOOR under that number. That is the THIRD
+#        STOREY of one failure, and step (0b) says why the regress stops there rather than
+#        building a fourth.
 #
-#   ROUND-6 MUTATIONS — 13, each anchor asserted to match EXACTLY ONCE, each run against the fixture
+#   ROUND-6 MUTATIONS — 14, each anchor asserted to match EXACTLY ONCE, each run against the fixture
 #   tree that is supposed to watch it, and each required to make that fixture's own refusal STOP
-#   BEING SAID. They run on every suite run. 13 applied · 13 RED · 0 GREEN.
+#   BEING SAID. They run on every suite run. 14 applied · 14 RED · 0 GREEN.
 #     deletion      the bare arm, the truncation arm, the stale arm and the ambiguity arm, one at a
 #                   time ⇒ RED: each fixture loses its sentence. All four then hit the backstop, so
 #                   the suite still refuses — with a blunter message, which is the honest cost.
 #                   R28 stops checking that the battery runs ⇒ RED: the switched-off-battery tree
 #                   comes back clean.
+#                   R28 stops flooring how much the battery contains ⇒ RED: a transcript reporting
+#                   three passing assertions is accepted.
 #                   R28 stops calling check_interpreter / stops calling run_canary ⇒ RED: a census
 #                   module that refuses this interpreter, and one whose canary has drifted, are both
 #                   reported CLEAN. (Round 5 recorded these as covered by defence in depth. Defence
@@ -2294,15 +2302,22 @@ echo "== R28. THE CREDENTIAL SCRUB IS A PROPERTY OF THE TEXT, NOT A HABIT OF THE
 # any other and it can break like one — and the way it breaks is by finding LESS, which looks exactly
 # like good news. So its unit test runs first, and it runs four things: twenty-seven fixtures with
 # the answer written beside each — source shapes through the walk, whole scripts/ trees through the
-# judgement; nine runs of THIS CASE'S OWN CENSUS PROGRAM, lifted verbatim out of the heredoc below,
-# against the real tree with one violation planted in it; and twenty-four deliberate mutations of
-# the walk, of the judgement and of this file, each of which must be observed to FAIL.
-python3 "$HERE/lib/test_stderr_census.py" \
+# judgement; twelve runs of THIS CASE'S OWN CENSUS PROGRAM, lifted verbatim out of the heredoc
+# below, against the real tree with one violation planted in it; and twenty-five deliberate
+# mutations of the walk, of the judgement and of this file, each of which must be observed to
+# FAIL. Sixty-four assertions in all, and step (0b) below puts a floor under that number.
+# The transcript is KEPT, not just watched go by: the census program below reads it back and puts a
+# floor under how many assertions it reported. Running the battery and containing a battery are two
+# different facts, and only the second one is worth anything.
+BATTERY="$WORK/r28-census-battery.txt"
+python3 "$HERE/lib/test_stderr_census.py" 2>&1 | tee "$BATTERY"
+[ "${PIPESTATUS[0]}" -eq 0 ] \
   || fail "R28: the census's own walk is broken, or is no longer red-when-broken — until this passes, anything the census says about scripts/ below is unfounded"
 
-python3 - "$PLUGIN" "$HERE/lib" <<'PYR28' || fail "R28: a child process's stderr can reach a persisted artifact unscrubbed, or the machine-output profile does not cover what it claims"
+python3 - "$PLUGIN" "$HERE/lib" "$BATTERY" <<'PYR28' || fail "R28: a child process's stderr can reach a persisted artifact unscrubbed, or the machine-output profile does not cover what it claims"
 import glob, importlib.util, os, shutil, subprocess, sys, tempfile
 plugin = sys.argv[1]
+battery_transcript = sys.argv[3]
 sys.path.insert(0, os.path.join(plugin, "scripts"))
 sys.path.insert(0, sys.argv[2])
 import idc_credential_shapes as CS
@@ -2330,12 +2345,63 @@ SUITE = os.path.join(plugin, "tests", "smoke", "phase11-honesty-repro.sh")
 suite_lines = open(SUITE, encoding="utf-8").read().splitlines()
 runs_battery = [n for n, line in enumerate(suite_lines)
                 if line.startswith('python3 "$HERE/lib/test_stderr_census.py"')]
-if len(runs_battery) != 1 or "|| fail" not in suite_lines[runs_battery[0] + 1]:
+guard = " ".join(suite_lines[runs_battery[0]:runs_battery[0] + 3]) if runs_battery else ""
+if len(runs_battery) != 1 or "|| fail" not in guard or "PIPESTATUS" not in guard:
     sys.exit("this case no longer runs tests/smoke/lib/test_stderr_census.py, or runs it without "
-             "`|| fail` so its exit code is discarded. That file IS the evidence that the census "
-             "below can still tell a scrubbed read from a raw one; without it this case walks 62 "
-             "modules with a walk nobody has watched fail and reports whatever it happens to find. "
-             "Restore the invocation. If the battery genuinely has to move, move this check with it.")
+             "checking what it returned — the invocation is piped through `tee`, so its exit code "
+             "has to be read out of PIPESTATUS and turned into a `fail`, or a battery that reported "
+             "failure would scroll past as ordinary output. That file IS the evidence that the "
+             "census below can still tell a scrubbed read from a raw one; without it this case "
+             "walks 62 modules with a walk nobody has watched fail and reports whatever it happens "
+             "to find. Restore the invocation. If the battery genuinely has to move, move this "
+             "check with it.")
+
+# ── (0b) …AND IT MUST STILL CONTAIN SOMETHING ────────────────────────────────────────────────────
+# Step (0) proves the battery RUNS. Running is not containing. Empty its fixture tables — one line
+# each, `for … in ():` — and the file exits 0 with a shorter transcript, and nothing anywhere
+# notices. That was run, not imagined: with all five tables emptied, both gates reported success.
+#
+# Say plainly what this is, because it is the most useful sentence in the case: THIS IS THE THIRD
+# STOREY OF ONE FAILURE. First the ordering rule had no live positive example, so a dead detector
+# and a working one printed the same thing — answered with the canary. Then the JUDGEMENT had no
+# positive example, so a dead verdict arm and a working one printed the same thing — answered with
+# fixture trees run through this case's own program. Now the BATTERY itself: a gutted one and a full
+# one exit the same way. Every time, the guard had been moved one storey away from where it was
+# proved; every time, the failure looked exactly like good news.
+#
+# THE REGRESS TERMINATES HERE, DELIBERATELY. One could ask next what guards this floor, and the
+# answer is: a reviewer reading R28. This is the file a person opens — the rule, the registry, the
+# reasons and the refusals all live here so that they are READ rather than trusted. A fourth storey
+# would move the guard away from the reader again, which is the exact defect all three of these
+# fixed. Stop here.
+#
+# A FLOOR, not an equality, for the same reason as FLOOR_FILES/FLOOR_READS below: adding assertions
+# must stay silent (correct work should pass without ceremony) and removing them must go loud.
+# RAISE this in the same commit that adds assertions. NEVER lower it without naming, in that commit,
+# which assertions were deleted and why.
+FLOOR_ASSERTIONS = 64
+tally = [line for line in open(battery_transcript, encoding="utf-8").read().splitlines()
+         if line.startswith("test_stderr_census: assertions_passed=")]
+if len(tally) != 1:
+    sys.exit(f"the battery ran but did not report how many assertions it passed: expected exactly "
+             f"one `test_stderr_census: assertions_passed=…` line in its transcript, found "
+             f"{len(tally)}. Without that number this case can tell you the battery RAN and nothing "
+             f"about whether it still CONTAINS anything, which is the whole difference between a "
+             f"guard and a habit.")
+fields = dict(part.split("=", 1) for part in tally[0].split(": ", 1)[1].split())
+if fields.get("python") != sys.version.split()[0]:
+    sys.exit(f"the battery transcript says it was produced by Python {fields.get('python')!r}, but "
+             f"this census is running on {sys.version.split()[0]}. So the transcript is not this "
+             f"run's — it is stale, or hand-made — and a floor applied to somebody else's numbers "
+             f"is not a floor at all.")
+if int(fields["assertions_passed"]) < FLOOR_ASSERTIONS:
+    sys.exit(f"the census's battery passed only {fields['assertions_passed']} assertions; it has to "
+             f"pass at least {FLOOR_ASSERTIONS}. Assertions have been DELETED — some of the shape "
+             f"fixtures, the judgement trees, the end-to-end runs of this program, or the "
+             f"mutations. A battery that still runs and no longer contains anything reports exactly "
+             f"what a healthy one reports, and everything this case says about scripts/ below rests "
+             f"on it. Either restore what was removed, or lower this floor in a commit that names "
+             f"each assertion deleted and why it was safe to delete.")
 
 # ── (1) THE PROFILE, DRIVEN BY LITERAL SAMPLES ───────────────────────────────────────────────────
 D = load("scripts/idc_autorun_drain.py", "D")

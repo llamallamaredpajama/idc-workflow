@@ -67,12 +67,27 @@ def scratch_dir(what):
     return path
 
 failures = []
+PASSED = [0]
 
 
 def check(condition, message):
     if not condition:
         failures.append(message)
     return condition
+
+
+def say(ok, text):
+    """Print one verdict line, and COUNT it when it passed.
+
+    The count is the last line this file prints, and R28 puts a FLOOR under it. That is
+    not ceremony either: R28 checks that this battery still RUNS, and running is not the
+    same as containing anything. Empty the fixture tables below and this file exits 0
+    with a shorter transcript — which was measured, not imagined, and is the third storey
+    of one failure. See R28's step (0b) for the whole of it.
+    """
+    if ok:
+        PASSED[0] += 1
+    print("  %s %s" % ("ok  " if ok else "FAIL", text))
 
 
 def classify(source, module="<fixture>"):
@@ -254,7 +269,7 @@ for label, _why, source, want_raw, want_scrubbed, want_cuts in CASES:
                "\n      scrubbed  expected %r\n                got      %r"
                "\n      cuts      expected %r\n                got      %r"
                % (label, want_raw, got_raw, want_scrubbed, got_scrubbed, want_cuts, got_cuts))
-    print("  %s %s" % ("ok  " if ok else "FAIL", label))
+    say(ok, label)
 
 # A module that will not parse is a census FAILURE, never a skip. The day a scripts/*.py
 # uses syntax newer than the interpreter running the suite, a swallowed SyntaxError would
@@ -262,11 +277,11 @@ for label, _why, source, want_raw, want_scrubbed, want_cuts in CASES:
 try:
     SC.analyze("def broken(:\n    pass\n", "scripts/idc_broken.py")
     check(False, "an unparseable module was accepted — a skipped module reports clean")
-    print("  FAIL an unparseable module is a census failure")
+    say(False, "an unparseable module is a census failure")
 except SC.ParseFailure as exc:
     check(exc.module == "scripts/idc_broken.py",
           "ParseFailure did not name the module it could not read")
-    print("  ok   an unparseable module is a census failure, and names itself")
+    say(True, "an unparseable module is a census failure, and names itself")
 
 # …and not only when the parser calls it a SyntaxError. A stray null byte makes ast.parse
 # raise ValueError, and "the census could not read this module" has to mean the same thing
@@ -274,10 +289,10 @@ except SC.ParseFailure as exc:
 try:
     SC.analyze("x = 1\0\n", "scripts/idc_nullbyte.py")
     check(False, "a module the parser refused for a non-syntax reason was accepted")
-    print("  FAIL any parser refusal is a census failure, not only a SyntaxError")
+    say(False, "any parser refusal is a census failure, not only a SyntaxError")
 except SC.ParseFailure as exc:
     check(exc.module == "scripts/idc_nullbyte.py", "ParseFailure did not name the module")
-    print("  ok   any parser refusal is a census failure, not only a SyntaxError")
+    say(True, "any parser refusal is a census failure, not only a SyntaxError")
 
 # The floor. 3.9 and not 3.8 — but NOT for the reason this comment used to give. It said
 # 3.8 wraps a plain index in an extra node so the truncation rule under-matches; that was
@@ -288,20 +303,20 @@ except SC.ParseFailure as exc:
 try:
     SC.check_interpreter((3, 8, 20, "final", 0))
     check(False, "the floor accepted Python 3.8, where the truncation rule under-matches")
-    print("  FAIL the floor refuses an interpreter the walk is not proven on")
+    say(False, "the floor refuses an interpreter the walk is not proven on")
 except SC.InterpreterTooOld:
     SC.check_interpreter((3, 9, 0, "final", 0))          # must NOT raise
     SC.check_interpreter()                               # nor must the one we are on
-    print("  ok   the floor refuses 3.8, admits 3.9, and admits this interpreter")
+    say(True, "the floor refuses 3.8, admits 3.9, and admits this interpreter")
 
 # The canary itself, on this interpreter.
 try:
     SC.run_canary()
-    print("  ok   the canary agrees with its hand-counted answer on Python %s"
-          % sys.version.split()[0])
+    say(True, "the canary agrees with its hand-counted answer on Python %s"
+        % sys.version.split()[0])
 except SC.CanaryDrift as exc:
     check(False, "the canary drifted on this interpreter: %r" % (exc.drift,))
-    print("  FAIL the canary agrees with its hand-counted answer")
+    say(False, "the canary agrees with its hand-counted answer")
 
 
 # ── PART TWO: the judgement, on trees that have something wrong with them ────────────
@@ -439,7 +454,7 @@ for label, _why, modules, allowed, want in JUDGEMENTS:
     expected = {arm: want.get(arm, ()) for arm in SC.Verdict.ARMS}
     ok = check(got == expected,
                "%s\n      expected %r\n      got      %r" % (label, expected, got))
-    print("  %s %s" % ("ok  " if ok else "FAIL", label))
+    say(ok, label)
 
 # A module the census cannot DECODE never reaches the parser, so `analyze`'s refusal
 # cannot catch it. Until this was wrapped it escaped `census()` as a bare traceback and
@@ -451,10 +466,10 @@ UNDECODABLE_TREE = tree({"scripts/idc_binary.py":
 try:
     SC.census(UNDECODABLE_TREE)
     check(False, "a module that is not valid UTF-8 was not reported as a census failure")
-    print("  FAIL a module that cannot be decoded is a named census failure")
+    say(False, "a module that cannot be decoded is a named census failure")
 except SC.ParseFailure as exc:
     check(exc.module == "scripts/idc_binary.py", "ParseFailure did not name the module")
-    print("  ok   a module that cannot be decoded is a named census failure")
+    say(True, "a module that cannot be decoded is a named census failure")
 
 
 # ── PART THREE: R28's own program, over a tree with something planted in it ──────────
@@ -467,6 +482,10 @@ except SC.ParseFailure as exc:
 # So this part runs R28's census program itself, lifted verbatim out of the file that
 # runs it, against a root that IS the real tree (by symlink) with one violation added.
 # Nothing here is a re-implementation; if the program changes, this runs the change.
+# Comfortably above any floor R28 will sensibly carry. See battery_transcript().
+BIG_ENOUGH = 100000
+
+
 def r28_program():
     """R28's census program, lifted out of the suite file rather than copied."""
     text = open(SUITE_PATH, encoding="utf-8").read()
@@ -531,9 +550,34 @@ def mirror(extra=None, edits=None, suite_edits=None):
     return root
 
 
-def run_r28(root, lib=LIB_DIR, program=None):
-    """Run R28's census program exactly as the suite runs it: `python3 - <root> <lib>`."""
-    proc = subprocess.run([sys.executable, "-", root, lib],
+def battery_transcript(passed=BIG_ENOUGH, tallied=True, python=None):
+    """A stand-in for this file's own output, which R28 reads back and floors.
+
+    R28 keeps the battery's transcript and requires it to report enough passing
+    assertions, because a battery that RUNS is not the same as a battery that still
+    CONTAINS anything. These are fixture INPUTS — hand-made on purpose, so the floor can
+    be shown a gutted run without this file having to run a gutted copy of itself.
+    `passed` is a large number rather than the real tally because the real tally is not
+    known until the last line of this file, long after these runs happen.
+    """
+    path = os.path.join(scratch_dir("battery"), "battery.txt")
+    lines = ["  ok   (a hand-made transcript: a fixture input, not a real run)"]
+    if tallied:
+        lines.append("test_stderr_census: assertions_passed=%d python=%s"
+                     % (passed, python or sys.version.split()[0]))
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
+    return path
+
+
+def run_r28(root, lib=LIB_DIR, program=None, transcript=None):
+    """Run R28's census program exactly as the suite runs it.
+
+    `python3 - <root> <lib> <battery transcript>` — the same three arguments the heredoc
+    is given by the shell line above it.
+    """
+    proc = subprocess.run([sys.executable, "-", root, lib,
+                           transcript or lib_for("healthy-battery", battery_transcript)],
                           input=program or R28_PROGRAM,
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                           universal_newlines=True)
@@ -560,6 +604,9 @@ AMBIGUOUS_SENTENCE = "covers MORE THAN ONE read"
 FLOOR_SENTENCE = "only proven to give identical answers"
 CANARY_SENTENCE = "no longer answers the way it was hand-counted"
 BATTERY_SENTENCE = "no longer runs tests/smoke/lib/test_stderr_census.py"
+GUTTED_SENTENCE = "it has to pass at least"
+NO_TALLY_SENTENCE = "did not report how many assertions it passed"
+STALE_TALLY_SENTENCE = "the transcript is not this run's"
 
 # Fixture roots, built once and reused by PART FOUR. `bare` deliberately plants inside a
 # module that ALREADY holds an exemption, so the same tree also catches an exemption keyed
@@ -586,8 +633,8 @@ FIXTURES = {
     # line's trailing continuation because the same text also appears inside R28's own
     # self-check, and an anchor that matched twice would build a fixture nobody planned.
     "battery-off": lambda: mirror(suite_edits=[
-        ('python3 "$HERE/lib/test_stderr_census.py" \\\n',
-         'true "$HERE/lib/test_stderr_census.py" \\\n')]),
+        ('python3 "$HERE/lib/test_stderr_census.py" 2>&1 | tee',
+         'true "$HERE/lib/test_stderr_census.py" 2>&1 | tee')]),
 }
 ROOTS = {}
 
@@ -670,12 +717,33 @@ END_TO_END = (
      "R28's canary call was measured green, because this file runs the canary too; that "
      "is defence in depth, and defence in depth is not evidence.",
      "clean", ("drifted", DRIFTED_LIB), ((CANARY_SENTENCE, 1),)),
+
+    ("a battery that has been GUTTED makes R28 REFUSE",
+     "The third storey. R28 proves this file still runs; nothing proved it still "
+     "contains anything. Emptying its fixture tables — one line each — leaves it exiting "
+     "0 with a shorter transcript, and all five emptied at once was measured to leave "
+     "BOTH gates green. R28 now floors the tally this file prints.",
+     "clean", None, ((GUTTED_SENTENCE, 1),), battery_transcript(passed=3)),
+
+    ("a battery that has stopped reporting its tally makes R28 REFUSE",
+     "The floor is only as good as the number it reads. Deleting the tally line is a "
+     "quieter way to remove the floor than deleting the floor, so it fails too.",
+     "clean", None, ((NO_TALLY_SENTENCE, 1),), battery_transcript(tallied=False)),
+
+    ("a battery transcript from another interpreter makes R28 REFUSE",
+     "A transcript left over from an earlier run, or written by hand, would satisfy any "
+     "floor. The tally carries the Python that produced it and R28 requires it to be the "
+     "one it is running on.",
+     "clean", None, ((STALE_TALLY_SENTENCE, 1),),
+     battery_transcript(python="3.0.0-not-this-one")),
 )
 
 print("  -- R28's own program, against fixture trees --")
-for label, _why, root_name, lib_spec, must in END_TO_END:
+for entry in END_TO_END:
+    label, _why, root_name, lib_spec, must = entry[:5]
+    transcript = entry[5] if len(entry) > 5 else None
     lib = LIB_DIR if lib_spec is None else lib_for(*lib_spec)
-    code, output = run_r28(root_for(root_name), lib)
+    code, output = run_r28(root_for(root_name), lib, transcript=transcript)
     if not must:
         ok = check(code == 0, "%s: exit %d\n      %s" % (label, code, output.strip()))
     else:
@@ -685,7 +753,7 @@ for label, _why, root_name, lib_spec, must in END_TO_END:
                    "%s\n      exit %d; the refusal did not say %s\n      got: %s"
                    % (label, code, "; ".join(missing) or "(it did not refuse at all)",
                       output.strip()))
-    print("  %s %s" % ("ok  " if ok else "FAIL", label))
+    say(ok, label)
 
 
 # ── PART FOUR: the mutations ─────────────────────────────────────────────────────────
@@ -823,10 +891,10 @@ print("  -- mutations (each anchor asserted to match exactly once) --")
 for kind, what, anchor, replacement, must_fail in MUTATIONS:
     try:
         observed = must_fail(load_mutant(anchor, replacement))
-        print("  ok   RED  [%s] %s\n          => %s" % (kind, what, observed))
+        say(True, "RED  [%s] %s\n          => %s" % (kind, what, observed))
     except AssertionError as exc:
         check(False, "[%s] %s stayed GREEN: %s" % (kind, what, exc))
-        print("  FAIL GREEN [%s] %s — %s" % (kind, what, exc))
+        say(False, "GREEN [%s] %s — %s" % (kind, what, exc))
 
 # ── PART FOUR, SECOND HALF: the guards only a fixture tree can watch ─────────────────
 # The battery above breaks the WALK and lets the canary notice. Nothing it does can reach
@@ -863,7 +931,7 @@ E2E_MUTATIONS = (
      (("if ambiguous:\n    sys.exit(", "if False:\n    sys.exit("),), AMBIGUOUS_SENTENCE),
 
     ("deletion", "R28 stops checking that this battery is still being run", "battery-off",
-     (), (('if len(runs_battery) != 1 or "|| fail" not in suite_lines[runs_battery[0] + 1]:',
+     (), (('if len(runs_battery) != 1 or "|| fail" not in guard or "PIPESTATUS" not in guard:',
            "if False:"),), BATTERY_SENTENCE),
 
     ("deletion", "R28 stops asking the interpreter floor", "clean",
@@ -896,6 +964,11 @@ E2E_MUTATIONS = (
        '        reads.extend([setattr(r, "scrubbed", True) or r for r in found_reads])'),),
      (), BARE_SENTENCE),
 
+    ("deletion", "R28 stops putting a floor under how much the battery still contains",
+     "clean", (),
+     (('if int(fields["assertions_passed"]) < FLOOR_ASSERTIONS:', "if False:"),),
+     GUTTED_SENTENCE, battery_transcript(passed=3)),
+
     ("value", "the file set drops scripts/hooks/ AND the floors are lowered to match",
      "hooks",
      (('(os.path.join(root, "scripts", "*.py"))\n                  '
@@ -906,24 +979,33 @@ E2E_MUTATIONS = (
 )
 
 print("  -- the judgement and R28 itself, broken one guard at a time --")
-for kind, what, root_name, lib_edits, program_edits, sentence in E2E_MUTATIONS:
+for entry in E2E_MUTATIONS:
+    kind, what, root_name, lib_edits, program_edits, sentence = entry[:6]
+    transcript = entry[6] if len(entry) > 6 else None
     try:
         lib = mutant_lib(lib_edits) if lib_edits else LIB_DIR
         program = edited(R28_PROGRAM, program_edits, "R28's program") if program_edits \
             else None
-        code, output = run_r28(root_for(root_name), lib, program)
+        code, output = run_r28(root_for(root_name), lib, program, transcript)
         if sentence in output:
             raise AssertionError("the refusal survived the mutation, so the fixture that "
                                  "is supposed to be watching this guard is not what "
                                  "catches it — the pair proves nothing")
-        print("  ok   RED  [%s] %s\n          => %s" % (kind, what, outcome(code, output)))
+        say(True, "RED  [%s] %s\n          => %s" % (kind, what, outcome(code, output)))
     except AssertionError as exc:
         check(False, "[%s] %s stayed GREEN: %s" % (kind, what, exc))
-        print("  FAIL GREEN [%s] %s — %s" % (kind, what, exc))
+        say(False, "GREEN [%s] %s — %s" % (kind, what, exc))
 
+# THE TALLY, in a shape a shell can read. R28 floors it — see step (0b) there for why a
+# battery that runs is not the same as a battery that still contains anything. The
+# interpreter is stamped alongside so a transcript left over from another run, or from
+# another Python, cannot be mistaken for this one's.
+print("test_stderr_census: assertions_passed=%d python=%s"
+      % (PASSED[0], sys.version.split()[0]))
 if failures:
     print("\ntest_stderr_census: %d FAILED" % len(failures))
     for message in failures:
         print("  - %s" % message)
     sys.exit(1)
-print("test_stderr_census: OK (Python %s)" % sys.version.split()[0])
+print("test_stderr_census: OK (Python %s) — %d assertions"
+      % (sys.version.split()[0], PASSED[0]))

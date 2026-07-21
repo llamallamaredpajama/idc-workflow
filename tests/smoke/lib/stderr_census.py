@@ -45,18 +45,30 @@ None of those changes the structure, so none of them can hide from a tree.
 
 WHAT THIS FILE OWES ITS CALLER
 ------------------------------
-Three things, in the order they must run:
+Four things, in the order they must run:
 
   1. `check_interpreter()` — refuse an interpreter this walk is not proven on.
   2. `run_canary()`        — prove, on a fixture with a known answer, that the walk
                              still tells the rules apart ON THIS interpreter.
-  3. `census(root)`        — the real walk, over the real tree.
+  3. `census(root)`        — the real walk, over the real tree. Facts only.
+  4. `judge(scan, allowed)`— those facts measured against R28's registry, and turned
+                             into the four findings R28 has a sentence for.
 
 Step 2 is not ceremony. On today's clean tree the ordering rule's true answer is ZERO,
 so a walk that has stopped detecting truncation-inside-the-door produces byte-identical
 output to a working one, and the suite reports success. The canary is the only place
 that rule has a positive example, so it is the only thing standing between "clean" and
 "blind". See R28's prose for the experiment that established this.
+
+Step 4 exists because that lesson had to be learned TWICE. Round 5 gave the walk a
+canary and stopped there — and an independent verifier then broke the layer ABOVE the
+walk twenty-eight ways, found fourteen of them undetected, and proved six of those
+fourteen would let a real planted credential leak through with both gates reporting
+success. Every one of them lived in the judgement: `census()` throwing away what
+`analyze()` found, or R28's verdict arms deciding not to look. A canary one function
+below cannot see any of that. So the judgement is a function here, where a fixture tree
+with a known-bad module can be pushed through it — and the fixtures that do so are in
+test_stderr_census.py, which runs before R28 says anything about scripts/.
 """
 import ast
 import glob
@@ -64,10 +76,30 @@ import os
 import sys
 
 # ── THE RULES, as constants ──────────────────────────────────────────────────────────
-# The oldest interpreter this walk is PROVEN identical on. 3.9 and not 3.8, because 3.9
-# is where `x[:200]`'s shape settled: on 3.8 a plain index like `d["k"]` still arrives
-# wrapped in an extra `ast.Index` node, which changes what the truncation check below is
-# looking at — and changing it in the direction that finds FEWER violations, silently.
+# The oldest interpreter this walk is PROVEN identical on, and the reason is NOT the one
+# this comment used to give. It said 3.8 wraps a plain index in an extra `ast.Index` node
+# and so under-matches the truncation rule. That was inherited from the proposal and it
+# was then MEASURED on a real CPython 3.8.20: a real cut is still `ast.Slice` there and an
+# index is still not, so `isinstance(node.slice, ast.Slice)` gives 3.8 the same two answers
+# it gives 3.14. Truncation count 0, every count identical, canary green. There is no
+# under-match. The sentence was confident and false, which is worse than no sentence.
+#
+# What 3.8 actually gets wrong is the KEY. A read inside a multi-line f-string is reported
+# at the f-string's OPENING line, not its own, so `_source_line` below derives the wrong
+# text for it: 7 of the 25 keys on today's real tree are wrong on 3.8 — with every count
+# perfect and the canary passing green. A wrong key is a wrong exemption, and that is the
+# one thing here that fails quietly.
+#
+# The floor is at 3.9 rather than 3.9.7 DELIBERATELY, and it is a cost taken with open
+# eyes: the same f-string collapse survives on 3.9.6 in its narrow form (a TRIPLE-QUOTED
+# multi-line f-string whose replacement field carries a conversion `!r` or a format spec;
+# fixed upstream in 3.9.7). 3.9.6 is `/usr/bin/python3` on this project's dev machine and
+# the `python3` four of its five shells resolve to, so a floor of 3.9.7 would make this
+# suite refuse to run in every agent and teammate pane. The residual hole — two reads
+# collapsing onto one key, so one exemption silently covers a read nobody approved — is
+# closed instead by `judge()` below, which fails the census when an exemption matches more
+# than one read. That guard is version-independent and it also closes the same hole on
+# every interpreter, where two byte-identical source lines in one module already collide.
 MIN_PYTHON = (3, 9)
 
 # The credential scrub, under every name it is called by in this repo: `CS.scrub` and
@@ -125,6 +157,14 @@ class Site(object):
     is silent. A key made of node positions would be tidier and strictly worse — the
     positions of anything inside an f-string MOVE between Python 3.9 and 3.10, so a key
     computed on one interpreter would quietly miss on another.
+
+    The one thing a text key cannot promise on its own is that it names ONE read. Two
+    byte-identical source lines in a module derive the same key on every interpreter —
+    scripts/hooks/idc_recirc_closeout_gate.py:395 and :414 are identical today, and are
+    harmless only because neither is exempt — and on 3.9.6 two DIFFERENT lines inside one
+    multi-line f-string collapse onto the opening line as well (see MIN_PYTHON above).
+    Either way one exemption would cover two reads while its author approved one. That is
+    what `judge()` refuses, and it is the only reason a text key is safe.
     """
 
     def __init__(self, module, lineno, line):
@@ -288,13 +328,107 @@ def census(root):
     modules, reads, truncations = [], [], []
     for path in source_files(root):
         module = os.path.relpath(path, root)
-        with open(path, encoding="utf-8") as handle:
-            source = handle.read()
+        try:
+            with open(path, encoding="utf-8") as handle:
+                source = handle.read()
+        except (OSError, UnicodeDecodeError) as exc:
+            # Not every unreadable module reaches the parser. A file carrying a byte that
+            # is not valid UTF-8 fails at the READ, before `analyze` has anything to try,
+            # and until this was wrapped it escaped as a bare traceback — so R28's
+            # sentence explaining why an unreadable module is a refusal never printed.
+            # Loud either way, but the operator got a stack trace instead of the reason.
+            raise ParseFailure(module, "unreadable: %s: %s" % (type(exc).__name__, exc))
         modules.append(module)
         found_reads, found_cuts = analyze(source, module)
         reads.extend(found_reads)
         truncations.extend(found_cuts)
     return Census(modules, reads, truncations)
+
+
+# ── THE JUDGEMENT ────────────────────────────────────────────────────────────────────
+# Everything above answers "what is there". This answers "what is wrong with it", which
+# is a different question and needs the registry — and the registry lives in R28, so it
+# arrives as an argument. Nothing here speaks: `judge` hands back four lists and R28 puts
+# the sentences on them.
+#
+# Why this is a function at all, rather than nine lines inside R28 where it used to live:
+# nine lines inside a shell heredoc cannot be handed a fixture. They can only ever be run
+# against the one real tree — which is CLEAN, so all four of these lists are empty, so
+# every one of these guards could be dead and the output would not move by a character.
+# That is not a hypothesis. Somebody deleted each of these arms in turn, planted a real
+# credential-leaking read in scripts/, and watched the whole suite report success four
+# times over. It is the same shape as the ordering rule's zero-positive-examples problem
+# that the canary exists for, one storey up, and it wants the same answer: a fixture with
+# a known-bad module, pushed through the code that actually runs.
+class Verdict(object):
+    """The four things that can be wrong, once the registry has had its say.
+
+    `bare`        — a child's stderr read raw, and nobody registered it. The finding.
+    `ambiguous`   — one registry entry matching SEVERAL reads. Explained below.
+    `stale`       — a registry entry matching NO read: an exemption outliving its site.
+    `truncations` — a cut taken inside the door, so the door was handed a fragment.
+
+    `bare` and `stale` are the two directions of "fail closed both ways": a new raw read
+    fails, and so does an exemption that has stopped naming anything, which is what stops
+    the registry rotting into a blanket pass.
+    """
+
+    def __init__(self, bare, ambiguous, stale, truncations):
+        self.bare = bare
+        self.ambiguous = ambiguous        # [(key, [Read, ...])], each with 2+ reads
+        self.stale = stale                # [key]
+        self.truncations = truncations
+
+    ARMS = ("bare", "ambiguous", "stale", "truncations")
+
+    @property
+    def clean(self):
+        return not any(getattr(self, arm) for arm in self.ARMS)
+
+    def fired(self):
+        """The names of the arms that found something, in the order R28 speaks them.
+
+        R28 uses this as a BACKSTOP: after it has said its piece about each arm it asks
+        whether anything is left unspoken, so that disabling one arm cannot turn a
+        finding into silence — it can only downgrade the sentence.
+        """
+        return [arm for arm in self.ARMS if getattr(self, arm)]
+
+
+def judge(scan, allowed_raw):
+    """Measure what the walk found against R28's registry of registered raw reads.
+
+    `allowed_raw` is keyed `(module relative path, exact stripped source line)` — see
+    `Site.key`. Three rules, and the middle one is newer than the other two:
+
+      * a read whose key is registered is EXEMPT, scrubbed or not;
+      * a registered key must match AT LEAST one read, or the exemption is stale;
+      * a registered key must match AT MOST one read, or the exemption is ambiguous.
+
+    The at-most-one rule is the one nobody thought to write down. An exemption is a
+    person's judgement about ONE line of code that they read and accepted. If two reads
+    derive the same key, that single judgement silently covers a second read the author
+    never saw — and the second one can be anything at all, including the raw read into a
+    committed message this whole census exists to prevent. It happens two ways, both
+    ordinary: two byte-identical lines in one module (true on every interpreter, and
+    already true today at idc_recirc_closeout_gate.py:395 and :414 — harmless only
+    because neither is registered), and, on Python 3.9.6 and 3.8, two different lines
+    inside one multi-line f-string, which the parser reports at the same line number.
+    Both were reproduced with a real unscrubbed read that the census cleared.
+
+    So an exemption that covers more than one read is a FAILURE, and R28 names every site
+    it covered — because the fix is to make the lines distinguishable again, and that
+    needs the reader to see all of them.
+    """
+    matched = {}
+    for read in scan.reads:
+        if read.key in allowed_raw:
+            matched.setdefault(read.key, []).append(read)
+    bare = [read for read in scan.reads
+            if read.key not in allowed_raw and not read.scrubbed]
+    ambiguous = [(key, matched[key]) for key in sorted(matched) if len(matched[key]) > 1]
+    stale = sorted(set(allowed_raw) - set(matched))
+    return Verdict(bare, ambiguous, stale, list(scan.truncations))
 
 
 # ── LAYER 1: THE FLOOR ───────────────────────────────────────────────────────────────

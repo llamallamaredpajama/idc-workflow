@@ -244,7 +244,9 @@
 #
 #   THE MUTATIONS ARE NOW EXECUTABLE, and run every time this suite does. test_stderr_census.py
 #   breaks the walk ten ways in memory, asserts each anchor matched EXACTLY ONCE, and requires each
-#   mutant to fail. Three classes, as round 4 established. 10 applied · 10 RED · 0 GREEN.
+#   mutant to fail. Three classes, as round 4 established. 10 applied · 10 RED · 0 GREEN — which was
+#   true of the battery AS SCOPED THEN, and was not the whole truth. Two independent verifiers went
+#   at the finished code afterwards; the honest number is in ROUND 6 below.
 #     deletion      A. drop the read-vs-write test on the attribute ⇒ RED: `fake.stderr = "x"`, a
 #                                                  WRITE, counts as a read of a child's output.
 #                   B. drop the scoping of the cut rule to doors holding stderr ⇒ RED: an unrelated
@@ -275,6 +277,83 @@
 #   dead is indistinguishable from a working one. The canary is the only place that rule is ever
 #   exercised positively, which is what makes it the load-bearing layer rather than the ceremonial
 #   one. Edit its expected numbers to make something pass and the census becomes decoration.
+#
+#   ROUND 6 — THE SAME ARGUMENT, ONE STOREY UP, WHERE NOBODY HAD APPLIED IT. Round 5 answered "the
+#   ordering rule has no live positive example" with a canary, and the canary is real and does its
+#   job. But the canary calls `analyze` directly, and the rule this case actually enforces is
+#   decided two functions further out — in `census()`, and in the verdict arms below. NEITHER had a
+#   single assertion behind it, and on a clean tree neither says anything, so a dead arm and a
+#   working arm produce byte-identical output. Two independent verifiers established this, and the
+#   honest final tally for round 5 is NOT 10 RED / 0 GREEN:
+#
+#     * AN ADVERSARIAL VERIFIER APPLIED 28 MUTATIONS: 14 RED · 14 GREEN. Six of the greens were
+#       re-run with a REAL credential-leaking read planted in scripts/, and both gates reported
+#       success every time — the bare arm disabled; the truncation arm disabled; the exemption keyed
+#       on the module instead of the line; `census()` marking every read scrubbed; `census()`
+#       dropping the cuts it was handed; the hooks glob deleted with the floors lowered to match.
+#       And the meta-finding: replacing this case's `python3 …/test_stderr_census.py` with `true` —
+#       the entire battery above silently stops running — was GREEN.
+#     * A VERSION VERIFIER RAN ELEVEN INTERPRETERS, 3.8.20 to 3.14.4, including CI's exact build
+#       today (3.12.3) and after the runner flip (3.14.4). Today's tree is byte-identical on all ten
+#       supported ones, keys included. It found one real divergence: on 3.9.6 and 3.8, a read inside
+#       a TRIPLE-QUOTED multi-line f-string whose replacement field carries a conversion (`!r`) or a
+#       format spec is reported at the f-string's OPENING line. Two reads then collapse onto one
+#       exemption key, and one exemption silently covers a read nobody approved. 3.9.6 is
+#       `/usr/bin/python3` — the `python3` four of five shells on the dev machine resolve to — and
+#       hooks/idc_stop_fixpoint_gate.py:405-408 already writes `!r` inside an f-string, safe only
+#       because it uses implicit concatenation rather than triple-quoting.
+#     * AND IT DISPROVED A SENTENCE THIS CASE WAS STATING AS FACT. The 3.9 floor was justified here,
+#       in stderr_census.py and in the contract by saying that on 3.8 `ast.Index` makes the cut rule
+#       under-match. Measured on a real CPython 3.8.20: it does not. Real cuts are still `ast.Slice`
+#       and indices still are not, so the rule gives the same two answers. What 3.8 actually breaks
+#       is the KEY — 7 of the 25 real-tree keys are wrong there, with every COUNT perfect and the
+#       canary passing green. All three places that repeated the wrong reason now say the measured
+#       one. A confident sentence that turns out to be false is worse than no sentence.
+#
+#   WHAT ROUND 6 CHANGED, and it is the same medicine as round 5's canary:
+#     1. THE JUDGEMENT IS A FUNCTION (`SCAN.judge`), so a fixture tree can be pushed through it. The
+#        registry, the reasons and every sentence stay here.
+#     2. AN EXEMPTION MUST MATCH EXACTLY ONE READ. Matching none was already stale; matching two is
+#        now ambiguous and fails, naming every site it covered. That closes the 3.9.6 f-string
+#        collapse without raising the floor to 3.9.7 — which would make this suite refuse to run
+#        under /usr/bin/python3, i.e. in every agent and teammate pane — and it also closes the
+#        version-independent form, two byte-identical lines in one module, which already exists
+#        today at hooks/idc_recirc_closeout_gate.py:395 and :414 (harmless only because neither is
+#        registered).
+#     3. THE ARMS NOW HAVE POSITIVE EXAMPLES. test_stderr_census.py builds trees that are the REAL
+#        tree plus one planted violation, and runs THIS CASE'S OWN PROGRAM over them — lifted out of
+#        this file, not re-implemented — requiring each arm to refuse and to name the site.
+#     4. THIS CASE CHECKS THAT ITS OWN BATTERY IS STILL BEING RUN (step 0), and a BACKSTOP after the
+#        arms refuses anything the arms let through, so disabling one arm can only downgrade the
+#        sentence, never produce silence.
+#
+#   ROUND-6 MUTATIONS — 13, each anchor asserted to match EXACTLY ONCE, each run against the fixture
+#   tree that is supposed to watch it, and each required to make that fixture's own refusal STOP
+#   BEING SAID. They run on every suite run. 13 applied · 13 RED · 0 GREEN.
+#     deletion      the bare arm, the truncation arm, the stale arm and the ambiguity arm, one at a
+#                   time ⇒ RED: each fixture loses its sentence. All four then hit the backstop, so
+#                   the suite still refuses — with a blunter message, which is the honest cost.
+#                   R28 stops checking that the battery runs ⇒ RED: the switched-off-battery tree
+#                   comes back clean.
+#                   R28 stops calling check_interpreter / stops calling run_canary ⇒ RED: a census
+#                   module that refuses this interpreter, and one whose canary has drifted, are both
+#                   reported CLEAN. (Round 5 recorded these as covered by defence in depth. Defence
+#                   in depth is not evidence.)
+#                   judge() stops noticing an exemption that matched nothing / that matched twice
+#                   ⇒ RED: the stale and ambiguous trees come back clean.
+#                   census() throws away the cuts analyze found ⇒ RED: the cut tree comes back clean
+#                   — this is the round-5 canary result reproduced one function out, and the reason
+#                   the canary alone was never enough.
+#     substitution  the exemption keyed on the MODULE instead of the line ⇒ RED: a bare read planted
+#                   in a module that holds one exemption is reported clean.
+#                   census() marks every read scrubbed ⇒ RED: the bare tree comes back clean. Note
+#                   round 5 already caught the SAME effect one layer lower (Read.scrubbed forced
+#                   True in the constructor, caught by the canary) — same lie, different storey, and
+#                   only one of the two storeys had anything watching it.
+#     value         the hooks glob deleted AND the floors lowered to 1,1 ⇒ RED: a bare read in a
+#                   hooks module is reported clean. Neither edit alone survives the floors; the pair
+#                   does, which is why the fixture plants the violation under hooks/ rather than
+#                   trusting a count.
 
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -2173,19 +2252,46 @@ echo "== R28. THE CREDENTIAL SCRUB IS A PROPERTY OF THE TEXT, NOT A HABIT OF THE
 #       fails too, so the list cannot rot into a blanket exemption.
 #
 # THE BOUNDARY OF THE RULE, said out loud so nobody mistakes this census for full cover. The rule
-# reaches every place a child's stderr is READ. A child's stderr can also reach a persisted artifact
-# with no `.stderr` read anywhere, by being merged into stdout at the call —
-# `stderr=subprocess.STDOUT` at scripts/idc_live_check.py:1137, whose output is then redacted by hand
-# at :1160. That site is correct, but it is correct by DISCIPLINE, not because anything checks it:
+# reaches exactly one thing: an expression that reads the attribute `stderr` off something that is
+# not `sys`. FOUR ordinary shapes carry a child's stderr past that rule, and the first three of them
+# ALREADY SHIP in this repo. None is a live leak today; all four were run through this census by an
+# adversarial verifier and came back CLEAN, so what follows is the honest extent of the cover.
+#
+#   stderr=subprocess.STDOUT            the stderr is merged into stdout at the CALL, so there is no
+#                                       `.stderr` anywhere to see. scripts/idc_live_check.py:1137,
+#                                       redacted by hand at :1160 — correct, but correct by
+#                                       DISCIPLINE, not because anything checks it.
+#   tool_response.get("stderr")         the stderr arrives as a dict KEY, not an attribute — a hook
+#                                       reading what Claude Code handed it.
+#                                       scripts/hooks/idc_post_commit_sync.py:106 and
+#                                       scripts/hooks/idc_post_issue_create.py:103 both do this
+#                                       today. Both only feed the text to a regex classifier, so
+#                                       neither leaks — but neither is visible to this census and
+#                                       neither is registered anywhere, so the day one of them is put
+#                                       into a message, nothing goes red.
+#   out, err = proc.communicate()       a Popen read with no `.stderr` in the expression at all.
+#                                       scripts/idc_live_check.py:1182 already calls it.
+#   CS.scrub(_tail(p.stderr))           the READ is seen and correctly counted as scrubbed — but the
+#                                       CUT has moved into a helper, so the ordering rule below sees
+#                                       zero cuts and says CLEAN. The verifier built this, and then
+#                                       showed the credential survives on this case's own two
+#                                       ordering samples. Bounding child output in a named helper is
+#                                       already house style here (scripts/idc_autorun_drain.py:511),
+#                                       so it is one ordinary refactor away, in either direction.
+#
 # scripts/ makes 53 subprocess calls across 24 modules and this rule governs 25 reads across 19. The
-# remainder is governed by nothing. Widening the rule to "any capture whose stderr can reach a
-# message" is a real and arguably larger piece of work — but it is a change to the RULE, decided by
-# people, not a change to the machinery that reads the code. It is deliberately not attempted here.
+# remainder is governed by nothing. Widening the rule — to dict-key reads, to `communicate()`, to a
+# cut applied one function away — is a real and arguably larger piece of work, but it is a change to
+# the RULE, decided by people, not a change to the machinery that reads the code. It is deliberately
+# not attempted here, and it is written down rather than left to be rediscovered.
 
 # THE CENSUS'S OWN WALK, before it is allowed to say anything about scripts/. It is a program like
 # any other and it can break like one — and the way it breaks is by finding LESS, which looks exactly
-# like good news. So its unit test runs first: fourteen shapes with the answer written beside each,
-# and ten deliberate mutations of the walk that must each be observed to FAIL.
+# like good news. So its unit test runs first, and it runs four things: twenty-seven fixtures with
+# the answer written beside each — source shapes through the walk, whole scripts/ trees through the
+# judgement; nine runs of THIS CASE'S OWN CENSUS PROGRAM, lifted verbatim out of the heredoc below,
+# against the real tree with one violation planted in it; and twenty-three deliberate mutations of
+# the walk, of the judgement and of this file, each of which must be observed to FAIL.
 python3 "$HERE/lib/test_stderr_census.py" \
   || fail "R28: the census's own walk is broken, or is no longer red-when-broken — until this passes, anything the census says about scripts/ below is unfounded"
 
@@ -2204,6 +2310,27 @@ def load(rel, name):
     spec.loader.exec_module(mod)
     return mod
 
+
+# ── (0) THE BATTERY THIS CASE LEANS ON MUST STILL BE RUNNING ─────────────────────────────────────
+# Everything below trusts a walk over a parse tree, and everything that keeps that walk honest — the
+# shape fixtures, the fixture trees that push a known-bad module through the real judgement, and the
+# mutations of the walk, of the judgement and of THIS FILE that must each be observed to fail — lives
+# in tests/smoke/lib/test_stderr_census.py, which is run by the one line immediately above this
+# heredoc. Change that line to `true` and the entire battery stops running: the suite stays green and
+# nothing anywhere notices. That is not a worry, it is a measured result — an independent verifier
+# made exactly that edit and both gates reported success. A guard that can be switched off in one
+# line, silently, is a guard on a timer. So this case reads its own source and refuses if the
+# invocation has gone.
+SUITE = os.path.join(plugin, "tests", "smoke", "phase11-honesty-repro.sh")
+suite_lines = open(SUITE, encoding="utf-8").read().splitlines()
+runs_battery = [n for n, line in enumerate(suite_lines)
+                if line.startswith('python3 "$HERE/lib/test_stderr_census.py"')]
+if len(runs_battery) != 1 or "|| fail" not in suite_lines[runs_battery[0] + 1]:
+    sys.exit("this case no longer runs tests/smoke/lib/test_stderr_census.py, or runs it without "
+             "`|| fail` so its exit code is discarded. That file IS the evidence that the census "
+             "below can still tell a scrubbed read from a raw one; without it this case walks 62 "
+             "modules with a walk nobody has watched fail and reports whatever it happens to find. "
+             "Restore the invocation. If the battery genuinely has to move, move this check with it.")
 
 # ── (1) THE PROFILE, DRIVEN BY LITERAL SAMPLES ───────────────────────────────────────────────────
 D = load("scripts/idc_autorun_drain.py", "D")
@@ -2296,14 +2423,20 @@ try:
     SCAN.check_interpreter()
 except SCAN.InterpreterTooOld as exc:
     sys.exit(f"this census walks a parse tree, and it is only proven to give identical answers on "
-             f"Python {exc.minimum[0]}.{exc.minimum[1]}+ — checked on seven interpreters from 3.9.6 "
-             f"to 3.14.3. This one is {exc.running}. It is not safe to let it report clean here: "
-             f"before {exc.minimum[0]}.{exc.minimum[1]} a plain index like d['k'] still arrives "
-             f"wrapped in an extra node, so the truncation check below is looking at a different "
-             f"shape than the one it was written for, and it finds FEWER violations without saying "
-             f"so. Run the suite on {exc.minimum[0]}.{exc.minimum[1]}+. (This is not hypothetical: "
-             f"`python3` on this project's dev machine is 3.9.6 in one shell and 3.14.3 in another, "
-             f"and CI's is a third.)")
+             f"Python {exc.minimum[0]}.{exc.minimum[1]}+ — checked on eleven interpreters from 3.9.6 "
+             f"to 3.14.4, including the exact builds CI runs today and after the runner flip. This "
+             f"one is {exc.running}, and it is not safe to let it report clean here.\n"
+             f"WHY, stated as it was actually measured rather than as it was first guessed: below "
+             f"3.9 a read that sits inside a MULTI-LINE f-string is reported at the f-string's "
+             f"OPENING line instead of its own. The census keys its exemptions on the read's source "
+             f"line, so those keys come out wrong — 7 of the 25 keys on today's tree are wrong on "
+             f"3.8 — and they come out wrong with every COUNT perfect and the canary passing green. "
+             f"(The earlier claim here, that 3.8 wraps a plain index in an extra node and so finds "
+             f"FEWER truncations, was tested on a real 3.8.20 and is FALSE: the cut rule gives the "
+             f"same answers there. The keys are the thing that breaks.) Run the suite on "
+             f"{exc.minimum[0]}.{exc.minimum[1]}+. (This is not hypothetical: `python3` on this "
+             f"project's dev machine is 3.9.6 in one shell and 3.14.3 in another, and CI's is a "
+             f"third.)")
 
 # STEP TWO — THE CANARY, and it is the load-bearing one. A fixture whose answer was counted by hand
 # goes through the same walk the real tree does. It contains the right and the wrong spelling of
@@ -2331,11 +2464,13 @@ except SCAN.CanaryDrift as exc:
 try:
     scan = SCAN.census(plugin)
 except SCAN.ParseFailure as exc:
-    sys.exit(f"{exc.module} did not parse on Python {sys.version.split()[0]}: {exc.detail}. A module "
-             f"the census cannot READ is a module the census cannot CLEAR, so this is a census "
-             f"failure and never a skip. Skipping it would drop the module out of the count and "
-             f"report clean — which is precisely what would happen the day one of these files uses "
-             f"syntax newer than whichever `python3` the suite happened to run under.")
+    sys.exit(f"the census could not read {exc.module} on Python {sys.version.split()[0]}: "
+             f"{exc.detail}. A module the census cannot READ is a module the census cannot CLEAR, so "
+             f"this is a census failure and never a skip. Skipping it would drop the module out of "
+             f"the count and report clean — which is precisely what would happen the day one of "
+             f"these files uses syntax newer than whichever `python3` the suite happened to run "
+             f"under. It covers both ways a module can be unreadable: the parser refusing it, and "
+             f"the file itself not being decodable as UTF-8 before the parser ever sees it.")
 
 # FLOORS, deliberately not equalities. The hazard this census exists for is a walk that stops SEEING
 # things; finding MORE is not a hazard. A floor therefore stays silent when someone adds a correctly
@@ -2362,6 +2497,11 @@ if len(scan.modules) < FLOOR_FILES or len(scan.reads) < FLOOR_READS:
 # behind it. None is silent. A key made of node positions would be tidier and strictly worse, because
 # the positions of anything inside an f-string MOVE between Python 3.9 and 3.10, so a key computed on
 # one interpreter would quietly stop matching on another.
+#
+# What a text key cannot promise by itself is that it names ONE read, and that gap is why the arms
+# below check three things and not two: an entry that matches nothing is stale, and an entry that
+# matches SEVERAL is ambiguous. See the ambiguity refusal for what goes wrong and how it was
+# reproduced. Both entries here match exactly one read on every interpreter from 3.9.6 to 3.14.4.
 ALLOWED_RAW = {
     ("scripts/idc_gh_board.py", "if _is_rate_limit_stderr(p.stderr):"):
         "rate-limit detection: matches fixed markers to choose RateLimitError over BoardReadError; "
@@ -2371,19 +2511,36 @@ ALLOWED_RAW = {
         "absence detection: decides present/absent/indeterminate from fixed gh wording; the text is "
         "never carried into the result",
 }
-bare, seen_allowed = [], set()
-for read in scan.reads:
-    if read.key in ALLOWED_RAW:
-        seen_allowed.add(read.key)
-    elif not read.scrubbed:
-        bare.append(read.where())
+# The registry is applied by SCAN.judge, which is a function rather than nine lines here for one
+# reason: nine lines here can only ever run against the one real tree, and the real tree is CLEAN, so
+# every arm below could be dead and the output would not move by a character. Somebody checked. Each
+# arm was deleted in turn with a real credential-leaking read planted in scripts/, and the suite
+# reported success every time. The fixtures that now stand behind these arms — a tree with a bare
+# read, a tree with a cut inside the door, a tree whose exemption has gone stale, a tree where one
+# exemption covers two reads, a violation inside scripts/hooks/ — live in the battery run at the top
+# of this case, and they push those trees through THIS program, not through a copy of it.
+verdict = SCAN.judge(scan, ALLOWED_RAW)
+bare = [read.where() for read in verdict.bare]
 if bare:
     sys.exit("a child process's stderr is read WITHOUT passing through the scrub at the read. Every "
              "one of these travels into a message that is printed, persisted, or committed — which "
              "is the whole of F1/F20/F33/F35/F40. Scrub it at the read (`CS.scrub` in scripts/, "
              "`H.scrub` in scripts/hooks/), or register it in ALLOWED_RAW with a reason:\n  "
              + "\n  ".join(bare))
-stale = sorted(set(ALLOWED_RAW) - seen_allowed)
+ambiguous = [(key, [read.where() for read in reads]) for key, reads in verdict.ambiguous]
+if ambiguous:
+    sys.exit("an ALLOWED_RAW entry covers MORE THAN ONE read. An exemption is one person's judgement "
+             "about one line they read and accepted; when two reads derive the same key that single "
+             "judgement silently covers a second read nobody ever looked at, and the second one can "
+             "be the raw read into a committed message this whole census exists to stop. Two ways in, "
+             "both ordinary and both reproduced with a real unscrubbed read that the census cleared: "
+             "two byte-identical lines in one module (any interpreter — idc_recirc_closeout_gate.py "
+             "395 and 414 are identical today, and are safe only because neither is registered), and, "
+             "on Python 3.9.6 and 3.8, two different lines inside one multi-line f-string, which the "
+             "parser reports at the same line. Make the lines distinguishable, or scrub one of them:\n"
+             + "\n".join(f"  {mod}: {ln}\n" + "\n".join(f"    covers {w}" for w in where)
+                         for (mod, ln), where in ambiguous))
+stale = [key for key in verdict.stale]
 if stale:
     sys.exit("ALLOWED_RAW names a line that no longer exists — an exemption that outlives its site is "
              "how an allowlist rots into a blanket pass. Remove or re-point it:\n  "
@@ -2409,6 +2566,19 @@ if scan.truncations:
              "userinfo) cannot fire once the cut has removed that anchor, and the secret survives "
              "scrubbing. Move the slice outside: `scrub(p.stderr or '').strip()[:200]`:\n  "
              + "\n  ".join(t.where() for t in scan.truncations))
+
+# THE BACKSTOP. Four arms above, each with the sentence that explains what it costs. This asks the
+# one question none of them can ask about itself: did the census find something that no arm spoke
+# about? Disabling an arm is a one-word edit — `if bare:` becomes `if False:` — and on a clean tree
+# it changes nothing at all, which is exactly why all four of them were found disabled-and-green by
+# a verifier who then planted a real credential leak and watched the suite pass. This cannot restore
+# the arm's explanation, and it is not meant to: it is here so that the worst a single edit can do is
+# DOWNGRADE a finding to a blunt sentence, never turn it into silence.
+if not verdict.clean:
+    sys.exit(f"the census found something and every arm above let it through: "
+             f"{', '.join(verdict.fired())}. One of those arms has been disabled or its condition no "
+             f"longer reaches the finding. Read the arm named here, restore it, and run again — the "
+             f"census is reporting a real finding that nothing explained.")
 # …and the proof that the rule above is load-bearing rather than stylistic, on the two shapes whose
 # anchor sits at the END. Each sample is built so the secret ends EXACTLY at the cut and the closing
 # anchor falls entirely beyond it — the precise geometry a real `git`/`gh` failure produces when it

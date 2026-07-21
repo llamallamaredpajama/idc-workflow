@@ -69,7 +69,7 @@ except ImportError:  # pragma: no cover - non-POSIX fallback
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from idc_journal_replay import (reconstruct_state_from_entries, journal_item_id, scan_journal_strict,
-                                watermark_from)
+                                journal_adopted, watermark_from, has_numberless_create)
 
 # --- attribution -----------------------------------------------------------------------------------
 # IDC-attributable branch/worktree naming (the design's exact list). Anchored at the START, and `build`
@@ -893,6 +893,19 @@ def check_journal_divergence(ctx, findings, journal_path):
         return True
     expected_state = reconstruct_state_from_entries(entries)
     create_watermark = watermark_from(entries)
+    # A NUMBERLESS create record VOIDS the numbered watermark as an adoption lower bound: on the
+    # github backend a create whose issue-number read-back failed journals only its project_item_id,
+    # so the TRUE first create may be that numberless one and an item numbered below the first
+    # NUMBERED create can still be post-adoption. Granting it the legacy carve-out anyway is fail
+    # OPEN — the board-only item's missing history reads as "predates journaling" and doctor Row 10
+    # reports board↔git coherent (#155). So the carve-out is disabled outright while any numberless
+    # create is on record, exactly as the engine's dispose corroboration already does
+    # (idc_transition._journal_corroboration); this path was simply never wired to the same helper.
+    numberless_create = has_numberless_create(entries)
+    # No create record at all → journaling has not begun: a genuinely pre-journal board, where every
+    # board-only item is legacy. (Kept explicit: with a numberless-only journal, watermark_from is
+    # ALSO None, and those two Nones mean opposite things.)
+    adopted = journal_adopted(entries)
 
     actual_state = {}
     for item in board:
@@ -917,7 +930,14 @@ def check_journal_divergence(ctx, findings, journal_path):
             # journaled create — item numbers are monotonic on both backends): those predate
             # journaling (legacy). An item ABOVE the watermark was created after create-journaling
             # began, so a total absence of journal lines means lost (truncated) or bypassed history.
-            if create_watermark is not None and item_id > create_watermark:
+            if not adopted:
+                continue  # pre-journal board: no create record at all, so nothing to be above.
+            if numberless_create:
+                findings.append(finding(RISKY, "journal", f"#{item_id}",
+                    "Item has no journal history, and a journaled create carries no item number "
+                    "(the github issue-number read-back gap) — the adoption watermark is unreliable, "
+                    "so the pre-journal carve-out cannot be granted", "reconcile manually"))
+            elif create_watermark is not None and item_id > create_watermark:
                 findings.append(finding(RISKY, "journal", f"#{item_id}",
                     "Item has no journal history but was created after journaling began "
                     f"(numbered above journaled create #{create_watermark})", "reconcile manually"))

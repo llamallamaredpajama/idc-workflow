@@ -1,5 +1,35 @@
 #!/bin/bash
 # idc-assert-class: behavior
+#
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
+# START HERE. Everything from the next paragraph to `set -u` is HISTORY — six rounds of it, kept
+# deliberately, because each round's evidence is what stops the next one re-deciding a settled
+# question from memory. If you have arrived here at 2am, this block is what you actually need.
+#
+#   WHAT THIS SUITE ASSERTS. Thirty-odd cases (R1…R30), each one a defect the review of PR #163
+#   named, reproduced against the REAL shipped helper rather than against prose. Every case executes
+#   a helper and asserts on its output; a case that only greps for wording is not one of these.
+#
+#   WHAT THE BIGGEST CASE ASSERTS. R28 (search for "== R28") is two halves. One: the credential
+#   scrub's MACHINE-OUTPUT profile really redacts every shape it claims to, at all three consumers,
+#   driven by literal samples. Two: a CENSUS over every module in scripts/ — every read of a child
+#   process's stderr passes through the scrub AT THE READ or is registered in R28's own ALLOWED_RAW
+#   with a reason, and where it does pass through, no truncation happens INSIDE the scrub call.
+#
+#   WHERE THE MACHINERY LIVES. tests/smoke/lib/stderr_census.py walks the parse tree and judges
+#   nothing it is not asked to; tests/smoke/lib/test_stderr_census.py is that walk's own battery
+#   (shape fixtures, whole fixture trees, runs of R28's program against a planted violation, and
+#   mutations of all three) and it runs before R28 says anything about scripts/. The rule, the
+#   registry, every reason and every failure sentence stay in R28 below, where a reviewer already is.
+#
+#   THE ONE THING TO KNOW BEFORE EDITING. The recurring defect in this work is a guard that was
+#   moved one step away from where it was proved: a dead check and a working check print the same
+#   thing on a clean tree. Four times now — the ordering rule, the judgement layer, the battery's
+#   contents, the count floors — and every one was found by somebody who had not built it. So: no
+#   number here may be lowered to make something pass, and no guard is finished until it has been
+#   watched to fail.
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
+#
 # Phase 11 (PR #163 completion-honesty repro) — the defects the static review of PR #163 named, each
 # reproduced against the REAL shipped helpers so the fix has something that can go from red to green.
 #
@@ -343,7 +373,9 @@
 #
 #   ROUND-6 MUTATIONS — 14, each anchor asserted to match EXACTLY ONCE, each run against the fixture
 #   tree that is supposed to watch it, and each required to make that fixture's own refusal STOP
-#   BEING SAID. They run on every suite run. 14 applied · 14 RED · 0 GREEN.
+#   BEING SAID. They run on every suite run. 14 applied · 14 RED · 0 GREEN — and a FIFTEENTH was
+#   added in ROUND 7 below, so the table in the battery now holds 15 (12 deletion, 2 substitution,
+#   1 value).
 #     deletion      the bare arm, the truncation arm, the stale arm and the ambiguity arm, one at a
 #                   time ⇒ RED: each fixture loses its sentence. All four then hit the backstop, so
 #                   the suite still refuses — with a blunter message, which is the honest cost.
@@ -375,6 +407,55 @@
 #   that cannot be DECODED. A file that is not valid UTF-8 never reaches the parser, so analyze's
 #   refusal cannot catch it; until now it escaped census() as a bare traceback and the sentence
 #   below explaining why an unreadable module is a refusal never printed. 11 applied · 11 RED.
+#
+#   ROUND 7 — THE FOURTH STOREY, FOUND THE SAME WAY THE OTHER THREE WERE. An independent reviewer
+#   read rounds 5 and 6 and asked the one question nobody inside the work had: which guard still has
+#   no positive example? The answer was the COUNT FLOORS (FLOOR_FILES, FLOOR_READS = 62, 25). The
+#   reviewer disabled that arm, ran the whole 64-assertion battery against the change, and got 64
+#   green — not one assertion moved. Then, with the floors off, narrowed the census's file set and
+#   watched a REAL unscrubbed read, planted in a module the narrowed walk no longer visits, clear R28
+#   with exit 0 and a silent transcript. This was reproduced here before anything was changed.
+#
+#   SAY IT PLAINLY, BECAUSE IT IS THE MOST USEFUL SENTENCE IN THIS CASE: that is the FOURTH time in
+#   this work that a guard described as covered turned out to have nothing watching it — the ordering
+#   rule, the judgement layer, the battery's contents, now the count floors — and every one of the
+#   four was found by somebody who had not built the thing. The battery's own docstring had been
+#   claiming since round 6 that it proved "its count floors"; it did not. A rewrite is not what fixes
+#   that. A reader who did not write it is.
+#
+#   WHAT ROUND 7 CHANGED — no rule change anywhere; the walk is untouched:
+#     1. THE COUNT FLOORS HAVE A POSITIVE EXAMPLE. A fixture runs this case's own program against a
+#        walk that has stopped looking at part of scripts/, with a real leak sitting in the part it
+#        no longer looks at, and requires the floor to be what speaks; the paired mutation takes the
+#        floor arm away and requires R28 to fall silent. That is the FIFTEENTH e2e mutation.
+#     2. STEP (0) ASKS FOR THE INDEX, NOT THE WORD. It tested `"PIPESTATUS" in guard` — so changing
+#        `${PIPESTATUS[0]}` to `${PIPESTATUS[1]}`, which is tee's status and is always 0, turned the
+#        `|| fail` into a no-op and step (0) waved it through, exit 0, silent. A guard protecting a
+#        rewrite whose thesis is "spelling is not structure" had been written as a question about
+#        spelling. It now requires the literal `${PIPESTATUS[0]}`, and a fixture plants that typo.
+#        Three checks in the battery that were followed by an unconditional pass now report their own
+#        answer, so a failing one reduces the tally step (0b) floors instead of leaving a perfect
+#        transcript behind.
+#     3. A MUTATION THAT CRASHES THE PROGRAM NO LONGER SCORES AS A GUARD THAT HELD. The e2e battery's
+#        RED criterion was "the sentence stopped being said", which a NameError satisfies just as
+#        well as a disabled arm. Every row now also states the outcome it must produce — "refused"
+#        where the backstop still speaks, "clean" where nothing does — and a crash fails.
+#     4. THREE PROSE CORRECTIONS, all of them the same class round 6 corrected three times: the
+#        ROUND-5 not-already-caught bullet above (it said "every fixture" and "the one false
+#        positive"; the measured answer is 13 of 15 clean and TWO false positives); the boundary
+#        paragraph (a cut does not have to be a slice — two character-precision spellings leak on
+#        this case's own ordering samples and the census certifies them as scrubbed); and the scrub
+#        door's name match (any function called `scrub`/`_scrub` is treated as the door).
+#     5. AND AN ORIENTING BLOCK AT THE TOP OF THIS FILE, because six rounds of narrative before
+#        `set -u` buries the rule under its own history. The history stays: it is the evidence.
+#
+#   ROUND-7 MUTATIONS — the battery now runs 26 in all (11 in-memory against the walk, 15 against the
+#   judgement and this file), each anchor asserted to match EXACTLY ONCE, all RED, on every suite run.
+#     deletion      R28 stops flooring how many files and reads the census must find ⇒ RED: a walk
+#                   that has stopped looking at part of scripts/, with a real unscrubbed read in the
+#                   part it no longer looks at, is reported CLEAN and nothing else notices.
+#   Two new end-to-end fixtures came with it (a narrowed walk; a `${PIPESTATUS[1]}` typo), so the
+#   battery is 27 fixtures · 14 runs of this case's own program · 26 mutations = 67 assertions.
 
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

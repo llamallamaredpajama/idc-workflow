@@ -118,11 +118,13 @@ class Site(object):
 
     `line` is the read's own source line, stripped — the same text R28's ALLOWED_RAW is
     keyed on, and deliberately so. Keying an exemption to a line of text means that
-    reformatting that line breaks the key; that brittleness is the guard, not a defect
-    in it. Every reformatting of an exempted line was tried, and each one fires either
-    "this read is now bare" or "this exemption names a line that no longer exists" —
-    never silence. A key made of node positions instead would be silent, and worse: the
-    positions of anything inside an f-string MOVE between Python 3.9 and 3.10.
+    reformatting that line breaks the key, and that brittleness is the guard rather than
+    a defect in it. Four reformattings of a live exemption were tried against this walk
+    and all four are LOUD: three come back as "this read is now bare", and deleting the
+    site outright trips the count floor, with the stale-exemption check behind it. None
+    is silent. A key made of node positions would be tidier and strictly worse — the
+    positions of anything inside an f-string MOVE between Python 3.9 and 3.10, so a key
+    computed on one interpreter would quietly miss on another.
     """
 
     def __init__(self, module, lineno, line):

@@ -2353,10 +2353,12 @@ if len(scan.modules) < FLOOR_FILES or len(scan.reads) < FLOOR_READS:
 # both feed sites that DO scrub before the text escapes.
 #
 # The key is a LINE OF TEXT on purpose, and it stays one. Reformatting an exempted line breaks the
-# key — and that brittleness is the guard, not a defect in it: every reformatting was tried, and each
-# one fires either "this read is now bare" or "this exemption names a line that no longer exists".
-# Never silence. A key made of node positions would be tidier and strictly worse, because the
-# positions of anything inside an f-string MOVE between Python 3.9 and 3.10.
+# key — and that brittleness is the guard, not a defect in it. Four reformattings of a live exemption
+# were tried against this walk and all four are LOUD: three surface as "this read is now bare", and
+# deleting the site outright trips the count floor above, with the stale-exemption check below still
+# behind it. None is silent. A key made of node positions would be tidier and strictly worse, because
+# the positions of anything inside an f-string MOVE between Python 3.9 and 3.10, so a key computed on
+# one interpreter would quietly stop matching on another.
 ALLOWED_RAW = {
     ("scripts/idc_gh_board.py", "if _is_rate_limit_stderr(p.stderr):"):
         "rate-limit detection: matches fixed markers to choose RateLimitError over BoardReadError; "

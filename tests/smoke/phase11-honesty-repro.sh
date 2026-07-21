@@ -1,5 +1,35 @@
 #!/bin/bash
 # idc-assert-class: behavior
+#
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
+# START HERE. Everything from the next paragraph to `set -u` is HISTORY — six rounds of it, kept
+# deliberately, because each round's evidence is what stops the next one re-deciding a settled
+# question from memory. If you have arrived here at 2am, this block is what you actually need.
+#
+#   WHAT THIS SUITE ASSERTS. Thirty-odd cases (R1…R30), each one a defect the review of PR #163
+#   named, reproduced against the REAL shipped helper rather than against prose. Every case executes
+#   a helper and asserts on its output; a case that only greps for wording is not one of these.
+#
+#   WHAT THE BIGGEST CASE ASSERTS. R28 (search for "== R28") is two halves. One: the credential
+#   scrub's MACHINE-OUTPUT profile really redacts every shape it claims to, at all three consumers,
+#   driven by literal samples. Two: a CENSUS over every module in scripts/ — every read of a child
+#   process's stderr passes through the scrub AT THE READ or is registered in R28's own ALLOWED_RAW
+#   with a reason, and where it does pass through, no truncation happens INSIDE the scrub call.
+#
+#   WHERE THE MACHINERY LIVES. tests/smoke/lib/stderr_census.py walks the parse tree and judges
+#   nothing it is not asked to; tests/smoke/lib/test_stderr_census.py is that walk's own battery
+#   (shape fixtures, whole fixture trees, runs of R28's program against a planted violation, and
+#   mutations of all three) and it runs before R28 says anything about scripts/. The rule, the
+#   registry, every reason and every failure sentence stay in R28 below, where a reviewer already is.
+#
+#   THE ONE THING TO KNOW BEFORE EDITING. The recurring defect in this work is a guard that was
+#   moved one step away from where it was proved: a dead check and a working check print the same
+#   thing on a clean tree. Four times now — the ordering rule, the judgement layer, the battery's
+#   contents, the count floors — and every one was found by somebody who had not built it. So: no
+#   number here may be lowered to make something pass, and no guard is finished until it has been
+#   watched to fail.
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
+#
 # Phase 11 (PR #163 completion-honesty repro) — the defects the static review of PR #163 named, each
 # reproduced against the REAL shipped helpers so the fix has something that can go from red to green.
 #
@@ -228,6 +258,204 @@
 #   and R25's shell `fail` banners named only the half of their heredoc that existed before this
 #   round, so breaking the new half printed a sentence about the old one. Both now name every case
 #   they guard — which is the standard R26 already held itself to.
+#
+#   ROUND 5 — R28's census stopped reading scripts/ as TEXT and started reading it as a PARSE TREE.
+#   The machinery moved to tests/smoke/lib/stderr_census.py; the rule, the registry and every failure
+#   sentence stayed here. Two things had to hold before that counted as an improvement rather than
+#   just a rewrite, and both were measured:
+#     * PARITY. On the untouched tree the new walk reports the SAME 25 sites as the text census —
+#       same modules, same line numbers, same 23-scrubbed/2-exempt split, 0 cuts, 62 files — and
+#       reports them identically on seven interpreters from 3.9.6 to 3.14.3.
+#     * NOT-ALREADY-CAUGHT. Every PART ONE SHAPE fixture in test_stderr_census.py — the fifteen that
+#       are a piece of source with its answer written beside it — was run against the TEXT census and
+#       its answer recorded before it was written down. A fixture the old code already handled proves
+#       nothing; that is round 4's `ghp_` lesson, turned on the check itself. THIRTEEN of the fifteen
+#       came back CLEAN from the old census, which is what makes them blind spots. The old census
+#       REJECTED the other two, and both rejections were FALSE POSITIVES this rewrite fixes: correct,
+#       correctly-ordered code that merely spanned three lines, and an attribute WRITE
+#       (`fake.stderr = "no child ran"`) that a regex cannot tell from a read.
+#       THIS BULLET USED TO SAY "every fixture" AND "the one FALSE POSITIVE", and was wrong twice.
+#       The PART TWO/THREE/FOUR fixtures are trees, mutant libraries and hand-made transcripts, which
+#       a text census cannot be run against at all, so the universal could not have been true; and
+#       the second false positive — the attribute write — had been fixed silently and never credited.
+#       Both numbers re-measured in round 7 by running all fifteen through the old logic verbatim.
+#
+#   THE MUTATIONS ARE NOW EXECUTABLE, and run every time this suite does. test_stderr_census.py
+#   breaks the walk ten ways in memory, asserts each anchor matched EXACTLY ONCE, and requires each
+#   mutant to fail. Three classes, as round 4 established. 10 applied · 10 RED · 0 GREEN — which was
+#   true of the battery AS SCOPED THEN, and was not the whole truth. Two independent verifiers went
+#   at the finished code afterwards; the honest number is in ROUND 6 below.
+#     deletion      A. drop the read-vs-write test on the attribute ⇒ RED: `fake.stderr = "x"`, a
+#                                                  WRITE, counts as a read of a child's output.
+#                   B. drop the scoping of the cut rule to doors holding stderr ⇒ RED: an unrelated
+#                                                  `CS.scrub(banner[:80])` is reported as a leak.
+#                   C. drop the interpreter floor's refusal ⇒ RED: 3.8 is accepted, and on 3.8 the
+#                                                  cut rule is quietly looking at a different shape.
+#                   D. skip an unparseable module instead of failing ⇒ RED: the census clears a file
+#                                                  it could not read.
+#     value         E. forget that the drain calls the door `_scrub` ⇒ RED, and red on the real tree
+#                                                  too: idc_autorun_drain.py:488 becomes a bare read.
+#                   F. lower the floor to 3.8 ⇒ RED, as C.
+#                   G. take the exemption key from the line AFTER the read ⇒ RED: every key becomes
+#                                                  a comment, so ALLOWED_RAW can match nothing.
+#     substitution  H. match the door's name by substring instead of exactly ⇒ RED:
+#                                                  `_scrub_later(p.stderr)` counts as scrubbed —
+#                                                  the old `"scrub" in line` bug wearing a parse
+#                                                  tree as a costume.
+#                   I. count every subscript as a cut, not only a slice ⇒ RED: `table["stderr"]`
+#                                                  is reported as a truncation.
+#                   J. look only at each argument's outermost node ⇒ RED: `CS.scrub(p.stderr or "")`
+#                                                  stops counting as scrubbed at all.
+#
+#   AND THE RESULT THAT JUSTIFIES THE CANARY, which was run and not imagined: B, H and I change the
+#   answer on the REAL TREE BY NOTHING AT ALL. 62 files, 25 reads, 2 exempt, 0 cuts — byte-identical
+#   to a healthy walk, suite green. Three of the ten mutations are caught by the canary and by
+#   nothing else. That is not a quirk of these three: the cut-inside-the-door rule's true answer on
+#   this repo is ZERO, so it has no live example anywhere to fail on, and a walk with it entirely
+#   dead is indistinguishable from a working one. The canary is the only place that rule is ever
+#   exercised positively, which is what makes it the load-bearing layer rather than the ceremonial
+#   one. Edit its expected numbers to make something pass and the census becomes decoration.
+#
+#   ROUND 6 — THE SAME ARGUMENT, ONE STOREY UP, WHERE NOBODY HAD APPLIED IT. Round 5 answered "the
+#   ordering rule has no live positive example" with a canary, and the canary is real and does its
+#   job. But the canary calls `analyze` directly, and the rule this case actually enforces is
+#   decided two functions further out — in `census()`, and in the verdict arms below. NEITHER had a
+#   single assertion behind it, and on a clean tree neither says anything, so a dead arm and a
+#   working arm produce byte-identical output. Two independent verifiers established this, and the
+#   honest final tally for round 5 is NOT 10 RED / 0 GREEN:
+#
+#     * AN ADVERSARIAL VERIFIER APPLIED 28 MUTATIONS: 14 RED · 14 GREEN. Six of the greens were
+#       re-run with a REAL credential-leaking read planted in scripts/, and both gates reported
+#       success every time — the bare arm disabled; the truncation arm disabled; the exemption keyed
+#       on the module instead of the line; `census()` marking every read scrubbed; `census()`
+#       dropping the cuts it was handed; the hooks glob deleted with the floors lowered to match.
+#       And the meta-finding: replacing this case's `python3 …/test_stderr_census.py` with `true` —
+#       the entire battery above silently stops running — was GREEN.
+#     * A VERSION VERIFIER RAN ELEVEN INTERPRETERS, 3.8.20 to 3.14.4, including CI's exact build
+#       today (3.12.3) and after the runner flip (3.14.4). Today's tree is byte-identical on all ten
+#       supported ones, keys included. It found one real divergence: on 3.9.6 and 3.8, a read inside
+#       a TRIPLE-QUOTED multi-line f-string whose replacement field carries a conversion (`!r`) or a
+#       format spec is reported at the f-string's OPENING line. Two reads then collapse onto one
+#       exemption key, and one exemption silently covers a read nobody approved. 3.9.6 is
+#       `/usr/bin/python3` — the `python3` four of five shells on the dev machine resolve to — and
+#       hooks/idc_stop_fixpoint_gate.py:405-408 already writes `!r` inside an f-string, safe only
+#       because it uses implicit concatenation rather than triple-quoting.
+#     * AND IT DISPROVED A SENTENCE THIS CASE WAS STATING AS FACT. The 3.9 floor was justified here,
+#       in stderr_census.py and in the contract by saying that on 3.8 `ast.Index` makes the cut rule
+#       under-match. Measured on a real CPython 3.8.20: it does not. Real cuts are still `ast.Slice`
+#       and indices still are not, so the rule gives the same two answers. What 3.8 actually breaks
+#       is the KEY — 7 of the 25 real-tree keys are wrong there, with every COUNT perfect and the
+#       canary passing green. All three places that repeated the wrong reason now say the measured
+#       one. A confident sentence that turns out to be false is worse than no sentence.
+#
+#   WHAT ROUND 6 CHANGED, and it is the same medicine as round 5's canary:
+#     1. THE JUDGEMENT IS A FUNCTION (`SCAN.judge`), so a fixture tree can be pushed through it. The
+#        registry, the reasons and every sentence stay here.
+#     2. AN EXEMPTION MUST MATCH EXACTLY ONE READ. Matching none was already stale; matching two is
+#        now ambiguous and fails, naming every site it covered. That closes the 3.9.6 f-string
+#        collapse without raising the floor to 3.9.7 — which would make this suite refuse to run
+#        under /usr/bin/python3, i.e. in every agent and teammate pane — and it also closes the
+#        version-independent form, two byte-identical lines in one module, which already exists
+#        today at hooks/idc_recirc_closeout_gate.py:395 and :414 (harmless only because neither is
+#        registered).
+#     3. THE ARMS NOW HAVE POSITIVE EXAMPLES. test_stderr_census.py builds trees that are the REAL
+#        tree plus one planted violation, and runs THIS CASE'S OWN PROGRAM over them — lifted out of
+#        this file, not re-implemented — requiring each arm to refuse and to name the site.
+#     4. THIS CASE CHECKS THAT ITS OWN BATTERY IS STILL BEING RUN (step 0), and a BACKSTOP after the
+#        arms refuses anything the arms let through, so disabling one arm can only downgrade the
+#        sentence, never produce silence.
+#     5. AND THAT THE BATTERY STILL CONTAINS SOMETHING (step 0b). Running is not containing: with
+#        the battery's five fixture tables emptied — one line each — both gates reported success,
+#        measured on the tree as it stood after (1)-(4). So the battery now prints how many
+#        assertions it passed and this case puts a FLOOR under that number. That is the THIRD
+#        STOREY of one failure, and step (0b) says why the regress stops there rather than
+#        building a fourth.
+#
+#   ROUND-6 MUTATIONS — 14, each anchor asserted to match EXACTLY ONCE, each run against the fixture
+#   tree that is supposed to watch it, and each required to make that fixture's own refusal STOP
+#   BEING SAID. They run on every suite run. 14 applied · 14 RED · 0 GREEN — and a FIFTEENTH was
+#   added in ROUND 7 below, so the table in the battery now holds 15 (12 deletion, 2 substitution,
+#   1 value).
+#     deletion      the bare arm, the truncation arm, the stale arm and the ambiguity arm, one at a
+#                   time ⇒ RED: each fixture loses its sentence. All four then hit the backstop, so
+#                   the suite still refuses — with a blunter message, which is the honest cost.
+#                   R28 stops checking that the battery runs ⇒ RED: the switched-off-battery tree
+#                   comes back clean.
+#                   R28 stops flooring how much the battery contains ⇒ RED: a transcript reporting
+#                   three passing assertions is accepted.
+#                   R28 stops calling check_interpreter / stops calling run_canary ⇒ RED: a census
+#                   module that refuses this interpreter, and one whose canary has drifted, are both
+#                   reported CLEAN. (Round 5 recorded these as covered by defence in depth. Defence
+#                   in depth is not evidence.)
+#                   judge() stops noticing an exemption that matched nothing / that matched twice
+#                   ⇒ RED: the stale and ambiguous trees come back clean.
+#                   census() throws away the cuts analyze found ⇒ RED: the cut tree comes back clean
+#                   — this is the round-5 canary result reproduced one function out, and the reason
+#                   the canary alone was never enough.
+#     substitution  the exemption keyed on the MODULE instead of the line ⇒ RED: a bare read planted
+#                   in a module that holds one exemption is reported clean.
+#                   census() marks every read scrubbed ⇒ RED: the bare tree comes back clean. Note
+#                   round 5 already caught the SAME effect one layer lower (Read.scrubbed forced
+#                   True in the constructor, caught by the canary) — same lie, different storey, and
+#                   only one of the two storeys had anything watching it.
+#     value         the hooks glob deleted AND the floors lowered to 1,1 ⇒ RED: a bare read in a
+#                   hooks module is reported clean. Neither edit alone survives the floors; the pair
+#                   does, which is why the fixture plants the violation under hooks/ rather than
+#                   trusting a count.
+#
+#   Round 5's in-memory walk battery also gained an eleventh mutation this round: skip a module
+#   that cannot be DECODED. A file that is not valid UTF-8 never reaches the parser, so analyze's
+#   refusal cannot catch it; until now it escaped census() as a bare traceback and the sentence
+#   below explaining why an unreadable module is a refusal never printed. 11 applied · 11 RED.
+#
+#   ROUND 7 — THE FOURTH STOREY, FOUND THE SAME WAY THE OTHER THREE WERE. An independent reviewer
+#   read rounds 5 and 6 and asked the one question nobody inside the work had: which guard still has
+#   no positive example? The answer was the COUNT FLOORS (FLOOR_FILES, FLOOR_READS = 62, 25). The
+#   reviewer disabled that arm, ran the whole 64-assertion battery against the change, and got 64
+#   green — not one assertion moved. Then, with the floors off, narrowed the census's file set and
+#   watched a REAL unscrubbed read, planted in a module the narrowed walk no longer visits, clear R28
+#   with exit 0 and a silent transcript. This was reproduced here before anything was changed.
+#
+#   SAY IT PLAINLY, BECAUSE IT IS THE MOST USEFUL SENTENCE IN THIS CASE: that is the FOURTH time in
+#   this work that a guard described as covered turned out to have nothing watching it — the ordering
+#   rule, the judgement layer, the battery's contents, now the count floors — and every one of the
+#   four was found by somebody who had not built the thing. The battery's own docstring had been
+#   claiming since round 6 that it proved "its count floors"; it did not. A rewrite is not what fixes
+#   that. A reader who did not write it is.
+#
+#   WHAT ROUND 7 CHANGED — no rule change anywhere; the walk is untouched:
+#     1. THE COUNT FLOORS HAVE A POSITIVE EXAMPLE. A fixture runs this case's own program against a
+#        walk that has stopped looking at part of scripts/, with a real leak sitting in the part it
+#        no longer looks at, and requires the floor to be what speaks; the paired mutation takes the
+#        floor arm away and requires R28 to fall silent. That is the FIFTEENTH e2e mutation.
+#     2. STEP (0) ASKS FOR THE INDEX, NOT THE WORD. It tested `"PIPESTATUS" in guard` — so changing
+#        `${PIPESTATUS[0]}` to `${PIPESTATUS[1]}`, which is tee's status and is always 0, turned the
+#        `|| fail` into a no-op and step (0) waved it through, exit 0, silent. A guard protecting a
+#        rewrite whose thesis is "spelling is not structure" had been written as a question about
+#        spelling. It now requires the literal `${PIPESTATUS[0]}`, and a fixture plants that typo.
+#        Three checks in the battery that were followed by an unconditional pass now report their own
+#        answer, so a failing one reduces the tally step (0b) floors instead of leaving a perfect
+#        transcript behind.
+#     3. A MUTATION THAT CRASHES THE PROGRAM NO LONGER SCORES AS A GUARD THAT HELD. The e2e battery's
+#        RED criterion was "the sentence stopped being said", which a NameError satisfies just as
+#        well as a disabled arm. Every row now also states the outcome it must produce — "refused"
+#        where the backstop still speaks, "clean" where nothing does — and a crash fails.
+#     4. THREE PROSE CORRECTIONS, all of them the same class round 6 corrected three times: the
+#        ROUND-5 not-already-caught bullet above (it said "every fixture" and "the one false
+#        positive"; the measured answer is 13 of 15 clean and TWO false positives); the boundary
+#        paragraph (a cut does not have to be a slice — two character-precision spellings leak on
+#        this case's own ordering samples and the census certifies them as scrubbed); and the scrub
+#        door's name match (any function called `scrub`/`_scrub` is treated as the door).
+#     5. AND AN ORIENTING BLOCK AT THE TOP OF THIS FILE, because six rounds of narrative before
+#        `set -u` buries the rule under its own history. The history stays: it is the evidence.
+#
+#   ROUND-7 MUTATIONS — the battery now runs 26 in all (11 in-memory against the walk, 15 against the
+#   judgement and this file), each anchor asserted to match EXACTLY ONCE, all RED, on every suite run.
+#     deletion      R28 stops flooring how many files and reads the census must find ⇒ RED: a walk
+#                   that has stopped looking at part of scripts/, with a real unscrubbed read in the
+#                   part it no longer looks at, is reported CLEAN and nothing else notices.
+#   Two new end-to-end fixtures came with it (a narrowed walk; a `${PIPESTATUS[1]}` typo), so the
+#   battery is 27 fixtures · 14 runs of this case's own program · 26 mutations = 67 assertions.
 
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -2124,11 +2352,89 @@ echo "== R28. THE CREDENTIAL SCRUB IS A PROPERTY OF THE TEXT, NOT A HABIT OF THE
 #       the scrub at the read, or is named in the registry below with a reason. Fail-closed BOTH
 #       ways — a new unscrubbed read fails, and a registry entry that no longer matches a real line
 #       fails too, so the list cannot rot into a blanket exemption.
-python3 - "$PLUGIN" <<'PYR28' || fail "R28: a child process's stderr can reach a persisted artifact unscrubbed, or the machine-output profile does not cover what it claims"
-import glob, importlib.util, os, re, shutil, subprocess, sys, tempfile
+#
+# THE BOUNDARY OF THE RULE, said out loud so nobody mistakes this census for full cover. The rule
+# reaches exactly one thing: an expression that reads the attribute `stderr` off something that is
+# not `sys`. FIVE ordinary shapes carry a child's stderr past that rule, and three of them ALREADY
+# SHIP in this repo. None is a live leak today; all five were run through this census — the first
+# four by an adversarial verifier, the fifth by an independent reviewer — and came back CLEAN, so
+# what follows is the honest extent of the cover.
+#
+#   stderr=subprocess.STDOUT            the stderr is merged into stdout at the CALL, so there is no
+#                                       `.stderr` anywhere to see. scripts/idc_live_check.py:1137,
+#                                       redacted by hand at :1160 — correct, but correct by
+#                                       DISCIPLINE, not because anything checks it.
+#   tool_response.get("stderr")         the stderr arrives as a dict KEY, not an attribute — a hook
+#                                       reading what Claude Code handed it.
+#                                       scripts/hooks/idc_post_commit_sync.py:106 and
+#                                       scripts/hooks/idc_post_issue_create.py:103 both do this
+#                                       today. Both only feed the text to a regex classifier, so
+#                                       neither leaks — but neither is visible to this census and
+#                                       neither is registered anywhere, so the day one of them is put
+#                                       into a message, nothing goes red.
+#   out, err = proc.communicate()       a Popen read with no `.stderr` in the expression at all.
+#                                       scripts/idc_live_check.py:1182 already calls it — there, in
+#                                       a cleanup drain that discards what it returns.
+#   CS.scrub(_tail(p.stderr))           the READ is seen and correctly counted as scrubbed — but the
+#                                       CUT has moved into a helper, so the ordering rule below sees
+#                                       zero cuts and says CLEAN. The verifier built this, and then
+#                                       showed the credential survives on this case's own two
+#                                       ordering samples. Bounding child output in a named helper is
+#                                       already house style here (scripts/idc_autorun_drain.py:511),
+#                                       so it is one ordinary refactor away, in either direction.
+#   CS.scrub("%.200s" % p.stderr)       a cut that is not spelled as a SLICE. The read is seen and
+#   CS.scrub(f"{p.stderr:.200}")        counted as scrubbed — an affirmative certification, not a
+#                                       silence — and the ordering rule below reports zero cuts,
+#                                       because it recognises a truncation only when it is written
+#                                       as a slice. Measured against this case's OWN two ordering
+#                                       samples and the real scrub: both spellings leak the userinfo
+#                                       secret and the PEM body, exactly as `p.stderr[:200]` inside
+#                                       the door does. There are ZERO uses of either anywhere in
+#                                       scripts/ today and the old text census (`\[:\s*\d+\s*\]`)
+#                                       could not see them either, so this is not a regression — but
+#                                       "an index is not a truncation" was never the whole story,
+#                                       and slice-versus-index is not an exhaustive pair.
+#
+# AND ONE RESIDUAL IN THE OTHER DIRECTION, which deserves more attention than the five above because
+# it CERTIFIES rather than misses: the scrub door is matched by the callee's simple NAME (`scrub` or
+# `_scrub`), so any function called that is treated as the credential door. `def _scrub(s): return
+# s[:400]` in some module would make every read handed to it count as scrubbed, with zero cuts, and
+# this census would say CLEAN. The exactness of the match is a real guard — `_scrub_later` is not the
+# door, which is the old "is the word `scrub` on this line?" bug refusing to come back — and that
+# half was already written down; this half was not. It is not hypothetical either:
+# scripts/idc_autorun_drain.py:410 already defines a module-local `_scrub`, correctly, which is why
+# the name is on the list at all.
+#
+# scripts/ makes 53 subprocess calls across 24 modules and this rule governs 25 reads across 19. The
+# remainder is governed by nothing. Widening the rule — to dict-key reads, to `communicate()`, to a
+# cut applied one function away — is a real and arguably larger piece of work, but it is a change to
+# the RULE, decided by people, not a change to the machinery that reads the code. It is deliberately
+# not attempted here, and it is written down rather than left to be rediscovered.
+
+# THE CENSUS'S OWN WALK, before it is allowed to say anything about scripts/. It is a program like
+# any other and it can break like one — and the way it breaks is by finding LESS, which looks exactly
+# like good news. So its unit test runs first, and it runs four things: twenty-seven fixtures with
+# the answer written beside each — source shapes through the walk, whole scripts/ trees through the
+# judgement; fourteen runs of THIS CASE'S OWN CENSUS PROGRAM, lifted verbatim out of the heredoc
+# below, against the real tree with one violation planted in it; and twenty-six deliberate
+# mutations of the walk, of the judgement and of this file, each of which must be observed to
+# FAIL. Sixty-seven assertions in all, and step (0b) below puts a floor under that number.
+# The transcript is KEPT, not just watched go by: the census program below reads it back and puts a
+# floor under how many assertions it reported. Running the battery and containing a battery are two
+# different facts, and only the second one is worth anything.
+BATTERY="$WORK/r28-census-battery.txt"
+python3 "$HERE/lib/test_stderr_census.py" 2>&1 | tee "$BATTERY"
+[ "${PIPESTATUS[0]}" -eq 0 ] \
+  || fail "R28: the census's own walk is broken, or is no longer red-when-broken — until this passes, anything the census says about scripts/ below is unfounded"
+
+python3 - "$PLUGIN" "$HERE/lib" "$BATTERY" <<'PYR28' || fail "R28: a child process's stderr can reach a persisted artifact unscrubbed, or the machine-output profile does not cover what it claims"
+import glob, importlib.util, os, shutil, subprocess, sys, tempfile
 plugin = sys.argv[1]
+battery_transcript = sys.argv[3]
 sys.path.insert(0, os.path.join(plugin, "scripts"))
+sys.path.insert(0, sys.argv[2])
 import idc_credential_shapes as CS
+import stderr_census as SCAN
 
 
 def load(rel, name):
@@ -2137,6 +2443,86 @@ def load(rel, name):
     spec.loader.exec_module(mod)
     return mod
 
+
+# ── (0) THE BATTERY THIS CASE LEANS ON MUST STILL BE RUNNING ─────────────────────────────────────
+# Everything below trusts a walk over a parse tree, and everything that keeps that walk honest — the
+# shape fixtures, the fixture trees that push a known-bad module through the real judgement, and the
+# mutations of the walk, of the judgement and of THIS FILE that must each be observed to fail — lives
+# in tests/smoke/lib/test_stderr_census.py, which is run by the one line immediately above this
+# heredoc. Change that line to `true` and the entire battery stops running: the suite stays green and
+# nothing anywhere notices. That is not a worry, it is a measured result — an independent verifier
+# made exactly that edit and both gates reported success. A guard that can be switched off in one
+# line, silently, is a guard on a timer. So this case reads its own source and refuses if the
+# invocation has gone.
+SUITE = os.path.join(plugin, "tests", "smoke", "phase11-honesty-repro.sh")
+suite_lines = open(SUITE, encoding="utf-8").read().splitlines()
+runs_battery = [n for n, line in enumerate(suite_lines)
+                if line.startswith('python3 "$HERE/lib/test_stderr_census.py"')]
+guard = " ".join(suite_lines[runs_battery[0]:runs_battery[0] + 3]) if runs_battery else ""
+# It asks for the LITERAL `${PIPESTATUS[0]}`, not for the word PIPESTATUS, and the difference is the
+# whole thesis of this rewrite applied to the check's own guard: asking about spelling is not asking
+# about structure. `${PIPESTATUS[1]}` is tee's status, which is 0 whatever the battery returned, so an
+# index typo — or a well-meaning edit — turns the `|| fail` below into a no-op while the word is still
+# there. That was measured: with the index changed, this step waved the suite through, exit 0, silent.
+if (len(runs_battery) != 1 or "|| fail" not in guard
+        or "${PIPESTATUS[0]}" not in guard):
+    sys.exit("this case no longer runs tests/smoke/lib/test_stderr_census.py, or runs it without "
+             "checking what it returned — the invocation is piped through `tee`, so its exit code "
+             "has to be read out of ${PIPESTATUS[0]} SPECIFICALLY and turned into a `fail`. Index 1 "
+             "is tee's own status and is 0 however the battery ended, so reading it would leave a "
+             "battery that reported failure scrolling past as ordinary output. That file IS the "
+             "evidence that the census below can still tell a scrubbed read from a raw one; "
+             "without it this case "
+             "walks 62 modules with a walk nobody has watched fail and reports whatever it happens "
+             "to find. Restore the invocation. If the battery genuinely has to move, move this "
+             "check with it.")
+
+# ── (0b) …AND IT MUST STILL CONTAIN SOMETHING ────────────────────────────────────────────────────
+# Step (0) proves the battery RUNS. Running is not containing. Empty its fixture tables — one line
+# each, `for … in ():` — and the file exits 0 with a shorter transcript, and nothing anywhere
+# notices. That was run, not imagined: with all five tables emptied, both gates reported success.
+#
+# Say plainly what this is, because it is the most useful sentence in the case: THIS IS THE THIRD
+# STOREY OF ONE FAILURE. First the ordering rule had no live positive example, so a dead detector
+# and a working one printed the same thing — answered with the canary. Then the JUDGEMENT had no
+# positive example, so a dead verdict arm and a working one printed the same thing — answered with
+# fixture trees run through this case's own program. Now the BATTERY itself: a gutted one and a full
+# one exit the same way. Every time, the guard had been moved one storey away from where it was
+# proved; every time, the failure looked exactly like good news.
+#
+# THE REGRESS TERMINATES HERE, DELIBERATELY. One could ask next what guards this floor, and the
+# answer is: a reviewer reading R28. This is the file a person opens — the rule, the registry, the
+# reasons and the refusals all live here so that they are READ rather than trusted. A fourth storey
+# would move the guard away from the reader again, which is the exact defect all three of these
+# fixed. Stop here.
+#
+# A FLOOR, not an equality, for the same reason as FLOOR_FILES/FLOOR_READS below: adding assertions
+# must stay silent (correct work should pass without ceremony) and removing them must go loud.
+# RAISE this in the same commit that adds assertions. NEVER lower it without naming, in that commit,
+# which assertions were deleted and why.
+FLOOR_ASSERTIONS = 67
+tally = [line for line in open(battery_transcript, encoding="utf-8").read().splitlines()
+         if line.startswith("test_stderr_census: assertions_passed=")]
+if len(tally) != 1:
+    sys.exit(f"the battery ran but did not report how many assertions it passed: expected exactly "
+             f"one `test_stderr_census: assertions_passed=…` line in its transcript, found "
+             f"{len(tally)}. Without that number this case can tell you the battery RAN and nothing "
+             f"about whether it still CONTAINS anything, which is the whole difference between a "
+             f"guard and a habit.")
+fields = dict(part.split("=", 1) for part in tally[0].split(": ", 1)[1].split())
+if fields.get("python") != sys.version.split()[0]:
+    sys.exit(f"the battery transcript says it was produced by Python {fields.get('python')!r}, but "
+             f"this census is running on {sys.version.split()[0]}. So the transcript is not this "
+             f"run's — it is stale, or hand-made — and a floor applied to somebody else's numbers "
+             f"is not a floor at all.")
+if int(fields["assertions_passed"]) < FLOOR_ASSERTIONS:
+    sys.exit(f"the census's battery passed only {fields['assertions_passed']} assertions; it has to "
+             f"pass at least {FLOOR_ASSERTIONS}. Assertions have been DELETED — some of the shape "
+             f"fixtures, the judgement trees, the end-to-end runs of this program, or the "
+             f"mutations. A battery that still runs and no longer contains anything reports exactly "
+             f"what a healthy one reports, and everything this case says about scripts/ below rests "
+             f"on it. Either restore what was removed, or lower this floor in a commit that names "
+             f"each assertion deleted and why it was safe to delete.")
 
 # ── (1) THE PROFILE, DRIVEN BY LITERAL SAMPLES ───────────────────────────────────────────────────
 D = load("scripts/idc_autorun_drain.py", "D")
@@ -2195,12 +2581,131 @@ for widened in ("TOKENIZER_MODEL=gpt-4", "Authorization: Basic understanding of 
                  f"from it, which is exactly the gap F46 found inside the drain's own door")
 
 # ── (2) THE CENSUS ───────────────────────────────────────────────────────────────────────────────
-# A read of a completed child process's stderr. `sys.stderr`, a `stderr=` keyword and comments are not
-# reads of child output.
-READ = re.compile(r"(?<![\w.])(\w+)\.stderr\b")
+# WHAT CHANGED, AND WHY. This census used to read scripts/ as TEXT: a pattern for `x.stderr`, a test
+# for whether the word `scrub` appeared anywhere on the line, and a hand-written paren counter for
+# whether a `[:200]` sat inside the call. Every one of those asks about SPELLING. The rule they were
+# standing in for is about STRUCTURE — is this read INSIDE the door, is that cut INSIDE the call —
+# and the two agree only until somebody writes correct code a different way. Then they part company
+# in silence: the check keeps passing and stops looking. Seven ways it had already gone blind — each
+# one planted into a copy of scripts/ and watched to come back CLEAN from the text census, each one
+# ordinary Python somebody would write on a good day:
+#
+#   subprocess.run(cmd, capture_output=True).stderr   the pattern needed a word character before the
+#                                                     dot, so a read taken straight off a call was
+#                                                     invisible — a whole SHAPE of read, and the
+#                                                     same line already ships with `.stdout` in it
+#   scrubbed = CS.scrub(a); f"{scrubbed} {r.stderr}"  the WORD "scrub" is on the line
+#   raw = p.stderr  # the caller already scrubs this  so is this one
+#   CS.scrub(p.stdout or "") + " | " + p.stderr       one scrub licensed the whole line
+#   CS.scrub(p.stderr.strip()[:MAX_TAIL])             a cut spelled with a name, not a number
+#   CS.scrub("gh failed :) " + p.stderr[:200])        the paren counter had no idea what a string was
+#   p = run(cmd, stderr=PIPE); detail = p.stderr      a blanket "skip lines containing stderr="
+#
+# …and it FAILED, loudly, on correct code that merely spanned three lines, because the paren counter
+# could only see one. That undocumented "every scrub call must fit on one line" rule is gone too.
+#
+# So the census now reads scripts/ as a PARSE TREE: Python's own account of what is inside what. The
+# machinery is tests/smoke/lib/stderr_census.py; the registry, the reasons and every failure message
+# stay here, where a reviewer is already reading. It runs in three steps and the ORDER is the point —
+# refuse an interpreter it is not proven on, prove on a fixture that it can still tell the rules
+# apart, and only then ask about the real code.
+
+# STEP ONE — THE FLOOR.
+try:
+    SCAN.check_interpreter()
+except SCAN.InterpreterTooOld as exc:
+    sys.exit(f"this census walks a parse tree, and it is only proven to give identical answers on "
+             f"Python {exc.minimum[0]}.{exc.minimum[1]}+ — checked on eleven interpreters from 3.9.6 "
+             f"to 3.14.4, including the exact builds CI runs today and after the runner flip. This "
+             f"one is {exc.running}, and it is not safe to let it report clean here.\n"
+             f"WHY, stated as it was actually measured rather than as it was first guessed: below "
+             f"3.9 a read that sits inside a MULTI-LINE f-string is reported at the f-string's "
+             f"OPENING line instead of its own. The census keys its exemptions on the read's source "
+             f"line, so those keys come out wrong — 7 of the 25 keys on today's tree are wrong on "
+             f"3.8 — and they come out wrong with every COUNT perfect and the canary passing green. "
+             f"(The earlier claim here, that 3.8 wraps a plain index in an extra node and so finds "
+             f"FEWER truncations, was tested on a real 3.8.20 and is FALSE: the cut rule gives the "
+             f"same answers there. The keys are the thing that breaks.) Run the suite on "
+             f"{exc.minimum[0]}.{exc.minimum[1]}+. (This is not hypothetical: `python3` on this "
+             f"project's dev machine is 3.9.6 in one shell and 3.14.3 in another, and CI's is a "
+             f"third.)")
+
+# STEP TWO — THE CANARY, and it is the load-bearing one. A fixture whose answer was counted by hand
+# goes through the same walk the real tree does. It contains the right and the wrong spelling of
+# every rule, so a walk that has stopped telling them apart cannot come back with its numbers.
+#
+# Why this cannot be dropped as ceremony: on today's tree the truncation rule's true answer is ZERO.
+# So a walk with that rule ENTIRELY DEAD produces byte-identical output to a working one and this
+# suite reports success. That was run as an experiment, not imagined — three of the ten mutations
+# recorded at the top of this file change the real tree's answer by NOTHING AT ALL and are caught
+# here and nowhere else. The rule (added in the two commits immediately before this rewrite) has no
+# live positive example anywhere in scripts/; the canary is the only place it has one, which makes
+# the canary the only thing standing between "clean" and "blind".
+try:
+    SCAN.run_canary()
+except SCAN.CanaryDrift as exc:
+    sys.exit(f"the census's CANARY no longer answers the way it was hand-counted, on Python "
+             f"{sys.version.split()[0]}. Each entry below is (expected, got): {exc.drift!r}.\n"
+             f"Stop here and read that as what it is: the parse-tree shapes this walk depends on are "
+             f"not the shapes it was written against, so a CLEAN census below would be MEANINGLESS. "
+             f"It would not be evidence that scripts/ is safe — only that the walk has gone quiet. "
+             f"Repair the walk for this interpreter. Do NOT edit the expected numbers to match what "
+             f"it now returns; that is the one edit that turns this guard into decoration.")
+
+# STEP THREE — THE REAL TREE.
+try:
+    scan = SCAN.census(plugin)
+except SCAN.ParseFailure as exc:
+    sys.exit(f"the census could not read {exc.module} on Python {sys.version.split()[0]}: "
+             f"{exc.detail}. A module the census cannot READ is a module the census cannot CLEAR, so "
+             f"this is a census failure and never a skip. Skipping it would drop the module out of "
+             f"the count and report clean — which is precisely what would happen the day one of "
+             f"these files uses syntax newer than whichever `python3` the suite happened to run "
+             f"under. It covers both ways a module can be unreadable: the parser refusing it, and "
+             f"the file itself not being decodable as UTF-8 before the parser ever sees it.")
+
+# FLOORS, deliberately not equalities. The hazard this census exists for is a walk that stops SEEING
+# things; finding MORE is not a hazard. A floor therefore stays silent when someone adds a correctly
+# scrubbed site — correct code should pass without ceremony — and goes loud the moment the walk goes
+# quiet. RAISE these in the same commit that adds sites. NEVER lower one without naming, in that
+# commit, the site that was deleted and why.
+#
+# THESE TWO NUMBERS ARE THE LAST THING BETWEEN A NARROWED WALK AND A CLEAN REPORT, and until round 7
+# nothing had ever watched them fail. A reviewer disabled this arm, ran the whole 64-assertion battery
+# against the change and got 64 green; then narrowed the file set — two globs, one edit — and a real
+# unscrubbed read planted in a module the narrowed walk no longer visits was reported CLEAN, exit 0,
+# with a silent transcript. Nothing else in the case can see that: the bare arm cannot report a read
+# in a file nobody opened, and the canary only ever looks at its own fixture. THAT WAS THE FOURTH TIME
+# IN THIS WORK THAT A GUARD DESCRIBED AS COVERED TURNED OUT TO HAVE NOTHING WATCHING IT — after the
+# ordering rule, the judgement layer and the battery's own contents — and every one of the four was
+# found by somebody who had not built the thing, which is the most useful sentence in this case.
+# The fixture that now watches these numbers is "a walk that has stopped looking at part of scripts/"
+# in the battery above, and the mutation that proves the fixture is load-bearing sits beside it.
+FLOOR_FILES, FLOOR_READS = 62, 25
+if len(scan.modules) < FLOOR_FILES or len(scan.reads) < FLOOR_READS:
+    sys.exit(f"the census walked {len(scan.modules)} files and found {len(scan.reads)} reads of a "
+             f"child's stderr; it has to find at least {FLOOR_FILES} and {FLOOR_READS}. Something "
+             f"is no longer being looked at. Either code was deleted — in which case say which site "
+             f"in the commit message and lower the floor deliberately — or the walk has stopped "
+             f"matching a shape it used to match, which is the silent failure this whole case is "
+             f"built around. Do not lower these to make the suite pass.")
+
 # (module, the exact stripped source line) -> why this read may stay raw. Both entries CLASSIFY the
 # text (a substring match that decides which exception to raise); neither puts it into a message, and
 # both feed sites that DO scrub before the text escapes.
+#
+# The key is a LINE OF TEXT on purpose, and it stays one. Reformatting an exempted line breaks the
+# key — and that brittleness is the guard, not a defect in it. Four reformattings of a live exemption
+# were tried against this walk and all four are LOUD: three surface as "this read is now bare", and
+# deleting the site outright trips the count floor above, with the stale-exemption check below still
+# behind it. None is silent. A key made of node positions would be tidier and strictly worse, because
+# the positions of anything inside an f-string MOVE between Python 3.9 and 3.10, so a key computed on
+# one interpreter would quietly stop matching on another.
+#
+# What a text key cannot promise by itself is that it names ONE read, and that gap is why the arms
+# below check three things and not two: an entry that matches nothing is stale, and an entry that
+# matches SEVERAL is ambiguous. See the ambiguity refusal for what goes wrong and how it was
+# reproduced. Both entries here match exactly one read on every interpreter from 3.9.6 to 3.14.4.
 ALLOWED_RAW = {
     ("scripts/idc_gh_board.py", "if _is_rate_limit_stderr(p.stderr):"):
         "rate-limit detection: matches fixed markers to choose RateLimitError over BoardReadError; "
@@ -2210,74 +2715,77 @@ ALLOWED_RAW = {
         "absence detection: decides present/absent/indeterminate from fixed gh wording; the text is "
         "never carried into the result",
 }
-bare, seen_allowed, scrubbed = [], set(), []
-for path in sorted(glob.glob(os.path.join(plugin, "scripts", "*.py"))
-                   + glob.glob(os.path.join(plugin, "scripts", "hooks", "*.py"))):
-    rel = os.path.relpath(path, plugin)
-    for lineno, raw in enumerate(open(path, encoding="utf-8"), 1):
-        line = raw.strip()
-        if line.startswith("#") or "stderr=" in line:
-            continue
-        m = READ.search(line)
-        if not m or m.group(1) == "sys":
-            continue
-        if (rel, line) in ALLOWED_RAW:
-            seen_allowed.add((rel, line))
-            continue
-        if "scrub" not in line:
-            bare.append(f"{rel}:{lineno}: {line}")
-        else:
-            scrubbed.append((rel, lineno, line))
+# The registry is applied by SCAN.judge, which is a function rather than nine lines here for one
+# reason: nine lines here can only ever run against the one real tree, and the real tree is CLEAN, so
+# every arm below could be dead and the output would not move by a character. Somebody checked. Each
+# arm was deleted in turn with a real credential-leaking read planted in scripts/, and the suite
+# reported success every time. The fixtures that now stand behind these arms — a tree with a bare
+# read, a tree with a cut inside the door, a tree whose exemption has gone stale, a tree where one
+# exemption covers two reads, a violation inside scripts/hooks/ — live in the battery run at the top
+# of this case, and they push those trees through THIS program, not through a copy of it.
+verdict = SCAN.judge(scan, ALLOWED_RAW)
+bare = [read.where() for read in verdict.bare]
 if bare:
     sys.exit("a child process's stderr is read WITHOUT passing through the scrub at the read. Every "
              "one of these travels into a message that is printed, persisted, or committed — which "
              "is the whole of F1/F20/F33/F35/F40. Scrub it at the read (`CS.scrub` in scripts/, "
              "`H.scrub` in scripts/hooks/), or register it in ALLOWED_RAW with a reason:\n  "
              + "\n  ".join(bare))
-stale = sorted(set(ALLOWED_RAW) - seen_allowed)
+ambiguous = [(key, [read.where() for read in reads]) for key, reads in verdict.ambiguous]
+if ambiguous:
+    sys.exit("an ALLOWED_RAW entry covers MORE THAN ONE read. An exemption is one person's judgement "
+             "about one line they read and accepted; when two reads derive the same key that single "
+             "judgement silently covers a second read nobody ever looked at, and the second one can "
+             "be the raw read into a committed message this whole census exists to stop. Two ways in, "
+             "both ordinary and both reproduced with a real unscrubbed read that the census cleared: "
+             "two byte-identical lines in one module (any interpreter — idc_recirc_closeout_gate.py "
+             "395 and 414 are identical today, and are safe only because neither is registered), and, "
+             "on Python 3.9.6 and 3.8, two different lines inside one multi-line f-string, which the "
+             "parser reports at the same line. Make the lines distinguishable, or scrub one of them:\n"
+             + "\n".join(f"  {mod}: {ln}\n" + "\n".join(f"    covers {w}" for w in where)
+                         for (mod, ln), where in ambiguous))
+stale = [key for key in verdict.stale]
 if stale:
     sys.exit("ALLOWED_RAW names a line that no longer exists — an exemption that outlives its site is "
              "how an allowlist rots into a blanket pass. Remove or re-point it:\n  "
              + "\n  ".join(f"{mod}: {ln}" for mod, ln in stale))
 
 # ── (2b) THE ORDERING — "AT THE READ" MEANS *BEFORE* THE CUT ─────────────────────────────────────
-# The census above only asks whether the token `scrub` appears on the line, so it cannot tell
-# `CS.scrub(p.stderr).strip()[:200]` from `CS.scrub(p.stderr.strip()[:200])`. The second truncates
-# FIRST and hands the door a fragment. Four rules are prefix-anchored and survive that, but two match
-# on a CLOSING anchor — the PEM `-----END … PRIVATE KEY-----` and the `@host` that terminates a URL
-# userinfo — and a cut landing before that anchor deletes the very thing the rule keys on, so the
-# secret walks through the open door untouched. That is the F1/F20/F33/F35/F40 class re-entering
-# through the one chokepoint the census exists to seal, invisible to a check that greps for a name.
-# So the slice lives OUTSIDE the call, the way all 23 sites spell it.
-SLICE = re.compile(r"\[:\s*\d+\s*\]")
-
-
-def scrub_argument(line):
-    """The text between `scrub(` and its matching `)` — i.e. what the door is actually handed."""
-    start = line.find("scrub(")
-    if start < 0:
-        return ""
-    depth, arg = 0, ""
-    for ch in line[start + len("scrub"):]:
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth -= 1
-            if depth == 0:
-                break
-        if depth >= 1:
-            arg += ch
-    return arg
-
-
-cut_first = [f"{rel}:{lineno}: {line}" for rel, lineno, line in scrubbed
-             if SLICE.search(scrub_argument(line))]
-if cut_first:
+# Passing through the door is not enough on its own: `CS.scrub(p.stderr).strip()[:200]` and
+# `CS.scrub(p.stderr.strip()[:200])` read identically to a human in a hurry, and the second truncates
+# FIRST and hands the door a fragment. Four of the scrub's rules are prefix-anchored and survive
+# that, but two match on a CLOSING anchor — the PEM `-----END … PRIVATE KEY-----`, and the `@host`
+# that terminates a URL userinfo — and a cut landing before that anchor deletes the very thing the
+# rule keys on, so the secret walks through the open door untouched. That is the F1/F20/F33/F35/F40
+# class re-entering through the one chokepoint the census exists to seal.
+#
+# So the cut lives OUTSIDE the call, the way all 23 sites spell it. What counts as a cut is a SLICE
+# (`[:200]`, `[:MAX_TAIL]`, `[0:200]`, `[: n ]`), and the honest statement of the rule is that one:
+# it recognises a cut only when the cut is SPELLED as a slice. An index like `d["k"]` selects rather
+# than shortens, and flagging it would make the check noise and get it switched off — but slice and
+# index are not an exhaustive pair, and the character-precision formats named in the boundary
+# paragraph above are real cuts this rule does not see. And the question is only asked of scrub calls
+# that are actually handling a child's stderr; an unrelated `CS.scrub(banner[:80])` truncates nothing
+# these rules care about.
+if scan.truncations:
     sys.exit("a child's stderr is TRUNCATED INSIDE the scrub call, so the cut runs BEFORE the door. "
              "A rule that matches on a closing anchor (the PEM footer, the `@host` ending a URL "
              "userinfo) cannot fire once the cut has removed that anchor, and the secret survives "
              "scrubbing. Move the slice outside: `scrub(p.stderr or '').strip()[:200]`:\n  "
-             + "\n  ".join(cut_first))
+             + "\n  ".join(t.where() for t in scan.truncations))
+
+# THE BACKSTOP. Four arms above, each with the sentence that explains what it costs. This asks the
+# one question none of them can ask about itself: did the census find something that no arm spoke
+# about? Disabling an arm is a one-word edit — `if bare:` becomes `if False:` — and on a clean tree
+# it changes nothing at all, which is exactly why all four of them were found disabled-and-green by
+# a verifier who then planted a real credential leak and watched the suite pass. This cannot restore
+# the arm's explanation, and it is not meant to: it is here so that the worst a single edit can do is
+# DOWNGRADE a finding to a blunt sentence, never turn it into silence.
+if not verdict.clean:
+    sys.exit(f"the census found something and every arm above let it through: "
+             f"{', '.join(verdict.fired())}. One of those arms has been disabled or its condition no "
+             f"longer reaches the finding. Read the arm named here, restore it, and run again — the "
+             f"census is reporting a real finding that nothing explained.")
 # …and the proof that the rule above is load-bearing rather than stylistic, on the two shapes whose
 # anchor sits at the END. Each sample is built so the secret ends EXACTLY at the cut and the closing
 # anchor falls entirely beyond it — the precise geometry a real `git`/`gh` failure produces when it
@@ -2358,6 +2866,6 @@ if "hunter2xyzzy" in proc.stdout:
              "THROUGH. It must WITHHOLD: a withheld diagnostic costs one re-run by hand, an "
              f"unscrubbed one costs a credential rotation. Got: {proc.stdout.strip()!r}")
 PYR28
-echo "  ok R28: the machine-output profile covers all three consumers, the prose floor stays narrower, and no module reads a child's stderr unscrubbed"
+echo "  ok R28: the machine-output profile covers all three consumers, the prose floor stays narrower, and a parse-tree census — floor, canary, then the real tree — finds no module reading a child's stderr unscrubbed and no cut taken inside the door"
 
 echo "phase11-honesty-repro: OK"

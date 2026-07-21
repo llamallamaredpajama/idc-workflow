@@ -2267,8 +2267,9 @@ for widened in ("TOKENIZER_MODEL=gpt-4", "Authorization: Basic understanding of 
 # whether a `[:200]` sat inside the call. Every one of those asks about SPELLING. The rule they were
 # standing in for is about STRUCTURE — is this read INSIDE the door, is that cut INSIDE the call —
 # and the two agree only until somebody writes correct code a different way. Then they part company
-# in silence: the check keeps passing and stops looking. Seven ways it had already gone blind, each
-# one measured against this very file, each one ordinary Python somebody would write on a good day:
+# in silence: the check keeps passing and stops looking. Seven ways it had already gone blind — each
+# one planted into a copy of scripts/ and watched to come back CLEAN from the text census, each one
+# ordinary Python somebody would write on a good day:
 #
 #   subprocess.run(cmd, capture_output=True).stderr   the pattern needed a word character before the
 #                                                     dot, so a read taken straight off a call was
@@ -2310,9 +2311,11 @@ except SCAN.InterpreterTooOld as exc:
 #
 # Why this cannot be dropped as ceremony: on today's tree the truncation rule's true answer is ZERO.
 # So a walk with that rule ENTIRELY DEAD produces byte-identical output to a working one and this
-# suite reports success. That was run as an experiment, not imagined. The rule was added three days
-# before this rewrite and has no live positive example anywhere in scripts/; the canary is the only
-# place it has one, which makes the canary the only thing standing between "clean" and "blind".
+# suite reports success. That was run as an experiment, not imagined — three of the ten mutations
+# recorded at the top of this file change the real tree's answer by NOTHING AT ALL and are caught
+# here and nowhere else. The rule (added in the two commits immediately before this rewrite) has no
+# live positive example anywhere in scripts/; the canary is the only place it has one, which makes
+# the canary the only thing standing between "clean" and "blind".
 try:
     SCAN.run_canary()
 except SCAN.CanaryDrift as exc:

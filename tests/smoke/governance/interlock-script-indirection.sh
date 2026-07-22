@@ -640,9 +640,14 @@ echo "  ok non-active session ⇒ hard deny for the direct raw write AND its int
 
 echo "== IDC_HOOKS_OBSERVE_ONLY=1 downgrades the active-session deny to a warning =="
 OUT="$(emit "$REPO" Bash 'gh issue create --title gate --body-file /tmp/body' "$S1" | IDC_HOOKS_OBSERVE_ONLY=1 python3 "$GATE" "$GOV_PLUGIN" 2>"$ERR")"; RC=$?
-[ -z "$OUT" ] || gov_fail "(observe) OBSERVE_ONLY must downgrade the deny → no stdout decision: $OUT"
+! printf '%s' "$OUT" | grep -q '"permissionDecision": *"deny"' \
+  || gov_fail "(observe) OBSERVE_ONLY must never emit permissionDecision=deny: $OUT"
+printf '%s' "$OUT" | grep -q '"additionalContext"' \
+  || gov_fail "(observe) OBSERVE_ONLY did not inject the would-be denial as additionalContext: $OUT"
+printf '%s' "$OUT" | grep -qi 'observe' \
+  || gov_fail "(observe) additionalContext did not identify the observe posture: $OUT"
 grep -qi 'would deny' "$ERR" || gov_fail "(observe) OBSERVE_ONLY did not warn-downgrade the deny: $(cat "$ERR")"
-echo "  ok OBSERVE_ONLY downgrades the active-session deny to a warning"
+echo "  ok OBSERVE_ONLY downgrades the active-session deny to warning + additionalContext"
 
 echo "== an opaque interpreter target (oversize / unreadable) is denied as opaque-script-indirection, unopened =="
 BIG="$WORK/big.sh"; head -c 70000 /dev/zero | tr '\0' '#' > "$BIG"; printf '\ngh issue create x\n' >> "$BIG"

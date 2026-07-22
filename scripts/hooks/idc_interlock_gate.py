@@ -11,13 +11,12 @@ C + D). The session-b7a93ff6 incident showed the escape hatch: the raw mutation 
 throwaway `fire_gate.sh` and run as `bash fire_gate.sh`, so a pure command-string match saw only
 `bash fire_gate.sh` and waved it through. This gate now sees THROUGH that indirection.
 
-POSTURE (U4 shared Path Gate): a raw governed mutation is a HARD DENY unless it comes through the
-sanctioned IDC door with a live authorization. The old warn-only non-active posture is gone: missing
-authorization is itself blocking. IDC_HOOKS_OBSERVE_ONLY=1 is the ONE debug escape hatch — it
-downgrades any deny back to a warning (honored inside pre_tool_deny()). There is no second bypass
-variable; the old IDC_HOOKS_INTERLOCK_ENFORCE opt-in is removed. There are no command-name
-exceptions: Init and Uninstall lifecycle writes run through validating tracker-adapter helpers, while
-the same raw GitHub operations remain denied when typed directly into Bash.
+POSTURE (U4 shared Path Gate): the core always computes the same allow/deny decision, then observes
+would-be denials when `pathway_enforcement.mode` is `off` (the scaffold default) and hard-denies only
+in `controlled` or `app-locked`. IDC_HOOKS_OBSERVE_ONLY=1 independently forces observe in every mode.
+There are no command-name exceptions: Init and Uninstall lifecycle writes run through validating
+tracker-adapter helpers, while the same raw GitHub operations are would-be denials when typed directly
+into Bash.
 
 CLASSIFIER (round-5 Fix 1): defense-in-depth by PER-SEGMENT classification, NOT a complete shell
 parser. The command is split into shell segments (`&&`/`||`/`;`/`|`/newline) and EACH is classified
@@ -1183,9 +1182,8 @@ def inspect_command(command, cwd, plugin_root, depth=0, seen=None):
 def classify(command, cwd, plugin_root, active):
     """Public Task-3 contract: classify one Bash command in its repo/session context.
 
-    ``active`` is deliberately part of the interface because the caller uses it to choose hard-deny
-    versus warning posture. Classification itself is identical in both postures so the same raw write
-    remains visible as a warning outside an active IDC command.
+    ``active`` remains part of the compatibility interface, but classification is posture-independent;
+    the shared Path Gate applies the configured observe-versus-enforce posture after classification.
     """
     _ = bool(active)  # normalize truthiness without changing warn-vs-deny classification
     return inspect_command(command, cwd, plugin_root)
@@ -1849,6 +1847,16 @@ def _shell_path_gate_request(command, cwd, plugin_root):
         return {"action": "bash", "raw_reason": analysis.deny_reason}
     return {"action": "write", "paths": analysis.paths} if analysis.paths else None
 
+
+def _apply_path_gate_decision(decision, fallback_reason):
+    observe = decision.get("observe")
+    if isinstance(observe, str) and observe:
+        H.pre_tool_observe(observe)
+    if decision.get("allowed"):
+        H.pre_tool_allow()
+    H.pre_tool_deny(str(decision.get("reason") or fallback_reason))
+
+
 def _gate(payload, plugin_root):
     cwd = payload.get("cwd") or os.getcwd()
     if not H.is_governed_repo(cwd):
@@ -1867,7 +1875,7 @@ def _gate(payload, plugin_root):
         finding = classify(command, cwd, plugin_root, False)
         if finding:
             decision = PG.evaluate_request(cwd, plugin_root, {"action": "bash", "raw_reason": render_reason(finding, plugin_root)})
-            H.pre_tool_deny(str(decision.get("reason") or "IDC interlock denied the raw governed mutation"))
+            _apply_path_gate_decision(decision, "IDC interlock denied the raw governed mutation")
         request = _shell_path_gate_request(command, cwd, plugin_root)
         if request is None:
             H.pre_tool_allow()
@@ -1876,11 +1884,13 @@ def _gate(payload, plugin_root):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         ).returncode != 0:
-            H.pre_tool_deny(_opaque_mutation_reason("the governed repo is not inside a Git worktree, so IDC cannot verify a live authorization"))
+            decision = PG.evaluate_request(cwd, plugin_root, {
+                "action": "bash",
+                "raw_reason": _opaque_mutation_reason("the governed repo is not inside a Git worktree, so IDC cannot verify a live authorization"),
+            })
+            _apply_path_gate_decision(decision, "IDC Path Gate could not verify the repository mutation")
         decision = PG.evaluate_request(cwd, plugin_root, request)
-        if decision.get("allowed"):
-            H.pre_tool_allow()
-        H.pre_tool_deny(str(decision.get("reason") or "IDC Path Gate denied the repository mutation"))
+        _apply_path_gate_decision(decision, "IDC Path Gate denied the repository mutation")
 
     if tool in {"Write", "Edit"}:
         path_value = tool_input.get("file_path") or tool_input.get("path")
@@ -1892,11 +1902,13 @@ def _gate(payload, plugin_root):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         ).returncode != 0:
-            H.pre_tool_deny(_opaque_mutation_reason("the governed repo is not inside a Git worktree, so IDC cannot verify a live authorization"))
+            decision = PG.evaluate_request(cwd, plugin_root, {
+                "action": action,
+                "raw_reason": _opaque_mutation_reason("the governed repo is not inside a Git worktree, so IDC cannot verify a live authorization"),
+            })
+            _apply_path_gate_decision(decision, "IDC Path Gate could not verify the repository mutation")
         decision = PG.evaluate_request(cwd, plugin_root, {"action": action, "paths": [path_value]})
-        if decision.get("allowed"):
-            H.pre_tool_allow()
-        H.pre_tool_deny(str(decision.get("reason") or "IDC Path Gate denied the repository mutation"))
+        _apply_path_gate_decision(decision, "IDC Path Gate denied the repository mutation")
 
     H.pre_tool_allow()
 

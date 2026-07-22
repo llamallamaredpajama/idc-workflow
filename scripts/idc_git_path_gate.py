@@ -164,9 +164,18 @@ def _collect_pre_push_paths(repo: str, lines: Iterable[str]) -> list[str]:
     return paths
 
 
-def _gate(repo: str, plugin_root: str, action: str, paths: list[str]) -> tuple[bool, str]:
-    decision = PG.evaluate_request(_repo_root(repo), plugin_root, {"action": action, "paths": paths})
-    return bool(decision.get("allowed")), str(decision.get("reason") or "")
+def _gate(repo: str, plugin_root: str, action: str, paths: list[str]) -> dict[str, object]:
+    return PG.evaluate_request(_repo_root(repo), plugin_root, {"action": action, "paths": paths})
+
+
+def _gate_exit(decision: dict[str, object]) -> int:
+    observe = decision.get("observe")
+    if isinstance(observe, str) and observe:
+        print(f"IDC Path Gate observe (would deny): {observe}", file=sys.stderr)
+    if decision.get("allowed"):
+        return 0
+    print(str(decision.get("reason") or "IDC Path Gate denied the git mutation"), file=sys.stderr)
+    return 1
 
 
 def cmd_install(args: argparse.Namespace) -> int:
@@ -187,11 +196,7 @@ def cmd_pre_commit(args: argparse.Namespace) -> int:
     paths = _collect_pre_commit_paths(repo)
     if not paths:
         return 0
-    allowed, reason = _gate(repo, args.plugin_root, "git", paths)
-    if allowed:
-        return 0
-    print(reason, file=sys.stderr)
-    return 1
+    return _gate_exit(_gate(repo, args.plugin_root, "git", paths))
 
 
 def cmd_pre_push(args: argparse.Namespace) -> int:
@@ -199,11 +204,7 @@ def cmd_pre_push(args: argparse.Namespace) -> int:
     paths = _collect_pre_push_paths(repo, sys.stdin.read().splitlines())
     if not paths:
         return 0
-    allowed, reason = _gate(repo, args.plugin_root, "git", paths)
-    if allowed:
-        return 0
-    print(reason, file=sys.stderr)
-    return 1
+    return _gate_exit(_gate(repo, args.plugin_root, "git", paths))
 
 
 def build_parser() -> argparse.ArgumentParser:

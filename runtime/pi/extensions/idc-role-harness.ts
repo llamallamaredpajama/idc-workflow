@@ -710,15 +710,16 @@ function evaluateSharedPathGate(request: Record<string, unknown>, cwd: string, p
 	if (proc.error) {
 		return { allowed: false, reason: `shared Path Gate could not be executed: ${proc.error.message}`, allowedRoots: policy.allowedRoots, blockedSurfaces: policy.blockedSurfaces };
 	}
-	let parsed: { allowed?: boolean; reason?: string } | undefined;
+	let parsed: { allowed?: boolean; reason?: string; observe?: string } | undefined;
 	try {
 		parsed = proc.stdout ? JSON.parse(proc.stdout) : undefined;
 	} catch {
 		parsed = undefined;
 	}
-	const reason = parsed?.reason || String(proc.stderr || proc.stdout || "shared Path Gate denied the mutation").trim();
+	const observed = typeof parsed?.observe === "string" && parsed.observe.length > 0;
+	const reason = parsed?.reason || parsed?.observe || String(proc.stderr || proc.stdout || "shared Path Gate denied the mutation").trim();
 	return {
-		allowed: proc.status === 0 && parsed?.allowed === true,
+		allowed: observed || (proc.status === 0 && parsed?.allowed === true),
 		reason,
 		allowedRoots: policy.allowedRoots,
 		blockedSurfaces: policy.blockedSurfaces,

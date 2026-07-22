@@ -20,7 +20,7 @@
 #
 #   (N) raw `gh pr merge`, NO active command ⇒ hard DENY naming idc_git_finish.py [headline]
 #   (D) same, an ACTIVE /idc:* command owned by the payload's session ⇒ hard DENY naming idc_git_finish.py
-#   (O) same active command + IDC_HOOKS_OBSERVE_ONLY=1 ⇒ downgraded to warn (no deny on stdout)
+#   (O) same active command + IDC_HOOKS_OBSERVE_ONLY=1 ⇒ warning/additionalContext, never a deny
 #   (B) raw `gh project item-edit` (no active command) ⇒ hard DENY naming idc_transition.py
 #   (C) state-closing `gh api … -f state=closed` (no active command) ⇒ hard DENY (close remediation)
 #   (A) allow: `gh pr view` / `gh project item-list` / the finisher's own python call ⇒ NO output

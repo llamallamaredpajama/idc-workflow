@@ -40,6 +40,7 @@ PROTECTED_MACHINE_RULES = [
 ]
 READ_ONLY_COMMANDS = {"doctor", "pause"}
 DEFAULT_TTL_SECONDS = 4 * 60 * 60
+PATHWAY_MODES = {"off", "controlled", "app-locked"}
 
 
 def _utc_now() -> dt.datetime:
@@ -68,6 +69,35 @@ def _run_git(repo: str, *args: str) -> str:
 
 def repo_root(repo: str) -> str:
     return os.path.realpath(os.path.abspath(repo))
+
+
+def pathway_mode(repo: str) -> str:
+    """Read the scaffolded pathway posture without taking a YAML dependency."""
+    config_path = os.path.join(repo_root(repo), "WORKFLOW-config.yaml")
+    try:
+        with open(config_path, encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return "off"
+
+    block_indent: int | None = None
+    for raw_line in lines:
+        content = raw_line.split("#", 1)[0].rstrip()
+        if not content.strip():
+            continue
+        indent = len(content) - len(content.lstrip())
+        stripped = content.strip()
+        if block_indent is None:
+            if stripped == "pathway_enforcement:":
+                block_indent = indent
+            continue
+        if indent <= block_indent:
+            break
+        key, separator, raw_value = stripped.partition(":")
+        if separator and key.strip() == "mode":
+            value = raw_value.strip().strip("\"'")
+            return value if value in PATHWAY_MODES else "off"
+    return "off"
 
 
 def current_branch(repo: str) -> str:
@@ -266,7 +296,7 @@ def _read_authorization(repo: str) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def evaluate_request(repo: str, plugin_root: str, request: dict[str, Any]) -> dict[str, Any]:
+def _evaluate_request(repo: str, plugin_root: str, request: dict[str, Any]) -> dict[str, Any]:
     del plugin_root  # reserved for future transport-specific helpers
 
     raw_reason = request.get("raw_reason")
@@ -338,6 +368,19 @@ def evaluate_request(repo: str, plugin_root: str, request: dict[str, Any]) -> di
             )
 
     return _allow("IDC Path Gate: mutation is inside the live authorization boundary")
+
+
+def evaluate_request(repo: str, plugin_root: str, request: dict[str, Any]) -> dict[str, Any]:
+    """Evaluate once, then apply the repository's transport-independent enforcement posture."""
+    decision = _evaluate_request(repo, plugin_root, request)
+    if decision.get("allowed"):
+        return decision
+    if os.environ.get("IDC_HOOKS_OBSERVE_ONLY", "") == "1" or pathway_mode(repo) == "off":
+        return {
+            "allowed": True,
+            "observe": str(decision.get("reason") or "IDC Path Gate would deny this mutation"),
+        }
+    return decision
 
 
 def _read_request_from_stdin() -> dict[str, Any]:

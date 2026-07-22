@@ -160,20 +160,17 @@ def prompt_expansion_context(context):
 
 
 # ── PreToolUse family (the terminal-action interlocks, v4 Phase 2 §3.2) ───────────────────────────
-# A PreToolUse gate decides on a tool call BEFORE it runs. Three postures, all exit 0 (a hook signals
+# A PreToolUse gate decides on a tool call BEFORE it runs. Four postures, all exit 0 (a hook signals
 # via its JSON, not its exit code):
 #   * pre_tool_allow()        — say nothing; the normal permission flow proceeds (the hot path).
-#   * pre_tool_warn(reason)   — WARN-INJECT: surface the remediation on stderr but DO NOT decide, so
-#                               the action still proceeds through the normal flow. The interlock uses
-#                               this OUTSIDE an active /idc:* command, so ordinary governed-repo work
-#                               is never bricked (§6 over-blocking).
+#   * pre_tool_warn(reason)   — surface the remediation on stderr but make no permission decision.
+#   * pre_tool_observe(reason) — warn and inject model-visible additionalContext while allowing.
 #   * pre_tool_deny(reason)   — HARD DENY: emit permissionDecision=deny with the remediation as the
 #                               reason (Claude Code feeds it back to the model → self-healing denial).
 #                               Honors IDC_HOOKS_OBSERVE_ONLY=1 → downgrade to warn-inject (§6).
-# POSTURE (Task 3): the interlock HARD-DENIES while the session owns an ACTIVE /idc:* command (the
-# window where a raw mutation is the forbidden improvisation) and WARN-INJECTS otherwise; there is no
-# opt-in promotion step — the active-command deny is the shipped enforcement. IDC_HOOKS_OBSERVE_ONLY=1
-# is the one debug escape (downgrades any deny back to warn-inject).
+# POSTURE (U4): the shared Path Gate chooses observe versus deny from WORKFLOW-config.yaml. This
+# module only emits that decision in Claude's PreToolUse schema; IDC_HOOKS_OBSERVE_ONLY=1 remains the
+# independent debug escape.
 def pre_tool_allow():
     """Proceed: emit nothing, exit 0. The normal permission flow is untouched."""
     sys.exit(0)
@@ -181,10 +178,22 @@ def pre_tool_allow():
 
 def pre_tool_warn(reason):
     """Warn-inject: surface the remediation (stderr) but make NO permission decision, so the action
-    still proceeds. The non-bricking posture the interlock uses OUTSIDE an active /idc:* command. NOTE:
-    exit-0 stderr is transcript/telemetry only — it is NOT injected into the model context; the
-    model-visible self-heal is the active-command pre_tool_deny()."""
+    still proceeds. NOTE: exit-0 stderr is transcript/telemetry only; use pre_tool_observe() when the
+    warning must also reach model-visible additionalContext."""
     warn(reason)
+    sys.exit(0)
+
+
+def pre_tool_observe(reason):
+    """Allow while surfacing the would-be denial in telemetry and model-visible context."""
+    context = f"IDC Path Gate observe (would deny): {reason}"
+    warn(context)
+    sys.stdout.write(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "additionalContext": context,
+        }
+    }))
     sys.exit(0)
 
 
@@ -206,9 +215,10 @@ def pre_tool_deny(reason):
 
 def guard_pre_tool(fn):
     """Run a PreToolUse gate `fn(payload, plugin_root)`. Policy decisions happen inside `fn` via
-    pre_tool_warn()/pre_tool_deny()/pre_tool_allow(); an UNEXPECTED exception fails OPEN (allow) —
-    a gate bug must never block a tool call — unless IDC_HOOKS_STRICT=1 (then it denies, to surface
-    the bug hard in CI/e2e). Mirrors guard_pre_action's fail mode for the PreToolUse family."""
+    pre_tool_warn()/pre_tool_observe()/pre_tool_deny()/pre_tool_allow(); an UNEXPECTED exception
+    fails OPEN (allow) — a gate bug must never block a tool call — unless IDC_HOOKS_STRICT=1 (then it
+    denies, to surface the bug hard in CI/e2e). Mirrors guard_pre_action's fail mode for the
+    PreToolUse family."""
     plugin_root = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("CLAUDE_PLUGIN_ROOT", "")
     payload = read_payload()
     try:

@@ -1269,6 +1269,13 @@ def _no_verify_reason(subcommand):
     )
 
 
+def _hooks_path_reason():
+    return (
+        "IDC Path Gate denied this Bash command because `core.hooksPath` disables IDC's managed Git "
+        "backstops. Remove the hooksPath override and let the IDC-managed pre-commit/pre-push hooks run."
+    )
+
+
 def _dynamic_git_flag_reason(subcommand):
     return (
         f"IDC Path Gate denied this Bash command because a `git {subcommand}` policy-sensitive flag "
@@ -1335,6 +1342,123 @@ def _copy_destination(args):
             return [arg.split("=", 1)[1]]
     path_args = [arg for arg in args if _is_path_like_arg(arg)]
     return [path_args[-1]] if path_args else []
+
+
+def _single_value_targets(args, short_opts=(), long_opts=()):
+    targets = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            break
+        if arg in short_opts or arg in long_opts:
+            if i + 1 < len(args):
+                targets.append(args[i + 1])
+            i += 2
+            continue
+        matched = False
+        for opt in short_opts:
+            if len(opt) == 2 and arg.startswith(opt) and arg != opt:
+                targets.append(arg[len(opt):])
+                matched = True
+                break
+        if matched:
+            i += 1
+            continue
+        for opt in long_opts:
+            if arg.startswith(opt + "="):
+                targets.append(arg.split("=", 1)[1])
+                matched = True
+                break
+        if matched:
+            i += 1
+            continue
+        i += 1
+    return targets
+
+
+def _tar_plan(args):
+    modes = set()
+    output = None
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            break
+        if arg == "--create":
+            modes.add("c")
+            i += 1
+            continue
+        if arg in {"--extract", "--get"}:
+            modes.add("x")
+            i += 1
+            continue
+        if arg == "--append":
+            modes.add("r")
+            i += 1
+            continue
+        if arg == "--update":
+            modes.add("u")
+            i += 1
+            continue
+        if arg == "--delete":
+            modes.add("d")
+            i += 1
+            continue
+        if arg == "--file" and i + 1 < len(args):
+            output = args[i + 1]
+            i += 2
+            continue
+        if arg.startswith("--file="):
+            output = arg.split("=", 1)[1]
+            i += 1
+            continue
+        if arg.startswith("-") and not arg.startswith("--"):
+            cluster = arg[1:]
+            j = 0
+            while j < len(cluster):
+                ch = cluster[j]
+                if ch in {"c", "x", "r", "u", "A", "d", "t"}:
+                    modes.add(ch)
+                if ch == "f":
+                    remainder = cluster[j + 1:]
+                    if remainder:
+                        output = remainder
+                    elif i + 1 < len(args):
+                        output = args[i + 1]
+                        i += 1
+                    break
+                j += 1
+            i += 1
+            continue
+        i += 1
+    return modes, output
+
+
+def _chmod_paths(args):
+    paths = []
+    mode_seen = False
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            paths.extend(a for a in args[i + 1:] if _is_path_like_arg(a))
+            break
+        if arg == "--reference" and i + 1 < len(args):
+            i += 2
+            continue
+        if arg.startswith("--reference="):
+            i += 1
+            continue
+        if arg.startswith("-"):
+            i += 1
+            continue
+        if not mode_seen:
+            mode_seen = True
+        elif _is_path_like_arg(arg):
+            paths.append(arg)
+        i += 1
+    return paths
 
 
 def _last_path_like_arg(args):
@@ -1505,27 +1629,45 @@ def _extract_command_substitutions(command):
     return bodies
 
 
-def _git_subcommand_and_args(args):
+_GIT_GLOBAL_VALUE_OPTS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"}
+
+
+def _git_subcommand_parts(args):
+    prefix = []
     i = 0
     while i < len(args):
         arg = args[i]
-        if arg in {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"}:
-            i += 2
+        if arg in _GIT_GLOBAL_VALUE_OPTS:
+            prefix.append(arg)
+            if i + 1 < len(args):
+                prefix.append(args[i + 1])
+                i += 2
+            else:
+                i += 1
             continue
         if arg.startswith("-C") and arg != "-C":
+            prefix.append(arg)
             i += 1
             continue
         if arg.startswith("-c") and arg != "-c":
+            prefix.append(arg)
             i += 1
             continue
         if arg.startswith("--git-dir=") or arg.startswith("--work-tree=") or arg.startswith("--namespace=") or arg.startswith("--config-env="):
+            prefix.append(arg)
             i += 1
             continue
         if arg.startswith("-"):
+            prefix.append(arg)
             i += 1
             continue
-        return arg, args[i + 1:]
-    return None, []
+        return prefix, arg, args[i + 1:]
+    return prefix, None, []
+
+
+def _git_subcommand_and_args(args):
+    _, subcommand, subargs = _git_subcommand_parts(args)
+    return subcommand, subargs
 
 
 def _git_no_verify_hit(args):
@@ -1544,6 +1686,8 @@ _GIT_POLICY_VALUE_OPTS = {
     },
     "push": {"--repo", "--receive-pack", "--exec"},
 }
+_GIT_CONFIG_VALUE_OPTS = {"-f", "--file", "--blob", "-t", "--type", "--default", "--url"}
+_GIT_CONFIG_MUTATING_FLAGS = {"--add", "--replace-all", "--unset", "--unset-all", "--remove-section", "--rename-section"}
 
 
 def _git_dynamic_policy_flag(args):
@@ -1563,6 +1707,65 @@ def _git_dynamic_policy_flag(args):
             return subcommand
         i += 1
     return None
+
+
+def _git_hooks_path_override(args):
+    prefix, _, _ = _git_subcommand_parts(args)
+    i = 0
+    while i < len(prefix):
+        arg = prefix[i]
+        if arg == "-c" and i + 1 < len(prefix):
+            if prefix[i + 1].split("=", 1)[0] == "core.hooksPath":
+                return True
+            i += 2
+            continue
+        if arg.startswith("-c") and arg != "-c":
+            if arg[2:].split("=", 1)[0] == "core.hooksPath":
+                return True
+            i += 1
+            continue
+        if arg == "--config-env" and i + 1 < len(prefix):
+            if prefix[i + 1].split("=", 1)[0] == "core.hooksPath":
+                return True
+            i += 2
+            continue
+        if arg.startswith("--config-env="):
+            if arg[len("--config-env="):].split("=", 1)[0] == "core.hooksPath":
+                return True
+        i += 1
+    return False
+
+
+def _git_config_hooks_path_mutation(args):
+    subcommand, subargs = _git_subcommand_and_args(args)
+    if subcommand != "config":
+        return False
+    mutate = False
+    positional = []
+    i = 0
+    while i < len(subargs):
+        arg = subargs[i]
+        if arg == "--":
+            positional.extend(a for a in subargs[i + 1:] if not a.startswith("-"))
+            break
+        if arg in _GIT_CONFIG_MUTATING_FLAGS:
+            mutate = True
+            i += 1
+            continue
+        if arg in _GIT_CONFIG_VALUE_OPTS and i + 1 < len(subargs):
+            i += 2
+            continue
+        if any(arg.startswith(opt + "=") for opt in _GIT_CONFIG_VALUE_OPTS if opt.startswith("--")):
+            i += 1
+            continue
+        if arg.startswith("-"):
+            i += 1
+            continue
+        positional.append(arg)
+        i += 1
+    if not positional or positional[0] != "core.hooksPath":
+        return False
+    return mutate or len(positional) >= 2
 
 
 _GIT_UNBOUNDED_WORKTREE_WRITERS = {
@@ -1646,6 +1849,68 @@ def _find_exec_is_read_only(args):
         if i + 1 >= len(args) or os.path.basename(args[i + 1]) not in {"grep", "cat"}:
             return False
     return saw_exec
+
+
+_HEREDOC_HEADS = INTERPRETERS | {"python", "python3", "node", "bun", "deno", "ruby"}
+_XARGS_MUTATING_HEADS = {
+    "bash", "sh", "zsh", "source", ".", "python", "python3", "node", "bun", "deno", "ruby",
+    "git", "rm", "mv", "cp", "install", "rsync", "split", "truncate", "find", "dd", "tee",
+    "sed", "perl", "chmod", "tar", "curl", "wget", "mkdir", "touch", "ln", "shred",
+}
+
+
+def _has_interpreter_heredoc(tokens):
+    seg = []
+    saw_heredoc = False
+
+    def flush():
+        nonlocal seg, saw_heredoc
+        if saw_heredoc:
+            peeled = _strip_prefixes(seg)
+            if peeled and os.path.basename(peeled[0]) in _HEREDOC_HEADS:
+                return True
+        seg = []
+        saw_heredoc = False
+        return False
+
+    for tok in tokens:
+        if tok in {"<<", "<<-"} or tok.startswith("<<"):
+            saw_heredoc = True
+            continue
+        if tok in _SEP or (tok and all(ch in "&|;()<>\n\r" for ch in tok)):
+            if flush():
+                return True
+            continue
+        seg.append(tok)
+    return flush()
+
+
+def _xargs_mutation_reason(seg):
+    if not seg or os.path.basename(seg[0]) != "xargs":
+        return None
+    i = 1
+    value_opts = _EXEC_WRAPPERS["xargs"]["value_opts"]
+    while i < len(seg):
+        tok = seg[i]
+        if tok == "--":
+            i += 1
+            break
+        if tok in value_opts and i + 1 < len(seg):
+            i += 2
+            continue
+        if tok.startswith("--") and "=" in tok:
+            i += 1
+            continue
+        if tok.startswith("-") and tok != "-":
+            i += 1
+            continue
+        break
+    if i >= len(seg):
+        return None
+    head = os.path.basename(seg[i])
+    if head in _XARGS_MUTATING_HEADS:
+        return _opaque_mutation_reason(f"`xargs {head}` hides its mutation targets in stdin")
+    return None
 
 
 def _startup_env_targets(seg):
@@ -1809,6 +2074,10 @@ def _analyze_direct_segments(tokens, cwd, repo_root):
     for seg in _segments(tokens):
         if analysis.deny_reason:
             break
+        reason = _xargs_mutation_reason(seg)
+        if reason:
+            analysis.deny(reason)
+            continue
         for i, tok in enumerate(seg):
             if tok in {">", ">>", ">|"} and i + 1 < len(seg):
                 hit = candidate(seg[i + 1])
@@ -1837,6 +2106,9 @@ def _analyze_direct_segments(tokens, cwd, repo_root):
             current_cwd = _next_cwd(current_cwd, args)
             continue
         if head == "git":
+            if _git_hooks_path_override(args) or _git_config_hooks_path_mutation(args):
+                analysis.deny(_hooks_path_reason())
+                continue
             dynamic_subcommand = _git_dynamic_policy_flag(args)
             if dynamic_subcommand:
                 analysis.deny(_dynamic_git_flag_reason(dynamic_subcommand))
@@ -1898,6 +2170,34 @@ def _analyze_direct_segments(tokens, cwd, repo_root):
             continue
         if head == "truncate":
             for arg in _file_operands(args, _TRUNCATE_VALUE_OPTS):
+                hit = candidate(arg)
+                if hit:
+                    analysis.add_paths([hit])
+            continue
+        if head == "curl":
+            for arg in _single_value_targets(args, {"-o"}, {"--output"}):
+                hit = candidate(arg)
+                if hit:
+                    analysis.add_paths([hit])
+            continue
+        if head == "wget":
+            for arg in _single_value_targets(args, {"-O"}, {"--output-document"}):
+                hit = candidate(arg)
+                if hit:
+                    analysis.add_paths([hit])
+            continue
+        if head == "tar":
+            modes, output = _tar_plan(args)
+            if modes & {"x", "d"}:
+                analysis.deny(_opaque_mutation_reason("`tar` can rewrite repository paths without a bounded literal target set"))
+                continue
+            if output:
+                hit = candidate(output)
+                if hit:
+                    analysis.add_paths([hit])
+            continue
+        if head == "chmod":
+            for arg in _chmod_paths(args):
                 hit = candidate(arg)
                 if hit:
                     analysis.add_paths([hit])
@@ -1970,8 +2270,10 @@ def _analyze_shell_mutations(command, cwd, repo_root, plugin_root, depth=0, seen
     try:
         tokens = _lex(cleaned)
     except ValueError:
-        if _mentions_interpreter_form(cleaned):
-            analysis.deny(_opaque_mutation_reason("an unparseable shell indirection cannot be statically vetted"))
+        analysis.deny(_opaque_mutation_reason("the shell command could not be parsed safely before execution"))
+        return analysis
+    if _has_interpreter_heredoc(tokens):
+        analysis.deny(_opaque_mutation_reason("an interpreter here-document hides its repository mutation body"))
         return analysis
     for i, tok in enumerate(tokens):
         if tok in {">", ">>", ">|"} and i + 1 < len(tokens):

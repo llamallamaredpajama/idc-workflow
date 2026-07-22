@@ -110,6 +110,9 @@ observe_case Write "$REPO/TRACKER.md"
 observe_case Edit "$REPO/src/x.ts"
 observe_case NotebookEdit "$REPO/src/demo.ipynb"
 observe_case Bash 'gh issue create --title gate --body x'
+observe_case Bash 'eval "cp src/x.ts TRACKER.md"'
+observe_case Bash 'C=cp; $C src/x.ts TRACKER.md'
+observe_case Bash 'split src/x.ts TRACKER.md'
 
 python3 "$GIT_GATE" pre-commit --repo "$REPO" --plugin-root "$GOV_PLUGIN" >"$WORK/off-pre-commit.out" 2>"$WORK/off-pre-commit.err"
 [ "$?" -eq 0 ] || gov_fail "off-mode pre-commit hard-denied"
@@ -128,6 +131,9 @@ deny_case Write "$REPO/TRACKER.md"
 deny_case Edit "$REPO/src/x.ts"
 deny_case NotebookEdit "$REPO/src/demo.ipynb"
 deny_case Bash 'gh issue create --title gate --body x'
+deny_case Bash 'eval "cp src/x.ts TRACKER.md"'
+deny_case Bash 'C=cp; $C src/x.ts TRACKER.md'
+deny_case Bash 'split src/x.ts TRACKER.md'
 
 python3 "$GIT_GATE" pre-commit --repo "$REPO" --plugin-root "$GOV_PLUGIN" >"$WORK/controlled-pre-commit.out" 2>"$WORK/controlled-pre-commit.err"
 [ "$?" -ne 0 ] || gov_fail "controlled-mode pre-commit did not hard-deny"

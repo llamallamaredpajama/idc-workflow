@@ -65,6 +65,7 @@ import dataclasses
 import os
 import re
 import shlex
+import subprocess
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -1223,18 +1224,62 @@ def render_reason(finding, plugin_root=""):
     )
 
 
-def _repo_candidate_path(raw_path, cwd):
+@dataclasses.dataclass
+class _ShellGateAnalysis:
+    paths: list[str] = dataclasses.field(default_factory=list)
+    deny_reason: str | None = None
+
+    def add_paths(self, paths):
+        for item in paths:
+            if item and item not in self.paths:
+                self.paths.append(item)
+
+    def deny(self, reason):
+        if reason and not self.deny_reason:
+            self.deny_reason = reason
+
+    def merge(self, other):
+        if other is None:
+            return
+        self.add_paths(getattr(other, "paths", []))
+        self.deny(getattr(other, "deny_reason", None))
+
+
+_TRUNCATE_VALUE_OPTS = {"-s", "--size", "-r", "--reference"}
+_SHRED_VALUE_OPTS = {"-n", "--iterations", "-s", "--size", "--random-source"}
+_ENV_VALUE_OPTS = {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}
+
+
+def _opaque_mutation_reason(what):
+    return (
+        f"IDC Path Gate denied this mutation because {what}, so the exact repository targets "
+        "cannot be proven before execution. Use a literal command that names the target files or a "
+        "sanctioned IDC command to open the correct write boundary first."
+    )
+
+
+def _no_verify_reason(subcommand):
+    suffix = " (or `-n`)" if subcommand == "commit" else ""
+    return (
+        f"IDC Path Gate denied this Bash command because `git {subcommand} --no-verify`{suffix} "
+        "suppresses IDC's managed Git backstops. Remove the hook-suppression flag and let the "
+        "IDC-managed hooks run."
+    )
+
+
+def _repo_candidate_path(raw_path, cwd, repo_root=None):
     if not isinstance(raw_path, str):
         return None
     candidate = raw_path.strip()
-    if not candidate or candidate == "-" or candidate.startswith("&"):
+    if not candidate or candidate == "-" or candidate.startswith("&") or candidate.startswith("-"):
         return None
     if candidate in {"/dev/null", "/dev/stdout", "/dev/stderr"} or candidate.startswith("/dev/fd/"):
         return None
     if "$" in candidate or "`" in candidate:
         return None
-    abs_path = os.path.abspath(candidate if os.path.isabs(candidate) else os.path.join(cwd, candidate))
-    repo_abs = os.path.abspath(cwd)
+    repo_abs = os.path.abspath(cwd if repo_root is None else repo_root)
+    cwd_abs = os.path.abspath(cwd if cwd is not None else repo_abs)
+    abs_path = os.path.abspath(candidate if os.path.isabs(candidate) else os.path.join(cwd_abs, candidate))
     rel = os.path.relpath(abs_path, repo_abs)
     if rel == "." or rel.startswith("..") or os.path.isabs(rel):
         return None
@@ -1251,23 +1296,72 @@ def _dedupe_paths(paths):
     return out
 
 
-def _extract_apply_patch_paths(command, cwd):
+def _is_path_like_arg(arg):
+    return bool(arg) and not arg.startswith("-") and not _ASSIGN_RE.match(arg)
+
+
+def _file_operands(args, value_opts):
+    operands = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            operands.extend(a for a in args[i + 1:] if _is_path_like_arg(a))
+            break
+        if arg in value_opts and i + 1 < len(args):
+            i += 2
+            continue
+        if _is_path_like_arg(arg):
+            operands.append(arg)
+        i += 1
+    return operands
+
+
+def _copy_destination(args):
+    for i, arg in enumerate(args):
+        if arg in {"-t", "--target-directory"}:
+            return [args[i + 1]] if i + 1 < len(args) else []
+        if arg.startswith("--target-directory="):
+            return [arg.split("=", 1)[1]]
+    path_args = [arg for arg in args if _is_path_like_arg(arg)]
+    return [path_args[-1]] if path_args else []
+
+
+def _last_path_like_arg(args):
+    for arg in reversed(args):
+        if _is_path_like_arg(arg) and not arg.startswith("s/"):
+            return arg
+    return None
+
+
+def _inline_writer_code(args):
+    for i, arg in enumerate(args[:-1]):
+        if arg in {"-c", "-e"}:
+            return args[i + 1]
+    return None
+
+
+_INLINE_WRITER_MUTATION_RE = re.compile(
+    r"(writeFileSync|appendFileSync|writeFile\b|appendFile\b|createWriteStream|rmSync|rmdirSync|unlinkSync|"
+    r"fs\.(?:write|append|rm|unlink|rmdir)|\.write_text\s*\(|\.write_bytes\s*\(|"
+    r"open\s*\([^)]*,\s*['\"](?:w|a|x)|os\.(?:remove|unlink|rmdir|truncate)|"
+    r"shutil\.(?:rmtree|move|copy)|\.unlink\s*\(|\.rmtree\s*\()"
+)
+
+
+def _extract_apply_patch_paths(command, cwd, repo_root=None):
     if not re.search(r"(^|\s)apply_patch($|\s)", command):
         return [], False
     paths = []
     for match in re.finditer(r"(?m)^\*\*\* (?:Update|Add|Delete) File: (.+?)\s*$", command):
-        candidate = _repo_candidate_path(match.group(1), cwd)
+        candidate = _repo_candidate_path(match.group(1), cwd, repo_root)
         if candidate:
             paths.append(candidate)
     return _dedupe_paths(paths), True
 
 
-def _extract_inline_writer_paths(head, args, cwd):
-    code = None
-    for i, arg in enumerate(args[:-1]):
-        if arg in {"-c", "-e"}:
-            code = args[i + 1]
-            break
+def _extract_inline_writer_paths(head, args, cwd, repo_root=None):
+    code = _inline_writer_code(args)
     if not isinstance(code, str) or not code:
         return []
     patterns = []
@@ -1283,79 +1377,477 @@ def _extract_inline_writer_paths(head, args, cwd):
     out = []
     for pattern in patterns:
         for match in pattern.finditer(code):
-            candidate = _repo_candidate_path(match.group(2), cwd)
+            candidate = _repo_candidate_path(match.group(2), cwd, repo_root)
             if candidate:
                 out.append(candidate)
     return _dedupe_paths(out)
 
 
-def _shell_path_gate_request(command, cwd):
-    cleaned = _join_line_continuations(_strip_shell_comments(command))
-    patch_paths, saw_apply_patch = _extract_apply_patch_paths(cleaned, cwd)
-    if saw_apply_patch:
-        if patch_paths:
-            return {"action": "write", "paths": patch_paths}
-        return {
-            "action": "bash",
-            "raw_reason": (
-                "IDC Path Gate denied this mutation because the apply_patch payload did not name any "
-                "repository file paths that could be validated. Use a sanctioned IDC command to open the correct write boundary first."
-            ),
-        }
-    try:
-        tokens = _lex(cleaned)
-    except ValueError:
+def _next_cwd(current_cwd, args):
+    operands = [arg for arg in args if not arg.startswith("-") or arg == "-"]
+    if not operands:
         return None
+    target = operands[0]
+    if len(operands) > 1 or target == "-" or re.search(r"[$`*?\[]", target):
+        return None
+    if target == "~" or target.startswith("~/"):
+        return os.path.abspath(os.path.expanduser(target))
+    if os.path.isabs(target):
+        return os.path.abspath(target)
+    if current_cwd is None:
+        return None
+    return os.path.normpath(os.path.join(current_cwd, target))
 
-    paths = []
-    for i, tok in enumerate(tokens):
-        if tok in {">", ">>"} and i + 1 < len(tokens):
-            candidate = _repo_candidate_path(tokens[i + 1], cwd)
-            if candidate:
-                paths.append(candidate)
-        elif tok.isdigit() and i + 2 < len(tokens) and tokens[i + 1] in {">", ">>"}:
-            candidate = _repo_candidate_path(tokens[i + 2], cwd)
-            if candidate:
-                paths.append(candidate)
+
+def _read_balanced_paren(command, start):
+    depth = 1
+    i = start
+    body = []
+    single = False
+    dbl = False
+    while i < len(command) and depth > 0:
+        ch = command[i]
+        if single:
+            if ch == "'":
+                single = False
+            body.append(ch)
+            i += 1
+            continue
+        if dbl:
+            if ch == '"':
+                dbl = False
+            body.append(ch)
+            i += 1
+            continue
+        if ch == "\\":
+            body.append(ch)
+            if i + 1 < len(command):
+                body.append(command[i + 1])
+            i += 2
+            continue
+        if ch == "'":
+            single = True
+            body.append(ch)
+            i += 1
+            continue
+        if ch == '"':
+            dbl = True
+            body.append(ch)
+            i += 1
+            continue
+        if ch == "(":
+            depth += 1
+            body.append(ch)
+            i += 1
+            continue
+        if ch == ")":
+            depth -= 1
+            if depth == 0:
+                i += 1
+                break
+            body.append(ch)
+            i += 1
+            continue
+        body.append(ch)
+        i += 1
+    return "".join(body), i
+
+
+def _extract_command_substitutions(command):
+    bodies = []
+    i = 0
+    single = False
+    while i < len(command):
+        ch = command[i]
+        if single:
+            if ch == "'":
+                single = False
+            i += 1
+            continue
+        if ch == "'":
+            single = True
+            i += 1
+            continue
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == "`":
+            j = i + 1
+            body = []
+            while j < len(command) and command[j] != "`":
+                if command[j] == "\\" and j + 1 < len(command):
+                    body.append(command[j + 1])
+                    j += 2
+                else:
+                    body.append(command[j])
+                    j += 1
+            bodies.append("".join(body))
+            i = j + 1
+            continue
+        if ch == "$" and command[i + 1:i + 3] == "((":
+            _, end = _read_balanced_paren(command, i + 2)
+            i = end + 1 if end < len(command) and command[end:end + 1] == ")" else end
+            continue
+        if ch in "$<>" and command[i + 1:i + 2] == "(":
+            body, end = _read_balanced_paren(command, i + 2)
+            bodies.append(body)
+            i = end
+            continue
+        i += 1
+    return bodies
+
+
+def _git_subcommand_and_args(args):
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg in {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"}:
+            i += 2
+            continue
+        if arg.startswith("-C") and arg != "-C":
+            i += 1
+            continue
+        if arg.startswith("-c") and arg != "-c":
+            i += 1
+            continue
+        if arg.startswith("--git-dir=") or arg.startswith("--work-tree=") or arg.startswith("--namespace=") or arg.startswith("--config-env="):
+            i += 1
+            continue
+        if arg.startswith("-"):
+            i += 1
+            continue
+        return arg, args[i + 1:]
+    return None, []
+
+
+def _git_no_verify_hit(args):
+    subcommand, subargs = _git_subcommand_and_args(args)
+    if subcommand == "commit" and ("--no-verify" in subargs or "-n" in subargs):
+        return "commit"
+    if subcommand == "push" and "--no-verify" in subargs:
+        return "push"
+    return None
+
+
+def _startup_env_targets(seg):
+    targets = []
+    i = 0
+    while i < len(seg) and _ASSIGN_RE.match(seg[i]):
+        m = _STARTUP_ENV_RE.match(seg[i])
+        if m and m.group(1) != "":
+            targets.append(m.group(1))
+        i += 1
+    if i < len(seg) and os.path.basename(seg[i]) == "env":
+        i += 1
+        while i < len(seg):
+            tok = seg[i]
+            if tok == "--":
+                break
+            if tok in {"-S", "--split-string"} or tok.startswith("--split-string=") or (tok.startswith("-S") and not tok.startswith("--") and len(tok) > 2):
+                break
+            if tok in _ENV_VALUE_OPTS and i + 1 < len(seg):
+                i += 2
+                continue
+            if tok.startswith("-"):
+                i += 1
+                continue
+            if _ASSIGN_RE.match(tok):
+                m = _STARTUP_ENV_RE.match(tok)
+                if m and m.group(1) != "":
+                    targets.append(m.group(1))
+                i += 1
+                continue
+            break
+    return targets
+
+
+def _analyze_shell_target(target, cwd, repo_root, plugin_root, depth, seen):
+    analysis = _ShellGateAnalysis()
+    lexical = os.path.normpath(target if os.path.isabs(target) else os.path.join(cwd, target))
+    real = os.path.realpath(lexical)
+    display = target
+    if _is_sensitive(os.path.basename(real)) or _is_sensitive(os.path.basename(lexical)):
+        analysis.deny(_opaque_mutation_reason(f"`{display}` is a sensitive shell target the interlock refuses to open"))
+        return analysis
+    if plugin_root:
+        scripts_dir = os.path.normpath(os.path.realpath(os.path.join(plugin_root, "scripts")))
+        if real == scripts_dir or real.startswith(scripts_dir + os.sep):
+            return analysis
+    if real in seen:
+        analysis.deny(_opaque_mutation_reason(f"`{display}` is a cyclic shell include"))
+        return analysis
+    if depth + 1 > MAX_SCRIPT_DEPTH:
+        analysis.deny(_opaque_mutation_reason(f"`{display}` nests past depth {MAX_SCRIPT_DEPTH}"))
+        return analysis
+    if not os.path.isfile(real):
+        analysis.deny(_opaque_mutation_reason(f"`{display}` is not a readable regular file"))
+        return analysis
+    try:
+        if os.path.getsize(real) > MAX_SCRIPT_BYTES:
+            analysis.deny(_opaque_mutation_reason(f"`{display}` is larger than {MAX_SCRIPT_BYTES} bytes"))
+            return analysis
+        with open(real, "r", encoding="utf-8", errors="replace") as fh:
+            body = fh.read(MAX_SCRIPT_BYTES + 1)
+    except OSError:
+        analysis.deny(_opaque_mutation_reason(f"`{display}` is unreadable"))
+        return analysis
+    analysis.merge(_analyze_shell_mutations(body, cwd, repo_root, plugin_root, depth + 1, seen | {real}))
+    return analysis
+
+
+def _su_command_payload(seg):
+    for i, tok in enumerate(seg[1:], 1):
+        if tok in {"-c", "--command"}:
+            return True, seg[i + 1] if i + 1 < len(seg) else None
+        if tok.startswith("--command="):
+            return True, tok.split("=", 1)[1]
+        if tok.startswith("-c") and not tok.startswith("--") and len(tok) > 2:
+            return True, tok[2:]
+    return False, None
+
+
+def _analyze_su_segment(seg, cwd, repo_root, plugin_root, depth, seen):
+    analysis = _ShellGateAnalysis()
+    has_command, payload = _su_command_payload(seg)
+    if has_command:
+        if not payload or _has_shell_expansion(payload):
+            analysis.deny(_opaque_mutation_reason("a dynamic `su -c` payload could mutate repository paths"))
+            return analysis
+        if depth + 1 > MAX_SCRIPT_DEPTH:
+            analysis.deny(_opaque_mutation_reason(f"a `su -c` payload nests past depth {MAX_SCRIPT_DEPTH}"))
+            return analysis
+        analysis.merge(_analyze_shell_mutations(payload, cwd, repo_root, plugin_root, depth + 1, seen))
+        return analysis
+    for i, tok in enumerate(seg[1:], 1):
+        if os.path.basename(tok) in INTERPRETERS or tok in {"source", "."}:
+            return _analyze_indirection_segment(seg[i:], cwd, repo_root, plugin_root, depth, seen)
+    return analysis
+
+
+def _analyze_indirection_segment(seg, cwd, repo_root, plugin_root, depth, seen):
+    analysis = _ShellGateAnalysis()
+    seg = _peel_to_inspect_head(seg)
+    if not seg:
+        return analysis
+    for target in _startup_env_targets(seg):
+        if "$" in target or "`" in target:
+            analysis.deny(_opaque_mutation_reason("a startup-file target is dynamic"))
+            return analysis
+        analysis.merge(_analyze_shell_target(target, cwd, repo_root, plugin_root, depth, seen))
+        if analysis.deny_reason:
+            return analysis
+    payload = _env_split_payload(seg)
+    if payload is not None:
+        if _has_shell_expansion(payload):
+            analysis.deny(_opaque_mutation_reason("a dynamic `env -S` payload could mutate repository paths"))
+            return analysis
+        if depth + 1 > MAX_SCRIPT_DEPTH:
+            analysis.deny(_opaque_mutation_reason(f"an `env -S` payload nests past depth {MAX_SCRIPT_DEPTH}"))
+            return analysis
+        analysis.merge(_analyze_shell_mutations(payload, cwd, repo_root, plugin_root, depth + 1, seen))
+        return analysis
+    seg = _strip_prefixes(seg)
+    if not seg:
+        return analysis
+    if os.path.basename(seg[0]) == "su":
+        return _analyze_su_segment(seg, cwd, repo_root, plugin_root, depth, seen)
+    if seg[0] in {"source", "."} and len(seg) >= 2:
+        analysis.merge(_analyze_shell_target(seg[1], cwd, repo_root, plugin_root, depth, seen))
+        return analysis
+    head = os.path.basename(seg[0])
+    if head in INTERPRETERS:
+        payload, sources, script = _interpreter_plan(seg[1:])
+        if payload is not None:
+            if _has_shell_expansion(payload):
+                analysis.deny(_opaque_mutation_reason(f"a dynamic `{head} -c` payload could mutate repository paths"))
+                return analysis
+            if depth + 1 > MAX_SCRIPT_DEPTH:
+                analysis.deny(_opaque_mutation_reason(f"a `{head} -c` payload nests past depth {MAX_SCRIPT_DEPTH}"))
+                return analysis
+            analysis.merge(_analyze_shell_mutations(payload, cwd, repo_root, plugin_root, depth + 1, seen))
+            if analysis.deny_reason:
+                return analysis
+        for target in [*sources, *([script] if script is not None else [])]:
+            analysis.merge(_analyze_shell_target(target, cwd, repo_root, plugin_root, depth, seen))
+            if analysis.deny_reason:
+                break
+    return analysis
+
+
+def _analyze_direct_segments(tokens, cwd, repo_root):
+    analysis = _ShellGateAnalysis()
+    current_cwd = os.path.abspath(cwd)
+
+    def candidate(raw):
+        if current_cwd is None and not (os.path.isabs(raw) or raw == "~" or raw.startswith("~/")):
+            analysis.deny(_opaque_mutation_reason("a preceding `cd` made later relative paths unprovable"))
+            return None
+        return _repo_candidate_path(raw, current_cwd or repo_root, repo_root)
 
     for seg in _segments(tokens):
+        if analysis.deny_reason:
+            break
+        for i, tok in enumerate(seg):
+            if tok in {">", ">>", ">|"} and i + 1 < len(seg):
+                hit = candidate(seg[i + 1])
+                if hit:
+                    analysis.add_paths([hit])
+            elif tok.isdigit() and i + 2 < len(seg) and seg[i + 1] in {">", ">>", ">|"}:
+                hit = candidate(seg[i + 2])
+                if hit:
+                    analysis.add_paths([hit])
         peeled = _strip_prefixes(seg)
         if not peeled:
             continue
         head = os.path.basename(peeled[0])
         args = peeled[1:]
+        if head == "cd":
+            current_cwd = _next_cwd(current_cwd, args)
+            continue
+        if head == "git":
+            subcommand = _git_no_verify_hit(args)
+            if subcommand:
+                analysis.deny(_no_verify_reason(subcommand))
+            continue
+        if head in {"rm", "mkdir", "touch"}:
+            for arg in args:
+                if _is_path_like_arg(arg):
+                    hit = candidate(arg)
+                    if hit:
+                        analysis.add_paths([hit])
+            continue
+        if head == "shred":
+            for arg in _file_operands(args, _SHRED_VALUE_OPTS):
+                hit = candidate(arg)
+                if hit:
+                    analysis.add_paths([hit])
+            continue
+        if head in {"mv", "ln"}:
+            for arg in args:
+                if _is_path_like_arg(arg):
+                    hit = candidate(arg)
+                    if hit:
+                        analysis.add_paths([hit])
+            continue
+        if head in {"cp", "install"}:
+            for arg in _copy_destination(args):
+                hit = candidate(arg)
+                if hit:
+                    analysis.add_paths([hit])
+            continue
+        if head == "truncate":
+            for arg in _file_operands(args, _TRUNCATE_VALUE_OPTS):
+                hit = candidate(arg)
+                if hit:
+                    analysis.add_paths([hit])
+            continue
+        if head == "find":
+            if any(arg in {"-exec", "-execdir", "-ok"} for arg in args):
+                analysis.deny(_opaque_mutation_reason("`find -exec` can mutate repository paths without a statically provable target set"))
+            elif "-delete" in args:
+                analysis.deny(_opaque_mutation_reason("`find -delete` can mutate repository paths without a statically provable target set"))
+            continue
+        if head == "dd":
+            of_arg = next((arg for arg in args if arg.startswith("of=")), None)
+            if of_arg:
+                hit = candidate(of_arg[3:])
+                if hit:
+                    analysis.add_paths([hit])
+            continue
         if head == "tee":
             for arg in args:
-                if arg.startswith("-"):
-                    continue
-                candidate = _repo_candidate_path(arg, cwd)
-                if candidate:
-                    paths.append(candidate)
+                if _is_path_like_arg(arg):
+                    hit = candidate(arg)
+                    if hit:
+                        analysis.add_paths([hit])
             continue
         if head == "sed" and any(arg == "-i" or arg.startswith("-i") for arg in args):
-            for arg in reversed(args):
-                if arg.startswith("-"):
-                    continue
-                candidate = _repo_candidate_path(arg, cwd)
-                if candidate:
-                    paths.append(candidate)
-                    break
+            hit = _last_path_like_arg(args)
+            if hit:
+                scoped = candidate(hit)
+                if scoped:
+                    analysis.add_paths([scoped])
+            else:
+                analysis.deny(_opaque_mutation_reason("`sed -i` does not name a literal repository target"))
             continue
         if head == "perl" and any(re.match(r"^-[A-Za-z]*p[A-Za-z]*i|^-[A-Za-z]*i[A-Za-z]*p", arg) for arg in args):
-            for arg in reversed(args):
-                if arg.startswith("-"):
-                    continue
-                candidate = _repo_candidate_path(arg, cwd)
-                if candidate:
-                    paths.append(candidate)
-                    break
+            hit = _last_path_like_arg(args)
+            if hit:
+                scoped = candidate(hit)
+                if scoped:
+                    analysis.add_paths([scoped])
+            else:
+                analysis.deny(_opaque_mutation_reason("`perl -pi` does not name a literal repository target"))
             continue
         if head in {"python", "python3", "node", "bun", "deno", "ruby"}:
-            paths.extend(_extract_inline_writer_paths(head, args, cwd))
+            paths = _extract_inline_writer_paths(head, args, current_cwd or repo_root, repo_root)
+            if paths:
+                analysis.add_paths(paths)
+            else:
+                code = _inline_writer_code(args)
+                if isinstance(code, str) and _INLINE_WRITER_MUTATION_RE.search(code):
+                    analysis.deny(_opaque_mutation_reason(f"a `{head}` one-liner mutates files without naming a literal repository path"))
+            continue
+    return analysis
 
-    paths = _dedupe_paths(paths)
-    return {"action": "write", "paths": paths} if paths else None
 
+def _analyze_shell_mutations(command, cwd, repo_root, plugin_root, depth=0, seen=None):
+    analysis = _ShellGateAnalysis()
+    if seen is None:
+        seen = frozenset()
+    if not command or not command.strip():
+        return analysis
+    cleaned = _join_line_continuations(_strip_shell_comments(command))
+    patch_paths, saw_apply_patch = _extract_apply_patch_paths(cleaned, cwd, repo_root)
+    if saw_apply_patch:
+        if patch_paths:
+            analysis.add_paths(patch_paths)
+        else:
+            analysis.deny(_opaque_mutation_reason("the apply_patch payload did not name any repository files"))
+            return analysis
+    try:
+        tokens = _lex(cleaned)
+    except ValueError:
+        if _mentions_interpreter_form(cleaned):
+            analysis.deny(_opaque_mutation_reason("an unparseable shell indirection cannot be statically vetted"))
+        return analysis
+    for i, tok in enumerate(tokens):
+        if tok in {">", ">>", ">|"} and i + 1 < len(tokens):
+            hit = _repo_candidate_path(tokens[i + 1], cwd, repo_root)
+            if hit:
+                analysis.add_paths([hit])
+        elif tok.isdigit() and i + 2 < len(tokens) and tokens[i + 1] in {">", ">>", ">|"}:
+            hit = _repo_candidate_path(tokens[i + 2], cwd, repo_root)
+            if hit:
+                analysis.add_paths([hit])
+    analysis.merge(_analyze_direct_segments(tokens, cwd, repo_root))
+    if analysis.deny_reason:
+        return analysis
+    bodies = _extract_command_substitutions(cleaned)
+    if depth + 1 > MAX_SCRIPT_DEPTH and bodies:
+        analysis.deny(_opaque_mutation_reason(f"a shell substitution nests past depth {MAX_SCRIPT_DEPTH}"))
+        return analysis
+    for body in bodies:
+        analysis.merge(_analyze_shell_mutations(body, cwd, repo_root, plugin_root, depth + 1, seen))
+        if analysis.deny_reason:
+            return analysis
+    for target in _stdin_script_targets(tokens):
+        analysis.merge(_analyze_shell_target(target, cwd, repo_root, plugin_root, depth, seen))
+        if analysis.deny_reason:
+            return analysis
+    for seg in _segments(tokens):
+        analysis.merge(_analyze_indirection_segment(seg, cwd, repo_root, plugin_root, depth, seen))
+        if analysis.deny_reason:
+            return analysis
+    return analysis
+
+
+def _shell_path_gate_request(command, cwd, plugin_root):
+    repo_root = os.path.abspath(cwd)
+    analysis = _analyze_shell_mutations(command, repo_root, repo_root, plugin_root)
+    if analysis.deny_reason:
+        return {"action": "bash", "raw_reason": analysis.deny_reason}
+    return {"action": "write", "paths": analysis.paths} if analysis.paths else None
 
 def _gate(payload, plugin_root):
     cwd = payload.get("cwd") or os.getcwd()
@@ -1376,9 +1868,15 @@ def _gate(payload, plugin_root):
         if finding:
             decision = PG.evaluate_request(cwd, plugin_root, {"action": "bash", "raw_reason": render_reason(finding, plugin_root)})
             H.pre_tool_deny(str(decision.get("reason") or "IDC interlock denied the raw governed mutation"))
-        request = _shell_path_gate_request(command, cwd)
+        request = _shell_path_gate_request(command, cwd, plugin_root)
         if request is None:
             H.pre_tool_allow()
+        if request.get("action") != "bash" and subprocess.run(
+            ["git", "-C", cwd, "rev-parse", "--is-inside-work-tree"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ).returncode != 0:
+            H.pre_tool_deny(_opaque_mutation_reason("the governed repo is not inside a Git worktree, so IDC cannot verify a live authorization"))
         decision = PG.evaluate_request(cwd, plugin_root, request)
         if decision.get("allowed"):
             H.pre_tool_allow()
@@ -1389,6 +1887,12 @@ def _gate(payload, plugin_root):
         if not isinstance(path_value, str) or not path_value.strip():
             H.pre_tool_allow()
         action = "write" if tool == "Write" else "edit"
+        if subprocess.run(
+            ["git", "-C", cwd, "rev-parse", "--is-inside-work-tree"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ).returncode != 0:
+            H.pre_tool_deny(_opaque_mutation_reason("the governed repo is not inside a Git worktree, so IDC cannot verify a live authorization"))
         decision = PG.evaluate_request(cwd, plugin_root, {"action": action, "paths": [path_value]})
         if decision.get("allowed"):
             H.pre_tool_allow()

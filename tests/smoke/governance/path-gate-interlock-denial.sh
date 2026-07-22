@@ -94,6 +94,18 @@ export SID_BUILD
 
 RAW_TRACKER_REDIRECT="printf 'ticket: raw\\n' > TRACKER.md"
 RAW_TRACKER_PY="python3 -c \"open('TRACKER.md','w').write('ticket: raw\\n')\""
+RAW_TRACKER_PY_DYNAMIC="$(cat <<'CMD'
+T=TRACKER.md; python3 -c "open('$T','w').write('ticket: raw\n')"
+CMD
+)"
+RAW_TRACKER_NODE_DYNAMIC="$(cat <<'CMD'
+T=TRACKER.md; node -e "require('fs').writeFileSync('$T','ticket: raw\n')"
+CMD
+)"
+RAW_TRACKER_RUBY_DYNAMIC="$(cat <<'CMD'
+T=TRACKER.md; ruby -e "File.write('$T','ticket: raw\n')"
+CMD
+)"
 RAW_TRACKER_CP="cp src/seed.ts TRACKER.md"
 RAW_TRACKER_MV="mv src/seed.ts TRACKER.md"
 RAW_TRACKER_BASH_C="bash -c 'cp src/seed.ts TRACKER.md'"
@@ -158,6 +170,9 @@ deny_case Bash 'find . -type f -exec rm {} ;' "$SID_NONE"
 # No live authorization: every repository-writing surface must deny.
 deny_case Bash "$RAW_TRACKER_REDIRECT" "$SID_NONE"
 deny_case Bash "$RAW_TRACKER_PY" "$SID_NONE"
+deny_case Bash "$RAW_TRACKER_PY_DYNAMIC" "$SID_NONE"
+deny_case Bash "$RAW_TRACKER_NODE_DYNAMIC" "$SID_NONE"
+deny_case Bash "$RAW_TRACKER_RUBY_DYNAMIC" "$SID_NONE"
 deny_case Bash "$RAW_TRACKER_CP" "$SID_NONE"
 deny_case Bash "$RAW_TRACKER_MV" "$SID_NONE"
 deny_case Bash "$RAW_TRACKER_BASH_C" "$SID_NONE"
@@ -188,6 +203,9 @@ allow_case Bash "$RAW_SRC_SCRIPT" "$SID_BUILD"
 allow_case Bash "$PATCH_SRC" "$SID_BUILD"
 deny_case Bash "$RAW_TRACKER_REDIRECT" "$SID_BUILD"
 deny_case Bash "$RAW_TRACKER_PY" "$SID_BUILD"
+deny_case Bash "$RAW_TRACKER_PY_DYNAMIC" "$SID_BUILD"
+deny_case Bash "$RAW_TRACKER_NODE_DYNAMIC" "$SID_BUILD"
+deny_case Bash "$RAW_TRACKER_RUBY_DYNAMIC" "$SID_BUILD"
 deny_case Bash "$RAW_TRACKER_CP" "$SID_BUILD"
 deny_case Bash "$RAW_TRACKER_MV" "$SID_BUILD"
 deny_case Bash "$RAW_TRACKER_BASH_C" "$SID_BUILD"

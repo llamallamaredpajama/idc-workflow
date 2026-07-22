@@ -79,9 +79,9 @@ and the Recirculator.
 IDC names three `pathway_enforcement.mode` profiles: `off | controlled | app-locked`.
 
 The shipped default is `off`: the Path Gate still computes and reports would-be denials, but it does
-not block them. `controlled` is an explicit opt-in. It blocks supported-runtime off-path mutations
-and blocks merge when pathway evidence is missing or inconsistent, but it cannot stop a machine
-administrator from removing hooks, editing `.git`, or disabling GitHub rules.
+not block them. `controlled` is an explicit opt-in.
+
+`controlled` blocks supported-runtime off-path mutations and blocks merge when pathway evidence is missing or inconsistent, but it cannot stop a machine administrator from removing hooks, editing `.git`, or disabling GitHub rules.
 
 The Claude mutation hook covers exactly these tool transports: `Bash`, `Write`, `Edit`, and
 `NotebookEdit`. MCP writer tools need an explicit Path Gate adapter and hook matcher before they

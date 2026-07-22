@@ -67,6 +67,21 @@ python3 "$GIT_GATE" install-hooks --repo "$REPO" --plugin-root "$GOV_PLUGIN" >/d
 python3 "$GIT_GATE" verify-hooks --repo "$REPO" --plugin-root "$GOV_PLUGIN" >/dev/null \
   || gov_fail "freshly-installed git backstops did not verify"
 
+# Verification must prove Git will execute both the managed wrapper and its chained predecessor.
+chmod -x "$PRE_COMMIT_HOOK"
+if python3 "$GIT_GATE" verify-hooks --repo "$REPO" --plugin-root "$GOV_PLUGIN" >/dev/null 2>&1; then
+  gov_fail "verify-hooks certified a non-executable managed pre-commit hook"
+fi
+chmod +x "$PRE_COMMIT_HOOK"
+CHAINED_PRE_PUSH="$PRE_PUSH_HOOK.idc-path-gate-original"
+chmod -x "$CHAINED_PRE_PUSH"
+if python3 "$GIT_GATE" verify-hooks --repo "$REPO" --plugin-root "$GOV_PLUGIN" >/dev/null 2>&1; then
+  gov_fail "verify-hooks certified a non-executable chained pre-push hook"
+fi
+chmod +x "$CHAINED_PRE_PUSH"
+python3 "$GIT_GATE" verify-hooks --repo "$REPO" --plugin-root "$GOV_PLUGIN" >/dev/null \
+  || gov_fail "restored executable Git backstops did not verify"
+
 SID="pg-git-$$-$(basename "$WORK")"
 python3 "$CONTRACT" start --repo "$REPO" --session "$SID" --command build \
   --plugin-root "$GOV_PLUGIN" --args 'demo' --source user >/dev/null \
@@ -139,6 +154,24 @@ cmp -s "$WORK/expected.args" "$HOOKS_DIR/chained.args" \
   || gov_fail "chained pre-push hook did not receive the original hook arguments"
 [ -z "$(find "$RUNTIME_TMP" -mindepth 1 -maxdepth 1 -print -quit)" ] \
   || gov_fail "managed pre-push hook left its stdin buffer behind"
+
+# Existing refs need commit-by-commit inspection too. Commit A mutates TRACKER.md; commit B restores
+# its final tree and changes only authorized source. A tip-to-tip diff sees only src/app.ts, but the
+# pushed history still contains the protected mutation and must be refused.
+EXISTING_REMOTE_SHA="$(git -C "$REPO" rev-parse origin/main)"
+printf 'ticket: HIDDEN-IN-HISTORY\n' > "$REPO/TRACKER.md"
+git -C "$REPO" add TRACKER.md
+git -C "$REPO" commit --no-verify -qm 'test: protected existing-ref lower commit'
+git -C "$REPO" checkout -q "$EXISTING_REMOTE_SHA" -- TRACKER.md
+printf 'export const x = 4;\n' > "$REPO/src/app.ts"
+git -C "$REPO" add TRACKER.md src/app.ts
+git -C "$REPO" commit --no-verify -qm 'test: restore protected tree at existing-ref tip'
+if git -C "$REPO" push origin main >"$WORK/existing-history-push.out" 2>&1; then
+  gov_fail "pre-push allowed a protected lower commit on an existing ref whose tip restored the protected tree"
+fi
+grep -qi 'path gate' "$WORK/existing-history-push.out" \
+  || gov_fail "existing-ref history denial did not mention the Path Gate: $(cat "$WORK/existing-history-push.out")"
+git -C "$REPO" reset --hard -q origin/main
 
 # A chained hook's failure status propagates exactly after both hooks see the same stdin bytes.
 touch "$HOOKS_DIR/chained.fail"

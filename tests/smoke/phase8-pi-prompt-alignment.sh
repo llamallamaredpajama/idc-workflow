@@ -111,6 +111,14 @@ done
 grep -qiE 'default[^.]{0,80}off|off[^.]{0,80}default' "$WORKFLOW" || { echo "MISSING in WORKFLOW.md: pathway enforcement defaults to off"; fails=$((fails+1)); }
 grep -qiE 'controlled[^.]{0,100}(opt-in|opt in)' "$WORKFLOW" || { echo "MISSING in WORKFLOW.md: controlled is opt-in"; fails=$((fails+1)); }
 grep -qiE 'tracked to U8/U9|U8/U9' "$WORKFLOW" || { echo "MISSING in WORKFLOW.md: limitations are tracked to U8/U9"; fails=$((fails+1)); }
+if grep -qiE 'automerge|auto-merge' "$WORKFLOW"; then
+  echo "STALE in WORKFLOW.md: automatic merge promise remains while merge is operator-performed"
+  fails=$((fails+1))
+fi
+grep -qiE 'planning PRs[^.]{0,180}operator|operator[^.]{0,180}planning PRs' "$WORKFLOW" \
+  || { echo "MISSING in WORKFLOW.md: planning PR merge is operator-performed until the helper lands"; fails=$((fails+1)); }
+grep -qiE 'build PRs[^.]{0,180}operator|operator[^.]{0,180}build PRs' "$WORKFLOW" \
+  || { echo "MISSING in WORKFLOW.md: build PR merge is operator-performed until the helper lands"; fails=$((fails+1)); }
 
 python3 - "$HOOKS" <<'PY' || { echo "MISSING in hooks.json: honest Bash/Write/Edit/NotebookEdit coverage description"; fails=$((fails+1)); }
 import json, sys

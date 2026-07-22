@@ -11,6 +11,7 @@ set -uo pipefail
 ENTRY="$GOV_PLUGIN/scripts/hooks/idc_command_entry_gate.py"
 GATE="$GOV_PLUGIN/scripts/hooks/idc_interlock_gate.py"
 CONTRACT="$GOV_PLUGIN/scripts/idc_command_contract.py"
+PATH_GATE="$GOV_PLUGIN/scripts/idc_path_gate.py"
 [ -f "$ENTRY" ] || gov_fail "idc_command_entry_gate.py not found at $ENTRY"
 [ -f "$GATE" ] || gov_fail "idc_interlock_gate.py not found at $GATE"
 [ -f "$CONTRACT" ] || gov_fail "idc_command_contract.py not found at $CONTRACT"
@@ -110,6 +111,9 @@ CMD
 )"
 RAW_TRACKER_CP="cp src/seed.ts TRACKER.md"
 RAW_TRACKER_MV="mv src/seed.ts TRACKER.md"
+RAW_TRACKER_RSYNC="rsync src/seed.ts TRACKER.md"
+RAW_TRACKER_GIT_CHECKOUT="git checkout -- TRACKER.md"
+RAW_TRACKER_GIT_RESTORE="git restore --source=HEAD TRACKER.md"
 RAW_TRACKER_BASH_C="bash -c 'cp src/seed.ts TRACKER.md'"
 RAW_TRACKER_BASH_DYNAMIC='CMD="cp src/seed.ts TRACKER.md"; bash -c "$CMD"'
 RAW_TRACKER_SH_C="sh -c 'mv src/seed.ts TRACKER.md'"
@@ -177,6 +181,11 @@ deny_case Bash "$RAW_TRACKER_NODE_DYNAMIC" "$SID_NONE"
 deny_case Bash "$RAW_TRACKER_RUBY_DYNAMIC" "$SID_NONE"
 deny_case Bash "$RAW_TRACKER_CP" "$SID_NONE"
 deny_case Bash "$RAW_TRACKER_MV" "$SID_NONE"
+deny_case Bash "$RAW_TRACKER_RSYNC" "$SID_NONE"
+deny_case Bash "$RAW_TRACKER_GIT_CHECKOUT" "$SID_NONE"
+deny_case Bash "$RAW_TRACKER_GIT_RESTORE" "$SID_NONE"
+deny_case Bash 'git reset --hard HEAD' "$SID_NONE"
+deny_case Bash 'git apply /tmp/change.patch' "$SID_NONE"
 deny_case Bash "$RAW_TRACKER_BASH_C" "$SID_NONE"
 deny_case Bash "$RAW_TRACKER_BASH_DYNAMIC" "$SID_NONE"
 deny_case Bash "$RAW_TRACKER_SH_C" "$SID_NONE"
@@ -211,6 +220,11 @@ deny_case Bash "$RAW_TRACKER_NODE_DYNAMIC" "$SID_BUILD"
 deny_case Bash "$RAW_TRACKER_RUBY_DYNAMIC" "$SID_BUILD"
 deny_case Bash "$RAW_TRACKER_CP" "$SID_BUILD"
 deny_case Bash "$RAW_TRACKER_MV" "$SID_BUILD"
+deny_case Bash "$RAW_TRACKER_RSYNC" "$SID_BUILD"
+deny_case Bash "$RAW_TRACKER_GIT_CHECKOUT" "$SID_BUILD"
+deny_case Bash "$RAW_TRACKER_GIT_RESTORE" "$SID_BUILD"
+deny_case Bash 'git reset --hard HEAD' "$SID_BUILD"
+deny_case Bash 'git apply /tmp/change.patch' "$SID_BUILD"
 deny_case Bash "$RAW_TRACKER_BASH_C" "$SID_BUILD"
 deny_case Bash "$RAW_TRACKER_BASH_DYNAMIC" "$SID_BUILD"
 deny_case Bash "$RAW_TRACKER_SH_C" "$SID_BUILD"
@@ -228,6 +242,14 @@ allow_case Write "$REPO/src/x.ts" "$SID_BUILD"
 deny_case Write "$REPO/TRACKER.md" "$SID_BUILD"
 deny_case Bash 'gh issue create --title gate --body-file /tmp/body' "$SID_BUILD"
 
+# NotebookEdit is an Edit transport, not a Write alias. An edit-only authorization must admit the
+# registered NotebookEdit hook path while refusing the same target through Write.
+python3 "$PATH_GATE" authorize --repo "$REPO" --session "$SID_BUILD" --command build \
+  --branch main --allow-path src --allow-action edit >/dev/null \
+  || gov_fail "could not write the edit-only NotebookEdit authorization"
+allow_case NotebookEdit "$REPO/src/demo.ipynb" "$SID_BUILD"
+deny_case Write "$REPO/src/demo.ipynb" "$SID_BUILD"
+
 # A governed non-Git repository skips Git-bound authorization checks for ordinary in-repo edits,
 # while protected machine-owned surfaces remain denied and outside paths stay out of jurisdiction.
 NONGIT="$WORK/non-git-repo"
@@ -235,6 +257,14 @@ mkdir -p "$NONGIT/docs/workflow" "$NONGIT/src"
 printf 'backend: filesystem\n' > "$NONGIT/docs/workflow/tracker-config.yaml"
 printf 'pathway_enforcement:\n  mode: controlled\n' > "$NONGIT/WORKFLOW-config.yaml"
 printf 'export const x = 1;\n' > "$NONGIT/src/x.ts"
+printf 'receipt_version: 2\nplugin_version: %s\n' "$PLUGIN_VERSION" > "$NONGIT/docs/workflow/install-receipt.yaml"
+NONGIT_SID="pg-nongit-$$-$(basename "$WORK")"
+python3 "$CONTRACT" start --repo "$NONGIT" --session "$NONGIT_SID" --command init \
+  --plugin-root "$GOV_PLUGIN" --args '' --source user >/dev/null \
+  || gov_fail "could not open the non-Git init command record"
+python3 "$PATH_GATE" authorize --repo "$NONGIT" --session "$NONGIT_SID" --command init \
+  --allow-path . --allow-action write --allow-action edit --allow-action git >/dev/null \
+  || gov_fail "non-Git init could not mint its Path Gate authorization without a branch"
 allow_case Write "$NONGIT/src/new.ts" "$SID_NONE" "$NONGIT"
 allow_case Edit "$NONGIT/src/x.ts" "$SID_NONE" "$NONGIT"
 deny_case Write "$NONGIT/tracker.MD" "$SID_NONE" "$NONGIT"

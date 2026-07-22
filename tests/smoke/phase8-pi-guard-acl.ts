@@ -140,6 +140,12 @@ const observedTrackerWrite = evaluateBashForRole("plan", "gh project item-edit -
 if (!observedTrackerWrite.allowed) {
 	throw new Error(`[MODE-OFF] expected shared-core observe to ALLOW raw tracker write, got BLOCK :: ${observedTrackerWrite.reason}`);
 }
+for (const role of ["think", "build-impl", "plan", "recirculator", "build-finish"] as IdcRole[]) {
+	const rawMerge = evaluateBashForRole(role, "gh pr merge 5 --squash", CWD);
+	if (rawMerge.allowed) {
+		throw new Error(`[MODE-OFF-MERGE] expected operator-only merge policy to BLOCK ${role}, got ALLOW :: ${rawMerge.reason}`);
+	}
+}
 fs.writeFileSync(path.join(CWD, "WORKFLOW-config.yaml"), "pathway_enforcement:\n  mode: controlled\n");
 restoreAuthState();
 

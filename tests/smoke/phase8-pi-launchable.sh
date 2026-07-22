@@ -34,7 +34,7 @@ paths="$(for role in $ROLES; do
   PI_IDC_HARNESS_REPO="$RT" bash "$LAUNCHER" run "$role" --dry-run 2>/dev/null \
     | grep -oE "'$RT[^']*'" | tr -d "'"
 done | sort -u)"
-[ -n "$paths" ] || fail "launcher emitted no harness-rooted paths (is `run --dry-run` broken?)"
+[ -n "$paths" ] || fail "launcher emitted no harness-rooted paths (is 'run --dry-run' broken?)"
 
 missing=0
 while IFS= read -r p; do

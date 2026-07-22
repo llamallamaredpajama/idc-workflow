@@ -15,6 +15,7 @@ from typing import Iterable
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 
+import idc_credential_shapes as CS  # noqa: E402
 import idc_path_gate as PG  # noqa: E402
 
 MANAGED_MARKER = "IDC_PATH_GATE_MANAGED=1"
@@ -131,7 +132,7 @@ def verify_hooks(repo: str, plugin_root: str) -> tuple[bool, str]:
 def _run_git(repo: str, *args: str) -> str:
     proc = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True)
     if proc.returncode != 0:
-        raise RuntimeError((proc.stderr or proc.stdout or "git failed").strip())
+        raise RuntimeError(CS.scrub(proc.stderr or proc.stdout or "git failed").strip())
     return (proc.stdout or "").strip()
 
 

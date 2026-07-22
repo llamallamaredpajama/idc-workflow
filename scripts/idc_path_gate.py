@@ -23,6 +23,7 @@ sys.path.insert(0, SCRIPT_DIR)
 sys.path.insert(0, HOOKS_DIR)
 
 import idc_command_contract as C  # noqa: E402
+import idc_credential_shapes as CS  # noqa: E402
 import idc_ledger as L  # noqa: E402
 
 AUTH_RELPATH = os.path.join("idc-path-gate", "authorization.json")
@@ -61,7 +62,7 @@ def _parse_iso(value: str) -> dt.datetime | None:
 def _run_git(repo: str, *args: str) -> str:
     proc = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True)
     if proc.returncode != 0:
-        raise RuntimeError((proc.stderr or proc.stdout or "git failed").strip())
+        raise RuntimeError(CS.scrub(proc.stderr or proc.stdout or "git failed").strip())
     return (proc.stdout or "").strip()
 
 

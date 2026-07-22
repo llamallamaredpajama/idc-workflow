@@ -94,7 +94,13 @@ reasoning-tier.
 Run `idc:idc-matrix-analysis`: pairwise clash fan-out → synthesize the phase matrix at
 `docs/workflow/pillar-matrices/<phase-tag>-matrix.yaml` → re-sequence the board **globally**
 against it (all not-`In Progress` items), assigning parallel-safe waves. Validate with
-`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_matrix_check.py" <matrix>`. **Re-link paused origins:**
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_matrix_check.py" <matrix>`. Then compile the
+**authoritative** whole-horizon graph and frozen preview — read-only only, never a live tracker
+mutation here:
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_execution_graph.py" --matrix <matrix> ... --json`
+re-derives deterministic Waves, and
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_tracker_projection.py" --matrix <matrix> ... --json`
+emits the frozen projection + pure simulation the later sanctioned apply consumes. **Re-link paused origins:**
 the same global re-sequence also re-points any **paused** issue whose recirc ticket was retired (its
 scope admitted as one of the considerations now being decomposed — found via the consideration's
 recorded paused-origin link) **off that retired ticket** and onto the consideration's **new unblocker

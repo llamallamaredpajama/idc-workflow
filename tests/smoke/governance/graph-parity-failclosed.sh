@@ -60,7 +60,7 @@ pillars:
     blocks_on: []
 YAML
 out="$(python3 "$PROJECTION" --matrix "$WORK/inprogress-mutate.yaml" --backend filesystem --tracker "$T_IMM" --json 2>&1)" \
-  && fail "projection accepted an `In Progress` mutation (must reject immutable occupancy)"
+  && fail "projection accepted an 'In Progress' mutation (must reject immutable occupancy)"
 printf '%s\n' "$out" | grep -qiE 'In Progress|immutable|alpha' \
   || fail "In Progress mutation rejection must name the immutable item; got: $out"
 [ "$(gov_field "$T_IMM" "$alpha_num" Status)" = "In Progress" ] \

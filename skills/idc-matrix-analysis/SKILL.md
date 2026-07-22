@@ -73,7 +73,10 @@ issue-mint step (`idc:idc-goal-contract` stamps it as the github-only `idc-prove
 so the issue↔matrix link is identical by construction — no fuzzy `Trace:` matching.
 
 Assign waves so that **every pillar in a wave owns disjoint surfaces** and all `blocks_on`
-upstreams sit in earlier waves.
+upstreams sit in earlier waves. These authored `wave:` values are descriptive input, not final
+truth: `scripts/idc_execution_graph.py` re-derives the authoritative whole-horizon Waves
+deterministically from dependencies, normalized resource conflicts, and immutable `In Progress`
+occupancy, and any mismatch is fail-closed.
 
 ## 2.5 DAG intelligence — the staffing ceiling (the head chef gets smart)
 

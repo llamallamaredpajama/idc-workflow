@@ -34,8 +34,9 @@ SID_NONE="pg-none-$$-$(basename "$WORK")"
 SID_BUILD="pg-build-$$-$(basename "$WORK")"
 ERR="$WORK/err"
 
-emit_tool() { # emit_tool <tool> <value> <session>
-  TOOL="$1" VALUE="$2" SID="$3" REPO="$REPO" python3 - <<'PY'
+emit_tool() { # emit_tool <tool> <value> <session> [repo]
+  local target_repo="${4:-$REPO}"
+  TOOL="$1" VALUE="$2" SID="$3" REPO="$target_repo" python3 - <<'PY'
 import json, os
 payload = {
     "cwd": os.environ["REPO"],
@@ -54,16 +55,16 @@ print(json.dumps(payload))
 PY
 }
 
-gate() { OUT="$(emit_tool "$1" "$2" "$3" | python3 "$GATE" "$GOV_PLUGIN" 2>"$ERR")"; RC=$?; }
+gate() { OUT="$(emit_tool "$1" "$2" "$3" "${4:-$REPO}" | python3 "$GATE" "$GOV_PLUGIN" 2>"$ERR")"; RC=$?; }
 is_deny() { printf '%s' "$OUT" | grep -q '"permissionDecision": *"deny"'; }
 allow_case() {
-  gate "$1" "$2" "$3"
+  gate "$1" "$2" "$3" "${4:-$REPO}"
   [ "$RC" -eq 0 ] || gov_fail "ALLOW expected exit 0 but got $RC for $1:$2"
   [ -z "$OUT" ] || gov_fail "ALLOW expected no permission decision for $1:$2, got: $OUT"
   grep -q 'IDC interlock' "$ERR" && gov_fail "ALLOW unexpectedly warned for $1:$2 ⇒ $(cat "$ERR")"
 }
 deny_case() {
-  gate "$1" "$2" "$3"
+  gate "$1" "$2" "$3" "${4:-$REPO}"
   [ "$RC" -eq 0 ] || gov_fail "DENY expected exit 0 but got $RC for $1:$2 ⇒ $(cat "$ERR")"
   is_deny || gov_fail "DENY expected permissionDecision=deny for $1:$2, stdout=[$OUT] stderr=[$(cat "$ERR")]"
 }
@@ -109,6 +110,7 @@ RAW_SRC_MV="mv src/seed.ts src/moved.ts"
 RAW_SRC_BASH_C="bash -c 'cp src/seed.ts src/copied.ts'"
 RAW_SRC_ENV_S="env -S 'bash -c \"cp src/seed.ts src/copied.ts\"'"
 RAW_SRC_CD_CHAIN="cd src && cp seed.ts copied.ts"
+RAW_OUTSIDE_PY="python3 -c \"open('/tmp/idc-note.md','w').write('outside\\n')\""
 WRITER_SCRIPT="$WORK/write-tracker.sh"
 cat > "$WRITER_SCRIPT" <<'SH'
 cp src/seed.ts TRACKER.md
@@ -144,6 +146,14 @@ apply_patch <<'EOF'
 EOF
 PATCH
 )"
+
+# Outside-repo mutations are outside the Path Gate's jurisdiction, and read-only find -exec forms
+# remain reads. These allow even without a live repository authorization.
+allow_case Write /tmp/idc-note.md "$SID_NONE"
+allow_case Bash "$RAW_OUTSIDE_PY" "$SID_NONE"
+allow_case Bash 'find . -type f -exec grep -H needle {} ;' "$SID_NONE"
+allow_case Bash 'find . -type f -exec cat {} ;' "$SID_NONE"
+deny_case Bash 'find . -type f -exec rm {} ;' "$SID_NONE"
 
 # No live authorization: every repository-writing surface must deny.
 deny_case Bash "$RAW_TRACKER_REDIRECT" "$SID_NONE"
@@ -197,4 +207,16 @@ allow_case Write "$REPO/src/x.ts" "$SID_BUILD"
 deny_case Write "$REPO/TRACKER.md" "$SID_BUILD"
 deny_case Bash 'gh issue create --title gate --body-file /tmp/body' "$SID_BUILD"
 
-echo "PASS: the shared Path Gate denies unauthenticated Write/Edit/raw-gh mutations, recursively blocks cp/mv/redirection/apply_patch through bash/sh/zsh/env -S/script/BASH_ENV/command-substitution forms, still admits authorized ordinary source writes, and keeps protected tracker/raw-gh writes blocked"
+# A governed non-Git repository skips Git-bound authorization checks for ordinary in-repo edits,
+# while protected machine-owned surfaces remain denied and outside paths stay out of jurisdiction.
+NONGIT="$WORK/non-git-repo"
+mkdir -p "$NONGIT/docs/workflow" "$NONGIT/src"
+printf 'backend: filesystem\n' > "$NONGIT/docs/workflow/tracker-config.yaml"
+printf 'pathway_enforcement:\n  mode: controlled\n' > "$NONGIT/WORKFLOW-config.yaml"
+printf 'export const x = 1;\n' > "$NONGIT/src/x.ts"
+allow_case Write "$NONGIT/src/new.ts" "$SID_NONE" "$NONGIT"
+allow_case Edit "$NONGIT/src/x.ts" "$SID_NONE" "$NONGIT"
+deny_case Write "$NONGIT/tracker.MD" "$SID_NONE" "$NONGIT"
+allow_case Write /tmp/idc-non-git-note.md "$SID_NONE" "$NONGIT"
+
+echo "PASS: the shared Path Gate keeps outside paths out of jurisdiction, allows read-only find -exec, denies mutating find -exec and unauthenticated repository writes, admits authorized source writes, and preserves protected-path denial in Git and governed non-Git repositories"

@@ -1,9 +1,10 @@
 #!/bin/bash
 # path-gate-boundaries.sh — the shared Path Gate core enforces auth-object integrity:
-# missing auth denies, allowed paths/actions admit, symlink aliases resolve to their real target
-# before the protected-surface check, protected machine-owned files stay denied, subprocess failures
-# scrub child stderr at the read, and branch / ticket / graph-node / contract-digest / expiry
-# mismatches all fail closed.
+# absent / unreadable / corrupt auth states deny distinctly, CLI defaults admit the standard profile,
+# outside-repo paths stay outside this gate's jurisdiction, allowed paths/actions admit, symlink aliases
+# resolve to their real target before the case-insensitive protected-surface check, protected
+# machine-owned files stay denied, subprocess failures scrub child stderr at the read, and branch /
+# ticket / graph-node / contract-digest / expiry mismatches all fail closed.
 set -uo pipefail
 . "$(dirname "$0")/lib.sh"
 
@@ -61,6 +62,9 @@ deny_case() {
   [ "$RC" -ne 0 ] || gov_fail "DENY expected non-zero exit for action=$1 paths=$2, got 0 with: $OUT"
   printf '%s' "$OUT" | grep -q '"allowed": *false' || gov_fail "DENY expected allowed=false, got: $OUT"
 }
+reason_has() {
+  printf '%s' "$OUT" | grep -qi "$1" || gov_fail "expected denial reason to mention [$1], got: $OUT"
+}
 
 mutate_auth() { AUTH_PATH="$AUTH_PATH" MODE="$1" VALUE="${2:-}" python3 - <<'PY'
 import json, os
@@ -93,14 +97,44 @@ authorize() {
     || gov_fail "could not write a shared Path Gate authorization"
 }
 
-# Missing auth denies.
+# Outside-repo paths are outside this gate's jurisdiction, even without authorization.
+allow_case write /tmp/idc-note.md T-42 NODE-7
+
+# Absent auth denies with a distinct, scrubbed reason.
 deny_case write src/app.ts T-42 NODE-7
+reason_has 'authorization.*absent'
+
+# The minimal authorize CLI applies the standard write/edit/git profile.
+DEFAULT_AUTH="$(python3 "$PATH_GATE" authorize --repo "$REPO" --session "$SID" --command build)" \
+  || gov_fail "minimal authorize CLI failed"
+printf '%s' "$DEFAULT_AUTH" | python3 -c '
+import json, sys
+auth = json.load(sys.stdin)
+assert auth["allowed_paths"] == ["."]
+assert set(auth["allowed_actions"]) == {"write", "edit", "git"}
+' || gov_fail "minimal authorize CLI did not apply the standard default profile: $DEFAULT_AUTH"
+allow_case write src/app.ts '' ''
+deny_case write tracker.MD '' ''
+reason_has 'protected machine-owned surface'
 
 authorize
 allow_case write src/app.ts T-42 NODE-7
 deny_case write src/tracker-link.md T-42 NODE-7
 deny_case write docs/notes.md T-42 NODE-7
 deny_case write TRACKER.md T-42 NODE-7
+
+# Authorization read failures are distinct and never echo corrupt file contents or local paths.
+printf 'password=hunter2xyzzy this is not json\n' > "$AUTH_PATH"
+deny_case write src/app.ts T-42 NODE-7
+reason_has 'authorization.*corrupt'
+! printf '%s' "$OUT" | grep -Fq 'hunter2xyzzy' || gov_fail "corrupt authorization content leaked: $OUT"
+! printf '%s' "$OUT" | grep -Fq "$AUTH_PATH" || gov_fail "authorization path leaked: $OUT"
+rm -f "$AUTH_PATH"
+mkdir "$AUTH_PATH"
+deny_case write src/app.ts T-42 NODE-7
+reason_has 'authorization.*unreadable'
+! printf '%s' "$OUT" | grep -Fq "$AUTH_PATH" || gov_fail "unreadable authorization path leaked: $OUT"
+rmdir "$AUTH_PATH"
 
 authorize
 mutate_auth branch wrong/branch
@@ -148,4 +182,4 @@ grep -Fq '[REDACTED]' "$WORK/auth-path.out" \
 grep -Fq 'while opening repo' "$WORK/auth-path.out" \
   || gov_fail "auth-path lost the useful git failure detail after scrubbing: $(cat "$WORK/auth-path.out")"
 
-echo "PASS: shared Path Gate boundaries hold (missing auth, protected paths, symlink aliases, and branch/ticket/graph-node/contract-digest/expiry mismatches all fail closed)"
+echo "PASS: shared Path Gate boundaries hold (outside paths are out of jurisdiction; default authorization works; absent/unreadable/corrupt auth, protected case variants/symlink aliases, and branch/ticket/graph-node/contract-digest/expiry mismatches behave distinctly and fail closed)"

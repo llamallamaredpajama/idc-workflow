@@ -129,6 +129,8 @@ deny_gate "git push --no-verify origin main"
 # mutate the repo and bypass BOTH git hooks with commit+push --no-verify. Each representative route
 # below must deny BEFORE execution.
 deny_or_exploit "cp->TRACKER" "cp src/app.ts TRACKER.md"
+deny_or_exploit "dynamic mutation target" 'T=TRACKER.md; cp src/app.ts $T'
+deny_or_exploit "dynamic no-verify flag" 'G=--no-verify; git commit $G -m x'
 deny_or_exploit "mv->TRACKER" "mv src/app.ts TRACKER.md"
 deny_or_exploit "bash-c nested writer" "bash -c 'cp src/app.ts TRACKER.md'"
 deny_or_exploit "dynamic bash-c writer" 'CMD="cp src/app.ts TRACKER.md"; bash -c "$CMD"'

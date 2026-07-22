@@ -93,6 +93,7 @@ USAGE (CLI — for the scaffold's gitignore step, and the governance test):
     python3 idc_ledger.py --cwd <repo> ensure-gitignore         # additive, idempotent
 """
 import argparse
+import copy
 import contextlib
 import json
 import os
@@ -632,6 +633,74 @@ def command_start(cwd, session_id, command, plugin_version, args_sha256, source,
             commands.append(rec)
         persisted = _atomic_write_state(cwd, read_taints(cwd, _raw=raw), _prune_finished(commands))
     return rec if persisted else None
+
+
+def rollback_command_start(cwd, session_id, command, nonce, prior_record=None):
+    """INTERNAL admission rollback for `idc_command_entry_gate.py` only.
+
+    Undo a command-start write ONLY while the UserPromptExpansion admission transaction is still
+    running and Path Gate authorization has failed, before any command body can execute. The exact
+    `(session_id, command, nonce)` compare-and-swap is load-bearing: a prior, foreign, or concurrent
+    active record is never removed. A newly created record is deleted; an idempotent re-entry restores
+    the exact active record snapshot it replaced.
+
+    This deliberately has no CLI operation. Once a command body expands, an active lifecycle record
+    may represent real work and must never be erased through a general agent-visible abort escape
+    hatch. Returns True when the attempt is absent/restored after a durable write (or was already
+    replaced/removed by another writer), False when validation or persistence fails."""
+    if not idc_hook_lib.is_governed_repo(cwd):
+        return False
+    if not str(session_id).strip() or not str(command).strip() or not str(nonce).strip():
+        return False
+    session_id = str(session_id)
+    command = str(command)
+    nonce = str(nonce)
+    if prior_record is not None:
+        if not isinstance(prior_record, dict):
+            return False
+        if (
+            prior_record.get("session_id") != session_id
+            or prior_record.get("command") != command
+            or prior_record.get("state") != _CMD_ACTIVE
+        ):
+            return False
+        prior_record = copy.deepcopy(prior_record)
+
+    with _write_lock(cwd):
+        raw = _read_raw(cwd)
+        commands = _read_commands(cwd, _raw=raw)
+        target_index = next(
+            (
+                i
+                for i, record in enumerate(commands)
+                if record.get("session_id") == session_id
+                and record.get("command") == command
+                and record.get("state") == _CMD_ACTIVE
+                and record.get("nonce") == nonce
+            ),
+            None,
+        )
+        if target_index is None:
+            # The exact attempt is already absent or a concurrent writer replaced it. Either state is
+            # safe for this rollback; never touch the record now occupying the lifecycle key.
+            return True
+        if prior_record is None:
+            del commands[target_index]
+        else:
+            commands[target_index] = prior_record
+        if not _atomic_write_state(cwd, read_taints(cwd, _raw=raw), _prune_finished(commands)):
+            return False
+
+        persisted = _read_commands(cwd)
+        if prior_record is None:
+            return not any(
+                record.get("session_id") == session_id
+                and record.get("command") == command
+                and record.get("state") == _CMD_ACTIVE
+                and record.get("nonce") == nonce
+                for record in persisted
+            )
+        return any(record == prior_record for record in persisted)
 
 
 def command_finish(cwd, session_id, command, status, evidence):

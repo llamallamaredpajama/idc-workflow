@@ -64,7 +64,6 @@ import dataclasses
 import os
 import re
 import shlex
-import subprocess
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -1265,6 +1264,14 @@ def _no_verify_reason(subcommand):
     )
 
 
+def _dynamic_git_flag_reason(subcommand):
+    return (
+        f"IDC Path Gate denied this Bash command because a `git {subcommand}` policy-sensitive flag "
+        "contains a shell expansion and is opaque, so IDC cannot prove that managed Git backstops remain enabled. "
+        "Use literal Git flags and let the IDC-managed hooks run."
+    )
+
+
 def _repo_candidate_path(raw_path, cwd, repo_root=None):
     if not isinstance(raw_path, str):
         return None
@@ -1281,7 +1288,7 @@ def _repo_candidate_path(raw_path, cwd, repo_root=None):
     rel = os.path.relpath(abs_path, repo_abs)
     if rel == "." or rel.startswith("..") or os.path.isabs(rel):
         return None
-    return candidate
+    return abs_path
 
 
 def _dedupe_paths(paths):
@@ -1358,7 +1365,7 @@ def _extract_apply_patch_paths(command, cwd, repo_root=None):
     return _dedupe_paths(paths), True
 
 
-def _extract_inline_writer_paths(head, args, cwd, repo_root=None):
+def _extract_inline_writer_literals(head, args):
     code = _inline_writer_code(args)
     if not isinstance(code, str) or not code:
         return []
@@ -1375,9 +1382,7 @@ def _extract_inline_writer_paths(head, args, cwd, repo_root=None):
     out = []
     for pattern in patterns:
         for match in pattern.finditer(code):
-            candidate = _repo_candidate_path(match.group(2), cwd, repo_root)
-            if candidate:
-                out.append(candidate)
+            out.append(match.group(2))
     return _dedupe_paths(out)
 
 
@@ -1525,6 +1530,47 @@ def _git_no_verify_hit(args):
     if subcommand == "push" and "--no-verify" in subargs:
         return "push"
     return None
+
+
+_GIT_POLICY_VALUE_OPTS = {
+    "commit": {
+        "-m", "--message", "-F", "--file", "-C", "--reuse-message", "-c", "--reedit-message",
+        "--author", "--date", "--cleanup", "--fixup", "--squash", "--pathspec-from-file", "--trailer",
+    },
+    "push": {"--repo", "--receive-pack", "--exec"},
+}
+
+
+def _git_dynamic_policy_flag(args):
+    subcommand, subargs = _git_subcommand_and_args(args)
+    value_opts = _GIT_POLICY_VALUE_OPTS.get(subcommand)
+    if value_opts is None:
+        return None
+    i = 0
+    while i < len(subargs):
+        arg = subargs[i]
+        if arg == "--":
+            break
+        if arg in value_opts and i + 1 < len(subargs):
+            i += 2
+            continue
+        if _has_shell_expansion(arg):
+            return subcommand
+        i += 1
+    return None
+
+
+def _find_exec_is_read_only(args):
+    saw_exec = False
+    for i, arg in enumerate(args):
+        if arg == "-ok":
+            return False
+        if arg not in {"-exec", "-execdir"}:
+            continue
+        saw_exec = True
+        if i + 1 >= len(args) or os.path.basename(args[i + 1]) not in {"grep", "cat"}:
+            return False
+    return saw_exec
 
 
 def _startup_env_targets(seg):
@@ -1677,6 +1723,9 @@ def _analyze_direct_segments(tokens, cwd, repo_root):
     current_cwd = os.path.abspath(cwd)
 
     def candidate(raw):
+        if _has_shell_expansion(raw):
+            analysis.deny(_opaque_mutation_reason("a mutation target contains a shell expansion"))
+            return None
         if current_cwd is None and not (os.path.isabs(raw) or raw == "~" or raw.startswith("~/")):
             analysis.deny(_opaque_mutation_reason("a preceding `cd` made later relative paths unprovable"))
             return None
@@ -1703,6 +1752,10 @@ def _analyze_direct_segments(tokens, cwd, repo_root):
             current_cwd = _next_cwd(current_cwd, args)
             continue
         if head == "git":
+            dynamic_subcommand = _git_dynamic_policy_flag(args)
+            if dynamic_subcommand:
+                analysis.deny(_dynamic_git_flag_reason(dynamic_subcommand))
+                continue
             subcommand = _git_no_verify_hit(args)
             if subcommand:
                 analysis.deny(_no_verify_reason(subcommand))
@@ -1740,7 +1793,7 @@ def _analyze_direct_segments(tokens, cwd, repo_root):
                     analysis.add_paths([hit])
             continue
         if head == "find":
-            if any(arg in {"-exec", "-execdir", "-ok"} for arg in args):
+            if any(arg in {"-exec", "-execdir", "-ok"} for arg in args) and not _find_exec_is_read_only(args):
                 analysis.deny(_opaque_mutation_reason("`find -exec` can mutate repository paths without a statically provable target set"))
             elif "-delete" in args:
                 analysis.deny(_opaque_mutation_reason("`find -delete` can mutate repository paths without a statically provable target set"))
@@ -1778,12 +1831,18 @@ def _analyze_direct_segments(tokens, cwd, repo_root):
                 analysis.deny(_opaque_mutation_reason("`perl -pi` does not name a literal repository target"))
             continue
         if head in {"python", "python3", "node", "bun", "deno", "ruby"}:
-            paths = _extract_inline_writer_paths(head, args, current_cwd or repo_root, repo_root)
+            literals = _extract_inline_writer_literals(head, args)
+            paths = [
+                candidate_path
+                for literal in literals
+                for candidate_path in [_repo_candidate_path(literal, current_cwd or repo_root, repo_root)]
+                if candidate_path
+            ]
             if paths:
                 analysis.add_paths(paths)
             else:
                 code = _inline_writer_code(args)
-                if isinstance(code, str) and _INLINE_WRITER_MUTATION_RE.search(code):
+                if not literals and isinstance(code, str) and _INLINE_WRITER_MUTATION_RE.search(code):
                     analysis.deny(_opaque_mutation_reason(f"a `{head}` one-liner mutates files without naming a literal repository path"))
             continue
     return analysis
@@ -1811,10 +1870,16 @@ def _analyze_shell_mutations(command, cwd, repo_root, plugin_root, depth=0, seen
         return analysis
     for i, tok in enumerate(tokens):
         if tok in {">", ">>", ">|"} and i + 1 < len(tokens):
+            if _has_shell_expansion(tokens[i + 1]):
+                analysis.deny(_opaque_mutation_reason("a redirection target contains a shell expansion"))
+                return analysis
             hit = _repo_candidate_path(tokens[i + 1], cwd, repo_root)
             if hit:
                 analysis.add_paths([hit])
         elif tok.isdigit() and i + 2 < len(tokens) and tokens[i + 1] in {">", ">>", ">|"}:
+            if _has_shell_expansion(tokens[i + 2]):
+                analysis.deny(_opaque_mutation_reason("a redirection target contains a shell expansion"))
+                return analysis
             hit = _repo_candidate_path(tokens[i + 2], cwd, repo_root)
             if hit:
                 analysis.add_paths([hit])
@@ -1879,16 +1944,6 @@ def _gate(payload, plugin_root):
         request = _shell_path_gate_request(command, cwd, plugin_root)
         if request is None:
             H.pre_tool_allow()
-        if request.get("action") != "bash" and subprocess.run(
-            ["git", "-C", cwd, "rev-parse", "--is-inside-work-tree"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        ).returncode != 0:
-            decision = PG.evaluate_request(cwd, plugin_root, {
-                "action": "bash",
-                "raw_reason": _opaque_mutation_reason("the governed repo is not inside a Git worktree, so IDC cannot verify a live authorization"),
-            })
-            _apply_path_gate_decision(decision, "IDC Path Gate could not verify the repository mutation")
         decision = PG.evaluate_request(cwd, plugin_root, request)
         _apply_path_gate_decision(decision, "IDC Path Gate denied the repository mutation")
 
@@ -1897,16 +1952,6 @@ def _gate(payload, plugin_root):
         if not isinstance(path_value, str) or not path_value.strip():
             H.pre_tool_allow()
         action = "write" if tool == "Write" else "edit"
-        if subprocess.run(
-            ["git", "-C", cwd, "rev-parse", "--is-inside-work-tree"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        ).returncode != 0:
-            decision = PG.evaluate_request(cwd, plugin_root, {
-                "action": action,
-                "raw_reason": _opaque_mutation_reason("the governed repo is not inside a Git worktree, so IDC cannot verify a live authorization"),
-            })
-            _apply_path_gate_decision(decision, "IDC Path Gate could not verify the repository mutation")
         decision = PG.evaluate_request(cwd, plugin_root, {"action": action, "paths": [path_value]})
         _apply_path_gate_decision(decision, "IDC Path Gate denied the repository mutation")
 

@@ -71,6 +71,15 @@ def repo_root(repo: str) -> str:
     return os.path.realpath(os.path.abspath(repo))
 
 
+def _is_git_worktree(repo: str) -> bool:
+    proc = subprocess.run(
+        ["git", "-C", repo, "rev-parse", "--is-inside-work-tree"],
+        capture_output=True,
+        text=True,
+    )
+    return proc.returncode == 0 and (proc.stdout or "").strip() == "true"
+
+
 def pathway_mode(repo: str) -> str:
     """Read the scaffolded pathway posture without taking a YAML dependency."""
     config_path = os.path.join(repo_root(repo), "WORKFLOW-config.yaml")
@@ -131,7 +140,7 @@ def _atomic_write_json(path: str, payload: dict[str, Any]) -> None:
         raise
 
 
-def _normalize_repo_rel(path_value: str, repo: str) -> str:
+def _request_repo_rel(path_value: str, repo: str) -> str | None:
     if not isinstance(path_value, str) or not path_value.strip():
         raise ValueError("path must be a non-empty string")
     raw = path_value.strip()
@@ -141,8 +150,15 @@ def _normalize_repo_rel(path_value: str, repo: str) -> str:
     if rel == ".":
         return "."
     if rel.startswith("..") or os.path.isabs(rel):
-        raise ValueError(f"{path_value!r} escapes the repository root")
+        return None
     return rel.replace(os.sep, "/")
+
+
+def _normalize_repo_rel(path_value: str, repo: str) -> str:
+    rel = _request_repo_rel(path_value, repo)
+    if rel is None:
+        raise ValueError(f"{path_value!r} escapes the repository root")
+    return rel
 
 
 def _normalize_allowed_paths(repo: str, paths: list[str]) -> list[str]:
@@ -167,7 +183,8 @@ def _path_allowed(relpath: str, allowed_paths: list[str]) -> bool:
 
 
 def _is_protected_machine_path(relpath: str) -> bool:
-    return any(fnmatch.fnmatchcase(relpath, rule) for rule in PROTECTED_MACHINE_RULES)
+    candidate = relpath.casefold()
+    return any(fnmatch.fnmatchcase(candidate, rule.casefold()) for rule in PROTECTED_MACHINE_RULES)
 
 
 def _find_active_record_by_nonce(repo: str, command: str, nonce: str) -> dict[str, Any] | None:
@@ -214,7 +231,7 @@ def _allow(reason: str) -> dict[str, Any]:
 
 def _no_auth_reason() -> str:
     return (
-        "IDC Path Gate denied this mutation because no live authorization exists for this repository mutation. "
+        "IDC Path Gate denied this mutation because the live authorization is absent for this repository mutation. "
         "Route the work through an existing IDC command (think, intake, plan, build, recirculate, init, update, or a sanctioned recovery door) so IDC can open the sanctioned write path."
     )
 
@@ -286,14 +303,20 @@ def write_authorization(
     return auth
 
 
-def _read_authorization(repo: str) -> dict[str, Any] | None:
+def _read_authorization(repo: str) -> tuple[str, dict[str, Any] | None]:
     path = auth_path(repo)
     try:
         with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
-    except (OSError, ValueError):
-        return None
-    return data if isinstance(data, dict) else None
+    except FileNotFoundError:
+        return "absent", None
+    except OSError:
+        return "unreadable", None
+    except ValueError:
+        return "corrupt", None
+    if not isinstance(data, dict):
+        return "corrupt", None
+    return "ok", data
 
 
 def _evaluate_request(repo: str, plugin_root: str, request: dict[str, Any]) -> dict[str, Any]:
@@ -310,16 +333,36 @@ def _evaluate_request(repo: str, plugin_root: str, request: dict[str, Any]) -> d
     if not isinstance(raw_paths, list):
         raw_paths = []
     try:
-        paths = [_normalize_repo_rel(p, repo) for p in raw_paths if isinstance(p, str) and p.strip()]
+        paths = [
+            rel
+            for p in raw_paths
+            if isinstance(p, str) and p.strip()
+            for rel in [_request_repo_rel(p, repo)]
+            if rel is not None
+        ]
     except ValueError as exc:
         return _deny(f"IDC Path Gate denied this mutation because the requested path is invalid: {exc}")
 
     if not paths:
-        return _allow("IDC Path Gate: no path-gated mutation was identified")
+        return _allow("IDC Path Gate: no in-repository path-gated mutation was identified")
 
-    auth = _read_authorization(repo)
-    if not auth:
+    for rel in paths:
+        if _is_protected_machine_path(rel):
+            return _deny(
+                f"IDC Path Gate denied this mutation because `{rel}` is a protected machine-owned surface. Use the sanctioned IDC helper instead of mutating it directly."
+            )
+
+    if not _is_git_worktree(repo):
+        return _allow("IDC Path Gate: ordinary mutation is inside a governed non-Git repository")
+
+    auth_state, auth = _read_authorization(repo)
+    if auth_state == "absent":
         return _deny(_no_auth_reason())
+    if auth_state == "unreadable":
+        return _deny("IDC Path Gate denied this mutation because the live authorization is unreadable.")
+    if auth_state == "corrupt":
+        return _deny("IDC Path Gate denied this mutation because the live authorization is corrupt.")
+    assert auth is not None
 
     if auth.get("schema") != 1:
         return _deny("IDC Path Gate denied this mutation because the authorization object is missing or has the wrong schema.")
@@ -358,10 +401,6 @@ def _evaluate_request(repo: str, plugin_root: str, request: dict[str, Any]) -> d
 
     allowed_paths = _normalize_allowed_paths(repo, list(auth.get("allowed_paths") or []))
     for rel in paths:
-        if _is_protected_machine_path(rel):
-            return _deny(
-                f"IDC Path Gate denied this mutation because `{rel}` is a protected machine-owned surface. Use the sanctioned IDC helper instead of mutating it directly."
-            )
         if not _path_allowed(rel, allowed_paths):
             return _deny(
                 f"IDC Path Gate denied this mutation because `{rel}` is outside the live authorization boundary ({', '.join(allowed_paths)})."
@@ -437,8 +476,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ticket")
     p.add_argument("--graph-node")
     p.add_argument("--ttl-seconds", type=int, default=DEFAULT_TTL_SECONDS)
-    p.add_argument("--allow-path", action="append", default=[])
-    p.add_argument("--allow-action", action="append", default=[])
+    p.add_argument("--allow-path", action="append", default=None)
+    p.add_argument("--allow-action", action="append", default=None)
     p.set_defaults(func=cmd_authorize)
 
     p = sub.add_parser("evaluate")

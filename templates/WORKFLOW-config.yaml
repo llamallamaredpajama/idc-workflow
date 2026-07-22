@@ -21,6 +21,16 @@ gating:
   prd: on    # PRD changes always gate (user-facing product function)
   trd: off   # TRD/spec changes gate only when on (greenfield default: off)
 
+# Pathway enforcement profiles.
+# IDC names three `pathway_enforcement.mode` profiles: `off | controlled | app-locked`.
+# `controlled` blocks supported-runtime off-path mutations and blocks merge when pathway evidence is missing or inconsistent, but it cannot stop a machine administrator from removing hooks, editing `.git`, or disabling GitHub rules.
+# `app-locked` adds a GitHub App as the sole tracker writer and trusted check source; it closes the ordinary-token tracker-write gap but still does not protect against repository or organization administrators removing the rules or the App.
+# The filesystem tracker remains useful for hermetic tests and local demonstrations. It must stay `off` and makes no hard pathway-security claim.
+# This scaffold keeps the profile explicit but non-enforcing until backend-aware default enablement lands.
+pathway_enforcement:
+  mode: off          # off | controlled | app-locked
+  attempt_ceiling: 3
+
 # Canonical document map for the IDC roles (v2 — five-layer chain + lean process tree).
 documents:
   workflow: WORKFLOW.md

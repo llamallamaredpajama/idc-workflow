@@ -39,6 +39,7 @@ CONTRACT="$GOV_PLUGIN/scripts/idc_command_contract.py"
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 REPO="$WORK/repo"; mkdir -p "$REPO/docs/workflow"
 printf 'backend: filesystem\n' > "$REPO/docs/workflow/tracker-config.yaml"
+printf 'pathway_enforcement:\n  mode: controlled\n' > "$REPO/WORKFLOW-config.yaml"
 printf '# tracker state for build-lane command_start\n' > "$REPO/TRACKER.md"
 NONGOV="$WORK/plain"; mkdir -p "$NONGOV"   # no docs/workflow/tracker-config.yaml
 
@@ -81,9 +82,14 @@ echo "  ok (D) active /idc:* command ⇒ hard deny naming idc_git_finish.py"
 
 # ── (O) OBSERVE_ONLY downgrades the active-command deny back to warn ─────────────────────────────────
 IDC_HOOKS_OBSERVE_ONLY=1 gate "$REPO" Bash "$MERGE" "$SD"
-[ -z "$OUT" ] || gov_fail "(O) OBSERVE_ONLY must downgrade deny → no stdout decision: $OUT"
+[ "$RC" -eq 0 ] || gov_fail "(O) OBSERVE_ONLY gate exit was $RC, expected 0"
+! is_deny || gov_fail "(O) OBSERVE_ONLY must never emit permissionDecision=deny: $OUT"
+printf '%s' "$OUT" | grep -q '"additionalContext"' \
+  || gov_fail "(O) OBSERVE_ONLY did not inject the would-be denial as additionalContext: $OUT"
+printf '%s' "$OUT" | grep -qi 'observe' \
+  || gov_fail "(O) OBSERVE_ONLY additionalContext did not identify the observe posture: $OUT"
 grep -qi 'would deny' "$ERR" || gov_fail "(O) OBSERVE_ONLY did not warn-downgrade the deny: $(cat "$ERR")"
-echo "  ok (O) IDC_HOOKS_OBSERVE_ONLY=1 downgrades the active-command deny to a warning"
+echo "  ok (O) IDC_HOOKS_OBSERVE_ONLY=1 downgrades the active-command deny to warning + additionalContext"
 
 # ── (B) raw board mutation ⇒ interlock fires naming the engine ──────────────────────────────────────
 gate "$REPO" Bash "gh project item-edit --id ITEM --project-id PVT_x --field-id F --single-select-option-id O" "$SW"

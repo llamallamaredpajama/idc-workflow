@@ -20,6 +20,7 @@ REPO="$WORK/repo"; mkdir -p "$REPO/docs/workflow" "$REPO/src" "$REPO/tests"
   git checkout -q -b main
 )
 printf 'backend: filesystem\n' > "$REPO/docs/workflow/tracker-config.yaml"
+printf 'pathway_enforcement:\n  mode: controlled\n' > "$REPO/WORKFLOW-config.yaml"
 printf 'ticket: demo\n' > "$REPO/TRACKER.md"
 printf 'export const x = 1;\n' > "$REPO/src/app.ts"
 printf 'test(1)\n' > "$REPO/tests/app.t"

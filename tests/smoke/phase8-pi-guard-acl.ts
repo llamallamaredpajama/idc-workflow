@@ -28,6 +28,7 @@ fs.mkdirSync(path.join(CWD, "docs", "workflow", "code-reviews"), { recursive: tr
 fs.mkdirSync(path.join(CWD, "docs", "considerations"), { recursive: true });
 fs.mkdirSync(path.join(CWD, "src"), { recursive: true });
 fs.writeFileSync(path.join(CWD, "docs", "workflow", "tracker-config.yaml"), "backend: filesystem\n");
+fs.writeFileSync(path.join(CWD, "WORKFLOW-config.yaml"), "pathway_enforcement:\n  mode: off\n");
 fs.writeFileSync(path.join(CWD, "TRACKER.md"), "ticket: demo\n");
 fs.writeFileSync(path.join(CWD, "src", "x.ts"), "export const x = 1;\n");
 
@@ -79,6 +80,18 @@ function expectPath(tag: string, attemptedPath: string, allow: boolean, reasonNe
 		throw new Error(`[${tag}] expected ${allow ? "ALLOW" : "BLOCK"} for ${attemptedPath} with reason containing ${JSON.stringify(reasonNeedle)}, got ${evaluation.allowed ? "ALLOW" : "BLOCK"} :: ${evaluation.reason}`);
 	}
 }
+
+// [MODE] Core observe posture must travel through the Pi call chain as ALLOW. Pi does not read
+// pathway mode itself: it consumes the shared core's `observe` result, then controlled mode restores
+// the hard-deny assertions below.
+fs.rmSync(AUTH_PATH);
+expectPath("MODE-OFF", inRepo("src/x.ts"), true, "path is inside role implementation authority");
+const observedTrackerWrite = evaluateBashForRole("plan", "gh project item-edit --id X --field-id F --single-select-option-id O", CWD);
+if (!observedTrackerWrite.allowed) {
+	throw new Error(`[MODE-OFF] expected shared-core observe to ALLOW raw tracker write, got BLOCK :: ${observedTrackerWrite.reason}`);
+}
+fs.writeFileSync(path.join(CWD, "WORKFLOW-config.yaml"), "pathway_enforcement:\n  mode: controlled\n");
+restoreAuthState();
 
 // [AUTH] Pi must translate into the SAME shared Path Gate policy: removing or corrupting the
 // authorization / active-command evidence now blocks even otherwise-allowed source writes.

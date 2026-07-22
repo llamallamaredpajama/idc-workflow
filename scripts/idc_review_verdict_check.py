@@ -77,6 +77,14 @@ CODE_REVIEWS_DIR = os.path.join("docs", "workflow", "code-reviews")
 WITNESS_FILE = "idc-review-verdict-witnesses.json"
 
 
+def _wrong_source_problem(verdict_path):
+    abs_path = os.path.abspath(verdict_path)
+    marker = os.path.join(os.sep, CODE_REVIEWS_DIR, "")
+    if abs_path.rfind(marker) < 0:
+        return f"wrong-source verdict path {abs_path} — only {CODE_REVIEWS_DIR}/ verdicts are valid review witnesses"
+    return None
+
+
 def _code_reviews_context(verdict_path):
     abs_path = os.path.abspath(verdict_path)
     marker = os.path.join(os.sep, CODE_REVIEWS_DIR, "")
@@ -124,9 +132,10 @@ def _read_witnesses(common_git_dir):
 
 
 def witness_problem(verdict_path, doc):
+    path_problem = _wrong_source_problem(verdict_path)
+    if path_problem:
+        return path_problem
     repo_root, common_git_dir, rel, err = _code_reviews_context(verdict_path)
-    if rel is None:
-        return None
     if err:
         return err
     witnesses = _read_witnesses(common_git_dir)
@@ -150,9 +159,10 @@ def witness_problem(verdict_path, doc):
 
 
 def record_witness(verdict_path, doc):
-    repo_root, common_git_dir, rel, err = _code_reviews_context(verdict_path)
-    if rel is None:
+    path_problem = _wrong_source_problem(verdict_path)
+    if path_problem:
         return True, None
+    repo_root, common_git_dir, rel, err = _code_reviews_context(verdict_path)
     if err:
         return False, err
     try:

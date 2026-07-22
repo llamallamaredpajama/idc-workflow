@@ -648,12 +648,10 @@ def _gate(payload, plugin_root):
         # loud-fail can never desync (a hardcoded DEFAULT_BOUND here would drift if the bound changed).
         if H.counter_get(key) >= _STOP_GATE_BOUND:
             _annotate_forced_exit_once(cwd, plugin_root, sid, detail)
-        # Filesystem drain re-runs have the full local evidence needed to stay fail-closed after the
-        # retry budget. The github persisted-verdict path keeps the legacy bounded allow: it is a
-        # zero-GraphQL stale-state guard, not the full local re-proof path the filesystem hook can run.
-        blocker = (H.bounded_block if _read_backend(cwd) == "github"
-                   else H.bounded_block_fail_closed)
-        blocker(key, reason, bound=_STOP_GATE_BOUND)
+        # Both supported backends stay fail-closed after the retry budget is exhausted. The github
+        # path proves pending work from the persisted session-scoped drain verdict rather than a live
+        # board re-read, but that supported proof surface is still never permission to falsely finish.
+        H.bounded_block_fail_closed(key, reason, bound=_STOP_GATE_BOUND)
         return  # unreachable (bounded_block exits); defensive
 
     # OBLIGATION SATISFIED (m5 — clear the marker on a PROVEN-complete pipe). When this confirmed

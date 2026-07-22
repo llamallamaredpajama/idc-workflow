@@ -14,7 +14,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { evaluateBashForRole, evaluatePathForRole, type IdcRole } from "../../runtime/pi/extensions/idc-role-harness.ts";
+import registerRoleHarness, { evaluateBashForRole, evaluatePathForRole, type IdcRole } from "../../runtime/pi/extensions/idc-role-harness.ts";
 
 const PLUGIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const CONTRACT = path.join(PLUGIN, "scripts", "idc_command_contract.py");
@@ -99,6 +99,31 @@ function authorizeActions(actions: Array<"write" | "edit">) {
 	]);
 }
 
+async function expectRegisteredHandlerPreservesAction() {
+	type Handler = (event: Record<string, unknown>, ctx: Record<string, unknown>) => Promise<{ block?: boolean; reason?: string } | undefined>;
+	const handlers = new Map<string, Handler>();
+	const fakePi = {
+		registerFlag: () => undefined,
+		getFlag: (name: string) => name === "idc-role" ? "build-impl" : name === "idc-guard-mode" ? "block" : undefined,
+		on: (event: string, handler: Handler) => handlers.set(event, handler),
+	};
+	await registerRoleHarness(fakePi as never);
+	const handler = handlers.get("tool_call");
+	if (!handler) throw new Error("[ACTION-HANDLER] idc-role-harness did not register a tool_call handler");
+
+	authorizeActions(["edit"]);
+	const ctx = { cwd: CWD, hasUI: false, ui: { notify: () => undefined } };
+	const editResult = await handler({ toolName: "edit", toolCallId: "edit-only", input: { path: inRepo("src/x.ts"), oldText: "x", newText: "y" } }, ctx);
+	if (editResult?.block) {
+		throw new Error(`[ACTION-HANDLER] edit-only authorization should ALLOW the registered Edit event, got BLOCK :: ${editResult.reason}`);
+	}
+	const writeResult = await handler({ toolName: "write", toolCallId: "write-denied", input: { path: inRepo("src/x.ts"), content: "x" } }, ctx);
+	if (writeResult?.block !== true) {
+		throw new Error("[ACTION-HANDLER] edit-only authorization should BLOCK the registered Write event");
+	}
+	restoreAuthState();
+}
+
 function expectPath(tag: string, attemptedPath: string, allow: boolean, reasonNeedle: string) {
 	const evaluation = evaluatePathForRole("build-impl", attemptedPath, CWD);
 	if (evaluation.allowed !== allow || (reasonNeedle && !evaluation.reason.includes(reasonNeedle))) {
@@ -128,6 +153,7 @@ authorizeActions(["write"]);
 expectPathAction("ACTION-WRITE-ONLY", "write", true);
 expectPathAction("ACTION-WRITE-ONLY", "edit", false);
 restoreAuthState();
+await expectRegisteredHandlerPreservesAction();
 
 // [AUTH] Pi must translate into the SAME shared Path Gate policy: removing or corrupting the
 // authorization / active-command evidence now blocks even otherwise-allowed source writes.

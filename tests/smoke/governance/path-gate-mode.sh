@@ -15,10 +15,18 @@ HOOKS="$GOV_PLUGIN/hooks/hooks.json"
 [ -f "$INTERLOCK" ] || gov_fail "idc_interlock_gate.py not found at $INTERLOCK"
 [ -f "$HOOKS" ] || gov_fail "hooks.json not found at $HOOKS"
 
-python3 - "$HOOKS" <<'PY' || gov_fail "NotebookEdit is not registered as a Path Gate PreToolUse transport"
-import json, sys
-hooks = json.load(open(sys.argv[1], encoding="utf-8"))["hooks"]["PreToolUse"]
-assert any(entry.get("matcher") == "NotebookEdit" for entry in hooks)
+python3 - "$HOOKS" <<'PY' || gov_fail "hooks.json does not honestly register/describe the Path Gate mutation transports"
+import json, re, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+hooks = doc["hooks"]["PreToolUse"]
+notebook = next((entry for entry in hooks if entry.get("matcher") == "NotebookEdit"), None)
+assert notebook is not None, "NotebookEdit matcher absent"
+commands = [hook.get("command", "") for hook in notebook.get("hooks", [])]
+assert any("idc_interlock_gate_hook.sh" in command for command in commands), "NotebookEdit is not wired to the Path Gate interlock hook"
+description = doc.get("description", "")
+assert re.search(r"mode[^.]{0,80}off[^.]{0,120}(observe|allow)|(off)[^.]{0,120}(observe|allow)", description, re.I), "off-mode observe/allow posture absent"
+assert re.search(r"controlled[^.]{0,100}(app-locked)?[^.]{0,100}(hard[- ]deny|deni)", description, re.I), "controlled/app-locked hard-deny posture absent"
+assert "IDC_HOOKS_OBSERVE_ONLY=1" in description and re.search(r"debug[^.]{0,100}(downgrade|override)|downgrade[^.]{0,100}debug", description, re.I), "observe-only debug downgrade absent"
 PY
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT

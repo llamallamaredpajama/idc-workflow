@@ -86,6 +86,11 @@ have "plan.md" "operator[- ]performed|operator (performs|must perform|merges)" "
 have "plan.md" "open[^.]{0,100}(push|planning PR)|(push|report)[^.]{0,100}(operator|merge)" "limits Plan to opening/pushing/reporting the PR"
 absent "plan.md" "self-merge|gh pr merge" "forbidden raw/self-merge instruction"
 
+# ── Recirculator: prepares/pushes/reports the sync PR; merge is operator-performed ──────────
+have "recirculator.md" "operator[- ]performed|operator (performs|must perform|merges)" "makes sync-PR merge operator-performed until a sanctioned helper exists"
+have "recirculator.md" "prepare[^.]{0,120}push[^.]{0,120}(report|handoff)|(prepare|push|report)[^.]{0,120}(operator|merge)" "limits the Recirculator to preparing/pushing/reporting the sync PR"
+absent "recirculator.md" "automerge|auto-merge|self-merge|gh pr merge" "forbidden automatic/raw/self-merge instruction"
+
 # ── Shared transport boundary + controlled-mode limitations are explicit ───────────────────
 for transport in Bash Write Edit NotebookEdit; do
   if ! grep -q "$transport" "$WORKFLOW"; then

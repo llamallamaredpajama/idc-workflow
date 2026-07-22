@@ -1,7 +1,7 @@
 #!/bin/bash
 # path-gate-git-backstops.sh — the shared Path Gate also gates git pre-commit/pre-push backstops:
-# hooks install + verify cleanly, an authorized source-only change can commit/push, an unauthorized
-# commit that bypasses pre-commit is still blocked at pre-push, generic Bash writers are stopped
+# hooks install + verify cleanly, chained pre-push stdin/status are preserved, multi-commit new refs
+# cannot smuggle a protected lower commit, staged deletions are gated, generic Bash writers are stopped
 # before a `--no-verify` commit+push can bypass BOTH git hooks, explicit `git commit/push --no-verify`
 # is denied at PreToolUse, failing child git stderr/stdout is scrubbed at the read, and
 # deleted/divergent hook files are detected fail-closed.
@@ -41,6 +41,19 @@ STARTUP_SCRIPT="$WORK/startup-writer.sh"
 cat > "$STARTUP_SCRIPT" <<'SH'
 cp src/app.ts TRACKER.md
 SH
+
+HOOKS_DIR="$(git -C "$REPO" rev-parse --git-path hooks)"
+case "$HOOKS_DIR" in /*) : ;; *) HOOKS_DIR="$REPO/$HOOKS_DIR" ;; esac
+PRE_COMMIT_HOOK="$HOOKS_DIR/pre-commit"
+PRE_PUSH_HOOK="$HOOKS_DIR/pre-push"
+cat > "$PRE_PUSH_HOOK" <<'SH'
+#!/bin/sh
+HOOK_DIR="$(dirname "$0")"
+printf '%s\n%s\n' "$1" "$2" > "$HOOK_DIR/chained.args"
+cat > "$HOOK_DIR/chained.stdin"
+[ ! -f "$HOOK_DIR/chained.fail" ] || exit 23
+SH
+chmod +x "$PRE_PUSH_HOOK"
 
 python3 "$GIT_GATE" install-hooks --repo "$REPO" --plugin-root "$GOV_PLUGIN" >/dev/null \
   || gov_fail "could not install git backstops"
@@ -107,8 +120,76 @@ printf 'export const x = 2;\n' > "$REPO/src/app.ts"
 git -C "$REPO" add src/app.ts
 git -C "$REPO" commit -qm 'feat: authorized source change' \
   || gov_fail "authorized source commit was blocked by pre-commit"
-git -C "$REPO" push -u origin main >/dev/null 2>&1 \
+LOCAL_SHA="$(git -C "$REPO" rev-parse HEAD)"
+RUNTIME_TMP="$WORK/runtime-tmp"; mkdir -p "$RUNTIME_TMP"
+TMPDIR="$RUNTIME_TMP" git -C "$REPO" push -u origin main >/dev/null 2>&1 \
   || gov_fail "authorized source push was blocked by pre-push"
+printf 'refs/heads/main %s refs/heads/main %s\n' "$LOCAL_SHA" "$(printf '0%.0s' {1..40})" > "$WORK/expected.stdin"
+cmp -s "$WORK/expected.stdin" "$HOOKS_DIR/chained.stdin" \
+  || gov_fail "chained pre-push hook did not receive the exact pushed-ref stdin record"
+printf 'origin\n%s\n' "$REMOTE" > "$WORK/expected.args"
+cmp -s "$WORK/expected.args" "$HOOKS_DIR/chained.args" \
+  || gov_fail "chained pre-push hook did not receive the original hook arguments"
+[ -z "$(find "$RUNTIME_TMP" -mindepth 1 -maxdepth 1 -print -quit)" ] \
+  || gov_fail "managed pre-push hook left its stdin buffer behind"
+
+# A chained hook's failure status propagates exactly after both hooks see the same stdin bytes.
+touch "$HOOKS_DIR/chained.fail"
+printf 'refs/heads/main %s refs/heads/main %s\n' "$LOCAL_SHA" "$(printf '0%.0s' {1..40})" \
+  | TMPDIR="$RUNTIME_TMP" "$PRE_PUSH_HOOK" origin "$REMOTE" >/dev/null 2>&1
+RC=$?
+[ "$RC" -eq 23 ] || gov_fail "managed pre-push hook changed chained hook status 23 to $RC"
+cmp -s "$WORK/expected.stdin" "$HOOKS_DIR/chained.stdin" \
+  || gov_fail "chained failing pre-push hook did not receive exact replayed stdin"
+rm -f "$HOOKS_DIR/chained.fail"
+
+# A new branch must inspect every newly reachable commit, not only the tip: the protected mutation
+# below is deliberately in the lower commit while the tip changes only an authorized source path.
+git -C "$REPO" checkout -qb smuggled
+printf 'ticket: SMUGGLED\n' > "$REPO/TRACKER.md"
+git -C "$REPO" add TRACKER.md
+git -C "$REPO" commit --no-verify -qm 'test: protected lower commit'
+printf 'export const x = 3;\n' > "$REPO/src/app.ts"
+git -C "$REPO" add src/app.ts
+git -C "$REPO" commit --no-verify -qm 'test: ordinary tip commit'
+python3 "$PATH_GATE" authorize --repo "$REPO" --session "$SID" --command build \
+  --branch smuggled --ticket T-42 --graph-node NODE-7 \
+  --allow-action write --allow-action edit --allow-action git --allow-path src >/dev/null \
+  || gov_fail "could not authorize the new-branch smuggling fixture's ordinary source path"
+if git -C "$REPO" push origin smuggled >"$WORK/smuggled-push.out" 2>&1; then
+  REMOTE_TRACKER="$(git --git-dir="$REMOTE" show refs/heads/smuggled:TRACKER.md 2>/dev/null || true)"
+  gov_fail "pre-push allowed a protected lower commit on a new ref (remote TRACKER.md = $REMOTE_TRACKER)"
+fi
+if git --git-dir="$REMOTE" show-ref --verify --quiet refs/heads/smuggled; then
+  REMOTE_TRACKER="$(git --git-dir="$REMOTE" show refs/heads/smuggled:TRACKER.md 2>/dev/null || true)"
+  [ "$REMOTE_TRACKER" != 'ticket: SMUGGLED' ] \
+    || gov_fail "remote received ticket: SMUGGLED despite the controlled pre-push gate"
+fi
+grep -qi 'path gate' "$WORK/smuggled-push.out" \
+  || gov_fail "new-ref smuggling denial did not mention the Path Gate: $(cat "$WORK/smuggled-push.out")"
+git -C "$REPO" checkout -q main
+git -C "$REPO" reset --hard -q origin/main
+python3 "$PATH_GATE" authorize --repo "$REPO" --session "$SID" --command build \
+  --branch main --ticket T-42 --graph-node NODE-7 \
+  --allow-action write --allow-action edit --allow-action git --allow-path src >/dev/null \
+  || gov_fail "could not restore the main-branch Path Gate authorization"
+
+# Deletion-only staged changes are mutations too. Protected deletion denies; an authorized source
+# deletion remains allowed so the diff-filter cannot simply reject every D record.
+git -C "$REPO" rm -q TRACKER.md
+if git -C "$REPO" commit -qm 'test: protected deletion' >"$WORK/delete-protected.out" 2>&1; then
+  gov_fail "pre-commit allowed deletion-only removal of protected TRACKER.md"
+fi
+grep -qi 'path gate' "$WORK/delete-protected.out" \
+  || gov_fail "protected deletion denial did not mention the Path Gate: $(cat "$WORK/delete-protected.out")"
+git -C "$REPO" reset --hard -q HEAD
+printf 'remove me\n' > "$REPO/src/remove.ts"
+git -C "$REPO" add src/remove.ts
+git -C "$REPO" commit -qm 'test: add authorized deletion fixture' \
+  || gov_fail "could not add the ordinary authorized deletion fixture"
+git -C "$REPO" rm -q src/remove.ts
+git -C "$REPO" commit -qm 'test: ordinary authorized deletion' \
+  || gov_fail "pre-commit blocked an ordinary authorized source deletion"
 
 # Unauthorized change bypasses pre-commit with --no-verify but is still blocked at pre-push.
 printf 'ticket: bypass\n' > "$REPO/TRACKER.md"
@@ -143,10 +224,6 @@ deny_or_exploit "script-file writer" "bash '$WRITER_SCRIPT'"
 deny_or_exploit "source-file writer" "source '$WRITER_SCRIPT'"
 deny_or_exploit "nested BASH_ENV writer" "BASH_ENV='$STARTUP_SCRIPT' env -S 'bash -c \"echo hi\"'"
 
-PRE_COMMIT_HOOK="$(git -C "$REPO" rev-parse --git-path hooks/pre-commit)"
-PRE_PUSH_HOOK="$(git -C "$REPO" rev-parse --git-path hooks/pre-push)"
-case "$PRE_COMMIT_HOOK" in /*) : ;; *) PRE_COMMIT_HOOK="$REPO/$PRE_COMMIT_HOOK" ;; esac
-case "$PRE_PUSH_HOOK" in /*) : ;; *) PRE_PUSH_HOOK="$REPO/$PRE_PUSH_HOOK" ;; esac
 [ -f "$PRE_COMMIT_HOOK" ] || gov_fail "installed pre-commit hook missing at $PRE_COMMIT_HOOK"
 [ -f "$PRE_PUSH_HOOK" ] || gov_fail "installed pre-push hook missing at $PRE_PUSH_HOOK"
 
@@ -185,4 +262,21 @@ grep -Fq '[REDACTED]' "$WORK/git-helper.err" \
 grep -Fq 'while listing staged files' "$WORK/git-helper.err" \
   || gov_fail "git helper lost the useful git failure detail after scrubbing: $(cat "$WORK/git-helper.err")"
 
-echo "PASS: git pre-commit/pre-push backstops install + verify, block unauthorized pushes, deny explicit --no-verify suppression, prove generic Bash mutations are denied before a commit+push --no-verify bypass, scrub child git diagnostics, and fail closed on deleted/divergent hook files"
+# A shared/global hooksPath is outside this repository's own common Git directory. Installation must
+# fail before writing either managed hook there. A separate linked-worktree positive is in the focused
+# Python companion so this check cannot be weakened to a literal <worktree>/.git/hooks requirement.
+EXTERNAL_REPO="$WORK/external-repo"; EXTERNAL_HOOKS="$WORK/shared-hooks"
+mkdir -p "$EXTERNAL_REPO" "$EXTERNAL_HOOKS"
+git -C "$EXTERNAL_REPO" init -q
+git -C "$EXTERNAL_REPO" config core.hooksPath "$EXTERNAL_HOOKS"
+if python3 "$GIT_GATE" install-hooks --repo "$EXTERNAL_REPO" --plugin-root "$GOV_PLUGIN" \
+  >"$WORK/external-hooks.out" 2>&1; then
+  gov_fail "install-hooks accepted a hooksPath outside the repository common Git directory"
+fi
+[ -z "$(find "$EXTERNAL_HOOKS" -mindepth 1 -maxdepth 1 -print -quit)" ] \
+  || gov_fail "install-hooks wrote into the refused shared hooksPath"
+
+python3 "$(dirname "$0")/_path_gate_git_backstops_unit.py" \
+  || gov_fail "focused Git backstop unit/integration checks failed"
+
+echo "PASS: git backstops preserve chained hooks, inspect full new-ref history, gate deletions, install atomically only inside the common Git directory, scrub diagnostics, and fail closed on tampering"

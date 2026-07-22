@@ -1,36 +1,44 @@
 #!/bin/bash
-# interlock-privilege-wrappers.sh — sudo/doas/su cannot hide the incident interpreter FILE/payload.
+# interlock-privilege-wrappers.sh — sudo/doas/su cannot hide the incident interpreter FILE/payload,
+# and the wrapped raw write must still HARD DENY even with no active lifecycle record.
 set -uo pipefail
 . "$(dirname "$0")/lib.sh"
 
-python3 - "$GOV_PLUGIN" <<'PY' || gov_fail "privilege-wrapper indirection probe failed"
-import importlib.util
-import os
-import sys
-import tempfile
+GATE="$GOV_PLUGIN/scripts/hooks/idc_interlock_gate.py"
+FIXTURE="$GOV_PLUGIN/tests/smoke/fixtures/session-b7a93ff6/fire_gate.sh"
+[ -f "$GATE" ] || gov_fail "idc_interlock_gate.py not found at $GATE"
+[ -f "$FIXTURE" ] || gov_fail "incident fixture fire_gate.sh missing at $FIXTURE"
 
-plugin = sys.argv[1]
-path = os.path.join(plugin, "scripts", "hooks", "idc_interlock_gate.py")
-spec = importlib.util.spec_from_file_location("idc_interlock_gate_privilege", path)
-gate = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = gate
-spec.loader.exec_module(gate)
-fixture = os.path.join(plugin, "tests", "smoke", "fixtures", "session-b7a93ff6", "fire_gate.sh")
+WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
+REPO="$WORK/repo"; mkdir -p "$REPO/docs/workflow"
+printf 'backend: filesystem\n' > "$REPO/docs/workflow/tracker-config.yaml"
+SID="priv-none-$$-$(basename "$WORK")"
+ERR="$WORK/err"
 
-commands = [
-    "sudo bash %r" % fixture,
-    "sudo -u root sh %r" % fixture,
-    "doas zsh %r" % fixture,
-    "doas -u root bash %r" % fixture,
-    "su -c %r root" % ("bash %r" % fixture),
-    "su root -c %r" % ("sh %r" % fixture),
-    "su --command=%r root" % "gh issue create --title gate --body-file /tmp/body",
-]
-with tempfile.TemporaryDirectory() as repo:
-    for command in commands:
-        hit = gate.inspect_command(command, repo, plugin)
-        assert hit is not None, "privilege wrapper bypassed inspection: %s" % command
-        assert "fire_gate.sh" not in hit.subject or "reached indirectly" in hit.subject, hit
+emit() { CWD="$REPO" TOOL="Bash" CMD="$1" SID="$SID" python3 -c \
+  'import os,json;print(json.dumps({"cwd":os.environ["CWD"],"tool_name":os.environ["TOOL"],"tool_input":{"command":os.environ["CMD"]},"session_id":os.environ["SID"]}))'; }
 
-print("PASS: sudo/doas/su interpreter-file and payload forms are inspected or fail closed")
-PY
+gate() { OUT="$(emit "$1" | python3 "$GATE" "$GOV_PLUGIN" 2>"$ERR")"; RC=$?; }
+is_deny() { printf '%s' "$OUT" | grep -q '"permissionDecision": *"deny"'; }
+
+commands=(
+  "sudo bash '$FIXTURE'"
+  "sudo -u root sh '$FIXTURE'"
+  "doas zsh '$FIXTURE'"
+  "doas -u root bash '$FIXTURE'"
+  "su -c \"bash '$FIXTURE'\" root"
+  "su root -c \"sh '$FIXTURE'\""
+  'su --command="gh issue create --title gate --body-file /tmp/body" root'
+)
+
+for command in "${commands[@]}"; do
+  gate "$command"
+  [ "$RC" -eq 0 ] || gov_fail "privilege-wrapper gate exit was $RC, expected 0 for: $command"
+  is_deny || gov_fail "privilege wrapper bypassed hard denial outside a live authorization: [$command] stdout=[$OUT] stderr=[$(cat "$ERR")]"
+  printf '%s%s' "$OUT" "$(cat "$ERR")" | grep -q 'fire_gate.sh' \
+    && printf '%s%s' "$OUT" "$(cat "$ERR")" | grep -qv 'reached indirectly' \
+    && gov_fail "privilege-wrapper denial leaked the incident fixture path without the indirectness note: [$command]"
+  echo "  ok privilege wrapper denied: $command"
+done
+
+echo "PASS: sudo/doas/su interpreter-file and payload forms are still hard-denied with no active lifecycle record"

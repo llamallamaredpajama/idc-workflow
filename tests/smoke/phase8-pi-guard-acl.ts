@@ -5,9 +5,9 @@
 //
 // Red-when-broken: every assertion tagged [B1]/[B2]/[BR]/[M3]/[GIT]/[FORCE]/[MERGE]/[DANGER]
 // FAILS against the pre-fix guard (the guard-bypass review proved each bypass returns
-// allowed:true end-to-end); the [PRESERVE] cases must stay green before AND after. The merge
-// gate is BEHAVIORAL (the role prompt) — the guard enforces only role-scope + --auto/--admin/
-// force-push bounds, not a hard verdict interlock.
+// allowed:true end-to-end); the [PRESERVE] cases must stay green before AND after. U4's shared
+// Path Gate hardens the raw tracker/merge surfaces too: `gh project` / raw blocked-by writes /
+// `gh pr merge` are now denied across Pi unless routed through a sanctioned IDC helper.
 
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -70,9 +70,9 @@ const cases: Case[] = [
 	// ── [MERGE] gh pr merge is role-scoped; merge-on-green/PASS is BEHAVIORAL (the prompt) ──
 	{ tag: "MERGE", role: "think", kind: "bash", input: "gh pr merge 5", allow: false, note: "think never merges (admission is operator-merged)" },
 	{ tag: "MERGE", role: "build-impl", kind: "bash", input: "gh pr merge 7", allow: false, note: "implementer never merges" },
-	{ tag: "MERGE", role: "plan", kind: "bash", input: "gh pr merge 5 --squash", allow: true, note: "plan automerges its planning PR" },
-	{ tag: "MERGE", role: "recirculator", kind: "bash", input: "gh pr merge 5 --squash", allow: true, note: "recirculator automerges its sync PR" },
-	{ tag: "MERGE", role: "build-finish", kind: "bash", input: "gh pr merge 7 --squash --delete-branch", allow: true, note: "build-finish merges the build PR (green/PASS gate is behavioral, not guard-enforced)" },
+	{ tag: "MERGE", role: "plan", kind: "bash", input: "gh pr merge 5 --squash", allow: false, note: "raw gh pr merge is denied — use the sanctioned finisher/binder path" },
+	{ tag: "MERGE", role: "recirculator", kind: "bash", input: "gh pr merge 5 --squash", allow: false, note: "raw gh pr merge is denied — recirculator finishes through sanctioned helpers" },
+	{ tag: "MERGE", role: "build-finish", kind: "bash", input: "gh pr merge 7 --squash --delete-branch", allow: false, note: "raw gh pr merge is denied — build-finish must use the sanctioned finisher tail" },
 	{ tag: "MERGE", role: "build-finish", kind: "bash", input: "gh pr merge 7 --auto", allow: false, note: "--auto blocked for every merge role" },
 
 	// ── [REVIEW-ARTIFACT] build-review may write ONLY durable review artifacts ─────────────
@@ -95,9 +95,9 @@ const cases: Case[] = [
 	{ tag: "M2", role: "build-review", kind: "bash", input: "gh api repos/o/r/issues -f title=pwn", allow: false, note: "-f implies POST" },
 	{ tag: "M2", role: "build-review", kind: "bash", input: "gh api repos/o/r/issues", allow: true, note: "bare gh api is a GET read" },
 	{ tag: "M2", role: "build-review", kind: "bash", input: "gh api repos/o/r/issues -X GET", allow: true, note: "explicit GET stays a read" },
-	{ tag: "M2", role: "plan", kind: "bash", input: "gh project item-edit --id X --field-id F --single-select-option-id O", allow: true, note: "plan does tracker writes via the bounded gh project surface" },
+	{ tag: "M2", role: "plan", kind: "bash", input: "gh project item-edit --id X --field-id F --single-select-option-id O", allow: false, note: "raw tracker writes are denied — use the sanctioned transition/helper path" },
 	{ tag: "M2", role: "plan", kind: "bash", input: "gh api graphql -f query='mutation{ x }'", allow: false, note: "gh api graphql is an unbounded raw surface — denied for all" },
-	{ tag: "M2", role: "plan", kind: "bash", input: "gh api --method POST repos/o/r/issues/5/dependencies/blocked_by -F issue_id=9", allow: true, note: "the bounded blocked-by dependency endpoint is the one safelisted gh-api write" },
+	{ tag: "M2", role: "plan", kind: "bash", input: "gh api --method POST repos/o/r/issues/5/dependencies/blocked_by -F issue_id=9", allow: false, note: "raw blocked-by writes are denied — use the sanctioned transition/helper path" },
 
 	// ── [M3b] $VAR-bearing cross-repo target refused fail-closed ─────────────────────────────
 	{ tag: "M3b", role: "build-finish", kind: "bash", input: "git --git-dir=$PWD/../other/.git --work-tree=$PWD/../other commit -m x", allow: false, note: "$PWD indirection" },
@@ -200,7 +200,7 @@ for (const c of cases) {
 fs.rmSync(CWD, { recursive: true, force: true });
 
 if (failures === 0) {
-	console.log(`PASS: per-role guard ACL holds (${cases.length} cases: file-write fail-closed preserved; B1/B2/BR/M3 bypasses closed; build-review durable artifact lane scoped; scoped git grant + force-push/merge role-scoping enforced; merge-on-green/PASS is behavioral)`);
+	console.log(`PASS: per-role guard ACL holds (${cases.length} cases: file-write fail-closed preserved; B1/B2/BR/M3 bypasses closed; build-review durable artifact lane scoped; scoped git grant preserved; raw tracker/merge surfaces now fail closed through the shared Path Gate)`);
 	process.exit(0);
 }
 console.log(`FAIL: ${failures}/${cases.length} guard ACL assertions failed`);

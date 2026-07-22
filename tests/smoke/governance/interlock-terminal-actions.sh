@@ -6,22 +6,23 @@
 # item-delete`, a GraphQL board write) — bypasses the single write door (idc_transition.py /
 # idc_git_finish.py). The interlock gate intercepts it and names the exact door command.
 #
-# POSTURE (Task 3): a HARD DENY while the session owns an ACTIVE `/idc:*` command
-# (idc_ledger.active_commands, scoped to the payload's session); a WARN-INJECT (surface the
-# remediation, never block — ordinary governed-repo work is never bricked) OUTSIDE an active command;
-# IDC_HOOKS_OBSERVE_ONLY=1 downgrades any deny back to warn. It NEVER fires on the sanctioned path
-# (the finisher's own python call), on a read (`gh pr view` / `gh project item-list`), on a non-Bash
-# tool, or outside a governed repo. (Indirection-aware inspection is covered by the sibling
-# interlock-script-indirection.sh.)
+# POSTURE (U4 shared Path Gate): every raw governed mutation is a HARD DENY unless it comes through
+# the sanctioned door with a live authorization. Classifier-only/warn-only behavior is no longer a
+# valid safety posture: a raw `gh pr merge` / `gh issue close` / board mutation / issue-state write
+# must be denied even when NO active lifecycle record exists. IDC_HOOKS_OBSERVE_ONLY=1 is still the
+# one debug escape hatch that downgrades any deny back to a warning. The gate NEVER fires on the
+# sanctioned path (the finisher's own python call), on a read (`gh pr view` / `gh project item-list`),
+# on a non-Bash tool, or outside a governed repo. (Indirection-aware inspection is covered by the
+# sibling interlock-script-indirection.sh.)
 #
-# Red-when-broken: neuter idc_interlock_gate.classify (make it always return None) → the (W)/(D)/(B)/
+# Red-when-broken: neuter idc_interlock_gate.classify (make it always return None) → the (N)/(D)/(B)/
 # (C) fire-cases all stop firing → this scenario FAILs.
 #
-#   (W) raw `gh pr merge`, NO active command ⇒ WARN-INJECT naming idc_git_finish.py, NO deny [headline]
+#   (N) raw `gh pr merge`, NO active command ⇒ hard DENY naming idc_git_finish.py [headline]
 #   (D) same, an ACTIVE /idc:* command owned by the payload's session ⇒ hard DENY naming idc_git_finish.py
 #   (O) same active command + IDC_HOOKS_OBSERVE_ONLY=1 ⇒ downgraded to warn (no deny on stdout)
-#   (B) raw `gh project item-edit` (no active command) ⇒ interlock fires naming idc_transition.py
-#   (C) state-closing `gh api … -f state=closed` (no active command) ⇒ interlock fires (close remediation)
+#   (B) raw `gh project item-edit` (no active command) ⇒ hard DENY naming idc_transition.py
+#   (C) state-closing `gh api … -f state=closed` (no active command) ⇒ hard DENY (close remediation)
 #   (A) allow: `gh pr view` / `gh project item-list` / the finisher's own python call ⇒ NO output
 #   (T) a non-Bash tool ⇒ NO output (self-gated)
 #   (G) non-governed repo ⇒ NO output (repo-gated)
@@ -58,13 +59,15 @@ gate() { OUT="$(emit "$1" "$2" "$3" "$4" | python3 "$GATE" "$GOV_PLUGIN" 2>"$ERR
 
 MERGE="cd wt && gh pr merge 12 --squash --delete-branch"
 
-# ── (W) warn-inject when NO active command owns the session (headline) ───────────────────────────────
+is_deny() { printf '%s' "$OUT" | grep -q '"permissionDecision": *"deny"'; }
+
+# ── (N) hard deny even when NO active command owns the session (headline) ─────────────────────────
 gate "$REPO" Bash "$MERGE" "$SW"
-[ "$RC" -eq 0 ] || gov_fail "(W) gate exit was $RC, expected 0 (warn-inject never blocks)"
-[ -z "$OUT" ] || gov_fail "(W) warn-inject must NOT emit a permission decision on stdout: $OUT"
-grep -q 'IDC interlock' "$ERR" || gov_fail "(W) no interlock warning on stderr: $(cat "$ERR")"
-grep -q 'idc_git_finish.py' "$ERR" || gov_fail "(W) warning did not name the idc_git_finish.py remediation: $(cat "$ERR")"
-echo "  ok (W) raw gh pr merge, no active command ⇒ warn-inject naming idc_git_finish.py, never blocks [headline]"
+[ "$RC" -eq 0 ] || gov_fail "(N) gate exit was $RC, expected 0 (a hook signals via JSON, not exit code)"
+is_deny || gov_fail "(N) a raw merge without a live authorization was not denied: stdout=[$OUT] stderr=[$(cat "$ERR")]"
+printf '%s' "$OUT" | grep -q 'idc_git_finish.py' \
+  || gov_fail "(N) deny reason did not name the idc_git_finish.py remediation: $OUT"
+echo "  ok (N) raw gh pr merge, no active command ⇒ hard deny naming idc_git_finish.py [headline]"
 
 # ── (D) hard deny while the session owns an active /idc:* command ─────────────────────────────────────
 gate "$REPO" Bash "$MERGE" "$SD"
@@ -83,21 +86,21 @@ echo "  ok (O) IDC_HOOKS_OBSERVE_ONLY=1 downgrades the active-command deny to a 
 
 # ── (B) raw board mutation ⇒ interlock fires naming the engine ──────────────────────────────────────
 gate "$REPO" Bash "gh project item-edit --id ITEM --project-id PVT_x --field-id F --single-select-option-id O" "$SW"
-grep -q 'IDC interlock' "$ERR" || gov_fail "(B) raw gh project item-edit did not fire the interlock: $(cat "$ERR")"
-grep -q 'idc_transition.py' "$ERR" || gov_fail "(B) board-mutation warning did not name idc_transition.py: $(cat "$ERR")"
+is_deny || gov_fail "(B) raw gh project item-edit without a live authorization was not denied: stdout=[$OUT] stderr=[$(cat "$ERR")]"
+printf '%s' "$OUT" | grep -q 'idc_transition.py' || gov_fail "(B) board-mutation deny did not name idc_transition.py: $OUT"
 # The remediation must name the CURRENT engine op set: the #150 `dispose` terminal-disposition door
 # is present, and the REMOVED `retire` op is gone (else the suggested self-healing recovery command
 # would be rejected by the engine's argparse). Red-when-broken: revert the op list to name `retire`.
-grep -q 'dispose' "$ERR" || gov_fail "(B) board-mutation remediation must name the dispose op (the #150 terminal-disposition door)"
-grep -qw 'retire' "$ERR" && gov_fail "(B) board-mutation remediation still names the removed retire engine op (its argparse-invalid recovery defeats the interlock self-heal)"
-echo "  ok (B) raw gh project item-edit ⇒ interlock fires naming idc_transition.py (op list = current, dispose present, retire gone)"
+printf '%s' "$OUT" | grep -q 'dispose' || gov_fail "(B) board-mutation remediation must name the dispose op (the #150 terminal-disposition door)"
+printf '%s' "$OUT" | grep -qw 'retire' && gov_fail "(B) board-mutation remediation still names the removed retire engine op (its argparse-invalid recovery defeats the interlock self-heal)"
+echo "  ok (B) raw gh project item-edit ⇒ hard deny naming idc_transition.py (op list = current, dispose present, retire gone)"
 
 # ── (C) state-closing gh api ⇒ interlock fires (REST field form AND JSON-body form) ─────────────────
 gate "$REPO" Bash 'gh api repos/o/r/issues/5 -X PATCH -f state=closed' "$SW"
-grep -q 'IDC interlock' "$ERR" || gov_fail "(C) state-closing gh api (-f state=closed) did not fire: $(cat "$ERR")"
+is_deny || gov_fail "(C) state-closing gh api (-f state=closed) without a live authorization was not denied: stdout=[$OUT] stderr=[$(cat "$ERR")]"
 gate "$REPO" Bash 'gh api repos/o/r/issues/5 -X PATCH --input - <<< '\''{"state":"closed"}'\''' "$SW"
-grep -q 'IDC interlock' "$ERR" || gov_fail "(C) state-closing gh api (JSON body \"state\":\"closed\") did not fire: $(cat "$ERR")"
-echo "  ok (C) state-closing gh api (REST -f state=closed AND JSON body) ⇒ interlock fires (close remediation)"
+is_deny || gov_fail "(C) state-closing gh api (JSON body \"state\":\"closed\") without a live authorization was not denied: stdout=[$OUT] stderr=[$(cat "$ERR")]"
+echo "  ok (C) state-closing gh api (REST -f state=closed AND JSON body) ⇒ hard deny (close remediation)"
 
 # ── (A) allow the sanctioned path + reads (no false positives) ──────────────────────────────────────
 allow_case() {  # $1 = command that must NOT fire the interlock (even while a command is active: SD)
@@ -125,4 +128,4 @@ gate "$NONGOV" Bash "$MERGE" "$SD"
 grep -q 'IDC interlock' "$ERR" && gov_fail "(G) fired outside a governed repo: $(cat "$ERR")"
 echo "  ok (G) non-governed repo ⇒ repo-gated no-op"
 
-echo "PASS: PreToolUse interlocks — a raw gh pr merge / gh issue close / state-closing gh api / raw board mutation hard-denies while the session owns an active /idc:* command and warn-injects the exact door command otherwise (OBSERVE_ONLY downgrades any deny); the sanctioned finisher call, reads, non-Bash tools, and non-governed repos are untouched"
+echo "PASS: PreToolUse interlocks — a raw gh pr merge / gh issue close / state-closing gh api / raw board mutation hard-denies both without a live authorization and during an active /idc:* command (OBSERVE_ONLY downgrades any deny); the sanctioned finisher call, reads, non-Bash tools, and non-governed repos are untouched"

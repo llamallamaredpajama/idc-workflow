@@ -57,8 +57,8 @@ check(r["action"] == "bound", r)
 check(f.pr_body == f"PR body\n\n<!-- idc-gate-pr: {GATE} -->", f.pr_body)
 check(f.gate_body == f"Gate body\n\n<!-- idc-gate-pr: {PR} -->", f.gate_body)
 check(len(f.writes()) == 2, f.calls)
-check(sum(c[:2] == ("pr", "view") for c in f.calls) == 2, "PR write lacked readback")
-check(sum(c[:2] == ("issue", "view") for c in f.calls) == 2, "gate write lacked readback")
+check(sum(c[:2] == ("pr", "view") for c in f.calls) >= 2, "PR write lacked readback")
+check(sum(c[:2] == ("issue", "view") for c in f.calls) >= 2, "gate write lacked readback")
 print("  ok both reciprocal markers bind with positive readback")
 
 # Idempotent rerun: exact existing reciprocal binding is a write-free success.

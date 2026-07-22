@@ -275,7 +275,7 @@ def _read_backend(cwd):
 # to CARRY those lines — they were being dropped, and the sentence pointed at output the operator
 # could no longer see. Naming the items is the difference between a cure they can run and a re-run
 # they have to do first just to find out what broke.
-_FINDING_TOKENS = ("finish-coherence", "live", "acceptance")
+_FINDING_TOKENS = ("finish-coherence", "journal", "live", "acceptance")
 
 
 def _drain_detail(stdout):
@@ -472,6 +472,12 @@ def _block_reason(detail, pending_taints, plugin_root=""):
                "board is claiming work that is done, so the run is NOT complete.")
         cure = ("repair the named items through the existing door — `/idc:janitor --apply-safe` (batch) "
                 "or `idc_git_finish.py --close-only` per item; both are safe to re-run")
+    elif "journal-gap" in detail:
+        why = ("The build lane is drained but the canonical transition journal does NOT replay to the "
+               f"current board ({_where(detail, 'journal', 'journal: gap …')}) — sanctioned history and live state disagree, "
+               "so the run is NOT complete.")
+        cure = ("repair the divergence through the existing doors — inspect `idc_journal_replay.py`, then "
+                "reconcile via `/idc:janitor --check-journal-divergence` or the appropriate sanctioned finish/transition path")
     elif "live-gap" in detail:
         why = ("The build lane is drained but a live surface this repo DECLARES has no current passing "
                f"verification evidence ({_where(detail, 'live', 'live: gap <name>')}) — its verify "
@@ -642,9 +648,12 @@ def _gate(payload, plugin_root):
         # loud-fail can never desync (a hardcoded DEFAULT_BOUND here would drift if the bound changed).
         if H.counter_get(key) >= _STOP_GATE_BOUND:
             _annotate_forced_exit_once(cwd, plugin_root, sid, detail)
-        # bounded_block: block for the first N=3 stops, then loud-fail-ALLOW (never an infinite nag;
-        # Claude Code's `stop_hook_active` is the second backstop). Reuses the shared counter + bound.
-        H.bounded_block(key, reason, bound=_STOP_GATE_BOUND)
+        # Filesystem drain re-runs have the full local evidence needed to stay fail-closed after the
+        # retry budget. The github persisted-verdict path keeps the legacy bounded allow: it is a
+        # zero-GraphQL stale-state guard, not the full local re-proof path the filesystem hook can run.
+        blocker = (H.bounded_block if _read_backend(cwd) == "github"
+                   else H.bounded_block_fail_closed)
+        blocker(key, reason, bound=_STOP_GATE_BOUND)
         return  # unreachable (bounded_block exits); defensive
 
     # OBLIGATION SATISFIED (m5 — clear the marker on a PROVEN-complete pipe). When this confirmed

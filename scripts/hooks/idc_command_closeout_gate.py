@@ -54,6 +54,19 @@ def _gate(payload, plugin_root):
     if not session_id:
         H.allow()
 
+    # A PRESENT but unreadable / identity-damaged ledger is INDETERMINATE, not "no open command".
+    # The tolerant reader is right for hints and wrong for a stop that would CERTIFY a clean walk-away,
+    # so an existing untrustworthy ledger fails closed here. (No ledger yet is fine — that is the
+    # honest empty state for a repo that never opened a command record.)
+    ledger_ok, ledger_detail = idc_ledger.probe(cwd)
+    if not ledger_ok:
+        key = f"command-closeout.{session_id}.ledger"
+        H.bounded_block_fail_closed(
+            key,
+            "IDC command closeout gate: the obligations ledger for this governed repo is present but "
+            f"cannot be trusted ({ledger_detail}). Failing closed — repair the ledger / rerun the "
+            "sanctioned recovery command, then stop.")
+
     # BEFORE any record is found — a read error here fails OPEN (never trap a non-IDC session).
     try:
         active = idc_ledger.active_commands(cwd, session_id)
@@ -70,11 +83,11 @@ def _gate(payload, plugin_root):
     command = sorted(str(c.get("command")) for c in active)[0]
     key = f"command-closeout.{session_id}.{command}"
     try:
-        H.bounded_block(key, _block_reason(session_id, command, plugin_root))
+        H.bounded_block_fail_closed(key, _block_reason(session_id, command, plugin_root))
     except SystemExit:
         raise
     except Exception as exc:  # noqa: BLE001 — an error AFTER a record was found is fail-closed
-        H.bounded_block(
+        H.bounded_block_fail_closed(
             key,
             "IDC command closeout gate: an open command record exists for this session but its "
             f"state could not be verified ({exc}). Failing closed — close the command via "

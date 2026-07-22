@@ -25,7 +25,7 @@ python3 - "$GOV_PLUGIN/scripts" "$REPO" <<'PY' || fail "github gate-approved uni
 import sys, json
 sys.path.insert(0, sys.argv[1])
 repo = sys.argv[2]
-import idc_transition as E, idc_gh_board as B, idc_gh_close as GC
+import idc_transition as E, idc_gh_board as B, idc_gh_close as GC, idc_pr_gate_bind as PB
 
 # Board fixtures: issue# -> {title, labels, body}; pr# -> {state, mergedAt, body}.
 GATE_PR = lambda n: f"<!-- idc-gate-pr: {n} -->"
@@ -115,6 +115,7 @@ def fake_gh(args, r):
         return json.dumps(PRS[args[2]])
     raise AssertionError(f"unexpected gh call: {args}")
 B._gh = fake_gh
+PB._gh_json = lambda args, repo: json.loads(fake_gh(args, repo))
 FETCHES = {}
 def fake_fetch(iid, r):
     FETCHES[iid] = FETCHES.get(iid, 0) + 1

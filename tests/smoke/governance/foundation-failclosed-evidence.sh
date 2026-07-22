@@ -59,20 +59,21 @@ git_common_dir() {
 
 # ── 1. Stop closeout stays FAIL-CLOSED after the repair budget is exhausted ───────────────────────
 R1="$WORK/closeout-bound"
+SID1="closeout-foundation-$$"
 mkdir -p "$R1"
 mkrepo "$R1"
-python3 - "$GOV_PLUGIN/scripts/hooks" "$R1" <<'PY'
+python3 - "$GOV_PLUGIN/scripts/hooks" "$R1" "$SID1" <<'PY'
 import sys
 sys.path.insert(0, sys.argv[1])
 import idc_ledger
-ok = idc_ledger.command_start(sys.argv[2], "S-CLOSEOUT", "autorun", "0.0.0", "digest", "user")
+ok = idc_ledger.command_start(sys.argv[2], sys.argv[3], "autorun", "0.0.0", "digest", "user")
 if not ok:
     raise SystemExit("could not open the active command record")
 PY
 LOUD_ON=""
 for i in 1 2 3 4; do
   ERR="$WORK/closeout-$i.err"
-  OUT="$(closeout_payload "$R1" S-CLOSEOUT | python3 "$CLOSEOUT_GATE" "$GOV_PLUGIN" 2>"$ERR")"
+  OUT="$(closeout_payload "$R1" "$SID1" | python3 "$CLOSEOUT_GATE" "$GOV_PLUGIN" 2>"$ERR")"
   blocks "$OUT" \
     || fail "(1) closeout gate allowed stop attempt $i for an open command record — the bound must never become permission to falsely finish"
   if grep -qi 'LOUD-FAIL' "$ERR"; then

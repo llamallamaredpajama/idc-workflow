@@ -15,6 +15,9 @@
 set -uo pipefail
 . "$(dirname "$0")/lib.sh"
 gov_engine_env
+git -C "$REPO" init -q -b main >/dev/null 2>&1
+git -C "$REPO" config user.email test@example.com >/dev/null 2>&1
+git -C "$REPO" config user.name Test >/dev/null 2>&1
 
 CHECK="$GOV_PLUGIN/scripts/idc_review_verdict_check.py"
 [ -f "$CHECK" ] || fail "idc_review_verdict_check.py not found at $CHECK"

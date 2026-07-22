@@ -74,6 +74,13 @@ function mutateAuth(mutator: (value: Record<string, unknown>) => void) {
 	fs.writeFileSync(AUTH_PATH, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
+function expectPathAction(tag: string, action: "write" | "edit", allow: boolean) {
+	const evaluation = evaluatePathForRole("build-impl", inRepo("src/x.ts"), CWD, {}, action);
+	if (evaluation.allowed !== allow) {
+		throw new Error(`[${tag}] expected ${action} to ${allow ? "ALLOW" : "BLOCK"}, got ${evaluation.allowed ? "ALLOW" : "BLOCK"} :: ${evaluation.reason}`);
+	}
+}
+
 function expectPath(tag: string, attemptedPath: string, allow: boolean, reasonNeedle: string) {
 	const evaluation = evaluatePathForRole("build-impl", attemptedPath, CWD);
 	if (evaluation.allowed !== allow || (reasonNeedle && !evaluation.reason.includes(reasonNeedle))) {
@@ -91,6 +98,17 @@ if (!observedTrackerWrite.allowed) {
 	throw new Error(`[MODE-OFF] expected shared-core observe to ALLOW raw tracker write, got BLOCK :: ${observedTrackerWrite.reason}`);
 }
 fs.writeFileSync(path.join(CWD, "WORKFLOW-config.yaml"), "pathway_enforcement:\n  mode: controlled\n");
+restoreAuthState();
+
+// [ACTION] Pi must preserve the actual Write/Edit tool action when consulting the shared gate.
+// An action-specific grant is not interchangeable with the other mutation transport.
+mutateAuth((value) => { value.allowed_actions = ["edit"]; });
+expectPathAction("ACTION-EDIT-ONLY", "edit", true);
+expectPathAction("ACTION-EDIT-ONLY", "write", false);
+restoreAuthState();
+mutateAuth((value) => { value.allowed_actions = ["write"]; });
+expectPathAction("ACTION-WRITE-ONLY", "write", true);
+expectPathAction("ACTION-WRITE-ONLY", "edit", false);
 restoreAuthState();
 
 // [AUTH] Pi must translate into the SAME shared Path Gate policy: removing or corrupting the

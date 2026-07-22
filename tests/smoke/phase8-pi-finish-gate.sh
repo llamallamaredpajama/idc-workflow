@@ -20,6 +20,12 @@ have() {
     fails=$((fails+1))
   fi
 }
+absent() {
+  if grep -qiE "$1" "$FIN"; then
+    echo "FORBIDDEN in build-finisher.md: $2 (/$1/)"
+    fails=$((fails+1))
+  fi
+}
 
 # A durable verdict artifact is the primary non-LLM handoff when coms-net is absent.
 have 'docs/workflow/code-reviews' 'reads the durable review artifact directory'
@@ -32,12 +38,15 @@ have '(missing|absent|malformed|unreadable)[^.]{0,120}(verdict|review)[^.]{0,160
 have '(never|do not|must not)[^.]{0,80}assum(e|ed|ption)[^.]{0,120}(PASS|GREEN|green|pass)' 'explicitly forbids assumed PASS/GREEN'
 have '(coms-net|coms_net)[^.]{0,120}(unavailable|fails|missing|cannot connect|no server)[^.]{0,160}(do NOT merge|do not merge|must not merge|refuse|blocked-stop|fail-closed)' 'coms-net failure is not a merge bypass'
 
-# Merge requires both review verdict and real test evidence.
+# Readiness requires both review verdict and real test evidence; the operator performs the merge
+# until the sanctioned helper lands.
 have '(PASS-WITH-NITS|PASS)[^.]{0,160}(tests|verification)[^.]{0,160}(green|pass|passed)' 'requires green test evidence in addition to a green verdict'
-have 'gh pr merge' 'still performs the merge after the strict gate is satisfied'
+have 'operator[- ]performed|operator (performs|must perform|merges)' 'makes merge operator-performed'
+have 'prepare[^.]{0,120}push[^.]{0,120}(report|handoff)|(prepare|push|report)[^.]{0,120}(operator|merge)' 'prepares, pushes, and reports evidence for the operator'
+absent 'gh pr merge' 'must not instruct the raw merge command while the shared gate denies it'
 
 if [ "$fails" -eq 0 ]; then
-  echo "PASS: Pi build-finish is a strict merge gate — no durable PASS/PASS-WITH-NITS verdict + green tests, no merge; coms-net failure cannot become assumed green"
+  echo "PASS: Pi build-finish is a strict readiness gate — no durable PASS/PASS-WITH-NITS verdict + green tests, no operator merge handoff; raw merge is not instructed"
   exit 0
 fi
 echo "FAIL: $fails Pi build-finish gate invariant(s) unmet"

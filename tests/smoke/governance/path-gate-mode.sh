@@ -9,9 +9,17 @@ set -uo pipefail
 PATH_GATE="$GOV_PLUGIN/scripts/idc_path_gate.py"
 GIT_GATE="$GOV_PLUGIN/scripts/idc_git_path_gate.py"
 INTERLOCK="$GOV_PLUGIN/scripts/hooks/idc_interlock_gate.py"
+HOOKS="$GOV_PLUGIN/hooks/hooks.json"
 [ -f "$PATH_GATE" ] || gov_fail "idc_path_gate.py not found at $PATH_GATE"
 [ -f "$GIT_GATE" ] || gov_fail "idc_git_path_gate.py not found at $GIT_GATE"
 [ -f "$INTERLOCK" ] || gov_fail "idc_interlock_gate.py not found at $INTERLOCK"
+[ -f "$HOOKS" ] || gov_fail "hooks.json not found at $HOOKS"
+
+python3 - "$HOOKS" <<'PY' || gov_fail "NotebookEdit is not registered as a Path Gate PreToolUse transport"
+import json, sys
+hooks = json.load(open(sys.argv[1], encoding="utf-8"))["hooks"]["PreToolUse"]
+assert any(entry.get("matcher") == "NotebookEdit" for entry in hooks)
+PY
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 REPO="$WORK/repo"; REMOTE="$WORK/remote.git"
@@ -52,7 +60,12 @@ import json, os
 tool = os.environ["TOOL"]
 value = os.environ["VALUE"]
 payload = {"cwd": os.environ["REPO"], "tool_name": tool, "session_id": os.environ["SID"]}
-payload["tool_input"] = {"command": value} if tool == "Bash" else {"file_path": value}
+if tool == "Bash":
+    payload["tool_input"] = {"command": value}
+elif tool == "NotebookEdit":
+    payload["tool_input"] = {"notebook_path": value}
+else:
+    payload["tool_input"] = {"file_path": value}
 print(json.dumps(payload))
 PY
 }
@@ -87,6 +100,7 @@ printf '%s' "$OUT" | grep -q '"allowed": *true' || gov_fail "off-mode core did n
 printf '%s' "$OUT" | grep -q '"observe"' || gov_fail "off-mode core did not preserve the would-be-denial reason: $OUT"
 observe_case Write "$REPO/TRACKER.md"
 observe_case Edit "$REPO/src/x.ts"
+observe_case NotebookEdit "$REPO/src/demo.ipynb"
 observe_case Bash 'gh issue create --title gate --body x'
 
 python3 "$GIT_GATE" pre-commit --repo "$REPO" --plugin-root "$GOV_PLUGIN" >"$WORK/off-pre-commit.out" 2>"$WORK/off-pre-commit.err"
@@ -104,6 +118,7 @@ core_eval
 printf '%s' "$OUT" | grep -q '"allowed": *false' || gov_fail "controlled-mode core did not preserve hard denial: $OUT"
 deny_case Write "$REPO/TRACKER.md"
 deny_case Edit "$REPO/src/x.ts"
+deny_case NotebookEdit "$REPO/src/demo.ipynb"
 deny_case Bash 'gh issue create --title gate --body x'
 
 python3 "$GIT_GATE" pre-commit --repo "$REPO" --plugin-root "$GOV_PLUGIN" >"$WORK/controlled-pre-commit.out" 2>"$WORK/controlled-pre-commit.err"
@@ -135,4 +150,4 @@ for config_case in unknown missing unreadable; do
   [ "$config_case" = unreadable ] && chmod 600 "$REPO/WORKFLOW-config.yaml"
 done
 
-echo "PASS: Path Gate off mode observes across core/Claude/git; controlled and app-locked hard-deny; observe-only and safe config fallbacks remain non-blocking"
+echo "PASS: Path Gate off mode observes across core/Claude/git (including NotebookEdit); controlled and app-locked hard-deny; observe-only and safe config fallbacks remain non-blocking"

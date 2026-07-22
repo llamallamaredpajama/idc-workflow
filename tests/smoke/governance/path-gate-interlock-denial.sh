@@ -49,6 +49,8 @@ if tool == "Bash":
     payload["tool_input"] = {"command": value}
 elif tool == "Write":
     payload["tool_input"] = {"file_path": value, "content": "x"}
+elif tool == "NotebookEdit":
+    payload["tool_input"] = {"notebook_path": value, "new_source": "x"}
 else:
     payload["tool_input"] = {"file_path": value}
 print(json.dumps(payload))
@@ -190,6 +192,7 @@ deny_case Bash "$RAW_TRACKER_BASH_ENV_NESTED" "$SID_NONE"
 deny_case Bash "$PATCH_TRACKER" "$SID_NONE"
 deny_case Write "$REPO/TRACKER.md" "$SID_NONE"
 deny_case Edit "$REPO/src/x.ts" "$SID_NONE"
+deny_case NotebookEdit "$REPO/src/demo.ipynb" "$SID_NONE"
 deny_case Bash 'gh issue create --title gate --body-file /tmp/body' "$SID_NONE"
 
 authorize_build

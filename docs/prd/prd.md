@@ -16,10 +16,17 @@ is **autonomy with one consent point**: the operator casts an idea into the stre
 flows to merged, tested code on its own; the stream stops to ask exactly once — when the
 product's user-facing function is about to change.
 
-v2 is **guardrails, not train tracks**. v1 hand-held a weaker model with standing
-reviewer/fixer/researcher roles, multi-pass plan reviews, a claim-state machine, and
-per-edit gates. v2 trusts the model and keeps only the guardrails that catch real
-derailments.
+v2 keeps the model's coding method flexible while hardening the route by which repository-changing work becomes accepted state.
+
+**Pathway guardrails, not coding prescriptions.** IDC does not dictate how an agent designs, plans, or writes code. It does require governed work to enter through Think, Intake, Recirculation, Plan, Build, or an operational recovery route; it keeps the tracker synchronized as part of every transition and refuses unproven completion.
+
+IDC names three `pathway_enforcement.mode` profiles: `off | controlled | app-locked`.
+
+`controlled` blocks supported-runtime off-path mutations and blocks merge when pathway evidence is missing or inconsistent, but it cannot stop a machine administrator from removing hooks, editing `.git`, or disabling GitHub rules.
+
+`app-locked` adds a GitHub App as the sole tracker writer and trusted check source; it closes the ordinary-token tracker-write gap but still does not protect against repository or organization administrators removing the rules or the App.
+
+The filesystem tracker remains useful for hermetic tests and local demonstrations. It must stay `off` and makes no hard pathway-security claim.
 
 ## 2. Users
 
@@ -71,10 +78,7 @@ Recirculator reuses this same gate for any backflow needing a requirements chang
 **Nothing else in the system asks for permission.**
 
 ### R7 — Install & health (`/idc:init`, `/idc:doctor`)
-`/idc:init` scaffolds a repo for IDC v2: the governance contract, config with
-codebase-derived domains + tier-symbolic model routing, a four-field tracker board, and
-install receipts enabling clean uninstall/upgrade. `/idc:doctor` is a read-only health
-check of those surfaces.
+`/idc:init` scaffolds a repo for IDC v2: the governance contract, config with codebase-derived domains + tier-symbolic model routing, the documented `pathway_enforcement` stanza, a four-field tracker board, and install receipts enabling clean uninstall/upgrade. `/idc:doctor` is a read-only health check of those surfaces.
 
 ### R8 — Runtime-neutral
 The pipeline runs on Claude Code or Codex through **one thin adapter per runtime** over a

@@ -9,13 +9,13 @@
   <img src="https://img.shields.io/badge/Claude%20Code-plugin-e8e7df?style=flat-square&labelColor=1a1a1a" alt="Claude Code plugin">
   <img src="https://img.shields.io/badge/commands-13-e8e7df?style=flat-square&labelColor=1a1a1a" alt="13 commands">
   <img src="https://img.shields.io/badge/runtime-Claude%20%C2%B7%20Codex%20%C2%B7%20Pi-e8e7df?style=flat-square&labelColor=1a1a1a" alt="runtimes">
-  <img src="https://img.shields.io/badge/guardrails-5-c8dc00?style=flat-square&labelColor=1a1a1a" alt="5 guardrails">
+  <img src="https://img.shields.io/badge/pathway-off%20%7C%20controlled%20%7C%20app--locked-c8dc00?style=flat-square&labelColor=1a1a1a" alt="pathway enforcement profiles">
   <img src="https://img.shields.io/badge/license-MIT-e8e7df?style=flat-square&labelColor=1a1a1a" alt="MIT license">
 </p>
 
 <p align="center">
   <b>A <a href="https://claude.com/claude-code">Claude Code</a> plugin that carries software from a raw idea to merged, reviewed code —</b><br>
-  a guardrail-framed, tracker-driven, goal-contract pipeline. <i>Guardrails, not train tracks.</i>
+  a guardrail-framed, tracker-driven, goal-contract pipeline. <i>Pathway guardrails, not coding prescriptions.</i>
 </p>
 
 ---
@@ -60,7 +60,7 @@ remains one-way, iterative, and observable through the dashboard.
 ## Table of contents
 
 - [What IDC is](#what-idc-is)
-- [The five guardrails](#the-five-guardrails)
+- [Pathway guardrails and enforcement profiles](#pathway-guardrails-and-enforcement-profiles)
 - [Install](#install)
 - [Requirements](#requirements)
 - [Quickstart](#quickstart)
@@ -93,18 +93,17 @@ the pipeline intervenes only where a real derailment would otherwise ship.
 > **Autorun** runs the whole pipeline: admitted considerations → plan → build eligible waves as they
 > land → exit when nothing actionable remains (an open Think PR is reported + skipped, never bypassed).
 
-## The five guardrails
+## Pathway guardrails and enforcement profiles
 
-IDC v3 trusts the model and keeps only the parts of the pipeline that catch real derailments. There
-are exactly **five**:
+**Pathway guardrails, not coding prescriptions.** IDC does not dictate how an agent designs, plans, or writes code. It does require governed work to enter through Think, Intake, Recirculation, Plan, Build, or an operational recovery route; it keeps the tracker synchronized as part of every transition and refuses unproven completion.
 
-| # | Guardrail (the part) | What it prevents |
-|---|-----------|------------------|
-| 1 | **The one gate at the top** (the Think PR admitting the PRD + TRD) | Your product's function — and, on brownfield, its architecture — never changes without your consent, asked once before any work begins. |
-| 2 | **Parallel waves on separate files** (the matrix + sequencer) | Wide builds never collide. |
-| 3 | **The review stage** (real verification surfaces) | Nothing ships that isn't green on genuine functional tests. |
-| 4 | **The Recirculator** (controlled return path) | Docs and reality never silently diverge. |
-| 5 | **One-way flow + the metered dashboard** | The chain stays auditable end to end. |
+IDC names three `pathway_enforcement.mode` profiles: `off | controlled | app-locked`.
+
+- `off` preserves an explicit non-enforcing development/test setup and makes no pathway-security claim.
+- `controlled` blocks supported-runtime off-path mutations and blocks merge when pathway evidence is missing or inconsistent, but it cannot stop a machine administrator from removing hooks, editing `.git`, or disabling GitHub rules.
+- `app-locked` adds a GitHub App as the sole tracker writer and trusted check source; it closes the ordinary-token tracker-write gap but still does not protect against repository or organization administrators removing the rules or the App.
+
+The filesystem tracker remains useful for hermetic tests and local demonstrations. It must stay `off` and makes no hard pathway-security claim.
 
 **The one gate.** At the **end of Think**, the PRD + TRD ride a **Think PR** — they stay **draft until
 you merge it** (merge = approval = admission). You get a push notification with a plain-terms summary +
@@ -382,7 +381,7 @@ llms.txt          agent-readable index of the whole plugin
 
 <p align="center">
   <br>
-  <img src="https://img.shields.io/badge/%E2%97%89-guardrails%2C%20not%20train%20tracks-1a1a1a?style=flat-square&labelColor=c8dc00" alt="guardrails, not train tracks">
+  <img src="https://img.shields.io/badge/%E2%97%89-pathway%20guardrails%2C%20not%20coding%20prescriptions-1a1a1a?style=flat-square&labelColor=c8dc00" alt="pathway guardrails, not coding prescriptions">
   <br><br>
   <sub>Visual identity in the editorial language of the <a href="https://www.oliverwymanforum.com">Oliver Wyman Forum</a> — paper ground, charcoal ink, and a single chartreuse accent.</sub>
 </p>

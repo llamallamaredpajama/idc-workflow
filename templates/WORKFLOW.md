@@ -16,12 +16,11 @@
 > turbine (§3.1). This is the friendly picture; the numbered sections below are the authoritative
 > contract.
 
-IDC carries an idea from a raw thought to merged, tested code. It is built on
-**guardrails, not train tracks**: the model is trusted to do the work; the process
-intervenes only where a real derailment would otherwise ship. There are exactly five
-guardrails — the one requirements gate at the end of Think (§2), matrix deconfliction (§4.2),
-real verification surfaces (§4.3), recirculator drift-healing (§4.4), and one-way flow through
-the glass wall (§1.2). Everything else flows autonomously.
+IDC carries an idea from a raw thought to merged, tested code.
+
+**Pathway guardrails, not coding prescriptions.** IDC does not dictate how an agent designs, plans, or writes code. It does require governed work to enter through Think, Intake, Recirculation, Plan, Build, or an operational recovery route; it keeps the tracker synchronized as part of every transition and refuses unproven completion.
+
+Everything else flows autonomously.
 
 ## 1. Canonical chain & flow
 
@@ -74,6 +73,16 @@ pillar plans. All five survive as files for traceability. **The requirements lay
 (always) and the TRD when `gating.trd: on` — are gated at the end of Think (§2) and authored
 there; every plan-layer doc below them is drafted, updated, and merged autonomously** by Plan
 and the Recirculator.
+
+### 1.4 Pathway enforcement profiles
+
+IDC names three `pathway_enforcement.mode` profiles: `off | controlled | app-locked`.
+
+`controlled` blocks supported-runtime off-path mutations and blocks merge when pathway evidence is missing or inconsistent, but it cannot stop a machine administrator from removing hooks, editing `.git`, or disabling GitHub rules.
+
+`app-locked` adds a GitHub App as the sole tracker writer and trusted check source; it closes the ordinary-token tracker-write gap but still does not protect against repository or organization administrators removing the rules or the App.
+
+The filesystem tracker remains useful for hermetic tests and local demonstrations. It must stay `off` and makes no hard pathway-security claim.
 
 ## 2. The one gate — requirements admission (the Think PR)
 

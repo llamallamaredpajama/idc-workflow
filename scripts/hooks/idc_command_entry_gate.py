@@ -32,7 +32,9 @@ stderr warning + allow.
 
 Invocation: idc_command_entry_gate.py <PLUGIN_ROOT>   (UserPromptExpansion payload on stdin).
 """
+import contextlib
 import os
+import subprocess
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -42,6 +44,7 @@ import idc_hook_lib as H  # noqa: E402
 import idc_plugin_freshness as freshness  # noqa: E402
 import idc_command_contract as C  # noqa: E402
 import idc_ledger as L  # noqa: E402
+import idc_path_gate as PG  # noqa: E402
 
 # Fail-closed on an unverifiable freshness signal (invalid receipt / unreadable manifest / gate bug):
 # the workflow commands. Running an unverifiable workflow body can re-introduce just-fixed bugs.
@@ -82,6 +85,15 @@ WRITE_FAILED_REASON = (
     "out, so running it would leave un-enforceable state. Check that the repo root is writable, then "
     "retry the IDC command."
 )
+
+AUTH_WRITE_FAILED_REASON = (
+    "IDC refused to expand this command because it could not write the shared Path Gate authorization "
+    "under this repository's Git directory. Without that authorization the Write/Edit/git backstops "
+    "would fail closed on every repository mutation, so the command would enter a self-contradictory "
+    "state. Check that the repository Git directory is writable, then retry the IDC command."
+)
+
+AUTH_REQUIRED_COMMANDS = set(C.COMMANDS) - {"doctor", "pause"}
 
 
 def _normalize_command(command_name):
@@ -147,9 +159,11 @@ _REG_CONFLICT = "conflict"      # the ledger REFUSED this start: it would narrow
 def _register_if_governed(payload, plugin_root, command, running=None):
     """Open (idempotent upsert) the command's active lifecycle record when this is a governed repo
     with a session to key on — the shared open-a-record path for BOTH the clean admit and the
-    allow-on-invalid-receipt fork. Returns `(outcome, detail)`, where outcome is one of `_REG_OPENED` /
-    `_REG_DEFERRED` / `_REG_WRITE_FAILED` / `_REG_CONFLICT` and `detail` carries the refusal message
-    the caller must surface (empty for the non-refusal outcomes).
+    allow-on-invalid-receipt fork. Returns `(outcome, detail, registration)`, where outcome is one of
+    `_REG_OPENED` / `_REG_DEFERRED` / `_REG_WRITE_FAILED` / `_REG_CONFLICT`, `detail` carries the
+    refusal message the caller must surface (empty for the non-refusal outcomes), and `registration`
+    identifies the exact persisted write this attempt made so admission can roll it back if Path Gate
+    authorization fails before the command body expands.
 
     `init` defers its start to commands/init.md (Task 6), and a non-governed repo / missing session has
     nothing to key on, so those return `_REG_DEFERRED` and the caller emits the bootstrap context
@@ -160,16 +174,18 @@ def _register_if_governed(payload, plugin_root, command, running=None):
     proven the runtime is NOT positively stale); the clean-admit caller passes the version its
     freshness evaluation already read, so only the recovery fork re-reads the manifest."""
     if command in DEFERS_REGISTRATION:
-        return _REG_DEFERRED, ""
+        return _REG_DEFERRED, "", None
     cwd = payload.get("cwd") or os.getcwd()
     session_id = payload.get("session_id")
     if not (session_id and H.is_governed_repo(cwd)):
-        return _REG_DEFERRED, ""
+        return _REG_DEFERRED, "", None
     if running is None:
         running = freshness.read_version(plugin_root) or ""
     try:
-        C.register_start(cwd, session_id, command, running,
-                         payload.get("command_args") or "", payload.get("command_source") or "")
+        with L.capture_command_start() as captured:
+            written = C.register_start(cwd, session_id, command, running,
+                                       payload.get("command_args") or "",
+                                       payload.get("command_source") or "")
     except L.ObligationConflict as exc:
         # A narrowing/replacing restart was REFUSED by the ledger (round-6 BLOCKS 1, rule A): the PRIOR
         # obligation record is left fully intact (the ledger raises BEFORE persisting anything), and the
@@ -185,13 +201,26 @@ def _register_if_governed(payload, plugin_root, command, running=None):
         # an obligation that CONFLICTS is the same class, so it is refused the same way, with the honest
         # remediation the direct CLI already gives ("finish or reset the active run before intaking a
         # different manifest").
-        return _REG_CONFLICT, str(exc)
+        return _REG_CONFLICT, str(exc), None
     # Ground-truth readback: report "opened" ONLY when the record is actually present via the status
-    # read path. Trusting the writer's return would let a swallowed write be reported as opened.
+    # read path WITH THIS ATTEMPT'S nonce. Trusting the writer's return would let a swallowed write be
+    # reported as opened; accepting any same-command record would mistake a prior/concurrent record for
+    # this attempt and later make a rollback capable of erasing the wrong obligation.
+    captured_written = captured.get("written")
+    attempt_nonce = written.get("nonce") if isinstance(written, dict) else None
     active = C.active_records(cwd, session_id)
-    if any(c.get("command") == command for c in active):
-        return _REG_OPENED, ""
-    return _REG_WRITE_FAILED, ""
+    if (
+        attempt_nonce
+        and isinstance(captured_written, dict)
+        and captured_written.get("session_id") == str(session_id)
+        and captured_written.get("command") == command
+        and captured_written.get("nonce") == attempt_nonce
+        and any(
+            c.get("command") == command and c.get("nonce") == attempt_nonce for c in active
+        )
+    ):
+        return _REG_OPENED, "", {"nonce": attempt_nonce, "prior": captured.get("prior")}
+    return _REG_WRITE_FAILED, "", None
 
 
 def _block(reason):
@@ -200,6 +229,46 @@ def _block(reason):
         H.warn(f"OBSERVE-ONLY (would block expansion): {reason}")
         raise SystemExit(0)
     H.prompt_expansion_block(reason)
+
+
+def _path_gate_applies(payload, command):
+    if command not in AUTH_REQUIRED_COMMANDS:
+        return False
+    cwd = payload.get("cwd") or os.getcwd()
+    session_id = payload.get("session_id")
+    if not (session_id and H.is_governed_repo(cwd)):
+        return False
+    return subprocess.run(
+        ["git", "-C", cwd, "rev-parse", "--is-inside-work-tree"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ).returncode == 0
+
+
+@contextlib.contextmanager
+def _admission_transaction(payload, command):
+    """Hold the cross-process Path Gate lock across start -> auth/rollback -> expansion decision."""
+    if not _path_gate_applies(payload, command):
+        yield None
+        return
+    cwd = payload.get("cwd") or os.getcwd()
+    try:
+        with PG.admission_lock(cwd):
+            yield PG.authorization_snapshot(cwd)
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001 — admission infrastructure fails closed, scrubbed
+        detail = H.scrub(str(exc)).strip() or "[no exception detail]"
+        H.warn(
+            "idc-entry-gate: Path Gate admission transaction failed "
+            f"({type(exc).__name__}): {detail}"
+        )
+        _block(AUTH_WRITE_FAILED_REASON)
+
+
+def _restore_path_gate_auth(cwd, snapshot, expected_nonce):
+    """Internal pre-expansion auth rollback; deliberately no command/CLI surface."""
+    return PG.restore_authorization_snapshot(cwd, snapshot, expected_nonce)
 
 
 def _fail_closed_or_allow(payload, command, why, plugin_root):
@@ -211,17 +280,106 @@ def _fail_closed_or_allow(payload, command, why, plugin_root):
     context claims a record exists, so one must actually be opened (Fix 2)."""
     if command in ALLOW_ON_INVALID:
         H.warn(f"idc-entry-gate: allowing recovery command /idc:{command} despite: {why}")
-        reg, detail = _register_if_governed(payload, plugin_root, command)
-        if reg == _REG_CONFLICT:
-            # Defensive mirror of `_admit` (round-7 BLOCKS 1): a conflicting obligation is refused on
-            # THIS fork too. Expanding here would run the command against an obligation the ledger
-            # refused to stamp — the same unenforceable state the write-failure path already blocks.
-            _block(detail)
-        # A recovery command may still expand to help the operator even if the record write failed —
-        # but it must NOT claim a record exists (opened iff genuinely persisted). `_emit_context` is
-        # terminal, so a `_REG_WRITE_FAILED` here still expands, just with the bootstrap context.
-        _emit_context(command, plugin_root, reg == _REG_OPENED)
+        with _admission_transaction(payload, command) as auth_snapshot:
+            reg, detail, registration = _register_if_governed(payload, plugin_root, command)
+            if reg == _REG_CONFLICT:
+                # Defensive mirror of `_admit`: never run against an unstamped obligation.
+                _block(detail)
+            if reg == _REG_OPENED and not _ensure_path_gate_auth(
+                payload, command, registration, auth_snapshot
+            ):
+                _block(AUTH_WRITE_FAILED_REASON)
+            # A recovery command may still expand on a ledger write failure, but must not claim a
+            # record exists. `_emit_context` is terminal and releases the lock via finally.
+            _emit_context(command, plugin_root, reg == _REG_OPENED)
     _block(REPAIR_REASON)
+
+
+def _ensure_path_gate_auth(payload, command, registration, auth_snapshot):
+    """Write/refresh the shared Path Gate authorization for commands that legitimately mutate the
+    repository. Read-only commands (`doctor`, `pause`) do not need one. The gate is keyed by the
+    already-open active command record's nonce, so a later finish naturally retires it when the
+    record leaves the active set.
+
+    Registration + authorization is one admission transaction. If authorization fails, roll back
+    the exact nonce this expansion wrote before the command body can run: remove a newly created
+    record, or restore the prior active record that an idempotent re-entry updated. This is an
+    internal-only pre-expansion repair, not a general command abort path; after expansion, lifecycle
+    records may represent real work and may be closed only through the command contract."""
+    if command not in AUTH_REQUIRED_COMMANDS:
+        return True
+    cwd = payload.get("cwd") or os.getcwd()
+    session_id = payload.get("session_id")
+    if not (session_id and H.is_governed_repo(cwd)):
+        return True
+    if not _path_gate_applies(payload, command):
+        return True
+    attempt_nonce = registration.get("nonce") if registration else None
+    try:
+        auth = PG.write_authorization(
+            cwd,
+            session=session_id,
+            command=command,
+            expected_nonce=attempt_nonce,
+        )
+        if auth.get("nonce") != attempt_nonce:
+            raise RuntimeError("Path Gate authorization did not bind the admission attempt nonce")
+        return True
+    except Exception as exc:  # noqa: BLE001 — admission still blocks after a scrubbed diagnostic
+        detail = H.scrub(str(exc)).strip() or "[no exception detail]"
+        H.warn(
+            "idc-entry-gate: Path Gate authorization write failed "
+            f"({type(exc).__name__}): {detail}"
+        )
+        if not registration:
+            H.warn(
+                "idc-entry-gate: authorization rollback did not persist because this admission "
+                "attempt had no exact registration nonce"
+            )
+            return False
+        try:
+            rolled_back = L.rollback_command_start(
+                cwd,
+                session_id,
+                command,
+                registration.get("nonce"),
+                prior_record=registration.get("prior"),
+            )
+        except Exception as rollback_exc:  # noqa: BLE001 — warn, then preserve the original block
+            rollback_detail = H.scrub(str(rollback_exc)).strip() or "[no exception detail]"
+            H.warn(
+                "idc-entry-gate: authorization rollback raised "
+                f"({type(rollback_exc).__name__}): {rollback_detail}; cleanup was not confirmed"
+            )
+            rolled_back = False
+        if not rolled_back:
+            H.warn(
+                "idc-entry-gate: authorization rollback did not persist; cleanup was not confirmed"
+            )
+            # Do not restore prior authorization while the attempt record may still be active: that
+            # would manufacture a record/auth nonce mismatch. Leave current auth untouched, block the
+            # admission, and surface that cleanup could not be completed.
+            H.warn(
+                "idc-entry-gate: authorization state rollback skipped because ledger rollback did "
+                "not persist; current authorization was left unchanged"
+            )
+            return False
+        try:
+            auth_restored = _restore_path_gate_auth(cwd, auth_snapshot, attempt_nonce)
+        except Exception as auth_rollback_exc:  # noqa: BLE001 — scrub, warn, preserve original block
+            auth_rollback_detail = H.scrub(str(auth_rollback_exc)).strip() or "[no exception detail]"
+            H.warn(
+                "idc-entry-gate: authorization state rollback raised "
+                f"({type(auth_rollback_exc).__name__}): {auth_rollback_detail}; "
+                "cleanup was not confirmed"
+            )
+            auth_restored = False
+        if not auth_restored:
+            H.warn(
+                "idc-entry-gate: authorization state rollback did not persist; "
+                "cleanup was not confirmed"
+            )
+        return False
 
 
 def _admit(payload, plugin_root, command):
@@ -241,24 +399,22 @@ def _admit(payload, plugin_root, command):
     # Admitted on a clean, non-stale freshness signal. Open the lifecycle record (idempotent upsert)
     # when this is a governed repo with a session; init and non-governed / session-less cases emit the
     # bootstrap context instead (no false "record opened" claim).
-    reg, detail = _register_if_governed(payload, plugin_root, command,
-                                        running=result.running_version or "")
-    if reg == _REG_CONFLICT:
-        # The ledger REFUSED to stamp this start because it would narrow/replace the active record's
-        # obligation (round-7 BLOCKS 1). REFUSE the expansion with the conflict's OWN remediation — the
-        # same honest refusal the direct `contract start` CLI gives. This is not command-class-scoped:
-        # unlike an unverifiable receipt (where a recovery command must still run to DIAGNOSE), there is
-        # nothing here to diagnose — the prior record is intact and still enforced, and the operator's
-        # remedy is to finish or reset that run. Admitting instead would run a command whose obligation
-        # was never recorded, which the Stop gate could not enforce.
-        _block(detail)
-    if reg == _REG_WRITE_FAILED and command in WORKFLOW_COMMANDS:
-        # The obligation could NOT be recorded (Fix 2). A workflow command must not run UNRECORDED —
-        # the Stop gate could never enforce its closeout — so it is fail-closed/blocked. A recovery/
-        # diagnostic command falls through and expands with the bootstrap context below (opened is
-        # False), so it never claims a record that does not exist.
-        _block(WRITE_FAILED_REASON)
-    _emit_context(command, plugin_root, reg == _REG_OPENED)
+    with _admission_transaction(payload, command) as auth_snapshot:
+        reg, detail, registration = _register_if_governed(
+            payload, plugin_root, command, running=result.running_version or ""
+        )
+        if reg == _REG_CONFLICT:
+            # The ledger refused to narrow/replace the active obligation. Surface its remediation;
+            # admitting instead would run a command whose obligation Stop could not enforce.
+            _block(detail)
+        if reg == _REG_WRITE_FAILED and command in WORKFLOW_COMMANDS:
+            # A workflow command must not run unrecorded; Stop could not enforce its closeout.
+            _block(WRITE_FAILED_REASON)
+        if reg == _REG_OPENED and not _ensure_path_gate_auth(
+            payload, command, registration, auth_snapshot
+        ):
+            _block(AUTH_WRITE_FAILED_REASON)
+        _emit_context(command, plugin_root, reg == _REG_OPENED)
 
 
 def main():

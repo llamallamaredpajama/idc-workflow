@@ -204,6 +204,16 @@ Idempotent: a no-op if the line is already present (report `ledger-gitignore-alr
 appends it (`…-added`). None is a stamped/receipt-tracked file, so they never appear in the Phase 1
 drift classification — they are standing additives the same way the Phase 3 `Stage`-option append is.
 
+### §D — Refresh the shared Path Gate git backstops
+
+Re-install/verify the shared Path Gate pre-commit/pre-push hooks in the repository Git dir. This is
+idempotent and preserves any pre-existing unmanaged hook by chaining it behind the IDC-managed wrapper:
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_path_gate.py" install-hooks --repo "$ROOT" --plugin-root "${CLAUDE_PLUGIN_ROOT}"
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_path_gate.py" verify-hooks  --repo "$ROOT" --plugin-root "${CLAUDE_PLUGIN_ROOT}"
+```
+If verification fails, STOP — the repo would otherwise claim guarded git backstops it does not have.
+
 ## Phase 3 — Board reconcile (one safe additive migration; everything else report-only)
 
 Compare the live tracker against the installed version's expectation. Update performs exactly **one**

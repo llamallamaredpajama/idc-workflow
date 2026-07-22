@@ -11,8 +11,8 @@
 #   * the interlock inspects interpreter indirection: `bash|sh|zsh FILE`, `source FILE`, `. FILE`,
 #     and quoted `bash -c '…'` payloads are resolved and their protected operations matched;
 #   * the newly-protected raw ops (`gh issue create`, a `dependencies/blocked_by` REST write) deny;
-#   * the SAME raw command OUTSIDE an active command stays a warning (ordinary governed-repo work is
-#     never bricked), and IDC_HOOKS_OBSERVE_ONLY=1 downgrades the active-session deny to a warning;
+#   * the SAME raw command OUTSIDE an active command is still a hard deny — missing authorization is
+#     not a warn-only posture anymore — and IDC_HOOKS_OBSERVE_ONLY=1 downgrades any deny to a warning;
 #   * an unreadable / over-64-KiB / sensitive interpreter target is denied as opaque WITHOUT ever
 #     opening it (no secret content is echoed into a denial);
 #   * the sanctioned door (`idc_transition.py`, `idc_pr_finish.py`) is never denied.
@@ -32,8 +32,20 @@ FIXTURE="$GOV_PLUGIN/tests/smoke/fixtures/session-b7a93ff6"
 [ -f "$FIXTURE/fire_gate.sh" ] || gov_fail "incident fixture fire_gate.sh missing at $FIXTURE"
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
-REPO="$WORK/repo"; mkdir -p "$REPO/docs/workflow"
+REPO="$WORK/repo"; mkdir -p "$REPO/docs/workflow" "$REPO/src"
+(
+  cd "$REPO"
+  git init -q
+  git checkout -q -b main
+)
 printf 'backend: filesystem\n' > "$REPO/docs/workflow/tracker-config.yaml"
+printf 'pathway_enforcement:\n  mode: controlled\n' > "$REPO/WORKFLOW-config.yaml"
+printf 'ticket: demo\n' > "$REPO/TRACKER.md"
+printf 'export const payload = 3;\n' > "$REPO/src/payload.ts"
+WRITER="$WORK/write-tracker.sh"
+cat > "$WRITER" <<'SH'
+cp src/payload.ts TRACKER.md
+SH
 
 # S1 owns an ACTIVE /idc:think command (the incident's live command); SNONE owns nothing.
 S1="s1-$$-$(basename "$WORK")"
@@ -208,6 +220,23 @@ echo "== round-8 Fix 2: a DYNAMIC bash -c / env -S payload fails closed; a stati
 deny "CMD=\"gh issue \"\"create --title x --body-file /tmp/b\"; bash -c \"\$CMD\""
 deny "bash -c 'gh issue create --title x --body-file /tmp/b'"
 deny "env -S \"\$CMD\""
+allow "bash -c 'echo hi'"
+
+echo "== the shared Path Gate recurses through shell payloads, scripts, and startup files for generic writers too =="
+deny "bash '$WRITER'"
+deny "sh '$WRITER'"
+deny "zsh '$WRITER'"
+deny "source '$WRITER'"
+deny ". '$WRITER'"
+deny "bash -c 'cp src/payload.ts TRACKER.md'"
+deny 'CMD="cp src/payload.ts TRACKER.md"; bash -c "$CMD"'
+deny "sh -c 'mv src/payload.ts TRACKER.md'"
+deny "zsh -c 'printf \"ticket: nested\\n\" > TRACKER.md'"
+deny "env -S 'bash -c \"cp src/payload.ts TRACKER.md\"'"
+deny 'CMD="bash -c \"cp src/payload.ts TRACKER.md\""; env -S "$CMD"'
+deny "BASH_ENV='$WRITER' bash -c 'echo hi'"
+deny "BASH_ENV='$WRITER' env -S 'bash -c \"echo hi\"'"
+deny 'echo $(cp src/payload.ts TRACKER.md)'
 allow "bash -c 'echo hi'"
 
 echo "== round-9 Fix A: unresolvable DYNAMIC constructs fail closed BY CONSTRUCTION (findings 1/3/4 + class) =="
@@ -601,18 +630,24 @@ printf '%s' "$OUT" | grep -qF "$GOV_PLUGIN/scripts/idc_" \
   || gov_fail "(fix6) the denial did not interpolate the real plugin path ($GOV_PLUGIN/scripts/…): [$OUT]"
 echo "  ok the denial remediation interpolates the real plugin path (no literal token)"
 
-echo "== outside an active command, the same raw mutation stays a WARNING (never bricks ordinary work) =="
+echo "== outside an active command, the same raw mutation still HARD DENIES (missing auth is blocking) =="
 gate 'gh issue create --title gate --body-file /tmp/body' "$SNONE"
-[ "$RC" -eq 0 ] || gov_fail "(warn) gate exit $RC, expected 0 (warn never blocks)"
-[ -z "$OUT" ] || gov_fail "(warn) a non-active session must NOT emit a permission decision: $OUT"
-grep -q 'IDC interlock' "$ERR" || gov_fail "(warn) non-active session lost the interlock warning: $(cat "$ERR")"
-echo "  ok non-active session ⇒ warn (no deny)"
+[ "$RC" -eq 0 ] || gov_fail "(inactive) gate exit $RC, expected 0 (a hook signals via JSON, not exit code)"
+is_deny || gov_fail "(inactive) a non-active session did not deny raw gh issue create: stdout=[$OUT] stderr=[$(cat "$ERR")]"
+gate "bash '$FIXTURE/fire_gate.sh'" "$SNONE"
+is_deny || gov_fail "(inactive) a non-active session did not deny interpreter indirection: stdout=[$OUT] stderr=[$(cat "$ERR")]"
+echo "  ok non-active session ⇒ hard deny for the direct raw write AND its interpreter-indirection form"
 
 echo "== IDC_HOOKS_OBSERVE_ONLY=1 downgrades the active-session deny to a warning =="
 OUT="$(emit "$REPO" Bash 'gh issue create --title gate --body-file /tmp/body' "$S1" | IDC_HOOKS_OBSERVE_ONLY=1 python3 "$GATE" "$GOV_PLUGIN" 2>"$ERR")"; RC=$?
-[ -z "$OUT" ] || gov_fail "(observe) OBSERVE_ONLY must downgrade the deny → no stdout decision: $OUT"
+! printf '%s' "$OUT" | grep -q '"permissionDecision": *"deny"' \
+  || gov_fail "(observe) OBSERVE_ONLY must never emit permissionDecision=deny: $OUT"
+printf '%s' "$OUT" | grep -q '"additionalContext"' \
+  || gov_fail "(observe) OBSERVE_ONLY did not inject the would-be denial as additionalContext: $OUT"
+printf '%s' "$OUT" | grep -qi 'observe' \
+  || gov_fail "(observe) additionalContext did not identify the observe posture: $OUT"
 grep -qi 'would deny' "$ERR" || gov_fail "(observe) OBSERVE_ONLY did not warn-downgrade the deny: $(cat "$ERR")"
-echo "  ok OBSERVE_ONLY downgrades the active-session deny to a warning"
+echo "  ok OBSERVE_ONLY downgrades the active-session deny to warning + additionalContext"
 
 echo "== an opaque interpreter target (oversize / unreadable) is denied as opaque-script-indirection, unopened =="
 BIG="$WORK/big.sh"; head -c 70000 /dev/zero | tr '\0' '#' > "$BIG"; printf '\ngh issue create x\n' >> "$BIG"
@@ -673,4 +708,4 @@ printf '%s' "$FOUT" | grep -q '"permissionDecision": *"deny"' \
 rm -f "$FIFOT"
 echo "  ok symlink→.env (and →FIFO) ⇒ denied on the resolved path via the sensitive lane, never opened"
 
-echo "PASS: the mutation interlock is a hard deny during an active IDC command, sees through bash/sh/zsh/source/. indirection and quoted bash -c payloads, protects gh issue create + dependency REST writes, downgrades under OBSERVE_ONLY, warns (never bricks) outside an active command, and refuses opaque/sensitive interpreter targets unread"
+echo "PASS: the mutation interlock is a hard deny both without a live authorization and during an active IDC command, sees through bash/sh/zsh/source/. indirection and quoted bash -c payloads, protects gh issue create + dependency REST writes, downgrades under OBSERVE_ONLY, and refuses opaque/sensitive interpreter targets unread"

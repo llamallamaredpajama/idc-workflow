@@ -72,8 +72,9 @@ receipt (`cannot stamp missing file`). The scaffold helper converges at that gra
 ## Phase 3 — Scaffold from templates
 Run the deterministic scaffold helper. It copies the templates, substitutes
 `{{PROJECT_NAME}}`, lays down the lean `docs/workflow/` tree (`pillar-matrices/`,
-`code-reviews/`, `intakes/`, README), selects the backend, and — for the `filesystem` backend —
-initializes `TRACKER.md`. It is idempotent: it never clobbers an existing operator file.
+`code-reviews/`, `intakes/`, README), selects the backend, initializes/refreshes the shared Path
+Gate git backstops, and — for the `filesystem` backend — initializes `TRACKER.md`. It is
+idempotent: it never clobbers an existing operator file.
 `intakes/` is the durable home for the manifests `/idc:intake` compiles; it ships as a tracked
 `.gitkeep` so an empty intake home survives a fresh clone, and it is **not** gitignored — a manifest
 is a durable record of what a foreign artifact compiled to, like a pillar matrix.
@@ -117,9 +118,15 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" start \
   --plugin-root "${CLAUDE_PLUGIN_ROOT}" --args "$ARGUMENTS" --source user
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" status \
   --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --json
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_path_gate.py" authorize \
+  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command init \
+  --allow-path . --allow-action write --allow-action edit --allow-action git
 ```
 A stale runtime is refused here too (`start` exits 4) — do not scaffold further on stale logic; run
-`/reload-plugins`. From here init owes an honest closeout (Phase 8).
+`/reload-plugins`. The `authorize` call is init's counterpart to the command entry gate: expansion
+was admitted before the repo was governed, so once governance exists init must mint the shared Path
+Gate authorization itself or later Write/Edit/git mutations fail closed. From here init owes an
+honest closeout (Phase 8).
 
 ## Phase 4 — Provision (or link) the board (github backend)
 Decide create-vs-link:

@@ -111,4 +111,11 @@ python3 "$PLUGIN_ROOT/scripts/idc_git_janitor.py" --repo "$REPO_ROOT" --ensure-g
 # board. Module owns the filename + ignore rule; idempotent + append-only, same as the ledger.
 python3 "$PLUGIN_ROOT/scripts/idc_pause_state.py" --cwd "$REPO_ROOT" ensure-gitignore
 
+# Install/refresh the shared Path Gate git backstops when this scaffold target is a git repo. The hook
+# files live in the repository Git dir (common hooks path), not the worktree, so this is the
+# deterministic scaffold point that gives every governed git repo the pre-commit/pre-push deny path.
+if git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  python3 "$PLUGIN_ROOT/scripts/idc_git_path_gate.py" install-hooks --repo "$REPO_ROOT" --plugin-root "$PLUGIN_ROOT"
+fi
+
 echo "idc-init scaffold complete (backend=$BACKEND, project=$PROJECT_NAME)"

@@ -7,6 +7,7 @@ payload into a normalized request and this module returns allow/deny plus remedi
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import fnmatch
 import hashlib
@@ -27,6 +28,7 @@ import idc_credential_shapes as CS  # noqa: E402
 import idc_ledger as L  # noqa: E402
 
 AUTH_RELPATH = os.path.join("idc-path-gate", "authorization.json")
+ADMISSION_LOCK_RELPATH = os.path.join("idc-path-gate", "admission.lock")
 PROTECTED_MACHINE_RULES = [
     "TRACKER.md",
     "TRACKER-archive.md",
@@ -41,6 +43,11 @@ PROTECTED_MACHINE_RULES = [
 READ_ONLY_COMMANDS = {"doctor", "pause"}
 DEFAULT_TTL_SECONDS = 4 * 60 * 60
 PATHWAY_MODES = {"off", "controlled", "app-locked"}
+
+try:
+    import fcntl  # POSIX advisory locks (macOS/Linux — IDC's supported platforms)
+except ImportError:  # pragma: no cover - unsupported platform fails closed at acquisition
+    fcntl = None
 
 
 def _utc_now() -> dt.datetime:
@@ -122,6 +129,40 @@ def auth_path(repo: str) -> str:
     return git_path(repo, AUTH_RELPATH)
 
 
+def admission_lock_path(repo: str) -> str:
+    return git_path(repo, ADMISSION_LOCK_RELPATH)
+
+
+@contextlib.contextmanager
+def admission_lock(repo: str):
+    """Serialize command-entry registration -> authorization/rollback across processes.
+
+    This safety lock is fail-closed (unlike the ledger's best-effort observer lock): without it two
+    admission processes can overwrite the same active record between start and authorization. Lock
+    order is admission lock -> ledger write lock -> authorization atomic write; no code acquires the
+    admission lock from inside either lower-level lock."""
+    if fcntl is None:
+        raise RuntimeError("Path Gate admission locking is unavailable on this platform")
+    path = admission_lock_path(repo)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    try:
+        fh = open(path, "a", encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"cannot open Path Gate admission lock: {CS.scrub(str(exc))}") from exc
+    try:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        except OSError as exc:
+            raise RuntimeError(f"cannot acquire Path Gate admission lock: {CS.scrub(str(exc))}") from exc
+        yield
+    finally:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        fh.close()
+
+
 def _atomic_write_json(path: str, payload: dict[str, Any]) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".idc-path-gate.", suffix=".tmp")
@@ -138,6 +179,66 @@ def _atomic_write_json(path: str, payload: dict[str, Any]) -> None:
         except OSError:
             pass
         raise
+
+
+def authorization_snapshot(repo: str) -> bytes | None:
+    """Exact authorization bytes for command-entry rollback, or None when absent."""
+    try:
+        with open(auth_path(repo), "rb") as fh:
+            return fh.read()
+    except FileNotFoundError:
+        return None
+
+
+def _atomic_write_bytes(path: str, payload: bytes) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".idc-path-gate.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def restore_authorization_snapshot(repo: str, snapshot: bytes | None, expected_nonce: str) -> bool:
+    """Restore exact pre-admission auth iff current auth is this attempt (nonce CAS).
+
+    Called only while `admission_lock` is held and before command expansion. There is deliberately no
+    CLI operation for this internal transaction repair."""
+    path = auth_path(repo)
+    try:
+        with open(path, "rb") as fh:
+            current = fh.read()
+    except FileNotFoundError:
+        current = None
+    if current == snapshot:
+        return True
+    try:
+        decoded = json.loads(current.decode("utf-8")) if current is not None else None
+    except (UnicodeDecodeError, ValueError):
+        return False
+    if not isinstance(decoded, dict) or decoded.get("nonce") != str(expected_nonce):
+        return False
+    if snapshot is None:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+    else:
+        _atomic_write_bytes(path, snapshot)
+    try:
+        with open(path, "rb") as fh:
+            restored = fh.read()
+    except FileNotFoundError:
+        restored = None
+    return restored == snapshot
 
 
 def _request_repo_rel(path_value: str, repo: str) -> str | None:
@@ -276,11 +377,23 @@ def write_authorization(
     ticket: str | None = None,
     graph_node: str | None = None,
     ttl_seconds: int = DEFAULT_TTL_SECONDS,
+    expected_nonce: str | None = None,
 ) -> dict[str, Any]:
     records = [rec for rec in C.active_records(repo, session) if rec.get("command") == command]
     if not records:
         raise RuntimeError(f"no active command record found for session={session!r}, command={command!r}")
-    record = records[0]
+    if expected_nonce is not None:
+        record = next(
+            (rec for rec in records if rec.get("nonce") == str(expected_nonce)),
+            None,
+        )
+        if record is None:
+            raise RuntimeError(
+                "active command record no longer matches the expected admission nonce; "
+                "the admission attempt is no longer current"
+            )
+    else:
+        record = records[0]
     if not record.get("nonce"):
         raise RuntimeError("active command record carries no nonce")
     branch = branch or current_branch(repo)

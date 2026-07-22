@@ -1,7 +1,8 @@
 #!/bin/bash
 # path-gate-boundaries.sh — the shared Path Gate core enforces auth-object integrity:
-# missing auth denies, allowed paths/actions admit, protected machine-owned files stay denied, and
-# branch / ticket / graph-node / contract-digest / expiry mismatches all fail closed.
+# missing auth denies, allowed paths/actions admit, protected machine-owned files stay denied,
+# subprocess failures scrub child stderr at the read, and branch / ticket / graph-node /
+# contract-digest / expiry mismatches all fail closed.
 set -uo pipefail
 . "$(dirname "$0")/lib.sh"
 
@@ -122,5 +123,25 @@ python3 "$PATH_GATE" authorize --repo "$REPO" --session "$SID" --command build \
   || gov_fail "could not narrow the shared Path Gate authorization to tests/**"
 deny_case write src/app.ts T-42 NODE-7
 allow_case write tests/app.t T-42 NODE-7
+
+FAKE_GIT_DIR="$WORK/fake-git-stderr"; mkdir -p "$FAKE_GIT_DIR"
+cat >"$FAKE_GIT_DIR/git" <<'SH'
+#!/bin/sh
+printf 'fatal: Authorization: Basic QWxhZGRpbjpvcGVuc2VzYW1l while opening repo\n' >&2
+exit 1
+SH
+chmod +x "$FAKE_GIT_DIR/git"
+PATH="$FAKE_GIT_DIR:$PATH" \
+  python3 "$PATH_GATE" auth-path --repo "$REPO" >"$WORK/auth-path.out" 2>"$WORK/auth-path.err"
+RC=$?
+[ "$RC" -ne 0 ] || gov_fail "auth-path unexpectedly succeeded through a failing git child"
+! grep -Fq 'QWxhZGRpbjpvcGVuc2VzYW1l' "$WORK/auth-path.out" \
+  || gov_fail "auth-path leaked a Basic credential from child stderr: $(cat "$WORK/auth-path.out")"
+grep -Fq 'IDC Path Gate infrastructure error:' "$WORK/auth-path.out" \
+  || gov_fail "auth-path hid the infrastructure error context: $(cat "$WORK/auth-path.out")"
+grep -Fq '[REDACTED]' "$WORK/auth-path.out" \
+  || gov_fail "auth-path did not preserve a scrubbed diagnostic marker: $(cat "$WORK/auth-path.out")"
+grep -Fq 'while opening repo' "$WORK/auth-path.out" \
+  || gov_fail "auth-path lost the useful git failure detail after scrubbing: $(cat "$WORK/auth-path.out")"
 
 echo "PASS: shared Path Gate boundaries hold (missing auth, protected paths, branch/ticket/graph-node/contract-digest/expiry mismatches all fail closed)"

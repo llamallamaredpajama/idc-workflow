@@ -1,8 +1,8 @@
 #!/bin/bash
 # path-gate-git-backstops.sh — the shared Path Gate also gates git pre-commit/pre-push backstops:
 # hooks install + verify cleanly, an authorized source-only change can commit/push, an unauthorized
-# commit that bypasses pre-commit is still blocked at pre-push, and deleted/divergent hook files are
-# detected fail-closed.
+# commit that bypasses pre-commit is still blocked at pre-push, failing child git stderr/stdout is
+# scrubbed at the read, and deleted/divergent hook files are detected fail-closed.
 set -uo pipefail
 . "$(dirname "$0")/lib.sh"
 
@@ -82,4 +82,26 @@ if python3 "$GIT_GATE" verify-hooks --repo "$REPO" --plugin-root "$GOV_PLUGIN" >
   gov_fail "verify-hooks passed after the pre-push backstop diverged"
 fi
 
-echo "PASS: git pre-commit/pre-push backstops install + verify, block unauthorized pushes, and fail closed on deleted/divergent hook files"
+FAKE_GIT_DIR="$WORK/fake-git-stdout"; mkdir -p "$FAKE_GIT_DIR"
+cat >"$FAKE_GIT_DIR/git" <<'SH'
+#!/bin/sh
+printf 'fatal: password=hunter2xyzzy while listing staged files\n'
+exit 1
+SH
+chmod +x "$FAKE_GIT_DIR/git"
+PATH="$FAKE_GIT_DIR:$PATH" \
+  python3 "$GIT_GATE" pre-commit --repo "$REPO" --plugin-root "$GOV_PLUGIN" >"$WORK/git-helper.out" 2>"$WORK/git-helper.err"
+RC=$?
+[ "$RC" -ne 0 ] || gov_fail "pre-commit unexpectedly succeeded through a failing git child"
+! grep -Fq 'hunter2xyzzy' "$WORK/git-helper.out" \
+  || gov_fail "git helper leaked a named secret from child stdout on stdout: $(cat "$WORK/git-helper.out")"
+! grep -Fq 'hunter2xyzzy' "$WORK/git-helper.err" \
+  || gov_fail "git helper leaked a named secret from child stdout on stderr: $(cat "$WORK/git-helper.err")"
+grep -Fq 'IDC Path Gate git helper failed:' "$WORK/git-helper.err" \
+  || gov_fail "git helper hid the infrastructure failure context: $(cat "$WORK/git-helper.err")"
+grep -Fq '[REDACTED]' "$WORK/git-helper.err" \
+  || gov_fail "git helper did not preserve a scrubbed diagnostic marker: $(cat "$WORK/git-helper.err")"
+grep -Fq 'while listing staged files' "$WORK/git-helper.err" \
+  || gov_fail "git helper lost the useful git failure detail after scrubbing: $(cat "$WORK/git-helper.err")"
+
+echo "PASS: git pre-commit/pre-push backstops install + verify, block unauthorized pushes, scrub child git diagnostics, and fail closed on deleted/divergent hook files"

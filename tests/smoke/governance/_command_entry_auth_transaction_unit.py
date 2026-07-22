@@ -368,6 +368,37 @@ class CommandEntryAuthorizationTransactionTests(unittest.TestCase):
         self.assertIn("rollback", stderr.lower())
         self.assertIn("did not persist", stderr.lower())
 
+    def test_failed_ledger_rollback_keeps_attempt_authorization_coherent(self) -> None:
+        real_write = gate.PG.write_authorization
+
+        def write_then_fail(*args: object, **kwargs: object) -> None:
+            real_write(*args, **kwargs)
+            raise RuntimeError("simulated failure after attempt authorization write")
+
+        with (
+            mock.patch.object(gate.L, "rollback_command_start", return_value=False),
+            mock.patch.object(
+                gate,
+                "_restore_path_gate_auth",
+                wraps=gate._restore_path_gate_auth,
+            ) as auth_restore,
+        ):
+            code, stdout, stderr, _auth_write = self._invoke(
+                session="S-ledger-rollback-fail",
+                auth_side_effect=write_then_fail,
+            )
+
+        self.assertEqual(0, code)
+        self.assertIn('"decision": "block"', stdout)
+        self.assertEqual(0, auth_restore.call_count)
+        self.assertIn("authorization state rollback skipped", stderr.lower())
+        active = self._active("S-ledger-rollback-fail")
+        self.assertEqual(1, len(active))
+        auth_state, auth = gate.PG._read_authorization(str(self.repo))
+        self.assertEqual("ok", auth_state)
+        self.assertIsInstance(auth, dict)
+        self.assertEqual(active[0].get("nonce"), auth.get("nonce"))
+
     def test_authorization_rollback_failure_warns_and_still_blocks(self) -> None:
         prior = self._open(
             "S-auth-restore-fail",

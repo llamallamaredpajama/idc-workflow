@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """idc_interlock_gate.py — the PreToolUse mutation interlock (v4 Phase 2 §3.2; Task 3 command integrity).
 
-Fired on PreToolUse for the Bash tool. The transition engine (idc_transition.py), the finisher tail
+Fired on PreToolUse for Bash, Write, Edit, and NotebookEdit. The transition engine
+(idc_transition.py), the finisher tail
 (idc_git_finish.py), and the sanctioned PR finisher (idc_pr_finish.py) are the ONE door to terminal
 workflow state — but an agent can still type a raw `gh issue create` / `gh pr merge` / `gh issue
 close` / state-closing or dependency `gh api` / raw board mutation (`gh project
@@ -1942,8 +1943,11 @@ def _gate(payload, plugin_root):
         decision = PG.evaluate_request(cwd, plugin_root, request)
         _apply_path_gate_decision(decision, "IDC Path Gate denied the repository mutation")
 
-    if tool in {"Write", "Edit"}:
-        path_value = tool_input.get("file_path") or tool_input.get("path")
+    if tool in {"Write", "Edit", "NotebookEdit"}:
+        if tool == "NotebookEdit":
+            path_value = tool_input.get("notebook_path")
+        else:
+            path_value = tool_input.get("file_path") or tool_input.get("path")
         if not isinstance(path_value, str) or not path_value.strip():
             H.pre_tool_allow()
         action = "write" if tool == "Write" else "edit"

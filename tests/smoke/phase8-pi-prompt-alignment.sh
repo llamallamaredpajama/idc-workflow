@@ -2,8 +2,8 @@
 # idc-assert-class: doc
 # Phase 8 smoke — the vendored Pi role prompts match the CURRENT 5-field-board IDC contract:
 # they drive the board through the tracker adapter (not TRACKER.md), Plan is idempotent + sets
-# the board fields + runs the matrix, Build claims before working, the finisher merges on a
-# durable review verdict (behavioral) + recirculates, the reviewer is source/tracker-read-only
+# the board fields + runs the matrix, Build claims before working, the finisher prepares an
+# operator-merge handoff only on a durable review verdict + recirculates, the reviewer is source/tracker-read-only
 # but writes a scoped verdict artifact under docs/workflow/code-reviews/ and reports findings
 # over coms-net when available, and NO prompt carries the RETIRED vocabulary (claim-state
 # machine, bookend ceremony, the deleted recirculator verdict taxonomy / change-order files).
@@ -93,7 +93,7 @@ for transport in Bash Write Edit NotebookEdit; do
     fails=$((fails+1))
   fi
 done
-if ! grep -qiE 'MCP[^.]{0,180}(explicit|dedicated)[^.]{0,120}(adapter|matcher)[^.]{0,120}(not|no)[^.]{0,80}(claim|cover)|not[^.]{0,100}(claim|cover)[^.]{0,180}MCP' "$WORKFLOW"; then
+if ! tr '\n' ' ' < "$WORKFLOW" | grep -qiE 'MCP[^.]{0,180}(explicit|dedicated)[^.]{0,120}(adapter|matcher)[^.]{0,120}(not|no)[^.]{0,80}(claim|cover)|not[^.]{0,100}(claim|cover)[^.]{0,180}MCP'; then
   echo "MISSING in WORKFLOW.md: MCP writer tools require an explicit adapter/matcher and are not claimed covered"
   fails=$((fails+1))
 fi

@@ -7,7 +7,7 @@
 // FAILS against the pre-fix guard (the guard-bypass review proved each bypass returns
 // allowed:true end-to-end); the [PRESERVE] cases must stay green before AND after. U4's shared
 // Path Gate hardens the raw tracker/merge surfaces too: `gh project` / raw blocked-by writes /
-// `gh pr merge` are now denied across Pi unless routed through a sanctioned IDC helper.
+// `gh pr merge` are denied across Pi; merge stays operator-performed until a sanctioned helper lands.
 
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
@@ -81,6 +81,24 @@ function expectPathAction(tag: string, action: "write" | "edit", allow: boolean)
 	}
 }
 
+function authorizeActions(actions: Array<"write" | "edit">) {
+	runPy([
+		PATH_GATE,
+		"authorize",
+		"--repo",
+		CWD,
+		"--session",
+		AUTH_SESSION,
+		"--command",
+		"build",
+		"--branch",
+		"main",
+		"--allow-path",
+		".",
+		...actions.flatMap((action) => ["--allow-action", action]),
+	]);
+}
+
 function expectPath(tag: string, attemptedPath: string, allow: boolean, reasonNeedle: string) {
 	const evaluation = evaluatePathForRole("build-impl", attemptedPath, CWD);
 	if (evaluation.allowed !== allow || (reasonNeedle && !evaluation.reason.includes(reasonNeedle))) {
@@ -102,11 +120,11 @@ restoreAuthState();
 
 // [ACTION] Pi must preserve the actual Write/Edit tool action when consulting the shared gate.
 // An action-specific grant is not interchangeable with the other mutation transport.
-mutateAuth((value) => { value.allowed_actions = ["edit"]; });
+authorizeActions(["edit"]);
 expectPathAction("ACTION-EDIT-ONLY", "edit", true);
 expectPathAction("ACTION-EDIT-ONLY", "write", false);
 restoreAuthState();
-mutateAuth((value) => { value.allowed_actions = ["write"]; });
+authorizeActions(["write"]);
 expectPathAction("ACTION-WRITE-ONLY", "write", true);
 expectPathAction("ACTION-WRITE-ONLY", "edit", false);
 restoreAuthState();
@@ -114,7 +132,7 @@ restoreAuthState();
 // [AUTH] Pi must translate into the SAME shared Path Gate policy: removing or corrupting the
 // authorization / active-command evidence now blocks even otherwise-allowed source writes.
 fs.rmSync(AUTH_PATH);
-expectPath("AUTH", inRepo("src/x.ts"), false, "no live authorization exists");
+expectPath("AUTH", inRepo("src/x.ts"), false, "authorization is absent");
 restoreAuthState();
 mutateAuth((value) => { delete value.nonce; });
 expectPath("AUTH", inRepo("src/x.ts"), false, "missing `nonce`");
@@ -177,12 +195,12 @@ const cases: Case[] = [
 	{ tag: "FORCE", role: "build-finish", kind: "bash", input: "git push -f", allow: false, note: "-f blocked" },
 	{ tag: "FORCE", role: "build-finish", kind: "bash", input: "git push --force-with-lease origin x", allow: false, note: "--force-with-lease blocked" },
 
-	// ── [MERGE] gh pr merge is role-scoped; merge-on-green/PASS is BEHAVIORAL (the prompt) ──
+	// ── [MERGE] raw gh pr merge is denied; the operator merges until a sanctioned helper lands ──
 	{ tag: "MERGE", role: "think", kind: "bash", input: "gh pr merge 5", allow: false, note: "think never merges (admission is operator-merged)" },
 	{ tag: "MERGE", role: "build-impl", kind: "bash", input: "gh pr merge 7", allow: false, note: "implementer never merges" },
-	{ tag: "MERGE", role: "plan", kind: "bash", input: "gh pr merge 5 --squash", allow: false, note: "raw gh pr merge is denied — use the sanctioned finisher/binder path" },
-	{ tag: "MERGE", role: "recirculator", kind: "bash", input: "gh pr merge 5 --squash", allow: false, note: "raw gh pr merge is denied — recirculator finishes through sanctioned helpers" },
-	{ tag: "MERGE", role: "build-finish", kind: "bash", input: "gh pr merge 7 --squash --delete-branch", allow: false, note: "raw gh pr merge is denied — build-finish must use the sanctioned finisher tail" },
+	{ tag: "MERGE", role: "plan", kind: "bash", input: "gh pr merge 5 --squash", allow: false, note: "raw gh pr merge is denied — operator performs the merge until the helper lands" },
+	{ tag: "MERGE", role: "recirculator", kind: "bash", input: "gh pr merge 5 --squash", allow: false, note: "raw gh pr merge is denied — operator performs the merge until the helper lands" },
+	{ tag: "MERGE", role: "build-finish", kind: "bash", input: "gh pr merge 7 --squash --delete-branch", allow: false, note: "raw gh pr merge is denied — operator performs the merge until the helper lands" },
 	{ tag: "MERGE", role: "build-finish", kind: "bash", input: "gh pr merge 7 --auto", allow: false, note: "--auto blocked for every merge role" },
 
 	// ── [REVIEW-ARTIFACT] build-review may write ONLY durable review artifacts ─────────────
@@ -243,7 +261,7 @@ const cases: Case[] = [
 	{ tag: "SAFELIST", role: "build-finish", kind: "bash", input: "git stash pop", allow: false, note: "git stash pop" },
 	{ tag: "SAFELIST", role: "build-finish", kind: "bash", input: "git revert HEAD", allow: false, note: "git revert" },
 	{ tag: "SAFELIST", role: "build-finish", kind: "bash", input: "git rebase main", allow: false, note: "git rebase" },
-	{ tag: "SAFELIST", role: "build-finish", kind: "bash", input: "git merge other", allow: false, note: "git merge (local) — merges go through gh pr merge" },
+	{ tag: "SAFELIST", role: "build-finish", kind: "bash", input: "git merge other", allow: false, note: "git merge (local) — merge is operator-performed until the sanctioned helper lands" },
 	// the `<ref> <pathspec>` checkout form WITHOUT `--` is now path-checked
 	{ tag: "SAFELIST", role: "build-finish", kind: "bash", input: "git checkout HEAD~1 docs/prd/x.md", allow: false, note: "checkout <ref> <pathspec> overwrites the PRD" },
 

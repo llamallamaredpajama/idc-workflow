@@ -1,10 +1,10 @@
 #!/bin/bash
 # idc-assert-class: doc
-# Phase 8 smoke — Pi build-finish must be a strict merge gate.
+# Phase 8 smoke — Pi build-finish must be a strict operator-merge readiness gate.
 #
 # Live Pi e2e exposed a dangerous fail-open: when coms-net was unavailable and no review verdict
 # could be retrieved, build-finish assumed GREEN/PASS and merged. A first-class Pi runtime must
-# refuse to merge unless it has real evidence: a durable review verdict artifact with PASS or
+# refuse a merge-ready handoff unless it has real evidence: a durable review verdict artifact with PASS or
 # PASS-WITH-NITS plus green test evidence. Missing/malformed/non-green evidence is a blocked stop,
 # never an assumed green lane.
 #

@@ -41,6 +41,7 @@ export type IdcRole =
 	| "build-finish";
 
 type GuardMode = "off" | "warn" | "block";
+type PathMutationAction = "write" | "edit";
 
 export interface GuardOptions {
 	recirculatorAllowCanonical?: boolean;
@@ -133,11 +134,6 @@ const BUILD_ALLOWED_EXPLICIT = [
 // mirroring their Claude counterparts. force-push and cross-repo `-C` are blocked for ALL of
 // them; build-review + sequence get NO git authority.
 const GIT_ROLES = new Set<IdcRole>(["think", "plan", "build-impl", "build-finish", "recirculator"]);
-// Roles that may `gh pr merge`: build-finish (the build PR), plan (its planning PR),
-// recirculator (its doc-sync PR). Each merges its own PR on the role's BEHAVIORAL green/PASS
-// decision (the prompt's /fullauto-goal contract), mirroring the Claude finisher/recirculator —
-// no hard interlock. force-push and cross-repo `-C` stay blocked for all roles.
-const MERGE_ROLES = new Set<IdcRole>(["build-finish", "plan", "recirculator"]);
 
 // IDC-LOCAL (guard-bypass B-4, class-level): the git subcommands an IDC git-role may run. A
 // SAFELIST, not a denylist — every OTHER worktree-rewriting/history subcommand (apply, am,
@@ -273,6 +269,7 @@ export function evaluatePathForRole(
 	attemptedPath: string,
 	cwd: string,
 	options: GuardOptions = {},
+	action: PathMutationAction = "write",
 ): GuardEvaluation {
 	const absPath = path.normalize(path.isAbsolute(attemptedPath) ? attemptedPath : normalizeToolPath(attemptedPath, cwd));
 	const policy = pathPolicyFor(role, options);
@@ -326,7 +323,7 @@ export function evaluatePathForRole(
 
 		const explicitAllowed = policy.allowedRoots.filter((rule) => rule !== "repo source/tests/implementation files except blocked governance surfaces");
 		if (matchesAny(absPath, cwd, explicitAllowed) || isInsideOrEqual(path.resolve(cwd), absPath)) {
-			const shared = enforceSharedPathGatePath(role, absPath, cwd, policy);
+			const shared = enforceSharedPathGatePath(role, absPath, cwd, policy, action);
 			if (!shared.allowed) return { ...shared, attemptedPaths: [absPath] };
 			return {
 				allowed: true,
@@ -347,7 +344,7 @@ export function evaluatePathForRole(
 	}
 
 	if (matchesAny(absPath, cwd, policy.allowedRoots)) {
-		const shared = enforceSharedPathGatePath(role, absPath, cwd, policy);
+		const shared = enforceSharedPathGatePath(role, absPath, cwd, policy, action);
 		if (!shared.allowed) return { ...shared, attemptedPaths: [absPath] };
 		return {
 			allowed: true,
@@ -554,9 +551,9 @@ function evaluateGhForRole(role: IdcRole, mutation: BashMutation, cwd: string, p
 			if (!GIT_ROLES.has(role)) return deny(`gh pr create is outside ${role} authority`);
 			return allow(`gh pr create is within ${role} authority`);
 		case "merge": {
-			if (mutation.ghAuto) return deny("gh pr merge --auto is blocked; IDC uses a direct blocking merge");
+			if (mutation.ghAuto) return deny("gh pr merge --auto is blocked; merge is operator-performed until a sanctioned helper exists");
 			if (mutation.ghAdmin) return deny("gh pr merge --admin is blocked; it bypasses branch protection / the green-gate");
-			return denyThroughSharedPathGate("IDC Path Gate denied raw gh pr merge: use the sanctioned IDC finisher/merge helper instead.", cwd, policy);
+			return denyThroughSharedPathGate("IDC Path Gate denied raw gh pr merge: merge is operator-performed until a sanctioned IDC finisher/merge helper exists.", cwd, policy);
 		}
 		default:
 			return allow("gh op not gated");
@@ -615,7 +612,8 @@ export default async function (pi: ExtensionAPI) {
 
 		if (isToolCallEventType("write", event) || isToolCallEventType("edit", event)) {
 			const attempted = normalizeToolPath(event.input.path, ctx.cwd);
-			const evaluation = evaluatePathForRole(rawRole, attempted, ctx.cwd, readGuardOptions());
+			const action: PathMutationAction = isToolCallEventType("edit", event) ? "edit" : "write";
+			const evaluation = evaluatePathForRole(rawRole, attempted, ctx.cwd, readGuardOptions(), action);
 			return enforceEvaluation({ role: rawRole, mode, tool: event.toolName, attempted, evaluation, ctx });
 		}
 
@@ -726,9 +724,15 @@ function evaluateSharedPathGate(request: Record<string, unknown>, cwd: string, p
 	};
 }
 
-function enforceSharedPathGatePath(_role: IdcRole, absPath: string, cwd: string, policy: PathPolicy): GuardEvaluation {
+function enforceSharedPathGatePath(
+	_role: IdcRole,
+	absPath: string,
+	cwd: string,
+	policy: PathPolicy,
+	action: PathMutationAction = "write",
+): GuardEvaluation {
 	return evaluateSharedPathGate({
-		action: "write",
+		action,
 		paths: [absPath],
 	}, cwd, policy);
 }

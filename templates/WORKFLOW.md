@@ -78,7 +78,25 @@ and the Recirculator.
 
 IDC names three `pathway_enforcement.mode` profiles: `off | controlled | app-locked`.
 
-`controlled` blocks supported-runtime off-path mutations and blocks merge when pathway evidence is missing or inconsistent, but it cannot stop a machine administrator from removing hooks, editing `.git`, or disabling GitHub rules.
+The shipped default is `off`: the Path Gate still computes and reports would-be denials, but it does
+not block them. `controlled` is an explicit opt-in. It blocks supported-runtime off-path mutations
+and blocks merge when pathway evidence is missing or inconsistent, but it cannot stop a machine
+administrator from removing hooks, editing `.git`, or disabling GitHub rules.
+
+The Claude mutation hook covers exactly these tool transports: `Bash`, `Write`, `Edit`, and
+`NotebookEdit`. MCP writer tools need an explicit Path Gate adapter and hook matcher before they
+join this boundary, and are not claimed covered until then.
+
+`controlled` currently has these documented limitations, tracked to U8/U9 rather than silently
+claimed as complete:
+
+- real ticket, graph-node, and declared-path mint-at-transition;
+- per-worker-worktree and per-branch authorization with matching ledger visibility;
+- first-class Pi and Codex lifecycle producers;
+- a sanctioned finisher/merge helper (until it lands, Pi agents prepare, push, and report the
+  gates; the operator performs the merge);
+- mandatory identity binding plus live-tracker comparison in every adapter; and
+- TTL heartbeat renewal for long drains.
 
 `app-locked` adds a GitHub App as the sole tracker writer and trusted check source; it closes the ordinary-token tracker-write gap but still does not protect against repository or organization administrators removing the rules or the App.
 

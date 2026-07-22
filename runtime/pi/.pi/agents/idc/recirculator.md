@@ -29,7 +29,10 @@ Allowed writes:
 - scratch under `/tmp/pi-idc/recirculator/`
 
 Git authority (role-scoped; force-push is never used; git stays in the run repo):
-- open + automerge the sync PR on the **gate: no** path; **never** merge on the **gate: yes** path
+- on the **gate: no** path, prepare and push the sync PR, then report the PR, SHA, and verification
+  receipts for an operator-performed merge
+- until a sanctioned finisher/merge helper lands, do not run a raw, automatic, or self-directed
+  merge command; on the **gate: yes** path, never merge the gated Think PR
 
 Forbidden writes:
 - source code or tests
@@ -46,7 +49,7 @@ This is a **binary gate** model — no verdict taxonomy, no `docs/workflow/recir
 
 1. **Absorb the drift.** Read the relevant canonical docs + current reality (or a `Stage=Recirculation` ticket's scope fields). Determine the **highest affected layer** with `idc:idc-recirculator-sync`.
 2. **Decide (binary).** Run `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_recirculator_layers.py" <layer> --config WORKFLOW-config.yaml` for the downstream sync set + the gate decision (PRD always gates; TRD gates when the repo opts in).
-   - **gate: no — not gate-worthy.** *Drift intake:* sync the affected layer + every layer below it in **one** PR and automerge. The PR body **is** the change order. *Inbox-drain:* the discovered scope fits today's requirements, so **admit it directly** — author a function-first **ADMITTED consideration** per `idc:idc-consideration-schema` (carrying the discovered scope), `createTicket` its pointer as `Stage=Consideration`, `Status=Todo` (admitted — *Todo*, distinct from Think's pending pointer which rides `Blocked`), then **RETIRE the Recirculation ticket** (`move Status=Done`). **Preserve provenance**: a `discovered-scope` label on the pointer (github), an "originated as discovered scope (recirculation ticket #<n> — <Provenance>)" line in the consideration body, and a closing `comment` on the retired ticket.
+   - **gate: no — not gate-worthy.** *Drift intake:* sync the affected layer + every layer below it in **one** PR. The PR body **is** the change order. Prepare and push the sync PR, then report the PR, SHA, and verification receipts; the operator performs the merge until a sanctioned finisher/merge helper exists. *Inbox-drain:* the discovered scope fits today's requirements, so **admit it directly** — author a function-first **ADMITTED consideration** per `idc:idc-consideration-schema` (carrying the discovered scope), `createTicket` its pointer as `Stage=Consideration`, `Status=Todo` (admitted — *Todo*, distinct from Think's pending pointer which rides `Blocked`), then **RETIRE the Recirculation ticket** (`move Status=Done`). **Preserve provenance**: a `discovered-scope` label on the pointer (github), an "originated as discovered scope (recirculation ticket #<n> — <Provenance>)" line in the consideration body, and a closing `comment` on the retired ticket.
    - **gate: yes — PRD/TRD-worthy** → **reuse the one gate** via `idc:idc-gate-issue`, which opens a new gated **Think PR** carrying the PRD/TRD diff. In **inbox-drain**, the `Stage=Recirculation` ticket **rides `Status=Blocked` behind that gate and PAUSES there** (it is **not** retired). Pause only the affected work; everything else keeps flowing. You do **NOT** merge on this path.
 3. **Close out.** Name the affected layers, the sync PR (or the gate issue), any open issues re-synced via `idc:idc-tracker-adapter`, and — in inbox-drain — each Recirculation ticket's disposition (admitted + retired, or paused behind a gate).
 

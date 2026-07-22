@@ -356,6 +356,14 @@ def _ensure_path_gate_auth(payload, command, registration, auth_snapshot):
             H.warn(
                 "idc-entry-gate: authorization rollback did not persist; cleanup was not confirmed"
             )
+            # Do not restore prior authorization while the attempt record may still be active: that
+            # would manufacture a record/auth nonce mismatch. Leave current auth untouched, block the
+            # admission, and surface that cleanup could not be completed.
+            H.warn(
+                "idc-entry-gate: authorization state rollback skipped because ledger rollback did "
+                "not persist; current authorization was left unchanged"
+            )
+            return False
         try:
             auth_restored = _restore_path_gate_auth(cwd, auth_snapshot, attempt_nonce)
         except Exception as auth_rollback_exc:  # noqa: BLE001 — scrub, warn, preserve original block

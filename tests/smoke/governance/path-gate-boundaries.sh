@@ -1,8 +1,9 @@
 #!/bin/bash
 # path-gate-boundaries.sh — the shared Path Gate core enforces auth-object integrity:
-# missing auth denies, allowed paths/actions admit, protected machine-owned files stay denied,
-# subprocess failures scrub child stderr at the read, and branch / ticket / graph-node /
-# contract-digest / expiry mismatches all fail closed.
+# missing auth denies, allowed paths/actions admit, symlink aliases resolve to their real target
+# before the protected-surface check, protected machine-owned files stay denied, subprocess failures
+# scrub child stderr at the read, and branch / ticket / graph-node / contract-digest / expiry
+# mismatches all fail closed.
 set -uo pipefail
 . "$(dirname "$0")/lib.sh"
 
@@ -22,6 +23,7 @@ printf 'backend: filesystem\n' > "$REPO/docs/workflow/tracker-config.yaml"
 printf 'ticket: demo\n' > "$REPO/TRACKER.md"
 printf 'export const x = 1;\n' > "$REPO/src/app.ts"
 printf 'test(1)\n' > "$REPO/tests/app.t"
+ln -s ../TRACKER.md "$REPO/src/tracker-link.md"
 SID="pg-boundary-$$-$(basename "$WORK")"
 python3 "$CONTRACT" start --repo "$REPO" --session "$SID" --command build \
   --plugin-root "$GOV_PLUGIN" --args 'demo' --source user >/dev/null \
@@ -60,7 +62,7 @@ deny_case() {
 }
 
 mutate_auth() { AUTH_PATH="$AUTH_PATH" MODE="$1" VALUE="${2:-}" python3 - <<'PY'
-import json, os, datetime
+import json, os
 path = os.environ["AUTH_PATH"]
 mode = os.environ["MODE"]
 value = os.environ.get("VALUE", "")
@@ -95,6 +97,7 @@ deny_case write src/app.ts T-42 NODE-7
 
 authorize
 allow_case write src/app.ts T-42 NODE-7
+deny_case write src/tracker-link.md T-42 NODE-7
 deny_case write docs/notes.md T-42 NODE-7
 deny_case write TRACKER.md T-42 NODE-7
 
@@ -144,4 +147,4 @@ grep -Fq '[REDACTED]' "$WORK/auth-path.out" \
 grep -Fq 'while opening repo' "$WORK/auth-path.out" \
   || gov_fail "auth-path lost the useful git failure detail after scrubbing: $(cat "$WORK/auth-path.out")"
 
-echo "PASS: shared Path Gate boundaries hold (missing auth, protected paths, branch/ticket/graph-node/contract-digest/expiry mismatches all fail closed)"
+echo "PASS: shared Path Gate boundaries hold (missing auth, protected paths, symlink aliases, and branch/ticket/graph-node/contract-digest/expiry mismatches all fail closed)"

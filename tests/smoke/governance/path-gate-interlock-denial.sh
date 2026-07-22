@@ -1,6 +1,7 @@
 #!/bin/bash
 # path-gate-interlock-denial.sh — the shared Path Gate reaches Claude's PreToolUse transport:
-# direct Write/Edit file mutations deny without a live authorization, a sanctioned command session can
+# direct Write/Edit file mutations deny without a live authorization, generic Bash file writers and
+# the supported `apply_patch` Bash alias are stopped before execution, a sanctioned command session can
 # write inside its allowed source surface, protected machine-owned tracker files stay denied, and raw
 # gh tracker writes stay denied whether or not a lifecycle record exists.
 set -uo pipefail
@@ -58,6 +59,11 @@ allow_case() {
   [ -z "$OUT" ] || gov_fail "ALLOW expected no permission decision for $1:$2, got: $OUT"
   grep -q 'IDC interlock' "$ERR" && gov_fail "ALLOW unexpectedly warned for $1:$2 ⇒ $(cat "$ERR")"
 }
+deny_case() {
+  gate "$1" "$2" "$3"
+  [ "$RC" -eq 0 ] || gov_fail "DENY expected exit 0 but got $RC for $1:$2 ⇒ $(cat "$ERR")"
+  is_deny || gov_fail "DENY expected permissionDecision=deny for $1:$2, stdout=[$OUT] stderr=[$(cat "$ERR")]"
+}
 
 authorize_build() {
   ENTRY_OUT="$(python3 - "$REPO" <<'PY' | python3 "$ENTRY" "$GOV_PLUGIN"
@@ -82,19 +88,48 @@ PY
 }
 export SID_BUILD
 
-# No live authorization: direct file-authoring surfaces must deny.
-gate Write "$REPO/TRACKER.md" "$SID_NONE"
-is_deny || gov_fail "raw Write to TRACKER.md without authorization was not denied: stdout=[$OUT] stderr=[$(cat "$ERR")]"
-gate Edit "$REPO/src/x.ts" "$SID_NONE"
-is_deny || gov_fail "raw Edit to src/x.ts without authorization was not denied: stdout=[$OUT] stderr=[$(cat "$ERR")]"
-gate Bash 'gh issue create --title gate --body-file /tmp/body' "$SID_NONE"
-is_deny || gov_fail "raw gh issue create without authorization was not denied: stdout=[$OUT] stderr=[$(cat "$ERR")]"
+RAW_TRACKER_REDIRECT="printf 'ticket: raw\\n' > TRACKER.md"
+RAW_TRACKER_PY="python3 -c \"open('TRACKER.md','w').write('ticket: raw\\n')\""
+RAW_SRC_PY="python3 -c \"open('src/x.ts','w').write('export const x = 2;\\n')\""
+PATCH_TRACKER="$(cat <<'PATCH'
+apply_patch <<'EOF'
+*** Begin Patch
+*** Update File: TRACKER.md
+@@
+-ticket: demo
++ticket: patched
+*** End Patch
+EOF
+PATCH
+)"
+PATCH_SRC="$(cat <<'PATCH'
+apply_patch <<'EOF'
+*** Begin Patch
+*** Update File: src/x.ts
+@@
+-export const x = 1;
++export const x = 2;
+*** End Patch
+EOF
+PATCH
+)"
+
+# No live authorization: every repository-writing surface must deny.
+deny_case Bash "$RAW_TRACKER_REDIRECT" "$SID_NONE"
+deny_case Bash "$RAW_TRACKER_PY" "$SID_NONE"
+deny_case Bash "$PATCH_TRACKER" "$SID_NONE"
+deny_case Write "$REPO/TRACKER.md" "$SID_NONE"
+deny_case Edit "$REPO/src/x.ts" "$SID_NONE"
+deny_case Bash 'gh issue create --title gate --body-file /tmp/body' "$SID_NONE"
 
 authorize_build
+allow_case Bash "$RAW_SRC_PY" "$SID_BUILD"
+allow_case Bash "$PATCH_SRC" "$SID_BUILD"
+deny_case Bash "$RAW_TRACKER_REDIRECT" "$SID_BUILD"
+deny_case Bash "$RAW_TRACKER_PY" "$SID_BUILD"
+deny_case Bash "$PATCH_TRACKER" "$SID_BUILD"
 allow_case Write "$REPO/src/x.ts" "$SID_BUILD"
-gate Write "$REPO/TRACKER.md" "$SID_BUILD"
-is_deny || gov_fail "authorized build session still allowed a direct TRACKER.md write: stdout=[$OUT] stderr=[$(cat "$ERR")]"
-gate Bash 'gh issue create --title gate --body-file /tmp/body' "$SID_BUILD"
-is_deny || gov_fail "authorized build session still allowed a raw gh issue create: stdout=[$OUT] stderr=[$(cat "$ERR")]"
+deny_case Write "$REPO/TRACKER.md" "$SID_BUILD"
+deny_case Bash 'gh issue create --title gate --body-file /tmp/body' "$SID_BUILD"
 
-echo "PASS: the shared Path Gate denies unauthenticated Write/Edit/raw-gh mutations, admits authorized source writes, and still blocks protected tracker/raw-gh writes"
+echo "PASS: the shared Path Gate denies unauthenticated Write/Edit/raw-gh mutations, stops generic Bash writers plus the apply_patch alias before execution, admits authorized source writes, and still blocks protected tracker/raw-gh writes"

@@ -1,9 +1,9 @@
 // Phase 8 smoke — exercises the REAL per-role guard (`evaluatePathForRole` /
 // `evaluateBashForRole` from runtime/pi/extensions/idc-role-harness.ts) against the locks the
 // pi-guard-fix branch adds + the fail-closed guarantees it must preserve. No GitHub, no agent
-// binary — pure function calls. Run via tests/smoke/phase8-pi-guard-acl.sh (exit 0 = pass).
+// binary — pure function calls.
 //
-// Red-when-broken: every assertion tagged [B1]/[B2]/[BR]/[M3]/[GIT]/[FORCE]/[MERGE]/[DANGER]
+// Red-when-broken: every assertion tagged [B1]/[B2]/[BR]/[M3]/[AUTH]/[GIT]/[FORCE]/[MERGE]/[DANGER]
 // FAILS against the pre-fix guard (the guard-bypass review proved each bypass returns
 // allowed:true end-to-end); the [PRESERVE] cases must stay green before AND after. U4's shared
 // Path Gate hardens the raw tracker/merge surfaces too: `gh project` / raw blocked-by writes /
@@ -13,14 +13,90 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { evaluateBashForRole, evaluatePathForRole, type IdcRole } from "../../runtime/pi/extensions/idc-role-harness.ts";
+
+const PLUGIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const CONTRACT = path.join(PLUGIN, "scripts", "idc_command_contract.py");
+const PATH_GATE = path.join(PLUGIN, "scripts", "idc_path_gate.py");
 
 // A fake run repo on disk so path-relative cases resolve against a real cwd.
 const CWD = fs.mkdtempSync(path.join(os.tmpdir(), "pi-guard-acl-"));
 execFileSync("git", ["init", "-q"], { cwd: CWD });
 execFileSync("git", ["checkout", "-q", "-b", "main"], { cwd: CWD });
+fs.mkdirSync(path.join(CWD, "docs", "workflow", "code-reviews"), { recursive: true });
+fs.mkdirSync(path.join(CWD, "docs", "considerations"), { recursive: true });
+fs.mkdirSync(path.join(CWD, "src"), { recursive: true });
+fs.writeFileSync(path.join(CWD, "docs", "workflow", "tracker-config.yaml"), "backend: filesystem\n");
+fs.writeFileSync(path.join(CWD, "TRACKER.md"), "ticket: demo\n");
+fs.writeFileSync(path.join(CWD, "src", "x.ts"), "export const x = 1;\n");
 
 const inRepo = (rel: string) => path.join(CWD, rel);
+const runPy = (args: string[]) => execFileSync("python3", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+
+const AUTH_SESSION = "pi-auth-session";
+runPy([CONTRACT, "start", "--repo", CWD, "--session", AUTH_SESSION, "--command", "build", "--plugin-root", PLUGIN, "--args", "demo", "--source", "user"]);
+runPy([
+	PATH_GATE,
+	"authorize",
+	"--repo",
+	CWD,
+	"--session",
+	AUTH_SESSION,
+	"--command",
+	"build",
+	"--branch",
+	"main",
+	"--allow-action",
+	"write",
+	"--allow-action",
+	"edit",
+	"--allow-action",
+	"git",
+	"--allow-path",
+	".",
+]);
+
+const AUTH_PATH = runPy([PATH_GATE, "auth-path", "--repo", CWD]).trim();
+const SESSION_STATE = inRepo(".idc-session-state.json");
+const GOOD_AUTH = fs.readFileSync(AUTH_PATH, "utf8");
+const GOOD_STATE = fs.readFileSync(SESSION_STATE, "utf8");
+
+function restoreAuthState() {
+	fs.writeFileSync(AUTH_PATH, GOOD_AUTH, "utf8");
+	fs.writeFileSync(SESSION_STATE, GOOD_STATE, "utf8");
+}
+
+function mutateAuth(mutator: (value: Record<string, unknown>) => void) {
+	const value = JSON.parse(fs.readFileSync(AUTH_PATH, "utf8")) as Record<string, unknown>;
+	mutator(value);
+	fs.writeFileSync(AUTH_PATH, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function expectPath(tag: string, attemptedPath: string, allow: boolean, reasonNeedle: string) {
+	const evaluation = evaluatePathForRole("build-impl", attemptedPath, CWD);
+	if (evaluation.allowed !== allow || (reasonNeedle && !evaluation.reason.includes(reasonNeedle))) {
+		throw new Error(`[${tag}] expected ${allow ? "ALLOW" : "BLOCK"} for ${attemptedPath} with reason containing ${JSON.stringify(reasonNeedle)}, got ${evaluation.allowed ? "ALLOW" : "BLOCK"} :: ${evaluation.reason}`);
+	}
+}
+
+// [AUTH] Pi must translate into the SAME shared Path Gate policy: removing or corrupting the
+// authorization / active-command evidence now blocks even otherwise-allowed source writes.
+fs.rmSync(AUTH_PATH);
+expectPath("AUTH", inRepo("src/x.ts"), false, "no live authorization exists");
+restoreAuthState();
+mutateAuth((value) => { delete value.nonce; });
+expectPath("AUTH", inRepo("src/x.ts"), false, "missing `nonce`");
+restoreAuthState();
+mutateAuth((value) => { value.contract_digest = "deadbeef"; });
+expectPath("AUTH", inRepo("src/x.ts"), false, "contract digest is corrupt or stale");
+restoreAuthState();
+mutateAuth((value) => { value.expires_at = "2000-01-01T00:00:00Z"; });
+expectPath("AUTH", inRepo("src/x.ts"), false, "authorization is expired or unreadable");
+restoreAuthState();
+fs.writeFileSync(SESSION_STATE, JSON.stringify({ version: 2, commands: [], taints: [] }, null, 2) + "\n", "utf8");
+expectPath("AUTH", inRepo("src/x.ts"), false, "bound command record is no longer active");
+restoreAuthState();
 
 type Case = { tag: string; role: IdcRole; kind: "bash" | "write"; input: string; allow: boolean; note: string };
 
@@ -203,7 +279,7 @@ for (const c of cases) {
 fs.rmSync(CWD, { recursive: true, force: true });
 
 if (failures === 0) {
-	console.log(`PASS: per-role guard ACL holds (${cases.length} cases: file-write fail-closed preserved; B1/B2/BR/M3 bypasses closed; build-review durable artifact lane scoped; scoped git grant preserved; raw tracker/merge surfaces now fail closed through the shared Path Gate)`);
+	console.log(`PASS: per-role guard ACL holds (${cases.length} cases: file-write fail-closed preserved; shared Path Gate auth state is mandatory for Pi writes; B1/B2/BR/M3 bypasses closed; build-review durable artifact lane scoped; scoped git grant preserved; raw tracker/merge surfaces now fail closed through the shared Path Gate)`);
 	process.exit(0);
 }
 console.log(`FAIL: ${failures}/${cases.length} guard ACL assertions failed`);

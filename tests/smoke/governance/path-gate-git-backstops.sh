@@ -1,16 +1,19 @@
 #!/bin/bash
 # path-gate-git-backstops.sh — the shared Path Gate also gates git pre-commit/pre-push backstops:
 # hooks install + verify cleanly, an authorized source-only change can commit/push, an unauthorized
-# commit that bypasses pre-commit is still blocked at pre-push, failing child git stderr/stdout is
+# commit that bypasses pre-commit is still blocked at pre-push, a generic Bash writer is stopped
+# before a `--no-verify` commit+push can bypass BOTH git hooks, failing child git stderr/stdout is
 # scrubbed at the read, and deleted/divergent hook files are detected fail-closed.
 set -uo pipefail
 . "$(dirname "$0")/lib.sh"
 
 PATH_GATE="$GOV_PLUGIN/scripts/idc_path_gate.py"
 GIT_GATE="$GOV_PLUGIN/scripts/idc_git_path_gate.py"
+INTERLOCK="$GOV_PLUGIN/scripts/hooks/idc_interlock_gate.py"
 CONTRACT="$GOV_PLUGIN/scripts/idc_command_contract.py"
 [ -f "$PATH_GATE" ] || gov_fail "idc_path_gate.py not found at $PATH_GATE (shared core not implemented yet)"
 [ -f "$GIT_GATE" ] || gov_fail "idc_git_path_gate.py not found at $GIT_GATE (git backstop not implemented yet)"
+[ -f "$INTERLOCK" ] || gov_fail "idc_interlock_gate.py not found at $INTERLOCK (Bash transport not implemented yet)"
 [ -f "$CONTRACT" ] || gov_fail "idc_command_contract.py not found at $CONTRACT"
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
@@ -44,6 +47,20 @@ python3 "$PATH_GATE" authorize --repo "$REPO" --session "$SID" --command build \
   --allow-action write --allow-action edit --allow-action git --allow-path src >/dev/null \
   || gov_fail "could not write a shared Path Gate authorization"
 
+emit_bash() { VALUE="$1" SID="$2" REPO="$REPO" python3 - <<'PY'
+import json, os
+print(json.dumps({
+    "cwd": os.environ["REPO"],
+    "tool_name": "Bash",
+    "session_id": os.environ["SID"],
+    "tool_input": {"command": os.environ["VALUE"]},
+}))
+PY
+}
+
+gate_bash() { OUT="$(emit_bash "$1" "$2" | python3 "$INTERLOCK" "$GOV_PLUGIN" 2>"$WORK/interlock.err")"; RC=$?; }
+is_deny() { printf '%s' "$OUT" | grep -q '"permissionDecision": *"deny"'; }
+
 # Authorized source-only commit/push passes both backstops.
 printf 'export const x = 2;\n' > "$REPO/src/app.ts"
 git -C "$REPO" add src/app.ts
@@ -61,6 +78,25 @@ if git -C "$REPO" push origin main >"$WORK/push.out" 2>&1; then
   gov_fail "pre-push allowed an unauthorized tracker mutation after a --no-verify commit"
 fi
 grep -qi 'path gate' "$WORK/push.out" || gov_fail "pre-push failure did not mention the Path Gate: $(cat "$WORK/push.out")"
+
+# Git-only enforcement is insufficient: if a generic Bash writer slips past PreToolUse, an agent can
+# mutate the repo and bypass BOTH git hooks with commit+push --no-verify. The fix must deny here,
+# before any mutation occurs.
+git -C "$REPO" reset --hard -q origin/main
+GENERIC_WRITER="python3 -c \"open('TRACKER.md','w').write('ticket: generic-bypass\\n')\""
+gate_bash "$GENERIC_WRITER" "$SID"
+[ "$RC" -eq 0 ] || gov_fail "generic Bash writer crashed the interlock (expected a decision): $(cat "$WORK/interlock.err")"
+if ! is_deny; then
+  (
+    cd "$REPO"
+    python3 -c "open('TRACKER.md','w').write('ticket: generic-bypass\\n')"
+    git add TRACKER.md
+    git commit --no-verify -qm 'test: generic writer bypass'
+    git push --no-verify origin main >/dev/null 2>&1
+  ) || gov_fail "generic Bash writer slipped past PreToolUse, but the follow-on --no-verify bypass did not complete"
+  REMOTE_TRACKER="$(git --git-dir="$REMOTE" show main:TRACKER.md)"
+  gov_fail "generic Bash writer slipped past the pre-mutation gate and both git backstops via --no-verify (remote TRACKER.md = $REMOTE_TRACKER)"
+fi
 
 PRE_COMMIT_HOOK="$(git -C "$REPO" rev-parse --git-path hooks/pre-commit)"
 PRE_PUSH_HOOK="$(git -C "$REPO" rev-parse --git-path hooks/pre-push)"
@@ -104,4 +140,4 @@ grep -Fq '[REDACTED]' "$WORK/git-helper.err" \
 grep -Fq 'while listing staged files' "$WORK/git-helper.err" \
   || gov_fail "git helper lost the useful git failure detail after scrubbing: $(cat "$WORK/git-helper.err")"
 
-echo "PASS: git pre-commit/pre-push backstops install + verify, block unauthorized pushes, scrub child git diagnostics, and fail closed on deleted/divergent hook files"
+echo "PASS: git pre-commit/pre-push backstops install + verify, block unauthorized pushes, prove generic Bash mutations are denied before a commit+push --no-verify bypass, scrub child git diagnostics, and fail closed on deleted/divergent hook files"

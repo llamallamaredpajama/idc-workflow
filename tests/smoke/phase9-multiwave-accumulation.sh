@@ -26,6 +26,7 @@ FIN="$PLUGIN/scripts/idc_git_finish.py"
 JAN="$PLUGIN/scripts/idc_git_janitor.py"
 TRK="$PLUGIN/scripts/idc_tracker_fs.py"
 BOARD="$PLUGIN/scripts/idc_gh_board.py"
+CHECK="$PLUGIN/scripts/idc_review_verdict_check.py"
 fail() { echo "FAIL: $1"; [ -n "${2:-}" ] && { echo "----- detail -----"; echo "$2"; }; exit 1; }
 gitc() { git -C "$REPO" "$@"; }
 
@@ -95,7 +96,7 @@ gitc config user.email t@example.com; gitc config user.name tester
 echo hello > "$REPO/README.md"; gitc add -A; gitc commit -qm init
 BASE="$(gitc symbolic-ref --short HEAD)"   # == main by construction (pinned on both origin and clone)
 gitc push -q origin "HEAD:$BASE"
-mkdir -p "$REPO/docs/workflow"; printf 'backend: filesystem\n' > "$REPO/docs/workflow/tracker-config.yaml"
+mkdir -p "$REPO/docs/workflow/code-reviews"; printf 'backend: filesystem\n' > "$REPO/docs/workflow/tracker-config.yaml"
 TRACKER="$REPO/TRACKER.md"
 python3 "$TRK" --tracker "$TRACKER" init >/dev/null || fail "tracker init failed"
 
@@ -114,10 +115,12 @@ run_issue() {  # $1 = issue/PR number
   git -C "$wt" push -q origin "$br" || fail "push $br failed"
   # Receipt gate: a clean PASS verdict owning PR/issue #n (no nits, no merge_conditions) so the tail
   # runs its git mechanics — this phase exercises debris accumulation, not the gate itself.
-  printf '{"verdict":"PASS","pr":%s,"issue":%s,"findings":[]}\n' "$n" "$n" > "$REPO/verdict-$n.json"
+  local verdict="$REPO/docs/workflow/code-reviews/2026-07-22-pr-$n-review.json"
+  printf '{"verdict":"PASS","pr":%s,"issue":%s,"findings":[]}\n' "$n" "$n" > "$verdict"
+  python3 "$CHECK" "$verdict" >/dev/null 2>&1 || fail "validator rejected the clean finish verdict for #$n"
   local out; out="$( cd "$REPO" && env PATH="$WORK/bin:$PATH" WORK="$WORK" ORIGIN="$ORIGIN" BRANCH="$br" \
     python3 "$FIN" --pr "$n" --issue "$n" --worktree "$wt" --repo "$REPO" --tracker "$TRACKER" \
-      --verdict "$REPO/verdict-$n.json" 2>&1 )"
+      --verdict "$verdict" 2>&1 )"
   printf '%s\n' "$out" | grep -qx 'finish: ok' || fail "finish of #$n did not report ok" "$out"
   gitc fetch -q --prune origin
 }

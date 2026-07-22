@@ -7,13 +7,18 @@ set -euo pipefail
 
 . "$(dirname "$0")/lib.sh"
 gov_engine_env
+CHECK="$GOV_PLUGIN/scripts/idc_review_verdict_check.py"
+git -C "$REPO" init -q -b main >/dev/null 2>&1
+git -C "$REPO" config user.email test@example.com >/dev/null 2>&1
+git -C "$REPO" config user.name Test >/dev/null 2>&1
+mkdir -p "$REPO/docs/workflow/code-reviews"
 
 JOURNAL="$REPO/docs/workflow/transition-journal.ndjson"
 
 item=$(eng create-ticket --title 'journal replay lifecycle' --stage 'Buildable' --status 'Todo')
 eng move --num "$item" --to-status "In Progress" >/dev/null
 
-VERDICT_PATH="$REPO/verdict.json"
+VERDICT_PATH="$REPO/docs/workflow/code-reviews/journal-replay-pass.json"
 cat > "$VERDICT_PATH" <<EOF
 {
   "verdict": "PASS",
@@ -24,6 +29,7 @@ cat > "$VERDICT_PATH" <<EOF
   ]
 }
 EOF
+python3 "$CHECK" "$VERDICT_PATH" >/dev/null 2>&1 || fail "initial replay verdict did not validate"
 eng close --num "$item" --verdict "$VERDICT_PATH" --pr 1 >/dev/null
 
 [ -f "$JOURNAL" ] || fail "canonical transition journal was not created at $JOURNAL"
@@ -86,10 +92,12 @@ bi=$(eng create-ticket --title 'buildable: drifted then closed' --stage 'Buildab
 [ -n "$bi" ] || fail "could not create the buildable item"
 python3 "$GOV_TRK" --tracker "$T" set --num "$bi" --field Stage --value Recirculation >/dev/null \
   || fail "could not drift the item's Stage out-of-band"
-cat > "$REPO/vd.json" <<EOF
+VD_PATH="$REPO/docs/workflow/code-reviews/journal-replay-drift.json"
+cat > "$VD_PATH" <<EOF
 {"verdict":"PASS","issue":$bi,"pr":7,"findings":[]}
 EOF
-eng close --num "$bi" --verdict "$REPO/vd.json" --pr 7 >/dev/null 2>&1 || fail "the guarded close failed"
+python3 "$CHECK" "$VD_PATH" >/dev/null 2>&1 || fail "the drift-close verdict did not validate"
+eng close --num "$bi" --verdict "$VD_PATH" --pr 7 >/dev/null 2>&1 || fail "the guarded close failed"
 set +e
 out=$(python3 "$GOV_PLUGIN/scripts/idc_journal_replay.py" --journal "$JOURNAL" --tracker "$T" 2>&1); rc=$?
 set -e

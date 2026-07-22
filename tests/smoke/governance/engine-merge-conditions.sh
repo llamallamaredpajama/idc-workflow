@@ -16,24 +16,28 @@ set -uo pipefail
 . "$(dirname "$0")/lib.sh"
 gov_engine_env
 CHECK="$GOV_PLUGIN/scripts/idc_review_verdict_check.py"
+git -C "$REPO" init -q -b main >/dev/null 2>&1
+mkdir -p "$REPO/docs/workflow/code-reviews"
 
 # Backward-compat first: a verdict WITHOUT merge_conditions still validates (absent ⇒ no conditions).
-cat > "$REPO/v-plain.json" <<JSON
+V_PLAIN="$REPO/docs/workflow/code-reviews/2026-07-22-pr-9-plain.json"
+cat > "$V_PLAIN" <<JSON
 {"verdict":"PASS","pr":9,"findings":[]}
 JSON
-python3 "$CHECK" "$REPO/v-plain.json" >/dev/null 2>&1 \
+python3 "$CHECK" "$V_PLAIN" >/dev/null 2>&1 \
   || fail "(compat) a verdict with no merge_conditions no longer validates (broke backward compat)"
 echo "  ok (compat) verdict without merge_conditions still validates"
 
 # (1) verdict with an UNMET merge_condition ⇒ close denied.
 n1="$(gov_seed_item "$T" --title 'build1' --stage Buildable --status 'In Progress')" || fail "seed failed"
-cat > "$REPO/v-unmet.json" <<JSON
+V_UNMET="$REPO/docs/workflow/code-reviews/2026-07-22-pr-10-unmet.json"
+cat > "$V_UNMET" <<JSON
 {"verdict":"PASS-WITH-NITS","pr":10,"issue":$n1,
  "findings":[{"dimension":"style","severity":"nit","confidence":0.9,"evidence":"e","attack":"a","unblock":"u","fingerprint":"fp1"}],
  "merge_conditions":[{"id":"ci-green","description":"CI must be green before merge","met":false}]}
 JSON
-python3 "$CHECK" "$REPO/v-unmet.json" >/dev/null 2>&1 || fail "(1) the unmet-condition verdict is itself malformed"
-if eng close --num "$n1" --verdict "$REPO/v-unmet.json" --pr 10 2>/dev/null; then
+python3 "$CHECK" "$V_UNMET" >/dev/null 2>&1 || fail "(1) the unmet-condition verdict is itself malformed"
+if eng close --num "$n1" --verdict "$V_UNMET" --pr 10 2>/dev/null; then
   fail "(1) engine closed while a merge_condition was unmet (guard merge-conditions-met must deny)"
 fi
 [ "$(gov_field "$T" "$n1" Status)" != "Done" ] || fail "(1) denied close still drove the item to Done"
@@ -41,12 +45,14 @@ echo "  ok (1) close is blocked while a merge_condition is unmet"
 
 # (2) same verdict with the condition MET ⇒ close allowed.
 n2="$(gov_seed_item "$T" --title 'build2' --stage Buildable --status 'In Progress')" || fail "seed failed"
-cat > "$REPO/v-met.json" <<JSON
+V_MET="$REPO/docs/workflow/code-reviews/2026-07-22-pr-10-met.json"
+cat > "$V_MET" <<JSON
 {"verdict":"PASS-WITH-NITS","pr":10,"issue":$n2,
  "findings":[{"dimension":"style","severity":"nit","confidence":0.9,"evidence":"e","attack":"a","unblock":"u","fingerprint":"fp1"}],
  "merge_conditions":[{"id":"ci-green","description":"CI must be green before merge","met":true}]}
 JSON
-eng close --num "$n2" --verdict "$REPO/v-met.json" --pr 10 >/dev/null 2>&1 \
+python3 "$CHECK" "$V_MET" >/dev/null 2>&1 || fail "(2) the all-met verdict is itself malformed"
+eng close --num "$n2" --verdict "$V_MET" --pr 10 >/dev/null 2>&1 \
   || fail "(2) engine denied close even though every merge_condition was met"
 [ "$(gov_field "$T" "$n2" Status)" = "Done" ] || fail "(2) all-conditions-met close did not drive the item to Done"
 echo "  ok (2) close is allowed once every merge_condition is met"

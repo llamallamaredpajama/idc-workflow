@@ -29,11 +29,15 @@ set -uo pipefail
 FIN="$GOV_PLUGIN/scripts/idc_git_finish.py"
 FILER="$GOV_PLUGIN/scripts/idc_file_findings.py"
 TRK="$GOV_PLUGIN/scripts/idc_tracker_fs.py"
+CHECK="$GOV_PLUGIN/scripts/idc_review_verdict_check.py"
 [ -f "$FIN" ] || gov_fail "idc_git_finish.py not found at $FIN (not implemented yet)"
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
-REPO="$WORK/repo"; mkdir -p "$REPO/docs/workflow"
+REPO="$WORK/repo"; mkdir -p "$REPO/docs/workflow/code-reviews"
 printf 'backend: filesystem\n' > "$REPO/docs/workflow/tracker-config.yaml"
+git -C "$REPO" init -q -b main >/dev/null 2>&1
+git -C "$REPO" config user.email test@example.com >/dev/null 2>&1
+git -C "$REPO" config user.name Test >/dev/null 2>&1
 T="$REPO/TRACKER.md"
 python3 "$TRK" --tracker "$T" init >/dev/null || gov_fail "tracker init failed"
 PARENT="$(python3 "$TRK" --tracker "$T" create --title 'build: feature' --stage Buildable --status 'In Progress')" \
@@ -46,11 +50,13 @@ fin() { ( cd "$REPO" && python3 "$FIN" --repo "$REPO" --tracker "$T" --worktree 
 PROCEEDED='finish: resolve-branch failed'   # the first git step past the gate → proof the gate passed
 
 # ── (U) unrouted nit ⇒ REFUSE (headline) ─────────────────────────────────────────────────────────
-cat > "$REPO/v-nit.json" <<JSON
+V_NIT="$REPO/docs/workflow/code-reviews/2026-07-22-pr-77-nit.json"
+cat > "$V_NIT" <<JSON
 {"verdict":"PASS-WITH-NITS","pr":77,"issue":$PARENT,
  "findings":[{"dimension":"style","severity":"nit","confidence":0.9,"evidence":"magic 7","attack":"a","unblock":"name it","fingerprint":"style:f.py:7:magic"}]}
 JSON
-out="$(fin --pr 77 --issue "$PARENT" --verdict "$REPO/v-nit.json")"; rc=$?
+python3 "$CHECK" "$V_NIT" >/dev/null 2>&1 || gov_fail "(U) verdict did not validate"
+out="$(fin --pr 77 --issue "$PARENT" --verdict "$V_NIT")"; rc=$?
 [ "$rc" -ne 0 ] || gov_fail "(U) finish did NOT refuse while a review nit was unrouted"
 printf '%s\n' "$out" | grep -q 'finish: require-routed-findings failed' \
   || gov_fail "(U) refusal not attributed to require-routed-findings: $out"
@@ -59,8 +65,8 @@ printf '%s\n' "$out" | grep -qi 'idc_file_findings' \
 echo "  ok (U) unrouted finding ⇒ finish REFUSES, naming the filer remediation [headline]"
 
 # ── (R) route it with the filer ⇒ the SAME verdict now PROCEEDS ───────────────────────────────────
-python3 "$FILER" --repo "$REPO" --verdict "$REPO/v-nit.json" >/dev/null || gov_fail "(R) filer run failed"
-out="$(fin --pr 77 --issue "$PARENT" --verdict "$REPO/v-nit.json")"
+python3 "$FILER" --repo "$REPO" --verdict "$V_NIT" >/dev/null || gov_fail "(R) filer run failed"
+out="$(fin --pr 77 --issue "$PARENT" --verdict "$V_NIT")"
 printf '%s\n' "$out" | grep -q 'require-routed-findings failed' \
   && gov_fail "(R) still refused after the finding was routed to the board: $out"
 printf '%s\n' "$out" | grep -qF "$PROCEEDED" \
@@ -68,21 +74,25 @@ printf '%s\n' "$out" | grep -qF "$PROCEEDED" \
 echo "  ok (R) once the filer routes the finding, the gate PROCEEDS"
 
 # ── (C) unmet merge_condition ⇒ REFUSE (routing clean: no findings) ───────────────────────────────
-cat > "$REPO/v-cond.json" <<JSON
+V_COND="$REPO/docs/workflow/code-reviews/2026-07-22-pr-77-cond.json"
+cat > "$V_COND" <<JSON
 {"verdict":"PASS","pr":77,"issue":$PARENT,"findings":[],
  "merge_conditions":[{"id":"ci-green","description":"CI must be green before merge","met":false}]}
 JSON
-out="$(fin --pr 77 --issue "$PARENT" --verdict "$REPO/v-cond.json")"; rc=$?
+python3 "$CHECK" "$V_COND" >/dev/null 2>&1 || gov_fail "(C) verdict did not validate"
+out="$(fin --pr 77 --issue "$PARENT" --verdict "$V_COND")"; rc=$?
 [ "$rc" -ne 0 ] || gov_fail "(C) finish did NOT refuse while a merge_condition was unmet"
 printf '%s\n' "$out" | grep -q 'finish: merge-conditions-met failed' \
   || gov_fail "(C) refusal not attributed to merge-conditions-met: $out"
 echo "  ok (C) unmet merge_condition ⇒ finish REFUSES"
 
 # ── (P) clean, routed, condition-met receipt ⇒ PROCEEDS ───────────────────────────────────────────
-cat > "$REPO/v-clean.json" <<JSON
+V_CLEAN="$REPO/docs/workflow/code-reviews/2026-07-22-pr-77-clean.json"
+cat > "$V_CLEAN" <<JSON
 {"verdict":"PASS","pr":77,"issue":$PARENT,"findings":[]}
 JSON
-out="$(fin --pr 77 --issue "$PARENT" --verdict "$REPO/v-clean.json")"
+python3 "$CHECK" "$V_CLEAN" >/dev/null 2>&1 || gov_fail "(P) verdict did not validate"
+out="$(fin --pr 77 --issue "$PARENT" --verdict "$V_CLEAN")"
 printf '%s\n' "$out" | grep -qE 'finish: (require-routed-findings|merge-conditions-met|verdict) failed' \
   && gov_fail "(P) a clean receipt was wrongly refused by the gate: $out"
 printf '%s\n' "$out" | grep -qF "$PROCEEDED" \
@@ -90,14 +100,16 @@ printf '%s\n' "$out" | grep -qF "$PROCEEDED" \
 echo "  ok (P) a clean, routed, condition-met receipt PROCEEDS past the gate"
 
 # ── (E) --no-require-routed-findings skips ONLY the routed sub-check ───────────────────────────────
-cat > "$REPO/v-nit2.json" <<JSON
+V_NIT2="$REPO/docs/workflow/code-reviews/2026-07-22-pr-77-nit2.json"
+cat > "$V_NIT2" <<JSON
 {"verdict":"PASS-WITH-NITS","pr":77,"issue":$PARENT,
  "findings":[{"dimension":"style","severity":"nit","confidence":0.9,"evidence":"unrouted","attack":"a","unblock":"u","fingerprint":"style:z.py:1:unrouted"}]}
 JSON
-out="$(fin --pr 77 --issue "$PARENT" --verdict "$REPO/v-nit2.json")"
+python3 "$CHECK" "$V_NIT2" >/dev/null 2>&1 || gov_fail "(E) verdict did not validate"
+out="$(fin --pr 77 --issue "$PARENT" --verdict "$V_NIT2")"
 printf '%s\n' "$out" | grep -q 'finish: require-routed-findings failed' \
   || gov_fail "(E-pre) an unrouted nit must refuse by DEFAULT: $out"
-out="$(fin --pr 77 --issue "$PARENT" --verdict "$REPO/v-nit2.json" --no-require-routed-findings)"
+out="$(fin --pr 77 --issue "$PARENT" --verdict "$V_NIT2" --no-require-routed-findings)"
 printf '%s\n' "$out" | grep -q 'require-routed-findings failed' \
   && gov_fail "(E) --no-require-routed-findings did not skip the routed check: $out"
 printf '%s\n' "$out" | grep -qF "$PROCEEDED" \
@@ -112,7 +124,7 @@ printf '%s\n' "$out" | grep -q 'finish: verdict failed' \
 echo "  ok (M) no --verdict ⇒ finish REFUSES (receipt gate; no call site can silently skip)"
 
 # ── (O) a verdict for a DIFFERENT PR ⇒ REFUSE (ownership) ─────────────────────────────────────────
-out="$(fin --pr 999 --issue "$PARENT" --verdict "$REPO/v-clean.json")"; rc=$?
+out="$(fin --pr 999 --issue "$PARENT" --verdict "$V_CLEAN")"; rc=$?
 [ "$rc" -ne 0 ] || gov_fail "(O) finish accepted a verdict bound to a different PR"
 printf '%s\n' "$out" | grep -q 'finish: verdict failed' \
   || gov_fail "(O) a wrong-PR verdict was not refused: $out"
@@ -121,9 +133,17 @@ echo "  ok (O) a verdict for a different PR ⇒ finish REFUSES (the receipt must
 # ── (G) github: an unreadable board ⇒ fail CLOSED ─────────────────────────────────────────────────
 # In-process (no live GitHub): monkeypatch the board reader to raise, then prove BOTH the routing
 # helper's fail-closed signal AND the CLI gate's refusal (never merges on an unverifiable board).
-python3 - "$GOV_PLUGIN/scripts" <<'PY' || gov_fail "(G) github fail-closed unit failed (see assertion above)"
-import sys, os, json, tempfile, argparse, io, contextlib
+V_GH="$REPO/docs/workflow/code-reviews/2026-07-22-pr-77-gh.json"
+cat > "$V_GH" <<JSON
+{"verdict":"PASS-WITH-NITS","pr":77,"issue":1,
+ "findings":[{"dimension":"style","severity":"nit","confidence":0.9,
+               "evidence":"e","attack":"a","unblock":"u","fingerprint":"gh:fp"}]}
+JSON
+python3 "$CHECK" "$V_GH" >/dev/null 2>&1 || gov_fail "(G) github verdict did not validate"
+python3 - "$GOV_PLUGIN/scripts" "$REPO" "$V_GH" <<'PY' || gov_fail "(G) github fail-closed unit failed (see assertion above)"
+import sys, argparse, io, contextlib
 sys.path.insert(0, sys.argv[1])
+repo, vf = sys.argv[2], sys.argv[3]
 import idc_gh_board as B
 import idc_git_finish as G
 
@@ -139,21 +159,18 @@ B.fetch_items = boom
 try:
     # (G1) the routing helper propagates BoardReadError (never a silent empty routed-set).
     try:
-        G.routing_gap(VERDICT, "github", ".", None, "owner", "1")
+        G.routing_gap(VERDICT, "github", repo, None, "owner", "1")
     except B.BoardReadError:
         print("  ok (G1) github: unreadable board → routing_gap raises BoardReadError (fail-closed)")
     else:
         print("FAIL: (G1) routing_gap did not raise on an unreadable board"); sys.exit(1)
 
     # (G2) the CLI gate turns that into a REFUSAL (exit non-zero, attributed to require-routed-findings).
-    d = tempfile.mkdtemp(); vf = os.path.join(d, "v.json")
-    with open(vf, "w") as fh:
-        json.dump(VERDICT, fh)
     args = argparse.Namespace(verdict=vf, issue=1, pr=77, require_routed=True)
     err = io.StringIO()
     try:
         with contextlib.redirect_stderr(err):
-            G.enforce_receipt_gate(args, "github", ".", None, "owner", "1")
+            G.enforce_receipt_gate(args, "github", repo, None, "owner", "1")
     except SystemExit as e:
         assert e.code and e.code != 0, f"gate exit was {e.code!r} (expected non-zero)"
     else:

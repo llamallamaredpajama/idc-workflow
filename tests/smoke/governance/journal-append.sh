@@ -10,6 +10,11 @@
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 gov_engine_env
+CHECK="$GOV_PLUGIN/scripts/idc_review_verdict_check.py"
+git -C "$REPO" init -q -b main >/dev/null 2>&1
+git -C "$REPO" config user.email test@example.com >/dev/null 2>&1
+git -C "$REPO" config user.name Test >/dev/null 2>&1
+mkdir -p "$REPO/docs/workflow/code-reviews"
 
 J_PATH="$REPO/docs/workflow/transition-journal.ndjson"
 mkdir -p "$(dirname "$J_PATH")"
@@ -22,7 +27,7 @@ n_child=$(eng create-ticket --title 'fs-child' --stage 'Buildable' --status 'Tod
 
 eng link --parent "$n_parent" --child "$n_child" >/dev/null
 
-VERDICT_PATH="$REPO/verdict.json"
+VERDICT_PATH="$REPO/docs/workflow/code-reviews/journal-append-fs.json"
 cat > "$VERDICT_PATH" <<EOF
 {
   "verdict": "PASS",
@@ -33,6 +38,7 @@ cat > "$VERDICT_PATH" <<EOF
   ]
 }
 EOF
+python3 "$CHECK" "$VERDICT_PATH" >/dev/null 2>&1 || fail "fs close verdict did not validate"
 eng move --num "$n_child" --to-status "In Progress" >/dev/null
 eng close --num "$n_child" --verdict "$VERDICT_PATH" --pr 1 >/dev/null
 
@@ -43,20 +49,23 @@ echo "  ok (1) fs backend: create(x2), link, move, close wrote 5 journal lines"
 
 # (2) Github backend: move + close should yield 2 more journal entries.
 # We monkeypatch the github board interface to avoid real network calls.
-python3 - "$GOV_PLUGIN/scripts" "$REPO" <<'PY' || fail "github journal unit failed (see above)"
+VERDICT_PATH_GH="$REPO/docs/workflow/code-reviews/journal-append-gh.json"
+cat > "$VERDICT_PATH_GH" <<EOF
+{
+  "verdict": "PASS",
+  "issue": 10,
+  "pr": 2,
+  "merge_conditions": [
+    {"id": "c1", "description": "d1", "met": true}
+  ]
+}
+EOF
+python3 "$CHECK" "$VERDICT_PATH_GH" >/dev/null 2>&1 || fail "github close verdict did not validate"
+python3 - "$GOV_PLUGIN/scripts" "$REPO" "$VERDICT_PATH_GH" <<'PY' || fail "github journal unit failed (see above)"
 import sys, json, os
 sys.path.insert(0, sys.argv[1])
 repo_root = sys.argv[2]
-# Create a verdict for the github item. The issue number is hardcoded to 10 in the python block
-# so we can just create the verdict file with that number.
-verdict_path_gh = os.path.join(repo_root, "verdict_gh.json")
-with open(verdict_path_gh, "w") as f:
-    json.dump({
-        "verdict": "PASS",
-        "issue": 10,
-        "pr": 2,
-        "merge_conditions": [{"id": "c1", "description": "d1", "met": True}]
-    }, f)
+verdict_path_gh = sys.argv[3]
 
 import idc_transition as E, idc_gh_board as B, idc_gh_close as C
 

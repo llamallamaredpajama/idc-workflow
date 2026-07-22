@@ -15,6 +15,7 @@ set -uo pipefail
 PLUGIN="$(cd "$(dirname "$0")/../.." && pwd)"
 SCRIPT="$PLUGIN/scripts/idc_git_finish.py"
 TRK="$PLUGIN/scripts/idc_tracker_fs.py"
+CHECK="$PLUGIN/scripts/idc_review_verdict_check.py"
 fail() { echo "FAIL: $1"; exit 1; }
 
 [ -f "$SCRIPT" ] || fail "idc_git_finish.py not found (not implemented yet)"
@@ -92,7 +93,7 @@ setup_repo() {
   git -C "$WT" commit -qm "work"
   git -C "$WT" push -q origin "$BRANCH"
 
-  mkdir -p "$REPO/docs/workflow"
+  mkdir -p "$REPO/docs/workflow/code-reviews"
   printf 'backend: filesystem\n' > "$REPO/docs/workflow/tracker-config.yaml"
   TRACKER="$REPO/TRACKER.md"
   python3 "$TRK" --tracker "$TRACKER" init >/dev/null
@@ -100,7 +101,9 @@ setup_repo() {
   python3 "$TRK" --tracker "$TRACKER" claim --num 1 --agent tester >/dev/null
   # The finish tail is a receipt gate: a clean PASS verdict owning PR #501 / issue #1, no nits (so
   # nothing to route) and no merge_conditions — the git-mechanics scenarios exercise the tail past it.
-  printf '{"verdict":"PASS","pr":501,"issue":1,"findings":[]}\n' > "$REPO/verdict.json"
+  VERDICT="$REPO/docs/workflow/code-reviews/2026-07-22-pr-501-review.json"
+  printf '{"verdict":"PASS","pr":501,"issue":1,"findings":[]}\n' > "$VERDICT"
+  python3 "$CHECK" "$VERDICT" >/dev/null 2>&1 || fail "validator did not accept the clean finish verdict"
 }
 
 run_finish() {
@@ -108,7 +111,7 @@ run_finish() {
   ( cd "$REPO" && \
     env PATH="$WORK/bin:$PATH" WORK="$WORK" ORIGIN="$ORIGIN" BRANCH="$BRANCH" BASE="$BASE" $extra_env \
       python3 "$SCRIPT" --pr 501 --issue 1 --worktree "$WT" --repo "$REPO" --tracker "$TRACKER" \
-        --verdict "$REPO/verdict.json" )
+        --verdict "$VERDICT" )
 }
 
 # land_branch — represent a MERGED PR: actually merge the head branch's work INTO base + push, so the

@@ -53,6 +53,7 @@ FINISH="$PLUGIN/scripts/idc_git_finish.py"
 RECOVER="$PLUGIN/scripts/idc_finish_recover.py"
 LEDGER="$PLUGIN/scripts/hooks/idc_ledger.py"
 TRK="$PLUGIN/scripts/idc_tracker_fs.py"
+CHECK="$PLUGIN/scripts/idc_review_verdict_check.py"
 fail() { printf 'FAIL: %s\n' "$1"; exit 1; }
 
 for f in "$FINISH" "$RECOVER" "$LEDGER" "$TRK"; do
@@ -142,13 +143,15 @@ setup_repo() {
   git -C "$WT" commit -qm work
   git -C "$WT" push -q origin "$BRANCH"
 
-  mkdir -p "$REPO/docs/workflow"
+  mkdir -p "$REPO/docs/workflow/code-reviews"
   printf 'backend: filesystem\n' > "$REPO/docs/workflow/tracker-config.yaml"
   TRACKER="$REPO/TRACKER.md"
   python3 "$TRK" --tracker "$TRACKER" init >/dev/null
   python3 "$TRK" --tracker "$TRACKER" create --title "Test issue" >/dev/null
   python3 "$TRK" --tracker "$TRACKER" claim --num 1 --agent tester >/dev/null
-  printf '{"verdict":"PASS","pr":501,"issue":1,"findings":[]}\n' > "$REPO/verdict.json"
+  VERDICT="$REPO/docs/workflow/code-reviews/2026-07-22-pr-501-review.json"
+  printf '{"verdict":"PASS","pr":501,"issue":1,"findings":[]}\n' > "$VERDICT"
+  python3 "$CHECK" "$VERDICT" >/dev/null 2>&1 || fail "validator did not accept the clean finish verdict"
 }
 
 # run_finish <extra env…> — the normal finish tail, as the finisher session would run it.
@@ -156,7 +159,7 @@ run_finish() {
   ( cd "$REPO" && env PATH="$BIN:$PATH" WORK="$WORK" ORIGIN="$ORIGIN" REPO="$REPO" \
       BRANCH="$BRANCH" BASE="$BASE" CLAUDE_CODE_SESSION_ID=dead-session "$@" \
       python3 "$FINISH" --pr 501 --issue 1 --worktree "$WT" --repo "$REPO" \
-        --tracker "$TRACKER" --verdict "$REPO/verdict.json" ) >/dev/null 2>&1
+        --tracker "$TRACKER" --verdict "$VERDICT" ) >/dev/null 2>&1
 }
 
 # run_recover [extra env…] — a FRESH session's recovery pass (a different session id, by design).

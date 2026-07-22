@@ -43,6 +43,7 @@ for t in \
   phase1-brownfield-scan \
   phase1-settings-json \
   phase1-lint-rules \
+  phase1-run-evals-no-evalsets \
   phase1-pipe-safety \
   phase1-codex-mirror-sync \
   phase1-git-janitor \

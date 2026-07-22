@@ -12,6 +12,11 @@ FIXTURE="$GOV_PLUGIN/tests/smoke/fixtures/session-b7a93ff6/fire_gate.sh"
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 REPO="$WORK/repo"; mkdir -p "$REPO/docs/workflow" "$REPO/src"
+(
+  cd "$REPO"
+  git init -q
+  git checkout -q -b main
+)
 printf 'backend: filesystem\n' > "$REPO/docs/workflow/tracker-config.yaml"
 printf 'ticket: demo\n' > "$REPO/TRACKER.md"
 printf 'export const payload = 3;\n' > "$REPO/src/payload.ts"

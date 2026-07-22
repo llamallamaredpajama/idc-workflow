@@ -33,6 +33,11 @@ FIXTURE="$GOV_PLUGIN/tests/smoke/fixtures/session-b7a93ff6"
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 REPO="$WORK/repo"; mkdir -p "$REPO/docs/workflow" "$REPO/src"
+(
+  cd "$REPO"
+  git init -q
+  git checkout -q -b main
+)
 printf 'backend: filesystem\n' > "$REPO/docs/workflow/tracker-config.yaml"
 printf 'ticket: demo\n' > "$REPO/TRACKER.md"
 printf 'export const payload = 3;\n' > "$REPO/src/payload.ts"
@@ -223,9 +228,11 @@ deny "zsh '$WRITER'"
 deny "source '$WRITER'"
 deny ". '$WRITER'"
 deny "bash -c 'cp src/payload.ts TRACKER.md'"
+deny 'CMD="cp src/payload.ts TRACKER.md"; bash -c "$CMD"'
 deny "sh -c 'mv src/payload.ts TRACKER.md'"
 deny "zsh -c 'printf \"ticket: nested\\n\" > TRACKER.md'"
 deny "env -S 'bash -c \"cp src/payload.ts TRACKER.md\"'"
+deny 'CMD="bash -c \"cp src/payload.ts TRACKER.md\""; env -S "$CMD"'
 deny "BASH_ENV='$WRITER' bash -c 'echo hi'"
 deny "BASH_ENV='$WRITER' env -S 'bash -c \"echo hi\"'"
 deny 'echo $(cp src/payload.ts TRACKER.md)'

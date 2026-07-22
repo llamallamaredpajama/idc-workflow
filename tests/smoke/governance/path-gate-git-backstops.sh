@@ -130,8 +130,10 @@ deny_gate "git push --no-verify origin main"
 deny_or_exploit "cp->TRACKER" "cp src/app.ts TRACKER.md"
 deny_or_exploit "mv->TRACKER" "mv src/app.ts TRACKER.md"
 deny_or_exploit "bash-c nested writer" "bash -c 'cp src/app.ts TRACKER.md'"
+deny_or_exploit "dynamic bash-c writer" 'CMD="cp src/app.ts TRACKER.md"; bash -c "$CMD"'
 deny_or_exploit "sh-c nested writer" "sh -c 'mv src/app.ts TRACKER.md'"
 deny_or_exploit "env-S nested writer" "env -S 'bash -c \"cp src/app.ts TRACKER.md\"'"
+deny_or_exploit "dynamic env-S writer" 'CMD="bash -c \"cp src/app.ts TRACKER.md\""; env -S "$CMD"'
 deny_or_exploit "command substitution writer" ': $(cp src/app.ts TRACKER.md)'
 deny_or_exploit "cd-chain writer" "cd src && cp app.ts ../TRACKER.md"
 deny_or_exploit "script-file writer" "bash '$WRITER_SCRIPT'"

@@ -17,6 +17,7 @@ REPO="$WORK/repo"; mkdir -p "$REPO/docs/workflow" "$REPO/src"
   git checkout -q -b main
 )
 printf 'backend: filesystem\n' > "$REPO/docs/workflow/tracker-config.yaml"
+printf '# tracker state for build-lane command_start\n' > "$REPO/TRACKER.md"
 printf 'export const x = 1;\n' > "$REPO/src/app.ts"
 SID="pg-fast-$$-$(basename "$WORK")"
 python3 "$CONTRACT" start --repo "$REPO" --session "$SID" --command build \

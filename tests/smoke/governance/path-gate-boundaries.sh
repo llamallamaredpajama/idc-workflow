@@ -115,8 +115,11 @@ authorize
 mutate_auth expires_past
 deny_case write src/app.ts T-42 NODE-7
 
-authorize
-mutate_auth allowed_paths tests
+python3 "$PATH_GATE" authorize --repo "$REPO" --session "$SID" --command build \
+  --branch "$BRANCH" --ticket T-42 --graph-node NODE-7 \
+  --allow-action write --allow-action edit --allow-action git \
+  --allow-path tests >/dev/null \
+  || gov_fail "could not narrow the shared Path Gate authorization to tests/**"
 deny_case write src/app.ts T-42 NODE-7
 allow_case write tests/app.t T-42 NODE-7
 

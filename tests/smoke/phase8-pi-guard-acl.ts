@@ -9,6 +9,7 @@
 // Path Gate hardens the raw tracker/merge surfaces too: `gh project` / raw blocked-by writes /
 // `gh pr merge` are now denied across Pi unless routed through a sanctioned IDC helper.
 
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -16,6 +17,8 @@ import { evaluateBashForRole, evaluatePathForRole, type IdcRole } from "../../ru
 
 // A fake run repo on disk so path-relative cases resolve against a real cwd.
 const CWD = fs.mkdtempSync(path.join(os.tmpdir(), "pi-guard-acl-"));
+execFileSync("git", ["init", "-q"], { cwd: CWD });
+execFileSync("git", ["checkout", "-q", "-b", "main"], { cwd: CWD });
 
 const inRepo = (rel: string) => path.join(CWD, rel);
 

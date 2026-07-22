@@ -11,15 +11,13 @@ C + D). The session-b7a93ff6 incident showed the escape hatch: the raw mutation 
 throwaway `fire_gate.sh` and run as `bash fire_gate.sh`, so a pure command-string match saw only
 `bash fire_gate.sh` and waved it through. This gate now sees THROUGH that indirection.
 
-POSTURE (Task 3): the interlock is a HARD DENY while the session owns an ACTIVE `/idc:*` command
-(idc_ledger.active_commands, scoped to the payload's session) — the window where a raw mutation is
-the improvisation the pipeline forbids. OUTSIDE an active command it is a WARN-INJECT (surface the
-remediation, never block) so ordinary governed-repo work is never bricked. IDC_HOOKS_OBSERVE_ONLY=1
-is the ONE debug escape hatch — it downgrades any deny back to a warning (honored inside
-pre_tool_deny()). There is no second bypass variable; the old IDC_HOOKS_INTERLOCK_ENFORCE opt-in is
-removed (the active-command deny is the shipped enforcement). There are no command-name exceptions:
-Init and Uninstall lifecycle writes run through validating tracker-adapter helpers, while the same raw
-GitHub operations remain denied under every active IDC command.
+POSTURE (U4 shared Path Gate): a raw governed mutation is a HARD DENY unless it comes through the
+sanctioned IDC door with a live authorization. The old warn-only non-active posture is gone: missing
+authorization is itself blocking. IDC_HOOKS_OBSERVE_ONLY=1 is the ONE debug escape hatch — it
+downgrades any deny back to a warning (honored inside pre_tool_deny()). There is no second bypass
+variable; the old IDC_HOOKS_INTERLOCK_ENFORCE opt-in is removed. There are no command-name
+exceptions: Init and Uninstall lifecycle writes run through validating tracker-adapter helpers, while
+the same raw GitHub operations remain denied when typed directly into Bash.
 
 CLASSIFIER (round-5 Fix 1): defense-in-depth by PER-SEGMENT classification, NOT a complete shell
 parser. The command is split into shell segments (`&&`/`||`/`;`/`|`/newline) and EACH is classified
@@ -60,7 +58,8 @@ classifier pattern. Only a RAW terminal command (or one hidden behind interprete
 matches.
 
 Invocation: idc_interlock_gate.py <PLUGIN_ROOT>   (PreToolUse payload on stdin).
-Self-gated: no-op (allow) outside a governed repo, for non-Bash tools, or on a non-matching command.
+Self-gated: no-op (allow) outside a governed repo, or on a tool/payload the shared Path Gate does not
+recognize.
 """
 import dataclasses
 import os
@@ -68,9 +67,12 @@ import re
 import shlex
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.dirname(_HERE))
 import idc_hook_lib as H  # noqa: E402
-import idc_ledger as L    # noqa: E402  (active_commands — the deny-vs-warn signal)
+import idc_ledger as L    # noqa: E402  (kept for the public Task-3 contract context)
+import idc_path_gate as PG  # noqa: E402
 
 # ── bounded interpreter-inspection limits + data (Task 3) ─────────────────────────────────────────
 MAX_SCRIPT_DEPTH = 3
@@ -1225,25 +1227,34 @@ def _gate(payload, plugin_root):
     cwd = payload.get("cwd") or os.getcwd()
     if not H.is_governed_repo(cwd):
         H.pre_tool_allow()
-    if payload.get("tool_name") != "Bash":
-        H.pre_tool_allow()
-    command = (payload.get("tool_input") or {}).get("command")
-    if not isinstance(command, str) or not command.strip():
-        H.pre_tool_allow()
 
-    # Classification is posture-independent (classify() ignores its `active` flag by contract), so
-    # run it first and read the session ledger only once a finding exists — the overwhelmingly
-    # common clean Bash call never pays the ledger read.
-    finding = classify(command, cwd, plugin_root, False)
-    if not finding:
-        H.pre_tool_allow()
-    # POSTURE: hard deny while the session owns an ACTIVE /idc:* command; warn otherwise. The deny
-    # honors IDC_HOOKS_OBSERVE_ONLY=1 (the ONE debug escape) inside pre_tool_deny().
-    active = bool(L.active_commands(cwd, session_id=payload.get("session_id")))
-    reason = render_reason(finding, plugin_root)
-    if active:
-        H.pre_tool_deny(reason)
-    H.pre_tool_warn(reason)       # non-active governed work: warn-inject, never blocks
+    tool = payload.get("tool_name")
+    tool_input = payload.get("tool_input") or {}
+
+    if tool == "Bash":
+        command = tool_input.get("command")
+        if not isinstance(command, str) or not command.strip():
+            H.pre_tool_allow()
+        # Classification is posture-independent (classify() ignores its `active` flag by contract), so
+        # the adapter translates the Bash payload into one raw-mutation request and the shared Path Gate
+        # decides the deny.
+        finding = classify(command, cwd, plugin_root, False)
+        if not finding:
+            H.pre_tool_allow()
+        decision = PG.evaluate_request(cwd, plugin_root, {"action": "bash", "raw_reason": render_reason(finding, plugin_root)})
+        H.pre_tool_deny(str(decision.get("reason") or "IDC interlock denied the raw governed mutation"))
+
+    if tool in {"Write", "Edit"}:
+        path_value = tool_input.get("file_path") or tool_input.get("path")
+        if not isinstance(path_value, str) or not path_value.strip():
+            H.pre_tool_allow()
+        action = "write" if tool == "Write" else "edit"
+        decision = PG.evaluate_request(cwd, plugin_root, {"action": action, "paths": [path_value]})
+        if decision.get("allowed"):
+            H.pre_tool_allow()
+        H.pre_tool_deny(str(decision.get("reason") or "IDC Path Gate denied the repository mutation"))
+
+    H.pre_tool_allow()
 
 
 if __name__ == "__main__":

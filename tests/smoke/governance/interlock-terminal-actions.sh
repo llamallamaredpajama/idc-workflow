@@ -39,6 +39,7 @@ CONTRACT="$GOV_PLUGIN/scripts/idc_command_contract.py"
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 REPO="$WORK/repo"; mkdir -p "$REPO/docs/workflow"
 printf 'backend: filesystem\n' > "$REPO/docs/workflow/tracker-config.yaml"
+printf '# tracker state for build-lane command_start\n' > "$REPO/TRACKER.md"
 NONGOV="$WORK/plain"; mkdir -p "$NONGOV"   # no docs/workflow/tracker-config.yaml
 
 # SD owns an ACTIVE /idc:* command; SW owns nothing (per-run-unique, like the sibling lifecycle test).

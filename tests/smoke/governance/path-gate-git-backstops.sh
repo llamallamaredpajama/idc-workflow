@@ -64,6 +64,8 @@ grep -qi 'path gate' "$WORK/push.out" || gov_fail "pre-push failure did not ment
 
 PRE_COMMIT_HOOK="$(git -C "$REPO" rev-parse --git-path hooks/pre-commit)"
 PRE_PUSH_HOOK="$(git -C "$REPO" rev-parse --git-path hooks/pre-push)"
+case "$PRE_COMMIT_HOOK" in /*) : ;; *) PRE_COMMIT_HOOK="$REPO/$PRE_COMMIT_HOOK" ;; esac
+case "$PRE_PUSH_HOOK" in /*) : ;; *) PRE_PUSH_HOOK="$REPO/$PRE_PUSH_HOOK" ;; esac
 [ -f "$PRE_COMMIT_HOOK" ] || gov_fail "installed pre-commit hook missing at $PRE_COMMIT_HOOK"
 [ -f "$PRE_PUSH_HOOK" ] || gov_fail "installed pre-push hook missing at $PRE_PUSH_HOOK"
 

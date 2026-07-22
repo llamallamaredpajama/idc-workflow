@@ -8,7 +8,10 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { spawnSync } from "node:child_process";
+import * as fs from "node:fs";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { BashMutation } from "./guard-shell-core.ts";
 import {
 	analyzeBashCommand,
@@ -323,6 +326,8 @@ export function evaluatePathForRole(
 
 		const explicitAllowed = policy.allowedRoots.filter((rule) => rule !== "repo source/tests/implementation files except blocked governance surfaces");
 		if (matchesAny(absPath, cwd, explicitAllowed) || isInsideOrEqual(path.resolve(cwd), absPath)) {
+			const shared = enforceSharedPathGatePath(role, absPath, cwd, policy);
+			if (!shared.allowed) return { ...shared, attemptedPaths: [absPath] };
 			return {
 				allowed: true,
 				reason: "path is inside role implementation authority",
@@ -342,6 +347,8 @@ export function evaluatePathForRole(
 	}
 
 	if (matchesAny(absPath, cwd, policy.allowedRoots)) {
+		const shared = enforceSharedPathGatePath(role, absPath, cwd, policy);
+		if (!shared.allowed) return { ...shared, attemptedPaths: [absPath] };
 		return {
 			allowed: true,
 			reason: "path is inside role write authority",
@@ -395,7 +402,7 @@ export function evaluateBashForRole(
 		// reads + `issue/pr comment` never reach here (classifyGhCommand emits no mutation for
 		// them), so they stay allowed for every role.
 		if (mutation.ghOp) {
-			const ghEval = evaluateGhForRole(role, mutation, policy);
+			const ghEval = evaluateGhForRole(role, mutation, cwd, policy);
 			if (!ghEval.allowed) return ghEval;
 			continue;
 		}
@@ -534,7 +541,7 @@ function gitTouchedPaths(mutation: BashMutation): string[] {
 }
 
 // IDC-LOCAL: per-role GitHub-CLI ACL for the gated gh ops.
-function evaluateGhForRole(role: IdcRole, mutation: BashMutation, policy: PathPolicy): GuardEvaluation {
+function evaluateGhForRole(role: IdcRole, mutation: BashMutation, cwd: string, policy: PathPolicy): GuardEvaluation {
 	const deny = (reason: string): GuardEvaluation => ({ allowed: false, reason, allowedRoots: policy.allowedRoots, blockedSurfaces: policy.blockedSurfaces });
 	const allow = (reason: string): GuardEvaluation => ({ allowed: true, reason, allowedRoots: policy.allowedRoots, blockedSurfaces: policy.blockedSurfaces });
 	switch (mutation.ghOp) {
@@ -542,18 +549,14 @@ function evaluateGhForRole(role: IdcRole, mutation: BashMutation, policy: PathPo
 			return deny(`${mutation.kind} is outside every IDC role authority (not a tracker op)`);
 		case "tracker-write":
 			if (role === "build-review") return deny(`build-review is read-only on the tracker; ${mutation.kind} blocked (reads + comment only)`);
-			return allow(`${mutation.kind} is within ${role} tracker authority`);
+			return denyThroughSharedPathGate(`IDC Path Gate denied ${mutation.kind}: raw tracker writes must go through a sanctioned IDC helper.`, cwd, policy);
 		case "pr-create":
 			if (!GIT_ROLES.has(role)) return deny(`gh pr create is outside ${role} authority`);
 			return allow(`gh pr create is within ${role} authority`);
 		case "merge": {
-			if (!MERGE_ROLES.has(role)) return deny(`gh pr merge is outside ${role} authority`);
 			if (mutation.ghAuto) return deny("gh pr merge --auto is blocked; IDC uses a direct blocking merge");
 			if (mutation.ghAdmin) return deny("gh pr merge --admin is blocked; it bypasses branch protection / the green-gate");
-			// The merge-on-green + review-PASS decision is BEHAVIORAL — it lives in the role
-			// prompt's /fullauto-goal contract (mirroring the Claude finisher), not a hard guard
-			// interlock. The guard enforces only role-scope + the --auto/--admin/force-push bounds.
-			return allow(`gh pr merge is within ${role} authority`);
+			return denyThroughSharedPathGate("IDC Path Gate denied raw gh pr merge: use the sanctioned IDC finisher/merge helper instead.", cwd, policy);
 		}
 		default:
 			return allow("gh op not gated");
@@ -683,6 +686,71 @@ function readGuardOptions(): GuardOptions {
 		recirculatorAllowCanonical: process.env.PI_IDC_RECIRCULATOR_ALLOW_CANONICAL === "1",
 		liveOpsApproved: process.env[LIVE_OP_APPROVAL_ENV] === "1",
 	};
+}
+
+function sharedPathGatePluginRoot(): string {
+	if (process.env.PI_IDC_PLUGIN_ROOT) return process.env.PI_IDC_PLUGIN_ROOT;
+	if (process.env.PI_IDC_HARNESS_REPO) return path.resolve(process.env.PI_IDC_HARNESS_REPO, "../..");
+	return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+}
+
+function sharedPathGateScript(): string {
+	return path.join(sharedPathGatePluginRoot(), "scripts", "idc_path_gate.py");
+}
+
+function currentGitBranch(cwd: string): string {
+	const proc = spawnSync("git", ["-C", cwd, "branch", "--show-current"], { encoding: "utf8" });
+	return proc.status === 0 ? String(proc.stdout || "").trim() : "";
+}
+
+function sharedPathGateInlineAuth(role: IdcRole, cwd: string): Record<string, unknown> {
+	return {
+		schema: 1,
+		branch: currentGitBranch(cwd),
+		allowed_paths: ["."],
+		allowed_actions: ["write", "edit", "git"],
+		graph_node: `pi:${role}`,
+	};
+}
+
+function evaluateSharedPathGate(request: Record<string, unknown>, cwd: string, policy: PathPolicy): GuardEvaluation {
+	const script = sharedPathGateScript();
+	if (!fs.existsSync(script)) {
+		return { allowed: false, reason: `shared Path Gate missing at ${script}`, allowedRoots: policy.allowedRoots, blockedSurfaces: policy.blockedSurfaces };
+	}
+	const proc = spawnSync("python3", [script, "evaluate", "--repo", cwd, "--plugin-root", sharedPathGatePluginRoot()], {
+		input: JSON.stringify(request),
+		encoding: "utf8",
+	});
+	if (proc.error) {
+		return { allowed: false, reason: `shared Path Gate could not be executed: ${proc.error.message}`, allowedRoots: policy.allowedRoots, blockedSurfaces: policy.blockedSurfaces };
+	}
+	let parsed: { allowed?: boolean; reason?: string } | undefined;
+	try {
+		parsed = proc.stdout ? JSON.parse(proc.stdout) : undefined;
+	} catch {
+		parsed = undefined;
+	}
+	const reason = parsed?.reason || String(proc.stderr || proc.stdout || "shared Path Gate denied the mutation").trim();
+	return {
+		allowed: proc.status === 0 && parsed?.allowed === true,
+		reason,
+		allowedRoots: policy.allowedRoots,
+		blockedSurfaces: policy.blockedSurfaces,
+	};
+}
+
+function enforceSharedPathGatePath(role: IdcRole, absPath: string, cwd: string, policy: PathPolicy): GuardEvaluation {
+	return evaluateSharedPathGate({
+		action: "write",
+		paths: [absPath],
+		authorization: sharedPathGateInlineAuth(role, cwd),
+		trust_inline_authorization: true,
+	}, cwd, policy);
+}
+
+function denyThroughSharedPathGate(rawReason: string, cwd: string, policy: PathPolicy): GuardEvaluation {
+	return evaluateSharedPathGate({ action: "bash", raw_reason: rawReason }, cwd, policy);
 }
 
 // A1: live-operation approval gate, mirroring specialist-guard (inert/opt-in). Returns

@@ -33,6 +33,7 @@ stderr warning + allow.
 Invocation: idc_command_entry_gate.py <PLUGIN_ROOT>   (UserPromptExpansion payload on stdin).
 """
 import os
+import subprocess
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -42,6 +43,7 @@ import idc_hook_lib as H  # noqa: E402
 import idc_plugin_freshness as freshness  # noqa: E402
 import idc_command_contract as C  # noqa: E402
 import idc_ledger as L  # noqa: E402
+import idc_path_gate as PG  # noqa: E402
 
 # Fail-closed on an unverifiable freshness signal (invalid receipt / unreadable manifest / gate bug):
 # the workflow commands. Running an unverifiable workflow body can re-introduce just-fixed bugs.
@@ -82,6 +84,15 @@ WRITE_FAILED_REASON = (
     "out, so running it would leave un-enforceable state. Check that the repo root is writable, then "
     "retry the IDC command."
 )
+
+AUTH_WRITE_FAILED_REASON = (
+    "IDC refused to expand this command because it could not write the shared Path Gate authorization "
+    "under this repository's Git directory. Without that authorization the Write/Edit/git backstops "
+    "would fail closed on every repository mutation, so the command would enter a self-contradictory "
+    "state. Check that the repository Git directory is writable, then retry the IDC command."
+)
+
+AUTH_REQUIRED_COMMANDS = set(C.COMMANDS) - {"doctor", "pause"}
 
 
 def _normalize_command(command_name):
@@ -217,11 +228,34 @@ def _fail_closed_or_allow(payload, command, why, plugin_root):
             # THIS fork too. Expanding here would run the command against an obligation the ledger
             # refused to stamp — the same unenforceable state the write-failure path already blocks.
             _block(detail)
+        if reg == _REG_OPENED and not _ensure_path_gate_auth(payload, command):
+            _block(AUTH_WRITE_FAILED_REASON)
         # A recovery command may still expand to help the operator even if the record write failed —
         # but it must NOT claim a record exists (opened iff genuinely persisted). `_emit_context` is
         # terminal, so a `_REG_WRITE_FAILED` here still expands, just with the bootstrap context.
         _emit_context(command, plugin_root, reg == _REG_OPENED)
     _block(REPAIR_REASON)
+
+
+def _ensure_path_gate_auth(payload, command):
+    """Write/refresh the shared Path Gate authorization for commands that legitimately mutate the
+    repository. Read-only commands (`doctor`, `pause`) do not need one. The gate is keyed by the
+    already-open active command record's nonce, so a later finish naturally retires it when the
+    record leaves the active set."""
+    if command not in AUTH_REQUIRED_COMMANDS:
+        return True
+    cwd = payload.get("cwd") or os.getcwd()
+    session_id = payload.get("session_id")
+    if not (session_id and H.is_governed_repo(cwd)):
+        return True
+    if subprocess.run(["git", "-C", cwd, "rev-parse", "--is-inside-work-tree"],
+                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+        return True
+    try:
+        PG.write_authorization(cwd, session=session_id, command=command)
+        return True
+    except Exception:
+        return False
 
 
 def _admit(payload, plugin_root, command):
@@ -258,6 +292,8 @@ def _admit(payload, plugin_root, command):
         # diagnostic command falls through and expands with the bootstrap context below (opened is
         # False), so it never claims a record that does not exist.
         _block(WRITE_FAILED_REASON)
+    if reg == _REG_OPENED and not _ensure_path_gate_auth(payload, command):
+        _block(AUTH_WRITE_FAILED_REASON)
     _emit_context(command, plugin_root, reg == _REG_OPENED)
 
 

@@ -1246,6 +1246,10 @@ class _ShellGateAnalysis:
 _TRUNCATE_VALUE_OPTS = {"-s", "--size", "-r", "--reference"}
 _SHRED_VALUE_OPTS = {"-n", "--iterations", "-s", "--size", "--random-source"}
 _ENV_VALUE_OPTS = {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}
+_SPLIT_VALUE_OPTS = {
+    "-a", "--suffix-length", "-b", "--bytes", "-C", "--line-bytes", "-l", "--lines",
+    "-n", "--number", "--additional-suffix", "--filter",
+}
 
 
 def _opaque_mutation_reason(what):
@@ -1817,8 +1821,14 @@ def _analyze_direct_segments(tokens, cwd, repo_root):
         peeled = _strip_prefixes(seg)
         if not peeled:
             continue
+        if _has_shell_expansion(peeled[0]):
+            analysis.deny(_opaque_mutation_reason("the command name contains a shell expansion"))
+            continue
         head = os.path.basename(peeled[0])
         args = peeled[1:]
+        if head == "eval":
+            analysis.deny(_opaque_mutation_reason("`eval` reparses a command whose mutation targets cannot be bounded safely"))
+            continue
         if head == "cd":
             current_cwd = _next_cwd(current_cwd, args)
             continue
@@ -1871,6 +1881,16 @@ def _analyze_direct_segments(tokens, cwd, repo_root):
                 hit = candidate(arg)
                 if hit:
                     analysis.add_paths([hit])
+            continue
+        if head == "split":
+            if any(arg == "--filter" or arg.startswith("--filter=") for arg in args):
+                analysis.deny(_opaque_mutation_reason("`split --filter` executes a writer whose output targets cannot be bounded"))
+                continue
+            operands = _file_operands(args, _SPLIT_VALUE_OPTS)
+            output_prefix = operands[-1] if len(operands) >= 2 else "x"
+            hit = candidate(output_prefix)
+            if hit:
+                analysis.add_paths([hit])
             continue
         if head == "truncate":
             for arg in _file_operands(args, _TRUNCATE_VALUE_OPTS):

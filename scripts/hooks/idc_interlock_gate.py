@@ -1822,6 +1822,10 @@ def _analyze_direct_segments(tokens, cwd, repo_root):
         if not peeled:
             continue
         if _has_shell_expansion(peeled[0]):
+            first_syntax_word = next((tok for tok in seg if not _ASSIGN_RE.match(tok)), "")
+            if first_syntax_word == "case":
+                # `case "$value" in` evaluates a selector; the expansion is not a command head.
+                continue
             analysis.deny(_opaque_mutation_reason("the command name contains a shell expansion"))
             continue
         head = os.path.basename(peeled[0])

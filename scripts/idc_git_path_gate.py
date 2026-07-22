@@ -73,8 +73,17 @@ def _managed_content(kind: str, plugin_root: str, original_hook: str | None) -> 
         return (
             f"{header}"
             "IDC_PUSH_STDIN=$(mktemp \"${TMPDIR:-/tmp}/idc-path-gate-pre-push.XXXXXX\")\n"
-            "trap 'exit 1' HUP INT TERM\n"
-            "trap 'rm -f \"$IDC_PUSH_STDIN\"' 0\n"
+            "idc_cleanup() { rm -f \"$IDC_PUSH_STDIN\"; }\n"
+            "idc_reraise() {\n"
+            "  IDC_SIGNAL=$1\n"
+            "  trap - 0 \"$IDC_SIGNAL\"\n"
+            "  idc_cleanup\n"
+            "  kill -s \"$IDC_SIGNAL\" \"$$\"\n"
+            "}\n"
+            "trap 'idc_reraise HUP' HUP\n"
+            "trap 'idc_reraise INT' INT\n"
+            "trap 'idc_reraise TERM' TERM\n"
+            "trap idc_cleanup 0\n"
             "cat > \"$IDC_PUSH_STDIN\"\n"
             f"sh {shlex.quote(wrapper)} \"$PLUGIN_ROOT\" \"$@\" < \"$IDC_PUSH_STDIN\"\n"
             "if [ -n \"$IDC_ORIGINAL_HOOK\" ] && [ -x \"$IDC_ORIGINAL_HOOK\" ]; then\n"
@@ -129,6 +138,11 @@ def _parse_original(content: str) -> str:
 
 
 def install_hooks(repo: str, plugin_root: str) -> None:
+    """Install atomically per hook; retry completes a recoverable partial pair.
+
+    If the second hook fails, the first may already be managed. That state is intentional: the
+    original error propagates unchanged, and a later call safely retries the missing second hook.
+    """
     repo = _repo_root(repo)
     plugin_root = os.path.abspath(plugin_root)
     for kind in ("pre-commit", "pre-push"):
@@ -207,9 +221,28 @@ def _collect_pre_commit_paths(repo: str) -> list[str]:
     return [line.strip() for line in out.splitlines() if line.strip()]
 
 
-def _collect_pre_push_paths(repo: str, lines: Iterable[str]) -> list[str]:
+def _remote_ref_shas(repo: str, remote: str) -> list[str]:
+    if not remote:
+        raise RuntimeError("actual push remote is required to inspect a new ref")
+    out = _run_git(repo, "ls-remote", "--refs", remote)
+    shas: list[str] = []
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) != 2 or not re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", parts[0]):
+            raise RuntimeError("git ls-remote returned an invalid server ref record")
+        shas.append(parts[0])
+    return shas
+
+
+def _collect_pre_push_paths(
+    repo: str,
+    lines: Iterable[str],
+    *,
+    remote: str | None = None,
+) -> list[str]:
     paths: list[str] = []
     seen: set[str] = set()
+    server_shas: list[str] | None = None
     for line in lines:
         parts = line.strip().split()
         if len(parts) != 4:
@@ -220,8 +253,10 @@ def _collect_pre_push_paths(repo: str, lines: Iterable[str]) -> list[str]:
         if remote_sha and not re.fullmatch(r"0+", remote_sha):
             outputs = [_run_git(repo, "diff", "--name-only", remote_sha, local_sha)]
         else:
+            if server_shas is None:
+                server_shas = _remote_ref_shas(repo, remote or "")
             try:
-                commits = _run_git(repo, "rev-list", local_sha, "--not", "--remotes").splitlines()
+                commits = _run_git(repo, "rev-list", local_sha, "--not", *server_shas).splitlines()
             except RuntimeError:
                 commits = [local_sha]
             outputs = [
@@ -275,7 +310,7 @@ def cmd_pre_commit(args: argparse.Namespace) -> int:
 
 def cmd_pre_push(args: argparse.Namespace) -> int:
     repo = _repo_root(args.repo)
-    paths = _collect_pre_push_paths(repo, sys.stdin.read().splitlines())
+    paths = _collect_pre_push_paths(repo, sys.stdin.read().splitlines(), remote=args.remote)
     if not paths:
         return 0
     return _gate_exit(_gate(repo, args.plugin_root, "git", paths))
@@ -303,6 +338,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("pre-push")
     p.add_argument("--repo", required=True)
     p.add_argument("--plugin-root", required=True)
+    p.add_argument("--remote")
     p.set_defaults(func=cmd_pre_push)
 
     return ap

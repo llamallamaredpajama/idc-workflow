@@ -32,7 +32,6 @@ stderr warning + allow.
 
 Invocation: idc_command_entry_gate.py <PLUGIN_ROOT>   (UserPromptExpansion payload on stdin).
 """
-import copy
 import os
 import subprocess
 import sys
@@ -181,15 +180,11 @@ def _register_if_governed(payload, plugin_root, command, running=None):
         return _REG_DEFERRED, "", None
     if running is None:
         running = freshness.read_version(plugin_root) or ""
-    prior = next(
-        (copy.deepcopy(record) for record in C.active_records(cwd, session_id)
-         if record.get("command") == command),
-        None,
-    )
     try:
-        written = C.register_start(cwd, session_id, command, running,
-                                   payload.get("command_args") or "",
-                                   payload.get("command_source") or "")
+        with L.capture_command_start() as captured:
+            written = C.register_start(cwd, session_id, command, running,
+                                       payload.get("command_args") or "",
+                                       payload.get("command_source") or "")
     except L.ObligationConflict as exc:
         # A narrowing/replacing restart was REFUSED by the ledger (round-6 BLOCKS 1, rule A): the PRIOR
         # obligation record is left fully intact (the ledger raises BEFORE persisting anything), and the
@@ -210,12 +205,20 @@ def _register_if_governed(payload, plugin_root, command, running=None):
     # read path WITH THIS ATTEMPT'S nonce. Trusting the writer's return would let a swallowed write be
     # reported as opened; accepting any same-command record would mistake a prior/concurrent record for
     # this attempt and later make a rollback capable of erasing the wrong obligation.
+    captured_written = captured.get("written")
     attempt_nonce = written.get("nonce") if isinstance(written, dict) else None
     active = C.active_records(cwd, session_id)
-    if attempt_nonce and any(
-        c.get("command") == command and c.get("nonce") == attempt_nonce for c in active
+    if (
+        attempt_nonce
+        and isinstance(captured_written, dict)
+        and captured_written.get("session_id") == str(session_id)
+        and captured_written.get("command") == command
+        and captured_written.get("nonce") == attempt_nonce
+        and any(
+            c.get("command") == command and c.get("nonce") == attempt_nonce for c in active
+        )
     ):
-        return _REG_OPENED, "", {"nonce": attempt_nonce, "prior": prior}
+        return _REG_OPENED, "", {"nonce": attempt_nonce, "prior": captured.get("prior")}
     return _REG_WRITE_FAILED, "", None
 
 

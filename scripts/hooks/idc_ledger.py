@@ -95,6 +95,7 @@ USAGE (CLI — for the scaffold's gitignore step, and the governance test):
 import argparse
 import copy
 import contextlib
+import contextvars
 import json
 import os
 import sys
@@ -118,6 +119,12 @@ _LEDGER_VERSION = 2
 _CMD_ACTIVE = "active"
 _CMD_FINISHED = "finished"
 _MAX_FINISHED = 20
+
+# `command_start` keeps its established signature and return value. The entry gate opts into this
+# process-local capture only around its one `register_start` call, so the ledger can return the exact
+# prior record observed INSIDE the same write lock as the attempt write. A ContextVar isolates
+# concurrent threads/tasks; it is never persisted and has no CLI surface.
+_COMMAND_START_CAPTURE = contextvars.ContextVar("idc_command_start_capture", default=None)
 
 try:
     import fcntl  # POSIX advisory file locks (macOS/Linux — IDC's platforms)
@@ -473,6 +480,22 @@ class ObligationConflict(Exception):
             "manifest, so the first manifest's coverage obligation cannot vanish")
 
 
+@contextlib.contextmanager
+def capture_command_start():
+    """INTERNAL entry-gate channel for one atomic `command_start` result.
+
+    Yields a mutable `{prior, written}` capture. `command_start` fills it while holding its ledger
+    write lock: `prior` is the exact active record that write replaced (or None for a new record), and
+    `written` is the exact record only when persistence succeeded. The public/internal behavior of
+    `command_start` itself is unchanged, and this context has deliberately no CLI counterpart."""
+    captured = {"prior": None, "written": None}
+    token = _COMMAND_START_CAPTURE.set(captured)
+    try:
+        yield captured
+    finally:
+        _COMMAND_START_CAPTURE.reset(token)
+
+
 def command_start(cwd, session_id, command, plugin_version, args_sha256, source,
                   intake_manifest=None, intake_units=None, recirc_requested=None,
                   build_requested=None, plan_admitted=None, uninstall_flags=None, nonce=None,
@@ -558,10 +581,17 @@ def command_start(cwd, session_id, command, plugin_version, args_sha256, source,
     with _write_lock(cwd):  # read-modify-write must be atomic vs concurrent writers (no lost records)
         raw = _read_raw(cwd)
         commands = _read_commands(cwd, _raw=raw)
+        captured = _COMMAND_START_CAPTURE.get()
+        prior_record = None
         replaced = False
         for i, c in enumerate(commands):
             if (c.get("session_id") == session_id and c.get("command") == command
                     and c.get("state") == _CMD_ACTIVE):
+                # Capture the exact record THIS locked write is about to replace. Taking this snapshot
+                # before the lock (as the entry gate once did) lets a concurrent same-key update land
+                # in the gap and then get erased by a failed-auth rollback restoring stale state.
+                if captured is not None:
+                    prior_record = copy.deepcopy(c)
                 # MONOTONIC OBLIGATIONS (round-5 finding 1, rule A). A re-start of the SAME
                 # (session, command) may only UNION each stamped obligation with the prior record —
                 # NEVER replace or narrow it. So `/build #1 #2` re-entered as `/build #1` still owes
@@ -632,6 +662,9 @@ def command_start(cwd, session_id, command, plugin_version, args_sha256, source,
         if not replaced:
             commands.append(rec)
         persisted = _atomic_write_state(cwd, read_taints(cwd, _raw=raw), _prune_finished(commands))
+        if captured is not None:
+            captured["prior"] = prior_record
+            captured["written"] = copy.deepcopy(rec) if persisted else None
     return rec if persisted else None
 
 

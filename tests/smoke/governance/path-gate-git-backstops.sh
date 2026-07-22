@@ -82,6 +82,19 @@ chmod +x "$CHAINED_PRE_PUSH"
 python3 "$GIT_GATE" verify-hooks --repo "$REPO" --plugin-root "$GOV_PLUGIN" >/dev/null \
   || gov_fail "restored executable Git backstops did not verify"
 
+# The owning user's execute bit is decisive: group/other execute bits do not make an owner-mode
+# 0655 hook executable for its owner, and verification must not certify that false state.
+chmod 0655 "$PRE_COMMIT_HOOK"
+if python3 "$GIT_GATE" verify-hooks --repo "$REPO" --plugin-root "$GOV_PLUGIN" >/dev/null 2>&1; then
+  gov_fail "verify-hooks certified owner-mode 0655 on the managed pre-commit hook"
+fi
+chmod 0755 "$PRE_COMMIT_HOOK"
+chmod 0655 "$CHAINED_PRE_PUSH"
+if python3 "$GIT_GATE" verify-hooks --repo "$REPO" --plugin-root "$GOV_PLUGIN" >/dev/null 2>&1; then
+  gov_fail "verify-hooks certified owner-mode 0655 on the chained pre-push hook"
+fi
+chmod 0755 "$CHAINED_PRE_PUSH"
+
 SID="pg-git-$$-$(basename "$WORK")"
 python3 "$CONTRACT" start --repo "$REPO" --session "$SID" --command build \
   --plugin-root "$GOV_PLUGIN" --args 'demo' --source user >/dev/null \

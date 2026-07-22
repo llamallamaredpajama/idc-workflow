@@ -223,6 +223,11 @@ deny_case Bash "$RAW_TRACKER_MV" "$SID_BUILD"
 deny_case Bash "$RAW_TRACKER_RSYNC" "$SID_BUILD"
 deny_case Bash "$RAW_TRACKER_GIT_CHECKOUT" "$SID_BUILD"
 deny_case Bash "$RAW_TRACKER_GIT_RESTORE" "$SID_BUILD"
+# Directory-wide destinations/checkout pathspecs can overwrite protected descendants even though
+# the literal target is only the repository root. A broad `.` authorization must not admit them.
+deny_case Bash 'rsync -a /tmp/tree/ ./' "$SID_BUILD"
+deny_case Bash 'git checkout HEAD~1 -- .' "$SID_BUILD"
+deny_case Bash 'git restore .' "$SID_BUILD"
 deny_case Bash 'git reset --hard HEAD' "$SID_BUILD"
 deny_case Bash 'git apply /tmp/change.patch' "$SID_BUILD"
 deny_case Bash "$RAW_TRACKER_BASH_C" "$SID_BUILD"

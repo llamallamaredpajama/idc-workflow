@@ -120,10 +120,24 @@ def current_branch(repo: str) -> str:
     return _run_git(repo, "branch", "--show-current")
 
 
+def _has_git_metadata(repo: str) -> bool:
+    current = repo_root(repo)
+    while True:
+        if os.path.lexists(os.path.join(current, ".git")):
+            return True
+        parent = os.path.dirname(current)
+        if parent == current:
+            return False
+        current = parent
+
+
 def git_path(repo: str, relpath: str) -> str:
-    if not _is_git_worktree(repo):
+    try:
+        out = _run_git(repo, "rev-parse", "--git-path", relpath)
+    except RuntimeError:
+        if _has_git_metadata(repo):
+            raise
         return os.path.normpath(os.path.join(repo_root(repo), ".idc", relpath))
-    out = _run_git(repo, "rev-parse", "--git-path", relpath)
     return os.path.normpath(out if os.path.isabs(out) else os.path.join(repo, out))
 
 

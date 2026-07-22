@@ -12,7 +12,8 @@
 # the persisted verdict supplies only the BOARD conjunct for github.
 #
 # Cases (all github backend):
-#   (1) persisted recirc-pending (exit 4) for THIS session  ⇒ BLOCK (bounded N=3 → loud-fail-allow),
+#   (1) persisted recirc-pending (exit 4) for THIS session  ⇒ BLOCK (first 3 ordinary blocks,
+#       then LOUD-FAIL while STILL blocking),
 #       AND the drain binary is NEVER spawned on the stop path (0 GraphQL — a tripwire drain proves it);
 #   (2) persisted `complete` (exit 0)                        ⇒ ALLOW (board conjunct false — the crux);
 #   (3) NO persisted verdict for this session               ⇒ DEFER (allow + warn) — never guesses;
@@ -73,28 +74,31 @@ run_gate() { : > "$ERRLOG"; GATE_OUT="$(mk_payload "$REPO" "$1" | python3 "$GATE
 blocks() { printf '%s' "$1" | python3 -c 'import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get("decision")=="block" else 1)' 2>/dev/null; }
 no_trip() { [ ! -e "$SENTINEL" ] || fail "0-GraphQL VIOLATED: the drain binary was spawned on the github stop path (sentinel exists) — the gate must read ONLY the local persisted verdict"; }
 
-# ── (1) persisted recirc-pending (exit 4) for THIS session ⇒ BLOCK (N=3) then ALLOW, drain NEVER spawned
+# ── (1) persisted recirc-pending (exit 4) for THIS session ⇒ BLOCK, then LOUD-FAIL while STILL blocking
 SID="ghsess-$$-$(basename "$WORK")"
 led    set --kind orchestrator_drain --session "$SID" >/dev/null || fail "could not set the orchestrator_drain marker"
 led    set --kind mid_finish --key 42 --session "$SID" >/dev/null || fail "could not set the mid_finish taint"
 vwrite --verdict recirc-pending --exit 4 --session "$SID"          || fail "could not persist the recirc-pending verdict"
-blocked=0; allowed_on=""; FIRST_OUT=""
+blocked=0; loud_on=""; FIRST_OUT=""
 for i in 1 2 3 4 5; do
   run_gate "$SID"
   no_trip
   [ "$i" -eq 1 ] && FIRST_OUT="$GATE_OUT"
-  if blocks "$GATE_OUT"; then
-    blocked=$((blocked + 1))
-    [ "$i" -le 3 ] || fail "gate blocked on try $i — the N=3 bound is not enforced (infinite-nag risk)"
+  blocks "$GATE_OUT" \
+    || fail "gate allowed on try $i — the bounded stop budget must never become permission to falsely finish"
+  blocked=$((blocked + 1))
+  if grep -qi 'LOUD-FAIL' "$ERRLOG"; then
+    [ -z "$loud_on" ] && loud_on="$i"
+    [ "$i" -ge 4 ] || fail "gate LOUD-FAILed before the bound was exhausted (got loud_on=$i)"
   else
-    allowed_on="$i"; break
+    [ "$i" -le 3 ] || fail "the gate must LOUD-FAIL once the bound is exhausted, while STILL blocking (try $i)"
   fi
 done
-[ "$blocked" -eq 3 ]    || fail "expected exactly 3 blocks before the loud-fail, got $blocked [re-defer / drop-persist ⇒ RED]"
-[ "$allowed_on" = "4" ] || fail "expected the 4th stop to be ALLOWED (loud-fail), got '$allowed_on' (infinite-nag risk)"
+[ "$blocked" -eq 5 ]  || fail "expected all 5 stop attempts to stay BLOCKED, got $blocked blocks [re-defer / drop-persist ⇒ RED]"
+[ "$loud_on" = "4" ] || fail "expected the FIRST LOUD-FAIL on the 4th stop, got loud_on='${loud_on:-<none>}'"
 printf '%s' "$FIRST_OUT" | grep -q '/idc:recirculate' || fail "block reason must name the /idc:recirculate remediation (got: $FIRST_OUT)"
 [ ! -e "$SENTINEL" ]    || fail "0-GraphQL VIOLATED across the whole block loop — the drain was spawned"
-echo "  ok (1) persisted recirc-pending (exit 4) for THIS session ⇒ blocks 3× then allows — AND the drain binary was NEVER spawned (0 GraphQL)"
+echo "  ok (1) persisted recirc-pending (exit 4) for THIS session ⇒ blocks 5×, with the first LOUD-FAIL on the 4th stop — AND the drain binary was NEVER spawned (0 GraphQL)"
 
 # ── (2) persisted `complete` (exit 0) ⇒ ALLOW (board conjunct false — the crux allow) ───────────────
 # Fresh session id so the anti-nag counter is clean; last-write-wins overwrites nothing (new session).
@@ -195,4 +199,4 @@ grep -qxF '.idc-drain-verdict.json*' "$GI" \
   || fail "(6) the gitignore self-heal must be idempotent — exactly ONE ignore line after many writes"
 echo "  ok (6) gitignore self-heal: the verdict file is ignored after the first persist (idempotent, no litter)"
 
-echo "PASS: the Stop fixpoint gate gates a github stop from the LOCAL persisted drain verdict with ZERO GraphQL — recirc-pending blocks (bounded, drain never spawned), complete allows + clears the marker, a missing or foreign-session verdict defers, the ledger alone never blocks a clean board, and persisting a verdict self-heals the gitignore (no committed litter)"
+echo "PASS: the Stop fixpoint gate gates a github stop from the LOCAL persisted drain verdict with ZERO GraphQL — recirc-pending blocks 5× with the first LOUD-FAIL on the 4th stop while STILL blocking (drain never spawned), complete allows + clears the marker, a missing or foreign-session verdict defers, the ledger alone never blocks a clean board, and persisting a verdict self-heals the gitignore (no committed litter)"

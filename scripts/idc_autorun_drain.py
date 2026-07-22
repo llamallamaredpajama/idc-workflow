@@ -105,6 +105,7 @@ import sys
 
 BEGIN = "<!-- idc-tracker-state:begin -->"
 END = "<!-- idc-tracker-state:end -->"
+JOURNAL_REL = os.path.join("docs", "workflow", "transition-journal.ndjson")
 
 # The wave-close coherence check's ceiling, in seconds. Exported so the Stop fixpoint gate — which
 # re-runs this drain on its own stop path — can assert its own timeout is strictly LARGER and keep the
@@ -581,6 +582,39 @@ def _run_wave_close_live(args, root):
                                  ("live: ok", "live: ok (attested)", "live: not-declared"))
 
 
+def _run_wave_close_journal(args, root):
+    """The wave-close journal↔board parity check (`idc_journal_replay.py`).
+
+    Reuses the existing replay helper and rides the existing `--coherence` opt-in, because it is the
+    same certifying-path question: can this would-be-complete board still be proven from sanctioned
+    history? A readable mismatch is a real GAP; a missing/corrupt/unreadable journal is an ERROR and
+    therefore `drain: unknown`, never a silent complete.
+    """
+    checker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "idc_journal_replay.py")
+    journal_path = os.path.join(root, JOURNAL_REL)
+    if not os.path.isfile(checker) or not os.path.exists(journal_path):
+        return None, None
+    argv = [sys.executable, checker, "--journal", journal_path, "--backend", args.backend]
+    if args.backend == "github":
+        argv += ["--owner", args.owner, "--project", str(args.project)]
+    else:
+        argv += ["--tracker", args.tracker]
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as e:
+        return "error", _scrub(f"journal: error ({e})")
+    stdout, stderr = _scrub(r.stdout or ""), _scrub(r.stderr or "")
+    if r.returncode == 0 and "OK: Journal replay matches current board state." in stdout:
+        return "ok", "journal: ok"
+    if r.returncode == 1:
+        lines = [ln.strip(" -") for ln in (stderr or stdout).splitlines() if ln.strip()]
+        detail = next((ln for ln in lines if "mismatch" in ln.lower() or "present on board" in ln.lower()
+                       or "missing from board" in ln.lower()), None)
+        return "gap", f"journal: gap {detail or 'journal replay disagrees with the board'}"
+    detail = " ".join((stderr or stdout).split())[-400:]
+    return "error", f"journal: error ({detail or 'journal replay could not establish parity'})"
+
+
 # THE WAVE-CLOSE GATE TABLE — the single ordered source of truth for every wave-close gate: which flag
 # opts it in, how it runs, and which verdict token its finding becomes. It replaced four copy-paste
 # invocation blocks plus six copy-paste gating branches, which is not merely tidier — the two halves had
@@ -603,6 +637,7 @@ _WAVE_CLOSE_GATES = (
     # (name, flag attribute, runner, gap verdict token)
     ("acceptance", "acceptance", _run_wave_close_acceptance, "acceptance-gap"),
     ("coherence", "coherence", _run_wave_close_coherence, "coherence-gap"),
+    ("journal", "coherence", _run_wave_close_journal, "journal-gap"),
     ("live", "live", _run_wave_close_live, "live-gap"),
 )
 
@@ -632,13 +667,12 @@ def main():
                          "ERROR/corrupt check ⇒ `drain: unknown` exit 2 (both NON-TERMINAL); ok ⇒ complete exit 0. "
                          "The Phase-0 exit-code set {0,2,3,4} is unchanged (acceptance-gap is a new TOKEN on exit 4).")
     ap.add_argument("--coherence", action="store_true",
-                    help="at wave close, also invoke idc_finish_coherence.py (BOTH backends) and GATE a "
-                         "would-be-`complete` verdict on it: items whose work shipped (PR merged / issue "
-                         "closed as completed) but whose board Status was never advanced ⇒ "
-                         "`drain: coherence-gap` exit 4; an indeterminate check ⇒ `drain: unknown` exit 2. "
-                         "Opt-in so DEFAULT output stays byte-identical. Closes the merge→board-flip window "
-                         "in idc_git_finish.py: without it a board still advertising shipped work reads as a "
-                         "clean terminal `complete`.")
+                    help="at wave close, also invoke idc_finish_coherence.py AND the journal↔board replay "
+                         "check on the same certifying path. A stale board ⇒ `drain: coherence-gap` exit 4; "
+                         "a readable journal mismatch ⇒ `drain: journal-gap` exit 4; an indeterminate check "
+                         "(including a corrupt/missing journal) ⇒ `drain: unknown` exit 2. Opt-in so DEFAULT "
+                         "output stays byte-identical. Closes the merge→board-flip window in idc_git_finish.py, "
+                         "and the raw-Done/journal-divergence false-complete the audit reproduced.")
     ap.add_argument("--live", action="store_true",
                     help="at wave close, also invoke idc_live_check.py (backend-blind, AUDIT only — it "
                          "executes nothing, so the stop path stays fast) and GATE a would-be-`complete` "

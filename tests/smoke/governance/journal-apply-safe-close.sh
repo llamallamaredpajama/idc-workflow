@@ -57,4 +57,39 @@ fi
   || fail "apply-safe should have closed #$item (Status=Done)"
 echo "PASS: apply-safe board close is journaled and the re-scan converges to coherent."
 
+echo "--- unsupported raw Done must NOT be laundered through a SAFE-FIX board close ---"
+python3 - "$GOV_PLUGIN/scripts" <<'PY' || fail "apply-safe laundered a raw Done despite journal divergence"
+import sys
+sys.path.insert(0, sys.argv[1])
+import idc_git_janitor as J
+
+calls = []
+
+def fake_apply_board(finding, ctx):
+    calls.append((finding.get("op"), finding.get("number")))
+    return True, "closed issue"
+
+J._apply_board = fake_apply_board
+findings = [
+    J.finding(J.SAFE_FIX, "board", "#42",
+              "Status=Done but the issue is still OPEN",
+              "close the issue (gh issue close)", number=42, op="close-issue"),
+    J.finding(J.RISKY, "journal", "#42",
+              "Status mismatch: journal says 'Todo', board says 'Done'",
+              "reconcile manually", number=42),
+]
+results = J.apply_safe(findings, {"repo": "/tmp/repo", "backend": "github"})
+if calls:
+    raise SystemExit("apply_safe executed a SAFE-FIX board close for #42 even though the same item "
+                     "already had a journal divergence finding — that launders an unsupported raw Done")
+if len(results) != 1:
+    raise SystemExit(f"expected one skipped SAFE-FIX result, got: {results!r}")
+finding, ok, note = results[0]
+if ok:
+    raise SystemExit(f"the raw-Done SAFE-FIX was reported successful instead of refused: {results!r}")
+if finding.get("number") != 42 or "journal" not in note.lower():
+    raise SystemExit(f"the refusal must stay attached to #42 and name the journal divergence: {results!r}")
+print("  ok an unsupported raw Done with a journal mismatch is REFUSED before any SAFE-FIX board close runs")
+PY
+
 echo "--- All journal-apply-safe-close tests passed! ---"

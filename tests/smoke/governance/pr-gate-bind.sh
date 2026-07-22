@@ -57,8 +57,8 @@ check(r["action"] == "bound", r)
 check(f.pr_body == f"PR body\n\n<!-- idc-gate-pr: {GATE} -->", f.pr_body)
 check(f.gate_body == f"Gate body\n\n<!-- idc-gate-pr: {PR} -->", f.gate_body)
 check(len(f.writes()) == 2, f.calls)
-check(sum(c[:2] == ("pr", "view") for c in f.calls) == 2, "PR write lacked readback")
-check(sum(c[:2] == ("issue", "view") for c in f.calls) == 2, "gate write lacked readback")
+check(sum(c[:2] == ("pr", "view") for c in f.calls) >= 2, "PR write lacked readback")
+check(sum(c[:2] == ("issue", "view") for c in f.calls) >= 2, "gate write lacked readback")
 print("  ok both reciprocal markers bind with positive readback")
 
 # Idempotent rerun: exact existing reciprocal binding is a write-free success.
@@ -73,6 +73,28 @@ f = Fake(pr_body=f"PR\n\n<!-- idc-gate-pr: {GATE} -->").install()
 r = B.bind(".", PR, GATE)
 check(r["action"] == "bound" and len(f.writes()) == 1 and f.writes()[0][:2] == ("issue", "edit"), (r, f.calls))
 print("  ok a correct partial binding converges by writing only the missing side")
+
+# The TERMINAL path consumes a LIVE reciprocal proof, not the gate body's one-sided say-so.
+f = Fake(pr_body=f"PR\n\n<!-- idc-gate-pr: {GATE} -->",
+         gate_body=f"Gate\n\n<!-- idc-gate-pr: {PR} -->").install()
+r = B.validate_live_binding(".", PR, GATE)
+check(r["pr"] == PR and r["gate"] == GATE, r)
+print("  ok the live reciprocal validator accepts an exact PR↔gate binding")
+
+def refuses_live(fake, needle):
+    fake.install()
+    try:
+        B.validate_live_binding(".", PR, GATE)
+    except B.BindError as exc:
+        check(needle.lower() in str(exc).lower(), (needle, str(exc)))
+    else:
+        raise AssertionError("live reciprocal validator did not refuse")
+
+refuses_live(Fake(gate_body=f"Gate\n\n<!-- idc-gate-pr: {PR} -->"), "PR")
+refuses_live(Fake(pr_body=f"PR\n\n<!-- idc-gate-pr: {GATE} -->"), "gate")
+refuses_live(Fake(pr_body=f"PR\n\n<!-- idc-gate-pr: 999 -->",
+                  gate_body=f"Gate\n\n<!-- idc-gate-pr: {PR} -->"), "999")
+print("  ok one-sided or wrong-number live bindings refuse before the terminal path can trust them")
 
 
 def refuses(fake, needle):
@@ -104,7 +126,7 @@ else:
 check(len(f.writes()) == 1 and not any(c[:2] == ("issue", "edit") for c in f.calls), f.calls)
 print("  ok divergent readback stops before the second write")
 
-print("PASS: reciprocal PR/gate binder is validating, idempotent, requirements-only, and readback-verified")
+print("PASS: reciprocal PR/gate binder is validating, idempotent, requirements-only, readback-verified, and exposes a live reciprocal PR↔gate proof for terminal paths")
 PY
 
 for doc in "$GOV_PLUGIN/commands/think.md" "$GOV_PLUGIN/skills/idc-gate-issue/SKILL.md"; do

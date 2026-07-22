@@ -270,6 +270,23 @@ def bounded_block(key, reason, bound=DEFAULT_BOUND):
     block(reason)
 
 
+def bounded_block_fail_closed(key, reason, bound=DEFAULT_BOUND):
+    """Block for `key`, and stay blocked after the repair budget is exhausted.
+
+    The first `bound` attempts are ordinary blocks. Once the counter reaches the bound, emit the same
+    LOUD-FAIL marker as `bounded_block` so the operator sees a governance miss, but KEEP returning a
+    block decision — the bounded retry budget is never permission to falsely finish.
+    """
+    n = counter_get(key)
+    if observe_only():
+        warn(f"OBSERVE-ONLY (would block): {reason}")
+        sys.exit(0)
+    counter_set(key, min(n + 1, bound))
+    if n >= bound:
+        loud_fail(reason)
+    block(reason)
+
+
 def guard_pre_action(fn):
     """Run a pre-action gate `fn(payload, plugin_root)`. Policy denials happen inside `fn` via
     block()/bounded_block(); an UNEXPECTED exception fails open (warn + allow) unless STRICT."""

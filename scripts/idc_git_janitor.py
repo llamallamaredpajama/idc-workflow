@@ -625,9 +625,16 @@ def scan(ctx):
 # --- apply-safe ------------------------------------------------------------------------------------
 def apply_safe(findings, ctx):
     """Execute ONLY the SAFE-FIX findings, worktrees→local→remote→board (worktrees before their
-    branches so a merged clean worktree's branch is deletable). Returns a list of (finding, ok, note)."""
+    branches so a merged clean worktree's branch is deletable). Returns a list of (finding, ok, note).
+
+    A SAFE-FIX board close is REFUSED when the same item already carries a journal divergence finding:
+    closing the issue or stamping Done there would launder an unsupported raw terminal state into a
+    sanctioned clean-up. The journal mismatch must be reconciled first, never paved over by Janitor.
+    """
     repo = ctx["repo"]
     results = []
+    blocked_board_nums = {f.get("number") for f in findings
+                          if f.get("dim") == "journal" and f.get("number") is not None}
     order = {"worktree": 0, "branch": 1, "remote-branch": 2, "board": 3}
     for f in sorted((f for f in findings if f["tier"] == SAFE_FIX), key=lambda f: order.get(f["dim"], 9)):
         dim = f["dim"]
@@ -643,6 +650,11 @@ def apply_safe(findings, ctx):
             _, rc = git(["push", "origin", "--delete", f["name"]], repo)  # --delete, never --force
             results.append((f, rc == 0, "deleted on origin" if rc == 0 else "git push --delete failed"))
         elif dim == "board":
+            if f.get("number") in blocked_board_nums:
+                results.append((f, False,
+                                "refused: the same item already has a journal divergence finding — "
+                                "reconcile sanctioned history before any SAFE-FIX board close"))
+                continue
             ok, note = _apply_board(f, ctx)
             results.append((f, ok, note))
     return results
@@ -923,7 +935,7 @@ def check_journal_divergence(ctx, findings, journal_path):
 
         if not actual_item:
             findings.append(finding(RISKY, "journal", f"#{item_id}",
-                "Item present in journal but missing from board.", "reconcile manually"))
+                "Item present in journal but missing from board.", "reconcile manually", number=item_id))
             continue
         if not expected_item:
             # Board-only items are tolerated ONLY below the derived adoption watermark (the earliest
@@ -936,11 +948,11 @@ def check_journal_divergence(ctx, findings, journal_path):
                 findings.append(finding(RISKY, "journal", f"#{item_id}",
                     "Item has no journal history, and a journaled create carries no item number "
                     "(the github issue-number read-back gap) — the adoption watermark is unreliable, "
-                    "so the pre-journal carve-out cannot be granted", "reconcile manually"))
+                    "so the pre-journal carve-out cannot be granted", "reconcile manually", number=item_id))
             elif create_watermark is not None and item_id > create_watermark:
                 findings.append(finding(RISKY, "journal", f"#{item_id}",
                     "Item has no journal history but was created after journaling began "
-                    f"(numbered above journaled create #{create_watermark})", "reconcile manually"))
+                    f"(numbered above journaled create #{create_watermark})", "reconcile manually", number=item_id))
             continue
 
         act_stage = actual_item.get("stage")
@@ -949,12 +961,12 @@ def check_journal_divergence(ctx, findings, journal_path):
         if "stage" in expected_item and expected_item.get("stage") != act_stage:
             detail = (f"Stage mismatch: journal says '{expected_item.get('stage')}', "
                       f"board says '{act_stage}'")
-            findings.append(finding(RISKY, "journal", f"#{item_id}", detail, "reconcile manually"))
+            findings.append(finding(RISKY, "journal", f"#{item_id}", detail, "reconcile manually", number=item_id))
 
         if "status" in expected_item and expected_item.get("status") != act_status:
             detail = (f"Status mismatch: journal says '{expected_item.get('status')}', "
                       f"board says '{act_status}'")
-            findings.append(finding(RISKY, "journal", f"#{item_id}", detail, "reconcile manually"))
+            findings.append(finding(RISKY, "journal", f"#{item_id}", detail, "reconcile manually", number=item_id))
 
     return False
 

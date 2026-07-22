@@ -35,6 +35,7 @@ PLUGIN="$(cd "$(dirname "$0")/../.." && pwd)"
 FIN="$PLUGIN/scripts/idc_git_finish.py"
 JAN="$PLUGIN/scripts/idc_git_janitor.py"
 TRK="$PLUGIN/scripts/idc_tracker_fs.py"
+CHECK="$PLUGIN/scripts/idc_review_verdict_check.py"
 fail() { echo "FAIL: $1"; [ -n "${2:-}" ] && { echo "----- report -----"; echo "$2"; }; exit 1; }
 gitc() { git -C "$REPO" "$@"; }
 
@@ -107,7 +108,7 @@ gitc config user.email t@example.com; gitc config user.name tester
 echo hello > "$REPO/README.md"; gitc add -A; gitc commit -qm init
 BASE="$(gitc symbolic-ref --short HEAD)"   # == main by construction (pinned on both origin and clone)
 gitc push -q origin "HEAD:$BASE"
-mkdir -p "$REPO/docs/workflow"; printf 'backend: filesystem\n' > "$REPO/docs/workflow/tracker-config.yaml"
+mkdir -p "$REPO/docs/workflow/code-reviews"; printf 'backend: filesystem\n' > "$REPO/docs/workflow/tracker-config.yaml"
 TRACKER="$REPO/TRACKER.md"
 python3 "$TRK" --tracker "$TRACKER" init >/dev/null                          || fail "tracker init failed"
 python3 "$TRK" --tracker "$TRACKER" create --title "buildable feature" >/dev/null  # #1
@@ -129,10 +130,12 @@ git -C "$WT" push -q origin "$BRANCH"                                        || 
 # ---- run the finisher's deterministic git-finalization tail ---------------------------------------
 # Receipt gate: a clean PASS verdict owning PR #1 / issue #1 (no nits to route, no merge_conditions),
 # so the tail runs its real git mechanics — this phase certifies the git/janitor end-state, not the gate.
-printf '{"verdict":"PASS","pr":1,"issue":1,"findings":[]}\n' > "$REPO/verdict.json"
+VERDICT_PATH="$REPO/docs/workflow/code-reviews/2026-07-22-pr-1-review.json"
+printf '{"verdict":"PASS","pr":1,"issue":1,"findings":[]}\n' > "$VERDICT_PATH"
+python3 "$CHECK" "$VERDICT_PATH" >/dev/null 2>&1 || fail "validator rejected the clean finish verdict"
 finish_out="$( cd "$REPO" && env PATH="$WORK/bin:$PATH" WORK="$WORK" ORIGIN="$ORIGIN" BRANCH="$BRANCH" \
   python3 "$FIN" --pr 1 --issue 1 --worktree "$WT" --repo "$REPO" --tracker "$TRACKER" \
-    --verdict "$REPO/verdict.json" 2>&1 )"; rc=$?
+    --verdict "$VERDICT_PATH" 2>&1 )"; rc=$?
 [ "$rc" -eq 0 ] || fail "the finish tail must succeed on a real lifecycle (got exit $rc)" "$finish_out"
 printf '%s\n' "$finish_out" | grep -qx 'finish: ok' || fail "finish must print 'finish: ok'" "$finish_out"
 

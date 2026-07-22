@@ -1,9 +1,10 @@
 #!/bin/bash
 # path-gate-interlock-denial.sh — the shared Path Gate reaches Claude's PreToolUse transport:
-# direct Write/Edit file mutations deny without a live authorization, generic Bash file writers and
-# the supported `apply_patch` Bash alias are stopped before execution, a sanctioned command session can
-# write inside its allowed source surface, protected machine-owned tracker files stay denied, and raw
-# gh tracker writes stay denied whether or not a lifecycle record exists.
+# direct Write/Edit file mutations deny without a live authorization; generic Bash file writers,
+# file utilities, command substitutions, script indirection, BASH_ENV startup files, and the supported
+# `apply_patch` Bash alias are stopped before execution; a sanctioned command session can still write
+# ordinary source files; protected machine-owned tracker files stay denied; and raw gh tracker writes
+# stay denied whether or not a lifecycle record exists.
 set -uo pipefail
 . "$(dirname "$0")/lib.sh"
 
@@ -24,6 +25,7 @@ REPO="$WORK/repo"; mkdir -p "$REPO/docs/workflow" "$REPO/src"
 printf 'backend: filesystem\n' > "$REPO/docs/workflow/tracker-config.yaml"
 printf 'ticket: demo\n' > "$REPO/TRACKER.md"
 printf 'export const x = 1;\n' > "$REPO/src/x.ts"
+printf 'export const seed = 3;\n' > "$REPO/src/seed.ts"
 PLUGIN_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$GOV_PLUGIN/.claude-plugin/plugin.json")"
 printf 'receipt_version: 2\nplugin_version: %s\n' "$PLUGIN_VERSION" > "$REPO/docs/workflow/install-receipt.yaml"
 
@@ -90,7 +92,33 @@ export SID_BUILD
 
 RAW_TRACKER_REDIRECT="printf 'ticket: raw\\n' > TRACKER.md"
 RAW_TRACKER_PY="python3 -c \"open('TRACKER.md','w').write('ticket: raw\\n')\""
+RAW_TRACKER_CP="cp src/seed.ts TRACKER.md"
+RAW_TRACKER_MV="mv src/seed.ts TRACKER.md"
+RAW_TRACKER_BASH_C="bash -c 'cp src/seed.ts TRACKER.md'"
+RAW_TRACKER_SH_C="sh -c 'mv src/seed.ts TRACKER.md'"
+RAW_TRACKER_ZSH_C="zsh -c 'printf \"ticket: zsh\\n\" > TRACKER.md'"
+RAW_TRACKER_ENV_S="env -S 'bash -c \"cp src/seed.ts TRACKER.md\"'"
+RAW_TRACKER_SUBST=': $(cp src/seed.ts TRACKER.md)'
+RAW_TRACKER_CD_CHAIN="cd src && cp seed.ts ../TRACKER.md"
 RAW_SRC_PY="python3 -c \"open('src/x.ts','w').write('export const x = 2;\\n')\""
+RAW_SRC_CP="cp src/seed.ts src/copied.ts"
+RAW_SRC_MV="mv src/seed.ts src/moved.ts"
+RAW_SRC_BASH_C="bash -c 'cp src/seed.ts src/copied.ts'"
+RAW_SRC_ENV_S="env -S 'bash -c \"cp src/seed.ts src/copied.ts\"'"
+RAW_SRC_CD_CHAIN="cd src && cp seed.ts copied.ts"
+WRITER_SCRIPT="$WORK/write-tracker.sh"
+cat > "$WRITER_SCRIPT" <<'SH'
+cp src/seed.ts TRACKER.md
+SH
+SAFE_WRITER_SCRIPT="$WORK/write-src.sh"
+cat > "$SAFE_WRITER_SCRIPT" <<'SH'
+cp src/seed.ts src/copied.ts
+SH
+RAW_TRACKER_SCRIPT="bash '$WRITER_SCRIPT'"
+RAW_TRACKER_SOURCE="source '$WRITER_SCRIPT'"
+RAW_TRACKER_BASH_ENV="BASH_ENV='$WRITER_SCRIPT' bash -c 'echo hi'"
+RAW_TRACKER_BASH_ENV_NESTED="BASH_ENV='$WRITER_SCRIPT' env -S 'bash -c \"echo hi\"'"
+RAW_SRC_SCRIPT="bash '$SAFE_WRITER_SCRIPT'"
 PATCH_TRACKER="$(cat <<'PATCH'
 apply_patch <<'EOF'
 *** Begin Patch
@@ -117,6 +145,18 @@ PATCH
 # No live authorization: every repository-writing surface must deny.
 deny_case Bash "$RAW_TRACKER_REDIRECT" "$SID_NONE"
 deny_case Bash "$RAW_TRACKER_PY" "$SID_NONE"
+deny_case Bash "$RAW_TRACKER_CP" "$SID_NONE"
+deny_case Bash "$RAW_TRACKER_MV" "$SID_NONE"
+deny_case Bash "$RAW_TRACKER_BASH_C" "$SID_NONE"
+deny_case Bash "$RAW_TRACKER_SH_C" "$SID_NONE"
+deny_case Bash "$RAW_TRACKER_ZSH_C" "$SID_NONE"
+deny_case Bash "$RAW_TRACKER_ENV_S" "$SID_NONE"
+deny_case Bash "$RAW_TRACKER_SUBST" "$SID_NONE"
+deny_case Bash "$RAW_TRACKER_CD_CHAIN" "$SID_NONE"
+deny_case Bash "$RAW_TRACKER_SCRIPT" "$SID_NONE"
+deny_case Bash "$RAW_TRACKER_SOURCE" "$SID_NONE"
+deny_case Bash "$RAW_TRACKER_BASH_ENV" "$SID_NONE"
+deny_case Bash "$RAW_TRACKER_BASH_ENV_NESTED" "$SID_NONE"
 deny_case Bash "$PATCH_TRACKER" "$SID_NONE"
 deny_case Write "$REPO/TRACKER.md" "$SID_NONE"
 deny_case Edit "$REPO/src/x.ts" "$SID_NONE"
@@ -124,12 +164,30 @@ deny_case Bash 'gh issue create --title gate --body-file /tmp/body' "$SID_NONE"
 
 authorize_build
 allow_case Bash "$RAW_SRC_PY" "$SID_BUILD"
+allow_case Bash "$RAW_SRC_CP" "$SID_BUILD"
+allow_case Bash "$RAW_SRC_MV" "$SID_BUILD"
+allow_case Bash "$RAW_SRC_BASH_C" "$SID_BUILD"
+allow_case Bash "$RAW_SRC_ENV_S" "$SID_BUILD"
+allow_case Bash "$RAW_SRC_CD_CHAIN" "$SID_BUILD"
+allow_case Bash "$RAW_SRC_SCRIPT" "$SID_BUILD"
 allow_case Bash "$PATCH_SRC" "$SID_BUILD"
 deny_case Bash "$RAW_TRACKER_REDIRECT" "$SID_BUILD"
 deny_case Bash "$RAW_TRACKER_PY" "$SID_BUILD"
+deny_case Bash "$RAW_TRACKER_CP" "$SID_BUILD"
+deny_case Bash "$RAW_TRACKER_MV" "$SID_BUILD"
+deny_case Bash "$RAW_TRACKER_BASH_C" "$SID_BUILD"
+deny_case Bash "$RAW_TRACKER_SH_C" "$SID_BUILD"
+deny_case Bash "$RAW_TRACKER_ZSH_C" "$SID_BUILD"
+deny_case Bash "$RAW_TRACKER_ENV_S" "$SID_BUILD"
+deny_case Bash "$RAW_TRACKER_SUBST" "$SID_BUILD"
+deny_case Bash "$RAW_TRACKER_CD_CHAIN" "$SID_BUILD"
+deny_case Bash "$RAW_TRACKER_SCRIPT" "$SID_BUILD"
+deny_case Bash "$RAW_TRACKER_SOURCE" "$SID_BUILD"
+deny_case Bash "$RAW_TRACKER_BASH_ENV" "$SID_BUILD"
+deny_case Bash "$RAW_TRACKER_BASH_ENV_NESTED" "$SID_BUILD"
 deny_case Bash "$PATCH_TRACKER" "$SID_BUILD"
 allow_case Write "$REPO/src/x.ts" "$SID_BUILD"
 deny_case Write "$REPO/TRACKER.md" "$SID_BUILD"
 deny_case Bash 'gh issue create --title gate --body-file /tmp/body' "$SID_BUILD"
 
-echo "PASS: the shared Path Gate denies unauthenticated Write/Edit/raw-gh mutations, stops generic Bash writers plus the apply_patch alias before execution, admits authorized source writes, and still blocks protected tracker/raw-gh writes"
+echo "PASS: the shared Path Gate denies unauthenticated Write/Edit/raw-gh mutations, recursively blocks cp/mv/redirection/apply_patch through bash/sh/zsh/env -S/script/BASH_ENV/command-substitution forms, still admits authorized ordinary source writes, and keeps protected tracker/raw-gh writes blocked"

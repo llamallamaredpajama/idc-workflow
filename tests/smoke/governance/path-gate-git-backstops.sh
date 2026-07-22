@@ -1,9 +1,10 @@
 #!/bin/bash
 # path-gate-git-backstops.sh — the shared Path Gate also gates git pre-commit/pre-push backstops:
 # hooks install + verify cleanly, an authorized source-only change can commit/push, an unauthorized
-# commit that bypasses pre-commit is still blocked at pre-push, a generic Bash writer is stopped
-# before a `--no-verify` commit+push can bypass BOTH git hooks, failing child git stderr/stdout is
-# scrubbed at the read, and deleted/divergent hook files are detected fail-closed.
+# commit that bypasses pre-commit is still blocked at pre-push, generic Bash writers are stopped
+# before a `--no-verify` commit+push can bypass BOTH git hooks, explicit `git commit/push --no-verify`
+# is denied at PreToolUse, failing child git stderr/stdout is scrubbed at the read, and
+# deleted/divergent hook files are detected fail-closed.
 set -uo pipefail
 . "$(dirname "$0")/lib.sh"
 
@@ -31,6 +32,14 @@ git -C "$REPO" remote add origin "$REMOTE"
 printf 'backend: filesystem\n' > "$REPO/docs/workflow/tracker-config.yaml"
 printf 'ticket: demo\n' > "$REPO/TRACKER.md"
 printf 'export const x = 1;\n' > "$REPO/src/app.ts"
+WRITER_SCRIPT="$WORK/write-tracker.sh"
+cat > "$WRITER_SCRIPT" <<'SH'
+cp src/app.ts TRACKER.md
+SH
+STARTUP_SCRIPT="$WORK/startup-writer.sh"
+cat > "$STARTUP_SCRIPT" <<'SH'
+cp src/app.ts TRACKER.md
+SH
 
 python3 "$GIT_GATE" install-hooks --repo "$REPO" --plugin-root "$GOV_PLUGIN" >/dev/null \
   || gov_fail "could not install git backstops"
@@ -61,6 +70,37 @@ PY
 gate_bash() { OUT="$(emit_bash "$1" "$2" | python3 "$INTERLOCK" "$GOV_PLUGIN" 2>"$WORK/interlock.err")"; RC=$?; }
 is_deny() { printf '%s' "$OUT" | grep -q '"permissionDecision": *"deny"'; }
 
+deny_gate() {
+  gate_bash "$1" "$SID"
+  [ "$RC" -eq 0 ] || gov_fail "expected a deny decision for: $1 :: $(cat "$WORK/interlock.err")"
+  is_deny || gov_fail "expected PreToolUse to deny: [$1] stdout=[$OUT] stderr=[$(cat "$WORK/interlock.err")]"
+}
+
+reset_repo_to_origin() {
+  git -C "$REPO" reset --hard -q origin/main
+  printf 'ticket: demo\n' > "$REPO/TRACKER.md"
+  printf 'export const x = 2;\n' > "$REPO/src/app.ts"
+}
+
+deny_or_exploit() {
+  local label="$1" cmd="$2"
+  reset_repo_to_origin
+  gate_bash "$cmd" "$SID"
+  [ "$RC" -eq 0 ] || gov_fail "$label crashed the interlock (expected a decision): $(cat "$WORK/interlock.err")"
+  if is_deny; then
+    return 0
+  fi
+  (
+    cd "$REPO"
+    eval "$cmd"
+    git add -A TRACKER.md src/app.ts
+    git commit --no-verify -qm "test: $label bypass"
+    git push --no-verify origin main >/dev/null 2>&1
+  ) || gov_fail "$label slipped past PreToolUse, but the follow-on --no-verify bypass did not complete"
+  REMOTE_TRACKER="$(git --git-dir="$REMOTE" show main:TRACKER.md)"
+  gov_fail "$label slipped past the pre-mutation gate and both git backstops via --no-verify (remote TRACKER.md = $REMOTE_TRACKER)"
+}
+
 # Authorized source-only commit/push passes both backstops.
 printf 'export const x = 2;\n' > "$REPO/src/app.ts"
 git -C "$REPO" add src/app.ts
@@ -79,24 +119,24 @@ if git -C "$REPO" push origin main >"$WORK/push.out" 2>&1; then
 fi
 grep -qi 'path gate' "$WORK/push.out" || gov_fail "pre-push failure did not mention the Path Gate: $(cat "$WORK/push.out")"
 
+# PreToolUse must refuse explicit hook-suppression attempts, not leave git hooks as the primary gate.
+deny_gate "git commit --no-verify -m bypass"
+deny_gate "git commit -n -m bypass"
+deny_gate "git push --no-verify origin main"
+
 # Git-only enforcement is insufficient: if a generic Bash writer slips past PreToolUse, an agent can
-# mutate the repo and bypass BOTH git hooks with commit+push --no-verify. The fix must deny here,
-# before any mutation occurs.
-git -C "$REPO" reset --hard -q origin/main
-GENERIC_WRITER="python3 -c \"open('TRACKER.md','w').write('ticket: generic-bypass\\n')\""
-gate_bash "$GENERIC_WRITER" "$SID"
-[ "$RC" -eq 0 ] || gov_fail "generic Bash writer crashed the interlock (expected a decision): $(cat "$WORK/interlock.err")"
-if ! is_deny; then
-  (
-    cd "$REPO"
-    python3 -c "open('TRACKER.md','w').write('ticket: generic-bypass\\n')"
-    git add TRACKER.md
-    git commit --no-verify -qm 'test: generic writer bypass'
-    git push --no-verify origin main >/dev/null 2>&1
-  ) || gov_fail "generic Bash writer slipped past PreToolUse, but the follow-on --no-verify bypass did not complete"
-  REMOTE_TRACKER="$(git --git-dir="$REMOTE" show main:TRACKER.md)"
-  gov_fail "generic Bash writer slipped past the pre-mutation gate and both git backstops via --no-verify (remote TRACKER.md = $REMOTE_TRACKER)"
-fi
+# mutate the repo and bypass BOTH git hooks with commit+push --no-verify. Each representative route
+# below must deny BEFORE execution.
+deny_or_exploit "cp->TRACKER" "cp src/app.ts TRACKER.md"
+deny_or_exploit "mv->TRACKER" "mv src/app.ts TRACKER.md"
+deny_or_exploit "bash-c nested writer" "bash -c 'cp src/app.ts TRACKER.md'"
+deny_or_exploit "sh-c nested writer" "sh -c 'mv src/app.ts TRACKER.md'"
+deny_or_exploit "env-S nested writer" "env -S 'bash -c \"cp src/app.ts TRACKER.md\"'"
+deny_or_exploit "command substitution writer" ': $(cp src/app.ts TRACKER.md)'
+deny_or_exploit "cd-chain writer" "cd src && cp app.ts ../TRACKER.md"
+deny_or_exploit "script-file writer" "bash '$WRITER_SCRIPT'"
+deny_or_exploit "source-file writer" "source '$WRITER_SCRIPT'"
+deny_or_exploit "nested BASH_ENV writer" "BASH_ENV='$STARTUP_SCRIPT' env -S 'bash -c \"echo hi\"'"
 
 PRE_COMMIT_HOOK="$(git -C "$REPO" rev-parse --git-path hooks/pre-commit)"
 PRE_PUSH_HOOK="$(git -C "$REPO" rev-parse --git-path hooks/pre-push)"
@@ -140,4 +180,4 @@ grep -Fq '[REDACTED]' "$WORK/git-helper.err" \
 grep -Fq 'while listing staged files' "$WORK/git-helper.err" \
   || gov_fail "git helper lost the useful git failure detail after scrubbing: $(cat "$WORK/git-helper.err")"
 
-echo "PASS: git pre-commit/pre-push backstops install + verify, block unauthorized pushes, prove generic Bash mutations are denied before a commit+push --no-verify bypass, scrub child git diagnostics, and fail closed on deleted/divergent hook files"
+echo "PASS: git pre-commit/pre-push backstops install + verify, block unauthorized pushes, deny explicit --no-verify suppression, prove generic Bash mutations are denied before a commit+push --no-verify bypass, scrub child git diagnostics, and fail closed on deleted/divergent hook files"

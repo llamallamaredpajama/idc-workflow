@@ -32,8 +32,14 @@ FIXTURE="$GOV_PLUGIN/tests/smoke/fixtures/session-b7a93ff6"
 [ -f "$FIXTURE/fire_gate.sh" ] || gov_fail "incident fixture fire_gate.sh missing at $FIXTURE"
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
-REPO="$WORK/repo"; mkdir -p "$REPO/docs/workflow"
+REPO="$WORK/repo"; mkdir -p "$REPO/docs/workflow" "$REPO/src"
 printf 'backend: filesystem\n' > "$REPO/docs/workflow/tracker-config.yaml"
+printf 'ticket: demo\n' > "$REPO/TRACKER.md"
+printf 'export const payload = 3;\n' > "$REPO/src/payload.ts"
+WRITER="$WORK/write-tracker.sh"
+cat > "$WRITER" <<'SH'
+cp src/payload.ts TRACKER.md
+SH
 
 # S1 owns an ACTIVE /idc:think command (the incident's live command); SNONE owns nothing.
 S1="s1-$$-$(basename "$WORK")"
@@ -208,6 +214,21 @@ echo "== round-8 Fix 2: a DYNAMIC bash -c / env -S payload fails closed; a stati
 deny "CMD=\"gh issue \"\"create --title x --body-file /tmp/b\"; bash -c \"\$CMD\""
 deny "bash -c 'gh issue create --title x --body-file /tmp/b'"
 deny "env -S \"\$CMD\""
+allow "bash -c 'echo hi'"
+
+echo "== the shared Path Gate recurses through shell payloads, scripts, and startup files for generic writers too =="
+deny "bash '$WRITER'"
+deny "sh '$WRITER'"
+deny "zsh '$WRITER'"
+deny "source '$WRITER'"
+deny ". '$WRITER'"
+deny "bash -c 'cp src/payload.ts TRACKER.md'"
+deny "sh -c 'mv src/payload.ts TRACKER.md'"
+deny "zsh -c 'printf \"ticket: nested\\n\" > TRACKER.md'"
+deny "env -S 'bash -c \"cp src/payload.ts TRACKER.md\"'"
+deny "BASH_ENV='$WRITER' bash -c 'echo hi'"
+deny "BASH_ENV='$WRITER' env -S 'bash -c \"echo hi\"'"
+deny 'echo $(cp src/payload.ts TRACKER.md)'
 allow "bash -c 'echo hi'"
 
 echo "== round-9 Fix A: unresolvable DYNAMIC constructs fail closed BY CONSTRUCTION (findings 1/3/4 + class) =="

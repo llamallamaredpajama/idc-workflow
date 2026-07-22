@@ -1,6 +1,7 @@
 #!/bin/bash
-# interlock-privilege-wrappers.sh — sudo/doas/su cannot hide the incident interpreter FILE/payload,
-# and the wrapped raw write must still HARD DENY even with no active lifecycle record.
+# interlock-privilege-wrappers.sh — sudo/doas/su cannot hide either the incident's raw gh mutation
+# or a generic file writer targeting TRACKER.md, and the wrapped raw write must still HARD DENY even
+# with no active lifecycle record.
 set -uo pipefail
 . "$(dirname "$0")/lib.sh"
 
@@ -10,8 +11,14 @@ FIXTURE="$GOV_PLUGIN/tests/smoke/fixtures/session-b7a93ff6/fire_gate.sh"
 [ -f "$FIXTURE" ] || gov_fail "incident fixture fire_gate.sh missing at $FIXTURE"
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
-REPO="$WORK/repo"; mkdir -p "$REPO/docs/workflow"
+REPO="$WORK/repo"; mkdir -p "$REPO/docs/workflow" "$REPO/src"
 printf 'backend: filesystem\n' > "$REPO/docs/workflow/tracker-config.yaml"
+printf 'ticket: demo\n' > "$REPO/TRACKER.md"
+printf 'export const payload = 3;\n' > "$REPO/src/payload.ts"
+WRITER="$WORK/write-tracker.sh"
+cat > "$WRITER" <<'SH'
+cp src/payload.ts TRACKER.md
+SH
 SID="priv-none-$$-$(basename "$WORK")"
 ERR="$WORK/err"
 
@@ -29,6 +36,12 @@ commands=(
   "su -c \"bash '$FIXTURE'\" root"
   "su root -c \"sh '$FIXTURE'\""
   'su --command="gh issue create --title gate --body-file /tmp/body" root'
+  "sudo bash '$WRITER'"
+  "sudo -u root sh '$WRITER'"
+  "doas zsh '$WRITER'"
+  "doas -u root bash '$WRITER'"
+  "su -c \"bash '$WRITER'\" root"
+  'su --command="bash -c '\''cp src/payload.ts TRACKER.md'\''" root'
 )
 
 for command in "${commands[@]}"; do
@@ -41,4 +54,4 @@ for command in "${commands[@]}"; do
   echo "  ok privilege wrapper denied: $command"
 done
 
-echo "PASS: sudo/doas/su interpreter-file and payload forms are still hard-denied with no active lifecycle record"
+echo "PASS: sudo/doas/su interpreter-file and payload forms are still hard-denied with no active lifecycle record, including generic file-writer scripts targeting TRACKER.md"

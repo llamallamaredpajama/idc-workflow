@@ -139,6 +139,37 @@ class CommandEntryAuthorizationTransactionTests(unittest.TestCase):
         self.assertIn('"decision": "block"', stdout)
         self.assertEqual([prior], self._active("S-prior"))
 
+    def test_pre_registration_race_restores_the_record_actually_replaced(self) -> None:
+        prior = self._open(
+            "S-pre-race", "build", "prior-race-nonce", build_requested=["#1"]
+        )
+        concurrent: dict[str, object] = {}
+        real_register_start = gate.C.register_start
+
+        def concurrent_then_register(*args: object, **kwargs: object) -> dict:
+            concurrent.update(
+                self._open(
+                    "S-pre-race",
+                    "build",
+                    "concurrent-race-nonce",
+                    build_requested=["#2"],
+                )
+            )
+            return real_register_start(*args, **kwargs)
+
+        with mock.patch.object(
+            gate.C, "register_start", side_effect=concurrent_then_register
+        ) as registration:
+            code, stdout, _stderr, _auth_write = self._invoke(
+                session="S-pre-race", args="#3"
+            )
+
+        self.assertEqual(0, code)
+        self.assertEqual(1, registration.call_count)
+        self.assertIn('"decision": "block"', stdout)
+        self.assertNotEqual(prior, concurrent)
+        self.assertEqual([concurrent], self._active("S-pre-race"))
+
     def test_rollback_nonce_does_not_remove_a_concurrent_replacement(self) -> None:
         replacement: dict[str, object] = {}
 

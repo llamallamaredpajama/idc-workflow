@@ -1832,12 +1832,7 @@ def _analyze_direct_segments(tokens, cwd, repo_root):
             continue
         if head in {"python", "python3", "node", "bun", "deno", "ruby"}:
             literals = _extract_inline_writer_literals(head, args)
-            paths = [
-                candidate_path
-                for literal in literals
-                for candidate_path in [_repo_candidate_path(literal, current_cwd or repo_root, repo_root)]
-                if candidate_path
-            ]
+            paths = [candidate_path for literal in literals if (candidate_path := candidate(literal))]
             if paths:
                 analysis.add_paths(paths)
             else:

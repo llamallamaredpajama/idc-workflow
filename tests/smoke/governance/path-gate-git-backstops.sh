@@ -181,6 +181,43 @@ python3 "$PATH_GATE" authorize --repo "$REPO" --session "$SID" --command build \
   --allow-action write --allow-action edit --allow-action git --allow-path src >/dev/null \
   || gov_fail "could not restore the main-branch Path Gate authorization"
 
+# Local remote-tracking refs are not authoritative for the server being pushed to. A stale local
+# origin/ghost points at the protected lower commit, but no corresponding server ref exists. The
+# actual server ref set must still leave both new commits visible to the gate and block the push.
+git -C "$REPO" checkout -qb ghost-smuggled
+printf 'ticket: GHOST-SMUGGLED\n' > "$REPO/TRACKER.md"
+git -C "$REPO" add TRACKER.md
+git -C "$REPO" commit --no-verify -qm 'test: protected lower commit behind stale ghost'
+GHOST_LOWER_SHA="$(git -C "$REPO" rev-parse HEAD)"
+printf 'export const x = 4;\n' > "$REPO/src/app.ts"
+git -C "$REPO" add src/app.ts
+git -C "$REPO" commit --no-verify -qm 'test: innocent tip behind stale ghost'
+git -C "$REPO" update-ref refs/remotes/origin/ghost "$GHOST_LOWER_SHA"
+git --git-dir="$REMOTE" show-ref --verify --quiet refs/heads/ghost \
+  && gov_fail "stale-ghost fixture accidentally created a real server ghost ref"
+python3 "$PATH_GATE" authorize --repo "$REPO" --session "$SID" --command build \
+  --branch ghost-smuggled --ticket T-42 --graph-node NODE-7 \
+  --allow-action write --allow-action edit --allow-action git --allow-path src >/dev/null \
+  || gov_fail "could not authorize the stale-ghost fixture's ordinary source path"
+if git -C "$REPO" push origin ghost-smuggled >"$WORK/ghost-push.out" 2>&1; then
+  REMOTE_TRACKER="$(git --git-dir="$REMOTE" show refs/heads/ghost-smuggled:TRACKER.md 2>/dev/null || true)"
+  gov_fail "stale local remote-tracking ref hid a protected lower commit (remote TRACKER.md = $REMOTE_TRACKER)"
+fi
+if git --git-dir="$REMOTE" show-ref --verify --quiet refs/heads/ghost-smuggled; then
+  REMOTE_TRACKER="$(git --git-dir="$REMOTE" show refs/heads/ghost-smuggled:TRACKER.md 2>/dev/null || true)"
+  [ "$REMOTE_TRACKER" != 'ticket: GHOST-SMUGGLED' ] \
+    || gov_fail "remote received ticket: GHOST-SMUGGLED through a stale local ref exclusion"
+fi
+grep -qi 'path gate' "$WORK/ghost-push.out" \
+  || gov_fail "stale-ghost denial did not mention the Path Gate: $(cat "$WORK/ghost-push.out")"
+git -C "$REPO" update-ref -d refs/remotes/origin/ghost
+git -C "$REPO" checkout -q main
+git -C "$REPO" reset --hard -q origin/main
+python3 "$PATH_GATE" authorize --repo "$REPO" --session "$SID" --command build \
+  --branch main --ticket T-42 --graph-node NODE-7 \
+  --allow-action write --allow-action edit --allow-action git --allow-path src >/dev/null \
+  || gov_fail "could not restore main authorization after the stale-ghost proof"
+
 # Deletion-only staged changes are mutations too. Protected deletion denies; an authorized source
 # deletion remains allowed so the diff-filter cannot simply reject every D record.
 git -C "$REPO" rm -q TRACKER.md

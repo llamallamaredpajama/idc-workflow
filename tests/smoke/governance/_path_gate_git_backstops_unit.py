@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -67,6 +69,7 @@ class GitBackstopTests(unittest.TestCase):
             paths = gate._collect_pre_push_paths(
                 str(repo),
                 [f"refs/heads/smuggled {tip} refs/heads/smuggled {ZERO_SHA}\n"],
+                remote="origin",
             )
 
             self.assertEqual({"TRACKER.md", "src/app.ts"}, set(paths))
@@ -76,6 +79,8 @@ class GitBackstopTests(unittest.TestCase):
 
         def fake_run_git(_repo: str, *args: str) -> str:
             calls.append(args)
+            if args and args[0] == "ls-remote":
+                return ""
             if args and args[0] == "rev-list":
                 raise RuntimeError("simulated rev-list failure")
             if args and args[0] == "diff-tree":
@@ -86,11 +91,64 @@ class GitBackstopTests(unittest.TestCase):
             paths = gate._collect_pre_push_paths(
                 "/unused",
                 [f"refs/heads/topic {'a' * 40} refs/heads/topic {ZERO_SHA}\n"],
+                remote="origin",
             )
 
         self.assertEqual(["src/app.ts"], paths)
-        self.assertEqual("rev-list", calls[0][0])
-        self.assertEqual(("diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "a" * 40), calls[1])
+        self.assertEqual(("ls-remote", "--refs", "origin"), calls[0])
+        self.assertEqual("rev-list", calls[1][0])
+        self.assertEqual(("diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "a" * 40), calls[2])
+
+    def test_new_ref_uses_server_refs_not_stale_local_remote_tracking_refs(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = root / "repo"
+            remote = root / "remote.git"
+            init_repo(repo)
+            commit_file(repo, "TRACKER.md", "ticket: baseline\n", "test: baseline")
+            subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+            run_git(repo, "remote", "add", "origin", str(remote))
+            run_git(repo, "push", "-qu", "origin", "main")
+
+            run_git(repo, "checkout", "-q", "-b", "ghost-smuggled")
+            lower = commit_file(repo, "TRACKER.md", "ticket: GHOST-SMUGGLED\n", "test: protected lower")
+            tip = commit_file(repo, "src/app.ts", "export const x = 3;\n", "test: innocent tip")
+            run_git(repo, "update-ref", "refs/remotes/origin/ghost", lower)
+            self.assertNotIn("refs/heads/ghost", run_git(remote, "show-ref"))
+
+            paths = gate._collect_pre_push_paths(
+                str(repo),
+                [f"refs/heads/ghost-smuggled {tip} refs/heads/ghost-smuggled {ZERO_SHA}\n"],
+                remote="origin",
+            )
+
+            self.assertEqual({"TRACKER.md", "src/app.ts"}, set(paths))
+
+    def test_new_ref_remote_query_failure_is_scrubbed_and_never_falls_back_local(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            fake_dir = Path(td)
+            fake_git = fake_dir / "git"
+            fake_git.write_text(
+                "#!/bin/sh\n"
+                "printf 'fatal: password=hunter2xyzzy while querying actual push remote\\n' >&2\n"
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            fake_git.chmod(0o755)
+            path = f"{fake_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+
+            with mock.patch.dict(os.environ, {"PATH": path}):
+                with self.assertRaises(RuntimeError) as raised:
+                    gate._collect_pre_push_paths(
+                        "/unused",
+                        [f"refs/heads/topic {'a' * 40} refs/heads/topic {ZERO_SHA}\n"],
+                        remote="origin",
+                    )
+
+            detail = str(raised.exception)
+            self.assertNotIn("hunter2xyzzy", detail)
+            self.assertIn("[REDACTED]", detail)
+            self.assertIn("actual push remote", detail)
 
     def test_managed_pre_push_replays_stdin_and_preserves_args_and_status(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -131,6 +189,58 @@ class GitBackstopTests(unittest.TestCase):
             self.assertEqual(record, (root / "gate.stdin").read_bytes())
             self.assertEqual(record, (root / "original.stdin").read_bytes())
             self.assertEqual("origin\n/tmp/remote.git\n", (root / "original.args").read_text(encoding="utf-8"))
+
+    def test_managed_pre_push_reraises_sigterm_and_cleans_stdin_buffer(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            plugin = root / "plugin"
+            wrappers = plugin / "scripts" / "hooks"
+            runtime_tmp = root / "runtime-tmp"
+            wrappers.mkdir(parents=True)
+            runtime_tmp.mkdir()
+            ready = root / "child-ready"
+            wrapper = wrappers / "idc_git_pre_push.sh"
+            wrapper.write_text(
+                "#!/bin/sh\n"
+                f"printf ready > {str(ready)!r}\n"
+                "sleep 30\n",
+                encoding="utf-8",
+            )
+            wrapper.chmod(0o755)
+            managed = root / "pre-push"
+            managed.write_text(gate._managed_content("pre-push", str(plugin), None), encoding="utf-8")
+            managed.chmod(0o755)
+            env = dict(os.environ)
+            env["TMPDIR"] = str(runtime_tmp)
+            proc = subprocess.Popen(
+                [str(managed), "origin", "/tmp/remote.git"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+                env=env,
+            )
+            try:
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    buffers = list(runtime_tmp.glob("idc-path-gate-pre-push.*"))
+                    if ready.exists() and buffers:
+                        break
+                    if proc.poll() is not None:
+                        self.fail(f"managed hook exited before signal: {proc.returncode}")
+                    time.sleep(0.02)
+                else:
+                    self.fail("managed hook did not start its sleeping child and stdin buffer")
+
+                os.killpg(proc.pid, signal.SIGTERM)
+                proc.communicate(timeout=5)
+            finally:
+                if proc.poll() is None:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    proc.communicate()
+
+            self.assertEqual(-signal.SIGTERM, proc.returncode)
+            self.assertEqual([], list(runtime_tmp.iterdir()))
 
     def test_staged_deletion_is_collected(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -221,6 +331,31 @@ class GitBackstopTests(unittest.TestCase):
             subprocess.run([str(hook), "origin", "/tmp/remote.git"], cwd=repo, input=b"", check=True)
             self.assertEqual("ran", marker.read_text(encoding="utf-8"))
             self.assertEqual([], [path for path in hook.parent.iterdir() if "idc-path-gate-tmp" in path.name])
+
+    def test_retry_completes_after_forced_second_hook_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / "repo"
+            init_repo(repo)
+            pre_push = Path(run_git(repo, "rev-parse", "--git-path", "hooks/pre-push"))
+            if not pre_push.is_absolute():
+                pre_push = repo / pre_push
+            real_replace = os.replace
+
+            def fail_pre_push_once(src: str, dst: str) -> None:
+                if Path(dst) == pre_push and "idc-path-gate-tmp" in Path(src).name:
+                    raise OSError("simulated second-hook failure")
+                real_replace(src, dst)
+
+            with mock.patch.object(gate.os, "replace", side_effect=fail_pre_push_once):
+                with self.assertRaisesRegex(OSError, "simulated second-hook failure"):
+                    gate.install_hooks(str(repo), str(PLUGIN_ROOT))
+
+            pre_commit = pre_push.with_name("pre-commit")
+            self.assertIn(gate.MANAGED_MARKER, pre_commit.read_text(encoding="utf-8"))
+            self.assertFalse(pre_push.exists())
+
+            gate.install_hooks(str(repo), str(PLUGIN_ROOT))
+            self.assertEqual((True, "ok"), gate.verify_hooks(str(repo), str(PLUGIN_ROOT)))
 
     def test_managed_hook_has_no_unreachable_manual_status_branch(self) -> None:
         content = gate._managed_content("pre-push", str(PLUGIN_ROOT), None)

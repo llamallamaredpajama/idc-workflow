@@ -194,6 +194,8 @@ def verify_hooks(repo: str, plugin_root: str) -> tuple[bool, str]:
         hook = _hook_path(repo, kind)
         if not os.path.isfile(hook):
             return False, f"missing {kind} hook at {hook}"
+        if not (os.stat(hook).st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)):
+            return False, f"missing executable bit on {kind} hook at {hook}"
         try:
             current = _read_text(hook)
         except OSError as exc:
@@ -206,6 +208,8 @@ def verify_hooks(repo: str, plugin_root: str) -> tuple[bool, str]:
             return False, f"{kind} hook diverged from the IDC-managed content"
         if original and not os.path.exists(original):
             return False, f"{kind} hook references a missing chained original hook: {original}"
+        if original and not (os.stat(original).st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)):
+            return False, f"{kind} chained original hook is not executable: {original}"
     return True, "ok"
 
 
@@ -251,19 +255,20 @@ def _collect_pre_push_paths(
         if not local_sha or re.fullmatch(r"0+", local_sha):
             continue
         if remote_sha and not re.fullmatch(r"0+", remote_sha):
-            outputs = [_run_git(repo, "diff", "--name-only", remote_sha, local_sha)]
+            exclusions = [remote_sha]
         else:
             if server_shas is None:
                 server_shas = _remote_ref_shas(repo, remote or "")
-            try:
-                commits = _run_git(repo, "rev-list", local_sha, "--not", *server_shas).splitlines()
-            except RuntimeError:
-                commits = [local_sha]
-            outputs = [
-                _run_git(repo, "diff-tree", "--root", "--no-commit-id", "--name-only", "-r", commit)
-                for commit in commits
-                if commit.strip()
-            ]
+            exclusions = server_shas
+        try:
+            commits = _run_git(repo, "rev-list", local_sha, "--not", *exclusions).splitlines()
+        except RuntimeError:
+            commits = [local_sha]
+        outputs = [
+            _run_git(repo, "diff-tree", "--root", "--no-commit-id", "--name-only", "-r", commit)
+            for commit in commits
+            if commit.strip()
+        ]
         for out in outputs:
             for rel in out.splitlines():
                 rel = rel.strip()

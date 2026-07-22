@@ -115,9 +115,9 @@ if grep -qiE 'automerge|auto-merge' "$WORKFLOW"; then
   echo "STALE in WORKFLOW.md: automatic merge promise remains while merge is operator-performed"
   fails=$((fails+1))
 fi
-grep -qiE 'planning PRs[^.]{0,180}operator|operator[^.]{0,180}planning PRs' "$WORKFLOW" \
+tr '\n' ' ' < "$WORKFLOW" | grep -qiE 'planning PRs[^.]{0,180}operator|operator[^.]{0,180}planning PRs' \
   || { echo "MISSING in WORKFLOW.md: planning PR merge is operator-performed until the helper lands"; fails=$((fails+1)); }
-grep -qiE 'build PRs[^.]{0,180}operator|operator[^.]{0,180}build PRs' "$WORKFLOW" \
+tr '\n' ' ' < "$WORKFLOW" | grep -qiE 'build PRs[^.]{0,180}operator|operator[^.]{0,180}build PRs' \
   || { echo "MISSING in WORKFLOW.md: build PR merge is operator-performed until the helper lands"; fails=$((fails+1)); }
 
 python3 - "$HOOKS" <<'PY' || { echo "MISSING in hooks.json: honest Bash/Write/Edit/NotebookEdit coverage description"; fails=$((fails+1)); }

@@ -220,7 +220,8 @@ already fired at Think). One run decomposes an **admitted** consideration → is
 fan-out → goal-contract authoring → **pairwise clash/matrix analysis** (parallel work never
 collides) → global re-sequencing against the live board (`In Progress` issues immutable;
 re-sequencing happens ONLY here) → mechanical schema check → board admission, opening a
-planning PR whose body is the audit trail and which **automerges when green** (no gate here).
+planning PR whose body is the audit trail. Plan prepares and pushes the green PR; until U8/U9 lands
+the sanctioned merge helper, the operator performs the merge (this is not a product-approval gate).
 **Zero durable workers** (bounded fan-out only). The only plan review is matrix deconfliction +
 the schema check.
 
@@ -229,8 +230,8 @@ the schema check.
 The only board-polled role. One **durable worker per parallel-safe issue** executes the
 issue's goal contract as a goal loop (record-and-vary, evidence-before-assertion, and the
 **no-punt rule** — incidental work needed for success is fixed in the same loop, never
-deferred). Review is fresh-context **bounded fan-out** — iterate → reverify → automerge
-when all green → close. **Nothing merges that isn't green on real functional tests; a
+deferred). Review is fresh-context **bounded fan-out** — iterate → reverify → prepare the green
+operator handoff → close after merge. **Nothing merges that isn't green on real functional tests; a
 shallow or placeholder suite is a review FAIL.** Builders never edit canonical docs;
 divergence files a recirculation and pauses only the affected issue.
 
@@ -355,7 +356,8 @@ every role.
 ## 7. Commit / PR conventions
 
 Every commit traces to the issue or change order it advances. Never commit with
-`--no-verify`. Planning PRs and (non-gated) recirculation PRs automerge when green; build PRs
-automerge on a PASS review with real tests green. The **Think PR** is the one human touchpoint
+`--no-verify`. Until the U8/U9 sanctioned merge helper lands, the operator performs merges for
+planning PRs, non-gated recirculation PRs, and build PRs after their required green/PASS checks.
+The **Think PR** is the one product-approval touchpoint
 (§2) — it stays **draft until the operator merges it** (= approval = admission); a gated
 recirculation rides the same Think-PR gate.

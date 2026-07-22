@@ -1561,6 +1561,76 @@ def _git_dynamic_policy_flag(args):
     return None
 
 
+_GIT_UNBOUNDED_WORKTREE_WRITERS = {
+    "am", "apply", "cherry-pick", "clean", "merge", "rebase", "revert",
+}
+
+
+def _git_worktree_mutation(args):
+    """Return (literal path operands, opaque reason) for Git commands that rewrite the worktree.
+
+    Branch creation/switching remains a Git lifecycle operation. Explicit file-oriented forms are
+    translated into the same shared path request as direct writers; commands whose touched files
+    cannot be known before execution fail closed in controlled posture.
+    """
+    subcommand, subargs = _git_subcommand_and_args(args)
+    if not subcommand:
+        return [], None
+
+    if subcommand in _GIT_UNBOUNDED_WORKTREE_WRITERS:
+        return [], _opaque_mutation_reason(
+            f"`git {subcommand}` can rewrite repository files without a bounded literal path list"
+        )
+    if subcommand == "reset" and any(
+        arg in {"--hard", "--merge", "--keep"} for arg in subargs
+    ):
+        return [], _opaque_mutation_reason(
+            "a worktree-rewriting `git reset` does not expose a bounded literal path list"
+        )
+    if subcommand == "read-tree" and "-u" in subargs:
+        return [], _opaque_mutation_reason(
+            "`git read-tree -u` can rewrite repository files without a bounded literal path list"
+        )
+    if subcommand == "stash":
+        operation = next((arg for arg in subargs if not arg.startswith("-")), "push")
+        if operation not in {"list", "show"}:
+            return [], _opaque_mutation_reason(
+                f"`git stash {operation}` can rewrite repository state without a bounded literal path list"
+            )
+
+    if subcommand not in {"checkout", "restore", "rm", "mv"}:
+        return [], None
+    if any(
+        arg == "--pathspec-from-file" or arg.startswith("--pathspec-from-file=")
+        for arg in subargs
+    ):
+        return [], _opaque_mutation_reason(
+            f"`git {subcommand} --pathspec-from-file` hides its mutation targets in another file"
+        )
+
+    if subcommand == "checkout":
+        if any(arg in {"-b", "-B", "--orphan"} for arg in subargs):
+            return [], None
+        if "--" in subargs:
+            split = subargs.index("--")
+            return [arg for arg in subargs[split + 1:] if _is_path_like_arg(arg)], None
+        operands = _file_operands(subargs, {"--conflict"})
+        if len(operands) > 1:
+            return operands[1:], None
+        if len(operands) == 1 and (
+            "/" in operands[0] or "." in operands[0] or operands[0] in {"TRACKER.md", "CLAUDE.md"}
+        ):
+            return operands, None
+        return [], None
+
+    value_options = {
+        "restore": {"-s", "--source", "--conflict"},
+        "rm": {},
+        "mv": {},
+    }[subcommand]
+    return _file_operands(subargs, value_options), None
+
+
 def _find_exec_is_read_only(args):
     saw_exec = False
     for i, arg in enumerate(args):
@@ -1760,6 +1830,15 @@ def _analyze_direct_segments(tokens, cwd, repo_root):
             subcommand = _git_no_verify_hit(args)
             if subcommand:
                 analysis.deny(_no_verify_reason(subcommand))
+                continue
+            git_paths, git_reason = _git_worktree_mutation(args)
+            if git_reason:
+                analysis.deny(git_reason)
+                continue
+            for arg in git_paths:
+                hit = candidate(arg)
+                if hit:
+                    analysis.add_paths([hit])
             continue
         if head in {"rm", "mkdir", "touch"}:
             for arg in args:
@@ -1782,6 +1861,12 @@ def _analyze_direct_segments(tokens, cwd, repo_root):
                         analysis.add_paths([hit])
             continue
         if head in {"cp", "install"}:
+            for arg in _copy_destination(args):
+                hit = candidate(arg)
+                if hit:
+                    analysis.add_paths([hit])
+            continue
+        if head == "rsync":
             for arg in _copy_destination(args):
                 hit = candidate(arg)
                 if hit:

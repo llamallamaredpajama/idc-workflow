@@ -553,7 +553,7 @@ function evaluateGhForRole(role: IdcRole, mutation: BashMutation, cwd: string, p
 		case "merge": {
 			if (mutation.ghAuto) return deny("gh pr merge --auto is blocked; merge is operator-performed until a sanctioned helper exists");
 			if (mutation.ghAdmin) return deny("gh pr merge --admin is blocked; it bypasses branch protection / the green-gate");
-			return denyThroughSharedPathGate("IDC Path Gate denied raw gh pr merge: merge is operator-performed until a sanctioned IDC finisher/merge helper exists.", cwd, policy);
+			return deny("raw gh pr merge is blocked: merge is operator-performed until a sanctioned IDC finisher/merge helper exists");
 		}
 		default:
 			return allow("gh op not gated");

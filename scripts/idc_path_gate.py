@@ -121,6 +121,8 @@ def current_branch(repo: str) -> str:
 
 
 def git_path(repo: str, relpath: str) -> str:
+    if not _is_git_worktree(repo):
+        return os.path.normpath(os.path.join(repo_root(repo), ".idc", relpath))
     out = _run_git(repo, "rev-parse", "--git-path", relpath)
     return os.path.normpath(out if os.path.isabs(out) else os.path.join(repo, out))
 
@@ -396,7 +398,8 @@ def write_authorization(
         record = records[0]
     if not record.get("nonce"):
         raise RuntimeError("active command record carries no nonce")
-    branch = branch or current_branch(repo)
+    if branch is None:
+        branch = current_branch(repo) if _is_git_worktree(repo) else ""
     if allowed_paths is None or allowed_actions is None:
         def_paths, def_actions = _default_profile(command)
         allowed_paths = def_paths if allowed_paths is None else allowed_paths

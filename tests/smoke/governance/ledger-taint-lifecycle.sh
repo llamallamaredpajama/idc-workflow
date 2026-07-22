@@ -35,10 +35,20 @@ fail() { echo "FAIL: $1"; exit 1; }
 
 LEDGER="$GOV_PLUGIN/scripts/hooks/idc_ledger.py"
 SCAFFOLD="$GOV_PLUGIN/scripts/idc_init_scaffold.sh"
+CLOSEOUT_GATE="$GOV_PLUGIN/scripts/hooks/idc_command_closeout_gate.py"
 [ -f "$LEDGER" ] || fail "idc_ledger.py not found at $LEDGER (not implemented yet)"
+[ -f "$CLOSEOUT_GATE" ] || fail "idc_command_closeout_gate.py not found at $CLOSEOUT_GATE (not implemented yet)"
 
 # led <repo> <op> [args…] — drive the ledger CLI pinned to a governed workspace root <repo>.
 led() { python3 "$LEDGER" --cwd "$1" "${@:2}"; }
+# closeout_payload <repo> <session> — a Stop payload for the closeout gate.
+closeout_payload() { python3 - "$1" "$2" <<'PY'
+import json,sys
+cwd,sid=sys.argv[1:3]
+print(json.dumps({"session_id":sid,"cwd":cwd,"hook_event_name":"Stop","stop_hook_active":False}))
+PY
+}
+closeout_blocks() { printf '%s' "$1" | python3 -c 'import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get("decision")=="block" else 1)' 2>/dev/null; }
 
 # A governed throwaway workspace: a repo root carrying the governance marker so is_governed_repo()
 # is true (the ledger writes there; a non-governed dir is the (G) case).
@@ -110,6 +120,45 @@ led "$REPO" pending --session S1 | grep -q 'recirc_checkpoint:T-7' \
 led "$REPO" clear --kind recirc_checkpoint --key T-7 >/dev/null || fail "(C) cleanup clear failed"
 echo "  ok (C) a corrupt/missing ledger reads as empty (never throws); a write recovers it"
 
+# ── (C2) proof surfaces treat a CORRUPT / identity-damaged ledger as INDETERMINATE, never clean ──
+# Tolerant readers stay tolerant for hints, but a STOP closeout that would CERTIFY a clean walk-away
+# must fail closed on a present-but-untrustworthy ledger. Old code read active_commands() directly, so a
+# corrupt/identity-damaged file became "no open command" and the stop was falsely allowed.
+PROOF_REPO="$WORK/proof-surface"; mkdir -p "$PROOF_REPO/docs/workflow"
+printf 'backend: filesystem\n' > "$PROOF_REPO/docs/workflow/tracker-config.yaml"
+python3 - "$GOV_PLUGIN/scripts/hooks" "$PROOF_REPO" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import idc_ledger
+ok = idc_ledger.command_start(sys.argv[2], "S-PROOF", "autorun", "0.0.0", "digest", "user")
+if not ok:
+    raise SystemExit("could not open the active command record")
+PY
+# (a) outright corrupt JSON ⇒ block, never certify clean.
+printf '}{ not json\n' > "$PROOF_REPO/.idc-session-state.json"
+CLOSEOUT_OUT="$(closeout_payload "$PROOF_REPO" S-PROOF | python3 "$CLOSEOUT_GATE" "$GOV_PLUGIN" 2>/dev/null)"
+closeout_blocks "$CLOSEOUT_OUT" \
+  || fail "(C2a) a CORRUPT existing ledger must fail the closeout gate CLOSED (indeterminate), not read as 'no open command'"
+printf '%s' "$CLOSEOUT_OUT" | grep -qi 'ledger' \
+  || fail "(C2a) the fail-closed closeout reason must name the ledger as untrustworthy (got: $CLOSEOUT_OUT)"
+# (b) identity-damaged command record (the readers skip it) ⇒ block, never certify clean.
+python3 - "$PROOF_REPO/.idc-session-state.json" <<'PY'
+import json,sys
+with open(sys.argv[1], 'w', encoding='utf-8') as fh:
+    json.dump({"version": 2,
+               "taints": [],
+               "commands": [{"session_id": "S-PROOF", "command": "autorun", "state": "actve",
+                             "plugin_version": "0.0.0", "args_sha256": "digest",
+                             "source": "user", "closeout": None}]}, fh)
+    fh.write("\n")
+PY
+CLOSEOUT_OUT="$(closeout_payload "$PROOF_REPO" S-PROOF | python3 "$CLOSEOUT_GATE" "$GOV_PLUGIN" 2>/dev/null)"
+closeout_blocks "$CLOSEOUT_OUT" \
+  || fail "(C2b) an identity-damaged active command record must fail the closeout gate CLOSED, not disappear from active_commands()"
+printf '%s' "$CLOSEOUT_OUT" | grep -qi 'ledger' \
+  || fail "(C2b) the identity-damaged fail-closed reason must name the ledger as untrustworthy (got: $CLOSEOUT_OUT)"
+echo "  ok (C2) a corrupt / identity-damaged existing ledger is indeterminate for Stop closeout proof surfaces (fail-closed, never clean)"
+
 # ── (G) repo-gate — outside a governed repo a write is a no-op (no state-file litter) ──────────────
 NGREPO="$WORK/not-governed"; mkdir -p "$NGREPO"     # no docs/workflow/tracker-config.yaml
 led "$NGREPO" set --kind unfiled_findings --session S1 >/dev/null \
@@ -154,4 +203,4 @@ got="$(led "$KREPO" pending --session S1 | grep -c '^mid_finish:')"
   || fail "(K) concurrent writers lost taints — expected $KN mid_finish taints, got $got [drop _write_lock ⇒ RED]"
 echo "  ok (K) $KN concurrent writers all recorded — no lost updates (ledger serializes writes)"
 
-echo "PASS: idc_ledger obligations ledger — path/roundtrip/mid_finish/stale-safety/corrupt-tolerance/repo-gate hold; the scaffold gitignores the state file idempotently & non-destructively; clear_taint is the red-when-broken headline"
+echo "PASS: idc_ledger obligations ledger — path/roundtrip/mid_finish/stale-safety/corrupt-tolerance/repo-gate hold; corrupt / identity-damaged existing ledgers are indeterminate for Stop closeout proof surfaces; the scaffold gitignores the state file idempotently & non-destructively; clear_taint is the red-when-broken headline"

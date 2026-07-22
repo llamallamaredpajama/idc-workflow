@@ -37,9 +37,11 @@ fail() { echo "FAIL: $1"; exit 1; }
 DRAIN="$GOV_PLUGIN/scripts/idc_autorun_drain.py"
 ACC="$GOV_PLUGIN/scripts/idc_acceptance_check.py"
 TRK="$GOV_PLUGIN/scripts/idc_tracker_fs.py"
+ENGINE="$GOV_PLUGIN/scripts/idc_transition.py"
 VERDICT="$GOV_PLUGIN/scripts/hooks/idc_drain_verdict.py"
 [ -f "$DRAIN" ]   || fail "idc_autorun_drain.py not found at $DRAIN"
 [ -f "$ACC" ]     || fail "idc_acceptance_check.py not found at $ACC (the sibling the drain reuses)"
+[ -f "$ENGINE" ]  || fail "idc_transition.py not found at $ENGINE (the engine-backed journal seed)"
 [ -f "$VERDICT" ] || fail "idc_drain_verdict.py not found at $VERDICT (the Stage E2 persist sidecar)"
 
 # new_repo -> echoes a fresh GOVERNED repo dir with an init'd TRACKER.md. Governed = docs/workflow/
@@ -58,6 +60,8 @@ trap cleanup EXIT
 
 # run_drain <tracker> <session> [extra-args…] -> stdout in $OUT, exit code in $RC (never aborts).
 run_drain() { local t="$1" s="$2"; shift 2; OUT="$(python3 "$DRAIN" --tracker "$t" --session-id "$s" "$@" 2>/dev/null)"; RC=$?; }
+# eng <repo> <op> [args…] -> the sanctioned engine, pinned to one governed throwaway repo.
+eng() { local repo="$1"; shift; python3 "$ENGINE" --repo "$repo" --backend filesystem --tracker "$repo/TRACKER.md" "$@"; }
 
 # ── 1. acceptance GAP ⇒ drain: acceptance-gap + exit 4 (NOT complete/0), gap line printed + persisted ─
 # A merged-"Done" increment with an unmet blocks_goal:true deferral (resolves to no clean Done enabler)
@@ -176,4 +180,48 @@ printf '%s\n' "$OUT" | grep -qi '^acceptance:' \
   && fail "(DEFAULT) no acceptance line may appear without --acceptance — default output must stay byte-identical"
 echo "  ok (DEFAULT) without --acceptance the gate never fires — default drain output byte-identical"
 
-echo "PASS: a wave-close acceptance ERROR ⇒ drain: unknown exit 2 and a GAP ⇒ drain: acceptance-gap exit 4 (both non-terminal + persisted, gap line still printed); acceptance ok stays drain: complete exit 0; recirc-pending still wins; the gate is opt-in (--acceptance) so default output is byte-identical; Phase-0 exit-code set {0,2,3,4} unchanged"
+# ── 6. journal↔board divergence at wave close stays NON-TERMINAL under the existing --coherence gate ─
+# Seed a REAL journaled item through the engine (Todo), then perform an UNSANCTIONED raw tracker move
+# to Done. The build lane now LOOKS drained on the board, so pre-fix drain printed `complete`; with the
+# coherence gate enabled the journal mismatch must keep it non-terminal.
+R5="$(new_repo)" || fail "new_repo failed (JOURNAL-GAP)"; REPOS+=("$R5"); T5="$R5/TRACKER.md"
+J5="$(eng "$R5" create-ticket --title 'raw done bypass' --stage Buildable --status Todo)" \
+  || fail "(JOURNAL-GAP) engine create-ticket failed"
+python3 "$TRK" --tracker "$T5" move --num "$J5" --status Done >/dev/null \
+  || fail "(JOURNAL-GAP) raw tracker move to Done failed"
+# precondition: without the coherence gate, the board still LOOKS terminal.
+run_drain "$T5" S-JG-PRE
+[ "$RC" -eq 0 ] && printf '%s\n' "$OUT" | grep -qx 'drain: complete' \
+  || fail "(JOURNAL-GAP) precondition: without --coherence the raw-Done board must still LOOK terminal (rc=$RC out=$(printf '%s' "$OUT" | tr '\n' '|'))"
+run_drain "$T5" S-JG --coherence
+[ "$RC" -eq 4 ] \
+  || fail "(JOURNAL-GAP) journal/board divergence at wave close must be NON-TERMINAL — exit 4, got $RC (out: $(printf '%s' "$OUT" | tr '\n' '|'))"
+printf '%s\n' "$OUT" | grep -qx 'drain: journal-gap' \
+  || fail "(JOURNAL-GAP) must print 'drain: journal-gap' (out: $(printf '%s' "$OUT" | tr '\n' '|'))"
+printf '%s\n' "$OUT" | grep -qx 'drain: complete' \
+  && fail "(JOURNAL-GAP) the drain must NOT report terminal 'drain: complete' over a journal mismatch (out: $(printf '%s' "$OUT" | tr '\n' '|'))"
+V5="$(python3 "$VERDICT" --cwd "$R5" read --session S-JG)"
+printf '%s' "$V5" | grep -q '"verdict": "journal-gap"' \
+  || fail "(JOURNAL-GAP) the journal-gap verdict must be PERSISTED (Stage E2) — got: ${V5:-<none>}"
+printf '%s' "$V5" | grep -q '"exit": 4' \
+  || fail "(JOURNAL-GAP) the persisted verdict must record exit 4 — got: ${V5:-<none>}"
+echo "  ok (JOURNAL-GAP) a raw board Done with mismatched journal history stays non-terminal under --coherence"
+
+# ── 7. a CORRUPT journal at wave close is INDETERMINATE, never terminal clean ─────────────────────
+JPATH="$R5/docs/workflow/transition-journal.ndjson"
+printf '}{ not ndjson\n' > "$JPATH"
+run_drain "$T5" S-JERR --coherence
+[ "$RC" -eq 2 ] \
+  || fail "(JOURNAL-ERROR) a corrupt journal on a would-be-complete board must be INDETERMINATE — exit 2, got $RC (out: $(printf '%s' "$OUT" | tr '\n' '|'))"
+printf '%s\n' "$OUT" | grep -qx 'drain: unknown' \
+  || fail "(JOURNAL-ERROR) must print 'drain: unknown' (out: $(printf '%s' "$OUT" | tr '\n' '|'))"
+printf '%s\n' "$OUT" | grep -qx 'drain: complete' \
+  && fail "(JOURNAL-ERROR) the drain must NOT report terminal 'drain: complete' when the journal is corrupt (out: $(printf '%s' "$OUT" | tr '\n' '|'))"
+V6="$(python3 "$VERDICT" --cwd "$R5" read --session S-JERR)"
+printf '%s' "$V6" | grep -q '"verdict": "unknown"' \
+  || fail "(JOURNAL-ERROR) the unknown verdict must be PERSISTED (Stage E2) — got: ${V6:-<none>}"
+printf '%s' "$V6" | grep -q '"exit": 2' \
+  || fail "(JOURNAL-ERROR) the persisted verdict must record exit 2 — got: ${V6:-<none>}"
+echo "  ok (JOURNAL-ERROR) a corrupt journal at wave close is indeterminate, never a silent complete"
+
+echo "PASS: a wave-close acceptance ERROR ⇒ drain: unknown exit 2 and a GAP ⇒ drain: acceptance-gap exit 4 (both non-terminal + persisted, gap line still printed); journal↔board divergence under --coherence is non-terminal and corrupt journal state is indeterminate; acceptance ok stays drain: complete exit 0; recirc-pending still wins; default output stays byte-identical without the gate; Phase-0 exit-code set {0,2,3,4} unchanged"

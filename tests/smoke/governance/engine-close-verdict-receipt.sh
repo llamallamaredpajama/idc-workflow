@@ -16,6 +16,11 @@ set -uo pipefail
 . "$(dirname "$0")/lib.sh"
 gov_engine_env
 
+CHECK="$GOV_PLUGIN/scripts/idc_review_verdict_check.py"
+[ -f "$CHECK" ] || fail "idc_review_verdict_check.py not found at $CHECK"
+mkdir -p "$REPO/docs/workflow/code-reviews"
+VERDICT="$REPO/docs/workflow/code-reviews/2026-07-22-pr-9-review.json"
+
 n="$(gov_seed_item "$T" --title 'build' --stage Buildable --status 'In Progress')" || fail "seed failed"
 
 # (1) close with NO verdict receipt ⇒ denied; item stays not-Done.
@@ -36,13 +41,20 @@ if eng close --num "$n" --verdict "$REPO/bad-verdict.json" --pr 9 2>/dev/null; t
 fi
 echo "  ok (2) close on an invalid verdict is denied"
 
-# (3) close with a VALID verdict that OWNS the item (issue==num) ⇒ allowed; item is Done.
-cat > "$REPO/good-verdict.json" <<JSON
+# (3) a VALID code-reviews verdict with NO source-owned witness ⇒ denied.
+cat > "$VERDICT" <<JSON
 {"verdict":"PASS","pr":9,"issue":$n,"findings":[]}
 JSON
-eng close --num "$n" --verdict "$REPO/good-verdict.json" --pr 9 >/dev/null 2>&1 \
-  || fail "(3) engine denied a close backed by a VALID, item-owning verdict receipt"
-[ "$(gov_field "$T" "$n" Status)" = "Done" ] || fail "(3) valid-verdict close did not drive the item to Done"
-echo "  ok (3) close backed by a valid, item-owning verdict receipt succeeds"
+if eng close --num "$n" --verdict "$VERDICT" --pr 9 2>/dev/null; then
+  fail "(3) engine closed on a code-reviews verdict with NO validator-owned witness (a shaped PASS must not be enough)"
+fi
+echo "  ok (3) a valid code-reviews verdict without a source-owned witness is denied"
 
-echo "PASS: engine close requires a validated verdict receipt for the item (no receipt / invalid receipt ⇒ denied; valid + owning ⇒ Done)"
+# (4) once the REAL validator has run and recorded its witness, the SAME verdict may close.
+python3 "$CHECK" "$VERDICT" >/dev/null 2>&1 || fail "(4) validator did not accept the good code-reviews verdict"
+eng close --num "$n" --verdict "$VERDICT" --pr 9 >/dev/null 2>&1 \
+  || fail "(4) engine denied a close backed by a VALID, item-owning, witnessed verdict receipt"
+[ "$(gov_field "$T" "$n" Status)" = "Done" ] || fail "(4) valid witnessed close did not drive the item to Done"
+echo "  ok (4) close backed by a valid, item-owning, witnessed verdict receipt succeeds"
+
+echo "PASS: engine close requires a validated verdict receipt for the item, and a code-reviews verdict must also carry a source-owned validator witness (no receipt / invalid receipt / unwitnessed shaped PASS ⇒ denied; valid + owning + witnessed ⇒ Done)"

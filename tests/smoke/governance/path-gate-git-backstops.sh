@@ -42,6 +42,13 @@ cat > "$STARTUP_SCRIPT" <<'SH'
 cp src/app.ts TRACKER.md
 SH
 
+# Seed a remote baseline before the backstops exist. The later allowed push then exercises a normal
+# existing-ref record, while TRACKER.md is genuinely tracked for the staged-deletion scenario.
+git -C "$REPO" add docs/workflow/tracker-config.yaml WORKFLOW-config.yaml TRACKER.md src/app.ts
+git -C "$REPO" commit -qm 'test: baseline'
+git -C "$REPO" push -u origin main >/dev/null 2>&1
+BASE_REMOTE_SHA="$(git -C "$REPO" rev-parse HEAD)"
+
 HOOKS_DIR="$(git -C "$REPO" rev-parse --git-path hooks)"
 case "$HOOKS_DIR" in /*) : ;; *) HOOKS_DIR="$REPO/$HOOKS_DIR" ;; esac
 PRE_COMMIT_HOOK="$HOOKS_DIR/pre-commit"
@@ -124,7 +131,7 @@ LOCAL_SHA="$(git -C "$REPO" rev-parse HEAD)"
 RUNTIME_TMP="$WORK/runtime-tmp"; mkdir -p "$RUNTIME_TMP"
 TMPDIR="$RUNTIME_TMP" git -C "$REPO" push -u origin main >/dev/null 2>&1 \
   || gov_fail "authorized source push was blocked by pre-push"
-printf 'refs/heads/main %s refs/heads/main %s\n' "$LOCAL_SHA" "$(printf '0%.0s' {1..40})" > "$WORK/expected.stdin"
+printf 'refs/heads/main %s refs/heads/main %s\n' "$LOCAL_SHA" "$BASE_REMOTE_SHA" > "$WORK/expected.stdin"
 cmp -s "$WORK/expected.stdin" "$HOOKS_DIR/chained.stdin" \
   || gov_fail "chained pre-push hook did not receive the exact pushed-ref stdin record"
 printf 'origin\n%s\n' "$REMOTE" > "$WORK/expected.args"
@@ -135,7 +142,7 @@ cmp -s "$WORK/expected.args" "$HOOKS_DIR/chained.args" \
 
 # A chained hook's failure status propagates exactly after both hooks see the same stdin bytes.
 touch "$HOOKS_DIR/chained.fail"
-printf 'refs/heads/main %s refs/heads/main %s\n' "$LOCAL_SHA" "$(printf '0%.0s' {1..40})" \
+printf 'refs/heads/main %s refs/heads/main %s\n' "$LOCAL_SHA" "$BASE_REMOTE_SHA" \
   | TMPDIR="$RUNTIME_TMP" "$PRE_PUSH_HOOK" origin "$REMOTE" >/dev/null 2>&1
 RC=$?
 [ "$RC" -eq 23 ] || gov_fail "managed pre-push hook changed chained hook status 23 to $RC"

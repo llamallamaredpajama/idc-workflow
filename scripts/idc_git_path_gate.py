@@ -10,6 +10,7 @@ import shlex
 import stat
 import subprocess
 import sys
+import tempfile
 from typing import Iterable
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -31,7 +32,25 @@ def _git_path(repo: str, relpath: str) -> str:
 
 
 def _hook_path(repo: str, kind: str) -> str:
-    return _git_path(repo, os.path.join("hooks", kind))
+    return os.path.join(_hooks_dir(repo), kind)
+
+
+def _hooks_dir(repo: str) -> str:
+    hooks_dir = _git_path(repo, "hooks")
+    common_dir = _run_git(repo, "rev-parse", "--git-common-dir")
+    if not os.path.isabs(common_dir):
+        common_dir = os.path.join(repo, common_dir)
+    resolved_hooks = os.path.realpath(hooks_dir)
+    resolved_common = os.path.realpath(common_dir)
+    try:
+        owned = os.path.commonpath((resolved_common, resolved_hooks)) == resolved_common
+    except ValueError:
+        owned = False
+    if not owned:
+        raise RuntimeError(
+            f"refusing hooks directory outside repository common Git directory: {hooks_dir}"
+        )
+    return hooks_dir
 
 
 def _backup_path(hook_path: str) -> str:
@@ -41,13 +60,7 @@ def _backup_path(hook_path: str) -> str:
 def _managed_content(kind: str, plugin_root: str, original_hook: str | None) -> str:
     wrapper = os.path.join(plugin_root, "scripts", "hooks", f"idc_git_{kind.replace('-', '_')}.sh")
     original = original_hook or ""
-    chain = (
-        "if [ -n \"$IDC_ORIGINAL_HOOK\" ] && [ -x \"$IDC_ORIGINAL_HOOK\" ]; then\n"
-        "  exec \"$IDC_ORIGINAL_HOOK\" \"$@\"\n"
-        "fi\n"
-        "exit 0\n"
-    )
-    return (
+    header = (
         "#!/bin/sh\n"
         f"# {MANAGED_MARKER}\n"
         f"# IDC_PATH_GATE_KIND={kind}\n"
@@ -55,20 +68,52 @@ def _managed_content(kind: str, plugin_root: str, original_hook: str | None) -> 
         "set -eu\n"
         f"PLUGIN_ROOT={shlex.quote(plugin_root)}\n"
         f"IDC_ORIGINAL_HOOK={shlex.quote(original)}\n"
+    )
+    if kind == "pre-push":
+        return (
+            f"{header}"
+            "IDC_PUSH_STDIN=$(mktemp \"${TMPDIR:-/tmp}/idc-path-gate-pre-push.XXXXXX\")\n"
+            "trap 'exit 1' HUP INT TERM\n"
+            "trap 'rm -f \"$IDC_PUSH_STDIN\"' 0\n"
+            "cat > \"$IDC_PUSH_STDIN\"\n"
+            f"sh {shlex.quote(wrapper)} \"$PLUGIN_ROOT\" \"$@\" < \"$IDC_PUSH_STDIN\"\n"
+            "if [ -n \"$IDC_ORIGINAL_HOOK\" ] && [ -x \"$IDC_ORIGINAL_HOOK\" ]; then\n"
+            "  \"$IDC_ORIGINAL_HOOK\" \"$@\" < \"$IDC_PUSH_STDIN\"\n"
+            "fi\n"
+            "exit 0\n"
+        )
+    return (
+        f"{header}"
         f"sh {shlex.quote(wrapper)} \"$PLUGIN_ROOT\" \"$@\"\n"
-        "rc=$?\n"
-        "if [ \"$rc\" -ne 0 ]; then\n"
-        "  exit \"$rc\"\n"
+        "if [ -n \"$IDC_ORIGINAL_HOOK\" ] && [ -x \"$IDC_ORIGINAL_HOOK\" ]; then\n"
+        "  exec \"$IDC_ORIGINAL_HOOK\" \"$@\"\n"
         "fi\n"
-        f"{chain}"
+        "exit 0\n"
     )
 
 
 def _write_text(path: str, content: str) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(content)
-    os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    parent = os.path.dirname(path)
+    os.makedirs(parent, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(
+        dir=parent,
+        prefix=f".{os.path.basename(path)}.idc-path-gate-tmp-",
+        text=True,
+    )
+    try:
+        fh = os.fdopen(fd, "w", encoding="utf-8")
+        fd = -1
+        with fh:
+            fh.write(content)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(temp_path, 0o755)
+        os.replace(temp_path, path)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
 
 
 def _read_text(path: str) -> str:
@@ -88,23 +133,44 @@ def install_hooks(repo: str, plugin_root: str) -> None:
     plugin_root = os.path.abspath(plugin_root)
     for kind in ("pre-commit", "pre-push"):
         hook = _hook_path(repo, kind)
+        backup = _backup_path(hook)
         original = ""
-        if os.path.exists(hook):
-            try:
-                existing = _read_text(hook)
-            except OSError:
-                existing = ""
-            if MANAGED_MARKER in existing:
-                original = _parse_original(existing)
-            else:
-                backup = _backup_path(hook)
-                if os.path.exists(backup):
-                    raise RuntimeError(f"refusing to overwrite unmanaged {kind} hook while backup already exists: {hook}")
-                os.replace(hook, backup)
+        moved_original = False
+        original_mode: int | None = None
+        try:
+            if os.path.exists(hook):
+                try:
+                    existing = _read_text(hook)
+                except OSError:
+                    existing = ""
+                if MANAGED_MARKER in existing:
+                    original = _parse_original(existing)
+                else:
+                    if os.path.exists(backup):
+                        raise RuntimeError(
+                            f"refusing to overwrite unmanaged {kind} hook while backup already exists: {hook}"
+                        )
+                    original_mode = stat.S_IMODE(os.stat(hook).st_mode)
+                    os.replace(hook, backup)
+                    moved_original = True
+                    os.chmod(backup, os.stat(backup).st_mode | stat.S_IXUSR)
+                    original = backup
+            elif os.path.exists(backup):
                 os.chmod(backup, os.stat(backup).st_mode | stat.S_IXUSR)
                 original = backup
-        content = _managed_content(kind, plugin_root, original)
-        _write_text(hook, content)
+            content = _managed_content(kind, plugin_root, original)
+            _write_text(hook, content)
+        except Exception as exc:
+            if moved_original and not os.path.exists(hook) and os.path.exists(backup):
+                try:
+                    os.replace(backup, hook)
+                    if original_mode is not None:
+                        os.chmod(hook, original_mode)
+                except OSError as rollback_exc:
+                    raise RuntimeError(
+                        f"failed to install {kind} hook and restore its original: {rollback_exc}"
+                    ) from exc
+            raise
 
 
 def verify_hooks(repo: str, plugin_root: str) -> tuple[bool, str]:
@@ -137,7 +203,7 @@ def _run_git(repo: str, *args: str) -> str:
 
 
 def _collect_pre_commit_paths(repo: str) -> list[str]:
-    out = _run_git(repo, "diff", "--cached", "--name-only", "--diff-filter=ACMRTUXB")
+    out = _run_git(repo, "diff", "--cached", "--name-only", "--diff-filter=ACDMRTUXB")
     return [line.strip() for line in out.splitlines() if line.strip()]
 
 
@@ -152,15 +218,23 @@ def _collect_pre_push_paths(repo: str, lines: Iterable[str]) -> list[str]:
         if not local_sha or re.fullmatch(r"0+", local_sha):
             continue
         if remote_sha and not re.fullmatch(r"0+", remote_sha):
-            cmd = ["diff", "--name-only", remote_sha, local_sha]
+            outputs = [_run_git(repo, "diff", "--name-only", remote_sha, local_sha)]
         else:
-            cmd = ["diff-tree", "--no-commit-id", "--name-only", "-r", local_sha]
-        out = _run_git(repo, *cmd)
-        for rel in out.splitlines():
-            rel = rel.strip()
-            if rel and rel not in seen:
-                seen.add(rel)
-                paths.append(rel)
+            try:
+                commits = _run_git(repo, "rev-list", local_sha, "--not", "--remotes").splitlines()
+            except RuntimeError:
+                commits = [local_sha]
+            outputs = [
+                _run_git(repo, "diff-tree", "--root", "--no-commit-id", "--name-only", "-r", commit)
+                for commit in commits
+                if commit.strip()
+            ]
+        for out in outputs:
+            for rel in out.splitlines():
+                rel = rel.strip()
+                if rel and rel not in seen:
+                    seen.add(rel)
+                    paths.append(rel)
     return paths
 
 

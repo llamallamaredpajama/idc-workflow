@@ -1287,7 +1287,7 @@ def _repo_candidate_path(raw_path, cwd, repo_root=None):
     cwd_abs = os.path.abspath(cwd if cwd is not None else repo_abs)
     abs_path = os.path.abspath(candidate if os.path.isabs(candidate) else os.path.join(cwd_abs, candidate))
     rel = os.path.relpath(abs_path, repo_abs)
-    if rel == "." or rel.startswith("..") or os.path.isabs(rel):
+    if rel.startswith("..") or os.path.isabs(rel):
         return None
     return abs_path
 

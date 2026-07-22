@@ -194,7 +194,7 @@ def verify_hooks(repo: str, plugin_root: str) -> tuple[bool, str]:
         hook = _hook_path(repo, kind)
         if not os.path.isfile(hook):
             return False, f"missing {kind} hook at {hook}"
-        if not (os.stat(hook).st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)):
+        if not os.access(hook, os.X_OK):
             return False, f"missing executable bit on {kind} hook at {hook}"
         try:
             current = _read_text(hook)
@@ -208,7 +208,7 @@ def verify_hooks(repo: str, plugin_root: str) -> tuple[bool, str]:
             return False, f"{kind} hook diverged from the IDC-managed content"
         if original and not os.path.exists(original):
             return False, f"{kind} hook references a missing chained original hook: {original}"
-        if original and not (os.stat(original).st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)):
+        if original and not os.access(original, os.X_OK):
             return False, f"{kind} chained original hook is not executable: {original}"
     return True, "ok"
 

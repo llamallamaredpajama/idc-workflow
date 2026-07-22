@@ -290,6 +290,22 @@ def _is_protected_machine_path(relpath: str) -> bool:
     return any(fnmatch.fnmatchcase(candidate, rule.casefold()) for rule in PROTECTED_MACHINE_RULES)
 
 
+def _contains_protected_machine_path(relpath: str) -> bool:
+    """Whether a broad directory target can reach a protected descendant."""
+    candidate = relpath.casefold().strip("/") or "."
+    if candidate == ".":
+        return True
+    for rule in PROTECTED_MACHINE_RULES:
+        wildcard_at = min(
+            (index for mark in "*?[" if (index := rule.find(mark)) >= 0),
+            default=len(rule),
+        )
+        fixed_prefix = rule[:wildcard_at].rstrip("/").casefold()
+        if fixed_prefix and fixed_prefix.startswith(candidate + "/"):
+            return True
+    return False
+
+
 def _find_active_record_by_nonce(repo: str, command: str, nonce: str) -> dict[str, Any] | None:
     state = L.read_state(repo)
     for rec in state.get("commands", []):
@@ -463,9 +479,9 @@ def _evaluate_request(repo: str, plugin_root: str, request: dict[str, Any]) -> d
         return _allow("IDC Path Gate: no in-repository path-gated mutation was identified")
 
     for rel in paths:
-        if _is_protected_machine_path(rel):
+        if _is_protected_machine_path(rel) or _contains_protected_machine_path(rel):
             return _deny(
-                f"IDC Path Gate denied this mutation because `{rel}` is a protected machine-owned surface. Use the sanctioned IDC helper instead of mutating it directly."
+                f"IDC Path Gate denied this mutation because `{rel}` is or contains a protected machine-owned surface. Use the sanctioned IDC helper instead of mutating it directly."
             )
 
     if not _is_git_worktree(repo):

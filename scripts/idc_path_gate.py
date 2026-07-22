@@ -67,7 +67,7 @@ def _run_git(repo: str, *args: str) -> str:
 
 
 def repo_root(repo: str) -> str:
-    return os.path.abspath(repo)
+    return os.path.realpath(os.path.abspath(repo))
 
 
 def current_branch(repo: str) -> str:
@@ -105,8 +105,8 @@ def _normalize_repo_rel(path_value: str, repo: str) -> str:
     if not isinstance(path_value, str) or not path_value.strip():
         raise ValueError("path must be a non-empty string")
     raw = path_value.strip()
-    abs_path = os.path.normpath(raw if os.path.isabs(raw) else os.path.join(repo, raw))
-    repo_abs = os.path.abspath(repo)
+    repo_abs = repo_root(repo)
+    abs_path = os.path.realpath(raw if os.path.isabs(raw) else os.path.join(repo_abs, raw))
     rel = os.path.relpath(abs_path, repo_abs)
     if rel == ".":
         return "."
@@ -287,17 +287,13 @@ def evaluate_request(repo: str, plugin_root: str, request: dict[str, Any]) -> di
     if not paths:
         return _allow("IDC Path Gate: no path-gated mutation was identified")
 
-    trust_inline = bool(request.get("trust_inline_authorization"))
-    inline_auth = request.get("authorization") if trust_inline else None
-    auth = inline_auth if isinstance(inline_auth, dict) else _read_authorization(repo)
+    auth = _read_authorization(repo)
     if not auth:
         return _deny(_no_auth_reason())
 
     if auth.get("schema") != 1:
         return _deny("IDC Path Gate denied this mutation because the authorization object is missing or has the wrong schema.")
-    required = ("branch", "allowed_paths", "allowed_actions") if trust_inline else (
-        "command", "branch", "allowed_paths", "allowed_actions", "issued_at", "expires_at", "nonce", "contract_digest"
-    )
+    required = ("command", "branch", "allowed_paths", "allowed_actions", "issued_at", "expires_at", "nonce", "contract_digest")
     for field in required:
         if field not in auth:
             return _deny(f"IDC Path Gate denied this mutation because the authorization object is missing `{field}`.")
@@ -311,9 +307,8 @@ def evaluate_request(repo: str, plugin_root: str, request: dict[str, Any]) -> di
             f"IDC Path Gate denied this mutation because the live branch is `{current}` but the authorization is bound to `{auth.get('branch')}`."
         )
 
-    expires_raw = str(auth.get("expires_at") or "")
-    expires_at = _parse_iso(expires_raw) if expires_raw else None
-    if (not trust_inline and expires_at is None) or (expires_at is not None and expires_at <= _utc_now()):
+    expires_at = _parse_iso(str(auth.get("expires_at") or ""))
+    if expires_at is None or expires_at <= _utc_now():
         return _deny("IDC Path Gate denied this mutation because the live authorization is expired or unreadable.")
 
     ticket = request.get("ticket")
@@ -323,14 +318,13 @@ def evaluate_request(repo: str, plugin_root: str, request: dict[str, Any]) -> di
     if graph_node is not None and graph_node != auth.get("graph_node"):
         return _deny("IDC Path Gate denied this mutation because the request graph node does not match the live authorization.")
 
-    if not trust_inline:
-        record = _find_active_record_by_nonce(repo, str(auth.get("command") or ""), str(auth.get("nonce") or ""))
-        if not record:
-            return _deny("IDC Path Gate denied this mutation because the bound command record is no longer active.")
+    record = _find_active_record_by_nonce(repo, str(auth.get("command") or ""), str(auth.get("nonce") or ""))
+    if not record:
+        return _deny("IDC Path Gate denied this mutation because the bound command record is no longer active.")
 
-        expected_digest = _digest_payload(record, auth)
-        if auth.get("contract_digest") != expected_digest:
-            return _deny("IDC Path Gate denied this mutation because the authorization contract digest is corrupt or stale.")
+    expected_digest = _digest_payload(record, auth)
+    if auth.get("contract_digest") != expected_digest:
+        return _deny("IDC Path Gate denied this mutation because the authorization contract digest is corrupt or stale.")
 
     allowed_paths = _normalize_allowed_paths(repo, list(auth.get("allowed_paths") or []))
     for rel in paths:

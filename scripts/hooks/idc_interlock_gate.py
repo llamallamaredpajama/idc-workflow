@@ -1223,6 +1223,140 @@ def render_reason(finding, plugin_root=""):
     )
 
 
+def _repo_candidate_path(raw_path, cwd):
+    if not isinstance(raw_path, str):
+        return None
+    candidate = raw_path.strip()
+    if not candidate or candidate == "-" or candidate.startswith("&"):
+        return None
+    if candidate in {"/dev/null", "/dev/stdout", "/dev/stderr"} or candidate.startswith("/dev/fd/"):
+        return None
+    if "$" in candidate or "`" in candidate:
+        return None
+    abs_path = os.path.abspath(candidate if os.path.isabs(candidate) else os.path.join(cwd, candidate))
+    repo_abs = os.path.abspath(cwd)
+    rel = os.path.relpath(abs_path, repo_abs)
+    if rel == "." or rel.startswith("..") or os.path.isabs(rel):
+        return None
+    return candidate
+
+
+def _dedupe_paths(paths):
+    out, seen = [], set()
+    for item in paths:
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
+def _extract_apply_patch_paths(command, cwd):
+    if not re.search(r"(^|\s)apply_patch($|\s)", command):
+        return [], False
+    paths = []
+    for match in re.finditer(r"(?m)^\*\*\* (?:Update|Add|Delete) File: (.+?)\s*$", command):
+        candidate = _repo_candidate_path(match.group(1), cwd)
+        if candidate:
+            paths.append(candidate)
+    return _dedupe_paths(paths), True
+
+
+def _extract_inline_writer_paths(head, args, cwd):
+    code = None
+    for i, arg in enumerate(args[:-1]):
+        if arg in {"-c", "-e"}:
+            code = args[i + 1]
+            break
+    if not isinstance(code, str) or not code:
+        return []
+    patterns = []
+    if head in {"python", "python3"}:
+        patterns = [
+            re.compile(r"open\(\s*(['\"])([^'\"]+)\1\s*,\s*(['\"])[^'\"]*[wax][^'\"]*\3"),
+            re.compile(r"Path\(\s*(['\"])([^'\"]+)\1\s*\)\.(?:write_text|write_bytes)\s*\("),
+        ]
+    elif head in {"node", "bun", "deno"}:
+        patterns = [re.compile(r"(?:writeFileSync|appendFileSync|createWriteStream)\(\s*(['\"])([^'\"]+)\1")]
+    elif head == "ruby":
+        patterns = [re.compile(r"(?:File\.(?:write|binwrite)|File\.open)\(\s*(['\"])([^'\"]+)\1")]
+    out = []
+    for pattern in patterns:
+        for match in pattern.finditer(code):
+            candidate = _repo_candidate_path(match.group(2), cwd)
+            if candidate:
+                out.append(candidate)
+    return _dedupe_paths(out)
+
+
+def _shell_path_gate_request(command, cwd):
+    cleaned = _join_line_continuations(_strip_shell_comments(command))
+    patch_paths, saw_apply_patch = _extract_apply_patch_paths(cleaned, cwd)
+    if saw_apply_patch:
+        if patch_paths:
+            return {"action": "write", "paths": patch_paths}
+        return {
+            "action": "bash",
+            "raw_reason": (
+                "IDC Path Gate denied this mutation because the apply_patch payload did not name any "
+                "repository file paths that could be validated. Use a sanctioned IDC command to open the correct write boundary first."
+            ),
+        }
+    try:
+        tokens = _lex(cleaned)
+    except ValueError:
+        return None
+
+    paths = []
+    for i, tok in enumerate(tokens):
+        if tok in {">", ">>"} and i + 1 < len(tokens):
+            candidate = _repo_candidate_path(tokens[i + 1], cwd)
+            if candidate:
+                paths.append(candidate)
+        elif tok.isdigit() and i + 2 < len(tokens) and tokens[i + 1] in {">", ">>"}:
+            candidate = _repo_candidate_path(tokens[i + 2], cwd)
+            if candidate:
+                paths.append(candidate)
+
+    for seg in _segments(tokens):
+        peeled = _strip_prefixes(seg)
+        if not peeled:
+            continue
+        head = os.path.basename(peeled[0])
+        args = peeled[1:]
+        if head == "tee":
+            for arg in args:
+                if arg.startswith("-"):
+                    continue
+                candidate = _repo_candidate_path(arg, cwd)
+                if candidate:
+                    paths.append(candidate)
+            continue
+        if head == "sed" and any(arg == "-i" or arg.startswith("-i") for arg in args):
+            for arg in reversed(args):
+                if arg.startswith("-"):
+                    continue
+                candidate = _repo_candidate_path(arg, cwd)
+                if candidate:
+                    paths.append(candidate)
+                    break
+            continue
+        if head == "perl" and any(re.match(r"^-[A-Za-z]*p[A-Za-z]*i|^-[A-Za-z]*i[A-Za-z]*p", arg) for arg in args):
+            for arg in reversed(args):
+                if arg.startswith("-"):
+                    continue
+                candidate = _repo_candidate_path(arg, cwd)
+                if candidate:
+                    paths.append(candidate)
+                    break
+            continue
+        if head in {"python", "python3", "node", "bun", "deno", "ruby"}:
+            paths.extend(_extract_inline_writer_paths(head, args, cwd))
+
+    paths = _dedupe_paths(paths)
+    return {"action": "write", "paths": paths} if paths else None
+
+
 def _gate(payload, plugin_root):
     cwd = payload.get("cwd") or os.getcwd()
     if not H.is_governed_repo(cwd):
@@ -1239,10 +1373,16 @@ def _gate(payload, plugin_root):
         # the adapter translates the Bash payload into one raw-mutation request and the shared Path Gate
         # decides the deny.
         finding = classify(command, cwd, plugin_root, False)
-        if not finding:
+        if finding:
+            decision = PG.evaluate_request(cwd, plugin_root, {"action": "bash", "raw_reason": render_reason(finding, plugin_root)})
+            H.pre_tool_deny(str(decision.get("reason") or "IDC interlock denied the raw governed mutation"))
+        request = _shell_path_gate_request(command, cwd)
+        if request is None:
             H.pre_tool_allow()
-        decision = PG.evaluate_request(cwd, plugin_root, {"action": "bash", "raw_reason": render_reason(finding, plugin_root)})
-        H.pre_tool_deny(str(decision.get("reason") or "IDC interlock denied the raw governed mutation"))
+        decision = PG.evaluate_request(cwd, plugin_root, request)
+        if decision.get("allowed"):
+            H.pre_tool_allow()
+        H.pre_tool_deny(str(decision.get("reason") or "IDC Path Gate denied the repository mutation"))
 
     if tool in {"Write", "Edit"}:
         path_value = tool_input.get("file_path") or tool_input.get("path")

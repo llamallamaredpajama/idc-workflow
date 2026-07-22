@@ -698,21 +698,6 @@ function sharedPathGateScript(): string {
 	return path.join(sharedPathGatePluginRoot(), "scripts", "idc_path_gate.py");
 }
 
-function currentGitBranch(cwd: string): string {
-	const proc = spawnSync("git", ["-C", cwd, "branch", "--show-current"], { encoding: "utf8" });
-	return proc.status === 0 ? String(proc.stdout || "").trim() : "";
-}
-
-function sharedPathGateInlineAuth(role: IdcRole, cwd: string): Record<string, unknown> {
-	return {
-		schema: 1,
-		branch: currentGitBranch(cwd),
-		allowed_paths: ["."],
-		allowed_actions: ["write", "edit", "git"],
-		graph_node: `pi:${role}`,
-	};
-}
-
 function evaluateSharedPathGate(request: Record<string, unknown>, cwd: string, policy: PathPolicy): GuardEvaluation {
 	const script = sharedPathGateScript();
 	if (!fs.existsSync(script)) {
@@ -740,12 +725,10 @@ function evaluateSharedPathGate(request: Record<string, unknown>, cwd: string, p
 	};
 }
 
-function enforceSharedPathGatePath(role: IdcRole, absPath: string, cwd: string, policy: PathPolicy): GuardEvaluation {
+function enforceSharedPathGatePath(_role: IdcRole, absPath: string, cwd: string, policy: PathPolicy): GuardEvaluation {
 	return evaluateSharedPathGate({
 		action: "write",
 		paths: [absPath],
-		authorization: sharedPathGateInlineAuth(role, cwd),
-		trust_inline_authorization: true,
 	}, cwd, policy);
 }
 

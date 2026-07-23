@@ -210,6 +210,9 @@ def _validate_seen_ledger(value: dict[str, Any]) -> dict[str, Any]:
         disposition = entry.get("last_disposition")
         if not isinstance(disposition, str) or not disposition.strip():
             raise BaselineError("seen-finding ledger entry last_disposition must be a non-empty string")
+        for key in ("first_seen", "last_seen"):
+            if key in entry and not isinstance(entry.get(key), str):
+                raise BaselineError(f"seen-finding ledger entry {key} must be a string when present")
         if fingerprint in fingerprints:
             raise BaselineError(f"seen-finding ledger holds duplicate entries for {fingerprint!r}")
         fingerprints.add(fingerprint)

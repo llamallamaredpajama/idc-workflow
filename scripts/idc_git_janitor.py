@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """idc_git_janitor.py — the deterministic board↔git reconciler (`WORKFLOW.md §A`).
 
-One read-only-by-default scanner that, from a SINGLE board read + the merged-PR list, compares board
+One no-repairs-by-default scanner (every scan durably records seen findings in
+`docs/workflow/reconciliation-seen-findings.json`) that, from a SINGLE board read + the merged-PR list, compares board
 state against git reality (worktrees, local+remote branches, board↔issue↔PR coherence, attribution)
 and classifies every finding into four verdict tiers:
 
@@ -1712,7 +1713,9 @@ def _interrupt(point):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Deterministic board↔git reconciler (read-only by default).")
+    ap = argparse.ArgumentParser(
+        description="Deterministic board↔git reconciler (no repairs by default; every scan "
+                    "durably records seen findings in docs/workflow/reconciliation-seen-findings.json).")
     ap.add_argument("--repo", default=".", help="repo dir to scan (default: cwd)")
     ap.add_argument("--backend", choices=("filesystem", "github"), default="filesystem",
                     help="tracker backend (default: filesystem)")

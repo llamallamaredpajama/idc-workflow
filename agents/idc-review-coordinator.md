@@ -23,8 +23,11 @@ per PR and at phase close. Reasoning tier.
    through the fixed helper — never by writing the ledger file yourself:
    `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_review_seen_ledger.py" record-round --repo <repo> --round <round.json>`
    (`round.json`: `{"schema_version":1,"pr":<n>,"candidates":[{"fingerprint":…,"disposition":
-   "below-floor"|"rejected"|"refuted"|…}]}`). This makes rejected/refuted/below-floor candidates
-   *seen*, so a later round cannot resurface them as new. Then drop any finding below the **0.8**
+   "below-floor"|"rejected"|"refuted"}]}` — exactly those three; `filed`/`confirmed`/
+   `suppressed-seen` are reserved for the fixed-code filer and the helper refuses them). Record the
+   round only AFTER the per-reviewer filer has fired for this round's verdicts — recording first
+   would mark first-time findings as already seen. This makes rejected/refuted/below-floor
+   candidates *seen*, so a later round cannot resurface them as new. Then drop any finding below the **0.8**
    confidence floor. A fingerprint the ledger already carries from an earlier round is a
    resurfaced seen finding — never score it as new work. On suspicion that a utility-tier lane
    missed something, re-run that dimension up-tier.

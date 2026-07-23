@@ -116,11 +116,15 @@ def ticket_body(item, parent_issue=None):
 def record_verdict_seen(repo, verdict, dry_run=False):
     """Persist EVERY finding fingerprint in this verdict into the per-PR seen ledger BEFORE any
     filing/flooring disposition, then return the suppression key-set: the `finding:<fp>` keys whose
-    fingerprint was already seen in an EARLIER round. Those resurfaced findings are recognized —
-    never re-filed as duplicate routed board work. Dispositions are decided by this fixed code
-    (prior-seen → suppressed-seen; minor/nit → filed; major/blocker → confirmed); model-authored
-    verdict text never writes the ledger itself. Raises SL.SeenLedgerError on invalid ledger state
-    (the caller refuses to file — fail closed). No PR number ⇒ no per-PR ledger scope ⇒ no-op."""
+    fingerprint was seen in an EARLIER round with a TERMINAL non-routable disposition
+    (SL.TERMINAL_NON_ROUTABLE: suppressed-seen/below-floor/rejected/refuted/confirmed). A bare
+    prior "filed" NEVER suppresses: "filed" records a routing attempt, so a fingerprint whose
+    filing failed stays retryable — the retry re-files it, and actually-filed items stay idempotent
+    via the board-key dedupe (which reads the board, not this ledger). Dispositions are decided by
+    this fixed code (terminal-prior → suppressed-seen; minor/nit → filed; major/blocker →
+    confirmed); model-authored verdict text never writes the ledger itself. Raises
+    SL.SeenLedgerError on invalid ledger state (the caller refuses to file — fail closed). No PR
+    number ⇒ no per-PR ledger scope ⇒ no-op."""
     pr = verdict.get("pr")
     if isinstance(pr, bool) or not isinstance(pr, int):
         return frozenset()
@@ -133,15 +137,15 @@ def record_verdict_seen(repo, verdict, dry_run=False):
             fingerprints.append((fp, f.get("severity")))
     if not fingerprints:
         return frozenset()
-    prior = SL.seen_fingerprints(SL.read_ledger(repo, pr))
+    suppressible = SL.suppressible_fingerprints(SL.read_ledger(repo, pr))
     if not dry_run:
         SL.record_observations(repo, pr, [
             {"fingerprint": fp,
-             "disposition": ("suppressed-seen" if fp in prior
+             "disposition": ("suppressed-seen" if fp in suppressible
                              else ("filed" if sev in MINOR_NIT else "confirmed"))}
             for fp, sev in fingerprints
         ])
-    return frozenset(f"finding:{fp}" for fp, _sev in fingerprints if fp in prior)
+    return frozenset(f"finding:{fp}" for fp, _sev in fingerprints if fp in suppressible)
 
 
 # ── filesystem backend ───────────────────────────────────────────────────────────────────────────

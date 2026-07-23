@@ -37,6 +37,15 @@ SCHEMA_VERSION = 1
 LEDGER_DIR_RELPATH = os.path.join("docs", "workflow", "code-reviews")
 # Every way an observation can leave a round; "suppressed-seen" is the resurfaced-duplicate outcome.
 DISPOSITIONS = ("filed", "confirmed", "suppressed-seen", "below-floor", "rejected", "refuted")
+# The model-observable subset a coordinator round record may claim. The rest — filed / confirmed /
+# suppressed-seen — are decided and written by the fixed-code filer only; "suppressed-seen" in
+# particular buys a routing-gap exemption at finish, so a model-authored round must not mint it.
+ROUND_DISPOSITIONS = ("below-floor", "rejected", "refuted")
+# Prior dispositions that make a resurfaced fingerprint suppressible: terminal, non-routable
+# outcomes only. "filed" is deliberately absent — it records a routing ATTEMPT, so a fingerprint
+# whose filing failed stays retryable on the next run; actually-filed items remain idempotent via
+# the filer's board-key dedupe, which reads the board itself, not this ledger.
+TERMINAL_NON_ROUTABLE = ("suppressed-seen", "below-floor", "rejected", "refuted", "confirmed")
 
 
 class SeenLedgerError(RuntimeError):
@@ -147,6 +156,17 @@ def seen_fingerprints(ledger: dict[str, Any] | None) -> set[str]:
     return {entry["fingerprint"] for entry in ledger.get("entries", [])}
 
 
+def suppressible_fingerprints(ledger: dict[str, Any] | None) -> set[str]:
+    """The fingerprints a filer run may suppress as resurfaced: seen before AND last recorded in a
+    terminal non-routable disposition. A bare "filed" never suppresses — otherwise a failed filing
+    plus its own prescribed retry would permanently strand the finding as never-routed while the
+    routing gap reads it as converged."""
+    if not ledger:
+        return set()
+    return {entry["fingerprint"] for entry in ledger.get("entries", [])
+            if entry.get("last_disposition") in TERMINAL_NON_ROUTABLE}
+
+
 def record_observations(repo: str, pr: int, observations: list[dict[str, Any]]) -> set[str]:
     """Record one observation per (fingerprint, disposition) into the per-PR ledger — seen_count
     increments, dispositions update, new fingerprints append. Returns the set of fingerprints that
@@ -199,9 +219,10 @@ def _validate_round(value: Any) -> tuple[int, list[dict[str, Any]]]:
         if not isinstance(fingerprint, str) or not fingerprint.strip():
             raise SeenLedgerError("round candidate fingerprint must be a non-empty string")
         disposition = candidate.get("disposition")
-        if disposition not in DISPOSITIONS:
+        if disposition not in ROUND_DISPOSITIONS:
             raise SeenLedgerError(
-                f"round candidate disposition {disposition!r} is not one of {DISPOSITIONS}")
+                f"round candidate disposition {disposition!r} is not one of {ROUND_DISPOSITIONS} — "
+                "filed/confirmed/suppressed-seen are reserved for the fixed-code filer")
         observations.append({"fingerprint": fingerprint.strip(), "disposition": disposition})
     return pr, observations
 

@@ -22,6 +22,30 @@ T="$PLUGIN_ROOT/templates"
 case "$BACKEND" in github|filesystem) ;; *) echo "idc-init: BACKEND must be github|filesystem" >&2; exit 2 ;; esac
 
 cd "$REPO_ROOT"
+
+# ── The honest-claim precondition (spec §2.1) ─────────────────────────────────────────────────────
+# `controlled` and `app-locked` are HARD pathway-security claims: they promise that supported runtime
+# hooks deny off-path mutations AND that a required deterministic GitHub check plus repository rules
+# block off-path integration. A filesystem-backed repo has no integration boundary to enforce, so it
+# can never honor that promise — it "remains useful for hermetic tests and local demonstrations" but
+# "MUST NOT claim hard pathway security". Refuse the dishonest combination here, at the door that
+# creates governed repos, instead of letting a repo advertise protection it does not have. Read the
+# posture through the SHIPPED parser so this can never drift from what the Path Gate itself sees.
+declared_pathway_mode() {
+  PYTHONPATH="$PLUGIN_ROOT/scripts" python3 -c \
+    'import sys; import idc_path_gate as G; print(G.pathway_mode(sys.argv[1]))' "$1"
+}
+if [ "$BACKEND" = "filesystem" ] && [ -f WORKFLOW-config.yaml ]; then
+  claimed="$(declared_pathway_mode "$REPO_ROOT")"
+  case "$claimed" in
+    controlled|app-locked)
+      echo "idc-init: refusing to scaffold the filesystem backend — WORKFLOW-config.yaml claims pathway_enforcement.mode: $claimed" >&2
+      echo "idc-init: the filesystem tracker makes no hard pathway-security claim (spec §2.1); set 'mode: off', or select the github backend." >&2
+      exit 2
+      ;;
+  esac
+fi
+
 mkdir -p docs/workflow
 
 # Resolve every governed dest's template source through the shared resolver — the single source of
@@ -30,7 +54,13 @@ resolve() { python3 "$PLUGIN_ROOT/scripts/idc_template_for.py" --plugin-root "$P
 
 # Root + config files (idempotent: never clobber an operator's file).
 [ -f WORKFLOW.md ]                        || cp "$(resolve WORKFLOW.md)" WORKFLOW.md
-[ -f WORKFLOW-config.yaml ]               || cp "$(resolve WORKFLOW-config.yaml)" WORKFLOW-config.yaml
+# Track whether THIS run created the config: the backend-aware pathway default below applies only to
+# a config the scaffold itself laid down. A pre-existing WORKFLOW-config.yaml is operator data.
+CONFIG_CREATED=no
+if [ ! -f WORKFLOW-config.yaml ]; then
+  cp "$(resolve WORKFLOW-config.yaml)" WORKFLOW-config.yaml
+  CONFIG_CREATED=yes
+fi
 [ -f docs/workflow/tracker-config.yaml ]  || cp "$(resolve docs/workflow/tracker-config.yaml)" docs/workflow/tracker-config.yaml
 # The transition engine's legal-transition table (v4 Phase 2). Scaffolded into the governed repo so
 # it is operator-visible + update-managed; the engine (idc_transition.machine_path_for) prefers this
@@ -78,6 +108,75 @@ if [ "$BACKEND" = "filesystem" ]; then
   sed "s|^backend: .*|backend: filesystem|" docs/workflow/tracker-config.yaml > "$tmp" \
     && mv "$tmp" docs/workflow/tracker-config.yaml
   python3 "$PLUGIN_ROOT/scripts/idc_tracker_fs.py" --tracker "$REPO_ROOT/TRACKER.md" init
+fi
+
+# ── Backend-aware pathway default (spec §2.1 default claim, enabled by §7.9 step 9) ───────────────
+# `controlled` is the default security claim for governed GITHUB-backed repositories: the supported
+# runtimes deny off-path mutations and the required `idc/pathway-integrity` check plus the repository
+# ruleset block off-path integration. That default is only honest now that the integration-enforcement
+# surface exists, which is why the flip is the LAST implementation step rather than part of the
+# original contract change. The filesystem backend has no integration boundary, so it stays `off`.
+#
+# The default is applied HERE, in backend-aware code, and NOT by editing templates/WORKFLOW-config.yaml
+# — one template serves both backends, so a blanket template edit would hand a filesystem scaffold a
+# security claim it cannot honor. It is applied ONLY to a config this run created: a pre-existing
+# WORKFLOW-config.yaml is operator data (`always_ask` in the install receipt), so an operator's
+# explicit posture survives every re-scaffold and `/idc:init` stays idempotent.
+if [ "$CONFIG_CREATED" = "yes" ]; then
+  case "$BACKEND" in
+    github)     PATHWAY_DEFAULT=controlled ;;
+    *)          PATHWAY_DEFAULT=off ;;
+  esac
+  tmp="$(mktemp)"
+  PATHWAY_DEFAULT="$PATHWAY_DEFAULT" python3 - WORKFLOW-config.yaml "$tmp" <<'PY'
+import os
+import re
+import sys
+
+src, dest = sys.argv[1], sys.argv[2]
+want = os.environ["PATHWAY_DEFAULT"]
+
+with open(src, encoding="utf-8") as fh:
+    lines = fh.readlines()
+
+out, in_block, block_indent, done = [], False, None, False
+for raw in lines:
+    if done:
+        out.append(raw)
+        continue
+    code = raw.split("#", 1)[0].rstrip()
+    stripped = code.strip()
+    indent = len(code) - len(code.lstrip()) if stripped else None
+    if not in_block:
+        if stripped == "pathway_enforcement:":
+            in_block, block_indent = True, indent
+        out.append(raw)
+        continue
+    if stripped and indent is not None and indent <= block_indent:
+        in_block = False                      # left the stanza without finding `mode:`
+        out.append(raw)
+        continue
+    match = re.match(r"^(\s*)(mode:)(\s*)([^\s#]+)(.*)$", raw.rstrip("\n"))
+    if not (match and stripped.startswith("mode:")):
+        out.append(raw)
+        continue
+    lead, key, gap, old, rest = match.groups()
+    # Keep any trailing inline comment anchored at its original column.
+    comment_col = len(lead) + len(key) + len(gap) + len(old)
+    if rest.strip():
+        pad = max(1, comment_col + (len(rest) - len(rest.lstrip())) - (comment_col - len(old) + len(want)))
+        rest = " " * pad + rest.lstrip()
+    newline = "\n" if raw.endswith("\n") else ""
+    out.append("%s%s%s%s%s%s" % (lead, key, gap, want, rest, newline))
+    done = True
+
+if not done:
+    sys.exit("idc-init: could not find pathway_enforcement.mode in WORKFLOW-config.yaml")
+
+with open(dest, "w", encoding="utf-8") as fh:
+    fh.write("".join(out))
+PY
+  mv "$tmp" WORKFLOW-config.yaml
 fi
 
 # Gitignore the per-session obligations ledger (.idc-session-state.json, v4 Phase 3): transient

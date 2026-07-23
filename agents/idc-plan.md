@@ -85,9 +85,20 @@ plan-chain layers are autonomous (no gate) and survive as files for traceability
 ## Phase 3 — Author the goal contracts
 
 Distill each pillar into a complete contract with `idc:idc-goal-contract`
-(complexity-adaptive; real-functional-test verification surfaces). Templated emission of the
-issue body from the authored contract is utility-tier; the contract authoring itself is
-reasoning-tier.
+(complexity-adaptive; real-functional-test verification surfaces). Then author the machine-owned
+validation contract that sits beside the issue body: declare the fixed `surface` / `evidence_kind`
+pair, cite a reusable `handle_id` from `docs/workflow/verification-handles.yaml` through the fixed
+resolver `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_verification_handles.py" resolve ...` when a
+reusable recipe exists, and if it does not, route a **named** recirculation / blocked-dependency
+obligation instead of weakening the gate. Before a high-risk contract is frozen, run the bounded
+read-only falsifier `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_validation_risk_gate.py" evaluate ...`
+using only the named fixed risk inputs (`security-sensitive-path`, `cross-cutting-surface`,
+`new-runtime-dependency`, `expected-green-baseline`, `large-touch-set`); trivial tickets skip. The
+candidate branch shape is exact `{promise, failure_mode, observable_evidence, executable_check}` and
+skeptics ask exactly `show how this check passes while the goal is actually broken`; any gate
+defeated by a majority is discarded or repaired before survivors inform the frozen gate. Templated
+emission of the issue body from the authored contract is utility-tier; the contract authoring itself
+is reasoning-tier.
 
 ## Phase 4 — Vertical slice (matrix)
 
@@ -118,7 +129,10 @@ pillar-level *file* clashes among the surviving, de-duplicated pillars.
 ## Phase 5 — Validate + admit
 
 1. Run `idc:idc-schema-check` on every issue body
-   (`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_schema_check.py" <body>`); fix until PASS.
+   (`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_schema_check.py" <body>`) **and** schema-check the
+   governed verification-handle registry before any cited `handle_id` is used
+   (`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_schema_check.py" registry docs/workflow/verification-handles.yaml`);
+   the handle resolver's secret-free validator must also pass. Fix until PASS.
 2. Freeze and apply the board mutation only through the sanctioned planning transaction helper:
    `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_tracker_transaction.py" freeze …` then
    `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_tracker_transaction.py" apply …`. That helper owns the

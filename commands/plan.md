@@ -22,7 +22,13 @@ authored and gated at the end of Think) and **never authors the PRD/TRD and neve
 run produces and where it writes (`WORKFLOW.md §4.2`): the plan chain (`docs/plans/` master +
 subphases + pillars), the phase matrix (`docs/workflow/pillar-matrices/`), and goal-contract issues
 on the board via `idc:idc-tracker-adapter`. Every issue body passes `idc:idc-schema-check` before
-admission; the matrix passes `idc:idc-matrix-analysis`'s check; re-sequencing is global but
+admission; reusable verification recipes resolve through the governed
+`docs/workflow/verification-handles.yaml` registry via
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_verification_handles.py" resolve ...` (schema-checked +
+secret-free before citation/use, missing handles route to a named recirculation / blocked-dependency
+obligation, never a warning-only pass); and high-risk tickets run the bounded fixed-code falsifier
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_validation_risk_gate.py" evaluate ...` before any frozen
+gate is emitted. The matrix passes `idc:idc-matrix-analysis`'s check; re-sequencing is global but
 `In Progress` issues are immutable. The authored matrix is descriptive input only —
 `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_execution_graph.py" --matrix <matrix> ... --json` re-derives
 authoritative whole-horizon Waves, and `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_tracker_projection.py"

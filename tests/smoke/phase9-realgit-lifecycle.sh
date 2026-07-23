@@ -36,12 +36,20 @@ FIN="$PLUGIN/scripts/idc_git_finish.py"
 JAN="$PLUGIN/scripts/idc_git_janitor.py"
 TRK="$PLUGIN/scripts/idc_tracker_fs.py"
 CHECK="$PLUGIN/scripts/idc_review_verdict_check.py"
+TXN="$PLUGIN/scripts/idc_tracker_transaction.py"
+VAL="$PLUGIN/scripts/idc_validation_contract.py"
+BREC="$PLUGIN/scripts/idc_build_receipt.py"
+GRAPH_DIGEST='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+PROJECTION_DIGEST='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
 fail() { echo "FAIL: $1"; [ -n "${2:-}" ] && { echo "----- report -----"; echo "$2"; }; exit 1; }
 gitc() { git -C "$REPO" "$@"; }
 
 [ -f "$FIN" ] || fail "idc_git_finish.py not found at $FIN"
 [ -f "$JAN" ] || fail "idc_git_janitor.py not found at $JAN"
 [ -f "$TRK" ] || fail "idc_tracker_fs.py not found at $TRK"
+[ -f "$TXN" ] || fail "idc_tracker_transaction.py not found at $TXN"
+[ -f "$VAL" ] || fail "idc_validation_contract.py not found at $VAL"
+[ -f "$BREC" ] || fail "idc_build_receipt.py not found at $BREC"
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 ORIGIN="$WORK/origin.git"; REPO="$WORK/repo"; BRANCH="build-1"
@@ -105,13 +113,62 @@ git clone -q "$ORIGIN" "$REPO" 2>/dev/null
 # the ambient default, so pin it explicitly too. (Modern git already inherits `main` from the origin.)
 gitc symbolic-ref HEAD refs/heads/main
 gitc config user.email t@example.com; gitc config user.name tester
-echo hello > "$REPO/README.md"; gitc add -A; gitc commit -qm init
+mkdir -p "$REPO/docs/workflow/build-validation" \
+         "$REPO/docs/workflow/build-validation-executions" \
+         "$REPO/docs/workflow/build-receipts" \
+         "$REPO/docs/workflow/code-reviews"
+echo hello > "$REPO/README.md"
+cat > "$REPO/verify.sh" <<'SH'
+#!/bin/bash
+set -euo pipefail
+grep -qx 'green' feature.txt
+SH
+chmod +x "$REPO/verify.sh"
+gitc add -A; gitc commit -qm init
 BASE="$(gitc symbolic-ref --short HEAD)"   # == main by construction (pinned on both origin and clone)
 gitc push -q origin "HEAD:$BASE"
-mkdir -p "$REPO/docs/workflow/code-reviews"; printf 'backend: filesystem\n' > "$REPO/docs/workflow/tracker-config.yaml"
+printf 'backend: filesystem\n' > "$REPO/docs/workflow/tracker-config.yaml"
 TRACKER="$REPO/TRACKER.md"
 python3 "$TRK" --tracker "$TRACKER" init >/dev/null                          || fail "tracker init failed"
-python3 "$TRK" --tracker "$TRACKER" create --title "buildable feature" >/dev/null  # #1
+
+# Real U5 planning receipt: freeze + apply a one-pillar plan before Build claims the item.
+MATRIX="$WORK/phase9-plan.yaml"
+cat > "$MATRIX" <<'YAML'
+phase: Phase 1
+pillars:
+  - id: buildable feature
+    wave: 1
+    domain: core
+    surfaces: [feature.txt]
+    blocks_on: []
+YAML
+PLAN_FROZEN="$WORK/phase9-plan.freeze.json"
+python3 "$TXN" freeze \
+  --repo "$REPO" \
+  --backend filesystem \
+  --tracker "$TRACKER" \
+  --matrix "$MATRIX" \
+  --baseline expected-red \
+  --label phase9-plan \
+  --out "$PLAN_FROZEN" >/dev/null \
+  || fail "could not freeze the planning transaction"
+python3 "$TXN" apply \
+  --repo "$REPO" \
+  --backend filesystem \
+  --tracker "$TRACKER" \
+  --frozen "$PLAN_FROZEN" >/dev/null \
+  || fail "could not apply the planning transaction"
+PLAN_RECEIPT="$REPO/docs/workflow/planning-receipts/phase9-plan.json"
+[ -f "$PLAN_RECEIPT" ] || fail "planning transaction did not mint the source-owned planning receipt"
+read -r PLAN_GRAPH_DIGEST PLAN_PROJECTION_DIGEST <<EOF
+$(python3 - "$PLAN_RECEIPT" <<'PY'
+import json, sys
+receipt = json.load(open(sys.argv[1], encoding='utf-8'))
+print(receipt['graph_digest'], receipt['projection_digest'])
+PY
+)
+EOF
+
 # Claim through the TRANSITION ENGINE (not the raw tracker) so the claim is JOURNALED — the real
 # lifecycle shape. The janitor's journal-replay dimension must still certify the finished lifecycle
 # COHERENT below, which requires the finisher's tracker-close to land in the same journal
@@ -123,19 +180,64 @@ python3 "$ENG" --repo "$REPO" --backend filesystem --tracker "$TRACKER" claim --
 
 WT="$REPO/.claude/worktrees/$BRANCH"
 gitc worktree add -q -b "$BRANCH" "$WT" "$BASE"                              || fail "worktree add failed"
-echo change > "$WT/feature.txt"; git -C "$WT" add -A; git -C "$WT" commit -qm "implement feature"
+
+CONTRACT_PATH="$REPO/docs/workflow/build-validation/phase9-build.json"
+EXECUTION_PATH="$REPO/docs/workflow/build-validation-executions/phase9-build.json"
+BUILD_RECEIPT="$REPO/docs/workflow/build-receipts/phase9-build.json"
+python3 "$VAL" freeze \
+  --repo "$WT" \
+  --issue 1 \
+  --pr 1 \
+  --graph-node buildable-feature \
+  --planning-receipt "$PLAN_RECEIPT" \
+  --touch feature.txt \
+  --off-limits README.md \
+  --verify 'bash verify.sh' \
+  --baseline expected-red \
+  --label phase9-build \
+  --out "$CONTRACT_PATH" >/dev/null \
+  || fail "could not freeze the build validation contract"
+
+echo green > "$WT/feature.txt"; git -C "$WT" add -A; git -C "$WT" commit -qm "implement feature"
 BUILD_TIP="$(git -C "$WT" rev-parse HEAD)"
 git -C "$WT" push -q origin "$BRANCH"                                        || fail "push of build branch failed"
+python3 "$VAL" run --repo "$WT" --contract "$CONTRACT_PATH" --out "$EXECUTION_PATH" >/dev/null \
+  || fail "could not execute the frozen validation gate"
+VERDICT_PATH="$REPO/docs/workflow/code-reviews/2026-07-22-pr-1-review.json"
+python3 - "$EXECUTION_PATH" "$VERDICT_PATH" <<'PY' || exit 1
+import json, sys
+execution_path, verdict_path = sys.argv[1:3]
+execution = json.load(open(execution_path, encoding='utf-8'))
+verdict = {
+    'verdict': 'PASS',
+    'pr': 1,
+    'issue': 1,
+    'head': execution['head'],
+    'diff_digest': execution['diff_digest'],
+    'findings': [],
+}
+with open(verdict_path, 'w', encoding='utf-8') as fh:
+    json.dump(verdict, fh, indent=2, sort_keys=True)
+    fh.write('\n')
+PY
+python3 "$CHECK" "$VERDICT_PATH" >/dev/null 2>&1 || fail "validator rejected the clean finish verdict"
+python3 "$BREC" write \
+  --repo "$WT" \
+  --contract "$CONTRACT_PATH" \
+  --execution "$EXECUTION_PATH" \
+  --verdict "$VERDICT_PATH" \
+  --graph-digest "$PLAN_GRAPH_DIGEST" \
+  --projection-digest "$PLAN_PROJECTION_DIGEST" \
+  --out "$BUILD_RECEIPT" >/dev/null \
+  || fail "could not write the verified implementation receipt"
 
 # ---- run the finisher's deterministic git-finalization tail ---------------------------------------
-# Receipt gate: a clean PASS verdict owning PR #1 / issue #1 (no nits to route, no merge_conditions),
-# so the tail runs its real git mechanics — this phase certifies the git/janitor end-state, not the gate.
-VERDICT_PATH="$REPO/docs/workflow/code-reviews/2026-07-22-pr-1-review.json"
-printf '{"verdict":"PASS","pr":1,"issue":1,"findings":[]}\n' > "$VERDICT_PATH"
-python3 "$CHECK" "$VERDICT_PATH" >/dev/null 2>&1 || fail "validator rejected the clean finish verdict"
+# Receipt gate: a clean PASS verdict owning PR #1 / issue #1 plus a source-owned build receipt bound
+# to the exact final diff, so the tail runs its real git mechanics — this phase certifies the
+# planning-receipt -> implementation-receipt -> git/janitor end-state chain, not merely the merge.
 finish_out="$( cd "$REPO" && env PATH="$WORK/bin:$PATH" WORK="$WORK" ORIGIN="$ORIGIN" BRANCH="$BRANCH" \
   python3 "$FIN" --pr 1 --issue 1 --worktree "$WT" --repo "$REPO" --tracker "$TRACKER" \
-    --verdict "$VERDICT_PATH" 2>&1 )"; rc=$?
+    --verdict "$VERDICT_PATH" --build-receipt "$BUILD_RECEIPT" 2>&1 )"; rc=$?
 [ "$rc" -eq 0 ] || fail "the finish tail must succeed on a real lifecycle (got exit $rc)" "$finish_out"
 printf '%s\n' "$finish_out" | grep -qx 'finish: ok' || fail "finish must print 'finish: ok'" "$finish_out"
 
@@ -206,4 +308,4 @@ printf '%s\n' "$deb" | grep -qF "RISKY branch build-7" \
 printf '%s\n' "$deb" | grep -qF "REPORT-ONLY branch codex/experiment" \
   || fail "a foreign branch must be REPORT-ONLY even when its tip is merged" "$deb"
 
-echo "PASS: a real build triplet driven through idc_git_finish.py leaves an end-state idc_git_janitor.py certifies COHERENT (exit 0, JSON verdict coherent); recreating the merged branch the finisher deleted flips the SAME scan to exit 1 (SAFE-FIX) — red-when-broken by construction; injected debris exits 1 with correct SAFE-FIX/RISKY/REPORT-ONLY tiering"
+echo "PASS: a real build triplet driven through planning-receipt -> build-receipt -> idc_git_finish.py leaves an end-state idc_git_janitor.py certifies COHERENT (exit 0, JSON verdict coherent); recreating the merged branch the finisher deleted flips the SAME scan to exit 1 (SAFE-FIX) — red-when-broken by construction; injected debris exits 1 with correct SAFE-FIX/RISKY/REPORT-ONLY tiering"

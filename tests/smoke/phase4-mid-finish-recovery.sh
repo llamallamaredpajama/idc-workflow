@@ -54,9 +54,13 @@ RECOVER="$PLUGIN/scripts/idc_finish_recover.py"
 LEDGER="$PLUGIN/scripts/hooks/idc_ledger.py"
 TRK="$PLUGIN/scripts/idc_tracker_fs.py"
 CHECK="$PLUGIN/scripts/idc_review_verdict_check.py"
+VAL="$PLUGIN/scripts/idc_validation_contract.py"
+BREC="$PLUGIN/scripts/idc_build_receipt.py"
+GRAPH_DIGEST='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+PROJECTION_DIGEST='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
 fail() { printf 'FAIL: %s\n' "$1"; exit 1; }
 
-for f in "$FINISH" "$RECOVER" "$LEDGER" "$TRK"; do
+for f in "$FINISH" "$RECOVER" "$LEDGER" "$TRK" "$VAL" "$BREC"; do
   [ -f "$f" ] || fail "missing helper: $f"
 done
 python3 "$RECOVER" --help >/dev/null 2>&1 || fail "idc_finish_recover.py --help should parse"
@@ -130,28 +134,89 @@ setup_repo() {
   git clone -q "$ORIGIN" "$REPO"
   git -C "$REPO" config user.email t@example.com
   git -C "$REPO" config user.name tester
+  mkdir -p "$REPO/docs/workflow/build-validation" \
+           "$REPO/docs/workflow/build-validation-executions" \
+           "$REPO/docs/workflow/build-receipts" \
+           "$REPO/docs/workflow/code-reviews"
   echo hello > "$REPO/README.md"
-  git -C "$REPO" add README.md
+  cat > "$REPO/verify.sh" <<'SH'
+#!/bin/bash
+set -euo pipefail
+grep -qx 'green' change.txt
+SH
+  chmod +x "$REPO/verify.sh"
+  git -C "$REPO" add README.md verify.sh
   git -C "$REPO" commit -qm init
   BASE="$(git -C "$REPO" symbolic-ref --short HEAD)"
   git -C "$REPO" push -q origin "HEAD:$BASE"
 
   WT="$REPO/.claude/worktrees/$BRANCH"
   git -C "$REPO" worktree add -q -b "$BRANCH" "$WT" "$BASE"
-  echo change > "$WT/change.txt"
-  git -C "$WT" add change.txt
-  git -C "$WT" commit -qm work
-  git -C "$WT" push -q origin "$BRANCH"
 
-  mkdir -p "$REPO/docs/workflow/code-reviews"
   printf 'backend: filesystem\n' > "$REPO/docs/workflow/tracker-config.yaml"
   TRACKER="$REPO/TRACKER.md"
   python3 "$TRK" --tracker "$TRACKER" init >/dev/null
   python3 "$TRK" --tracker "$TRACKER" create --title "Test issue" >/dev/null
   python3 "$TRK" --tracker "$TRACKER" claim --num 1 --agent tester >/dev/null
+
+  CONTRACT="$REPO/docs/workflow/build-validation/${BRANCH}.json"
+  EXECUTION="$REPO/docs/workflow/build-validation-executions/${BRANCH}.json"
+  BUILD_RECEIPT="$REPO/docs/workflow/build-receipts/${BRANCH}.json"
+
+  echo change > "$WT/change.txt"
+  git -C "$WT" add change.txt
+  git -C "$WT" commit -qm work
+  git -C "$WT" push -q origin "$BRANCH"
+
+  python3 "$VAL" freeze \
+    --repo "$WT" \
+    --issue 1 \
+    --pr 501 \
+    --graph-node test-issue \
+    --graph-digest "$GRAPH_DIGEST" \
+    --projection-digest "$PROJECTION_DIGEST" \
+    --touch change.txt \
+    --off-limits README.md \
+    --verify 'bash verify.sh' \
+    --baseline expected-red \
+    --label "$BRANCH" \
+    --out "$CONTRACT" >/dev/null \
+    || fail "could not freeze the build validation contract for $BRANCH"
+
+  echo green > "$WT/change.txt"
+  git -C "$WT" add change.txt
+  git -C "$WT" commit -qm "green"
+  git -C "$WT" push -q origin "$BRANCH"
+
+  python3 "$VAL" run --repo "$WT" --contract "$CONTRACT" --out "$EXECUTION" >/dev/null \
+    || fail "could not execute the frozen validation gate for $BRANCH"
   VERDICT="$REPO/docs/workflow/code-reviews/2026-07-22-pr-501-review.json"
-  printf '{"verdict":"PASS","pr":501,"issue":1,"findings":[]}\n' > "$VERDICT"
+  python3 - "$EXECUTION" "$VERDICT" <<'PY' || exit 1
+import json, sys
+execution_path, verdict_path = sys.argv[1:3]
+execution = json.load(open(execution_path, encoding='utf-8'))
+verdict = {
+    'verdict': 'PASS',
+    'pr': 501,
+    'issue': 1,
+    'head': execution['head'],
+    'diff_digest': execution['diff_digest'],
+    'findings': [],
+}
+with open(verdict_path, 'w', encoding='utf-8') as fh:
+    json.dump(verdict, fh, indent=2, sort_keys=True)
+    fh.write('\n')
+PY
   python3 "$CHECK" "$VERDICT" >/dev/null 2>&1 || fail "validator did not accept the clean finish verdict"
+  python3 "$BREC" write \
+    --repo "$WT" \
+    --contract "$CONTRACT" \
+    --execution "$EXECUTION" \
+    --verdict "$VERDICT" \
+    --graph-digest "$GRAPH_DIGEST" \
+    --projection-digest "$PROJECTION_DIGEST" \
+    --out "$BUILD_RECEIPT" >/dev/null \
+    || fail "could not write the implementation receipt for $BRANCH"
 }
 
 # run_finish <extra env…> — the normal finish tail, as the finisher session would run it.
@@ -159,7 +224,7 @@ run_finish() {
   ( cd "$REPO" && env PATH="$BIN:$PATH" WORK="$WORK" ORIGIN="$ORIGIN" REPO="$REPO" \
       BRANCH="$BRANCH" BASE="$BASE" CLAUDE_CODE_SESSION_ID=dead-session "$@" \
       python3 "$FINISH" --pr 501 --issue 1 --worktree "$WT" --repo "$REPO" \
-        --tracker "$TRACKER" --verdict "$VERDICT" ) >/dev/null 2>&1
+        --tracker "$TRACKER" --verdict "$VERDICT" --build-receipt "$BUILD_RECEIPT" ) >/dev/null 2>&1
 }
 
 # run_recover [extra env…] — a FRESH session's recovery pass (a different session id, by design).

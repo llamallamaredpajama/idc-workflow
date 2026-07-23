@@ -27,10 +27,14 @@ JAN="$PLUGIN/scripts/idc_git_janitor.py"
 TRK="$PLUGIN/scripts/idc_tracker_fs.py"
 BOARD="$PLUGIN/scripts/idc_gh_board.py"
 CHECK="$PLUGIN/scripts/idc_review_verdict_check.py"
+VAL="$PLUGIN/scripts/idc_validation_contract.py"
+BREC="$PLUGIN/scripts/idc_build_receipt.py"
+GRAPH_DIGEST='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+PROJECTION_DIGEST='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
 fail() { echo "FAIL: $1"; [ -n "${2:-}" ] && { echo "----- detail -----"; echo "$2"; }; exit 1; }
 gitc() { git -C "$REPO" "$@"; }
 
-for f in "$FIN" "$JAN" "$TRK" "$BOARD"; do [ -f "$f" ] || fail "helper not found: $f"; done
+for f in "$FIN" "$JAN" "$TRK" "$BOARD" "$VAL" "$BREC"; do [ -f "$f" ] || fail "helper not found: $f"; done
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 ORIGIN="$WORK/origin.git"; REPO="$WORK/repo"
@@ -93,10 +97,21 @@ git clone -q "$ORIGIN" "$REPO" 2>/dev/null
 # the ambient default, so pin it explicitly too. (Modern git already inherits `main` from the origin.)
 gitc symbolic-ref HEAD refs/heads/main
 gitc config user.email t@example.com; gitc config user.name tester
-echo hello > "$REPO/README.md"; gitc add -A; gitc commit -qm init
+mkdir -p "$REPO/docs/workflow/build-validation" \
+         "$REPO/docs/workflow/build-validation-executions" \
+         "$REPO/docs/workflow/build-receipts" \
+         "$REPO/docs/workflow/code-reviews"
+echo hello > "$REPO/README.md"
+cat > "$REPO/verify.sh" <<'SH'
+#!/bin/bash
+set -euo pipefail
+grep -qx "$2" "$1"
+SH
+chmod +x "$REPO/verify.sh"
+gitc add -A; gitc commit -qm init
 BASE="$(gitc symbolic-ref --short HEAD)"   # == main by construction (pinned on both origin and clone)
 gitc push -q origin "HEAD:$BASE"
-mkdir -p "$REPO/docs/workflow/code-reviews"; printf 'backend: filesystem\n' > "$REPO/docs/workflow/tracker-config.yaml"
+printf 'backend: filesystem\n' > "$REPO/docs/workflow/tracker-config.yaml"
 TRACKER="$REPO/TRACKER.md"
 python3 "$TRK" --tracker "$TRACKER" init >/dev/null || fail "tracker init failed"
 
@@ -107,20 +122,67 @@ jcount() { python3 "$JAN" --repo "$REPO" --tracker "$TRACKER" --json \
 # One issue's full lifecycle: create buildable → claim → real worktree+commit+push → finish tail → prune.
 run_issue() {  # $1 = issue/PR number
   local n="$1" br="build-$1" wt="$REPO/.claude/worktrees/build-$1"
+  local contract="$REPO/docs/workflow/build-validation/$br.json"
+  local execution="$REPO/docs/workflow/build-validation-executions/$br.json"
+  local build_receipt="$REPO/docs/workflow/build-receipts/$br.json"
+  local verdict="$REPO/docs/workflow/code-reviews/2026-07-22-pr-$n-review.json"
+  local expect="green-$n"
   python3 "$TRK" --tracker "$TRACKER" create --title "feature $n" >/dev/null
   python3 "$TRK" --tracker "$TRACKER" claim --num "$n" --agent tester >/dev/null || fail "claim #$n failed"
   gitc worktree add -q -b "$br" "$wt" "$BASE" || fail "worktree add $br failed"
-  printf 'work %s\n' "$n" > "$wt/feature-$n.txt"
+  printf 'work-%s\n' "$n" > "$wt/feature-$n.txt"
+  git -C "$wt" add -A; git -C "$wt" commit -qm "seed $n"
+  git -C "$wt" push -q origin "$br" || fail "push $br failed"
+  python3 "$VAL" freeze \
+    --repo "$wt" \
+    --issue "$n" \
+    --pr "$n" \
+    --graph-node "feature-$n" \
+    --graph-digest "$GRAPH_DIGEST" \
+    --projection-digest "$PROJECTION_DIGEST" \
+    --touch "feature-$n.txt" \
+    --off-limits README.md \
+    --verify "bash verify.sh feature-$n.txt $expect" \
+    --baseline expected-red \
+    --label "$br" \
+    --out "$contract" >/dev/null \
+    || fail "could not freeze build validation for #$n"
+  printf '%s\n' "$expect" > "$wt/feature-$n.txt"
   git -C "$wt" add -A; git -C "$wt" commit -qm "implement $n"
   git -C "$wt" push -q origin "$br" || fail "push $br failed"
-  # Receipt gate: a clean PASS verdict owning PR/issue #n (no nits, no merge_conditions) so the tail
-  # runs its git mechanics — this phase exercises debris accumulation, not the gate itself.
-  local verdict="$REPO/docs/workflow/code-reviews/2026-07-22-pr-$n-review.json"
-  printf '{"verdict":"PASS","pr":%s,"issue":%s,"findings":[]}\n' "$n" "$n" > "$verdict"
+  python3 "$VAL" run --repo "$wt" --contract "$contract" --out "$execution" >/dev/null \
+    || fail "could not execute build validation for #$n"
+  python3 - "$execution" "$verdict" "$n" <<'PY' || exit 1
+import json, sys
+execution_path, verdict_path, n = sys.argv[1:]
+execution = json.load(open(execution_path, encoding='utf-8'))
+verdict = {
+    'verdict': 'PASS',
+    'pr': int(n),
+    'issue': int(n),
+    'head': execution['head'],
+    'diff_digest': execution['diff_digest'],
+    'findings': [],
+}
+with open(verdict_path, 'w', encoding='utf-8') as fh:
+    json.dump(verdict, fh, indent=2, sort_keys=True)
+    fh.write('\n')
+PY
   python3 "$CHECK" "$verdict" >/dev/null 2>&1 || fail "validator rejected the clean finish verdict for #$n"
+  python3 "$BREC" write \
+    --repo "$wt" \
+    --contract "$contract" \
+    --execution "$execution" \
+    --verdict "$verdict" \
+    --graph-digest "$GRAPH_DIGEST" \
+    --projection-digest "$PROJECTION_DIGEST" \
+    --out "$build_receipt" >/dev/null \
+    || fail "could not write build receipt for #$n"
+  # Receipt gate: a clean PASS verdict owning PR/issue #n plus a source-owned implementation receipt,
+  # so the tail runs its git mechanics — this phase exercises debris accumulation, not the gate itself.
   local out; out="$( cd "$REPO" && env PATH="$WORK/bin:$PATH" WORK="$WORK" ORIGIN="$ORIGIN" BRANCH="$br" \
     python3 "$FIN" --pr "$n" --issue "$n" --worktree "$wt" --repo "$REPO" --tracker "$TRACKER" \
-      --verdict "$verdict" 2>&1 )"
+      --verdict "$verdict" --build-receipt "$build_receipt" 2>&1 )"
   printf '%s\n' "$out" | grep -qx 'finish: ok' || fail "finish of #$n did not report ok" "$out"
   gitc fetch -q --prune origin
 }

@@ -71,19 +71,19 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   requested item. When the run was invoked on explicit `#<issue>` refs, that **requested issue set is
   stamped on the record at start**, and `complete` requires **one verified merged-PR receipt PER
   requested issue** — a request for two issues cannot close with one receipt. Evidence refs:
-  `receipts:{<issue>:{"pr":<merged-PR#>,"build_receipt":"docs/workflow/build-receipts/<file>.json"}}`
-  (the legacy `{pr}` shape still re-verifies the merged PR, but the U6 path binds the same issue to a
-  source-owned implementation receipt). The validator **re-reads each PR's merged-state for real (`gh
-  pr view`)**, proves the **PR↔issue linkage from the PR's OWN closing references**
-  (`closingIssuesReferences`), and when `build_receipt` is present re-verifies that source-owned
-  receipt against the exact issue/PR/final-diff binding. A merged PR that closes a *different* issue
-  fails the receipt closed; a caller `state` is never trusted. For a **whole-frontier build (no
-  `#<issue>` named)** the **eligible frontier is stamped on the record at start**, and `complete`
-  requires **a verified merged-PR receipt for EVERY stamped-frontier issue OR an oracle-confirmed empty
-  remaining frontier** (the validator re-reads the live ready frontier). An **arbitrary-subset close**
-  — receipts for some frontier issues while others remain eligible — is refused; if the frontier could
+  `receipts:{<issue>:{"pr":<merged-PR#>,"build_receipt":"docs/workflow/build-receipts/<file>.json"}}`.
+  Every normal Build closeout **requires** both the merged PR reference and the repo-relative
+  source-owned implementation receipt path. The validator **re-reads each PR's merged-state for real
+  (`gh pr view`)**, proves the **PR↔issue linkage from the PR's OWN closing references**
+  (`closingIssuesReferences`), and re-verifies that source-owned implementation receipt against the
+  exact issue/PR/final-diff binding. A missing `build_receipt`, a merged PR that closes a *different*
+  issue, or a caller-supplied `state` is refused closed. For a **whole-frontier build (no `#<issue>`
+  named)** the **eligible frontier is stamped on the record at start**, and `complete` requires **a
+  verified merged-PR receipt for EVERY stamped-frontier issue OR an oracle-confirmed empty remaining
+  frontier** (the validator re-reads the live ready frontier). An **arbitrary-subset close** —
+  receipts for some frontier issues while others remain eligible — is refused; if the frontier could
   not be stamped at start and the oracle still reports eligible work, the close fails closed (rule B).
-  `receipts:{<issue>:{"pr":<merged-PR#>,"build_receipt":"..."}}` per built issue on the U6 path.
+  `receipts:{<issue>:{"pr":<merged-PR#>,"build_receipt":"..."}}` per built issue.
 - **`no_action`** — the **live oracle** reports no eligible Buildable work (its `eligible_buildables`
   count is 0). Never claim `no_action` without that fresh oracle result.
 - **`blocked_external`** — an existing drain error or rate-limit receipt: `blocker:{helper, exit

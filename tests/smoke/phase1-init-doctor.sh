@@ -245,7 +245,40 @@ gh_mode="$(PYTHONPATH="$PLUGIN/scripts" python3 -c \
   'import sys; import idc_path_gate as G; print(G.pathway_mode(sys.argv[1]))' "$GHB")"
 [ "$gh_mode" = "controlled" ] || { rm -rf "$GHB"; \
   fail "a github-backed scaffold must default to 'controlled' (spec §2.1 default claim, enabled once integration enforcement exists) — read '$gh_mode'"; }
+
+# doctor's honest-claim ROW (spec §2.1 final sentence): the scaffold door above guards CREATION
+# time only, so a config hand-edited to `controlled` after the fact still reads as governed. Doctor
+# re-checks it every run through the deterministic door, asserted here on the two REAL scaffolds
+# this test just produced (filesystem→off, github→controlled) plus the two failure postures.
+DOORCHK="$PLUGIN/scripts/idc_doctor_pathway_check.py"
+[ -f "$DOORCHK" ] || { rm -rf "$GHB"; fail "doctor's honest-claim door not found at $DOORCHK (not implemented yet)"; }
+python3 "$DOORCHK" --repo "$SBX" >/dev/null 2>&1 \
+  || { rm -rf "$GHB"; fail "the honest-claim door FAILED the filesystem scaffold it just approved (backend=filesystem, mode=off is an honest claim)"; }
+python3 "$DOORCHK" --repo "$GHB" >/dev/null 2>&1 \
+  || { rm -rf "$GHB"; fail "the honest-claim door FAILED the github scaffold (backend=github, mode=controlled is the spec §2.1 default claim)"; }
 rm -rf "$GHB"
+
+# hand-edit the filesystem scaffold's config to claim `controlled` — the post-scaffold drift the
+# scaffold door cannot see. Red-when-broken: neuter the door's filesystem branch and this passes.
+cp "$SBX/WORKFLOW-config.yaml" "$SBX/.workflow-config.bak" || fail "could not back up the scaffolded config"
+for claimed in controlled app-locked; do
+  sed "s/^\([[:space:]]*\)mode:.*/\1mode: $claimed/" "$SBX/.workflow-config.bak" > "$SBX/WORKFLOW-config.yaml" \
+    || fail "could not rewrite WORKFLOW-config.yaml to claim $claimed"
+  grep -qE "^[[:space:]]*mode:[[:space:]]*$claimed" "$SBX/WORKFLOW-config.yaml" \
+    || fail "the test fixture did not actually claim '$claimed' — the assertion below would be vacuous"
+  derr="$(python3 "$DOORCHK" --repo "$SBX" 2>&1 >/dev/null)"; drc=$?
+  [ "$drc" -eq 1 ] \
+    || fail "doctor's honest-claim door must exit 1 (FAIL) for a filesystem repo claiming '$claimed' (spec §2.1), got $drc — [$derr]"
+  echo "$derr" | grep -qi filesystem \
+    || fail "the door's refusal must name the filesystem backend, got: [$derr]"
+done
+# an unreadable config is INDETERMINATE (exit 2), never the honest `off` the Path Gate parser
+# reports for a config it cannot open. Red-when-broken: collapse exit 2 into 0 and this fails.
+rm -f "$SBX/WORKFLOW-config.yaml"
+derr="$(python3 "$DOORCHK" --repo "$SBX" 2>&1 >/dev/null)"; drc=$?
+[ "$drc" -eq 2 ] \
+  || fail "a MISSING WORKFLOW-config.yaml must be INDETERMINATE (exit 2), never an honest PASS — the Path Gate parser reports it as 'off'; got $drc — [$derr]"
+mv "$SBX/.workflow-config.bak" "$SBX/WORKFLOW-config.yaml" || fail "could not restore the scaffolded config"
 
 # --- static guard: EVERY post-provenance github board mutation runs AFTER the Status gate ---
 # The validating adapter's `ensure-field` (adds fields) and `ensure-link` (publishes the board)
@@ -272,4 +305,4 @@ grep -qF '[--pi]' "$INIT_MD"        || fail "init.md: --pi missing from the argu
 grep -qF 'Phase 6b' "$INIT_MD"      || fail "init.md: Phase 6b Pi-adapter section missing"
 grep -qF 'install-pi.sh' "$INIT_MD" || fail "init.md: Phase 6b must invoke scripts/install-pi.sh"
 
-echo "PASS: init scaffolds the v2 tree (filesystem backend) + doctor checks satisfied + board-mutation ordering guarded + --pi wired"
+echo "PASS: init scaffolds the v2 tree (filesystem backend) + doctor checks satisfied (incl. the honest-claim door) + board-mutation ordering guarded + --pi wired"

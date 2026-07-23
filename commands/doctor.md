@@ -79,6 +79,31 @@ ls WORKFLOW.md WORKFLOW-config.yaml docs/workflow/pillar-matrices docs/workflow/
 ```
 A partial tree is a FAIL that lists the missing paths. Fix hint: run `/idc:init`.
 
+**4b — Pathway enforcement claim is honest (spec §2.1).** `controlled` / `app-locked` promise that
+supported runtime hooks deny off-path mutations **and** that a required GitHub check plus repository
+rules block off-path *integration*. The filesystem tracker has no integration boundary, so it MUST
+NOT claim hard pathway security — `/idc:doctor` must FAIL that combination. (`/idc:init`'s scaffold
+door refuses to *create* it; this row catches a `WORKFLOW-config.yaml` hand-edited to `controlled`
+afterwards, or a repo adopted from elsewhere.) Run the deterministic door — read-only, two file
+reads, no board and no network:
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_doctor_pathway_check.py" --repo "$PWD"
+```
+- exit **0** → **PASS** (note the reported `backend=… , pathway_enforcement.mode=…`): the claim
+  matches the backend — any `github` posture, or `filesystem` declaring `off`.
+- exit **1** → **FAIL**: the `filesystem` backend claims `controlled`/`app-locked`. Fix hint: "set
+  `pathway_enforcement.mode: off` in `WORKFLOW-config.yaml`, or move this repo to the `github`
+  backend (`/idc:init`) — the filesystem tracker makes no hard pathway-security claim (spec §2.1)."
+- exit **2** → **FAIL**, **never PASS**: `WORKFLOW-config.yaml` or the tracker backend is
+  missing/unreadable/unrecognized, so the claim could not be established — and an *indeterminate*
+  claim is not an honest one (the runtime Path Gate parser reports an unreadable config as `off`,
+  which is the right fail-closed default for enforcement but is not evidence of honesty). Fix hint:
+  "restore `WORKFLOW-config.yaml` + `docs/workflow/tracker-config.yaml` (`/idc:init`), then re-run
+  `/idc:doctor`."
+This is a **sub-row of check 4** (like `5b` under `5`): report it in the table under row 4 and fold
+its result into row 4's persisted `result` — a `4b` FAIL makes row 4 FAIL — so the ten-row report
+contract stays exactly as it is.
+
 **5 — Install receipt present.** PASS if `docs/workflow/install-receipt.yaml` exists and
 parses with the expected keys (`receipt_version` — exactly `1` legacy or `2`, no other value,
 `fingerprint_method: sha256`, `files[]`, and — for a `2` receipt — a valid `plugin_version`, the

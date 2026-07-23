@@ -18,7 +18,25 @@ import sys
 import tempfile
 import time
 
+# THE CREDENTIAL SCRUB DOOR — see `idc_credential_shapes.scrub`. Every read of a CHILD PROCESS's
+# stderr in this module passes through it AT THE READ, and `tests/smoke/phase11-honesty-repro.sh` R28
+# is the census that keeps that true across every module in scripts/.
+#
+# THE IMPORT IS TOLERANT BECAUSE SEVERAL MODULES HERE RUN AS LONE RELOCATED COPIES. The smoke and
+# governance suites copy a single script to a temp directory and execute it there to prove a deleted
+# guard was the one doing the work (`phase1-pipe-safety` F, `governance/external-intake-completeness`,
+# `phase4-completion-honesty` F) — a hard sibling import makes those copies die on ImportError. The
+# fallback FAILS CLOSED: with no table to scrub with, a child's stderr is WITHHELD, never passed
+# through. This block is byte-identical everywhere it appears and R28 asserts that, so no copy of it
+# can drift into a pass-through.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import idc_credential_shapes as CS  # noqa: E402
+except ImportError:                                      # a lone relocated copy — fail closed
+    class CS:                                            # noqa: N801 — stand-in for the shared table
+        scrub = staticmethod(
+            lambda text: text and "[child output withheld — the credential table is not importable]")
+
 import idc_matrix_check  # noqa: E402
 
 SCHEMA_VERSION = 1
@@ -83,7 +101,7 @@ def _common_git_dir(cwd: str) -> str:
             timeout=15,
         )
         if proc.returncode != 0:
-            detail = _clip(proc.stderr or proc.stdout or "git rev-parse failed", 200)
+            detail = _clip(CS.scrub(proc.stderr or proc.stdout or "git rev-parse failed"), 200)
             raise ValidationError(f"{cwd} is not inside a governed git repository ({detail})")
         raw = proc.stdout.strip()
         if not os.path.isabs(raw):
@@ -234,7 +252,7 @@ def _normalize_surfaces(values, label: str):
 def _git(repo: str, *args: str, text: bool = True):
     proc = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=text)
     if proc.returncode != 0:
-        detail = _clip(proc.stderr or proc.stdout or f"git {' '.join(args)} failed", 200)
+        detail = _clip(CS.scrub(proc.stderr or proc.stdout or f"git {' '.join(args)} failed"), 200)
         raise ValidationError(f"git {' '.join(args)} failed: {detail}")
     return proc.stdout if text else proc.stdout
 
@@ -246,7 +264,7 @@ def git_head(repo: str, ref: str = "HEAD") -> str:
 def git_diff_info(repo: str, base_commit: str, ref: str = "HEAD"):
     diff = subprocess.run(["git", "-C", repo, "diff", "--binary", f"{base_commit}...{ref}"], capture_output=True)
     if diff.returncode != 0:
-        detail = _clip((diff.stderr or diff.stdout or b"git diff failed").decode("utf-8", "replace"), 200)
+        detail = _clip(CS.scrub((diff.stderr or diff.stdout or b"git diff failed").decode("utf-8", "replace")), 200)
         raise ValidationError(f"git diff --binary {base_commit}...{ref} failed: {detail}")
     names = _git(repo, "diff", "--name-only", f"{base_commit}...{ref}")
     changed = sorted({line.strip() for line in names.splitlines() if line.strip()})
@@ -269,7 +287,7 @@ def _verification_results(repo: str, commands):
             "command": command,
             "exit_code": int(proc.returncode),
             "stdout_excerpt": _clip(proc.stdout),
-            "stderr_excerpt": _clip(proc.stderr),
+            "stderr_excerpt": _clip(CS.scrub(proc.stderr) or ""),
         })
     return results
 

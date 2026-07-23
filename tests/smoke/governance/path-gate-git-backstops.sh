@@ -124,6 +124,11 @@ deny_gate() {
   [ "$RC" -eq 0 ] || gov_fail "expected a deny decision for: $1 :: $(cat "$WORK/interlock.err")"
   is_deny || gov_fail "expected PreToolUse to deny: [$1] stdout=[$OUT] stderr=[$(cat "$WORK/interlock.err")]"
 }
+allow_gate() {
+  gate_bash "$1" "$SID"
+  [ "$RC" -eq 0 ] || gov_fail "expected an allow decision for: $1 :: $(cat "$WORK/interlock.err")"
+  [ -z "$OUT" ] || gov_fail "expected PreToolUse to allow: [$1] stdout=[$OUT] stderr=[$(cat "$WORK/interlock.err")]"
+}
 
 reset_repo_to_origin() {
   git -C "$REPO" reset --hard -q origin/main
@@ -295,6 +300,14 @@ grep -qi 'path gate' "$WORK/push.out" || gov_fail "pre-push failure did not ment
 deny_gate "git commit --no-verify -m bypass"
 deny_gate "git commit -n -m bypass"
 deny_gate "git push --no-verify origin main"
+# Mutating or overriding `core.hooksPath` disables IDC's managed Git backstops and must deny, while
+# read-only Git/config queries stay allowed.
+deny_gate "git config core.hooksPath /dev/null"
+deny_gate "git config --local core.hooksPath /dev/null"
+deny_gate "git -c core.hooksPath=/dev/null commit -m bypass"
+deny_gate "git -c core.hooksPath=/dev/null push origin main"
+allow_gate "git config core.hooksPath"
+allow_gate "git config --get core.hooksPath"
 
 # Git-only enforcement is insufficient: if a generic Bash writer slips past PreToolUse, an agent can
 # mutate the repo and bypass BOTH git hooks with commit+push --no-verify. Each representative route

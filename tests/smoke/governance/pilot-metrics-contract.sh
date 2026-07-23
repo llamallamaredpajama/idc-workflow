@@ -125,6 +125,16 @@ PY
   if validate "$dir" "$sha" >"$dir/out" 2>"$dir/err"; then
     fail "REFUTATION $n ACCEPTED — $label (the validator must refuse this)"
   fi
+  # A refusal must be a NAMED FINDING, not a crash. Mutation testing found three neuters
+  # (`if not os.path.isfile(...)` -> `if False:`, `if leaf not in body:` -> `if False:`) that kept this
+  # scenario green only because the validator blew up on the very next line — a traceback exits
+  # non-zero, so "did it exit non-zero" could not tell a working guard from a deleted one. Requiring a
+  # clean refusal makes each guard independently provable.
+  if grep -q 'Traceback (most recent call last)' "$dir/err"; then
+    fail "REFUTATION $n CRASHED instead of refusing cleanly — $label: $(grep -m1 'Error' "$dir/err")"
+  fi
+  grep -q 'idc-pilot-metrics:' "$dir/err" \
+    || fail "REFUTATION $n produced no named finding — $label: $(head -2 "$dir/err")"
 }
 
 # --- B. every one of the ten §15.6 metrics is required at its EXACT field path -------------------
@@ -190,14 +200,22 @@ refute "a lane receipt pointing at a file that does not exist" \
 STALE="$WORK/stale"
 seed "$STALE" || fail "could not seed the stale-receipt fixture"
 printf 'the lane was re-run after the metrics were written\n' >> "$STALE/pilot-source-heavy.log"
-if validate "$STALE" >/dev/null 2>&1; then
+if validate "$STALE" >/dev/null 2>"$WORK/stale.err"; then
   fail "a pilot bundle whose lane receipt changed after the fact was accepted — stale evidence must be refused"
 fi
+grep -qi 'stale' "$WORK/stale.err" \
+  || fail "the stale-receipt refusal must say the receipt changed after the metrics were written: $(cat "$WORK/stale.err")"
 
 # --- E. a NON-source-heavy pilot is refused on a deterministic criterion -------------------------
-refute "too few source files"            "d['pilot']['composition']['source_files'] = 4"
-refute "too little source LOC"           "d['pilot']['composition']['source_loc'] = 120"
-refute "source is a minority of the repo (a docs/config repo)" \
+# Each of the three thresholds is refuted IN ISOLATION — the other two stay satisfied — so a
+# neutered floor cannot hide behind a sibling floor still doing the rejecting. (Mutation testing
+# caught exactly that: zeroing MIN_SOURCE_LOC left this scenario green because the old fixture also
+# tripped the source-share floor.)
+refute "too few source files (file floor alone)" \
+  "d['pilot']['composition']['source_files'] = 4"
+refute "too little source LOC (LOC floor alone: share and file count stay healthy)" \
+  "d['pilot']['composition'].update({'source_loc': 400, 'total_loc': 700, 'total_files': 301})"
+refute "source is a minority of the repo — a docs/config repo (share floor alone)" \
   "d['pilot']['composition'].update({'source_loc': 6000, 'total_loc': 60000})"
 refute "composition evidence missing entirely" "d['pilot'].pop('composition')"
 

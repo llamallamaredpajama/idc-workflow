@@ -63,8 +63,11 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   `planning_pr` (the PR **number** — the validator **re-reads its merged-state for real (`gh pr view`)**,
   never a caller `state`), `matrix:"<repo-relative path to the matrix YAML you wrote>"` (the validator
   re-runs `idc_matrix_check` on the referenced file — **never a `"pass"` string**),
-  `decompositions:{<consideration>:<child>}`, `pointers_retired:[…]`. The validator **re-derives** the
-  rest: it confirms every decomposition child **exists** (via the tracker reader; on the github backend
+  `decompositions:{<consideration>:<child>}`, `pointers_retired:[…]`,
+  `planning_receipt:"<repo-relative path to the machine-owned planning receipt the sanctioned transaction wrote>"`
+  (the validator re-runs `idc_planning_receipt.py verify` against the **live tracker** — missing,
+  wrong-source, wrong-kind/schema, forged, stale, or readback-mismatched receipts are refused). The
+  validator **re-derives** the rest: it confirms every decomposition child **exists** (via the tracker reader; on the github backend
   it additionally **re-runs the schema + provenance checks** on each child's live body), and it
   cross-checks `pointers_retired` against the decomposed set: `pointers_retired` must **EQUAL** the
   decomposed set — an empty list is valid only when nothing was decomposed, and an **extra** retired

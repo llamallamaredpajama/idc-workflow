@@ -1698,6 +1698,84 @@ def _claim_plan_pr_merged(refs: dict, repo: str, session: str) -> CloseoutResult
     return CloseoutResult(True, "ok", "planning PR merged (real gh read)", {})
 
 
+def _claim_plan_receipt(refs: dict, repo: str, session: str) -> CloseoutResult:
+    rel = refs.get("planning_receipt")
+    path = _confined_repo_path(repo, rel)
+    if path is None or not os.path.isfile(path):
+        return _fail("plan-receipt-bad-ref",
+                     "plan complete requires refs.planning_receipt as a repo-relative path to the "
+                     "source-owned planning receipt the sanctioned transaction wrote")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            receipt = json.load(fh)
+    except OSError as exc:
+        return _fail("plan-receipt-unreadable",
+                     f"the referenced planning receipt could not be read: {exc}")
+    except json.JSONDecodeError as exc:
+        return _fail("plan-receipt-invalid-json",
+                     f"the referenced planning receipt is invalid JSON: {exc}")
+
+    if receipt.get("written_by") != "idc_planning_receipt.py":
+        return _fail("plan-receipt-source",
+                     "plan complete requires a source-owned planning receipt written by "
+                     "idc_planning_receipt.py")
+    if os.path.abspath(str(receipt.get("repo") or "")) != os.path.abspath(repo):
+        return _fail("plan-receipt-repo",
+                     "plan complete requires a planning receipt bound to THIS repo's identity")
+
+    backend = _repo_backend(repo)
+    if backend not in ("filesystem", "github"):
+        return _fail("plan-backend-indeterminate",
+                     "Plan could not establish the tracker backend from tracker-config.yaml (fail closed)")
+    if receipt.get("backend") != backend:
+        return _fail("plan-receipt-backend",
+                     f"plan complete requires a planning receipt for the repo's current backend {backend!r}, "
+                     f"got {receipt.get('backend')!r}")
+
+    owner = None
+    project = None
+    if backend == "github":
+        try:
+            import idc_next_action as NEXT  # noqa: E402 — reuse the constrained tracker-config reader
+            read_backend, project = NEXT._read_tracker_config(repo)
+        except Exception as exc:  # noqa: BLE001 — unreadable config is fail-closed for the receipt
+            return _fail("plan-receipt-config",
+                         f"plan complete could not read tracker-config.yaml to verify the planning receipt: {exc}")
+        if read_backend != "github":
+            return _fail("plan-receipt-backend",
+                         f"plan complete requires the github backend for this receipt, got {read_backend!r}")
+        try:
+            project = int(project)
+        except (TypeError, ValueError):
+            return _fail("plan-receipt-project",
+                         "plan complete on the github backend requires a readable project number to "
+                         "verify the planning receipt")
+        owner = _gh_capture(repo, ["repo", "view", "--json", "owner", "-q", ".owner.login"])
+        if not _ne_str(owner):
+            return _fail("plan-receipt-owner",
+                         "plan complete on the github backend requires a real gh owner read to verify "
+                         "the planning receipt")
+        owner = owner.strip()
+
+    try:
+        import idc_planning_receipt as PR  # noqa: E402 — lazy: Plan complete alone needs this witness
+        result = PR.verify_receipt(
+            repo=repo,
+            receipt_path=path,
+            backend=backend,
+            tracker=os.path.join(repo, "TRACKER.md"),
+            owner=owner,
+            project=project,
+        )
+    except Exception as exc:  # noqa: BLE001 — any invalid/stale/forged receipt fails closed
+        return _fail("plan-receipt-invalid",
+                     "plan complete requires a VALID source-owned planning receipt: " + str(exc))
+    return CloseoutResult(True, "ok", "planning receipt re-verified against the live tracker", {
+        "planning_receipt": str(rel),
+        "planning_receipt_final_digest": result.get("final_digest"),
+    })
+
+
 def _claim_plan_decomposition(refs: dict, repo: str, session: str) -> CloseoutResult:
     decompositions = refs.get("decompositions")
     if not isinstance(decompositions, dict) or not decompositions \
@@ -3038,7 +3116,8 @@ _CLAIM_TABLE = {
         "complete": (Claim("plan-matrix-revalidated", _claim_plan_matrix),
                      Claim("plan-pr-merged", _claim_plan_pr_merged),
                      Claim("plan-decomposition-children", _claim_plan_decomposition),
-                     Claim("plan-admitted-set-covered", _claim_plan_admitted_set_covered)),
+                     Claim("plan-admitted-set-covered", _claim_plan_admitted_set_covered),
+                     Claim("plan-receipt-verified", _claim_plan_receipt)),
         "no_action": (Claim("plan-oracle-no-admitted", _claim_plan_no_action),),
     },
     "recirculate": {

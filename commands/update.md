@@ -143,6 +143,30 @@ This is the same notion of "structure" `/idc:init` seeds, so a config can be bro
 structural alignment without ever risking the `domains`, `field_ids`, `project_number`, or `prd`
 values it carries.
 
+**Backend-aware pathway default — advise, never flip.** A fresh `/idc:init` now scaffolds a
+github-backed repo as `pathway_enforcement.mode: controlled` and a filesystem-backed repo as `off`.
+An **already-governed** repo keeps whatever posture it has: `WORKFLOW-config.yaml` is operator data,
+so update **never** rewrites the mode. Read the repo's backend and its declared mode, then report:
+
+```bash
+# read-only: the same shipped parser the Path Gate itself uses, so the advisory can never disagree
+PYTHONPATH="${CLAUDE_PLUGIN_ROOT}/scripts" python3 -c \
+  'import sys; import idc_path_gate as G; print(G.pathway_mode(sys.argv[1]))' "$ROOT"
+```
+
+- **github backend still on `off`** → report `preserved — pathway default advisory: this version
+  scaffolds github-backed repos as controlled; set pathway_enforcement.mode: controlled by hand to
+  adopt it`, and name what adopting it requires (the `idc/pathway-integrity` check + ruleset must be
+  installed, or merges will block with nothing to satisfy them). It is an **advisory**: do not edit
+  the file, do not offer a replace.
+- **filesystem backend claiming `controlled` / `app-locked`** → report it as a **finding**: the
+  filesystem tracker makes no hard pathway-security claim (spec §2.1), so that config advertises
+  protection the repo cannot deliver. Tell the operator to set `mode: off` or migrate to the github
+  backend. Still never rewrite the file yourself.
+- **anything else** → say nothing; the posture is coherent.
+
+`app-locked` is never advised as a default — it stays an opt-in profile.
+
 - **`docs/workflow/verification-handles.yaml`** is preserved as operator-owned recipe data, not
   a structure-only config. Validate it read-only through the fixed helper:
   ```bash

@@ -93,6 +93,25 @@ has "$I" 'idc_stage_options\.py' \
 has "$I" 'ensure-option Recirculation' \
   || fail "init.md must append the Recirculation option to a pre-3.1.0 board (the on-existing migration)"
 
+# --- init.md + update.md: the backend-aware pathway default is stated, and update stays advisory --
+# Spec §2.1 makes `controlled` the default security claim for governed GITHUB-backed repos while the
+# filesystem backend must stay `off`. The mechanism is backend-aware scaffold code, so the prose an
+# executing agent reads must (a) name the rule, and (b) never authorize the agent to flip an existing
+# operator config by hand — WORKFLOW-config.yaml is `always_ask` operator data.
+has "$I" 'backend-aware pathway default' \
+  || fail "init.md must document the backend-aware pathway default (github ⇒ controlled, filesystem ⇒ off)"
+has "$I" 'pathway_enforcement' \
+  || fail "init.md must name the pathway_enforcement stanza the scaffold now sets"
+has "$I" 'app-locked.{0,60}(never|opt-in)|opt-in.{0,60}app-locked' \
+  || fail "init.md must state that app-locked is never a default (the GitHub App must not become a normal dependency)"
+has "$U" 'backend-aware pathway default' \
+  || fail "update.md must document the backend-aware pathway default for already-governed repos"
+has "$U" 'advis' \
+  || fail "update.md must present the controlled default as an ADVISORY, not an edit"
+# The refusal half of the honest-claim rule must be visible in the init contract too.
+has "$I" 'refuse' \
+  || fail "init.md must state that the scaffold refuses a filesystem backend claiming controlled/app-locked"
+
 # --- uninstall.md: deletion is receipt-driven (only delete what IDC created) --------------------
 UN="$C/uninstall.md"
 [ -f "$UN" ] || fail "commands/uninstall.md missing"

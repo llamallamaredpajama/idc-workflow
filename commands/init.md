@@ -86,6 +86,28 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/idc_init_scaffold.sh" \
 Then write the Phase-1 derived domains into `WORKFLOW-config.yaml::domains` (replace the
 empty `domains: []` with the list, each `- name: / brief: / surfaces: [...]`).
 
+**Backend-aware pathway default.** The helper also sets `pathway_enforcement.mode` from the backend
+it just scaffolded — you do not set it by hand:
+
+| Backend | Scaffolded `pathway_enforcement.mode` | Why |
+|---|---|---|
+| `github` | `controlled` | The default security claim: supported runtimes deny off-path mutations, and the required `idc/pathway-integrity` check plus the repository ruleset block off-path integration. |
+| `filesystem` | `off` | There is no integration boundary to enforce, so the repo makes no hard pathway-security claim. |
+
+`app-locked` is **never** a default — it stays opt-in, so the GitHub App never becomes a normal
+dependency of an IDC install. A repo that wants it sets `mode: app-locked` deliberately and installs
+the App.
+
+Two rules the helper enforces, so a governed repo can never advertise protection it does not have:
+- it **refuses** to scaffold the `filesystem` backend over a config claiming `controlled` or
+  `app-locked` (exit 2, naming the backend and the offending mode);
+- it applies the default **only to a config it just created**. `WORKFLOW-config.yaml` is operator
+  data, so a re-`init` never rewrites an existing posture.
+
+For a `controlled` github-backed repo, Phase 4's board provisioning and the pathway check/ruleset
+installation are what make the claim real; until those land the repo is configured for enforcement
+but not yet protected by it.
+
 **Type-aware TRD-gating default.** The scaffolded `WORKFLOW-config.yaml` ships the greenfield
 default (`gating.prd: on`, `gating.trd: off`). If Phase 1b classified the repo **brownfield**
 (`TRD_GATING_DEFAULT=on`), flip the TRD gate on so an established stack can't be silently

@@ -210,6 +210,43 @@ grep -q "idc-tracker-state:begin" "$SBX/TRACKER.md" || fail "TRACKER.md missing 
 python3 "$PLUGIN/scripts/idc_tracker_fs.py" --tracker "$SBX/TRACKER.md" create --title "smoke" >/dev/null \
                                                  || fail "tracker unusable after scaffold"
 
+# --- doctor's honest-claim rule: a filesystem repo never carries a hard pathway-security claim ----
+# Spec §2.1: `controlled`/`app-locked` promise that supported runtimes deny off-path mutations AND
+# that a required GitHub check plus repository rules block off-path integration. A filesystem-backed
+# repo has no integration boundary, so it "MUST NOT claim hard pathway security". Two halves:
+#   1. the scaffold LEAVES a filesystem repo `off` (read through the shipped Path Gate parser, so
+#      this asserts what the enforcement code actually sees, not what the YAML looks like);
+#   2. the scaffold REFUSES to proceed over a config that claims otherwise.
+# Red-when-broken: make the backend-aware default unconditional (or drop the refusal) and this fails.
+fs_mode="$(PYTHONPATH="$PLUGIN/scripts" python3 -c \
+  'import sys; import idc_path_gate as G; print(G.pathway_mode(sys.argv[1]))' "$SBX")"
+[ "$fs_mode" = "off" ] \
+  || fail "a filesystem-backed scaffold must leave pathway_enforcement.mode 'off' — it makes no hard pathway-security claim (spec §2.1); the Path Gate parser read '$fs_mode'"
+
+CLAIM="$(mktemp -d)"
+( cd "$CLAIM" && git init -q )
+printf 'pathway_enforcement:\n  mode: controlled\n  attempt_ceiling: 3\n' > "$CLAIM/WORKFLOW-config.yaml"
+if bash "$SCAFFOLD" "$PLUGIN" "$CLAIM" "False Claim" filesystem >/dev/null 2>"$CLAIM/err"; then
+  rm -rf "$CLAIM"
+  fail "the scaffold ACCEPTED a filesystem-backed repo claiming pathway_enforcement.mode: controlled — /idc:doctor's honest-claim rule (spec §2.1) must refuse it"
+fi
+grep -qi 'filesystem' "$CLAIM/err" \
+  || { cp "$CLAIM/err" /tmp/idc-phase1-claim-err.txt 2>/dev/null; rm -rf "$CLAIM"; \
+       fail "the filesystem/controlled refusal must name the backend (see /tmp/idc-phase1-claim-err.txt)"; }
+rm -rf "$CLAIM"
+
+# The github-backed counterpart: the SAME scaffold defaults an enforcing repo to `controlled`, so
+# the two backends are proven to diverge deliberately rather than by accident.
+GHB="$(mktemp -d)"
+( cd "$GHB" && git init -q )
+bash "$SCAFFOLD" "$PLUGIN" "$GHB" "Gh Backend" github >/dev/null \
+  || { rm -rf "$GHB"; fail "scaffold helper failed on the github backend"; }
+gh_mode="$(PYTHONPATH="$PLUGIN/scripts" python3 -c \
+  'import sys; import idc_path_gate as G; print(G.pathway_mode(sys.argv[1]))' "$GHB")"
+[ "$gh_mode" = "controlled" ] || { rm -rf "$GHB"; \
+  fail "a github-backed scaffold must default to 'controlled' (spec §2.1 default claim, enabled once integration enforcement exists) — read '$gh_mode'"; }
+rm -rf "$GHB"
+
 # --- static guard: EVERY post-provenance github board mutation runs AFTER the Status gate ---
 # The validating adapter's `ensure-field` (adds fields) and `ensure-link` (publishes the board)
 # both mutate an operator's board, so they

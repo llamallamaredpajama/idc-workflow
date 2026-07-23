@@ -976,6 +976,16 @@ if FAKE_MERGED_PRS="90" FAKE_PR_CLOSES="90:1" gh_finish --repo "$REPO_BUILD" --s
      --evidence-json '{"schema_version":1,"refs":{"receipts":{"1":{"pr":90}}}}' 2>/dev/null; then
   gov_fail "(7g-req, F5) a build complete for TWO requested issues with only ONE merged-PR receipt was accepted"
 fi
+# (7g-receipt, U6) a legacy `{pr}`-only closeout is not enough: each built issue must also cite the
+# source-owned implementation receipt so fixed code can re-verify it on every normal closeout path.
+SBR="sbr-$$-$(basename "$WORK")"
+contract start --repo "$REPO_BUILD" --session "$SBR" --command build --plugin-root "$GOV_PLUGIN" \
+  --args '#1' --source user >/dev/null
+if FAKE_MERGED_PRS="90" FAKE_PR_CLOSES="90:1" gh_finish --repo "$REPO_BUILD" --session "$SBR" \
+     --command build --status complete \
+     --evidence-json '{"schema_version":1,"refs":{"receipts":{"1":{"pr":90}}}}' 2>/dev/null; then
+  gov_fail "(7g-receipt, U6) a build complete accepted legacy {pr}-only closeout without refs.receipts.1.build_receipt"
+fi
 # a merged PR that closes the WRONG issue (#2, not the requested #1) fails the linkage closed.
 if FAKE_MERGED_PRS="90 91" FAKE_PR_CLOSES="90:1 91:2" gh_finish --repo "$REPO_BUILD" --session "$SB" \
      --command build --status complete \

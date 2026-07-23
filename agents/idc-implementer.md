@@ -46,9 +46,13 @@ API sink). No cache path in the brief → tracker ops fall back to a live board 
    `In Progress` and posts a claim comment naming this agent. Set the `attempt:<n>` label.
 2. **Freeze and execute the issue's validation contract inside the `/fullauto-goal` loop.** Before
    the first code change, freeze the machine-owned gate through
-   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_validation_contract.py" freeze --repo "$PWD" --issue <N> --pr <PR> ...`
-   so baseline classification (`expected-red` vs `expected-green`), exact `touch` / `off-limits`,
-   and the frozen verification commands are outside the builder's authority. Then execute the issue's
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_validation_contract.py" freeze --repo "$PWD" --issue <N> --pr <PR> --surface <cli|api|gui|library|agent|ci|none> --evidence-kind <...> [--handle-id <id>] ...`
+   so baseline classification (`expected-red` vs `expected-green`), the fixed `surface` /
+   `evidence_kind` pair, any cited verification `handle_id` (resolved + secret-checked by fixed code
+   before use), exact `touch` / `off-limits`, and the frozen verification commands are outside the
+   builder's authority. High-risk tickets run the bounded fixed-code falsifier
+   `idc_validation_risk_gate.py` before this freeze; trivial tickets deterministically skip it. Then
+   execute the issue's
    goal contract as a `/fullauto-goal` loop with full auto-goal discipline:
    - render-before-run (the issue body IS the rendered contract);
    - **failing test first** when the target behavior is untested — write the real functional

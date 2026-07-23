@@ -718,14 +718,16 @@ def enforce_receipt_gate(args, backend, repo, tracker_path, owner, project_numbe
 
 
 def enforce_build_receipt(args, repo, branch):
-    """Optional U6 implementation-receipt gate.
+    """Mandatory U6 implementation-receipt gate for the normal finish path.
 
-    Legacy callers may still omit --build-receipt, but when a receipt path is supplied it is treated as
-    authoritative: the receipt must be source-owned, bound to THIS issue/PR, bound to THIS branch's
-    current head, and still match the exact final diff before any mutation proceeds.
+    Every supported/public/canonical finish route must supply --build-receipt. The receipt is
+    authoritative: it must be source-owned, bound to THIS issue/PR, bound to THIS branch's current
+    head, and still match the exact final diff before any mutation proceeds.
     """
     if not args.build_receipt:
-        return
+        _fail("build-receipt",
+              "--build-receipt is required on the normal finish path — final-diff/test/review freshness "
+              "must be proven before merge/close")
     try:
         import idc_build_receipt as BR  # noqa: E402 — lazy: only the U6 path needs this helper
         BR.verify_receipt(repo=repo, receipt_path=args.build_receipt,
@@ -836,9 +838,10 @@ def main():
                           "findings must be routed to the board + its merge_conditions met before any "
                           "merge/close. Required: the finish is a receipt gate.")
     ap.add_argument("--build-receipt", dest="build_receipt", default=None,
-                     help="optional source-owned implementation receipt for THIS issue/PR/diff. When "
-                          "present it is fail-closed: stale/fake/wrong-head receipts refuse the merge "
-                          "before any mutation.")
+                     help="required source-owned implementation receipt for THIS issue/PR/diff on the "
+                          "normal finish path. Stale/fake/wrong-head receipts — or omission — refuse "
+                          "the merge before any mutation. (close-only recovery is the only path that "
+                          "does not require it.)")
     ap.add_argument("--session-id", dest="session_id", default=None,
                      help="session id recorded on the mid-finish obligation (default: "
                           "$CLAUDE_CODE_SESSION_ID) — it attributes the in-flight record, and a "

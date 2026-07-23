@@ -44,18 +44,13 @@ python3 "$VH" validate --repo "$REPO" --registry "$REG" >/dev/null \
   || fail "a valid verification-handle registry was rejected by the fixed resolver"
 out="$(python3 "$VH" resolve --repo "$REPO" --registry "$REG" --handle-id api-health --surface api)" \
   || fail "a valid verification handle did not resolve"
-printf '%s' "$out" | python3 - <<'PY' || exit 1
-import json, sys
-obj = json.load(sys.stdin)
-handle = obj.get('handle') or {}
-if handle.get('handle_id') != 'api-health':
-    raise SystemExit(f"FAIL: resolved handle_id mismatch: {handle}")
-if handle.get('surface') != 'api' or handle.get('evidence_kind') != 'response-body':
-    raise SystemExit(f"FAIL: resolved handle lost the fixed surface/evidence pairing: {handle}")
-if handle.get('verify_commands') != ['curl -s http://localhost:3000/health']:
-    raise SystemExit(f"FAIL: resolved handle lost its verify command: {handle}")
-print('ok: valid verification handle resolved through fixed code')
-PY
+python3 -c 'import json,sys
+obj=json.load(sys.stdin)
+handle=obj.get("handle") or {}
+assert handle.get("handle_id")=="api-health", f"FAIL: resolved handle_id mismatch: {handle}"
+assert handle.get("surface")=="api" and handle.get("evidence_kind")=="response-body", f"FAIL: resolved handle lost the fixed surface/evidence pairing: {handle}"
+assert handle.get("verify_commands")==["curl -s http://localhost:3000/health"], f"FAIL: resolved handle lost its verify command: {handle}"
+print("ok: valid verification handle resolved through fixed code")' <<<"$out" || exit 1
 
 # (B1) schema-version mismatch is refused.
 BAD_VERSION="$WORK/bad-version.yaml"
@@ -135,18 +130,13 @@ out="$(python3 "$VH" resolve --repo "$REPO" --registry "$REG" --handle-id missin
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || fail "a missing verification handle resolved without creating an obligation"
-printf '%s' "$out" | python3 - <<'PY' || exit 1
-import json, sys
-obj = json.load(sys.stdin)
-obligation = obj.get('obligation') or {}
-if obligation.get('kind') != 'recirculation':
-    raise SystemExit(f"FAIL: missing handle did not return a recirculation obligation: {obligation}")
-if obligation.get('name') != 'missing-api-handle':
-    raise SystemExit(f"FAIL: missing handle obligation lost its required name: {obligation}")
-if obligation.get('handle_id') != 'missing-api':
-    raise SystemExit(f"FAIL: missing handle obligation lost the cited handle id: {obligation}")
-print('ok: missing verification handle returned a named obligation')
-PY
+python3 -c 'import json,sys
+obj=json.load(sys.stdin)
+obligation=obj.get("obligation") or {}
+assert obligation.get("kind")=="recirculation", f"FAIL: missing handle did not return a recirculation obligation: {obligation}"
+assert obligation.get("name")=="missing-api-handle", f"FAIL: missing handle obligation lost its required name: {obligation}"
+assert obligation.get("handle_id")=="missing-api", f"FAIL: missing handle obligation lost the cited handle id: {obligation}"
+print("ok: missing verification handle returned a named obligation")' <<<"$out" || exit 1
 
 # (E) doctor's read-only audit warns on nonexistent citations.
 CONTRACT="$WORK/contract.json"
@@ -160,6 +150,7 @@ printf '%s\n' "$out" | grep -qiE 'warning:.*missing-api|unknown handle' \
 
 # (F) scaffold + receipt integration: the registry is copied, stamped, and preserved as operator data.
 SBX="$WORK/scaffold"
+mkdir -p "$SBX"
 ( cd "$SBX" && git init -q )
 bash "$SCAFFOLD" "$PLUGIN" "$SBX" "Handle Test" filesystem >/dev/null \
   || fail "scaffold helper failed while creating the verification-handle registry"
@@ -201,16 +192,12 @@ echo "$STAMP_PATHS" | xargs python3 "$RCHK" stamp \
   --customized docs/workflow/tracker-config.yaml >/dev/null \
   || fail "stamping the scaffolded verification-handle registry failed"
 vout="$(python3 "$RCHK" verify --repo "$SBX" --json)" || fail "receipt verification failed on the scaffolded registry"
-printf '%s' "$vout" | python3 - <<'PY' || exit 1
-import json, sys
-obj = json.load(sys.stdin)
-always_ask = set(obj.get('always_ask') or [])
-if 'docs/workflow/verification-handles.yaml' not in always_ask:
-    raise SystemExit(f"FAIL: verification-handles.yaml must be preserved as operator data (always_ask), got {sorted(always_ask)}")
-unrecorded = obj.get('unrecorded') or []
-if unrecorded:
-    raise SystemExit(f"FAIL: fresh scaffold left governed files unrecorded: {unrecorded}")
-print('ok: scaffolded verification-handle registry is receipt-listed and preserved as operator data')
-PY
+python3 -c 'import json,sys
+obj=json.load(sys.stdin)
+always_ask=set(obj.get("always_ask") or [])
+assert "docs/workflow/verification-handles.yaml" in always_ask, f"FAIL: verification-handles.yaml must be preserved as operator data (always_ask), got {sorted(always_ask)}"
+unrecorded=obj.get("unrecorded") or []
+assert not unrecorded, f"FAIL: fresh scaffold left governed files unrecorded: {unrecorded}"
+print("ok: scaffolded verification-handle registry is receipt-listed and preserved as operator data")' <<<"$vout" || exit 1
 
 echo "PASS: verification handles are schema-checked, secret-free, obligation-backed on misses, doctor-warned on nonexistent citations, and scaffolded as preserved operator data"

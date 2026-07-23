@@ -27,9 +27,13 @@ Each PR is reviewed by the independent combined review agent (`idc:idc-review-en
 `idc:idc-review-coordinator`) — fresh-context fan-out across the 13 dimensions, test genuineness
 enforced. Before the implementer writes code it freezes the issue's machine-owned validation contract
 via `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_validation_contract.py" freeze ...` — baseline
-classification (`expected-red` vs `expected-green`), exact `touch` / `off-limits`, graph/projection
-binding, and the frozen verification commands — then the same frozen gate is re-run through
-`idc_validation_contract.py run ...` at the final head to mint the source-owned execution receipt.
+classification (`expected-red` vs `expected-green`), the fixed `surface` / `evidence_kind` pair,
+any cited `handle_id` from `docs/workflow/verification-handles.yaml` (resolved and secret-checked by
+fixed code before use), exact `touch` / `off-limits`, graph/projection binding, and the frozen
+verification commands. High-risk tickets additionally run the bounded fixed-code falsifier
+`idc_validation_risk_gate.py` before the contract is frozen; trivial tickets deterministically skip
+it. The same frozen gate is then re-run through `idc_validation_contract.py run ...` at the final
+head to mint the source-owned execution receipt.
 The **finisher** (not the implementer)
 runs its own `/fullauto-goal` loop over all findings, then `/simplify` + git finalization, writes the
 verified implementation receipt through
@@ -68,11 +72,10 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   stamped on the record at start**, and `complete` requires **one verified merged-PR receipt PER
   requested issue** — a request for two issues cannot close with one receipt. Evidence refs:
   `receipts:{<issue>:{"pr":<merged-PR#>,"build_receipt":"docs/workflow/build-receipts/<file>.json"}}`
-  (the legacy `{pr}` shape still re-verifies the merged PR, but the U6 path binds the same issue to a
-  source-owned implementation receipt). The validator **re-reads each PR's merged-state for real (`gh
+  — both keys are mandatory. The validator **re-reads each PR's merged-state for real (`gh
   pr view`)**, proves the **PR↔issue linkage from the PR's OWN closing references**
-  (`closingIssuesReferences`), and when `build_receipt` is present re-verifies that source-owned
-  receipt against the exact issue/PR/final-diff binding. A merged PR that closes a *different* issue
+  (`closingIssuesReferences`), and re-verifies that source-owned implementation receipt against the
+  exact issue/PR/final-diff binding. A merged PR that closes a *different* issue
   fails the receipt closed; a caller `state` is never trusted. For a **whole-frontier build (no
   `#<issue>` named)** the **eligible frontier is stamped on the record at start**, and `complete`
   requires **a verified merged-PR receipt for EVERY stamped-frontier issue OR an oracle-confirmed empty

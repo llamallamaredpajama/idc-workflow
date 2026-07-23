@@ -72,9 +72,10 @@ receipt (`cannot stamp missing file`). The scaffold helper converges at that gra
 ## Phase 3 — Scaffold from templates
 Run the deterministic scaffold helper. It copies the templates, substitutes
 `{{PROJECT_NAME}}`, lays down the lean `docs/workflow/` tree (`pillar-matrices/`,
-`code-reviews/`, `intakes/`, README), selects the backend, initializes/refreshes the shared Path
-Gate git backstops, and — for the `filesystem` backend — initializes `TRACKER.md`. It is
-idempotent: it never clobbers an existing operator file.
+`code-reviews/`, `intakes/`, README, and the governed `verification-handles.yaml` registry stub),
+selects the backend, initializes/refreshes the shared Path Gate git backstops, and — for the
+`filesystem` backend — initializes `TRACKER.md`. It is idempotent: it never clobbers an existing
+operator file.
 `intakes/` is the durable home for the manifests `/idc:intake` compiles; it ships as a tracked
 `.gitkeep` so an empty intake home survives a fresh clone, and it is **not** gitignored — a manifest
 is a durable record of what a foreign artifact compiled to, like a pillar matrix.
@@ -326,16 +327,20 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_receipt_check.py" stamp \
   --customized WORKFLOW-config.yaml --customized docs/workflow/tracker-config.yaml \
   WORKFLOW.md WORKFLOW-config.yaml \
   docs/workflow/tracker-config.yaml docs/workflow/workflow-machine.yaml docs/workflow/README.md \
+  docs/workflow/verification-handles.yaml \
   docs/workflow/pillar-matrices/.gitkeep docs/workflow/code-reviews/.gitkeep \
   docs/workflow/code-reviews/.gitignore docs/workflow/intakes/.gitkeep
 ```
 Pass **every** file the scaffold laid down: a governed file the stamp list omits is left `unrecorded`
 (`idc_receipt_check.py verify --json`), which is the migration gap `/idc:update` §B then has to
-clean up after — at install time it is simply a bug. `docs/workflow/intakes/.gitkeep` is the durable
-home `/idc:intake` writes its manifests into; the **keepfile is the only intake path the receipt ever
-lists**. A compiled intake manifest is a work product, not scaffold IDC installed, so it is never
-stamped — which is exactly what keeps `/idc:uninstall` (whose removal manifest *is* this receipt)
-from deleting an operator's manifest as if it were pristine scaffold.
+clean up after — at install time it is simply a bug. `docs/workflow/verification-handles.yaml` is the
+fresh scaffold's governed verification-handle registry stub; it must be receipt-listed from the first
+stamp so `/idc:update` can preserve operator-authored recipes and `/idc:doctor` can audit cited
+handle ids against a real file. `docs/workflow/intakes/.gitkeep` is the durable home `/idc:intake`
+writes its manifests into; the **keepfile is the only intake path the receipt ever lists**. A
+compiled intake manifest is a work product, not scaffold IDC installed, so it is never stamped —
+which is exactly what keeps `/idc:uninstall` (whose removal manifest *is* this receipt) from deleting
+an operator's manifest as if it were pristine scaffold.
 `docs/workflow/workflow-machine.yaml` is the transition engine's legal-transition table (v4 Phase 2),
 scaffolded so it is operator-visible + update-managed. It is **pristine** (no operator data written
 into it — unlike the two `--customized` files below), so it is stamped plain and `/idc:update`

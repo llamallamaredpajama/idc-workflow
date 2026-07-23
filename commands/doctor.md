@@ -182,8 +182,9 @@ Plan, once, at issue creation**. An issue that bypassed Plan — hand-filed, or 
 review-residual — can sit build-eligible (`Status = Todo`, `Stage = Buildable`) while **malformed**
 (fails the schema check) and/or carrying a **prose-only dependency** ("blocked on X" in the body
 with no native *blocked-by* link), and Autorun's drain (which keys on native `blocked_by` only)
-would claim and execute it cold. This row re-runs the existing schema check over that lane and
-flags prose dependencies with no recorded link. It is a **read-only `⚠` heads-up — never a hard
+would claim and execute it cold. This row re-runs the existing schema check over that lane,
+flags prose dependencies with no recorded link, **and warns when a frozen validation contract cites
+an unknown verification-handle id** (read-only: `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_verification_handles.py" audit-citations --repo "$PWD" --contracts-dir "$PWD/docs/workflow/build-validation"`). It is a **read-only `⚠` heads-up — never a hard
 FAIL** (Build still trusts the board; the schema check stays Plan's gate). Branch on
 `docs/workflow/tracker-config.yaml::backend`:
 

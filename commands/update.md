@@ -64,18 +64,20 @@ run**, so a half-finished update can never masquerade as complete.
   ```bash
   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_receipt_check.py" verify --repo "$ROOT" --json
   ```
-  The JSON's `always_ask` list names the **data-bearing configs** (`WORKFLOW-config.yaml`,
-  `docs/workflow/tracker-config.yaml`). These are **operator-owned data files**: `/idc:init` seeds
-  them from a blank stub template, then fills them with this repo's data (`domains`, `field_ids`,
-  `project_number`, the `prd` path, …). Because the template is a stub by design, a filled config
-  *always* differs from it byte-wise — that difference is the operator's data, **not drift**. So
-  update **never overwrites a data-bearing config and never offers a destructive keep/replace.**
-  Handle every `always_ask` file **present on disk** with the **structure-only rule (Phase 2 §A)**
-  regardless of its drift class or recorded `state`; this takes precedence over the rules below (and
-  subsumes the old legacy-receipt guard — a `state: stamped` data config is preserved, never silently
-  re-stamped). The one exception is a `missing` data config (the operator deleted it): there is no
-  data on disk to preserve and no file for §A's structure check to read, so it follows the `missing`
-  rule below — restore as the blank stub, default leave-removed — which §A also points to.
+  The JSON's `always_ask` list names the **operator-data files** (`WORKFLOW-config.yaml`,
+  `docs/workflow/tracker-config.yaml`, and `docs/workflow/verification-handles.yaml`). The two
+  configs are seeded from blank stubs, then filled with this repo's data (`domains`, `field_ids`,
+  `project_number`, the `prd` path, …). Update therefore **never overwrites a data-bearing config**
+  and never offers a destructive keep/replace over operator data. The verification-handle registry is a governed, secret-free,
+  operator-owned recipe file: update must preserve it and never overwrite a cited or customized
+  recipe with a template refresh. Because these files are operator data by design, update **never
+  overwrites them and never offers a destructive whole-file replace.** Handle every `always_ask`
+  file **present on disk** with the preserve rules in Phase 2 §A regardless of its drift class or
+  recorded `state`; this takes precedence over the rules below (and subsumes the old
+  legacy-receipt guard — a `state: stamped` operator-data file is preserved, never silently
+  re-stamped). The one exception is a `missing` operator-data file (the operator deleted it): there
+  is no data on disk to preserve and no file for §A's advisory checks to read, so it follows the
+  `missing` rule below — restore as the blank stub, default leave-removed — which §A also points to.
   Branch the remaining (non-`always_ask`) files on the drift class **and** the recorded `state`:
   - `unchanged` **and** `state: stamped` → pristine. Safe to refresh
     silently — but only if the installed plugin's template for that file actually differs from
@@ -105,18 +107,21 @@ run**, so a half-finished update can never masquerade as complete.
   error — do not silently treat files as untouched.
 - **No receipt (pre-receipt install):** this is the one-time graduation. **Diff-and-ask for every
   scaffold file** (treat them all as possibly-customized), apply what the operator approves, then
-  Phase 4 writes the repo's first receipt. The two data-bearing configs are the exception even here:
-  apply the **structure-only rule (Phase 2 §A)** — preserve, never offer to overwrite their data.
+  Phase 4 writes the repo's first receipt. The operator-data files are the exception even here:
+  apply the preserve rules in **Phase 2 §A** — the two configs use the structure-only advisory and
+  `verification-handles.yaml` is preserved after fixed-code validation, never overwritten.
 
 ## Phase 2 — Apply the approved refreshes (files only)
 
-### §A — Data-bearing configs (`always_ask`): preserve, structure-only advisory, never overwrite
+### §A — Operator-data files (`always_ask`): preserve, advise, never overwrite
 
 For each `always_ask` file **present on disk**, **leave the file exactly as-is** — it holds the
-operator's data. (A `missing` data config — the operator deleted it — has no data to preserve and no
-file for the check below to read; do **not** run the structure helper against a nonexistent path —
-follow the Phase 1 `missing` rule instead: restore as the blank stub, default leave-removed.) Check
-*only* whether the installed template introduced **new structure** worth adopting: resolve + render
+operator's data. (A `missing` operator-data file — the operator deleted it — has no data to preserve
+and no file for the advisory checks below to read; do **not** run them against a nonexistent path —
+follow the Phase 1 `missing` rule instead: restore as the blank stub, default leave-removed.)
+
+- **`WORKFLOW-config.yaml` + `docs/workflow/tracker-config.yaml`** use the existing
+  **structure-only** advisory: resolve + render the template (the §B mechanics below), then compare
 the template (the §B mechanics below), then compare structural keys (list contents, block scalars,
 and flow values are treated as opaque, so `domains` entries / `field_ids` values / model-routing
 prose never read as drift — only a genuinely new key does):
@@ -130,9 +135,20 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_config_keys.py" --added "$ROOT/<dest>
   hand** (add the key, keep your values). **Never** overwrite the file or offer a whole-file
   replace — that discards the operator's data and is never the right move for these files.
 
-This is the same notion of "structure" `/idc:init` seeds, so a data config can be brought into
+This is the same notion of "structure" `/idc:init` seeds, so a config can be brought into
 structural alignment without ever risking the `domains`, `field_ids`, `project_number`, or `prd`
 values it carries.
+
+- **`docs/workflow/verification-handles.yaml`** is preserved as operator-owned recipe data, not
+  a structure-only config. Validate it read-only through the fixed helper:
+  ```bash
+  python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_verification_handles.py" validate \
+    --repo "$ROOT"
+  ```
+  - Validation passes → report `preserved — registry current` and leave the file untouched.
+  - Validation fails (schema mismatch / malformed / secret-bearing) → report the exact helper error
+    and stop. Never overwrite the registry with the template to make the warning disappear; the
+    operator's recipes must be preserved and repaired in-place.
 
 ### §B — Template-stamped files (everything else)
 
@@ -285,8 +301,10 @@ version and pass it as `--plugin-version` — this is the value the stale-runtim
 reads back on the next session, so it must always be **this session's real running version**,
 never a guess. Pass the files the operator **kept customized** via `--customized` so the next
 update asks again instead of silently re-stamping over them — this **always includes the two
-data-bearing configs** (preserved in Phase 2 §A), which keeps a pre-guard `state: stamped`
-receipt from re-appearing:
+operator-data configs** (preserved in Phase 2 §A), which keeps a pre-guard `state: stamped`
+receipt from re-appearing. `docs/workflow/verification-handles.yaml` stays preserved by the helper's
+fixed `always_ask` path even when it remains receipt-stamped plain, so its operator-authored recipes
+are never silently refreshed:
 ```bash
 PLUGIN_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' \
   "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json")"

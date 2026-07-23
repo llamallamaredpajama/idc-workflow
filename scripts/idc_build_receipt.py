@@ -118,6 +118,11 @@ def write_receipt(*, repo: str, contract_path: str, execution_path: str, verdict
         raise ReceiptError("execution receipt is not for the frozen validation contract it claims")
     if execution.get("result") != "pass":
         raise ReceiptError("verification run against stale code is refused until the frozen gate records a passing execution")
+    if execution.get("surface") != contract.get("surface") or execution.get("evidence_kind") != contract.get("evidence_kind"):
+        raise ReceiptError("contract-drift refused: the execution receipt's declared surface/evidence kind no longer match the frozen validation contract")
+    declared = execution.get("declared_evidence") or {}
+    if declared.get("kind") != execution.get("evidence_kind") or declared.get("surface") != execution.get("surface"):
+        raise ReceiptError("contract-drift refused: the execution receipt's declared evidence no longer matches its recorded surface/evidence kind")
 
     graph_digest = _ensure_hex("graph_digest", graph_digest)
     projection_digest = _ensure_hex("projection_digest", projection_digest)
@@ -172,6 +177,11 @@ def write_receipt(*, repo: str, contract_path: str, execution_path: str, verdict
         "changed_paths": current_diff["changed_paths"],
         "touch": list(contract.get("touch") or []),
         "off_limits": list(contract.get("off_limits") or []),
+        "surface": contract.get("surface"),
+        "evidence_kind": contract.get("evidence_kind"),
+        "skip_reason": contract.get("skip_reason"),
+        "handle_id": contract.get("handle_id"),
+        "declared_evidence": execution.get("declared_evidence"),
         "review_head": review_head,
         "review_diff_digest": review_diff,
         "result": "pass",
@@ -234,6 +244,17 @@ def verify_receipt(*, repo: str, receipt_path: str, expected_issue: int | None =
         raise ReceiptError("build receipt issue/PR no longer match the frozen validation contract")
     if execution.get("issue") != receipt.get("issue") or execution.get("pr") != receipt.get("pr"):
         raise ReceiptError("build receipt issue/PR no longer match the execution receipt")
+    if receipt.get("surface") != contract.get("surface") or receipt.get("evidence_kind") != contract.get("evidence_kind"):
+        raise ReceiptError("contract-drift refused: the implementation receipt no longer matches the frozen surface/evidence kind")
+    if receipt.get("skip_reason") != contract.get("skip_reason"):
+        raise ReceiptError("contract-drift refused: the implementation receipt no longer matches the frozen skip_reason")
+    if execution.get("surface") != receipt.get("surface") or execution.get("evidence_kind") != receipt.get("evidence_kind"):
+        raise ReceiptError("contract-drift refused: the execution receipt no longer matches the implementation receipt's surface/evidence kind")
+    if execution.get("skip_reason") != receipt.get("skip_reason"):
+        raise ReceiptError("contract-drift refused: the execution receipt no longer matches the implementation receipt's skip_reason")
+    declared = receipt.get("declared_evidence") or {}
+    if declared.get("kind") != receipt.get("evidence_kind") or declared.get("surface") != receipt.get("surface"):
+        raise ReceiptError("contract-drift refused: the implementation receipt's declared evidence no longer matches its recorded surface/evidence kind")
 
     recomputed = VC.git_diff_info(workspace, receipt.get("base_commit"), ref=receipt.get("head"))
     if recomputed["diff_digest"] != receipt.get("diff_digest"):

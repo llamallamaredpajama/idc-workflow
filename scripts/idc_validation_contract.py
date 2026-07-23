@@ -43,6 +43,23 @@ SCHEMA_VERSION = 1
 CONTRACT_KIND = "build-validation-contract"
 EXECUTION_KIND = "verification-execution"
 WITNESS_FILE = "idc-build-validation-witnesses.json"
+SURFACE_EVIDENCE_TABLE = {
+    "cli": "pane-capture",
+    "api": "response-body",
+    "gui": "screenshot-or-recording",
+    "library": "public-import-sample",
+    "agent": "agent-run-capture",
+    "ci": "check-run",
+    "none": "none",
+}
+EVIDENCE_PATTERNS = {
+    "pane-capture": [re.compile(r".")],
+    "response-body": [re.compile(r"\b(curl|httpie|wget|fetch)\b", re.I)],
+    "screenshot-or-recording": [re.compile(r"\b(playwright|cypress|selenium|puppeteer|screenshot|record)\b", re.I)],
+    "public-import-sample": [re.compile(r"\b(import\b|require\(|python\s+-c\b|node\s+-e\b|ruby\s+-e\b)", re.I)],
+    "agent-run-capture": [re.compile(r"\b(claude|codex|pi|agent)\b", re.I)],
+    "check-run": [re.compile(r"\b(gh\s+run|gh\s+workflow|check-run|ci)\b", re.I)],
+}
 
 
 class ValidationError(Exception):
@@ -292,6 +309,71 @@ def _verification_results(repo: str, commands):
     return results
 
 
+def _matching_handle_commands(repo: str, handle_registry: str | None, handle_id: str | None,
+                              surface: str | None, commands):
+    if not handle_id:
+        return surface, None, [str(cmd).strip() for cmd in (commands or []) if str(cmd).strip()]
+    try:
+        import idc_verification_handles as VH  # noqa: E402 — lazy: only U6 handle-backed contracts use this helper
+    except ImportError as exc:
+        raise ValidationError(f"verification-handle resolution requested, but idc_verification_handles.py is unavailable ({exc})") from exc
+    if not surface:
+        raise ValidationError("handle-backed validation contracts must declare --surface")
+    result = VH.resolve_handle(repo=repo, handle_id=handle_id, surface=surface, override=handle_registry)
+    handle = result.get("handle") or {}
+    resolved_commands = [str(cmd).strip() for cmd in handle.get("verify_commands") or [] if str(cmd).strip()]
+    explicit = [str(cmd).strip() for cmd in (commands or []) if str(cmd).strip()]
+    if explicit and explicit != resolved_commands:
+        raise ValidationError(
+            f"handle_id {handle_id!r} resolved verify_commands {resolved_commands!r}, which do not exactly match the explicit --verify commands {explicit!r}")
+    return surface, handle, resolved_commands
+
+
+
+def _validation_surface(surface: str | None, evidence_kind: str | None, skip_reason: str | None, commands):
+    commands = [str(cmd).strip() for cmd in (commands or []) if str(cmd).strip()]
+    surface = str(surface or ("cli" if commands else "none")).strip()
+    if surface not in SURFACE_EVIDENCE_TABLE:
+        raise ValidationError(f"surface must be one of {sorted(SURFACE_EVIDENCE_TABLE)}, got {surface!r}")
+    expected = SURFACE_EVIDENCE_TABLE[surface]
+    evidence_kind = evidence_kind or expected
+    if evidence_kind != expected:
+        raise ValidationError(
+            f"surface/evidence pair mismatch: surface {surface!r} requires evidence_kind {expected!r}, got {evidence_kind!r}")
+    if surface == "none":
+        if commands:
+            raise ValidationError("surface:none must not carry runnable verification commands")
+        reason = str(skip_reason or "").strip()
+        if not reason or "\n" in reason:
+            raise ValidationError("surface:none requires a one-line skip_reason")
+        return surface, expected, reason, []
+    if skip_reason not in (None, ""):
+        raise ValidationError("skip_reason is legal only when surface:none")
+    if not commands:
+        raise ValidationError("at least one --verify command is required unless surface:none")
+    patterns = EVIDENCE_PATTERNS[expected]
+    if not any(any(p.search(cmd) for p in patterns) for cmd in commands):
+        raise ValidationError(
+            f"declared commands cannot produce evidence_kind {expected!r} for surface {surface!r}")
+    return surface, expected, None, commands
+
+
+
+def _declared_evidence(kind: str, surface: str, skip_reason: str | None, results):
+    if kind == "none":
+        return {"kind": kind, "surface": surface, "skip_reason": skip_reason, "records": []}
+    records = []
+    for row in results:
+        records.append({
+            "command": row.get("command"),
+            "exit_code": row.get("exit_code"),
+            "stdout_excerpt": _clip(row.get("stdout_excerpt")),
+            "stderr_excerpt": _clip(row.get("stderr_excerpt")),
+        })
+    return {"kind": kind, "surface": surface, "skip_reason": None, "records": records}
+
+
+
 def _baseline_state(results):
     return "expected-green" if all(row.get("exit_code") == 0 for row in results) else "expected-red"
 
@@ -324,7 +406,10 @@ def _planning_receipt_info(path: str):
 
 def freeze_contract(*, repo: str, issue: int, pr: int, graph_node: str, graph_digest: str | None,
                     projection_digest: str | None, planning_receipt: str | None, touch, off_limits,
-                    verify_commands, baseline: str, label: str, out: str, attempt_ceiling: int = 3):
+                    verify_commands, baseline: str, label: str, out: str, attempt_ceiling: int = 3,
+                    surface: str | None = None, evidence_kind: str | None = None,
+                    skip_reason: str | None = None, handle_registry: str | None = None,
+                    handle_id: str | None = None):
     workspace = _abs_repo(repo)
     repo = _repo_identity(workspace)
     planning = _planning_receipt_info(planning_receipt) if planning_receipt else None
@@ -338,11 +423,10 @@ def freeze_contract(*, repo: str, issue: int, pr: int, graph_node: str, graph_di
     projection_digest = _ensure_hex("projection_digest", projection_digest)
     if baseline not in {"expected-red", "expected-green"}:
         raise ValidationError(f"baseline must be expected-red or expected-green, got {baseline!r}")
-    commands = [str(cmd).strip() for cmd in (verify_commands or []) if str(cmd).strip()]
-    if not commands:
-        raise ValidationError("at least one --verify command is required")
     if attempt_ceiling <= 0:
         raise ValidationError("attempt_ceiling must be positive")
+    surface, handle_doc, commands = _matching_handle_commands(repo, handle_registry, handle_id, surface, verify_commands)
+    surface, evidence_kind, skip_reason, commands = _validation_surface(surface, evidence_kind, skip_reason, commands)
     touch_surfaces = _normalize_surfaces(touch, "touch")
     off_limits_surfaces = _normalize_surfaces(off_limits, "off-limits")
     base_commit = git_head(workspace)
@@ -369,6 +453,14 @@ def freeze_contract(*, repo: str, issue: int, pr: int, graph_node: str, graph_di
         "attempt_ceiling": int(attempt_ceiling),
         "touch": touch_surfaces,
         "off_limits": off_limits_surfaces,
+        "surface": surface,
+        "evidence_kind": evidence_kind,
+        "skip_reason": skip_reason,
+        "handle_id": handle_id,
+        "handle_registry": (
+            os.path.relpath(os.path.abspath(handle_registry), repo) if (handle_id and handle_registry)
+            else ("docs/workflow/verification-handles.yaml" if handle_id else None)
+        ),
         "verification": [{"command": cmd} for cmd in commands],
         "baseline": {
             "expected": baseline,
@@ -399,6 +491,8 @@ def load_contract(path: str, require_witness: bool = True):
     expected = _contract_digest(doc)
     if doc.get("contract_digest") != expected:
         raise ValidationError("frozen contract digest mismatch — the frozen gate was modified after issuance")
+    commands = [row.get("command") for row in doc.get("verification") or [] if isinstance(row, dict)]
+    _validation_surface(doc.get("surface"), doc.get("evidence_kind"), doc.get("skip_reason"), commands)
     if require_witness:
         problem = _witness_problem("contract", path, doc)
         if problem:
@@ -412,6 +506,8 @@ def run_contract(*, repo: str, contract_path: str, out: str):
     if _repo_identity(workspace) != os.path.abspath(contract.get("repo") or ""):
         raise ValidationError("validation contract is bound to a different repo identity")
     commands = [row.get("command") for row in contract.get("verification") or []]
+    surface, evidence_kind, skip_reason, commands = _validation_surface(
+        contract.get("surface"), contract.get("evidence_kind"), contract.get("skip_reason"), commands)
     results = _verification_results(workspace, commands)
     diff_info = git_diff_info(workspace, contract["base_commit"], ref="HEAD")
     head = git_head(workspace)
@@ -434,7 +530,13 @@ def run_contract(*, repo: str, contract_path: str, out: str):
         "head": head,
         "diff_digest": diff_info["diff_digest"],
         "changed_paths": diff_info["changed_paths"],
+        "surface": surface,
+        "evidence_kind": evidence_kind,
+        "skip_reason": skip_reason,
+        "handle_id": contract.get("handle_id"),
+        "handle_registry": contract.get("handle_registry"),
         "verification": results,
+        "declared_evidence": _declared_evidence(evidence_kind, surface, skip_reason, results),
         "result": "pass" if all(row.get("exit_code") == 0 for row in results) else "fail",
     }
     doc["execution_digest"] = _execution_digest(doc)
@@ -459,6 +561,11 @@ def load_execution(path: str, require_witness: bool = True):
     expected = _execution_digest(doc)
     if doc.get("execution_digest") != expected:
         raise ValidationError("execution receipt digest mismatch — the recorded execution was modified after it ran")
+    _validation_surface(doc.get("surface"), doc.get("evidence_kind"), doc.get("skip_reason"),
+                        [row.get("command") for row in (doc.get("verification") or []) if isinstance(row, dict)])
+    declared = doc.get("declared_evidence") or {}
+    if declared.get("kind") != doc.get("evidence_kind") or declared.get("surface") != doc.get("surface"):
+        raise ValidationError("execution receipt contract-drift: declared evidence no longer matches its recorded surface/evidence kind")
     if require_witness:
         problem = _witness_problem("execution", path, doc)
         if problem:
@@ -480,7 +587,12 @@ def main(argv=None):
     fp.add_argument("--planning-receipt")
     fp.add_argument("--touch", action="append", required=True)
     fp.add_argument("--off-limits", action="append", required=True)
-    fp.add_argument("--verify", action="append", required=True)
+    fp.add_argument("--verify", action="append")
+    fp.add_argument("--surface")
+    fp.add_argument("--evidence-kind")
+    fp.add_argument("--skip-reason")
+    fp.add_argument("--handle-registry")
+    fp.add_argument("--handle-id")
     fp.add_argument("--baseline", required=True, choices=("expected-red", "expected-green"))
     fp.add_argument("--label", required=True)
     fp.add_argument("--out", required=True)
@@ -509,6 +621,11 @@ def main(argv=None):
                 label=args.label,
                 out=args.out,
                 attempt_ceiling=args.attempt_ceiling,
+                surface=args.surface,
+                evidence_kind=args.evidence_kind,
+                skip_reason=args.skip_reason,
+                handle_registry=args.handle_registry,
+                handle_id=args.handle_id,
             )
             return 0
         if args.command == "run":

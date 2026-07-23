@@ -225,11 +225,15 @@ printf '%s\n' "$out" | grep -qiE 'cannot produce|evidence|screenshot|recording' 
 # (F) A tampered execution receipt whose declared evidence kind drifts from the frozen contract is refused.
 FORGED_EXEC="$REPO_GOOD/docs/workflow/build-validation-executions/forged-surface.json"
 python3 - "$EXEC_GOOD" "$FORGED_EXEC" <<'PY'
-import json, sys
+import hashlib, json, sys
 src, dst = sys.argv[1:3]
 execution = json.load(open(src, encoding='utf-8'))
 execution['evidence_kind'] = 'response-body'
 execution['declared_evidence']['kind'] = 'response-body'
+body = dict(execution)
+body.pop('execution_digest', None)
+blob = json.dumps(body, sort_keys=True, separators=(',', ':')).encode('utf-8')
+execution['execution_digest'] = hashlib.sha256(blob).hexdigest()
 with open(dst, 'w', encoding='utf-8') as fh:
     json.dump(execution, fh, indent=2, sort_keys=True)
     fh.write('\n')

@@ -106,8 +106,9 @@ The finisher runs its **own** `/fullauto-goal` loop. Its completion contract car
    merge lock for *this area's* file surface — disjoint areas hold distinct leases and merge
    concurrently; see *Merge serialization*). First mint the verified implementation receipt through
    `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_build_receipt.py" write --repo "$PWD" --contract <contract.json> --execution <execution.json> --verdict <verdict.json> --graph-digest <digest> --projection-digest <digest> --out <build-receipt.json>`
-   so the exact issue/PR, frozen gate digest, graph/projection digests, executed verification, review
-   head, and final diff are bound together by a source-owned artifact. Then run the deterministic tail —
+   so the exact issue/PR, frozen gate digest, fixed `surface` / `evidence_kind`, any cited
+   verification `handle_id`, graph/projection digests, executed verification, review head, and final
+   diff are bound together by a source-owned artifact. Then run the deterministic tail —
    `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_finish.py" --pr <N> --issue <M> --worktree <path> --verdict <verdict.json> --build-receipt <build-receipt.json>`
    — **`--verdict` is mandatory** and `--build-receipt` is the U6 implementation-receipt path: the
    tail is a P5/U6 **receipt gate** that refuses to merge/close on stale/fake/wrong-head build

@@ -1,0 +1,44 @@
+name: idc-pathway-integrity
+
+# Version-pinned integration guard (spec §2.3). It emits the required `idc/pathway-integrity` check,
+# bound to the EXACT proposed head commit, by running the fixed deterministic checker
+# scripts/idc_pathway_check.py — no LLM, no arbitrary generated script. The repository ruleset
+# (.github/rulesets/idc-pathway-integrity.json) makes this check required and strict (up-to-date
+# head), so a merge cannot land unless the check ran and passed on the exact head being merged.
+#
+# This workflow runs in THIS repository's own CI too: this repo is governed by the run's own
+# receipts, so the checker passes here honestly (the protected surfaces exist and HEAD binds) and
+# fails only when the contract is genuinely violated.
+
+on:
+  pull_request:
+  push:
+    branches: [main, integration/idc-pathway-integrity]
+
+permissions:
+  contents: read
+
+jobs:
+  pathway-integrity:
+    # This job's name IS the required check context the ruleset pins.
+    name: idc/pathway-integrity
+    runs-on: ubuntu-latest
+    env:
+      # On a pull request, bind to the PR head; on a push, to the pushed commit.
+      HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Checkout the exact proposed head
+        uses: actions/checkout@v4
+        with:
+          # Check out the head commit itself (not the synthetic PR merge commit) so the checker
+          # binds to the exact SHA a merge would land.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+
+      - name: Enforce pathway integrity at the exact head
+        # Version-pinned source token; the checker refuses a wrong or stale source.
+        run: |
+          python3 scripts/idc_pathway_check.py \
+            --repo . \
+            --head "$HEAD_SHA" \
+            --source "idc/pathway-integrity@v1"

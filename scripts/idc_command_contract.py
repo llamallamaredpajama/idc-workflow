@@ -2035,6 +2035,23 @@ def _valid_build_receipt(issue: object, receipt: object, repo: str) -> CloseoutR
                      f"build receipt for {issue}: merged PR #{pr} does NOT close issue #{_gate_key(issue)} "
                      "(its closing references name a different issue) — a receipt cannot borrow an "
                      "unrelated merged PR")
+    build_receipt_rel = receipt.get("build_receipt")
+    if not _present(build_receipt_rel):
+        return _fail("build-receipt-path",
+                     f"build receipt for {issue}: refs.receipts.{_gate_key(issue)}.build_receipt is required "
+                     "and must name a repo-relative source-owned implementation receipt")
+    build_receipt_path = _confined_repo_path(repo, build_receipt_rel)
+    if build_receipt_path is None or not os.path.isfile(build_receipt_path):
+        return _fail("build-receipt-path",
+                     f"build receipt for {issue}: refs.receipts.{_gate_key(issue)}.build_receipt must "
+                     "name a repo-relative source-owned implementation receipt")
+    try:
+        import idc_build_receipt as BR  # noqa: E402 — lazy: every normal build closeout re-verifies it
+        BR.verify_receipt(repo=repo, receipt_path=build_receipt_path,
+                          expected_issue=int(_gate_key(issue)), expected_pr=int(pr))
+    except Exception as exc:  # noqa: BLE001 — stale/forged implementation receipts fail closed
+        return _fail("build-receipt-invalid",
+                     f"build receipt for {issue}: the referenced implementation receipt is invalid: {exc}")
     return CloseoutResult(True, "ok", "receipt ok", {})
 
 

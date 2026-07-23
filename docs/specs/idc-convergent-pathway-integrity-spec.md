@@ -204,7 +204,10 @@ declares:
 
 - ticket and graph-node identity;
 - the observable goal;
-- existing verification commands to reuse;
+- the declared user/system surface: `cli | api | gui | library | agent | ci | none`;
+- the declared evidence kind, fixed by the surface table: `cli→pane-capture`, `api→response-body`, `gui→screenshot-or-recording`, `library→public-import-sample`, `agent→agent-run-capture`, `ci→check-run`, `none→none`;
+- a one-line `skip_reason` when `surface:none` is the honest no-behavioral-diff case;
+- existing verification commands to reuse, including any cited `handle_id` resolved from the governed verification-handle registry;
 - whether the baseline is `expected-red` or a proven idempotent `expected-green`;
 - declared `touch` and `off-limits` paths;
 - required tracker pre-state, lifecycle transitions, and terminal post-state;
@@ -212,7 +215,17 @@ declares:
 - freshness inputs: base/head/diff, relevant path digests, and validator version.
 
 The contract is declarative. IDC MUST use one fixed tracker/pathway validator; Plan MUST NOT generate
-an arbitrary tracker-mutation script for every ticket.
+an arbitrary tracker-mutation script for every ticket. Fixed validators MUST reject any impossible
+surface/evidence pairing, any command set that cannot produce the declared evidence kind, and any
+`surface:none` contract lacking its one-line `skip_reason`.
+
+Reusable verification recipes live in one governed per-repo registry,
+`docs/workflow/verification-handles.yaml`. Fixed code schema-checks that registry before any entry is
+cited, resolved, or used; malformed, missing, unknown-field, invalid-shape, schema-version-mismatched,
+or secret-bearing entries fail closed. Commands, fixtures, emulators, and account identifiers or
+placeholders are allowed there; inline credentials, auth material, `.env` content, key material, and
+private URLs are rejected before use. A missing handle creates a named Recirculation or
+blocked-dependency obligation; a warning-only downgrade is forbidden.
 
 At Build claim, an independent local validator performs the Fusion-inspired loop:
 
@@ -235,6 +248,16 @@ in evidence and the repaired gate runs immediately. Fixed IDC invariants—path 
 tracker transaction legality, journal integrity, receipt binding, and merge protection—cannot be
 repaired or weakened at runtime.
 
+For the minority of tickets where choosing the wrong gate is consequential, Plan runs a deterministic
+risk-gated read-only discovery/falsification pass before the frozen gate is written. Only named fixed
+risk inputs may trigger it: `security-sensitive-path`, `cross-cutting-surface`,
+`new-runtime-dependency`, `expected-green-baseline`, and `large-touch-set`; trivial tickets
+skip deterministically. Candidate branches use the exact schema `{promise, failure_mode,
+observable_evidence, executable_check}`. Independent skeptics ask exactly `show how this check passes
+while the goal is actually broken`; any gate defeated by a majority is discarded or repaired before
+survivors inform the frozen gate. Discovery never mutates tracker state, never owns the validator, and
+must preserve the fixed validator, frozen-gate digest, path exclusions, and attempt ceiling unchanged.
+
 This augments IDC's existing failing-test-first goal contracts. It does not replace or duplicate
 ordinary TDD, and it does not tell the builder how to code.
 
@@ -242,7 +265,9 @@ ordinary TDD, and it does not tell the builder how to code.
 
 Every receipt MUST be written by the component that executed or freshly re-derived the claimed fact.
 Receipts bind at least the producing command/version, repository identity, ticket/graph node, exact
-commit or tracker snapshot, inputs, outcome, and bounded redacted evidence.
+commit or tracker snapshot, inputs, outcome, the declared surface/evidence kind, and bounded redacted
+evidence of that declared kind. Any receipt whose declared evidence no longer matches the frozen
+contract's surface/evidence pair is a deterministic contract-drift failure.
 
 For facts not reproducible from committed/remote state, the receipt also requires a witness outside
 the agent-authored artifact: Git-directory evidence, a trusted CI/check-run identity, or the
@@ -258,9 +283,12 @@ approval MUST use a fresh live read; journal shape alone is insufficient.
 ### 4.1 Plan
 
 Plan remains pure decomposition. It performs the full-horizon deduplication and matrix analysis,
-declares semantic dependencies and resource ownership, emits each validation contract, compiles the
-graph, derives Waves deterministically, simulates the complete tracker projection, and applies it as
-one guarded transaction. The Planning PR cannot close without a valid planning-application receipt.
+declares semantic dependencies and resource ownership, emits each validation contract, resolves and
+cites any reusable verification `handle_id`, routes missing handles into named existing-door
+obligations, runs the deterministic risk-gated falsifier when and only when the named fixed risk inputs
+say it must, compiles the graph, derives Waves deterministically, simulates the complete tracker
+projection, and applies it as one guarded transaction. The Planning PR cannot close without a valid
+planning-application receipt.
 
 ### 4.2 Build and Finisher
 
@@ -272,6 +300,8 @@ Before merge, IDC MUST prove:
 
 - the actual PR diff stays within `touch` and outside `off-limits`;
 - the frozen acceptance gate ran against the final diff and commit;
+- the merge/close path received the mandatory source-owned build receipt for that exact issue/PR/diff;
+- the execution receipt's declared surface/evidence kind still matches the frozen contract;
 - existing and new functional verification passed;
 - review executed against that same diff and has no unrouted findings or merge conditions;
 - graph, tracker projection, and authorization remain current;
@@ -421,6 +451,9 @@ Tests MUST prove at least:
 - partial tracker application persists a recoverable obligation and cannot report completion;
 - unexpected-green and indeterminate baselines stop before implementation/mutation;
 - the builder cannot modify the frozen gate;
+- the fixed surface/evidence table is enforced mechanically, `surface:none` requires a one-line reason, and impossible evidence kinds are refused;
+- the governed verification-handle registry is schema-checked and secret-free before citation/use, missing handles create named obligations, and doctor warns on nonexistent citations;
+- only named fixed risk inputs trigger divergent discovery, trivial tickets skip, majority-defeated gates are discarded or repaired, and discovery preserves the fixed validator/frozen-gate/path/attempt inputs;
 - a final diff outside `touch`, inside `off-limits`, or different from the tested/reviewed diff fails;
 - shaped PASS, forged journal, one-sided gate marker, stale witness, and wrong-source check fail;
 - graph omissions, dependency cycles, normalized path collisions, Wave contradictions, and live board

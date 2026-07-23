@@ -155,9 +155,15 @@ re-query (Phase 1) is the only poll; the consultant's closeout is the only nudge
 
 Each implementer's PR goes to the **reviewer**: the independent combined review agent
 (`idc:idc-review-engine`, run via `idc:idc-review-coordinator`) — fresh-context specialist
-fan-out → deduped, confidence-floored, fail-closed verdict (validated JSON). It finds *all*
-issues including side issues. Test genuineness is enforced — a shallow/placeholder suite is a
-`FAIL`.
+fan-out → deduped, confidence-floored, fail-closed verdict (validated JSON). Under U6 the
+implementer first freezes a machine-owned validation contract (`idc_validation_contract.py
+freeze ...`) carrying the fixed `surface` / `evidence_kind` pair, any cited verification
+`handle_id`, the exact `touch` / `off-limits`, and the graph/projection binding; high-risk tickets
+run the bounded fixed-code falsifier (`idc_validation_risk_gate.py`) before freeze and trivial
+tickets deterministically skip it. The implementer later re-runs that same frozen gate at the final
+head (`idc_validation_contract.py run ...`), so review + finish inherit a source-owned execution
+receipt, not a caller-typed PASS. It finds *all* issues including side issues. Test genuineness is
+enforced — a shallow/placeholder suite is a `FAIL`.
 
 ## Phase 3 — Finish (the finisher owns fix + merge)
 

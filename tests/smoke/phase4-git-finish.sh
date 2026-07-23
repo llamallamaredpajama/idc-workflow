@@ -16,9 +16,15 @@ PLUGIN="$(cd "$(dirname "$0")/../.." && pwd)"
 SCRIPT="$PLUGIN/scripts/idc_git_finish.py"
 TRK="$PLUGIN/scripts/idc_tracker_fs.py"
 CHECK="$PLUGIN/scripts/idc_review_verdict_check.py"
+VAL="$PLUGIN/scripts/idc_validation_contract.py"
+BREC="$PLUGIN/scripts/idc_build_receipt.py"
+GRAPH_DIGEST='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+PROJECTION_DIGEST='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
 fail() { echo "FAIL: $1"; exit 1; }
 
 [ -f "$SCRIPT" ] || fail "idc_git_finish.py not found (not implemented yet)"
+[ -f "$VAL" ] || fail "idc_validation_contract.py not found (not implemented yet)"
+[ -f "$BREC" ] || fail "idc_build_receipt.py not found (not implemented yet)"
 
 python3 "$SCRIPT" --help >/dev/null 2>&1 || fail "--help should parse"
 
@@ -80,30 +86,83 @@ setup_repo() {
   git clone -q "$ORIGIN" "$REPO"
   git -C "$REPO" config user.email t@example.com
   git -C "$REPO" config user.name tester
+  mkdir -p "$REPO/docs/workflow/build-validation" \
+           "$REPO/docs/workflow/build-validation-executions" \
+           "$REPO/docs/workflow/build-receipts" \
+           "$REPO/docs/workflow/code-reviews"
   echo hello > "$REPO/README.md"
-  git -C "$REPO" add README.md
+  cat > "$REPO/verify.sh" <<'SH'
+#!/bin/bash
+set -euo pipefail
+grep -qx 'green' change.txt
+SH
+  chmod +x "$REPO/verify.sh"
+  git -C "$REPO" add README.md verify.sh
   git -C "$REPO" commit -qm init
   BASE="$(git -C "$REPO" symbolic-ref --short HEAD)"   # the default/base branch (global — the gh stub's baseRefName)
   git -C "$REPO" push -q origin "HEAD:$BASE"
 
   WT="$REPO/.claude/worktrees/$BRANCH"
   git -C "$REPO" worktree add -q -b "$BRANCH" "$WT" "$BASE"
-  echo change > "$WT/change.txt"
-  git -C "$WT" add change.txt
-  git -C "$WT" commit -qm "work"
-  git -C "$WT" push -q origin "$BRANCH"
 
-  mkdir -p "$REPO/docs/workflow/code-reviews"
   printf 'backend: filesystem\n' > "$REPO/docs/workflow/tracker-config.yaml"
   TRACKER="$REPO/TRACKER.md"
   python3 "$TRK" --tracker "$TRACKER" init >/dev/null
   python3 "$TRK" --tracker "$TRACKER" create --title "Test issue" >/dev/null
   python3 "$TRK" --tracker "$TRACKER" claim --num 1 --agent tester >/dev/null
-  # The finish tail is a receipt gate: a clean PASS verdict owning PR #501 / issue #1, no nits (so
-  # nothing to route) and no merge_conditions — the git-mechanics scenarios exercise the tail past it.
+
+  CONTRACT="$REPO/docs/workflow/build-validation/${BRANCH}.json"
+  EXECUTION="$REPO/docs/workflow/build-validation-executions/${BRANCH}.json"
+  BUILD_RECEIPT="$REPO/docs/workflow/build-receipts/${BRANCH}.json"
+  python3 "$VAL" freeze \
+    --repo "$WT" \
+    --issue 1 \
+    --pr 501 \
+    --graph-node test-issue \
+    --graph-digest "$GRAPH_DIGEST" \
+    --projection-digest "$PROJECTION_DIGEST" \
+    --touch change.txt \
+    --off-limits README.md \
+    --verify 'bash verify.sh' \
+    --baseline expected-red \
+    --label "$BRANCH" \
+    --out "$CONTRACT" >/dev/null \
+    || fail "could not freeze the build validation contract for $BRANCH"
+
+  echo green > "$WT/change.txt"
+  git -C "$WT" add change.txt
+  git -C "$WT" commit -qm "work"
+  git -C "$WT" push -q origin "$BRANCH"
+
+  python3 "$VAL" run --repo "$WT" --contract "$CONTRACT" --out "$EXECUTION" >/dev/null \
+    || fail "could not execute the frozen validation gate for $BRANCH"
   VERDICT="$REPO/docs/workflow/code-reviews/2026-07-22-pr-501-review.json"
-  printf '{"verdict":"PASS","pr":501,"issue":1,"findings":[]}\n' > "$VERDICT"
+  python3 - "$EXECUTION" "$VERDICT" <<'PY' || exit 1
+import json, sys
+execution_path, verdict_path = sys.argv[1:3]
+execution = json.load(open(execution_path, encoding='utf-8'))
+verdict = {
+    'verdict': 'PASS',
+    'pr': 501,
+    'issue': 1,
+    'head': execution['head'],
+    'diff_digest': execution['diff_digest'],
+    'findings': [],
+}
+with open(verdict_path, 'w', encoding='utf-8') as fh:
+    json.dump(verdict, fh, indent=2, sort_keys=True)
+    fh.write('\n')
+PY
   python3 "$CHECK" "$VERDICT" >/dev/null 2>&1 || fail "validator did not accept the clean finish verdict"
+  python3 "$BREC" write \
+    --repo "$WT" \
+    --contract "$CONTRACT" \
+    --execution "$EXECUTION" \
+    --verdict "$VERDICT" \
+    --graph-digest "$GRAPH_DIGEST" \
+    --projection-digest "$PROJECTION_DIGEST" \
+    --out "$BUILD_RECEIPT" >/dev/null \
+    || fail "could not write the implementation receipt for $BRANCH"
 }
 
 run_finish() {
@@ -111,7 +170,7 @@ run_finish() {
   ( cd "$REPO" && \
     env PATH="$WORK/bin:$PATH" WORK="$WORK" ORIGIN="$ORIGIN" BRANCH="$BRANCH" BASE="$BASE" $extra_env \
       python3 "$SCRIPT" --pr 501 --issue 1 --worktree "$WT" --repo "$REPO" --tracker "$TRACKER" \
-        --verdict "$VERDICT" )
+        --verdict "$VERDICT" --build-receipt "$BUILD_RECEIPT" )
 }
 
 # land_branch — represent a MERGED PR: actually merge the head branch's work INTO base + push, so the
@@ -139,6 +198,30 @@ git -C "$REPO" worktree list --porcelain | grep -qF "$WT" && fail "worktree shou
 [ -z "$(git -C "$REPO" ls-remote --heads origin "$BRANCH")" ] || fail "remote branch '$BRANCH' should have been deleted"
 [ "$(python3 "$TRK" --tracker "$TRACKER" show --num 1 --field Status)" = "Done" ] \
   || fail "tracker issue #1 should be Status=Done after tracker-close"
+
+# ============ Scenario A2 (red-when-broken): a tampered build receipt refuses before any mutation ===
+WORKA2="$(mktemp -d)"
+trap 'rm -rf "$WORK" "$WORKA2"' EXIT
+make_gh_stub "$WORKA2/bin"
+OLDWORK="$WORK"; WORK="$WORKA2"
+setup_repo "$WORKA2"
+python3 - "$BUILD_RECEIPT" <<'PY'
+import json, sys
+path = sys.argv[1]
+doc = json.load(open(path, encoding='utf-8'))
+doc['diff_digest'] = '0' * 64
+with open(path, 'w', encoding='utf-8') as fh:
+    json.dump(doc, fh, indent=2, sort_keys=True)
+    fh.write('\n')
+PY
+out="$(run_finish "" 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] || fail "a tampered build receipt must refuse before the finish tail mutates anything (got 0): $out"
+printf '%s\n' "$out" | grep -qE '^finish: build-receipt failed' \
+  || fail "expected 'finish: build-receipt failed' for a tampered implementation receipt, got: $out"
+[ -d "$WT" ] || fail "a rejected build receipt must leave the worktree intact (no mutation reached)"
+[ "$(python3 "$TRK" --tracker "$TRACKER" show --num 1 --field Status)" = "In Progress" ] \
+  || fail "a rejected build receipt must not close the tracker item"
+WORK="$OLDWORK"
 
 # ============ Scenario B (red-when-broken proof): the merge stub's --delete-branch is a no-op ====
 # Models the audit's exact observed production bug: the flag is passed, but the branch survives.
@@ -386,4 +469,4 @@ printf '%s\n' "$out" | grep -q '^finish: ok (close-only)$' || fail "(K) expected
   || fail "(K) tracker issue #1 should be Done (the head resolved to the correct unit)"
 WORK="$OLDWORK"
 
-echo "PASS: idc_git_finish.py worktree/merge/branch/tracker tail + fail-closed remote-branch verify + --close-only recovery (green/idempotent + merged-state-receipt fail-closed + unambiguous head-branch ownership gate [adapter-first] + advanced-branch containment gate [ancestry/per-commit/squash] + live-remote-tip data-safety + auto-worktree removal) green"
+echo "PASS: idc_git_finish.py worktree/merge/branch/tracker tail + optional build-receipt gate + fail-closed remote-branch verify + --close-only recovery (green/idempotent + tampered build-receipt refusal + merged-state-receipt fail-closed + unambiguous head-branch ownership gate [adapter-first] + advanced-branch containment gate [ancestry/per-commit/squash] + live-remote-tip data-safety + auto-worktree removal) green"

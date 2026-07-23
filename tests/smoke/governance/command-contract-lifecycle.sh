@@ -32,7 +32,10 @@ CR="$GOV_PLUGIN/scripts/hooks/idc_command_report.py"
 RECEIPT="$GOV_PLUGIN/scripts/idc_receipt_check.py"
 TXN="$GOV_PLUGIN/scripts/idc_tracker_transaction.py"
 PLANREC="$GOV_PLUGIN/scripts/idc_planning_receipt.py"
-for f in "$CONTRACT" "$CLOSEOUT_GATE" "$INTAKE" "$DV" "$CR" "$RECEIPT" "$TXN" "$PLANREC"; do
+CHECK="$GOV_PLUGIN/scripts/idc_review_verdict_check.py"
+VAL="$GOV_PLUGIN/scripts/idc_validation_contract.py"
+BREC="$GOV_PLUGIN/scripts/idc_build_receipt.py"
+for f in "$CONTRACT" "$CLOSEOUT_GATE" "$INTAKE" "$DV" "$CR" "$RECEIPT" "$TXN" "$PLANREC" "$CHECK" "$VAL" "$BREC"; do
   [ -f "$f" ] || gov_fail "required helper not found: $f (not implemented yet)"
 done
 
@@ -50,6 +53,8 @@ OUT="$WORK/out.json"
 S1="s1-$$-$(basename "$WORK")"
 S2="s2-$$-$(basename "$WORK")"
 _MAX_FINISHED_EXPECT=20
+BUILD_GRAPH_DIGEST='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+BUILD_PROJECTION_DIGEST='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
 
 contract() { python3 "$CONTRACT" "$@"; }
 json_count() {
@@ -223,6 +228,83 @@ PY
   [ -n "$rel" ] || gov_fail "planning receipt fixture $label returned no receipt path"
   [ -f "$repo/$rel" ] || gov_fail "planning receipt fixture $label did not write $repo/$rel"
   printf '%s' "$rel"
+}
+setup_build_receipt_repo() {  # $1 = repo path
+  local repo="$1"
+  mkdir -p "$repo/docs/workflow/build-validation" \
+           "$repo/docs/workflow/build-validation-executions" \
+           "$repo/docs/workflow/build-receipts" \
+           "$repo/docs/workflow/code-reviews"
+  git -C "$repo" init -q -b main >/dev/null 2>&1 || gov_fail "could not init git repo for $repo"
+  git -C "$repo" config user.email t@example.com >/dev/null 2>&1 || gov_fail "could not set git email for $repo"
+  git -C "$repo" config user.name tester >/dev/null 2>&1 || gov_fail "could not set git name for $repo"
+  cat > "$repo/verify.sh" <<'SH'
+#!/bin/bash
+set -euo pipefail
+grep -qx "$2" "$1"
+SH
+  chmod +x "$repo/verify.sh"
+  printf '# seed\n' > "$repo/README.md"
+  git -C "$repo" add README.md verify.sh docs/workflow/tracker-config.yaml >/dev/null 2>&1 \
+    || gov_fail "could not stage the build-receipt repo seed for $repo"
+  git -C "$repo" commit -qm init >/dev/null 2>&1 || gov_fail "could not seed the build-receipt repo $repo"
+}
+make_build_receipt() {  # $1 = repo, $2 = issue, $3 = pr, $4 = label
+  local repo="$1" issue="$2" pr="$3" label="$4"
+  local touch="feature-${label}.txt" expect="green-${label}"
+  local contract_rel="docs/workflow/build-validation/${label}.json"
+  local execution_rel="docs/workflow/build-validation-executions/${label}.json"
+  local verdict_rel="docs/workflow/code-reviews/${label}-review.json"
+  local receipt_rel="docs/workflow/build-receipts/${label}.json"
+  printf 'red-%s\n' "$label" > "$repo/$touch"
+  git -C "$repo" add "$touch" >/dev/null 2>&1 || gov_fail "could not stage red fixture $label"
+  git -C "$repo" commit -qm "seed $label" >/dev/null 2>&1 || gov_fail "could not commit red fixture $label"
+  python3 "$VAL" freeze \
+    --repo "$repo" \
+    --issue "$issue" \
+    --pr "$pr" \
+    --graph-node "build-$label" \
+    --graph-digest "$BUILD_GRAPH_DIGEST" \
+    --projection-digest "$BUILD_PROJECTION_DIGEST" \
+    --touch "$touch" \
+    --off-limits README.md \
+    --verify "bash verify.sh $touch $expect" \
+    --baseline expected-red \
+    --label "$label" \
+    --out "$repo/$contract_rel" >/dev/null \
+    || gov_fail "could not freeze build receipt fixture $label"
+  printf '%s\n' "$expect" > "$repo/$touch"
+  git -C "$repo" add "$touch" >/dev/null 2>&1 || gov_fail "could not stage green fixture $label"
+  git -C "$repo" commit -qm "green $label" >/dev/null 2>&1 || gov_fail "could not commit green fixture $label"
+  python3 "$VAL" run --repo "$repo" --contract "$repo/$contract_rel" --out "$repo/$execution_rel" >/dev/null \
+    || gov_fail "could not execute build receipt fixture $label"
+  python3 - "$repo/$execution_rel" "$repo/$verdict_rel" "$issue" "$pr" <<'PY' || gov_fail "could not write build review verdict $label"
+import json, sys
+execution_path, verdict_path, issue, pr = sys.argv[1:]
+execution = json.load(open(execution_path, encoding='utf-8'))
+verdict = {
+    'verdict': 'PASS',
+    'pr': int(pr),
+    'issue': int(issue),
+    'head': execution['head'],
+    'diff_digest': execution['diff_digest'],
+    'findings': [],
+}
+with open(verdict_path, 'w', encoding='utf-8') as fh:
+    json.dump(verdict, fh, indent=2, sort_keys=True)
+    fh.write('\n')
+PY
+  python3 "$CHECK" "$repo/$verdict_rel" >/dev/null 2>&1 || gov_fail "validator rejected build review verdict $label"
+  python3 "$BREC" write \
+    --repo "$repo" \
+    --contract "$repo/$contract_rel" \
+    --execution "$repo/$execution_rel" \
+    --verdict "$repo/$verdict_rel" \
+    --graph-digest "$BUILD_GRAPH_DIGEST" \
+    --projection-digest "$BUILD_PROJECTION_DIGEST" \
+    --out "$repo/$receipt_rel" >/dev/null \
+    || gov_fail "could not write build receipt fixture $label"
+  printf '%s' "$receipt_rel"
 }
 
 # (1) start creates one active record and is idempotent for the same session+command. S1 opens a
@@ -967,19 +1049,34 @@ echo "  ok (7e) autorun complete is cleared only by THIS session's durable, GATE
 # receipt PER requested issue, with the PR↔issue linkage proven from the PR's OWN closing references.
 REPO_BUILD="$WORK/repo-build"; mkdir -p "$REPO_BUILD/docs/workflow"
 printf 'backend: filesystem\n' > "$REPO_BUILD/docs/workflow/tracker-config.yaml"
+setup_build_receipt_repo "$REPO_BUILD"
+RB90_1="$(make_build_receipt "$REPO_BUILD" 1 90 req-1-pr90)"
+RB91_2="$(make_build_receipt "$REPO_BUILD" 2 91 req-2-pr91)"
+RB92_2="$(make_build_receipt "$REPO_BUILD" 2 92 req-2-pr92)"
+RB93_2="$(make_build_receipt "$REPO_BUILD" 2 93 req-2-pr93)"
 SB="sb-$$-$(basename "$WORK")"
 # started with `#1 #2` → requested {1,2}. A single merged-PR receipt for #1 leaves #2 uncovered → refuse.
 contract start --repo "$REPO_BUILD" --session "$SB" --command build --plugin-root "$GOV_PLUGIN" \
   --args '#1 #2' --source user >/dev/null
 if FAKE_MERGED_PRS="90" FAKE_PR_CLOSES="90:1" gh_finish --repo "$REPO_BUILD" --session "$SB" \
      --command build --status complete \
-     --evidence-json '{"schema_version":1,"refs":{"receipts":{"1":{"pr":90}}}}' 2>/dev/null; then
+     --evidence-json "$(printf '{\"schema_version\":1,\"refs\":{\"receipts\":{\"1\":{\"pr\":90,\"build_receipt\":\"%s\"}}}}' "$RB90_1")" 2>/dev/null; then
   gov_fail "(7g-req, F5) a build complete for TWO requested issues with only ONE merged-PR receipt was accepted"
+fi
+# (7g-receipt, U6) a legacy `{pr}`-only closeout is not enough: each built issue must also cite the
+# source-owned implementation receipt so fixed code can re-verify it on every normal closeout path.
+SBR="sbr-$$-$(basename "$WORK")"
+contract start --repo "$REPO_BUILD" --session "$SBR" --command build --plugin-root "$GOV_PLUGIN" \
+  --args '#1' --source user >/dev/null
+if FAKE_MERGED_PRS="90" FAKE_PR_CLOSES="90:1" gh_finish --repo "$REPO_BUILD" --session "$SBR" \
+     --command build --status complete \
+     --evidence-json '{"schema_version":1,"refs":{"receipts":{"1":{"pr":90}}}}' 2>/dev/null; then
+  gov_fail "(7g-receipt, U6) a build complete accepted legacy {pr}-only closeout without refs.receipts.1.build_receipt"
 fi
 # a merged PR that closes the WRONG issue (#2, not the requested #1) fails the linkage closed.
 if FAKE_MERGED_PRS="90 91" FAKE_PR_CLOSES="90:1 91:2" gh_finish --repo "$REPO_BUILD" --session "$SB" \
      --command build --status complete \
-     --evidence-json '{"schema_version":1,"refs":{"receipts":{"1":{"pr":90},"2":{"pr":91}}}}' 2>/dev/null; then
+     --evidence-json "$(printf '{\"schema_version\":1,\"refs\":{\"receipts\":{\"1\":{\"pr\":90,\"build_receipt\":\"%s\"},\"2\":{\"pr\":91,\"build_receipt\":\"%s\"}}}}' "$RB90_1" "$RB91_2")" 2>/dev/null; then
   : # this SHOULD pass (90→#1, 91→#2) — asserted below; the wrong-issue case is next.
 fi
 # wrong-issue: requested #2's receipt cites a merged PR (93) whose closing refs name #1, not #2 → refuse.
@@ -987,13 +1084,13 @@ contract start --repo "$REPO_BUILD" --session "$SB" --command build --plugin-roo
   --args '#1 #2' --source user >/dev/null
 if FAKE_MERGED_PRS="90 93" FAKE_PR_CLOSES="90:1 93:1" gh_finish --repo "$REPO_BUILD" --session "$SB" \
      --command build --status complete \
-     --evidence-json '{"schema_version":1,"refs":{"receipts":{"1":{"pr":90},"2":{"pr":93}}}}' 2>/dev/null; then
+     --evidence-json "$(printf '{\"schema_version\":1,\"refs\":{\"receipts\":{\"1\":{\"pr\":90,\"build_receipt\":\"%s\"},\"2\":{\"pr\":93,\"build_receipt\":\"%s\"}}}}' "$RB90_1" "$RB93_2")" 2>/dev/null; then
   gov_fail "(7g-req, F5) a build complete accepted a receipt whose merged PR closes the WRONG issue"
 fi
 # honest: each requested issue has a merged PR that closes IT (90→#1, 92→#2) → accepted.
 FAKE_MERGED_PRS="90 92" FAKE_PR_CLOSES="90:1 92:2" gh_finish --repo "$REPO_BUILD" --session "$SB" \
   --command build --status complete \
-  --evidence-json '{"schema_version":1,"refs":{"receipts":{"1":{"pr":90},"2":{"pr":92}}}}' \
+  --evidence-json "$(printf '{\"schema_version\":1,\"refs\":{\"receipts\":{\"1\":{\"pr\":90,\"build_receipt\":\"%s\"},\"2\":{\"pr\":92,\"build_receipt\":\"%s\"}}}}' "$RB90_1" "$RB92_2")" \
   || gov_fail "(7g-req, F5) a build complete with a linked merged-PR receipt per requested issue was rejected"
 echo "  ok (7g-req, F5) build stamps the requested issue set; complete needs a linked merged-PR receipt per issue (partial/wrong-issue refused)"
 
@@ -1002,21 +1099,24 @@ echo "  ok (7g-req, F5) build stamps the requested issue set; complete needs a l
 # empty remaining frontier. An arbitrary-subset close is REFUSED.
 REPO_BF="$WORK/repo-bf"; mkdir -p "$REPO_BF/docs/workflow"
 printf 'backend: filesystem\n' > "$REPO_BF/docs/workflow/tracker-config.yaml"
+setup_build_receipt_repo "$REPO_BF"
 python3 "$GOV_TRK" --tracker "$REPO_BF/TRACKER.md" init >/dev/null || gov_fail "(7g-frontier) could not init REPO_BF"
 python3 "$GOV_TRK" --tracker "$REPO_BF/TRACKER.md" create --title b1 --stage Buildable --status Todo >/dev/null  # #1 eligible
 python3 "$GOV_TRK" --tracker "$REPO_BF/TRACKER.md" create --title b2 --stage Buildable --status Todo >/dev/null  # #2 eligible
+BF90_1="$(make_build_receipt "$REPO_BF" 1 90 frontier-1-pr90)"
+BF91_2="$(make_build_receipt "$REPO_BF" 2 91 frontier-2-pr91)"
 SBF="sbf-$$-$(basename "$WORK")"
 bf_finish() { PATH="$FAKE_BIN:$PATH" contract finish --repo "$REPO_BF" --session "$SBF" "$@"; }
 # whole-frontier start (no #issue) stamps frontier {1,2}. A subset receipt (only #1, #2 still eligible)
 # → REFUSED (arbitrary-subset close is not a whole-frontier complete).
 contract start --repo "$REPO_BF" --session "$SBF" --command build --plugin-root "$GOV_PLUGIN" --args 'drain the whole ready frontier' --source user >/dev/null
 if FAKE_MERGED_PRS="90" FAKE_PR_CLOSES="90:1" bf_finish --command build --status complete \
-     --evidence-json '{"schema_version":1,"refs":{"receipts":{"1":{"pr":90}}}}' 2>/dev/null; then
+     --evidence-json "$(printf '{\"schema_version\":1,\"refs\":{\"receipts\":{\"1\":{\"pr\":90,\"build_receipt\":\"%s\"}}}}' "$BF90_1")" 2>/dev/null; then
   gov_fail "(7g-frontier, F4) a whole-frontier build complete with a receipt for ONLY #1 (leaving #2 eligible) was accepted (arbitrary subset)"
 fi
 # covering EVERY stamped-frontier issue with a linked merged-PR receipt → accepted.
 FAKE_MERGED_PRS="90 91" FAKE_PR_CLOSES="90:1 91:2" bf_finish --command build --status complete \
-  --evidence-json '{"schema_version":1,"refs":{"receipts":{"1":{"pr":90},"2":{"pr":91}}}}' \
+  --evidence-json "$(printf '{\"schema_version\":1,\"refs\":{\"receipts\":{\"1\":{\"pr\":90,\"build_receipt\":\"%s\"},\"2\":{\"pr\":91,\"build_receipt\":\"%s\"}}}}' "$BF90_1" "$BF91_2")" \
   || gov_fail "(7g-frontier, F4) a whole-frontier build covering EVERY stamped-frontier issue was rejected"
 echo "  ok (7g-frontier, F4) a whole-frontier build stamps the eligible frontier at start; an arbitrary-subset close is refused, full-frontier coverage accepted"
 # (7g-frontier-empty) a whole-frontier build on an EMPTY ready frontier closes via the oracle (no receipts).
@@ -1037,29 +1137,32 @@ echo "  ok (7g-frontier-empty, F4) a whole-frontier build on an empty ready fron
 # mirror (requested-first then whole-frontier restart) refuses identically; full coverage is accepted.
 REPO_CM="$WORK/repo-cm"; mkdir -p "$REPO_CM/docs/workflow"
 printf 'backend: filesystem\n' > "$REPO_CM/docs/workflow/tracker-config.yaml"
+setup_build_receipt_repo "$REPO_CM"
 python3 "$GOV_TRK" --tracker "$REPO_CM/TRACKER.md" init >/dev/null || gov_fail "(7g-crossmode) could not init REPO_CM"
 python3 "$GOV_TRK" --tracker "$REPO_CM/TRACKER.md" create --title c1 --stage Buildable --status Todo >/dev/null  # #1 eligible
 python3 "$GOV_TRK" --tracker "$REPO_CM/TRACKER.md" create --title c2 --stage Buildable --status Todo >/dev/null  # #2 eligible
+CM90_1="$(make_build_receipt "$REPO_CM" 1 90 crossmode-1-pr90)"
+CM91_2="$(make_build_receipt "$REPO_CM" 2 91 crossmode-2-pr91)"
 # (a) frontier-first → requested restart: a subset close (#1 only, #2 still eligible) is refused.
 SCM="scm-$$-$(basename "$WORK")"
 contract start --repo "$REPO_CM" --session "$SCM" --command build --plugin-root "$GOV_PLUGIN" --args 'drain the whole ready frontier' --source user >/dev/null
 contract start --repo "$REPO_CM" --session "$SCM" --command build --plugin-root "$GOV_PLUGIN" --args '#1' --source user >/dev/null
 if FAKE_MERGED_PRS="90" FAKE_PR_CLOSES="90:1" gh_finish --repo "$REPO_CM" --session "$SCM" \
-     --command build --status complete --evidence-json '{"schema_version":1,"refs":{"receipts":{"1":{"pr":90}}}}' 2>/dev/null; then
+     --command build --status complete --evidence-json "$(printf '{\"schema_version\":1,\"refs\":{\"receipts\":{\"1\":{\"pr\":90,\"build_receipt\":\"%s\"}}}}' "$CM90_1")" 2>/dev/null; then
   gov_fail "(7g-crossmode, F1) a cross-mode build (whole-frontier then #1 restart) closed covering ONLY #1 while #2 stayed eligible (the frontier obligation was dropped)"
 fi
 [ "$(contract status --repo "$REPO_CM" --session "$SCM" --json | json_count active)" -eq 1 ] \
   || gov_fail "(7g-crossmode, F1) the refused cross-mode subset close must leave the build record active"
 # covering BOTH the requested #1 AND the stamped frontier {1,2} (union satisfied) → accepted.
 FAKE_MERGED_PRS="90 91" FAKE_PR_CLOSES="90:1 91:2" gh_finish --repo "$REPO_CM" --session "$SCM" \
-  --command build --status complete --evidence-json '{"schema_version":1,"refs":{"receipts":{"1":{"pr":90},"2":{"pr":91}}}}' \
+  --command build --status complete --evidence-json "$(printf '{\"schema_version\":1,\"refs\":{\"receipts\":{\"1\":{\"pr\":90,\"build_receipt\":\"%s\"},\"2\":{\"pr\":91,\"build_receipt\":\"%s\"}}}}' "$CM90_1" "$CM91_2")" \
   || gov_fail "(7g-crossmode, F1) a cross-mode build covering BOTH the requested #1 AND the stamped frontier #1,#2 was rejected"
 # (b) mirror: requested-first (#1) then whole-frontier restart → the same subset close is refused.
 SCM2="scm2-$$-$(basename "$WORK")"
 contract start --repo "$REPO_CM" --session "$SCM2" --command build --plugin-root "$GOV_PLUGIN" --args '#1' --source user >/dev/null
 contract start --repo "$REPO_CM" --session "$SCM2" --command build --plugin-root "$GOV_PLUGIN" --args 'drain the whole ready frontier' --source user >/dev/null
 if FAKE_MERGED_PRS="90" FAKE_PR_CLOSES="90:1" gh_finish --repo "$REPO_CM" --session "$SCM2" \
-     --command build --status complete --evidence-json '{"schema_version":1,"refs":{"receipts":{"1":{"pr":90}}}}' 2>/dev/null; then
+     --command build --status complete --evidence-json "$(printf '{\"schema_version\":1,\"refs\":{\"receipts\":{\"1\":{\"pr\":90,\"build_receipt\":\"%s\"}}}}' "$CM90_1")" 2>/dev/null; then
   gov_fail "(7g-crossmode, F1) the mirror cross-mode build (#1 then whole-frontier restart) closed covering ONLY #1 while #2 stayed eligible"
 fi
 echo "  ok (7g-crossmode, F1) cross-mode build obligations UNION — a whole-frontier + explicit-#issue record needs both covered; a subset close refused, full coverage accepted"

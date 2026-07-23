@@ -67,8 +67,12 @@ validated verdict.
    contract: a review agent cannot stop without one at this path — the SubagentStop verdict gate
    blocks the stop otherwise — and the deterministic filer (`scripts/idc_file_findings.py`, fired
    by that gate) routes every surviving minor/nit finding and every `deferrals[]` entry to the
-   board as a non-blocking `Stage=Recirculation` item. The reviewer never files tickets, emits
-   markers, or mutates the tracker itself; it emits only the verdict.
+   board as a non-blocking `Stage=Recirculation` item. The filer persists every finding
+   fingerprint into the per-PR seen-fingerprint ledger (fixed code:
+   `scripts/idc_review_seen_ledger.py`) before disposition and suppresses any fingerprint an
+   earlier round already saw — a resurfaced rejected/refuted/below-floor finding never becomes
+   duplicate routed board work. The reviewer never files tickets, emits markers, writes the seen
+   ledger, or mutates the tracker itself; it emits only the verdict.
 
 ## Invocation sites
 

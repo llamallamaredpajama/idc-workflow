@@ -11,7 +11,8 @@ Operator input: `$ARGUMENTS` — optional consideration paths or notes; otherwis
 whole repo.
 
 Autorun is **full-pipeline autonomy that pauses only at human gates**: it **never forces** a gate — a gate-worthy item just **pauses behind its gate** (reported + skipped), exactly like an `[operator-action]` gate issue.
-It drains the pipe in one fixed top-to-bottom order — **recirculate** the Recirculation inbox, then **plan** approved considerations, then **drain** the Buildable waves — and exits when nothing actionable remains.
+It drains the pipe in one fixed top-to-bottom order — **recirculate** the Recirculation inbox, then **plan** approved considerations, then **drain** the Buildable waves — and exits when nothing actionable remains. A repo still carrying
+`reconciliation-baseline-required` / `baseline-pending` is **not** actionable completion: the drain must surface `baseline: pending` / `drain: baseline-pending`, never `complete`.
 
 **Command lifecycle (verify at entry).** The command entry gate opened this command's lifecycle record
 at expansion; verify it before the drain, and **close it with a validated terminal status** at exit

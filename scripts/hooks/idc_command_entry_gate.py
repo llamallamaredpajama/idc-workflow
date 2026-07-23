@@ -45,6 +45,7 @@ import idc_plugin_freshness as freshness  # noqa: E402
 import idc_command_contract as C  # noqa: E402
 import idc_ledger as L  # noqa: E402
 import idc_path_gate as PG  # noqa: E402
+import idc_reconciliation_baseline as RB  # noqa: E402
 
 # Fail-closed on an unverifiable freshness signal (invalid receipt / unreadable manifest / gate bug):
 # the workflow commands. Running an unverifiable workflow body can re-introduce just-fixed bugs.
@@ -94,6 +95,15 @@ AUTH_WRITE_FAILED_REASON = (
 )
 
 AUTH_REQUIRED_COMMANDS = set(C.COMMANDS) - {"doctor", "pause"}
+BASELINE_ALLOWED_COMMANDS = {"doctor", "update", "janitor", "pause", "uninstall", "init"}
+
+BASELINE_PENDING_REASON = (
+    "IDC refused to expand this command because the repository is baseline-pending under "
+    "`reconciliation-baseline-required`. Ordinary mutating workflow commands stay blocked until "
+    "`/idc:janitor --bootstrap` (or `/idc:update` resuming that bootstrap) completes. "
+    "`/idc:doctor`, `/idc:update`, `/idc:janitor`, `/idc:pause`, and `/idc:uninstall` remain "
+    "available while the baseline is pending."
+)
 
 
 def _normalize_command(command_name):
@@ -382,6 +392,23 @@ def _ensure_path_gate_auth(payload, command, registration, auth_snapshot):
         return False
 
 
+def _baseline_pending(cwd):
+    inside_git = subprocess.run(
+        ["git", "-C", cwd, "rev-parse", "--is-inside-work-tree"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ).returncode == 0
+    if not inside_git:
+        return False
+    try:
+        return RB.status(cwd).get("pending", False)
+    except RB.BaselineError:
+        # A malformed baseline artifact is itself indeterminate governed state. Let doctor/update/
+        # janitor in so they can diagnose or repair it; ordinary mutators fail closed on the same
+        # baseline-pending path rather than guessing the repo is current.
+        return True
+
+
 def _admit(payload, plugin_root, command):
     cwd = payload.get("cwd") or os.getcwd()
     # Task-1 freshness. An InvalidReceiptError (or any other exception) propagates to the caller's
@@ -395,6 +422,8 @@ def _admit(payload, plugin_root, command):
                               "the running plugin manifest could not be read", plugin_root)
     if result.verdict == "stale":
         _block(STALE_REASON)  # blocks EVERY command, recovery ones included (stale code is unsafe)
+    if H.is_governed_repo(cwd) and command not in BASELINE_ALLOWED_COMMANDS and _baseline_pending(cwd):
+        _block(BASELINE_PENDING_REASON)
 
     # Admitted on a clean, non-stale freshness signal. Open the lifecycle record (idempotent upsert)
     # when this is a governed repo with a session; init and non-governed / session-less cases emit the

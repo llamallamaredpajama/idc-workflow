@@ -53,6 +53,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(SCRIPT_DIR, "hooks"))   # the ledger lives one level down
 sys.path.insert(0, SCRIPT_DIR)                          # …but scripts/ stays FIRST: this file's own
 # siblings must never be shadowed by a same-named module added to hooks/ later.
+import idc_review_seen_ledger as RSL    # noqa: E402
 import idc_review_verdict_check as VC   # noqa: E402 — the verdict validator + PASSING set (reuse)
 import idc_transition as TE             # noqa: E402 — load_verdict + unmet_merge_conditions (reuse)
 import idc_file_findings as FF          # noqa: E402 — work_items + existing-keys readers (reuse)
@@ -664,7 +665,12 @@ def routing_gap(verdict, backend, repo, tracker_path, owner, project):
     idc_file_findings.work_items derives) whose stable dedupe `key` is NOT yet among the board's filed
     idc-recirc-source keys. [] ⇒ every routable finding is already routed to the board. Raises
     idc_gh_board.BoardReadError (github, unreadable board) so the caller fails CLOSED — never confirm
-    routing (and merge) on an unverifiable board state."""
+    routing (and merge) on an unverifiable board state.
+
+    U7 extends this with the durable per-PR seen ledger: a resurfaced seen finding whose current round
+    was intentionally suppressed (`suppressed-seen`) is not a routing gap just because the board has no
+    new Recirculation item for it.
+    """
     items = FF.work_items(verdict)
     if not items:
         return []  # a clean PASS (no nits/deferrals) has nothing to route
@@ -672,7 +678,12 @@ def routing_gap(verdict, backend, repo, tracker_path, owner, project):
         existing = FF._fs_existing_keys(tracker_path)
     else:
         existing = FF._github_existing_keys(repo, owner, project)  # raises BoardReadError → fail-closed
-    return [it for it in items if it["key"] not in existing]
+    missing = [it for it in items if it["key"] not in existing]
+    try:
+        return RSL.filter_missing_routing_gaps(repo, verdict, missing)
+    except RSL.ReviewSeenLedgerError as e:
+        _fail("require-routed-findings",
+              f"cannot read the review seen ledger to confirm routed findings ({str(e)[:160]})")
 
 
 def enforce_receipt_gate(args, backend, repo, tracker_path, owner, project_number):

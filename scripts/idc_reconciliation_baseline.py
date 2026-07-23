@@ -29,6 +29,7 @@ SCHEMA_VERSION = 1
 MARKER_RELPATH = os.path.join("docs", "workflow", "reconciliation-baseline-required.json")
 RECEIPT_RELPATH = os.path.join("docs", "workflow", "reconciliation-adoption.json")
 CHECKPOINT_RELPATH = os.path.join("docs", "workflow", "reconciliation-checkpoint.json")
+SEEN_FINDINGS_RELPATH = os.path.join("docs", "workflow", "reconciliation-seen-findings.json")
 CURSOR_BASENAME = "idc-reconciliation-cursor.json"
 PENDING_STATE = "baseline-pending"
 ADOPTED_STATE = "legacy-adopted"
@@ -57,6 +58,10 @@ def receipt_path(repo: str) -> str:
 
 def checkpoint_path(repo: str) -> str:
     return os.path.join(_repo_abspath(repo), CHECKPOINT_RELPATH)
+
+
+def seen_findings_path(repo: str) -> str:
+    return os.path.join(_repo_abspath(repo), SEEN_FINDINGS_RELPATH)
 
 
 def git_dir(repo: str) -> str:
@@ -183,6 +188,62 @@ def _validate_checkpoint(value: dict[str, Any]) -> dict[str, Any]:
     return value
 
 
+def _validate_seen_entry(entry: Any, *, index: int) -> dict[str, Any]:
+    if not isinstance(entry, dict):
+        raise BaselineError(f"seen ledger entry[{index}] must be a JSON object")
+    fingerprint = entry.get("fingerprint")
+    if not isinstance(fingerprint, str) or not fingerprint.strip():
+        raise BaselineError(f"seen ledger entry[{index}] fingerprint must be a non-empty string")
+    root_id = entry.get("root_id")
+    if not isinstance(root_id, str) or not root_id.strip():
+        raise BaselineError(f"seen ledger entry[{index}] root_id must be a non-empty string")
+    seen_count = entry.get("seen_count")
+    if not isinstance(seen_count, int) or isinstance(seen_count, bool) or seen_count < 1:
+        raise BaselineError(f"seen ledger entry[{index}] seen_count must be an integer >= 1")
+    for key in ("first_seen_at", "last_seen_at", "last_disposition"):
+        value = entry.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise BaselineError(f"seen ledger entry[{index}] {key} must be a non-empty string")
+    dispositions = entry.get("dispositions")
+    if not isinstance(dispositions, list) or not dispositions:
+        raise BaselineError(f"seen ledger entry[{index}] dispositions must be a non-empty list")
+    cleaned = []
+    for disp in dispositions:
+        if not isinstance(disp, str) or not disp.strip():
+            raise BaselineError(f"seen ledger entry[{index}] dispositions must contain only non-empty strings")
+        cleaned.append(disp.strip())
+    if entry["last_disposition"].strip() not in cleaned:
+        raise BaselineError(f"seen ledger entry[{index}] last_disposition must appear in dispositions")
+    out = dict(entry)
+    out["fingerprint"] = fingerprint.strip()
+    out["root_id"] = root_id.strip()
+    out["first_seen_at"] = str(entry["first_seen_at"]).strip()
+    out["last_seen_at"] = str(entry["last_seen_at"]).strip()
+    out["last_disposition"] = str(entry["last_disposition"]).strip()
+    out["dispositions"] = sorted(set(cleaned))
+    return out
+
+
+def _validate_seen_ledger(value: dict[str, Any]) -> dict[str, Any]:
+    if value.get("schema_version") != SCHEMA_VERSION:
+        raise BaselineError("seen ledger schema_version must be 1")
+    entries = value.get("entries")
+    if not isinstance(entries, list):
+        raise BaselineError("seen ledger entries must be a list")
+    seen = set()
+    normalized = []
+    for index, entry in enumerate(entries):
+        validated = _validate_seen_entry(entry, index=index)
+        fingerprint = validated["fingerprint"]
+        if fingerprint in seen:
+            raise BaselineError(f"seen ledger has duplicate fingerprint {fingerprint!r}")
+        seen.add(fingerprint)
+        normalized.append(validated)
+    out = dict(value)
+    out["entries"] = normalized
+    return out
+
+
 def read_marker(repo: str) -> dict[str, Any] | None:
     value = _read_json(marker_path(repo), "baseline marker")
     return None if value is None else _validate_marker(value)
@@ -196,6 +257,11 @@ def read_receipt(repo: str) -> dict[str, Any] | None:
 def read_checkpoint(repo: str) -> dict[str, Any] | None:
     value = _read_json(checkpoint_path(repo), "reconciliation checkpoint")
     return None if value is None else _validate_checkpoint(value)
+
+
+def read_seen_ledger(repo: str) -> dict[str, Any] | None:
+    value = _read_json(seen_findings_path(repo), "reconciliation seen ledger")
+    return None if value is None else _validate_seen_ledger(value)
 
 
 def read_cursor(repo: str) -> dict[str, Any] | None:
@@ -265,6 +331,17 @@ def write_cursor(repo: str, cursor: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def write_seen_ledger(repo: str, ledger: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(ledger)
+    normalized.setdefault("schema_version", SCHEMA_VERSION)
+    normalized.setdefault("entries", [])
+    normalized.setdefault("updated_at", _utc_now())
+    validated = _validate_seen_ledger(normalized)
+    validated["updated_at"] = str(normalized.get("updated_at") or _utc_now())
+    _atomic_write_json(seen_findings_path(repo), validated)
+    return validated
+
+
 def clear_marker(repo: str) -> None:
     path = marker_path(repo)
     if os.path.exists(path):
@@ -287,6 +364,7 @@ def status(repo: str) -> dict[str, Any]:
     marker = read_marker(repo)
     receipt = read_receipt(repo)
     checkpoint = read_checkpoint(repo)
+    seen_ledger = read_seen_ledger(repo)
     cursor = read_cursor(repo)
     state = "not-required"
     if marker:
@@ -300,10 +378,12 @@ def status(repo: str) -> dict[str, Any]:
         "marker_present": bool(marker),
         "receipt_present": bool(receipt),
         "checkpoint_present": bool(checkpoint),
+        "seen_ledger_present": bool(seen_ledger),
         "cursor_present": bool(cursor),
         "marker_path": MARKER_RELPATH,
         "receipt_path": RECEIPT_RELPATH,
         "checkpoint_path": CHECKPOINT_RELPATH,
+        "seen_ledger_path": SEEN_FINDINGS_RELPATH,
         "cursor_path": CURSOR_BASENAME,
         "default_branch": (marker or receipt or {}).get("default_branch"),
         "reason": marker.get("reason") if marker else None,

@@ -34,6 +34,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import idc_review_seen_ledger as RSL   # noqa: E402
 import idc_review_verdict_check as VC  # noqa: E402
 import idc_recirc_sweep as SW          # noqa: E402  — read_backend/read_config/gh_owner/parse_markers/RECIRC_SOURCE_MARKER
 import idc_tracker_fs                  # noqa: E402  — the filesystem state reader (DRY with the backend)
@@ -90,6 +91,27 @@ def ticket_title(item):
     return f"{tag}: {item['what'][:60] or 'review finding'}"
 
 
+def _fingerprint_from_item(item):
+    key = str(item.get("key", ""))
+    return key[len("finding:"):] if key.startswith("finding:") else None
+
+
+def _planned_work_items(repo, verdict):
+    plan = RSL.plan_verdict_round(repo, verdict)
+    items = work_items(verdict)
+    if not plan:
+        return items, plan
+    selected = []
+    for item in items:
+        if item.get("kind") != "finding":
+            selected.append(item)
+            continue
+        fingerprint = _fingerprint_from_item(item)
+        if fingerprint and RSL.route_required_for_fingerprint(plan, fingerprint):
+            selected.append(item)
+    return selected, plan
+
+
 def ticket_body(item, parent_issue=None):
     """A drainable Recirculation body (the same five fields idc_recirc_sweep.recirc_ticket_body
     emits, so /idc:recirculate treats a filer ticket exactly like a swept one) plus the extended
@@ -138,7 +160,11 @@ def run_filesystem(verdict, repo, tracker_path, parent_issue, dry_run):
     if not os.path.isfile(tracker_path):
         warn(f"filesystem backend: no TRACKER.md at {tracker_path} — nothing filed")
         return 3
-    items = work_items(verdict)
+    try:
+        items, seen_plan = _planned_work_items(repo, verdict)
+    except RSL.ReviewSeenLedgerError as e:
+        warn(f"filesystem: invalid review seen ledger ({str(e)[:160]})")
+        return 2
     existing = _fs_existing_keys(tracker_path)
     existing_numbers = {it.get("number") for it in _fs_state(tracker_path).get("issues", [])}
     # Tickets are created THROUGH the transition engine (the single write door) — no direct backend
@@ -146,9 +172,13 @@ def run_filesystem(verdict, repo, tracker_path, parent_issue, dry_run):
     # Recirculation/Todo item + writes the dedupe-marker body; link_blocks adds the parent edge.
     ctx = TE.fs_ctx(repo, tracker_path)
     filed = skipped = failed = 0
+    filed_fingerprints = set()
     for it in items:
+        fingerprint = _fingerprint_from_item(it)
         if it["key"] in existing:
             skipped += 1
+            if fingerprint:
+                filed_fingerprints.add(fingerprint)
             continue
         if it["blocks_goal"] and parent_issue and parent_issue not in existing_numbers:
             warn(f"filesystem: parent issue #{parent_issue} not found for blocks_goal item {it['key']} — nothing filed")
@@ -157,6 +187,8 @@ def run_filesystem(verdict, repo, tracker_path, parent_issue, dry_run):
         if dry_run:
             existing.add(it["key"])
             filed += 1
+            if fingerprint:
+                filed_fingerprints.add(fingerprint)
             continue
         try:
             num = TE.recirculate_intake(ctx, ticket_title(it), ticket_body(it, parent_issue))
@@ -168,6 +200,13 @@ def run_filesystem(verdict, repo, tracker_path, parent_issue, dry_run):
             continue
         existing.add(it["key"])
         filed += 1
+        if fingerprint:
+            filed_fingerprints.add(fingerprint)
+    try:
+        RSL.finalize_verdict_round(repo, verdict, seen_plan, filed_fingerprints=filed_fingerprints)
+    except RSL.ReviewSeenLedgerError as e:
+        warn(f"filesystem: could not write the review seen ledger ({str(e)[:160]})")
+        return 2
     print(f"idc-file-findings: filed {filed}, skipped {skipped} duplicate(s), failed {failed} (backend=filesystem)")
     return 3 if failed else 0
 
@@ -200,20 +239,27 @@ def _github_existing_keys(repo, owner, project):
     return keys
 
 
-def file_github(verdict, repo, owner, project, existing_keys, parent_issue, dry_run):
+def file_github(verdict, repo, owner, project, existing_keys, parent_issue, dry_run, items=None):
     """Create one atomic Recirculation/Todo item per un-filed nit/deferral, THROUGH the transition
     engine (the single write door — the engine's recirculate-intake wraps idc_gh_board.create_item's
-    atomic Stage+Status primitive). Returns the count filed. `existing_keys` is the caller-supplied
-    dedupe set (fail-closed to build it before calling)."""
-    items = work_items(verdict)
+    atomic Stage+Status primitive). Returns the count filed and the set of finding fingerprints whose
+    route now exists. `existing_keys` is the caller-supplied dedupe set (fail-closed to build it before
+    calling)."""
+    items = work_items(verdict) if items is None else list(items)
     ctx = TE.github_ctx(repo, owner, project)
     filed = 0
+    filed_fingerprints = set()
     for it in items:
+        fingerprint = _fingerprint_from_item(it)
         if it["key"] in existing_keys:
+            if fingerprint:
+                filed_fingerprints.add(fingerprint)
             continue
         existing_keys.add(it["key"])
         if dry_run:
             filed += 1
+            if fingerprint:
+                filed_fingerprints.add(fingerprint)
             continue
         try:
             TE.recirculate_intake(ctx, ticket_title(it), ticket_body(it, parent_issue))
@@ -223,7 +269,9 @@ def file_github(verdict, repo, owner, project, existing_keys, parent_issue, dry_
             warn(f"github: create failed for {it['key']} ({str(e)[:120]}) — surfaced, not counted")
             continue
         filed += 1
-    return filed
+        if fingerprint:
+            filed_fingerprints.add(fingerprint)
+    return filed, filed_fingerprints
 
 
 def run_github(verdict, repo, owner, project, parent_issue, dry_run):
@@ -231,12 +279,22 @@ def run_github(verdict, repo, owner, project, parent_issue, dry_run):
         warn("github backend: could not resolve owner/project_number — nothing filed")
         return 3
     try:
+        items, seen_plan = _planned_work_items(repo, verdict)
+    except RSL.ReviewSeenLedgerError as e:
+        warn(f"github: invalid review seen ledger ({str(e)[:160]})")
+        return 2
+    try:
         existing = _github_existing_keys(repo, owner, project)
     except idc_gh_board.BoardReadError as e:
         warn(f"github: dedupe board read failed ({str(e)[:120]}) — filing NOTHING to avoid "
              "duplicates (will retry next run)")
         return 3
-    filed = file_github(verdict, repo, owner, project, existing, parent_issue, dry_run)
+    filed, filed_fingerprints = file_github(verdict, repo, owner, project, existing, parent_issue, dry_run, items=items)
+    try:
+        RSL.finalize_verdict_round(repo, verdict, seen_plan, filed_fingerprints=filed_fingerprints)
+    except RSL.ReviewSeenLedgerError as e:
+        warn(f"github: could not write the review seen ledger ({str(e)[:160]})")
+        return 2
     print(f"idc-file-findings: filed {filed} (backend=github)")
     return 0
 

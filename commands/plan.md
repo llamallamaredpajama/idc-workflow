@@ -26,9 +26,12 @@ admission; the matrix passes `idc:idc-matrix-analysis`'s check; re-sequencing is
 `In Progress` issues are immutable. The authored matrix is descriptive input only —
 `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_execution_graph.py" --matrix <matrix> ... --json` re-derives
 authoritative whole-horizon Waves, and `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_tracker_projection.py"
---matrix <matrix> ... --json` emits the frozen read-only projection/simulation before any sanctioned
-apply. All issues flow as `Todo` — there is no gate here. Close by opening the planning PR (body =
-audit trail) and automerging when green.
+--matrix <matrix> ... --json` emits the frozen read-only projection/simulation. Sanctioned live
+application now runs through `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_tracker_transaction.py" freeze …`
+then `… apply …`: the helper re-reads the relevant tracker state for optimistic concurrency, persists
+a pre-write obligation, applies only the frozen sanctioned operations, requires journal corroboration +
+exact live postcondition, and writes the planning receipt last. All issues flow as `Todo` — there is
+no gate here. Close by opening the planning PR (body = audit trail) and automerging when green.
 
 Do not write source or tests; never write the PRD/TRD (Think authors + gates them); do not reorder
 `In Progress` issues. Halt only on the conditions in the playbook's §Authority & halt (including a
@@ -60,8 +63,11 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   `planning_pr` (the PR **number** — the validator **re-reads its merged-state for real (`gh pr view`)**,
   never a caller `state`), `matrix:"<repo-relative path to the matrix YAML you wrote>"` (the validator
   re-runs `idc_matrix_check` on the referenced file — **never a `"pass"` string**),
-  `decompositions:{<consideration>:<child>}`, `pointers_retired:[…]`. The validator **re-derives** the
-  rest: it confirms every decomposition child **exists** (via the tracker reader; on the github backend
+  `decompositions:{<consideration>:<child>}`, `pointers_retired:[…]`,
+  `planning_receipt:"<repo-relative path to the machine-owned planning receipt the sanctioned transaction wrote>"`
+  (the validator re-runs `idc_planning_receipt.py verify` against the **live tracker** — missing,
+  wrong-source, wrong-kind/schema, forged, stale, or readback-mismatched receipts are refused). The
+  validator **re-derives** the rest: it confirms every decomposition child **exists** (via the tracker reader; on the github backend
   it additionally **re-runs the schema + provenance checks** on each child's live body), and it
   cross-checks `pointers_retired` against the decomposed set: `pointers_retired` must **EQUAL** the
   decomposed set — an empty list is valid only when nothing was decomposed, and an **extra** retired

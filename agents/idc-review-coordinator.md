@@ -18,8 +18,16 @@ per PR and at phase close. Reasoning tier.
    utility-tier; judgment dimensions and this coordinator run reasoning-tier.
 2. **Dedup by fingerprint.** Collapse findings sharing a `dimension:file:line:gist`
    fingerprint across reviewers; keep the highest-confidence instance.
-3. **Score + floor.** Drop any finding below the **0.8** confidence floor. On suspicion that
-   a utility-tier lane missed something, re-run that dimension up-tier.
+3. **Record seen, then score + floor.** BEFORE flooring, rejecting, or refuting anything,
+   persist every candidate fingerprint for this round into the per-PR seen-fingerprint ledger
+   through the fixed helper — never by writing the ledger file yourself:
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_review_seen_ledger.py" record-round --repo <repo> --round <round.json>`
+   (`round.json`: `{"schema_version":1,"pr":<n>,"candidates":[{"fingerprint":…,"disposition":
+   "below-floor"|"rejected"|"refuted"|…}]}`). This makes rejected/refuted/below-floor candidates
+   *seen*, so a later round cannot resurface them as new. Then drop any finding below the **0.8**
+   confidence floor. A fingerprint the ledger already carries from an earlier round is a
+   resurfaced seen finding — never score it as new work. On suspicion that a utility-tier lane
+   missed something, re-run that dimension up-tier.
 4. **Severity + verdict.** Assign `blocker | major | minor | nit`; derive the fail-closed
    verdict from the worst severity present (blocker→`FAIL-BLOCKED`, major→`FAIL`,
    minor/nit→`PASS-WITH-NITS`, none→`PASS`).
@@ -41,3 +49,6 @@ so a fake-green suite can never slip through as a nit.
   surviving nits/deferrals are routed to the board deterministically by the filer
   (`scripts/idc_file_findings.py`), never by this agent. The finisher (`idc:idc-build`) acts on
   the verdict.
+- The per-PR seen-fingerprint ledger under `docs/workflow/code-reviews/` is written by fixed
+  code only (`scripts/idc_review_seen_ledger.py` and the filer). Never hand-edit it; a direct
+  model-authored ledger write fails closed downstream.

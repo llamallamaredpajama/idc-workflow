@@ -946,6 +946,34 @@ def dedupe_findings(findings):
     return list(grouped.values())
 
 
+def _seen_fingerprint(f):
+    """The stable all-seen ledger fingerprint for a deduped finding. Derived from the same root
+    identity dedupe_findings groups on (classification + root_id), so the same fact resurfacing on a
+    later pass re-derives the same fingerprint — never from pass-varying prose."""
+    root_id = f.get("root_id") or f"{f.get('dim')}:{f.get('name')}"
+    classification = f.get("classification")
+    return f"{classification}:{root_id}" if classification else root_id
+
+
+def _apply_seen_ledger(ctx, findings):
+    """Record every deduped finding into the durable all-seen ledger BEFORE any disposition, then
+    mark resurfaced findings `seen_before`. Only this fixed code writes the ledger (spec §4.4); a
+    ledger that does not validate raises RB.BaselineError so the caller fails closed (exit 2, never
+    a hollow clean or an amnesty rescan). Returns the set of fingerprints seen on earlier passes."""
+    observations = []
+    for f in findings:
+        fp = _seen_fingerprint(f)
+        f["fingerprint"] = fp
+        observations.append({
+            "fingerprint": fp,
+            "disposition": f.get("route") or ("blocker" if f.get("blocker") else "finding"),
+        })
+    prior = RB.record_seen_findings(ctx["repo"], observations)
+    for f in findings:
+        f["seen_before"] = f["fingerprint"] in prior
+    return prior
+
+
 def _plan_op(f):
     if f.get("tier") == SAFE_FIX:
         return {
@@ -967,10 +995,15 @@ def _plan_op(f):
 def build_plan(findings):
     ops = []
     blockers = []
+    new_blockers = []
     for f in findings:
         root_id = f.get("root_id") or f"{f.get('dim')}:{f.get('name')}"
         if f.get("blocker"):
             blockers.append(root_id)
+            # A blocker already recorded in the durable all-seen ledger is unresolved but NOT new:
+            # it must not re-count as fresh debris (reset pass counting) or re-route an obligation.
+            if not f.get("seen_before"):
+                new_blockers.append(root_id)
         op = _plan_op(f)
         if not op:
             continue
@@ -989,6 +1022,8 @@ def build_plan(findings):
         "validated": validated,
         "operations": ops,
         "blockers": sorted(set(blockers)),
+        "new_blockers": sorted(set(new_blockers)),
+        "new_blocker_count": len(set(new_blockers)),
     }
 
 
@@ -1184,7 +1219,8 @@ def emit_json(findings, ctx, indeterminate, applied=None, plan=None):
         # `op` (every non-board dimension) simply omits the key, so existing consumers are unchanged.
         "findings": [{k: v for k, v in f.items() if k in
                       ("tier", "dim", "name", "detail", "action", "number", "op", "classification",
-                       "route", "preserve", "root_id", "source_pin", "symptoms", "blocker")} for f in findings],
+                       "route", "preserve", "root_id", "source_pin", "symptoms", "blocker",
+                       "fingerprint", "seen_before")} for f in findings],
     }
     if plan is not None:
         out["plan"] = plan
@@ -1744,6 +1780,16 @@ def main():
                 classification="test-stubborn", root_id=stubborn, blocker=True,
             ))
         findings0 = dedupe_findings(findings0)
+        # U7 Item 1: persist the durable all-seen ledger BEFORE disposition/planning, so a resurfaced
+        # seen finding (including rejected/below-threshold ones) can never count as new again. An
+        # invalid or model-authored ledger refuses the scan fail-closed — exit 2, never amnesty.
+        try:
+            _apply_seen_ledger(context, findings0)
+        except RB.BaselineError as exc:
+            print(f"janitor: {exc}", file=sys.stderr)
+            _write_scan_report(context["repo"], args.report_session, args.report_nonce,
+                               _JANITOR_BLOCKED_EXIT)
+            sys.exit(_JANITOR_BLOCKED_EXIT)
         plan0 = build_plan(findings0)
         if indeterminate0:
             plan0["blockers"] = sorted(set(plan0["blockers"]) | {"indeterminate-ground-truth"})

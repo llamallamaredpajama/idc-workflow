@@ -39,6 +39,7 @@ import idc_recirc_sweep as SW          # noqa: E402  — read_backend/read_confi
 import idc_tracker_fs                  # noqa: E402  — the filesystem state reader (DRY with the backend)
 import idc_gh_board                    # noqa: E402  — referenced by attribute so tests can monkeypatch
 import idc_transition as TE            # noqa: E402  — the single write door: tickets are created THROUGH the engine
+import idc_review_seen_ledger as SL    # noqa: E402  — the fixed per-PR seen-fingerprint ledger (U7 Item 1)
 
 MINOR_NIT = {"minor", "nit"}
 RECIRC_STAGE = "Recirculation"
@@ -62,7 +63,7 @@ def work_items(verdict):
             continue
         fp = str(f.get("fingerprint", "")).strip()
         items.append({
-            "kind": "finding", "key": f"finding:{fp}", "origin": origin,
+            "kind": "finding", "key": f"finding:{fp}", "origin": origin, "fingerprint": fp,
             "what": (str(f.get("evidence", "")).strip() or fp or "review nit"),
             "area": str(f.get("dimension", "review")).strip() or "review",
             "suggested": str(f.get("unblock", "")).strip(),
@@ -111,6 +112,38 @@ def ticket_body(item, parent_issue=None):
     )
 
 
+# ── per-PR seen-fingerprint ledger (U7 Item 1) ───────────────────────────────────────────────────
+def record_verdict_seen(repo, verdict, dry_run=False):
+    """Persist EVERY finding fingerprint in this verdict into the per-PR seen ledger BEFORE any
+    filing/flooring disposition, then return the suppression key-set: the `finding:<fp>` keys whose
+    fingerprint was already seen in an EARLIER round. Those resurfaced findings are recognized —
+    never re-filed as duplicate routed board work. Dispositions are decided by this fixed code
+    (prior-seen → suppressed-seen; minor/nit → filed; major/blocker → confirmed); model-authored
+    verdict text never writes the ledger itself. Raises SL.SeenLedgerError on invalid ledger state
+    (the caller refuses to file — fail closed). No PR number ⇒ no per-PR ledger scope ⇒ no-op."""
+    pr = verdict.get("pr")
+    if isinstance(pr, bool) or not isinstance(pr, int):
+        return frozenset()
+    fingerprints = []
+    for f in verdict.get("findings", []):
+        if not isinstance(f, dict):
+            continue
+        fp = str(f.get("fingerprint", "")).strip()
+        if fp:
+            fingerprints.append((fp, f.get("severity")))
+    if not fingerprints:
+        return frozenset()
+    prior = SL.seen_fingerprints(SL.read_ledger(repo, pr))
+    if not dry_run:
+        SL.record_observations(repo, pr, [
+            {"fingerprint": fp,
+             "disposition": ("suppressed-seen" if fp in prior
+                             else ("filed" if sev in MINOR_NIT else "confirmed"))}
+            for fp, sev in fingerprints
+        ])
+    return frozenset(f"finding:{fp}" for fp, _sev in fingerprints if fp in prior)
+
+
 # ── filesystem backend ───────────────────────────────────────────────────────────────────────────
 def _fs_state(tracker_path):
     """The TRACKER.md state via the backend's own reader (DRY; correct block parsing). Degrades to
@@ -134,7 +167,7 @@ def _fs_existing_keys(tracker_path):
     return keys
 
 
-def run_filesystem(verdict, repo, tracker_path, parent_issue, dry_run):
+def run_filesystem(verdict, repo, tracker_path, parent_issue, dry_run, suppressed_keys=frozenset()):
     if not os.path.isfile(tracker_path):
         warn(f"filesystem backend: no TRACKER.md at {tracker_path} — nothing filed")
         return 3
@@ -145,8 +178,11 @@ def run_filesystem(verdict, repo, tracker_path, parent_issue, dry_run):
     # mutation here. The engine's recirculate-intake op creates a normalized, read-back-verified
     # Recirculation/Todo item + writes the dedupe-marker body; link_blocks adds the parent edge.
     ctx = TE.fs_ctx(repo, tracker_path)
-    filed = skipped = failed = 0
+    filed = skipped = suppressed = failed = 0
     for it in items:
+        if it["key"] in suppressed_keys:
+            suppressed += 1
+            continue
         if it["key"] in existing:
             skipped += 1
             continue
@@ -168,7 +204,8 @@ def run_filesystem(verdict, repo, tracker_path, parent_issue, dry_run):
             continue
         existing.add(it["key"])
         filed += 1
-    print(f"idc-file-findings: filed {filed}, skipped {skipped} duplicate(s), failed {failed} (backend=filesystem)")
+    print(f"idc-file-findings: filed {filed}, skipped {skipped} duplicate(s), "
+          f"suppressed {suppressed} seen finding(s), failed {failed} (backend=filesystem)")
     return 3 if failed else 0
 
 
@@ -200,15 +237,19 @@ def _github_existing_keys(repo, owner, project):
     return keys
 
 
-def file_github(verdict, repo, owner, project, existing_keys, parent_issue, dry_run):
+def file_github(verdict, repo, owner, project, existing_keys, parent_issue, dry_run,
+                suppressed_keys=frozenset()):
     """Create one atomic Recirculation/Todo item per un-filed nit/deferral, THROUGH the transition
     engine (the single write door — the engine's recirculate-intake wraps idc_gh_board.create_item's
     atomic Stage+Status primitive). Returns the count filed. `existing_keys` is the caller-supplied
-    dedupe set (fail-closed to build it before calling)."""
+    dedupe set (fail-closed to build it before calling); `suppressed_keys` carries the seen-ledger
+    resurfaced findings that must not be re-filed as duplicate routed work."""
     items = work_items(verdict)
     ctx = TE.github_ctx(repo, owner, project)
     filed = 0
     for it in items:
+        if it["key"] in suppressed_keys:
+            continue
         if it["key"] in existing_keys:
             continue
         existing_keys.add(it["key"])
@@ -226,7 +267,7 @@ def file_github(verdict, repo, owner, project, existing_keys, parent_issue, dry_
     return filed
 
 
-def run_github(verdict, repo, owner, project, parent_issue, dry_run):
+def run_github(verdict, repo, owner, project, parent_issue, dry_run, suppressed_keys=frozenset()):
     if not (owner and project):
         warn("github backend: could not resolve owner/project_number — nothing filed")
         return 3
@@ -236,7 +277,8 @@ def run_github(verdict, repo, owner, project, parent_issue, dry_run):
         warn(f"github: dedupe board read failed ({str(e)[:120]}) — filing NOTHING to avoid "
              "duplicates (will retry next run)")
         return 3
-    filed = file_github(verdict, repo, owner, project, existing, parent_issue, dry_run)
+    filed = file_github(verdict, repo, owner, project, existing, parent_issue, dry_run,
+                        suppressed_keys=suppressed_keys)
     print(f"idc-file-findings: filed {filed} (backend=github)")
     return 0
 
@@ -271,13 +313,23 @@ def main():
     except (TypeError, ValueError):
         parent = None
 
+    # U7 Item 1: persist seen fingerprints BEFORE any filing disposition, fail-closed on invalid
+    # ledger state — a resurfaced seen finding must never become duplicate routed board work.
+    try:
+        suppressed_keys = record_verdict_seen(a.repo, verdict, dry_run=a.dry_run)
+    except SL.SeenLedgerError as e:
+        warn(f"refusing to file — review seen-fingerprint ledger did not validate: {e}")
+        sys.exit(2)
+
     backend = SW.read_backend(a.repo) or "filesystem"
     if backend == "github":
         owner = SW.gh_owner(a.repo)
         project_number, _ = SW.read_config(a.repo)
-        sys.exit(run_github(verdict, a.repo, owner, project_number, parent, a.dry_run))
+        sys.exit(run_github(verdict, a.repo, owner, project_number, parent, a.dry_run,
+                            suppressed_keys=suppressed_keys))
     tracker = a.tracker or os.path.join(a.repo, "TRACKER.md")
-    sys.exit(run_filesystem(verdict, a.repo, tracker, parent, a.dry_run))
+    sys.exit(run_filesystem(verdict, a.repo, tracker, parent, a.dry_run,
+                            suppressed_keys=suppressed_keys))
 
 
 if __name__ == "__main__":

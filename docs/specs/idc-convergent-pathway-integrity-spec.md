@@ -344,6 +344,15 @@ tracker transactions, stale receipts, orphaned branches/PRs/worktrees, graph pro
 canonical drift. It preserves work first, invokes Intake for outside artifacts, invokes
 Recirculation for scope/canonical drift, and uses existing guarded doors for non-destructive repair.
 
+Janitor persists a durable seen-finding ledger across passes and deduplicates against all previously
+seen findings, including rejected: every finding is recorded before disposition, and a resurfaced
+seen finding is recognized rather than counted as new — it cannot reset the three-pass counter,
+duplicate a routed obligation, or advance a checkpoint as if it were new. Fixed code alone validates
+and writes the ledger; model-authored report text never mutates it, and invalid direct ledger writes
+fail closed. The per-PR review→fix→re-review path keeps the same convergence discipline: seen
+fingerprints are persisted before flooring/rejection/refutation, so a resurfaced rejected, refuted,
+or below-floor finding cannot recycle the review attempt counter or re-file duplicate routed work.
+
 Janitor does not write product code, author requirements, create arbitrary Buildables, hand-edit the
 tracker, or fabricate history. Repairs are frozen, simulated, idempotent, read back, and receipted.
 After three non-converging passes it stops with exact blockers; it never advances a clean checkpoint
@@ -462,8 +471,12 @@ Tests MUST prove at least:
 - repeated Stop attempts never convert unresolved work into a successful finish;
 - outside PR/branch work is preserved, pinned, and routed; merged outside work receives reconciliation
   rather than forged implementation history;
-- Janitor deduplicates findings, refuses unvalidated operations, and halts after three
-  non-converging passes;
+- Janitor deduplicates against all previously seen findings, including rejected, refuses
+  unvalidated operations, and halts after three non-converging passes;
+- seen-finding ledgers are persisted before disposition across Janitor passes and review→fix→
+  re-review rounds — covering rejected, refuted, below-floor, and filed findings — and a resurfaced
+  seen finding cannot recycle the Janitor pass counter or the review attempt counter, cannot re-file
+  duplicate routed work, and an unvalidated direct (model-authored) ledger write fails closed;
 - adoption tolerates pre-boundary missing receipts but detects all post-boundary unreceipted facts;
 - filesystem mode remains functional for hermetic tests while refusing the controlled security claim.
 

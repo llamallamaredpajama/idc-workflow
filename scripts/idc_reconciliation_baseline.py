@@ -7,6 +7,7 @@ adoption boundary:
 * ``docs/workflow/reconciliation-baseline-required.json`` — durable baseline-pending marker.
 * ``docs/workflow/reconciliation-adoption.json`` — durable adoption receipt.
 * ``docs/workflow/reconciliation-checkpoint.json`` — durable convergence checkpoint.
+* ``docs/workflow/reconciliation-seen-findings.json`` — durable all-seen finding ledger (U7 Item 1).
 * ``<git-dir>/idc-reconciliation-cursor.json`` — local scan accelerator only.
 
 The marker and receipt are clone-portable repository state. The cursor is intentionally local and may
@@ -29,6 +30,7 @@ SCHEMA_VERSION = 1
 MARKER_RELPATH = os.path.join("docs", "workflow", "reconciliation-baseline-required.json")
 RECEIPT_RELPATH = os.path.join("docs", "workflow", "reconciliation-adoption.json")
 CHECKPOINT_RELPATH = os.path.join("docs", "workflow", "reconciliation-checkpoint.json")
+SEEN_RELPATH = os.path.join("docs", "workflow", "reconciliation-seen-findings.json")
 CURSOR_BASENAME = "idc-reconciliation-cursor.json"
 PENDING_STATE = "baseline-pending"
 ADOPTED_STATE = "legacy-adopted"
@@ -57,6 +59,10 @@ def receipt_path(repo: str) -> str:
 
 def checkpoint_path(repo: str) -> str:
     return os.path.join(_repo_abspath(repo), CHECKPOINT_RELPATH)
+
+
+def seen_ledger_path(repo: str) -> str:
+    return os.path.join(_repo_abspath(repo), SEEN_RELPATH)
 
 
 def git_dir(repo: str) -> str:
@@ -181,6 +187,72 @@ def _validate_checkpoint(value: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(raw, list) or any(not isinstance(item, str) or not item for item in raw):
             raise BaselineError(f"checkpoint {key} must be a list of non-empty strings")
     return value
+
+
+def _validate_seen_ledger(value: dict[str, Any]) -> dict[str, Any]:
+    if value.get("schema_version") != SCHEMA_VERSION:
+        raise BaselineError("seen-finding ledger schema_version must be 1")
+    entries = value.get("entries")
+    if not isinstance(entries, list):
+        raise BaselineError("seen-finding ledger entries must be a list")
+    fingerprints = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise BaselineError(
+                "seen-finding ledger entries must be fixed-code-written objects "
+                "(fingerprint/seen_count) — refusing a direct model-authored ledger write")
+        fingerprint = entry.get("fingerprint")
+        if not isinstance(fingerprint, str) or not fingerprint.strip():
+            raise BaselineError("seen-finding ledger entry fingerprint must be a non-empty string")
+        seen_count = entry.get("seen_count")
+        if isinstance(seen_count, bool) or not isinstance(seen_count, int) or seen_count < 1:
+            raise BaselineError("seen-finding ledger entry seen_count must be an integer >= 1")
+        disposition = entry.get("last_disposition")
+        if not isinstance(disposition, str) or not disposition.strip():
+            raise BaselineError("seen-finding ledger entry last_disposition must be a non-empty string")
+        if fingerprint in fingerprints:
+            raise BaselineError(f"seen-finding ledger holds duplicate entries for {fingerprint!r}")
+        fingerprints.add(fingerprint)
+    return value
+
+
+def read_seen_ledger(repo: str) -> dict[str, Any] | None:
+    """The validated durable all-seen finding ledger, or None when none exists yet. Malformed or
+    unreadable ledger state raises BaselineError — fail closed, never an empty/clean default."""
+    value = _read_json(seen_ledger_path(repo), "seen-finding ledger")
+    return None if value is None else _validate_seen_ledger(value)
+
+
+def record_seen_findings(repo: str, observations: list[dict[str, Any]]) -> set[str]:
+    """Record one observation per finding (``{"fingerprint": str, "disposition": str}``) into the
+    durable all-seen ledger — seen_count increments, dispositions update, new fingerprints append.
+    Returns the set of fingerprints already seen BEFORE this recording (the dedupe set: a resurfaced
+    seen finding must not reset pass counting, duplicate a routed obligation, or advance a
+    checkpoint as new). The load validates first, so invalid ledger state refuses the recording."""
+    ledger = read_seen_ledger(repo)
+    if ledger is None:
+        ledger = {"schema_version": SCHEMA_VERSION, "entries": []}
+    prior = {entry["fingerprint"] for entry in ledger["entries"]}
+    by_fingerprint = {entry["fingerprint"]: entry for entry in ledger["entries"]}
+    now = _utc_now()
+    for obs in observations:
+        fingerprint = str(obs.get("fingerprint", "")).strip()
+        disposition = str(obs.get("disposition", "")).strip() or "observed"
+        if not fingerprint:
+            raise BaselineError("seen-finding observation fingerprint must be non-empty")
+        entry = by_fingerprint.get(fingerprint)
+        if entry is None:
+            by_fingerprint[fingerprint] = {
+                "fingerprint": fingerprint, "seen_count": 1,
+                "first_seen": now, "last_seen": now, "last_disposition": disposition,
+            }
+        else:
+            entry["seen_count"] = int(entry["seen_count"]) + 1
+            entry["last_seen"] = now
+            entry["last_disposition"] = disposition
+    ledger["entries"] = [by_fingerprint[key] for key in sorted(by_fingerprint)]
+    _atomic_write_json(seen_ledger_path(repo), ledger)
+    return prior
 
 
 def read_marker(repo: str) -> dict[str, Any] | None:

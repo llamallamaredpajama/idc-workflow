@@ -20,6 +20,7 @@
 #   (E) --no-require-routed-findings ⇒ skips ONLY the routed sub-check (escape hatch)
 #   (M) no --verdict ⇒ REFUSE (receipt gate; no call site can silently skip)
 #   (O) a verdict for a different PR ⇒ REFUSE (the receipt must own the item)
+#   (B) omitting --build-receipt on a normal finish ⇒ REFUSE before any irreversible finish step
 #   (G) github: an unreadable board ⇒ fail CLOSED (never merge on an unverifiable routing state)
 #
 # Usage: bash tests/smoke/governance/finish-receipt-gate.sh   (exit 0 = pass)
@@ -32,7 +33,9 @@ TRK="$GOV_PLUGIN/scripts/idc_tracker_fs.py"
 CHECK="$GOV_PLUGIN/scripts/idc_review_verdict_check.py"
 [ -f "$FIN" ] || gov_fail "idc_git_finish.py not found at $FIN (not implemented yet)"
 
-WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
+WORK="$(mktemp -d)"
+WORK2=""
+trap 'rm -rf "$WORK" "$WORK2"' EXIT
 REPO="$WORK/repo"; mkdir -p "$REPO/docs/workflow/code-reviews"
 printf 'backend: filesystem\n' > "$REPO/docs/workflow/tracker-config.yaml"
 git -C "$REPO" init -q -b main >/dev/null 2>&1
@@ -48,6 +51,78 @@ PARENT="$(python3 "$TRK" --tracker "$T" create --title 'build: feature' --stage 
 fin() { ( cd "$REPO" && python3 "$FIN" --repo "$REPO" --tracker "$T" --worktree "$REPO/nowt" "$@" 2>&1 ); }
 
 PROCEEDED='finish: resolve-branch failed'   # the first git step past the gate → proof the gate passed
+
+make_gh_stub() {
+  local bindir="$1"
+  mkdir -p "$bindir"
+  cat > "$bindir/gh" <<'STUB'
+#!/usr/bin/env python3
+import os, subprocess, sys
+args = sys.argv[1:]
+STATE_FILE = os.path.join(os.environ["WORK2"], "gh-pr-merged")
+BRANCH = os.environ["BRANCH2"]
+ORIGIN = os.environ["ORIGIN2"]
+BASE = os.environ.get("BASE2", "main")
+
+if args[:2] == ["pr", "view"]:
+    j = args[args.index("--json") + 1] if "--json" in args else ""
+    if j == "headRefName":
+        print(BRANCH)
+    elif j == "state":
+        print("MERGED" if os.path.exists(STATE_FILE) else "OPEN")
+    elif j == "baseRefName":
+        print(BASE)
+    sys.exit(0)
+
+if args[:2] == ["pr", "merge"]:
+    if "--squash" not in args or "--delete-branch" not in args:
+        sys.stderr.write("gh stub: pr merge missing --squash/--delete-branch\n")
+        sys.exit(1)
+    open(STATE_FILE, "w").close()
+    subprocess.run(["git", "-C", ORIGIN, "branch", "-D", BRANCH], capture_output=True)
+    sys.exit(0)
+
+sys.stderr.write("gh stub: unhandled " + repr(args) + "\n")
+sys.exit(99)
+STUB
+  chmod +x "$bindir/gh"
+}
+
+setup_finish_repo() {
+  local work="$1"
+  ORIGIN2="$work/origin.git"
+  REPO2="$work/repo"
+  BRANCH2='worktree-build-1'
+  git init -q --bare "$ORIGIN2"
+  git clone -q "$ORIGIN2" "$REPO2"
+  git -C "$REPO2" config user.email t@example.com
+  git -C "$REPO2" config user.name tester
+  mkdir -p "$REPO2/docs/workflow/code-reviews"
+  printf 'backend: filesystem\n' > "$REPO2/docs/workflow/tracker-config.yaml"
+  printf '# seed\n' > "$REPO2/README.md"
+  git -C "$REPO2" add README.md docs/workflow/tracker-config.yaml
+  git -C "$REPO2" commit -qm init
+  BASE2="$(git -C "$REPO2" symbolic-ref --short HEAD)"
+  git -C "$REPO2" push -q origin "HEAD:$BASE2"
+
+  WT2="$REPO2/.claude/worktrees/$BRANCH2"
+  git -C "$REPO2" worktree add -q -b "$BRANCH2" "$WT2" "$BASE2"
+  printf 'real finish branch\n' > "$WT2/change.txt"
+  git -C "$WT2" add change.txt
+  git -C "$WT2" commit -qm branch
+  git -C "$WT2" push -q origin "$BRANCH2"
+
+  TRACKER2="$REPO2/TRACKER.md"
+  python3 "$TRK" --tracker "$TRACKER2" init >/dev/null || gov_fail "(B) tracker init failed"
+  ISSUE2="$(python3 "$TRK" --tracker "$TRACKER2" create --title 'build: receipt gate' --stage Buildable --status 'In Progress')" \
+    || gov_fail "(B) build issue seed failed"
+
+  VERDICT2="$REPO2/docs/workflow/code-reviews/2026-07-23-pr-501-clean.json"
+  cat > "$VERDICT2" <<JSON
+{"verdict":"PASS","pr":501,"issue":$ISSUE2,"findings":[]}
+JSON
+  python3 "$CHECK" "$VERDICT2" >/dev/null 2>&1 || gov_fail "(B) clean verdict did not validate"
+}
 
 # ── (U) unrouted nit ⇒ REFUSE (headline) ─────────────────────────────────────────────────────────
 V_NIT="$REPO/docs/workflow/code-reviews/2026-07-22-pr-77-nit.json"
@@ -181,4 +256,23 @@ finally:
     B.fetch_items = orig
 PY
 
-echo "PASS: idc_git_finish.py is a receipt gate — unrouted findings + unmet merge_conditions + missing/wrong-PR verdicts REFUSE the merge/close; a clean routed condition-met receipt PROCEEDS; --no-require-routed-findings is a routed-only escape; github fails CLOSED on an unreadable board"
+# ── (B) omitting --build-receipt on a real finish ⇒ REFUSE before any irreversible step ─────────────
+WORK2="$(mktemp -d)"
+setup_finish_repo "$WORK2"
+make_gh_stub "$WORK2/bin"
+set +e
+out="$(cd "$REPO2" && PATH="$WORK2/bin:$PATH" WORK2="$WORK2" ORIGIN2="$ORIGIN2" BRANCH2="$BRANCH2" BASE2="$BASE2" \
+  python3 "$FIN" --repo "$REPO2" --tracker "$TRACKER2" --worktree "$WT2" --pr 501 --issue "$ISSUE2" --verdict "$VERDICT2" 2>&1)"
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || gov_fail "(B) finish accepted a clean verdict while omitting --build-receipt"
+printf '%s\n' "$out" | grep -q 'finish: build-receipt failed' \
+  || gov_fail "(B) missing --build-receipt refusal was not attributed to the build-receipt gate: $out"
+[ -d "$WT2" ] || gov_fail "(B) missing --build-receipt refusal must leave the worktree intact"
+[ "$(python3 "$TRK" --tracker "$TRACKER2" show --num "$ISSUE2" --field Status)" = "In Progress" ] \
+  || gov_fail "(B) missing --build-receipt refusal must not close the tracker item"
+git -C "$ORIGIN2" show-ref --verify --quiet "refs/heads/$BRANCH2" \
+  || gov_fail "(B) missing --build-receipt refusal must leave the remote branch intact"
+echo "  ok (B) omitting --build-receipt on a real finish REFUSES before any irreversible step"
+
+echo "PASS: idc_git_finish.py is a receipt gate — unrouted findings + unmet merge_conditions + missing/wrong-PR verdicts REFUSE the merge/close; omitting --build-receipt now REFUSES before any irreversible finish step; a clean routed condition-met receipt PROCEEDS; --no-require-routed-findings is a routed-only escape; github fails CLOSED on an unreadable board"

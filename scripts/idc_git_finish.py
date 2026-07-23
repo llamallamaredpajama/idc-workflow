@@ -717,6 +717,23 @@ def enforce_receipt_gate(args, backend, repo, tracker_path, owner, project_numbe
               "that is not satisfied; refusing to merge (resolve it, re-review, retry)")
 
 
+def enforce_build_receipt(args, repo, branch):
+    """Optional U6 implementation-receipt gate.
+
+    Legacy callers may still omit --build-receipt, but when a receipt path is supplied it is treated as
+    authoritative: the receipt must be source-owned, bound to THIS issue/PR, bound to THIS branch's
+    current head, and still match the exact final diff before any mutation proceeds.
+    """
+    if not args.build_receipt:
+        return
+    try:
+        import idc_build_receipt as BR  # noqa: E402 — lazy: only the U6 path needs this helper
+        BR.verify_receipt(repo=repo, receipt_path=args.build_receipt,
+                          expected_issue=args.issue, expected_pr=args.pr, head_ref=branch)
+    except Exception as exc:  # noqa: BLE001 — any stale/forged receipt fails closed here
+        _fail("build-receipt", str(exc))
+
+
 def close_only_recover(args, repo, worktree_abs, tracker_path, backend, project_number, field_ids,
                        owner, name, session_id=None):
     """CLOSE-ONLY recovery for an ALREADY-MERGED PR whose board was never advanced — the phantom-idle
@@ -818,6 +835,10 @@ def main():
                      help="path to the review verdict JSON (the finish RECEIPT) — validated + its "
                           "findings must be routed to the board + its merge_conditions met before any "
                           "merge/close. Required: the finish is a receipt gate.")
+    ap.add_argument("--build-receipt", dest="build_receipt", default=None,
+                     help="optional source-owned implementation receipt for THIS issue/PR/diff. When "
+                          "present it is fail-closed: stale/fake/wrong-head receipts refuse the merge "
+                          "before any mutation.")
     ap.add_argument("--session-id", dest="session_id", default=None,
                      help="session id recorded on the mid-finish obligation (default: "
                           "$CLAUDE_CODE_SESSION_ID) — it attributes the in-flight record, and a "
@@ -855,6 +876,7 @@ def main():
     enforce_receipt_gate(args, backend, repo, tracker_path, owner, project_number)
 
     branch = resolve_branch(repo, args.pr)
+    enforce_build_receipt(args, repo, branch)
     worktree_remove(repo, worktree_abs)
     # RECORD IN-FLIGHT STATE, immediately before the point of no return. Set here rather than at the
     # top of the tail on purpose: everything above this line is reversible and leaves no shipped

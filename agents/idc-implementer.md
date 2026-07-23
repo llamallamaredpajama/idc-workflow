@@ -44,13 +44,21 @@ API sink). No cache path in the brief → tracker ops fall back to a live board 
 
 1. **Claim** the issue through `idc:idc-tracker-adapter`: `claim` flips `Status` to
    `In Progress` and posts a claim comment naming this agent. Set the `attempt:<n>` label.
-2. **Execute the issue's goal contract as a `/fullauto-goal` loop** with full auto-goal discipline:
+2. **Freeze and execute the issue's validation contract inside the `/fullauto-goal` loop.** Before
+   the first code change, freeze the machine-owned gate through
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_validation_contract.py" freeze --repo "$PWD" --issue <N> --pr <PR> ...`
+   so baseline classification (`expected-red` vs `expected-green`), exact `touch` / `off-limits`,
+   and the frozen verification commands are outside the builder's authority. Then execute the issue's
+   goal contract as a `/fullauto-goal` loop with full auto-goal discipline:
    - render-before-run (the issue body IS the rendered contract);
    - **failing test first** when the target behavior is untested — write the real functional
      test, watch it go red, then implement to green;
    - record-and-vary each round (what changed / what the evidence showed / next experiment);
    - evidence-before-assertion — never claim done without the verification surface's actual
      output;
+   - re-run the **frozen** gate at the final head through
+     `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_validation_contract.py" run --repo "$PWD" --contract <contract.json> --out <execution.json>`
+     so review/finish inherit a source-owned execution receipt, never a caller-authored success text;
    - the **attempt ceiling** (~3 failed hypotheses → blocked-stop with evidence);
    - the **no-punt rule** — incidental work needed to satisfy the contract is fixed in this
      same loop, never deferred to a follow-up.

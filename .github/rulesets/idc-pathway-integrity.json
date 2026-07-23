@@ -1,0 +1,53 @@
+{
+  "idc_contract": {
+    "contract_version": 1,
+    "required_check": "idc/pathway-integrity",
+    "exact_head": true,
+    "protected_surfaces": [
+      ".github/workflows/**",
+      "scripts/hooks/**",
+      "scripts/idc_validation_contract.py",
+      "scripts/idc_receipt_check.py"
+    ],
+    "note": "protected_surfaces is IDC metadata that scripts/idc_ruleset_check.py enforces alongside the GitHub rules below; the workflow/hook/validation/receipt classes must each be represented so a merge cannot strip the governance machinery. Code-owner review (require_code_owner_review) governs these surfaces once a CODEOWNERS file names them — see the U8 report for the operator provisioning step."
+  },
+  "github_ruleset": {
+    "name": "idc-pathway-integrity",
+    "target": "branch",
+    "enforcement": "active",
+    "conditions": {
+      "ref_name": {
+        "include": ["~DEFAULT_BRANCH"],
+        "exclude": []
+      }
+    },
+    "rules": [
+      {
+        "type": "pull_request",
+        "parameters": {
+          "required_approving_review_count": 1,
+          "require_code_owner_review": true,
+          "dismiss_stale_reviews_on_push": true,
+          "require_last_push_approval": true,
+          "required_review_thread_resolution": true
+        }
+      },
+      {
+        "type": "required_status_checks",
+        "parameters": {
+          "strict_required_status_checks_policy": true,
+          "do_not_enforce_on_create": false,
+          "required_status_checks": [
+            { "context": "idc/pathway-integrity" }
+          ]
+        }
+      },
+      {
+        "type": "non_fast_forward"
+      },
+      {
+        "type": "deletion"
+      }
+    ]
+  }
+}

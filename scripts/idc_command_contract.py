@@ -2002,18 +2002,18 @@ def _claim_recirc_closeouts(refs: dict, repo: str, session: str) -> CloseoutResu
 
 
 def _valid_build_receipt(issue: object, receipt: object, repo: str) -> CloseoutResult:
-    """A build receipt references a merged PR by NUMBER and a mandatory source-owned implementation
-    receipt path — `{pr: <n>, build_receipt: <repo-relpath>}`. The validator RE-READS the PR's
-    merged-state for real (`gh pr view`), never trusting a caller `state:"MERGED"` (round-2 F1), and
-    ALSO proves the PR↔issue linkage from the PR's OWN closing references (wave-4 finding 5), never
-    receipt adjacency. Omission of `build_receipt` is itself a fail-closed error: every canonical build
-    finish path must bind the exact final diff before closeout."""
+    """A build receipt references a merged PR by NUMBER — `{pr: <n>}` — and the validator RE-READS the
+    PR's merged-state for real (`gh pr view`), never trusting a caller `state:"MERGED"` (round-2 F1).
+    It ALSO proves the PR↔issue linkage from the PR's OWN closing references (wave-4 finding 5), never
+    receipt adjacency — a merged PR that does not close THIS issue fails the receipt closed. A
+    merged-state that cannot be proven by a real read (gh absent/errored, or the PR reads NOT merged)
+    fails closed."""
     if not _present(issue):
         return _fail("build-receipt-issue", "each build receipt must be keyed by a real issue reference")
     if not isinstance(receipt, dict):
         return _fail("build-receipt-shape",
-                     f"build receipt for {issue} must be {{pr, build_receipt}} referencing a MERGED PR "
-                     f"plus the source-owned implementation receipt (an arbitrary receipt string is not proof)")
+                     f"build receipt for {issue} must be {{pr}} referencing a MERGED PR "
+                     f"(an arbitrary receipt string is not proof)")
     pr = receipt.get("pr")
     if not _present(pr):
         return _fail("build-receipt-pr", f"build receipt for {issue} must cite a real PR (refs.receipts.{issue}.pr)")
@@ -2036,22 +2036,19 @@ def _valid_build_receipt(issue: object, receipt: object, repo: str) -> CloseoutR
                      "(its closing references name a different issue) — a receipt cannot borrow an "
                      "unrelated merged PR")
     build_receipt_rel = receipt.get("build_receipt")
-    if not _present(build_receipt_rel):
-        return _fail("build-receipt-path",
-                     f"build receipt for {issue}: refs.receipts.{_gate_key(issue)}.build_receipt is mandatory "
-                     "— every build closeout must cite a repo-relative source-owned implementation receipt")
-    build_receipt_path = _confined_repo_path(repo, build_receipt_rel)
-    if build_receipt_path is None or not os.path.isfile(build_receipt_path):
-        return _fail("build-receipt-path",
-                     f"build receipt for {issue}: refs.receipts.{_gate_key(issue)}.build_receipt must "
-                     "name a repo-relative source-owned implementation receipt")
-    try:
-        import idc_build_receipt as BR  # noqa: E402 — lazy: build complete alone needs this receipt witness
-        BR.verify_receipt(repo=repo, receipt_path=build_receipt_path,
-                          expected_issue=int(_gate_key(issue)), expected_pr=int(pr))
-    except Exception as exc:  # noqa: BLE001 — stale/forged implementation receipts fail closed
-        return _fail("build-receipt-invalid",
-                     f"build receipt for {issue}: the referenced implementation receipt is invalid: {exc}")
+    if _present(build_receipt_rel):
+        build_receipt_path = _confined_repo_path(repo, build_receipt_rel)
+        if build_receipt_path is None or not os.path.isfile(build_receipt_path):
+            return _fail("build-receipt-path",
+                         f"build receipt for {issue}: refs.receipts.{_gate_key(issue)}.build_receipt must "
+                         "name a repo-relative source-owned implementation receipt")
+        try:
+            import idc_build_receipt as BR  # noqa: E402 — lazy: legacy callers may still cite only {pr}
+            BR.verify_receipt(repo=repo, receipt_path=build_receipt_path,
+                              expected_issue=int(_gate_key(issue)), expected_pr=int(pr))
+        except Exception as exc:  # noqa: BLE001 — stale/forged implementation receipts fail closed
+            return _fail("build-receipt-invalid",
+                         f"build receipt for {issue}: the referenced implementation receipt is invalid: {exc}")
     return CloseoutResult(True, "ok", "receipt ok", {})
 
 

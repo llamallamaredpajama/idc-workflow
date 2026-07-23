@@ -139,7 +139,7 @@ out="$(python3 "$VC" freeze \
   --evidence-kind pane-capture \
   --baseline expected-red \
   --label pair-mismatch \
-  --out "$WORK/pair-mismatch.json" 2>&1)" \
+  --out "$REPO_PAIR/docs/workflow/build-validation/pair-mismatch.json" 2>&1)" \
   && fail "a mismatched surface/evidence pair was accepted"
 printf '%s\n' "$out" | grep -qiE 'surface|evidence|pair' \
   || fail "surface/evidence mismatch refusal must explain the pairing failure; got: $out"
@@ -165,7 +165,7 @@ out="$(python3 "$VC" freeze \
   --evidence-kind none \
   --baseline expected-green \
   --label docs-only \
-  --out "$WORK/none-missing-reason.json" 2>&1)" \
+  --out "$REPO_NONE/docs/workflow/build-validation/none-missing-reason.json" 2>&1)" \
   && fail "surface:none without a skip_reason was accepted"
 printf '%s\n' "$out" | grep -qiE 'skip_reason|surface:none|one-line' \
   || fail "surface:none refusal must name the missing skip_reason; got: $out"
@@ -217,7 +217,7 @@ out="$(python3 "$VC" freeze \
   --evidence-kind screenshot-or-recording \
   --baseline expected-red \
   --label impossible-evidence \
-  --out "$WORK/impossible-evidence.json" 2>&1)" \
+  --out "$REPO_IMPOSSIBLE/docs/workflow/build-validation/impossible-evidence.json" 2>&1)" \
   && fail "an impossible evidence kind for the declared commands was accepted"
 printf '%s\n' "$out" | grep -qiE 'cannot produce|evidence|screenshot|recording' \
   || fail "impossible-evidence refusal must explain the producibility failure; got: $out"

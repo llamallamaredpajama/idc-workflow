@@ -26,9 +26,12 @@ admission; the matrix passes `idc:idc-matrix-analysis`'s check; re-sequencing is
 `In Progress` issues are immutable. The authored matrix is descriptive input only —
 `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_execution_graph.py" --matrix <matrix> ... --json` re-derives
 authoritative whole-horizon Waves, and `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_tracker_projection.py"
---matrix <matrix> ... --json` emits the frozen read-only projection/simulation before any sanctioned
-apply. All issues flow as `Todo` — there is no gate here. Close by opening the planning PR (body =
-audit trail) and automerging when green.
+--matrix <matrix> ... --json` emits the frozen read-only projection/simulation. Sanctioned live
+application now runs through `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_tracker_transaction.py" freeze …`
+then `… apply …`: the helper re-reads the relevant tracker state for optimistic concurrency, persists
+a pre-write obligation, applies only the frozen sanctioned operations, requires journal corroboration +
+exact live postcondition, and writes the planning receipt last. All issues flow as `Todo` — there is
+no gate here. Close by opening the planning PR (body = audit trail) and automerging when green.
 
 Do not write source or tests; never write the PRD/TRD (Think authors + gates them); do not reorder
 `In Progress` issues. Halt only on the conditions in the playbook's §Authority & halt (including a

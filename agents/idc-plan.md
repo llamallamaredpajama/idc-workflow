@@ -100,7 +100,11 @@ mutation here:
 `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_execution_graph.py" --matrix <matrix> ... --json`
 re-derives deterministic Waves, and
 `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_tracker_projection.py" --matrix <matrix> ... --json`
-emits the frozen projection + pure simulation the later sanctioned apply consumes. **Re-link paused origins:**
+emits the frozen projection + pure simulation the later sanctioned apply consumes. The live write then
+runs only through `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_tracker_transaction.py" freeze …` followed by
+`… apply …`, which re-reads for optimistic concurrency, persists the pre-write obligation, applies only
+its frozen sanctioned operations, requires journal corroboration + exact live postcondition, and writes
+the planning receipt last. **Re-link paused origins:**
 the same global re-sequence also re-points any **paused** issue whose recirc ticket was retired (its
 scope admitted as one of the considerations now being decomposed — found via the consideration's
 recorded paused-origin link) **off that retired ticket** and onto the consideration's **new unblocker
@@ -115,16 +119,19 @@ pillar-level *file* clashes among the surviving, de-duplicated pillars.
 
 1. Run `idc:idc-schema-check` on every issue body
    (`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_schema_check.py" <body>`); fix until PASS.
-2. Create issues and set `Status`/`Wave`/`Phase`/`Domain` + native blocked-by through
-   `idc:idc-tracker-adapter`. All issues flow as `Todo` — **there is no gate in Plan**; the
-   requirements were already admitted at the end of Think. **Link each Buildable child back to its
-   consideration pointer** through the **engine** (`idc_transition.py … link --parent <pointer>
-   --child <buildable> --kind sub`) — the engine records the link durably (a journaled `idc-blocked-by`
-   marker on github; native `blocked_by`/`parent` on filesystem). This is the **pointer-decomposition
-   record** the engine's guarded `dispose --disposition retired` verifies (a named Buildable child that
-   references the pointer) before it retires the pointer in step 3; without it the retirement is
-   fail-closed. On the **github** backend, stamp each
-   Buildable issue body with the provenance marker
+2. Freeze and apply the board mutation only through the sanctioned planning transaction helper:
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_tracker_transaction.py" freeze …` then
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_tracker_transaction.py" apply …`. That helper owns the
+   live tracker write: it binds the start digest, frozen projection, ordered sanctioned operations,
+   optimistic-concurrency re-read, mandatory journal corroboration, exact live readback, and the final
+   planning receipt. All issues flow as `Todo` — **there is no gate in Plan**; the requirements were
+   already admitted at the end of Think. **Link each Buildable child back to its consideration pointer**
+   through the **engine** (`idc_transition.py … link --parent <pointer> --child <buildable> --kind sub`)
+   — the engine records the link durably (a journaled `idc-blocked-by` marker on github; native
+   `blocked_by`/`parent` on filesystem). This is the **pointer-decomposition record** the engine's
+   guarded `dispose --disposition retired` verifies (a named Buildable child that references the
+   pointer) before it retires the pointer in step 3; without it the retirement is fail-closed. On the
+   **github** backend, stamp each Buildable issue body with the provenance marker
    `<!-- idc-provenance: {"matrix":"<phase-tag>-matrix.yaml","pillar":"<id>"} -->`
    (`idc:idc-goal-contract`), carrying the **exact** `pillars[].id` from the matrix entry just
    authored in Phase 4 (the same value written to the matrix YAML, so the link is deterministic at

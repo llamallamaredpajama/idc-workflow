@@ -1188,11 +1188,33 @@ FAKE_MERGED_PRS="42" gh_finish --repo "$REPO_PLAN_R" --session "$SPR" --command 
 contract start --repo "$REPO_PLAN_R" --session "$SPR" --command plan --plugin-root "$GOV_PLUGIN" --args 'receipt-drift' --source user >/dev/null
 python3 "$GOV_TRK" --tracker "$REPO_PLAN_R/TRACKER.md" set --num 2 --field Domain --value drift >/dev/null \
   || gov_fail "(7f-receipt) could not inject a post-receipt live board drift"
+BAD_READBACK_RECEIPT="docs/workflow/planning-receipts/bad-readback.json"
+python3 - "$GOV_PLUGIN" "$REPO_PLAN_R" "$PLAN_RECEIPT_OK" "$BAD_READBACK_RECEIPT" <<'PY'
+import json, os, sys
+plugin, repo, good_rel, bad_rel = sys.argv[1:]
+sys.path.insert(0, os.path.join(plugin, 'scripts'))
+import idc_planning_receipt as PR  # noqa: E402
+path = os.path.join(repo, good_rel)
+receipt = json.load(open(path, encoding='utf-8'))
+live = PR.normalize_live_items(PR.read_live_snapshot('filesystem', os.path.join(repo, 'TRACKER.md'), repo))
+receipt['final_snapshot'] = live
+receipt['final_digest'] = PR.sha256_json(live)
+receipt['readback'] = {'ok': True, 'mismatches': [], 'final_digest': receipt['final_digest']}
+out = os.path.join(repo, bad_rel)
+os.makedirs(os.path.dirname(out), exist_ok=True)
+with open(out, 'w', encoding='utf-8') as fh:
+    json.dump(receipt, fh, indent=2, sort_keys=True)
+    fh.write('\n')
+PY
+if FAKE_MERGED_PRS="42" gh_finish --repo "$REPO_PLAN_R" --session "$SPR" --command plan --status complete \
+     --evidence-json "$(plan_ev "$SINGLEMX" '{"1":2}' '[1]' "$BAD_READBACK_RECEIPT")" 2>/dev/null; then
+  gov_fail "(7f-receipt) a planning receipt whose final digest matches but whose frozen live readback drifted was accepted"
+fi
 if FAKE_MERGED_PRS="42" gh_finish --repo "$REPO_PLAN_R" --session "$SPR" --command plan --status complete \
      --evidence-json "$(plan_ev "$SINGLEMX" '{"1":2}' '[1]' "$PLAN_RECEIPT_OK")" 2>/dev/null; then
-  gov_fail "(7f-receipt) a stale planning receipt whose live readback drifted was accepted"
+  gov_fail "(7f-receipt) a stale planning receipt whose live final digest drifted was accepted"
 fi
-echo "  ok (7f-receipt, U5) plan complete requires a valid source-owned planning receipt (missing/forged/stale rejected; one current receipt accepted)"
+echo "  ok (7f-receipt, U5) plan complete requires a valid source-owned planning receipt (missing/forged/stale/readback-mismatched rejected; one current receipt accepted)"
 
 PLAN_OK_RECEIPT="$(write_plan_receipt "$REPO_PLAN" "$SINGLEMX" plan-ok)"
 FAKE_MERGED_PRS="42" gh_finish --repo "$REPO_PLAN" --session "$SP" --command plan --status complete \

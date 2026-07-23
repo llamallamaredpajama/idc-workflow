@@ -46,8 +46,10 @@ JSON
 RAW="$(python3 "$TRK" --tracker "$REPO/TRACKER.md" create --title 'raw post-boundary item' --stage Buildable)" \
   || gov_fail "post-boundary raw create failed"
 
-OUT1="$(python3 "$JAN" --repo "$REPO" --tracker "$REPO/TRACKER.md" --json)" \
-  || gov_fail "first janitor scan failed"
+set +e
+OUT1="$(python3 "$JAN" --repo "$REPO" --tracker "$REPO/TRACKER.md" --json)"; RC1=$?
+set -e
+[ "$RC1" -eq 1 ] || gov_fail "first janitor scan must exit 1 with findings, got $RC1"
 REPORT_JSON="$OUT1" python3 - "$RAW" <<'PY' || gov_fail "first janitor scan did not surface the post-boundary raw fact"
 import json, os, sys
 raw = int(sys.argv[1])
@@ -60,8 +62,10 @@ CURSOR="$REPO/.git/idc-reconciliation-cursor.json"
 [ -f "$CURSOR" ] || gov_fail "first janitor scan did not write its local cursor"
 rm -f "$CURSOR"
 
-OUT2="$(python3 "$JAN" --repo "$REPO" --tracker "$REPO/TRACKER.md" --json)" \
-  || gov_fail "second janitor scan after cursor deletion failed"
+set +e
+OUT2="$(python3 "$JAN" --repo "$REPO" --tracker "$REPO/TRACKER.md" --json)"; RC2=$?
+set -e
+[ "$RC2" -eq 1 ] || gov_fail "second janitor scan after cursor deletion must exit 1 with findings, got $RC2"
 REPORT_JSON="$OUT2" python3 - "$RAW" <<'PY' || gov_fail "deleting the local cursor granted amnesty instead of forcing a durable rescan"
 import json, os, sys
 raw = int(sys.argv[1])

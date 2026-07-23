@@ -53,6 +53,7 @@ Usage:
 """
 import argparse
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -70,6 +71,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from idc_journal_replay import (reconstruct_state_from_entries, journal_item_id, scan_journal_strict,
                                 journal_adopted, watermark_from, has_numberless_create)
+import idc_reconciliation_baseline as RB
 
 # --- attribution -----------------------------------------------------------------------------------
 # IDC-attributable branch/worktree naming (the design's exact list). Anchored at the START, and `build`
@@ -273,6 +275,18 @@ JANITOR_PROVENANCE = "idc_git_janitor.py"
 # runtime-only token both rotation and journal_append create when they lock — never committed. Derived
 # from JOURNAL_REL so the ignore rule and the lock path can't drift.
 JOURNAL_LOCK_GITIGNORE_LINE = JOURNAL_REL.replace(os.sep, "/") + ".lock"
+TEST_STUBBORN_ENV = "IDC_JANITOR_TEST_STUBBORN_FINDING"
+TEST_INTERRUPT_ENV = "IDC_JANITOR_TEST_INTERRUPT_AFTER"
+BOOTSTRAP_INTERRUPT_POINT = "after-baseline-marker"
+ALLOWED_PLAN_OPS = {
+    "remove-worktree", "delete-local-branch", "delete-remote-branch", "close-board-item",
+    "route-intake", "route-reconciliation_audit", "route-investigate",
+}
+OUTSIDE_BRANCH_CLASS = "outside-unmerged-branch"
+OUTSIDE_MERGED_CLASS = "outside-merged-work"
+OUTSIDE_DEFAULT_CLASS = "outside-default-branch"
+POST_BOUNDARY_TRACKER_CLASS = "post-boundary-unreceipted-tracker"
+FOREIGN_TOOL_CLASS = "foreign-tool-work"
 
 
 def read_at_cap(n, limit):
@@ -401,6 +415,201 @@ def finding(tier, dim, name, detail, action="", **extra):
     return f
 
 
+def _sha256_hex(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def _git_bytes(args, repo):
+    try:
+        p = subprocess.run(["git", "-C", repo] + args, capture_output=True, check=False)
+    except (OSError, ValueError):
+        return b"", 127
+    return p.stdout or b"", p.returncode
+
+
+def _merge_base(repo, left, right):
+    out, rc = git(["merge-base", left, right], repo)
+    return out.strip() if rc == 0 and out.strip() else ""
+
+
+def _repo_identity(repo):
+    out, rc = git(["remote", "get-url", "origin"], repo)
+    raw = out.strip() if rc == 0 else ""
+    if raw:
+        m = re.search(r"github\.com[:/]([^/]+/[^/.]+)(?:\.git)?$", raw)
+        if m:
+            return m.group(1)
+        base = os.path.basename(raw.rstrip("/"))
+        if base.endswith(".git"):
+            base = base[:-4]
+        parent = os.path.basename(os.path.dirname(raw.rstrip("/")))
+        if parent and parent not in ("", ".", os.sep):
+            return f"{parent}/{base}" if base else parent
+        if base:
+            return base
+    return os.path.basename(os.path.abspath(repo))
+
+
+def _diff_sha256(repo, base, head):
+    if not base or not head:
+        return ""
+    raw, rc = _git_bytes(["diff", "--binary", f"{base}..{head}"], repo)
+    return _sha256_hex(raw) if rc == 0 else ""
+
+
+def _source_pin(repo, base, head):
+    return {
+        "repository": _repo_identity(repo),
+        "base": base,
+        "head": head,
+        "diff_sha256": _diff_sha256(repo, base, head),
+    }
+
+
+def _read_reconciliation(repo, default):
+    try:
+        marker = RB.read_marker(repo)
+        receipt = RB.read_receipt(repo)
+        checkpoint = RB.read_checkpoint(repo)
+        cursor = RB.read_cursor(repo)
+        status = RB.status(repo)
+        return {
+            "status": status,
+            "marker": marker,
+            "receipt": receipt,
+            "checkpoint": checkpoint,
+            "cursor": cursor,
+            "error": None,
+            "default_branch": (marker or receipt or {}).get("default_branch") or {
+                "name": default,
+                "head": tip_sha(repo, "refs/heads/" + default),
+            },
+        }
+    except RB.BaselineError as exc:
+        return {
+            "status": {
+                "schema_version": RB.SCHEMA_VERSION,
+                "state": RB.PENDING_STATE,
+                "pending": True,
+                "marker_present": False,
+                "receipt_present": False,
+                "checkpoint_present": False,
+                "cursor_present": False,
+                "marker_path": RB.MARKER_RELPATH,
+                "receipt_path": RB.RECEIPT_RELPATH,
+                "checkpoint_path": RB.CHECKPOINT_RELPATH,
+                "cursor_path": RB.CURSOR_BASENAME,
+                "default_branch": {"name": default, "head": tip_sha(repo, "refs/heads/" + default)},
+                "reason": RB.REQUIRED_REASON,
+            },
+            "marker": None,
+            "receipt": None,
+            "checkpoint": None,
+            "cursor": None,
+            "error": str(exc),
+            "default_branch": {"name": default, "head": tip_sha(repo, "refs/heads/" + default)},
+        }
+
+
+def _journal_suffix_item_ids(ctx):
+    receipt = ctx.get("reconciliation", {}).get("receipt")
+    if not receipt:
+        return set(), None
+    journal_path = os.path.join(ctx["repo"], JOURNAL_REL)
+    if not os.path.exists(journal_path):
+        return set(), "missing"
+    entries, error = scan_journal_strict(journal_path)
+    if error:
+        return set(), error
+    start = int(receipt.get("journal_entry_count") or 0)
+    return {journal_item_id(e) for e in entries[start:] if journal_item_id(e) is not None}, None
+
+
+def _legacy_item_snapshot(board):
+    out = []
+    for item in board or []:
+        if item.get("number") is None:
+            continue
+        out.append({
+            "number": item["number"],
+            "stage": item.get("stage") or "",
+            "status": item.get("status") or "",
+            "evidence_class": RB.ADOPTED_STATE,
+            "historical_verification": "not-claimed",
+        })
+    return sorted(out, key=lambda it: it["number"])
+
+
+def _current_ref_snapshots(ctx):
+    repo = ctx["repo"]
+    default = ctx["default"]
+    refs = []
+    for branch in sorted(local_branches(repo)):
+        if branch == default:
+            continue
+        refs.append({
+            "name": branch,
+            "kind": "local_branch",
+            "head": tip_sha(repo, "refs/heads/" + branch),
+            "foreign_tool": foreign_label(branch),
+            "idc_attributable": is_idc(branch),
+        })
+    return refs
+
+
+def _post_boundary_tracker_findings(ctx):
+    receipt = ctx.get("reconciliation", {}).get("receipt")
+    board = ctx.get("board") or []
+    if not receipt:
+        return [], False
+    suffix_ids, journal_error = _journal_suffix_item_ids(ctx)
+    if journal_error:
+        return [finding(
+            RISKY,
+            "baseline",
+            "journal",
+            f"could not establish post-boundary journal coverage ({journal_error})",
+            "re-run Janitor after journal state is readable",
+            classification=POST_BOUNDARY_TRACKER_CLASS,
+            root_id="post-boundary-journal",
+            route="reconciliation_audit",
+            preserve=True,
+            blocker=True,
+        )], True
+    legacy = {
+        int(item["number"]): {
+            "stage": item.get("stage") or "",
+            "status": item.get("status") or "",
+        }
+        for item in receipt.get("legacy_items") or []
+        if isinstance(item, dict) and isinstance(item.get("number"), int)
+    }
+    findings = []
+    for item in board:
+        number = item.get("number")
+        if not isinstance(number, int):
+            continue
+        state = {"stage": item.get("stage") or "", "status": item.get("status") or ""}
+        if number in legacy and legacy[number] == state:
+            continue
+        if number in suffix_ids:
+            continue
+        findings.append(finding(
+            RISKY,
+            "baseline",
+            f"#{number}",
+            "post-boundary tracker state changed without a matching journal suffix since adoption",
+            "route a reconciliation audit; do not claim historical verification",
+            number=number,
+            classification=POST_BOUNDARY_TRACKER_CLASS,
+            root_id=f"post-boundary-item:#{number}",
+            route="reconciliation_audit",
+            preserve=True,
+            blocker=True,
+        ))
+    return findings, False
+
+
 def scan(ctx):
     """Return (findings, indeterminate). Pure over ctx (git + board already loaded). indeterminate is
     True when a dimension could not be fully established (a degraded github secondary read) — the
@@ -435,6 +644,11 @@ def scan(ctx):
     merged_refs = ctx.get("merged_refs", set())
     merged_oids = ctx.get("merged_oids", {})
     origin_default_ref = ctx.get("origin_default_ref")
+    receipt = ctx.get("reconciliation", {}).get("receipt")
+    adopted_ref_names = {
+        ref.get("name") for ref in (receipt.get("adopted_refs") or [])
+        if isinstance(ref, dict) and isinstance(ref.get("name"), str)
+    } if receipt else set()
     _merged_cache = {}
 
     def branch_merged(short, remote=False):
@@ -484,9 +698,33 @@ def scan(ctx):
         if wt.get("branch"):
             wt_branches.add(wt["branch"])
         if not is_idc(name):
-            findings.append(finding(
-                REPORT_ONLY, "worktree", path,
-                f"non-IDC ({foreign_label(name)}) worktree on '{name}'", "never auto-fixed (foreign)"))
+            label = foreign_label(name)
+            receipt = ctx.get("reconciliation", {}).get("receipt")
+            pending_baseline = bool((ctx.get("reconciliation", {}).get("status") or {}).get("pending"))
+            head = tip_sha(repo, "refs/heads/" + name) if wt.get("branch") else ""
+            base = _merge_base(repo, "refs/heads/" + name, default) if wt.get("branch") else ""
+            if receipt and name in adopted_ref_names:
+                continue
+            if (receipt or pending_baseline) and label == "unknown" and wt.get("branch") and name not in adopted_ref_names:
+                findings.append(finding(
+                    RISKY, "worktree", path,
+                    f"outside-path worktree on '{name}' is preserved for Intake adoption",
+                    "preserve and route through Intake/Build adoption",
+                    classification=OUTSIDE_BRANCH_CLASS,
+                    root_id=f"outside-branch:{name}",
+                    route="intake",
+                    preserve=True,
+                    source_pin=_source_pin(repo, base, head),
+                ))
+            else:
+                findings.append(finding(
+                    REPORT_ONLY, "worktree", path,
+                    f"non-IDC ({label}) worktree on '{name}'", "never auto-fixed (foreign)",
+                    classification=FOREIGN_TOOL_CLASS,
+                    root_id=f"foreign-worktree:{name}",
+                    route="investigate",
+                    preserve=True,
+                ))
             continue
         if worktree_dirty(path):
             findings.append(finding(
@@ -519,10 +757,36 @@ def scan(ctx):
             return
         kind = "remote" if remote else "local"
         if not is_idc(name):
-            detail = f"non-IDC ({foreign_label(name)}) {kind} branch"
+            label = foreign_label(name)
+            receipt = ctx.get("reconciliation", {}).get("receipt")
+            pending_baseline = bool((ctx.get("reconciliation", {}).get("status") or {}).get("pending"))
+            ref = ("refs/remotes/origin/" + name) if remote else ("refs/heads/" + name)
+            head = live.get(name) if remote and live else tip_sha(repo, ref)
+            if receipt and name in adopted_ref_names:
+                return
+            if (receipt or pending_baseline) and label == "unknown" and name not in adopted_ref_names:
+                merged, _via = branch_merged(name, remote=remote)
+                base = _merge_base(repo, ref, default)
+                findings.append(finding(
+                    RISKY, dim, name,
+                    ("already-merged outside-path work" if merged else "outside-path branch") +
+                    (f" on origin/{name}" if remote else f" on {name}"),
+                    "route to a reconciliation audit" if merged else "preserve and route through Intake/Build adoption",
+                    classification=OUTSIDE_MERGED_CLASS if merged else OUTSIDE_BRANCH_CLASS,
+                    root_id=f"outside-branch:{name}",
+                    route="reconciliation_audit" if merged else "intake",
+                    preserve=True,
+                    source_pin=_source_pin(repo, base, head),
+                ))
+                return
+            detail = f"non-IDC ({label}) {kind} branch"
             findings.append(finding(REPORT_ONLY, dim, name,
                                     detail + (f" origin/{name}" if remote else ""),
-                                    "never auto-fixed (foreign)"))
+                                    "never auto-fixed (foreign)",
+                                    classification=FOREIGN_TOOL_CLASS,
+                                    root_id=f"foreign-branch:{name}",
+                                    route="investigate",
+                                    preserve=True))
             return
         merged, via = branch_merged(name, remote=remote)
         if merged:
@@ -619,10 +883,115 @@ def scan(ctx):
             f"open recirc branch {b0} + {n_inbox} open Stage=Recirculation ticket(s) — a mid-drain "
             f"truncation; resume /idc:recirculate", action="resume the recirc drain"))
 
+    receipt = ctx.get("reconciliation", {}).get("receipt")
+    if receipt:
+        baseline_head = (receipt.get("default_branch") or {}).get("head") or ""
+        current_head = tip_sha(repo, "refs/heads/" + default)
+        if baseline_head and current_head and current_head != baseline_head:
+            findings.append(finding(
+                RISKY,
+                "baseline",
+                default,
+                "default-branch head moved after adoption without a same-path IDC receipt binding",
+                "route a reconciliation audit for the post-boundary default-branch diff",
+                classification=OUTSIDE_DEFAULT_CLASS,
+                root_id=f"outside-default:{current_head}",
+                route="reconciliation_audit",
+                preserve=True,
+                source_pin=_source_pin(repo, baseline_head, current_head),
+            ))
+        extra_findings, extra_indeterminate = _post_boundary_tracker_findings(ctx)
+        findings.extend(extra_findings)
+        indeterminate = indeterminate or extra_indeterminate
+
     return findings, indeterminate
 
 
 # --- apply-safe ------------------------------------------------------------------------------------
+def _tier_rank(tier):
+    return {SAFE_FIX: 3, RISKY: 2, REPORT_ONLY: 1}.get(tier, 0)
+
+
+def dedupe_findings(findings):
+    grouped = {}
+    for raw in findings:
+        root_id = raw.get("root_id") or f"{raw.get('dim')}:{raw.get('name')}"
+        item = dict(raw)
+        item.setdefault("root_id", root_id)
+        item.setdefault("symptoms", [])
+        item["symptoms"] = [*item.get("symptoms", []), f"{item.get('dim')}:{item.get('name')}"]
+        current = grouped.get(root_id)
+        if current is None:
+            grouped[root_id] = item
+            continue
+        current["symptoms"] = sorted(set(current.get("symptoms", [])) | set(item["symptoms"]))
+        current["blocker"] = bool(current.get("blocker") or item.get("blocker"))
+        if item.get("preserve"):
+            current["preserve"] = True
+        if item.get("source_pin") and not current.get("source_pin"):
+            current["source_pin"] = item["source_pin"]
+        if item.get("route") and not current.get("route"):
+            current["route"] = item["route"]
+        if item.get("classification") and not current.get("classification"):
+            current["classification"] = item["classification"]
+        if _tier_rank(item.get("tier")) > _tier_rank(current.get("tier")):
+            merged = dict(item)
+            merged["symptoms"] = current["symptoms"]
+            merged["blocker"] = current["blocker"]
+            if current.get("preserve"):
+                merged["preserve"] = True
+            if current.get("source_pin") and not merged.get("source_pin"):
+                merged["source_pin"] = current["source_pin"]
+            grouped[root_id] = merged
+    return list(grouped.values())
+
+
+def _plan_op(f):
+    if f.get("tier") == SAFE_FIX:
+        return {
+            "worktree": "remove-worktree",
+            "branch": "delete-local-branch",
+            "remote-branch": "delete-remote-branch",
+            "board": "close-board-item",
+        }.get(f.get("dim"))
+    route = f.get("route")
+    if route == "intake":
+        return "route-intake"
+    if route == "reconciliation_audit":
+        return "route-reconciliation_audit"
+    if route == "investigate":
+        return "route-investigate"
+    return None
+
+
+def build_plan(findings):
+    ops = []
+    blockers = []
+    for f in findings:
+        root_id = f.get("root_id") or f"{f.get('dim')}:{f.get('name')}"
+        if f.get("blocker"):
+            blockers.append(root_id)
+        op = _plan_op(f)
+        if not op:
+            continue
+        ops.append({
+            "root_id": root_id,
+            "op": op,
+            "tier": f.get("tier"),
+            "route": f.get("route"),
+            "classification": f.get("classification"),
+            "name": f.get("name"),
+            "preserve": bool(f.get("preserve")),
+            "source_pin": f.get("source_pin"),
+        })
+    validated = all(op["op"] in ALLOWED_PLAN_OPS and not (op["op"].startswith("delete") and op.get("preserve")) for op in ops)
+    return {
+        "validated": validated,
+        "operations": ops,
+        "blockers": sorted(set(blockers)),
+    }
+
+
 def apply_safe(findings, ctx):
     """Execute ONLY the SAFE-FIX findings, worktrees→local→remote→board (worktrees before their
     branches so a merged clean worktree's branch is deletable). Returns a list of (finding, ok, note).
@@ -796,13 +1165,17 @@ def print_report(findings, ctx):
           f"({len(findings)} findings)")
 
 
-def emit_json(findings, ctx, indeterminate, applied=None):
+def emit_json(findings, ctx, indeterminate, applied=None, plan=None):
     c = counts(findings)
+    baseline = dict((ctx.get("reconciliation") or {}).get("status") or {})
+    if (ctx.get("reconciliation") or {}).get("error"):
+        baseline["error"] = ctx["reconciliation"]["error"]
     out = {
         "verdict": verdict(findings, indeterminate),
         "counts": {"safe_fix": c[SAFE_FIX], "risky": c[RISKY], "report_only": c[REPORT_ONLY],
                    "total": len(findings)},
         "board_scanned": ctx.get("board") is not None,
+        "baseline": baseline,
         # `op` rides the JSON (never the human report) because it is the finding's MACHINE
         # classification — the stable token a programmatic consumer filters on instead of
         # pattern-matching the prose `detail`. idc_finish_coherence.py selects the board-stale class
@@ -810,8 +1183,11 @@ def emit_json(findings, ctx, indeterminate, applied=None):
         # English, which drifts the moment a detail string is reworded. Additive: a finding with no
         # `op` (every non-board dimension) simply omits the key, so existing consumers are unchanged.
         "findings": [{k: v for k, v in f.items() if k in
-                      ("tier", "dim", "name", "detail", "action", "number", "op")} for f in findings],
+                      ("tier", "dim", "name", "detail", "action", "number", "op", "classification",
+                       "route", "preserve", "root_id", "source_pin", "symptoms", "blocker")} for f in findings],
     }
+    if plan is not None:
+        out["plan"] = plan
     if applied is not None:
         out["applied"] = [{"dim": f["dim"], "name": f["name"], "ok": ok, "note": note}
                           for (f, ok, note) in applied]
@@ -838,6 +1214,7 @@ def build_ctx(args):
     origin_default = "refs/remotes/origin/" + default
     ctx = {"repo": repo, "default": default, "worktrees": trees, "backend": args.backend,
            "origin_default_ref": origin_default if _ref_exists(repo, origin_default) else None}
+    ctx["reconciliation"] = _read_reconciliation(repo, default)
 
     if args.backend == "github":
         if not args.owner or not args.project:
@@ -1210,6 +1587,94 @@ def rotate_journal(ctx, journal_path):
     print(f"Journal rotated. {len(to_keep)} entries remain.")
 
 
+def _route_obligations(findings):
+    obligations = []
+    seen = set()
+    for f in findings:
+        route = f.get("route")
+        if route not in ("intake", "reconciliation_audit", "investigate"):
+            continue
+        root_id = f.get("root_id") or f"{f.get('dim')}:{f.get('name')}"
+        if root_id in seen:
+            continue
+        seen.add(root_id)
+        obligations.append({
+            "root_id": root_id,
+            "classification": f.get("classification"),
+            "route": route,
+            "name": f.get("name"),
+            "source_pin": f.get("source_pin"),
+            "preserve": bool(f.get("preserve")),
+        })
+    return obligations
+
+
+def _bootstrap_receipt(ctx, findings):
+    board = ctx.get("board") or []
+    prior = ctx.get("reconciliation", {}).get("receipt") or {}
+    journal_path = os.path.join(ctx["repo"], JOURNAL_REL)
+    journal_count = 0
+    if os.path.exists(journal_path):
+        entries, error = scan_journal_strict(journal_path)
+        if not error:
+            journal_count = len(entries)
+    merged_obligations = {}
+    for item in prior.get("routed_obligations") or []:
+        if isinstance(item, dict) and isinstance(item.get("root_id"), str):
+            merged_obligations[item["root_id"]] = item
+    for item in _route_obligations(findings):
+        merged_obligations[item["root_id"]] = item
+    return {
+        "schema_version": RB.SCHEMA_VERSION,
+        "state": RB.ADOPTED_STATE,
+        "created_at": prior.get("created_at") or datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+        "default_branch": {
+            "name": ctx["default"],
+            "head": tip_sha(ctx["repo"], "refs/heads/" + ctx["default"]),
+        },
+        "journal_entry_count": journal_count,
+        "legacy_items": _legacy_item_snapshot(board),
+        "adopted_refs": _current_ref_snapshots(ctx),
+        "routed_obligations": [merged_obligations[key] for key in sorted(merged_obligations)],
+        "unresolved": [],
+    }
+
+
+def _checkpoint_payload(findings, *, advanced):
+    return {
+        "schema_version": RB.SCHEMA_VERSION,
+        "resolved_root_ids": sorted({
+            (f.get("root_id") or f"{f.get('dim')}:{f.get('name')}")
+            for f in findings if not f.get("blocker")
+        }),
+        "blocked_root_ids": sorted({
+            (f.get("root_id") or f"{f.get('dim')}:{f.get('name')}")
+            for f in findings if f.get("blocker")
+        }),
+        "checkpoint_advanced": bool(advanced),
+        "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+
+
+def _write_cursor(ctx, findings, *, rescanned_from_durable):
+    try:
+        RB.write_cursor(ctx["repo"], {
+            "schema_version": RB.SCHEMA_VERSION,
+            "root_ids": sorted({
+                (f.get("root_id") or f"{f.get('dim')}:{f.get('name')}") for f in findings
+            }),
+            "rescanned_from_durable": bool(rescanned_from_durable),
+            "default_head": tip_sha(ctx["repo"], "refs/heads/" + ctx["default"]),
+        })
+    except RB.BaselineError:
+        pass
+
+
+def _interrupt(point):
+    if os.environ.get(TEST_INTERRUPT_ENV) == point:
+        raise SystemExit(99)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Deterministic board↔git reconciler (read-only by default).")
     ap.add_argument("--repo", default=".", help="repo dir to scan (default: cwd)")
@@ -1220,6 +1685,10 @@ def main():
     ap.add_argument("--project", help="integer project number (github backend)")
     ap.add_argument("--apply-safe", action="store_true",
                     help="execute ONLY the SAFE-FIX tier, then re-scan and report the delta")
+    ap.add_argument("--bootstrap", action="store_true",
+                    help="create or resume the one-time adoption baseline")
+    ap.add_argument("--max-passes", type=int, default=1,
+                    help="maximum non-converging repair/bootstrap passes before halting (default: 1)")
     ap.add_argument("--json", action="store_true", help="emit the machine-readable JSON report")
     ap.add_argument("--check-journal-divergence", action="store_true",
                     help="run the journal-replay reconciliation dimension (opt-in until #150 "
@@ -1260,18 +1729,113 @@ def main():
         rotate_journal(ctx, journal_path)
         sys.exit(0)
 
-    findings, indeterminate = scan(ctx)
+    def perform_scan(context):
+        findings0, indeterminate0 = scan(context)
+        journal_path0 = os.path.join(context["repo"], JOURNAL_REL)
+        # OPT-IN until #150: sanctioned mutation doors outside the engine (adapter claim/move/close
+        # prose, gate closes, recirc stage stamps) do not journal yet, so a default replay would report
+        # documented normal traffic as RISKY divergence. Doctor Row 10 passes the flag explicitly.
+        if args.check_journal_divergence:
+            indeterminate0 = check_journal_divergence(context, findings0, journal_path0) or indeterminate0
+        stubborn = os.environ.get(TEST_STUBBORN_ENV)
+        if stubborn:
+            findings0.append(finding(
+                RISKY, "plan", stubborn, "test-only stubborn finding", "leave blocked for the next pass",
+                classification="test-stubborn", root_id=stubborn, blocker=True,
+            ))
+        findings0 = dedupe_findings(findings0)
+        plan0 = build_plan(findings0)
+        if indeterminate0:
+            plan0["blockers"] = sorted(set(plan0["blockers"]) | {"indeterminate-ground-truth"})
+        if not plan0["validated"]:
+            plan0["blockers"] = sorted(set(plan0["blockers"]) | {"unvalidated-plan"})
+        return findings0, indeterminate0, plan0
 
-    journal_path = os.path.join(ctx["repo"], JOURNAL_REL)
-    # OPT-IN until #150: sanctioned mutation doors outside the engine (adapter claim/move/close
-    # prose, gate closes, recirc stage stamps) do not journal yet, so a default replay would report
-    # documented normal traffic as RISKY divergence. Doctor Row 10 passes the flag explicitly.
-    if args.check_journal_divergence:
-        indeterminate = check_journal_divergence(ctx, findings, journal_path) or indeterminate
+    max_passes = max(1, int(args.max_passes or 1))
+    rescanned = bool(ctx.get("reconciliation", {}).get("receipt")) and not bool(ctx.get("reconciliation", {}).get("cursor"))
+
+    if args.bootstrap:
+        resume = bool((ctx.get("reconciliation", {}).get("marker") or {}).get("in_progress"))
+        RB.write_marker(
+            ctx["repo"],
+            default_branch_name=ctx["default"],
+            default_branch_head=tip_sha(ctx["repo"], "refs/heads/" + ctx["default"]),
+            in_progress={"mode": "bootstrap", "requested_max_passes": max_passes},
+            resume={"resumed": resume},
+        )
+        _interrupt(BOOTSTRAP_INTERRUPT_POINT)
+        previous_blockers = None
+        stagnant = 0
+        for pass_no in range(1, max_passes + 1):
+            ctx = build_ctx(args)
+            rescanned = bool(ctx.get("reconciliation", {}).get("receipt")) and not bool(ctx.get("reconciliation", {}).get("cursor"))
+            findings, indeterminate, plan = perform_scan(ctx)
+            plan.update({
+                "passes": pass_no,
+                "halted": False,
+                "checkpoint_advanced": False,
+                "rescanned_from_durable": rescanned,
+                "resumed": resume,
+            })
+            _write_cursor(ctx, findings, rescanned_from_durable=rescanned)
+            if plan["validated"] and not plan["blockers"]:
+                receipt = _bootstrap_receipt(ctx, findings)
+                checkpoint = _checkpoint_payload(findings, advanced=True)
+                RB.finalize_bootstrap(ctx["repo"], receipt, checkpoint)
+                ctx_done = build_ctx(args)
+                rescanned_done = bool(ctx_done.get("reconciliation", {}).get("receipt")) and not bool(ctx_done.get("reconciliation", {}).get("cursor"))
+                findings_done, indeterminate_done, plan_done = perform_scan(ctx_done)
+                plan_done.update({
+                    "passes": pass_no,
+                    "halted": False,
+                    "checkpoint_advanced": True,
+                    "rescanned_from_durable": rescanned_done,
+                    "resumed": resume,
+                })
+                _write_cursor(ctx_done, findings_done, rescanned_from_durable=rescanned_done)
+                if args.json:
+                    emit_json(findings_done, ctx_done, indeterminate_done, plan=plan_done)
+                else:
+                    print_report(findings_done, ctx_done)
+                    print("janitor: " + _VERDICT_BANNER[verdict(findings_done, indeterminate_done)])
+                code = _exit_code(findings_done, indeterminate_done)
+                _write_scan_report(ctx_done["repo"], args.report_session, args.report_nonce, code)
+                sys.exit(code)
+            blockers = tuple(plan["blockers"])
+            stagnant = (stagnant + 1) if blockers == previous_blockers else 1
+            previous_blockers = blockers
+            RB.write_checkpoint(ctx["repo"], _checkpoint_payload(findings, advanced=False))
+            if stagnant >= max_passes:
+                plan["halted"] = True
+                if args.json:
+                    emit_json(findings, ctx, indeterminate, plan=plan)
+                else:
+                    print_report(findings, ctx)
+                    print("janitor: findings")
+                _write_scan_report(ctx["repo"], args.report_session, args.report_nonce, 1)
+                sys.exit(1)
+        plan["halted"] = True
+        if args.json:
+            emit_json(findings, ctx, indeterminate, plan=plan)
+        else:
+            print_report(findings, ctx)
+            print("janitor: findings")
+        _write_scan_report(ctx["repo"], args.report_session, args.report_nonce, 1)
+        sys.exit(1)
+
+    findings, indeterminate, plan = perform_scan(ctx)
+    plan.update({
+        "passes": 1,
+        "halted": False,
+        "checkpoint_advanced": False,
+        "rescanned_from_durable": rescanned,
+        "resumed": False,
+    })
+    _write_cursor(ctx, findings, rescanned_from_durable=rescanned)
 
     if not args.apply_safe:
         if args.json:
-            emit_json(findings, ctx, indeterminate)
+            emit_json(findings, ctx, indeterminate, plan=plan)
         else:
             print_report(findings, ctx)
             print("janitor: " + _VERDICT_BANNER[verdict(findings, indeterminate)])
@@ -1282,18 +1846,24 @@ def main():
     # --apply-safe: execute SAFE-FIX, re-scan, report the delta.
     if not args.json:
         print("janitor: applying SAFE-FIX tier only (RISKY + REPORT-ONLY are never touched)…")
-    applied = apply_safe(findings, ctx)
+    applied = apply_safe(findings, ctx) if plan["validated"] else []
     if not args.json:
         for (f, ok, note) in applied:
             mark = "✓" if ok else "✗"
             print(f"janitor: {mark} {f['dim']} {f['name']} — {note}")
     ctx2 = build_ctx(args)                       # re-establish ground truth after mutation
-    findings2, indeterminate2 = scan(ctx2)
-    journal_path = os.path.join(ctx2["repo"], JOURNAL_REL)
-    if args.check_journal_divergence:
-        indeterminate2 = check_journal_divergence(ctx2, findings2, journal_path) or indeterminate2
+    rescanned2 = bool(ctx2.get("reconciliation", {}).get("receipt")) and not bool(ctx2.get("reconciliation", {}).get("cursor"))
+    findings2, indeterminate2, plan2 = perform_scan(ctx2)
+    plan2.update({
+        "passes": 1,
+        "halted": False,
+        "checkpoint_advanced": False,
+        "rescanned_from_durable": rescanned2,
+        "resumed": False,
+    })
+    _write_cursor(ctx2, findings2, rescanned_from_durable=rescanned2)
     if args.json:
-        emit_json(findings2, ctx2, indeterminate2, applied=applied)
+        emit_json(findings2, ctx2, indeterminate2, applied=applied, plan=plan2)
     else:
         applied_ok = sum(1 for (_f, ok, _n) in applied if ok)
         print(f"janitor: delta — {applied_ok} SAFE-FIX applied; {len(findings2)} findings remain")

@@ -41,6 +41,9 @@ printf 'receipt_version: 2\nplugin_version: %s\nfingerprint_method: sha256\nwrit
   > "$REPO/docs/workflow/install-receipt.yaml"
 python3 "$TRK" --tracker "$REPO/TRACKER.md" init >/dev/null || gov_fail "tracker init failed"
 mkdir -p "$REPO/docs/workflow" && : > "$REPO/docs/workflow/transition-journal.ndjson"
+printf base > "$REPO/app.txt"
+git -C "$REPO" add -A
+git -C "$REPO" commit -qm base
 
 MARKER="$REPO/docs/workflow/reconciliation-baseline-required.json"
 ADOPTION="$REPO/docs/workflow/reconciliation-adoption.json"
@@ -116,8 +119,10 @@ JSON
 rm -f "$MARKER"
 raw="$(python3 "$TRK" --tracker "$REPO/TRACKER.md" create --title 'raw post-boundary item' --stage Buildable)" \
   || gov_fail "post-boundary raw create failed"
-JOUT="$(python3 "$JAN" --repo "$REPO" --tracker "$REPO/TRACKER.md" --json)" \
-  || gov_fail "janitor json scan exited non-zero"
+set +e
+JOUT="$(python3 "$JAN" --repo "$REPO" --tracker "$REPO/TRACKER.md" --json)"; JRC=$?
+set -e
+[ "$JRC" -eq 1 ] || gov_fail "janitor json scan must exit 1 with findings, got $JRC"
 REPORT_JSON="$JOUT" python3 - "$raw" "$legacy" <<'PY' || gov_fail "post-boundary unreceipted tracker mutation was not detected correctly"
 import json, os, sys
 raw = int(sys.argv[1]); legacy = int(sys.argv[2])

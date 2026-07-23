@@ -103,6 +103,11 @@ import re
 import subprocess
 import sys
 
+try:
+    import idc_reconciliation_baseline as RB
+except ImportError:  # pragma: no cover - lone copied drain fixtures keep running without the helper
+    RB = None
+
 BEGIN = "<!-- idc-tracker-state:begin -->"
 END = "<!-- idc-tracker-state:end -->"
 JOURNAL_REL = os.path.join("docs", "workflow", "transition-journal.ndjson")
@@ -763,6 +768,22 @@ def main():
     if not eligible and (recirc_inbox or unplanned):
         _persist_verdict(root, sid, "recirc-pending", 4, gates_ran)
         print("drain: recirc-pending")
+        sys.exit(4)
+    baseline_pending = False
+    inside_git = bool(root) and subprocess.run(
+        ["git", "-C", root, "rev-parse", "--is-inside-work-tree"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ).returncode == 0
+    if inside_git and RB is not None:
+        try:
+            baseline_pending = bool(RB.status(root).get("pending"))
+        except RB.BaselineError:
+            baseline_pending = True
+    if not eligible and baseline_pending:
+        _persist_verdict(root, sid, "baseline-pending", 4, gates_ran)
+        print("baseline: pending")
+        print("drain: baseline-pending")
         sys.exit(4)
     # THE WAVE-CLOSE GATES (v4 Phase 3 Stage E3 + the completion-honesty pair): the build lane is drained
     # and no stronger non-terminal signal (unverified/recirc-pending) fired — so the drain WOULD print

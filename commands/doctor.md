@@ -107,6 +107,13 @@ same invalid-receipt state `/idc:update`'s freshness guard refuses to run agains
 repair or re-stamp it (`/idc:init` or `/idc:update`) before continuing." Do **not** recompute or
 verify fingerprints here — that is update's job; doctor only checks presence and parse.
 
+**5b — Adoption baseline state.** If `docs/workflow/reconciliation-baseline-required.json` exists,
+report **FAIL** with the note `baseline-pending — run /idc:janitor --bootstrap (or /idc:update to
+resume it)` until `docs/workflow/reconciliation-adoption.json` exists and the marker is gone. This is
+blocking, not advisory: ordinary mutators must not run on a baseline-pending repo. If neither file
+exists, report `n/a (no adoption baseline yet)`; if only the adoption receipt exists, report PASS and
+note the recorded baseline head.
+
 **6 — Pi runtime (optional).** The IDC Pi runtime (`runtime/pi/`, vendored) needs **Bun** to
 boot the coms-net hub + role harness; the **Pi agent** itself (the `pi` binary / npm package
 `@earendil-works/pi-coding-agent`, historically `@mariozechner/pi-*`) is a separate

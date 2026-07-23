@@ -15,9 +15,13 @@ Update makes **one, and only one, non-destructive** board change — appending a
 `Stage` option (additive: existing options keep their node ids, so item values survive) — and
 **reports** every other kind of board drift without touching it. It never performs a destructive or
 structural board mutation (no option-set replace, no field rename/delete) and never touches the
-data-bearing configs. Idempotent: a re-run with nothing stale reports `skipped-already-current` and
-the option append is a no-op. The receipt is rewritten **only at the very end of a fully successful
-run**, so a half-finished update can never masquerade as complete.
+data-bearing configs. U7 adds the one-time adoption bootstrap: update writes the durable
+`reconciliation-baseline-required` / `baseline-pending` marker before bootstrap begins, delegates to
+`/idc:janitor --bootstrap`, and writes the adoption receipt last only after bootstrap converges. Until
+that bootstrap completes, ordinary mutators stay blocked while doctor/update/janitor/recovery remain
+available. Idempotent: a re-run with nothing stale reports `skipped-already-current` and the option
+append is a no-op. The receipt is rewritten **only at the very end of a fully successful run**, so a
+half-finished update can never masquerade as complete.
 
 ## Phase 0 — Preconditions
 
@@ -276,6 +280,21 @@ gh repo view --json deleteBranchOnMerge --jq .deleteBranchOnMerge 2>/dev/null
 - The probe errors (no GitHub remote, or `gh` lacks repo-admin scope) → nothing to offer consent
   over, so **do not prompt**; leave it untouched and report `n/a (probe failed: <reason>)` — a
   distinct outcome from `declined`, never silently folded into it.
+
+## Phase 3c — Baseline bootstrap handoff (one-time migration)
+
+After the file/board refresh and before rewriting the install receipt, ensure the governed repo has a
+durable adoption boundary:
+
+- write / preserve `docs/workflow/reconciliation-baseline-required.json` (`baseline-pending`);
+- delegate to `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_janitor.py" --repo "$ROOT" <board args> --bootstrap`;
+- if bootstrap is interrupted or halts with blockers, **leave the marker present** and report the
+  blockers honestly — the repo is explicitly baseline-pending, not falsely current;
+- only a converged bootstrap clears the marker and writes `docs/workflow/reconciliation-adoption.json`
+  last.
+
+This marker is what blocks ordinary mutating workflow commands while still leaving `/idc:doctor`,
+`/idc:update`, `/idc:janitor`, and recovery doors available.
 
 ## Phase 4 — Rewrite the receipt (end of a successful run only)
 

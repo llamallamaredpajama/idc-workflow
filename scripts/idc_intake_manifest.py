@@ -60,7 +60,12 @@ TOP_KEYS = {
     "schema_version", "intake_id", "source", "operator_goal", "runtime",
     "expected_unit_ids", "units", "verification",
 }
-SOURCE_KEYS = {"kind", "display_name", "repo_relative_locator", "sha256"}
+SOURCE_KEYS_MARKDOWN = {"kind", "display_name", "repo_relative_locator", "sha256"}
+SOURCE_KEYS_PINNED = {
+    "kind", "display_name", "repo_relative_locator", "sha256",
+    "source_repository", "head_commit", "base_commit", "diff_sha256",
+}
+PINNED_SOURCE_KINDS = {"external_branch", "external_pr"}
 GOAL_KEYS = {"verbatim_or_redacted", "normalized", "redactions"}
 RUNTIME_KEYS = {"plugin_version"}
 VERIFICATION_KEYS = {"status", "review_path", "source_sha256"}
@@ -78,6 +83,7 @@ REVIEW_BINDING_PREFIX = "manifest_content_sha256="
 
 INTAKE_ID_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
 PLUGIN_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 EXPLICIT_ID_RE = re.compile(r"^(U\d+|B\d+)\b")
 STABLE_HEADING_RE = re.compile(r"^(?:Phase|Step|Gate|Stop)\b", re.IGNORECASE)
@@ -526,11 +532,24 @@ def _intake_id_from_output(path: str) -> str:
     return intake_id
 
 
-def extract_manifest(source_path: str, out_path: str, goal: str, plugin_version: str) -> dict[str, Any]:
+def extract_manifest(
+        source_path: str,
+        out_path: str,
+        goal: str,
+        plugin_version: str,
+        *,
+        source_kind: str = "external_markdown",
+        source_repository: str | None = None,
+        head_commit: str | None = None,
+        base_commit: str | None = None,
+        diff_sha256: str | None = None,
+) -> dict[str, Any]:
     if not PLUGIN_VERSION_RE.fullmatch(plugin_version):
         raise IntakeError("plugin version must be exactly X.Y.Z")
     if not isinstance(goal, str) or not goal.strip():
         raise IntakeError("operator goal must be non-empty")
+    if source_kind != "external_markdown" and source_kind not in PINNED_SOURCE_KINDS:
+        raise IntakeError("source kind must be external_markdown, external_branch, or external_pr")
     try:
         with open(source_path, "rb") as handle:
             raw = handle.read()
@@ -545,15 +564,32 @@ def extract_manifest(source_path: str, out_path: str, goal: str, plugin_version:
     expected, units = _extract_units(parsed_text)
     redacted_goal, goal_redactions = _redact_human_text(goal)
     display_name, _ = _redact_human_text(os.path.basename(os.path.normpath(source_path)))
+    source = {
+        "kind": source_kind,
+        "display_name": display_name,
+        "repo_relative_locator": _source_locator(source_path),
+        "sha256": source_hash,
+    }
+    if source_kind in PINNED_SOURCE_KINDS:
+        if not isinstance(source_repository, str) or not source_repository.strip():
+            raise IntakeError("pinned intake sources require --source-repository")
+        _reject_unsafe_text(source_repository, "manifest.source.source_repository")
+        if not isinstance(head_commit, str) or not SHA1_RE.fullmatch(head_commit):
+            raise IntakeError("pinned intake sources require a 40-hex --source-head")
+        if not isinstance(base_commit, str) or not SHA1_RE.fullmatch(base_commit):
+            raise IntakeError("pinned intake sources require a 40-hex --source-base")
+        if not isinstance(diff_sha256, str) or not SHA256_RE.fullmatch(diff_sha256):
+            raise IntakeError("pinned intake sources require a 64-hex --source-diff-sha256")
+        source.update({
+            "source_repository": source_repository.strip(),
+            "head_commit": head_commit,
+            "base_commit": base_commit,
+            "diff_sha256": diff_sha256,
+        })
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "intake_id": _intake_id_from_output(out_path),
-        "source": {
-            "kind": "external_markdown",
-            "display_name": display_name,
-            "repo_relative_locator": _source_locator(source_path),
-            "sha256": source_hash,
-        },
+        "source": source,
         "operator_goal": {
             "verbatim_or_redacted": redacted_goal,
             "normalized": _normalize_goal(redacted_goal),
@@ -570,9 +606,13 @@ def extract_manifest(source_path: str, out_path: str, goal: str, plugin_version:
 
 def _validate_source(source: Any) -> dict[str, Any]:
     obj = _expect_object(source, "manifest.source")
-    _expect_exact_keys(obj, SOURCE_KEYS, "manifest.source")
-    if obj["kind"] != "external_markdown":
-        raise IntakeError("manifest.source.kind must be external_markdown")
+    kind = obj.get("kind")
+    if kind == "external_markdown":
+        _expect_exact_keys(obj, SOURCE_KEYS_MARKDOWN, "manifest.source")
+    elif kind in PINNED_SOURCE_KINDS:
+        _expect_exact_keys(obj, SOURCE_KEYS_PINNED, "manifest.source")
+    else:
+        raise IntakeError("manifest.source.kind must be external_markdown, external_branch, or external_pr")
     display = obj["display_name"]
     if not isinstance(display, str) or not display or display != os.path.basename(display) or \
             "/" in display or "\\" in display:
@@ -584,6 +624,16 @@ def _validate_source(source: Any) -> dict[str, Any]:
         _reject_unsafe_text(obj["repo_relative_locator"], "manifest.source.repo_relative_locator")
     if not isinstance(obj["sha256"], str) or not SHA256_RE.fullmatch(obj["sha256"]):
         raise IntakeError("manifest.source.sha256 must be 64 lowercase hex characters")
+    if kind in PINNED_SOURCE_KINDS:
+        repo_id = obj["source_repository"]
+        if not isinstance(repo_id, str) or not repo_id.strip():
+            raise IntakeError("manifest.source.source_repository must be a non-empty string")
+        _reject_unsafe_text(repo_id, "manifest.source.source_repository")
+        for key in ("head_commit", "base_commit"):
+            if not isinstance(obj[key], str) or not SHA1_RE.fullmatch(obj[key]):
+                raise IntakeError(f"manifest.source.{key} must be 40 lowercase hex characters")
+        if not isinstance(obj["diff_sha256"], str) or not SHA256_RE.fullmatch(obj["diff_sha256"]):
+            raise IntakeError("manifest.source.diff_sha256 must be 64 lowercase hex characters")
     return obj
 
 
@@ -874,7 +924,17 @@ def _status(data: dict[str, Any], manifest_path: str) -> dict[str, Any]:
 
 
 def cmd_extract(args: argparse.Namespace) -> int:
-    manifest = extract_manifest(args.source, args.out, args.goal, args.plugin_version)
+    manifest = extract_manifest(
+        args.source,
+        args.out,
+        args.goal,
+        args.plugin_version,
+        source_kind=args.source_kind,
+        source_repository=args.source_repository,
+        head_commit=args.source_head,
+        base_commit=args.source_base,
+        diff_sha256=args.source_diff_sha256,
+    )
     print(json.dumps({"intake_id": manifest["intake_id"], "manifest": args.out,
                       "unit_count": len(manifest["expected_unit_ids"])}, sort_keys=True))
     return 0
@@ -950,6 +1010,12 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--out", required=True)
     extract.add_argument("--goal", required=True)
     extract.add_argument("--plugin-version", required=True)
+    extract.add_argument("--source-kind", default="external_markdown",
+                         choices=["external_markdown", "external_branch", "external_pr"])
+    extract.add_argument("--source-repository")
+    extract.add_argument("--source-head")
+    extract.add_argument("--source-base")
+    extract.add_argument("--source-diff-sha256")
     extract.set_defaults(func=cmd_extract)
 
     validate = sub.add_parser("validate", help="validate exact-once mapping and independent review")

@@ -152,8 +152,10 @@ printf branch > "$REPO/outside.txt"
 git -C "$REPO" add outside.txt
 git -C "$REPO" commit -qm 'outside branch work'
 git -C "$REPO" checkout -q main
-OUT1="$(python3 "$JAN" --repo "$REPO" --tracker "$REPO/TRACKER.md" --json)" \
-  || gov_fail "janitor json scan for unmerged outside work failed"
+set +e
+OUT1="$(python3 "$JAN" --repo "$REPO" --tracker "$REPO/TRACKER.md" --json)"; RC1=$?
+set -e
+[ "$RC1" -eq 1 ] || gov_fail "janitor scan for unmerged outside work must exit 1 with findings, got $RC1"
 REPORT_JSON="$OUT1" python3 - "$BASELINE_HEAD" <<'PY' || gov_fail "unmerged outside branch was not preserved + routed with pins"
 import json, os, sys
 baseline = sys.argv[1]
@@ -176,8 +178,10 @@ git -C "$REPO" add merged.txt
 git -C "$REPO" commit -qm 'outside merged work'
 git -C "$REPO" checkout -q main
 git -C "$REPO" merge -q --no-ff feature-merged -m 'merge outside work'
-OUT2="$(python3 "$JAN" --repo "$REPO" --tracker "$REPO/TRACKER.md" --json)" \
-  || gov_fail "janitor json scan for merged outside work failed"
+set +e
+OUT2="$(python3 "$JAN" --repo "$REPO" --tracker "$REPO/TRACKER.md" --json)"; RC2=$?
+set -e
+[ "$RC2" -eq 1 ] || gov_fail "janitor scan for merged outside work must exit 1 with findings, got $RC2"
 REPORT_JSON="$OUT2" python3 - <<'PY' || gov_fail "merged outside work was not routed to a reconciliation audit with pins"
 import json, os
 report = json.loads(os.environ["REPORT_JSON"])

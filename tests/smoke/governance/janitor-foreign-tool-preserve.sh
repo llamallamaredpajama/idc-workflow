@@ -46,8 +46,10 @@ git -C "$REPO" add codex.txt
 git -C "$REPO" commit -qm 'codex work'
 git -C "$REPO" checkout -q main
 
-OUT="$(python3 "$JAN" --repo "$REPO" --tracker "$REPO/TRACKER.md" --apply-safe --json)" \
-  || gov_fail "janitor apply-safe json failed"
+set +e
+OUT="$(python3 "$JAN" --repo "$REPO" --tracker "$REPO/TRACKER.md" --apply-safe --json)"; RC=$?
+set -e
+[ "$RC" -eq 1 ] || gov_fail "janitor apply-safe json must exit 1 with remaining findings, got $RC"
 git -C "$REPO" show-ref --verify --quiet refs/heads/codex/experiment \
   || gov_fail "foreign-tool branch was deleted by janitor --apply-safe"
 REPORT_JSON="$OUT" python3 - <<'PY' || gov_fail "foreign-tool work was not preserved + routed honestly"

@@ -30,7 +30,9 @@ INTAKE="$GOV_PLUGIN/scripts/idc_intake_manifest.py"
 DV="$GOV_PLUGIN/scripts/hooks/idc_drain_verdict.py"
 CR="$GOV_PLUGIN/scripts/hooks/idc_command_report.py"
 RECEIPT="$GOV_PLUGIN/scripts/idc_receipt_check.py"
-for f in "$CONTRACT" "$CLOSEOUT_GATE" "$INTAKE" "$DV" "$CR" "$RECEIPT"; do
+TXN="$GOV_PLUGIN/scripts/idc_tracker_transaction.py"
+PLANREC="$GOV_PLUGIN/scripts/idc_planning_receipt.py"
+for f in "$CONTRACT" "$CLOSEOUT_GATE" "$INTAKE" "$DV" "$CR" "$RECEIPT" "$TXN" "$PLANREC"; do
   [ -f "$f" ] || gov_fail "required helper not found: $f (not implemented yet)"
 done
 
@@ -193,6 +195,34 @@ TRD impact: yes — a theme provider + a persisted preference.
 
 - default follows OS at launch?
 MD
+}
+write_plan_receipt() {  # $1 = repo, $2 = repo-relative matrix path, $3 = label
+  local repo="$1" matrix_rel="$2" label="$3" frozen rel
+  frozen="$WORK/${label}.freeze.json"
+  python3 "$TXN" freeze \
+    --repo "$repo" \
+    --backend filesystem \
+    --tracker "$repo/TRACKER.md" \
+    --matrix "$repo/$matrix_rel" \
+    --baseline expected-red \
+    --label "$label" \
+    --out "$frozen" >/dev/null \
+    || gov_fail "could not freeze planning receipt fixture $label"
+  python3 "$TXN" apply \
+    --repo "$repo" \
+    --backend filesystem \
+    --tracker "$repo/TRACKER.md" \
+    --frozen "$frozen" >/dev/null \
+    || gov_fail "could not apply planning receipt fixture $label"
+  rel="$(python3 - "$frozen" <<'PY'
+import json, sys
+bundle = json.load(open(sys.argv[1], encoding='utf-8'))
+print(bundle['receipt_relpath'])
+PY
+)"
+  [ -n "$rel" ] || gov_fail "planning receipt fixture $label returned no receipt path"
+  [ -f "$repo/$rel" ] || gov_fail "planning receipt fixture $label did not write $repo/$rel"
+  printf '%s' "$rel"
 }
 
 # (1) start creates one active record and is idempotent for the same session+command. S1 opens a
@@ -1043,7 +1073,7 @@ printf 'backend: filesystem\n' > "$REPO_PLAN/docs/workflow/tracker-config.yaml"
 python3 "$GOV_TRK" --tracker "$REPO_PLAN/TRACKER.md" init >/dev/null || gov_fail "could not init REPO_PLAN"
 python3 "$GOV_TRK" --tracker "$REPO_PLAN/TRACKER.md" create --title "consider dark mode" \
   --stage Consideration --status Todo >/dev/null || gov_fail "could not create consideration #1"
-python3 "$GOV_TRK" --tracker "$REPO_PLAN/TRACKER.md" create --title "dark mode child" \
+python3 "$GOV_TRK" --tracker "$REPO_PLAN/TRACKER.md" create --title "pillar-a" \
   --stage Buildable --status Todo >/dev/null || gov_fail "could not create child #2"
 SP="sp-$$-$(basename "$WORK")"
 GOODMX="docs/workflow/pillar-matrices/good.yaml"
@@ -1061,8 +1091,22 @@ pillars:
     surfaces: [src/b/]
     blocks_on: []
 YML
-plan_ev() {  # $1 = matrix, $2 = decompositions JSON, $3 = pointers_retired JSON
-  printf '{"schema_version":1,"refs":{"matrix":"%s","planning_pr":42,"decompositions":%s,"pointers_retired":%s}}' "$1" "$2" "$3"
+SINGLEMX="docs/workflow/pillar-matrices/single.yaml"
+cat > "$REPO_PLAN/$SINGLEMX" <<'YML'
+phase: Phase 1
+pillars:
+  - id: pillar-a
+    wave: 1
+    domain: ui
+    surfaces: [src/a/]
+    blocks_on: []
+YML
+plan_ev() {  # $1 = matrix, $2 = decompositions JSON, $3 = pointers_retired JSON, $4 = planning receipt (optional)
+  local extra=""
+  if [ -n "${4:-}" ]; then
+    extra=",\"planning_receipt\":\"$4\""
+  fi
+  printf '{"schema_version":1,"refs":{"matrix":"%s","planning_pr":42,"decompositions":%s,"pointers_retired":%s%s}}' "$1" "$2" "$3" "$extra"
 }
 retire_pointer() { python3 "$GOV_TRK" --tracker "$REPO_PLAN/TRACKER.md" move --num "$1" --status Done >/dev/null; }
 # (7f-omit / F3) with consideration #1 STILL admitted (Consideration/Todo) plan complete is refused —
@@ -1074,9 +1118,86 @@ if FAKE_MERGED_PRS="42" gh_finish --repo "$REPO_PLAN" --session "$SP" --command 
 fi
 # retire the pointer (Plan's real advance moves it off the Consideration/Todo lane) → no admitted remains.
 retire_pointer 1
+
+# (7f-receipt, U5) plan complete additionally requires a VALID source-owned planning receipt: omitting
+# the ref, pointing at a missing/forged/mismatched receipt, or presenting a stale live-readback all
+# fail closed; one current machine-owned receipt is accepted.
+REPO_PLAN_R="$WORK/repo-plan-receipt"; mkdir -p "$REPO_PLAN_R/docs/workflow/pillar-matrices"
+printf 'backend: filesystem\n' > "$REPO_PLAN_R/docs/workflow/tracker-config.yaml"
+python3 "$GOV_TRK" --tracker "$REPO_PLAN_R/TRACKER.md" init >/dev/null || gov_fail "(7f-receipt) could not init REPO_PLAN_R"
+python3 "$GOV_TRK" --tracker "$REPO_PLAN_R/TRACKER.md" create --title "consider dark mode" \
+  --stage Consideration --status Todo >/dev/null || gov_fail "(7f-receipt) could not create consideration #1"
+python3 "$GOV_TRK" --tracker "$REPO_PLAN_R/TRACKER.md" create --title "pillar-a" \
+  --stage Buildable --status Todo >/dev/null || gov_fail "(7f-receipt) could not create child #2"
+cp "$REPO_PLAN/$SINGLEMX" "$REPO_PLAN_R/$SINGLEMX"
+python3 "$GOV_TRK" --tracker "$REPO_PLAN_R/TRACKER.md" move --num 1 --status Done >/dev/null \
+  || gov_fail "(7f-receipt) could not retire pointer #1"
+PLAN_RECEIPT_OK="$(write_plan_receipt "$REPO_PLAN_R" "$SINGLEMX" plan-receipt-ok)"
+MISSING_PLAN_RECEIPT="docs/workflow/planning-receipts/missing.json"
+BAD_SOURCE_RECEIPT="docs/workflow/planning-receipts/bad-source.json"
+BAD_KIND_RECEIPT="docs/workflow/planning-receipts/bad-kind.json"
+BAD_SCHEMA_RECEIPT="docs/workflow/planning-receipts/bad-schema.json"
+BAD_DIGEST_RECEIPT="docs/workflow/planning-receipts/bad-digest.json"
+python3 - "$REPO_PLAN_R" "$PLAN_RECEIPT_OK" "$BAD_SOURCE_RECEIPT" "$BAD_KIND_RECEIPT" "$BAD_SCHEMA_RECEIPT" "$BAD_DIGEST_RECEIPT" <<'PY'
+import json, os, sys
+repo, src_rel, bad_source_rel, bad_kind_rel, bad_schema_rel, bad_digest_rel = sys.argv[1:]
+src_path = os.path.join(repo, src_rel)
+receipt = json.load(open(src_path, encoding='utf-8'))
+variants = {
+    bad_source_rel: dict(receipt, written_by='forged-writer.py'),
+    bad_kind_rel: dict(receipt, kind='not-planning-application'),
+    bad_schema_rel: dict(receipt, schema_version=999),
+    bad_digest_rel: dict(receipt, final_digest='0' * 64),
+}
+for rel, body in variants.items():
+    path = os.path.join(repo, rel)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as fh:
+        json.dump(body, fh, indent=2, sort_keys=True)
+        fh.write('\n')
+PY
+SPR="spr-$$-$(basename "$WORK")"
+contract start --repo "$REPO_PLAN_R" --session "$SPR" --command plan --plugin-root "$GOV_PLUGIN" --args 'receipt' --source user >/dev/null
+if FAKE_MERGED_PRS="42" gh_finish --repo "$REPO_PLAN_R" --session "$SPR" --command plan --status complete \
+     --evidence-json "$(plan_ev "$SINGLEMX" '{"1":2}' '[1]')" 2>/dev/null; then
+  gov_fail "(7f-receipt) a plan complete with NO refs.planning_receipt was accepted"
+fi
+if FAKE_MERGED_PRS="42" gh_finish --repo "$REPO_PLAN_R" --session "$SPR" --command plan --status complete \
+     --evidence-json "$(plan_ev "$SINGLEMX" '{"1":2}' '[1]' "$MISSING_PLAN_RECEIPT")" 2>/dev/null; then
+  gov_fail "(7f-receipt) a plan complete with a MISSING planning receipt was accepted"
+fi
+if FAKE_MERGED_PRS="42" gh_finish --repo "$REPO_PLAN_R" --session "$SPR" --command plan --status complete \
+     --evidence-json "$(plan_ev "$SINGLEMX" '{"1":2}' '[1]' "$BAD_SOURCE_RECEIPT")" 2>/dev/null; then
+  gov_fail "(7f-receipt) a plan complete with a forged receipt source was accepted"
+fi
+if FAKE_MERGED_PRS="42" gh_finish --repo "$REPO_PLAN_R" --session "$SPR" --command plan --status complete \
+     --evidence-json "$(plan_ev "$SINGLEMX" '{"1":2}' '[1]' "$BAD_KIND_RECEIPT")" 2>/dev/null; then
+  gov_fail "(7f-receipt) a plan complete with a receipt kind mismatch was accepted"
+fi
+if FAKE_MERGED_PRS="42" gh_finish --repo "$REPO_PLAN_R" --session "$SPR" --command plan --status complete \
+     --evidence-json "$(plan_ev "$SINGLEMX" '{"1":2}' '[1]' "$BAD_SCHEMA_RECEIPT")" 2>/dev/null; then
+  gov_fail "(7f-receipt) a plan complete with a receipt schema mismatch was accepted"
+fi
+if FAKE_MERGED_PRS="42" gh_finish --repo "$REPO_PLAN_R" --session "$SPR" --command plan --status complete \
+     --evidence-json "$(plan_ev "$SINGLEMX" '{"1":2}' '[1]' "$BAD_DIGEST_RECEIPT")" 2>/dev/null; then
+  gov_fail "(7f-receipt) a plan complete with a forged receipt digest was accepted"
+fi
+FAKE_MERGED_PRS="42" gh_finish --repo "$REPO_PLAN_R" --session "$SPR" --command plan --status complete \
+  --evidence-json "$(plan_ev "$SINGLEMX" '{"1":2}' '[1]' "$PLAN_RECEIPT_OK")" \
+  || gov_fail "(7f-receipt) a plan complete backed by one current source-owned planning receipt was rejected"
+contract start --repo "$REPO_PLAN_R" --session "$SPR" --command plan --plugin-root "$GOV_PLUGIN" --args 'receipt-drift' --source user >/dev/null
+python3 "$GOV_TRK" --tracker "$REPO_PLAN_R/TRACKER.md" set --num 2 --field Domain --value drift >/dev/null \
+  || gov_fail "(7f-receipt) could not inject a post-receipt live board drift"
+if FAKE_MERGED_PRS="42" gh_finish --repo "$REPO_PLAN_R" --session "$SPR" --command plan --status complete \
+     --evidence-json "$(plan_ev "$SINGLEMX" '{"1":2}' '[1]' "$PLAN_RECEIPT_OK")" 2>/dev/null; then
+  gov_fail "(7f-receipt) a stale planning receipt whose live readback drifted was accepted"
+fi
+echo "  ok (7f-receipt, U5) plan complete requires a valid source-owned planning receipt (missing/forged/stale rejected; one current receipt accepted)"
+
+PLAN_OK_RECEIPT="$(write_plan_receipt "$REPO_PLAN" "$SINGLEMX" plan-ok)"
 FAKE_MERGED_PRS="42" gh_finish --repo "$REPO_PLAN" --session "$SP" --command plan --status complete \
-  --evidence-json "$(plan_ev "$GOODMX" '{"1":2}' '[1]')" \
-  || gov_fail "(7f) a plan complete backed by matrix + MERGED PR + existing child + retired pointer + no-admitted-remaining was rejected"
+  --evidence-json "$(plan_ev "$GOODMX" '{"1":2}' '[1]' "$PLAN_OK_RECEIPT")" \
+  || gov_fail "(7f) a plan complete backed by matrix + MERGED PR + existing child + retired pointer + no-admitted-remaining + current planning receipt was rejected"
 echo "  ok (7f, F3) plan complete re-derives matrix + merged PR + children + retired pointers + the required admitted set (an omitted consideration refuses)"
 
 # (7f-retire, F3) THE RETIRE-THEN-OMIT bypass: the admitted set STAMPED at start remembers a
@@ -1087,8 +1208,8 @@ printf 'backend: filesystem\n' > "$REPO_RT/docs/workflow/tracker-config.yaml"
 python3 "$GOV_TRK" --tracker "$REPO_RT/TRACKER.md" init >/dev/null || gov_fail "(7f-retire) could not init REPO_RT"
 python3 "$GOV_TRK" --tracker "$REPO_RT/TRACKER.md" create --title cA --stage Consideration --status Todo >/dev/null  # #1
 python3 "$GOV_TRK" --tracker "$REPO_RT/TRACKER.md" create --title cB --stage Consideration --status Todo >/dev/null  # #2
-python3 "$GOV_TRK" --tracker "$REPO_RT/TRACKER.md" create --title chA --stage Buildable --status Todo >/dev/null     # #3
-python3 "$GOV_TRK" --tracker "$REPO_RT/TRACKER.md" create --title chB --stage Buildable --status Todo >/dev/null     # #4
+python3 "$GOV_TRK" --tracker "$REPO_RT/TRACKER.md" create --title pillar-a --stage Buildable --status Todo >/dev/null # #3
+python3 "$GOV_TRK" --tracker "$REPO_RT/TRACKER.md" create --title pillar-b --stage Buildable --status Todo >/dev/null # #4
 cp "$REPO_PLAN/$GOODMX" "$REPO_RT/$GOODMX"
 SRT="srt-$$-$(basename "$WORK")"
 # START stamps plan_admitted = {1,2} (both considerations). Retire BOTH off the board.
@@ -1101,9 +1222,10 @@ if FAKE_MERGED_PRS="42" gh_finish --repo "$REPO_RT" --session "$SRT" --command p
   gov_fail "(7f-retire, F3) a plan complete that retired #2 off the board but never decomposed it was ACCEPTED (retire-then-omit)"
 fi
 # honest: decompose BOTH (#1→#3, #2→#4) with both pointers retired → accepted.
+RT_RECEIPT="$(write_plan_receipt "$REPO_RT" "$GOODMX" plan-retire-ok)"
 FAKE_MERGED_PRS="42" gh_finish --repo "$REPO_RT" --session "$SRT" --command plan --status complete \
-  --evidence-json "$(plan_ev "$GOODMX" '{"1":3,"2":4}' '[1,2]')" \
-  || gov_fail "(7f-retire, F3) a plan complete decomposing EVERY admitted consideration was rejected"
+  --evidence-json "$(plan_ev "$GOODMX" '{"1":3,"2":4}' '[1,2]' "$RT_RECEIPT")" \
+  || gov_fail "(7f-retire, F3) a plan complete decomposing EVERY admitted consideration + current planning receipt was rejected"
 echo "  ok (7f-retire, F3) the retire-then-omit bypass is caught by the start-stamped admitted set (retire #1,#2 + decompose only #1 → refused)"
 
 # (7f-ptr, ROUND-5 F2) pointers_retired is proven by reading each pointer's LIVE board status
@@ -1114,9 +1236,10 @@ printf 'backend: filesystem\n' > "$REPO_PTR/docs/workflow/tracker-config.yaml"
 python3 "$GOV_TRK" --tracker "$REPO_PTR/TRACKER.md" init >/dev/null || gov_fail "(7f-ptr) could not init REPO_PTR"
 python3 "$GOV_TRK" --tracker "$REPO_PTR/TRACKER.md" create --title "pointer consideration" \
   --stage Consideration --status Todo >/dev/null || gov_fail "(7f-ptr) could not create consideration #1"
-python3 "$GOV_TRK" --tracker "$REPO_PTR/TRACKER.md" create --title "child of #1" \
+python3 "$GOV_TRK" --tracker "$REPO_PTR/TRACKER.md" create --title "pillar-a" \
   --stage Buildable --status Todo >/dev/null || gov_fail "(7f-ptr) could not create child #2"
 cp "$REPO_PLAN/$GOODMX" "$REPO_PTR/$GOODMX"
+cp "$REPO_PLAN/$SINGLEMX" "$REPO_PTR/$SINGLEMX"
 SPTR="sptr-$$-$(basename "$WORK")"
 ptr_finish() { PATH="$FAKE_BIN:$PATH" contract finish --repo "$REPO_PTR" --session "$SPTR" "$@"; }
 contract start --repo "$REPO_PTR" --session "$SPTR" --command plan --plugin-root "$GOV_PLUGIN" --args 'ptr' --source user >/dev/null
@@ -1126,9 +1249,10 @@ if FAKE_MERGED_PRS="42" ptr_finish --command plan --status complete \
   gov_fail "(7f-ptr, F2) a plan complete claiming pointer #1 retired while the board reads Blocked was ACCEPTED (caller-map comparison, not a live read)"
 fi
 python3 "$GOV_TRK" --tracker "$REPO_PTR/TRACKER.md" move --num 1 --status Done >/dev/null  # genuinely retire it
+PTR_RECEIPT="$(write_plan_receipt "$REPO_PTR" "$SINGLEMX" plan-ptr-ok)"
 FAKE_MERGED_PRS="42" ptr_finish --command plan --status complete \
-  --evidence-json "$(plan_ev "$GOODMX" '{"1":2}' '[1]')" \
-  || gov_fail "(7f-ptr, F2) a plan complete whose pointer #1 is GENUINELY retired (Done) was rejected"
+  --evidence-json "$(plan_ev "$GOODMX" '{"1":2}' '[1]' "$PTR_RECEIPT")" \
+  || gov_fail "(7f-ptr, F2) a plan complete whose pointer #1 is GENUINELY retired (Done) + current planning receipt was rejected"
 echo "  ok (7f-ptr, F2) pointers_retired is proven by each pointer's LIVE board status (Blocked-claimed-retired refused; Done accepted)"
 
 # (7f-gh-admitted, ROUND-5 F2) the FULL claim walker runs through the PRODUCTION start path on the
@@ -1150,7 +1274,7 @@ echo "  ok (7f-gh-admitted, F2) the full plan walker runs through the production
 # (7f-sabotage) each re-derived claim fails closed independently (children present so the reach is real).
 python3 "$GOV_TRK" --tracker "$REPO_PLAN/TRACKER.md" create --title "second consideration" \
   --stage Consideration --status Todo >/dev/null || gov_fail "could not create consideration #3"
-python3 "$GOV_TRK" --tracker "$REPO_PLAN/TRACKER.md" create --title "second child" \
+python3 "$GOV_TRK" --tracker "$REPO_PLAN/TRACKER.md" create --title "pillar-b" \
   --stage Buildable --status Todo >/dev/null || gov_fail "could not create child #4"
 contract start --repo "$REPO_PLAN" --session "$SP" --command plan --plugin-root "$GOV_PLUGIN" --args 'p2' --source user >/dev/null
 # (i) planning PR NOT merged (real gh OPEN).
@@ -1189,9 +1313,10 @@ if FAKE_MERGED_PRS="42" gh_finish --repo "$REPO_PLAN" --session "$SP" --command 
   gov_fail "(7f-sabotage) a plan complete whose matrix FAILS deconfliction was accepted"
 fi
 retire_pointer 3
+PLAN_SABOTAGE_RECEIPT="$(write_plan_receipt "$REPO_PLAN" "$GOODMX" plan-sabotage-ok)"
 FAKE_MERGED_PRS="42" gh_finish --repo "$REPO_PLAN" --session "$SP" --command plan --status complete \
-  --evidence-json "$(plan_ev "$GOODMX" '{"3":4}' '[3]')" >/dev/null \
-  || gov_fail "(7f-sabotage) could not honestly close the plan record"
+  --evidence-json "$(plan_ev "$GOODMX" '{"3":4}' '[3]' "$PLAN_SABOTAGE_RECEIPT")" >/dev/null \
+  || gov_fail "(7f-sabotage) could not honestly close the plan record with a current planning receipt"
 echo "  ok (7f-sabotage) plan complete fails closed on unmerged PR, missing child, empty pointers, colliding matrix"
 
 # (7f-gh, F2/F3) on the GITHUB backend the child re-verification RE-RUNS the shipped github-only schema

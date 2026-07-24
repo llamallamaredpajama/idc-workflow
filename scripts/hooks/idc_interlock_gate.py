@@ -195,8 +195,9 @@ _PROTECTED_COMBOS = (
     {("issue", v) for v in ("create", "new", "close", "delete", "edit", "reopen", "lock", "unlock",
                             "transfer", "pin", "unpin")}
     | {("pr", v) for v in ("merge", "close", "edit")}
-    | {("project", v) for v in ("create", "item-add", "item-edit", "item-delete", "item-archive",
-                                "field-create", "edit", "delete", "copy", "link", "unlink")}
+    | {("project", v) for v in ("create", "item-add", "item-create", "item-edit", "item-delete",
+                                "item-archive", "field-create", "field-delete", "edit", "delete",
+                                "copy", "close", "mark-template", "link", "unlink")}
 )
 def _gh_positionals(seg):
     """The POSITIONAL word sequence of a `gh …` command SEGMENT — known execution prefixes and options
@@ -254,7 +255,10 @@ def _combo_subject(pos):
                    "pr-merge" if verb == "merge" else f"pr-{verb}")
     # Keep distinct private kinds for precise diagnostics; policy denies every protected combo.
     kind = {"delete": "project-delete", "item-delete": "project-item-delete",
-            "field-create": "project-field-create", "link": "project-link"}.get(verb, "project-mutation")
+            "item-create": "project-item-create", "field-create": "project-field-create",
+            "field-delete": "project-field-delete", "close": "project-close",
+            "mark-template": "project-mark-template",
+            "link": "project-link"}.get(verb, "project-mutation")
     return _mk("a raw `gh project` board mutation", _ENGINE, kind)
 
 
@@ -415,14 +419,24 @@ def _ws_combos(command):
         return _mk("a raw `gh pr edit`", _PR_GATE_BIND, "pr-edit")
     if _has(c, "gh project item-delete"):
         return _mk("a raw `gh project item-delete` board mutation", _ENGINE, "project-item-delete")
+    # `item-create` is checked BEFORE the bare `create` rule so a draft-item mint is named precisely
+    # (the word-boundary lookarounds already keep `item-create` from matching `project create`).
+    if _has(c, "gh project item-create"):
+        return _mk("a raw `gh project item-create` board mutation", _ENGINE, "project-item-create")
     if _has(c, "gh project create"):
         return _mk("a raw `gh project create` board mutation", _ENGINE, "project-create")
     if _has(c, "gh project field-create"):
         return _mk("a raw `gh project field-create` board mutation", _ENGINE, "project-field-create")
+    if _has(c, "gh project field-delete"):
+        return _mk("a raw `gh project field-delete` board mutation", _ENGINE, "project-field-delete")
     if _has(c, "gh project link"):
         return _mk("a raw `gh project link` board mutation", _ENGINE, "project-link")
     if _has(c, "gh project delete"):
         return _mk("a raw `gh project` board mutation", _ENGINE, "project-delete")
+    if _has(c, "gh project close"):
+        return _mk("a raw `gh project close` board mutation", _ENGINE, "project-close")
+    if _has(c, "gh project mark-template"):
+        return _mk("a raw `gh project mark-template` board mutation", _ENGINE, "project-mark-template")
     if _has(c, "gh project item-edit") or _has(c, "gh project item-add"):
         return _mk("a raw `gh project item-{edit,add}` board mutation", _ENGINE, "project-mutation")
     return None

@@ -17,9 +17,9 @@ Update makes **one, and only one, non-destructive** board change — appending a
 structural board mutation (no option-set replace, no field rename/delete) and never touches the
 data-bearing configs. U7 adds the one-time adoption bootstrap: update writes the durable
 `reconciliation-baseline-required` / `baseline-pending` marker before bootstrap begins, delegates to
-`/idc:janitor --bootstrap`, and writes the adoption receipt last only after bootstrap converges. Until
-that bootstrap completes, ordinary mutators stay blocked while doctor/update/janitor/recovery remain
-available. Idempotent: a re-run with nothing stale reports `skipped-already-current` and the option
+`/idc:janitor --bootstrap`, and clears that marker (keeping the adoption receipt) **last**, only after
+a verified-converged confirming scan (see Phase 3c). Until that bootstrap completes, ordinary mutators
+stay blocked while doctor/update/janitor/recovery remain available. Idempotent: a re-run with nothing stale reports `skipped-already-current` and the option
 append is a no-op. The receipt is rewritten **only at the very end of a fully successful run**, so a
 half-finished update can never masquerade as complete.
 
@@ -330,8 +330,23 @@ durable adoption boundary:
 - delegate to `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_janitor.py" --repo "$ROOT" <board args> --bootstrap`;
 - if bootstrap is interrupted or halts with blockers, **leave the marker present** and report the
   blockers honestly — the repo is explicitly baseline-pending, not falsely current;
-- only a converged bootstrap clears the marker and writes `docs/workflow/reconciliation-adoption.json`
-  last.
+- **receipt-last, gated on a verified-converged confirming scan.** Bootstrap runs two scans: a
+  pass-1 scan and then a "confirming" post-final scan that runs *with* the freshly written adoption
+  receipt so it can establish the post-boundary watermark. The receipt is therefore written
+  **provisionally** before that confirming scan — but `baseline-pending` is cleared **only after** the
+  confirming scan is genuinely clean (validated, no blockers, not indeterminate). The marker-clear is
+  the **last** durable step. If the confirming scan is *not* clean, the provisional
+  `docs/workflow/reconciliation-adoption.json` is rolled back, the marker stays present, and bootstrap
+  exits non-zero with the blockers named — the repo stays honestly baseline-pending, never momentarily
+  "adopted." Because the marker-clear is last, any interrupt (including one right after the provisional
+  receipt) resumes as baseline-pending; a later run re-scans and converges. In short: **only a
+  converged bootstrap clears the marker and keeps `docs/workflow/reconciliation-adoption.json`.**
+
+A legacy governed repo with an **empty board and no transition journal** bootstraps cleanly on its
+own — no operator pre-step is required. An empty board has no post-boundary tracker facts, so a
+missing journal is treated as the lazy pre-journal start rather than an indeterminate gap (the journal
+is created on the first sanctioned mutation). A **non-empty** adopted board with a missing/unreadable
+journal remains a fail-closed blocker: post-boundary coverage genuinely cannot be established there.
 
 This marker is what blocks ordinary mutating workflow commands while still leaving `/idc:doctor`,
 `/idc:update`, `/idc:janitor`, and recovery doors available.

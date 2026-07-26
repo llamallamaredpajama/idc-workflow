@@ -349,6 +349,19 @@ def clear_marker(repo: str) -> None:
             raise BaselineError(f"could not clear baseline marker: {exc}") from exc
 
 
+def clear_receipt(repo: str) -> None:
+    """Remove a provisionally-written adoption receipt (roll back). Bootstrap writes the receipt to
+    disk BEFORE the confirming post-final scan (which reads it to compute the post-boundary
+    watermark); if that scan is NOT clean, the receipt must not survive — the durable state stays
+    ``baseline-pending``. Idempotent: a no-op when no receipt exists."""
+    path = receipt_path(repo)
+    if os.path.exists(path):
+        try:
+            os.unlink(path)
+        except OSError as exc:
+            raise BaselineError(f"could not clear adoption receipt: {exc}") from exc
+
+
 def clear_cursor(repo: str) -> None:
     path = cursor_path(repo)
     if os.path.exists(path):
@@ -385,11 +398,17 @@ def status(repo: str) -> dict[str, Any]:
     }
 
 
-def finalize_bootstrap(repo: str, receipt: dict[str, Any], checkpoint: dict[str, Any]) -> dict[str, Any]:
+def commit_bootstrap(repo: str, checkpoint: dict[str, Any]) -> None:
+    """Commit a converged bootstrap: write the convergence checkpoint, then clear the
+    ``baseline-pending`` marker as the **last** durable step. The adoption receipt must already be on
+    disk — bootstrap writes it provisionally (via :func:`write_receipt`) before the confirming
+    post-final scan, which reads it for the post-boundary watermark — and this runs ONLY after that
+    confirming scan verifies convergence. Because the marker-clear is last, any interrupt before it
+    leaves the repo honestly ``baseline-pending`` (resume-able), never a cleared marker beside an
+    unverified adoption. A non-converged confirming scan calls :func:`clear_receipt` instead and never
+    reaches here."""
     write_checkpoint(repo, checkpoint)
-    written = write_receipt(repo, receipt)
     clear_marker(repo)
-    return written
 
 
 def _cmd_status(args: argparse.Namespace) -> int:

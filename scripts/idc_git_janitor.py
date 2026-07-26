@@ -279,6 +279,12 @@ JOURNAL_LOCK_GITIGNORE_LINE = JOURNAL_REL.replace(os.sep, "/") + ".lock"
 TEST_STUBBORN_ENV = "IDC_JANITOR_TEST_STUBBORN_FINDING"
 TEST_INTERRUPT_ENV = "IDC_JANITOR_TEST_INTERRUPT_AFTER"
 BOOTSTRAP_INTERRUPT_POINT = "after-baseline-marker"
+# Crash-window seam for the receipt-last finalization: bootstrap writes the adoption receipt
+# provisionally (the confirming post-final scan needs it for the post-boundary watermark) but clears
+# the baseline-pending marker only AFTER that scan converges. An interrupt HERE — after the
+# provisional receipt, before the marker-clear — must leave the marker present (resume-able), never a
+# cleared marker beside an unverified adoption.
+BOOTSTRAP_PROVISIONAL_RECEIPT_POINT = "after-provisional-receipt"
 ALLOWED_PLAN_OPS = {
     "remove-worktree", "delete-local-branch", "delete-remote-branch", "close-board-item",
     "route-intake", "route-reconciliation_audit", "route-investigate",
@@ -565,6 +571,16 @@ def _post_boundary_tracker_findings(ctx):
         return [], False
     suffix_ids, journal_error = _journal_suffix_item_ids(ctx)
     if journal_error:
+        # A MISSING journal on an EMPTY board is not a post-boundary gap: with no tracker items,
+        # nothing could have mutated after adoption, and the transition journal is created lazily on
+        # the first sanctioned mutation. Treat it as clean — the same pre-journal tolerance
+        # check_journal_divergence already grants (a missing journal is indeterminate ONLY when the
+        # board is non-empty). This is what lets a legacy empty-board / no-journal repo bootstrap
+        # without a human first hand-creating an empty journal (update-adoption anomaly 1). A missing
+        # journal beside a NON-empty adopted board, or any READ error (corrupt/unreadable), stays a
+        # fail-closed blocker: post-boundary coverage genuinely cannot be established.
+        if journal_error == "missing" and not board:
+            return [], False
         return [finding(
             RISKY,
             "baseline",
@@ -1828,16 +1844,40 @@ def main():
             })
             _write_cursor(ctx, findings, rescanned_from_durable=rescanned)
             if plan["validated"] and not plan["blockers"]:
+                # RECEIPT-LAST finalization (B2). The confirming post-final scan needs the adoption
+                # receipt on disk to compute the post-boundary watermark, so write it PROVISIONALLY —
+                # but DO NOT clear the baseline-pending marker yet. The marker-clear is gated on that
+                # confirming scan below, so a non-converged confirming scan can never leave the repo
+                # falsely adopted. The marker staying present until the very end is the kill/restart
+                # safety property: any interrupt between here and the marker-clear resumes as
+                # baseline-pending (never a cleared marker beside an unverified adoption).
                 receipt = _bootstrap_receipt(ctx, findings)
-                checkpoint = _checkpoint_payload(findings, advanced=True)
-                RB.finalize_bootstrap(ctx["repo"], receipt, checkpoint)
+                RB.write_receipt(ctx["repo"], receipt)
+                _interrupt(BOOTSTRAP_PROVISIONAL_RECEIPT_POINT)
                 ctx_done = build_ctx(args)
                 rescanned_done = bool(ctx_done.get("reconciliation", {}).get("receipt")) and not bool(ctx_done.get("reconciliation", {}).get("cursor"))
                 findings_done, indeterminate_done, plan_done = perform_scan(ctx_done)
+                converged = plan_done["validated"] and not plan_done["blockers"]
+                if converged:
+                    # Confirming scan is clean → COMMIT: write the convergence checkpoint (from the
+                    # pass-1 findings, exactly as before) then clear the marker as the LAST durable
+                    # step. Observable end-state is byte-for-byte identical to the pre-fix happy path.
+                    RB.commit_bootstrap(ctx_done["repo"], _checkpoint_payload(findings, advanced=True))
+                else:
+                    # Confirming scan is NOT clean → ROLL BACK the provisional receipt and stay
+                    # honestly baseline-pending (marker never cleared); record the not-advanced
+                    # checkpoint from the confirming findings, and report the blockers with a non-zero
+                    # exit. No temporary false-completion: nothing on disk claims adoption.
+                    RB.clear_receipt(ctx_done["repo"])
+                    RB.write_checkpoint(ctx_done["repo"], _checkpoint_payload(findings_done, advanced=False))
+                # Re-read the durable reconciliation snapshot so the report's baseline block reflects
+                # the committed (legacy-adopted) / rolled-back (baseline-pending) reality — no extra
+                # board read; the findings themselves are unchanged by the marker/receipt state.
+                ctx_done["reconciliation"] = _read_reconciliation(ctx_done["repo"], ctx_done["default"])
                 plan_done.update({
                     "passes": pass_no,
                     "halted": False,
-                    "checkpoint_advanced": True,
+                    "checkpoint_advanced": converged,
                     "rescanned_from_durable": rescanned_done,
                     "resumed": resume,
                 })

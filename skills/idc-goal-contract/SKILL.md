@@ -49,9 +49,14 @@ matching):
 <!-- idc-provenance: {"matrix":"<phase-tag>-matrix.yaml","pillar":"<id>"} -->
 ```
 
-`<id>` is the same `pillars[].id` value Plan authored in
-`docs/workflow/pillar-matrices/<phase-tag>-matrix.yaml` — written into both places in the same
-run, so the link is identical by construction. Modeled on the `<!-- idc-deferral: {…} -->`
+**You author the prose body only — never the marker.** The marker is applied **deterministically by
+the sanctioned planning transaction at create-time**: fixed code derives it from the matrix pillar id
+`(basename(matrix), pillars[].id)` and appends it to the body Plan supplies via `--bodies`
+(`idc_tracker_transaction.py freeze --bodies …`). The machine owns the marker (global contract #16), so
+the model→matrix→issue link is identical by construction. **Your body must NOT contain its own
+`idc-provenance` marker** — freeze **fails closed** if it does (a model-authored marker could shadow the
+machine-derived one). `<id>` is the same `pillars[].id` value Plan authored in
+`docs/workflow/pillar-matrices/<phase-tag>-matrix.yaml`. Modeled on the `<!-- idc-deferral: {…} -->`
 marker. Filesystem-backed trackers have no issue bodies, so the marker is **github-only**.
 
 ## Complexity-adaptive

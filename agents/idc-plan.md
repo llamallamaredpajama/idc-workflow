@@ -145,21 +145,29 @@ pillar-level *file* clashes among the surviving, de-duplicated pillars.
    `blocked_by`/`parent` on filesystem). This is the **pointer-decomposition record** the engine's
    guarded `dispose --disposition retired` verifies (a named Buildable child that references the
    pointer) before it retires the pointer in step 3; without it the retirement is fail-closed. On the
-   **github** backend, stamp each Buildable issue body with the provenance marker
-   `<!-- idc-provenance: {"matrix":"<phase-tag>-matrix.yaml","pillar":"<id>"} -->`
-   (`idc:idc-goal-contract`), carrying the **exact** `pillars[].id` from the matrix entry just
-   authored in Phase 4 (the same value written to the matrix YAML, so the link is deterministic at
-   source — no fuzzy `Trace:` matching downstream). Filesystem trackers have no issue bodies, so
-   the stamp is github-only. **Provenance post-condition (github, DET-VERIFY):** once this run's
-   Buildables are minted, run
+   **github** backend, Plan authors the per-Buildable goal-contract body (`idc:idc-goal-contract`,
+   reasoning-tier) into a **bodies JSON keyed by `logical_id`** (the matrix `pillars[].id`) **before**
+   freeze, and passes it as `--bodies <bodies.json>` to `idc_tracker_transaction.py freeze`. The
+   sanctioned transaction then creates each github Buildable **with** that body and appends the
+   machine-derived provenance marker
+   `<!-- idc-provenance: {"matrix":"<phase-tag>-matrix.yaml","pillar":"<id>"} -->` in **fixed code**
+   from the matrix pillar id (the model authors prose; the machine owns the marker — global contract
+   #16), carrying the **exact** `pillars[].id` from the matrix entry just authored in Phase 4
+   (deterministic at source — no fuzzy `Trace:` matching downstream). Freeze **fails closed** if any
+   created Buildable has no body, an empty/whitespace body, or a body that already carries a marker —
+   so no empty-body Buildable can be minted. Filesystem trackers have no issue bodies, so `--bodies` is
+   github-only. **Provenance post-condition (github, DET-VERIFY):** the transaction's OWN post-apply
+   body postcondition already re-read each minted issue's LIVE body and proved the marker landed, so
+   running
    `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_provenance_check.py" --matrix <phase-tag>-matrix.yaml --issues <n1,n2,...>`
-   — it re-reads each issue's LIVE body (not Plan's own belief of what it wrote) and confirms a
-   valid marker naming a pillar actually in the matrix just authored. **Exit 0** confirms every
-   minted Buildable is stamped; **exit 2 halts Plan** — it prints the offending issue numbers,
-   which Plan re-stamps (`comment`/body edit through the adapter) and re-checks before continuing
-   to step 3. Plan **cannot report Phase 5 done while this check fails** — a dropped stamp used to
-   silently disarm the Recirculator's provenance regime (`idc_recirc_sweep.py`); this converts that
-   gap from PROSE-ONLY to a verified post-condition.
+   is a belt-and-suspenders verification of an **already-satisfied invariant** — it re-reads each
+   issue's LIVE body (not Plan's own belief of what it wrote) and confirms a valid marker naming a
+   pillar actually in the matrix just authored. **Exit 0** confirms every minted Buildable is stamped.
+   If it **exits 2**, the transaction's own body-postcondition already failed the apply — there is no
+   phantom re-stamp door: fix the authored body / matrix pillar id and **re-freeze/re-apply**
+   (fail-closed). Plan **cannot report Phase 5 done while this check fails** — a dropped marker used to
+   silently disarm the Recirculator's provenance regime (`idc_recirc_sweep.py`); the create-time marker
+   plus this post-condition close that gap.
 3. Advance the consideration pointer `Consideration → Planning` through the **guarded Stage door**
    (the only sanctioned Stage-write — it validates the Stage/Status pair against the machine and
    journals the transition; a raw `set --field Stage` is denied by the mutation interlock):

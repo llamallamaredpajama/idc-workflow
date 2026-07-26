@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 
@@ -93,6 +94,74 @@ def load_frozen(path: str) -> dict:
     return bundle
 
 
+# ── github goal-contract body channel (B1) ───────────────────────────────────────────────────────
+# The sanctioned create door (idc_transition.run("create-ticket", …, body=X) → idc_gh_board.create_item
+# → `gh issue create --body X`) already writes bodies; U5 simply stopped feeding it one. These helpers
+# restore create-with-body on the GITHUB backend ONLY (the filesystem backend has no issue bodies — its
+# create ops carry no `body` key and stay `body=""`, byte-for-byte unchanged). Marker AUTHORITY stays in
+# FIXED CODE (global contract #16): the model authors prose via --bodies; the machine derives + appends
+# the provenance marker deterministically from (basename(matrix), logical_id), so a downstream sweep
+# (idc_recirc_sweep.provenance_of) / Plan's post-condition (idc_provenance_check.py) matches the issue to
+# its matrix pillar by EXACT key — never a fuzzy Trace: match, never a model-writable machine-checked key.
+
+
+def _provenance_marker(matrix_basename: str, logical_id: str) -> str:
+    """The machine-owned github provenance marker for a minted Buildable. Serialized so that
+    idc_recirc_sweep.provenance_of (and thus idc_provenance_check.py) accepts it verbatim — the sweep's
+    own parser is the authority, so this can never drift from what it will validate."""
+    payload = json.dumps({"matrix": matrix_basename, "pillar": logical_id},
+                         separators=(",", ":"), ensure_ascii=False)
+    return f"<!-- idc-provenance: {payload} -->"
+
+
+def _compose_body_with_marker(body: str, matrix_basename: str, logical_id: str) -> str:
+    """Model-authored prose with the machine-derived marker APPENDED so the minted issue body ENDS with
+    the marker (the shape idc_provenance_check re-reads and the sweep matches)."""
+    return body.rstrip("\n") + "\n\n" + _provenance_marker(matrix_basename, logical_id)
+
+
+def _load_bodies(path: str | None) -> dict:
+    """Load the optional --bodies map {logical_id: model-authored goal-contract body}. Absent path → {}
+    (the github fail-closed guard below then refuses any create with no body)."""
+    if not path:
+        return {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except OSError as exc:
+        raise TransactionError(f"could not read --bodies map {path}: {exc}")
+    except json.JSONDecodeError as exc:
+        raise TransactionError(f"--bodies map {path} is invalid JSON: {exc}")
+    if not isinstance(data, dict):
+        raise TransactionError("--bodies map must be a JSON object {logical_id: body}")
+    return data
+
+
+def _attach_github_bodies(operations, matrix_path, bodies):
+    """Thread the model-authored goal-contract body + machine-derived provenance marker onto each github
+    create-ticket op (github backend only; the frozen op then carries the composed body, covered by
+    operations_digest → tamper-evident after freeze). FAIL CLOSED: a create whose logical_id has no body
+    entry, or an empty/whitespace body, or a body that ALREADY carries an idc-provenance marker, raises
+    TransactionError — no empty-body (and no marker-shadowed) Buildable can be frozen."""
+    import idc_recirc_sweep as RS  # lazy: RS imports idc_transition (already loaded) — no module cycle
+    matrix_basename = os.path.basename(matrix_path)
+    for op in operations:
+        if op.get("op") != "create-ticket":
+            continue
+        logical_id = op["logical_id"]
+        body = bodies.get(logical_id)
+        if body is None or not str(body).strip():
+            raise TransactionError(
+                f"github create for {logical_id!r} has no goal-contract body in --bodies — refusing to "
+                "freeze an empty-body Buildable (Plan must author one body per created Buildable)")
+        if RS.PROVENANCE_MARKER.search(str(body)):
+            raise TransactionError(
+                f"github create for {logical_id!r}: the authored body already carries an idc-provenance "
+                "marker — the machine owns the marker (a model-authored one could shadow the "
+                "machine-derived one via provenance_of's first-match); refusing to freeze")
+        op["body"] = _compose_body_with_marker(str(body), matrix_basename, logical_id)
+
+
 def build_operations(projection_rows, start_rows):
     projection_by_id = {row["logical_id"]: row for row in projection_rows}
     start_by_id = {row["logical_id"]: row for row in start_rows}
@@ -173,7 +242,8 @@ def _filter_relevant(rows, relevant_ids):
 
 def freeze_plan(repo: str, matrix_path: str, backend: str, tracker: str = "TRACKER.md",
                 owner: str | None = None, project: int | None = None,
-                baseline: str = "expected-red", label: str | None = None):
+                baseline: str = "expected-red", label: str | None = None,
+                bodies_path: str | None = None):
     repo = os.path.abspath(repo)
     tracker_path = _repo_path(repo, tracker)
     projection_bundle = idc_tracker_projection.build_projection(
@@ -192,6 +262,11 @@ def freeze_plan(repo: str, matrix_path: str, backend: str, tracker: str = "TRACK
     relevant_ids = [row["logical_id"] for row in projection_rows]
     relevant_rows = _filter_relevant(start_rows, relevant_ids)
     operations = build_operations(projection_rows, start_rows)
+    if backend == "github":
+        # Thread the goal-contract body + machine-derived marker onto each github create-ticket op
+        # BEFORE the bundle's operations_digest is taken, so the body is tamper-evident after freeze.
+        # On the filesystem backend --bodies is ignored (its creates carry no body — see --help).
+        _attach_github_bodies(operations, matrix_path, _load_bodies(bodies_path))
     actual = "expected-green" if not operations else "expected-red"
     if baseline not in {"expected-red", "expected-green"}:
         raise TransactionError(f"baseline must be expected-red or expected-green, got {baseline!r}")
@@ -294,7 +369,7 @@ def _execute_operation(ctx: dict, operation: dict, logical_to_number: dict):
             "create-ticket",
             ctx,
             title=operation["title"],
-            body="",
+            body=operation.get("body", ""),
             stage=operation.get("stage") or None,
             status=operation.get("status") or None,
         )
@@ -357,6 +432,43 @@ def _write_obligation(repo: str, bundle: dict, status: str, applied_operations, 
     PR.atomic_write_json(path, _obligation_record(bundle, status, applied_operations, remaining_operations,
                                                   failure=failure, final_digest=final_digest))
     return path
+
+
+def _read_live_issue_body(repo: str, number) -> str:
+    """Re-read one github issue's LIVE body — the SAME `gh issue view <n> --json body -q .body` idiom
+    idc_provenance_check uses, so the transaction's own post-apply check is parser-compatible with it.
+    A gh failure is fail-closed (raises TransactionError): the postcondition can never pass blind."""
+    try:
+        proc = subprocess.run(["gh", "issue", "view", str(number), "--json", "body", "-q", ".body"],
+                              cwd=repo, capture_output=True, text=True)
+    except OSError as exc:
+        raise TransactionError(f"github body postcondition: gh issue view #{number} failed: {exc}")
+    if proc.returncode != 0:
+        raise TransactionError(
+            f"github body postcondition: gh issue view #{number} exited {proc.returncode}")
+    return proc.stdout
+
+
+def _verify_github_bodies(repo: str, bundle: dict, applied_operations):
+    """github-only D3 exact-readback of each minted Buildable's LIVE body: it must carry the
+    machine-derived idc-provenance marker naming this run's matrix + the create's pillar id. Uses
+    idc_recirc_sweep.provenance_of (the sweep's own parser) so the transaction enforces exactly what
+    idc_provenance_check.py checks — that helper in Plan Phase 5 becomes a verification of an
+    already-satisfied invariant. Returns the list of misses (empty ⇒ every marker landed)."""
+    import idc_recirc_sweep as RS  # lazy: RS imports idc_transition (already loaded) — no module cycle
+    matrix_basename = os.path.basename(bundle.get("matrix") or "")
+    misses = []
+    for applied in applied_operations:
+        if applied.get("op") != "create-ticket":
+            continue
+        logical_id = applied.get("logical_id")
+        number = (applied.get("runtime") or {}).get("item")
+        prov = RS.provenance_of(_read_live_issue_body(repo, number))
+        if not prov or prov.get("matrix") != matrix_basename or prov.get("pillar") != logical_id:
+            misses.append(
+                f"#{number} ({logical_id}) live body is missing its idc-provenance marker "
+                f"(matrix={matrix_basename!r}, pillar={logical_id!r})")
+    return misses
 
 
 def apply_frozen(frozen_path: str, repo: str | None = None, backend: str | None = None,
@@ -422,6 +534,20 @@ def apply_frozen(frozen_path: str, repo: str | None = None, backend: str | None 
                                   failure="; ".join(mismatches), final_digest=final_digest)
             raise TransactionError("exact live postcondition failed: " + "; ".join(mismatches))
 
+        if backend == "github":
+            # STRENGTHEN, never weaken (spec §8 D3 extended to the issue body): after the title/stage/
+            # status live postcondition passes, prove each minted Buildable's LIVE body carries the
+            # machine-derived provenance marker. On a miss, write the postcondition-mismatch obligation
+            # and raise — exactly the readback-failure path above; no empty/unmarked Buildable is ever
+            # journaled as a clean create + given a receipt.
+            marker_misses = _verify_github_bodies(repo, bundle, applied_operations)
+            if marker_misses:
+                if obligation_path:
+                    _write_obligation(repo, bundle, "postcondition-mismatch", applied_operations, [],
+                                      failure="; ".join(marker_misses), final_digest=final_digest)
+                raise TransactionError(
+                    "github body-marker postcondition failed: " + "; ".join(marker_misses))
+
         if obligation_path:
             _write_obligation(repo, bundle, "awaiting-receipt", applied_operations, [], final_digest=final_digest)
         receipt = PR.build_receipt(repo, bundle, final_snapshot, applied_operations)
@@ -456,6 +582,12 @@ def main():
     fp.add_argument("--project", type=int)
     fp.add_argument("--baseline", required=True, choices=("expected-red", "expected-green"))
     fp.add_argument("--label")
+    fp.add_argument("--bodies",
+                    help="github backend only: a JSON map {logical_id: model-authored goal-contract "
+                         "body}, one entry per Buildable to be created. Fixed code appends the "
+                         "machine-derived idc-provenance marker to each; freeze FAILS CLOSED on a "
+                         "missing/empty body or a body that already carries a marker. Ignored on the "
+                         "filesystem backend (its issues have no bodies).")
     fp.add_argument("--out", required=True)
 
     ap_apply = sp.add_parser("apply")
@@ -478,6 +610,7 @@ def main():
                 project=args.project,
                 baseline=args.baseline,
                 label=args.label,
+                bodies_path=args.bodies,
             )
             write_frozen(args.out, bundle)
             return

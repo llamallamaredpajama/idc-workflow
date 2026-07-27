@@ -531,6 +531,36 @@ class CommandEntryAuthorizationTransactionTests(unittest.TestCase):
         )
         self.assertEqual(["write", "edit", "git"], auth2.get("allowed_actions"))
 
+    def test_read_only_ceiling_is_not_bypassed_by_action_case_or_whitespace(self) -> None:
+        # F17: the read-only ceiling normalizes actions (strip + lowercase) BEFORE comparing, so a
+        # cased or whitespace-padded mutation action cannot slip past the ceiling and then satisfy a
+        # lowercase enforcement request. Each variant must raise and write no authorization.
+        self._open("S-ro-case", "doctor", "doctor-case-nonce")
+        for variant in ("Write", " write ", "GIT", "Edit"):
+            with self.subTest(variant=variant):
+                with self.assertRaises(RuntimeError) as ctx:
+                    gate.PG.write_authorization(
+                        str(self.repo),
+                        session="S-ro-case",
+                        command="doctor",
+                        allowed_paths=["."],
+                        allowed_actions=[variant],
+                    )
+                self.assertIn("read-only", str(ctx.exception).lower())
+                self.assertFalse(self._auth_path().exists())
+
+        # A mutating command normalizes a cased/padded action rather than storing it verbatim, so the
+        # stored grant matches the lowercase form enforcement compares against.
+        self._open("S-rw-case", "build", "build-case-nonce", build_requested=["#5"])
+        auth3 = gate.PG.write_authorization(
+            str(self.repo),
+            session="S-rw-case",
+            command="build",
+            allowed_paths=["."],
+            allowed_actions=[" Write ", "EDIT", "git", "git"],
+        )
+        self.assertEqual(["write", "edit", "git"], auth3.get("allowed_actions"))
+
 
 if __name__ == "__main__":
     if len(sys.argv) == 5 and sys.argv[1] == "--race-child":

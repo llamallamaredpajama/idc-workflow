@@ -13,6 +13,11 @@ accident:
     installed and touches nothing.
   * A built-in denylist refuses `--apply` against known production repositories, before any network
     call.
+  * Protected-surface OWNERSHIP is a MANDATORY precondition (F18): the ruleset's
+    `require_code_owner_review` binds no reviewer unless a CODEOWNERS names every protected surface,
+    so the installer refuses (before any network call, in dry-run and apply alike) when the target
+    checkout's CODEOWNERS does not cover them. The checkout root is resolved from the ruleset's
+    canonical location (`<root>/.github/rulesets/<name>.json`) unless `--repo-root` overrides it.
 
 Live sandbox use (the only repos this run may mutate) is gated further by the caller — see
 `tests/live/pathway-github-integration.sh`, which refuses anything but a disposable sandbox.
@@ -75,6 +80,13 @@ def _load_payload(ruleset_path: str):
     return doc, gh, reasons
 
 
+def _repo_root_of_ruleset(ruleset_path: str) -> str:
+    """The checkout root that carries the ruleset. The ruleset canonically lives at
+    `<root>/.github/rulesets/<name>.json`, so the root is three directories up. Used to locate the
+    CODEOWNERS whose coverage gates the install (F18)."""
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(ruleset_path))))
+
+
 def _gh_json(args: list):
     out = subprocess.run(["gh"] + args, capture_output=True, text=True)
     if out.returncode != 0:
@@ -112,6 +124,10 @@ def main(argv=None) -> int:
                         help="OWNER/REPO to install the ruleset on (REQUIRED — no implicit default)")
     parser.add_argument("--ruleset", default=RC.DEFAULT_RULESET,
                         help="path to the ruleset JSON (default: the shipped one)")
+    parser.add_argument("--repo-root", default=None,
+                        help="checkout root whose CODEOWNERS must cover every protected surface "
+                             "(default: derived from the ruleset's canonical "
+                             "<root>/.github/rulesets/<name>.json location)")
     parser.add_argument("--apply", action="store_true",
                         help="actually create/update the ruleset (default: dry-run, touches nothing)")
     args = parser.parse_args(argv)
@@ -136,6 +152,20 @@ def main(argv=None) -> int:
         print("REFUSE: ruleset fails its own contract — refusing to install a weakened ruleset:",
               file=sys.stderr)
         for r in reasons:
+            print("  - {}".format(r), file=sys.stderr)
+        return 1
+
+    # F18: ownership coverage is a MANDATORY install precondition. require_code_owner_review binds a
+    # reviewer only once a CODEOWNERS names every protected surface, so refuse (in dry-run and apply
+    # alike, before any network call) when the target checkout's CODEOWNERS does not cover them.
+    repo_root = args.repo_root or _repo_root_of_ruleset(args.ruleset)
+    surfaces = (doc.get("idc_contract") or {}).get("protected_surfaces") or []
+    ownership = RC.validate_codeowners(repo_root, surfaces)
+    if ownership:
+        print("REFUSE: protected surfaces are not all owned in {} — require_code_owner_review would "
+              "bind no reviewer; add CODEOWNERS coverage before installing:".format(repo_root),
+              file=sys.stderr)
+        for r in ownership:
             print("  - {}".format(r), file=sys.stderr)
         return 1
 

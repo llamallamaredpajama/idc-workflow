@@ -229,6 +229,113 @@ def _witness_problem(kind: str, path: str, doc: dict):
     return None
 
 
+# --- Planning-receipt witness -------------------------------------------------------------------
+# A planning receipt is written during Plan and BORROWED at Build freeze, so — unlike the contract /
+# execution / build-receipt witnesses, which are recorded and verified within a single Build worktree
+# lifecycle — its witness must survive travelling from the checkout Plan ran in to a DIFFERENT Build
+# worktree of the same repo. It is therefore keyed by the receipt's path relative to its OWN worktree
+# toplevel (the stable logical repo path `docs/workflow/planning-receipts/<label>.json`, identical in
+# every worktree) rather than the primary-checkout-relative path (`_repo_context`, which embeds the
+# worktree subdir and so differs per worktree). The store still lives in the shared git common dir and
+# still binds the stable repo identity (the primary checkout root), so a foreign-repo receipt is
+# refused (F7) while a legitimate cross-worktree receipt is recognized (F19).
+PLANNING_WITNESS_KIND = "planning-receipt"
+
+
+def _worktree_toplevel(path: str) -> str:
+    proc = subprocess.run(
+        ["git", "-C", path, "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True, timeout=15)
+    if proc.returncode != 0:
+        detail = _clip(CS.scrub(proc.stderr or proc.stdout or "git rev-parse failed"), 200)
+        raise ValidationError(f"{path} is not inside a git worktree ({detail})")
+    return os.path.realpath(proc.stdout.strip())
+
+
+def _planning_witness_context(receipt_path: str):
+    """`(common_git_dir, repo_identity, logical_rel)` for a planning receipt.
+
+    `logical_rel` is the receipt's path relative to its own worktree toplevel (stable across linked
+    worktrees); `repo_identity` is the shared primary checkout root; the store is the common git dir."""
+    abs_path = os.path.realpath(os.path.abspath(receipt_path))
+    parent = os.path.dirname(abs_path) or "."
+    common_git_dir = _common_git_dir(parent)
+    repo_identity = os.path.realpath(os.path.dirname(common_git_dir))
+    toplevel = _worktree_toplevel(parent)
+    rel = os.path.relpath(abs_path, toplevel)
+    if rel == ".." or rel.startswith(".." + os.sep):
+        raise ValidationError(
+            f"planning receipt {receipt_path} must live under its worktree root {toplevel}")
+    return common_git_dir, repo_identity, rel
+
+
+def _planning_witness_key(rel: str) -> str:
+    return f"{PLANNING_WITNESS_KIND}:{rel}"
+
+
+def record_planning_witness(receipt_path: str, doc: dict) -> str:
+    """Record the out-of-tree machine witness for a freshly written planning receipt (called by the
+    sanctioned transaction). Keyed by the worktree-relative logical path so a Build contract frozen in
+    a different worktree can find it; bound to the byte digest so a re-signed forgery is caught."""
+    common_git_dir, repo_identity, rel = _planning_witness_context(receipt_path)
+    digest = _digest_file(receipt_path)
+    witnesses = _read_witnesses(common_git_dir)
+    if witnesses is None:
+        raise ValidationError("the validation witness store is unreadable")
+    witnesses[_planning_witness_key(rel)] = {
+        "kind": PLANNING_WITNESS_KIND,
+        "digest": digest,
+        "repo_identity": repo_identity,
+        "label": doc.get("label"),
+        "receipt_digest": doc.get("receipt_digest"),
+        "validated_at": _now(),
+        "validator": os.path.basename(__file__),
+    }
+    target = _witness_path(common_git_dir)
+    fd, tmp = tempfile.mkstemp(prefix=".idc-build-validation.", suffix=".tmp", dir=common_git_dir)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(witnesses, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+        os.replace(tmp, target)
+    except OSError as exc:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise ValidationError(f"could not record the planning-receipt witness for {rel} ({exc})") from exc
+    return rel
+
+
+def planning_witness_problem(receipt_path: str, doc: dict):
+    """Refusal reason if the planning receipt is not machine-anchored, else None."""
+    try:
+        common_git_dir, repo_identity, rel = _planning_witness_context(receipt_path)
+    except ValidationError as exc:
+        return str(exc)
+    witnesses = _read_witnesses(common_git_dir)
+    if witnesses is None:
+        return "the validation witness store is unreadable"
+    rec = witnesses.get(_planning_witness_key(rel))
+    if not isinstance(rec, dict):
+        return f"no machine-owned witness is recorded for planning receipt {rel}"
+    if rec.get("kind") != PLANNING_WITNESS_KIND:
+        return f"the planning-receipt witness for {rel} is for {rec.get('kind')!r}"
+    if rec.get("repo_identity") != repo_identity:
+        return f"the planning-receipt witness for {rel} names repository {rec.get('repo_identity')!r}, not this repo"
+    try:
+        digest = _digest_file(receipt_path)
+    except OSError as exc:
+        return f"could not re-read {rel} to verify its witness ({exc})"
+    if rec.get("digest") != digest:
+        return f"the planning-receipt witness for {rel} is stale — its byte digest no longer matches the file"
+    expected_self = rec.get("receipt_digest")
+    actual_self = doc.get("receipt_digest")
+    if expected_self is not None and actual_self is not None and expected_self != actual_self:
+        return f"the planning-receipt witness for {rel} vouches for a different receipt version"
+    return None
+
+
 def atomic_write_json(path: str, data):
     parent = os.path.dirname(os.path.abspath(path)) or "."
     os.makedirs(parent, exist_ok=True)
@@ -390,7 +497,7 @@ def _execution_digest(doc: dict) -> str:
     return sha256_json(body)
 
 
-def _planning_receipt_info(path: str, repo: str):
+def _planning_receipt_info(path: str):
     if not path:
         return None
     try:
@@ -404,21 +511,27 @@ def _planning_receipt_info(path: str, repo: str):
         raise ValidationError(f"could not read planning receipt {path}: {exc}") from exc
     except json.JSONDecodeError as exc:
         raise ValidationError(f"planning receipt {path} is invalid JSON: {exc}") from exc
-    # Fully verify the receipt's self-integrity — machine writer, recomputed self-digest, and internal
-    # projection/operations/final digests — BEFORE borrowing any binding (F7). A repo-local edited
-    # receipt whose graph/projection digest was swapped but whose receipt_digest was left stale is
-    # refused here, so it cannot inject a forged binding into the frozen Build contract. The
-    # live-board readback is intentionally not re-run at freeze time (the board legitimately advances
-    # between Plan and Build), but the receipt is bound to THIS repository, so a receipt minted for a
-    # different repo is refused too.
+    # 1. Self-integrity — machine writer, recomputed self-digest, and internal
+    #    projection/operations/final digests — so a lazily edited receipt is refused (F5).
     try:
         PR.verify_receipt_integrity(doc)
     except PR.ReceiptError as exc:
         raise ValidationError(f"planning receipt failed verification: {exc}") from exc
-    receipt_repo = doc.get("repo")
-    if not receipt_repo or os.path.realpath(str(receipt_repo)) != os.path.realpath(repo):
+    # 2. OUT-OF-TREE MACHINE ANCHOR (F7). The receipt's written_by + receipt_digest are IN-BAND — a
+    #    repo-local forger can swap a borrowed binding and recompute the self-digest, passing step 1.
+    #    The authoritative proof of machine authorship is the witness the sanctioned transaction
+    #    records in the git common dir when it writes the receipt (the same store the build-contract /
+    #    execution / build receipts use): it lives outside the committed working tree a PR can edit and
+    #    is keyed to the receipt file's byte digest, so a hand-forged or re-signed receipt has no
+    #    matching witness and is refused. The common dir is shared across linked worktrees, so a
+    #    receipt written by Plan in one worktree is recognized by a Build contract frozen in another
+    #    worktree of the same repo (F19) — this supersedes the earlier realpath(receipt["repo"])
+    #    compare, which rejected every worktree-produced receipt because freeze normalizes the repo to
+    #    the primary checkout root while the receipt records the (worktree) checkout Plan ran in.
+    problem = planning_witness_problem(path, doc)
+    if problem:
         raise ValidationError(
-            f"planning receipt is bound to a different repository ({receipt_repo!r}), not {repo!r}")
+            f"planning receipt is not machine-anchored ({problem}); refusing to borrow its bindings")
     return {
         "path": path,
         "graph_digest": doc.get("graph_digest"),
@@ -452,7 +565,7 @@ def freeze_contract(*, repo: str, issue: int, pr: int, graph_node: str, graph_di
     workspace = _abs_repo(repo)
     attempt_ceiling = _resolve_attempt_ceiling(workspace, attempt_ceiling)
     repo = _repo_identity(workspace)
-    planning = _planning_receipt_info(planning_receipt, repo) if planning_receipt else None
+    planning = _planning_receipt_info(planning_receipt) if planning_receipt else None
     if planning:
         graph_digest = graph_digest or planning.get("graph_digest")
         projection_digest = projection_digest or planning.get("projection_digest")
@@ -645,8 +758,20 @@ def main(argv=None):
     rp.add_argument("--contract", required=True)
     rp.add_argument("--out", required=True)
 
+    # The SINGLE resolved attempt-ceiling source (F21). Both the risk gate's `--attempt-ceiling` and
+    # the implementer's retry loop read this, so the operator's `pathway_enforcement.attempt_ceiling`
+    # (spec §2.1) governs the risk gate, the frozen contract, AND the loop from one value — not a
+    # hard-coded 3 that silently disagrees with the config.
+    cp = sp.add_parser("attempt-ceiling",
+                       help="print the repo's resolved attempt ceiling (config value, else the "
+                            "built-in default) — the single source the risk gate + retry loop consume")
+    cp.add_argument("--repo", required=True)
+
     args = ap.parse_args(argv)
     try:
+        if args.command == "attempt-ceiling":
+            print(_resolve_attempt_ceiling(_abs_repo(args.repo), None))
+            return 0
         if args.command == "freeze":
             freeze_contract(
                 repo=args.repo,

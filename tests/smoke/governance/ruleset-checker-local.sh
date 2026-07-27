@@ -102,6 +102,32 @@ out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$NO_CO" 2>&1)" \
 printf '%s\n' "$out" | grep -qiE 'codeowner' \
   || fail "missing-CODEOWNERS refusal must name CODEOWNERS; got: $out"
 
+# F20: GitHub CODEOWNERS is LAST-MATCH-WINS. A broad `* @owner` followed by a later, MORE-SPECIFIC
+# rule with NO owner leaves that surface unowned on GitHub — the checker must refuse it, not
+# false-certify coverage off the earlier `*` match. Red-when-broken: a first-match validator returns
+# owned on the `*` rule and admits.
+LMW_ROOT="$WORK/co-last-match"; mkdir -p "$LMW_ROOT/.github"
+cat > "$LMW_ROOT/.github/CODEOWNERS" <<'CO'
+* @owner
+# a later, more-specific rule with NO owner un-owns the hook surface on GitHub (last-match-wins)
+/scripts/hooks/
+CO
+out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$LMW_ROOT" 2>&1)" \
+  && fail "checker false-certified a surface un-owned by a later last-match-wins ownerless override"
+printf '%s\n' "$out" | grep -qiE 'hook|owner' \
+  || fail "last-match-wins refusal must name the un-owned surface; got: $out"
+
+# Control: the SAME two rules in the OTHER order (`* @owner` LAST) legitimately owns every surface,
+# because GitHub's last match is then the owning `*`. This must pass — the fix is precedence-aware,
+# not a blanket ban on wildcard+specific combinations.
+LMW_OK="$WORK/co-last-match-ok"; mkdir -p "$LMW_OK/.github"
+cat > "$LMW_OK/.github/CODEOWNERS" <<'CO'
+/scripts/hooks/
+* @owner
+CO
+python3 "$CHK" --ruleset "$RS" --repo-root "$LMW_OK" >/dev/null \
+  || fail "checker refused a CODEOWNERS whose LAST matching rule (`* @owner`) owns every surface"
+
 # --- installer safety guards (no network is reached before these refusals) ----------------------
 # No --repo -> refuse (never guesses the target board).
 python3 "$INS" --ruleset "$RS" >/dev/null 2>&1 \
@@ -117,4 +143,23 @@ printf '%s' "$plan" | grep -Fq "idc/pathway-integrity" \
 python3 "$INS" --ruleset "$RS" --repo llamallamaredpajama/idc-workflow --apply >/dev/null 2>&1 \
   && fail "installer did NOT refuse to mutate a known production repo"
 
-echo "PASS: ruleset checker enforces PR flow, exact-head required check, force-push/deletion prevention, and all protected surfaces; installer refuses without --repo and refuses a production repo"
+# F18: ownership coverage is a MANDATORY install precondition, not just an optional --repo-root check
+# on the standalone checker. Installing the ruleset into a repo whose CODEOWNERS does not cover every
+# protected surface is refused BEFORE any network call — otherwise require_code_owner_review binds no
+# reviewer. The installer resolves the repo root from the ruleset's canonical location
+# (<root>/.github/rulesets/<name>.json). Red-when-broken: with the installer ignoring CODEOWNERS, this
+# dry-run prints a plan and exits 0.
+INST_NOCO="$WORK/install-no-codeowners"; mkdir -p "$INST_NOCO/.github/rulesets"
+cp "$RS" "$INST_NOCO/.github/rulesets/idc-pathway-integrity.json"
+out="$(python3 "$INS" --ruleset "$INST_NOCO/.github/rulesets/idc-pathway-integrity.json" \
+        --repo llamallamaredpajama/ke-idc-test-repo-install 2>&1)" \
+  && fail "installer did NOT refuse a repo whose CODEOWNERS is absent (ownership is a mandatory precondition)"
+printf '%s\n' "$out" | grep -qiE 'codeowner|owner' \
+  || fail "install ownership refusal must name the CODEOWNERS gap; got: $out"
+
+# An explicit --repo-root that DOES cover every surface lets the dry-run succeed.
+python3 "$INS" --ruleset "$INST_NOCO/.github/rulesets/idc-pathway-integrity.json" \
+        --repo llamallamaredpajama/ke-idc-test-repo-install --repo-root "$PLUGIN" >/dev/null \
+  || fail "installer refused even though --repo-root supplies a complete CODEOWNERS"
+
+echo "PASS: ruleset checker enforces PR flow, exact-head required check, force-push/deletion prevention, all protected surfaces, and GitHub last-match-wins ownership; installer refuses without --repo, refuses a production repo, and refuses to install without CODEOWNERS coverage"

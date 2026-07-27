@@ -5,17 +5,27 @@ name: idc-pathway-integrity
 # deterministic checker scripts/idc_pathway_check.py — no LLM, no arbitrary generated script.
 #
 # TRUSTED CHECKER (F1). On a pull request the checker CODE is taken from the BASE ref — the
-# already-merged, trusted tree — not the PR head it is judging, so a PR cannot weaken its own required
-# check, remove a load-bearing hook, or gut validation code and still make the check green. The
-# trusted checker validates the PR-HEAD tree (surfaces present AND non-empty) while binding --head to
-# the exact proposed head SHA. On a push to a protected branch the pushed commit is itself trusted, so
-# it serves as both the checker source and the judged tree.
+# already-merged, trusted tree — not the PR head it is judging. So a PR cannot weaken the CHECKER
+# SCRIPT, remove a load-bearing hook, or gut validation code and still make the deterministic check
+# green: the base-ref checker runs the real logic against the PR-HEAD tree (surfaces present AND
+# non-empty) while binding --head to the exact proposed head SHA. On a push to a protected branch the
+# pushed commit is itself trusted, so it serves as both the checker source and the judged tree.
+#
+# WHAT THIS DOES NOT COVER (F16). For a SAME-REPO pull_request, GitHub evaluates the WORKFLOW
+# DEFINITION from the PR head, not the base. So a PR can edit THIS file — keep the job/check name
+# `idc/pathway-integrity` but replace the run: step with `exit 0` — and its own required check reports
+# green without ever invoking the trusted checker. The deterministic guarantee therefore covers the
+# checker script and the protected surfaces, NOT the workflow definition itself. Workflow-definition
+# tampering is caught by a DIFFERENT gate: CODEOWNERS review of /.github/workflows/
+# (require_code_owner_review), i.e. a human code-owner, not this check. A hardening follow-up is to
+# move the gate to an org-level required / pinned reusable workflow a PR head cannot redefine.
 #
 # SCOPE. The ruleset (.github/rulesets/idc-pathway-integrity.json) makes this check required and
 # strict (up-to-date head); its review/ownership rules (require_code_owner_review + CODEOWNERS,
-# validated by scripts/idc_ruleset_check.py) protect the surface CONTENT. The spec §2.3 evidence-bound
-# merge refusal (tracker / graph / journal / authorization / validation / review / finish evidence) is
-# owned by the finisher/gate receipts at merge time, NOT by this static head-bound check.
+# validated by scripts/idc_ruleset_check.py) protect the surface CONTENT and the workflow definition.
+# The spec §2.3 evidence-bound merge refusal (tracker / graph / journal / authorization / validation /
+# review / finish evidence) is owned by the finisher/gate receipts at merge time, NOT by this static
+# head-bound check.
 #
 # Follow-up (supply-chain hardening): pin `actions/checkout` to a full commit SHA rather than the
 # moving `@v4` tag. Left as `@v4` here because resolving the exact SHA needs network access; a wrong

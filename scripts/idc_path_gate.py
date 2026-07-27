@@ -381,6 +381,23 @@ def _find_active_record_by_nonce(repo: str, command: str, nonce: str) -> dict[st
 MUTATION_ACTIONS = ("write", "edit", "git")
 
 
+def _normalize_actions(actions: list[str]) -> list[str]:
+    """Canonical action tokens: stripped, lowercased, empties dropped, order-preserving de-dupe.
+
+    Enforcement (`_evaluate_request`) already compares the requested action against the stored
+    `allowed_actions` on this normalized form. So an authorization MUST be normalized to the same form
+    BEFORE the role-action-ceiling check and BEFORE storage — otherwise a cased or whitespace-padded
+    token (`Write`, ` write `) slips the ceiling (`"Write" not in MUTATION_ACTIONS`) yet is later
+    matched by a lowercase enforcement request, minting the very grant the ceiling exists to refuse
+    (F17)."""
+    normalized: list[str] = []
+    for raw in actions or []:
+        token = str(raw).strip().lower()
+        if token and token not in normalized:
+            normalized.append(token)
+    return normalized
+
+
 def _default_profile(command: str) -> tuple[list[str], list[str]]:
     if command in READ_ONLY_COMMANDS:
         return ["."], []
@@ -495,6 +512,12 @@ def write_authorization(
         def_paths, def_actions = _default_profile(command)
         allowed_paths = def_paths if allowed_paths is None else allowed_paths
         allowed_actions = def_actions if allowed_actions is None else allowed_actions
+    # Normalize the requested actions to enforcement's canonical form (strip/lowercase/dedupe) ONCE,
+    # before both the ceiling check and storage. This is load-bearing: the ceiling compares against
+    # the lowercase MUTATION_ACTIONS and enforcement matches on the same normalized form, so a cased
+    # or padded token must be canonicalized here or it would slip the ceiling yet still satisfy a
+    # real lowercase request (F17).
+    allowed_actions = _normalize_actions(allowed_actions)
     # Enforce the command's role action ceiling: a read-only command can never be granted a mutation
     # action, even when one is explicitly requested. This closes the escalation where any active
     # record — including a read-only doctor/pause record — could mint a broad write/edit/git grant.
@@ -512,7 +535,7 @@ def write_authorization(
         command=command,
         branch=branch,
         allowed_paths=_normalize_allowed_paths(repo, list(allowed_paths)),
-        allowed_actions=list(dict.fromkeys(allowed_actions)),
+        allowed_actions=allowed_actions,
         ticket=ticket,
         graph_node=graph_node,
         ttl_seconds=ttl_seconds,

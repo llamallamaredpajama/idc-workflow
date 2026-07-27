@@ -180,19 +180,30 @@ def _normalize_owned_path(value: str) -> str:
 
 
 def _surface_is_owned(surface: str, rules: list) -> bool:
-    """Whether the WHOLE protected surface is owned: some CODEOWNERS entry with >=1 owner is the
-    surface itself or an ancestor directory of it (a deeper pattern owns only part, so it does not
-    count). A root pattern (`*` / `/`) owns everything."""
+    """Whether the WHOLE protected surface is owned under GitHub's LAST-MATCH-WINS precedence.
+
+    GitHub applies the *last* matching CODEOWNERS pattern to a path, so a later rule overrides an
+    earlier one. Ownership of the whole surface therefore depends on the LAST rule (in file order)
+    that applies to it — either the surface itself or an ancestor (`*` / `/` own everything) — and
+    that last rule must name an owner. A first-match check would false-certify a surface that a broad
+    early `* @owner` covers but a later, more-specific OWNERLESS rule un-owns (F20).
+
+    A later rule that carves out a strict DESCENDANT of the surface with no owner also leaves part of
+    the surface unowned on GitHub, so it likewise defeats ownership (until a still-later ancestor rule
+    re-establishes it). We track ownership statefully in file order, mirroring GitHub's per-path
+    last-match resolution at surface granularity."""
     target = _normalize_owned_path(surface)
+    owned = False
     for pattern, owners in rules:
-        if not owners:
-            continue
-        owned = _normalize_owned_path(pattern)
-        if owned in ("", "*"):
-            return True
-        if target == owned or target.startswith(owned + "/"):
-            return True
-    return False
+        rule_path = _normalize_owned_path(pattern)
+        covers_whole = rule_path in ("", "*") or target == rule_path or target.startswith(rule_path + "/")
+        if covers_whole:
+            # The last ancestor-or-self rule sets the default ownership across the whole surface.
+            owned = bool(owners)
+        elif rule_path.startswith(target + "/") and not owners:
+            # A later ownerless rule under the surface carves a hole in the coverage.
+            owned = False
+    return owned
 
 
 def validate_codeowners(repo_root: str, surfaces) -> list:

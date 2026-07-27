@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -140,6 +141,46 @@ def atomic_write_json(path: str, data):
 def _read_json(path: str):
     with open(path, encoding="utf-8") as fh:
         return json.load(fh)
+
+
+def _is_git_repo(path: str) -> bool:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", os.path.abspath(path), "rev-parse", "--git-dir"],
+            capture_output=True, text=True, timeout=15)
+        return proc.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def write_receipt(repo: str, receipt_path: str, receipt: dict) -> None:
+    """Write the planning receipt to disk AND record its machine-owned witness in the git common dir.
+
+    The self `receipt_digest` is only tamper-EVIDENCE: it is recomputed over the receipt body, so a
+    repo-local forger can swap a borrowed binding (graph/projection digest) and re-sign the receipt,
+    and it would still pass `verify_receipt_integrity`. The authoritative proof of machine authorship
+    is an OUT-OF-TREE witness recorded here — the SAME git-common-dir witness store the build
+    contract / execution / build receipts use. It records the receipt file's byte digest OUTSIDE the
+    committed working tree a PR can edit, and — because the common dir is shared across linked
+    worktrees — it is visible to a Build contract frozen in any worktree of the same repo. A Build
+    freeze refuses to borrow a receipt whose witness is absent or stale, which closes the
+    re-signed-forgery hole (F7) while accepting legitimate worktree-produced receipts (F19).
+
+    Witnessing is skipped for a non-git governed repo (no common dir to anchor into); such a repo can
+    never reach a Build freeze, which itself requires a git repo, so no borrow is left unanchored."""
+    atomic_write_json(receipt_path, receipt)
+    try:
+        import idc_validation_contract as VC  # noqa: E402 — sibling; lazy to avoid an import cycle
+    except ImportError:
+        return
+    try:
+        VC.record_planning_witness(os.path.abspath(receipt_path), receipt)
+    except VC.ValidationError as exc:
+        # A non-git repo has no common dir to anchor into — skip (a Build freeze can't run there
+        # anyway). Any OTHER failure inside a git repo would leave an un-borrowable receipt, so it is
+        # surfaced rather than swallowed.
+        if _is_git_repo(repo):
+            raise ReceiptError(f"could not anchor the planning receipt witness: {exc}") from exc
 
 
 def read_live_snapshot(backend: str, tracker: str, repo: str, owner: str | None = None,

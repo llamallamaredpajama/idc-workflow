@@ -139,6 +139,83 @@ def validate_contract(contract: dict) -> list:
     return reasons
 
 
+# CODEOWNERS is looked for at the three locations GitHub honors, in precedence order.
+CODEOWNERS_RELPATHS = (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
+
+
+def _read_codeowners(repo_root: str):
+    """`(relpath, text)` for the first CODEOWNERS GitHub would honor, or `(None, None)`."""
+    for rel in CODEOWNERS_RELPATHS:
+        path = os.path.join(repo_root, rel)
+        if os.path.isfile(path):
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    return rel, fh.read()
+            except OSError:
+                return rel, None
+    return None, None
+
+
+def _codeowners_rules(text: str) -> list:
+    """Parse CODEOWNERS into `(pattern, owners)` pairs, dropping comments and blank lines."""
+    rules = []
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        parts = line.split()
+        pattern = parts[0]
+        owners = [tok for tok in parts[1:] if tok.startswith("@") or "@" in tok]
+        rules.append((pattern, owners))
+    return rules
+
+
+def _normalize_owned_path(value: str) -> str:
+    """A surface glob / CODEOWNERS pattern reduced to a comparable repo-relative directory-or-file."""
+    text = str(value).strip().lstrip("/")
+    for suffix in ("/**", "/*"):
+        if text.endswith(suffix):
+            text = text[: -len(suffix)]
+    return text.rstrip("/")
+
+
+def _surface_is_owned(surface: str, rules: list) -> bool:
+    """Whether the WHOLE protected surface is owned: some CODEOWNERS entry with >=1 owner is the
+    surface itself or an ancestor directory of it (a deeper pattern owns only part, so it does not
+    count). A root pattern (`*` / `/`) owns everything."""
+    target = _normalize_owned_path(surface)
+    for pattern, owners in rules:
+        if not owners:
+            continue
+        owned = _normalize_owned_path(pattern)
+        if owned in ("", "*"):
+            return True
+        if target == owned or target.startswith(owned + "/"):
+            return True
+    return False
+
+
+def validate_codeowners(repo_root: str, surfaces) -> list:
+    """Refusal reasons for protected-surface ownership: a CODEOWNERS must exist and name an owner for
+    every protected surface, so `require_code_owner_review` actually binds a reviewer to each (F6)."""
+    rel, text = _read_codeowners(repo_root)
+    if rel is None:
+        return ["no CODEOWNERS file found (looked at {}) — require_code_owner_review cannot bind a "
+                "reviewer to any protected surface".format(", ".join(CODEOWNERS_RELPATHS))]
+    if text is None:
+        return ["the CODEOWNERS file {} is unreadable".format(rel)]
+    rules = _codeowners_rules(text)
+    if not rules:
+        return ["{} declares no owner rules — every protected surface is unowned".format(rel)]
+    reasons = []
+    for surface in surfaces or []:
+        if isinstance(surface, str) and surface and not _surface_is_owned(surface, rules):
+            reasons.append(
+                "protected surface {!r} has no code owner in {} — add a CODEOWNERS rule for it".format(
+                    surface, rel))
+    return reasons
+
+
 def _gh_json(args: list, repo_flag=None):
     cmd = ["gh"] + args
     out = subprocess.run(cmd, capture_output=True, text=True)
@@ -167,9 +244,14 @@ def main(argv=None) -> int:
     parser.add_argument("--repo", default=None,
                         help="OWNER/REPO — validate the LIVE installed ruleset via `gh api` "
                              "instead of a local file")
+    parser.add_argument("--repo-root", default=None,
+                        help="repository checkout root — additionally validate that a CODEOWNERS file "
+                             "names an owner for every protected surface (F6). When omitted, ownership "
+                             "coverage is not checked (the ruleset structure still is).")
     args = parser.parse_args(argv)
 
     reasons = []
+    contract = None
     if args.repo:
         try:
             gh = load_live_ruleset(args.repo)
@@ -183,7 +265,8 @@ def main(argv=None) -> int:
         if os.path.isfile(local):
             with open(local) as fh:
                 doc = json.load(fh)
-            reasons += validate_contract(doc.get("idc_contract") or {})
+            contract = doc.get("idc_contract") or {}
+            reasons += validate_contract(contract)
         else:
             print("  note: protected-surface metadata not checked (no local ruleset file available)")
     else:
@@ -206,7 +289,14 @@ def main(argv=None) -> int:
         if "idc_contract" not in doc:
             reasons.append("top-level 'idc_contract' object is missing")
         else:
-            reasons += validate_contract(doc["idc_contract"])
+            contract = doc["idc_contract"]
+            reasons += validate_contract(contract)
+
+    # Protected-surface OWNERSHIP: when a repo root is supplied, a CODEOWNERS must name an owner for
+    # every protected surface, or require_code_owner_review binds no reviewer to them (F6).
+    if args.repo_root:
+        surfaces = (contract or {}).get("protected_surfaces") if isinstance(contract, dict) else None
+        reasons += validate_codeowners(args.repo_root, surfaces or [])
 
     if reasons:
         print("idc-pathway-integrity ruleset: REFUSE")

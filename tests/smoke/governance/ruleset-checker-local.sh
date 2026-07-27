@@ -75,6 +75,33 @@ refute "protected VALIDATION surface removed" \
 refute "protected RECEIPT surface removed" \
   'contract["protected_surfaces"] = [s for s in contract["protected_surfaces"] if "receipt" not in s]'
 
+# --- F6: protected-surface OWNERSHIP (CODEOWNERS) validation ------------------------------------
+# require_code_owner_review in the ruleset only binds a reviewer once a CODEOWNERS file names each
+# protected surface. With --repo-root, the checker verifies that coverage and REFUSES an absent or
+# incomplete CODEOWNERS. The shipped repo carries a CODEOWNERS covering all four surface classes.
+python3 "$CHK" --ruleset "$RS" --repo-root "$PLUGIN" >/dev/null \
+  || fail "the shipped ruleset + repo CODEOWNERS was rejected (every protected surface must be owned)"
+
+# A CODEOWNERS that leaves one protected surface unowned is refused.
+CO_ROOT="$WORK/co-incomplete"; mkdir -p "$CO_ROOT/.github"
+cat > "$CO_ROOT/.github/CODEOWNERS" <<'CO'
+.github/workflows/ @owner
+scripts/hooks/ @owner
+scripts/idc_validation_contract.py @owner
+# the receipt surface is deliberately left unowned
+CO
+out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$CO_ROOT" 2>&1)" \
+  && fail "checker admitted a repo whose CODEOWNERS leaves a protected surface unowned"
+printf '%s\n' "$out" | grep -qiE 'codeowner|owner|receipt' \
+  || fail "unowned-surface refusal must name the ownership gap; got: $out"
+
+# A repo with NO CODEOWNERS file at all is refused.
+NO_CO="$WORK/co-absent"; mkdir -p "$NO_CO"
+out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$NO_CO" 2>&1)" \
+  && fail "checker admitted a repo with NO CODEOWNERS file"
+printf '%s\n' "$out" | grep -qiE 'codeowner' \
+  || fail "missing-CODEOWNERS refusal must name CODEOWNERS; got: $out"
+
 # --- installer safety guards (no network is reached before these refusals) ----------------------
 # No --repo -> refuse (never guesses the target board).
 python3 "$INS" --ruleset "$RS" >/dev/null 2>&1 \

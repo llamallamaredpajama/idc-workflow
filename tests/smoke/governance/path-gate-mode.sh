@@ -1,8 +1,9 @@
 #!/bin/bash
 # path-gate-mode.sh — the shared Path Gate observes by default and enforces only when opted in.
 # One fixture flips off -> controlled so the Claude and git transports prove both postures against
-# the same would-be denials. The core scanner also fails soft to off for missing/unreadable/unknown
-# configuration and keeps app-locked enforcement plus the observe-only override explicit.
+# the same would-be denials. The core scanner fails soft to off for missing/unreadable configuration
+# but FAILS CLOSED for a declared-but-unrecognized mode, and keeps app-locked enforcement plus the
+# observe-only override explicit.
 set -uo pipefail
 . "$(dirname "$0")/lib.sh"
 
@@ -151,10 +152,18 @@ IDC_HOOKS_OBSERVE_ONLY=1 core_eval
 [ "$RC" -eq 0 ] || gov_fail "observe-only override did not force observe in app-locked mode: $OUT"
 printf '%s' "$OUT" | grep -q '"observe"' || gov_fail "observe-only override lost the underlying denial: $OUT"
 
-# Missing, unknown, and unreadable config all fail soft to off.
-for config_case in unknown missing unreadable; do
+# A DECLARED but unrecognized/malformed mode must FAIL CLOSED (hard-deny), not silently fall to off
+# (F10): a typo like `controllled` must never disable enforcement. This is distinct from a config that
+# genuinely cannot be read (missing/unreadable), which still fails soft to off.
+printf 'pathway_enforcement:\n  mode: controllled\n' > "$REPO/WORKFLOW-config.yaml"
+core_eval
+[ "$RC" -ne 0 ] || gov_fail "an unrecognized declared mode did not fail closed (must not silently observe): $OUT"
+printf '%s' "$OUT" | grep -q '"allowed": *false' \
+  || gov_fail "an unrecognized declared mode did not hard-deny (silently disabled enforcement): $OUT"
+
+# Missing and unreadable config cannot be read at all -> fail soft to off (observe).
+for config_case in missing unreadable; do
   case "$config_case" in
-    unknown) printf 'pathway_enforcement:\n  mode: surprising\n' > "$REPO/WORKFLOW-config.yaml" ;;
     missing) rm -f "$REPO/WORKFLOW-config.yaml" ;;
     unreadable) printf 'pathway_enforcement:\n  mode: controlled\n' > "$REPO/WORKFLOW-config.yaml"; chmod 000 "$REPO/WORKFLOW-config.yaml" ;;
   esac

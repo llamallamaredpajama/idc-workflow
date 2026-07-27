@@ -50,24 +50,15 @@ PROTECTED_SURFACES = (
     "scripts/idc_pathway_check.py",                 # the checker itself
 )
 
-_HEX = set("0123456789abcdef")
-
-
-def _is_hex(value: str) -> bool:
-    return bool(value) and all(c in _HEX for c in value.lower())
-
-
 def _sha_matches(proposed: str, actual: str) -> bool:
-    """Exact-head equality, tolerating an abbreviated (>=7 hex) proposed SHA."""
+    """Exact-head equality — a FULL, exact SHA match only.
+
+    An abbreviated hex prefix is deliberately refused: the ruleset pins this check at the exact
+    proposed head, so a merge must bind the whole commit id the checker verified. Accepting a >=7-char
+    prefix would let a merge land a commit the check never pinned in full (two commits can share a
+    short prefix, and the workflow always passes the complete `github.event.pull_request.head.sha`)."""
     p, a = proposed.strip().lower(), actual.strip().lower()
-    if not p or not a:
-        return False
-    if p == a:
-        return True
-    # Only accept a prefix match when both are hex and the shorter is a real abbreviation.
-    if _is_hex(p) and _is_hex(a) and len(p) >= 7 and (a.startswith(p) or p.startswith(a)):
-        return True
-    return False
+    return bool(p) and bool(a) and p == a
 
 
 def _repo_head(repo: str) -> str | None:

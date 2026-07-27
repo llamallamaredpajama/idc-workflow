@@ -390,12 +390,35 @@ def _execution_digest(doc: dict) -> str:
     return sha256_json(body)
 
 
-def _planning_receipt_info(path: str):
+def _planning_receipt_info(path: str, repo: str):
     if not path:
         return None
-    doc = _read_json(path)
-    if doc.get("written_by") != "idc_planning_receipt.py":
-        raise ValidationError("planning receipt must be written by idc_planning_receipt.py")
+    try:
+        import idc_planning_receipt as PR  # noqa: E402 — sibling script on sys.path
+    except ImportError as exc:
+        raise ValidationError(
+            f"cannot verify the planning receipt: idc_planning_receipt.py is unavailable ({exc})") from exc
+    try:
+        doc = _read_json(path)
+    except OSError as exc:
+        raise ValidationError(f"could not read planning receipt {path}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValidationError(f"planning receipt {path} is invalid JSON: {exc}") from exc
+    # Fully verify the receipt's self-integrity — machine writer, recomputed self-digest, and internal
+    # projection/operations/final digests — BEFORE borrowing any binding (F7). A repo-local edited
+    # receipt whose graph/projection digest was swapped but whose receipt_digest was left stale is
+    # refused here, so it cannot inject a forged binding into the frozen Build contract. The
+    # live-board readback is intentionally not re-run at freeze time (the board legitimately advances
+    # between Plan and Build), but the receipt is bound to THIS repository, so a receipt minted for a
+    # different repo is refused too.
+    try:
+        PR.verify_receipt_integrity(doc)
+    except PR.ReceiptError as exc:
+        raise ValidationError(f"planning receipt failed verification: {exc}") from exc
+    receipt_repo = doc.get("repo")
+    if not receipt_repo or os.path.realpath(str(receipt_repo)) != os.path.realpath(repo):
+        raise ValidationError(
+            f"planning receipt is bound to a different repository ({receipt_repo!r}), not {repo!r}")
     return {
         "path": path,
         "graph_digest": doc.get("graph_digest"),
@@ -404,15 +427,32 @@ def _planning_receipt_info(path: str):
     }
 
 
+DEFAULT_ATTEMPT_CEILING = 3
+
+
+def _resolve_attempt_ceiling(workspace: str, attempt_ceiling: int | None) -> int:
+    """The contract's attempt_ceiling: an explicit CLI value wins; otherwise default from the repo
+    config (`pathway_enforcement.attempt_ceiling`, spec §2.1); otherwise the built-in default (F11)."""
+    if attempt_ceiling is not None:
+        return attempt_ceiling
+    try:
+        import idc_path_gate as PG  # noqa: E402 — sibling script on sys.path
+        configured = PG.pathway_attempt_ceiling(workspace)
+    except Exception:  # noqa: BLE001 — a config/parse problem falls back to the built-in default
+        configured = None
+    return configured if configured is not None else DEFAULT_ATTEMPT_CEILING
+
+
 def freeze_contract(*, repo: str, issue: int, pr: int, graph_node: str, graph_digest: str | None,
                     projection_digest: str | None, planning_receipt: str | None, touch, off_limits,
-                    verify_commands, baseline: str, label: str, out: str, attempt_ceiling: int = 3,
+                    verify_commands, baseline: str, label: str, out: str, attempt_ceiling: int | None = None,
                     surface: str | None = None, evidence_kind: str | None = None,
                     skip_reason: str | None = None, handle_registry: str | None = None,
                     handle_id: str | None = None):
     workspace = _abs_repo(repo)
+    attempt_ceiling = _resolve_attempt_ceiling(workspace, attempt_ceiling)
     repo = _repo_identity(workspace)
-    planning = _planning_receipt_info(planning_receipt) if planning_receipt else None
+    planning = _planning_receipt_info(planning_receipt, repo) if planning_receipt else None
     if planning:
         graph_digest = graph_digest or planning.get("graph_digest")
         projection_digest = projection_digest or planning.get("projection_digest")
@@ -596,7 +636,9 @@ def main(argv=None):
     fp.add_argument("--baseline", required=True, choices=("expected-red", "expected-green"))
     fp.add_argument("--label", required=True)
     fp.add_argument("--out", required=True)
-    fp.add_argument("--attempt-ceiling", type=int, default=3)
+    fp.add_argument("--attempt-ceiling", type=int, default=None,
+                    help="explicit attempt ceiling; when omitted, defaults from the repo config's "
+                         "pathway_enforcement.attempt_ceiling, then the built-in %d" % DEFAULT_ATTEMPT_CEILING)
 
     rp = sp.add_parser("run")
     rp.add_argument("--repo", required=True)

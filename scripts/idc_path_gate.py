@@ -43,6 +43,12 @@ PROTECTED_MACHINE_RULES = [
 READ_ONLY_COMMANDS = {"doctor", "pause"}
 DEFAULT_TTL_SECONDS = 4 * 60 * 60
 PATHWAY_MODES = {"off", "controlled", "app-locked"}
+# A config that is readable and explicitly declares a `mode:` value we do not recognize (a typo like
+# `controllled`, or a blank value) is MALFORMED, not `off`. Collapsing it to `off` would silently
+# disable enforcement on a config the operator believed was enforcing. The runtime fails closed on it
+# (it is not `off`, so a would-be denial is NOT downgraded to observe) and `/idc:doctor` reports it as
+# indeterminate — never an honest posture (F10).
+UNKNOWN_MODE = "unknown"
 
 try:
     import fcntl  # POSIX advisory locks (macOS/Linux — IDC's supported platforms)
@@ -88,7 +94,13 @@ def _is_git_worktree(repo: str) -> bool:
 
 
 def pathway_mode(repo: str) -> str:
-    """Read the scaffolded pathway posture without taking a YAML dependency."""
+    """Read the scaffolded pathway posture without taking a YAML dependency.
+
+    Returns one of PATHWAY_MODES, or `UNKNOWN_MODE` when the config IS readable and explicitly declares
+    a `mode:` whose value is not a recognized mode (a typo / malformed value). A config that is missing,
+    unreadable, or declares no `mode:` returns `off` (an ungoverned or non-enforcing repo). The
+    distinction is load-bearing: `off` downgrades a would-be denial to observe, while `UNKNOWN_MODE`
+    does NOT — a malformed mode must fail closed rather than silently disable enforcement (F10)."""
     config_path = os.path.join(repo_root(repo), "WORKFLOW-config.yaml")
     try:
         with open(config_path, encoding="utf-8") as fh:
@@ -112,8 +124,46 @@ def pathway_mode(repo: str) -> str:
         key, separator, raw_value = stripped.partition(":")
         if separator and key.strip() == "mode":
             value = raw_value.strip().strip("\"'")
-            return value if value in PATHWAY_MODES else "off"
+            return value if value in PATHWAY_MODES else UNKNOWN_MODE
     return "off"
+
+
+def pathway_attempt_ceiling(repo: str) -> int | None:
+    """Read `pathway_enforcement.attempt_ceiling` from WORKFLOW-config.yaml without a YAML dependency.
+
+    Returns the configured positive integer, or None when the config is absent/unreadable, declares no
+    `attempt_ceiling`, or declares a non-integer/non-positive value (the caller supplies the built-in
+    default). Mirrors `pathway_mode`'s block parse line for line so the two cannot disagree about the
+    `pathway_enforcement:` block a config declares."""
+    config_path = os.path.join(repo_root(repo), "WORKFLOW-config.yaml")
+    try:
+        with open(config_path, encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return None
+
+    block_indent: int | None = None
+    for raw_line in lines:
+        content = raw_line.split("#", 1)[0].rstrip()
+        if not content.strip():
+            continue
+        indent = len(content) - len(content.lstrip())
+        stripped = content.strip()
+        if block_indent is None:
+            if stripped == "pathway_enforcement:":
+                block_indent = indent
+            continue
+        if indent <= block_indent:
+            break
+        key, separator, raw_value = stripped.partition(":")
+        if separator and key.strip() == "attempt_ceiling":
+            value = raw_value.strip().strip("\"'")
+            try:
+                parsed = int(value)
+            except ValueError:
+                return None
+            return parsed if parsed > 0 else None
+    return None
 
 
 def current_branch(repo: str) -> str:

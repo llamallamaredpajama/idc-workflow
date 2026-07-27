@@ -90,6 +90,44 @@ out="$(python3 "$REC" verify \
 printf '%s\n' "$out" | grep -qiE 'final digest|live board|mismatch' \
   || fail "forged receipt refusal must name the final-digest mismatch; got: $out"
 
+# F5 — matching-board tamper: the receipt still describes the live board exactly (projection and
+# final snapshot untouched), but a field the live readback does NOT cross-check — the machine
+# `written_by` owner, or a borrowed binding like `graph_digest` — is edited without recomputing the
+# self-integrity `receipt_digest`. Plan closeout must recompute the digest and require the machine
+# writer, so a hand-forged / edited "machine-owned" receipt is refused even when it matches the board.
+python3 - "$RECEIPT_PATH" "$WORK/forged-writer.json" <<'PY'
+import json, sys
+src, dst = sys.argv[1:]
+receipt = json.load(open(src, encoding='utf-8'))
+receipt['written_by'] = 'attacker-hand-forged'   # not machine-owned; receipt_digest left stale
+with open(dst, 'w', encoding='utf-8') as fh:
+    json.dump(receipt, fh, indent=2, sort_keys=True)
+    fh.write('\n')
+PY
+out="$(python3 "$REC" verify \
+  --repo "$REPO" --backend filesystem --tracker "$T" \
+  --receipt "$WORK/forged-writer.json" 2>&1)" \
+  && fail "a receipt with a forged (non-machine) written_by was accepted although it still matches the board"
+printf '%s\n' "$out" | grep -qiE 'written_by|machine-owned|owner|digest' \
+  || fail "forged-writer refusal must name the writer/ownership/digest failure; got: $out"
+
+python3 - "$RECEIPT_PATH" "$WORK/tampered-binding.json" <<'PY'
+import json, sys
+src, dst = sys.argv[1:]
+receipt = json.load(open(src, encoding='utf-8'))
+# Edit a borrowed binding (the graph digest a Build contract copies) but keep the stale receipt_digest.
+receipt['graph_digest'] = 'c' * 64
+with open(dst, 'w', encoding='utf-8') as fh:
+    json.dump(receipt, fh, indent=2, sort_keys=True)
+    fh.write('\n')
+PY
+out="$(python3 "$REC" verify \
+  --repo "$REPO" --backend filesystem --tracker "$T" \
+  --receipt "$WORK/tampered-binding.json" 2>&1)" \
+  && fail "a receipt whose graph_digest was edited (without re-signing receipt_digest) was accepted"
+printf '%s\n' "$out" | grep -qiE 'digest|edited|tamper' \
+  || fail "tampered-binding refusal must name the receipt-digest mismatch; got: $out"
+
 python3 "$GOV_TRK" --tracker "$T" set --num 1 --field Domain --value drift >/dev/null \
   || fail "could not inject a post-receipt live board drift"
 out="$(python3 "$REC" verify \

@@ -18,6 +18,17 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 SCHEMA_VERSION = 1
 KIND = "planning-application"
+WRITTEN_BY = "idc_planning_receipt.py"
+
+# The fields that make a receipt self-describing. A downstream consumer must be able to prove a
+# receipt's integrity WITHOUT the live board (which legitimately advances after the receipt is
+# written), so these — plus the recomputed self-digest and the machine writer — are the integrity
+# surface.
+_SELF_REQUIRED = (
+    "schema_version", "kind", "written_by", "receipt_digest",
+    "projection", "projection_digest", "operations", "operations_digest",
+    "final_snapshot", "final_digest", "readback", "obligation_relpath",
+)
 
 
 class ReceiptError(Exception):
@@ -261,27 +272,42 @@ def build_receipt(repo: str, bundle: dict, final_snapshot, applied_operations):
     return receipt
 
 
-def verify_receipt(repo: str, receipt_path: str, backend: str, tracker: str,
-                   owner: str | None = None, project: int | None = None):
-    try:
-        receipt = _read_json(receipt_path)
-    except OSError as exc:
-        raise ReceiptError(f"could not read receipt {receipt_path}: {exc}")
-    except json.JSONDecodeError as exc:
-        raise ReceiptError(f"receipt {receipt_path} is invalid JSON: {exc}")
+def _recompute_receipt_digest(receipt: dict) -> str:
+    """The self-digest a fresh receipt commits to: sha256 of every field except the digest itself."""
+    body = dict(receipt)
+    body.pop("receipt_digest", None)
+    return sha256_json(body)
 
-    required = [
-        "schema_version", "kind", "projection", "projection_digest", "operations",
-        "operations_digest", "final_snapshot", "final_digest", "readback", "obligation_relpath",
-    ]
-    missing = [key for key in required if key not in receipt]
+
+def verify_receipt_integrity(receipt: dict) -> dict:
+    """Self-integrity of a planning receipt, WITHOUT reading the live board.
+
+    Proves machine ownership and that nothing was edited after the receipt was written: the machine
+    `written_by`, the recomputed self-digest, and the internal projection/operations/final digests.
+    A hand-forged or edited receipt that still *matches* the current board is refused here, because
+    the `receipt_digest` is recomputed over the whole body (F5), and any borrowed binding (graph /
+    projection / final digest) a downstream Build contract copies is covered by that digest (F7).
+
+    The live-board readback is deliberately NOT part of this: the board legitimately advances between
+    Plan (when the receipt is written) and Build (when a contract borrows a binding), so a consumer
+    that only needs to trust the receipt's own fields must not re-compare against a moved board.
+    `verify_receipt` layers the live readback on top for Plan closeout. Returns the normalized
+    projection / final snapshot so callers need not re-normalize."""
+    if not isinstance(receipt, dict):
+        raise ReceiptError("planning receipt is not a JSON object")
+    missing = [key for key in _SELF_REQUIRED if key not in receipt]
     if missing:
         raise ReceiptError(f"receipt missing required field(s): {', '.join(missing)}")
     if receipt.get("schema_version") != SCHEMA_VERSION:
         raise ReceiptError(f"receipt schema_version must be {SCHEMA_VERSION}, got {receipt.get('schema_version')!r}")
     if receipt.get("kind") != KIND:
         raise ReceiptError(f"receipt kind must be {KIND!r}, got {receipt.get('kind')!r}")
-
+    if receipt.get("written_by") != WRITTEN_BY:
+        raise ReceiptError(
+            f"receipt is not machine-owned: written_by must be {WRITTEN_BY!r}, got {receipt.get('written_by')!r}")
+    if _recompute_receipt_digest(receipt) != receipt.get("receipt_digest"):
+        raise ReceiptError(
+            "receipt_digest mismatch — the receipt was edited or hand-forged after it was written")
     projection = normalize_projection_rows(receipt.get("projection"))
     if sha256_json(projection) != receipt.get("projection_digest"):
         raise ReceiptError("receipt projection digest does not match its embedded frozen projection")
@@ -291,6 +317,19 @@ def verify_receipt(repo: str, receipt_path: str, backend: str, tracker: str,
     final_snapshot = normalize_receipted_live_rows(receipt.get("final_snapshot"))
     if sha256_json(final_snapshot) != receipt.get("final_digest"):
         raise ReceiptError("receipt final digest does not match its embedded final live snapshot")
+    return {"projection": projection, "final_snapshot": final_snapshot}
+
+
+def verify_receipt(repo: str, receipt_path: str, backend: str, tracker: str,
+                   owner: str | None = None, project: int | None = None):
+    try:
+        receipt = _read_json(receipt_path)
+    except OSError as exc:
+        raise ReceiptError(f"could not read receipt {receipt_path}: {exc}")
+    except json.JSONDecodeError as exc:
+        raise ReceiptError(f"receipt {receipt_path} is invalid JSON: {exc}")
+
+    projection = verify_receipt_integrity(receipt)["projection"]
 
     live_snapshot = read_live_snapshot(backend, tracker, repo, owner=owner, project=project)
     live_rows = normalize_live_items(live_snapshot)

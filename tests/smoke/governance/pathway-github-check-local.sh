@@ -62,6 +62,12 @@ HEAD="$(git -C "$REPO" rev-parse HEAD)"
 python3 "$CHECK" --repo "$REPO" --head "$HEAD" --source "$SOURCE" >/dev/null \
   || fail "checker refused a compliant repo (exact head, pinned source, all surfaces present)"
 
+# (A2) ABBREVIATED head (F13) — a hex prefix of the true head is NOT the exact head. A required
+#      "exact head" check that accepts a >=7-char prefix lets a merge bind a commit the checker never
+#      pinned in full, so a proposed head must match the repository HEAD exactly and in full.
+python3 "$CHECK" --repo "$REPO" --head "${HEAD:0:12}" --source "$SOURCE" >/dev/null 2>&1 \
+  && fail "checker admitted an ABBREVIATED head (${HEAD:0:12}) — the exact-head check must require a full SHA"
+
 # (B) STALE head (proposed head != actual head) -> REFUSE
 python3 "$CHECK" --repo "$REPO" --head "0000000000000000000000000000000000000000" --source "$SOURCE" >/dev/null 2>&1 \
   && fail "checker admitted a STALE head (proposed head != actual repo head)"
@@ -75,4 +81,4 @@ rm -f "$REPO/scripts/idc_receipt_check.py"
 python3 "$CHECK" --repo "$REPO" --head "$HEAD" --source "$SOURCE" >/dev/null 2>&1 \
   && fail "checker admitted a repo MISSING a protected surface (receipt surface removed)"
 
-echo "PASS: idc/pathway-integrity binds to the exact head + pinned source, and refuses stale head / wrong source / missing protected surface"
+echo "PASS: idc/pathway-integrity binds to the exact FULL head + pinned source, and refuses stale head / abbreviated head / wrong source / missing protected surface"

@@ -1,14 +1,25 @@
 name: idc-pathway-integrity
 
-# Version-pinned integration guard (spec §2.3). It emits the required `idc/pathway-integrity` check,
-# bound to the EXACT proposed head commit, by running the fixed deterministic checker
-# scripts/idc_pathway_check.py — no LLM, no arbitrary generated script. The repository ruleset
-# (.github/rulesets/idc-pathway-integrity.json) makes this check required and strict (up-to-date
-# head), so a merge cannot land unless the check ran and passed on the exact head being merged.
+# Version-pinned integration guard — the STRUCTURAL leg of spec §2.3. It emits the required
+# `idc/pathway-integrity` check, bound to the EXACT proposed head commit, by running the fixed
+# deterministic checker scripts/idc_pathway_check.py — no LLM, no arbitrary generated script.
 #
-# This workflow runs in THIS repository's own CI too: this repo is governed by the run's own
-# receipts, so the checker passes here honestly (the protected surfaces exist and HEAD binds) and
-# fails only when the contract is genuinely violated.
+# TRUSTED CHECKER (F1). On a pull request the checker CODE is taken from the BASE ref — the
+# already-merged, trusted tree — not the PR head it is judging, so a PR cannot weaken its own required
+# check, remove a load-bearing hook, or gut validation code and still make the check green. The
+# trusted checker validates the PR-HEAD tree (surfaces present AND non-empty) while binding --head to
+# the exact proposed head SHA. On a push to a protected branch the pushed commit is itself trusted, so
+# it serves as both the checker source and the judged tree.
+#
+# SCOPE. The ruleset (.github/rulesets/idc-pathway-integrity.json) makes this check required and
+# strict (up-to-date head); its review/ownership rules (require_code_owner_review + CODEOWNERS,
+# validated by scripts/idc_ruleset_check.py) protect the surface CONTENT. The spec §2.3 evidence-bound
+# merge refusal (tracker / graph / journal / authorization / validation / review / finish evidence) is
+# owned by the finisher/gate receipts at merge time, NOT by this static head-bound check.
+#
+# Follow-up (supply-chain hardening): pin `actions/checkout` to a full commit SHA rather than the
+# moving `@v4` tag. Left as `@v4` here because resolving the exact SHA needs network access; a wrong
+# SHA would break the required check.
 
 on:
   pull_request:
@@ -27,18 +38,37 @@ jobs:
       # On a pull request, bind to the PR head; on a push, to the pushed commit.
       HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
-      - name: Checkout the exact proposed head
+      - name: Checkout the TRUSTED checker (base ref on a PR; the pushed commit on a push)
+        uses: actions/checkout@v4
+        with:
+          # The base ref is the already-merged, trusted tree — a PR cannot modify it, so the checker
+          # taken from here cannot be weakened by the PR it is judging.
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          path: trusted
+          fetch-depth: 1
+
+      - name: Checkout the exact proposed head (the tree being judged)
         uses: actions/checkout@v4
         with:
           # Check out the head commit itself (not the synthetic PR merge commit) so the checker
           # binds to the exact SHA a merge would land.
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: head
           fetch-depth: 1
 
-      - name: Enforce pathway integrity at the exact head
+      - name: Enforce pathway integrity at the exact head with the TRUSTED checker
         # Version-pinned source token; the checker refuses a wrong or stale source.
         run: |
-          python3 scripts/idc_pathway_check.py \
-            --repo . \
+          if [ -f trusted/scripts/idc_pathway_check.py ]; then
+            CHECKER=trusted/scripts/idc_pathway_check.py   # normal case: the trusted base-ref checker
+          else
+            # Bootstrap ONLY: the base ref predates the checker (the very PR that introduces it). The
+            # head checker runs here for this operator-reviewed PR; every subsequent PR's base carries
+            # the trusted checker, so this fallback never triggers again.
+            CHECKER=head/scripts/idc_pathway_check.py
+            echo "note: base ref carries no checker (bootstrap) — running the head checker for this PR only"
+          fi
+          python3 "$CHECKER" \
+            --repo head \
             --head "$HEAD_SHA" \
             --source "idc/pathway-integrity@v1"

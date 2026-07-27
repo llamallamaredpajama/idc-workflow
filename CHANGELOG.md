@@ -48,6 +48,11 @@ the whole claim.
   release evidence that is missing, malformed, stale, unbound, or not source-heavy. The plain
   invocation is unchanged, so the every-commit lint guard still runs before any pilot exists.
 
+_Review note (correctness-neutral): the trusted commit-history audit over this release flagged 91
+mechanical narrative issues across the 80 commits (subject/body style). They do not affect behavior
+and the history was deliberately not rewritten; the substantive review findings were remediated in
+the code and tests above._
+
 ## 4.2.0 — 2026-07-19
 
 Completion honesty.

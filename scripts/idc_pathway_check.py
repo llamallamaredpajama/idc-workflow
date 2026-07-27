@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic `idc/pathway-integrity` integration check (spec §2.3).
+"""Deterministic `idc/pathway-integrity` integration check — the STRUCTURAL leg of spec §2.3.
 
 This is the fixed checker the version-pinned `.github/workflows/idc-pathway-integrity.yml` runs on
 every pull request. It emits a single verdict — no LLM, no arbitrary generated script, no network
@@ -10,18 +10,29 @@ REFUSES (non-zero) otherwise:
      checkout actually landed on. A stale head (the check ran against an older commit than the one a
      merge would land) is refused. This is the "required check at the exact proposed head commit"
      guarantee: the workflow passes `--head ${{ github.event.pull_request.head.sha }}` and checks out
-     that same SHA, so a mismatch means the binding was tampered with or the checkout drifted.
+     that same SHA, so a mismatch means the binding was tampered with or the checkout drifted. Only a
+     FULL, exact SHA match is accepted — an abbreviated prefix is refused.
   2. PINNED SOURCE — the check source the workflow presents (`--source`) equals the version-pinned
      expected source. Substituting a wrong or stale source (a forged/renamed check, or an old pinned
      revision) is refused. In `app-locked` repositories this is the "expected check source" pin.
   3. PROTECTED SURFACES — every IDC integrity surface (the pathway workflow, the hook surface, the
-     validation surface, and the receipt surface) is present in the repository. Their presence is the
-     structural evidence that the governance machinery a merge relies on has not been stripped out.
+     validation surface, and the receipt surface) is present AND carries content (not a gutted empty
+     stub or an emptied directory). Their presence-with-content is the structural evidence that the
+     governance machinery a merge relies on has not been stripped out.
 
-The checker is intentionally structural and deterministic so it is honestly green on the governed IDC
-source repository itself (this repo IS governed by the run's own receipts) while going red the moment
-any binding or protected surface is weakened. It does not re-run the whole IDC lifecycle — the smoke
-suite does that; this check guards the *integration boundary*.
+SCOPE — WHAT THIS CHECK DOES *NOT* DO. Spec §2.3 requires that a merge be refused when tracker,
+graph, journal, authorization, validation, review, or finish evidence is missing, stale, corrupt, or
+divergent. This deterministic, head-bound checker does NOT — and cannot — evaluate those live
+evidence classes: they depend on the tracker board, the git-directory receipts, and the review/gate
+state at merge time, not on a static checkout. That evidence-bound merge refusal is owned by the
+mechanisms that hold the evidence — the finisher/gate receipts (`idc_build_receipt.py`,
+`idc_validation_contract.py`, the review-verdict chain) and the ruleset's review/ownership rules
+(`require_code_owner_review` + CODEOWNERS, enforced by `idc_ruleset_check.py`). This check guards the
+narrower *structural* integration boundary: the exact-head binding, the pinned source, and the
+presence-with-content of the protected surfaces. The published contract is exactly that — no more.
+
+For the checker itself to be trustworthy the workflow runs it from a TRUSTED (base-ref) copy, not the
+PR-head copy it is judging, so a PR cannot weaken the judge; see the workflow header.
 
 Compiles under the repo's ambient Python 3.9 (`from __future__ import annotations`).
 """
@@ -59,6 +70,26 @@ def _sha_matches(proposed: str, actual: str) -> bool:
     short prefix, and the workflow always passes the complete `github.event.pull_request.head.sha`)."""
     p, a = proposed.strip().lower(), actual.strip().lower()
     return bool(p) and bool(a) and p == a
+
+
+def _surface_has_content(path: str) -> bool:
+    """Whether a protected surface carries content, not just a path. A file must be non-empty; a
+    directory must hold at least one non-empty regular file. This turns the surface check from mere
+    existence into a content check (F1): a surface gutted to an empty file, or a hook directory whose
+    load-bearing files were all removed, no longer passes."""
+    if os.path.isdir(path):
+        for root, _dirs, files in os.walk(path):
+            for name in files:
+                try:
+                    if os.path.getsize(os.path.join(root, name)) > 0:
+                        return True
+                except OSError:
+                    continue
+        return False
+    try:
+        return os.path.getsize(path) > 0
+    except OSError:
+        return False
 
 
 def _repo_head(repo: str) -> str | None:
@@ -99,10 +130,15 @@ def check(repo: str, head: str, source: str, expected_source: str,
             "wrong check source: got {!r}, expected the version-pinned {!r}".format(
                 source.strip(), expected_source.strip()))
 
-    # 3. protected surfaces present
+    # 3. protected surfaces present AND carry content (not a gutted empty stub / emptied dir)
     for surface in surfaces:
-        if not os.path.exists(os.path.join(repo, surface)):
+        path = os.path.join(repo, surface)
+        if not os.path.exists(path):
             reasons.append("missing protected surface: {}".format(surface))
+        elif not _surface_has_content(path):
+            reasons.append(
+                "hollow protected surface: {} exists but carries no content (a gutted file or an "
+                "emptied directory)".format(surface))
 
     return reasons
 

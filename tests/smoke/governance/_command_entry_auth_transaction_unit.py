@@ -499,6 +499,38 @@ class CommandEntryAuthorizationTransactionTests(unittest.TestCase):
         self.assertIn("authorization state rollback did not persist", stderr.lower())
         self.assertEqual([prior], self._active("S-auth-restore-fail"))
 
+    def test_read_only_command_cannot_mint_a_mutation_grant(self) -> None:
+        # F2: a read-only command record (doctor/pause) must never be usable to mint a
+        # write/edit/git authorization, even when mutating actions are explicitly requested through
+        # write_authorization. A read-only role's action ceiling is empty, so requesting a mutation
+        # action is refused and no authorization is written.
+        self._open("S-ro", "doctor", "doctor-nonce")
+        with self.assertRaises(RuntimeError) as ctx:
+            gate.PG.write_authorization(
+                str(self.repo),
+                session="S-ro",
+                command="doctor",
+                allowed_paths=["."],
+                allowed_actions=["write", "edit", "git"],
+            )
+        self.assertIn("read-only", str(ctx.exception).lower())
+        self.assertFalse(self._auth_path().exists())
+
+        # A read-only command with no mutation actions still mints an (empty-action) authorization.
+        auth = gate.PG.write_authorization(str(self.repo), session="S-ro", command="doctor")
+        self.assertEqual([], auth.get("allowed_actions"))
+
+        # A mutating command CAN still mint the write grant (control — the ceiling is per-role).
+        self._open("S-rw", "build", "build-nonce", build_requested=["#1"])
+        auth2 = gate.PG.write_authorization(
+            str(self.repo),
+            session="S-rw",
+            command="build",
+            allowed_paths=["."],
+            allowed_actions=["write", "edit", "git"],
+        )
+        self.assertEqual(["write", "edit", "git"], auth2.get("allowed_actions"))
+
 
 if __name__ == "__main__":
     if len(sys.argv) == 5 and sys.argv[1] == "--race-child":

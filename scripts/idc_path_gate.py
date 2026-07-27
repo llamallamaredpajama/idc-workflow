@@ -378,10 +378,21 @@ def _find_active_record_by_nonce(repo: str, command: str, nonce: str) -> dict[st
     return None
 
 
+MUTATION_ACTIONS = ("write", "edit", "git")
+
+
 def _default_profile(command: str) -> tuple[list[str], list[str]]:
     if command in READ_ONLY_COMMANDS:
         return ["."], []
     return ["."], ["write", "edit", "git"]
+
+
+def _role_action_ceiling(command: str) -> set[str]:
+    """The mutation actions a command's ROLE may ever be granted. A read-only command
+    (`doctor`/`pause`) has an empty ceiling — it can never mint a write/edit/git grant, no matter what
+    actions a caller passes to `write_authorization` (F2)."""
+    _paths, actions = _default_profile(command)
+    return set(actions)
 
 
 def _digest_payload(record: dict[str, Any], auth: dict[str, Any]) -> str:
@@ -484,6 +495,17 @@ def write_authorization(
         def_paths, def_actions = _default_profile(command)
         allowed_paths = def_paths if allowed_paths is None else allowed_paths
         allowed_actions = def_actions if allowed_actions is None else allowed_actions
+    # Enforce the command's role action ceiling: a read-only command can never be granted a mutation
+    # action, even when one is explicitly requested. This closes the escalation where any active
+    # record — including a read-only doctor/pause record — could mint a broad write/edit/git grant.
+    ceiling = _role_action_ceiling(command)
+    over_ceiling = [a for a in allowed_actions if a in MUTATION_ACTIONS and a not in ceiling]
+    if over_ceiling:
+        raise RuntimeError(
+            f"command {command!r} is read-only and may not be granted mutation action(s) "
+            f"{sorted(set(over_ceiling))}: a read-only command record cannot mint a write/edit/git "
+            f"authorization"
+        )
     auth = build_authorization(
         repo,
         record=record,
@@ -580,6 +602,20 @@ def _evaluate_request(repo: str, plugin_root: str, request: dict[str, Any]) -> d
     if expires_at is None or expires_at <= _utc_now():
         return _deny("IDC Path Gate denied this mutation because the live authorization is expired or unreadable.")
 
+    # Ticket / graph-node identity (spec §3.2). The spec MUST is to deny a mutation "bound to the
+    # WRONG ticket/graph node" — a MISMATCH — and it declares `ticket` explicitly nullable. That is
+    # what these two checks enforce: a request that presents an identity NOT matching the live
+    # authorization is denied.
+    #
+    # F3 (contested): the review asked to additionally "require ticket/graph on every request and deny
+    # missing identity." That is NOT implemented here on purpose, because it would break every
+    # legitimate mutation: the Claude Write/Edit adapter, the Bash/interlock adapter, and the git
+    # adapter all build the request from action/paths[/raw_reason] and NEVER carry a ticket/graph node,
+    # so a raw file write cannot be attributed to a ticket at all. The spec-faithful direction — "mint
+    # non-null ticket/graph/path scopes from the claimed transition" — is a transition-scoped-mint
+    # change that spans the Build-contract->authorization handoff and is incompatible with the current
+    # admission-time mint (the entry gate mints BEFORE the command body determines its transition). It
+    # is a named follow-up, not a one-line runtime denial. See the fix-run notes for the full rationale.
     ticket = request.get("ticket")
     if ticket is not None and ticket != auth.get("ticket"):
         return _deny("IDC Path Gate denied this mutation because the request ticket does not match the live authorization.")

@@ -49,10 +49,10 @@ REPO="$WORK/repo"
 mkdir -p "$REPO/.github/workflows" "$REPO/scripts/hooks"
 cp "$WF"    "$REPO/.github/workflows/idc-pathway-integrity.yml"
 cp "$CHECK" "$REPO/scripts/idc_pathway_check.py"
-# the checker asserts these protected surfaces EXIST (their presence is the integrity evidence):
-: > "$REPO/scripts/idc_validation_contract.py"   # validation surface
-: > "$REPO/scripts/idc_receipt_check.py"          # receipt surface
-: > "$REPO/scripts/hooks/idc_ledger.py"           # hook surface
+# the checker asserts these protected surfaces exist AND carry content (not a gutted empty stub):
+printf '# validation surface\n' > "$REPO/scripts/idc_validation_contract.py"   # validation surface
+printf '# receipt surface\n'    > "$REPO/scripts/idc_receipt_check.py"          # receipt surface
+printf '# hook surface\n'       > "$REPO/scripts/hooks/idc_ledger.py"           # hook surface
 git -C "$REPO" init -q
 git -C "$REPO" add -A
 git -C "$REPO" -c user.email=t@t -c user.name=t commit -qm seed
@@ -80,5 +80,20 @@ python3 "$CHECK" --repo "$REPO" --head "$HEAD" --source "idc/pathway-integrity@v
 rm -f "$REPO/scripts/idc_receipt_check.py"
 python3 "$CHECK" --repo "$REPO" --head "$HEAD" --source "$SOURCE" >/dev/null 2>&1 \
   && fail "checker admitted a repo MISSING a protected surface (receipt surface removed)"
+printf '# receipt surface\n' > "$REPO/scripts/idc_receipt_check.py"   # restore for the next case
 
-echo "PASS: idc/pathway-integrity binds to the exact FULL head + pinned source, and refuses stale head / abbreviated head / wrong source / missing protected surface"
+# (E) HOLLOW protected surface (F1): a surface that EXISTS but was gutted to empty content is not
+#     valid — the check must validate protected content, not mere path existence. Gut the validation
+#     surface to zero bytes, assert refusal, then restore it.
+: > "$REPO/scripts/idc_validation_contract.py"
+python3 "$CHECK" --repo "$REPO" --head "$HEAD" --source "$SOURCE" >/dev/null 2>&1 \
+  && fail "checker admitted a repo whose validation surface was gutted to empty content (presence-only check)"
+printf '# validation surface\n' > "$REPO/scripts/idc_validation_contract.py"
+
+# (F) HOLLOW hook DIRECTORY: the hook surface dir present but empty (every hook removed) -> REFUSE.
+rm -f "$REPO/scripts/hooks/idc_ledger.py"
+python3 "$CHECK" --repo "$REPO" --head "$HEAD" --source "$SOURCE" >/dev/null 2>&1 \
+  && fail "checker admitted a repo whose hook surface directory was emptied (a load-bearing hook removed)"
+printf '# hook surface\n' > "$REPO/scripts/hooks/idc_ledger.py"
+
+echo "PASS: idc/pathway-integrity binds to the exact FULL head + pinned source, and refuses stale head / abbreviated head / wrong source / missing OR hollow protected surface"

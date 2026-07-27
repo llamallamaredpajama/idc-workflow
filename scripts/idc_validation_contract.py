@@ -360,10 +360,13 @@ def _evict_stale_versions(bucket: dict, receipt_path: str) -> None:
     new entry, so repeated recirc re-applies would otherwise grow the bucket (and the in-.git store)
     without bound.
 
-    Retention is count+age hybrid. ALWAYS KEEP:
+    Retention is count+age hybrid. ALWAYS KEEP the UNION of (a) and (b) — they are independent
+    guarantees and neither consumes the other's budget, so the retained floor is
+    `PLANNING_WITNESS_RETAIN` versions PLUS the live one when it is not already among them:
       (a) the receipt's CURRENT on-disk digest — always borrowable;
       (b) the newest PLANNING_WITNESS_RETAIN versions by `validated_at`;
-      (c) ANY version whose `validated_at` is within PLANNING_WITNESS_GRACE_SECONDS of now —
+      (c) ANY version whose `validated_at` is within PLANNING_WITNESS_GRACE_SECONDS of now (a stamp
+          in the FUTURE is not "recent" and gets no grace) —
           bounded by PLANNING_WITNESS_HARD_CAP, beyond which eviction resumes oldest-first even
           inside the grace window so (b)'s boundedness guarantee survives.
 
@@ -386,13 +389,18 @@ def _evict_stale_versions(bucket: dict, receipt_path: str) -> None:
     # newest first by validated_at; digest is a stable tiebreaker for records written the same second.
     ordered = [dg for dg, _rec in sorted(
         bucket.items(), key=lambda kv: (kv[1].get("validated_at") or "", kv[0]), reverse=True)]
+    # (b) FIRST and on its own counter, then (a) unioned in. Seeding `keep` with the live digest and
+    # then filling to RETAIN meant the live version CONSUMED one of the newest-RETAIN slots, so the
+    # retained set was `live` + newest-(RETAIN-1) rather than the documented `live` UNION newest-RETAIN
+    # — with the live receipt the OLDEST entry, the 8th-newest version was evicted even though the
+    # stated rule keeps it. The two clauses are independent guarantees and must not share a budget.
     keep = set()
-    if live in bucket:                                  # (a) the live on-disk version
-        keep.add(live)
     for dg in ordered:                                  # (b) the newest RETAIN by validated_at
         if len(keep) >= PLANNING_WITNESS_RETAIN:
             break
         keep.add(dg)
+    if live in bucket:                                  # (a) the live on-disk version, always borrowable
+        keep.add(live)
     # (c) grace window, newest-first so the HARD CAP drops the OLDEST in-grace versions first.
     for dg in ordered:
         if len(keep) >= PLANNING_WITNESS_HARD_CAP:
@@ -400,7 +408,12 @@ def _evict_stale_versions(bucket: dict, receipt_path: str) -> None:
         if dg in keep:
             continue
         age = _witness_age_seconds(bucket[dg].get("validated_at"), now_epoch)
-        if age is not None and age <= PLANNING_WITNESS_GRACE_SECONDS:
+        # `0 <= age`: a FUTURE `validated_at` (clock skew, a hand-edited store, a record written on a
+        # machine running fast) yields a NEGATIVE age, which satisfies `age <= GRACE` and would let a
+        # skewed record claim grace protection indefinitely — and, worse, consume hard-cap slots ahead
+        # of legitimately recent versions. A stamp in the future is not evidence of recency, so it is
+        # simply not grace-protected and falls back to the count rule, exactly like an unparseable one.
+        if age is not None and 0 <= age <= PLANNING_WITNESS_GRACE_SECONDS:
             keep.add(dg)
     for dg in [d for d in bucket if d not in keep]:
         del bucket[dg]

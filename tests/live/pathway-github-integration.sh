@@ -126,6 +126,14 @@ CO
     || fail "could not push the scaffolded CODEOWNERS to the default branch (F39 enforces the committed copy)"
   CO_CREATED=1
 fi
+# The W3 staleness guard compares this checkout's remote-tracking tip against GitHub's live tip and
+# REFUSES a stale one. On the scaffold path above the `git push` updates the tracking ref as a side
+# effect, but on the STEADY-STATE path (a CODEOWNERS already committed) nothing here refreshes it, so
+# any commit landing on the default branch from elsewhere makes this the only test exercising --apply
+# against real GitHub fail intermittently. `tests/live/` is outside `run-all.sh` and CI has no `gh`
+# credential, so nothing else would catch it.
+git -C "$SANDBOX" fetch -q origin \
+  || fail "could not refresh the remote-tracking refs before --apply (the W3 staleness guard compares against them)"
 python3 "$INSTALL" --repo "$NWO" --ruleset "$RS" --repo-root "$SANDBOX" --apply \
   || fail "ruleset install (--apply) failed"
 INSTALLED_ID="$(gh api "repos/$NWO/rulesets" --jq '.[] | select(.name=="idc-pathway-integrity") | .id' 2>/dev/null | head -1)"

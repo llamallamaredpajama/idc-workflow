@@ -1053,4 +1053,124 @@ out="$(python3 "$INS" --ruleset "$RS" --repo "$SANDBOX" --repo-root "$W1_TGT" 2>
 printf '%s\n' "$out" | grep -Fq "$LIMIT" \
   || fail "W1 installer oversized refusal must name the limit in bytes; got: $out"
 
+# (W1c2) The INSTALLER's committed read must measure RAW BYTES too — and unlike the checker's
+#        working-tree read, its lever is NOT newlines. `_committed_codeowners` decodes raw `git show`
+#        stdout itself, so no universal-newline translation happens and a CRLF file's raw length and
+#        decoded length agree; (W1c) above is pure ASCII/LF, where `len(raw) == len(text)` and a
+#        code-point measurement is INDISTINGUISHABLE from a byte measurement. That left the committed
+#        side's "measure bytes" guarantee unproven: breaking `_committed_codeowners` to return
+#        `len(decoded_text)` kept this whole lane green.
+#
+#        MULTI-BYTE UTF-8 is the lever that does diverge here. This fixture is EXACTLY the limit in raw
+#        bytes while its decoded length is thousands of code points short, so it must REFUSE — and it
+#        certifies the moment the size is taken from the decoded string instead of the bytes.
+#        Red-when-broken: return `len(text)` from `_committed_codeowners` and this case CERTIFIES.
+W1_TGT_MB="$WORK/target-oversize-co-utf8"
+git init -q -b main "$W1_TGT_MB"
+git -C "$W1_TGT_MB" config user.email idc-test@example.com
+git -C "$W1_TGT_MB" config user.name "IDC Test"
+git -C "$W1_TGT_MB" config commit.gpgsign false
+git -C "$W1_TGT_MB" remote add origin "git@github.com:$SANDBOX.git"
+echo placeholder > "$W1_TGT_MB/README.md"
+# $1=path $2=exact RAW byte size. Padding comments are multi-byte (U+00E9, 2 bytes each), so the
+# decoded code-point count lands far below the byte count.
+mk_codeowners_utf8() {
+  python3 - "$1" "$2" <<'PY' || return 1
+import os, sys
+path, target = sys.argv[1], int(sys.argv[2])
+rules = ("/.github/workflows/ @team\n/scripts/hooks/ @team\n"
+         "/scripts/idc_validation_contract.py @team\n/scripts/idc_receipt_check.py @team\n"
+         "/scripts/idc_pathway_check.py @team\n/.github/rulesets/ @team\n/.github/CODEOWNERS @team\n")
+os.makedirs(os.path.dirname(path), exist_ok=True)
+body = rules
+pad = "# " + ("é" * 40) + "\n"                # 3 ASCII + 80 bytes of payload = 83 bytes, 43 points
+while len(body.encode("utf-8")) + len(pad.encode("utf-8")) <= target:
+    body += pad
+short = target - len(body.encode("utf-8"))         # top up with single-byte ASCII to land EXACTLY
+if short:
+    body += "#" * short
+raw = body.encode("utf-8")
+assert len(raw) == target, "fixture is %d bytes, wanted %d" % (len(raw), target)
+assert len(body) < target, "fixture has no multi-byte undercount to exercise (%d points vs %d bytes)" % (len(body), target)
+with open(path, "wb") as fh:
+    fh.write(raw)
+print("utf8 fixture: %d raw bytes, %d decoded code points (undercount %d)" % (len(raw), len(body), target - len(body)))
+PY
+}
+mk_codeowners_utf8 "$W1_TGT_MB/.github/CODEOWNERS" "$LIMIT" \
+  || fail "W1: could not build the committed multi-byte UTF-8 CODEOWNERS fixture"
+git -C "$W1_TGT_MB" add -A && git -C "$W1_TGT_MB" commit -q -m init >/dev/null 2>&1
+git -C "$W1_TGT_MB" update-ref refs/remotes/origin/main "$(git -C "$W1_TGT_MB" rev-parse HEAD)"
+git -C "$W1_TGT_MB" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+out="$(python3 "$INS" --ruleset "$RS" --repo "$SANDBOX" --repo-root "$W1_TGT_MB" 2>&1)" \
+  && fail "installer CERTIFIED a target whose COMMITTED CODEOWNERS is $LIMIT RAW bytes of multi-byte UTF-8 — the committed size gate must measure BYTES, not decoded code points (W1)"
+printf '%s\n' "$out" | grep -Fq "$LIMIT" \
+  || fail "W1 installer multi-byte oversized refusal must name the limit in bytes; got: $out"
+
+# (W1c3) CONTROL for the pair above — the SAME multi-byte construction one byte under the limit still
+#        CERTIFIES. Without this, a committed-side gate that refused every multi-byte file (or every
+#        large one) would pass (W1c2) while being useless.
+W1_TGT_MB_OK="$WORK/target-just-under-co-utf8"
+git init -q -b main "$W1_TGT_MB_OK"
+git -C "$W1_TGT_MB_OK" config user.email idc-test@example.com
+git -C "$W1_TGT_MB_OK" config user.name "IDC Test"
+git -C "$W1_TGT_MB_OK" config commit.gpgsign false
+git -C "$W1_TGT_MB_OK" remote add origin "git@github.com:$SANDBOX.git"
+echo placeholder > "$W1_TGT_MB_OK/README.md"
+mk_codeowners_utf8 "$W1_TGT_MB_OK/.github/CODEOWNERS" "$((LIMIT - 1))" \
+  || fail "W1: could not build the just-under multi-byte UTF-8 CODEOWNERS fixture"
+git -C "$W1_TGT_MB_OK" add -A && git -C "$W1_TGT_MB_OK" commit -q -m init >/dev/null 2>&1
+git -C "$W1_TGT_MB_OK" update-ref refs/remotes/origin/main "$(git -C "$W1_TGT_MB_OK" rev-parse HEAD)"
+git -C "$W1_TGT_MB_OK" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+python3 "$INS" --ruleset "$RS" --repo "$SANDBOX" --repo-root "$W1_TGT_MB_OK" >/dev/null 2>&1 \
+  || fail "installer REFUSED a covering multi-byte CODEOWNERS of $((LIMIT - 1)) RAW bytes — one byte under the limit must still certify (W1 control)"
+
+# (W1d) An UNMEASURABLE size is a REFUSAL, not a skipped check. The size gate used to take its number
+#       from a separate `os.path.getsize`, and an OSError there left `size=None`, which the validator
+#       read as "no size supplied -> skip the limit check": a CODEOWNERS of EXACTLY the limit then
+#       CERTIFIED. "Cannot prove it is under the limit" must never resolve to "certify it".
+#       Asserted directly against the validator, since forcing a stat failure through the CLI would
+#       test the harness rather than the gate.
+python3 - "$PLUGIN/scripts" <<'PY' || fail "W1d: an unknown CODEOWNERS size did not fail closed"
+import sys
+sys.path.insert(0, sys.argv[1])
+import idc_ruleset_check as RC
+
+problem = RC.codeowners_size_problem(".github/CODEOWNERS", None)
+if not problem:
+    print("UNKNOWN-SIZE-CERTIFIED: codeowners_size_problem(rel, None) returned no refusal — an "
+          "unmeasurable CODEOWNERS silently skips GitHub's 3 MB load limit")
+    sys.exit(1)
+
+# ...and it must reach the shared validator, not just the helper: a covering file whose size is
+# unknown must still be refused by validate_codeowners_content.
+rules = ("/.github/workflows/ @team\n/scripts/hooks/ @team\n"
+         "/scripts/idc_validation_contract.py @team\n/scripts/idc_receipt_check.py @team\n"
+         "/scripts/idc_pathway_check.py @team\n/.github/rulesets/ @team\n/.github/CODEOWNERS @team\n")
+surfaces = [".github/workflows", "scripts/hooks", "scripts/idc_validation_contract.py",
+            "scripts/idc_receipt_check.py", "scripts/idc_pathway_check.py", ".github/rulesets",
+            ".github/CODEOWNERS"]
+if not RC.validate_codeowners_content(".github/CODEOWNERS", rules, surfaces, None):
+    print("UNKNOWN-SIZE-CERTIFIED: validate_codeowners_content certified a covering CODEOWNERS whose "
+          "byte size is unknown")
+    sys.exit(1)
+# The control: the SAME content with a known, under-limit size certifies, so the refusal above is
+# about the unknown SIZE and not about the content.
+if RC.validate_codeowners_content(".github/CODEOWNERS", rules, surfaces, len(rules.encode("utf-8"))):
+    print("CONTROL-FAILED: a covering CODEOWNERS with a known small size was refused")
+    sys.exit(1)
+
+# `size_bytes` must be REQUIRED. With a default, any future caller that forgets it silently disables
+# the limit check — and nothing goes red, because the installer's own size gate masks it.
+try:
+    RC.validate_codeowners_content(".github/CODEOWNERS", rules, surfaces)
+except TypeError:
+    pass
+else:
+    print("SIZE-OPTIONAL: validate_codeowners_content still accepts a call with no size_bytes, so a "
+          "caller can silently opt out of the 3 MB gate")
+    sys.exit(1)
+print("W1d ok: unknown size refuses, known size certifies, size_bytes is required")
+PY
+
 echo "PASS: ruleset checker enforces PR flow, exact-head required check, force-push/deletion prevention, all seven protected surfaces (incl. the F40 governance-of-governance set: the checker, the ruleset dir, and CODEOWNERS itself), GitHub any-depth/last-match-wins ownership with a strict class allowlist that fails closed on unmodeled patterns, re-types a dotted-basename DIRECTORY surface off the file guess so an interior ownerless hole cannot false-certify (F28), treats a '**/name/' trailing-slash pattern as directory-only (F32) and a bare '/' as matching-nothing (F33), and counts only valid owner tokens so a bare '@' cannot false-certify (F41); installer refuses without --repo, refuses a production repo, requires --repo-root, BINDS it to --repo via a local origin-identity check (F34), and validates the CODEOWNERS COMMITTED on the default branch — refusing an uncommitted or working-tree-diverged copy (F39); reads the enforced branch from origin/HEAD and REFUSES rather than trusting the checked-out branch when it is unset, accepting a validated --default-branch override (F44); and normalizes newlines before the divergence compare so a byte-identical CRLF-committed CODEOWNERS is not false-refused (F45); types KNOWN governance surfaces authoritatively so a directory-only '/<file>/' rule can never certify a protected FILE surface (F46), rejects lookalike substrings standing in for a real governance file (F47), requires the installer's origin-identity remote to be on the GitHub host so a non-GitHub checkout ending in the same owner/repo cannot certify the target (F48), and requires the EFFECTIVE committed CODEOWNERS file (root/docs, not just .github) to own its own path (F49); and — separating class MEMBERSHIP from surface TYPING — reads a bare-name rule as matching the FILE of that name so a later ownerless slashless rule un-owns it instead of being invisible (F50), demands each mandatory class be declared at its CANONICAL path so a same-basename decoy cannot leave the executed checker unprotected (F51), and never lets a descendant entry inherit its directory class's kind, so a directory-only rule cannot certify a FILE beneath a governance directory (F52); and refuses a CODEOWNERS at or over GitHub's 3 MB load limit — measured in RAW BYTES so a CRLF file cannot undercount its way past the gate — in the checker's working-tree read and in the installer's committed-content read alike, while a file one byte under the limit still certifies (W1)"

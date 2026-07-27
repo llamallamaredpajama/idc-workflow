@@ -55,6 +55,21 @@ if CAP <= RETAIN:
     print("CONFIG-INCOHERENT: hard cap %d must exceed the count floor %d" % (CAP, RETAIN))
     sys.exit(1)
 
+# RETAIN is PINNED, not derived. It is the pre-existing F31 count floor — the number of same-label
+# re-applies a not-yet-frozen Build is guaranteed to survive — so a silent change to it is a change to
+# a shipped guarantee and must fail here rather than be absorbed by a test that reads the value back
+# out of the implementation.
+#
+# GRACE and CAP are deliberately NOT pinned: the plan introduced them as PROPOSED values, "adjustable
+# with rationale", so hard-coding 7 days / 64 would contradict the contract they were added under. The
+# properties that actually matter about them — the cap bounds the bucket and evicts oldest-first, the
+# grace window is a real window with both ends closed — are asserted behaviourally below and hold at
+# any coherent values.
+if RETAIN != 8:
+    print("RETAIN-CHANGED: PLANNING_WITNESS_RETAIN is %d, expected the pinned F31 count floor of 8 — "
+          "if this was deliberate, update this assertion and the F31 guarantee it encodes" % RETAIN)
+    sys.exit(1)
+
 RECEIPTS = os.path.join(repo, "docs", "workflow", "planning-receipts")
 os.makedirs(RECEIPTS, exist_ok=True)
 
@@ -228,6 +243,60 @@ if "garbage" in synth or "missing" in synth:
           "kept %r" % (sorted(synth),))
     sys.exit(1)
 print("ok: an unparseable/absent validated_at is not grace-retained (fail closed)")
+
+# (C4) a FUTURE `validated_at` earns NO grace. A stamp ahead of now yields a NEGATIVE age, which
+#      satisfies a bare `age <= GRACE` — so clock skew (or a hand-edited store) could park records in
+#      the grace clause permanently and, worse, let them consume HARD-CAP slots ahead of legitimately
+#      recent versions. A stamp in the future is not evidence of recency.
+#      The fixture uses MORE future-skewed records than the count floor, so the newest-RETAIN clause
+#      cannot be what bounds them — only the age test can. Red-when-broken: drop the `0 <= age` bound
+#      and all 20 survive on grace.
+SKEWED = RETAIN + 12
+synth = {"skew%02d" % i: {"validated_at": stamp(-(3600 * (i + 1)))} for i in range(SKEWED)}
+synth["legit"] = {"validated_at": stamp(60)}                    # genuinely recent -> must survive
+synth["ancient"] = {"validated_at": stamp(GRACE + 3600)}        # outside the window -> must go
+VC._evict_stale_versions(synth, NOWHERE)
+kept_skew = [k for k in synth if k.startswith("skew")]
+if len(kept_skew) > RETAIN:
+    print("FUTURE-SKEW-GRACE-RETAINED: %d of %d future-dated versions survived (the count floor is "
+          "%d) — a negative age is being read as 'inside the grace window'"
+          % (len(kept_skew), SKEWED, RETAIN))
+    sys.exit(1)
+if "legit" not in synth:
+    print("SKEW-DISPLACED-LEGIT: a genuinely in-grace version was evicted while future-dated ones "
+          "were retained; kept %r" % (sorted(synth),))
+    sys.exit(1)
+if "ancient" in synth:
+    print("STALE-VERSION-RETAINED: the past-window version survived the future-skew fixture")
+    sys.exit(1)
+print("ok: a future-dated validated_at is not grace-retained (%d of %d kept, count floor %d)"
+      % (len(kept_skew), SKEWED, RETAIN))
+
+# (C5) the live on-disk digest and the newest-RETAIN set are INDEPENDENT guarantees — the live version
+#      must not consume one of the RETAIN slots. Seeding `keep` with the live digest and then filling
+#      to RETAIN made the retained set `live` + newest-(RETAIN-1), so with the live receipt as the
+#      OLDEST entry the RETAIN-th newest version was evicted even though the documented rule keeps it.
+#      Every version here is OUTSIDE the grace window, so (c) cannot mask the difference.
+synth = {}
+for i in range(RETAIN + 1):                    # i=0 NEWEST ... i=RETAIN OLDEST
+    synth["e%03d" % i] = {"validated_at": stamp(GRACE + 3600 * (i + 1))}
+live_dg = "e%03d" % RETAIN                     # the OLDEST entry is the live on-disk one
+_real_digest_file = VC._digest_file
+VC._digest_file = lambda _path: live_dg
+try:
+    VC._evict_stale_versions(synth, NOWHERE)
+finally:
+    VC._digest_file = _real_digest_file
+missing = [k for k in ("e%03d" % i for i in range(RETAIN)) if k not in synth]
+if missing:
+    print("LIVE-CONSUMED-A-RETAIN-SLOT: the live version displaced newest-RETAIN member(s) %r; kept %r"
+          % (missing, sorted(synth)))
+    sys.exit(1)
+if live_dg not in synth:
+    print("LIVE-EVICTED: the current on-disk version was evicted; kept %r" % (sorted(synth),))
+    sys.exit(1)
+print("ok: keep is live UNION newest-%d (%d entries), not live + newest-%d"
+      % (RETAIN, len(synth), RETAIN - 1))
 PY
 
 echo "PASS: planning-witness retention is a BOUNDED count+age hybrid (F31/W5) — the hard cap holds even when every version is inside the grace window and evicts oldest-first, a version inside the grace window survives >RETAIN newer re-applies and stays borrowable, a version past the window is still evicted, an unparseable stamp is never grace-retained, and the current receipt stays borrowable while an evicted version is refused fail-closed"

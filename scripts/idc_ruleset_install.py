@@ -149,13 +149,44 @@ def _normalize_remote(url: str):
     return "{}/{}".format(segs[0], segs[1]).lower()
 
 
+def _git(repo_root: str, args: list, text=True):
+    """Run `git -C <repo_root> <args>` through the ONE hardened door every git read in this module
+    uses. Raises OSError when git cannot be executed (callers fail closed on that).
+
+    REPLACEMENT OBJECTS ARE DISABLED HERE, and that is load-bearing, not hygiene. `git replace`
+    installs a `refs/replace/<oid>` mapping that rewires OBJECT lookup: `git show` FOLLOWS it and
+    hands back the substituted commit's bytes, while `git rev-parse` keeps reporting the ORIGINAL
+    oid. The two commands therefore disagree, and this module's apply path runs exactly that pair —
+    it compares `rev-parse`'s oid against GitHub's live tip (which matches, so the staleness gate
+    passes) and then reads content with `git show` (which returns attacker-chosen bytes). The result
+    was a green `OK: ruleset created` receipt over a repo binding NO reviewer for six of seven
+    protected surfaces.
+
+    PINNING THE OID IS NOT A FIX FOR THIS ON ITS OWN — verified: `git show <full-oid>:<path>` still
+    follows the replace ref, because replacement is applied at object lookup, below ref resolution.
+    Only refusing to read replacement refs closes it, so it is set for EVERY call rather than at the
+    one site that reads content: any future git read added here is trust-bearing by default.
+
+    A `refs/replace/*` ref is a deliberate LOCAL tamper (`refs/replace` is not fetched by a default
+    clone), so this is not remotely reachable — but the premise of this whole module is that a
+    locally-resolving ref is not proof of what GitHub enforces, and a local tamper is precisely the
+    threat the committed-content gates exist to survive.
+
+    Both the env var and the `--no-replace-objects` flag are set: the flag is immune to a caller
+    scrubbing the environment, and the env var propagates to anything git itself shells out to."""
+    env = dict(os.environ)
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    kwargs = {"capture_output": True, "env": env}
+    if text:
+        kwargs["text"] = True
+    return subprocess.run(["git", "-C", repo_root, "--no-replace-objects"] + args, **kwargs)
+
+
 def _repo_root_identity(repo_root: str):
     """The `owner/repo` identity of the checkout at `repo_root`, read from its `origin` remote — a
     LOCAL, no-network check. None if there is no resolvable origin (or `git` is unavailable)."""
     try:
-        out = subprocess.run(
-            ["git", "-C", repo_root, "config", "--get", "remote.origin.url"],
-            capture_output=True, text=True)
+        out = _git(repo_root, ["config", "--get", "remote.origin.url"])
     except OSError:
         return None
     if out.returncode != 0:
@@ -181,24 +212,36 @@ def _default_branch_ref(repo_root: str, override=None):
     so the caller refuses and points the operator at `--default-branch` (or a full clone)."""
     if override:
         try:
-            chk = subprocess.run(
-                ["git", "-C", repo_root, "rev-parse", "--verify", "--quiet",
-                 "{}^{{commit}}".format(override)],
-                capture_output=True, text=True)
+            chk = _git(repo_root, ["rev-parse", "--verify", "--quiet",
+                                   "{}^{{commit}}".format(override)])
         except OSError:
             return None, "git-unavailable"
         if chk.returncode != 0 or not chk.stdout.strip():
             return None, "override-unresolved"
         return override, None
     try:
-        out = subprocess.run(
-            ["git", "-C", repo_root, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-            capture_output=True, text=True)
+        out = _git(repo_root, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
     except OSError:
         return None, "git-unavailable"
     if out.returncode == 0 and out.stdout.strip():
         return out.stdout.strip(), None                     # e.g. "origin/main"
     return None, "origin-head-unset"
+
+
+def _resolve_commit(repo_root: str, ref: str):
+    """The immutable commit OID `ref` names in this checkout, or None when it does not resolve.
+
+    Resolved ONCE and then used for BOTH the live tip comparison and the committed-content read, so
+    those two can never be answered from different commits — a symbolic ref (`origin/main`) re-read
+    between the two calls is a check-then-act window, and an immutable oid is not re-readable."""
+    try:
+        out = _git(repo_root, ["rev-parse", "--verify", "--quiet", "{}^{{commit}}".format(ref)])
+    except OSError:
+        return None
+    sha = (out.stdout or "").strip()
+    if out.returncode != 0 or not sha:
+        return None
+    return sha
 
 
 def _normalize_newlines(text):
@@ -225,9 +268,10 @@ def _committed_codeowners(repo_root: str, ref: str):
     file GitHub silently refuses to load."""
     for rel in RC.CODEOWNERS_RELPATHS:
         try:
-            out = subprocess.run(
-                ["git", "-C", repo_root, "show", "{}:{}".format(ref, rel)],
-                capture_output=True)                        # bytes — decode ourselves, strict UTF-8
+            # bytes — decode ourselves, strict UTF-8. Goes through `_git`, which DISABLES replacement
+            # objects: a `refs/replace/*` ref would otherwise make this read return a substituted
+            # commit's bytes while the tip check saw the real oid and passed.
+            out = _git(repo_root, ["show", "{}:{}".format(ref, rel)], text=False)
         except OSError:
             return None, None, None
         if out.returncode == 0:
@@ -254,7 +298,16 @@ def _load_payload(ruleset_path: str):
 
 
 def _gh_json(args: list):
-    out = subprocess.run(["gh"] + args, capture_output=True, text=True)
+    try:
+        out = subprocess.run(["gh"] + args, capture_output=True, text=True)
+    except OSError as exc:
+        # An absent or unexecutable `gh` is a FAILURE TO VERIFY, not a pass. Converting it here — at
+        # the single door every live read goes through — means all five call sites fail closed
+        # through their existing `except RuntimeError` and print this module's own
+        # `REFUSE: …` message, instead of a raw traceback escaping past the gates (the convention
+        # already used at the mutation call). Fixing it at the door rather than at each caller also
+        # covers any live read added later.
+        raise RuntimeError("could not invoke gh: {}".format(exc))
     if out.returncode != 0:
         raise RuntimeError("`gh {}` failed: {}".format(" ".join(args), CS.scrub(out.stderr).strip()[:200]))
     return json.loads(out.stdout or "null")
@@ -324,7 +377,11 @@ def _principal_problem(owner_repo: str, tok: str):
         if not isinstance(perms, dict):
             return ("team owner {!r}: GitHub returned no permissions object for its grant on {} — "
                     "refusing to assume access.".format(tok, owner_repo))
-        if not any(bool(perms.get(k)) for k in ("push", "maintain", "admin")):
+        # `is True`, not truthiness: GitHub documents these as JSON booleans, and every non-boolean a
+        # malformed/proxied body could carry — the STRING "false", "0", "no" — is truthy in Python and
+        # would grant write access on a body we could not actually parse. Only a real `true` counts;
+        # anything else falls through to the read/triage refusal, which is the fail-closed direction.
+        if not any(perms.get(k) is True for k in ("push", "maintain", "admin")):
             return ("team owner {!r} has only read/triage access on {} — a code owner without write "
                     "access cannot satisfy require_code_owner_review.".format(tok, owner_repo))
         return None
@@ -360,7 +417,7 @@ def _names_default_branch(ref: str, default_branch: str) -> bool:
     return ref == default_branch or ref == "origin/{}".format(default_branch)
 
 
-def live_default_branch_problem(owner_repo: str, repo_root: str, ref: str, override):
+def live_default_branch_problem(owner_repo: str, repo_root: str, ref: str, override, local_sha=None):
     """The refusal reason when the validation ref is not bound to `owner_repo`'s LIVE default branch on
     GitHub (or the local checkout of it is stale), else None.
 
@@ -370,7 +427,21 @@ def live_default_branch_problem(owner_repo: str, repo_root: str, ref: str, overr
     `origin/HEAD` may be stale after the repo's default branch was renamed. Either way the committed
     CODEOWNERS validated by `git show` is not the one GitHub enforces, so the receipt is green over
     protection that does not exist. Both are closed here, plus a tip-equality check that pins `git
-    show` to the exact bytes live on GitHub."""
+    show` to the exact bytes live on GitHub.
+
+    `local_sha` is the caller's ALREADY-RESOLVED oid for `ref` (`_resolve_commit`). The same oid is
+    handed to `_committed_codeowners`, so the commit compared against GitHub here and the commit the
+    content is read from are the same object by construction, not by re-resolving a symbolic ref
+    twice. Passing None makes this resolve it itself (kept for direct callers and tests).
+
+    RESIDUAL, stated honestly (not closable here): this is a check-then-act against a LIVE remote.
+    GitHub's default branch and tip are read before the principal lookups and before the mutation, so
+    a push that lands in that window is not reflected at mutation time — the ruleset would be applied
+    against a tip one commit behind what the operator saw certified. Re-reading immediately before
+    the PUT/POST would narrow the window but never close it (there is no compare-and-swap on the
+    rulesets API), and every gate here already fails closed, so the residual is DOCUMENTED rather
+    than chased. The exposure is bounded by the fact that the newly pushed commit still had to pass
+    the repo's own protection to land."""
     try:
         repo_doc = _gh_json(["api", "repos/{}".format(owner_repo)])
     except (RuntimeError, ValueError) as exc:
@@ -402,15 +473,9 @@ def live_default_branch_problem(owner_repo: str, repo_root: str, ref: str, overr
     if not remote_sha:
         return ("GitHub reported no tip commit for {}'s default branch {!r} — refusing to certify "
                 "against an unconfirmed tip.".format(owner_repo, default_branch))
-    try:
-        out = subprocess.run(
-            ["git", "-C", repo_root, "rev-parse", "--verify", "--quiet",
-             "{}^{{commit}}".format(ref)],
-            capture_output=True, text=True)
-    except OSError:
-        return "git is unavailable, so the local tip of {} cannot be compared with GitHub's".format(ref)
-    local_sha = (out.stdout or "").strip()
-    if out.returncode != 0 or not local_sha:
+    if local_sha is None:
+        local_sha = _resolve_commit(repo_root, ref)
+    if not local_sha:
         return ("{!r} no longer resolves in the checkout at {} — cannot compare it with GitHub's "
                 "tip.".format(ref, repo_root))
     if local_sha != remote_sha:
@@ -552,14 +617,26 @@ def main(argv=None) -> int:
     # bytes GitHub does not enforce. Runs BEFORE the `git show` read below so the committed CODEOWNERS
     # that gets validated is the enforced one. Dry-run keeps today's local-only resolution and makes NO
     # network call.
+    # Resolve the validation ref to an IMMUTABLE oid ONCE, and use that oid for both the live tip
+    # comparison and the committed-content read below. A symbolic ref re-read per call is a
+    # check-then-act window between "the commit we vouched for" and "the commit we read bytes from";
+    # an oid cannot drift between the two. (The replace-ref hole that made those two calls disagree
+    # outright is closed in `_git`, which this goes through.)
+    ref_oid = _resolve_commit(args.repo_root, ref)
+    if ref_oid is None:
+        print("REFUSE: {!r} does not resolve to a commit in the checkout at {} — the branch GitHub "
+              "enforces CODEOWNERS from must be readable here before anything can be certified "
+              "against it.".format(ref, args.repo_root), file=sys.stderr)
+        return 2
+
     if args.apply:
         live_problem = live_default_branch_problem(
-            args.repo, args.repo_root, ref, args.default_branch)
+            args.repo, args.repo_root, ref, args.default_branch, local_sha=ref_oid)
         if live_problem:
             print("REFUSE: {}".format(live_problem), file=sys.stderr)
             return 1
 
-    committed_rel, committed_text, committed_size = _committed_codeowners(args.repo_root, ref)
+    committed_rel, committed_text, committed_size = _committed_codeowners(args.repo_root, ref_oid)
     # GitHub does not load a CODEOWNERS of 3 MB or more AT ALL, so an oversized file would install
     # require_code_owner_review over ZERO code owners. Gate the raw committed byte size FIRST — ahead
     # of the readability and working-tree-divergence checks — so the refusal names the real reason

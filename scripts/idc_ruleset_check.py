@@ -227,14 +227,24 @@ CODEOWNERS_MAX_BYTES = 3 * 1024 * 1024
 def codeowners_size_problem(rel, size_bytes):
     """The refusal reason when the CODEOWNERS at `rel` is at/over GitHub's 3 MB load limit, else None.
 
-    `size_bytes` is the file's RAW BYTE size and must never be a decoded text length: the working-tree
-    read opens in text mode, whose universal-newline translation collapses each CRLF to one LF and so
-    UNDERCOUNTS a CRLF file by one byte per line — enough to certify a file GitHub refuses to load.
-    Both call sites therefore measure bytes at the source (`os.path.getsize` for the working tree, the
-    length of `git show`'s raw stdout for the committed copy). `size_bytes is None` means the size
-    could not be established and the check is skipped — the caller's other gates still apply."""
-    if rel is None or size_bytes is None:
+    `size_bytes` is the file's RAW BYTE size and must never be a decoded text length: `len(text)`
+    counts CODE POINTS, so a multi-byte UTF-8 file undercounts, and a text-mode read additionally
+    collapses each CRLF to one LF — either is enough to certify a file GitHub refuses to load. Both
+    call sites therefore take the size from the SAME byte string they decode (`len(raw)`), never from
+    a separate `stat`, so no second read can disagree with the bytes actually validated.
+
+    `size_bytes is None` means the size COULD NOT BE ESTABLISHED, and that is a REFUSAL, not a skipped
+    check. An unmeasurable file cannot be shown to be under the limit, and "cannot prove it is safe"
+    must never resolve to "certify it" — this gate exists precisely because an oversized CODEOWNERS
+    parses perfectly here while binding no reviewer on GitHub."""
+    if rel is None:
         return None
+    if size_bytes is None:
+        return ("the RAW byte size of the CODEOWNERS file {} could not be determined, so it cannot be "
+                "shown to be under GitHub's {}-byte (3 MB) load limit. GitHub does not load a "
+                "CODEOWNERS at or over that limit AT ALL, which would leave every protected surface "
+                "without a code owner, so an unmeasurable file is refused rather than "
+                "certified.".format(rel, CODEOWNERS_MAX_BYTES))
     if size_bytes >= CODEOWNERS_MAX_BYTES:
         return ("the CODEOWNERS file {} is {} bytes — GitHub does not load a CODEOWNERS of {} bytes "
                 "(3 MB) or more, so it would bind NO code owner to ANY protected surface and "
@@ -245,23 +255,36 @@ def codeowners_size_problem(rel, size_bytes):
 
 def _read_codeowners_sized(repo_root: str):
     """`(relpath, text, size_bytes)` for the first CODEOWNERS GitHub would honor, or `(None, None,
-    None)`. `size_bytes` is the RAW on-disk byte count (`os.path.getsize`), taken independently of the
-    text-mode read so newline translation cannot undercount it against `CODEOWNERS_MAX_BYTES`."""
+    None)`. `size_bytes` is the RAW on-disk byte count.
+
+    ONE read, in BINARY, supplies both values. The size used to be a separate `os.path.getsize`, which
+    was wrong twice over: an `OSError` from that call left `size=None` and SILENTLY DISABLED the 3 MB
+    gate (a file at the limit certified instead of refusing), and stat-ing the path then re-opening it
+    validated one snapshot's content against another snapshot's size if the file changed in between.
+    Taking `len(raw)` from the very bytes we decode makes those two disagreements impossible, and a
+    read that fails now yields `size_bytes=None`, which `codeowners_size_problem` treats as a REFUSAL.
+
+    The decoded text reproduces text-mode universal-newline translation exactly (CRLF/CR -> LF),
+    because callers compare this string against the committed copy and parse ownership rules out of
+    it: only the SIZE's provenance changed here, never the text's meaning."""
     for rel in CODEOWNERS_RELPATHS:
         path = os.path.join(repo_root, rel)
         if os.path.isfile(path):
             try:
-                size = os.path.getsize(path)
+                with open(path, "rb") as fh:
+                    raw = fh.read()
             except OSError:
-                size = None
+                # Unreadable: the size is genuinely UNKNOWN, so it is reported as None and refused by
+                # the size gate rather than skipped.
+                return rel, None, None
             try:
-                with open(path, encoding="utf-8") as fh:
-                    return rel, fh.read(), size
-            except (OSError, UnicodeDecodeError):
-                # A CODEOWNERS with invalid UTF-8 (or an unreadable file) is treated as unreadable and
-                # fails closed via the `text is None` path — a clean refusal, never an uncaught
-                # UnicodeDecodeError traceback out of the checker/installer (F35).
-                return rel, None, size
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                # A CODEOWNERS with invalid UTF-8 is treated as unreadable and fails closed via the
+                # `text is None` path — a clean refusal, never an uncaught UnicodeDecodeError
+                # traceback out of the checker/installer (F35). The size IS known here.
+                return rel, None, len(raw)
+            return rel, text.replace("\r\n", "\n").replace("\r", "\n"), len(raw)
     return None, None, None
 
 
@@ -616,15 +639,18 @@ def _owned_under(target, rules: list) -> bool:
     return owned
 
 
-def validate_codeowners_content(rel, text, surfaces, size_bytes=None) -> list:
+def validate_codeowners_content(rel, text, surfaces, size_bytes) -> list:
     """Refusal reasons for CODEOWNERS `(rel, text)` against `surfaces` — the shared core of the
     working-tree check (`validate_codeowners`, F6) and the installer's COMMITTED-content check (F39).
     `rel is None` means no CODEOWNERS was found; `text is None` means it was found but unreadable.
 
-    `size_bytes` (optional) is the file's RAW BYTE size. When supplied it is gated against GitHub's
-    3 MB load limit BEFORE any rule is read: an oversized file parses fine here but is not loaded by
-    GitHub at all, so ownership derived from its rules would be pure fiction. Callers that cannot
-    establish a byte size pass None and skip only that check."""
+    `size_bytes` is the file's RAW BYTE size and is REQUIRED — deliberately not defaulted. It is gated
+    against GitHub's 3 MB load limit BEFORE any rule is read: an oversized file parses fine here but is
+    not loaded by GitHub at all, so ownership derived from its rules would be pure fiction. It carried
+    a `=None` default once, and that made W1 opt-in: any future caller that simply forgot the kwarg
+    would have silently disabled the limit check with nothing going red, because the installer's own
+    size gate is defence-in-depth and would have masked it. `None` remains a legal VALUE (the size is
+    unknown) but it now REFUSES; what is no longer possible is failing to pass it at all."""
     if rel is None:
         return ["no CODEOWNERS file found (looked at {}) — require_code_owner_review cannot bind a "
                 "reviewer to any protected surface".format(", ".join(CODEOWNERS_RELPATHS))]

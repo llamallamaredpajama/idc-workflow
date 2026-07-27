@@ -102,6 +102,12 @@ case "$path" in
     case " ${STUB_READONLY_TEAMS:-} " in
       *" $team "*) printf '{"permissions":{"pull":true,"triage":true,"push":false,"maintain":false,"admin":false}}\n'; exit 0 ;;
     esac
+    # A malformed body carrying the permission flags as JSON STRINGS rather than booleans. Every value
+    # here means "no write access", but the STRING "false" is truthy in Python.
+    if [ -n "${STUB_STRING_PERMS:-}" ]; then
+      printf '{"permissions":{"pull":"true","push":"false","maintain":"false","admin":"false"}}\n'
+      exit 0
+    fi
     printf '{"permissions":{"pull":true,"push":true,"maintain":false,"admin":false}}\n'
     exit 0 ;;
   */rulesets|*/rulesets/*)
@@ -228,6 +234,77 @@ out="$(apply "$TGT_USER" "cafebabe00000000000000000000000000000000")" \
 printf '%s\n' "$out" | grep -qiE 'stale|fetch' \
   || fail "W3e: the stale-checkout refusal must say the checkout is stale / to git fetch; got: $out"
 
+# (W3f) GIT-REPLACE TAMPER — the tip check compares `rev-parse`'s oid against GitHub's and passes,
+#       but a `refs/replace/<oid>` ref rewires OBJECT lookup so `git show` returns a DIFFERENT commit's
+#       bytes. The two commands disagree, and the installer runs exactly that pair: it vouched for the
+#       real tip and then certified attacker-chosen content, printing `OK: ruleset created` over a repo
+#       binding NO reviewer for six of the seven protected surfaces.
+#
+#       The fixture: commit A covers only ONE surface (so it MUST be refused on ownership grounds);
+#       commit B covers all seven. The branch and origin/main stay at A, GitHub is told the tip is A —
+#       so every other gate is satisfied — and `git replace A B` is installed. If content is read
+#       through the replace ref, the installer sees B's full coverage and certifies.
+#
+#       Red-when-broken: drop `--no-replace-objects`/GIT_NO_REPLACE_OBJECTS from `_git` and this case
+#       prints `OK: ruleset ... created` instead of refusing. Note that PINNING THE OID DOES NOT FIX
+#       THIS — `git show <full-oid>:<path>` follows the replace ref too, because replacement is applied
+#       at object lookup, below ref resolution. Only refusing to read replacement refs closes it.
+TGT_REPL="$WORK/tgt-replace"; mk_target "$TGT_REPL" "@alice"
+# A = the tip GitHub knows about; its CODEOWNERS covers ONE surface only.
+cat > "$TGT_REPL/.github/CODEOWNERS" <<'CO'
+/.github/CODEOWNERS @alice
+CO
+git -C "$TGT_REPL" add -A
+git -C "$TGT_REPL" commit -q -m "narrow codeowners (the bytes GitHub enforces)"
+SHA_REPL_A="$(git -C "$TGT_REPL" rev-parse HEAD)"
+# B = full seven-surface coverage, committed then rewound out of the branch.
+cat > "$TGT_REPL/.github/CODEOWNERS" <<'CO'
+/.github/workflows/ @alice
+/scripts/hooks/ @alice
+/scripts/idc_validation_contract.py @alice
+/scripts/idc_receipt_check.py @alice
+/scripts/idc_pathway_check.py @alice
+/.github/rulesets/ @alice
+/.github/CODEOWNERS @alice
+CO
+git -C "$TGT_REPL" add -A
+git -C "$TGT_REPL" commit -q -m "wide codeowners (never on the enforced branch)"
+SHA_REPL_B="$(git -C "$TGT_REPL" rev-parse HEAD)"
+git -C "$TGT_REPL" reset -q --hard "$SHA_REPL_A"
+git -C "$TGT_REPL" update-ref refs/remotes/origin/main "$SHA_REPL_A"
+git -C "$TGT_REPL" replace "$SHA_REPL_A" "$SHA_REPL_B"
+# The WORKING TREE is left holding B's wide content (uncommitted). This is what makes the case prove a
+# genuine FALSE-CERTIFY rather than a lucky save by a neighbouring gate: with the guard REMOVED,
+# `git show` returns B, the working-tree-vs-committed divergence gate sees B == B and passes, ownership
+# sees all seven surfaces covered and passes, and `--apply` prints `OK: ruleset ... created` over a repo
+# whose ENFORCED CODEOWNERS binds a reviewer to exactly one surface. With the guard in place `git show`
+# returns A, so the run refuses. (Left committed at A with an A working tree, the divergence gate would
+# refuse even with the hole open, and this case would pass for the wrong reason.)
+cat > "$TGT_REPL/.github/CODEOWNERS" <<'CO'
+/.github/workflows/ @alice
+/scripts/hooks/ @alice
+/scripts/idc_validation_contract.py @alice
+/scripts/idc_receipt_check.py @alice
+/scripts/idc_pathway_check.py @alice
+/.github/rulesets/ @alice
+/.github/CODEOWNERS @alice
+CO
+# Prove the fixture is REAL before asserting on it: without the guard, `git show` must actually hand
+# back B's bytes while `rev-parse` still reports A. A fixture that does not diverge would make the
+# assertion below pass for the wrong reason.
+[ "$(git -C "$TGT_REPL" rev-parse --verify --quiet 'refs/remotes/origin/main^{commit}')" = "$SHA_REPL_A" ] \
+  || fail "W3f fixture: origin/main no longer resolves to commit A — the tamper fixture is not set up as intended"
+git -C "$TGT_REPL" show "refs/remotes/origin/main:.github/CODEOWNERS" | grep -Fq '/scripts/hooks/' \
+  || fail "W3f fixture: \`git show\` did NOT follow the replace ref, so this case cannot prove the guard works"
+git -C "$TGT_REPL" --no-replace-objects show "refs/remotes/origin/main:.github/CODEOWNERS" | grep -Fq '/scripts/hooks/' \
+  && fail "W3f fixture: \`--no-replace-objects\` still returned the substituted bytes — the fixture is not a replace-ref tamper"
+out="$(apply "$TGT_REPL" "$SHA_REPL_A")" \
+  && fail "W3f: apply CERTIFIED through a \`git replace\` ref — it validated a substituted commit's CODEOWNERS while the tip check vouched for the real one; got: $out"
+printf '%s\n' "$out" | grep -qiE '^OK: ruleset' \
+  && fail "W3f: apply reported the ruleset was created over a repo whose ENFORCED CODEOWNERS binds one surface; got: $out"
+printf '%s\n' "$out" | grep -qiE '^REFUSE:' \
+  || fail "W3f: apply must REFUSE the replace-ref tamper via this module's refusal convention; got: $out"
+
 # --- W2: every owner principal must exist and hold write-or-better access ---------------------------
 
 # (W2a) NONEXISTENT USER — the handle 404s (deleted, renamed, or never a collaborator).
@@ -260,6 +337,16 @@ out="$(PATH="$STUB_BIN:$PATH" STUB_BRANCH_SHA="$SHA_TEAM" STUB_READONLY_TEAMS="r
         python3 "$INS" --ruleset "$RS" --repo "$REPO" --repo-root "$TGT_TEAM" --apply 2>&1)" \
   && fail "W2e: apply CERTIFIED a team owner holding only read/triage access"
 
+# (W2e2) STRING-VALUED PERMISSION FLAGS — a malformed/proxied body returns `"push":"false"` instead of
+#        the documented boolean. Every flag says NO write access, but `bool("false")` is True in
+#        Python, so a truthiness test reads the team as writable and certifies. Only a real `true`
+#        may count. Red-when-broken: use `bool(perms.get(k))` and this case CERTIFIES.
+out="$(PATH="$STUB_BIN:$PATH" STUB_BRANCH_SHA="$SHA_TEAM" STUB_STRING_PERMS=1 \
+        python3 "$INS" --ruleset "$RS" --repo "$REPO" --repo-root "$TGT_TEAM" --apply 2>&1)" \
+  && fail "W2e2: apply CERTIFIED a team whose permissions came back as the STRING \"false\" — a truthy string is not a write grant; got: $out"
+printf '%s\n' "$out" | grep -Fq 'acme/reviewers' \
+  || fail "W2e2: the string-permissions refusal must name the team; got: $out"
+
 # (W2f) EMAIL OWNER — GitHub exposes no API that resolves an email owner to a user with access, so it
 #       is live-UNVERIFIABLE and refused at apply (fail closed, consistent with F41's philosophy).
 #       Note the checker accepts the email FORM; this gate is strictly about live verifiability.
@@ -287,6 +374,29 @@ printf '%s\n' "$out" | grep -qi 'traceback' \
 out="$(PATH="$STUB_BIN:$PATH" STUB_FAIL_ALL=1 \
         python3 "$INS" --ruleset "$RS" --repo "$REPO" --repo-root "$TGT_USER" --apply 2>&1)" \
   && fail "W2i: apply CERTIFIED while every gh call failed"
+
+# (W2j) `gh` NOT INSTALLED AT ALL — a bare PATH with no gh on it. `gh failed` and `gh is absent` are
+#       different errors: the first is a non-zero exit this module already converts, the second raises
+#       OSError out of subprocess.run. It must fail closed through this module's own REFUSE convention,
+#       not escape as a raw traceback past the gates. Red-when-broken: drop the OSError conversion in
+#       `_gh_json` and this case prints a FileNotFoundError traceback.
+#       PATH keeps python3 AND git — ONLY gh is removed. Dropping git too would make this case refuse
+#       at the origin-identity check, long before any gh call, and it would pass without ever
+#       exercising the path under test (verified: with git also absent, breaking the OSError
+#       conversion left this case GREEN).
+BAREPATH="$WORK/barepath"; mkdir -p "$BAREPATH"
+ln -sf "$(command -v python3)" "$BAREPATH/python3"
+ln -sf "$(command -v git)" "$BAREPATH/git"
+command -v gh >/dev/null 2>&1 && [ -e "$BAREPATH/gh" ] \
+  && fail "W2j: the bare PATH still carries a gh — this case would not exercise the missing-gh path"
+out="$(PATH="$BAREPATH" "$BAREPATH/python3" "$INS" --ruleset "$RS" --repo "$REPO" \
+        --repo-root "$TGT_USER" --apply 2>&1)" \
+  && fail "W2j: apply CERTIFIED with no \`gh\` on PATH — an unverifiable target must fail closed; got: $out"
+printf '%s\n' "$out" | grep -qi 'traceback' \
+  && fail "W2j: a missing \`gh\` produced a TRACEBACK instead of this module's REFUSE convention; got: $out"
+# Specifically the GH refusal — not the git-absent / identity refusal, which would prove nothing here.
+printf '%s\n' "$out" | grep -Fq 'could not invoke gh' \
+  || fail "W2j: a missing \`gh\` must refuse with this module's 'could not invoke gh' message (a different refusal means this case never reached the gh call); got: $out"
 
 # --- the dry-run contract: NO network calls, at all -------------------------------------------------
 # The strongest available form of the assertion: run dry-run with the stub on PATH and a LOG, then

@@ -18,7 +18,11 @@
 #   (2) HAVE a prohibition on a raw / self-directed / automatic merge command;
 #   (3) ABSENT `gh pr merge`  — the raw merge command;
 #   (4) ABSENT `idc_pr_finish.py … autonomous` — the autonomous finisher, which merges with no human
-#       touchpoint and is the Claude/Codex-runtime door, not Pi's.
+#       touchpoint and is the Claude/Codex-runtime door, not Pi's;
+#   (5) ABSENT `git merge` — the raw LOCAL merge command. (1)+(2) are prose checks, and prose is not
+#       semantics: a sentence can promise an operator-performed merge, forbid a "raw" merge command,
+#       and still instruct `git merge --ff-only` + push. That near-miss trips neither (3) nor (4), so
+#       it is planted as a known-bad fixture and (5) is what catches it.
 #
 # Matching is done over the file's WHOLE TEXT with whitespace normalized to single spaces, NOT
 # line-by-line: both personas wrap these exact sentences mid-clause (recirculator.md breaks between
@@ -59,6 +63,12 @@ FORBIDDEN = [
     ("the raw merge command `gh pr merge`", re.compile(r"(?i)\bgh\s+pr\s+merge\b")),
     ("the autonomous finisher (`idc_pr_finish.py … autonomous`)",
      re.compile(r"(?i)idc_pr_finish\.py.{0,80}?\bautonomous\b")),
+    # `git merge` is the OTHER way to land the branch yourself, and the original spec named only
+    # `gh pr merge` + the autonomous finisher. That left a real gap: a persona sentence can satisfy
+    # BOTH required regexes (it says the merge is operator-performed, and it forbids a "raw" merge
+    # command) while still instructing a local `git merge --ff-only` + push — a self-merge by another
+    # name, which neither FORBIDDEN pattern saw. The near-miss is planted below as a known-bad line.
+    ("the raw local merge command `git merge`", re.compile(r"(?i)\bgit\s+merge\b")),
 ]
 
 # (0) SELF-TEST against PLANTED fixtures (F29). Every REQUIRED regex gets a known-GOOD line it must
@@ -81,6 +91,14 @@ FORBIDDEN_KNOWN_BAD = [
     (0, "gh   pr   merge"),                                       # guards the `\s+` tolerance
     (1, 'python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_pr_finish.py" autonomous --repo "$PWD"'),
     (1, "run idc_pr_finish.py with the autonomous subcommand"),
+    (2, "run `git merge --ff-only integration/x` and push"),
+    (2, "git   merge"),                                           # guards the `\s+` tolerance
+    # THE NEAR-MISS that motivated FORBIDDEN[2] (reviewer-crafted, verified): it satisfies BOTH
+    # REQUIRED regexes and trips NEITHER of the original two FORBIDDEN patterns, yet directs a
+    # self-merge. Planting it here means the gap stays closed — if FORBIDDEN[2] is ever dropped or
+    # loosened, this line stops being flagged and the self-test fails.
+    (2, "the integration merge is operator-performed: do not run a raw or automatic merge command; "
+        "when CI is green, run git merge --ff-only and push the result yourself"),
 ]
 for idx, sample in REQUIRED_KNOWN_GOOD:
     if not REQUIRED[idx][1].search(sample):
@@ -100,6 +118,19 @@ for idx, sample in REQUIRED_KNOWN_BAD:
     if REQUIRED[idx][1].search(sample):
         print("SELFTEST-FAIL: REQUIRED[%d] (%s) matched a line it must NOT: %r"
               % (idx, REQUIRED[idx][0], sample))
+
+# The near-miss is only a NEAR-miss if the REQUIRED checks genuinely wave it through — that is exactly
+# why a FORBIDDEN command scanner has to catch it. Assert both halves, so this stays a proof that the
+# REQUIRED prose checks CANNOT stand in for the command scanners rather than a bare extra fixture.
+NEAR_MISS = ("the integration merge is operator-performed: do not run a raw or automatic merge "
+             "command; when CI is green, run git merge --ff-only and push the result yourself")
+for idx in (0, 1):
+    if not REQUIRED[idx][1].search(NEAR_MISS):
+        print("SELFTEST-FAIL: the near-miss no longer satisfies REQUIRED[%d] (%s), so it no longer "
+              "demonstrates that prose checks cannot catch a self-merge instruction" % (idx, REQUIRED[idx][0]))
+if not any(rx.search(NEAR_MISS) for _label, rx in FORBIDDEN):
+    print("SELFTEST-FAIL: NO FORBIDDEN pattern flags the near-miss self-merge instruction — a persona "
+          "could mandate an operator-performed merge and still direct a `git merge` self-merge")
 
 # The self-test ran to completion. Emit a sentinel the harness REQUIRES, so a python crash or an early
 # exit that skips the fixtures can never be mistaken for a clean pass (F36).

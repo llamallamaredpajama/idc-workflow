@@ -32,6 +32,7 @@ import argparse
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 
@@ -221,7 +222,15 @@ CODEOWNERS_RELPATHS = (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
 # `require_code_owner_review` binds NO reviewer to any protected surface even though the file parses
 # perfectly here. That is a false-certify of exactly the kind F6/F39 exist to prevent (a green receipt
 # over protection GitHub never applies), so the size is a fail-closed refusal at the same door.
-CODEOWNERS_MAX_BYTES = 3 * 1024 * 1024
+#
+# "3 MB" IS AMBIGUOUS IN GITHUB'S DOCS and this gate resolves it DOWNWARD, deliberately (F29). Decimal
+# reads as 3,000,000; binary as 3,145,728. Picking the binary value would leave the 3,000,000–3,145,727
+# window certifying HERE while GitHub refuses to load the file — a fail-OPEN gap of ~146 KB in the one
+# gate that exists to stop exactly that false-certify. Picking the decimal value can only ever refuse a
+# file GitHub would have loaded, which is the safe direction and costs nothing real: a CODEOWNERS is
+# realistically a few KB, so no honest repository comes near either number. A fail-closed gate rounds
+# an ambiguous limit DOWN.
+CODEOWNERS_MAX_BYTES = 3 * 1000 * 1000
 
 
 def codeowners_size_problem(rel, size_bytes):
@@ -253,45 +262,116 @@ def codeowners_size_problem(rel, size_bytes):
     return None
 
 
-def _read_codeowners_sized(repo_root: str):
-    """`(relpath, text, size_bytes)` for the first CODEOWNERS GitHub would honor, or `(None, None,
-    None)`. `size_bytes` is the RAW on-disk byte count.
+# How much is read at a time while counting the tail of an over-limit file. Only ever used to COUNT —
+# the bytes are discarded immediately, so peak memory stays bounded by CODEOWNERS_MAX_BYTES + 1 + this,
+# no matter how large the file on disk is.
+_SIZE_COUNT_CHUNK = 1024 * 1024
 
-    ONE read, in BINARY, supplies both values. The size used to be a separate `os.path.getsize`, which
-    was wrong twice over: an `OSError` from that call left `size=None` and SILENTLY DISABLED the 3 MB
-    gate (a file at the limit certified instead of refusing), and stat-ing the path then re-opening it
-    validated one snapshot's content against another snapshot's size if the file changed in between.
-    Taking `len(raw)` from the very bytes we decode makes those two disagreements impossible, and a
-    read that fails now yields `size_bytes=None`, which `codeowners_size_problem` treats as a REFUSAL.
+
+def _read_codeowners_sized(repo_root: str):
+    """`(relpath, text, size_bytes, read_problem)` for the first CODEOWNERS GitHub would honor, or
+    `(None, None, None, None)` when none of the three locations exists. `size_bytes` is the RAW
+    on-disk byte count; `read_problem` is a ready-to-print refusal reason when the entry exists but
+    cannot be read AS GITHUB WOULD READ IT, else None.
+
+    ONE read, in BINARY, supplies content and size. The size used to be a separate `os.path.getsize`,
+    which was wrong twice over: an `OSError` from that call left `size=None` and SILENTLY DISABLED the
+    3 MB gate (a file at the limit certified instead of refusing), and stat-ing the path then
+    re-opening it validated one snapshot's content against another snapshot's size if the file changed
+    in between. Taking `len(raw)` from the very bytes we decode makes those two disagreements
+    impossible. **Do not reintroduce a separate `stat` for the size** — that is the bug F2 closed.
+
+    THE READ IS BOUNDED (F30). Reading an unbounded `fh.read()` meant a pathological CODEOWNERS had to
+    fit in memory BEFORE the gate that exists to refuse it could run, so the failure mode of an
+    oversized file was `MemoryError` rather than this module's REFUSE convention. At most
+    `CODEOWNERS_MAX_BYTES + 1` bytes are held: one byte over the limit is already proof the file is
+    over it. The exact size is still reported — the tail is COUNTED in `_SIZE_COUNT_CHUNK` pieces that
+    are discarded as they are read — so the refusal names a real number rather than a lower bound, and
+    an over-limit file is never decoded at all.
+
+    SYMLINKS ARE REFUSED, NOT FOLLOWED (F14). Git stores a symlink as a mode-120000 blob whose CONTENT
+    IS THE TARGET PATH STRING; GitHub loads that string as the file body, parses no owner rules out of
+    it, and binds NO reviewer to any protected surface. `os.path.isfile`/`open` both FOLLOW links, so
+    reading through one certifies the TARGET's rules against a file GitHub reads a path string from —
+    the F6/F39 false-certify class, triggered by the well-intentioned `ln -s ../CODEOWNERS
+    .github/CODEOWNERS` dedupe. A BROKEN link failed worse still: `isfile` was False, so the loop fell
+    THROUGH to a lower-precedence location and certified that, while GitHub honours the
+    higher-precedence blob that does exist. Hence `os.lstat`, and hence a non-regular entry at a
+    higher-precedence location REFUSES instead of falling through. Only "nothing is here" (ENOENT /
+    ENOTDIR) advances to the next location, because that is the only case where GitHub also looks on.
 
     The decoded text reproduces text-mode universal-newline translation exactly (CRLF/CR -> LF),
     because callers compare this string against the committed copy and parse ownership rules out of
     it: only the SIZE's provenance changed here, never the text's meaning."""
     for rel in CODEOWNERS_RELPATHS:
         path = os.path.join(repo_root, rel)
-        if os.path.isfile(path):
-            try:
-                with open(path, "rb") as fh:
-                    raw = fh.read()
-            except OSError:
-                # Unreadable: the size is genuinely UNKNOWN, so it is reported as None and refused by
-                # the size gate rather than skipped.
-                return rel, None, None
-            try:
-                text = raw.decode("utf-8")
-            except UnicodeDecodeError:
-                # A CODEOWNERS with invalid UTF-8 is treated as unreadable and fails closed via the
-                # `text is None` path — a clean refusal, never an uncaught UnicodeDecodeError
-                # traceback out of the checker/installer (F35). The size IS known here.
-                return rel, None, len(raw)
-            return rel, text.replace("\r\n", "\n").replace("\r", "\n"), len(raw)
-    return None, None, None
+        try:
+            st = os.lstat(path)                          # lstat, NOT stat — never follow the link
+        except (FileNotFoundError, NotADirectoryError):
+            continue                                     # nothing here; GitHub looks on too
+        except OSError as exc:
+            # The entry may or may not exist and we cannot tell — refusing beats falling through to a
+            # lower-precedence file GitHub would not be reading.
+            return rel, None, None, (
+                "the CODEOWNERS location {} could not be examined ({}) — GitHub honors it ahead of "
+                "the remaining locations, so it cannot be skipped in favour of a lower-precedence "
+                "file. Fix the permissions on it (or remove it) before "
+                "installing.".format(rel, exc))
+        if stat.S_ISLNK(st.st_mode):
+            return rel, None, None, (
+                "the CODEOWNERS at {} is a SYMLINK. Git stores a symlink as a mode-120000 blob whose "
+                "content is the TARGET PATH STRING, and GitHub loads that string as the file body — "
+                "so it declares NO owner rules and binds NO reviewer to any protected surface, while "
+                "reading through the link here would certify the target's rules instead. Replace it "
+                "with a regular file holding the rules GitHub must enforce.".format(rel))
+        if not stat.S_ISREG(st.st_mode):
+            return rel, None, None, (
+                "the CODEOWNERS at {} is not a regular file. GitHub honors this location ahead of the "
+                "remaining ones, so it cannot be skipped in favour of a lower-precedence CODEOWNERS: "
+                "a location GitHub reads no rules from binds no reviewer to any protected "
+                "surface.".format(rel))
+        try:
+            with open(path, "rb") as fh:
+                raw = fh.read(CODEOWNERS_MAX_BYTES + 1)
+                if len(raw) > CODEOWNERS_MAX_BYTES:
+                    # Already over the limit. Count the rest without retaining it, so the refusal can
+                    # name the real size, and never decode it.
+                    size = len(raw)
+                    while True:
+                        chunk = fh.read(_SIZE_COUNT_CHUNK)
+                        if not chunk:
+                            break
+                        size += len(chunk)
+                    return rel, None, size, None
+        except OSError as exc:
+            # Readable-as-an-entry but not readable as a FILE (permissions, an I/O error). Reported as
+            # its own cause: routing this through the unknown-size refusal told the operator their
+            # file might exceed 3 MB when the real problem was `chmod 000` (F21). The size gate still
+            # refuses an unknown size on its own — this only makes the message name the true cause.
+            return rel, None, None, (
+                "the CODEOWNERS file {} could not be read ({}) — check its permissions. Neither its "
+                "ownership rules nor its size can be established, and a file that cannot be shown to "
+                "cover the protected surfaces is refused rather than certified.".format(rel, exc))
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            # A CODEOWNERS with invalid UTF-8 is treated as unreadable and fails closed via the
+            # `text is None` path — a clean refusal, never an uncaught UnicodeDecodeError
+            # traceback out of the checker/installer (F35). The size IS known here.
+            return rel, None, len(raw), None
+        return rel, text.replace("\r\n", "\n").replace("\r", "\n"), len(raw), None
+    return None, None, None, None
 
 
 def _read_codeowners(repo_root: str):
     """`(relpath, text)` for the first CODEOWNERS GitHub would honor, or `(None, None)`. The size-free
-    view, for callers that only compare CONTENT (the installer's working-tree-vs-committed check)."""
-    rel, text, _size = _read_codeowners_sized(repo_root)
+    view, for callers that only compare CONTENT (the installer's working-tree-vs-committed check).
+
+    `text` is None whenever the file could not be read AS GITHUB READS IT — unreadable, invalid UTF-8,
+    over the load limit, or a symlink/non-regular entry. Every caller of this view compares the result
+    against the committed copy, so a None text yields a divergence refusal: fail-closed in all four
+    cases."""
+    rel, text, _size, _problem = _read_codeowners_sized(repo_root)
     return rel, text
 
 
@@ -639,7 +719,7 @@ def _owned_under(target, rules: list) -> bool:
     return owned
 
 
-def validate_codeowners_content(rel, text, surfaces, size_bytes) -> list:
+def validate_codeowners_content(rel, text, surfaces, size_bytes, read_problem) -> list:
     """Refusal reasons for CODEOWNERS `(rel, text)` against `surfaces` — the shared core of the
     working-tree check (`validate_codeowners`, F6) and the installer's COMMITTED-content check (F39).
     `rel is None` means no CODEOWNERS was found; `text is None` means it was found but unreadable.
@@ -650,10 +730,21 @@ def validate_codeowners_content(rel, text, surfaces, size_bytes) -> list:
     a `=None` default once, and that made W1 opt-in: any future caller that simply forgot the kwarg
     would have silently disabled the limit check with nothing going red, because the installer's own
     size gate is defence-in-depth and would have masked it. `None` remains a legal VALUE (the size is
-    unknown) but it now REFUSES; what is no longer possible is failing to pass it at all."""
+    unknown) but it now REFUSES; what is no longer possible is failing to pass it at all.
+
+    `read_problem` is REQUIRED for the same reason, and reported FIRST. It carries the reader's own
+    precise cause when the file exists but cannot be read the way GitHub reads it — a symlink, a
+    non-regular entry, an OS-level read failure (F14/F21). Without it, all three arrived here as
+    `size_bytes=None` and were reported with the SIZE refusal, telling an operator whose CODEOWNERS was
+    `chmod 000` that their file might exceed 3 MB. Reporting it ahead of the size gate is a DIAGNOSTIC
+    ordering only: the size gate still refuses an unknown size on its own, so the fail-closed behaviour
+    F2 established is unchanged — only which true statement gets printed. The installer's committed
+    read has no such cause (it reads bytes out of `git show`) and passes None explicitly."""
     if rel is None:
         return ["no CODEOWNERS file found (looked at {}) — require_code_owner_review cannot bind a "
                 "reviewer to any protected surface".format(", ".join(CODEOWNERS_RELPATHS))]
+    if read_problem:
+        return [read_problem]
     oversize = codeowners_size_problem(rel, size_bytes)
     if oversize:
         return [oversize]
@@ -686,27 +777,72 @@ def validate_codeowners(repo_root: str, surfaces) -> list:
     must exist and name an owner for every protected surface, so `require_code_owner_review` actually
     binds a reviewer to each (F6). The installer additionally validates the COMMITTED content GitHub
     enforces on the default branch, not the working tree (F39). The file's RAW byte size is threaded in
-    so a CODEOWNERS at/over GitHub's 3 MB load limit is refused rather than certified."""
-    rel, text, size_bytes = _read_codeowners_sized(repo_root)
-    return validate_codeowners_content(rel, text, surfaces, size_bytes=size_bytes)
+    so a CODEOWNERS at/over GitHub's 3 MB load limit is refused rather than certified, and a symlinked
+    or otherwise unreadable location is refused rather than followed (F14)."""
+    rel, text, size_bytes, read_problem = _read_codeowners_sized(repo_root)
+    return validate_codeowners_content(rel, text, surfaces, size_bytes=size_bytes,
+                                       read_problem=read_problem)
 
 
 def _gh_json(args: list, repo_flag=None):
     cmd = ["gh"] + args
-    out = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True)
+    except OSError as exc:
+        # An absent or unexecutable `gh` is a FAILURE TO VERIFY, not a pass. Converted here — at the
+        # single door every live read in this module goes through — so `--repo` mode refuses through
+        # this module's own `REFUSE (live)` convention instead of escaping as a raw FileNotFoundError
+        # traceback past the gates. The installer carries the identical conversion (F10); this module
+        # is its own door and did not inherit it (F15).
+        raise RuntimeError("could not invoke gh: {}".format(exc))
     if out.returncode != 0:
         raise RuntimeError("`{}` failed: {}".format(" ".join(cmd), CS.scrub(out.stderr).strip()[:200]))
     return json.loads(out.stdout or "null")
 
 
+# GitHub paginates `repos/{repo}/rulesets` at 30 per page by DEFAULT, and the listing includes
+# org-inherited rulesets, so a repository governed by a handful of org rulesets can push ours off page
+# one. Reading a single page then means "absent from page 1" is silently read as "not installed" — the
+# exact 30-item truncation class this repo already documents in `idc_gh_board.py` and defends against
+# in `idc_git_janitor.py` (F24). Pages are walked explicitly rather than with `gh --paginate`, whose
+# output shape for array endpoints varies across gh versions (concatenated arrays vs `--slurp`).
+_RULESETS_PER_PAGE = 100
+
+
+def _gh_json_all_pages(path: str, per_page=_RULESETS_PER_PAGE) -> list:
+    """Every item of a paginated GitHub LIST endpoint, walked to exhaustion. A non-list page REFUSES
+    rather than being silently treated as empty — an unparseable listing is not proof of absence."""
+    items, page = [], 1
+    while True:
+        body = _gh_json(["api", "{}?per_page={}&page={}".format(path, per_page, page)])
+        if body is None:
+            break
+        if not isinstance(body, list):
+            raise RuntimeError(
+                "`{}` returned {}, not the documented JSON array — refusing to read an unparseable "
+                "listing as an empty one".format(path, type(body).__name__))
+        items.extend(body)
+        if len(body) < per_page:
+            break
+        page += 1
+    return items
+
+
 def load_live_ruleset(owner_repo: str) -> dict:
     """Fetch the installed `idc-pathway-integrity` ruleset for OWNER/REPO and return its payload."""
-    listing = _gh_json(["api", "repos/{}/rulesets".format(owner_repo)])
-    match = next((r for r in (listing or []) if r.get("name") == RULESET_NAME), None)
+    listing = _gh_json_all_pages("repos/{}/rulesets".format(owner_repo))
+    match = next((r for r in listing if isinstance(r, dict) and r.get("name") == RULESET_NAME), None)
     if match is None:
         raise RuntimeError(
             "no ruleset named {!r} is installed on {}".format(RULESET_NAME, owner_repo))
-    return _gh_json(["api", "repos/{}/rulesets/{}".format(owner_repo, match["id"])])
+    # `.get("id")`, not `["id"]`: a listing entry that carries the right name but no id is a malformed
+    # body, and the module's contract is that a missing field REFUSES rather than raising KeyError.
+    ruleset_id = match.get("id")
+    if ruleset_id is None:
+        raise RuntimeError(
+            "the ruleset named {!r} on {} was listed without an 'id' — refusing to read an "
+            "unidentifiable ruleset".format(RULESET_NAME, owner_repo))
+    return _gh_json(["api", "repos/{}/rulesets/{}".format(owner_repo, ruleset_id)])
 
 
 def main(argv=None) -> int:

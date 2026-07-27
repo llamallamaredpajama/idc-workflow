@@ -22,7 +22,7 @@
 # Red-when-broken, both directions:
 #   * revert to a pure count cap (drop the grace clause) -> part B's in-grace version is evicted and
 #     GRACE-VERSION-EVICTED fires;
-#   * drop the hard cap (grace retains unconditionally) -> part C1 keeps all 74 and CAP-EXCEEDED
+#   * drop the hard cap (grace retains unconditionally) -> part C1 keeps all CAP+10 and CAP-EXCEEDED
 #     fires; keep the cap but evict newest-first and CAP-KEPT-WRONG-VERSIONS fires;
 #   * drop the age test (treat every version as in-grace) -> part C2's ancient version survives and
 #     STALE-VERSION-RETAINED fires.

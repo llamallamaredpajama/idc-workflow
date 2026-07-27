@@ -955,8 +955,23 @@ printf '%s\n' "$out" | grep -qiE 'differ|working[- ]tree|commit|match' \
 # The fixtures sit on the exact boundary: one file of EXACTLY the limit (which must REFUSE — GitHub's
 # rule is ">= 3 MB is not loaded") and one of limit-1 (which must still CERTIFY). An off-by-one in
 # either direction fails this pair.
+#
+# THE EXPECTED LIMIT IS WRITTEN OUT AS A LITERAL HERE, and the fixtures are built from that literal —
+# NOT from the constant under test (F29). Deriving both boundary fixtures from `RC.CODEOWNERS_MAX_BYTES`
+# made the pair self-referential: whatever the constant said, the "at the limit" fixture refused and the
+# "one under" fixture certified, so no wrong threshold could ever turn this lane red. With the literal
+# driving the fixtures, changing the constant in EITHER direction fails a case, which is what makes this
+# a gate on the VALUE rather than on the code path.
+#
+# 3,000,000 — decimal, not 3*1024*1024. GitHub documents "3 MB" without saying which, and a fail-closed
+# gate rounds an ambiguous limit DOWN: the binary reading would certify the 3,000,000–3,145,727 window
+# that GitHub may refuse to load, which is the exact false-certify this gate exists to stop. See the
+# rationale on the constant itself.
+EXPECTED_LIMIT=3000000
 LIMIT="$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import idc_ruleset_check as RC; print(RC.CODEOWNERS_MAX_BYTES)' "$PLUGIN/scripts")"
-[ "$LIMIT" = "3145728" ] || fail "W1: CODEOWNERS_MAX_BYTES is $LIMIT, expected 3145728 (3 MB) — GitHub's documented load limit"
+[ "$LIMIT" = "$EXPECTED_LIMIT" ] \
+  || fail "W1: CODEOWNERS_MAX_BYTES is $LIMIT, expected $EXPECTED_LIMIT (GitHub's documented 3 MB load limit, resolved DOWN to the decimal reading so the gate fails closed)"
+LIMIT="$EXPECTED_LIMIT"   # fixtures are built from the literal, never from the constant under test
 
 # Write a CODEOWNERS covering ALL SEVEN protected surfaces, padded to EXACTLY $2 bytes with one
 # comment line. Padding is comments, so the ownership rules are identical across sizes and the ONLY
@@ -1002,8 +1017,14 @@ python3 "$CHK" --ruleset "$RS" --repo-root "$W1_UNDER" >/dev/null 2>&1 \
 #        opens in TEXT mode, whose universal-newline translation collapses each CRLF to a single LF —
 #        so `len(text)` undercounts a CRLF file by one byte per line. A CRLF file of EXACTLY the limit
 #        has thousands of lines, so a text-length measurement lands thousands of bytes UNDER it and
-#        certifies a file GitHub refuses to load. Red-when-broken: measure `len(text)` instead of
-#        `os.path.getsize` and this fixture certifies while (W1a)'s LF twin still refuses.
+#        certifies a file GitHub refuses to load.
+#        Red-when-broken, AS THE CODE STANDS TODAY: in `_read_codeowners_sized`, return
+#        `len(text)` in place of `len(raw)` on the success path — this fixture then certifies while
+#        (W1a)'s LF twin still refuses. (The recipe used to say "measure `len(text)` instead of
+#        `os.path.getsize`", naming a separate `stat` call that no longer exists anywhere in the
+#        module — the reader now takes size and content from ONE binary read. A recipe that cannot be
+#        executed as written proves nothing, and in this repo the red-when-broken recipe IS the
+#        trust mechanism for a guard, so it is kept current with the code it breaks.)
 W1_CRLF="$WORK/co-oversize-crlf"; mkdir -p "$W1_CRLF/.github"
 python3 - "$W1_CRLF/.github/CODEOWNERS" "$LIMIT" <<'PY' || fail "W1: could not build the CRLF oversized CODEOWNERS fixture"
 import os, sys
@@ -1150,13 +1171,14 @@ rules = ("/.github/workflows/ @team\n/scripts/hooks/ @team\n"
 surfaces = [".github/workflows", "scripts/hooks", "scripts/idc_validation_contract.py",
             "scripts/idc_receipt_check.py", "scripts/idc_pathway_check.py", ".github/rulesets",
             ".github/CODEOWNERS"]
-if not RC.validate_codeowners_content(".github/CODEOWNERS", rules, surfaces, None):
+if not RC.validate_codeowners_content(".github/CODEOWNERS", rules, surfaces, None, None):
     print("UNKNOWN-SIZE-CERTIFIED: validate_codeowners_content certified a covering CODEOWNERS whose "
           "byte size is unknown")
     sys.exit(1)
 # The control: the SAME content with a known, under-limit size certifies, so the refusal above is
 # about the unknown SIZE and not about the content.
-if RC.validate_codeowners_content(".github/CODEOWNERS", rules, surfaces, len(rules.encode("utf-8"))):
+if RC.validate_codeowners_content(".github/CODEOWNERS", rules, surfaces,
+                                  len(rules.encode("utf-8")), None):
     print("CONTROL-FAILED: a covering CODEOWNERS with a known small size was refused")
     sys.exit(1)
 
@@ -1170,7 +1192,193 @@ else:
     print("SIZE-OPTIONAL: validate_codeowners_content still accepts a call with no size_bytes, so a "
           "caller can silently opt out of the 3 MB gate")
     sys.exit(1)
-print("W1d ok: unknown size refuses, known size certifies, size_bytes is required")
+
+# `read_problem` must be REQUIRED for the same reason (F14/F21): it carries the reader's precise cause
+# for a symlink / non-regular / unreadable entry, and a caller that forgets it silently reverts every
+# one of those to the misleading SIZE refusal.
+try:
+    RC.validate_codeowners_content(".github/CODEOWNERS", rules, surfaces,
+                                   len(rules.encode("utf-8")))
+except TypeError:
+    pass
+else:
+    print("READ-PROBLEM-OPTIONAL: validate_codeowners_content still accepts a call with no "
+          "read_problem, so a caller can silently opt out of the symlink/unreadable causes")
+    sys.exit(1)
+
+# And a read_problem must WIN over the size gate — that ordering is the whole point of F21. A covering
+# file with a KNOWN, under-limit size but a read problem must refuse WITH THE READ PROBLEM's text.
+reasons = RC.validate_codeowners_content(".github/CODEOWNERS", rules, surfaces,
+                                         len(rules.encode("utf-8")), "IT-IS-A-SYMLINK")
+if not reasons or "IT-IS-A-SYMLINK" not in reasons[0]:
+    print("READ-PROBLEM-NOT-REPORTED: validate_codeowners_content did not surface the reader's own "
+          "cause; got: %r" % (reasons,))
+    sys.exit(1)
+print("W1d ok: unknown size refuses, known size certifies, size_bytes and read_problem are required, "
+      "and a read problem is reported ahead of the size gate")
 PY
 
-echo "PASS: ruleset checker enforces PR flow, exact-head required check, force-push/deletion prevention, all seven protected surfaces (incl. the F40 governance-of-governance set: the checker, the ruleset dir, and CODEOWNERS itself), GitHub any-depth/last-match-wins ownership with a strict class allowlist that fails closed on unmodeled patterns, re-types a dotted-basename DIRECTORY surface off the file guess so an interior ownerless hole cannot false-certify (F28), treats a '**/name/' trailing-slash pattern as directory-only (F32) and a bare '/' as matching-nothing (F33), and counts only valid owner tokens so a bare '@' cannot false-certify (F41); installer refuses without --repo, refuses a production repo, requires --repo-root, BINDS it to --repo via a local origin-identity check (F34), and validates the CODEOWNERS COMMITTED on the default branch — refusing an uncommitted or working-tree-diverged copy (F39); reads the enforced branch from origin/HEAD and REFUSES rather than trusting the checked-out branch when it is unset, accepting a validated --default-branch override (F44); and normalizes newlines before the divergence compare so a byte-identical CRLF-committed CODEOWNERS is not false-refused (F45); types KNOWN governance surfaces authoritatively so a directory-only '/<file>/' rule can never certify a protected FILE surface (F46), rejects lookalike substrings standing in for a real governance file (F47), requires the installer's origin-identity remote to be on the GitHub host so a non-GitHub checkout ending in the same owner/repo cannot certify the target (F48), and requires the EFFECTIVE committed CODEOWNERS file (root/docs, not just .github) to own its own path (F49); and — separating class MEMBERSHIP from surface TYPING — reads a bare-name rule as matching the FILE of that name so a later ownerless slashless rule un-owns it instead of being invisible (F50), demands each mandatory class be declared at its CANONICAL path so a same-basename decoy cannot leave the executed checker unprotected (F51), and never lets a descendant entry inherit its directory class's kind, so a directory-only rule cannot certify a FILE beneath a governance directory (F52); and refuses a CODEOWNERS at or over GitHub's 3 MB load limit — measured in RAW BYTES so a CRLF file cannot undercount its way past the gate — in the checker's working-tree read and in the installer's committed-content read alike, while a file one byte under the limit still certifies (W1)"
+# (W1i) The CHECKER's own gh door fails closed when `gh` is ABSENT (F15). `gh failed` and `gh is
+#       absent` are different errors: the first is a non-zero exit the module already converts, the
+#       second raises OSError out of `subprocess.run`. The installer gained that conversion (F10) but
+#       this module is its OWN door and did not inherit it, so `--repo` mode ended in a raw
+#       FileNotFoundError traceback two lines above the module's own `REFUSE (live)` message.
+#       It exits non-zero either way, so nothing false-certifies — the defect is the broken refusal
+#       CONTRACT, which is what the operator and CI actually read.
+#       Red-when-broken: drop the OSError arm in `_gh_json` and this prints a traceback.
+#       PATH keeps python3 (and git) — ONLY gh is removed — so the run genuinely reaches the gh call.
+W1_BARE="$WORK/barepath-checker"; mkdir -p "$W1_BARE"
+ln -sf "$(command -v python3)" "$W1_BARE/python3"
+ln -sf "$(command -v git)" "$W1_BARE/git"
+PATH="$W1_BARE" command -v gh >/dev/null 2>&1 \
+  && fail "W1i: \`gh\` IS resolvable under the bare PATH — this case would not exercise the missing-gh path"
+out="$(PATH="$W1_BARE" "$W1_BARE/python3" "$CHK" --ruleset "$RS" --repo "idc-stub-owner/idc-stub-target" 2>&1)" \
+  && fail "W1i: the checker's --repo mode SUCCEEDED with no \`gh\` on PATH — an unverifiable live read must fail closed; got: $out"
+printf '%s\n' "$out" | grep -qi 'traceback' \
+  && fail "W1i: a missing \`gh\` produced a TRACEBACK instead of the checker's REFUSE (live) convention (F15); got: $out"
+printf '%s\n' "$out" | grep -Fq 'REFUSE (live)' \
+  || fail "W1i: a missing \`gh\` must refuse via the module's own 'REFUSE (live)' convention; got: $out"
+printf '%s\n' "$out" | grep -Fq 'could not invoke gh' \
+  || fail "W1i: the refusal must name the missing gh (a different refusal means this case never reached the gh call); got: $out"
+
+# --- W1e/W1f/W1g/W1h: the reader must read the file GITHUB reads, and name the real cause -----------
+
+# A CODEOWNERS covering all seven protected surfaces, used as the CONTENT for the cases below.
+CO_RULES='/.github/workflows/ @team
+/scripts/hooks/ @team
+/scripts/idc_validation_contract.py @team
+/scripts/idc_receipt_check.py @team
+/scripts/idc_pathway_check.py @team
+/.github/rulesets/ @team
+/.github/CODEOWNERS @team'
+
+# (W1e) SYMLINKED CODEOWNERS — REFUSED, never followed (F14). Git stores a symlink as a mode-120000
+#       blob whose CONTENT IS THE TARGET PATH STRING, and GitHub loads that string as the file body:
+#       it declares no owner rules, so `require_code_owner_review` binds NO reviewer to ANY protected
+#       surface. `os.path.isfile()` and `open()` both FOLLOW links, so the checker read the TARGET's
+#       rules and certified them against a file GitHub reads `"../CODEOWNERS"` out of.
+#       `ln -s ../CODEOWNERS .github/CODEOWNERS` is a common, well-intentioned dedupe.
+#       Red-when-broken: swap `os.lstat` back to `os.path.isfile` in `_read_codeowners_sized` and this
+#       case CERTIFIES.
+W1_LINK="$WORK/co-symlink"; mkdir -p "$W1_LINK/.github"
+printf '%s\n' "$CO_RULES" > "$W1_LINK/CODEOWNERS"          # the real, covering file at the root
+ln -s ../CODEOWNERS "$W1_LINK/.github/CODEOWNERS"          # the higher-precedence location, symlinked
+# Prove the fixture is REAL before asserting on it: the link must resolve to covering content, so a
+# checker that follows it would genuinely certify (otherwise this case could pass for the wrong reason).
+[ -L "$W1_LINK/.github/CODEOWNERS" ] || fail "W1e fixture: .github/CODEOWNERS is not a symlink"
+grep -Fq '/scripts/hooks/' "$W1_LINK/.github/CODEOWNERS" \
+  || fail "W1e fixture: the symlink does not resolve to covering content, so a following read would not certify"
+out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$W1_LINK" 2>&1)" \
+  && fail "checker CERTIFIED a SYMLINKED .github/CODEOWNERS — GitHub loads the target PATH STRING as the file body, so no reviewer binds to any surface (F14); got: $out"
+printf '%s\n' "$out" | grep -qi 'symlink' \
+  || fail "W1e: the symlink refusal must say the file is a symlink, not report a size or a missing file; got: $out"
+
+# (W1f) BROKEN symlink — refuses at the SAME location, and must NOT fall through to the
+#       lower-precedence root CODEOWNERS. `os.path.isfile` is False for a broken link, so the old loop
+#       walked on and certified `CODEOWNERS` at the root while GitHub honours the higher-precedence
+#       `.github` blob that DOES exist and parses no owners from it — a strictly worse false-certify
+#       than (W1e). Red-when-broken: `continue` instead of returning on a non-regular entry and this
+#       case CERTIFIES off the root file.
+W1_BROKEN="$WORK/co-symlink-broken"; mkdir -p "$W1_BROKEN/.github"
+printf '%s\n' "$CO_RULES" > "$W1_BROKEN/CODEOWNERS"        # a perfectly good lower-precedence file
+ln -s ./nowhere-at-all "$W1_BROKEN/.github/CODEOWNERS"     # higher precedence, dangling
+[ -L "$W1_BROKEN/.github/CODEOWNERS" ] && [ ! -e "$W1_BROKEN/.github/CODEOWNERS" ] \
+  || fail "W1f fixture: .github/CODEOWNERS is not a BROKEN symlink"
+out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$W1_BROKEN" 2>&1)" \
+  && fail "checker CERTIFIED via the lower-precedence root CODEOWNERS while a BROKEN symlink occupies the location GitHub honors first (F14); got: $out"
+printf '%s\n' "$out" | grep -Fq '.github/CODEOWNERS' \
+  || fail "W1f: the refusal must name the HIGHER-PRECEDENCE location that GitHub reads, not the root file it fell through to; got: $out"
+
+# (W1g) UNREADABLE CODEOWNERS — refused with the PERMISSIONS cause, not the size cause (F21). An
+#       OSError leaves the size unknown, and an unknown size is itself a refusal — so this failed
+#       CLOSED already; what was wrong was the MESSAGE. The operator was told their file might exceed
+#       3 MB when the real problem was `chmod 000`, and the module's dedicated "is unreadable" message
+#       had become reachable only for invalid UTF-8. Fixed AT THE READER by distinguishing the two
+#       causes of a None size — NOT by reordering the size and readability gates, which is what F2
+#       closed.  Red-when-broken: drop the `read_problem` return from the reader's OSError arm and this
+#       case reports the 3 MB size message again.
+#       Skipped when the running user can read a 000-mode file (root), rather than asserted falsely.
+W1_NOREAD="$WORK/co-unreadable"; mkdir -p "$W1_NOREAD/.github"
+printf '%s\n' "$CO_RULES" > "$W1_NOREAD/.github/CODEOWNERS"
+chmod 000 "$W1_NOREAD/.github/CODEOWNERS"
+if [ "$(id -u)" = "0" ] || head -c1 "$W1_NOREAD/.github/CODEOWNERS" >/dev/null 2>&1; then
+  echo "  (W1g skipped: this user can read a 000-mode file, so the unreadable path cannot be exercised)"
+else
+  out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$W1_NOREAD" 2>&1)" \
+    && fail "checker CERTIFIED an UNREADABLE CODEOWNERS; got: $out"
+  printf '%s\n' "$out" | grep -qiE 'could not be read|permission' \
+    || fail "W1g: an unreadable CODEOWNERS must be refused with the READ/permissions cause; got: $out"
+  printf '%s\n' "$out" | grep -qiE '3 ?MB|load limit' \
+    && fail "W1g: an unreadable CODEOWNERS was refused with the SIZE message, hiding the real cause (F21); got: $out"
+  printf '%s\n' "$out" | grep -qi 'traceback' \
+    && fail "W1g: an unreadable CODEOWNERS produced a TRACEBACK instead of a refusal; got: $out"
+fi
+chmod 644 "$W1_NOREAD/.github/CODEOWNERS" 2>/dev/null || true
+
+# (W1h) The over-limit read is BOUNDED (F30). The gate used to `fh.read()` the whole file before it
+#       could refuse it, so the failure mode for a pathological CODEOWNERS was `MemoryError` rather
+#       than this module's REFUSE convention. The reader now holds at most CODEOWNERS_MAX_BYTES + 1
+#       bytes and COUNTS the rest in discarded chunks, so the refusal still names the EXACT size.
+#       Asserted two ways: the refusal names the true total (proving the tail was counted, not
+#       guessed at MAX+1), and PEAK PYTHON ALLOCATION stays near the limit rather than near the file
+#       size (proving the file was not all held at once).
+#       Memory is measured with `tracemalloc`, not `resource.ru_maxrss`: the read allocates a Python
+#       `bytes` object, which tracemalloc accounts for exactly and deterministically, while ru_maxrss
+#       is a process-wide high-water mark that (a) carries the interpreter's own baseline — which
+#       shifts between a standalone run and run-all.sh, and did — and (b) is in BYTES on macOS but
+#       KILOBYTES on Linux. That made an ru_maxrss threshold both flaky and unit-ambiguous.
+#       Red-when-broken: restore `raw = fh.read()` and the peak lands at the FILE size, ~13x the bound.
+W1_HUGE="$WORK/co-huge"; mkdir -p "$W1_HUGE/.github"
+HUGE_BYTES=$(( 40 * 1000 * 1000 ))
+python3 - "$W1_HUGE/.github/CODEOWNERS" "$HUGE_BYTES" <<'PY' || fail "W1h: could not build the huge CODEOWNERS fixture"
+import sys
+path, target = sys.argv[1], int(sys.argv[2])
+with open(path, "wb") as fh:
+    fh.write(b"/.github/CODEOWNERS @team\n")
+    written = 26
+    block = b"#" + b"x" * 254 + b"\n"
+    while written + len(block) <= target:
+        fh.write(block); written += len(block)
+    fh.write(b"#" * (target - written))
+PY
+python3 - "$PLUGIN/scripts" "$W1_HUGE" "$HUGE_BYTES" <<'PY' || fail "W1h: the bounded over-limit read did not behave"
+import sys, tracemalloc
+sys.path.insert(0, sys.argv[1])
+import idc_ruleset_check as RC
+root, expected = sys.argv[2], int(sys.argv[3])
+
+tracemalloc.start()
+rel, text, size, problem = RC._read_codeowners_sized(root)
+_current, peak = tracemalloc.get_traced_memory()
+tracemalloc.stop()
+
+if size != expected:
+    print("SIZE-WRONG: reader reported %r for a %d-byte file — the over-limit tail must be COUNTED, "
+          "not truncated to the read bound" % (size, expected)); sys.exit(1)
+if text is not None:
+    print("DECODED-ANYWAY: an over-limit file was decoded; it must be refused on size alone"); sys.exit(1)
+if problem is not None:
+    print("WRONG-CAUSE: an over-limit file reported read_problem=%r; size is the cause" % (problem,)); sys.exit(1)
+
+# The bound the code promises: one buffer of MAX+1, plus one counting chunk, plus slack. Comfortably
+# under the 40 MB file, so an unbounded read cannot squeak past.
+allowed = RC.CODEOWNERS_MAX_BYTES + RC._SIZE_COUNT_CHUNK + (2 << 20)
+if peak > allowed:
+    print("UNBOUNDED-READ: peak python allocation %d bytes while reading a %d-byte CODEOWNERS — the "
+          "read must be bounded by CODEOWNERS_MAX_BYTES + 1 (allowed %d) (F30)"
+          % (peak, expected, allowed)); sys.exit(1)
+# ...and the assertion must not be vacuous: a bounded read still has to allocate its buffer, so a peak
+# far BELOW the bound would mean tracemalloc measured nothing and the check above proves nothing.
+if peak < RC.CODEOWNERS_MAX_BYTES:
+    print("MEASURED-NOTHING: peak allocation %d bytes is below the read buffer itself — tracemalloc "
+          "did not observe the read, so the boundedness assertion is vacuous" % (peak,)); sys.exit(1)
+print("W1h ok: %d-byte file, exact size reported, not decoded, peak allocation %d bytes (bound %d)"
+      % (expected, peak, allowed))
+PY
+out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$W1_HUGE" 2>&1)" \
+  && fail "checker CERTIFIED a ${HUGE_BYTES}-byte CODEOWNERS"
+printf '%s\n' "$out" | grep -Fq "$HUGE_BYTES" \
+  || fail "W1h: the over-limit refusal must name the file's TRUE size, not the read bound; got: $out"
+rm -f "$W1_HUGE/.github/CODEOWNERS"
+
+echo "PASS: ruleset checker enforces PR flow, exact-head required check, force-push/deletion prevention, all seven protected surfaces (incl. the F40 governance-of-governance set: the checker, the ruleset dir, and CODEOWNERS itself), GitHub any-depth/last-match-wins ownership with a strict class allowlist that fails closed on unmodeled patterns, re-types a dotted-basename DIRECTORY surface off the file guess so an interior ownerless hole cannot false-certify (F28), treats a '**/name/' trailing-slash pattern as directory-only (F32) and a bare '/' as matching-nothing (F33), and counts only valid owner tokens so a bare '@' cannot false-certify (F41); installer refuses without --repo, refuses a production repo, requires --repo-root, BINDS it to --repo via a local origin-identity check (F34), and validates the CODEOWNERS COMMITTED on the default branch — refusing an uncommitted or working-tree-diverged copy (F39); reads the enforced branch from origin/HEAD and REFUSES rather than trusting the checked-out branch when it is unset, accepting a validated --default-branch override (F44); and normalizes newlines before the divergence compare so a byte-identical CRLF-committed CODEOWNERS is not false-refused (F45); types KNOWN governance surfaces authoritatively so a directory-only '/<file>/' rule can never certify a protected FILE surface (F46), rejects lookalike substrings standing in for a real governance file (F47), requires the installer's origin-identity remote to be on the GitHub host so a non-GitHub checkout ending in the same owner/repo cannot certify the target (F48), and requires the EFFECTIVE committed CODEOWNERS file (root/docs, not just .github) to own its own path (F49); and — separating class MEMBERSHIP from surface TYPING — reads a bare-name rule as matching the FILE of that name so a later ownerless slashless rule un-owns it instead of being invisible (F50), demands each mandatory class be declared at its CANONICAL path so a same-basename decoy cannot leave the executed checker unprotected (F51), and never lets a descendant entry inherit its directory class's kind, so a directory-only rule cannot certify a FILE beneath a governance directory (F52); and refuses a CODEOWNERS at or over GitHub's 3 MB load limit — measured in RAW BYTES so a CRLF file cannot undercount its way past the gate — in the checker's working-tree read and in the installer's committed-content read alike, while a file one byte under the limit still certifies (W1); the limit is the DECIMAL 3,000,000 reading of GitHub's ambiguous '3 MB', pinned against a literal so a wrong threshold turns this lane red rather than moving the fixtures with it (F29), and the over-limit read is BOUNDED — a 40 MB CODEOWNERS is refused with its exact size while peak allocation stays at the read buffer instead of the file size (F30); the reader reads what GITHUB reads: a SYMLINKED CODEOWNERS is REFUSED rather than followed to its target's rules, a BROKEN symlink refuses at its own (higher-precedence) location instead of falling through to a lower-precedence file, and an OS-unreadable file names the permissions cause instead of being reported as possibly over the size limit (F14/F21); and the checker's own live door refuses through 'REFUSE (live)' when \`gh\` is absent instead of raising a traceback (F15)"

@@ -31,17 +31,40 @@ accident:
     CODEOWNERS while the real default branch lacks one, that fallback would certify ownership against
     a branch GitHub does not enforce. When `origin/HEAD` is unset (a single-branch clone,
     `actions/checkout`, or a locally `git init`-ed checkout), the installer REFUSES unless the operator
-    names the enforced branch explicitly with `--default-branch <ref>` (validated to resolve here).
+    names the enforced branch explicitly with `--default-branch <ref>` (validated to resolve here, and
+    under `--apply` additionally required to NAME GitHub's live default branch — see LIVE GATES; a SHA
+    resolves but names no branch, so it is refused, and a shallow `actions/checkout` needs
+    `git fetch origin <D>:<D>` rather than a SHA).
   * The working-tree-vs-committed divergence check compares CONTENT, normalizing newlines on both
     sides (F45): the working tree is read in text mode (LF) while the committed copy is raw `git show`
     bytes (may be CRLF), so a byte-identical CRLF-committed CODEOWNERS is not mistaken for a divergence.
   * A committed CODEOWNERS at or over GitHub's 3 MB load limit is REFUSED on its raw byte size
     (`RC.codeowners_size_problem`). GitHub does not load such a file at all, so installing over it
     would switch on `require_code_owner_review` with ZERO code owners behind it.
+  * The OBJECT CHAIN the pinned commit names is re-hashed with `git fsck` before any content is read
+    out of it (`_object_chain_problem`, F13), and a non-zero exit REFUSES.
 
-LIVE GATES — `--apply` only. The checker is HERMETIC BY DESIGN: it validates CODEOWNERS *content* and
-has no target repo to interrogate, so two classes of false-certify can only be caught here, against
-the real repository, immediately before mutation:
+TRUST MODEL — stated explicitly, because these gates only mean something against a named threat. The
+checkout's `.git` directory is INSIDE the trust boundary this module defends: a local tamper there is
+the very thing the committed-content gates exist to survive, since the premise of the whole module is
+that "it resolves locally" is not proof of what GitHub enforces. Two layers implement that, and both
+are load-bearing:
+  * REF layer — `refs/replace/*` rewires object lookup so `git show` and `git rev-parse` disagree.
+    Closed in `_git` by disabling replacement objects on every call.
+  * OBJECT layer — git does not verify an object's hash when it READS it, so overwriting the loose
+    object file for the committed blob (or the enclosing tree) substitutes content while every oid
+    stays unchanged; disabling replacement refs does NOT help here. Closed by `_object_chain_problem`.
+What is NOT claimed: this is not a general repository audit, and an attacker who can write to `.git`
+retains every other power that grants (including deleting the checkout). The specific, narrow guarantee
+is that the CODEOWNERS bytes certified here are the bytes the pinned commit actually names.
+
+LIVE GATES — `--apply` only. Two classes of false-certify are enforced HERE rather than in the checker
+because only the installer can make them MANDATORY. The checker does have a live mode
+(`idc_ruleset_check.py --repo OWNER/REPO`, which can be combined with `--repo-root`), so "it has no
+target repo to interrogate" would be false — but `--repo` there is OPTIONAL, so any check hung off it
+is skippable by simply not passing the flag. The installer is about to MUTATE a named repository, so it
+always knows the target and can refuse unconditionally, against the real repository, immediately before
+mutation:
   * PRINCIPALS. Every distinct owner token in the committed CODEOWNERS must resolve on the target and
     hold write-or-better access — `@user` via `repos/{repo}/collaborators/{user}/permission`,
     `@org/team` via `orgs/{org}/teams/{team}/repos/{repo}`. An email owner is refused as
@@ -95,9 +118,21 @@ RULESET_NAME = "idc-pathway-integrity"
 # Repositories this installer must never mutate, even with --apply. Defense in depth: the live test
 # also refuses anything but a disposable sandbox. The production source repo of this very plugin is
 # the one an in-run agent is most likely to be standing next to, so it is named explicitly.
+# ENTRIES ARE LOWERCASE AND MATCHED CASE-FOLDED (F31). GitHub owner and repository names are
+# case-insensitive: `LlamaLlamaRedPajama/IDC-Workflow` and `llamallamaredpajama/idc-workflow` are the
+# SAME repository, and an exact `in` test would have walked the differently-cased spelling straight
+# past the denylist into the live apply path. The adjacent F34 identity gate already compares
+# `identity != args.repo.lower()` for precisely this reason, so an exact match here was the odd one
+# out. `_is_protected_repo` is the only reader; do not compare against this set directly.
 PROTECTED_REPOS = frozenset({
     "llamallamaredpajama/idc-workflow",
 })
+
+
+def _is_protected_repo(repo: str) -> bool:
+    """Whether `repo` names a denylisted production repository, compared CASE-FOLDED on both sides
+    because GitHub repository names are case-insensitive (F31)."""
+    return (repo or "").strip().lower() in {r.lower() for r in PROTECTED_REPOS}
 
 _REPO_RE = re.compile(r"^[^/\s]+/[^/\s]+$")
 
@@ -172,8 +207,21 @@ def _git(repo_root: str, args: list, text=True):
     locally-resolving ref is not proof of what GitHub enforces, and a local tamper is precisely the
     threat the committed-content gates exist to survive.
 
-    Both the env var and the `--no-replace-objects` flag are set: the flag is immune to a caller
-    scrubbing the environment, and the env var propagates to anything git itself shells out to."""
+    REF REWIRING IS ONLY THE UPPER LAYER OF THIS VECTOR CLASS. Disabling replacement refs does NOT make
+    `git show` trustworthy on its own: git does not verify an object's hash when it reads it, so
+    overwriting the loose OBJECT FILE for the committed blob (or the enclosing tree) returns
+    attacker-chosen bytes while `rev-parse` reports the unchanged oids and this flag makes no
+    difference (measured). That layer is closed by `_object_chain_problem`, which re-hashes the chain
+    with `git fsck` before anything is certified. The two are complementary, not alternatives — keep
+    both.
+
+    Both the env var and the `--no-replace-objects` flag are set, as belt and braces. The stated
+    reason used to be a division of labour between them, and that was inaccurate on both halves: git
+    documents the two as equivalent and the FLAG ALONE already exports `GIT_NO_REPLACE_OBJECTS=1` to
+    anything git shells out to (verified with an alias probe on git 2.54.0), while `_git` builds its
+    own `dict(os.environ)` copy, so there is no caller position from which the env var could be
+    scrubbed anyway. They are both set because redundancy on a security-load-bearing flag is cheap,
+    not because either covers a gap the other leaves."""
     env = dict(os.environ)
     env["GIT_NO_REPLACE_OBJECTS"] = "1"
     kwargs = {"capture_output": True, "env": env}
@@ -242,6 +290,64 @@ def _resolve_commit(repo_root: str, ref: str):
     if out.returncode != 0 or not sha:
         return None
     return sha
+
+
+def _object_chain_problem(repo_root: str, ref_oid: str):
+    """The refusal reason when the object chain reachable from `ref_oid` does not re-hash to the oids
+    naming it, else None. THE TRUST ANCHOR FOR EVERY `git show` READ IN THIS MODULE (F13).
+
+    WHY THIS EXISTS. Git does not verify an object's hash when it READS it — it verifies on write and
+    trusts the object store thereafter. So an attacker with write access to the checkout's `.git` can
+    overwrite the loose object file named for the committed CODEOWNERS blob, and `git show
+    <oid>:<path>` hands back their bytes while `rev-parse` still reports the ORIGINAL commit AND blob
+    oids. Every other gate in this module is then satisfied BY CONSTRUCTION: the commit oid is
+    untouched so the live tip comparison matches GitHub, and the working tree can hold the same
+    substituted bytes so the divergence gate passes. The result was `OK: ruleset created` over a repo
+    binding a reviewer to one of seven protected surfaces. Disabling replacement refs does not help
+    (measured: `GIT_NO_REPLACE_OBJECTS=1 git --no-replace-objects show` returns the substituted bytes
+    too) — that closes ref rewiring, one layer above this.
+
+    A TREE-LEVEL VARIANT IS STRICTLY HARDER, and rules out the cheaper fix. Substituting the enclosing
+    `.github` TREE object makes `git rev-parse <commit>:.github/CODEOWNERS` report the ATTACKER's blob
+    oid, which re-hashes to itself — so re-hashing `git show` output against the reported blob oid is
+    self-consistent and certifies. Only re-hashing every object on the chain, against the oid that
+    NAMES it, catches both.
+
+    `git fsck` is exactly that re-hash. Measured on git 2.54.0: exit 3 with `hash-path mismatch` for
+    BOTH the loose-blob and the tree-object substitution, exit 0 on the clean control. The gate is the
+    EXIT STATUS, never the message text — fsck also reports `dangling`/`unreachable` objects on
+    perfectly healthy repositories (159 such lines on this repo's own history) and still exits 0, so
+    parsing output would be both fragile and noisy.
+
+    SCOPE, HONESTLY. This verifies the object chain, which is what makes the committed-content read
+    trustworthy. It is not a general repository audit and does not claim to be. An attacker who can
+    write to `.git` can also delete this checkout — the guarantee bought here is narrow and specific:
+    *the bytes this module certifies are the bytes the pinned commit actually names*.
+
+    An fsck that cannot RUN is itself a refusal (fail closed): "we could not check" must never resolve
+    to "certify it", which is the same rule the size and principal gates follow.
+
+    COST. Reachability from a commit includes its ancestors, so this walks history — measured at ~1s
+    on this repo. That is paid once per install, against a mutation of repository protection rules,
+    and it is the only way to know the bytes are real. Verified NOT to false-refuse the checkout shapes
+    this module documents: shallow (`--depth 1` / `fetch-depth: 1`), blobless (`--filter=blob:none`)
+    and treeless (`--filter=tree:0`) clones all exit 0, because fsck understands shallow boundaries and
+    promisor objects."""
+    try:
+        out = _git(repo_root, ["fsck", "--no-progress", ref_oid])
+    except OSError as exc:
+        return ("git could not be invoked to verify the object chain of {} in the checkout at {} ({}) "
+                "— the committed CODEOWNERS is read out of that object store, so an unverifiable "
+                "store is refused rather than trusted.".format(ref_oid[:12], repo_root, exc))
+    if out.returncode != 0:
+        return ("the git object store in the checkout at {} FAILED verification for commit {} — `git "
+                "fsck` exited {}. Git does not re-hash objects when it reads them, so a corrupted or "
+                "TAMPERED object file makes `git show` return bytes that are not the ones this commit "
+                "names, while `rev-parse` keeps reporting the original oids and every other gate here "
+                "passes. Refusing to certify CODEOWNERS out of an object store that does not verify. "
+                "Re-clone the repository (or run `git fsck` yourself to inspect it) before "
+                "installing.".format(repo_root, ref_oid[:12], out.returncode))
+    return None
 
 
 def _normalize_newlines(text):
@@ -313,10 +419,51 @@ def _gh_json(args: list):
     return json.loads(out.stdout or "null")
 
 
+def _gh_json_all_pages(path: str, per_page=100) -> list:
+    """Every item of a paginated GitHub LIST endpoint, walked to exhaustion.
+
+    GitHub paginates `repos/{repo}/rulesets` at 30 per page by DEFAULT and the listing INCLUDES
+    org-inherited rulesets, so a repository governed by a handful of org rulesets can push ours off
+    page one. Reading one page then silently reads "absent from page 1" as "not installed", and the
+    idempotent PUT/update becomes a POST/create against a ruleset that already exists — the same
+    30-item truncation class this repo already documents in `idc_gh_board.py` and defends against in
+    `idc_git_janitor.py` (F24). Pages are walked explicitly rather than with `gh --paginate`, whose
+    output shape for array endpoints varies across gh versions (concatenated arrays vs `--slurp`).
+
+    A non-list page REFUSES rather than being read as empty: an unparseable listing is not proof of
+    absence, and this module's contract is that a malformed body fails closed."""
+    items, page = [], 1
+    while True:
+        body = _gh_json(["api", "{}?per_page={}&page={}".format(path, per_page, page)])
+        if body is None:
+            break
+        if not isinstance(body, list):
+            raise RuntimeError(
+                "`{}` returned {}, not the documented JSON array — refusing to read an unparseable "
+                "listing as an empty one".format(path, type(body).__name__))
+        items.extend(body)
+        if len(body) < per_page:
+            break
+        page += 1
+    return items
+
+
 def _existing_ruleset_id(owner_repo: str):
-    listing = _gh_json(["api", "repos/{}/rulesets".format(owner_repo)])
-    match = next((r for r in (listing or []) if r.get("name") == RULESET_NAME), None)
-    return match["id"] if match else None
+    listing = _gh_json_all_pages("repos/{}/rulesets".format(owner_repo))
+    # `isinstance(r, dict)` + `.get`, never `r["id"]`: `_gh_json` guarantees the body is valid JSON,
+    # NOT that it has the documented SHAPE. A listing entry carrying the right name but no `id` raised
+    # `KeyError: 'id'` — a raw traceback for the literal "missing field" this module's header promises
+    # REFUSES (F16). Every consumer of a gh body in this module reads defensively for the same reason.
+    match = next((r for r in listing if isinstance(r, dict) and r.get("name") == RULESET_NAME), None)
+    if match is None:
+        return None
+    ruleset_id = match.get("id")
+    if ruleset_id is None:
+        raise RuntimeError(
+            "a ruleset named {!r} is listed on {} but carries no 'id' — refusing to update an "
+            "unidentifiable ruleset (and refusing to create a duplicate over "
+            "it)".format(RULESET_NAME, owner_repo))
+    return ruleset_id
 
 
 # --- LIVE apply-path gates ------------------------------------------------------------------------
@@ -330,6 +477,23 @@ def _existing_ruleset_id(owner_repo: str):
 # the modern `role_name` (which surfaces `maintain`/`triage` and custom roles); `maintain` reports as
 # `write` in the legacy field on some paths and only as `role_name` on others, so BOTH are consulted.
 _WRITE_OR_BETTER = frozenset({"admin", "write", "maintain"})
+
+# `permission` IS THE AUTHORITATIVE FIELD; `role_name` is a FALLBACK, not an independent proof. The two
+# used to be OR'd (`perm not in W and role not in W`), which let ANY value in `role_name` grant access
+# on its own — and `role_name` carries ORG-DEFINED CUSTOM ROLE NAMES, which are free-form. A custom
+# role named "Write" (or "admin") that grants no push at all would then case-fold into this set and
+# satisfy the gate while the authoritative `permission` field said `read`. That inverts the module's
+# whole posture: the gate exists to prove a code owner CAN approve, so the field GitHub defines
+# normatively must be the one that decides. `role_name` is now consulted ONLY when `permission` is
+# absent or empty — the case the fallback was documented for — so it can still rescue a body that omits
+# the legacy field, but can no longer OVERRIDE one that reports read/triage/none.
+#
+# Residual, stated honestly: when `permission` is missing entirely, a colliding custom role name is
+# still accepted. There is nothing more authoritative left to consult at that point, and refusing every
+# body that omits the legacy field would break any GitHub Enterprise version that does not send it.
+# The exposure needs an org to have BOTH defined a custom role named like a built-in AND be served a
+# body with no `permission` field.
+_ROLE_ONLY_ACCEPTED = _WRITE_OR_BETTER
 
 
 def _distinct_owner_tokens(text: str) -> list:
@@ -351,9 +515,11 @@ def _principal_problem(owner_repo: str, tok: str):
 
     A CODEOWNERS rule that names a principal GitHub cannot resolve — a deleted/renamed handle, a team
     that does not exist or was never granted the repo, an outside collaborator downgraded to read —
-    binds NO reviewer for that rule. The checker cannot see this (it is hermetic by design: it validates
-    file CONTENT and has no repo to ask), so the installer is the only place the claim can be tested
-    against reality before protection is switched on."""
+    binds NO reviewer for that rule. File CONTENT cannot show this; it takes a live read against the
+    target. The checker can perform live reads (its `--repo` mode does), but that flag is OPTIONAL
+    there, so a gate hung off it is skippable. The installer always knows the repository it is about to
+    mutate, so this is the one place the claim can be tested against reality UNCONDITIONALLY, before
+    protection is switched on."""
     if not tok.startswith("@"):
         # An email owner only binds when it matches a committer identity GitHub can map to a user with
         # access; there is no API that resolves it, so it is live-UNVERIFIABLE. Fail closed and say so.
@@ -373,7 +539,13 @@ def _principal_problem(owner_repo: str, tok: str):
             return ("team owner {!r} could not be confirmed to have write access on {} — the team is "
                     "absent, invisible to this token, or has no grant on the repo ({}). A team that "
                     "cannot be resolved binds no reviewer.".format(tok, owner_repo, exc))
-        perms = (doc or {}).get("permissions")
+        if not isinstance(doc, dict):
+            # `_gh_json` guarantees valid JSON, NOT the documented shape: a bare list/string/number
+            # body reached `.get` and raised AttributeError instead of refusing (F16).
+            return ("team owner {!r}: GitHub returned a {} rather than the documented object for its "
+                    "grant on {} — refusing to assume access from a body this module cannot "
+                    "parse.".format(tok, type(doc).__name__, owner_repo))
+        perms = doc.get("permissions")
         if not isinstance(perms, dict):
             return ("team owner {!r}: GitHub returned no permissions object for its grant on {} — "
                     "refusing to assume access.".format(tok, owner_repo))
@@ -391,11 +563,19 @@ def _principal_problem(owner_repo: str, tok: str):
         return ("owner {!r} could not be confirmed as a collaborator on {} — the account does not "
                 "exist, was renamed, or has no access ({}). A handle GitHub cannot resolve binds no "
                 "reviewer.".format(tok, owner_repo, exc))
-    perm = str((doc or {}).get("permission") or "").strip().lower()
-    role = str((doc or {}).get("role_name") or "").strip().lower()
-    if perm not in _WRITE_OR_BETTER and role not in _WRITE_OR_BETTER:
+    if not isinstance(doc, dict):
+        return ("owner {!r}: GitHub returned a {} rather than the documented permission object for "
+                "{} — refusing to assume access from a body this module cannot parse.".format(
+                    tok, type(doc).__name__, owner_repo))
+    perm = str(doc.get("permission") or "").strip().lower()
+    role = str(doc.get("role_name") or "").strip().lower()
+    # `permission` decides when it is present; `role_name` is consulted only to rescue a body that
+    # omits it (see `_ROLE_ONLY_ACCEPTED`). A free-form custom role name must not out-vote the
+    # authoritative field.
+    granted = perm in _WRITE_OR_BETTER if perm else role in _ROLE_ONLY_ACCEPTED
+    if not granted:
         return ("owner {!r} has {!r} access on {} — a code owner without write access cannot satisfy "
-                "require_code_owner_review.".format(tok, role or perm or "no", owner_repo))
+                "require_code_owner_review.".format(tok, perm or role or "no", owner_repo))
     return None
 
 
@@ -448,7 +628,13 @@ def live_default_branch_problem(owner_repo: str, repo_root: str, ref: str, overr
         return ("cannot read the default branch of {} from GitHub ({}) — apply binds validation to the "
                 "branch GitHub actually enforces CODEOWNERS from, so an unverifiable default branch is "
                 "refused.".format(owner_repo, exc))
-    default_branch = str((repo_doc or {}).get("default_branch") or "").strip()
+    # isinstance, not `(repo_doc or {})`: a valid-JSON body of the wrong SHAPE (a list, a string)
+    # reached `.get` and raised AttributeError instead of this module's REFUSE convention (F16).
+    if not isinstance(repo_doc, dict):
+        return ("GitHub returned a {} rather than the documented repository object for {} — refusing "
+                "to certify against a body this module cannot parse.".format(
+                    type(repo_doc).__name__, owner_repo))
+    default_branch = str(repo_doc.get("default_branch") or "").strip()
     if not default_branch:
         return ("GitHub reported no default_branch for {} — refusing to certify ownership against an "
                 "unconfirmed branch.".format(owner_repo))
@@ -469,7 +655,14 @@ def live_default_branch_problem(owner_repo: str, repo_root: str, ref: str, overr
         return ("cannot read the tip of {}'s default branch {!r} from GitHub ({}) — refusing to certify "
                 "against bytes that may not be the ones GitHub enforces.".format(
                     owner_repo, default_branch, exc))
-    remote_sha = str((((branch_doc or {}).get("commit") or {}).get("sha") or "")).strip()
+    # Both levels are shape-checked (F16): `{"commit":"abc"}` — a string where the object belongs —
+    # raised AttributeError on the inner `.get` before this refused.
+    if not isinstance(branch_doc, dict):
+        return ("GitHub returned a {} rather than the documented branch object for {}'s {!r} — "
+                "refusing to certify against a body this module cannot parse.".format(
+                    type(branch_doc).__name__, owner_repo, default_branch))
+    commit_doc = branch_doc.get("commit")
+    remote_sha = str((commit_doc.get("sha") if isinstance(commit_doc, dict) else "") or "").strip()
     if not remote_sha:
         return ("GitHub reported no tip commit for {}'s default branch {!r} — refusing to certify "
                 "against an unconfirmed tip.".format(owner_repo, default_branch))
@@ -517,7 +710,12 @@ def main(argv=None) -> int:
     parser.add_argument("--default-branch", default=None, metavar="REF",
                         help="the branch GitHub enforces CODEOWNERS from, for checkouts where "
                              "origin/HEAD is unset (single-branch clone / actions/checkout / a locally "
-                             "git-init'd checkout). Must resolve in --repo-root. Without it the default "
+                             "git-init'd checkout). Must resolve in --repo-root AND, under --apply, "
+                             "must NAME the repo's live default branch: pass the branch name D (or "
+                             "origin/D). A SHA is REFUSED even though it resolves — it names no branch. "
+                             "Under actions/checkout the branch name often does not resolve locally "
+                             "while the SHA does; fix that with `git fetch origin D:D` (or "
+                             "fetch-depth: 0), not by passing the SHA. Without this flag the default "
                              "branch is read from origin/HEAD and an unresolvable one is REFUSED — the "
                              "installer never falls back to the currently checked-out branch (F44).")
     parser.add_argument("--apply", action="store_true",
@@ -548,7 +746,7 @@ def main(argv=None) -> int:
         return 1
 
     # Production-repo guard runs BEFORE any network call (and before the ownership gate).
-    if args.apply and args.repo in PROTECTED_REPOS:
+    if args.apply and _is_protected_repo(args.repo):
         print("REFUSE: {} is a protected production repository — this installer will not mutate its "
               "rulesets".format(args.repo), file=sys.stderr)
         return 3
@@ -629,6 +827,18 @@ def main(argv=None) -> int:
               "against it.".format(ref, args.repo_root), file=sys.stderr)
         return 2
 
+    # F13: the pinned oid names an object CHAIN, and git trusts its object store on read rather than
+    # re-hashing it. Verify that chain BEFORE anything is read out of it. This sits here — between
+    # resolving the oid and the first `git show` — deliberately: it is the single door every certify
+    # path passes through, so dry-run and apply are covered by one gate rather than by a check bolted
+    # onto each reader. Placing it after the committed read would certify the bytes first and check
+    # them second; placing it inside `if args.apply:` would leave dry-run printing a green plan over a
+    # tampered store. It is purely LOCAL (no network), so the dry-run no-network contract is intact.
+    chain_problem = _object_chain_problem(args.repo_root, ref_oid)
+    if chain_problem:
+        print("REFUSE: {}".format(chain_problem), file=sys.stderr)
+        return 1
+
     if args.apply:
         live_problem = live_default_branch_problem(
             args.repo, args.repo_root, ref, args.default_branch, local_sha=ref_oid)
@@ -673,8 +883,13 @@ def main(argv=None) -> int:
     # Ownership is validated against the COMMITTED content — exactly what GitHub enforces (F39), with
     # the raw committed byte size threaded in so the shared validator applies the same 3 MB load-limit
     # gate the checker does (defense in depth behind the explicit size refusal above).
+    # `read_problem=None` explicitly: that parameter carries the CHECKER's filesystem-read causes
+    # (symlink / non-regular entry / unreadable — F14, F21). This read came out of `git show`, which
+    # has no such states, so there is genuinely no cause to report. It is passed by name rather than
+    # defaulted for the same reason `size_bytes` is required — a caller must not be able to forget a
+    # fail-closed input (see `RC.validate_codeowners_content`).
     ownership = RC.validate_codeowners_content(
-        committed_rel, committed_text, surfaces, size_bytes=committed_size)
+        committed_rel, committed_text, surfaces, size_bytes=committed_size, read_problem=None)
     if ownership:
         print("REFUSE: protected surfaces are not all owned in the CODEOWNERS committed on {} ({}) — "
               "require_code_owner_review would bind no reviewer; add CODEOWNERS coverage before "
@@ -685,9 +900,11 @@ def main(argv=None) -> int:
 
     # At APPLY, every owner principal named in the committed CODEOWNERS must actually EXIST on the
     # target and hold write-or-better access. The ownership gate above proves the FILE covers every
-    # protected surface; it cannot prove the principals it names are real — the checker is hermetic by
-    # design (content-only, no repo to ask), so a rule naming a deleted handle or an ungranted team
-    # certifies here while binding no reviewer on GitHub. This is the last gate before mutation.
+    # protected surface; it cannot prove the principals it names are real. That takes a live read, and
+    # while the checker CAN read live (`--repo`), the flag is optional there and so the check would be
+    # skippable; here it is unconditional because the installer always knows the repo it is mutating.
+    # Without it, a rule naming a deleted handle or an ungranted team certifies while binding no
+    # reviewer on GitHub. This is the last gate before mutation.
     if args.apply:
         principals = verify_owner_principals(args.repo, committed_text)
         if principals:

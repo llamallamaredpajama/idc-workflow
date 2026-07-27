@@ -7,11 +7,23 @@
 # finisher — that is the documented Claude/Codex-runtime contract (`docs/architecture.md` §Runtime
 # model). The Pi runtime is deliberately DIFFERENT: its residents prepare, push, and report evidence,
 # and the OPERATOR performs the merge. That difference lives entirely in prose in
-# `runtime/pi/.pi/agents/idc/{plan,recirculator}.md`, and until now only the BUILD-FINISHER persona had
-# a guard over it (`tests/smoke/phase8-pi-finish-gate.sh`). A reviewer reading only the Claude playbooks
-# repeatedly (mis)reads the Pi personas as able to merge; an edit that actually GAVE them that power —
-# pasting in a `gh pr merge`, or the autonomous finisher invocation the Claude playbooks use — would
-# have shipped uncaught. This makes that a failing check instead of a reviewer's catch.
+# `runtime/pi/.pi/agents/idc/{plan,recirculator}.md`, and a reviewer reading only the Claude playbooks
+# repeatedly (mis)reads the Pi personas as able to merge.
+#
+# WHAT WAS ALREADY COVERED, stated honestly. `tests/smoke/phase8-pi-finish-gate.sh` guards the
+# BUILD-FINISHER persona, and `tests/smoke/phase8-pi-prompt-alignment.sh` ALREADY asserted
+# operator-performed-merge language and the ABSENCE of `gh pr merge` on BOTH of these personas. So
+# "pasting in a `gh pr merge` would have shipped uncaught" — which this header used to claim — is
+# FALSE, and the earlier lane is what makes it false.
+#
+# WHAT IS GENUINELY NEW HERE, and why the lane is still worth its weight:
+#   * the AUTONOMOUS FINISHER invocation (`idc_pr_finish.py … autonomous`) — the Claude/Codex-runtime
+#     door that merges with no human touchpoint — was not asserted absent anywhere;
+#   * raw `git merge`, the local merge command that trips none of the prose checks (see (5) below);
+#   * WHOLE-TEXT matching with whitespace normalized, which catches the invariant sentences these two
+#     personas wrap mid-clause and a line-oriented grep reports as falsely MISSING;
+#   * the regex SELF-TEST (F29 shape): every pattern is proven to match a planted positive and reject
+#     a planted negative, so a pattern that silently stopped matching cannot leave the lane green.
 #
 # The invariant, asserted for BOTH personas:
 #   (1) HAVE operator-performed-merge language;

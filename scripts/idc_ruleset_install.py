@@ -26,6 +26,15 @@ accident:
     bind no reviewer once the ruleset is live. The installer reads the committed content via a LOCAL
     `git show <default-branch>:.github/CODEOWNERS`, validates THAT, and refuses when no CODEOWNERS is
     committed or when the working-tree copy differs from it — fail closed, clear message.
+  * The default branch is read from the checkout's `origin/HEAD` (set by a real clone). It NEVER
+    falls back to the currently checked-out branch (F44): on a feature branch that carries a covering
+    CODEOWNERS while the real default branch lacks one, that fallback would certify ownership against
+    a branch GitHub does not enforce. When `origin/HEAD` is unset (a single-branch clone,
+    `actions/checkout`, or a locally `git init`-ed checkout), the installer REFUSES unless the operator
+    names the enforced branch explicitly with `--default-branch <ref>` (validated to resolve here).
+  * The working-tree-vs-committed divergence check compares CONTENT, normalizing newlines on both
+    sides (F45): the working tree is read in text mode (LF) while the committed copy is raw `git show`
+    bytes (may be CRLF), so a byte-identical CRLF-committed CODEOWNERS is not mistaken for a divergence.
 
 Live sandbox use (the only repos this run may mutate) is gated further by the caller — see
 `tests/live/pathway-github-integration.sh`, which refuses anything but a disposable sandbox.
@@ -103,29 +112,52 @@ def _repo_root_identity(repo_root: str):
     return _normalize_remote(out.stdout)
 
 
-def _default_branch_ref(repo_root: str):
-    """The branch GitHub will enforce CODEOWNERS from, as a git ref usable with `git show` — a LOCAL,
-    no-network resolution (F39). Prefers the checkout's known origin default
-    (`refs/remotes/origin/HEAD`, set by a real clone, e.g. `origin/main`); falls back to the currently
-    checked-out branch. None when neither is resolvable (a detached checkout with no origin HEAD, or an
-    unborn branch with no commit) — the caller then refuses, since a branch GitHub enforces cannot be
-    named."""
+def _default_branch_ref(repo_root: str, override=None):
+    """The git ref GitHub enforces CODEOWNERS from, as `(ref, reason)` — a LOCAL, no-network
+    resolution (F39/F44). `(ref, None)` on success; `(None, <reason>)` when the enforced branch cannot
+    be established, so the caller REFUSES (fail closed).
+
+    With an explicit `override` (the operator-asserted default branch, for the single-branch /
+    `actions/checkout` / locally `git init`-ed checkouts where `origin/HEAD` is unset), that ref is
+    used AFTER confirming it resolves to a commit in THIS checkout — a typo'd or absent branch returns
+    `(None, "override-unresolved")`, never silently trusted.
+
+    Without an override, the default branch is read ONLY from `refs/remotes/origin/HEAD` (set by a real
+    clone, e.g. `origin/main`). It deliberately does NOT fall back to the currently checked-out branch
+    (F44): a checkout sitting on a NON-default branch would otherwise validate THAT branch's committed
+    CODEOWNERS — not the branch GitHub actually enforces — and could certify ownership against a copy
+    that binds no reviewer. When `origin/HEAD` is unresolvable it returns `(None, "origin-head-unset")`
+    so the caller refuses and points the operator at `--default-branch` (or a full clone)."""
+    if override:
+        try:
+            chk = subprocess.run(
+                ["git", "-C", repo_root, "rev-parse", "--verify", "--quiet",
+                 "{}^{{commit}}".format(override)],
+                capture_output=True, text=True)
+        except OSError:
+            return None, "git-unavailable"
+        if chk.returncode != 0 or not chk.stdout.strip():
+            return None, "override-unresolved"
+        return override, None
     try:
         out = subprocess.run(
             ["git", "-C", repo_root, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
             capture_output=True, text=True)
-        if out.returncode == 0 and out.stdout.strip():
-            return out.stdout.strip()                       # e.g. "origin/main"
-        out = subprocess.run(
-            ["git", "-C", repo_root, "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True, text=True)
     except OSError:
+        return None, "git-unavailable"
+    if out.returncode == 0 and out.stdout.strip():
+        return out.stdout.strip(), None                     # e.g. "origin/main"
+    return None, "origin-head-unset"
+
+
+def _normalize_newlines(text):
+    """Collapse CRLF/CR to LF for a CONTENT-equality comparison only — it never rewrites the file
+    (F45). The working-tree copy is read in text mode (universal-newlines → LF) while the committed
+    copy is raw `git show` bytes (keeps CRLF), so a byte-identical CRLF-committed CODEOWNERS would
+    otherwise spuriously trip the divergence guard."""
+    if text is None:
         return None
-    if out.returncode == 0:
-        branch = out.stdout.strip()
-        if branch and branch != "HEAD":                     # "HEAD" == detached; not a named branch
-            return branch
-    return None
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _committed_codeowners(repo_root: str, ref: str):
@@ -204,6 +236,12 @@ def main(argv=None) -> int:
                         help="REQUIRED: a local checkout of the --repo TARGET whose CODEOWNERS must "
                              "cover every protected surface. The ownership gate validates THIS repo, "
                              "never the ruleset-carrying checkout.")
+    parser.add_argument("--default-branch", default=None, metavar="REF",
+                        help="the branch GitHub enforces CODEOWNERS from, for checkouts where "
+                             "origin/HEAD is unset (single-branch clone / actions/checkout / a locally "
+                             "git-init'd checkout). Must resolve in --repo-root. Without it the default "
+                             "branch is read from origin/HEAD and an unresolvable one is REFUSED — the "
+                             "installer never falls back to the currently checked-out branch (F44).")
     parser.add_argument("--apply", action="store_true",
                         help="actually create/update the ruleset (default: dry-run, touches nothing)")
     args = parser.parse_args(argv)
@@ -278,12 +316,19 @@ def main(argv=None) -> int:
     # tree differs from it — an uncommitted / stale / locally-edited CODEOWNERS could otherwise certify
     # here yet bind NO reviewer once the ruleset is live. Runs after the F34 identity check (so `ref` is
     # the target's own branch), before any network call, in dry-run and apply alike.
-    ref = _default_branch_ref(args.repo_root)
+    ref, ref_reason = _default_branch_ref(args.repo_root, args.default_branch)
     if ref is None:
-        print("REFUSE: cannot determine the branch GitHub will enforce CODEOWNERS from in the checkout "
-              "at --repo-root {} (no origin/HEAD and no named current branch). The committed, "
-              "default-branch CODEOWNERS is what binds reviewers, so it must be resolvable.".format(
-                  args.repo_root), file=sys.stderr)
+        if ref_reason == "override-unresolved":
+            print("REFUSE: --default-branch {!r} does not resolve to a commit in the checkout at {} — "
+                  "name the branch GitHub enforces (one that exists in this checkout).".format(
+                      args.default_branch, args.repo_root), file=sys.stderr)
+        else:
+            print("REFUSE: cannot determine the branch GitHub will enforce CODEOWNERS from in the "
+                  "checkout at --repo-root {} — origin/HEAD is unset (a single-branch clone, "
+                  "actions/checkout, or a locally git-init'd checkout) and this tool will NOT fall back "
+                  "to the currently checked-out branch, which may not be the default GitHub enforces "
+                  "(F44). Run against a full clone, or pass --default-branch <the branch GitHub "
+                  "enforces>.".format(args.repo_root), file=sys.stderr)
         return 2
     committed_rel, committed_text = _committed_codeowners(args.repo_root, ref)
     if committed_rel is None:
@@ -298,7 +343,11 @@ def main(argv=None) -> int:
               file=sys.stderr)
         return 1
     wt_rel, wt_text = RC._read_codeowners(args.repo_root)
-    if (wt_rel, wt_text) != (committed_rel, committed_text):
+    # Compare CONTENT, not raw bytes: the working-tree copy is read in text mode (LF) while the
+    # committed copy is raw `git show` bytes (may be CRLF), so normalize newlines on BOTH sides — a
+    # byte-identical CRLF-committed CODEOWNERS must not trip this guard (F45). Normalization is for the
+    # comparison only (neither file is rewritten); genuinely divergent content still refuses.
+    if (wt_rel, _normalize_newlines(wt_text)) != (committed_rel, _normalize_newlines(committed_text)):
         print("REFUSE: the working-tree CODEOWNERS ({}) does not match the copy committed on {} ({}) — "
               "GitHub enforces the committed default-branch copy, not your working tree, so a local edit "
               "or uncommitted file would install require_code_owner_review while binding a different (or "

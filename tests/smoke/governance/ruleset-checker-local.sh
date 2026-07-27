@@ -433,6 +433,12 @@ python3 "$CHK" --ruleset "$RS" --repo-root "$F41_EMAIL" >/dev/null \
 # them on the default branch, because F39 validates the CODEOWNERS GitHub actually enforces — the copy
 # COMMITTED on the default branch, not the working tree. An initial commit always exists so the checkout
 # has a resolvable branch even without a CODEOWNERS.
+#
+# It also sets `refs/remotes/origin/HEAD -> origin/main` (as a real clone would), because the installer
+# reads the ENFORCED default branch from origin/HEAD and — post-F44 — REFUSES rather than falling back
+# to the currently checked-out branch when it is unset. This mirrors a normal clone so the ownership
+# cases below exercise the production resolution path; the F44 fail-closed + --default-branch override
+# paths get their own dedicated fixtures (cases g/h).
 SANDBOX="llamallamaredpajama/ke-idc-test-repo-install"
 mk_target() {  # $1=dir  $2=OWNER/REPO for origin  $3=1 to write+commit a covering CODEOWNERS
   git init -q -b main "$1"
@@ -455,6 +461,9 @@ CO
   fi
   git -C "$1" add -A
   git -C "$1" commit -q -m init >/dev/null 2>&1
+  # origin/HEAD -> origin/main, pointing at the just-made commit (what a real clone would carry).
+  git -C "$1" update-ref refs/remotes/origin/main "$(git -C "$1" rev-parse HEAD)"
+  git -C "$1" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
 }
 
 # No --repo -> refuse (never guesses the target board).
@@ -560,4 +569,88 @@ out="$(python3 "$INS" --ruleset "$RS" --repo "$SANDBOX" --repo-root "$TGT_DIVERG
 printf '%s\n' "$out" | grep -qiE 'differ|working[- ]tree|commit|match' \
   || fail "F39 divergence refusal must name the working-tree/committed mismatch; got: $out"
 
-echo "PASS: ruleset checker enforces PR flow, exact-head required check, force-push/deletion prevention, all seven protected surfaces (incl. the F40 governance-of-governance set: the checker, the ruleset dir, and CODEOWNERS itself), GitHub any-depth/last-match-wins ownership with a strict class allowlist that fails closed on unmodeled patterns, re-types a dotted-basename DIRECTORY surface off the file guess so an interior ownerless hole cannot false-certify (F28), treats a '**/name/' trailing-slash pattern as directory-only (F32) and a bare '/' as matching-nothing (F33), and counts only valid owner tokens so a bare '@' cannot false-certify (F41); installer refuses without --repo, refuses a production repo, requires --repo-root, BINDS it to --repo via a local origin-identity check (F34), and validates the CODEOWNERS COMMITTED on the default branch — refusing an uncommitted or working-tree-diverged copy (F39)"
+# F44 — the default branch GitHub ENFORCES is read from origin/HEAD. When origin/HEAD is unset (a
+# single-branch clone, actions/checkout, or a locally git-init'd checkout), the installer must REFUSE
+# rather than fall back to the currently checked-out branch — that fallback certifies ownership against
+# a branch GitHub does not enforce. An explicit --default-branch <ref> is the sanctioned way to name
+# the enforced branch for such checkouts, and it is validated to resolve.
+#
+# (g) origin/HEAD unset + NO --default-branch must REFUSE, even though a covering CODEOWNERS is committed
+#     on the current branch. Red-when-broken (pre-fix): _default_branch_ref fell back to the current
+#     branch 'main', read its covering CODEOWNERS, and CERTIFIED (printed a plan / exit 0).
+TGT_NOHEAD="$WORK/target-no-origin-head"; mk_target "$TGT_NOHEAD" "$SANDBOX" 1
+git -C "$TGT_NOHEAD" symbolic-ref -d refs/remotes/origin/HEAD   # simulate single-branch / actions-checkout / git-init
+out="$(python3 "$INS" --ruleset "$RS" --repo "$SANDBOX" --repo-root "$TGT_NOHEAD" 2>&1)" \
+  && fail "installer certified with origin/HEAD unset — it must fail closed (F44), not trust the current branch"
+printf '%s\n' "$out" | grep -qiE 'origin/HEAD|default[- ]branch|current|full clone' \
+  || fail "F44 origin/HEAD-unset refusal must explain the enforced branch is unresolvable; got: $out"
+
+# (h) The feature-branch flip: a checkout on a NON-default branch that carries a covering CODEOWNERS
+#     while the real default branch (main) lacks one. The verdict must be decided by the ENFORCED branch,
+#     never by which branch happens to be checked out.
+TGT_FLIP="$WORK/target-branch-flip"
+git init -q -b main "$TGT_FLIP"
+git -C "$TGT_FLIP" config user.email idc-test@example.com
+git -C "$TGT_FLIP" config user.name "IDC Test"
+git -C "$TGT_FLIP" config commit.gpgsign false
+git -C "$TGT_FLIP" remote add origin "git@github.com:$SANDBOX.git"
+echo placeholder > "$TGT_FLIP/README.md"
+git -C "$TGT_FLIP" add -A && git -C "$TGT_FLIP" commit -q -m init >/dev/null 2>&1   # main: NO CODEOWNERS
+git -C "$TGT_FLIP" checkout -q -b add-governance
+mkdir -p "$TGT_FLIP/.github"
+cat > "$TGT_FLIP/.github/CODEOWNERS" <<'CO'
+/.github/workflows/ @team
+/scripts/hooks/ @team
+/scripts/idc_validation_contract.py @team
+/scripts/idc_receipt_check.py @team
+/scripts/idc_pathway_check.py @team
+/.github/rulesets/ @team
+/.github/CODEOWNERS @team
+CO
+git -C "$TGT_FLIP" add -A && git -C "$TGT_FLIP" commit -q -m codeowners >/dev/null 2>&1   # feature: covering
+# (h1) --default-branch main validates MAIN (uncovered) and REFUSES — proving the override selects the
+#      named ref, NOT the checked-out 'add-governance'. Red-when-broken (pre-fix): the current-branch
+#      fallback read add-governance's covering CODEOWNERS and certified.
+out="$(python3 "$INS" --ruleset "$RS" --repo "$SANDBOX" --repo-root "$TGT_FLIP" --default-branch main 2>&1)" \
+  && fail "installer certified via the checked-out feature branch instead of the named --default-branch main (F44 flip)"
+printf '%s\n' "$out" | grep -qiE 'codeowner|commit|owner' \
+  || fail "F44 flip refusal must name the missing ownership on the enforced branch; got: $out"
+# (h2) Control — --default-branch add-governance validates THAT (covered) ref and reaches the plan, so
+#      the override genuinely selects the ref it names (not a blanket refusal).
+python3 "$INS" --ruleset "$RS" --repo "$SANDBOX" --repo-root "$TGT_FLIP" --default-branch add-governance >/dev/null 2>&1 \
+  || fail "installer refused --default-branch add-governance whose committed CODEOWNERS covers every surface (F44 override control)"
+# (h3) A --default-branch that does not resolve in the checkout REFUSES (validated, never trusted).
+out="$(python3 "$INS" --ruleset "$RS" --repo "$SANDBOX" --repo-root "$TGT_FLIP" --default-branch nope-not-a-branch 2>&1)" \
+  && fail "installer accepted a --default-branch that does not resolve in the checkout (F44)"
+printf '%s\n' "$out" | grep -qiE 'does not resolve|resolve' \
+  || fail "unresolvable --default-branch refusal must say it does not resolve; got: $out"
+
+# F45 — the working-tree-vs-committed divergence guard compares CONTENT with newlines normalized on both
+# sides. The working tree is read in text mode (LF) while the committed copy is raw `git show` bytes
+# (keeps CRLF), so a byte-identical CRLF-committed CODEOWNERS must NOT be mistaken for a divergence.
+# (i1) A covering CODEOWNERS committed with CRLF endings, working tree byte-identical, must reach the
+#      plan. Red-when-broken (pre-fix): the raw-byte comparison saw LF (working tree) != CRLF (committed)
+#      and hard-REFUSED a byte-identical file.
+TGT_CRLF="$WORK/target-crlf-co"; git init -q -b main "$TGT_CRLF"
+git -C "$TGT_CRLF" config core.autocrlf false   # store the CRLF bytes verbatim (no checkout conversion)
+git -C "$TGT_CRLF" config user.email idc-test@example.com
+git -C "$TGT_CRLF" config user.name "IDC Test"
+git -C "$TGT_CRLF" config commit.gpgsign false
+git -C "$TGT_CRLF" remote add origin "git@github.com:$SANDBOX.git"
+echo placeholder > "$TGT_CRLF/README.md"
+mkdir -p "$TGT_CRLF/.github"
+printf '/.github/workflows/ @team\r\n/scripts/hooks/ @team\r\n/scripts/idc_validation_contract.py @team\r\n/scripts/idc_receipt_check.py @team\r\n/scripts/idc_pathway_check.py @team\r\n/.github/rulesets/ @team\r\n/.github/CODEOWNERS @team\r\n' > "$TGT_CRLF/.github/CODEOWNERS"
+git -C "$TGT_CRLF" add -A && git -C "$TGT_CRLF" commit -q -m init >/dev/null 2>&1
+git -C "$TGT_CRLF" update-ref refs/remotes/origin/main "$(git -C "$TGT_CRLF" rev-parse HEAD)"
+git -C "$TGT_CRLF" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+python3 "$INS" --ruleset "$RS" --repo "$SANDBOX" --repo-root "$TGT_CRLF" >/dev/null 2>&1 \
+  || fail "installer false-refused a byte-identical CRLF-committed CODEOWNERS (F45 — divergence guard compared LF working tree vs raw CRLF committed bytes)"
+# (i2) Control — a genuine CONTENT edit (beyond line endings) still REFUSES, so the normalization does
+#      not blind the guard to a real divergence.
+printf '/extra/genuine/ @team\r\n' >> "$TGT_CRLF/.github/CODEOWNERS"
+out="$(python3 "$INS" --ruleset "$RS" --repo "$SANDBOX" --repo-root "$TGT_CRLF" 2>&1)" \
+  && fail "installer certified a genuinely diverged working tree after CRLF normalization (F45 control)"
+printf '%s\n' "$out" | grep -qiE 'differ|working[- ]tree|commit|match' \
+  || fail "F45 genuine-divergence refusal must name the working-tree/committed mismatch; got: $out"
+
+echo "PASS: ruleset checker enforces PR flow, exact-head required check, force-push/deletion prevention, all seven protected surfaces (incl. the F40 governance-of-governance set: the checker, the ruleset dir, and CODEOWNERS itself), GitHub any-depth/last-match-wins ownership with a strict class allowlist that fails closed on unmodeled patterns, re-types a dotted-basename DIRECTORY surface off the file guess so an interior ownerless hole cannot false-certify (F28), treats a '**/name/' trailing-slash pattern as directory-only (F32) and a bare '/' as matching-nothing (F33), and counts only valid owner tokens so a bare '@' cannot false-certify (F41); installer refuses without --repo, refuses a production repo, requires --repo-root, BINDS it to --repo via a local origin-identity check (F34), and validates the CODEOWNERS COMMITTED on the default branch — refusing an uncommitted or working-tree-diverged copy (F39); reads the enforced branch from origin/HEAD and REFUSES rather than trusting the checked-out branch when it is unset, accepting a validated --default-branch override (F44); and normalizes newlines before the divergence compare so a byte-identical CRLF-committed CODEOWNERS is not false-refused (F45)"

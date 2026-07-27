@@ -72,12 +72,16 @@ TS="$(date +%s)"
 TESTBRANCH="idc-pathway-live-test/$TS"
 PR_NUM=""
 INSTALLED_ID=""
+CO_DEST="$SANDBOX/.github/CODEOWNERS"    # the TARGET repo's CODEOWNERS the F18 ownership gate reads
+CO_CREATED=""
 
 cleanup() {
   set +e
   [ -n "$PR_NUM" ] && gh pr close "$PR_NUM" --repo "$NWO" --delete-branch >/dev/null 2>&1
   # delete the branch ref if it somehow survived PR close
   gh api --method DELETE "repos/$NWO/git/refs/heads/$TESTBRANCH" >/dev/null 2>&1
+  # remove a CODEOWNERS this run scaffolded (restore the sandbox exactly as found)
+  [ -n "$CO_CREATED" ] && rm -f "$CO_DEST"
   # remove the ruleset ONLY if this run created it (restore the shared sandbox)
   if [ -z "$PRE_ID" ]; then
     local id
@@ -89,7 +93,22 @@ trap cleanup EXIT
 
 # ── 1/3 install (idempotent) ──────────────────────────────────────────────────────────────────────
 echo "-- 1/3 install ruleset (idempotent)"
-python3 "$INSTALL" --repo "$NWO" --ruleset "$RS" --apply || fail "ruleset install (--apply) failed"
+# F18: the ownership gate validates the TARGET repo named by --repo, via a checkout supplied with
+# --repo-root (never derived from the ruleset path, which is the plugin). The sandbox IS that checkout.
+# Templates ship no CODEOWNERS, so a fresh sandbox has none — scaffold a covering one for this run so
+# require_code_owner_review actually binds a reviewer; cleanup restores the sandbox (disposable + git).
+if [ ! -f "$CO_DEST" ]; then
+  mkdir -p "$SANDBOX/.github"
+  cat > "$CO_DEST" <<'CO'
+/.github/workflows/ @llamallamaredpajama
+/scripts/hooks/ @llamallamaredpajama
+/scripts/idc_validation_contract.py @llamallamaredpajama
+/scripts/idc_receipt_check.py @llamallamaredpajama
+CO
+  CO_CREATED=1
+fi
+python3 "$INSTALL" --repo "$NWO" --ruleset "$RS" --repo-root "$SANDBOX" --apply \
+  || fail "ruleset install (--apply) failed"
 INSTALLED_ID="$(gh api "repos/$NWO/rulesets" --jq '.[] | select(.name=="idc-pathway-integrity") | .id' 2>/dev/null | head -1)"
 [ -n "$INSTALLED_ID" ] || fail "ruleset not present after install"
 echo "   installed ruleset id: $INSTALLED_ID"

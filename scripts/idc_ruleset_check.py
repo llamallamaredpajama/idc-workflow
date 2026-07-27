@@ -194,79 +194,138 @@ def _surface_target(surface: str):
     return ("file", text) if "." in base else ("dir", text)
 
 
+def _name_matcher(anchored: bool, body: str):
+    """A wildcard-free, no-trailing-slash pattern. GitHub matches a FILE or a DIRECTORY of this name
+    (recursively, if a directory). A dotted basename is modelled as a file; a dotless one as a
+    directory — the safe over-match, since treating a name as a recursive directory can only broaden
+    what counts as owned or un-owned, never certify a surface a narrower reading would refuse."""
+    d = body.rstrip("/")
+    base = d.rsplit("/", 1)[-1]
+    if "." in base:
+        return ("file", anchored, d)
+    return ("dir_rec", anchored, d)
+
+
 def _rule_matcher(pattern: str):
-    """Classify a CODEOWNERS pattern into a matcher we can reason about at surface granularity, modelling
-    GitHub's gitignore-style semantics rather than treating every glob as recursive (F20). Returns:
+    """Classify a CODEOWNERS pattern into one of a FIXED set of documented matcher classes we can
+    reason about at surface granularity. Anything that does not reduce cleanly to a modeled class is
+    `unmodeled` and can NEVER establish ownership — only ever fail closed (F20).
 
-        ("root",)          every file in the repo, recursively        `*`  `/`  ``  `**`  `/**`
-        ("dir_rec", D)     every file under D, recursively            `/D/`  `/D/**`  `D/`  `D/**`  `/D`
-        ("dir_one", D)     files DIRECTLY in D only (one level)       `/D/*`  `D/*`  (`/*` -> D="")
-        ("suffix", ".ext") any file with that suffix, at any depth    `*.ext`  (slashless)
-        ("file", F)        one exact file                             `/path/to/file.ext`
-        ("unmodeled", SP)  cannot reduce cleanly; SP = wildcard-free leading directory (fail closed)
+    GitHub's CODEOWNERS follows gitignore semantics, whose two load-bearing rules here are:
+      * ANCHORING — a pattern with a slash at its start OR middle is relative to the repo ROOT; a
+        pattern that is slashless or carries only a TRAILING slash matches at ANY DEPTH (GitHub docs:
+        `*.js` matches "anywhere"; `apps/` matches "any file in an apps directory anywhere");
+      * DIRECTORY vs FILE — a trailing `/` matches a directory and everything under it; no trailing
+        slash matches a file OR a directory of that name (recursively, if a directory).
+    `*` matches within a single path segment (never crossing `/`); `**` / `?` / `[…]` — and any
+    pattern mixing a wildcard with structure we do not model — are `unmodeled`.
 
-    GitHub anchors a pattern containing a non-trailing slash to the repo root; a slashless pattern
-    matches at any depth; a single `*` does not cross a `/`. Anything we cannot reduce to a clean
-    anchored directory/file (mid-pattern globs, `?`, ranges) is `unmodeled` and handled conservatively
-    by the caller so it can never *establish* ownership — only ever fail closed."""
+    Returns (each `anchored` flag: True = repo-root-relative, False = matches at any depth):
+        ("root",)                  every file in the repo            `*`  `/`  ``  `**`  `/**`
+        ("dir_rec", anchored, D)   directory D and everything under it, recursively
+        ("dir_one", D)             files DIRECTLY under anchored D (one level)  `/D/*`  `D/*`  (`/*`->"")
+        ("suffix", ".ext")         any file with that suffix, at any depth      `*.ext`  `**/*.ext`
+        ("file", anchored, F)      a file named F (basename match when any-depth)
+        ("unmodeled", locality)    cannot reduce; locality = the anchored wildcard-free leading dir,
+                                   or "" when the pattern could match anywhere (fail closed)
+    """
     p = pattern.strip()
-    if p in ("", "/", "**", "/**"):
+    if p in ("", "/", "*", "**", "/**"):
         return ("root",)
-    anchored = p.startswith("/") or ("/" in p.rstrip("/"))
+
+    # Leading `**/` = "match at any depth" (documented: `**/logs`). Modeled only for a CLEAN tail — a
+    # bare name, a `name/` directory, or a `*.ext` suffix; anything more structured is `unmodeled` and
+    # fails closed as a could-be-anywhere pattern (the `anchored = "/" in ...` test below would
+    # otherwise mis-read the middle slash of `**/x` as a root anchor).
+    if p.startswith("**/"):
+        tail = p[3:]
+        if not tail or tail in ("*", "**"):
+            return ("root",)
+        if tail.startswith("*.") and not _has_wildcard(tail[1:]):
+            return ("suffix", tail[1:])
+        if "/" not in tail.rstrip("/") and not _has_wildcard(tail.rstrip("/")):
+            return _name_matcher(False, tail)                       # `**/logs` -> any-depth dir/file
+        return ("unmodeled", "")
+
     body = p[1:] if p.startswith("/") else p
-    if body == "*":
-        return ("dir_one", "") if anchored else ("root",)          # `/*` one-level root vs `*` all
+    anchored = "/" in p.rstrip("/")            # a slash that is not purely trailing anchors to root
+
+    if body == "*":                                                 # `/*` — one level at the root
+        return ("dir_one", "")
     if not anchored and body.startswith("*.") and not _has_wildcard(body[1:]):
-        return ("suffix", body[1:])                                 # `*.py` -> ".py"
+        return ("suffix", body[1:])                                 # `*.py` -> ".py" (any depth)
     if body.endswith("/*") and not _has_wildcard(body[:-2]):
-        return ("dir_one", body[:-2].rstrip("/"))
+        return ("dir_one", body[:-2].rstrip("/"))                   # `/scripts/*` — one level (anchored)
     if body.endswith("/**") and not _has_wildcard(body[:-3]):
-        return ("dir_rec", body[:-3].rstrip("/"))
-    if body.endswith("/") and not _has_wildcard(body[:-1]):
-        return ("dir_rec", body[:-1].rstrip("/"))
+        return ("dir_rec", anchored, body[:-3].rstrip("/"))         # `/scripts/**`
+    if body.endswith("/") and not _has_wildcard(body.rstrip("/")):
+        return ("dir_rec", anchored, body.rstrip("/"))              # `/docs/`(root)  `apps/`(any depth)
     if not _has_wildcard(body):
-        base = body.rsplit("/", 1)[-1]
-        return ("file", body) if "." in base else ("dir_rec", body.rstrip("/"))
-    # Unmodeled: keep the wildcard-free leading DIRECTORY so the caller can decide whether the pattern
-    # could plausibly touch the surface (and, if so, fail closed).
-    cut = len(body)
-    for i, ch in enumerate(body):
-        if ch in _WILDCARD_CHARS:
-            cut = i
-            break
-    return ("unmodeled", _dirname(body[:cut]).rstrip("/"))
+        return _name_matcher(anchored, body)                        # `/path/f.py`  `Makefile`(any depth)
+
+    # Unmodeled — a wildcard in a position we do not model. An ANCHORED pattern is confined under its
+    # wildcard-free leading directory; an UNANCHORED one may match at any depth, so its locality is ""
+    # (touches every surface). Neither can ever certify ownership (fail closed).
+    if anchored:
+        cut = len(body)
+        for i, ch in enumerate(body):
+            if ch in _WILDCARD_CHARS:
+                cut = i
+                break
+        return ("unmodeled", _dirname(body[:cut]).rstrip("/"))
+    return ("unmodeled", "")
 
 
 def _relationship(matcher, target):
     """How a rule matcher relates to a surface target: `covers_all` (every file in the surface is
-    matched), `touches` (some but not necessarily all), or `none`. `covers_all` + owner is the only way
-    a rule *establishes* whole-surface ownership; `touches` + ownerless carves a hole that defeats it."""
+    matched by this rule), `touches` (some, not provably all), or `none`. Only `covers_all` + an owner
+    *establishes* whole-surface ownership; `touches` + ownerless carves a hole that defeats it. An
+    `unmodeled` matcher is never `covers_all` — it can only fail closed."""
     kind = matcher[0]
     tkind, tpath = target
+    tcomps = tpath.split("/") if tpath else []
+
     if kind == "root":
         return "covers_all"
+
     if kind == "dir_rec":
-        R = matcher[1]
-        if R == "" or tpath == R or tpath.startswith(R + "/"):
-            return "covers_all"                                    # R is an ancestor-or-self of the surface
-        if tkind == "dir" and R.startswith(tpath + "/"):
-            return "touches"                                       # R is a strict descendant of the surface dir
-        return "none"
+        anchored, D = matcher[1], matcher[2]
+        if anchored:
+            if D == "" or tpath == D or tpath.startswith(D + "/"):
+                return "covers_all"                                # D is ancestor-or-self of the surface
+            if tkind == "dir" and D.startswith(tpath + "/"):
+                return "touches"                                   # D is a strict descendant of the surface dir
+            return "none"
+        # any-depth directory NAME (single segment): owns any dir of that name and its whole subtree.
+        if tkind == "file":
+            return "covers_all" if D in tcomps[:-1] else "none"    # an ANCESTOR dir of the file is named D
+        if D in tcomps:
+            return "covers_all"                                    # a component IS D -> that dir holds the surface
+        return "touches"                                           # a D dir may be nested under the surface
+
     if kind == "dir_one":
-        R = matcher[1]
+        D = matcher[1]
         if tkind == "dir":
-            return "touches" if R == tpath else "none"             # one level overlaps only the surface's own dir
-        return "covers_all" if _dirname(tpath) == R else "none"    # a file directly in R is fully matched
+            return "touches" if (D == tpath or D.startswith(tpath + "/")) else "none"
+        return "covers_all" if _dirname(tpath) == D else "none"    # a file directly in D is fully matched
+
     if kind == "suffix":
         if tkind == "dir":
             return "touches"                                       # some files under the surface may carry it
         return "covers_all" if tpath.endswith(matcher[1]) else "none"
+
     if kind == "file":
-        F = matcher[1]
-        if tkind == "dir":
-            return "touches" if F == tpath or F.startswith(tpath + "/") else "none"
-        return "covers_all" if F == tpath else "none"
-    # unmodeled — locality-scoped, and never `covers_all` (it can only fail closed, never certify).
+        anchored, F = matcher[1], matcher[2]
+        if anchored:
+            if tkind == "file":
+                return "covers_all" if tpath == F else "none"
+            return "touches" if (F == tpath or F.startswith(tpath + "/")) else "none"
+        # any-depth basename match
+        if tkind == "file":
+            return "covers_all" if tcomps[-1] == F else "none"
+        return "touches"                                           # a file named F could live under the surface
+
+    # unmodeled — locality-scoped, and NEVER covers_all (it can only fail closed, never certify).
     SP = matcher[1]
     if SP == "" or tpath == SP or tpath.startswith(SP + "/") or SP.startswith(tpath + "/"):
         return "touches"
@@ -287,11 +346,13 @@ def _surface_is_owned(surface: str, rules: list) -> bool:
       * a rule that only touches part of the surface WITH an owner is partial — it neither establishes
         nor removes whole-surface ownership.
     Crucially, a NON-recursive one-level rule (`dir/*`, `/*`) does NOT cover a nested subtree, so it
-    cannot certify `scripts/hooks/**` off `/scripts/*` or `/*` (F20). Patterns we cannot reduce to a
-    clean anchored directory/file are `unmodeled`: they never establish ownership and, when ownerless
-    and locally relevant, fail closed by un-owning. The consequence is a fail-closed bias — an exotic
-    or one-level CODEOWNERS may be refused with a clear message telling the operator to add an anchored
-    recursive rule — never a false-certify."""
+    cannot certify `scripts/hooks/**` off `/scripts/*` or `/*`; and a slashless / trailing-slash-only
+    rule (`hooks/`, a bare `idc_validation_contract.py`) matches at ANY DEPTH, so a later ownerless one
+    un-owns the surface it sits within (F20). Patterns we cannot reduce to a modeled class are
+    `unmodeled`: they never establish ownership and, when ownerless and possibly relevant, fail closed
+    by un-owning. The consequence is a strict fail-closed bias — an exotic or one-level CODEOWNERS may
+    be refused with a clear message telling the operator to add an anchored recursive rule — but the
+    matcher NEVER certifies a surface GitHub would leave unowned."""
     target = _surface_target(surface)
     owned = False
     for pattern, owners in rules:

@@ -15,9 +15,11 @@ accident:
     call.
   * Protected-surface OWNERSHIP is a MANDATORY precondition (F18): the ruleset's
     `require_code_owner_review` binds no reviewer unless a CODEOWNERS names every protected surface,
-    so the installer refuses (before any network call, in dry-run and apply alike) when the target
-    checkout's CODEOWNERS does not cover them. The checkout root is resolved from the ruleset's
-    canonical location (`<root>/.github/rulesets/<name>.json`) unless `--repo-root` overrides it.
+    so the installer refuses (before any network call, in dry-run and apply alike) when the TARGET
+    repo's CODEOWNERS does not cover them. The target is the repo named by `--repo`; because its
+    ownership is only knowable from a checkout of it, `--repo-root` (a checkout of `--repo`) is
+    REQUIRED — the gate is NEVER derived from the ruleset path, which for the shipped default ruleset
+    is the plugin itself (a different repository whose CODEOWNERS is irrelevant to the target).
 
 Live sandbox use (the only repos this run may mutate) is gated further by the caller — see
 `tests/live/pathway-github-integration.sh`, which refuses anything but a disposable sandbox.
@@ -80,13 +82,6 @@ def _load_payload(ruleset_path: str):
     return doc, gh, reasons
 
 
-def _repo_root_of_ruleset(ruleset_path: str) -> str:
-    """The checkout root that carries the ruleset. The ruleset canonically lives at
-    `<root>/.github/rulesets/<name>.json`, so the root is three directories up. Used to locate the
-    CODEOWNERS whose coverage gates the install (F18)."""
-    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(ruleset_path))))
-
-
 def _gh_json(args: list):
     out = subprocess.run(["gh"] + args, capture_output=True, text=True)
     if out.returncode != 0:
@@ -125,9 +120,9 @@ def main(argv=None) -> int:
     parser.add_argument("--ruleset", default=RC.DEFAULT_RULESET,
                         help="path to the ruleset JSON (default: the shipped one)")
     parser.add_argument("--repo-root", default=None,
-                        help="checkout root whose CODEOWNERS must cover every protected surface "
-                             "(default: derived from the ruleset's canonical "
-                             "<root>/.github/rulesets/<name>.json location)")
+                        help="REQUIRED: a local checkout of the --repo TARGET whose CODEOWNERS must "
+                             "cover every protected surface. The ownership gate validates THIS repo, "
+                             "never the ruleset-carrying checkout.")
     parser.add_argument("--apply", action="store_true",
                         help="actually create/update the ruleset (default: dry-run, touches nothing)")
     args = parser.parse_args(argv)
@@ -155,25 +150,34 @@ def main(argv=None) -> int:
             print("  - {}".format(r), file=sys.stderr)
         return 1
 
-    # F18: ownership coverage is a MANDATORY install precondition. require_code_owner_review binds a
-    # reviewer only once a CODEOWNERS names every protected surface, so refuse (in dry-run and apply
-    # alike, before any network call) when the target checkout's CODEOWNERS does not cover them.
-    repo_root = args.repo_root or _repo_root_of_ruleset(args.ruleset)
-    surfaces = (doc.get("idc_contract") or {}).get("protected_surfaces") or []
-    ownership = RC.validate_codeowners(repo_root, surfaces)
-    if ownership:
-        print("REFUSE: protected surfaces are not all owned in {} — require_code_owner_review would "
-              "bind no reviewer; add CODEOWNERS coverage before installing:".format(repo_root),
-              file=sys.stderr)
-        for r in ownership:
-            print("  - {}".format(r), file=sys.stderr)
-        return 1
-
-    # Production-repo guard runs BEFORE any network call.
+    # Production-repo guard runs BEFORE any network call (and before the ownership gate).
     if args.apply and args.repo in PROTECTED_REPOS:
         print("REFUSE: {} is a protected production repository — this installer will not mutate its "
               "rulesets".format(args.repo), file=sys.stderr)
         return 3
+
+    # F18: ownership coverage is a MANDATORY install precondition, validated against the TARGET repo
+    # named by --repo — NOT the ruleset-carrying checkout. For the shipped default ruleset that checkout
+    # is the PLUGIN itself, whose CODEOWNERS is irrelevant to the repo being protected; deriving the
+    # root from the ruleset path would validate the wrong repository and let the installer bind
+    # require_code_owner_review onto a target with no CODEOWNERS at all (F18). The target's ownership is
+    # only knowable from a checkout of it, so --repo-root (a checkout of --repo) is REQUIRED; we refuse
+    # rather than guess, in dry-run and apply alike, before any network call.
+    if not args.repo_root:
+        print("REFUSE: --repo-root <checkout of {}> is required so the TARGET repo's CODEOWNERS is the "
+              "one validated — require_code_owner_review binds no reviewer unless every protected "
+              "surface is owned in the repo being protected, and the ownership gate is never derived "
+              "from the ruleset path.".format(args.repo), file=sys.stderr)
+        return 2
+    surfaces = (doc.get("idc_contract") or {}).get("protected_surfaces") or []
+    ownership = RC.validate_codeowners(args.repo_root, surfaces)
+    if ownership:
+        print("REFUSE: protected surfaces are not all owned in the target checkout {} — "
+              "require_code_owner_review would bind no reviewer; add CODEOWNERS coverage before "
+              "installing:".format(args.repo_root), file=sys.stderr)
+        for r in ownership:
+            print("  - {}".format(r), file=sys.stderr)
+        return 1
 
     for line in _plan_lines(gh, args.repo, args.apply):
         print(line)

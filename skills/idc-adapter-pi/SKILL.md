@@ -65,10 +65,13 @@ level), each cook on a **disjoint** sub-surface so two cooks can never race on o
 
 **Worktree topology — cook → area-staging → merge (worktree-per-cook).** Each line cook runs in its
 **own worktree** (worktree-per-cook); the cooks' disjoint sub-surfaces converge onto the
-**area-staging** branch the sous-chef owns; the sous-chef **merges** that staging branch under the
-**board-backed merge lease** (pi's A2 row — fail-closed, no lease → no merge). Fan-out widens *who
-builds*, never *who judges*: the cooks build, an **independent** child-process review issues the
-verdict, and only then does the finisher merge.
+**area-staging** branch the sous-chef owns; the sous-chef takes the **board-backed merge lease** (pi's
+A2 row — fail-closed, no lease → no merge) before the integration-ref update. **On the experimental Pi
+runtime the finisher does not self-merge:** under the lease it prepares/pushes/reports the reviewed
+branch and the integration-ref merge is **operator-performed** — see the pi-row carve-out in
+§"The Build triplet as residents" (merge-serialization, step 5) and README / `docs/architecture.md`
+§Runtime model. Fan-out widens *who builds*, never *who judges*: the cooks build, an **independent**
+child-process review issues the verdict, and only then is the reviewed branch cleared to merge.
 
 ### The Build triplet as residents — worked example
 

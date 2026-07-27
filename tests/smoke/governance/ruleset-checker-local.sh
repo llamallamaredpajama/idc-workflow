@@ -174,38 +174,126 @@ out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$GS_D" 2>&1)" \
 printf '%s\n' "$out" | grep -qiE 'hook|owner' \
   || fail "ownerless-descendant refusal must name the un-owned hook surface; got: $out"
 
+# F20 (REOPENED round-3-codex) — the matcher strategy CHANGED to a strict class allowlist: each
+# documented GitHub CODEOWNERS pattern class is modeled precisely (any-depth semantics INCLUDED), and
+# ANY pattern outside the modeled classes fails CLOSED (can never certify). GitHub anchors a pattern
+# only when it carries a leading/middle slash; a SLASHLESS or trailing-slash-only pattern matches at
+# ANY DEPTH. The two reopen vectors below were false-certified when the round-3 matcher mis-anchored
+# such patterns to the repo root.
+#
+# Case E — a SLASHLESS bare directory (`hooks/`) matches at ANY DEPTH, so a later ownerless `hooks/`
+# un-owns `scripts/hooks/**` an earlier anchored rule owned. Red-when-broken (pre-fix): the validator
+# classified `hooks/` as a root-anchored dir, missed the override, and returned owned=True (false-certify).
+GS_E="$WORK/co-glob-e"; mkdir -p "$GS_E/.github"
+cat > "$GS_E/.github/CODEOWNERS" <<'CO'
+/.github/workflows/ @team
+/scripts/idc_validation_contract.py @team
+/scripts/idc_receipt_check.py @team
+/scripts/hooks/ @team
+hooks/
+CO
+out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$GS_E" 2>&1)" \
+  && fail "checker false-certified scripts/hooks/** — a later ownerless slashless 'hooks/' un-owns it at any depth"
+printf '%s\n' "$out" | grep -qiE 'hook|owner' \
+  || fail "slashless-dir refusal must name the un-owned hook surface; got: $out"
+
+# Case F — a SLASHLESS bare FILENAME (`idc_validation_contract.py`) matches that basename at ANY DEPTH,
+# so a later ownerless one un-owns the validation surface an earlier anchored rule owned. Red-when-broken
+# (pre-fix): classified as an exact repo-root file, missed the override, returned owned=True.
+GS_F="$WORK/co-glob-f"; mkdir -p "$GS_F/.github"
+cat > "$GS_F/.github/CODEOWNERS" <<'CO'
+/.github/workflows/ @team
+/scripts/hooks/ @team
+/scripts/idc_receipt_check.py @team
+/scripts/idc_validation_contract.py @team
+idc_validation_contract.py
+CO
+out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$GS_F" 2>&1)" \
+  && fail "checker false-certified the validation surface — a later ownerless slashless basename un-owns it at any depth"
+printf '%s\n' "$out" | grep -qiE 'valid|owner' \
+  || fail "slashless-file refusal must name the un-owned validation surface; got: $out"
+
+# Case G (control — precedence-aware, NOT a blanket ban on unanchored rules) — a slashless OWNED rule
+# (`hooks/ @team`) legitimately owns `scripts/hooks/**` because GitHub matches it at any depth. The
+# checker MUST certify it. Red-when-broken (pre-fix): the any-depth OWNED rule was mis-anchored to the
+# root and FALSE-REFUSED (owned=False), so the shipped-style diagnostic wrongly rejected a valid repo.
+GS_G="$WORK/co-glob-g"; mkdir -p "$GS_G/.github"
+cat > "$GS_G/.github/CODEOWNERS" <<'CO'
+/.github/workflows/ @team
+/scripts/idc_validation_contract.py @team
+/scripts/idc_receipt_check.py @team
+hooks/ @team
+CO
+python3 "$CHK" --ruleset "$RS" --repo-root "$GS_G" >/dev/null \
+  || fail "checker false-refused an any-depth OWNED rule ('hooks/ @team') that owns scripts/hooks/** on GitHub"
+
+# Case H (fail-closed on an UNMODELED pattern) — a surface 'owned' ONLY by a pattern outside the
+# modeled classes (a `[a-z]` char range — which CODEOWNERS does not even support) must NEVER certify:
+# the validator refuses rather than guessing the glob's reach. Guards the class-allowlist invariant so
+# an adversarial/unknown pattern can never be leaned on to establish ownership.
+GS_H="$WORK/co-glob-h"; mkdir -p "$GS_H/.github"
+cat > "$GS_H/.github/CODEOWNERS" <<'CO'
+/.github/workflows/ @team
+/scripts/idc_validation_contract.py @team
+/scripts/idc_receipt_check.py @team
+/scripts/hooks/[a-z]*.py @team
+CO
+out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$GS_H" 2>&1)" \
+  && fail "checker certified scripts/hooks/** off an UNMODELED char-range pattern — it must fail closed"
+printf '%s\n' "$out" | grep -qiE 'hook|owner' \
+  || fail "unmodeled-pattern refusal must name the un-owned hook surface; got: $out"
+
+# Case I (fail-closed on a different UNMODELED shape) — an owner that reaches the surface only through
+# a mid-pattern `**` we do not model must not certify either.
+GS_I="$WORK/co-glob-i"; mkdir -p "$GS_I/.github"
+cat > "$GS_I/.github/CODEOWNERS" <<'CO'
+/.github/workflows/ @team
+/scripts/idc_validation_contract.py @team
+/scripts/idc_receipt_check.py @team
+/scripts/**/hooks @team
+CO
+out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$GS_I" 2>&1)" \
+  && fail "checker certified scripts/hooks/** off an UNMODELED mid-'**' pattern — it must fail closed"
+printf '%s\n' "$out" | grep -qiE 'hook|owner' \
+  || fail "unmodeled mid-** refusal must name the un-owned hook surface; got: $out"
+
 # --- installer safety guards (no network is reached before these refusals) ----------------------
 # No --repo -> refuse (never guesses the target board).
 python3 "$INS" --ruleset "$RS" >/dev/null 2>&1 \
   && fail "installer acted with NO --repo target (must refuse without an explicit repo)"
-# Explicit sandbox repo, default (dry-run) mode -> prints a plan, exits 0, touches nothing.
-plan="$(python3 "$INS" --ruleset "$RS" --repo llamallamaredpajama/ke-idc-test-repo-install 2>&1)" \
-  || fail "installer dry-run against an explicit sandbox repo did not succeed"
+# Explicit sandbox repo + a --repo-root whose CODEOWNERS covers every surface -> dry-run plan, exit 0.
+plan="$(python3 "$INS" --ruleset "$RS" --repo llamallamaredpajama/ke-idc-test-repo-install \
+        --repo-root "$PLUGIN" 2>&1)" \
+  || fail "installer dry-run against an explicit sandbox repo (with a complete --repo-root) did not succeed"
 printf '%s' "$plan" | grep -Fq "idc-pathway-integrity" \
   || fail "installer plan does not name the ruleset it would install"
 printf '%s' "$plan" | grep -Fq "idc/pathway-integrity" \
   || fail "installer plan does not name the required check it would enforce"
-# A known production repo, even with --apply, is refused BEFORE any mutation.
+# A known production repo, even with --apply, is refused BEFORE any mutation (production guard first).
 python3 "$INS" --ruleset "$RS" --repo llamallamaredpajama/idc-workflow --apply >/dev/null 2>&1 \
   && fail "installer did NOT refuse to mutate a known production repo"
 
-# F18: ownership coverage is a MANDATORY install precondition, not just an optional --repo-root check
-# on the standalone checker. Installing the ruleset into a repo whose CODEOWNERS does not cover every
-# protected surface is refused BEFORE any network call — otherwise require_code_owner_review binds no
-# reviewer. The installer resolves the repo root from the ruleset's canonical location
-# (<root>/.github/rulesets/<name>.json). Red-when-broken: with the installer ignoring CODEOWNERS, this
-# dry-run prints a plan and exits 0.
-INST_NOCO="$WORK/install-no-codeowners"; mkdir -p "$INST_NOCO/.github/rulesets"
-cp "$RS" "$INST_NOCO/.github/rulesets/idc-pathway-integrity.json"
-out="$(python3 "$INS" --ruleset "$INST_NOCO/.github/rulesets/idc-pathway-integrity.json" \
-        --repo llamallamaredpajama/ke-idc-test-repo-install 2>&1)" \
-  && fail "installer did NOT refuse a repo whose CODEOWNERS is absent (ownership is a mandatory precondition)"
+# F18 (REOPENED round-3-codex) — the ownership gate must validate the TARGET repo named by --repo, NOT
+# the ruleset-carrying checkout. For the SHIPPED default ruleset that checkout is the PLUGIN itself,
+# whose CODEOWNERS covers all four surfaces — so the round-2 derivation validated the wrong repo and
+# would bind require_code_owner_review onto a target with NO CODEOWNERS at all. The fix stops deriving
+# the root from the ruleset path: --repo-root (a checkout of --repo) is now REQUIRED.
+#
+# (a) The documented default invocation — shipped ruleset, --repo target, NO --repo-root — must REFUSE
+#     rather than fall back to the plugin's own CODEOWNERS and pass. Red-when-broken (pre-fix): the
+#     installer derived repo_root=<plugin>, ownership passed, and this invocation printed a plan / exit 0.
+out="$(python3 "$INS" --ruleset "$RS" --repo llamallamaredpajama/ke-idc-test-repo-install 2>&1)" \
+  && fail "installer validated the ruleset-carrying (plugin) checkout instead of the target — the default invocation must REFUSE without --repo-root"
+printf '%s\n' "$out" | grep -qiE 'repo-root|codeowner|owner' \
+  || fail "missing-target-checkout refusal must explain that --repo-root is required; got: $out"
+
+# (b) A real TARGET checkout with NO CODEOWNERS is refused — require_code_owner_review would bind no
+#     reviewer. This is the gap F18 exists to close, now checked on the actual --repo-root target.
+TGT_NOCO="$WORK/target-no-codeowners"; mkdir -p "$TGT_NOCO"
+out="$(python3 "$INS" --ruleset "$RS" --repo llamallamaredpajama/ke-idc-test-repo-install \
+        --repo-root "$TGT_NOCO" 2>&1)" \
+  && fail "installer did NOT refuse a target checkout whose CODEOWNERS is absent"
 printf '%s\n' "$out" | grep -qiE 'codeowner|owner' \
-  || fail "install ownership refusal must name the CODEOWNERS gap; got: $out"
+  || fail "target-ownership refusal must name the CODEOWNERS gap; got: $out"
 
-# An explicit --repo-root that DOES cover every surface lets the dry-run succeed.
-python3 "$INS" --ruleset "$INST_NOCO/.github/rulesets/idc-pathway-integrity.json" \
-        --repo llamallamaredpajama/ke-idc-test-repo-install --repo-root "$PLUGIN" >/dev/null \
-  || fail "installer refused even though --repo-root supplies a complete CODEOWNERS"
-
-echo "PASS: ruleset checker enforces PR flow, exact-head required check, force-push/deletion prevention, all protected surfaces, and GitHub last-match-wins ownership; installer refuses without --repo, refuses a production repo, and refuses to install without CODEOWNERS coverage"
+echo "PASS: ruleset checker enforces PR flow, exact-head required check, force-push/deletion prevention, all protected surfaces, GitHub any-depth/last-match-wins ownership with a strict class allowlist that fails closed on unmodeled patterns; installer refuses without --repo, refuses a production repo, and requires --repo-root so the TARGET repo's CODEOWNERS (never the ruleset's) gates the install"

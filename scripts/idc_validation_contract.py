@@ -276,21 +276,32 @@ def _planning_witness_key(rel: str) -> str:
 def record_planning_witness(receipt_path: str, doc: dict) -> str:
     """Record the out-of-tree machine witness for a freshly written planning receipt (called by the
     sanctioned transaction). Keyed by the worktree-relative logical path so a Build contract frozen in
-    a different worktree can find it; bound to the byte digest so a re-signed forgery is caught."""
+    a different worktree can find it; and WITHIN that key, keyed by the receipt's BYTE digest so a
+    same-label rerun ADDS a witness rather than REPLACING the one an in-flight Build still depends on
+    (F27). The label default is stable across same-projection reruns (`planning-<sha256(projection)
+    [:12]>`), so the logical path is identical on re-apply — but `build_receipt` embeds a fresh
+    `created_at`, so the receipt BYTES differ. A single-entry witness would overwrite, invalidating a
+    Build worktree that still holds the earlier committed receipt (the F19 cross-worktree handoff).
+    Retaining every byte version keeps each legitimate receipt borrowable while a re-signed forgery —
+    whose bytes match NO recorded version — is still refused (F7)."""
     common_git_dir, repo_identity, rel = _planning_witness_context(receipt_path)
     digest = _digest_file(receipt_path)
     witnesses = _read_witnesses(common_git_dir)
     if witnesses is None:
         raise ValidationError("the validation witness store is unreadable")
-    witnesses[_planning_witness_key(rel)] = {
-        "kind": PLANNING_WITNESS_KIND,
-        "digest": digest,
+    key = _planning_witness_key(rel)
+    container = witnesses.get(key)
+    if (not isinstance(container, dict) or container.get("kind") != PLANNING_WITNESS_KIND
+            or not isinstance(container.get("witnesses"), dict)):
+        container = {"kind": PLANNING_WITNESS_KIND, "witnesses": {}}
+    container["witnesses"][digest] = {
         "repo_identity": repo_identity,
         "label": doc.get("label"),
         "receipt_digest": doc.get("receipt_digest"),
         "validated_at": _now(),
         "validator": os.path.basename(__file__),
     }
+    witnesses[key] = container
     target = _witness_path(common_git_dir)
     fd, tmp = tempfile.mkstemp(prefix=".idc-build-validation.", suffix=".tmp", dir=common_git_dir)
     try:
@@ -316,19 +327,24 @@ def planning_witness_problem(receipt_path: str, doc: dict):
     witnesses = _read_witnesses(common_git_dir)
     if witnesses is None:
         return "the validation witness store is unreadable"
-    rec = witnesses.get(_planning_witness_key(rel))
-    if not isinstance(rec, dict):
+    container = witnesses.get(_planning_witness_key(rel))
+    if not isinstance(container, dict) or container.get("kind") != PLANNING_WITNESS_KIND:
         return f"no machine-owned witness is recorded for planning receipt {rel}"
-    if rec.get("kind") != PLANNING_WITNESS_KIND:
-        return f"the planning-receipt witness for {rel} is for {rec.get('kind')!r}"
-    if rec.get("repo_identity") != repo_identity:
-        return f"the planning-receipt witness for {rel} names repository {rec.get('repo_identity')!r}, not this repo"
+    bucket = container.get("witnesses")
+    if not isinstance(bucket, dict):
+        return f"no machine-owned witness is recorded for planning receipt {rel}"
     try:
         digest = _digest_file(receipt_path)
     except OSError as exc:
         return f"could not re-read {rel} to verify its witness ({exc})"
-    if rec.get("digest") != digest:
-        return f"the planning-receipt witness for {rel} is stale — its byte digest no longer matches the file"
+    # Match by BYTE digest: a same-label rerun ADDS a version, so an in-flight Build holding an earlier
+    # receipt still finds its own version; a re-signed forgery matches no recorded version (F7/F27).
+    rec = bucket.get(digest)
+    if not isinstance(rec, dict):
+        return (f"the planning-receipt witness for {rel} is stale — its byte digest matches no recorded "
+                "machine witness")
+    if rec.get("repo_identity") != repo_identity:
+        return f"the planning-receipt witness for {rel} names repository {rec.get('repo_identity')!r}, not this repo"
     expected_self = rec.get("receipt_digest")
     actual_self = doc.get("receipt_digest")
     if expected_self is not None and actual_self is not None and expected_self != actual_self:

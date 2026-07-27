@@ -1280,10 +1280,19 @@ printf '%s\n' "$out" | grep -qi 'symlink' \
 #       than (W1e). Red-when-broken: `continue` instead of returning on a non-regular entry and this
 #       case CERTIFIES off the root file.
 W1_BROKEN="$WORK/co-symlink-broken"; mkdir -p "$W1_BROKEN/.github"
-printf '%s\n' "$CO_RULES" > "$W1_BROKEN/CODEOWNERS"        # a perfectly good lower-precedence file
+# The root file must be FULLY certifiable on its own — including owning ITSELF (F49) — or the
+# fall-through would be refused by a neighbouring gate and this case would pass for the wrong reason
+# (it did: without `/CODEOWNERS @team`, F49 refused and only the message assertion below fired).
+# With it, breaking the guard produces a genuine green CERTIFY, which is the thing being prevented.
+printf '%s\n/CODEOWNERS @team\n' "$CO_RULES" > "$W1_BROKEN/CODEOWNERS"
 ln -s ./nowhere-at-all "$W1_BROKEN/.github/CODEOWNERS"     # higher precedence, dangling
 [ -L "$W1_BROKEN/.github/CODEOWNERS" ] && [ ! -e "$W1_BROKEN/.github/CODEOWNERS" ] \
   || fail "W1f fixture: .github/CODEOWNERS is not a BROKEN symlink"
+# Prove the fixture is REAL: the root file alone must certify, so a fall-through genuinely false-certifies.
+W1F_PROBE="$WORK/co-symlink-broken-probe"; mkdir -p "$W1F_PROBE"
+cp "$W1_BROKEN/CODEOWNERS" "$W1F_PROBE/CODEOWNERS"
+python3 "$CHK" --ruleset "$RS" --repo-root "$W1F_PROBE" >/dev/null 2>&1 \
+  || fail "W1f fixture: the lower-precedence root CODEOWNERS does not certify on its own, so a fall-through would be caught by another gate and this case could not prove the guard works"
 out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$W1_BROKEN" 2>&1)" \
   && fail "checker CERTIFIED via the lower-precedence root CODEOWNERS while a BROKEN symlink occupies the location GitHub honors first (F14); got: $out"
 printf '%s\n' "$out" | grep -Fq '.github/CODEOWNERS' \

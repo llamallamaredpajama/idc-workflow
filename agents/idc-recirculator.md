@@ -85,6 +85,13 @@ mode only changes what gets fed in:
        blocking squash-merge, and deletes the branch atomically — never GitHub `--auto`). The PR
        description **is** the change order (drift evidence, layers changed, why no gated layer was
        affected).
+
+       > **Runtime carve-out.** This automerge step is **Claude/Codex-runtime behavior**
+       > (`docs/architecture.md` §Runtime model). The **Pi** runtime's Recirculator resident does
+       > **not** merge: it prepares and pushes the sync PR, reports the SHA + verification receipts,
+       > and stops at an **operator-performed merge**. `runtime/pi/.pi/agents/idc/recirculator.md` is
+       > the authority there, and `tests/smoke/governance/pi-plan-recirculator-merge-posture.sh`
+       > holds that posture.
      - *Inbox-drain:* the discovered scope fits within today's requirements, so **admit it
        directly**. Author a function-first **ADMITTED consideration** per
        `idc:idc-consideration-schema` (`docs/considerations/<YYYY-MM-DD>-<slug>-considerations.md`,

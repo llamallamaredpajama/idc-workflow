@@ -946,4 +946,111 @@ out="$(python3 "$INS" --ruleset "$RS" --repo "$SANDBOX" --repo-root "$TGT_CRLF" 
 printf '%s\n' "$out" | grep -qiE 'differ|working[- ]tree|commit|match' \
   || fail "F45 genuine-divergence refusal must name the working-tree/committed mismatch; got: $out"
 
-echo "PASS: ruleset checker enforces PR flow, exact-head required check, force-push/deletion prevention, all seven protected surfaces (incl. the F40 governance-of-governance set: the checker, the ruleset dir, and CODEOWNERS itself), GitHub any-depth/last-match-wins ownership with a strict class allowlist that fails closed on unmodeled patterns, re-types a dotted-basename DIRECTORY surface off the file guess so an interior ownerless hole cannot false-certify (F28), treats a '**/name/' trailing-slash pattern as directory-only (F32) and a bare '/' as matching-nothing (F33), and counts only valid owner tokens so a bare '@' cannot false-certify (F41); installer refuses without --repo, refuses a production repo, requires --repo-root, BINDS it to --repo via a local origin-identity check (F34), and validates the CODEOWNERS COMMITTED on the default branch — refusing an uncommitted or working-tree-diverged copy (F39); reads the enforced branch from origin/HEAD and REFUSES rather than trusting the checked-out branch when it is unset, accepting a validated --default-branch override (F44); and normalizes newlines before the divergence compare so a byte-identical CRLF-committed CODEOWNERS is not false-refused (F45); types KNOWN governance surfaces authoritatively so a directory-only '/<file>/' rule can never certify a protected FILE surface (F46), rejects lookalike substrings standing in for a real governance file (F47), requires the installer's origin-identity remote to be on the GitHub host so a non-GitHub checkout ending in the same owner/repo cannot certify the target (F48), and requires the EFFECTIVE committed CODEOWNERS file (root/docs, not just .github) to own its own path (F49); and — separating class MEMBERSHIP from surface TYPING — reads a bare-name rule as matching the FILE of that name so a later ownerless slashless rule un-owns it instead of being invisible (F50), demands each mandatory class be declared at its CANONICAL path so a same-basename decoy cannot leave the executed checker unprotected (F51), and never lets a descendant entry inherit its directory class's kind, so a directory-only rule cannot certify a FILE beneath a governance directory (F52)"
+# W1 — GitHub does not load a CODEOWNERS file of 3 MB or more AT ALL. Every rule in it is ignored, so
+# `require_code_owner_review` would bind NO reviewer to ANY protected surface while the file itself
+# parses perfectly here and certifies. That is a false-certify of exactly the kind F6/F39 exist to
+# prevent, so the RAW BYTE size is a fail-closed refusal at the same door — in the checker (working
+# tree) and in the installer (the copy COMMITTED on the default branch).
+#
+# The fixtures sit on the exact boundary: one file of EXACTLY the limit (which must REFUSE — GitHub's
+# rule is ">= 3 MB is not loaded") and one of limit-1 (which must still CERTIFY). An off-by-one in
+# either direction fails this pair.
+LIMIT="$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import idc_ruleset_check as RC; print(RC.CODEOWNERS_MAX_BYTES)' "$PLUGIN/scripts")"
+[ "$LIMIT" = "3145728" ] || fail "W1: CODEOWNERS_MAX_BYTES is $LIMIT, expected 3145728 (3 MB) — GitHub's documented load limit"
+
+# Write a CODEOWNERS covering ALL SEVEN protected surfaces, padded to EXACTLY $2 bytes with one
+# comment line. Padding is comments, so the ownership rules are identical across sizes and the ONLY
+# variable between the oversized and just-under fixtures is the byte count.
+mk_codeowners_sized() {  # $1=file path  $2=exact byte size
+  python3 - "$1" "$2" <<'PY' || return 1
+import os, sys
+path, target = sys.argv[1], int(sys.argv[2])
+rules = ("/.github/workflows/ @team\n/scripts/hooks/ @team\n"
+         "/scripts/idc_validation_contract.py @team\n/scripts/idc_receipt_check.py @team\n"
+         "/scripts/idc_pathway_check.py @team\n/.github/rulesets/ @team\n/.github/CODEOWNERS @team\n")
+os.makedirs(os.path.dirname(path), exist_ok=True)
+need = target - len(rules.encode("utf-8"))
+assert need >= 3, "target size is smaller than the covering rules"
+with open(path, "w", encoding="utf-8", newline="") as fh:
+    fh.write(rules)
+    fh.write("# " + "x" * (need - 3) + "\n")     # 3 bytes of "# " + "\n" plus the filler
+actual = os.path.getsize(path)
+assert actual == target, "fixture is %d bytes, wanted %d" % (actual, target)
+PY
+}
+
+# (W1a) checker — a CODEOWNERS of EXACTLY the limit is REFUSED, and the refusal names the limit.
+#       Red-when-broken (pre-fix): no size check existed anywhere, so this file's rules parsed, every
+#       surface read as owned, and the checker printed OK over protection GitHub would never apply.
+W1_OVER="$WORK/co-oversize"
+mk_codeowners_sized "$W1_OVER/.github/CODEOWNERS" "$LIMIT" || fail "W1: could not build the oversized CODEOWNERS fixture"
+out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$W1_OVER" 2>&1)" \
+  && fail "checker CERTIFIED a CODEOWNERS of $LIMIT bytes — GitHub does not load a file that size, so require_code_owner_review would bind no reviewer (W1)"
+printf '%s\n' "$out" | grep -Fq "$LIMIT" \
+  || fail "W1 oversized refusal must name the 3 MB limit in bytes; got: $out"
+printf '%s\n' "$out" | grep -qiE '3 ?MB|does not load|not load' \
+  || fail "W1 oversized refusal must explain GitHub will not load the file; got: $out"
+
+# (W1b) CONTROL — the same rules one byte under the limit still CERTIFY, so the gate is a size check
+#       and not a blanket refusal of large files.
+W1_UNDER="$WORK/co-just-under"
+mk_codeowners_sized "$W1_UNDER/.github/CODEOWNERS" "$((LIMIT - 1))" || fail "W1: could not build the just-under CODEOWNERS fixture"
+python3 "$CHK" --ruleset "$RS" --repo-root "$W1_UNDER" >/dev/null 2>&1 \
+  || fail "checker REFUSED a covering CODEOWNERS of $((LIMIT - 1)) bytes — one byte under GitHub's limit must still certify (W1 control)"
+
+# (W1b2) The size must be measured in RAW BYTES, never in decoded text length. The working-tree read
+#        opens in TEXT mode, whose universal-newline translation collapses each CRLF to a single LF —
+#        so `len(text)` undercounts a CRLF file by one byte per line. A CRLF file of EXACTLY the limit
+#        has thousands of lines, so a text-length measurement lands thousands of bytes UNDER it and
+#        certifies a file GitHub refuses to load. Red-when-broken: measure `len(text)` instead of
+#        `os.path.getsize` and this fixture certifies while (W1a)'s LF twin still refuses.
+W1_CRLF="$WORK/co-oversize-crlf"; mkdir -p "$W1_CRLF/.github"
+python3 - "$W1_CRLF/.github/CODEOWNERS" "$LIMIT" <<'PY' || fail "W1: could not build the CRLF oversized CODEOWNERS fixture"
+import os, sys
+path, target = sys.argv[1], int(sys.argv[2])
+rules = ["/.github/workflows/ @team", "/scripts/hooks/ @team",
+         "/scripts/idc_validation_contract.py @team", "/scripts/idc_receipt_check.py @team",
+         "/scripts/idc_pathway_check.py @team", "/.github/rulesets/ @team",
+         "/.github/CODEOWNERS @team"]
+# Pad with many SHORT comment lines so there are thousands of CRLFs to undercount.
+body = "\r\n".join(rules) + "\r\n"
+pad = "# " + "x" * 38 + "\r\n"                    # 42 bytes on disk, 41 code points once decoded
+while len(body.encode("utf-8")) + len(pad.encode("utf-8")) <= target:
+    body += pad
+short = target - len(body.encode("utf-8"))
+if short:                                         # top up to EXACTLY the limit
+    body += "#" * short
+with open(path, "wb") as fh:
+    fh.write(body.encode("utf-8"))
+actual = os.path.getsize(path)
+assert actual == target, "fixture is %d bytes, wanted %d" % (actual, target)
+decoded = len(open(path, encoding="utf-8").read())
+assert decoded < target, "fixture has no CRLF undercount to exercise (%d decoded vs %d bytes)" % (decoded, target)
+print("crlf fixture: %d raw bytes, %d decoded code points (undercount %d)" % (actual, decoded, target - decoded))
+PY
+out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$W1_CRLF" 2>&1)" \
+  && fail "checker CERTIFIED a CRLF CODEOWNERS of $LIMIT RAW bytes — the size gate must measure bytes, not decoded text length (W1)"
+printf '%s\n' "$out" | grep -Fq "$LIMIT" \
+  || fail "W1 CRLF oversized refusal must name the limit in bytes; got: $out"
+
+# (W1c) installer — an oversized CODEOWNERS COMMITTED on the default branch is REFUSED. This is the
+#       copy GitHub actually enforces (F39), so it is the one whose size decides whether any code owner
+#       binds at all. The working tree matches the committed copy, so the F39 divergence guard is not
+#       what refuses here — the size gate is.
+W1_TGT="$WORK/target-oversize-co"
+git init -q -b main "$W1_TGT"
+git -C "$W1_TGT" config user.email idc-test@example.com
+git -C "$W1_TGT" config user.name "IDC Test"
+git -C "$W1_TGT" config commit.gpgsign false
+git -C "$W1_TGT" remote add origin "git@github.com:$SANDBOX.git"
+echo placeholder > "$W1_TGT/README.md"
+mk_codeowners_sized "$W1_TGT/.github/CODEOWNERS" "$LIMIT" || fail "W1: could not build the committed oversized CODEOWNERS fixture"
+git -C "$W1_TGT" add -A && git -C "$W1_TGT" commit -q -m init >/dev/null 2>&1
+git -C "$W1_TGT" update-ref refs/remotes/origin/main "$(git -C "$W1_TGT" rev-parse HEAD)"
+git -C "$W1_TGT" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+out="$(python3 "$INS" --ruleset "$RS" --repo "$SANDBOX" --repo-root "$W1_TGT" 2>&1)" \
+  && fail "installer CERTIFIED a target whose COMMITTED CODEOWNERS is $LIMIT bytes — GitHub would load none of it (W1)"
+printf '%s\n' "$out" | grep -Fq "$LIMIT" \
+  || fail "W1 installer oversized refusal must name the limit in bytes; got: $out"
+
+echo "PASS: ruleset checker enforces PR flow, exact-head required check, force-push/deletion prevention, all seven protected surfaces (incl. the F40 governance-of-governance set: the checker, the ruleset dir, and CODEOWNERS itself), GitHub any-depth/last-match-wins ownership with a strict class allowlist that fails closed on unmodeled patterns, re-types a dotted-basename DIRECTORY surface off the file guess so an interior ownerless hole cannot false-certify (F28), treats a '**/name/' trailing-slash pattern as directory-only (F32) and a bare '/' as matching-nothing (F33), and counts only valid owner tokens so a bare '@' cannot false-certify (F41); installer refuses without --repo, refuses a production repo, requires --repo-root, BINDS it to --repo via a local origin-identity check (F34), and validates the CODEOWNERS COMMITTED on the default branch — refusing an uncommitted or working-tree-diverged copy (F39); reads the enforced branch from origin/HEAD and REFUSES rather than trusting the checked-out branch when it is unset, accepting a validated --default-branch override (F44); and normalizes newlines before the divergence compare so a byte-identical CRLF-committed CODEOWNERS is not false-refused (F45); types KNOWN governance surfaces authoritatively so a directory-only '/<file>/' rule can never certify a protected FILE surface (F46), rejects lookalike substrings standing in for a real governance file (F47), requires the installer's origin-identity remote to be on the GitHub host so a non-GitHub checkout ending in the same owner/repo cannot certify the target (F48), and requires the EFFECTIVE committed CODEOWNERS file (root/docs, not just .github) to own its own path (F49); and — separating class MEMBERSHIP from surface TYPING — reads a bare-name rule as matching the FILE of that name so a later ownerless slashless rule un-owns it instead of being invisible (F50), demands each mandatory class be declared at its CANONICAL path so a same-basename decoy cannot leave the executed checker unprotected (F51), and never lets a descendant entry inherit its directory class's kind, so a directory-only rule cannot certify a FILE beneath a governance directory (F52); and refuses a CODEOWNERS at or over GitHub's 3 MB load limit — measured in RAW BYTES so a CRLF file cannot undercount its way past the gate — in the checker's working-tree read and in the installer's committed-content read alike, while a file one byte under the limit still certifies (W1)"

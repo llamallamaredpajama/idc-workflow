@@ -35,6 +35,25 @@ accident:
   * The working-tree-vs-committed divergence check compares CONTENT, normalizing newlines on both
     sides (F45): the working tree is read in text mode (LF) while the committed copy is raw `git show`
     bytes (may be CRLF), so a byte-identical CRLF-committed CODEOWNERS is not mistaken for a divergence.
+  * A committed CODEOWNERS at or over GitHub's 3 MB load limit is REFUSED on its raw byte size
+    (`RC.codeowners_size_problem`). GitHub does not load such a file at all, so installing over it
+    would switch on `require_code_owner_review` with ZERO code owners behind it.
+
+LIVE GATES — `--apply` only. The checker is HERMETIC BY DESIGN: it validates CODEOWNERS *content* and
+has no target repo to interrogate, so two classes of false-certify can only be caught here, against
+the real repository, immediately before mutation:
+  * PRINCIPALS. Every distinct owner token in the committed CODEOWNERS must resolve on the target and
+    hold write-or-better access — `@user` via `repos/{repo}/collaborators/{user}/permission`,
+    `@org/team` via `orgs/{org}/teams/{team}/repos/{repo}`. An email owner is refused as
+    live-unverifiable (GitHub exposes no API that resolves one). A deleted handle, a renamed account,
+    an ungranted or invisible team, or a read-only collaborator binds NO reviewer, so each refuses.
+  * DEFAULT BRANCH. The validation ref must NAME the repo's live `default_branch` (accepted as `<D>`
+    or `origin/<D>`) and the local checkout of it must be at the same commit GitHub reports. This
+    closes a `--default-branch` pointed at any locally-resolving commit-ish (a SHA, a PR head, a
+    feature branch) and a stale `origin/HEAD` left by a default-branch rename — both resolve locally
+    while pointing `git show` at bytes GitHub does not enforce.
+Any gh failure, non-JSON body, or missing field REFUSES (fail closed). DRY-RUN MAKES NO NETWORK CALL —
+it keeps the local-only resolution and prints a note that these two gates run at apply.
 
 Live sandbox use (the only repos this run may mutate) is gated further by the caller — see
 `tests/live/pathway-github-integration.sh`, which refuses anything but a disposable sandbox.
@@ -193,24 +212,31 @@ def _normalize_newlines(text):
 
 
 def _committed_codeowners(repo_root: str, ref: str):
-    """`(relpath, text)` of the CODEOWNERS COMMITTED at `ref` (first of the GitHub-honored locations),
-    or `(None, None)` if none is committed. Reads via `git show <ref>:<relpath>` — the committed bytes
-    GitHub would enforce, not the working tree (F39). Decodes UTF-8 strictly, mirroring the checker's
-    `_read_codeowners`: a committed CODEOWNERS whose bytes are not valid UTF-8 returns `(relpath, None)`
-    so the caller fails closed via the 'unreadable' path rather than crashing on a decode error."""
+    """`(relpath, text, size_bytes)` of the CODEOWNERS COMMITTED at `ref` (first of the GitHub-honored
+    locations), or `(None, None, None)` if none is committed. Reads via `git show <ref>:<relpath>` —
+    the committed bytes GitHub would enforce, not the working tree (F39). Decodes UTF-8 strictly,
+    mirroring the checker's `_read_codeowners`: a committed CODEOWNERS whose bytes are not valid UTF-8
+    returns `(relpath, None, size)` so the caller fails closed via the 'unreadable' path rather than
+    crashing on a decode error.
+
+    `size_bytes` is the length of the RAW `git show` stdout — the exact byte count GitHub measures
+    against its 3 MB load limit. It is taken from the bytes, never from the decoded string, because
+    `len(text)` counts CODE POINTS: a multi-byte UTF-8 CODEOWNERS would undercount and could certify a
+    file GitHub silently refuses to load."""
     for rel in RC.CODEOWNERS_RELPATHS:
         try:
             out = subprocess.run(
                 ["git", "-C", repo_root, "show", "{}:{}".format(ref, rel)],
                 capture_output=True)                        # bytes — decode ourselves, strict UTF-8
         except OSError:
-            return None, None
+            return None, None, None
         if out.returncode == 0:
+            raw = out.stdout or b""
             try:
-                return rel, out.stdout.decode("utf-8")
+                return rel, raw.decode("utf-8"), len(raw)
             except UnicodeDecodeError:
-                return rel, None
-    return None, None
+                return rel, None, len(raw)
+    return None, None, None
 
 
 def _load_payload(ruleset_path: str):
@@ -238,6 +264,161 @@ def _existing_ruleset_id(owner_repo: str):
     listing = _gh_json(["api", "repos/{}/rulesets".format(owner_repo)])
     match = next((r for r in (listing or []) if r.get("name") == RULESET_NAME), None)
     return match["id"] if match else None
+
+
+# --- LIVE apply-path gates ------------------------------------------------------------------------
+# Everything below reaches the network and therefore runs ONLY under --apply. Dry-run stays a purely
+# local, no-network plan (a documented contract of this tool) and prints a note saying these gates run
+# at apply. Each gate FAILS CLOSED: any gh failure, non-JSON body, or missing field REFUSES rather than
+# assuming the permissive answer.
+
+# An effective grant that can actually satisfy `require_code_owner_review`. GitHub's
+# `/collaborators/{user}/permission` reports the legacy `permission` field (admin|write|read|none) and
+# the modern `role_name` (which surfaces `maintain`/`triage` and custom roles); `maintain` reports as
+# `write` in the legacy field on some paths and only as `role_name` on others, so BOTH are consulted.
+_WRITE_OR_BETTER = frozenset({"admin", "write", "maintain"})
+
+
+def _distinct_owner_tokens(text: str) -> list:
+    """Every DISTINCT owner token in CODEOWNERS `text`, in first-appearance order. Only SYNTACTICALLY
+    valid owners are returned — `RC._codeowners_rules` already drops malformed tokens (F41), which the
+    ownership gate has by then refused on if they left a surface unowned."""
+    seen, tokens = set(), []
+    for _pattern, owners in RC._codeowners_rules(text):
+        for tok in owners:
+            if tok not in seen:
+                seen.add(tok)
+                tokens.append(tok)
+    return tokens
+
+
+def _principal_problem(owner_repo: str, tok: str):
+    """The refusal reason when owner `tok` cannot be CONFIRMED to hold write-or-better access on
+    `owner_repo`, else None. One live `gh api` read per principal; any failure refuses.
+
+    A CODEOWNERS rule that names a principal GitHub cannot resolve — a deleted/renamed handle, a team
+    that does not exist or was never granted the repo, an outside collaborator downgraded to read —
+    binds NO reviewer for that rule. The checker cannot see this (it is hermetic by design: it validates
+    file CONTENT and has no repo to ask), so the installer is the only place the claim can be tested
+    against reality before protection is switched on."""
+    if not tok.startswith("@"):
+        # An email owner only binds when it matches a committer identity GitHub can map to a user with
+        # access; there is no API that resolves it, so it is live-UNVERIFIABLE. Fail closed and say so.
+        return ("owner {!r} is an email address — GitHub exposes no API to confirm an email owner "
+                "resolves to a user with write access on {}, so it cannot be verified before "
+                "protection is switched on. Name the owner as an @handle or @org/team "
+                "instead.".format(tok, owner_repo))
+    rest = tok[1:]
+    if "/" in rest:
+        org, _, team = rest.partition("/")
+        try:
+            doc = _gh_json(["api", "-H", "Accept: application/vnd.github.v3.repository+json",
+                            "orgs/{}/teams/{}/repos/{}".format(org, team, owner_repo)])
+        except (RuntimeError, ValueError) as exc:
+            # 404 covers all three indistinguishable cases: the team does not exist, it is invisible to
+            # this token, or it has no grant on the repo. None of them binds a reviewer.
+            return ("team owner {!r} could not be confirmed to have write access on {} — the team is "
+                    "absent, invisible to this token, or has no grant on the repo ({}). A team that "
+                    "cannot be resolved binds no reviewer.".format(tok, owner_repo, exc))
+        perms = (doc or {}).get("permissions")
+        if not isinstance(perms, dict):
+            return ("team owner {!r}: GitHub returned no permissions object for its grant on {} — "
+                    "refusing to assume access.".format(tok, owner_repo))
+        if not any(bool(perms.get(k)) for k in ("push", "maintain", "admin")):
+            return ("team owner {!r} has only read/triage access on {} — a code owner without write "
+                    "access cannot satisfy require_code_owner_review.".format(tok, owner_repo))
+        return None
+    try:
+        doc = _gh_json(["api", "repos/{}/collaborators/{}/permission".format(owner_repo, rest)])
+    except (RuntimeError, ValueError) as exc:
+        return ("owner {!r} could not be confirmed as a collaborator on {} — the account does not "
+                "exist, was renamed, or has no access ({}). A handle GitHub cannot resolve binds no "
+                "reviewer.".format(tok, owner_repo, exc))
+    perm = str((doc or {}).get("permission") or "").strip().lower()
+    role = str((doc or {}).get("role_name") or "").strip().lower()
+    if perm not in _WRITE_OR_BETTER and role not in _WRITE_OR_BETTER:
+        return ("owner {!r} has {!r} access on {} — a code owner without write access cannot satisfy "
+                "require_code_owner_review.".format(tok, role or perm or "no", owner_repo))
+    return None
+
+
+def verify_owner_principals(owner_repo: str, text: str) -> list:
+    """Refusal reasons for every DISTINCT owner principal in the COMMITTED CODEOWNERS `text` that
+    cannot be confirmed to exist AND hold write-or-better access on `owner_repo` (live)."""
+    problems = []
+    for tok in _distinct_owner_tokens(text):
+        problem = _principal_problem(owner_repo, tok)
+        if problem:
+            problems.append(problem)
+    return problems
+
+
+def _names_default_branch(ref: str, default_branch: str) -> bool:
+    """Whether the validation ref NAMES `default_branch` — accepted as exactly `<D>` or `origin/<D>`,
+    the only two spellings that denote that branch in a checkout. A SHA, a PR head ref, or any other
+    branch name is not the default branch, however cleanly it resolves locally."""
+    return ref == default_branch or ref == "origin/{}".format(default_branch)
+
+
+def live_default_branch_problem(owner_repo: str, repo_root: str, ref: str, override):
+    """The refusal reason when the validation ref is not bound to `owner_repo`'s LIVE default branch on
+    GitHub (or the local checkout of it is stale), else None.
+
+    `_default_branch_ref` proves the ref RESOLVES here; it cannot prove it is the branch GitHub
+    ENFORCES CODEOWNERS from. Two holes remain after it: an operator-supplied `--default-branch` may
+    name any locally-resolving commit-ish (a SHA, a PR head, a feature branch), and a checkout's
+    `origin/HEAD` may be stale after the repo's default branch was renamed. Either way the committed
+    CODEOWNERS validated by `git show` is not the one GitHub enforces, so the receipt is green over
+    protection that does not exist. Both are closed here, plus a tip-equality check that pins `git
+    show` to the exact bytes live on GitHub."""
+    try:
+        repo_doc = _gh_json(["api", "repos/{}".format(owner_repo)])
+    except (RuntimeError, ValueError) as exc:
+        return ("cannot read the default branch of {} from GitHub ({}) — apply binds validation to the "
+                "branch GitHub actually enforces CODEOWNERS from, so an unverifiable default branch is "
+                "refused.".format(owner_repo, exc))
+    default_branch = str((repo_doc or {}).get("default_branch") or "").strip()
+    if not default_branch:
+        return ("GitHub reported no default_branch for {} — refusing to certify ownership against an "
+                "unconfirmed branch.".format(owner_repo))
+    if not _names_default_branch(ref, default_branch):
+        if override:
+            return ("--default-branch {!r} is not the branch GitHub enforces on {} — its live default "
+                    "branch is {!r}. GitHub reads CODEOWNERS only from the default branch, so "
+                    "validating a SHA, a PR head, or another branch would certify ownership GitHub "
+                    "never applies. Pass --default-branch {} (or origin/{}).".format(
+                        override, owner_repo, default_branch, default_branch, default_branch))
+        return ("this checkout's origin/HEAD names {!r} but GitHub's live default branch for {} is "
+                "{!r} — origin/HEAD is stale, so validation would read the wrong branch's CODEOWNERS. "
+                "Refresh it with `git remote set-head origin -a`, or pass --default-branch "
+                "{}.".format(ref, owner_repo, default_branch, default_branch))
+    try:
+        branch_doc = _gh_json(["api", "repos/{}/branches/{}".format(owner_repo, default_branch)])
+    except (RuntimeError, ValueError) as exc:
+        return ("cannot read the tip of {}'s default branch {!r} from GitHub ({}) — refusing to certify "
+                "against bytes that may not be the ones GitHub enforces.".format(
+                    owner_repo, default_branch, exc))
+    remote_sha = str((((branch_doc or {}).get("commit") or {}).get("sha") or "")).strip()
+    if not remote_sha:
+        return ("GitHub reported no tip commit for {}'s default branch {!r} — refusing to certify "
+                "against an unconfirmed tip.".format(owner_repo, default_branch))
+    try:
+        out = subprocess.run(
+            ["git", "-C", repo_root, "rev-parse", "--verify", "--quiet",
+             "{}^{{commit}}".format(ref)],
+            capture_output=True, text=True)
+    except OSError:
+        return "git is unavailable, so the local tip of {} cannot be compared with GitHub's".format(ref)
+    local_sha = (out.stdout or "").strip()
+    if out.returncode != 0 or not local_sha:
+        return ("{!r} no longer resolves in the checkout at {} — cannot compare it with GitHub's "
+                "tip.".format(ref, repo_root))
+    if local_sha != remote_sha:
+        return ("the checkout's {} is at {} but GitHub's {} is at {} — this checkout is STALE, so "
+                "`git show` would validate bytes GitHub is not enforcing. Run `git fetch` (and update "
+                "the remote-tracking ref) before installing.".format(
+                    ref, local_sha[:12], default_branch, remote_sha[:12]))
+    return None
 
 
 def _plan_lines(gh: dict, owner_repo: str, apply: bool) -> list:
@@ -363,7 +544,31 @@ def main(argv=None) -> int:
                   "(F44). Run against a full clone, or pass --default-branch <the branch GitHub "
                   "enforces>.".format(args.repo_root), file=sys.stderr)
         return 2
-    committed_rel, committed_text = _committed_codeowners(args.repo_root, ref)
+
+    # At APPLY, bind the validation ref to the branch GitHub actually enforces CODEOWNERS from, and
+    # pin it to the exact commit live on GitHub. `_default_branch_ref` above only proves the ref
+    # resolves LOCALLY — a `--default-branch` naming a SHA/PR head/feature branch, or a stale
+    # `origin/HEAD` left behind by a default-branch rename, both resolve cleanly while pointing at
+    # bytes GitHub does not enforce. Runs BEFORE the `git show` read below so the committed CODEOWNERS
+    # that gets validated is the enforced one. Dry-run keeps today's local-only resolution and makes NO
+    # network call.
+    if args.apply:
+        live_problem = live_default_branch_problem(
+            args.repo, args.repo_root, ref, args.default_branch)
+        if live_problem:
+            print("REFUSE: {}".format(live_problem), file=sys.stderr)
+            return 1
+
+    committed_rel, committed_text, committed_size = _committed_codeowners(args.repo_root, ref)
+    # GitHub does not load a CODEOWNERS of 3 MB or more AT ALL, so an oversized file would install
+    # require_code_owner_review over ZERO code owners. Gate the raw committed byte size FIRST — ahead
+    # of the readability and working-tree-divergence checks — so the refusal names the real reason
+    # (the size) instead of a downstream symptom.
+    if committed_rel is not None:
+        oversize = RC.codeowners_size_problem(committed_rel, committed_size)
+        if oversize:
+            print("REFUSE: {} (committed on {})".format(oversize, ref), file=sys.stderr)
+            return 1
     if committed_rel is None:
         print("REFUSE: no CODEOWNERS is committed on {} in the checkout at {} — GitHub enforces the "
               "default-branch CODEOWNERS, so require_code_owner_review would bind no reviewer to any "
@@ -388,8 +593,11 @@ def main(argv=None) -> int:
               "installing.".format(wt_rel or "absent", ref, committed_rel), file=sys.stderr)
         return 1
 
-    # Ownership is validated against the COMMITTED content — exactly what GitHub enforces (F39).
-    ownership = RC.validate_codeowners_content(committed_rel, committed_text, surfaces)
+    # Ownership is validated against the COMMITTED content — exactly what GitHub enforces (F39), with
+    # the raw committed byte size threaded in so the shared validator applies the same 3 MB load-limit
+    # gate the checker does (defense in depth behind the explicit size refusal above).
+    ownership = RC.validate_codeowners_content(
+        committed_rel, committed_text, surfaces, size_bytes=committed_size)
     if ownership:
         print("REFUSE: protected surfaces are not all owned in the CODEOWNERS committed on {} ({}) — "
               "require_code_owner_review would bind no reviewer; add CODEOWNERS coverage before "
@@ -398,11 +606,29 @@ def main(argv=None) -> int:
             print("  - {}".format(r), file=sys.stderr)
         return 1
 
+    # At APPLY, every owner principal named in the committed CODEOWNERS must actually EXIST on the
+    # target and hold write-or-better access. The ownership gate above proves the FILE covers every
+    # protected surface; it cannot prove the principals it names are real — the checker is hermetic by
+    # design (content-only, no repo to ask), so a rule naming a deleted handle or an ungranted team
+    # certifies here while binding no reviewer on GitHub. This is the last gate before mutation.
+    if args.apply:
+        principals = verify_owner_principals(args.repo, committed_text)
+        if principals:
+            print("REFUSE: owner principals in the CODEOWNERS committed on {} ({}) could not be "
+                  "verified on {} — require_code_owner_review would bind no reviewer for "
+                  "them:".format(ref, committed_rel, args.repo), file=sys.stderr)
+            for p in principals:
+                print("  - {}".format(p), file=sys.stderr)
+            return 1
+
     for line in _plan_lines(gh, args.repo, args.apply):
         print(line)
 
     if not args.apply:
         print("(dry-run: pass --apply to create/update; nothing was changed)")
+        print("  note: --apply additionally binds validation to {}'s LIVE default branch (and its "
+              "current tip) and live-verifies every CODEOWNERS owner principal has write access. "
+              "Dry-run makes no network calls, so neither is checked here.".format(args.repo))
         return 0
 
     # Live mutation — idempotent: PUT to update an existing same-name ruleset, else POST to create.

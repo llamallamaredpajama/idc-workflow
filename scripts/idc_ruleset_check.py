@@ -217,21 +217,59 @@ def validate_contract(contract: dict) -> list:
 # CODEOWNERS is looked for at the three locations GitHub honors, in precedence order.
 CODEOWNERS_RELPATHS = (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
 
+# GitHub does not load a CODEOWNERS file of 3 MB or more AT ALL — every rule in it is ignored, so
+# `require_code_owner_review` binds NO reviewer to any protected surface even though the file parses
+# perfectly here. That is a false-certify of exactly the kind F6/F39 exist to prevent (a green receipt
+# over protection GitHub never applies), so the size is a fail-closed refusal at the same door.
+CODEOWNERS_MAX_BYTES = 3 * 1024 * 1024
 
-def _read_codeowners(repo_root: str):
-    """`(relpath, text)` for the first CODEOWNERS GitHub would honor, or `(None, None)`."""
+
+def codeowners_size_problem(rel, size_bytes):
+    """The refusal reason when the CODEOWNERS at `rel` is at/over GitHub's 3 MB load limit, else None.
+
+    `size_bytes` is the file's RAW BYTE size and must never be a decoded text length: the working-tree
+    read opens in text mode, whose universal-newline translation collapses each CRLF to one LF and so
+    UNDERCOUNTS a CRLF file by one byte per line — enough to certify a file GitHub refuses to load.
+    Both call sites therefore measure bytes at the source (`os.path.getsize` for the working tree, the
+    length of `git show`'s raw stdout for the committed copy). `size_bytes is None` means the size
+    could not be established and the check is skipped — the caller's other gates still apply."""
+    if rel is None or size_bytes is None:
+        return None
+    if size_bytes >= CODEOWNERS_MAX_BYTES:
+        return ("the CODEOWNERS file {} is {} bytes — GitHub does not load a CODEOWNERS of {} bytes "
+                "(3 MB) or more, so it would bind NO code owner to ANY protected surface and "
+                "require_code_owner_review would pass every change through unreviewed. Shrink it "
+                "below the limit before installing.".format(rel, size_bytes, CODEOWNERS_MAX_BYTES))
+    return None
+
+
+def _read_codeowners_sized(repo_root: str):
+    """`(relpath, text, size_bytes)` for the first CODEOWNERS GitHub would honor, or `(None, None,
+    None)`. `size_bytes` is the RAW on-disk byte count (`os.path.getsize`), taken independently of the
+    text-mode read so newline translation cannot undercount it against `CODEOWNERS_MAX_BYTES`."""
     for rel in CODEOWNERS_RELPATHS:
         path = os.path.join(repo_root, rel)
         if os.path.isfile(path):
             try:
+                size = os.path.getsize(path)
+            except OSError:
+                size = None
+            try:
                 with open(path, encoding="utf-8") as fh:
-                    return rel, fh.read()
+                    return rel, fh.read(), size
             except (OSError, UnicodeDecodeError):
                 # A CODEOWNERS with invalid UTF-8 (or an unreadable file) is treated as unreadable and
                 # fails closed via the `text is None` path — a clean refusal, never an uncaught
                 # UnicodeDecodeError traceback out of the checker/installer (F35).
-                return rel, None
-    return None, None
+                return rel, None, size
+    return None, None, None
+
+
+def _read_codeowners(repo_root: str):
+    """`(relpath, text)` for the first CODEOWNERS GitHub would honor, or `(None, None)`. The size-free
+    view, for callers that only compare CONTENT (the installer's working-tree-vs-committed check)."""
+    rel, text, _size = _read_codeowners_sized(repo_root)
+    return rel, text
 
 
 # GitHub CODEOWNERS owners take exactly three documented forms — `@username`, `@org/team`, and an
@@ -578,13 +616,21 @@ def _owned_under(target, rules: list) -> bool:
     return owned
 
 
-def validate_codeowners_content(rel, text, surfaces) -> list:
+def validate_codeowners_content(rel, text, surfaces, size_bytes=None) -> list:
     """Refusal reasons for CODEOWNERS `(rel, text)` against `surfaces` — the shared core of the
     working-tree check (`validate_codeowners`, F6) and the installer's COMMITTED-content check (F39).
-    `rel is None` means no CODEOWNERS was found; `text is None` means it was found but unreadable."""
+    `rel is None` means no CODEOWNERS was found; `text is None` means it was found but unreadable.
+
+    `size_bytes` (optional) is the file's RAW BYTE size. When supplied it is gated against GitHub's
+    3 MB load limit BEFORE any rule is read: an oversized file parses fine here but is not loaded by
+    GitHub at all, so ownership derived from its rules would be pure fiction. Callers that cannot
+    establish a byte size pass None and skip only that check."""
     if rel is None:
         return ["no CODEOWNERS file found (looked at {}) — require_code_owner_review cannot bind a "
                 "reviewer to any protected surface".format(", ".join(CODEOWNERS_RELPATHS))]
+    oversize = codeowners_size_problem(rel, size_bytes)
+    if oversize:
+        return [oversize]
     if text is None:
         return ["the CODEOWNERS file {} is unreadable".format(rel)]
     rules = _codeowners_rules(text)
@@ -613,9 +659,10 @@ def validate_codeowners(repo_root: str, surfaces) -> list:
     """Refusal reasons for protected-surface ownership in the WORKING TREE at `repo_root`: a CODEOWNERS
     must exist and name an owner for every protected surface, so `require_code_owner_review` actually
     binds a reviewer to each (F6). The installer additionally validates the COMMITTED content GitHub
-    enforces on the default branch, not the working tree (F39)."""
-    rel, text = _read_codeowners(repo_root)
-    return validate_codeowners_content(rel, text, surfaces)
+    enforces on the default branch, not the working tree (F39). The file's RAW byte size is threaded in
+    so a CODEOWNERS at/over GitHub's 3 MB load limit is refused rather than certified."""
+    rel, text, size_bytes = _read_codeowners_sized(repo_root)
+    return validate_codeowners_content(rel, text, surfaces, size_bytes=size_bytes)
 
 
 def _gh_json(args: list, repo_flag=None):

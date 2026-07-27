@@ -9,6 +9,7 @@ U6 adds a machine-owned validation contract for Build:
 from __future__ import annotations
 
 import argparse
+import calendar
 import contextlib
 import hashlib
 import json
@@ -321,33 +322,86 @@ def _embedded_receipt_digest(raw: bytes):
 
 PLANNING_WITNESS_RETAIN = 8
 
+# AGE-AWARE retention (see `_evict_stale_versions`). A pure count-8 cap is measured in RE-APPLIES, not
+# in time, so a burst of same-label Plan re-applies can evict a version an in-flight Build is still
+# holding — `planning_witness_problem` is consulted exactly ONCE, at Build contract freeze, so the
+# window between a Build claiming work and freezing it is exactly where that eviction strands a
+# LEGITIMATE receipt. The grace window is sized to the real thing being protected: a Build claims and
+# freezes within days, not weeks.
+PLANNING_WITNESS_GRACE_SECONDS = 7 * 24 * 3600
+# ...but the F31 boundedness guarantee must survive the grace window, or a re-apply loop inside 7 days
+# grows the in-.git store without limit again. Beyond this many retained versions, eviction resumes
+# oldest-first EVEN INSIDE grace, so the bucket is bounded by a constant no matter the re-apply rate.
+PLANNING_WITNESS_HARD_CAP = 64
+
+
+def _witness_age_seconds(validated_at, now_epoch):
+    """Age in seconds of a witness record's `validated_at`, or None when it cannot be parsed.
+
+    `_now()` emits UTC `%Y-%m-%dT%H:%M:%SZ`, which ambient Python 3.9 parses with `time.strptime` +
+    `calendar.timegm` (no `datetime.fromisoformat` 'Z' handling, which only arrived in 3.11). A record
+    written by an older/newer format — or with the field absent — returns None and is treated as NOT
+    grace-protected, so it falls back to the count rule. That is the fail-closed direction: an
+    unparseable stamp can only cause an EVICTION, and an evicted version is refused stale (never
+    false-accepted)."""
+    if not validated_at:
+        return None
+    try:
+        parsed = time.strptime(str(validated_at), "%Y-%m-%dT%H:%M:%SZ")
+    except (ValueError, TypeError):
+        return None
+    return now_epoch - calendar.timegm(parsed)
+
 
 def _evict_stale_versions(bucket: dict, receipt_path: str) -> None:
     """Bound the per-path planning-witness bucket (F31). `record_planning_witness` ADDS a version per
     receipt byte digest so a same-label rerun does not clobber the one an in-flight Build still borrows
     (F27) — but each same-projection re-apply embeds a fresh `created_at` → new bytes → new digest → a
     new entry, so repeated recirc re-applies would otherwise grow the bucket (and the in-.git store)
-    without bound. Retain the receipt's CURRENT on-disk digest (always borrowable) plus the most recent
-    PLANNING_WITNESS_RETAIN-1 others by `validated_at`, evicting the oldest. The window is set
-    generously so a realistic in-flight borrow — which holds a recent version — is never evicted; a
-    Build more than PLANNING_WITNESS_RETAIN same-label re-applies behind would re-anchor its receipt,
-    the safe (fail-closed) direction."""
+    without bound.
+
+    Retention is count+age hybrid. ALWAYS KEEP:
+      (a) the receipt's CURRENT on-disk digest — always borrowable;
+      (b) the newest PLANNING_WITNESS_RETAIN versions by `validated_at`;
+      (c) ANY version whose `validated_at` is within PLANNING_WITNESS_GRACE_SECONDS of now —
+          bounded by PLANNING_WITNESS_HARD_CAP, beyond which eviction resumes oldest-first even
+          inside the grace window so (b)'s boundedness guarantee survives.
+
+    (c) is why this is not a pure count: a Build consults `planning_witness_problem` exactly ONCE, at
+    contract freeze, so re-apply churn between a Build CLAIMING work and FREEZING it could evict the
+    version it legitimately holds — the count cap measures re-applies, not the time a Build actually
+    takes. Inside the grace window that can no longer happen.
+
+    RESIDUAL, stated honestly: a Build that takes longer than the grace window, or that is buried under
+    more than PLANNING_WITNESS_HARD_CAP newer versions, can still have its version evicted. That
+    remains the fail-closed direction — an evicted version is REFUSED stale and the Build re-anchors
+    its receipt via the existing recovery message; it is never false-accepted."""
     if len(bucket) <= PLANNING_WITNESS_RETAIN:
         return
     try:
         live = _digest_file(receipt_path)
     except OSError:
         live = None
+    now_epoch = time.time()
     # newest first by validated_at; digest is a stable tiebreaker for records written the same second.
     ordered = [dg for dg, _rec in sorted(
         bucket.items(), key=lambda kv: (kv[1].get("validated_at") or "", kv[0]), reverse=True)]
     keep = set()
-    if live in bucket:
+    if live in bucket:                                  # (a) the live on-disk version
         keep.add(live)
-    for dg in ordered:
+    for dg in ordered:                                  # (b) the newest RETAIN by validated_at
         if len(keep) >= PLANNING_WITNESS_RETAIN:
             break
         keep.add(dg)
+    # (c) grace window, newest-first so the HARD CAP drops the OLDEST in-grace versions first.
+    for dg in ordered:
+        if len(keep) >= PLANNING_WITNESS_HARD_CAP:
+            break
+        if dg in keep:
+            continue
+        age = _witness_age_seconds(bucket[dg].get("validated_at"), now_epoch)
+        if age is not None and age <= PLANNING_WITNESS_GRACE_SECONDS:
+            keep.add(dg)
     for dg in [d for d in bucket if d not in keep]:
         del bucket[dg]
 
@@ -362,9 +416,11 @@ def record_planning_witness(receipt_path: str, doc: dict, *, write_receipt=None)
     `created_at`, so the receipt BYTES differ. A single-entry witness would overwrite, invalidating a
     Build worktree that still holds the earlier committed receipt (the F19 cross-worktree handoff).
     Retaining byte versions keeps each legitimate receipt borrowable while a re-signed forgery — whose
-    bytes match NO recorded version — is still refused (F7). The retained set is BOUNDED to the most
-    recent PLANNING_WITNESS_RETAIN versions (the current on-disk one always kept) so repeated same-label
-    re-applies cannot grow the in-.git store without limit (F31); the whole read-modify-write runs under
+    bytes match NO recorded version — is still refused (F7). The retained set is BOUNDED by the
+    count+age hybrid in `_evict_stale_versions` — the current on-disk version, the newest
+    PLANNING_WITNESS_RETAIN, and anything inside PLANNING_WITNESS_GRACE_SECONDS, all capped at
+    PLANNING_WITNESS_HARD_CAP — so repeated same-label re-applies can neither grow the in-.git store
+    without limit (F31) nor evict the version a not-yet-frozen Build is holding; the read-modify-write runs under
     an exclusive store lock so a concurrent contract-witness write cannot drop it (F30). The receipt is
     read ONCE, under that same lock, so the byte-digest key and the receipt's embedded self-digest are
     taken from a single view — a concurrent same-path rewrite cannot bind one version's bytes to

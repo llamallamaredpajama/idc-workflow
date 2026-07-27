@@ -64,4 +64,25 @@ got="$(ceiling_of "$REPO/docs/workflow/build-validation/default.json")"
 [ "$got" = "3" ] \
   || fail "attempt_ceiling did not fall back to the built-in default 3 with no config/flag; got $got"
 
-echo "PASS: build contract attempt_ceiling defaults from pathway_enforcement.attempt_ceiling, honors an explicit override, and falls back to 3"
+# (D) F23 — a DECLARED but malformed ceiling (a typo / non-positive) errs to the safe default 3 AND
+# surfaces a warning to the operator, instead of being silently swallowed like an ABSENT value (which
+# would be asymmetric with the F10 mode hardening in this same effort). Red-when-broken: before the fix
+# a malformed value returned None indistinguishably from absent, so no warning was ever emitted.
+printf 'pathway_enforcement:\n  mode: controlled\n  attempt_ceiling: banana\n' > "$REPO/WORKFLOW-config.yaml"
+err="$WORK/ceil-warn.txt"
+out="$(python3 "$VC" attempt-ceiling --repo "$REPO" 2>"$err")" \
+  || fail "attempt-ceiling reader errored on a malformed config value (must err to the default, not crash)"
+[ "$out" = "3" ] \
+  || fail "malformed attempt_ceiling did not err to the safe built-in default 3; got $out"
+grep -qiE 'attempt_ceiling|positive integer|malformed' "$err" \
+  || fail "malformed attempt_ceiling was swallowed silently — no operator warning (F23); stderr: $(cat "$err")"
+
+# A WELL-FORMED value emits NO warning (the signal is specific to malformed, not noise on every read).
+printf 'pathway_enforcement:\n  mode: controlled\n  attempt_ceiling: 5\n' > "$REPO/WORKFLOW-config.yaml"
+err2="$WORK/ceil-nowarn.txt"
+out="$(python3 "$VC" attempt-ceiling --repo "$REPO" 2>"$err2")" || fail "reader errored on a valid config"
+[ "$out" = "5" ] || fail "valid attempt_ceiling 5 not resolved; got $out"
+grep -qiE 'WARNING' "$err2" \
+  && fail "a valid attempt_ceiling wrongly emitted a warning; stderr: $(cat "$err2")"
+
+echo "PASS: build contract attempt_ceiling defaults from pathway_enforcement.attempt_ceiling, honors an explicit override, falls back to 3, and warns (not swallows) on a declared-but-malformed value"

@@ -49,6 +49,12 @@ PATHWAY_MODES = {"off", "controlled", "app-locked"}
 # (it is not `off`, so a would-be denial is NOT downgraded to observe) and `/idc:doctor` reports it as
 # indeterminate — never an honest posture (F10).
 UNKNOWN_MODE = "unknown"
+# A readable config that explicitly DECLARES a `pathway_enforcement.attempt_ceiling` we cannot use (a
+# non-integer, zero, or negative) is MALFORMED — distinct from ABSENT (no key at all). The caller warns
+# the operator and falls back to the built-in default rather than silently swallowing the typo: the
+# attempt_ceiling analogue of UNKNOWN_MODE (F23). A distinct sentinel object so it can never collide
+# with a real ceiling value or with `None`.
+MALFORMED_ATTEMPT_CEILING = object()
 
 try:
     import fcntl  # POSIX advisory locks (macOS/Linux — IDC's supported platforms)
@@ -128,12 +134,21 @@ def pathway_mode(repo: str) -> str:
     return "off"
 
 
-def pathway_attempt_ceiling(repo: str) -> int | None:
+def pathway_attempt_ceiling(repo: str):
     """Read `pathway_enforcement.attempt_ceiling` from WORKFLOW-config.yaml without a YAML dependency.
 
-    Returns the configured positive integer, or None when the config is absent/unreadable, declares no
-    `attempt_ceiling`, or declares a non-integer/non-positive value (the caller supplies the built-in
-    default). Mirrors `pathway_mode`'s block parse line for line so the two cannot disagree about the
+    Returns one of:
+      * the configured POSITIVE INTEGER, when the config declares a valid one;
+      * `None` — the value is ABSENT: the config is unreadable/missing or declares no `attempt_ceiling`
+        key at all. The caller silently supplies the built-in default (an unset value is not an error).
+      * `MALFORMED_ATTEMPT_CEILING` — the config DECLARES an `attempt_ceiling` that is not a positive
+        integer (a typo like `banana`, `-5`, or a blank value). Distinguished from ABSENT so the caller
+        can surface the operator's mistake instead of silently swallowing it, mirroring `pathway_mode`'s
+        ABSENT(`off`) vs MALFORMED(`UNKNOWN_MODE`) split (F23). Not a fail-open — the ceiling only bounds
+        a retry loop, so a malformed value still errs to the safe default — but the silent swallow hid
+        the config error.
+
+    Mirrors `pathway_mode`'s block parse line for line so the two cannot disagree about the
     `pathway_enforcement:` block a config declares."""
     config_path = os.path.join(repo_root(repo), "WORKFLOW-config.yaml")
     try:
@@ -161,8 +176,8 @@ def pathway_attempt_ceiling(repo: str) -> int | None:
             try:
                 parsed = int(value)
             except ValueError:
-                return None
-            return parsed if parsed > 0 else None
+                return MALFORMED_ATTEMPT_CEILING          # declared but not an integer
+            return parsed if parsed > 0 else MALFORMED_ATTEMPT_CEILING  # declared but non-positive
     return None
 
 

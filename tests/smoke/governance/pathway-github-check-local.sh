@@ -96,4 +96,19 @@ python3 "$CHECK" --repo "$REPO" --head "$HEAD" --source "$SOURCE" >/dev/null 2>&
   && fail "checker admitted a repo whose hook surface directory was emptied (a load-bearing hook removed)"
 printf '# hook surface\n' > "$REPO/scripts/hooks/idc_ledger.py"
 
-echo "PASS: idc/pathway-integrity binds to the exact FULL head + pinned source, and refuses stale head / abbreviated head / wrong source / missing OR hollow protected surface"
+# (G) DISCLOSED BOUNDARY (F22): this is a shallow STRUCTURAL check, not content protection, and it says
+#     so. A GUTTED-BUT-NONEMPTY surface — a 1-byte stub replacing the validation surface, or a hook dir
+#     kept nonempty by one junk file while the real hook is deleted — still PASSES here. Deeper "the
+#     right content is present" protection is owned by CODEOWNERS review (F20), NOT this static check.
+#     This case pins that disclosed boundary so a future change to _surface_has_content is a deliberate,
+#     reviewed contract change rather than a silent drift.
+printf '#' > "$REPO/scripts/idc_validation_contract.py"          # 1-byte stub — nonempty but gutted
+rm -f "$REPO/scripts/hooks/idc_ledger.py"
+printf '# junk\n' > "$REPO/scripts/hooks/placeholder.txt"        # dir kept nonempty by a non-hook file
+python3 "$CHECK" --repo "$REPO" --head "$HEAD" --source "$SOURCE" >/dev/null 2>&1 \
+  || fail "structural check unexpectedly REFUSED a gutted-but-nonempty surface — the disclosed boundary (F22) changed; update the docstring/header if this is intentional"
+rm -f "$REPO/scripts/hooks/placeholder.txt"
+printf '# validation surface\n' > "$REPO/scripts/idc_validation_contract.py"
+printf '# hook surface\n'        > "$REPO/scripts/hooks/idc_ledger.py"
+
+echo "PASS: idc/pathway-integrity binds to the exact FULL head + pinned source, refuses stale head / abbreviated head / wrong source / missing OR hollow protected surface, and its gutted-but-nonempty boundary (F22, CODEOWNERS-owned) is pinned"

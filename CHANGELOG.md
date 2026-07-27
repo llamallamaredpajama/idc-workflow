@@ -38,6 +38,13 @@ organization administrators who can remove the rules or the App. It blocks the n
 agent pathways and blocks merge on missing or inconsistent evidence — that is the claim, and it is
 the whole claim.
 
+Runtime caveat (Pi merge): the pipeline "automerges when green" on the **Claude and Codex** runtimes.
+The **experimental Pi runtime does not self-merge** — no sanctioned Pi merge helper has landed yet, so
+the Pi finisher runs the same receipt/gate tail and then hands the reviewed branch to an
+**operator-performed merge**. This is documented consistently in the README, `docs/architecture.md`
+(§Runtime model), `agents/idc-finisher.md` (§Git finalization), and `skills/idc-adapter-pi` — the four
+surfaces now agree on the one behavior.
+
 - **Release evidence has to be measured, not asserted.** `scripts/idc_pilot_metrics.py` is a fixed
   schema validator for the source-heavy pilot's `pilot-metrics.json`: it requires all ten operational
   metrics at their exact field paths, binds the artifact to one exact reviewed commit, verifies every

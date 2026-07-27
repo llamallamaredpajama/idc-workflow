@@ -545,14 +545,26 @@ DEFAULT_ATTEMPT_CEILING = 3
 
 def _resolve_attempt_ceiling(workspace: str, attempt_ceiling: int | None) -> int:
     """The contract's attempt_ceiling: an explicit CLI value wins; otherwise default from the repo
-    config (`pathway_enforcement.attempt_ceiling`, spec §2.1); otherwise the built-in default (F11)."""
+    config (`pathway_enforcement.attempt_ceiling`, spec §2.1); otherwise the built-in default (F11).
+
+    A config that DECLARES a malformed ceiling (non-integer / non-positive) is not silently swallowed:
+    the operator gets a warning on stderr and the safe built-in default, mirroring the F10 mode
+    hardening (F23). Only the sibling import is tolerated — a genuine parse/attribute bug in the reader
+    propagates rather than being masked as 'unset', which the old blanket `except Exception` hid."""
     if attempt_ceiling is not None:
         return attempt_ceiling
     try:
         import idc_path_gate as PG  # noqa: E402 — sibling script on sys.path
-        configured = PG.pathway_attempt_ceiling(workspace)
-    except Exception:  # noqa: BLE001 — a config/parse problem falls back to the built-in default
-        configured = None
+    except ImportError:
+        return DEFAULT_ATTEMPT_CEILING
+    configured = PG.pathway_attempt_ceiling(workspace)
+    if configured is PG.MALFORMED_ATTEMPT_CEILING:
+        sys.stderr.write(
+            "idc-validation-contract: WARNING — WORKFLOW-config.yaml declares a "
+            "pathway_enforcement.attempt_ceiling that is not a positive integer; using the built-in "
+            f"default {DEFAULT_ATTEMPT_CEILING}. Set a positive integer (or remove the key) to silence "
+            "this.\n")
+        return DEFAULT_ATTEMPT_CEILING
     return configured if configured is not None else DEFAULT_ATTEMPT_CEILING
 
 

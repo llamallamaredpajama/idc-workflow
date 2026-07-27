@@ -128,7 +128,12 @@ The finisher runs its **own** `/fullauto-goal` loop. Its completion contract car
    promoted to `main` only after the staging e2e — see *e2e layering*) with a **direct, blocking**
    `gh pr merge --squash --delete-branch` (default method; pass `--merge-method` for the method the
    repo allows) — **not** GitHub `--auto` (auto-merge would defer the merge and, with the repo's
-   `deleteBranchOnMerge` off, skip the delete). The rest of the tail — branch deletes, tracker
+   `deleteBranchOnMerge` off, skip the delete). **Runtime carve-out (Pi):** the automerge above is the
+   **Claude and Codex** behavior. On the **experimental Pi runtime** no sanctioned Pi merge helper has
+   landed yet, so the Pi finisher does **not** self-merge — it runs the same receipt/gate tail, then
+   **prepares, pushes, and reports** the reviewed branch and hands it to an **operator-performed
+   merge** (README / `docs/architecture.md` §Runtime model). Everything else in this step is identical;
+   only the final merge call is the operator's on Pi. The rest of the tail — branch deletes, tracker
    close, end-state re-verify — is the script's deterministic step order, verified before it ever
    exits 0; it is not re-narrated here. **Fail-closed:** any unverified step prints a
    machine-readable `finish: <step> failed` line and exits non-zero — never a silent drop; the
@@ -191,9 +196,15 @@ Serialization is two layers — both required:
    multi-resident pool**; under the **single-merger** runtimes it **collapses to structural
    serialization** (one merger, so disjoint areas merge back-to-back, not literally in parallel):
    - **pi** (flat standing pool, **no master orchestrator**) → a **board-backed merge lease**:
-     the authoritative GitHub Projects board is the lock-holder; whichever finisher resident
-     holds the surface lease merges, then releases it; coms-net carries only the liveness/
-     notification. This is the runtime where disjoint surfaces merge **concurrently**.
+     the authoritative GitHub Projects board is the lock-holder; a finisher resident acquires the
+     surface lease before touching the shared integration ref, then releases it; coms-net carries only
+     the liveness/notification. **On the experimental Pi runtime the finisher does not self-merge** —
+     no sanctioned Pi merge helper has landed, so under the lease it prepares/pushes/reports the
+     reviewed branch and an **operator performs the merge** (see the *Git finalization* Pi carve-out
+     and README / `docs/architecture.md` §Runtime model). The board-backed lease is what keeps the
+     disjoint-surface merges serialized-per-surface so they can proceed **concurrently** across
+     surfaces; wiring a Pi resident to hold that lease and merge autonomously (rather than the
+     operator) is the pending helper, which is why the runtime stays experimental.
    - **Claude Teams** / the collapsed fallback → the single Build **orchestrator** is the sole
      merger (no teammate-finisher merges another's surface); the lease is structural and the train
      **collapses to serialized** back-to-back merges through that one merger.

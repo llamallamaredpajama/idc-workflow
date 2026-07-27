@@ -101,15 +101,19 @@ decision 7`, `agents/idc-build.md`). Worked example for one wave:
    **(b) a single-holder merge lease, fail-closed (no lease → no merge).** Because the pi pool
    is flat with **no master orchestrator**, the finisher resident proves exclusive ownership
    through the tracker adapter's lease primitive (`leaseAcquire(merge, owner, ttl) → token`)
-   before it merges **only** the integration-ref update (never content), then releases
+   before the integration-ref update (never content) touches the shared ref, then releases
    (`leaseRelease(merge, token)`); coms-net carries only the liveness/notification. The lease is
    a real, atomic primitive — **on the filesystem backend** it is `lease-acquire`/`lease-release`
    (flock-backed acquire-if-empty-or-expired, opaque token, TTL expiry, release-by-token; see
    `idc:idc-tracker-filesystem`); **on the GitHub backend** there is no native compare-and-set
-   lease yet, so the interim is **single-holder fail-closed** — exactly one orchestrator merges,
-   a finisher never self-merges concurrently (a native Projects-field CAS lease is a tracked
-   follow-up). This is the **pi row** of the one A2 merge contract (Claude Teams / collapsed: the
-   sole Build orchestrator merges; Codex: the app-server serially merges finisher threads).
+   lease yet, so the interim is **single-holder fail-closed** (a native Projects-field CAS lease is a
+   tracked follow-up). **On the experimental Pi runtime the finisher does not self-merge at all:** no
+   sanctioned Pi merge helper has landed, so under the lease the Pi finisher prepares/pushes/reports
+   the reviewed branch and the integration-ref merge is **operator-performed** (README /
+   `docs/architecture.md` §Runtime model; `agents/idc-finisher.md` §Git finalization Pi carve-out) —
+   wiring a Pi resident to hold the lease and merge autonomously is the pending helper. This is the
+   **pi row** of the one A2 merge contract (Claude Teams / collapsed: the sole Build orchestrator
+   merges; Codex: the app-server serially merges finisher threads).
 
 The forward triplet notifications — `build-impl → build-review → build-finish` — are all
 downstream-legal under the glass-wall ACL; the Recirculator is reachable from any of them.

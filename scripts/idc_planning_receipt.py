@@ -10,7 +10,6 @@ import argparse
 import hashlib
 import json
 import os
-import subprocess
 import sys
 import tempfile
 import time
@@ -143,14 +142,19 @@ def _read_json(path: str):
         return json.load(fh)
 
 
-def _is_git_repo(path: str) -> bool:
-    try:
-        proc = subprocess.run(
-            ["git", "-C", os.path.abspath(path), "rev-parse", "--git-dir"],
-            capture_output=True, text=True, timeout=15)
-        return proc.returncode == 0
-    except (OSError, subprocess.SubprocessError):
-        return False
+def _has_git_metadata(path: str) -> bool:
+    """True if `path` or an ancestor carries a `.git` entry. A PURE FILESYSTEM check that never invokes
+    the git binary, so a missing/broken `git` inside a real repository is not mistaken for a non-git
+    repo (which would silently leave the receipt un-anchored — F25). `.git` may be a directory (a normal
+    checkout) or a file (a linked worktree), so `os.path.lexists` covers both."""
+    current = os.path.abspath(path)
+    while True:
+        if os.path.lexists(os.path.join(current, ".git")):
+            return True
+        parent = os.path.dirname(current)
+        if parent == current:
+            return False
+        current = parent
 
 
 def write_receipt(repo: str, receipt_path: str, receipt: dict) -> None:
@@ -158,28 +162,41 @@ def write_receipt(repo: str, receipt_path: str, receipt: dict) -> None:
 
     The self `receipt_digest` is only tamper-EVIDENCE: it is recomputed over the receipt body, so a
     repo-local forger can swap a borrowed binding (graph/projection digest) and re-sign the receipt,
-    and it would still pass `verify_receipt_integrity`. The authoritative proof of machine authorship
-    is an OUT-OF-TREE witness recorded here — the SAME git-common-dir witness store the build
-    contract / execution / build receipts use. It records the receipt file's byte digest OUTSIDE the
-    committed working tree a PR can edit, and — because the common dir is shared across linked
-    worktrees — it is visible to a Build contract frozen in any worktree of the same repo. A Build
-    freeze refuses to borrow a receipt whose witness is absent or stale, which closes the
-    re-signed-forgery hole (F7) while accepting legitimate worktree-produced receipts (F19).
+    and it would still pass `verify_receipt_integrity`. The authoritative proof of machine authorship —
+    within the committed-tree (PR) threat model — is an OUT-OF-TREE witness recorded here: the SAME
+    git-common-dir witness store the build contract / execution / build receipts use. It records the
+    receipt file's byte digest OUTSIDE the committed working tree a PR can edit, so a re-signed forgery
+    in a PR has no matching witness; a local actor with `.git` write access could still forge it (that
+    is outside the PR threat model, and is scoped in the CHANGELOG). Because the common dir is shared
+    across linked worktrees, the witness is visible to a Build contract frozen in any worktree of the
+    same repo. A Build freeze refuses to borrow a receipt whose witness is absent or stale, which closes
+    the re-signed-forgery hole (F7) while accepting legitimate worktree-produced receipts (F19).
 
-    Witnessing is skipped for a non-git governed repo (no common dir to anchor into); such a repo can
-    never reach a Build freeze, which itself requires a git repo, so no borrow is left unanchored."""
+    Anchoring is REQUIRED whenever the repo carries git metadata (a `.git` entry here or in an ancestor,
+    detected WITHOUT invoking git). If it does and the witness cannot be recorded — the sanctioned
+    validation module is unimportable (a broken install), or `git` is missing/failing — the failure is
+    SURFACED here rather than swallowed: otherwise the receipt would persist witness-less and a later
+    Build freeze would refuse it with a confusing 'no witness' error far from the real cause (F25).
+    Witnessing is skipped ONLY for a genuinely non-git governed repo (the filesystem backend), which has
+    no common dir to anchor into and can never reach a Build freeze (freeze itself requires git), so no
+    borrow is left unanchored."""
     atomic_write_json(receipt_path, receipt)
+    anchor_required = _has_git_metadata(repo)
     try:
         import idc_validation_contract as VC  # noqa: E402 — sibling; lazy to avoid an import cycle
-    except ImportError:
+    except ImportError as exc:
+        if anchor_required:
+            raise ReceiptError(
+                "could not anchor the planning receipt witness — idc_validation_contract is not "
+                f"importable (broken install): {exc}") from exc
         return
     try:
         VC.record_planning_witness(os.path.abspath(receipt_path), receipt)
-    except VC.ValidationError as exc:
-        # A non-git repo has no common dir to anchor into — skip (a Build freeze can't run there
-        # anyway). Any OTHER failure inside a git repo would leave an un-borrowable receipt, so it is
-        # surfaced rather than swallowed.
-        if _is_git_repo(repo):
+    except (VC.ValidationError, OSError) as exc:
+        # In a git repo any anchor failure (a non-git ValidationError from a broken common dir, or a
+        # raw OSError when `git` is missing) leaves an un-borrowable receipt, so it is surfaced. A
+        # genuinely non-git repo (no metadata) legitimately has nothing to anchor into — skip.
+        if anchor_required:
             raise ReceiptError(f"could not anchor the planning receipt witness: {exc}") from exc
 
 

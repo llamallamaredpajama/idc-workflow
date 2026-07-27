@@ -128,6 +128,52 @@ CO
 python3 "$CHK" --ruleset "$RS" --repo-root "$LMW_OK" >/dev/null \
   || fail "checker refused a CODEOWNERS whose LAST matching rule (`* @owner`) owns every surface"
 
+# F20 (glob semantics) — GitHub distinguishes a NON-recursive one-level pattern (`dir/*`, `/*`) from a
+# recursive subtree (`dir/**`, `dir/`). A `dir/*` owns only the files DIRECTLY in dir, NOT a nested
+# subtree — so it must not false-certify `scripts/hooks/**`. Red-when-broken: a validator that strips
+# `/*` and `/**` identically collapses the one-level rule into a recursive claim and admits.
+#
+# Case B — `/scripts/*` (one level under scripts) does NOT own the nested `scripts/hooks/**` subtree.
+GS_B="$WORK/co-glob-b"; mkdir -p "$GS_B/.github"
+cat > "$GS_B/.github/CODEOWNERS" <<'CO'
+/.github/workflows/ @team
+/scripts/idc_validation_contract.py @team
+/scripts/idc_receipt_check.py @team
+/scripts/* @team
+CO
+out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$GS_B" 2>&1)" \
+  && fail "checker false-certified scripts/hooks/** off a one-level /scripts/* (GitHub: one level only)"
+printf '%s\n' "$out" | grep -qiE 'hook|owner' \
+  || fail "one-level-glob refusal must name the un-owned hook surface; got: $out"
+
+# Case C — `/*` (one level at repo root) does NOT own any nested subtree.
+GS_C="$WORK/co-glob-c"; mkdir -p "$GS_C/.github"
+cat > "$GS_C/.github/CODEOWNERS" <<'CO'
+/.github/workflows/ @team
+/scripts/idc_validation_contract.py @team
+/scripts/idc_receipt_check.py @team
+/* @team
+CO
+out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$GS_C" 2>&1)" \
+  && fail "checker false-certified a nested surface off a root one-level /* (GitHub: root files only)"
+printf '%s\n' "$out" | grep -qiE 'hook|owner' \
+  || fail "root one-level-glob refusal must name the un-owned surface; got: $out"
+
+# Case D — a later OWNERLESS descendant rule (`/scripts/hooks/*.py`) un-owns part of a surface an
+# earlier recursive rule owned; the whole surface is then not owned on GitHub.
+GS_D="$WORK/co-glob-d"; mkdir -p "$GS_D/.github"
+cat > "$GS_D/.github/CODEOWNERS" <<'CO'
+/.github/workflows/ @team
+/scripts/idc_validation_contract.py @team
+/scripts/idc_receipt_check.py @team
+/scripts/hooks/ @team
+/scripts/hooks/*.py
+CO
+out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$GS_D" 2>&1)" \
+  && fail "checker missed a later ownerless descendant (*.py) un-owning part of scripts/hooks/**"
+printf '%s\n' "$out" | grep -qiE 'hook|owner' \
+  || fail "ownerless-descendant refusal must name the un-owned hook surface; got: $out"
+
 # --- installer safety guards (no network is reached before these refusals) ----------------------
 # No --repo -> refuse (never guesses the target board).
 python3 "$INS" --ruleset "$RS" >/dev/null 2>&1 \

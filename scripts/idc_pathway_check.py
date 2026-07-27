@@ -75,8 +75,15 @@ def _sha_matches(proposed: str, actual: str) -> bool:
 def _surface_has_content(path: str) -> bool:
     """Whether a protected surface carries content, not just a path. A file must be non-empty; a
     directory must hold at least one non-empty regular file. This turns the surface check from mere
-    existence into a content check (F1): a surface gutted to an empty file, or a hook directory whose
-    load-bearing files were all removed, no longer passes."""
+    existence into a check that rejects a FULLY hollow surface (F1): a file gutted to zero bytes, or a
+    directory with no non-empty file at all, no longer passes.
+
+    This is a shallow STRUCTURAL check, not content protection. It does NOT catch a GUTTED-BUT-NONEMPTY
+    surface — a directory keeping one junk file while its load-bearing hooks are deleted, or a 1-byte
+    `# stub` replacing idc_validation_contract.py — which still passes here (F22). Deeper 'the right
+    content is still present' protection is deliberately deferred to code-owner review of the protected
+    surfaces (CODEOWNERS + require_code_owner_review), whose ownership validator must therefore be sound
+    (F20). See the workflow header for the disclosed scope boundary."""
     if os.path.isdir(path):
         for root, _dirs, files in os.walk(path):
             for name in files:

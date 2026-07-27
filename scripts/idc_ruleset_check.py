@@ -170,38 +170,135 @@ def _codeowners_rules(text: str) -> list:
     return rules
 
 
-def _normalize_owned_path(value: str) -> str:
-    """A surface glob / CODEOWNERS pattern reduced to a comparable repo-relative directory-or-file."""
-    text = str(value).strip().lstrip("/")
-    for suffix in ("/**", "/*"):
+_WILDCARD_CHARS = ("*", "?", "[")
+
+
+def _has_wildcard(text: str) -> bool:
+    return any(ch in text for ch in _WILDCARD_CHARS)
+
+
+def _dirname(path: str) -> str:
+    return path.rsplit("/", 1)[0] if "/" in path else ""
+
+
+def _surface_target(surface: str):
+    """Reduce a protected-surface entry to what it names, one of:
+        ("dir", D)   all files under directory D, recursively   (`D/**`, `D/*`, `D/`, or a bare dir)
+        ("file", F)  one exact file
+    A bare path is a file when its basename looks like a filename (has a dot), else a directory."""
+    text = str(surface).strip().lstrip("/").rstrip()
+    for suffix in ("/**", "/*", "/"):
         if text.endswith(suffix):
-            text = text[: -len(suffix)]
-    return text.rstrip("/")
+            return ("dir", text[: -len(suffix)].rstrip("/"))
+    base = text.rsplit("/", 1)[-1]
+    return ("file", text) if "." in base else ("dir", text)
+
+
+def _rule_matcher(pattern: str):
+    """Classify a CODEOWNERS pattern into a matcher we can reason about at surface granularity, modelling
+    GitHub's gitignore-style semantics rather than treating every glob as recursive (F20). Returns:
+
+        ("root",)          every file in the repo, recursively        `*`  `/`  ``  `**`  `/**`
+        ("dir_rec", D)     every file under D, recursively            `/D/`  `/D/**`  `D/`  `D/**`  `/D`
+        ("dir_one", D)     files DIRECTLY in D only (one level)       `/D/*`  `D/*`  (`/*` -> D="")
+        ("suffix", ".ext") any file with that suffix, at any depth    `*.ext`  (slashless)
+        ("file", F)        one exact file                             `/path/to/file.ext`
+        ("unmodeled", SP)  cannot reduce cleanly; SP = wildcard-free leading directory (fail closed)
+
+    GitHub anchors a pattern containing a non-trailing slash to the repo root; a slashless pattern
+    matches at any depth; a single `*` does not cross a `/`. Anything we cannot reduce to a clean
+    anchored directory/file (mid-pattern globs, `?`, ranges) is `unmodeled` and handled conservatively
+    by the caller so it can never *establish* ownership — only ever fail closed."""
+    p = pattern.strip()
+    if p in ("", "/", "**", "/**"):
+        return ("root",)
+    anchored = p.startswith("/") or ("/" in p.rstrip("/"))
+    body = p[1:] if p.startswith("/") else p
+    if body == "*":
+        return ("dir_one", "") if anchored else ("root",)          # `/*` one-level root vs `*` all
+    if not anchored and body.startswith("*.") and not _has_wildcard(body[1:]):
+        return ("suffix", body[1:])                                 # `*.py` -> ".py"
+    if body.endswith("/*") and not _has_wildcard(body[:-2]):
+        return ("dir_one", body[:-2].rstrip("/"))
+    if body.endswith("/**") and not _has_wildcard(body[:-3]):
+        return ("dir_rec", body[:-3].rstrip("/"))
+    if body.endswith("/") and not _has_wildcard(body[:-1]):
+        return ("dir_rec", body[:-1].rstrip("/"))
+    if not _has_wildcard(body):
+        base = body.rsplit("/", 1)[-1]
+        return ("file", body) if "." in base else ("dir_rec", body.rstrip("/"))
+    # Unmodeled: keep the wildcard-free leading DIRECTORY so the caller can decide whether the pattern
+    # could plausibly touch the surface (and, if so, fail closed).
+    cut = len(body)
+    for i, ch in enumerate(body):
+        if ch in _WILDCARD_CHARS:
+            cut = i
+            break
+    return ("unmodeled", _dirname(body[:cut]).rstrip("/"))
+
+
+def _relationship(matcher, target):
+    """How a rule matcher relates to a surface target: `covers_all` (every file in the surface is
+    matched), `touches` (some but not necessarily all), or `none`. `covers_all` + owner is the only way
+    a rule *establishes* whole-surface ownership; `touches` + ownerless carves a hole that defeats it."""
+    kind = matcher[0]
+    tkind, tpath = target
+    if kind == "root":
+        return "covers_all"
+    if kind == "dir_rec":
+        R = matcher[1]
+        if R == "" or tpath == R or tpath.startswith(R + "/"):
+            return "covers_all"                                    # R is an ancestor-or-self of the surface
+        if tkind == "dir" and R.startswith(tpath + "/"):
+            return "touches"                                       # R is a strict descendant of the surface dir
+        return "none"
+    if kind == "dir_one":
+        R = matcher[1]
+        if tkind == "dir":
+            return "touches" if R == tpath else "none"             # one level overlaps only the surface's own dir
+        return "covers_all" if _dirname(tpath) == R else "none"    # a file directly in R is fully matched
+    if kind == "suffix":
+        if tkind == "dir":
+            return "touches"                                       # some files under the surface may carry it
+        return "covers_all" if tpath.endswith(matcher[1]) else "none"
+    if kind == "file":
+        F = matcher[1]
+        if tkind == "dir":
+            return "touches" if F == tpath or F.startswith(tpath + "/") else "none"
+        return "covers_all" if F == tpath else "none"
+    # unmodeled — locality-scoped, and never `covers_all` (it can only fail closed, never certify).
+    SP = matcher[1]
+    if SP == "" or tpath == SP or tpath.startswith(SP + "/") or SP.startswith(tpath + "/"):
+        return "touches"
+    return "none"
 
 
 def _surface_is_owned(surface: str, rules: list) -> bool:
-    """Whether the WHOLE protected surface is owned under GitHub's LAST-MATCH-WINS precedence.
+    """Whether the WHOLE protected surface is owned under GitHub's LAST-MATCH-WINS, glob-aware
+    precedence. GitHub applies the *last* matching CODEOWNERS pattern to each file, so whole-surface
+    ownership means: some rule owns the whole surface AND no later rule un-owns any part of it.
 
-    GitHub applies the *last* matching CODEOWNERS pattern to a path, so a later rule overrides an
-    earlier one. Ownership of the whole surface therefore depends on the LAST rule (in file order)
-    that applies to it — either the surface itself or an ancestor (`*` / `/` own everything) — and
-    that last rule must name an owner. A first-match check would false-certify a surface that a broad
-    early `* @owner` covers but a later, more-specific OWNERLESS rule un-owns (F20).
-
-    A later rule that carves out a strict DESCENDANT of the surface with no owner also leaves part of
-    the surface unowned on GitHub, so it likewise defeats ownership (until a still-later ancestor rule
-    re-establishes it). We track ownership statefully in file order, mirroring GitHub's per-path
-    last-match resolution at surface granularity."""
-    target = _normalize_owned_path(surface)
+    We walk rules in file order tracking a single ownership state, mirroring GitHub's per-file
+    last-match resolution at surface granularity:
+      * a rule that COVERS the whole surface (an ancestor-or-self recursive rule, `*`, or the exact
+        file) sets ownership to whether it names an owner;
+      * a later rule that only TOUCHES part of the surface and names NO owner carves a hole, so the
+        whole surface is no longer owned;
+      * a rule that only touches part of the surface WITH an owner is partial — it neither establishes
+        nor removes whole-surface ownership.
+    Crucially, a NON-recursive one-level rule (`dir/*`, `/*`) does NOT cover a nested subtree, so it
+    cannot certify `scripts/hooks/**` off `/scripts/*` or `/*` (F20). Patterns we cannot reduce to a
+    clean anchored directory/file are `unmodeled`: they never establish ownership and, when ownerless
+    and locally relevant, fail closed by un-owning. The consequence is a fail-closed bias — an exotic
+    or one-level CODEOWNERS may be refused with a clear message telling the operator to add an anchored
+    recursive rule — never a false-certify."""
+    target = _surface_target(surface)
     owned = False
     for pattern, owners in rules:
-        rule_path = _normalize_owned_path(pattern)
-        covers_whole = rule_path in ("", "*") or target == rule_path or target.startswith(rule_path + "/")
-        if covers_whole:
-            # The last ancestor-or-self rule sets the default ownership across the whole surface.
+        rel = _relationship(_rule_matcher(pattern), target)
+        if rel == "covers_all":
             owned = bool(owners)
-        elif rule_path.startswith(target + "/") and not owners:
-            # A later ownerless rule under the surface carves a hole in the coverage.
+        elif rel == "touches" and not owners:
             owned = False
     return owned
 

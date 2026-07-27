@@ -151,7 +151,10 @@ def _read_codeowners(repo_root: str):
             try:
                 with open(path, encoding="utf-8") as fh:
                     return rel, fh.read()
-            except OSError:
+            except (OSError, UnicodeDecodeError):
+                # A CODEOWNERS with invalid UTF-8 (or an unreadable file) is treated as unreadable and
+                # fails closed via the `text is None` path — a clean refusal, never an uncaught
+                # UnicodeDecodeError traceback out of the checker/installer (F35).
                 return rel, None
     return None, None
 
@@ -230,8 +233,13 @@ def _rule_matcher(pattern: str):
                                    or "" when the pattern could match anywhere (fail closed)
     """
     p = pattern.strip()
-    if p in ("", "/", "*", "**", "/**"):
-        return ("root",)
+    if p in ("*", "**", "/**"):
+        return ("root",)                                            # matches every file in the repo
+    if p in ("", "/"):
+        # git (and thus CODEOWNERS) matches NOTHING for a lone `/` or an empty pattern — it is neither
+        # repo-wide nor a real surface. Modeled as `unmodeled` so it can NEVER establish ownership; a
+        # degenerate `/ @owner` rule must not be read as owning every surface (F33, fail closed).
+        return ("unmodeled", "")
 
     # Leading `**/` = "match at any depth" (documented: `**/logs`). Modeled only for a CLEAN tail — a
     # bare name, a `name/` directory, or a `*.ext` suffix; anything more structured is `unmodeled` and
@@ -243,8 +251,17 @@ def _rule_matcher(pattern: str):
             return ("root",)
         if tail.startswith("*.") and not _has_wildcard(tail[1:]):
             return ("suffix", tail[1:])
-        if "/" not in tail.rstrip("/") and not _has_wildcard(tail.rstrip("/")):
-            return _name_matcher(False, tail)                       # `**/logs` -> any-depth dir/file
+        body = tail.rstrip("/")
+        if "/" not in body and not _has_wildcard(body):
+            # A TRAILING slash means DIRECTORY-ONLY (gitignore/CODEOWNERS): `**/name/` matches a
+            # directory named `name` at any depth and everything under it — NEVER a regular file. It
+            # must classify as `dir_rec`, not `_name_matcher` (which would read a dotted basename like
+            # `**/idc_validation_contract.py/` as a FILE and drop the dir-only constraint, false-
+            # certifying the file surface `scripts/idc_validation_contract.py` that GitHub leaves
+            # unowned — F32).
+            if tail.endswith("/"):
+                return ("dir_rec", False, body)                     # `**/logs/` -> any-depth DIRECTORY
+            return _name_matcher(False, body)                       # `**/logs` -> any-depth dir/file
         return ("unmodeled", "")
 
     body = p[1:] if p.startswith("/") else p
@@ -380,8 +397,18 @@ def _surface_is_owned(surface: str, rules: list) -> bool:
     un-owns the surface it sits within (F20). Patterns we cannot reduce to a modeled class are
     `unmodeled`: they never establish ownership and, when ownerless and possibly relevant, fail closed
     by un-owning. The consequence is a strict fail-closed bias — an exotic or one-level CODEOWNERS may
-    be refused with a clear message telling the operator to add an anchored recursive rule — but the
-    matcher NEVER certifies a surface GitHub would leave unowned."""
+    be refused with a clear message telling the operator to add an anchored recursive rule.
+
+    Scope of the fail-closed guarantee: for a protected surface declared with the standard conventions
+    (a directory carrying a `/`, `/*` or `/**` suffix, or a genuine file), this never certifies a
+    surface GitHub would leave unowned — including a `**/name/` trailing-slash directory pattern, which
+    is directory-only and cannot own a file surface (F32). The ONE documented residual is an
+    UNDECLARED-directory dotted surface (`config/my.dir` with no `/`-family suffix and no rule that
+    structurally proves it is a directory) reached only through an unanchored any-depth ownerless rule:
+    `_surface_target`/`_declares_directory` still type it as a file, so an interior hole is invisible.
+    Closing it fully would need a filesystem stat of the surface and would false-REFUSE genuine dotted
+    files; it is the review's accepted 'non-standard declaration' tradeoff (F28 residual), not a
+    false-certify of any standard-declared surface."""
     target = _surface_target(surface)
     # F28: `_surface_target` types a bare dotted-basename path as a FILE, but it may name a DIRECTORY
     # (a dotfile dir like `.github`, or a dotted dir name like `config/my.dir`). If a rule structurally

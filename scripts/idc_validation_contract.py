@@ -308,6 +308,17 @@ def _planning_witness_key(rel: str) -> str:
     return f"{PLANNING_WITNESS_KIND}:{rel}"
 
 
+def _embedded_receipt_digest(raw: bytes):
+    """The `receipt_digest` a planning receipt commits to inside its own bytes, or None if the bytes do
+    not parse as a receipt object. Read from the SAME bytes the witness keys on, so the recorded
+    (byte-digest -> receipt_digest) binding is always internally consistent (F38)."""
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return doc.get("receipt_digest") if isinstance(doc, dict) else None
+
+
 PLANNING_WITNESS_RETAIN = 8
 
 
@@ -354,10 +365,35 @@ def record_planning_witness(receipt_path: str, doc: dict) -> str:
     bytes match NO recorded version — is still refused (F7). The retained set is BOUNDED to the most
     recent PLANNING_WITNESS_RETAIN versions (the current on-disk one always kept) so repeated same-label
     re-applies cannot grow the in-.git store without limit (F31); the whole read-modify-write runs under
-    an exclusive store lock so a concurrent contract-witness write cannot drop it (F30)."""
+    an exclusive store lock so a concurrent contract-witness write cannot drop it (F30). The receipt is
+    read ONCE, under that same lock, so the byte-digest key and the receipt's embedded self-digest are
+    taken from a single view — a concurrent same-path rewrite cannot bind one version's bytes to
+    another version's receipt_digest (F38)."""
     common_git_dir, repo_identity, rel = _planning_witness_context(receipt_path)
-    digest = _digest_file(receipt_path)
-    with _witness_store_lock(common_git_dir):            # F30: RMW under an exclusive lock
+    with _witness_store_lock(common_git_dir):            # F30/F38: RMW + receipt read under one lock
+        # F38: read the receipt's bytes ONCE, under the lock, and derive the byte-digest key from THAT
+        # read. Digesting before the lock (or in a read separate from the freshness check below) lets a
+        # concurrent same-path writer replace the receipt between reads, so the entry binds one
+        # version's bytes to another version's `receipt_digest`; the final on-disk receipt then matches
+        # a witness whose receipt_digest is wrong and Build refuses the legitimate receipt (fail-closed).
+        try:
+            with open(receipt_path, "rb") as fh:
+                raw = fh.read()
+        except OSError as exc:
+            raise ValidationError(
+                f"could not read the planning receipt to witness it ({exc})") from exc
+        digest = hashlib.sha256(raw).hexdigest()
+        # The receipt embeds its own receipt_digest. If the bytes on disk no longer carry the digest the
+        # caller computed for the receipt IT wrote, a concurrent writer clobbered this path after
+        # write_receipt wrote it — refuse rather than record the caller's stale doc against another
+        # version's bytes (F38). The writer whose bytes are actually on disk records a self-consistent
+        # witness, so its receipt stays borrowable; only the losing racer fails closed.
+        on_disk_digest = _embedded_receipt_digest(raw)
+        doc_digest = doc.get("receipt_digest")
+        if doc_digest is not None and on_disk_digest is not None and on_disk_digest != doc_digest:
+            raise ValidationError(
+                "the planning receipt on disk was overwritten by a concurrent writer while its witness "
+                "was being recorded — refusing to bind a stale receipt version to the current bytes (F38)")
         witnesses = _read_witnesses(common_git_dir)
         if witnesses is None:
             raise ValidationError("the validation witness store is unreadable")

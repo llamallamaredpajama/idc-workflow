@@ -304,19 +304,83 @@ CO
 python3 "$CHK" --ruleset "$F28_RS" --repo-root "$F28_OK" >/dev/null \
   || fail "checker false-refused a fully-owned dotted-directory surface (F28 control), or regressed a shipped dotted-file surface"
 
+# Case F35 — a CODEOWNERS whose bytes are NOT valid UTF-8 must fail closed with a CLEAN refusal, never
+# an uncaught UnicodeDecodeError traceback. Red-when-broken (pre-fix): `_read_codeowners` caught only
+# OSError, so an invalid byte crashed the checker with a Python traceback (still non-zero, but ungraceful
+# and with no actionable message). `\377\376` are raw non-UTF-8 bytes.
+BADUTF="$WORK/co-bad-utf8"; mkdir -p "$BADUTF/.github"
+printf '* @team\n\377\376 not utf-8\n' > "$BADUTF/.github/CODEOWNERS"
+out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$BADUTF" 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] \
+  || fail "checker admitted a repo whose CODEOWNERS is not valid UTF-8"
+printf '%s\n' "$out" | grep -q 'Traceback (most recent call last)' \
+  && fail "invalid-UTF-8 CODEOWNERS crashed with a traceback instead of a clean fail-closed refusal (F35)"
+printf '%s\n' "$out" | grep -qiE 'unreadable|codeowner' \
+  || fail "invalid-UTF-8 refusal must be a clean CODEOWNERS message; got: $out"
+
+# Case L (F32 — round-4 regression) — a `**/name/` pattern (leading `**/` + TRAILING slash + dotted
+# basename) is DIRECTORY-ONLY at any depth: it owns a directory named `idc_validation_contract.py`
+# anywhere, NEVER the regular FILE `scripts/idc_validation_contract.py`. So `**/idc_validation_contract.py/ @team`
+# leaves the validation FILE surface unowned on GitHub and the checker must refuse. Red-when-broken
+# (pre-fix): routed to `_name_matcher`, the trailing slash was rstripped and the dotted basename typed
+# as a FILE → owned=True (false-certify of a shipped protected-surface basename).
+GS_L="$WORK/co-glob-l"; mkdir -p "$GS_L/.github"
+cat > "$GS_L/.github/CODEOWNERS" <<'CO'
+/.github/workflows/ @team
+/scripts/hooks/ @team
+/scripts/idc_receipt_check.py @team
+**/idc_validation_contract.py/ @team
+CO
+out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$GS_L" 2>&1)" \
+  && fail "checker false-certified the validation FILE surface off a directory-only '**/name/' pattern (F32)"
+printf '%s\n' "$out" | grep -qiE 'valid|owner' \
+  || fail "F32 refusal must name the un-owned validation surface; got: $out"
+
+# Case M (F33) — a lone `/ @team` matches NOTHING on GitHub, so it certifies no surface; the checker
+# must not read it as repo-wide ownership. Red-when-broken (pre-fix): `/` was in the root-equivalence
+# set, so `/ @team` set owned=True for every surface.
+GS_M="$WORK/co-glob-m"; mkdir -p "$GS_M/.github"
+cat > "$GS_M/.github/CODEOWNERS" <<'CO'
+/ @team
+CO
+out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$GS_M" 2>&1)" \
+  && fail "checker false-certified every surface off a bare '/ @team' that GitHub matches nothing for (F33)"
+printf '%s\n' "$out" | grep -qiE 'owner|surface' \
+  || fail "bare-slash refusal must name an un-owned surface; got: $out"
+
 # --- installer safety guards (no network is reached before these refusals) ----------------------
+# A helper: build a throwaway checkout of a named target repo (its `origin` remote decides identity),
+# optionally with a CODEOWNERS covering all four protected surfaces. The installer's F34 identity gate
+# is a LOCAL origin-remote check, so a proper target checkout must carry the matching origin.
+SANDBOX="llamallamaredpajama/ke-idc-test-repo-install"
+mk_target() {  # $1=dir  $2=OWNER/REPO for origin  $3=1 to write a covering CODEOWNERS
+  git init -q -b main "$1"
+  git -C "$1" remote add origin "git@github.com:$2.git"
+  if [ "$3" = 1 ]; then
+    mkdir -p "$1/.github"
+    cat > "$1/.github/CODEOWNERS" <<'CO'
+/.github/workflows/ @team
+/scripts/hooks/ @team
+/scripts/idc_validation_contract.py @team
+/scripts/idc_receipt_check.py @team
+CO
+  fi
+}
+
 # No --repo -> refuse (never guesses the target board).
 python3 "$INS" --ruleset "$RS" >/dev/null 2>&1 \
   && fail "installer acted with NO --repo target (must refuse without an explicit repo)"
-# Explicit sandbox repo + a --repo-root whose CODEOWNERS covers every surface -> dry-run plan, exit 0.
-plan="$(python3 "$INS" --ruleset "$RS" --repo llamallamaredpajama/ke-idc-test-repo-install \
-        --repo-root "$PLUGIN" 2>&1)" \
-  || fail "installer dry-run against an explicit sandbox repo (with a complete --repo-root) did not succeed"
+# Explicit sandbox repo + a --repo-root that is a genuine checkout OF that repo (matching origin) whose
+# CODEOWNERS covers every surface -> dry-run plan, exit 0.
+TGT_OK="$WORK/target-ok"; mk_target "$TGT_OK" "$SANDBOX" 1
+plan="$(python3 "$INS" --ruleset "$RS" --repo "$SANDBOX" --repo-root "$TGT_OK" 2>&1)" \
+  || fail "installer dry-run against an explicit sandbox repo (with a matching, covered --repo-root) did not succeed"
 printf '%s' "$plan" | grep -Fq "idc-pathway-integrity" \
   || fail "installer plan does not name the ruleset it would install"
 printf '%s' "$plan" | grep -Fq "idc/pathway-integrity" \
   || fail "installer plan does not name the required check it would enforce"
-# A known production repo, even with --apply, is refused BEFORE any mutation (production guard first).
+# A known production repo, even with --apply, is refused BEFORE any mutation (production guard runs
+# ahead of the --repo-root requirement, so no --repo-root is even needed to trip it).
 python3 "$INS" --ruleset "$RS" --repo llamallamaredpajama/idc-workflow --apply >/dev/null 2>&1 \
   && fail "installer did NOT refuse to mutate a known production repo"
 
@@ -334,13 +398,43 @@ out="$(python3 "$INS" --ruleset "$RS" --repo llamallamaredpajama/ke-idc-test-rep
 printf '%s\n' "$out" | grep -qiE 'repo-root|codeowner|owner' \
   || fail "missing-target-checkout refusal must explain that --repo-root is required; got: $out"
 
-# (b) A real TARGET checkout with NO CODEOWNERS is refused — require_code_owner_review would bind no
-#     reviewer. This is the gap F18 exists to close, now checked on the actual --repo-root target.
-TGT_NOCO="$WORK/target-no-codeowners"; mkdir -p "$TGT_NOCO"
-out="$(python3 "$INS" --ruleset "$RS" --repo llamallamaredpajama/ke-idc-test-repo-install \
-        --repo-root "$TGT_NOCO" 2>&1)" \
+# (b) A real TARGET checkout (matching origin) with NO CODEOWNERS is refused — require_code_owner_review
+#     would bind no reviewer. This is the gap F18 exists to close, now checked on the actual target.
+TGT_NOCO="$WORK/target-no-codeowners"; mk_target "$TGT_NOCO" "$SANDBOX" 0
+out="$(python3 "$INS" --ruleset "$RS" --repo "$SANDBOX" --repo-root "$TGT_NOCO" 2>&1)" \
   && fail "installer did NOT refuse a target checkout whose CODEOWNERS is absent"
 printf '%s\n' "$out" | grep -qiE 'codeowner|owner' \
   || fail "target-ownership refusal must name the CODEOWNERS gap; got: $out"
 
-echo "PASS: ruleset checker enforces PR flow, exact-head required check, force-push/deletion prevention, all protected surfaces, GitHub any-depth/last-match-wins ownership with a strict class allowlist that fails closed on unmodeled patterns, and re-types a dotted-basename DIRECTORY surface off the file guess so an interior ownerless hole cannot false-certify (F28); installer refuses without --repo, refuses a production repo, and requires --repo-root so the TARGET repo's CODEOWNERS (never the ruleset's) gates the install"
+# F34 — requiring --repo-root is not enough: it must be a checkout OF --repo. An operator can point it
+# at ANY covering checkout (the plugin `.` is the convenient default when standing in it), and the
+# ownership gate would then certify the WRONG repository — re-opening the exact hole F18 closes. The
+# installer binds the two with a LOCAL origin-identity check and refuses on mismatch or an unverifiable
+# checkout, BEFORE the ownership gate (so a covering-but-unrelated CODEOWNERS never gets a chance to
+# false-certify).
+#
+# (c) A checkout whose origin names a DIFFERENT repo than --repo REFUSES — even though its CODEOWNERS
+#     fully covers the surfaces. Red-when-broken (pre-fix): --repo-root was only checked for presence,
+#     so a covering unrelated checkout passed the gate for an unowned target.
+TGT_WRONG="$WORK/target-wrong-identity"; mk_target "$TGT_WRONG" "someone-else/unrelated-repo" 1
+out="$(python3 "$INS" --ruleset "$RS" --repo "$SANDBOX" --repo-root "$TGT_WRONG" 2>&1)" \
+  && fail "installer certified the target using an UNRELATED checkout's CODEOWNERS (F34 — --repo-root not bound to --repo)"
+printf '%s\n' "$out" | grep -qiE 'checkout of|not the --repo target|wrong repository|F34' \
+  || fail "identity-mismatch refusal must explain --repo-root is not a checkout of --repo; got: $out"
+
+# (d) A checkout with NO resolvable origin cannot be confirmed as the target and REFUSES (an
+#     unverifiable checkout is not proof of the target repo).
+TGT_NOORIGIN="$WORK/target-no-origin"; git init -q -b main "$TGT_NOORIGIN"
+mkdir -p "$TGT_NOORIGIN/.github"
+cat > "$TGT_NOORIGIN/.github/CODEOWNERS" <<'CO'
+/.github/workflows/ @team
+/scripts/hooks/ @team
+/scripts/idc_validation_contract.py @team
+/scripts/idc_receipt_check.py @team
+CO
+out="$(python3 "$INS" --ruleset "$RS" --repo "$SANDBOX" --repo-root "$TGT_NOORIGIN" 2>&1)" \
+  && fail "installer accepted a --repo-root with no resolvable origin (cannot confirm it is a checkout of --repo)"
+printf '%s\n' "$out" | grep -qiE 'origin|confirm|unverifiable' \
+  || fail "no-origin refusal must explain the identity cannot be confirmed; got: $out"
+
+echo "PASS: ruleset checker enforces PR flow, exact-head required check, force-push/deletion prevention, all protected surfaces, GitHub any-depth/last-match-wins ownership with a strict class allowlist that fails closed on unmodeled patterns, re-types a dotted-basename DIRECTORY surface off the file guess so an interior ownerless hole cannot false-certify (F28), and treats a '**/name/' trailing-slash pattern as directory-only (F32) and a bare '/' as matching-nothing (F33); installer refuses without --repo, refuses a production repo, requires --repo-root, and BINDS it to --repo via a local origin-identity check so an unrelated covering checkout cannot certify the wrong repository (F34)"

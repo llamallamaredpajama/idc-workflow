@@ -68,6 +68,35 @@ PROTECTED_REPOS = frozenset({
 _REPO_RE = re.compile(r"^[^/\s]+/[^/\s]+$")
 
 
+def _normalize_remote(url: str):
+    """Normalize a git remote URL to lowercase `owner/repo`, or None if it does not parse. Handles the
+    three GitHub forms — `git@github.com:OWNER/REPO(.git)`, `https://github.com/OWNER/REPO(.git)`, and
+    `ssh://git@github.com/OWNER/REPO(.git)` — by taking the final two path segments after stripping a
+    trailing `.git`."""
+    text = (url or "").strip()
+    if not text:
+        return None
+    text = re.sub(r"\.git/*$", "", text.rstrip("/"))
+    m = re.search(r"[:/]([^/:]+)/([^/:]+)$", text)
+    if not m:
+        return None
+    return "{}/{}".format(m.group(1), m.group(2)).lower()
+
+
+def _repo_root_identity(repo_root: str):
+    """The `owner/repo` identity of the checkout at `repo_root`, read from its `origin` remote — a
+    LOCAL, no-network check. None if there is no resolvable origin (or `git` is unavailable)."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", repo_root, "config", "--get", "remote.origin.url"],
+            capture_output=True, text=True)
+    except OSError:
+        return None
+    if out.returncode != 0:
+        return None
+    return _normalize_remote(out.stdout)
+
+
 def _load_payload(ruleset_path: str):
     with open(ruleset_path) as fh:
         doc = json.load(fh)
@@ -169,6 +198,27 @@ def main(argv=None) -> int:
               "surface is owned in the repo being protected, and the ownership gate is never derived "
               "from the ruleset path.".format(args.repo), file=sys.stderr)
         return 2
+
+    # F34: --repo-root must be a checkout OF --repo. Requiring the flag is not enough — an operator can
+    # point it at ANY checkout whose CODEOWNERS happens to cover the surfaces (the plugin repo `.` is
+    # the convenient default when standing in it), and the ownership gate would then certify the wrong
+    # repository, re-opening the exact "validates the wrong repo" hole F18 exists to close. Bind the two
+    # with a LOCAL, no-network identity check (the checkout's `origin` remote) and REFUSE on mismatch or
+    # when the identity cannot be established — an unverifiable checkout is not proof of the target.
+    identity = _repo_root_identity(args.repo_root)
+    if identity is None:
+        print("REFUSE: cannot confirm the checkout at --repo-root {} is a checkout of {} — it has no "
+              "resolvable `origin` remote. The ownership gate must validate the TARGET repo, so an "
+              "unverifiable checkout is refused (point --repo-root at a checkout of {} whose origin "
+              "names it).".format(args.repo_root, args.repo, args.repo), file=sys.stderr)
+        return 2
+    if identity != args.repo.lower():
+        print("REFUSE: --repo-root {} is a checkout of {!r}, not the --repo target {!r} — validating an "
+              "unrelated checkout's CODEOWNERS would certify ownership of the wrong repository (F34). "
+              "Point --repo-root at a checkout of {}.".format(
+                  args.repo_root, identity, args.repo.lower(), args.repo), file=sys.stderr)
+        return 2
+
     surfaces = (doc.get("idc_contract") or {}).get("protected_surfaces") or []
     ownership = RC.validate_codeowners(args.repo_root, surfaces)
     if ownership:

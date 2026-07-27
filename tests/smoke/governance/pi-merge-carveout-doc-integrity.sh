@@ -16,6 +16,11 @@
 #
 # Red-when-broken: the round-3 topology paragraph ("the sous-chef **merges** that staging branch",
 # "only then does the finisher merge") had its carve-out ~40 lines away in §5, so this guard fails on it.
+#
+# F29: this scanner is SILENT on a clean tree, so a rotted DRIFT regex would disable it undetected (the
+# recurring silent-guard trap). An embedded self-test (step 0 below) feeds each DRIFT regex — every
+# alternation branch — a canned known-bad line and the CARVEOUT regex a canned carve-out, so a regex
+# regression fails THIS lane instead of shipping the next F8 drift uncaught.
 set -uo pipefail
 PLUGIN="$(cd "$(dirname "$0")/../../.." && pwd)"
 SKILL="$PLUGIN/skills/idc-adapter-pi/SKILL.md"
@@ -25,6 +30,37 @@ fail() { echo "FAIL: $1"; exit 1; }
 out="$(python3 - "$SKILL" <<'PY'
 import re, sys
 path = sys.argv[1]
+
+# The patterns are defined ONCE and shared by BOTH the embedded self-test and the real-file scan, so a
+# self-test failure is a faithful proof that the very regexes doing the real scan have rotted.
+DRIFT = [
+    re.compile(r"(?i)(sous[- ]chef|finisher)\s+\*{0,2}merges\b"),      # "the sous-chef merges …"
+    re.compile(r"(?i)\b(does|do)\s+the\s+finisher\s+\*{0,2}merge\b"),  # "…does the finisher merge"
+]
+CARVEOUT = re.compile(r"(?i)does not self-merge|operator-performed|operator merge")
+WINDOW = 6
+
+# (0) SELF-TEST against a PLANTED positive fixture (F29). A real-tree-silence scanner passes on a clean
+# tree whether or not its regexes still work, so a later edit that breaks/loosens a DRIFT regex (a typo
+# in the `sous[- ]chef|finisher` alternation, a dropped `\*{0,2}`) would silently disable the guard and
+# the NEXT F8 drift would ship uncaught — the silent-guard trap this repo has hit repeatedly. Feeding
+# each DRIFT regex a canned known-bad line (and CARVEOUT a canned carve-out) makes a regex regression
+# FAIL THE LANE here, not slip past a reviewer.
+# Exercise BOTH alternation branches of DRIFT[0] (sous-chef AND finisher) plus the space/bold variants,
+# so a break in EITHER branch — not just the one an incidental fixture happens to hit — fails the lane.
+DRIFT_KNOWN_BAD = [
+    (0, "On the Pi runtime the sous-chef merges the staging branch under the board-backed lease."),
+    (0, "the sous chef **merges** that branch"),                 # space-form + bold variant of DRIFT[0]
+    (0, "the finisher merges the integration branch"),           # the finisher branch of DRIFT[0]
+    (1, "only then does the finisher merge the integration ref"),
+]
+for idx, sample in DRIFT_KNOWN_BAD:
+    if not DRIFT[idx].search(sample):
+        print(f"SELFTEST-FAIL: DRIFT[{idx}] no longer flags its known-bad line: {sample!r}")
+CARVEOUT_KNOWN_GOOD = "the finisher does not self-merge; the integration merge is operator-performed"
+if not CARVEOUT.search(CARVEOUT_KNOWN_GOOD):
+    print(f"SELFTEST-FAIL: CARVEOUT no longer matches its known carve-out: {CARVEOUT_KNOWN_GOOD!r}")
+
 text = open(path, encoding="utf-8").read()
 lines = text.splitlines()
 
@@ -34,12 +70,6 @@ if "does not self-merge" not in text or "operator-performed" not in text:
           "'operator-performed') is not present in the skill")
 
 # (2) a finisher/sous-chef MERGE-AS-VERB claim must have an operator-merge carve-out nearby.
-DRIFT = [
-    re.compile(r"(?i)(sous[- ]chef|finisher)\s+\*{0,2}merges\b"),      # "the sous-chef merges …"
-    re.compile(r"(?i)\b(does|do)\s+the\s+finisher\s+\*{0,2}merge\b"),  # "…does the finisher merge"
-]
-CARVEOUT = re.compile(r"(?i)does not self-merge|operator-performed|operator merge")
-WINDOW = 6
 for i, line in enumerate(lines):
     if not any(rx.search(line) for rx in DRIFT):
         continue
@@ -48,6 +78,10 @@ for i, line in enumerate(lines):
         print(f"UNGUARDED-MERGE:{i+1}: {line.strip()}")
 PY
 )"
+if printf '%s\n' "$out" | grep -q '^SELFTEST-FAIL:'; then
+  echo "$out"
+  fail "the F8 drift-detection regexes rotted — a known-bad fixture is no longer flagged (F29 silent-guard tripwire)"
+fi
 if [ -n "$out" ]; then
   echo "$out"
   fail "Pi adapter SKILL attributes a merge to the finisher/sous-chef without an operator-merge carve-out (F8)"

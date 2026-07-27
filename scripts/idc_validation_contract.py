@@ -9,6 +9,7 @@ U6 adds a machine-owned validation contract for Build:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -17,6 +18,11 @@ import subprocess
 import sys
 import tempfile
 import time
+
+try:
+    import fcntl
+except ImportError:                                      # non-POSIX (e.g. Windows) — no advisory locks
+    fcntl = None
 
 # THE CREDENTIAL SCRUB DOOR — see `idc_credential_shapes.scrub`. Every read of a CHILD PROCESS's
 # stderr in this module passes through it AT THE READ, and `tests/smoke/phase11-honesty-repro.sh` R28
@@ -166,37 +172,66 @@ def _digest_file(path: str) -> str:
         return hashlib.sha256(fh.read()).hexdigest()
 
 
+@contextlib.contextmanager
+def _witness_store_lock(common_git_dir: str):
+    """Serialize the witness-store read-modify-write across concurrent recorders (F30).
+
+    The store is ONE shared file in the git COMMON dir, written by stages that can run concurrently in
+    different linked worktrees of the same repo — e.g. a Plan recording a PLANNING witness while a Build
+    freeze records a CONTRACT witness. `os.replace` makes the final swap atomic, but each recorder does
+    read-whole-store → mutate one key → replace, and the read→mutate is NOT covered by that atom. Two
+    writers that both read the pre-image lose-update (whole-file last-writer-wins), dropping one
+    witness and leaving a receipt witness-less → a later Build borrow fails closed with 'no machine-owned
+    witness' (the same fail-closed refusal F27 exists to prevent). An exclusive advisory lock held
+    across the WHOLE read→write makes concurrent recorders serialize instead. On a platform without
+    `fcntl` the lock degrades to a no-op (best-effort); the plugin's supported hosts are POSIX."""
+    if fcntl is None:
+        yield
+        return
+    lock_path = os.path.join(common_git_dir, WITNESS_FILE + ".lock")
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
 def _record_witness(kind: str, path: str, doc: dict):
     repo_root, common_git_dir, rel = _repo_context(path)
     digest = _digest_file(path)
-    witnesses = _read_witnesses(common_git_dir)
-    if witnesses is None:
-        raise ValidationError("the validation witness store is unreadable")
-    witnesses[rel] = {
-        "kind": kind,
-        "digest": digest,
-        "repo_root": repo_root,
-        "issue": doc.get("issue"),
-        "pr": doc.get("pr"),
-        "head": doc.get("head"),
-        "diff_digest": doc.get("diff_digest"),
-        "contract_digest": doc.get("contract_digest"),
-        "validated_at": _now(),
-        "validator": os.path.basename(__file__),
-    }
-    target = _witness_path(common_git_dir)
-    fd, tmp = tempfile.mkstemp(prefix=".idc-build-validation.", suffix=".tmp", dir=common_git_dir)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(witnesses, fh, indent=2, sort_keys=True)
-            fh.write("\n")
-        os.replace(tmp, target)
-    except OSError as exc:
+    with _witness_store_lock(common_git_dir):            # F30: RMW under an exclusive lock
+        witnesses = _read_witnesses(common_git_dir)
+        if witnesses is None:
+            raise ValidationError("the validation witness store is unreadable")
+        witnesses[rel] = {
+            "kind": kind,
+            "digest": digest,
+            "repo_root": repo_root,
+            "issue": doc.get("issue"),
+            "pr": doc.get("pr"),
+            "head": doc.get("head"),
+            "diff_digest": doc.get("diff_digest"),
+            "contract_digest": doc.get("contract_digest"),
+            "validated_at": _now(),
+            "validator": os.path.basename(__file__),
+        }
+        target = _witness_path(common_git_dir)
+        fd, tmp = tempfile.mkstemp(prefix=".idc-build-validation.", suffix=".tmp", dir=common_git_dir)
         try:
-            os.remove(tmp)
-        except OSError:
-            pass
-        raise ValidationError(f"could not record the validation witness for {rel} ({exc})") from exc
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(witnesses, fh, indent=2, sort_keys=True)
+                fh.write("\n")
+            os.replace(tmp, target)
+        except OSError as exc:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise ValidationError(f"could not record the validation witness for {rel} ({exc})") from exc
     return rel
 
 
@@ -273,6 +308,39 @@ def _planning_witness_key(rel: str) -> str:
     return f"{PLANNING_WITNESS_KIND}:{rel}"
 
 
+PLANNING_WITNESS_RETAIN = 8
+
+
+def _evict_stale_versions(bucket: dict, receipt_path: str) -> None:
+    """Bound the per-path planning-witness bucket (F31). `record_planning_witness` ADDS a version per
+    receipt byte digest so a same-label rerun does not clobber the one an in-flight Build still borrows
+    (F27) — but each same-projection re-apply embeds a fresh `created_at` → new bytes → new digest → a
+    new entry, so repeated recirc re-applies would otherwise grow the bucket (and the in-.git store)
+    without bound. Retain the receipt's CURRENT on-disk digest (always borrowable) plus the most recent
+    PLANNING_WITNESS_RETAIN-1 others by `validated_at`, evicting the oldest. The window is set
+    generously so a realistic in-flight borrow — which holds a recent version — is never evicted; a
+    Build more than PLANNING_WITNESS_RETAIN same-label re-applies behind would re-anchor its receipt,
+    the safe (fail-closed) direction."""
+    if len(bucket) <= PLANNING_WITNESS_RETAIN:
+        return
+    try:
+        live = _digest_file(receipt_path)
+    except OSError:
+        live = None
+    # newest first by validated_at; digest is a stable tiebreaker for records written the same second.
+    ordered = [dg for dg, _rec in sorted(
+        bucket.items(), key=lambda kv: (kv[1].get("validated_at") or "", kv[0]), reverse=True)]
+    keep = set()
+    if live in bucket:
+        keep.add(live)
+    for dg in ordered:
+        if len(keep) >= PLANNING_WITNESS_RETAIN:
+            break
+        keep.add(dg)
+    for dg in [d for d in bucket if d not in keep]:
+        del bucket[dg]
+
+
 def record_planning_witness(receipt_path: str, doc: dict) -> str:
     """Record the out-of-tree machine witness for a freshly written planning receipt (called by the
     sanctioned transaction). Keyed by the worktree-relative logical path so a Build contract frozen in
@@ -282,39 +350,44 @@ def record_planning_witness(receipt_path: str, doc: dict) -> str:
     [:12]>`), so the logical path is identical on re-apply — but `build_receipt` embeds a fresh
     `created_at`, so the receipt BYTES differ. A single-entry witness would overwrite, invalidating a
     Build worktree that still holds the earlier committed receipt (the F19 cross-worktree handoff).
-    Retaining every byte version keeps each legitimate receipt borrowable while a re-signed forgery —
-    whose bytes match NO recorded version — is still refused (F7)."""
+    Retaining byte versions keeps each legitimate receipt borrowable while a re-signed forgery — whose
+    bytes match NO recorded version — is still refused (F7). The retained set is BOUNDED to the most
+    recent PLANNING_WITNESS_RETAIN versions (the current on-disk one always kept) so repeated same-label
+    re-applies cannot grow the in-.git store without limit (F31); the whole read-modify-write runs under
+    an exclusive store lock so a concurrent contract-witness write cannot drop it (F30)."""
     common_git_dir, repo_identity, rel = _planning_witness_context(receipt_path)
     digest = _digest_file(receipt_path)
-    witnesses = _read_witnesses(common_git_dir)
-    if witnesses is None:
-        raise ValidationError("the validation witness store is unreadable")
-    key = _planning_witness_key(rel)
-    container = witnesses.get(key)
-    if (not isinstance(container, dict) or container.get("kind") != PLANNING_WITNESS_KIND
-            or not isinstance(container.get("witnesses"), dict)):
-        container = {"kind": PLANNING_WITNESS_KIND, "witnesses": {}}
-    container["witnesses"][digest] = {
-        "repo_identity": repo_identity,
-        "label": doc.get("label"),
-        "receipt_digest": doc.get("receipt_digest"),
-        "validated_at": _now(),
-        "validator": os.path.basename(__file__),
-    }
-    witnesses[key] = container
-    target = _witness_path(common_git_dir)
-    fd, tmp = tempfile.mkstemp(prefix=".idc-build-validation.", suffix=".tmp", dir=common_git_dir)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(witnesses, fh, indent=2, sort_keys=True)
-            fh.write("\n")
-        os.replace(tmp, target)
-    except OSError as exc:
+    with _witness_store_lock(common_git_dir):            # F30: RMW under an exclusive lock
+        witnesses = _read_witnesses(common_git_dir)
+        if witnesses is None:
+            raise ValidationError("the validation witness store is unreadable")
+        key = _planning_witness_key(rel)
+        container = witnesses.get(key)
+        if (not isinstance(container, dict) or container.get("kind") != PLANNING_WITNESS_KIND
+                or not isinstance(container.get("witnesses"), dict)):
+            container = {"kind": PLANNING_WITNESS_KIND, "witnesses": {}}
+        container["witnesses"][digest] = {
+            "repo_identity": repo_identity,
+            "label": doc.get("label"),
+            "receipt_digest": doc.get("receipt_digest"),
+            "validated_at": _now(),
+            "validator": os.path.basename(__file__),
+        }
+        _evict_stale_versions(container["witnesses"], receipt_path)   # F31: bound the retained set
+        witnesses[key] = container
+        target = _witness_path(common_git_dir)
+        fd, tmp = tempfile.mkstemp(prefix=".idc-build-validation.", suffix=".tmp", dir=common_git_dir)
         try:
-            os.remove(tmp)
-        except OSError:
-            pass
-        raise ValidationError(f"could not record the planning-receipt witness for {rel} ({exc})") from exc
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(witnesses, fh, indent=2, sort_keys=True)
+                fh.write("\n")
+            os.replace(tmp, target)
+        except OSError as exc:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise ValidationError(f"could not record the planning-receipt witness for {rel} ({exc})") from exc
     return rel
 
 

@@ -257,6 +257,53 @@ out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$GS_I" 2>&1)" \
 printf '%s\n' "$out" | grep -qiE 'hook|owner' \
   || fail "unmodeled mid-** refusal must name the un-owned hook surface; got: $out"
 
+# F28 (surface typing, NOT the rule matcher) — a bare protected-surface entry whose basename contains
+# a dot (`config/my.dir`, a dotfile dir like `.github`) is a DIRECTORY, but `_surface_target` guessed
+# it was a FILE. Typed as a file the checker only un-owns on an EXACT-name match, so a later ownerless
+# rule carving a hole INSIDE the directory is invisible and the surface false-certifies. The fix
+# re-types the surface to a directory once a rule structurally proves it is one, so the interior
+# ownerless hole un-owns it. These cases use a ruleset whose protected_surfaces carry an extra
+# dotted-DIRECTORY surface (the four shipped surface classes are preserved so validate_contract passes).
+F28_RS="$WORK/rs-f28.json"
+python3 - "$RS" "$F28_RS" <<'PY' || fail "F28 ruleset setup failed"
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["idc_contract"]["protected_surfaces"].append("config/my.dir")   # a dotted-basename DIRECTORY surface
+json.dump(d, open(sys.argv[2], "w"))
+PY
+
+# Case J (F28 false-certify) — `/config/my.dir/ @team` owns the directory, then a later ownerless
+# `/config/my.dir/secret.txt` carves a hole; GitHub leaves secret.txt unowned, so the surface is NOT
+# fully owned. Red-when-broken (pre-fix): the surface was typed as a file, the interior hole matched
+# no exact file, and the checker returned owned=True — a false-certify.
+F28_HOLE="$WORK/co-f28-hole"; mkdir -p "$F28_HOLE/.github"
+cat > "$F28_HOLE/.github/CODEOWNERS" <<'CO'
+/.github/workflows/ @team
+/scripts/hooks/ @team
+/scripts/idc_validation_contract.py @team
+/scripts/idc_receipt_check.py @team
+/config/my.dir/ @team
+/config/my.dir/secret.txt
+CO
+out="$(python3 "$CHK" --ruleset "$F28_RS" --repo-root "$F28_HOLE" 2>&1)" \
+  && fail "checker false-certified a dotted-basename DIRECTORY surface with an ownerless interior hole (F28)"
+printf '%s\n' "$out" | grep -qiE 'my\.dir|owner' \
+  || fail "F28 refusal must name the un-owned dotted-directory surface; got: $out"
+
+# Case K (F28 control) — the SAME dotted-directory surface FULLY owned (no interior hole) still
+# certifies, and the shipped dotted-FILE surfaces are unaffected (no rule structurally makes them
+# directories). Proves the fix is precedence/structure-aware, not a blanket refusal of dotted paths.
+F28_OK="$WORK/co-f28-ok"; mkdir -p "$F28_OK/.github"
+cat > "$F28_OK/.github/CODEOWNERS" <<'CO'
+/.github/workflows/ @team
+/scripts/hooks/ @team
+/scripts/idc_validation_contract.py @team
+/scripts/idc_receipt_check.py @team
+/config/my.dir/ @team
+CO
+python3 "$CHK" --ruleset "$F28_RS" --repo-root "$F28_OK" >/dev/null \
+  || fail "checker false-refused a fully-owned dotted-directory surface (F28 control), or regressed a shipped dotted-file surface"
+
 # --- installer safety guards (no network is reached before these refusals) ----------------------
 # No --repo -> refuse (never guesses the target board).
 python3 "$INS" --ruleset "$RS" >/dev/null 2>&1 \
@@ -296,4 +343,4 @@ out="$(python3 "$INS" --ruleset "$RS" --repo llamallamaredpajama/ke-idc-test-rep
 printf '%s\n' "$out" | grep -qiE 'codeowner|owner' \
   || fail "target-ownership refusal must name the CODEOWNERS gap; got: $out"
 
-echo "PASS: ruleset checker enforces PR flow, exact-head required check, force-push/deletion prevention, all protected surfaces, GitHub any-depth/last-match-wins ownership with a strict class allowlist that fails closed on unmodeled patterns; installer refuses without --repo, refuses a production repo, and requires --repo-root so the TARGET repo's CODEOWNERS (never the ruleset's) gates the install"
+echo "PASS: ruleset checker enforces PR flow, exact-head required check, force-push/deletion prevention, all protected surfaces, GitHub any-depth/last-match-wins ownership with a strict class allowlist that fails closed on unmodeled patterns, and re-types a dotted-basename DIRECTORY surface off the file guess so an interior ownerless hole cannot false-certify (F28); installer refuses without --repo, refuses a production repo, and requires --repo-root so the TARGET repo's CODEOWNERS (never the ruleset's) gates the install"

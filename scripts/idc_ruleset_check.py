@@ -332,6 +332,35 @@ def _relationship(matcher, target):
     return "none"
 
 
+def _declares_directory(surface_path: str, rules: list) -> bool:
+    """Whether some CODEOWNERS rule STRUCTURALLY proves `surface_path` is a directory, not a leaf file:
+    a trailing-slash / `/**` / `/*` rule ON it, or any anchored rule matching a path strictly BELOW
+    `surface_path/`. A leaf file has no interior and takes no trailing slash, so such a rule can only
+    exist when the surface is a directory — a fail-closed-safe signal to switch a dot-in-basename
+    surface that `_surface_target` GUESSED was a file (`config/my.dir`, `.github`) over to the stricter
+    directory reading (F28). Without it, the file reading only un-owns on an EXACT-name match, so a
+    later ownerless rule carving a hole INSIDE the directory (`/config/my.dir/secret.txt`) is invisible
+    and the surface false-certifies. Unanchored / any-depth patterns are deliberately NOT treated as
+    directory signals — they do not prove the surface is a directory and would false-REFUSE a genuine
+    dotted file that a suffix (`*.py`) or any-depth rule legitimately owns."""
+    below = surface_path.rstrip("/") + "/"
+    for pattern, _owners in rules:
+        m = _rule_matcher(pattern)
+        kind = m[0]
+        if kind == "dir_one":                          # `/D/*` — always anchored; D is a directory
+            D = m[1]
+            if D == surface_path or D.startswith(below):
+                return True
+        elif kind == "dir_rec" and m[1]:               # anchored `/D/` or `/D/**` — D is a directory
+            D = m[2]
+            if D == surface_path or D.startswith(below):
+                return True
+        elif kind == "file" and m[1]:                  # anchored `/F` matching strictly BELOW the surface
+            if m[2].startswith(below):
+                return True
+    return False
+
+
 def _surface_is_owned(surface: str, rules: list) -> bool:
     """Whether the WHOLE protected surface is owned under GitHub's LAST-MATCH-WINS, glob-aware
     precedence. GitHub applies the *last* matching CODEOWNERS pattern to each file, so whole-surface
@@ -354,6 +383,13 @@ def _surface_is_owned(surface: str, rules: list) -> bool:
     be refused with a clear message telling the operator to add an anchored recursive rule — but the
     matcher NEVER certifies a surface GitHub would leave unowned."""
     target = _surface_target(surface)
+    # F28: `_surface_target` types a bare dotted-basename path as a FILE, but it may name a DIRECTORY
+    # (a dotfile dir like `.github`, or a dotted dir name like `config/my.dir`). If a rule structurally
+    # proves it is a directory, evaluate it under the stricter directory reading so a later ownerless
+    # rule carving an interior hole un-owns it — instead of being invisible to the exact-file match
+    # (`_relationship` file branch), which would false-certify a surface GitHub leaves partly unowned.
+    if target[0] == "file" and _declares_directory(target[1], rules):
+        target = ("dir", target[1])
     owned = False
     for pattern, owners in rules:
         rel = _relationship(_rule_matcher(pattern), target)

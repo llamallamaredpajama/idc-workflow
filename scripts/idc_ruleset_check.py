@@ -61,21 +61,50 @@ DEFAULT_RULESET = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)),
                  "..", ".github", "rulesets", "idc-pathway-integrity.json"))
 
-# Each protected-surface CLASS must be represented by at least one entry whose path contains the key.
+# Each protected-surface CLASS must be represented by at least one entry, matched EXACTLY against a
+# canonical path — never an anywhere-substring, which a lookalike (`scripts/not-idc_pathway_check.py`,
+# `docs/CODEOWNERS.bak`, `tmp/.github/rulesets-backup`) would satisfy while leaving the real governance
+# file outside the ownership gate (F47). Each row carries the class's authoritative file/dir TYPE, so a
+# KNOWN surface is typed from what it IS rather than inferred from the CODEOWNERS rules under validation
+# (F46). F40 mandates the governance-of-governance classes (the deterministic checker, the ruleset
+# directory, and CODEOWNERS itself) so a downstream repo cannot certify while leaving those weakenable
+# without a code-owner review.
+#   (label, kind, canonical)   kind ∈ {"file", "dir"}
 SURFACE_CLASSES = (
-    ("workflow", ".github/workflows"),
-    ("hook", "scripts/hooks"),
-    ("validation", "valid"),
-    ("receipt", "receipt"),
-    # F40 — the guard machinery is load-bearing governance too. The shipped .github/CODEOWNERS already
-    # owns the deterministic checker, the ruleset directory, and CODEOWNERS itself; mandate them in the
-    # contract so a downstream repo cannot certify while leaving those three weakenable without a
-    # code-owner review (strip owners from CODEOWNERS, or poison the checker that the NEXT PR's trusted
-    # base then runs — a two-PR TOCTOU F1's base-ref run does not cover).
-    ("checker", "idc_pathway_check.py"),
-    ("ruleset", ".github/rulesets"),
-    ("codeowners", "CODEOWNERS"),
+    ("workflow",   "dir",  ".github/workflows"),
+    ("hook",       "dir",  "scripts/hooks"),
+    ("validation", "file", "scripts/idc_validation_contract.py"),
+    ("receipt",    "file", "scripts/idc_receipt_check.py"),
+    ("checker",    "file", "scripts/idc_pathway_check.py"),
+    ("ruleset",    "dir",  ".github/rulesets"),
+    ("codeowners", "file", ".github/CODEOWNERS"),
 )
+
+
+def _surface_matches_class(surface: str, kind: str, canonical: str) -> bool:
+    """True iff protected-surface `surface` represents the governance class `(kind, canonical)`, matched
+    EXACTLY (F47). A FILE class matches on basename == the canonical basename (the file, wherever it is
+    declared) or full-path equality; a DIR class matches when `canonical` is the surface path itself or a
+    leading path-prefix of it. An anywhere-substring lookalike — `scripts/not-idc_pathway_check.py`
+    (basename `not-idc_pathway_check.py`), `docs/CODEOWNERS.bak`, `tmp/.github/rulesets-backup` — does
+    NOT match, so it can no longer satisfy the mandatory-class requirement in place of the real file."""
+    path = _surface_target(surface)[1]
+    if kind == "file":
+        return path == canonical or path.rsplit("/", 1)[-1] == canonical.rsplit("/", 1)[-1]
+    return path == canonical or path.startswith(canonical + "/")
+
+
+def _authoritative_surface_type(surface: str):
+    """The AUTHORITATIVE file/dir type of a surface that represents a known governance class, else None
+    for a surface outside the modeled classes (a downstream / non-standard declaration). The ownership
+    check types a KNOWN surface from what it IS — a file or a directory — instead of inferring it from
+    the CODEOWNERS rules being validated; otherwise a directory-only `/<file>/ @owner` rule can re-type a
+    protected FILE surface to a directory and false-certify it as owned while GitHub, reading the trailing
+    slash as directory-only, leaves the FILE unowned (F46)."""
+    for _label, kind, canonical in SURFACE_CLASSES:
+        if _surface_matches_class(surface, kind, canonical):
+            return kind
+    return None
 
 
 def _rule(rules: list, rule_type: str):
@@ -142,11 +171,12 @@ def validate_contract(contract: dict) -> list:
     if not isinstance(surfaces, list) or not surfaces:
         reasons.append("idc_contract.protected_surfaces is missing or empty")
     else:
-        for label, key in SURFACE_CLASSES:
-            if not any(isinstance(s, str) and key in s for s in surfaces):
+        for label, kind, canonical in SURFACE_CLASSES:
+            if not any(isinstance(s, str) and _surface_matches_class(s, kind, canonical)
+                       for s in surfaces):
                 reasons.append(
-                    "protected_surfaces does not cover the {} surface (no entry containing "
-                    "{!r})".format(label, key))
+                    "protected_surfaces does not cover the {} surface (no entry naming "
+                    "{!r})".format(label, canonical))
     return reasons
 
 
@@ -234,13 +264,17 @@ def _surface_target(surface: str):
 def _name_matcher(anchored: bool, body: str):
     """A wildcard-free, no-trailing-slash pattern. GitHub matches a FILE or a DIRECTORY of this name
     (recursively, if a directory). A dotted basename is modelled as a file; a dotless one as a
-    directory — the safe over-match, since treating a name as a recursive directory can only broaden
-    what counts as owned or un-owned, never certify a surface a narrower reading would refuse."""
+    recursive directory-name that ALSO matches a file of that name (`dir_only=False`) — the safe
+    over-match, since treating a name as a recursive directory can only broaden what counts as owned or
+    un-owned, never certify a surface a narrower reading would refuse. The `dir_only=False` flag is
+    load-bearing: unlike a TRAILING-SLASH pattern (directory-only), a bare name owns a FILE surface of
+    that exact name (`/.github/CODEOWNERS @owner` owns the FILE `.github/CODEOWNERS`), so it must stay
+    distinct from the directory-only patterns that must NOT (F46)."""
     d = body.rstrip("/")
     base = d.rsplit("/", 1)[-1]
     if "." in base:
         return ("file", anchored, d)
-    return ("dir_rec", anchored, d)
+    return ("dir_rec", anchored, d, False)
 
 
 def _rule_matcher(pattern: str):
@@ -259,7 +293,10 @@ def _rule_matcher(pattern: str):
 
     Returns (each `anchored` flag: True = repo-root-relative, False = matches at any depth):
         ("root",)                  every file in the repo            `*`  `/`  ``  `**`  `/**`
-        ("dir_rec", anchored, D)   directory D and everything under it, recursively
+        ("dir_rec", anchored, D, dir_only)   directory D and everything under it, recursively.
+                                   dir_only=True for a TRAILING-SLASH / `/**` pattern (directory-only —
+                                   never matches a regular FILE named D); dir_only=False for a bare NAME
+                                   (`Makefile`, `.github/CODEOWNERS`) that also matches a file of that name.
         ("dir_one", D)             files DIRECTLY under anchored D (one level)  `/D/*`  `D/*`  (`/*`->"")
         ("suffix", ".ext")         any file with that suffix, at any depth      `*.ext`  `**/*.ext`
         ("file", anchored, F)      a file named F (basename match when any-depth)
@@ -294,7 +331,7 @@ def _rule_matcher(pattern: str):
             # certifying the file surface `scripts/idc_validation_contract.py` that GitHub leaves
             # unowned — F32).
             if tail.endswith("/"):
-                return ("dir_rec", False, body)                     # `**/logs/` -> any-depth DIRECTORY
+                return ("dir_rec", False, body, True)               # `**/logs/` -> any-depth DIRECTORY (dir-only)
             return _name_matcher(False, body)                       # `**/logs` -> any-depth dir/file
         return ("unmodeled", "")
 
@@ -308,9 +345,9 @@ def _rule_matcher(pattern: str):
     if body.endswith("/*") and not _has_wildcard(body[:-2]):
         return ("dir_one", body[:-2].rstrip("/"))                   # `/scripts/*` — one level (anchored)
     if body.endswith("/**") and not _has_wildcard(body[:-3]):
-        return ("dir_rec", anchored, body[:-3].rstrip("/"))         # `/scripts/**`
+        return ("dir_rec", anchored, body[:-3].rstrip("/"), True)   # `/scripts/**` (directory-only)
     if body.endswith("/") and not _has_wildcard(body.rstrip("/")):
-        return ("dir_rec", anchored, body.rstrip("/"))              # `/docs/`(root)  `apps/`(any depth)
+        return ("dir_rec", anchored, body.rstrip("/"), True)        # `/docs/`(root) `apps/`(any depth) dir-only
     if not _has_wildcard(body):
         return _name_matcher(anchored, body)                        # `/path/f.py`  `Makefile`(any depth)
 
@@ -341,9 +378,18 @@ def _relationship(matcher, target):
 
     if kind == "dir_rec":
         anchored, D = matcher[1], matcher[2]
+        dir_only = matcher[3] if len(matcher) > 3 else True
         if anchored:
-            if D == "" or tpath == D or tpath.startswith(D + "/"):
-                return "covers_all"                                # D is ancestor-or-self of the surface
+            if D == "" or tpath.startswith(D + "/"):
+                return "covers_all"                                # D is an ancestor of the surface (its subtree)
+            if tpath == D:
+                # D names the surface itself. A DIRECTORY-ONLY pattern (trailing slash / `/**`) owns the
+                # directory D and its subtree but matches NOTHING for a regular FILE named D on GitHub, so
+                # it must never certify a protected FILE surface (F46). A bare-NAME pattern (no trailing
+                # slash) matches a file OR a directory of that name, so it does own a file surface named D.
+                if tkind == "dir":
+                    return "covers_all"
+                return "none" if dir_only else "covers_all"
             if tkind == "dir" and D.startswith(tpath + "/"):
                 return "touches"                                   # D is a strict descendant of the surface dir
             return "none"
@@ -436,20 +482,34 @@ def _surface_is_owned(surface: str, rules: list) -> bool:
     Scope of the fail-closed guarantee: for a protected surface declared with the standard conventions
     (a directory carrying a `/`, `/*` or `/**` suffix, or a genuine file), this never certifies a
     surface GitHub would leave unowned — including a `**/name/` trailing-slash directory pattern, which
-    is directory-only and cannot own a file surface (F32). The ONE documented residual is an
-    UNDECLARED-directory dotted surface (`config/my.dir` with no `/`-family suffix and no rule that
-    structurally proves it is a directory) reached only through an unanchored any-depth ownerless rule:
-    `_surface_target`/`_declares_directory` still type it as a file, so an interior hole is invisible.
-    Closing it fully would need a filesystem stat of the surface and would false-REFUSE genuine dotted
-    files; it is the review's accepted 'non-standard declaration' tradeoff (F28 residual), not a
-    false-certify of any standard-declared surface."""
+    is directory-only and cannot own a file surface (F32), and a directory-only `/<file>/` rule on a
+    KNOWN governance FILE surface, which `_authoritative_surface_type` types from what the surface IS so
+    the rule can never re-type it to a directory and certify it (F46). The ONE documented residual is an
+    UNKNOWN dotted surface outside the modeled governance classes (a downstream `config/my.dir` with no
+    `/`-family suffix and no authoritative type) whose directory-ness is inferred from the rules: a
+    trailing-slash self-rule can still read it as a directory. That inference is deliberately confined to
+    non-governance surfaces — it cannot touch the F40-protected files — and closing it fully for arbitrary
+    downstream declarations would need a filesystem stat and would false-REFUSE genuine dotted files; it
+    is the review's accepted 'non-standard declaration' tradeoff (F28 residual), not a false-certify of
+    any standard-declared or governance surface."""
     target = _surface_target(surface)
-    # F28: `_surface_target` types a bare dotted-basename path as a FILE, but it may name a DIRECTORY
-    # (a dotfile dir like `.github`, or a dotted dir name like `config/my.dir`). If a rule structurally
-    # proves it is a directory, evaluate it under the stricter directory reading so a later ownerless
-    # rule carving an interior hole un-owns it — instead of being invisible to the exact-file match
-    # (`_relationship` file branch), which would false-certify a surface GitHub leaves partly unowned.
-    if target[0] == "file" and _declares_directory(target[1], rules):
+    # F46: a KNOWN governance surface is typed from what it AUTHORITATIVELY is — a file or a directory —
+    # never inferred from the CODEOWNERS rules under validation. Otherwise a directory-only
+    # `/<file>/ @owner` rule (trailing slash) re-types a protected FILE surface to a directory and then
+    # `covers_all`-certifies it, while GitHub reads the trailing slash as directory-only and leaves the
+    # FILE unowned — the exact false-certify F40's file surfaces exist to prevent.
+    auth = _authoritative_surface_type(surface)
+    if auth == "file":
+        target = ("file", target[1])
+    elif auth == "dir":
+        target = ("dir", target[1])
+    # F28 (unknown / non-standard surfaces only): `_surface_target` types a bare dotted-basename path as a
+    # FILE, but a downstream repo may name a DIRECTORY that way (`config/my.dir`, a dotfile dir). With no
+    # authoritative class type, fall back to structural inference — if a rule proves it is a directory,
+    # read it as one so a later ownerless interior-hole rule un-owns it (invisible to the exact-file
+    # match otherwise). This inference is deliberately NOT applied to the known FILE surfaces above, whose
+    # type a trailing-slash self-rule could otherwise abuse to false-certify (F46).
+    elif target[0] == "file" and _declares_directory(target[1], rules):
         target = ("dir", target[1])
     owned = False
     for pattern, owners in rules:
@@ -474,11 +534,21 @@ def validate_codeowners_content(rel, text, surfaces) -> list:
     if not rules:
         return ["{} declares no owner rules — every protected surface is unowned".format(rel)]
     reasons = []
+    declared = {s for s in (surfaces or []) if isinstance(s, str)}
     for surface in surfaces or []:
         if isinstance(surface, str) and surface and not _surface_is_owned(surface, rules):
             reasons.append(
                 "protected surface {!r} has no code owner in {} — add a CODEOWNERS rule for it".format(
                     surface, rel))
+    # F49: the contract pins the codeowners surface to `.github/CODEOWNERS`, but GitHub reads whichever
+    # of the three honored locations is present (`rel`) — which may be root `CODEOWNERS` or `docs/CODEOWNERS`.
+    # When the EFFECTIVE governing file is not the declared surface, nothing above forces it to own ITSELF,
+    # so a code owner could weaken the real governing file without a review. Require `/<rel>` to be owned
+    # too, wherever it lives (skipped when `rel` IS a declared surface — the loop already covers it).
+    if rel not in declared and not _surface_is_owned(rel, rules):
+        reasons.append(
+            "the effective CODEOWNERS file {!r} does not own itself — the governing file must name an "
+            "owner for its own path, or it can be weakened without a code-owner review (F49)".format(rel))
     return reasons
 
 

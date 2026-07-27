@@ -30,9 +30,10 @@
 # recorded as a documented divergence, never a failure. Only false-CERTIFY and a false-refusal of a
 # PRECISELY-MODELED class fail the lane.
 #
-# Red-when-broken: revert the F32 fix (`**/name/` -> file) or the F33 fix (bare `/` -> root) in
-# idc_ruleset_check.py and this lane FAILS — the differential reports the exact false-certifying cell.
-# Demonstrated during development against both reverted fixes.
+# Red-when-broken: revert the F32 fix (`**/name/` -> file), the F33 fix (bare `/` -> root), or the F46
+# fix (an anchored directory-only `/scripts/idc_validation_contract.py/` no longer certifies the FILE
+# surface — grid pattern below) in idc_ruleset_check.py and this lane FAILS, reporting the exact
+# false-certifying cell. Demonstrated during development against each reverted fix.
 #
 # Usage: bash tests/smoke/governance/codeowners-ownership-differential.sh   (exit 0 = pass)
 set -uo pipefail
@@ -148,6 +149,7 @@ PATTERNS = [
     "hooks",                                # SLASHLESS bare name, any depth
     "idc_validation_contract.py",           # SLASHLESS dotted basename (file), any depth
     "idc_validation_contract.py/",          # SLASHLESS dotted + TRAILING slash -> dir-only, any depth
+    "/scripts/idc_validation_contract.py/", # ANCHORED file path + TRAILING slash -> dir-only (F46)
     "**/idc_validation_contract.py/",       # **/ prefixed + TRAILING slash + dotted -> dir-only (F32)
     "**/hooks",                             # **/ prefixed bare name
     "**/hooks/",                            # **/ prefixed trailing-slash dir

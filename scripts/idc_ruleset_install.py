@@ -82,20 +82,39 @@ PROTECTED_REPOS = frozenset({
 
 _REPO_RE = re.compile(r"^[^/\s]+/[^/\s]+$")
 
+# The F34 identity gate must prove the checkout is the GitHub `--repo`, so a remote only counts when it
+# is hosted on GitHub. GH_HOST (the same env `gh` honors, e.g. a GitHub Enterprise host) overrides the
+# default; anything else — a non-GitHub SSH host, GitLab, a bare local path — is refused (F48).
+_GH_HOST = (os.environ.get("GH_HOST") or "github.com").strip().lower()
+
 
 def _normalize_remote(url: str):
-    """Normalize a git remote URL to lowercase `owner/repo`, or None if it does not parse. Handles the
-    three GitHub forms — `git@github.com:OWNER/REPO(.git)`, `https://github.com/OWNER/REPO(.git)`, and
-    `ssh://git@github.com/OWNER/REPO(.git)` — by taking the final two path segments after stripping a
-    trailing `.git`."""
+    """Normalize a git remote URL to lowercase `owner/repo` IFF it is hosted on the GitHub host, else
+    None. Handles the three GitHub forms — `git@github.com:OWNER/REPO(.git)`,
+    `https://github.com/OWNER/REPO(.git)`, and `ssh://git@github.com/OWNER/REPO(.git)`. The HOST is
+    parsed and checked (F48): dropping it and keeping only the last two path segments let a NON-GitHub
+    checkout (`git@evil.example.com:owner/repo`, `https://gitlab.com/owner/repo`, a local path ending in
+    `owner/repo`) satisfy the identity gate against `--repo owner/repo`, so an unrelated checkout's
+    CODEOWNERS could certify the real GitHub target. A remote whose host is not the GitHub host — or that
+    carries no host at all — returns None (unverifiable → refused upstream)."""
     text = (url or "").strip()
     if not text:
         return None
-    text = re.sub(r"\.git/*$", "", text.rstrip("/"))
-    m = re.search(r"[:/]([^/:]+)/([^/:]+)$", text)
-    if not m:
+    text = re.sub(r"\.git/*$", "", text)
+    host = path = None
+    m = re.match(r"^[A-Za-z][A-Za-z0-9+.\-]*://(?:[^@/]+@)?([^/:]+)(?::\d+)?/(.+)$", text)
+    if m:                                                   # scheme://[user@]host[:port]/owner/repo
+        host, path = m.group(1), m.group(2)
+    else:
+        m = re.match(r"^(?:[^@/]+@)?([^/:]+):(.+)$", text)  # scp-like  [user@]host:owner/repo
+        if m:
+            host, path = m.group(1), m.group(2)
+    if host is None or host.lower() != _GH_HOST:
         return None
-    return "{}/{}".format(m.group(1), m.group(2)).lower()
+    segs = [s for s in path.strip("/").split("/") if s]
+    if len(segs) < 2:
+        return None
+    return "{}/{}".format(segs[-2], segs[-1]).lower()
 
 
 def _repo_root_identity(repo_root: str):
@@ -297,10 +316,11 @@ def main(argv=None) -> int:
     # when the identity cannot be established — an unverifiable checkout is not proof of the target.
     identity = _repo_root_identity(args.repo_root)
     if identity is None:
-        print("REFUSE: cannot confirm the checkout at --repo-root {} is a checkout of {} — it has no "
-              "resolvable `origin` remote. The ownership gate must validate the TARGET repo, so an "
-              "unverifiable checkout is refused (point --repo-root at a checkout of {} whose origin "
-              "names it).".format(args.repo_root, args.repo, args.repo), file=sys.stderr)
+        print("REFUSE: cannot confirm the checkout at --repo-root {} is a checkout of {} — its `origin` "
+              "remote is absent or not on the GitHub host {!r} (F48). The ownership gate must validate the "
+              "TARGET GitHub repo, so an unverifiable or non-GitHub checkout is refused (point --repo-root "
+              "at a checkout of {} whose origin names it on GitHub; set GH_HOST for a GitHub Enterprise "
+              "host).".format(args.repo_root, args.repo, _GH_HOST, args.repo), file=sys.stderr)
         return 2
     if identity != args.repo.lower():
         print("REFUSE: --repo-root {} is a checkout of {!r}, not the --repo target {!r} — validating an "

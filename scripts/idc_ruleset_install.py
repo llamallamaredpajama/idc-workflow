@@ -20,6 +20,12 @@ accident:
     ownership is only knowable from a checkout of it, `--repo-root` (a checkout of `--repo`) is
     REQUIRED — the gate is NEVER derived from the ruleset path, which for the shipped default ruleset
     is the plugin itself (a different repository whose CODEOWNERS is irrelevant to the target).
+  * The ownership gate validates the CODEOWNERS GitHub actually ENFORCES — the copy COMMITTED on the
+    target's default branch, not the working tree (F39). GitHub evaluates CODEOWNERS from the default
+    branch, so an uncommitted / stale / locally-edited working-tree CODEOWNERS could certify here yet
+    bind no reviewer once the ruleset is live. The installer reads the committed content via a LOCAL
+    `git show <default-branch>:.github/CODEOWNERS`, validates THAT, and refuses when no CODEOWNERS is
+    committed or when the working-tree copy differs from it — fail closed, clear message.
 
 Live sandbox use (the only repos this run may mutate) is gated further by the caller — see
 `tests/live/pathway-github-integration.sh`, which refuses anything but a disposable sandbox.
@@ -95,6 +101,52 @@ def _repo_root_identity(repo_root: str):
     if out.returncode != 0:
         return None
     return _normalize_remote(out.stdout)
+
+
+def _default_branch_ref(repo_root: str):
+    """The branch GitHub will enforce CODEOWNERS from, as a git ref usable with `git show` — a LOCAL,
+    no-network resolution (F39). Prefers the checkout's known origin default
+    (`refs/remotes/origin/HEAD`, set by a real clone, e.g. `origin/main`); falls back to the currently
+    checked-out branch. None when neither is resolvable (a detached checkout with no origin HEAD, or an
+    unborn branch with no commit) — the caller then refuses, since a branch GitHub enforces cannot be
+    named."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", repo_root, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+            capture_output=True, text=True)
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip()                       # e.g. "origin/main"
+        out = subprocess.run(
+            ["git", "-C", repo_root, "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True)
+    except OSError:
+        return None
+    if out.returncode == 0:
+        branch = out.stdout.strip()
+        if branch and branch != "HEAD":                     # "HEAD" == detached; not a named branch
+            return branch
+    return None
+
+
+def _committed_codeowners(repo_root: str, ref: str):
+    """`(relpath, text)` of the CODEOWNERS COMMITTED at `ref` (first of the GitHub-honored locations),
+    or `(None, None)` if none is committed. Reads via `git show <ref>:<relpath>` — the committed bytes
+    GitHub would enforce, not the working tree (F39). Decodes UTF-8 strictly, mirroring the checker's
+    `_read_codeowners`: a committed CODEOWNERS whose bytes are not valid UTF-8 returns `(relpath, None)`
+    so the caller fails closed via the 'unreadable' path rather than crashing on a decode error."""
+    for rel in RC.CODEOWNERS_RELPATHS:
+        try:
+            out = subprocess.run(
+                ["git", "-C", repo_root, "show", "{}:{}".format(ref, rel)],
+                capture_output=True)                        # bytes — decode ourselves, strict UTF-8
+        except OSError:
+            return None, None
+        if out.returncode == 0:
+            try:
+                return rel, out.stdout.decode("utf-8")
+            except UnicodeDecodeError:
+                return rel, None
+    return None, None
 
 
 def _load_payload(ruleset_path: str):
@@ -220,11 +272,46 @@ def main(argv=None) -> int:
         return 2
 
     surfaces = (doc.get("idc_contract") or {}).get("protected_surfaces") or []
-    ownership = RC.validate_codeowners(args.repo_root, surfaces)
+
+    # F39: GitHub enforces the CODEOWNERS COMMITTED on the default branch, not the working tree. Validate
+    # that committed copy (via a local `git show`), and refuse when none is committed or when the working
+    # tree differs from it — an uncommitted / stale / locally-edited CODEOWNERS could otherwise certify
+    # here yet bind NO reviewer once the ruleset is live. Runs after the F34 identity check (so `ref` is
+    # the target's own branch), before any network call, in dry-run and apply alike.
+    ref = _default_branch_ref(args.repo_root)
+    if ref is None:
+        print("REFUSE: cannot determine the branch GitHub will enforce CODEOWNERS from in the checkout "
+              "at --repo-root {} (no origin/HEAD and no named current branch). The committed, "
+              "default-branch CODEOWNERS is what binds reviewers, so it must be resolvable.".format(
+                  args.repo_root), file=sys.stderr)
+        return 2
+    committed_rel, committed_text = _committed_codeowners(args.repo_root, ref)
+    if committed_rel is None:
+        print("REFUSE: no CODEOWNERS is committed on {} in the checkout at {} — GitHub enforces the "
+              "default-branch CODEOWNERS, so require_code_owner_review would bind no reviewer to any "
+              "protected surface. Commit (and push) a CODEOWNERS covering every protected surface before "
+              "installing.".format(ref, args.repo_root), file=sys.stderr)
+        return 1
+    if committed_text is None:
+        print("REFUSE: the CODEOWNERS committed on {} ({}) is unreadable (not valid UTF-8) — refusing "
+              "to certify ownership from a file GitHub cannot parse.".format(ref, committed_rel),
+              file=sys.stderr)
+        return 1
+    wt_rel, wt_text = RC._read_codeowners(args.repo_root)
+    if (wt_rel, wt_text) != (committed_rel, committed_text):
+        print("REFUSE: the working-tree CODEOWNERS ({}) does not match the copy committed on {} ({}) — "
+              "GitHub enforces the committed default-branch copy, not your working tree, so a local edit "
+              "or uncommitted file would install require_code_owner_review while binding a different (or "
+              "no) reviewer. Commit (and push) the CODEOWNERS you intend to enforce before "
+              "installing.".format(wt_rel or "absent", ref, committed_rel), file=sys.stderr)
+        return 1
+
+    # Ownership is validated against the COMMITTED content — exactly what GitHub enforces (F39).
+    ownership = RC.validate_codeowners_content(committed_rel, committed_text, surfaces)
     if ownership:
-        print("REFUSE: protected surfaces are not all owned in the target checkout {} — "
+        print("REFUSE: protected surfaces are not all owned in the CODEOWNERS committed on {} ({}) — "
               "require_code_owner_review would bind no reviewer; add CODEOWNERS coverage before "
-              "installing:".format(args.repo_root), file=sys.stderr)
+              "installing:".format(ref, committed_rel), file=sys.stderr)
         for r in ownership:
             print("  - {}".format(r), file=sys.stderr)
         return 1

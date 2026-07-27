@@ -20,7 +20,9 @@ The contract, in both modes:
     (`strict_required_status_checks_policy: true`);
   * force-push prevention (`non_fast_forward`) and branch-deletion prevention (`deletion`);
   * (file mode) `idc_contract.exact_head` true, `required_check` == the ruleset context, and
-    `protected_surfaces` covering the workflow / hook / validation / receipt classes.
+    `protected_surfaces` covering the workflow / hook / validation / receipt classes AND the
+    governance-of-governance classes (the deterministic checker, the ruleset directory, and
+    CODEOWNERS itself — F40).
 
 Any missing or weakened entry is a refusal (non-zero). Compiles under ambient Python 3.9.
 """
@@ -29,6 +31,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -64,6 +67,14 @@ SURFACE_CLASSES = (
     ("hook", "scripts/hooks"),
     ("validation", "valid"),
     ("receipt", "receipt"),
+    # F40 — the guard machinery is load-bearing governance too. The shipped .github/CODEOWNERS already
+    # owns the deterministic checker, the ruleset directory, and CODEOWNERS itself; mandate them in the
+    # contract so a downstream repo cannot certify while leaving those three weakenable without a
+    # code-owner review (strip owners from CODEOWNERS, or poison the checker that the NEXT PR's trusted
+    # base then runs — a two-PR TOCTOU F1's base-ref run does not cover).
+    ("checker", "idc_pathway_check.py"),
+    ("ruleset", ".github/rulesets"),
+    ("codeowners", "CODEOWNERS"),
 )
 
 
@@ -159,8 +170,31 @@ def _read_codeowners(repo_root: str):
     return None, None
 
 
+# GitHub CODEOWNERS owners take exactly three documented forms — `@username`, `@org/team`, and an
+# email address. Anything else (a bare `@`, a handle that is only punctuation, a trailing-space typo, a
+# deleted handle) binds NO reviewer on GitHub, so counting it as an owner false-certifies a surface the
+# required review leaves unbound — defeating F6's whole purpose (F41). We validate the owner FORMS and
+# treat any token that matches none of them as "no owner" (fail closed).
+_GH_LOGIN = re.compile(r"^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}$")   # user/org login: alnum + single hyphens, <=39
+_TEAM_SLUG = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
+_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _is_owner_token(tok: str) -> bool:
+    """True iff `tok` is a syntactically valid CODEOWNERS owner (`@user`, `@org/team`, or an email).
+    A bare `@`, `@/team`, `@-bad`, or a non-owner token is rejected (F41)."""
+    if tok.startswith("@"):
+        rest = tok[1:]
+        if "/" in rest:
+            org, _, team = rest.partition("/")
+            return bool(_GH_LOGIN.match(org)) and bool(_TEAM_SLUG.match(team))
+        return bool(_GH_LOGIN.match(rest))
+    return bool(_EMAIL.match(tok))
+
+
 def _codeowners_rules(text: str) -> list:
-    """Parse CODEOWNERS into `(pattern, owners)` pairs, dropping comments and blank lines."""
+    """Parse CODEOWNERS into `(pattern, owners)` pairs, dropping comments and blank lines. Only
+    syntactically valid owner tokens count as owners (`_is_owner_token`, F41)."""
     rules = []
     for line in text.splitlines():
         line = line.split("#", 1)[0].strip()
@@ -168,7 +202,7 @@ def _codeowners_rules(text: str) -> list:
             continue
         parts = line.split()
         pattern = parts[0]
-        owners = [tok for tok in parts[1:] if tok.startswith("@") or "@" in tok]
+        owners = [tok for tok in parts[1:] if _is_owner_token(tok)]
         rules.append((pattern, owners))
     return rules
 
@@ -427,10 +461,10 @@ def _surface_is_owned(surface: str, rules: list) -> bool:
     return owned
 
 
-def validate_codeowners(repo_root: str, surfaces) -> list:
-    """Refusal reasons for protected-surface ownership: a CODEOWNERS must exist and name an owner for
-    every protected surface, so `require_code_owner_review` actually binds a reviewer to each (F6)."""
-    rel, text = _read_codeowners(repo_root)
+def validate_codeowners_content(rel, text, surfaces) -> list:
+    """Refusal reasons for CODEOWNERS `(rel, text)` against `surfaces` — the shared core of the
+    working-tree check (`validate_codeowners`, F6) and the installer's COMMITTED-content check (F39).
+    `rel is None` means no CODEOWNERS was found; `text is None` means it was found but unreadable."""
     if rel is None:
         return ["no CODEOWNERS file found (looked at {}) — require_code_owner_review cannot bind a "
                 "reviewer to any protected surface".format(", ".join(CODEOWNERS_RELPATHS))]
@@ -446,6 +480,15 @@ def validate_codeowners(repo_root: str, surfaces) -> list:
                 "protected surface {!r} has no code owner in {} — add a CODEOWNERS rule for it".format(
                     surface, rel))
     return reasons
+
+
+def validate_codeowners(repo_root: str, surfaces) -> list:
+    """Refusal reasons for protected-surface ownership in the WORKING TREE at `repo_root`: a CODEOWNERS
+    must exist and name an owner for every protected surface, so `require_code_owner_review` actually
+    binds a reviewer to each (F6). The installer additionally validates the COMMITTED content GitHub
+    enforces on the default branch, not the working tree (F39)."""
+    rel, text = _read_codeowners(repo_root)
+    return validate_codeowners_content(rel, text, surfaces)
 
 
 def _gh_json(args: list, repo_flag=None):

@@ -80,8 +80,15 @@ cleanup() {
   [ -n "$PR_NUM" ] && gh pr close "$PR_NUM" --repo "$NWO" --delete-branch >/dev/null 2>&1
   # delete the branch ref if it somehow survived PR close
   gh api --method DELETE "repos/$NWO/git/refs/heads/$TESTBRANCH" >/dev/null 2>&1
-  # remove a CODEOWNERS this run scaffolded (restore the sandbox exactly as found)
-  [ -n "$CO_CREATED" ] && rm -f "$CO_DEST"
+  # revert a CODEOWNERS this run scaffolded, committed, and pushed (restore the sandbox exactly as
+  # found — F39 requires the committed default-branch copy, so removing the working-tree file is not
+  # enough; the commit on the default branch must be reverted and re-pushed).
+  if [ -n "$CO_CREATED" ]; then
+    rm -f "$CO_DEST"
+    git -C "$SANDBOX" rm -q --cached --ignore-unmatch .github/CODEOWNERS >/dev/null 2>&1
+    git -C "$SANDBOX" -c commit.gpgsign=false commit -q -m "idc pathway live test: remove scaffolded CODEOWNERS" >/dev/null 2>&1
+    git -C "$SANDBOX" push -q origin "HEAD:$DEFAULT" >/dev/null 2>&1
+  fi
   # remove the ruleset ONLY if this run created it (restore the shared sandbox)
   if [ -z "$PRE_ID" ]; then
     local id
@@ -93,18 +100,30 @@ trap cleanup EXIT
 
 # ── 1/3 install (idempotent) ──────────────────────────────────────────────────────────────────────
 echo "-- 1/3 install ruleset (idempotent)"
-# F18: the ownership gate validates the TARGET repo named by --repo, via a checkout supplied with
-# --repo-root (never derived from the ruleset path, which is the plugin). The sandbox IS that checkout.
-# Templates ship no CODEOWNERS, so a fresh sandbox has none — scaffold a covering one for this run so
-# require_code_owner_review actually binds a reviewer; cleanup restores the sandbox (disposable + git).
-if [ ! -f "$CO_DEST" ]; then
+# F18/F39/F40: the ownership gate validates the TARGET repo named by --repo, via a checkout supplied
+# with --repo-root (never derived from the ruleset path, which is the plugin). The sandbox IS that
+# checkout. It validates the CODEOWNERS as COMMITTED on the default branch — the copy GitHub enforces,
+# not the working tree (F39) — and requires all SEVEN protected surfaces owned, incl. the
+# governance-of-governance set (F40). Templates ship no CODEOWNERS, so a fresh sandbox has none —
+# scaffold a covering one, COMMIT it, and PUSH to the default branch so the enforced branch (and the
+# local origin/<default> ref the installer reads) carry it; cleanup reverts (disposable + git).
+if ! git -C "$SANDBOX" cat-file -e "origin/$DEFAULT:.github/CODEOWNERS" 2>/dev/null; then
   mkdir -p "$SANDBOX/.github"
   cat > "$CO_DEST" <<'CO'
 /.github/workflows/ @llamallamaredpajama
 /scripts/hooks/ @llamallamaredpajama
 /scripts/idc_validation_contract.py @llamallamaredpajama
 /scripts/idc_receipt_check.py @llamallamaredpajama
+/scripts/idc_pathway_check.py @llamallamaredpajama
+/.github/rulesets/ @llamallamaredpajama
+/.github/CODEOWNERS @llamallamaredpajama
 CO
+  git -C "$SANDBOX" add .github/CODEOWNERS \
+    || fail "could not stage the scaffolded CODEOWNERS"
+  git -C "$SANDBOX" -c commit.gpgsign=false commit -q -m "idc pathway live test: scaffold CODEOWNERS (auto-revert)" \
+    || fail "could not commit the scaffolded CODEOWNERS"
+  git -C "$SANDBOX" push -q origin "HEAD:$DEFAULT" \
+    || fail "could not push the scaffolded CODEOWNERS to the default branch (F39 enforces the committed copy)"
   CO_CREATED=1
 fi
 python3 "$INSTALL" --repo "$NWO" --ruleset "$RS" --repo-root "$SANDBOX" --apply \

@@ -24,6 +24,16 @@ RS="$PLUGIN/.github/rulesets/idc-pathway-integrity.json"
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 fail() { echo "FAIL: $1"; exit 1; }
 
+# F40 — the mandatory ownership set now also covers the governance-of-governance surfaces (the
+# deterministic checker, the ruleset directory, and CODEOWNERS itself). Fixtures that must ISOLATE a
+# single vector append these three so the ONLY ownership gap is the surface under test; a fixture
+# missing them would refuse for the wrong reason and mask a matcher regression (the checker would still
+# refuse on the governance gap even if the vector surface were wrongly certified).
+GOV='/scripts/idc_pathway_check.py @team
+/.github/rulesets/ @team
+/.github/CODEOWNERS @team'
+add_gov() { printf '%s\n' "$GOV" >> "$1/.github/CODEOWNERS"; }   # $1 = repo root
+
 # --- existence (the honest RED reason: nothing implemented yet) --------------------------------
 [ -f "$CHK" ] || fail "ruleset checker not implemented yet: scripts/idc_ruleset_check.py"
 [ -f "$INS" ] || fail "ruleset installer not implemented yet: scripts/idc_ruleset_install.py"
@@ -74,6 +84,13 @@ refute "protected VALIDATION surface removed" \
   'contract["protected_surfaces"] = [s for s in contract["protected_surfaces"] if "valid" not in s]'
 refute "protected RECEIPT surface removed" \
   'contract["protected_surfaces"] = [s for s in contract["protected_surfaces"] if "receipt" not in s]'
+# F40 — the three governance-of-governance surface classes are mandatory too.
+refute "protected CHECKER surface removed (idc_pathway_check.py)" \
+  'contract["protected_surfaces"] = [s for s in contract["protected_surfaces"] if "idc_pathway_check.py" not in s]'
+refute "protected RULESET-DIR surface removed (.github/rulesets)" \
+  'contract["protected_surfaces"] = [s for s in contract["protected_surfaces"] if ".github/rulesets" not in s]'
+refute "protected CODEOWNERS-self surface removed (.github/CODEOWNERS)" \
+  'contract["protected_surfaces"] = [s for s in contract["protected_surfaces"] if "CODEOWNERS" not in s]'
 
 # --- F6: protected-surface OWNERSHIP (CODEOWNERS) validation ------------------------------------
 # require_code_owner_review in the ruleset only binds a reviewer once a CODEOWNERS file names each
@@ -90,6 +107,7 @@ scripts/hooks/ @owner
 scripts/idc_validation_contract.py @owner
 # the receipt surface is deliberately left unowned
 CO
+add_gov "$CO_ROOT"   # own the governance surfaces so RECEIPT is the sole gap (F40 isolation)
 out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$CO_ROOT" 2>&1)" \
   && fail "checker admitted a repo whose CODEOWNERS leaves a protected surface unowned"
 printf '%s\n' "$out" | grep -qiE 'codeowner|owner|receipt' \
@@ -141,6 +159,7 @@ cat > "$GS_B/.github/CODEOWNERS" <<'CO'
 /scripts/idc_receipt_check.py @team
 /scripts/* @team
 CO
+add_gov "$GS_B"
 out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$GS_B" 2>&1)" \
   && fail "checker false-certified scripts/hooks/** off a one-level /scripts/* (GitHub: one level only)"
 printf '%s\n' "$out" | grep -qiE 'hook|owner' \
@@ -154,6 +173,7 @@ cat > "$GS_C/.github/CODEOWNERS" <<'CO'
 /scripts/idc_receipt_check.py @team
 /* @team
 CO
+add_gov "$GS_C"
 out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$GS_C" 2>&1)" \
   && fail "checker false-certified a nested surface off a root one-level /* (GitHub: root files only)"
 printf '%s\n' "$out" | grep -qiE 'hook|owner' \
@@ -169,6 +189,7 @@ cat > "$GS_D/.github/CODEOWNERS" <<'CO'
 /scripts/hooks/ @team
 /scripts/hooks/*.py
 CO
+add_gov "$GS_D"
 out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$GS_D" 2>&1)" \
   && fail "checker missed a later ownerless descendant (*.py) un-owning part of scripts/hooks/**"
 printf '%s\n' "$out" | grep -qiE 'hook|owner' \
@@ -192,6 +213,7 @@ cat > "$GS_E/.github/CODEOWNERS" <<'CO'
 /scripts/hooks/ @team
 hooks/
 CO
+add_gov "$GS_E"
 out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$GS_E" 2>&1)" \
   && fail "checker false-certified scripts/hooks/** — a later ownerless slashless 'hooks/' un-owns it at any depth"
 printf '%s\n' "$out" | grep -qiE 'hook|owner' \
@@ -208,6 +230,7 @@ cat > "$GS_F/.github/CODEOWNERS" <<'CO'
 /scripts/idc_validation_contract.py @team
 idc_validation_contract.py
 CO
+add_gov "$GS_F"
 out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$GS_F" 2>&1)" \
   && fail "checker false-certified the validation surface — a later ownerless slashless basename un-owns it at any depth"
 printf '%s\n' "$out" | grep -qiE 'valid|owner' \
@@ -224,6 +247,7 @@ cat > "$GS_G/.github/CODEOWNERS" <<'CO'
 /scripts/idc_receipt_check.py @team
 hooks/ @team
 CO
+add_gov "$GS_G"   # a valid control must own ALL surfaces incl. the F40 governance set
 python3 "$CHK" --ruleset "$RS" --repo-root "$GS_G" >/dev/null \
   || fail "checker false-refused an any-depth OWNED rule ('hooks/ @team') that owns scripts/hooks/** on GitHub"
 
@@ -238,6 +262,7 @@ cat > "$GS_H/.github/CODEOWNERS" <<'CO'
 /scripts/idc_receipt_check.py @team
 /scripts/hooks/[a-z]*.py @team
 CO
+add_gov "$GS_H"
 out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$GS_H" 2>&1)" \
   && fail "checker certified scripts/hooks/** off an UNMODELED char-range pattern — it must fail closed"
 printf '%s\n' "$out" | grep -qiE 'hook|owner' \
@@ -252,6 +277,7 @@ cat > "$GS_I/.github/CODEOWNERS" <<'CO'
 /scripts/idc_receipt_check.py @team
 /scripts/**/hooks @team
 CO
+add_gov "$GS_I"
 out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$GS_I" 2>&1)" \
   && fail "checker certified scripts/hooks/** off an UNMODELED mid-'**' pattern — it must fail closed"
 printf '%s\n' "$out" | grep -qiE 'hook|owner' \
@@ -285,6 +311,7 @@ cat > "$F28_HOLE/.github/CODEOWNERS" <<'CO'
 /config/my.dir/ @team
 /config/my.dir/secret.txt
 CO
+add_gov "$F28_HOLE"   # own the governance surfaces so the dotted-dir HOLE is the sole gap (F40 isolation)
 out="$(python3 "$CHK" --ruleset "$F28_RS" --repo-root "$F28_HOLE" 2>&1)" \
   && fail "checker false-certified a dotted-basename DIRECTORY surface with an ownerless interior hole (F28)"
 printf '%s\n' "$out" | grep -qiE 'my\.dir|owner' \
@@ -301,6 +328,7 @@ cat > "$F28_OK/.github/CODEOWNERS" <<'CO'
 /scripts/idc_receipt_check.py @team
 /config/my.dir/ @team
 CO
+add_gov "$F28_OK"   # the control must own ALL surfaces incl. the F40 governance set
 python3 "$CHK" --ruleset "$F28_RS" --repo-root "$F28_OK" >/dev/null \
   || fail "checker false-refused a fully-owned dotted-directory surface (F28 control), or regressed a shipped dotted-file surface"
 
@@ -331,6 +359,7 @@ cat > "$GS_L/.github/CODEOWNERS" <<'CO'
 /scripts/idc_receipt_check.py @team
 **/idc_validation_contract.py/ @team
 CO
+add_gov "$GS_L"
 out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$GS_L" 2>&1)" \
   && fail "checker false-certified the validation FILE surface off a directory-only '**/name/' pattern (F32)"
 printf '%s\n' "$out" | grep -qiE 'valid|owner' \
@@ -348,14 +377,70 @@ out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$GS_M" 2>&1)" \
 printf '%s\n' "$out" | grep -qiE 'owner|surface' \
   || fail "bare-slash refusal must name an un-owned surface; got: $out"
 
+# Case F40 — the mandatory ownership set now also covers the governance-of-governance surfaces (the
+# deterministic checker scripts/idc_pathway_check.py, the ruleset directory, and CODEOWNERS itself). A
+# CODEOWNERS owning ONLY the original four protected surfaces must now REFUSE — otherwise those three
+# guard-machinery paths stay weakenable without a code-owner review (strip owners from CODEOWNERS, or
+# poison the checker the next PR's trusted base then runs). Red-when-broken (pre-fix): protected_surfaces
+# listed only the 4, so a four-surface CODEOWNERS certified.
+F40_ONLY4="$WORK/co-only-four"; mkdir -p "$F40_ONLY4/.github"
+cat > "$F40_ONLY4/.github/CODEOWNERS" <<'CO'
+/.github/workflows/ @team
+/scripts/hooks/ @team
+/scripts/idc_validation_contract.py @team
+/scripts/idc_receipt_check.py @team
+CO
+out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$F40_ONLY4" 2>&1)" \
+  && fail "checker certified a CODEOWNERS owning only the 4 original surfaces — the checker/ruleset/CODEOWNERS governance surfaces must be mandated too (F40)"
+printf '%s\n' "$out" | grep -qiE 'idc_pathway_check|rulesets|CODEOWNERS' \
+  || fail "F40 refusal must name an un-owned governance surface; got: $out"
+
+# Case F41 — a bare `@` (or any malformed owner token) is NOT a valid CODEOWNERS owner: GitHub binds no
+# reviewer to it. `/scripts/hooks/ @` must leave the hook surface UNOWNED. Red-when-broken (pre-fix): the
+# owner filter counted any `@`-containing token, so a bare `@` certified a surface GitHub bound nobody to.
+F41_BARE="$WORK/co-bare-at"; mkdir -p "$F41_BARE/.github"
+cat > "$F41_BARE/.github/CODEOWNERS" <<'CO'
+/.github/workflows/ @team
+/scripts/hooks/ @
+/scripts/idc_validation_contract.py @team
+/scripts/idc_receipt_check.py @team
+CO
+add_gov "$F41_BARE"   # own the governance surfaces so the bare-@ HOOK surface is the sole gap
+out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$F41_BARE" 2>&1)" \
+  && fail "checker counted a bare '@' as an owner and certified an unbound hook surface (F41)"
+printf '%s\n' "$out" | grep -qiE 'hook|owner' \
+  || fail "bare-@ refusal must name the un-owned hook surface; got: $out"
+
+# Case F41 control — a valid EMAIL owner (a documented CODEOWNERS owner form) legitimately owns its
+# surface, so the fix rejects malformed tokens WITHOUT rejecting the valid non-`@` owner form. Every
+# surface (incl. the F40 governance set) is owned by an email address here.
+F41_EMAIL="$WORK/co-email-owner"; mkdir -p "$F41_EMAIL/.github"
+cat > "$F41_EMAIL/.github/CODEOWNERS" <<'CO'
+/.github/workflows/ dev@example.com
+/scripts/hooks/ dev@example.com
+/scripts/idc_validation_contract.py dev@example.com
+/scripts/idc_receipt_check.py dev@example.com
+/scripts/idc_pathway_check.py dev@example.com
+/.github/rulesets/ dev@example.com
+/.github/CODEOWNERS dev@example.com
+CO
+python3 "$CHK" --ruleset "$RS" --repo-root "$F41_EMAIL" >/dev/null \
+  || fail "checker rejected a valid EMAIL owner form (F41 control — @user, @org/team, and email must all bind)"
+
 # --- installer safety guards (no network is reached before these refusals) ----------------------
-# A helper: build a throwaway checkout of a named target repo (its `origin` remote decides identity),
-# optionally with a CODEOWNERS covering all four protected surfaces. The installer's F34 identity gate
-# is a LOCAL origin-remote check, so a proper target checkout must carry the matching origin.
+# A helper: build a throwaway git checkout of a named target repo (its `origin` remote decides identity
+# for the F34 gate). With a covering CODEOWNERS it writes ALL SEVEN protected surfaces (F40) and COMMITS
+# them on the default branch, because F39 validates the CODEOWNERS GitHub actually enforces — the copy
+# COMMITTED on the default branch, not the working tree. An initial commit always exists so the checkout
+# has a resolvable branch even without a CODEOWNERS.
 SANDBOX="llamallamaredpajama/ke-idc-test-repo-install"
-mk_target() {  # $1=dir  $2=OWNER/REPO for origin  $3=1 to write a covering CODEOWNERS
+mk_target() {  # $1=dir  $2=OWNER/REPO for origin  $3=1 to write+commit a covering CODEOWNERS
   git init -q -b main "$1"
+  git -C "$1" config user.email idc-test@example.com
+  git -C "$1" config user.name "IDC Test"
+  git -C "$1" config commit.gpgsign false
   git -C "$1" remote add origin "git@github.com:$2.git"
+  echo placeholder > "$1/README.md"
   if [ "$3" = 1 ]; then
     mkdir -p "$1/.github"
     cat > "$1/.github/CODEOWNERS" <<'CO'
@@ -363,8 +448,13 @@ mk_target() {  # $1=dir  $2=OWNER/REPO for origin  $3=1 to write a covering CODE
 /scripts/hooks/ @team
 /scripts/idc_validation_contract.py @team
 /scripts/idc_receipt_check.py @team
+/scripts/idc_pathway_check.py @team
+/.github/rulesets/ @team
+/.github/CODEOWNERS @team
 CO
   fi
+  git -C "$1" add -A
+  git -C "$1" commit -q -m init >/dev/null 2>&1
 }
 
 # No --repo -> refuse (never guesses the target board).
@@ -437,4 +527,37 @@ out="$(python3 "$INS" --ruleset "$RS" --repo "$SANDBOX" --repo-root "$TGT_NOORIG
 printf '%s\n' "$out" | grep -qiE 'origin|confirm|unverifiable' \
   || fail "no-origin refusal must explain the identity cannot be confirmed; got: $out"
 
-echo "PASS: ruleset checker enforces PR flow, exact-head required check, force-push/deletion prevention, all protected surfaces, GitHub any-depth/last-match-wins ownership with a strict class allowlist that fails closed on unmodeled patterns, re-types a dotted-basename DIRECTORY surface off the file guess so an interior ownerless hole cannot false-certify (F28), and treats a '**/name/' trailing-slash pattern as directory-only (F32) and a bare '/' as matching-nothing (F33); installer refuses without --repo, refuses a production repo, requires --repo-root, and BINDS it to --repo via a local origin-identity check so an unrelated covering checkout cannot certify the wrong repository (F34)"
+# F39 — GitHub enforces the CODEOWNERS COMMITTED on the default branch, not the working tree. The
+# installer reads the committed copy (`git show <default-branch>:.github/CODEOWNERS`), validates THAT,
+# and refuses when none is committed or when the working tree differs from it. Both directions below
+# are red-when-broken: pre-fix the installer read the working-tree bytes directly and would have
+# certified + installed require_code_owner_review while the enforced branch bound no reviewer.
+#
+# (e) A covering CODEOWNERS WRITTEN to the working tree but NEVER committed must REFUSE.
+TGT_UNCOMMITTED="$WORK/target-uncommitted-co"; mk_target "$TGT_UNCOMMITTED" "$SANDBOX" 0  # committed: none
+mkdir -p "$TGT_UNCOMMITTED/.github"
+cat > "$TGT_UNCOMMITTED/.github/CODEOWNERS" <<'CO'
+/.github/workflows/ @team
+/scripts/hooks/ @team
+/scripts/idc_validation_contract.py @team
+/scripts/idc_receipt_check.py @team
+/scripts/idc_pathway_check.py @team
+/.github/rulesets/ @team
+/.github/CODEOWNERS @team
+CO
+out="$(python3 "$INS" --ruleset "$RS" --repo "$SANDBOX" --repo-root "$TGT_UNCOMMITTED" 2>&1)" \
+  && fail "installer certified an UNCOMMITTED working-tree CODEOWNERS (F39 — GitHub enforces the committed default-branch copy)"
+printf '%s\n' "$out" | grep -qiE 'commit|working[- ]tree|enforce' \
+  || fail "F39 uncommitted refusal must explain the committed/working-tree gap; got: $out"
+
+# (f) A CODEOWNERS committed on the default branch but LOCALLY EDITED in the working tree must REFUSE —
+#     the committed copy is what GitHub enforces, so a working-tree edit that appears to cover a surface
+#     never reaches the enforced branch.
+TGT_DIVERGED="$WORK/target-diverged-co"; mk_target "$TGT_DIVERGED" "$SANDBOX" 1   # committed: covering CODEOWNERS
+printf '# stray local uncommitted edit\n' >> "$TGT_DIVERGED/.github/CODEOWNERS"
+out="$(python3 "$INS" --ruleset "$RS" --repo "$SANDBOX" --repo-root "$TGT_DIVERGED" 2>&1)" \
+  && fail "installer certified a working tree that DIVERGES from the committed CODEOWNERS (F39)"
+printf '%s\n' "$out" | grep -qiE 'differ|working[- ]tree|commit|match' \
+  || fail "F39 divergence refusal must name the working-tree/committed mismatch; got: $out"
+
+echo "PASS: ruleset checker enforces PR flow, exact-head required check, force-push/deletion prevention, all seven protected surfaces (incl. the F40 governance-of-governance set: the checker, the ruleset dir, and CODEOWNERS itself), GitHub any-depth/last-match-wins ownership with a strict class allowlist that fails closed on unmodeled patterns, re-types a dotted-basename DIRECTORY surface off the file guess so an interior ownerless hole cannot false-certify (F28), treats a '**/name/' trailing-slash pattern as directory-only (F32) and a bare '/' as matching-nothing (F33), and counts only valid owner tokens so a bare '@' cannot false-certify (F41); installer refuses without --repo, refuses a production repo, requires --repo-root, BINDS it to --repo via a local origin-identity check (F34), and validates the CODEOWNERS COMMITTED on the default branch — refusing an uncommitted or working-tree-diverged copy (F39)"

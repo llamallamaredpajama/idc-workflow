@@ -128,12 +128,19 @@ The finisher runs its **own** `/fullauto-goal` loop. Its completion contract car
    promoted to `main` only after the staging e2e — see *e2e layering*) with a **direct, blocking**
    `gh pr merge --squash --delete-branch` (default method; pass `--merge-method` for the method the
    repo allows) — **not** GitHub `--auto` (auto-merge would defer the merge and, with the repo's
-   `deleteBranchOnMerge` off, skip the delete). **Runtime carve-out (Pi):** the automerge above is the
-   **Claude and Codex** behavior. On the **experimental Pi runtime** no sanctioned Pi merge helper has
-   landed yet, so the Pi finisher does **not** self-merge — it runs the same receipt/gate tail, then
-   **prepares, pushes, and reports** the reviewed branch and hands it to an **operator-performed
-   merge** (README / `docs/architecture.md` §Runtime model). Everything else in this step is identical;
-   only the final merge call is the operator's on Pi. The rest of the tail — branch deletes, tracker
+   `deleteBranchOnMerge` off, skip the delete). **Runtime carve-out (Pi):** the self-merging tail above
+   is the **Claude and Codex** behavior. On the **experimental Pi runtime** no sanctioned Pi merge
+   helper has landed yet, so the Pi finisher does **not** run that self-merging invocation at all.
+   Instead it mints the build receipt (the step-4 `idc_build_receipt.py` call above) and **reports the
+   reviewed branch + receipts to the operator, who performs the merge out-of-band**; only after that
+   does the deterministic post-merge cleanup run, as
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_finish.py" --close-only --pr <N> --issue <M>`
+   — the recovery mode that SKIPS the merge, HARD-REFUSES unless the PR is already merged
+   (`verify_pr_merged` is its receipt — the merged state, not a verdict), and only then deletes the
+   branch, closes the tracker item, and re-verifies the end state. The Pi ordering is therefore
+   **build receipt → operator merge → `--close-only` cleanup** — there is no "prepare/push before merge"
+   step (no `idc_git_finish.py` mode implements one), and the operator is the merge gate (README /
+   `docs/architecture.md` §Runtime model). The rest of the tail — branch deletes, tracker
    close, end-state re-verify — is the script's deterministic step order, verified before it ever
    exits 0; it is not re-narrated here. **Fail-closed:** any unverified step prints a
    machine-readable `finish: <step> failed` line and exits non-zero — never a silent drop; the

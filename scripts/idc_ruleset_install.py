@@ -87,6 +87,10 @@ _REPO_RE = re.compile(r"^[^/\s]+/[^/\s]+$")
 # default; anything else — a non-GitHub SSH host, GitLab, a bare local path — is refused (F48).
 _GH_HOST = (os.environ.get("GH_HOST") or "github.com").strip().lower()
 
+# The URI schemes git actually uses to CLONE from a GitHub host. A remote on any other scheme (notably
+# `file://`, which reads a local directory) is not evidence the checkout came from GitHub (F53).
+_CLONE_SCHEMES = frozenset({"https", "http", "ssh", "git"})
+
 
 def _normalize_remote(url: str):
     """Normalize a git remote URL to lowercase `owner/repo` IFF it is hosted on the GitHub host, else
@@ -96,15 +100,24 @@ def _normalize_remote(url: str):
     checkout (`git@evil.example.com:owner/repo`, `https://gitlab.com/owner/repo`, a local path ending in
     `owner/repo`) satisfy the identity gate against `--repo owner/repo`, so an unrelated checkout's
     CODEOWNERS could certify the real GitHub target. A remote whose host is not the GitHub host — or that
-    carries no host at all — returns None (unverifiable → refused upstream)."""
+    carries no host at all — returns None (unverifiable → refused upstream).
+
+    The SCHEME and the path SHAPE are checked just as strictly (F53). Accepting any URI scheme let
+    `file://github.com/owner/repo.git` — which clones nothing from GitHub — pass the gate, and reducing
+    any `>= 2`-segment path to its last two let `https://github.com/decoy/owner/repo.git` pass as well.
+    Either way an unrelated checkout's CODEOWNERS could certify the real target, defeating the identity
+    proof F34/F48 exist to give. Only the network clone schemes GitHub actually serves are accepted, and
+    the path must be EXACTLY `owner/repo` — no deeper nesting."""
     text = (url or "").strip()
     if not text:
         return None
     text = re.sub(r"\.git/*$", "", text)
     host = path = None
-    m = re.match(r"^[A-Za-z][A-Za-z0-9+.\-]*://(?:[^@/]+@)?([^/:]+)(?::\d+)?/(.+)$", text)
+    m = re.match(r"^([A-Za-z][A-Za-z0-9+.\-]*)://(?:[^@/]+@)?([^/:]+)(?::\d+)?/(.+)$", text)
     if m:                                                   # scheme://[user@]host[:port]/owner/repo
-        host, path = m.group(1), m.group(2)
+        if m.group(1).lower() not in _CLONE_SCHEMES:
+            return None                                     # e.g. file:// — not a GitHub clone URL
+        host, path = m.group(2), m.group(3)
     else:
         m = re.match(r"^(?:[^@/]+@)?([^/:]+):(.+)$", text)  # scp-like  [user@]host:owner/repo
         if m:
@@ -112,9 +125,9 @@ def _normalize_remote(url: str):
     if host is None or host.lower() != _GH_HOST:
         return None
     segs = [s for s in path.strip("/").split("/") if s]
-    if len(segs) < 2:
+    if len(segs) != 2:                                      # EXACTLY owner/repo — never a deeper path
         return None
-    return "{}/{}".format(segs[-2], segs[-1]).lower()
+    return "{}/{}".format(segs[0], segs[1]).lower()
 
 
 def _repo_root_identity(repo_root: str):

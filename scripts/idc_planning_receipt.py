@@ -179,9 +179,25 @@ def write_receipt(repo: str, receipt_path: str, receipt: dict) -> None:
     Build freeze would refuse it with a confusing 'no witness' error far from the real cause (F25).
     Witnessing is skipped ONLY for a genuinely non-git governed repo (the filesystem backend), which has
     no common dir to anchor into and can never reach a Build freeze (freeze itself requires git), so no
-    borrow is left unanchored."""
-    atomic_write_json(receipt_path, receipt)
+    borrow is left unanchored.
+
+    The disk write and the witness record are ONE critical section (F54): the replacement is handed to
+    `record_planning_witness` as a callable and performed under the witness-store lock, so a second
+    same-label writer cannot replace the receipt between this writer's replace and its witness. Written
+    outside the lock, a racer that overwrote the file and then died before witnessing left the final
+    on-disk bytes unwitnessed, and a later Build refused a Plan that had reported success."""
     anchor_required = _has_git_metadata(repo)
+    # The receipt's parent directory must exist BEFORE the witness context is resolved: that resolution
+    # runs `git -C <receipt dir>`, which fails on a missing directory. The write used to create it as a
+    # side effect, but the write now happens inside the witness lock (F54), so create it here. Making a
+    # directory is not the atomic replace the lock exists to serialize, so it is safe outside.
+    parent = os.path.dirname(os.path.abspath(receipt_path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+    def _write() -> None:
+        atomic_write_json(receipt_path, receipt)
+
     try:
         import idc_validation_contract as VC  # noqa: E402 — sibling; lazy to avoid an import cycle
     except ImportError as exc:
@@ -189,15 +205,19 @@ def write_receipt(repo: str, receipt_path: str, receipt: dict) -> None:
             raise ReceiptError(
                 "could not anchor the planning receipt witness — idc_validation_contract is not "
                 f"importable (broken install): {exc}") from exc
+        _write()          # non-git governed repo: no witness store to coordinate with
         return
     try:
-        VC.record_planning_witness(os.path.abspath(receipt_path), receipt)
+        VC.record_planning_witness(os.path.abspath(receipt_path), receipt, write_receipt=_write)
     except (VC.ValidationError, OSError) as exc:
         # In a git repo any anchor failure (a non-git ValidationError from a broken common dir, or a
         # raw OSError when `git` is missing) leaves an un-borrowable receipt, so it is surfaced. A
-        # genuinely non-git repo (no metadata) legitimately has nothing to anchor into — skip.
+        # genuinely non-git repo (no metadata) legitimately has nothing to anchor into — skip, but
+        # still persist the receipt: the anchoring path owns the write now (F54), and this branch may
+        # be reached before it ran. `atomic_write_json` is idempotent, so a re-write is harmless.
         if anchor_required:
             raise ReceiptError(f"could not anchor the planning receipt witness: {exc}") from exc
+        _write()
 
 
 def read_live_snapshot(backend: str, tracker: str, repo: str, owner: str | None = None,

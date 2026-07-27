@@ -352,7 +352,7 @@ def _evict_stale_versions(bucket: dict, receipt_path: str) -> None:
         del bucket[dg]
 
 
-def record_planning_witness(receipt_path: str, doc: dict) -> str:
+def record_planning_witness(receipt_path: str, doc: dict, *, write_receipt=None) -> str:
     """Record the out-of-tree machine witness for a freshly written planning receipt (called by the
     sanctioned transaction). Keyed by the worktree-relative logical path so a Build contract frozen in
     a different worktree can find it; and WITHIN that key, keyed by the receipt's BYTE digest so a
@@ -368,9 +368,20 @@ def record_planning_witness(receipt_path: str, doc: dict) -> str:
     an exclusive store lock so a concurrent contract-witness write cannot drop it (F30). The receipt is
     read ONCE, under that same lock, so the byte-digest key and the receipt's embedded self-digest are
     taken from a single view — a concurrent same-path rewrite cannot bind one version's bytes to
-    another version's receipt_digest (F38)."""
+    another version's receipt_digest (F38).
+
+    `write_receipt` (optional) is the callable that PUTS the receipt on disk. When the sanctioned
+    transaction passes it, the file replacement happens INSIDE this lock, making the replace and the
+    witness record one critical section (F54). With the replace outside, two same-label writers could
+    interleave as: A writes bytes A and witnesses them; B replaces the file with bytes B and then dies
+    before witnessing — leaving the FINAL on-disk bytes unwitnessed, so a later Build refuses a Plan
+    that reported success. The F38 guard below cannot repair that: it acts at record time and cannot
+    retroactively invalidate the witness A already recorded. Holding the lock across both steps means a
+    second writer cannot replace the file until the first has witnessed whatever it wrote."""
     common_git_dir, repo_identity, rel = _planning_witness_context(receipt_path)
-    with _witness_store_lock(common_git_dir):            # F30/F38: RMW + receipt read under one lock
+    with _witness_store_lock(common_git_dir):            # F30/F38/F54: replace + RMW + read, one lock
+        if write_receipt is not None:
+            write_receipt()                              # F54: the atomic replace, inside the section
         # F38: read the receipt's bytes ONCE, under the lock, and derive the byte-digest key from THAT
         # read. Digesting before the lock (or in a read separate from the freshness check below) lets a
         # concurrent same-path writer replace the receipt between reads, so the entry binds one
@@ -427,6 +438,20 @@ def record_planning_witness(receipt_path: str, doc: dict) -> str:
     return rel
 
 
+# A receipt whose path has NO witness entry at all is either (a) minted by a pre-witness build of the
+# plugin — an upgrade that landed between a Plan and its Build — or (b) hand-forged at a path the
+# machine never wrote. Nothing in the receipt distinguishes them: `schema_version` did not change when
+# witnessing was introduced, and every in-band field is forgeable (that is why the witness exists). So
+# this can never be auto-accepted or re-anchored — doing so would hand a forger the exact bypass F7
+# closes. What CAN be fixed is the diagnosis: name the sanctioned recovery so the operator hitting the
+# legitimate upgrade case is not left guessing (F55).
+LEGACY_RECEIPT_RECOVERY = (
+    "if this Plan predates the planning-receipt witness (an upgrade landed between Plan and Build), "
+    "re-run the sanctioned Plan apply to mint a fresh witnessed receipt — the receipt cannot be "
+    "re-anchored in place, because a forged receipt is indistinguishable from a pre-witness one"
+)
+
+
 def planning_witness_problem(receipt_path: str, doc: dict):
     """Refusal reason if the planning receipt is not machine-anchored, else None."""
     try:
@@ -438,10 +463,10 @@ def planning_witness_problem(receipt_path: str, doc: dict):
         return "the validation witness store is unreadable"
     container = witnesses.get(_planning_witness_key(rel))
     if not isinstance(container, dict) or container.get("kind") != PLANNING_WITNESS_KIND:
-        return f"no machine-owned witness is recorded for planning receipt {rel}"
+        return f"no machine-owned witness is recorded for planning receipt {rel} — {LEGACY_RECEIPT_RECOVERY}"
     bucket = container.get("witnesses")
     if not isinstance(bucket, dict):
-        return f"no machine-owned witness is recorded for planning receipt {rel}"
+        return f"no machine-owned witness is recorded for planning receipt {rel} — {LEGACY_RECEIPT_RECOVERY}"
     try:
         digest = _digest_file(receipt_path)
     except OSError as exc:
@@ -451,7 +476,7 @@ def planning_witness_problem(receipt_path: str, doc: dict):
     rec = bucket.get(digest)
     if not isinstance(rec, dict):
         return (f"the planning-receipt witness for {rel} is stale — its byte digest matches no recorded "
-                "machine witness")
+                f"machine witness; {LEGACY_RECEIPT_RECOVERY}")
     if rec.get("repo_identity") != repo_identity:
         return f"the planning-receipt witness for {rel} names repository {rec.get('repo_identity')!r}, not this repo"
     expected_self = rec.get("receipt_digest")

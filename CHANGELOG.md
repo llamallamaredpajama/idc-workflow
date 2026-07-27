@@ -32,6 +32,14 @@ second half of that promise exist. What the flip does and does not do:
   install — `controlled` works without it. `app-locked` remains the deliberate choice for
   repositories that must stop an ordinary write token from touching the board at all.
 
+**Upgrade note — a Plan finished before this release cannot be built after it.** Planning receipts are
+now proven by a machine witness recorded outside the committed tree, so a receipt minted by an earlier
+version has no witness and Build refuses to borrow it. This is deliberate and cannot be repaired in
+place: nothing inside a receipt distinguishes "written by older code" from "hand-forged", which is
+precisely why the out-of-tree witness exists, so re-anchoring one would reopen the forgery hole. If an
+upgrade lands between a Plan and its Build, **re-run the sanctioned Plan apply** to mint a fresh
+witnessed receipt — the refusal message says so. Plans and Builds that both run on 5.0.0 are unaffected.
+
 Honest boundary, unchanged: `controlled` cannot stop a machine administrator from removing hooks,
 editing `.git`, or disabling GitHub rules, and neither profile protects against repository or
 organization administrators who can remove the rules or the App. It blocks the normal supported

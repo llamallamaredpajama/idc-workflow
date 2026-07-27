@@ -70,6 +70,9 @@ DEFAULT_RULESET = os.path.normpath(
 # directory, and CODEOWNERS itself) so a downstream repo cannot certify while leaving those weakenable
 # without a code-owner review.
 #   (label, kind, canonical)   kind ∈ {"file", "dir"}
+# CODEOWNERS is the one class GitHub reads from several locations; `CODEOWNERS_RELPATHS` (below) lists
+# them and `CODEOWNERS_CANONICAL` is the one the contract pins.
+CODEOWNERS_CANONICAL = ".github/CODEOWNERS"
 SURFACE_CLASSES = (
     ("workflow",   "dir",  ".github/workflows"),
     ("hook",       "dir",  "scripts/hooks"),
@@ -77,34 +80,65 @@ SURFACE_CLASSES = (
     ("receipt",    "file", "scripts/idc_receipt_check.py"),
     ("checker",    "file", "scripts/idc_pathway_check.py"),
     ("ruleset",    "dir",  ".github/rulesets"),
-    ("codeowners", "file", ".github/CODEOWNERS"),
+    ("codeowners", "file", CODEOWNERS_CANONICAL),
 )
 
 
-def _surface_matches_class(surface: str, kind: str, canonical: str) -> bool:
-    """True iff protected-surface `surface` represents the governance class `(kind, canonical)`, matched
-    EXACTLY (F47). A FILE class matches on basename == the canonical basename (the file, wherever it is
-    declared) or full-path equality; a DIR class matches when `canonical` is the surface path itself or a
-    leading path-prefix of it. An anywhere-substring lookalike — `scripts/not-idc_pathway_check.py`
-    (basename `not-idc_pathway_check.py`), `docs/CODEOWNERS.bak`, `tmp/.github/rulesets-backup` — does
-    NOT match, so it can no longer satisfy the mandatory-class requirement in place of the real file."""
+def _surface_declares_class(surface: str, kind: str, canonical: str) -> bool:
+    """MEMBERSHIP: does protected-surface `surface` declare the governance class `(kind, canonical)` —
+    i.e. does it put the class's CANONICAL path under protection?
+
+    Matched canonical-EXACTLY (F51). A decoy at another path — `tmp/idc_pathway_check.py`,
+    `backup/idc_validation_contract.py` — shares the basename but leaves the REAL file at its canonical
+    path unlisted, so nothing forces CODEOWNERS to own the checker the workflow actually executes; the
+    earlier basename-anywhere match let such a decoy satisfy the mandatory class and defeat F40. A DIR
+    class likewise requires its canonical ROOT: declaring a subdirectory (`.github/workflows/ci/**`)
+    protects a slice, not the surface, so it cannot stand in for the class.
+
+    The single exception is CODEOWNERS, which GitHub reads from whichever of three honored locations is
+    present — any of those is a legitimate declaration of the class (`_read_codeowners` resolves which
+    one actually governs, and F49 forces the effective file to own itself).
+
+    This is deliberately SEPARATE from `_authoritative_surface_type` below. Membership answers "is the
+    class covered?"; typing answers "is THIS surface a file or a directory?". Fusing them let a class's
+    kind be applied to a surface that was not the class's canonical path — the F52 false-certify."""
     path = _surface_target(surface)[1]
     if kind == "file":
-        return path == canonical or path.rsplit("/", 1)[-1] == canonical.rsplit("/", 1)[-1]
-    return path == canonical or path.startswith(canonical + "/")
+        if canonical == CODEOWNERS_CANONICAL:
+            return path in CODEOWNERS_RELPATHS
+        return path == canonical
+    return path == canonical
 
 
 def _authoritative_surface_type(surface: str):
-    """The AUTHORITATIVE file/dir type of a surface that represents a known governance class, else None
-    for a surface outside the modeled classes (a downstream / non-standard declaration). The ownership
-    check types a KNOWN surface from what it IS — a file or a directory — instead of inferring it from
-    the CODEOWNERS rules being validated; otherwise a directory-only `/<file>/ @owner` rule can re-type a
-    protected FILE surface to a directory and false-certify it as owned while GitHub, reading the trailing
-    slash as directory-only, leaves the FILE unowned (F46)."""
+    """TYPING: the AUTHORITATIVE file/dir type of a surface, or None when we cannot know it from the
+    governance model alone (a descendant entry or a downstream / non-standard declaration).
+
+    Only a surface that IS a class's canonical path gets the class's kind. A surface merely living
+    UNDER a directory class is NOT the class and must never inherit its `dir` kind: a FILE beneath
+    `.github/workflows` (`.github/workflows/idc-pathway-integrity.yml`) is a file, and typing it `dir`
+    let a directory-only trailing-slash rule `covers_all`-certify it while GitHub — reading the trailing
+    slash as directory-only — leaves the FILE unowned (F52, the F46 vector re-opened one level down).
+
+    The ownership check types a KNOWN surface from what it IS — never inferred from the CODEOWNERS rules
+    being validated, or a directory-only `/<file>/ @owner` rule could re-type a protected FILE surface
+    into a directory and certify it (F46). Descendant entries fall through to `_surface_is_owned`'s
+    structural handling, which fails CLOSED on a file/directory conflict rather than picking a side."""
     for _label, kind, canonical in SURFACE_CLASSES:
-        if _surface_matches_class(surface, kind, canonical):
+        if _surface_declares_class(surface, kind, canonical):
             return kind
     return None
+
+
+def _is_governance_descendant(surface: str) -> bool:
+    """Whether `surface` lives strictly UNDER a governance directory class without being a class itself.
+    Such an entry is governance-relevant (it is inside the machinery the pathway check protects) but has
+    no authoritative type, so `_surface_is_owned` resolves a file/dir ambiguity by requiring BOTH
+    readings to be owned — fail-closed — instead of letting the rules under validation pick the reading
+    that certifies (F52)."""
+    path = _surface_target(surface)[1]
+    return any(kind == "dir" and path.startswith(canonical + "/")
+               for _label, kind, canonical in SURFACE_CLASSES)
 
 
 def _rule(rules: list, rule_type: str):
@@ -172,7 +206,7 @@ def validate_contract(contract: dict) -> list:
         reasons.append("idc_contract.protected_surfaces is missing or empty")
     else:
         for label, kind, canonical in SURFACE_CLASSES:
-            if not any(isinstance(s, str) and _surface_matches_class(s, kind, canonical)
+            if not any(isinstance(s, str) and _surface_declares_class(s, kind, canonical)
                        for s in surfaces):
                 reasons.append(
                     "protected_surfaces does not cover the {} surface (no entry naming "
@@ -395,6 +429,13 @@ def _relationship(matcher, target):
             return "none"
         # any-depth directory NAME (single segment): owns any dir of that name and its whole subtree.
         if tkind == "file":
+            # A bare NAME (`dir_only=False`, e.g. `CODEOWNERS`) is not directory-only: GitHub matches a
+            # FILE of that name at ANY depth as well. Without this basename leg the FILE reading scored
+            # `none`, so a trailing OWNERLESS slashless rule — which GitHub applies last-match-wins to
+            # un-own the file — was invisible and the surface false-certified (F50). A TRAILING-SLASH
+            # pattern (`dir_only=True`) keeps the ancestor-only reading: it never matches a regular file.
+            if not dir_only and tcomps and tcomps[-1] == D:
+                return "covers_all"                                # the FILE itself is named D
             return "covers_all" if D in tcomps[:-1] else "none"    # an ANCESTOR dir of the file is named D
         if D in tcomps:
             return "covers_all"                                    # a component IS D -> that dir holds the surface
@@ -492,25 +533,41 @@ def _surface_is_owned(surface: str, rules: list) -> bool:
     downstream declarations would need a filesystem stat and would false-REFUSE genuine dotted files; it
     is the review's accepted 'non-standard declaration' tradeoff (F28 residual), not a false-certify of
     any standard-declared or governance surface."""
-    target = _surface_target(surface)
+    base = _surface_target(surface)
     # F46: a KNOWN governance surface is typed from what it AUTHORITATIVELY is — a file or a directory —
     # never inferred from the CODEOWNERS rules under validation. Otherwise a directory-only
     # `/<file>/ @owner` rule (trailing slash) re-types a protected FILE surface to a directory and then
     # `covers_all`-certifies it, while GitHub reads the trailing slash as directory-only and leaves the
     # FILE unowned — the exact false-certify F40's file surfaces exist to prevent.
     auth = _authoritative_surface_type(surface)
-    if auth == "file":
-        target = ("file", target[1])
-    elif auth == "dir":
-        target = ("dir", target[1])
-    # F28 (unknown / non-standard surfaces only): `_surface_target` types a bare dotted-basename path as a
-    # FILE, but a downstream repo may name a DIRECTORY that way (`config/my.dir`, a dotfile dir). With no
-    # authoritative class type, fall back to structural inference — if a rule proves it is a directory,
-    # read it as one so a later ownerless interior-hole rule un-owns it (invisible to the exact-file
-    # match otherwise). This inference is deliberately NOT applied to the known FILE surfaces above, whose
-    # type a trailing-slash self-rule could otherwise abuse to false-certify (F46).
-    elif target[0] == "file" and _declares_directory(target[1], rules):
-        target = ("dir", target[1])
+    if auth in ("file", "dir"):
+        targets = [(auth, base[1])]
+    # `_surface_target` types a bare dotted-basename path as a FILE, but the same spelling can name a
+    # DIRECTORY (`config/my.dir`, a dotfile dir). When a rule STRUCTURALLY proves it is a directory the
+    # two readings disagree, and which one we pick decides the verdict — so who decides matters:
+    elif base[0] == "file" and _declares_directory(base[1], rules):
+        if _is_governance_descendant(surface):
+            # Inside the governance machinery, the rules under validation must NOT get to pick the
+            # reading that certifies. Require BOTH readings to be owned — the fail-closed resolution.
+            # This is what closes F52: for `.github/workflows/idc-pathway-integrity.yml` a directory-only
+            # `/.github/workflows/idc-pathway-integrity.yml/ @team` rule satisfies the DIR reading but
+            # scores `none` under the FILE reading, so the surface is correctly REFUSED rather than
+            # certified while GitHub leaves the real file unowned.
+            targets = [("file", base[1]), ("dir", base[1])]
+        else:
+            # F28 (unknown / non-standard downstream surfaces only): read it as the directory the rules
+            # prove it to be, so a later ownerless interior-hole rule un-owns it (invisible to the
+            # exact-file match otherwise). Confined to surfaces outside the governance machinery, where
+            # requiring both readings would false-REFUSE a legitimately owned dotted directory.
+            targets = [("dir", base[1])]
+    else:
+        targets = [base]
+    return all(_owned_under(target, rules) for target in targets)
+
+
+def _owned_under(target, rules: list) -> bool:
+    """Walk `rules` in file order under ONE file/dir reading of the surface, tracking a single ownership
+    state the way GitHub resolves last-match-wins per file (see `_surface_is_owned`)."""
     owned = False
     for pattern, owners in rules:
         rel = _relationship(_rule_matcher(pattern), target)

@@ -497,6 +497,118 @@ CO
 python3 "$CHK" --ruleset "$RS" --repo-root "$F49_OK" >/dev/null \
   || fail "checker false-refused a root CODEOWNERS that legitimately owns its own /CODEOWNERS path (F49 control)"
 
+# Case F50 — a bare slashless pattern matches at ANY DEPTH and, having no trailing slash, matches a FILE
+# of that name as well as a directory. So a trailing OWNERLESS `CODEOWNERS` line is applied last-match-wins
+# by GitHub to the file `.github/CODEOWNERS` itself and UN-OWNS it, even though an earlier anchored rule
+# owned it. The checker must see that un-own and REFUSE. Red-when-broken (pre-fix): the FILE reading of an
+# unanchored directory-name matcher only checked ANCESTOR components, never a basename match, so the
+# ownerless line scored `none`, the un-own was invisible, and the governance file false-certified.
+# The slashless rule also matches at any depth for the DIRECTORY surfaces, so those are deliberately
+# RE-OWNED after it: that isolates the vector to the CODEOWNERS FILE, whose last matching rule stays the
+# ownerless slashless line (none of the re-owning directory rules match `.github/CODEOWNERS`). Without
+# this isolation the checker would refuse over the directory surfaces and mask a regression here.
+F50_ROOT="$WORK/co-f50"; mkdir -p "$F50_ROOT/.github"
+cat > "$F50_ROOT/.github/CODEOWNERS" <<'CO'
+/.github/workflows/ @team
+/scripts/hooks/ @team
+/scripts/idc_validation_contract.py @team
+/scripts/idc_receipt_check.py @team
+/scripts/idc_pathway_check.py @team
+/.github/rulesets/ @team
+/.github/CODEOWNERS @team
+CODEOWNERS
+/.github/workflows/ @team
+/scripts/hooks/ @team
+/.github/rulesets/ @team
+CO
+out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$F50_ROOT" 2>&1)" \
+  && fail "checker certified .github/CODEOWNERS while a later ownerless slashless 'CODEOWNERS' rule un-owns it under GitHub last-match-wins (F50)"
+printf '%s\n' "$out" | grep -qiE 'CODEOWNERS|no code owner' \
+  || fail "F50 refusal must name the un-owned CODEOWNERS surface; got: $out"
+
+# Case F50 control — the SAME fixture with the ownerless slashless line given an OWNER certifies, so the
+# added basename leg reads a bare-name rule as ownership too and does not blanket-refuse.
+F50_OK="$WORK/co-f50-ok"; mkdir -p "$F50_OK/.github"
+sed 's/^CODEOWNERS$/CODEOWNERS @team/' "$F50_ROOT/.github/CODEOWNERS" > "$F50_OK/.github/CODEOWNERS"
+python3 "$CHK" --ruleset "$RS" --repo-root "$F50_OK" >/dev/null \
+  || fail "checker false-refused a .github/CODEOWNERS owned by a bare-name rule (F50 control)"
+
+# Case F51 — the mandatory governance classes must be declared at their CANONICAL paths. A decoy sharing
+# only the basename (`tmp/idc_pathway_check.py`) leaves the REAL checker/validation/receipt files absent
+# from protected_surfaces, so `require_code_owner_review` binds no reviewer to the file the workflow
+# actually executes — defeating F40 while the contract reports full coverage. Red-when-broken (pre-fix):
+# file classes matched on basename ANYWHERE, so the decoys satisfied all three classes and this certified.
+F51_RS="$WORK/rs-f51.json"
+python3 - "$RS" "$F51_RS" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["idc_contract"]["protected_surfaces"] = [
+    ".github/workflows/**", "scripts/hooks/**", ".github/rulesets/**", ".github/CODEOWNERS",
+    "tmp/idc_validation_contract.py",          # decoy — real file at scripts/ stays unprotected
+    "tmp/idc_receipt_check.py",                # decoy
+    "tmp/idc_pathway_check.py",                # decoy — the EXECUTED checker
+]
+json.dump(d, open(sys.argv[2], "w"))
+PY
+out="$(python3 "$CHK" --ruleset "$F51_RS" 2>&1)" \
+  && fail "checker accepted decoy same-basename paths in place of the canonical checker/validation/receipt governance files (F51)"
+printf '%s\n' "$out" | grep -qiE 'idc_pathway_check.py|idc_validation_contract.py|idc_receipt_check.py' \
+  || fail "F51 refusal must name the uncovered canonical governance file(s); got: $out"
+
+# Case F51 control — CODEOWNERS is the one class GitHub honors at several locations, so declaring it at
+# the root path must still satisfy the class (the canonical-exact rule must not break legitimate placement).
+F51_OK="$WORK/rs-f51-ok.json"
+python3 - "$RS" "$F51_OK" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["idc_contract"]["protected_surfaces"] = [
+    s for s in d["idc_contract"]["protected_surfaces"] if "CODEOWNERS" not in s] + ["CODEOWNERS"]
+json.dump(d, open(sys.argv[2], "w"))
+PY
+python3 "$CHK" --ruleset "$F51_OK" >/dev/null \
+  || fail "checker refused a CODEOWNERS class declared at a GitHub-honored location (F51 control)"
+
+# Case F52 — a FILE declared BENEATH a governance directory class is a file, not the class. Typing it from
+# the CLASS's kind let a directory-only trailing-slash rule `covers_all`-certify it, while GitHub reads the
+# trailing slash as directory-only and leaves the real file UNOWNED — the F46 vector one level down.
+#
+# Asserted at the OWNERSHIP-FUNCTION level, deliberately. At whole-contract level this vector is MASKED:
+# any rule that un-owns a file inside `.github/workflows` also carves a hole in the mandatory
+# `.github/workflows/**` directory surface, so the checker already refuses over the directory and would
+# stay green no matter how the descendant was typed. The mis-typing is therefore a defense-in-depth
+# defect, not an exploitable contract-level false-certify — and only a direct assertion can prove it is
+# fixed. Red-when-broken: restore the class-prefix match in `_surface_declares_class` and the first
+# assertion below reports owned=True.
+python3 - "$PLUGIN" <<'PY' || fail "F52: descendant-file typing assertions failed (see message above)"
+import sys, importlib
+sys.path.insert(0, sys.argv[1] + "/scripts")
+RC = importlib.import_module("idc_ruleset_check")
+S = ".github/workflows/idc-pathway-integrity.yml"
+
+# The declared surface is a FILE and must be typed as one — never as the directory class it sits under.
+if RC._authoritative_surface_type(S) == "dir":
+    print("FAIL: descendant file %r inherited the directory class's kind (F52)" % S); sys.exit(1)
+
+# A directory-only trailing-slash rule names an owner but GitHub never applies it to a regular file.
+dir_only_rule = RC._codeowners_rules("/.github/workflows/idc-pathway-integrity.yml/ @team\n")
+if RC._surface_is_owned(S, dir_only_rule):
+    print("FAIL: directory-only trailing-slash rule certified the descendant FILE surface %r, which "
+          "GitHub leaves unowned (F52)" % S); sys.exit(1)
+
+# Control — a genuine file rule (no trailing slash) still establishes ownership, so the stricter typing
+# does not false-refuse legitimate coverage.
+file_rule = RC._codeowners_rules("/.github/workflows/idc-pathway-integrity.yml @team\n")
+if not RC._surface_is_owned(S, file_rule):
+    print("FAIL: genuine file rule was false-refused for descendant surface %r (F52 control)" % S)
+    sys.exit(1)
+
+# Control — an ancestor directory rule legitimately covers the file, exactly as GitHub resolves it.
+anc = RC._codeowners_rules("/.github/workflows/ @team\n")
+if not RC._surface_is_owned(S, anc):
+    print("FAIL: ancestor directory rule was false-refused for descendant surface %r (F52 control)" % S)
+    sys.exit(1)
+PY
+
 # Case F40 — the mandatory ownership set now also covers the governance-of-governance surfaces (the
 # deterministic checker scripts/idc_pathway_check.py, the ruleset directory, and CODEOWNERS itself). A
 # CODEOWNERS owning ONLY the original four protected surfaces must now REFUSE — otherwise those three
@@ -685,6 +797,38 @@ out="$(python3 "$INS" --ruleset "$RS" --repo "$SANDBOX" --repo-root "$TGT_EVILHO
 printf '%s\n' "$out" | grep -qiE 'github|host|origin|confirm|F48' \
   || fail "F48 refusal must explain the origin is not on the GitHub host; got: $out"
 
+# F53 — checking the HOST is still not enough: the SCHEME and the path SHAPE decide whether a remote is
+# really a GitHub clone of --repo. `file://github.com/<target>.git` carries the right host but clones a
+# local directory, and `https://github.com/decoy/<target>.git` carries an extra path segment — both used
+# to reduce to the target owner/repo and pass the F34/F48 gate, so an unrelated checkout's CODEOWNERS
+# could certify the real target. Each fixture below is a real clone EXCEPT its origin URL, so the URL is
+# the sole difference. Red-when-broken: accept any scheme (or `len(segs) >= 2`) and these certify.
+for f53 in "file://github.com/$SANDBOX.git|scheme" "https://github.com/decoy/$SANDBOX.git|segments"; do
+  f53_url="${f53%%|*}"; f53_why="${f53##*|}"
+  TGT_F53="$WORK/target-f53-$f53_why"; git init -q -b main "$TGT_F53"
+  git -C "$TGT_F53" config user.email idc-test@example.com
+  git -C "$TGT_F53" config user.name "IDC Test"
+  git -C "$TGT_F53" config commit.gpgsign false
+  git -C "$TGT_F53" remote add origin "$f53_url"
+  mkdir -p "$TGT_F53/.github"
+  cat > "$TGT_F53/.github/CODEOWNERS" <<'CO'
+/.github/workflows/ @team
+/scripts/hooks/ @team
+/scripts/idc_validation_contract.py @team
+/scripts/idc_receipt_check.py @team
+/scripts/idc_pathway_check.py @team
+/.github/rulesets/ @team
+/.github/CODEOWNERS @team
+CO
+  git -C "$TGT_F53" add -A && git -C "$TGT_F53" commit -q -m init >/dev/null 2>&1
+  git -C "$TGT_F53" update-ref refs/remotes/origin/main "$(git -C "$TGT_F53" rev-parse HEAD)"
+  git -C "$TGT_F53" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+  out="$(python3 "$INS" --ruleset "$RS" --repo "$SANDBOX" --repo-root "$TGT_F53" 2>&1)" \
+    && fail "installer certified the GitHub target from an origin that is not a GitHub clone URL ($f53_why: $f53_url) (F53)"
+  printf '%s\n' "$out" | grep -qiE 'github|host|origin|confirm|F53' \
+    || fail "F53 refusal ($f53_why) must explain the origin is not a GitHub clone of the target; got: $out"
+done
+
 # F39 — GitHub enforces the CODEOWNERS COMMITTED on the default branch, not the working tree. The
 # installer reads the committed copy (`git show <default-branch>:.github/CODEOWNERS`), validates THAT,
 # and refuses when none is committed or when the working tree differs from it. Both directions below
@@ -802,4 +946,4 @@ out="$(python3 "$INS" --ruleset "$RS" --repo "$SANDBOX" --repo-root "$TGT_CRLF" 
 printf '%s\n' "$out" | grep -qiE 'differ|working[- ]tree|commit|match' \
   || fail "F45 genuine-divergence refusal must name the working-tree/committed mismatch; got: $out"
 
-echo "PASS: ruleset checker enforces PR flow, exact-head required check, force-push/deletion prevention, all seven protected surfaces (incl. the F40 governance-of-governance set: the checker, the ruleset dir, and CODEOWNERS itself), GitHub any-depth/last-match-wins ownership with a strict class allowlist that fails closed on unmodeled patterns, re-types a dotted-basename DIRECTORY surface off the file guess so an interior ownerless hole cannot false-certify (F28), treats a '**/name/' trailing-slash pattern as directory-only (F32) and a bare '/' as matching-nothing (F33), and counts only valid owner tokens so a bare '@' cannot false-certify (F41); installer refuses without --repo, refuses a production repo, requires --repo-root, BINDS it to --repo via a local origin-identity check (F34), and validates the CODEOWNERS COMMITTED on the default branch — refusing an uncommitted or working-tree-diverged copy (F39); reads the enforced branch from origin/HEAD and REFUSES rather than trusting the checked-out branch when it is unset, accepting a validated --default-branch override (F44); and normalizes newlines before the divergence compare so a byte-identical CRLF-committed CODEOWNERS is not false-refused (F45); types KNOWN governance surfaces authoritatively so a directory-only '/<file>/' rule can never certify a protected FILE surface (F46), matches each mandatory governance class by exact basename/path-prefix so a lookalike substring cannot stand in for the real file (F47), requires the installer's origin-identity remote to be on the GitHub host so a non-GitHub checkout ending in the same owner/repo cannot certify the target (F48), and requires the EFFECTIVE committed CODEOWNERS file (root/docs, not just .github) to own its own path (F49)"
+echo "PASS: ruleset checker enforces PR flow, exact-head required check, force-push/deletion prevention, all seven protected surfaces (incl. the F40 governance-of-governance set: the checker, the ruleset dir, and CODEOWNERS itself), GitHub any-depth/last-match-wins ownership with a strict class allowlist that fails closed on unmodeled patterns, re-types a dotted-basename DIRECTORY surface off the file guess so an interior ownerless hole cannot false-certify (F28), treats a '**/name/' trailing-slash pattern as directory-only (F32) and a bare '/' as matching-nothing (F33), and counts only valid owner tokens so a bare '@' cannot false-certify (F41); installer refuses without --repo, refuses a production repo, requires --repo-root, BINDS it to --repo via a local origin-identity check (F34), and validates the CODEOWNERS COMMITTED on the default branch — refusing an uncommitted or working-tree-diverged copy (F39); reads the enforced branch from origin/HEAD and REFUSES rather than trusting the checked-out branch when it is unset, accepting a validated --default-branch override (F44); and normalizes newlines before the divergence compare so a byte-identical CRLF-committed CODEOWNERS is not false-refused (F45); types KNOWN governance surfaces authoritatively so a directory-only '/<file>/' rule can never certify a protected FILE surface (F46), rejects lookalike substrings standing in for a real governance file (F47), requires the installer's origin-identity remote to be on the GitHub host so a non-GitHub checkout ending in the same owner/repo cannot certify the target (F48), and requires the EFFECTIVE committed CODEOWNERS file (root/docs, not just .github) to own its own path (F49); and — separating class MEMBERSHIP from surface TYPING — reads a bare-name rule as matching the FILE of that name so a later ownerless slashless rule un-owns it instead of being invisible (F50), demands each mandatory class be declared at its CANONICAL path so a same-basename decoy cannot leave the executed checker unprotected (F51), and never lets a descendant entry inherit its directory class's kind, so a directory-only rule cannot certify a FILE beneath a governance directory (F52)"

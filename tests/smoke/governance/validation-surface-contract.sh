@@ -10,8 +10,12 @@
 #   (e) a WITNESSED execution receipt whose surface/evidence kind drifts from the frozen contract is
 #       refused at receipt-mint time, and a drifted build receipt is refused at verify time;
 #   (f) an omitted `--surface` is refused (an undeclared surface is not a declaration);
-#   (g) an all-static CLI gate is refused, while a static precondition guarding a real drive is not;
-#   (h) credential-shaped material a gate prints to STDOUT is redacted in both committed artifacts.
+#   (g) an all-static CLI gate is refused — including the piped `cat file | grep -q x` shape — while a
+#       static precondition guarding a real drive, and a real drive whose NAME contains "lint", are not;
+#   (h) credential-shaped material a gate prints to STDOUT is redacted in both committed artifacts,
+#       using the committed-evidence profile (vendor prefixes AND bare opaque runs), inside a
+#       400-character bound proven against a gate that prints past it;
+#   (i) a gate that never terminates is refused on a timeout rather than waited on.
 #
 # RED-WHEN-BROKEN NOTES — the two cases below that were previously INERT and why:
 #   * (B) used `--surface api --evidence-kind pane-capture` with `--verify 'bash verify.sh'`. With the
@@ -24,6 +28,8 @@
 #     check ran, and the assertion's grep matched the word "surface" inside the fixture's own filename.
 #     It now forges IN PLACE, re-records the machine witness, keeps the forgery self-consistent so it
 #     survives `load_execution`, and greps the exact drift sentence.
+#   * (A) asserted the 400-character evidence bound against a fixture gate that PRINTS NOTHING, so it
+#     held with the clip deleted. The assertion moved to (G), whose gate prints well past the bound.
 set -uo pipefail
 PLUGIN="$(cd "$(dirname "$0")/../../.." && pwd)"
 VC="$PLUGIN/scripts/idc_validation_contract.py"
@@ -122,10 +128,9 @@ if declared.get('kind') != 'pane-capture':
 records = declared.get('records') or []
 if not records:
     raise SystemExit(f"FAIL: execution receipt must carry bounded evidence records, got {declared}")
-for row in records:
-    for key in ('stdout_excerpt', 'stderr_excerpt'):
-        if len(str(row.get(key) or '')) > 400:
-            raise SystemExit(f"FAIL: {key} exceeded the bounded evidence limit: {row.get(key)!r}")
+# NO 400-character assertion here: this fixture's gate prints nothing, so the bound would hold with
+# the clip deleted and the check would be inert. The bound is proven in case (G), against a gate that
+# really does print past it.
 print('ok: cli validation contract recorded its declared surface/evidence kind and bounded evidence')
 PY
 write_verdict_from_execution "$EXEC_GOOD" "$VERDICT_GOOD"
@@ -303,6 +308,78 @@ python3 "$VC" freeze \
   --out "$MIXED_CONTRACT" >/dev/null \
   || fail "a static precondition guarding a REAL drive was wrongly refused as all-static"
 
+# (B5) `cat file | grep -q x` is ALL-STATIC. `cat`/`printf` exercise nothing, but they classed OTHER,
+# which satisfied the "something might drive the surface" clause on its own — so the two commonest
+# piped shapes of a purely static gate passed a rule written to refuse exactly them.
+PIPED_CONTRACT="$REPO_PAIR/docs/workflow/build-validation/piped-static.json"
+out="$(python3 "$VC" freeze \
+  --repo "$REPO_PAIR" \
+  --issue 1 \
+  --pr 401 \
+  --graph-node alpha \
+  --graph-digest "$GRAPH_DIGEST" \
+  --projection-digest "$PROJECTION_DIGEST" \
+  --touch src/allowed/ \
+  --off-limits docs/ \
+  --verify 'cat src/allowed/feature.txt | grep -q behavior' \
+  --surface cli \
+  --evidence-kind pane-capture \
+  --baseline expected-green \
+  --label piped-static \
+  --out "$PIPED_CONTRACT" 2>&1)" \
+  && fail "an ALL-STATIC piped gate (cat | grep) was accepted"
+printf '%s\n' "$out" | grep -qF 'all-static verification surface refused' \
+  || fail "the cat|grep refusal must come from the all-static rule; got: $out"
+[ ! -e "$PIPED_CONTRACT" ] || fail "a refused piped-static gate still wrote a contract at $PIPED_CONTRACT"
+
+# (B6) POSITIVE TWIN — a real drive whose NAME merely contains "lint" is NOT static. The rule used to
+# be a free search over the whole segment, so `bash e2e/lint-fix-flow.sh` (a script that fixes and
+# re-drives) and `npm run lint:e2e` were refused as inert with no override. It is now anchored to the
+# tokens that NAME what the segment runs.
+mkdir -p "$REPO_PAIR/e2e"
+cat > "$REPO_PAIR/e2e/lint-fix-flow.sh" <<'SH'
+#!/bin/bash
+grep -qx 'new behavior' src/allowed/feature.txt
+SH
+chmod +x "$REPO_PAIR/e2e/lint-fix-flow.sh"
+LINTNAME_CONTRACT="$REPO_PAIR/docs/workflow/build-validation/lint-named-drive.json"
+python3 "$VC" freeze \
+  --repo "$REPO_PAIR" \
+  --issue 1 \
+  --pr 401 \
+  --graph-node alpha \
+  --graph-digest "$GRAPH_DIGEST" \
+  --projection-digest "$PROJECTION_DIGEST" \
+  --touch src/allowed/ \
+  --off-limits docs/ \
+  --verify 'bash e2e/lint-fix-flow.sh' \
+  --surface cli \
+  --evidence-kind pane-capture \
+  --baseline expected-red \
+  --label lint-named-drive \
+  --out "$LINTNAME_CONTRACT" >/dev/null \
+  || fail "a real drive whose script name merely CONTAINS 'lint' was wrongly refused as all-static"
+# …and a task named exactly `lint` still classes static, so (B6) did not simply delete the rule.
+LINT_CONTRACT="$REPO_PAIR/docs/workflow/build-validation/plain-lint.json"
+out="$(python3 "$VC" freeze \
+  --repo "$REPO_PAIR" \
+  --issue 1 \
+  --pr 401 \
+  --graph-node alpha \
+  --graph-digest "$GRAPH_DIGEST" \
+  --projection-digest "$PROJECTION_DIGEST" \
+  --touch src/allowed/ \
+  --off-limits docs/ \
+  --verify 'make lint' \
+  --surface cli \
+  --evidence-kind pane-capture \
+  --baseline expected-red \
+  --label plain-lint \
+  --out "$LINT_CONTRACT" 2>&1)" \
+  && fail "a gate that is nothing but 'make lint' was accepted"
+printf '%s\n' "$out" | grep -qF 'all-static verification surface refused' \
+  || fail "'make lint' must still be refused BY THE ALL-STATIC RULE; got: $out"
+
 # (C) `surface:none` without a one-line skip_reason is refused.
 REPO_NONE="$WORK/repo-none"
 git init -q -b main "$REPO_NONE"
@@ -454,6 +531,29 @@ printf '%s\n' "$out" | grep -qF "contract-drift refused: the execution receipt's
 [ ! -e "$REPO_DRIFT/docs/workflow/build-receipts/drift-forged.json" ] \
   || fail "a refused drift still minted a build receipt"
 
+# (F1b) write path — a forgery that mutates ONLY `declared_evidence.kind`, leaving surface and
+# evidence_kind agreeing with the frozen contract, so the comparison in (F1) cannot see it. It is
+# refused at mint time and mints nothing.
+#
+# WHERE THE REFUSAL COMES FROM, and why this case asserts THAT sentence: the single enforcement point
+# is `idc_validation_contract.load_execution`, which `write_receipt` calls before any of its own
+# comparisons. `idc_build_receipt.py` used to repeat the same comparison a few lines later; neutering
+# that copy to `if False:` produced the identical refusal, identical exit code and no receipt, i.e. it
+# was a guard no input could ever reach. It has been removed and this case is red for the one that is
+# real. (Its RECEIPT-side twin in `verify_receipt` is a different comparison — `load_receipt` does not
+# make it — and is covered by "receipt declared-evidence" below.)
+cp "$WORK/exec-drift.orig.json" "$EXEC_DRIFT"
+retype "$EXEC_DRIFT" execution "doc['declared_evidence']['kind']='check-run'"
+out="$(python3 "$BR" write \
+  --repo "$REPO_DRIFT" --contract "$CONTRACT_DRIFT" --execution "$EXEC_DRIFT" --verdict "$VERDICT_DRIFT" \
+  --graph-digest "$GRAPH_DIGEST" --projection-digest "$PROJECTION_DIGEST" \
+  --out "$REPO_DRIFT/docs/workflow/build-receipts/drift-declared.json" 2>&1)" \
+  && fail "an execution receipt whose declared evidence contradicts its own recorded kind was accepted at mint time"
+printf '%s\n' "$out" | grep -qF "execution receipt contract-drift: declared evidence no longer matches its recorded surface/evidence kind" \
+  || fail "the mint-time declared-evidence refusal must be the verbatim single-enforcement-point sentence; got: $out"
+[ ! -e "$REPO_DRIFT/docs/workflow/build-receipts/drift-declared.json" ] \
+  || fail "a refused declared-evidence drift still minted a build receipt"
+
 # Restore the honest execution receipt and mint the real build receipt the verify-path cases mutate.
 cp "$WORK/exec-drift.orig.json" "$EXEC_DRIFT"
 retype "$EXEC_DRIFT" execution "pass"
@@ -552,13 +652,28 @@ printf '%s\n' "$out" | grep -qF "contract-drift refused: the execution receipt n
 # ── (G) credential-shaped material on the gate's STDOUT is redacted in BOTH committed artifacts ───
 # `stderr` was scrubbed at the read from the start; `stdout` was passed through raw and bounded, so a
 # gate that printed a token wrote it verbatim into the frozen contract AND the execution receipt —
-# both committed repo files. The literal below is synthetic and matches no real credential.
+# both committed repo files.
+#
+# THE PROFILE MATTERS AS MUCH AS THE DOOR. The shared floor catches what NAMES itself a secret or
+# carries a vendor's documented prefix; it does NOT catch a bare AWS secret access key, an Azure
+# `AccountKey=…`, or any other long opaque blob. A gate's stdout is an unpredictable capture from a
+# project's own probe — the one case `idc_credential_shapes` names as affordable for the opaque-run
+# backstop, and the profile `idc_live_check.py` (the repo's other committed-evidence writer) applies.
+# So this case asserts THREE shapes, not one. Every literal is synthetic and matches no real
+# credential.
 FAKE_TOKEN='ghp_EXAMPLENOTAREALTOKEN0123456789abcd'
+FAKE_OPAQUE='EXAMPLEONLYnotarealsecretaccesskey0000000000'
+FAKE_AZURE='EXAMPLEONLYnotarealazurestorageaccountkeyvalue000000000000000000000'
 REPO_LEAK="$WORK/repo-leak"
 setup_repo "$REPO_LEAK"
+# The gate also prints WELL OVER the 400-character evidence bound, so the "bounded evidence"
+# assertion below is not satisfied by a fixture that simply prints nothing.
 cat > "$REPO_LEAK/leaky-verify.sh" <<SH
 #!/bin/bash
 echo "gate output: $FAKE_TOKEN"
+echo "aws-ish: $FAKE_OPAQUE"
+echo "azure-ish: AccountKey=$FAKE_AZURE"
+for i in \$(seq 1 40); do echo "evidence line \$i of the gate's ordinary chatter"; done
 grep -qx 'new behavior' src/allowed/feature.txt
 SH
 chmod +x "$REPO_LEAK/leaky-verify.sh"
@@ -578,13 +693,24 @@ git -C "$REPO_LEAK" add src/allowed/feature.txt
 git -C "$REPO_LEAK" commit -qm 'implement leak-case behavior'
 python3 "$VC" run --repo "$REPO_LEAK" --contract "$CONTRACT_LEAK" --out "$EXEC_LEAK" >/dev/null \
   || fail "could not execute the stdout-redaction contract"
-python3 - "$CONTRACT_LEAK" "$EXEC_LEAK" "$FAKE_TOKEN" <<'PY' || exit 1
+python3 - "$CONTRACT_LEAK" "$EXEC_LEAK" "$FAKE_TOKEN" "$FAKE_OPAQUE" "$FAKE_AZURE" <<'PY' || exit 1
 import json, sys
-contract_path, exec_path, token = sys.argv[1:4]
+contract_path, exec_path = sys.argv[1:3]
+literals = {"vendor-prefixed token": sys.argv[3],
+            "bare opaque secret run": sys.argv[4],
+            "Azure AccountKey value": sys.argv[5]}
+# The two OPAQUE literals must be at least as long as the backstop's own bound, or they would be
+# redacted by some other rule (or not at all) and this case would prove nothing about the profile.
+for name in ("bare opaque secret run", "Azure AccountKey value"):
+    if len(literals[name]) < 40:
+        raise SystemExit(f"FAIL: the {name} fixture literal is shorter than the backstop's own bound "
+                         f"({len(literals[name])}); the case would prove nothing")
 for label, path in (("frozen contract", contract_path), ("execution receipt", exec_path)):
     raw = open(path, encoding='utf-8').read()
-    if token in raw:
-        raise SystemExit(f"FAIL: the gate's stdout token reached the committed {label} VERBATIM ({path})")
+    for name, literal in literals.items():
+        if literal in raw:
+            raise SystemExit(
+                f"FAIL: the gate's stdout {name} reached the committed {label} VERBATIM ({path})")
     if '[REDACTED]' not in raw:
         raise SystemExit(f"FAIL: the {label} carries no redaction marker — the excerpt was dropped, not scrubbed ({path})")
 contract = json.load(open(contract_path, encoding='utf-8'))
@@ -598,7 +724,51 @@ for label, rows in (("baseline.results", baseline), ("verification", runs),
         raise SystemExit(f"FAIL: {label} carries no redacted stdout excerpt: {rows!r}")
     if any('gate output' not in row for row in rows):
         raise SystemExit(f"FAIL: {label} lost the surrounding stdout evidence entirely: {rows!r}")
-print('ok: gate stdout is redacted in the frozen contract AND the execution receipt, evidence preserved')
+    # The BOUND, asserted against a gate that really does print past it: over-long output is CUT, and
+    # the cut is visible. With the clip removed these rows run to thousands of characters.
+    for row in rows:
+        if len(row) > 400:
+            raise SystemExit(f"FAIL: {label} exceeded the 400-character evidence bound ({len(row)})")
+        if not row.endswith('...'):
+            raise SystemExit(
+                f"FAIL: {label} was not actually clipped — the gate printed well past the bound, so a "
+                f"row that does not end in the truncation marker means the bound never fired: {row!r}")
+print('ok: gate stdout is redacted (vendor prefix, opaque run, Azure key) in the frozen contract AND '
+      'the execution receipt, bounded at 400 characters, evidence preserved')
 PY
 
-echo "PASS: validation contracts require an explicit surface, type the fixed surface/evidence table, refuse all-static gates, require surface:none reasons, reject impossible evidence, refuse witnessed receipt-side contract drift, and redact gate stdout"
+# ── (H) A GATE THAT NEVER TERMINATES IS REFUSED, NOT WAITED ON ───────────────────────────────────
+# Spec §3.4 names "timeout" as a stopping condition; this runner had none, so a hanging gate hung the
+# freeze forever. THIS IS A BOUND, so a broken guard does not go red on its own — it hangs, and a hang
+# reads like a slow pass. The probe therefore runs under an OUTER `timeout` and treats the outer
+# timeout firing as the failure signal, by name.
+#
+# A timeout is a REFUSAL, not a red baseline: a gate that could not finish established nothing, and
+# recording that as `expected-red` would let a hanging command freeze as a legitimate baseline.
+REPO_HANG="$WORK/repo-hang"
+setup_repo "$REPO_HANG"
+cat > "$REPO_HANG/hang.sh" <<'SH'
+#!/bin/bash
+sleep 300
+SH
+chmod +x "$REPO_HANG/hang.sh"
+git -C "$REPO_HANG" add hang.sh
+git -C "$REPO_HANG" commit -qm 'add a gate that never returns'
+HANG_CONTRACT="$REPO_HANG/docs/workflow/build-validation/hang.json"
+set +e
+out="$(IDC_VERIFY_TIMEOUT=2 timeout 60 python3 "$VC" freeze \
+  --repo "$REPO_HANG" --issue 5 --pr 405 --graph-node alpha \
+  --graph-digest "$GRAPH_DIGEST" --projection-digest "$PROJECTION_DIGEST" \
+  --touch src/allowed/ --off-limits docs/ \
+  --verify 'bash hang.sh' --surface cli --evidence-kind pane-capture \
+  --baseline expected-red --label hang --out "$HANG_CONTRACT" 2>&1)"
+rc=$?
+set -e
+[ "$rc" -eq 124 ] \
+  && fail "the freeze did not stop on its own — the OUTER timeout had to kill it, i.e. the verification-command timeout is gone"
+[ "$rc" -ne 0 ] || fail "a gate that never terminates was accepted: $out"
+printf '%s\n' "$out" | grep -qF 'timed out after 2s and established nothing' \
+  || fail "the refusal must name the timeout as the reason, not some later failure; got: $out"
+[ ! -e "$HANG_CONTRACT" ] || fail "a timed-out gate still wrote a frozen contract at $HANG_CONTRACT"
+
+echo "PASS: validation contracts require an explicit surface, type the fixed surface/evidence table, refuse all-static gates (including piped cat|grep) without refusing lint-NAMED drives, require surface:none reasons, reject impossible evidence, refuse witnessed receipt-side contract drift on both write and verify paths, redact gate stdout with the committed-evidence profile inside a 400-character bound, and refuse a gate that never terminates"

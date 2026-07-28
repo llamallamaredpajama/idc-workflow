@@ -119,9 +119,19 @@ The finisher runs its **own** `/fullauto-goal` loop. Its completion contract car
    witnessed** execution receipt, so the registry records what was *proven*, not what was retyped.
    The helper refuses a duplicate id, a secret-bearing recipe, and anything that would leave the
    registry invalid (restoring the file unchanged), so a refusal is a finding to fix, never a reason
-   to hand-edit the YAML. Skip this step when the contract already cited a `handle_id` (nothing new
-   was learned) or when `surface: none`. Then commit the registry change with the triplet's work — it
-   is reviewed and merged through the normal PR path, never written out of band.
+   to hand-edit the YAML. `--from-execution` is the helper's **only** mode — there is no
+   caller-declared form — and `--registry` must resolve inside this repo. Skip this step when the
+   contract already cited a `handle_id` (nothing new was learned) or when `surface: none`. Then commit
+   the registry change with the triplet's work — it is reviewed and merged through the normal PR path,
+   never written out of band.
+   **What "inside the reviewed diff" costs, plainly:** the build receipt refuses an execution receipt
+   that no longer matches the current head/diff, and refuses any changed path outside `touch` or inside
+   `off-limits`. So the appended entry sits inside the *receipt-bound* diff only when Plan put
+   `docs/workflow/verification-handles.yaml` inside `touch` **and** you re-run the frozen gate against
+   the post-append commit before minting. Where the plan did not allow that path, still make the
+   append and commit it on the branch — it is reviewed and merged with the rest of the work — and say
+   in the report that it landed outside the receipt-bound diff. Do **not** skip the append, and do
+   **not** widen the contract to make it fit. No fixed code checks this step (spec §4.2).
 5. **Git finalization.** Acquire the area's **surface-keyed merge-train lease** (the serialized
    merge lock for *this area's* file surface — disjoint areas hold distinct leases and merge
    concurrently; see *Merge serialization*). First mint the verified implementation receipt through

@@ -96,8 +96,12 @@ grep -q "$SENTINEL" "$CFG" && fail "negative control: domains should have been w
 # `docs/workflow/verification-handles.yaml` holds the operator's proven drive recipes. /idc:update
 # documents a preserve-and-validate branch for it, and NO phase7 test mentioned the registry at all —
 # so the branch could be deleted, or quietly turned into a template overwrite, with every update test
-# still green. This replays that branch exactly as commands/update.md prescribes it, in both
-# directions, and asserts the shipped playbook still carries the rule being replayed.
+# still green. This drives update's registry step — the fixed `validate` call it prescribes — in both
+# directions, and asserts the shipped playbook still carries the rule.
+#
+# WHAT THIS COVERS AND WHAT IT DOES NOT: /idc:update's registry handling IS the validate call plus a
+# report; the preserve path is read-only by construction, so cases 7a/7b prove the helper's verdict and
+# that the operator's bytes are untouched either way. They do NOT drive `/idc:update` end to end.
 UPDATE_MD="$PLUGIN/commands/update.md"
 VH="$PLUGIN/scripts/idc_verification_handles.py"
 REG="$SBX/docs/workflow/verification-handles.yaml"
@@ -127,10 +131,31 @@ if 'Never overwrite the registry' not in window:
 print("ok: /idc:update still documents preserve-and-validate for the verification-handle registry")
 PY
 
-# The operator's own recipe, in the file /idc:init scaffolded.
-python3 "$VH" append --repo "$SBX" --handle-id operator-recipe --surface cli \
-  --verify-command 'bash scripts/drive-the-app.sh' --fixture 'seed:operator' >/dev/null \
-  || fail "could not seed an operator recipe into the scaffolded registry"
+# The operator's own recipe, hand-written into the file /idc:init scaffolded. It is written directly
+# rather than through `append` on purpose: `append` is the fixed-code door for a PROVEN recipe and now
+# requires an execution receipt, while this fixture is modelling the other half of the registry's
+# life — an entry a human typed. It must survive /idc:update just the same.
+python3 - "$REG" <<'PY' || fail "could not seed an operator recipe into the scaffolded registry"
+import re, sys
+path = sys.argv[1]
+text = open(path, encoding='utf-8').read()
+entry = ('handles:\n'
+         '  - handle_id: operator-recipe\n'
+         '    surface: cli\n'
+         '    evidence_kind: pane-capture\n'
+         '    build_commands: []\n'
+         '    launch_commands: []\n'
+         '    verify_commands: ["bash scripts/drive-the-app.sh"]\n'
+         '    fixtures: ["seed:operator"]\n'
+         '    accounts: []\n'
+         '    emulators: []\n')
+new, count = re.subn(r'^handles:\s*(\[\s*\])?\s*$', entry.rstrip('\n'), text, count=1, flags=re.M)
+if count != 1:
+    raise SystemExit(f"the scaffolded registry has no top-level `handles:` key to seed: {text!r}")
+open(path, 'w', encoding='utf-8').write(new)
+PY
+python3 "$VH" validate --repo "$SBX" >/dev/null \
+  || fail "the hand-seeded operator recipe does not validate — the fixture is broken, not the code"
 OP_COPY="$SBX/registry.operator.bak"
 cp "$REG" "$OP_COPY"
 
@@ -167,12 +192,15 @@ set -e
 [ "$vh_rc" -ne 0 ] || fail "a registry whose evidence_kind contradicts its surface passed validation"
 printf '%s\n' "$vh_out" | grep -qi 'evidence_kind' \
   || fail "the malformed-registry error must name the offending field so update can report it verbatim; got: $vh_out"
-# The branch under test: on failure update reports and stops — it does not refresh from the template.
-if [ "$vh_rc" -eq 0 ]; then
-  cp "$TEMPLATE_REG" "$REG"            # only reachable if validation passed — i.e. never, here
-fi
+# The `validate` call update makes is READ-ONLY on both verdicts: a failing registry is reported, never
+# refreshed from the template. (An earlier revision guarded this with `if [ "$vh_rc" -eq 0 ]; then cp
+# template …; fi` and called it a replay of update's branch — but line 167 above already `fail`s unless
+# vh_rc is non-zero, so the `if` could never fire and the copy inside it was dead code replaying its
+# own condition rather than update's.)
 cmp -s "$REG" "$SBX/registry.malformed.bak" \
-  || fail "update overwrote a failing operator registry instead of reporting the helper error and stopping"
+  || fail "the failing-registry validate call is not read-only: it modified the operator's registry"
+cmp -s "$REG" "$TEMPLATE_REG" \
+  && fail "the operator's failing registry was replaced by the template — the preserve rule is gone"
 grep -qF 'operator-recipe' "$REG" \
   || fail "the operator's recipe was wiped by the malformed-registry path (F8 class, registry edition)"
 

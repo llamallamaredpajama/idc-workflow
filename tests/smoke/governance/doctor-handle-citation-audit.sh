@@ -14,8 +14,14 @@
 #   3. A missing registry `die()`d at exit 2, which on a pre-registry repo turns an advisory row into
 #      a hard doctor failure.
 #
-# Proves: the invocation is fenced; both absent inputs produce an exit-0 SKIP with no traceback; a
-# genuine dangling citation still WARNs and still exits 0.
+# Proves: the fenced invocation is EXTRACTED AND EXECUTED (fenced-but-broken is just as unwired as
+# prose — an earlier revision only asserted the fence existed, and stayed green when the command
+# inside it was rewritten to `--repository … --nonexistent-flag`); both absent inputs produce an
+# exit-0 SKIP with no traceback; a genuine dangling citation still WARNs and still exits 0.
+#
+# COVERAGE NOTE — doctor.md Row 9's link to the helper is asserted by substring, not by parsing the
+# row: a fence carrying this command anywhere in doctor.md satisfies case (A/B). What is proven is
+# that the shipped file contains a runnable invocation, not that Row 9 is where a reader finds it.
 set -uo pipefail
 PLUGIN="$(cd "$(dirname "$0")/../../.." && pwd)"
 VH="$PLUGIN/scripts/idc_verification_handles.py"
@@ -27,10 +33,23 @@ fail() { echo "FAIL: $1"; exit 1; }
 [ -f "$VH" ] || fail "missing verification-handle helper at $VH"
 [ -f "$DOCTOR" ] || fail "commands/doctor.md not found at $DOCTOR"
 
-# (A) The invocation is inside a runnable ```bash fence in doctor.md — not stranded in prose.
-python3 - "$DOCTOR" <<'PY' || exit 1
+# (A+B) The fenced invocation is extracted from doctor.md and ACTUALLY RUN against a REAL
+#       freshly-scaffolded repo — the exact state /idc:init leaves behind, where
+#       `docs/workflow/build-validation/` does not exist and the audit used to raise
+#       FileNotFoundError. A fence is only a step if the command inside it runs.
+SBX="$WORK/fresh"
+mkdir -p "$SBX"
+( cd "$SBX" && git init -q )
+bash "$SCAFFOLD" "$PLUGIN" "$SBX" "Doctor Test" filesystem >/dev/null \
+  || fail "scaffold helper failed while creating the doctor-audit fixture"
+[ -d "$SBX/docs/workflow/build-validation" ] \
+  && fail "this fixture assumes init does NOT scaffold docs/workflow/build-validation/ — it now does, so this case no longer covers the fresh-repo state"
+
+FENCED="$WORK/row9.sh"
+python3 - "$DOCTOR" "$FENCED" <<'PY' || exit 1
 import re, sys
-text = open(sys.argv[1], encoding='utf-8').read()
+doctor, out = sys.argv[1:3]
+text = open(doctor, encoding='utf-8').read()
 fences = re.findall(r"```bash\n(.*?)```", text, re.S)
 hits = [f for f in fences if 'idc_verification_handles.py' in f and 'audit-citations' in f]
 if not hits:
@@ -41,29 +60,25 @@ if not any('--contracts-dir' in f for f in hits):
     raise SystemExit(
         f"FAIL: the fenced audit-citations invocation does not pass --contracts-dir, so it audits no "
         f"frozen contracts at all: {hits!r}")
-print("ok: doctor.md Row 9 runs the citation audit from a fenced block")
+body = next(f for f in hits if '--contracts-dir' in f)
+# The two tokens the harness substitutes at run time, and nothing else: the fixture must run the
+# SHIPPED command, not a rewrite of it.
+body = body.replace('${CLAUDE_PLUGIN_ROOT}', '"$PLUGIN"').replace('$PWD', '"$SBX"')
+open(out, 'w', encoding='utf-8').write("set -uo pipefail\n" + body)
+print("ok: extracted doctor.md's fenced citation-audit invocation for execution")
 PY
 grep -qF 'SKIP' "$DOCTOR" \
   || fail "commands/doctor.md must document the SKIP outcome for the citation audit"
 
-# (B) A REAL freshly-scaffolded repo — the exact state /idc:init leaves behind — audits cleanly.
-#     `docs/workflow/build-validation/` does not exist there, which used to be an unhandled traceback.
-SBX="$WORK/fresh"
-mkdir -p "$SBX"
-( cd "$SBX" && git init -q )
-bash "$SCAFFOLD" "$PLUGIN" "$SBX" "Doctor Test" filesystem >/dev/null \
-  || fail "scaffold helper failed while creating the doctor-audit fixture"
-[ -d "$SBX/docs/workflow/build-validation" ] \
-  && fail "this fixture assumes init does NOT scaffold docs/workflow/build-validation/ — it now does, so case (B) no longer covers the fresh-repo state"
 set +e
-out="$(python3 "$VH" audit-citations --repo "$SBX" --contracts-dir "$SBX/docs/workflow/build-validation" 2>&1)"
+out="$(PLUGIN="$PLUGIN" SBX="$SBX" timeout 120 bash "$FENCED" 2>&1)"
 rc=$?
 set -e
-[ "$rc" -eq 0 ] || fail "a freshly-initialized repo (no docs/workflow/build-validation/) must audit at exit 0, got $rc: $out"
+[ "$rc" -eq 0 ] || fail "doctor.md's OWN fenced command failed on a freshly-initialized repo (exit $rc): $out"
 printf '%s\n' "$out" | grep -qF 'SKIP:' \
   || fail "an absent frozen-contract directory must produce an explicit SKIP line; got: $out"
-printf '%s\n' "$out" | grep -qiE 'Traceback|FileNotFoundError' \
-  && fail "the citation audit raised a traceback on a freshly-initialized repo: $out"
+printf '%s\n' "$out" | grep -qiE 'Traceback|FileNotFoundError|unrecognized arguments' \
+  && fail "doctor.md's fenced command is not runnable as shipped: $out"
 
 # (C) A repo with NO registry at all (every pre-registry install) — SKIP, exit 0, never a die().
 BARE="$WORK/bare"
@@ -112,4 +127,4 @@ printf '%s\n' "$out" | grep -qF "retired-recipe-xyz" \
 printf '%s\n' "$out" | grep -qF "'cli-smoke'" \
   && fail "the audit warned about a handle that DOES exist in the registry: $out"
 
-echo "PASS: doctor's handle-citation audit is fenced and runnable, SKIPs (exit 0, no traceback) on an absent registry or contracts dir, and warns without failing on a dangling citation"
+echo "PASS: doctor's own fenced handle-citation command was extracted and EXECUTED, SKIPs (exit 0, no traceback) on an absent registry or contracts dir, and warns without failing on a dangling citation"

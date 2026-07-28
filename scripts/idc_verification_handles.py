@@ -20,26 +20,35 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import idc_credential_shapes as CS  # noqa: E402
 import idc_schema_check as SC  # noqa: E402
 
 DEFAULT_RELPATH = "docs/workflow/verification-handles.yaml"
 ALLOWED_MISSING_ACTIONS = {"recirculation", "blocked-dependency"}
 ALLOWED_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "example.com", "www.example.com", "example.invalid"}
 
-TOKEN_PATTERNS = [
-    re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
-    re.compile(r"AKIA[0-9A-Z]{16}"),
-    re.compile(r"AIza[A-Za-z0-9_-]{20,}"),
-    re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),
-]
-SUSPICIOUS_PATTERNS = [
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
-    re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}"),
-    re.compile(r"(?i)(password|secret|api[_-]?key|auth[_-]?token|client[_-]?secret|private[_-]?key)\s*[:=]\s*\S+"),
-    re.compile(r"op://"),
-    re.compile(r"(^|[\s/])\.env([.\w-]*)?($|[\s'\"/])"),
-]
-URL_RE = re.compile(r"https?://([^/\s'\"]+)")
+# THE CREDENTIAL RULES COME FROM THE SHARED TABLE. This module used to keep a THIRD private copy of
+# them (four vendor prefixes and a `Bearer`/`password=` pair), which knew strictly less than
+# `idc_credential_shapes` and therefore ADMITTED material the rest of the repo rejects: every
+# non-HTTP `scheme://user:pass@host` (`psql postgres://svcuser:…@db.prod.internal`,
+# `redis-cli -u redis://default:…@cache.prod.internal`, `ssh://deploy:…@bastion`), Stripe-style
+# `sk_live_…`, OpenAI `sk-…`, JWTs and `Authorization: Basic …`. That mattered more here than
+# anywhere else once `append` existed: this is the first path where FIXED CODE WRITES into the
+# registry, so the gate went from advisory-on-read to load-bearing-on-write. A registry command is
+# machine/model-supplied text, so the MACHINE_OUTPUT profile is the right one (see that module on why
+# provenance, not caller identity, picks a profile), and a rule added there reaches this gate with no
+# second edit.
+_REGISTRY_ONLY_SHAPES = (
+    # Two shapes the shared table deliberately does not carry, because they are not credentials —
+    # they are POINTERS AT a credential store, which is exactly what a stored recipe must not contain.
+    (re.compile(r"op://"), "{marker}"),
+    (re.compile(r"(^|[\s/])\.env([.\w-]*)?($|[\s'\"/])"), "{marker}"),
+)
+SECRET_SHAPES = CS.MACHINE_OUTPUT_SHAPES + _REGISTRY_ONLY_SHAPES
+
+# ANY scheme, not just http(s) — the private-host rule below is about reaching a real host, and
+# `postgres://`, `redis://`, `mongodb://`, `ssh://` reach one just as well as `https://`.
+URL_RE = re.compile(r"\b([a-z][a-z0-9+.-]{0,32})://([^/\s'\"]+)", re.I)
 
 
 class HandleError(Exception):
@@ -58,41 +67,69 @@ def _repo_root(repo: str) -> str:
     return root
 
 
-def registry_path(repo: str, override: str | None) -> str:
+def registry_path(repo: str, override: str | None, *, must_be_inside_repo: bool = False) -> str:
+    """Resolve the registry path, optionally REFUSING an override outside the governed repo.
+
+    The containment check is opt-in because the three READ commands (`validate`, `resolve`,
+    `audit-citations`) legitimately point at an arbitrary file — that is how a candidate registry is
+    checked before it is installed, and how this repo's own fixtures exercise malformed inputs. The
+    WRITE command has no such need and must not have the ability: `append` is documented, here and in
+    spec §3.4, as writing IN PLACE on the ticket's own branch so the new recipe arrives as an ordinary
+    tracked doc diff. Without this check `--registry <anywhere>` made it a side-channel write that left
+    no diff in the governed repo at all — fixed code mutating an operator file with nothing to review."""
     root = _repo_root(repo)
     if override:
-        return os.path.abspath(override)
+        path = os.path.abspath(override)
+        if must_be_inside_repo:
+            resolved = os.path.realpath(path)
+            root_resolved = os.path.realpath(root)
+            if resolved != root_resolved and not resolved.startswith(root_resolved + os.sep):
+                raise HandleError(
+                    f"--registry {override} resolves outside the governed repo root {root}; the append "
+                    "writes IN PLACE on the ticket's own branch and never out of band")
+        return path
     return os.path.join(root, DEFAULT_RELPATH)
 
 
+PLACEHOLDER_MARKERS = (
+    "<placeholder>",
+    "placeholder",
+    "redacted",
+    "example.com",
+    "example.invalid",
+    "localhost",
+    "127.0.0.1",
+    "dummy",
+    "fake",
+    "sandbox-user",
+    "sample-account",
+)
+
+
 def _is_placeholder(value: str) -> bool:
-    text = value.lower()
-    return any(marker in text for marker in (
-        "<placeholder>",
-        "placeholder",
-        "redacted",
-        "example.com",
-        "example.invalid",
-        "localhost",
-        "127.0.0.1",
-        "dummy",
-        "fake",
-        "sandbox-user",
-        "sample-account",
-    ))
+    text = str(value or "").lower()
+    return any(marker in text for marker in PLACEHOLDER_MARKERS)
 
 
 def _secret_problem(value: str) -> str | None:
+    """Name the credential RULE that fired, never the value that fired it.
+
+    The refusal text is destined for a report — `agents/idc-finisher.md` tells the finisher a refusal
+    "is a finding to fix" — so echoing the offending command back would print the credential into the
+    very place the gate exists to keep it out of."""
     text = str(value or "")
     if not text:
         return None
-    for pattern in TOKEN_PATTERNS + SUSPICIOUS_PATTERNS:
+    for pattern, _replacement in SECRET_SHAPES:
         if pattern.search(text):
             return f"contains secret/credential/auth material matching {pattern.pattern!r}"
-    if _is_placeholder(text):
-        return None
     for match in URL_RE.finditer(text):
-        host = match.group(1).split("@")[-1].split(":")[0].lower()
+        # PER-URL, not a free-text search over the whole value. As a whole-value test, one benign word
+        # anywhere in the command ("run against example.com first", a `--dummy` flag) switched the
+        # private-host check off for every other URL in the same command.
+        if _is_placeholder(match.group(0)):
+            continue
+        host = match.group(2).split("@")[-1].split(":")[0].lower()
         if host not in ALLOWED_LOCAL_HOSTS:
             return f"contains a private URL host {host!r}; only localhost/example placeholders are allowed"
     return None
@@ -101,12 +138,12 @@ def _secret_problem(value: str) -> str | None:
 def _list_problem(key: str, values) -> str | None:
     if not isinstance(values, list):
         return f"{key} must be a list"
-    for item in values:
+    for index, item in enumerate(values):
         if not isinstance(item, str) or not item.strip():
             return f"{key} must contain only non-empty strings"
         problem = _secret_problem(item)
         if problem:
-            return f"{key} entry {item!r} {problem}"
+            return f"{key}[{index}] {problem}"     # the INDEX, never the value — see _secret_problem
     return None
 
 
@@ -307,24 +344,33 @@ def append_handle(repo: str, *, handle_id: str, surface: str | None = None,
                   launch_commands: list[str] | None = None, fixtures: list[str] | None = None,
                   accounts: list[str] | None = None, emulators: list[str] | None = None,
                   from_execution: str | None = None, override: str | None = None):
-    path = registry_path(repo, override)
+    path = registry_path(repo, override, must_be_inside_repo=True)
+    if not from_execution:
+        # SPEC §3.4: the append "MUST record the commands that were actually executed rather than
+        # commands re-declared by the caller." There used to be a second mode that did exactly what
+        # that forbids — `--verify-command 'bash ok.sh'` with no execution receipt wrote an unproven
+        # recipe every later freeze/run would then execute through `/bin/bash -lc`. A proven recipe is
+        # the only kind this door writes; a hand-authored entry is an OPERATOR edit to the YAML.
+        raise HandleError(
+            "append requires --from-execution: the registry records the commands a PASSING, WITNESSED "
+            "execution receipt actually ran, never commands re-declared by the caller")
     if not os.path.exists(path):
         raise HandleError(
             f"no verification-handle registry at {path} — run /idc:init or /idc:update to scaffold it "
             "before appending a proven recipe")
     _path, doc = load_registry(repo, override)          # fail closed on an already-broken registry
 
-    if from_execution:
-        surface, evidence_kind, proven = _entry_from_execution(from_execution)
-        if verify_commands and [c.strip() for c in verify_commands] != proven:
-            raise HandleError(
-                f"--verify-command {list(verify_commands)!r} does not match the executed commands "
-                f"{proven!r}; the registry records what was PROVEN, not what was retyped")
-        verify_commands = proven
-    else:
-        if not surface:
-            raise HandleError("append requires --surface (or --from-execution to derive it)")
-        evidence_kind = SC.SURFACE_EVIDENCE_TABLE.get(surface)
+    declared_surface = surface
+    surface, evidence_kind, proven = _entry_from_execution(from_execution)
+    if declared_surface and declared_surface != surface:
+        raise HandleError(
+            f"--surface {declared_surface!r} does not match the executed surface {surface!r}; the "
+            "registry records what was PROVEN, not what was retyped")
+    if verify_commands and [c.strip() for c in verify_commands] != proven:
+        raise HandleError(
+            f"--verify-command {list(verify_commands)!r} does not match the executed commands "
+            f"{proven!r}; the registry records what was PROVEN, not what was retyped")
+    verify_commands = proven
     if evidence_kind in (None, "none") or surface in (None, "", "none"):
         raise HandleError(
             f"surface must be one of {sorted(set(SC.SURFACE_EVIDENCE_TABLE) - {'none'})}, got {surface!r}")
@@ -353,19 +399,33 @@ def append_handle(repo: str, *, handle_id: str, surface: str | None = None,
         if problem:
             raise HandleError(problem)
 
+    # ATOMIC SWAP, NOT A COMPENSATING WRITE. The first version truncated the operator's file, then
+    # re-validated, then restored the original bytes from memory inside `except HandleError`. That
+    # covers the anticipated failure and nothing else: a signal, a Ctrl-C, a MemoryError or a future
+    # non-HandleError raise between the two writes leaves the governed file mutated with the only good
+    # copy in a dead process. Building the candidate beside it and validating THAT means the original
+    # is never open for writing at all, and `os.replace` is atomic on the same filesystem — the house
+    # idiom, `idc_validation_contract.atomic_write_json`.
     original = open(path, encoding="utf-8").read()
     updated = _insert_entry(original, _entry_block(entry))
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(updated)
-    try:                                                # re-validate the WHOLE file, not just the entry
-        load_registry(repo, override)
-        resolve_handle(repo, entry["handle_id"], entry["surface"], override=override)
-    except HandleError as exc:
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(original)                          # leave the operator's registry exactly as found
-        raise HandleError(
-            f"appending {entry['handle_id']!r} would leave {path} invalid ({exc}); the registry was "
-            "restored unchanged") from exc
+    tmp = path + ".append.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(updated)
+        try:                                            # re-validate the WHOLE candidate file
+            load_registry(repo, tmp)
+            resolve_handle(repo, entry["handle_id"], entry["surface"], override=tmp)
+        except HandleError as exc:
+            raise HandleError(
+                f"appending {entry['handle_id']!r} would leave {path} invalid ({exc}); the registry was "
+                "left unchanged") from exc
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     return {"ok": True, "path": path, "handle_id": entry["handle_id"], "handle": entry}
 
 
@@ -445,13 +505,17 @@ def main(argv: list[str] | None = None) -> int:
 
     pp = sub.add_parser("append", help="append a newly-proven verification recipe to the registry")
     pp.add_argument("--repo", required=True)
-    pp.add_argument("--registry")
+    pp.add_argument("--registry", help="must resolve INSIDE --repo: the append writes in place on the "
+                                       "ticket's branch, never out of band")
     pp.add_argument("--handle-id", required=True)
-    pp.add_argument("--surface")
+    pp.add_argument("--surface", help="optional cross-check; must equal the executed surface")
     pp.add_argument("--from-execution",
-                    help="derive surface/evidence_kind/verify_commands from a passing, witnessed "
-                         "execution receipt (the only way a recipe is PROVEN)")
-    pp.add_argument("--verify-command", action="append")
+                    help="REQUIRED. Derive surface/evidence_kind/verify_commands from a passing, "
+                         "witnessed execution receipt — the only way a recipe is PROVEN. (Enforced in "
+                         "`append_handle`, not by argparse: one enforcement point, so a test can be "
+                         "red for it.)")
+    pp.add_argument("--verify-command", action="append",
+                    help="optional cross-check; must equal the executed commands")
     pp.add_argument("--build-command", action="append")
     pp.add_argument("--launch-command", action="append")
     pp.add_argument("--fixture", action="append")

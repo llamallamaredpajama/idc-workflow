@@ -96,7 +96,6 @@ STATIC_CHECK_PATTERNS = [
     re.compile(r"^test\s+-[a-z]\b"),                                      # test -f / -d / -e …
     re.compile(r"^(e|f|z|r|)grep\b"),                                     # grep family
     re.compile(r"^(ruff|flake8|pylint|mypy|pyright|tsc|eslint|shellcheck|golangci-lint|clippy)\b", re.I),
-    re.compile(r"\b(lint|typecheck|type-check|format-check|fmt-check)\b", re.I),
     re.compile(r"^terraform\s+(validate|fmt)\b", re.I),
     re.compile(r"\bpy_compile\b"),
     re.compile(r"^python[0-9.]*\s+-c\s+['\"]?\s*import\b", re.I),         # bare import probe
@@ -107,10 +106,43 @@ INERT_SEGMENT_PATTERNS = [
     re.compile(r"^(true|false|:)$"),
     re.compile(r"^exit\s+\d+$"),
     re.compile(r"^echo\b"),
+    # `cat f | grep -q x` and `printf '%s' x | grep -q y` are the two piped shapes that used to pass a
+    # purely static gate: `cat`/`printf` classed OTHER, which satisfied the "something might drive the
+    # surface" clause all by itself. Neither exercises anything.
+    re.compile(r"^(cat|printf)\b"),
     re.compile(r"^cd\s"),
     re.compile(r"^set\s+-"),
 ]
 _SEGMENT_SPLIT = re.compile(r"&&|\|\||[;|]")
+
+# The lint/typecheck arm of the static-check rule, ANCHORED TO THE PROGRAM TOKEN. As a free search
+# over the whole segment it classed ANY command containing the word "lint" as a static check, with no
+# override: `npm run lint:e2e` and `bash e2e/lint-fix-flow.sh` — a lint task with a real end-to-end arm,
+# and a script that fixes and re-drives — were refused as inert. The rule is about what the segment
+# RUNS, so it now tests only the tokens that NAME what it runs: the program, plus the task/script name
+# after a known runner. A task called exactly `lint` (or `lint.sh`) still classes static; one whose
+# name merely contains it does not.
+STATIC_TASK_TOKEN = re.compile(
+    r"^(lint|typecheck|type-check|format-check|fmt-check)(\.(sh|bash|py|js|mjs|ts))?$", re.I)
+_RUNNER_TOKENS = {"bash", "sh", "zsh", "make", "just", "task", "npm", "pnpm", "yarn", "bun", "npx",
+                  "pnpx", "uv", "poetry", "pdm", "rye", "cargo", "go", "deno", "rake", "mise"}
+_RUNNER_SUBCOMMANDS = {"run", "exec", "dlx", "x", "--"}
+
+
+def _program_tokens(segment: str):
+    """The tokens that NAME what a segment runs: its program, plus the task name after a known runner.
+
+    Flags and everything past the program are arguments, not the program — `pytest tests/lint_test.py`
+    runs pytest over a file that happens to be named for linting."""
+    tokens = []
+    for raw in segment.split():
+        if raw.startswith("-") and raw != "--":
+            continue
+        base = raw.rsplit("/", 1)[-1]
+        tokens.append(base)
+        if base.lower() not in _RUNNER_TOKENS and base.lower() not in _RUNNER_SUBCOMMANDS:
+            break
+    return tokens
 
 
 class ValidationError(Exception):
@@ -695,28 +727,90 @@ def git_diff_info(repo: str, base_commit: str, ref: str = "HEAD"):
     }
 
 
+# THE SAME REDACTION PROFILE AS THE REPO'S OTHER COMMITTED-EVIDENCE WRITER. `CS.scrub` alone is the
+# shared floor: it catches what NAMES itself a secret or carries a vendor's documented prefix, and
+# nothing else. A gate's output is not that kind of text — it is an UNPREDICTABLE CAPTURE from a
+# project's own verify probe, which is precisely the case `idc_credential_shapes` names when it says
+# the opaque-run backstop is affordable "where the text is an unpredictable capture … whose output
+# nobody can characterise in advance". `idc_live_check.py`, the only other module writing probe output
+# into a committed file, applies `machine_output_redactors() + backstop`; this path applied the floor,
+# so a bare AWS secret access key, an Azure `AccountKey=…`, a base64/hex blob and a PEM body with no
+# footer still reached a git-committed file. Same provenance, same profile.
+#
+# The backstop is a GUESS ("a long opaque run is a credential we have no name for"), so it is declared
+# HERE rather than in the shared table — see that module on why it must never run over prose or over a
+# structured diagnostic, where a 40-character run is the commit sha the message exists to carry.
+_OPAQUE_RUN_BACKSTOP = re.compile(r"\b[A-Za-z0-9_\-]{40,4096}\b")
+MAX_CAPTURE_CHARS = 17 * 1024
+
+
+def _gate_evidence(scrubbed: str | None) -> str:
+    """Apply the opaque-run backstop to a capture that has ALREADY been through the scrub door.
+
+    THE BOUND SITS HERE AND NOT IN FRONT OF `CS.scrub`, deliberately. A cut taken before the door
+    destroys the left context every shared rule anchors on — the URL rule its scheme, the auth rule its
+    verb, the PEM rule its BEGIN line — which is why `tests/smoke/phase11-honesty-repro.sh` R28 refuses
+    a truncation inside a scrub call outright. So the shared profile still walks the whole capture
+    (every quantifier in it is bounded), and only this last rule is bounded to the head `_clip` keeps
+    anyway. Cutting the HEAD, not the tail, is what makes that lossless: nothing that reaches the
+    stored excerpt was ever outside the bound."""
+    out = scrubbed or ""
+    if len(out) > MAX_CAPTURE_CHARS:
+        out = out[:MAX_CAPTURE_CHARS] + f"\n[capture bounded at {MAX_CAPTURE_CHARS} characters]"
+    return _OPAQUE_RUN_BACKSTOP.sub("[REDACTED]", out)
+
+
+# A gate that hangs hangs the freeze, with no bound at all — spec §3.4 names "timeout" as a stopping
+# condition and this runner had none. `idc_live_check` sources its own the same way: a default, raised
+# or lowered per surface. The timeout is a REFUSAL, not a red baseline: a gate that could not finish
+# established nothing, and recording that as `expected-red` would let a hanging command freeze as a
+# legitimate baseline.
+DEFAULT_VERIFY_TIMEOUT = 600
+
+
+def _verify_timeout() -> int:
+    raw = str(os.environ.get("IDC_VERIFY_TIMEOUT") or "").strip()
+    if not raw:
+        return DEFAULT_VERIFY_TIMEOUT
+    try:
+        seconds = int(raw)
+    except ValueError as exc:
+        raise ValidationError(f"IDC_VERIFY_TIMEOUT must be a positive integer of seconds, got {raw!r}") from exc
+    if seconds <= 0:
+        raise ValidationError(f"IDC_VERIFY_TIMEOUT must be a positive integer of seconds, got {raw!r}")
+    return seconds
+
+
 def _verification_results(repo: str, commands):
     results = []
+    timeout = _verify_timeout()
     for command in commands:
-        proc = subprocess.run(
-            ["/bin/bash", "-lc", command],
-            cwd=repo,
-            capture_output=True,
-            text=True,
-        )
+        try:
+            proc = subprocess.run(
+                ["/bin/bash", "-lc", command],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise ValidationError(
+                f"verification command timed out after {timeout}s and established nothing: {command!r} "
+                "— raise IDC_VERIFY_TIMEOUT or make the gate terminate") from exc
         results.append({
             "command": command,
             "exit_code": int(proc.returncode),
-            # BOTH streams are scrubbed AT THE READ. `CS.scrub`'s docstring reserves itself for
-            # `stderr` because in this repo a child's stdout is usually DATA that its reader PARSES
-            # (parsing redaction markers would be a bug). A gate command's stdout is the exception
-            # that proves the rule: nothing parses it — it is stored verbatim as bounded EVIDENCE in
-            # the frozen contract's `baseline.results` and in the execution receipt's
-            # `declared_evidence.records`, and BOTH are COMMITTED repo files on the ticket's branch.
-            # Bounded-but-raw was half a promise: spec §3.5 requires "bounded REDACTED evidence", and
-            # a gate that prints a token to stdout wrote it verbatim into git history.
-            "stdout_excerpt": _clip(CS.scrub(proc.stdout) or ""),
-            "stderr_excerpt": _clip(CS.scrub(proc.stderr) or ""),
+            # BOTH streams go through the door AT THE READ, over the COMPLETE capture, before `_clip`
+            # cuts the stored excerpt — so there is no partial match at the 400-character boundary.
+            # `CS.scrub`'s docstring reserves itself for `stderr` because in this repo a child's stdout
+            # is usually DATA that its reader PARSES (parsing redaction markers would be a bug). A gate
+            # command's stdout is the exception that proves the rule: nothing parses it — it is stored
+            # as bounded EVIDENCE in the frozen contract's `baseline.results` and in the execution
+            # receipt's `declared_evidence.records`, and BOTH are COMMITTED repo files on the ticket's
+            # branch. Bounded-but-raw was half a promise: spec §3.5 requires "bounded REDACTED
+            # evidence", and a gate that prints a token to stdout wrote it verbatim into git history.
+            "stdout_excerpt": _clip(_gate_evidence(CS.scrub(proc.stdout))),
+            "stderr_excerpt": _clip(_gate_evidence(CS.scrub(proc.stderr))),
         })
     return results
 
@@ -731,6 +825,16 @@ def _matching_handle_commands(repo: str, handle_registry: str | None, handle_id:
         raise ValidationError(f"verification-handle resolution requested, but idc_verification_handles.py is unavailable ({exc})") from exc
     if not surface:
         raise ValidationError("handle-backed validation contracts must declare --surface")
+    if handle_registry:
+        # CONTAINMENT ON THE READ PATH TOO. The commands this resolves are copied inline into the
+        # committed contract and later executed through `/bin/bash -lc`, so `--handle-registry
+        # <anywhere>` lets an out-of-tree file choose what the frozen gate runs, with nothing in the
+        # governed repo to review. Its sibling write door (`append`) refuses the same shape.
+        try:
+            VH.registry_path(repo, handle_registry, must_be_inside_repo=True)
+        except VH.HandleError as exc:
+            raise ValidationError(
+                f"--handle-registry {handle_registry} resolves outside the governed repo: {exc}") from exc
     result = VH.resolve_handle(repo=repo, handle_id=handle_id, surface=surface, override=handle_registry)
     handle = result.get("handle") or {}
     resolved_commands = [str(cmd).strip() for cmd in handle.get("verify_commands") or [] if str(cmd).strip()]
@@ -747,6 +851,8 @@ def _segments(command: str):
 
 
 def _classify_segment(segment: str) -> str:
+    if any(STATIC_TASK_TOKEN.fullmatch(token) for token in _program_tokens(segment)):
+        return "static"
     for pattern in STATIC_CHECK_PATTERNS:
         if pattern.search(segment):
             return "static"
@@ -1099,6 +1205,9 @@ def check_surface(*, contract_path: str, execution_path: str | None = None,
     contract = load_contract(contract_path, require_witness=require_witness)
     report = {
         "ok": True,
+        # A reviewer pasting this JSON as evidence could not tell a WITNESSED check from a
+        # `--no-witness` one — two very different claims that printed identically.
+        "witness_checked": bool(require_witness),
         "contract": os.path.abspath(contract_path),
         "surface": contract.get("surface"),
         "evidence_kind": contract.get("evidence_kind"),

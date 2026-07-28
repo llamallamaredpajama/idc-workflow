@@ -179,4 +179,52 @@ if cmds != ['bash verify.sh']:
 print("ok: an explicit --verify identical to the handle's verify_commands is accepted")
 PY
 
-echo "PASS: a handle-backed contract resolves its verify command from the registry, the handle metadata survives into the execution receipt and the Build receipt, and a handle/explicit-command disagreement is refused by name"
+# (6) `--handle-registry` MUST resolve inside the governed repo. The commands it resolves are copied
+# inline into the committed contract and later executed through `/bin/bash -lc`, so an out-of-tree
+# registry lets a file nobody reviews choose what the frozen gate runs. Its sibling WRITE door
+# (`idc_verification_handles.py append`) refuses the same shape; this is the read half.
+OUTSIDE_DIR="$WORK/outside-the-repo"
+mkdir -p "$OUTSIDE_DIR"
+OUTSIDE_REG="$OUTSIDE_DIR/other-registry.yaml"
+cat > "$OUTSIDE_REG" <<'YAML'
+schema_version: 1
+handles:
+  - handle_id: cli-smoke
+    surface: cli
+    evidence_kind: pane-capture
+    build_commands: ["true"]
+    launch_commands: ["true"]
+    verify_commands: ["bash other-verify.sh"]
+    fixtures: ["seed:none"]
+    accounts: ["sandbox-user-placeholder"]
+    emulators: ["none"]
+YAML
+python3 "$VH" validate --repo "$REPO" --registry "$OUTSIDE_REG" >/dev/null \
+  || fail "the out-of-repo fixture registry is itself invalid — the case below would refuse for the wrong reason"
+OUTSIDE_CONTRACT="$REPO/docs/workflow/build-validation/handle-outside.json"
+out="$(python3 "$VC" freeze \
+  --repo "$REPO" --issue 1 --pr 401 --graph-node alpha \
+  --graph-digest "$GRAPH_DIGEST" --projection-digest "$PROJECTION_DIGEST" \
+  --touch src/allowed/ --off-limits docs/ \
+  --surface cli --handle-id "$HANDLE" --handle-registry "$OUTSIDE_REG" \
+  --baseline expected-green --label handle-outside --out "$OUTSIDE_CONTRACT" 2>&1)" \
+  && fail "a contract resolving its gate commands from a registry OUTSIDE the governed repo was accepted"
+printf '%s\n' "$out" | grep -qF 'outside the governed repo' \
+  || fail "the out-of-repo registry refusal must say the path is outside the governed repo; got: $out"
+[ ! -e "$OUTSIDE_CONTRACT" ] \
+  || fail "a refused out-of-repo registry still wrote a frozen contract at $OUTSIDE_CONTRACT"
+
+# (7) POSITIVE TWIN — the SAME override pointing at a path inside the repo is accepted, so (6) is
+# about containment and not about passing --handle-registry at all.
+INSIDE_REG="$REPO/docs/workflow/alt-handles.yaml"
+cp "$REPO/docs/workflow/verification-handles.yaml" "$INSIDE_REG"
+INSIDE_CONTRACT="$REPO/docs/workflow/build-validation/handle-inside.json"
+python3 "$VC" freeze \
+  --repo "$REPO" --issue 1 --pr 401 --graph-node alpha \
+  --graph-digest "$GRAPH_DIGEST" --projection-digest "$PROJECTION_DIGEST" \
+  --touch src/allowed/ --off-limits docs/ \
+  --surface cli --handle-id "$HANDLE" --handle-registry "$INSIDE_REG" \
+  --baseline expected-green --label handle-inside --out "$INSIDE_CONTRACT" >/dev/null \
+  || fail "an in-repo --handle-registry override was wrongly refused as out-of-repo"
+
+echo "PASS: a handle-backed contract resolves its verify command from the registry, the handle metadata survives into the execution receipt and the Build receipt, a handle/explicit-command disagreement is refused by name, and an out-of-repo --handle-registry is refused while an in-repo one is not"

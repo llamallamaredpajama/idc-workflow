@@ -10,13 +10,21 @@
 # through the normal PR path, never a side-channel write.
 #
 # Proves:
-#   (i)   after a handle-LESS contract executes green, `append --from-execution` records an entry
-#         whose verify_commands are exactly the commands that were EXECUTED;
-#   (ii)  the resulting file re-validates under `idc_schema_check.py registry` and resolves;
-#   (iii) a duplicate handle_id AND a secret-bearing recipe are both refused, leaving the file byte-
-#         identical;
-#   (iv)  the write lands as an ordinary tracked file change (git sees a modified, staged-able file);
-#   (v)   agents/idc-finisher.md still names the append step, before the build-receipt mint.
+#   (i)    after a handle-LESS contract executes green, `append --from-execution` records an entry
+#          whose verify_commands are exactly the commands that were EXECUTED;
+#   (ii)   the resulting file re-validates under `idc_schema_check.py registry` and resolves;
+#   (iii)  every refusal — a caller-declared recipe with no execution receipt, an out-of-repo
+#          `--registry`, a secret-bearing recipe, a duplicate handle_id — leaves the file
+#          byte-identical, and the secret refusal never echoes the credential back;
+#   (iv)   a crash between the candidate write and the swap leaves the operator's file untouched;
+#   (v)    the write lands as an ordinary tracked file change (git sees a modified, staged-able file);
+#   (vi)   agents/idc-finisher.md still names the append step, before the build-receipt mint.
+#
+# WHAT THIS DOES NOT PROVE — the append landing inside the RECEIPT-BOUND diff. `idc_build_receipt.py`
+# has no check for the append at all (spec §4.2 states it as a Finisher obligation for exactly that
+# reason), and two of that writer's own rules bound when it could: committing the registry after the
+# gate ran moves the head ("execution receipt does not match the current final diff") and the registry
+# sits under `docs/`, which the default plan shape marks off-limits. See spec §3.4.
 set -uo pipefail
 PLUGIN="$(cd "$(dirname "$0")/../../.." && pwd)"
 VC="$PLUGIN/scripts/idc_validation_contract.py"
@@ -32,6 +40,9 @@ fail() { echo "FAIL: $1"; exit 1; }
 
 GRAPH_DIGEST='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 PROJECTION_DIGEST='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+# Synthetic, matches no real credential, and deliberately unlike every path and filename in this
+# fixture so no assertion below can be satisfied by the fixture's own scaffolding.
+FAKE_TOKEN='ghp_EXAMPLENOTAREALTOKEN0123456789abcd'
 
 REPO="$WORK/repo"
 git init -q -b main "$REPO"
@@ -44,7 +55,14 @@ cat > "$REPO/drive-surface.sh" <<'SH'
 set -euo pipefail
 grep -qx 'new behavior' src/allowed/feature.txt
 SH
-chmod +x "$REPO/drive-surface.sh"
+# A gate whose own INVOCATION carries credential-shaped material — the realistic way a secret reaches
+# the registry now that `append` derives commands from a proven run rather than from the caller.
+cat > "$REPO/token-gate.sh" <<'SH'
+#!/bin/bash
+set -euo pipefail
+grep -qx 'new behavior' src/allowed/feature.txt
+SH
+chmod +x "$REPO/drive-surface.sh" "$REPO/token-gate.sh"
 printf 'old behavior\n' > "$REPO/src/allowed/feature.txt"
 # The scaffolded registry template: schema-valid, and EMPTY — the state every governed repo starts in.
 cat > "$REPO/docs/workflow/verification-handles.yaml" <<'YAML'
@@ -56,9 +74,12 @@ YAML
 git -C "$REPO" add -A
 git -C "$REPO" commit -qm init
 
-# A handle-LESS contract: this triplet is the first to drive this surface, so there is nothing to cite.
+# Two handle-LESS contracts: this triplet is the first to drive this surface, so there is nothing to
+# cite. The second one's gate command carries the synthetic credential.
 CONTRACT="$REPO/docs/workflow/build-validation/first.json"
 EXEC="$REPO/docs/workflow/build-validation-executions/first.json"
+CONTRACT_TOK="$REPO/docs/workflow/build-validation/token.json"
+EXEC_TOK="$REPO/docs/workflow/build-validation-executions/token.json"
 python3 "$VC" freeze \
   --repo "$REPO" --issue 7 --pr 707 --graph-node alpha \
   --graph-digest "$GRAPH_DIGEST" --projection-digest "$PROJECTION_DIGEST" \
@@ -66,29 +87,116 @@ python3 "$VC" freeze \
   --surface cli --evidence-kind pane-capture --verify 'bash drive-surface.sh' \
   --baseline expected-red --label first-of-its-kind --out "$CONTRACT" >/dev/null \
   || fail "could not freeze the handle-less contract"
+python3 "$VC" freeze \
+  --repo "$REPO" --issue 8 --pr 708 --graph-node beta \
+  --graph-digest "$GRAPH_DIGEST" --projection-digest "$PROJECTION_DIGEST" \
+  --touch src/allowed/ --off-limits docs/ \
+  --surface cli --evidence-kind pane-capture --verify "bash token-gate.sh --auth-token $FAKE_TOKEN" \
+  --baseline expected-red --label token-bearing --out "$CONTRACT_TOK" >/dev/null \
+  || fail "could not freeze the credential-bearing contract"
 printf 'new behavior\n' > "$REPO/src/allowed/feature.txt"
 git -C "$REPO" add src/allowed/feature.txt
 git -C "$REPO" commit -qm 'implement the behavior'
 python3 "$VC" run --repo "$REPO" --contract "$CONTRACT" --out "$EXEC" >/dev/null \
   || fail "could not execute the handle-less contract"
+python3 "$VC" run --repo "$REPO" --contract "$CONTRACT_TOK" --out "$EXEC_TOK" >/dev/null \
+  || fail "could not execute the credential-bearing contract"
 
 REG="$REPO/docs/workflow/verification-handles.yaml"
 
-# (iii-a) Refusals FIRST, against the pre-append file, so a refusal can never be mistaken for a
-#         side effect of the successful append below.
+# ── (iii) Refusals FIRST, against the pre-append file, so a refusal can never be mistaken for a side
+#         effect of the successful append below. Every one re-checks the bytes on disk.
 cp "$REG" "$WORK/registry.before"
+unchanged() { cmp -s "$REG" "$WORK/registry.before" || fail "$1"; }
+
+# (iii-a) NO --from-execution. Spec §3.4 requires the registry to record "the commands that were
+# actually executed rather than commands re-declared by the caller"; a second, caller-declared mode
+# did exactly what that forbids, writing an unproven recipe every later freeze/run would then execute
+# through `/bin/bash -lc`.
 set +e
-out="$(python3 "$VH" append --repo "$REPO" --handle-id 'cli-first-drive' --surface cli \
-        --verify-command "curl -H 'Authorization: Bearer ghp_012345678901234567890123456789012345' http://localhost:1/x" 2>&1)"
+out="$(python3 "$VH" append --repo "$REPO" --handle-id 'retyped-recipe' --surface cli \
+        --verify-command 'bash never-ran-anywhere.sh' 2>&1)"
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a caller-DECLARED recipe with no execution receipt was appended to the registry"
+printf '%s\n' "$out" | grep -qF -- '--from-execution' \
+  || fail "the refusal must name --from-execution as the requirement; got: $out"
+grep -qF 'never-ran-anywhere.sh' "$REG" \
+  && fail "an unproven, never-executed command was written into the governed registry"
+unchanged "a refused caller-declared append still modified the registry on disk"
+
+# (iii-b) An out-of-repo `--registry`. The append is documented — here and in spec §3.4 — as writing
+# IN PLACE on the ticket's own branch. Unchecked, `--registry <anywhere>` made fixed code mutate an
+# operator file with NO tracked diff in the governed repo at all.
+OUTSIDE_DIR="$WORK/outside-the-repo"
+mkdir -p "$OUTSIDE_DIR"
+OUTSIDE_REG="$OUTSIDE_DIR/other.yaml"
+cat > "$OUTSIDE_REG" <<'YAML'
+schema_version: 1
+handles: []
+YAML
+cp "$OUTSIDE_REG" "$WORK/outside.before"
+set +e
+out="$(python3 "$VH" append --repo "$REPO" --registry "$OUTSIDE_REG" --handle-id 'side-channel' \
+        --from-execution "$EXEC" 2>&1)"
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "an append targeting a registry OUTSIDE the governed repo was accepted"
+printf '%s\n' "$out" | grep -qF 'outside the governed repo root' \
+  || fail "the out-of-repo refusal must say the path is outside the governed repo root; got: $out"
+cmp -s "$OUTSIDE_REG" "$WORK/outside.before" \
+  || fail "a refused out-of-repo append still wrote to $OUTSIDE_REG"
+unchanged "an out-of-repo append attempt modified the in-repo registry"
+
+# (iii-c) A secret-bearing PROVEN recipe. The commands come from a real passing execution, so this is
+# the gate doing its job on the write path, not on a retyped string — and the refusal must name the
+# rule that fired WITHOUT echoing the credential, because agents/idc-finisher.md tells the finisher a
+# refusal "is a finding to fix", i.e. this string is destined for a report.
+set +e
+out="$(python3 "$VH" append --repo "$REPO" --handle-id 'token-bearing-drive' \
+        --from-execution "$EXEC_TOK" 2>&1)"
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || fail "a secret-bearing recipe was appended to the governed registry"
-printf '%s\n' "$out" | grep -qiE 'secret|credential|auth' \
-  || fail "the secret-bearing refusal must say what it found; got: $out"
-cmp -s "$REG" "$WORK/registry.before" \
-  || fail "a REFUSED append still modified the registry on disk"
+printf '%s\n' "$out" | grep -qF 'contains secret/credential/auth material' \
+  || fail "the secret-bearing refusal must name the rule that fired; got: $out"
+printf '%s\n' "$out" | grep -qF "$FAKE_TOKEN" \
+  && fail "the secret refusal PRINTED the credential verbatim into a string destined for a report"
+unchanged "a REFUSED append still modified the registry on disk"
 
-# (i) The real append: surface, evidence kind and verify_commands all derived from the PROVEN run.
+# (iii-d) A crash BETWEEN the candidate write and the swap. The first design truncated the operator's
+# file and restored it from memory inside `except HandleError`, so anything else — a signal, a
+# MemoryError, a future non-HandleError raise — left the governed file mutated with the only good copy
+# in a dead process. Injecting an OSError at the swap is that class, reproduced.
+python3 - "$PLUGIN/scripts" "$REPO" "$REG" "$EXEC" <<'PY' || exit 1
+import os, sys
+scripts, repo, reg, execution = sys.argv[1:5]
+sys.path.insert(0, scripts)
+import idc_verification_handles as VH
+before = open(reg, encoding='utf-8').read()
+real_replace = os.replace
+def boom(src, dst):
+    raise OSError("simulated crash between the candidate write and the atomic swap")
+os.replace = boom
+try:
+    VH.append_handle(repo, handle_id='crash-case', from_execution=execution)
+except OSError:
+    pass
+except VH.HandleError as exc:
+    raise SystemExit(f"FAIL: the injected fault was converted into a HandleError instead of propagating: {exc}")
+else:
+    raise SystemExit("FAIL: the injected OSError never propagated — the fault injection did not take")
+finally:
+    os.replace = real_replace
+if open(reg, encoding='utf-8').read() != before:
+    raise SystemExit("FAIL: FILE LEFT MUTATED — a fault outside HandleError left the operator's registry rewritten")
+if os.path.exists(reg + '.append.tmp'):
+    raise SystemExit("FAIL: the candidate temp file was left beside the operator's registry")
+print("ok: a fault at the swap leaves the operator's registry byte-identical and no temp file behind")
+PY
+unchanged "the fault-injection case left the registry modified"
+
+# ── (i) The real append: surface, evidence kind and verify_commands all derived from the PROVEN run.
 python3 "$VH" append --repo "$REPO" --handle-id 'cli-first-drive' --from-execution "$EXEC" \
   --fixture 'seed:none' >/dev/null \
   || fail "appending a newly-proven recipe from a passing execution receipt failed"
@@ -124,21 +232,19 @@ python3 "$SCHEMA" registry "$REG" >/dev/null \
 python3 "$VH" resolve --repo "$REPO" --handle-id 'cli-first-drive' --surface cli >/dev/null \
   || fail "the appended handle does not resolve through the fixed resolver"
 
-# (iii-b) A duplicate id is refused, and the refusal leaves the file byte-identical.
-cp "$REG" "$WORK/registry.after"
+# (iii-e) A duplicate id is refused, and the refusal leaves the file byte-identical.
+cp "$REG" "$WORK/registry.before"
 set +e
-out="$(python3 "$VH" append --repo "$REPO" --handle-id 'cli-first-drive' --surface cli \
-        --verify-command 'bash something-else.sh' 2>&1)"
+out="$(python3 "$VH" append --repo "$REPO" --handle-id 'cli-first-drive' --from-execution "$EXEC" 2>&1)"
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || fail "a duplicate handle_id silently replaced an existing registry entry"
 printf '%s\n' "$out" | grep -qF 'already exists' \
   || fail "the duplicate-id refusal must say the id already exists; got: $out"
-cmp -s "$REG" "$WORK/registry.after" \
-  || fail "a refused duplicate append still modified the registry on disk"
+unchanged "a refused duplicate append still modified the registry on disk"
 
-# (iv) The write is an ORDINARY TRACKED FILE CHANGE on the ticket's branch — reviewable and merged
-#      through the normal PR path, not a side-channel write outside the diff.
+# (v) The write is an ORDINARY TRACKED FILE CHANGE on the ticket's branch — reviewable and merged
+#     through the normal PR path, not a side-channel write outside the diff.
 status="$(git -C "$REPO" status --porcelain -- docs/workflow/verification-handles.yaml)"
 printf '%s\n' "$status" | grep -qE '^ ?M' \
   || fail "the append did not show up as a modified TRACKED file (git status: '${status:-<empty>}')"
@@ -146,12 +252,14 @@ git -C "$REPO" add docs/workflow/verification-handles.yaml
 git -C "$REPO" diff --cached --name-only | grep -qxF 'docs/workflow/verification-handles.yaml' \
   || fail "the appended registry cannot be staged into the ticket's own commit"
 
-# (v) The shipped finisher playbook still names the append step, and names it BEFORE the build receipt
-#     is minted — after the mint it would land outside the reviewed diff.
+# (vi) The shipped finisher playbook still names the append step, and names it BEFORE the build receipt
+#      is minted — after the mint it would land outside the reviewed diff.
 grep -qF 'idc_verification_handles.py' "$FINISHER" \
   || fail "agents/idc-finisher.md no longer names idc_verification_handles.py — the compounding step is gone"
 grep -qE 'idc_verification_handles\.py"? append' "$FINISHER" \
   || fail 'agents/idc-finisher.md must name the append subcommand, not merely the helper'
+grep -qF -- '--from-execution' "$FINISHER" \
+  || fail 'agents/idc-finisher.md must invoke the append with --from-execution — the only mode the helper has'
 python3 - "$FINISHER" <<'PY' || exit 1
 import re, sys
 text = open(sys.argv[1], encoding='utf-8').read()
@@ -169,4 +277,4 @@ if append_at > mint_at:
 print("ok: the finisher appends the proven recipe before the build receipt is minted")
 PY
 
-echo "PASS: a newly-proven recipe is appended back to the governed registry by fixed code, records the executed commands, re-validates, refuses duplicates and secrets without touching the file, lands as a tracked diff, and is wired into the finisher before the receipt mint"
+echo "PASS: a newly-proven recipe is appended back to the governed registry by fixed code, records the executed commands, re-validates, refuses retyped/out-of-repo/secret-bearing/duplicate appends without touching the file, survives a fault at the swap, lands as a tracked diff, and is wired into the finisher before the receipt mint"

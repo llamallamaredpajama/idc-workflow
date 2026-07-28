@@ -9,7 +9,13 @@
 # this was the one stage forming an opinion about it, and any refusal only surfaced at merge time.
 #
 # Proves: the shipped review playbook routes the reviewer through the fixed helper and tells it to
-# INHERIT the answer, and the helper itself passes an honest contract and refuses a drifted one.
+# INHERIT the answer, the helper passes an honest contract and refuses BOTH of its drift comparisons
+# (surface/evidence kind and skip_reason), and its report discloses whether the witness was checked.
+#
+# COVERAGE NOTE — `check-surface` is the ONLY caller of `check_surface`, and this is the only test
+# that runs it, so an uncovered branch here is an uncovered branch everywhere. Its skip_reason arm was
+# previously that: neutering it to `pass` left this lane green, because the surface/evidence case
+# above it never reaches a `surface:none` contract. Case (C) exists to keep it red-when-broken.
 set -uo pipefail
 PLUGIN="$(cd "$(dirname "$0")/../../.." && pwd)"
 VC="$PLUGIN/scripts/idc_validation_contract.py"
@@ -79,8 +85,26 @@ git -C "$REPO" commit -qm 'implement behavior'
 python3 "$VC" run --repo "$REPO" --contract "$CONTRACT" --out "$EXEC" >/dev/null \
   || fail "could not execute the pre-check fixture contract"
 
-python3 "$VC" check-surface --contract "$CONTRACT" --execution "$EXEC" >/dev/null \
+out="$(python3 "$VC" check-surface --contract "$CONTRACT" --execution "$EXEC")" \
   || fail "the deterministic pre-check refused an honest contract/execution pair (control)"
+
+# The report must say WHICH check it made. A reviewer pastes this JSON as evidence, and a witnessed
+# check and a `--no-witness` one are very different claims that used to print identically.
+nw="$(python3 "$VC" check-surface --contract "$CONTRACT" --execution "$EXEC" --no-witness)" \
+  || fail "check-surface --no-witness refused an honest contract/execution pair"
+python3 - "$out" "$nw" <<'PY' || exit 1
+import json, sys
+witnessed, unwitnessed = (json.loads(arg) for arg in sys.argv[1:3])
+if witnessed.get('witness_checked') is not True:
+    raise SystemExit(
+        f"FAIL: a witnessed check-surface report does not record witness_checked=true: {witnessed!r}")
+if unwitnessed.get('witness_checked') is not False:
+    raise SystemExit(
+        f"FAIL: a --no-witness check-surface report claims "
+        f"witness_checked={unwitnessed.get('witness_checked')!r} — a reviewer pasting this JSON as "
+        f"evidence cannot tell the two apart: {unwitnessed!r}")
+print("ok: the pre-check's own report discloses whether the witness binding was checked")
+PY
 
 # Drift the execution IN PLACE to a legal-but-different pairing and re-record its machine witness, so
 # the only thing left to catch it is the pre-check's comparison against the frozen contract.
@@ -107,4 +131,55 @@ set -e
 printf '%s\n' "$out" | grep -qF "contract-drift refused: the execution receipt's declared surface/evidence kind no longer match the frozen validation contract" \
   || fail "the pre-check's refusal must be the verbatim contract-drift sentence a reviewer can file; got: $out"
 
-echo "PASS: the review engine inherits a deterministic surface/evidence refusal from fixed code instead of forming an opinion about it"
+# (C) THE OTHER DRIFT COMPARISON — the execution receipt rewrote WHY the gate was skipped. Only
+# reachable on a `surface:none` chain: for every other surface `_validation_surface` refuses a
+# skip_reason outright, so a drifted execution never survives `load_execution` to reach this branch.
+# That is exactly why it went uncovered — case (B) can never reach it.
+REPO_SKIP="$WORK/repo-skip"
+git init -q -b main "$REPO_SKIP"
+git -C "$REPO_SKIP" config user.email test@example.com
+git -C "$REPO_SKIP" config user.name tester
+mkdir -p "$REPO_SKIP/docs/workflow/build-validation" \
+         "$REPO_SKIP/docs/workflow/build-validation-executions" "$REPO_SKIP/notes"
+printf '# docs\n' > "$REPO_SKIP/notes/README.md"
+git -C "$REPO_SKIP" add -A
+git -C "$REPO_SKIP" commit -qm init
+CONTRACT_SKIP="$REPO_SKIP/docs/workflow/build-validation/skip.json"
+EXEC_SKIP="$REPO_SKIP/docs/workflow/build-validation-executions/skip.json"
+python3 "$VC" freeze \
+  --repo "$REPO_SKIP" --issue 11 --pr 1111 --graph-node gamma \
+  --graph-digest "$GRAPH_DIGEST" --projection-digest "$PROJECTION_DIGEST" \
+  --touch notes/ --off-limits src/ \
+  --surface none --evidence-kind none --skip-reason 'docs-only change, no behavioral diff' \
+  --baseline expected-green --label precheck-skip --out "$CONTRACT_SKIP" >/dev/null \
+  || fail "could not freeze the surface:none contract used by the skip_reason pre-check case"
+printf '# docs, revised\n' > "$REPO_SKIP/notes/README.md"
+git -C "$REPO_SKIP" add notes/README.md
+git -C "$REPO_SKIP" commit -qm 'revise the docs'
+python3 "$VC" run --repo "$REPO_SKIP" --contract "$CONTRACT_SKIP" --out "$EXEC_SKIP" >/dev/null \
+  || fail "could not execute the surface:none contract"
+python3 "$VC" check-surface --contract "$CONTRACT_SKIP" --execution "$EXEC_SKIP" >/dev/null \
+  || fail "the pre-check refused an honest surface:none contract/execution pair (control)"
+
+python3 - "$PLUGIN/scripts" "$EXEC_SKIP" <<'PY' || fail "could not re-sign the skip_reason-drifted execution receipt"
+import json, sys
+scripts, target = sys.argv[1:3]
+sys.path.insert(0, scripts)
+import idc_validation_contract as VC
+doc = json.load(open(target, encoding='utf-8'))
+doc['skip_reason'] = 'a different reason invented after the fact'
+doc['declared_evidence']['skip_reason'] = doc['skip_reason']
+body = dict(doc); body.pop('execution_digest', None)
+doc['execution_digest'] = VC.sha256_json(body)
+VC.atomic_write_json(target, doc)
+VC._record_witness('execution', target, doc)
+PY
+set +e
+out="$(python3 "$VC" check-surface --contract "$CONTRACT_SKIP" --execution "$EXEC_SKIP" 2>&1)"
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "the pre-check passed an execution receipt that rewrote its skip_reason: $out"
+printf '%s\n' "$out" | grep -qF "contract-drift refused: the execution receipt's skip_reason no longer matches the frozen validation contract" \
+  || fail "the skip_reason refusal must be the verbatim sentence a reviewer can file; got: $out"
+
+echo "PASS: the review engine inherits BOTH deterministic drift refusals from fixed code instead of forming an opinion about them, and the pre-check report discloses what it checked"

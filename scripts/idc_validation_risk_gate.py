@@ -6,6 +6,25 @@ risk inputs require the bounded read-only divergent/falsification pass, validate
 schema, enforces the exact skeptic question, discards any gate defeated by a majority, and echoes the
 fixed validator/frozen-gate/path/attempt inputs back unchanged so callers can prove discovery never
 rewrote them.
+
+THE GATE IS AUTHORITATIVE OVER ITS OWN REQUIREDNESS (F59). It used to answer
+`required = bool(risk_inputs)` where `risk_inputs` was purely the caller's repeatable `--risk-input`
+flag: omit every flag and the gate returned `required: false`, exit 0, without ever looking at the
+touch set, the dependency delta, or anything else about the contract. Adversarial falsification was
+therefore satisfied by simply not asking for it, which makes the thing bookkeeping rather than a
+gate. So requiredness is now the union of
+
+  * DECLARED   — what the caller passed via `--risk-input`, still honored; and
+  * DERIVED    — what FIXED CODE reads out of the frozen contract's own facts (`--touch`, and the
+                 baseline classification when `--baseline` is supplied). `touch` / `off-limits` are
+                 fields of the machine-owned validation contract, outside the builder's authority,
+                 so deriving from them is deriving from the contract rather than from a request.
+
+A caller can add risk but can no longer subtract it, and when the derived set is non-empty the gate
+refuses (exit 2) unless a real falsification scenario is supplied. The output reports the two sets
+separately, plus a `derivation` block naming exactly which risk dimensions fixed code can decide and
+which remain declaration-only — so `required: false` can never be read as "fixed code inspected
+everything and found nothing".
 """
 from __future__ import annotations
 
@@ -23,6 +42,55 @@ ALLOWED_RISK_INPUTS = [
 ]
 SKEPTIC_QUESTION = "show how this check passes while the goal is actually broken"
 CANDIDATE_KEYS = ["promise", "failure_mode", "observable_evidence", "executable_check"]
+
+# --- the fixed derivation table (F59) --------------------------------------------------------------
+# Every threshold and marker below is FIXED CODE, deliberately boring and greppable: a reviewer must
+# be able to read what the gate will decide without running it, and a caller must not be able to
+# argue with it. Widening any of these is a deliberate edit here, not a call-site choice.
+
+# `large-touch-set`: the frozen contract names at least this many touch entries.
+LARGE_TOUCH_SET_MIN = 5
+
+# `cross-cutting-surface`: the touch set spans at least this many distinct top-level path segments.
+CROSS_CUTTING_MIN_ROOTS = 3
+
+# `new-runtime-dependency`: the touch set names a dependency manifest / lockfile. Basename match, so
+# `services/api/package.json` counts exactly like a root-level one.
+DEPENDENCY_MANIFESTS = frozenset({
+    "requirements.txt", "requirements-dev.txt", "constraints.txt", "pyproject.toml", "setup.py",
+    "setup.cfg", "pipfile", "pipfile.lock", "poetry.lock", "uv.lock",
+    "package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "npm-shrinkwrap.json",
+    "go.mod", "go.sum", "cargo.toml", "cargo.lock", "gemfile", "gemfile.lock", "composer.json",
+    "composer.lock", "pom.xml", "build.gradle", "build.gradle.kts", "mix.exs", "pubspec.yaml",
+    "podfile", "podfile.lock", "package.swift",
+})
+
+# `security-sensitive-path`: substrings that mark a touched path as security-bearing. Matched
+# case-insensitively against the whole normalized entry, so a directory or a file both hit.
+SECURITY_SENSITIVE_MARKERS = (
+    ".github/", ".git/hooks", "hooks/", "codeowners", "ruleset",
+    "auth", "secret", "credential", "token", "password", "passwd", "privkey", "private-key",
+    "crypto", "cipher", "certificate", "keystore", "security", "permission", "privilege",
+    "sudo", "iam", "acl", "sandbox", "sanitiz", "escap", "session",
+    ".env", ".pem", ".key", ".p12", ".pfx", "id_rsa",
+)
+
+# The baseline classifications the frozen contract distinguishes. `expected-green` is a risk input by
+# name: a contract that expects an already-green baseline is the one whose verification can pass
+# without ever having proven anything.
+BASELINE_CHOICES = ("expected-red", "expected-green", "unknown")
+BASELINE_RISK = "expected-green-baseline"
+
+# Which of the five named risk inputs FIXED CODE can decide from the contract facts this helper
+# receives, and which stay declaration-only. Reported verbatim in the output so nobody over-reads a
+# `required: false`.
+DERIVABLE_RISK_INPUTS = (
+    "security-sensitive-path",
+    "cross-cutting-surface",
+    "new-runtime-dependency",
+    "large-touch-set",
+)
+BASELINE_DERIVED_WHEN = "--baseline is supplied (declaration-only otherwise)"
 
 
 class RiskGateError(Exception):
@@ -64,6 +132,54 @@ def _validate_risk_inputs(inputs) -> list[str]:
             ordered.append(raw)
             seen.add(raw)
     return ordered
+
+
+def _normalize_touch_entry(entry: str) -> str:
+    """One touch entry as the derivation table sees it: forward slashes, lowercased, no leading `./`.
+
+    The `./` trim is deliberately a prefix strip and NOT `lstrip("./")` — the latter strips any
+    leading run of `.` and `/` characters, which silently turns `.github/workflows/release.yml` into
+    `github/...` and `.env` into `env`, i.e. it eats exactly the dotfile paths the security marker
+    list exists to catch.
+    """
+    text = str(entry or "").strip().replace("\\", "/")
+    while text.startswith("./"):
+        text = text[2:]
+    return text.lower()
+
+
+def derive_risk_inputs(touch: list, baseline: str = "unknown") -> list:
+    """The risk inputs FIXED CODE reads out of the frozen contract's own facts.
+
+    Returns them in ALLOWED_RISK_INPUTS order so the result is stable and diffable. Deriving from
+    `touch` is deriving from the machine-owned validation contract (the builder cannot author it),
+    which is the whole point: the caller supplies facts, this function decides risk.
+    """
+    entries = [_normalize_touch_entry(item) for item in (touch or [])]
+    entries = [item for item in entries if item]
+    derived = set()
+
+    if len(entries) >= LARGE_TOUCH_SET_MIN:
+        derived.add("large-touch-set")
+
+    roots = {item.split("/", 1)[0] for item in entries if item.split("/", 1)[0]}
+    if len(roots) >= CROSS_CUTTING_MIN_ROOTS:
+        derived.add("cross-cutting-surface")
+
+    for item in entries:
+        if os.path.basename(item.rstrip("/")) in DEPENDENCY_MANIFESTS:
+            derived.add("new-runtime-dependency")
+            break
+
+    for item in entries:
+        if any(marker in item for marker in SECURITY_SENSITIVE_MARKERS):
+            derived.add("security-sensitive-path")
+            break
+
+    if baseline == "expected-green":
+        derived.add(BASELINE_RISK)
+
+    return [name for name in ALLOWED_RISK_INPUTS if name in derived]
 
 
 def _validate_candidate(prefix: str, candidate) -> dict:
@@ -119,17 +235,35 @@ def _load_scenario(path: str):
 
 
 def evaluate(*, validator_digest: str, frozen_gate_digest: str, attempt_ceiling: int,
-             touch: list[str], off_limits: list[str], risk_inputs: list[str], scenario_path: str | None):
+             touch: list[str], off_limits: list[str], risk_inputs: list[str], scenario_path: str | None,
+             baseline: str = "unknown"):
     validator_digest = _hex("validator_digest", validator_digest)
     frozen_gate_digest = _hex("frozen_gate_digest", frozen_gate_digest)
     if attempt_ceiling <= 0:
         raise RiskGateError("attempt_ceiling must be positive")
+    if baseline not in BASELINE_CHOICES:
+        raise RiskGateError(f"baseline must be one of {list(BASELINE_CHOICES)}, got {baseline!r}")
     touch = _string_list("touch", touch)
     off_limits = _string_list("off-limits", off_limits)
-    risk_inputs = _validate_risk_inputs(risk_inputs)
+    declared = _validate_risk_inputs(risk_inputs)
+    derived = derive_risk_inputs(touch, baseline)
+
+    # The caller may ADD risk; it may not subtract it. Declared order is preserved (callers and the
+    # governance lane assert on it), with anything fixed code found appended.
+    effective = list(declared) + [name for name in derived if name not in declared]
+
     result = {
-        "required": bool(risk_inputs),
-        "risk_inputs": risk_inputs,
+        "required": bool(effective),
+        "risk_inputs": effective,
+        "declared_risk_inputs": declared,
+        "derived_risk_inputs": derived,
+        "baseline": baseline,
+        "derivation": {
+            "derived_by_fixed_code": list(DERIVABLE_RISK_INPUTS),
+            BASELINE_RISK: BASELINE_DERIVED_WHEN,
+            "note": "`required` is the union of declared and derived risk; omitting --risk-input "
+                    "cannot suppress a risk fixed code found in the frozen contract's touch set.",
+        },
         "skeptic_question": SKEPTIC_QUESTION,
         "validator_digest": validator_digest,
         "frozen_gate_digest": frozen_gate_digest,
@@ -139,10 +273,13 @@ def evaluate(*, validator_digest: str, frozen_gate_digest: str, attempt_ceiling:
         "selected": [],
         "discarded_indexes": [],
     }
-    if not risk_inputs:
+    if not effective:
         return result
     if not scenario_path:
-        raise RiskGateError("high-risk discovery requires --scenario when any named risk input is present")
+        source = "declared" if declared else "derived from the frozen contract"
+        raise RiskGateError(
+            f"high-risk discovery requires --scenario when any named risk input is present "
+            f"({source}: {', '.join(effective)})")
     candidates, skeptics = _load_scenario(scenario_path)
     selected = []
     discarded = []
@@ -167,6 +304,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         off_limits=args.off_limits,
         risk_inputs=args.risk_input,
         scenario_path=args.scenario,
+        baseline=args.baseline,
     )
     if args.out:
         parent = os.path.dirname(os.path.abspath(args.out)) or "."
@@ -190,7 +328,13 @@ def main(argv: list[str] | None = None) -> int:
     ep.add_argument("--attempt-ceiling", type=int, required=True)
     ep.add_argument("--touch", action="append", required=True)
     ep.add_argument("--off-limits", action="append", required=True)
-    ep.add_argument("--risk-input", action="append", default=[])
+    ep.add_argument("--risk-input", action="append", default=[],
+                    help="declare a named risk input; fixed code derives the rest from --touch and "
+                         "--baseline, and a declaration can only ADD risk, never suppress it")
+    ep.add_argument("--baseline", choices=BASELINE_CHOICES, default="unknown",
+                    help="the frozen contract's baseline classification; `expected-green` derives "
+                         "the expected-green-baseline risk input (omitted = that one dimension "
+                         "stays declaration-only)")
     ep.add_argument("--scenario")
     ep.add_argument("--out")
     ep.set_defaults(func=cmd_evaluate)

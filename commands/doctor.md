@@ -91,15 +91,21 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_doctor_pathway_check.py" --repo "$PWD
 ```
 - exit **0** → **PASS** (note the reported `backend=… , pathway_enforcement.mode=…`): the claim
   matches the backend — any `github` posture, or `filesystem` declaring `off`.
-- exit **1** → **FAIL**: the `filesystem` backend claims `controlled`/`app-locked`. Fix hint: "set
-  `pathway_enforcement.mode: off` in `WORKFLOW-config.yaml`, or move this repo to the `github`
-  backend (`/idc:init`) — the filesystem tracker makes no hard pathway-security claim (spec §2.1)."
+- exit **1** → **FAIL**, for either of the two ways a claim goes unhonored: the `filesystem` backend
+  claims `controlled`/`app-locked` (fix hint: "set `pathway_enforcement.mode: off` in
+  `WORKFLOW-config.yaml`, or move this repo to the `github` backend (`/idc:init`) — the filesystem
+  tracker makes no hard pathway-security claim (spec §2.1)"), **or** a claiming mode runs on a host
+  whose `python3` is missing/older than 3.10, so the PreToolUse Path Gate cannot evaluate any
+  mutation — it refuses them all, authorized work included, instead of enforcing (fix hint: "install
+  or select Python 3.10 or newer, then re-run `/idc:doctor`"). The exact reason is on stderr; quote
+  it in the row. This is the row that makes an unrunnable enforcement leg visible — the hook wrappers
+  are the only other place the runtime is checked, and they cannot report.
 - exit **2** → **FAIL**, **never PASS**: `WORKFLOW-config.yaml` or the tracker backend is
-  missing/unreadable/unrecognized, so the claim could not be established — and an *indeterminate*
-  claim is not an honest one (the runtime Path Gate parser reports an unreadable config as `off`,
-  which is the right fail-closed default for enforcement but is not evidence of honesty). Fix hint:
-  "restore `WORKFLOW-config.yaml` + `docs/workflow/tracker-config.yaml` (`/idc:init`), then re-run
-  `/idc:doctor`."
+  missing/unreadable/unrecognized, or the shared runtime preflight itself could not be run, so the
+  claim could not be established — and an *indeterminate* claim is not an honest one (the runtime
+  Path Gate parser reports an unreadable config as `off`, which is the right fail-closed default for
+  enforcement but is not evidence of honesty). Fix hint: "restore `WORKFLOW-config.yaml` +
+  `docs/workflow/tracker-config.yaml` (`/idc:init`), then re-run `/idc:doctor`."
 This is a **sub-row of check 4** (like `5b` under `5`): report it in the table under row 4 and fold
 its result into row 4's persisted `result` — a `4b` FAIL makes row 4 FAIL — so the ten-row report
 contract stays exactly as it is.

@@ -15,10 +15,22 @@ diagnostic, so this is where the claim is re-checked on every run.
 Three answers, and the third is the load-bearing one:
 
   * exit 0 — HONEST. The claim matches the backend (any github posture; filesystem declaring `off`).
-  * exit 1 — DISHONEST. Backend `filesystem` while the config claims `controlled`/`app-locked`.
+  * exit 1 — DISHONEST. Backend `filesystem` while the config claims `controlled`/`app-locked`; OR a
+             claiming mode on a host whose `python3` cannot run the runtime hooks (see below).
              A named one-line refusal goes to stderr.
   * exit 2 — INDETERMINATE. The claim could not be established: `WORKFLOW-config.yaml` missing or
-             unreadable, or the tracker backend missing/unreadable/unrecognized.
+             unreadable, the tracker backend missing/unreadable/unrecognized, or the shared runtime
+             preflight could not be executed to judge the hook runtime.
+
+WHY THE HOOK RUNTIME IS PART OF THE CLAIM (F57). Half of what `controlled`/`app-locked` promise is
+LOCAL: "supported runtime hooks deny off-path mutations". Those hooks need Python 3.10 or newer —
+`scripts/hooks/idc_interlock_gate.py` raises on import under 3.9 — and until F57 the transport
+answered an unsupported interpreter with `exit 0`, i.e. it allowed every mutation and said nothing.
+The transport now fails closed, but a repo whose interpreter cannot evaluate mutations is still not
+delivering the posture it advertises: it refuses everything, authorized work included. Nothing else
+in the tree looked at this (`idc_python_runtime.sh` was referenced only by the hook wrappers
+themselves), so the repo could report itself fully wired while enforcing nothing. This door is where
+that becomes visible.
 
 WHY THE DOOR RE-CHECKS THE CONFIG ITSELF INSTEAD OF TRUSTING THE PARSER. The shipped Path Gate
 parser `idc_path_gate.pathway_mode()` answers `"off"` when it cannot open the config at all
@@ -31,7 +43,10 @@ from a file nobody could read. So the readability of the two configs is establis
 never to teach the runtime parser this, because the runtime's fail-closed default is the correct one
 for enforcement.
 
-Deterministic: two small file reads, no network, no `gh`, no subprocess, no LLM, no writes.
+Deterministic: two small file reads plus — only for a claiming mode — one local run of the shipped
+runtime preflight (`sh scripts/idc_python_runtime.sh`, the exact probe the hook wrappers use, so the
+answer is about the `python3` the hooks resolve rather than the one that happens to be running this
+script). No network, no `gh`, no LLM, no writes.
 
     python3 scripts/idc_doctor_pathway_check.py --repo <governed-repo-root>
 """
@@ -40,6 +55,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import subprocess
 import sys
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -69,6 +85,27 @@ EXIT_INDETERMINATE = 2
 # The verdict token an honest run prints. Deliberately absent from every other exit path so a
 # surface that greps this output can never read "cannot tell" as "clean".
 HONEST_TOKEN = "pathway-claim: honest"
+
+# The shared runtime preflight every hook wrapper runs before spawning the gate. Asking IT — rather
+# than this process's own `sys.version_info` — keeps the answer about the `python3` the HOOKS
+# resolve from PATH, which is not necessarily the interpreter someone invoked doctor with.
+RUNTIME_PREFLIGHT = os.path.join(SCRIPT_DIR, "idc_python_runtime.sh")
+
+
+def hook_runtime_supported():
+    """``(True|False|None, reason)`` — can the hooks' `python3` run the Path Gate?
+
+    ``None`` means the question could not be asked (the preflight is missing or unrunnable), which
+    is INDETERMINATE, never a pass: this door's whole rule is that "cannot tell" is never honest.
+    """
+    if not os.path.isfile(RUNTIME_PREFLIGHT):
+        return None, f"the shared runtime preflight {os.path.basename(RUNTIME_PREFLIGHT)} is missing"
+    try:
+        proc = subprocess.run(["sh", RUNTIME_PREFLIGHT], capture_output=True)
+    except OSError as exc:
+        return None, (f"the shared runtime preflight could not be executed "
+                      f"({exc.__class__.__name__})")
+    return proc.returncode == 0, None
 
 
 def _read_text(path):
@@ -161,6 +198,23 @@ def classify(repo):
             f"— it has no integration boundary to enforce, so it MUST NOT claim hard pathway "
             f"security (spec §2.1). Set `mode: off` in {CONFIG_RELPATH}, or move this repo to the "
             f"`github` backend via `/idc:init`.")
+
+    # The LOCAL half of a claiming mode is "supported runtime hooks deny off-path mutations". A
+    # `python3` older than 3.10 cannot run the gate at all, so the hooks evaluate nothing (F57).
+    if mode in CLAIMING_MODES:
+        runtime_ok, why = hook_runtime_supported()
+        if runtime_ok is None:
+            return EXIT_INDETERMINATE, (
+                f"{why} — whether this repo's `{mode}` runtime enforcement can actually run CANNOT "
+                f"BE ESTABLISHED, so the pathway-security claim is INDETERMINATE, never honest. "
+                f"Repair the plugin installation, then re-run `/idc:doctor`.")
+        if not runtime_ok:
+            return EXIT_DISHONEST, (
+                f"this repo claims `pathway_enforcement.mode: {mode}`, but the `python3` the IDC "
+                f"hooks resolve is missing or older than 3.10, so the PreToolUse Path Gate cannot "
+                f"evaluate a single mutation — the transport refuses every one of them (including "
+                f"authorized work) instead of enforcing the posture this mode advertises. Install "
+                f"or select Python 3.10 or newer, then re-run `/idc:doctor`.")
 
     return EXIT_HONEST, f"{HONEST_TOKEN} (backend={backend}, pathway_enforcement.mode={mode})"
 

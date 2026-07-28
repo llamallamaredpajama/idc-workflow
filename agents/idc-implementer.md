@@ -50,8 +50,11 @@ API sink). No cache path in the brief → tracker ops fall back to a live board 
    so baseline classification (`expected-red` vs `expected-green`), the fixed `surface` /
    `evidence_kind` pair, any cited verification `handle_id` (resolved + secret-checked by fixed code
    before use), exact `touch` / `off-limits`, and the frozen verification commands are outside the
-   builder's authority. High-risk tickets run the bounded fixed-code falsifier
-   `idc_validation_risk_gate.py` before this freeze; trivial tickets deterministically skip it. Its
+   builder's authority. Every ticket runs the bounded fixed-code falsifier
+   `idc_validation_risk_gate.py` before this freeze and the falsifier decides its own requiredness —
+   it derives risk from the contract's `--touch` set (plus `--baseline`, the same
+   `expected-red`/`expected-green` value the freeze records) and skips only what it judges trivial,
+   so omitting `--risk-input` cannot suppress a risk it found. Its
    `--attempt-ceiling` is the repo's resolved ceiling from
    `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_validation_contract.py" attempt-ceiling --repo "$PWD"`
    (the config's `pathway_enforcement.attempt_ceiling`, default 3) — the SAME value the freeze

@@ -90,10 +90,15 @@ validation contract that sits beside the issue body: declare the fixed `surface`
 pair, cite a reusable `handle_id` from `docs/workflow/verification-handles.yaml` through the fixed
 resolver `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_verification_handles.py" resolve ...` when a
 reusable recipe exists, and if it does not, route a **named** recirculation / blocked-dependency
-obligation instead of weakening the gate. Before a high-risk contract is frozen, run the bounded
+obligation instead of weakening the gate. Before **any** contract is frozen, run the bounded
 read-only falsifier `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_validation_risk_gate.py" evaluate ...`
-using only the named fixed risk inputs (`security-sensitive-path`, `cross-cutting-surface`,
-`new-runtime-dependency`, `expected-green-baseline`, `large-touch-set`); trivial tickets skip. The
+and let **it** decide whether discovery is required: the helper derives risk in fixed code from the
+frozen contract's own `--touch` set (and `--baseline expected-red|expected-green` when the
+classification is known), unions that with any risk you declare via the named fixed inputs
+(`security-sensitive-path`, `cross-cutting-surface`, `new-runtime-dependency`,
+`expected-green-baseline`, `large-touch-set`), and deterministically skips only what it judges
+trivial. Declaring inputs can ADD risk; **omitting them cannot suppress a risk the helper found**,
+and it refuses (exit 2) if derived risk arrives without a `--scenario`. The
 candidate branch shape is exact `{promise, failure_mode, observable_evidence, executable_check}` and
 skeptics ask exactly `show how this check passes while the goal is actually broken`; any gate
 defeated by a majority is discarded or repaired before survivors inform the frozen gate. Templated

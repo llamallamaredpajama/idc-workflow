@@ -46,13 +46,15 @@ grep -Fq 'scripts/idc_pathway_check.py' "$WF" \
 
 # --- hermetic behavioral contract: a real tiny git repo carrying the protected surfaces ---------
 REPO="$WORK/repo"
-mkdir -p "$REPO/.github/workflows" "$REPO/scripts/hooks"
+mkdir -p "$REPO/.github/workflows" "$REPO/scripts/hooks" "$REPO/.github/rulesets"
 cp "$WF"    "$REPO/.github/workflows/idc-pathway-integrity.yml"
 cp "$CHECK" "$REPO/scripts/idc_pathway_check.py"
 # the checker asserts these protected surfaces exist AND carry content (not a gutted empty stub):
 printf '# validation surface\n' > "$REPO/scripts/idc_validation_contract.py"   # validation surface
 printf '# receipt surface\n'    > "$REPO/scripts/idc_receipt_check.py"          # receipt surface
 printf '# hook surface\n'       > "$REPO/scripts/hooks/idc_ledger.py"           # hook surface
+printf '{"idc_contract":{}}\n' > "$REPO/.github/rulesets/idc-pathway-integrity.json"  # ruleset surface
+printf '* @owner\n'             > "$REPO/.github/CODEOWNERS"                    # ownership surface
 git -C "$REPO" init -q
 git -C "$REPO" add -A
 git -C "$REPO" -c user.email=t@t -c user.name=t commit -qm seed

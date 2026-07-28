@@ -30,9 +30,10 @@ via `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_validation_contract.py" freeze .
 classification (`expected-red` vs `expected-green`), the fixed `surface` / `evidence_kind` pair,
 any cited `handle_id` from `docs/workflow/verification-handles.yaml` (resolved and secret-checked by
 fixed code before use), exact `touch` / `off-limits`, graph/projection binding, and the frozen
-verification commands. High-risk tickets additionally run the bounded fixed-code falsifier
-`idc_validation_risk_gate.py` before the contract is frozen; trivial tickets deterministically skip
-it. The same frozen gate is then re-run through `idc_validation_contract.py run ...` at the final
+verification commands. Every ticket additionally runs the bounded fixed-code falsifier
+`idc_validation_risk_gate.py` before the contract is frozen; the falsifier decides its own
+requiredness from the contract's touch set and baseline and deterministically skips only trivial
+tickets. The same frozen gate is then re-run through `idc_validation_contract.py run ...` at the final
 head to mint the source-owned execution receipt.
 The **finisher** (not the implementer)
 runs its own `/fullauto-goal` loop over all findings, then `/simplify` + git finalization, writes the

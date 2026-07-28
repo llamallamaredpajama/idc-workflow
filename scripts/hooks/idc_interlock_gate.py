@@ -57,6 +57,29 @@ NOT via the Bash tool, so PreToolUse never sees them; and a `python3 …/idc_tra
 classifier pattern. Only a RAW terminal command (or one hidden behind interpreter indirection)
 matches.
 
+KNOWN NON-COVERAGE — the published scope, stated so this gate is not read as a complete barrier
+(F58). Both channels are PRE-EXISTING (they behave identically on `main`) and both are tracked as
+follow-ups rather than closed here, because narrowing either one touches a load-bearing exemption:
+
+  1. SANCTIONED PLUGIN SCRIPTS. Rule 5 above returns `[]` — unscanned — for any file whose RESOLVED
+     path is under `<plugin_root>/scripts/`. That exemption is what keeps IDC's own helpers, which
+     legitimately shell out to `gh`, from being denied by their own gate. Its cost: a payload written
+     into that directory and then run is never classified, and the Path Gate cannot stop the write
+     either — `idc_path_gate` deliberately treats out-of-repository paths as outside its jurisdiction
+     (locked by `tests/smoke/governance/path-gate-boundaries.sh`), and the plugin root is outside the
+     governed repo. Neither half is a defect alone; the combination is the channel. Closing it means
+     replacing "anything under scripts/" with a manifest or hash-pin of the known plugin scripts.
+  2. ARGV-LIST INTERPRETER PAYLOADS. The classifier is a TEXT scanner, so it sees
+     `python3 -c 'os.system("gh pr merge 123")'` (the protected call appears as text) but NOT
+     `python3 -c 'subprocess.run(["gh","pr","merge","123"])'` (the same call carries no matching
+     substring). "Fail-closed on dynamic/opaque" above covers constructs a static reader cannot
+     RESOLVE; this one resolves fine and simply does not match. Closing it means treating
+     child-process-capable interpreter payloads as opaque — deny unless positively classified — which
+     is a much wider denial surface than this release should adopt unreviewed.
+
+Anything NOT on that list is in scope. In particular an unusable Python runtime is not a bypass: the
+transport hard-denies rather than allowing silently (F57, `scripts/hooks/idc_interlock_gate_hook.sh`).
+
 Invocation: idc_interlock_gate.py <PLUGIN_ROOT>   (PreToolUse payload on stdin).
 Self-gated: no-op (allow) outside a governed repo, or on a tool/payload the shared Path Gate does not
 recognize.

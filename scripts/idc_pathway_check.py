@@ -16,9 +16,10 @@ REFUSES (non-zero) otherwise:
      expected source. Substituting a wrong or stale source (a forged/renamed check, or an old pinned
      revision) is refused. In `app-locked` repositories this is the "expected check source" pin.
   3. PROTECTED SURFACES — every IDC integrity surface (the pathway workflow, the hook surface, the
-     validation surface, and the receipt surface) is present AND carries content (not a gutted empty
-     stub or an emptied directory). Their presence-with-content is the structural evidence that the
-     governance machinery a merge relies on has not been stripped out.
+     validation surface, the receipt surface, and the governance-of-governance surfaces: this
+     checker, the ruleset directory and CODEOWNERS) is present AND carries content (not a gutted
+     empty stub or an emptied directory). Their presence-with-content is the structural evidence that
+     the governance machinery a merge relies on has not been stripped out.
 
 SCOPE — WHAT THIS CHECK DOES *NOT* DO. Spec §2.3 requires that a merge be refused when tracker,
 graph, journal, authorization, validation, review, or finish evidence is missing, stale, corrupt, or
@@ -51,14 +52,21 @@ PATHWAY_CONTRACT_VERSION = 1
 EXPECTED_CHECK_SOURCE = "idc/pathway-integrity@v{}".format(PATHWAY_CONTRACT_VERSION)
 
 # The IDC integrity surfaces a merge depends on. A file OR a directory satisfies each entry; the point
-# is that the machinery exists in the tree the check bound to. Keep these aligned with the ruleset's
-# `idc_contract.protected_surfaces` (workflow / hook / validation / receipt classes).
+# is that the machinery exists in the tree the check bound to. These are kept aligned with the
+# ruleset's `idc_contract.protected_surfaces` (workflow / hook / validation / receipt classes, plus
+# the governance-of-governance surfaces) — and that alignment is no longer just a comment: the
+# governance lane `tests/smoke/governance/pathway-check-surface-alignment.sh` reds when the two lists
+# diverge. (F61: the ruleset declared seven surfaces while this tuple guarded five, so a tree with
+# `.github/CODEOWNERS` and the whole `.github/rulesets/` directory deleted still passed the required
+# check while the docstring claimed the lists matched.)
 PROTECTED_SURFACES = (
     ".github/workflows/idc-pathway-integrity.yml",  # workflow surface
     "scripts/hooks",                                # hook surface (directory)
     "scripts/idc_validation_contract.py",           # validation surface
     "scripts/idc_receipt_check.py",                 # receipt surface
     "scripts/idc_pathway_check.py",                 # the checker itself
+    ".github/rulesets",                             # the ruleset directory (directory)
+    ".github/CODEOWNERS",                           # the ownership surface the review rules lean on
 )
 
 def _sha_matches(proposed: str, actual: str) -> bool:

@@ -134,11 +134,41 @@ def downstream_depths(pillars):
     return depth, succ, pred
 
 
+def assert_done_closure(done, pred):
+    """Refuse to compile when a `Done` node's own prerequisites are not `Done` (tracker divergence).
+
+    `derive_waves` treats every `Done` node as completed evidence, which is what unlocks its
+    descendants. Nothing used to check that the evidence was earned: for `A -> B -> C` with B marked
+    `Done` while A is still `Todo`, B entered `completed`, C's only predecessor was satisfied, and C
+    was scheduled into a buildable wave with NO blockers recorded — while its transitive prerequisite
+    A had never been built. The precondition is exactly the condition this compiler exists to catch:
+    a stale, buggy, or unauthorized tracker mutation. Laundering it into a wave is worse than
+    refusing, because the wave carries no trace that anything was wrong.
+
+    Checking every `Done` node's DIRECT predecessors is sufficient for full-closure by induction: if
+    some node in a `Done` node's ancestry were not `Done`, the shallowest such node is the direct
+    predecessor of a `Done` node, and this loop visits every `Done` node. A predecessor with no live
+    tracker item at all is likewise not `Done` — an untracked prerequisite is divergence too.
+    """
+    divergent = []
+    for pid in sorted(done):
+        unmet = [dep for dep in sorted(pred.get(pid, [])) if dep not in done]
+        if unmet:
+            divergent.append(f"'{pid}' is Done but its prerequisite(s) {', '.join(repr(d) for d in unmet)} are not")
+    if divergent:
+        die("tracker/graph divergence — refusing to compile waves from unearned completion:\n- "
+            + "\n- ".join(divergent)
+            + "\nA Done node whose predecessors are not Done unlocks descendants that were never "
+              "actually unblocked. Correct the board (or the matrix's blocks_on edges) so completion "
+              "is consistent, then re-compile.")
+
+
 def derive_waves(pillars, live_by_id):
     pillar_by_id = {pillar["id"]: pillar for pillar in pillars if pillar.get("id")}
     depth, _succ, pred = downstream_depths(pillars)
     done = {pid for pid, item in live_by_id.items() if item.get("status") == "Done"}
     occupied = {pid for pid, item in live_by_id.items() if item.get("status") == "In Progress"}
+    assert_done_closure(done, pred)
     derived = {}
     blockers = {pid: [] for pid in pillar_by_id}
 

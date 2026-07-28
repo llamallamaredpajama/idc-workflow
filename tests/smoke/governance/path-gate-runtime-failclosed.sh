@@ -1,0 +1,238 @@
+#!/bin/bash
+# path-gate-runtime-failclosed.sh — F57: the shared Path Gate transport REFUSES on an unusable
+# runtime; it never allows silently.
+#
+# THE DEFECT THIS LANE LOCKS. `scripts/hooks/idc_interlock_gate_hook.sh` is the PreToolUse transport
+# for the whole shared Path Gate (Bash + Write + Edit + NotebookEdit). Its runtime preflight used to
+# read `sh idc_python_runtime.sh || exit 0` — exit 0 = ALLOW — reached AFTER the repo was confirmed
+# governed and BEFORE the pathway mode was ever consulted. On any host whose python3 predates 3.10
+# the entire enforcement leg silently permitted every mutation in `app-locked` mode, emitting zero
+# bytes. Meanwhile this plugin's own git hooks (idc_git_pre_commit.sh / idc_git_pre_push.sh) fail
+# CLOSED on the identical condition. This scenario is the standing proof that the transport now
+# agrees with them.
+#
+# WHAT IT PROVES, per interpreter lane:
+#   A. enforcing repo (app-locked, and controlled) + unusable python3  -> hard DENY, non-empty output
+#   B. `off` repo + unusable python3                                   -> allow, but a LOUD stderr
+#                                                                          line (never zero bytes)
+#   C. enforcing repo + unusable python3 + IDC_HOOKS_OBSERVE_ONLY=1    -> the documented debug
+#                                                                          downgrade, loud + allow
+#   D. control, SUPPORTED python3                                      -> the wrapper still delegates
+#                                                                          to the real gate (proves
+#                                                                          the refusal did not
+#                                                                          replace enforcement)
+#   E. the posture probe agrees with the SHIPPED parser across the whole mode matrix, so the
+#      fail-closed decision can never drift from `idc_path_gate.pathway_mode`.
+#
+# TWO INTERPRETER LANES, because "unusable python3" must be proven, not asserted:
+#   * SHIM lane (always runs, hermetic): a `python3` on PATH that fails the shared runtime preflight
+#     and refuses to run the 3.10-syntax gate, while ordinary scripts still execute — exactly how a
+#     real 3.9 behaves. Refusing the gate is what makes this red-when-broken: restore `|| exit 0`
+#     and case A produces zero bytes instead of a deny.
+#   * REAL lane (opportunistic): a genuine < 3.10 interpreter discovered on the box (stock macOS
+#     /usr/bin/python3 is 3.9.6). Skipped-with-a-printed-reason when the host has none, never
+#     silently.
+#
+# Red-when-broken: revert the wrapper's runtime branch to `|| exit 0` and A/B/C all fail (A sees an
+# empty allow, B/C see no stderr line). Break the probe's fail-closed default and A's `unknown` case
+# fails. Diverge the probe from the parser and E fails.
+#
+# Usage: bash tests/smoke/governance/path-gate-runtime-failclosed.sh   (exit 0 = pass)
+set -uo pipefail
+. "$(dirname "$0")/lib.sh"
+
+WRAPPER="$GOV_PLUGIN/scripts/hooks/idc_interlock_gate_hook.sh"
+PROBE="$GOV_PLUGIN/scripts/idc_pathway_posture_probe.py"
+RUNTIME="$GOV_PLUGIN/scripts/idc_python_runtime.sh"
+[ -f "$WRAPPER" ] || gov_fail "path gate transport wrapper not found at $WRAPPER"
+[ -f "$PROBE" ] || gov_fail "pathway posture probe not found at $PROBE (the wrapper cannot decide posture without it)"
+[ -f "$RUNTIME" ] || gov_fail "shared runtime preflight not found at $RUNTIME"
+
+WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
+REPO="$WORK/repo"
+mkdir -p "$REPO/docs/workflow" "$REPO/src"
+(
+  cd "$REPO"
+  git init -q
+  git checkout -q -b main
+  git config user.email idc@example.test
+  git config user.name 'IDC Path Gate Runtime'
+) || gov_fail "could not init the fixture repo"
+printf 'backend: github\n' > "$REPO/docs/workflow/tracker-config.yaml"
+printf 'export const x = 1;\n' > "$REPO/src/x.ts"
+printf 'ticket: demo\n' > "$REPO/TRACKER.md"
+printf 'pathway_enforcement:\n  mode: off\n' > "$REPO/WORKFLOW-config.yaml"
+git -C "$REPO" add . >/dev/null 2>&1
+git -C "$REPO" commit --no-verify -qm 'test: seed runtime-failclosed fixture' >/dev/null 2>&1 \
+  || gov_fail "could not seed the fixture commit"
+
+set_mode() { printf 'pathway_enforcement:\n  mode: %s\n' "$1" > "$REPO/WORKFLOW-config.yaml"; }
+
+payload() {
+  TOOL="$1" VALUE="$2" REPO="$REPO" python3 - <<'PY'
+import json, os
+tool = os.environ["TOOL"]
+payload = {"cwd": os.environ["REPO"], "tool_name": tool, "session_id": "pg-runtime-failclosed"}
+payload["tool_input"] = {"command": os.environ["VALUE"]} if tool == "Bash" else {"file_path": os.environ["VALUE"]}
+print(json.dumps(payload))
+PY
+}
+
+# --- the two interpreter lanes -------------------------------------------------------------------
+
+# A shim dir whose `python3` behaves like an interpreter older than 3.10: the shared preflight
+# rejects it, the 3.10-syntax gate refuses to run, and everything else (including the posture probe)
+# executes for real — which is precisely a real 3.9's behavior.
+SHIM="$WORK/shim-old"
+mkdir -p "$SHIM"
+REAL_PY="$(command -v python3)" || gov_fail "no python3 on PATH — cannot build the interpreter lanes"
+cat > "$SHIM/python3" <<SHIMEOF
+#!/bin/sh
+# Emulates python3 < 3.10 for this lane: the shared runtime preflight fails, the gate (which uses
+# 3.10-only \`X | Y\` annotations) raises on import, plain scripts still run.
+for arg in "\$@"; do
+  case "\$arg" in
+    *version_info*) exit 1 ;;
+    *idc_interlock_gate.py) echo "TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'" >&2; exit 1 ;;
+  esac
+done
+exec "$REAL_PY" "\$@"
+SHIMEOF
+chmod +x "$SHIM/python3"
+
+# A genuinely old interpreter, if the host has one. Symlinked into its own dir so PATH selection is
+# the only thing that changes between lanes.
+REAL_OLD=""
+for candidate in /usr/bin/python3 python3.9 python3.8 python3.7; do
+  cpath="$(command -v "$candidate" 2>/dev/null)" || continue
+  "$cpath" -c 'import sys; raise SystemExit(0 if sys.version_info < (3, 10) else 1)' >/dev/null 2>&1 || continue
+  REAL_OLD="$WORK/shim-real"
+  mkdir -p "$REAL_OLD"
+  ln -sf "$cpath" "$REAL_OLD/python3"
+  echo "note: real <3.10 interpreter lane using $cpath ($("$cpath" --version 2>&1))"
+  break
+done
+[ -n "$REAL_OLD" ] || echo "note: no real <3.10 interpreter on this host — the shim lane carries the proof (never a silent skip)"
+
+# gate_via <shim-dir-or-empty> <tool> <value> -> sets OUT / ERRTXT / RC
+gate_via() {
+  local shim="$1" tool="$2" value="$3"
+  local runpath="$PATH"
+  [ -n "$shim" ] && runpath="$shim:$PATH"
+  OUT="$(payload "$tool" "$value" | ( cd "$REPO" && PATH="$runpath" timeout 30 bash "$WRAPPER" "$GOV_PLUGIN" ) 2>"$WORK/err.txt")"
+  RC=$?
+  ERRTXT="$(cat "$WORK/err.txt")"
+}
+
+is_deny() { printf '%s' "$OUT" | grep -q '"permissionDecision" *: *"deny"'; }
+
+# --- A/B/C, run against every available "unusable runtime" lane ------------------------------------
+
+assert_lane() {
+  local lane="$1" shim="$2"
+
+  # A. an enforcing repo hard-denies rather than silently allowing.
+  for mode in app-locked controlled; do
+    set_mode "$mode"
+    for probe_case in "Write:$REPO/src/x.ts" "Bash:gh pr merge 12 --squash" "Edit:$REPO/src/x.ts"; do
+      gate_via "$shim" "${probe_case%%:*}" "${probe_case#*:}"
+      [ "$RC" -eq 0 ] || gov_fail "[$lane/$mode] transport exited $RC (a PreToolUse hook must exit 0 and speak JSON): $ERRTXT"
+      [ -n "$OUT" ] || gov_fail "[$lane/$mode] SILENT ALLOW on an unusable runtime for ${probe_case%%:*} — this is exactly F57 (zero bytes, mutation permitted)"
+      is_deny || gov_fail "[$lane/$mode] transport did not hard-deny on an unusable runtime for ${probe_case%%:*}: stdout=[$OUT] stderr=[$ERRTXT]"
+      printf '%s' "$OUT" | grep -qi 'python 3.10' \
+        || gov_fail "[$lane/$mode] the denial does not name the runtime remedy: $OUT"
+    done
+  done
+
+  # A'. a posture that CANNOT be established is treated as enforcing, never as `off` (F10 parity).
+  printf 'pathway_enforcement:\n  mode: controllled\n' > "$REPO/WORKFLOW-config.yaml"
+  gate_via "$shim" Write "$REPO/src/x.ts"
+  is_deny || gov_fail "[$lane] a declared-but-unrecognized mode did not fail closed on an unusable runtime: stdout=[$OUT] stderr=[$ERRTXT]"
+
+  # B. `off` still allows — its published contract is observe-and-allow — but never silently.
+  set_mode off
+  gate_via "$shim" Write "$REPO/src/x.ts"
+  [ "$RC" -eq 0 ] || gov_fail "[$lane/off] transport exited $RC: $ERRTXT"
+  ! is_deny || gov_fail "[$lane/off] a non-enforcing (off) repo was hard-denied on an unusable runtime — that bricks ordinary work: $OUT"
+  printf '%s' "$ERRTXT" | grep -qi 'NOT ENFORCING' \
+    || gov_fail "[$lane/off] allowed SILENTLY on an unusable runtime — the operator must be told enforcement is not running: stderr=[$ERRTXT]"
+
+  # C. the documented debug downgrade turns the deny into the same loud allow.
+  set_mode app-locked
+  OUT="$(payload Write "$REPO/src/x.ts" | ( cd "$REPO" && PATH="${shim:+$shim:}$PATH" IDC_HOOKS_OBSERVE_ONLY=1 timeout 30 bash "$WRAPPER" "$GOV_PLUGIN" ) 2>"$WORK/err.txt")"
+  RC=$?; ERRTXT="$(cat "$WORK/err.txt")"
+  [ "$RC" -eq 0 ] || gov_fail "[$lane] observe-only downgrade exited $RC: $ERRTXT"
+  ! is_deny || gov_fail "[$lane] IDC_HOOKS_OBSERVE_ONLY=1 did not downgrade the runtime denial: $OUT"
+  printf '%s' "$ERRTXT" | grep -qi 'NOT ENFORCING' \
+    || gov_fail "[$lane] observe-only downgrade went silent: stderr=[$ERRTXT]"
+}
+
+assert_lane shim "$SHIM"
+[ -n "$REAL_OLD" ] && assert_lane real-old "$REAL_OLD"
+
+# --- D. control: with a SUPPORTED interpreter the wrapper still delegates to the real gate ---------
+sh "$RUNTIME" || gov_fail "the ambient python3 is older than 3.10 — this suite cannot run its own control lane"
+set_mode app-locked
+gate_via "" Write "$REPO/src/x.ts"
+[ "$RC" -eq 0 ] || gov_fail "[supported] transport exited $RC: $ERRTXT"
+is_deny || gov_fail "[supported] the real gate no longer denies an unauthorized app-locked write — the runtime refusal must not have replaced enforcement: stdout=[$OUT] stderr=[$ERRTXT]"
+printf '%s' "$OUT" | grep -qi 'python 3.10' \
+  && gov_fail "[supported] a runtime-refusal denial was emitted on a SUPPORTED interpreter (the preflight is misfiring): $OUT"
+
+set_mode off
+gate_via "" Write "$REPO/src/x.ts"
+[ "$RC" -eq 0 ] || gov_fail "[supported/off] transport exited $RC: $ERRTXT"
+! is_deny || gov_fail "[supported/off] off mode hard-denied through the real gate: $OUT"
+printf '%s' "$ERRTXT" | grep -qi 'NOT ENFORCING' \
+  && gov_fail "[supported/off] the runtime-refusal warning fired on a SUPPORTED interpreter: stderr=[$ERRTXT]"
+
+# --- E. the probe never drifts from the shipped parser --------------------------------------------
+for mode_case in off controlled app-locked; do
+  set_mode "$mode_case"
+  got="$(cd "$REPO" && python3 "$PROBE" "$REPO")"
+  parsed="$(PYTHONPATH="$GOV_PLUGIN/scripts" python3 -c 'import sys, idc_path_gate as G; print(G.pathway_mode(sys.argv[1]))' "$REPO")"
+  [ "$got" = "$mode_case" ] || gov_fail "posture probe read '$got' for declared mode '$mode_case'"
+  [ "$got" = "$parsed" ] || gov_fail "posture probe ('$got') disagrees with the shipped parser ('$parsed') for mode '$mode_case'"
+done
+printf 'pathway_enforcement:\n  mode: controllled\n' > "$REPO/WORKFLOW-config.yaml"
+got="$(cd "$REPO" && python3 "$PROBE" "$REPO")"
+[ "$got" = "unknown" ] || gov_fail "posture probe reported '$got' for a malformed mode — it must be 'unknown' so the caller fails closed"
+rm -f "$REPO/WORKFLOW-config.yaml"
+got="$(cd "$REPO" && python3 "$PROBE" "$REPO")"
+[ "$got" = "off" ] || gov_fail "posture probe reported '$got' for a missing config — the shipped parser says 'off'"
+got="$(python3 "$PROBE" "$WORK/no-such-repo-$$")"
+[ "$got" = "off" ] || [ "$got" = "unknown" ] || gov_fail "posture probe emitted an unusable token '$got' for a nonexistent repo"
+
+# --- F. the condition is DETECTED, not just refused: /idc:doctor row 4b calls it dishonest --------
+# Before F57 nothing in the tree looked at the hook runtime — idc_python_runtime.sh was referenced
+# only by the wrappers that consume it — so a repo could report itself fully wired while enforcing
+# nothing. The doctor door asks the SAME preflight the wrappers ask, against the `python3` on PATH.
+DOCTOR="$GOV_PLUGIN/scripts/idc_doctor_pathway_check.py"
+[ -f "$DOCTOR" ] || gov_fail "doctor pathway door not found at $DOCTOR"
+
+doctor_on() { ( cd "$REPO" && PATH="${1:+$1:}$PATH" timeout 30 python3 "$DOCTOR" --repo "$REPO" ) >"$WORK/doc.out" 2>"$WORK/doc.err"; }
+
+set_mode controlled
+doctor_on "" && DRC=0 || DRC=$?
+[ "$DRC" -eq 0 ] || gov_fail "doctor refused a github+controlled repo on a SUPPORTED interpreter (exit $DRC): $(cat "$WORK/doc.err")"
+grep -q 'pathway-claim: honest' "$WORK/doc.out" \
+  || gov_fail "doctor did not report an honest claim for github+controlled on a supported interpreter: $(cat "$WORK/doc.out")"
+
+for lane_dir in "$SHIM" ${REAL_OLD:+"$REAL_OLD"}; do
+  for mode_case in controlled app-locked; do
+    set_mode "$mode_case"
+    doctor_on "$lane_dir" && DRC=0 || DRC=$?
+    [ "$DRC" -eq 1 ] \
+      || gov_fail "doctor exited $DRC for a '$mode_case' repo whose python3 cannot run the gate — an undetectable unrunnable enforcement leg is exactly F57's third leg: out=[$(cat "$WORK/doc.out")] err=[$(cat "$WORK/doc.err")]"
+    grep -qi 'python 3.10' "$WORK/doc.err" \
+      || gov_fail "doctor's refusal does not name the runtime as the cause: $(cat "$WORK/doc.err")"
+    grep -q 'pathway-claim: honest' "$WORK/doc.out" \
+      && gov_fail "doctor printed the honest token while the enforcement leg cannot run: $(cat "$WORK/doc.out")"
+  done
+  # `off` claims nothing, so an old interpreter is not a dishonest claim there.
+  set_mode off
+  doctor_on "$lane_dir" && DRC=0 || DRC=$?
+  [ "$DRC" -eq 0 ] || gov_fail "doctor failed an 'off' repo purely for an old interpreter (exit $DRC) — off makes no enforcement claim: $(cat "$WORK/doc.err")"
+done
+
+echo "PASS: the Path Gate transport hard-denies on an unusable runtime in enforcing modes (and on an unreadable posture), stays loud-but-allowing in off mode, honors the observe-only downgrade, still delegates to the real gate on a supported interpreter, its posture probe tracks the shipped parser, and /idc:doctor row 4b reports the unrunnable enforcement leg as a dishonest claim"

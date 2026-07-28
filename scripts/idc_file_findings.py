@@ -241,6 +241,28 @@ def _github_existing_keys(repo, owner, project):
     return keys
 
 
+def routed_finding_fingerprints(repo, tracker=None):
+    """The finding fingerprints the BOARD already carries as Recirculation work — the `finding:<fp>`
+    dedupe keys of existing idc-recirc-source markers, stripped back to bare fingerprints.
+
+    One implementation of "what is already routed", reused by the seen ledger's pending-retry
+    downgrade guard (idc_review_seen_ledger._board_routed_fingerprints) so the guard and the finish
+    routing gap can never disagree about what counts as routed. Read failures PROPAGATE (github
+    raises BoardReadError) rather than degrading to an empty set here — the caller decides, and its
+    decision is to fail closed."""
+    backend = SW.read_backend(repo) or "filesystem"
+    if backend == "github":
+        owner = SW.gh_owner(repo)
+        project_number, _ = SW.read_config(repo)
+        if not (owner and project_number):
+            raise idc_gh_board.BoardReadError(
+                "could not resolve owner/project_number to corroborate routed findings")
+        keys = _github_existing_keys(repo, owner, project_number)
+    else:
+        keys = _fs_existing_keys(tracker or os.path.join(repo, "TRACKER.md"))
+    return frozenset(k[len("finding:"):] for k in keys if k.startswith("finding:"))
+
+
 def file_github(verdict, repo, owner, project, existing_keys, parent_issue, dry_run,
                 suppressed_keys=frozenset()):
     """Create one atomic Recirculation/Todo item per un-filed nit/deferral, THROUGH the transition

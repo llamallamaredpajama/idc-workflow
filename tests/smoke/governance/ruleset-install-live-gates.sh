@@ -134,19 +134,46 @@ case "$path" in
     printf '{"permissions":{"pull":true,"push":true,"maintain":false,"admin":false}}\n'
     exit 0 ;;
   */rulesets)
-    # The LISTING. Three modes:
+    # The LISTING. Modes:
     #   default                     -> empty, so the installer takes the POST/create branch
     #   STUB_EXISTING_RULESET_ID=N  -> our ruleset already exists, so it must take the PUT/update branch
     #   STUB_RULESETS_PAGES=1       -> our ruleset sits on page 2 behind a FULL page of org-inherited
     #                                  rulesets, so a single-page read would report it absent
-    if [ -n "${STUB_RULESETS_PAGES:-}" ]; then
-      if [ "$page" = "1" ]; then
-        # Exactly per_page entries (100) of org-inherited noise -> a full page, so there IS a page 2.
+    #   STUB_RULESETS_SHORT=1       -> the backend IGNORES per_page and serves its documented 30-item
+    #                                  DEFAULT page, with our ruleset on page 2 (F36)
+    #   STUB_RULESETS_NULL=1        -> exits 0 with an EMPTY BODY: valid to `gh`, `None` after the JSON
+    #                                  decode, and NOT proof that no ruleset is installed (F34)
+    #   STUB_RULESETS_ENDLESS=1     -> every page is FULL, so the walk never reaches an empty one (F36)
+    # PAST THE LAST PAGE GITHUB RETURNS AN EMPTY ARRAY, and an empty page is the ONLY thing that ends
+    # the walk, so every paged mode below serves `[]` once its content is exhausted. A mode that
+    # instead repeated its last page forever would hang the walker rather than fail it.
+    if [ "${STUB_RULESETS_NULL:-0}" = "1" ]; then exit 0; fi
+    if [ "${STUB_RULESETS_ENDLESS:-0}" = "1" ]; then
+      # Full pages up to 150 — comfortably past the walker's page ceiling, so the CEILING is what
+      # stops a correct walker. Beyond 150 the stub ERRORS instead of serving another page: if the
+      # ceiling is removed, this case must FAIL LOUDLY on a different message rather than hang a CI
+      # lane forever (the trap that killed the prototype stub, recorded in the receipts).
+      if [ "$page" -le 150 ] 2>/dev/null; then
         awk 'BEGIN{printf "["; for(i=1;i<=100;i++){printf "%s{\"id\":%d,\"name\":\"org-inherited-%d\"}", (i>1?",":""), 9000+i, i}; printf "]\n"}'
         exit 0
       fi
-      printf '[{"id":%s,"name":"idc-pathway-integrity"}]\n' "${STUB_EXISTING_RULESET_ID:-4242}"
-      exit 0
+      echo "gh: stub refuses to serve page $page — the page ceiling should have stopped this walk" >&2
+      exit 1
+    fi
+    if [ "${STUB_RULESETS_SHORT:-0}" = "1" ]; then
+      case "$page" in
+        1) awk 'BEGIN{printf "["; for(i=1;i<=30;i++){printf "%s{\"id\":%d,\"name\":\"org-inherited-%d\"}", (i>1?",":""), 7000+i, i}; printf "]\n"}'; exit 0 ;;
+        2) printf '[{"id":%s,"name":"idc-pathway-integrity"}]\n' "${STUB_EXISTING_RULESET_ID:-4242}"; exit 0 ;;
+        *) echo '[]'; exit 0 ;;
+      esac
+    fi
+    if [ -n "${STUB_RULESETS_PAGES:-}" ]; then
+      case "$page" in
+        # Exactly per_page entries (100) of org-inherited noise -> a full page, so there IS a page 2.
+        1) awk 'BEGIN{printf "["; for(i=1;i<=100;i++){printf "%s{\"id\":%d,\"name\":\"org-inherited-%d\"}", (i>1?",":""), 9000+i, i}; printf "]\n"}'; exit 0 ;;
+        2) printf '[{"id":%s,"name":"idc-pathway-integrity"}]\n' "${STUB_EXISTING_RULESET_ID:-4242}"; exit 0 ;;
+        *) echo '[]'; exit 0 ;;
+      esac
     fi
     if [ -n "${STUB_EXISTING_RULESET_ID:-}" ] && [ "$page" = "1" ]; then
       printf '[{"id":%s,"name":"idc-pathway-integrity"}]\n' "$STUB_EXISTING_RULESET_ID"
@@ -206,6 +233,28 @@ probe="$(PATH="$STUB_BIN:$PATH" STUB_RULESETS_PAGES=1 gh api "repos/$REPO/rulese
   || fail "stub self-check: the gh stub failed on the second page"
 printf '%s' "$probe" | grep -Fq 'idc-pathway-integrity' \
   || fail "stub self-check: the paginated SECOND page must contain our ruleset; got: $probe"
+# Past the last page GitHub answers with an EMPTY ARRAY, and that is the only thing that ends the
+# walk. A stub that repeated its last page here would HANG the walker instead of failing it.
+probe="$(PATH="$STUB_BIN:$PATH" STUB_RULESETS_PAGES=1 gh api "repos/$REPO/rulesets?per_page=100&page=3")" \
+  || fail "stub self-check: the gh stub failed past the last page"
+[ "$probe" = "[]" ] \
+  || fail "stub self-check: past the last page the stub must return an EMPTY ARRAY as GitHub does, or the page walk cannot terminate; got: $probe"
+# STUB_RULESETS_SHORT: the backend IGNORES per_page and serves its 30-item default (F36).
+probe="$(PATH="$STUB_BIN:$PATH" STUB_RULESETS_SHORT=1 gh api "repos/$REPO/rulesets?per_page=100&page=1")" \
+  || fail "stub self-check: the gh stub failed on a SHORT first page"
+[ "$(printf '%s' "$probe" | grep -o 'org-inherited-' | wc -l | tr -d ' ')" = "30" ] \
+  || fail "stub self-check: the SHORT page mode must serve exactly 30 entries when 100 were asked for, or it does not model a backend ignoring per_page"
+printf '%s' "$probe" | grep -Fq 'idc-pathway-integrity' \
+  && fail "stub self-check: the SHORT first page must NOT contain our ruleset — that is the whole point of the case"
+probe="$(PATH="$STUB_BIN:$PATH" STUB_RULESETS_SHORT=1 gh api "repos/$REPO/rulesets?per_page=100&page=2")" \
+  || fail "stub self-check: the gh stub failed on the SHORT second page"
+printf '%s' "$probe" | grep -Fq 'idc-pathway-integrity' \
+  || fail "stub self-check: the SHORT second page must contain our ruleset; got: $probe"
+# STUB_RULESETS_NULL: exits 0 with NO output — valid to `gh`, and `None` once decoded (F34).
+probe="$(PATH="$STUB_BIN:$PATH" STUB_RULESETS_NULL=1 gh api "repos/$REPO/rulesets?per_page=100&page=1")" \
+  || fail "stub self-check: the NULL listing mode must EXIT 0 — a gh failure would refuse for the wrong reason"
+[ -z "$probe" ] \
+  || fail "stub self-check: the NULL listing mode must produce an EMPTY body; got: $probe"
 
 # --- fixtures --------------------------------------------------------------------------------------
 # A checkout of $REPO whose COMMITTED CODEOWNERS covers all seven protected surfaces, owned by $2.
@@ -560,6 +609,66 @@ w4c() {  # $1=label  $2..=VAR=VAL env assignments
 w4c "listing entry with no 'id'"      STUB_RULESET_NO_ID=1
 w4c "listing is an object, not array" STUB_RULESET_DICT=1
 w4c "branch.commit is a string"       STUB_BRANCH_BAD_SHAPE=1
+
+# (W4d) A NULL/EMPTY listing body must REFUSE, not read as "nothing is installed" (F34). `_gh_json`
+#       decodes an empty stdout as `None`, and the walk used to `break` on it — so a `gh` that exited 0
+#       with no body ended the listing, `_existing_ruleset_id` returned None, and `--apply` POSTed a
+#       CREATE off a read it could never verify, duplicating a ruleset that may already be live. The
+#       adjacent line refuses a `{}` body with "refusing to read an unparseable listing as an empty
+#       one"; `None` is not a list either. This is the MUTATION door, so the assertion is not merely
+#       "it refused" but "it made NO mutation call at all".
+#       Red-when-broken: restore `if body is None: break` and this case reports 'created' and logs a POST.
+out="$(PATH="$STUB_BIN:$PATH" STUB_BRANCH_SHA="$SHA_USER" STUB_RULESETS_NULL=1 \
+        python3 "$INS" --ruleset "$RS" --repo "$REPO" --repo-root "$TGT_USER" --apply 2>&1)" \
+  && fail "W4d: apply MUTATED on an unverifiable (empty-body) rulesets listing — an unreadable listing is not proof that no ruleset is installed (F34); got: $out"
+printf '%s\n' "$out" | grep -qi 'traceback' \
+  && fail "W4d: an empty listing body produced a TRACEBACK instead of this module's REFUSE convention; got: $out"
+printf '%s\n' "$out" | grep -qiE '^REFUSE:.*(empty body|unparseable listing)' \
+  || fail "W4d: the refusal must name the unreadable listing, not a downstream symptom; got: $out"
+W4D_LOG="$WORK/w4d-null.log"; : > "$W4D_LOG"
+PATH="$STUB_BIN:$PATH" STUB_LOG="$W4D_LOG" STUB_BRANCH_SHA="$SHA_USER" STUB_RULESETS_NULL=1 \
+  python3 "$INS" --ruleset "$RS" --repo "$REPO" --repo-root "$TGT_USER" --apply >/dev/null 2>&1
+grep -Fq -- "--method" "$W4D_LOG" \
+  && fail "W4d: a mutation call was made after an unverifiable listing read; the gh call log was: $(cat "$W4D_LOG")"
+
+# (W4e) The walk must NOT trust the server to honor `per_page` (F36). It used to stop on a SHORT page
+#       (`len(body) < per_page`), which reads "the server gave me fewer than I asked for" as "that was
+#       the last page". A backend serving its documented 30-item DEFAULT ends the walk after page one —
+#       silently reinstating the exact F24 truncation this function exists to close, with our ruleset
+#       sitting unread on page 2. Only an EMPTY page ends the walk now.
+#       Red-when-broken: restore `if len(body) < per_page: break` and this case reports 'created'
+#       (a DUPLICATE) instead of 'updated'.
+out="$(PATH="$STUB_BIN:$PATH" STUB_BRANCH_SHA="$SHA_USER" STUB_RULESETS_SHORT=1 STUB_EXISTING_RULESET_ID=8282 \
+        python3 "$INS" --ruleset "$RS" --repo "$REPO" --repo-root "$TGT_USER" --apply 2>&1)" \
+  || fail "W4e: apply failed against a backend serving 30-item pages; got: $out"
+printf '%s\n' "$out" | grep -qiE '^OK: ruleset .* updated' \
+  || fail "W4e: a backend ignoring per_page truncated the listing at page one, so an installed ruleset was read as ABSENT and the idempotent update became a duplicate CREATE (F36); got: $out"
+
+# (W4f) A listing that NEVER returns an empty page must RAISE at a page ceiling, not loop forever
+#       (F36). `while True:` with no bound is not hypothetical here: the prototype stub for W4b served
+#       a full page one for every page and the walker had to be KILLED rather than debugged from a
+#       failure. Asserted directly on the walker so the ceiling is exercised without driving 100 full
+#       `--apply` runs, and with `per_page=2` so the 100 PAGES are cheap.
+#       The stub stops serving past page 150 (well beyond the ceiling) and ERRORS: removing the ceiling
+#       makes this case fail on THAT message instead of hanging the lane.
+PATH="$STUB_BIN:$PATH" STUB_RULESETS_ENDLESS=1 python3 - "$PLUGIN/scripts" "$REPO" <<'PY' \
+  || fail "W4f: the page walk did not refuse a listing that never terminates (F36)"
+import sys
+sys.path.insert(0, sys.argv[1])
+import idc_ruleset_install as INS
+
+try:
+    items = INS._gh_json_all_pages("repos/{}/rulesets".format(sys.argv[2]), per_page=2)
+except RuntimeError as exc:
+    msg = str(exc)
+    if "empty page" not in msg or str(INS._MAX_LISTING_PAGES) not in msg:
+        print("WRONG-REFUSAL: the walk refused, but not at the page ceiling — got: %s" % msg)
+        sys.exit(1)
+    print("W4f ok: refused after %d pages — %s" % (INS._MAX_LISTING_PAGES, msg))
+    sys.exit(0)
+print("NO-CEILING: an endless listing returned %d items instead of refusing" % len(items))
+sys.exit(1)
+PY
 w4c "permission body is an array"     STUB_PRINCIPAL_BAD_SHAPE=1
 
 # --- W5: the object store behind `git show` must itself verify (F13) --------------------------------
@@ -710,4 +819,4 @@ PATH="$STUB_BIN:$PATH" STUB_LOG="$DRY_LOG" STUB_BRANCH_SHA="$SHA_USER" \
 [ -s "$DRY_LOG" ] \
   || fail "the stub log stayed EMPTY even under --apply — the log is not recording, so the dry-run assertion proves nothing"
 
-echo "PASS: the installer's --apply path binds certification to the live repository (W2+W3) — the validation ref must NAME GitHub's live default branch (a stale origin/HEAD, a non-default override, and a raw SHA are all refused; both \`D\` and \`origin/D\` spellings pass) and the local checkout must be at the same tip; every CODEOWNERS owner principal must resolve with write-or-better access (missing/read-only user, missing/read-only team, an email owner, a gh failure, and a non-JSON body each refuse fail-closed), with maintain/admin and a role_name-only grant PROVEN to be accepted while a free-form custom role name cannot out-vote an authoritative 'read'; wrong-SHAPE gh bodies REFUSE instead of raising KeyError/AttributeError (F16); the rulesets listing is PAGINATED, so a ruleset on page 2 is updated rather than duplicated (F24), and an already-installed ruleset takes the PUT/update branch (F23); the git OBJECT STORE behind \`git show\` is itself verified with \`git fsck\` before anything is certified, so substituting the committed blob's object file — or the enclosing tree, which self-consistently re-hashes — is REFUSED in apply AND dry-run while a healthy checkout still passes (F13); the production denylist matches CASE-INSENSITIVELY before any network call (F31); and dry-run still makes ZERO gh calls"
+echo "PASS: the installer's --apply path binds certification to the live repository (W2+W3) — the validation ref must NAME GitHub's live default branch (a stale origin/HEAD, a non-default override, and a raw SHA are all refused; both \`D\` and \`origin/D\` spellings pass) and the local checkout must be at the same tip; every CODEOWNERS owner principal must resolve with write-or-better access (missing/read-only user, missing/read-only team, an email owner, a gh failure, and a non-JSON body each refuse fail-closed), with maintain/admin and a role_name-only grant PROVEN to be accepted while a free-form custom role name cannot out-vote an authoritative 'read'; wrong-SHAPE gh bodies REFUSE instead of raising KeyError/AttributeError (F16); the rulesets listing is PAGINATED, so a ruleset on page 2 is updated rather than duplicated (F24), and an already-installed ruleset takes the PUT/update branch (F23); that page walk REFUSES rather than mutating on anything short of a complete listing — a null/empty body is not proof of absence and makes ZERO mutation calls (F34), a backend ignoring per_page cannot truncate it into a duplicate CREATE, and a listing that never empties is refused at a page ceiling instead of looping forever (F36); the git OBJECT STORE behind \`git show\` is itself verified with \`git fsck\` before anything is certified, so substituting the committed blob's object file — or the enclosing tree, which self-consistently re-hashes — is REFUSED in apply AND dry-run while a healthy checkout still passes (F13); the production denylist matches CASE-INSENSITIVELY before any network call (F31); and dry-run still makes ZERO gh calls"

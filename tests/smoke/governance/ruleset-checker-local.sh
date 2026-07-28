@@ -1265,10 +1265,12 @@ cat > "$W1_PAGE/gh" <<'STUB'
 # Minimal canned `gh` for the checker's live read: a paged rulesets listing plus the detail body.
 # The patterns are END-ANCHORED on `&page=N` deliberately: a `*page=1*` glob ALSO matches
 # `per_page=100&page=2`, which serves a full page forever and HANGS the walker instead of failing it.
+# Page 3 is the EMPTY ARRAY GitHub returns past the last page — the only thing that ends the walk.
 # Any unmodelled path errors rather than answering, so a runaway walk fails loudly.
 case "$2" in
   *"&page=1") cat "$STUB_PAGES/page1.json" ;;
   *"&page=2") cat "$STUB_PAGES/page2.json" ;;
+  *"&page=3") echo '[]' ;;
   */rulesets/4242) cat "$STUB_PAGES/detail.json" ;;
   *) echo "stub: unexpected gh api path: $2" >&2; exit 1 ;;
 esac
@@ -1289,7 +1291,9 @@ PY
 PATH="$W1_PAGE:$PATH" STUB_PAGES="$W1_PAGE" gh api "repos/o/r/rulesets?per_page=100&page=2" \
   | grep -Fq 'idc-pathway-integrity' \
   || fail "W1j stub self-check: page two does not serve our ruleset"
-PATH="$W1_PAGE:$PATH" STUB_PAGES="$W1_PAGE" gh api "repos/o/r/rulesets?per_page=100&page=3" >/dev/null 2>&1 \
+[ "$(PATH="$W1_PAGE:$PATH" STUB_PAGES="$W1_PAGE" gh api "repos/o/r/rulesets?per_page=100&page=3")" = "[]" ] \
+  || fail "W1j stub self-check: past the last page the stub must return the EMPTY ARRAY GitHub returns, or the page walk cannot terminate"
+PATH="$W1_PAGE:$PATH" STUB_PAGES="$W1_PAGE" gh api "repos/o/r/rulesets?per_page=100&page=4" >/dev/null 2>&1 \
   && fail "W1j stub self-check: an unmodelled page must ERROR, so a runaway walk fails instead of hanging"
 out="$(PATH="$W1_PAGE:$PATH" STUB_PAGES="$W1_PAGE" python3 "$CHK" --ruleset "$RS" \
         --repo "idc-stub-owner/idc-stub-target" 2>&1)"
@@ -1297,6 +1301,95 @@ out="$(PATH="$W1_PAGE:$PATH" STUB_PAGES="$W1_PAGE" python3 "$CHK" --ruleset "$RS
   || fail "W1j: a ruleset listed on PAGE 2 was read as ABSENT, so --repo mode refused a repo where it IS installed (F24); got: $out"
 printf '%s\n' "$out" | grep -Fq 'OK (PR flow' \
   || fail "W1j: --repo mode did not certify the paged live ruleset; got: $out"
+
+# (W1m) The checker's page walk must not end on anything that is merely UNFINISHED (F34/F36). Three
+#       ways the old walk could stop early or never stop, asserted on the walker directly because the
+#       consequences differ per module and the walker is the shared contract:
+#         null    an empty body decoded to `None` and `break`-ed, so an unverifiable listing read as
+#                 "nothing is installed" — while the very next line refused a `{}` body for that exact
+#                 reason. In the INSTALLER this branch MUTATES (see W4d); here it merely misdiagnoses,
+#                 which is the asymmetry worth stating rather than assuming both copies are equal.
+#         short   stopping on `len(body) < per_page` trusted the server to honor per_page: a backend
+#                 serving its 30-item default ends the walk at page one, silently reinstating the F24
+#                 truncation this function exists to close.
+#         endless `while True:` with no ceiling loops forever against a backend that always returns a
+#                 full page — the prototype stub for W1j did exactly this and had to be killed.
+#       Red-when-broken: restore `if body is None: break` (null case CERTIFIES a wrong answer),
+#       restore `if len(body) < per_page: break` (short case loses our ruleset), or drop the ceiling
+#       (endless case fails on the stub's out-of-range error instead of the ceiling refusal).
+W1_WALK="$WORK/walk-contract"; mkdir -p "$W1_WALK"
+cat > "$W1_WALK/gh" <<'STUB'
+#!/bin/sh
+# Canned `gh` for the page-walk contract. $WALK_MODE picks the failure being modelled. Pages are
+# END-ANCHORED on `&page=N`; past its content each mode returns the EMPTY ARRAY GitHub returns.
+page="${2##*&page=}"
+case "$WALK_MODE" in
+  null)  exit 0 ;;                                     # exit 0, zero bytes -> None after decoding
+  short) case "$page" in
+           1) awk 'BEGIN{printf "["; for(i=1;i<=30;i++){printf "%s{\"id\":%d,\"name\":\"org-inherited-%d\"}", (i>1?",":""), 7000+i, i}; printf "]\n"}' ;;
+           2) echo '[{"id":4242,"name":"idc-pathway-integrity"}]' ;;
+           *) echo '[]' ;;
+         esac ;;
+  endless)
+         # Full pages well past the ceiling, then a LOUD error: if the ceiling is removed this case
+         # must fail on a different message, never hang the lane.
+         if [ "$page" -le 150 ] 2>/dev/null; then
+           awk 'BEGIN{printf "["; for(i=1;i<=100;i++){printf "%s{\"id\":%d,\"name\":\"org-inherited-%d\"}", (i>1?",":""), 9000+i, i}; printf "]\n"}'
+         else
+           echo "stub: refusing to serve page $page — the ceiling should have stopped this walk" >&2
+           exit 1
+         fi ;;
+  *) echo "stub: no WALK_MODE" >&2; exit 1 ;;
+esac
+STUB
+chmod +x "$W1_WALK/gh"
+# Stub self-checks: each mode must really produce the shape the case depends on.
+[ -z "$(PATH="$W1_WALK:$PATH" WALK_MODE=null gh api 'repos/o/r/rulesets?per_page=100&page=1')" ] \
+  || fail "W1m stub self-check: the null mode must return an EMPTY body"
+PATH="$W1_WALK:$PATH" WALK_MODE=null gh api 'repos/o/r/rulesets?per_page=100&page=1' >/dev/null 2>&1 \
+  || fail "W1m stub self-check: the null mode must EXIT 0 — a gh failure would refuse for the wrong reason"
+[ "$(PATH="$W1_WALK:$PATH" WALK_MODE=short gh api 'repos/o/r/rulesets?per_page=100&page=1' | grep -o 'org-inherited-' | wc -l | tr -d ' ')" = "30" ] \
+  || fail "W1m stub self-check: the short mode must serve 30 entries when 100 were asked for"
+PATH="$W1_WALK:$PATH" WALK_MODE=short gh api 'repos/o/r/rulesets?per_page=100&page=1' | grep -Fq 'idc-pathway-integrity' \
+  && fail "W1m stub self-check: the SHORT first page must not carry our ruleset — that is the point of the case"
+PATH="$W1_WALK:$PATH" WALK_MODE=short gh api 'repos/o/r/rulesets?per_page=100&page=2' | grep -Fq 'idc-pathway-integrity' \
+  || fail "W1m stub self-check: the short SECOND page must carry our ruleset"
+PATH="$W1_WALK:$PATH" python3 - "$PLUGIN/scripts" <<'PY' || fail "W1m: the checker's page walk does not hold its termination contract (F34/F36)"
+import os, sys
+sys.path.insert(0, sys.argv[1])
+import idc_ruleset_check as RC
+
+PATH = "repos/o/r/rulesets"
+
+os.environ["WALK_MODE"] = "null"
+try:
+    got = RC._gh_json_all_pages(PATH)
+    print("NULL-READ-AS-EMPTY: an unverifiable (empty-body) listing returned %r instead of refusing "
+          "— absence of a body is not proof of absence of a ruleset (F34)" % (got,)); sys.exit(1)
+except RuntimeError as exc:
+    if "empty body" not in str(exc):
+        print("WRONG-REFUSAL (null): %s" % exc); sys.exit(1)
+
+os.environ["WALK_MODE"] = "short"
+items = RC._gh_json_all_pages(PATH)           # asks for 100/page; the server serves 30
+names = [r.get("name") for r in items if isinstance(r, dict)]
+if "idc-pathway-integrity" not in names:
+    print("PER_PAGE-TRUSTED: a backend serving 30 entries per page truncated the walk at page one, so "
+          "%d of the listing was read and our ruleset was missed (F36)" % len(items)); sys.exit(1)
+if len(items) != 31:
+    print("SHORT-WALK-WRONG: expected 30 org entries + ours, got %d" % len(items)); sys.exit(1)
+
+os.environ["WALK_MODE"] = "endless"
+try:
+    got = RC._gh_json_all_pages(PATH, per_page=2)     # per_page=2 only to keep the 100 pages cheap
+    print("NO-CEILING: an endless listing returned %d items instead of refusing" % len(got)); sys.exit(1)
+except RuntimeError as exc:
+    if "empty page" not in str(exc) or str(RC._MAX_LISTING_PAGES) not in str(exc):
+        print("WRONG-REFUSAL (endless): the walk stopped, but not at the page ceiling — got: %s" % exc)
+        sys.exit(1)
+print("W1m ok: null REFUSES, a short page does not end the walk, and the ceiling refuses at %d pages"
+      % RC._MAX_LISTING_PAGES)
+PY
 
 # --- W1e/W1f/W1g/W1h: the reader must read the file GITHUB reads, and name the real cause -----------
 
@@ -1354,6 +1447,70 @@ out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$W1_BROKEN" 2>&1)" \
   && fail "checker CERTIFIED via the lower-precedence root CODEOWNERS while a BROKEN symlink occupies the location GitHub honors first (F14); got: $out"
 printf '%s\n' "$out" | grep -Fq '.github/CODEOWNERS' \
   || fail "W1f: the refusal must name the HIGHER-PRECEDENCE location that GitHub reads, not the root file it fell through to; got: $out"
+
+# (W1k) A SYMLINKED `.github` DIRECTORY (F33). `os.lstat` refuses to follow only the LAST path
+#       component — every directory above it is still resolved by the kernel — so `ln -s .github-real
+#       .github` walked straight through the leaf guard W1e/W1f prove. The checker read the target's
+#       rules and printed OK, while git records `.github` as a mode-120000 blob, GitHub finds no
+#       `.github/CODEOWNERS` tree entry at all, and require_code_owner_review binds NO reviewer to ANY
+#       of the seven protected surfaces. Same false-certify as W1e, one directory level up.
+#       Red-when-broken: read the whole path with a single `os.lstat` instead of opening it component
+#       by component, and this case CERTIFIES.
+W1_DIRLINK="$WORK/co-dirlink"; mkdir -p "$W1_DIRLINK/.github-real"
+printf '%s\n' "$CO_RULES" > "$W1_DIRLINK/.github-real/CODEOWNERS"
+ln -s .github-real "$W1_DIRLINK/.github"                   # the DIRECTORY component, symlinked
+[ -L "$W1_DIRLINK/.github" ] && [ -d "$W1_DIRLINK/.github" ] \
+  || fail "W1k fixture: .github is not a symlink to a directory"
+[ -f "$W1_DIRLINK/.github/CODEOWNERS" ] \
+  || fail "W1k fixture: the link does not resolve to a CODEOWNERS, so a following read would not certify"
+# Fixture realness: the SAME content at a REAL .github/ must certify on its own, or breaking the guard
+# would be caught by a neighbouring gate and this case would pass for the wrong reason.
+W1K_PROBE="$WORK/co-dirlink-probe"; mkdir -p "$W1K_PROBE/.github"
+cp "$W1_DIRLINK/.github-real/CODEOWNERS" "$W1K_PROBE/.github/CODEOWNERS"
+python3 "$CHK" --ruleset "$RS" --repo-root "$W1K_PROBE" >/dev/null 2>&1 \
+  || fail "W1k fixture: the same CODEOWNERS at a REAL .github/ does not certify, so a followed symlink would not either and this case could not prove the guard works"
+out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$W1_DIRLINK" 2>&1)" \
+  && fail "checker CERTIFIED through a SYMLINKED .github DIRECTORY — git records .github as a mode-120000 blob, so GitHub finds no .github/CODEOWNERS and binds no reviewer to any protected surface (F33); got: $out"
+printf '%s\n' "$out" | grep -qi 'symlink' \
+  || fail "W1k: the refusal must say a symlink is in the way, not report a missing file; got: $out"
+printf '%s\n' "$out" | grep -Fq 'reached through .github' \
+  || fail "W1k: the refusal must name the DIRECTORY COMPONENT that is the symlink, not just the leaf path; got: $out"
+
+# (W1k2) CONTROL for W1k — the walk must fall through exactly where GITHUB falls through, or the guard
+#        is merely strict rather than correct. A REGULAR FILE at `.github` means git holds a blob there
+#        and no `.github/CODEOWNERS` tree entry exists, so GitHub reads the ROOT CODEOWNERS — and so
+#        must we. Without this case, "refuse anything that is not a directory" would pass W1k while
+#        false-refusing a perfectly governed repo.
+W1_DOTFILE="$WORK/co-dotgithub-file"; mkdir -p "$W1_DOTFILE"
+printf 'not a directory\n' > "$W1_DOTFILE/.github"
+printf '%s\n/CODEOWNERS @team\n' "$CO_RULES" > "$W1_DOTFILE/CODEOWNERS"
+[ -f "$W1_DOTFILE/.github" ] && [ ! -d "$W1_DOTFILE/.github" ] \
+  || fail "W1k2 fixture: .github is not a regular file"
+python3 "$CHK" --ruleset "$RS" --repo-root "$W1_DOTFILE" >/dev/null 2>&1 \
+  || fail "W1k2: the checker REFUSED a repo whose root CODEOWNERS covers every surface just because a regular file sits at .github — GitHub reads the root file there, so the walk must fall through, not refuse"
+
+# (W1k3) A CASE-VARIANT directory (F33). macOS ships a case-INSENSITIVE filesystem by default, so
+#        `.GitHub/CODEOWNERS` opens perfectly as `.github/CODEOWNERS` here while git records — and
+#        GitHub looks for — the exact spelling. Reading it certifies rules from a path GitHub never
+#        reads: the same false-certify as W1k, reached by spelling rather than by a symlink. The guard
+#        is an exact-name check against the parent's listing; on a case-SENSITIVE filesystem the alias
+#        cannot be created at all, so the case is skipped rather than asserted falsely.
+#        Red-when-broken: drop the `name not in os.listdir(parent)` check and this case CERTIFIES.
+W1_CASE="$WORK/co-case-variant"; mkdir -p "$W1_CASE/.GitHub"
+printf '%s\n' "$CO_RULES" > "$W1_CASE/.GitHub/CODEOWNERS"
+if [ -f "$W1_CASE/.github/CODEOWNERS" ]; then
+  # Fixture realness: the same content at the EXACT spelling certifies, so reading the alias would too.
+  W1C_PROBE="$WORK/co-case-probe"; mkdir -p "$W1C_PROBE/.github"
+  cp "$W1_CASE/.GitHub/CODEOWNERS" "$W1C_PROBE/.github/CODEOWNERS"
+  python3 "$CHK" --ruleset "$RS" --repo-root "$W1C_PROBE" >/dev/null 2>&1 \
+    || fail "W1k3 fixture: the same CODEOWNERS at the exact spelling does not certify, so this case could not prove the guard works"
+  out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$W1_CASE" 2>&1)" \
+    && fail "checker CERTIFIED a CODEOWNERS at .GitHub/ — git records that spelling and GitHub looks for .github/, so no reviewer binds to any protected surface (F33); got: $out"
+  printf '%s\n' "$out" | grep -Fq 'no CODEOWNERS file found' \
+    || fail "W1k3: a case-variant location must be read as ABSENT (GitHub looks on), not certified; got: $out"
+else
+  echo "  (W1k3 skipped: case-sensitive filesystem — a .GitHub alias cannot be created here)"
+fi
 
 # (W1g) UNREADABLE CODEOWNERS — refused with the PERMISSIONS cause, not the size cause (F21). An
 #       OSError leaves the size unknown, and an unknown size is itself a refusal — so this failed
@@ -1447,4 +1604,4 @@ printf '%s\n' "$out" | grep -Fq "$HUGE_BYTES" \
   || fail "W1h: the over-limit refusal must name the file's TRUE size, not the read bound; got: $out"
 rm -f "$W1_HUGE/.github/CODEOWNERS"
 
-echo "PASS: ruleset checker enforces PR flow, exact-head required check, force-push/deletion prevention, all seven protected surfaces (incl. the F40 governance-of-governance set: the checker, the ruleset dir, and CODEOWNERS itself), GitHub any-depth/last-match-wins ownership with a strict class allowlist that fails closed on unmodeled patterns, re-types a dotted-basename DIRECTORY surface off the file guess so an interior ownerless hole cannot false-certify (F28), treats a '**/name/' trailing-slash pattern as directory-only (F32) and a bare '/' as matching-nothing (F33), and counts only valid owner tokens so a bare '@' cannot false-certify (F41); installer refuses without --repo, refuses a production repo, requires --repo-root, BINDS it to --repo via a local origin-identity check (F34), and validates the CODEOWNERS COMMITTED on the default branch — refusing an uncommitted or working-tree-diverged copy (F39); reads the enforced branch from origin/HEAD and REFUSES rather than trusting the checked-out branch when it is unset, accepting a validated --default-branch override (F44); and normalizes newlines before the divergence compare so a byte-identical CRLF-committed CODEOWNERS is not false-refused (F45); types KNOWN governance surfaces authoritatively so a directory-only '/<file>/' rule can never certify a protected FILE surface (F46), rejects lookalike substrings standing in for a real governance file (F47), requires the installer's origin-identity remote to be on the GitHub host so a non-GitHub checkout ending in the same owner/repo cannot certify the target (F48), and requires the EFFECTIVE committed CODEOWNERS file (root/docs, not just .github) to own its own path (F49); and — separating class MEMBERSHIP from surface TYPING — reads a bare-name rule as matching the FILE of that name so a later ownerless slashless rule un-owns it instead of being invisible (F50), demands each mandatory class be declared at its CANONICAL path so a same-basename decoy cannot leave the executed checker unprotected (F51), and never lets a descendant entry inherit its directory class's kind, so a directory-only rule cannot certify a FILE beneath a governance directory (F52); and refuses a CODEOWNERS at or over GitHub's 3 MB load limit — measured in RAW BYTES so a CRLF file cannot undercount its way past the gate — in the checker's working-tree read and in the installer's committed-content read alike, while a file one byte under the limit still certifies (W1); the limit is the DECIMAL 3,000,000 reading of GitHub's ambiguous '3 MB', pinned against a literal so a wrong threshold turns this lane red rather than moving the fixtures with it (F29), and the over-limit read is BOUNDED — a 40 MB CODEOWNERS is refused with its exact size while peak allocation stays at the read buffer instead of the file size (F30); the reader reads what GITHUB reads: a SYMLINKED CODEOWNERS is REFUSED rather than followed to its target's rules, a BROKEN symlink refuses at its own (higher-precedence) location instead of falling through to a lower-precedence file, and an OS-unreadable file names the permissions cause instead of being reported as possibly over the size limit (F14/F21); and the checker's own live door refuses through 'REFUSE (live)' when \`gh\` is absent instead of raising a traceback (F15) and WALKS the paginated rulesets listing so a ruleset sitting past page one is not read as absent (F24)"
+echo "PASS: ruleset checker enforces PR flow, exact-head required check, force-push/deletion prevention, all seven protected surfaces (incl. the F40 governance-of-governance set: the checker, the ruleset dir, and CODEOWNERS itself), GitHub any-depth/last-match-wins ownership with a strict class allowlist that fails closed on unmodeled patterns, re-types a dotted-basename DIRECTORY surface off the file guess so an interior ownerless hole cannot false-certify (F28), treats a '**/name/' trailing-slash pattern as directory-only (F32) and a bare '/' as matching-nothing (F33), and counts only valid owner tokens so a bare '@' cannot false-certify (F41); installer refuses without --repo, refuses a production repo, requires --repo-root, BINDS it to --repo via a local origin-identity check (F34), and validates the CODEOWNERS COMMITTED on the default branch — refusing an uncommitted or working-tree-diverged copy (F39); reads the enforced branch from origin/HEAD and REFUSES rather than trusting the checked-out branch when it is unset, accepting a validated --default-branch override (F44); and normalizes newlines before the divergence compare so a byte-identical CRLF-committed CODEOWNERS is not false-refused (F45); types KNOWN governance surfaces authoritatively so a directory-only '/<file>/' rule can never certify a protected FILE surface (F46), rejects lookalike substrings standing in for a real governance file (F47), requires the installer's origin-identity remote to be on the GitHub host so a non-GitHub checkout ending in the same owner/repo cannot certify the target (F48), and requires the EFFECTIVE committed CODEOWNERS file (root/docs, not just .github) to own its own path (F49); and — separating class MEMBERSHIP from surface TYPING — reads a bare-name rule as matching the FILE of that name so a later ownerless slashless rule un-owns it instead of being invisible (F50), demands each mandatory class be declared at its CANONICAL path so a same-basename decoy cannot leave the executed checker unprotected (F51), and never lets a descendant entry inherit its directory class's kind, so a directory-only rule cannot certify a FILE beneath a governance directory (F52); and refuses a CODEOWNERS at or over GitHub's 3 MB load limit — measured in RAW BYTES so a CRLF file cannot undercount its way past the gate — in the checker's working-tree read and in the installer's committed-content read alike, while a file one byte under the limit still certifies (W1); the limit is the DECIMAL 3,000,000 reading of GitHub's ambiguous '3 MB', pinned against a literal so a wrong threshold turns this lane red rather than moving the fixtures with it (F29), and the over-limit read is BOUNDED — a 40 MB CODEOWNERS is refused with its exact size while peak allocation stays at the read buffer instead of the file size (F30); the reader reads what GITHUB reads: a SYMLINKED CODEOWNERS is REFUSED rather than followed to its target's rules, a BROKEN symlink refuses at its own (higher-precedence) location instead of falling through to a lower-precedence file, and an OS-unreadable file names the permissions cause instead of being reported as possibly over the size limit (F14/F21); the path is opened COMPONENT BY COMPONENT rather than lstat-ed whole, so a symlinked \`.github\` DIRECTORY — the leaf guard's blind spot — is refused instead of certifying the link target's rules, and a case-variant spelling on a case-insensitive filesystem is read as absent as GitHub reads it, while a plain FILE at \`.github\` still falls through to the root CODEOWNERS exactly as GitHub does (F33); and the checker's own live door refuses through 'REFUSE (live)' when \`gh\` is absent instead of raising a traceback (F15) and WALKS the paginated rulesets listing so a ruleset sitting past page one is not read as absent (F24) — ending only on an EMPTY page, refusing a null body rather than reading it as 'nothing is installed', and refusing at a page ceiling rather than looping forever (F34/F36)"

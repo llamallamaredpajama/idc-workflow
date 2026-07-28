@@ -293,8 +293,18 @@ def _resolve_commit(repo_root: str, ref: str):
 
 
 def _object_chain_problem(repo_root: str, ref_oid: str):
-    """The refusal reason when the object chain reachable from `ref_oid` does not re-hash to the oids
-    naming it, else None. THE TRUST ANCHOR FOR EVERY `git show` READ IN THIS MODULE (F13).
+    """The refusal reason when the checkout's git OBJECT STORE does not re-hash to the oids naming its
+    objects, else None. THE TRUST ANCHOR FOR EVERY `git show` READ IN THIS MODULE (F13).
+
+    WHAT IS ACTUALLY VERIFIED IS THE WHOLE STORE, deliberately a SUPERSET of the chain reachable from
+    `ref_oid` (F35). `git fsck` re-hashes every loose object and — with `--full`, its default —
+    verifies every pack, whichever heads are named on the command line; naming `ref_oid` scopes the
+    REACHABILITY trace, not the hashing. That is more than this gate needs and it is kept that way on
+    purpose: the extra coverage is free, it is fail-CLOSED, and narrowing it to the chain would mean
+    re-implementing fsck's walk here. The cost is a false refusal on a checkout carrying an unrelated
+    corrupt or orphaned object — a crashed write, an aborted fetch, a bad sector on a long-dead branch
+    — so the refusal message names that benign cause alongside tampering rather than accusing the
+    commit being installed.
 
     WHY THIS EXISTS. Git does not verify an object's hash when it READS it — it verifies on write and
     trusts the object store thereafter. So an attacker with write access to the checkout's `.git` can
@@ -319,10 +329,10 @@ def _object_chain_problem(repo_root: str, ref_oid: str):
     perfectly healthy repositories (159 such lines on this repo's own history) and still exits 0, so
     parsing output would be both fragile and noisy.
 
-    SCOPE, HONESTLY. This verifies the object chain, which is what makes the committed-content read
-    trustworthy. It is not a general repository audit and does not claim to be. An attacker who can
-    write to `.git` can also delete this checkout — the guarantee bought here is narrow and specific:
-    *the bytes this module certifies are the bytes the pinned commit actually names*.
+    SCOPE, HONESTLY. What this BUYS is narrow and specific: *the bytes this module certifies are the
+    bytes the pinned commit actually names*. What it RUNS is wider than that (see above), so a failure
+    here does not by itself prove the pinned chain is the damaged part. It is not a security audit of
+    the repository either — an attacker who can write to `.git` can also delete this checkout.
 
     An fsck that cannot RUN is itself a refusal (fail closed): "we could not check" must never resolve
     to "certify it", which is the same rule the size and principal gates follow.
@@ -340,13 +350,16 @@ def _object_chain_problem(repo_root: str, ref_oid: str):
                 "— the committed CODEOWNERS is read out of that object store, so an unverifiable "
                 "store is refused rather than trusted.".format(ref_oid[:12], repo_root, exc))
     if out.returncode != 0:
-        return ("the git object store in the checkout at {} FAILED verification for commit {} — `git "
-                "fsck` exited {}. Git does not re-hash objects when it reads them, so a corrupted or "
-                "TAMPERED object file makes `git show` return bytes that are not the ones this commit "
-                "names, while `rev-parse` keeps reporting the original oids and every other gate here "
+        return ("the git object store in the checkout at {} FAILED verification — `git fsck` exited "
+                "{}. Git does not re-hash objects when it reads them, so a corrupted or TAMPERED "
+                "object file makes `git show` return bytes that are not the ones a commit names, "
+                "while `rev-parse` keeps reporting the original oids and every other gate here "
                 "passes. Refusing to certify CODEOWNERS out of an object store that does not verify. "
-                "Re-clone the repository (or run `git fsck` yourself to inspect it) before "
-                "installing.".format(repo_root, ref_oid[:12], out.returncode))
+                "This check covers the WHOLE store, not only the chain of the commit being installed "
+                "({}), so it can also fire on unrelated corrupt or orphaned objects left by a crashed "
+                "write or an aborted fetch: run `git fsck` yourself to see what failed, and `git gc "
+                "--prune=now` (or a fresh clone) before concluding the commit was "
+                "tampered with.".format(repo_root, out.returncode, ref_oid[:12]))
     return None
 
 
@@ -419,6 +432,13 @@ def _gh_json(args: list):
     return json.loads(out.stdout or "null")
 
 
+# The walk below stops at an EMPTY page, so a listing that never empties must be bounded by something.
+# At the default 100 items per page this is 10,000 rulesets on a single repository — orders of
+# magnitude past anything real, so it can only be reached by a backend that is not paginating as
+# documented. See `_gh_json_all_pages` for why reaching it RAISES (F36).
+_MAX_LISTING_PAGES = 100
+
+
 def _gh_json_all_pages(path: str, per_page=100) -> list:
     """Every item of a paginated GitHub LIST endpoint, walked to exhaustion.
 
@@ -430,20 +450,40 @@ def _gh_json_all_pages(path: str, per_page=100) -> list:
     `idc_git_janitor.py` (F24). Pages are walked explicitly rather than with `gh --paginate`, whose
     output shape for array endpoints varies across gh versions (concatenated arrays vs `--slurp`).
 
-    A non-list page REFUSES rather than being read as empty: an unparseable listing is not proof of
-    absence, and this module's contract is that a malformed body fails closed."""
+    EVERY WAY THIS CAN FAIL TO ESTABLISH THE FULL LISTING REFUSES, because the caller turns the answer
+    into a MUTATION: "our ruleset is not in this listing" is what makes `--apply` POST a new one, so a
+    listing that is merely unfinished must never be read as a complete one (F34, F36).
+
+    * A NULL/empty body REFUSES. `_gh_json` maps a `gh` that exits 0 with no output to `None`, and
+      `None` used to `break` — reading an unverifiable body as "the listing ended", so `--apply`
+      created a duplicate ruleset off a read it could not verify, one line above a guard that refuses
+      a `{}` body for exactly that reason. It now goes through the same refusal: not a list, not proof
+      of absence.
+    * A NON-LIST page REFUSES: an unparseable listing is not proof of absence.
+    * ONLY AN EMPTY PAGE ENDS THE WALK. Stopping on a SHORT page (`len(body) < per_page`) trusted the
+      server to honor `per_page`: a backend serving its 30-item default would end the walk after page
+      one holding 30 entries, silently reinstating the very truncation this function exists to close.
+      An empty page is the one end-of-listing signal that needs no such trust, at the cost of one
+      extra request per listing (GitHub returns `[]` past the last page).
+    * A LISTING THAT NEVER EMPTIES REFUSES at `_MAX_LISTING_PAGES` rather than looping forever. This
+      is not hypothetical: a stub written for these very tests served a full page one for every page
+      and hung the walker, which had to be killed rather than debugged from a failure."""
     items, page = [], 1
     while True:
+        if page > _MAX_LISTING_PAGES:
+            raise RuntimeError(
+                "`{}` had not returned an empty page after {} pages of up to {} entries — refusing "
+                "to keep walking a listing that does not terminate, and refusing to answer from the "
+                "truncated part of it".format(path, _MAX_LISTING_PAGES, per_page))
         body = _gh_json(["api", "{}?per_page={}&page={}".format(path, per_page, page)])
-        if body is None:
-            break
         if not isinstance(body, list):
             raise RuntimeError(
                 "`{}` returned {}, not the documented JSON array — refusing to read an unparseable "
-                "listing as an empty one".format(path, type(body).__name__))
-        items.extend(body)
-        if len(body) < per_page:
+                "listing as an empty one".format(
+                    path, "an empty body" if body is None else type(body).__name__))
+        if not body:
             break
+        items.extend(body)
         page += 1
     return items
 

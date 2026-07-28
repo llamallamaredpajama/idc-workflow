@@ -29,6 +29,7 @@ Any missing or weakened entry is a refusal (non-zero). Compiles under ambient Py
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import re
@@ -268,6 +269,147 @@ def codeowners_size_problem(rel, size_bytes):
 _SIZE_COUNT_CHUNK = 1024 * 1024
 
 
+def _location_unexaminable_problem(rel: str, exc) -> str:
+    """Refusal reason when a CODEOWNERS location cannot be INSPECTED at all (a directory component we
+    may not list or open). Refusing beats falling through to a lower-precedence file GitHub would not
+    be reading."""
+    return ("the CODEOWNERS location {} could not be examined ({}) — GitHub honors it ahead of "
+            "the remaining locations, so it cannot be skipped in favour of a lower-precedence "
+            "file. Fix the permissions on it (or remove it) before installing.".format(rel, exc))
+
+
+def _unreadable_problem(rel: str, exc) -> str:
+    """Refusal reason when the CODEOWNERS FILE exists but its bytes cannot be read (permissions, an
+    I/O error). Reported as its own cause: routing this through the unknown-size refusal told the
+    operator their file might exceed 3 MB when the real problem was `chmod 000` (F21). The size gate
+    still refuses an unknown size on its own — this only makes the message name the true cause."""
+    return ("the CODEOWNERS file {} could not be read ({}) — check its permissions. Neither its "
+            "ownership rules nor its size can be established, and a file that cannot be shown to "
+            "cover the protected surfaces is refused rather than certified.".format(rel, exc))
+
+
+def _open_repo_file(root_fd: int, rel: str):
+    """`(fd, problem)` for the entry GIT RECORDS at exactly `rel`, opened one path component at a time
+    beneath the already-open directory `root_fd`.
+
+      `(fd, None)`     an open read-only fd on a REGULAR file at exactly `rel`. The caller owns it.
+      `(None, None)`   git records nothing GitHub would read at `rel` — look at the next location.
+      `(None, reason)` something IS there, but not something GitHub reads owner rules out of: REFUSE.
+
+    WHAT THIS GUARDS, MECHANICALLY. Each component is opened with `O_NOFOLLOW` relative to its parent's
+    fd, and its type is taken from `fstat` on the fd that was actually opened. A component that is a
+    symlink therefore fails with ELOOP instead of being resolved by the kernel, and the file whose
+    bytes are read is the file whose type was checked — there is no path re-resolution between the two.
+
+    WHY COMPONENT-AT-A-TIME (F33). The predecessor called `os.lstat` on the WHOLE path. `lstat` refuses
+    to follow only the LAST component; every directory above it is still resolved, so `ln -s
+    .github-real .github` walked straight through the symlink guard: the checker read the target's
+    rules and printed `OK`, while git recorded `.github` as a mode-120000 blob, GitHub found no
+    `.github/CODEOWNERS` tree entry at all, and `require_code_owner_review` bound NO reviewer to ANY
+    protected surface. That is the F6/F39 false-certify the leaf guard exists to prevent, reached one
+    directory level up. The rule is now a property of the WHOLE path: what this module certifies must
+    be the entry git records at that exact path, so every component is checked, not just the leaf.
+
+    THE THREE OUTCOMES ARE CHOSEN TO MATCH WHAT GITHUB ACTUALLY LOADS:
+
+    * A SYMLINK anywhere in the path REFUSES. At the leaf, git stores a mode-120000 blob whose CONTENT
+      IS THE TARGET PATH STRING, GitHub loads that string as the file body, parses no owner rules out
+      of it, and binds no reviewer — so falling through to a lower-precedence file would certify rules
+      GitHub does not honor at the location it DOES read. At a directory component, git records
+      nothing beneath the blob, so GitHub does look on — but this checker reads the WORKING TREE, and a
+      symlinked directory is exactly the state in which the working tree and the committed tree can
+      disagree in either direction (a local `ln -s` dedupe over a still-committed `.github/`, or a
+      committed symlink under a real local directory). Neither can be told apart from here, and one of
+      them false-certifies, so the fail-closed answer is the only one that is right in both. The
+      refusal names the component and the remedy.
+    * A NON-DIRECTORY component, or a name absent at that EXACT spelling, is "nothing here" — the
+      caller looks on, because that is precisely what GitHub does. A regular file at `.github` means
+      git holds a blob there and no `.github/CODEOWNERS` tree entry exists, so GitHub falls through to
+      `CODEOWNERS` / `docs/CODEOWNERS` and so do we.
+    * A non-REGULAR leaf REFUSES, as before: a location GitHub reads no rules from binds no reviewer,
+      and it must not be skipped in favour of a lower-precedence file.
+
+    THE EXACT-SPELLING CHECK (`name not in os.listdir(parent)`) exists because macOS ships a
+    CASE-INSENSITIVE filesystem by default. `.GitHub/CODEOWNERS` opens perfectly there while git
+    records — and GitHub looks for — `.github/CODEOWNERS`, so without it the checker certifies rules
+    from a path GitHub never reads. On a case-sensitive filesystem the check is a no-op (the open would
+    have failed anyway). GitHub documents its three locations with exact spellings; if it were in fact
+    case-folding, the cost here is a fall-through to the next location and, at worst, a fail-closed
+    "no CODEOWNERS file found" — the same direction this module resolves every other ambiguity in
+    (see `CODEOWNERS_MAX_BYTES`).
+
+    A LISTING WE CANNOT READ IS A REFUSAL, not a fall-through: "we could not check" must never resolve
+    to "certify it", which is the rule the size, principal and object-chain gates all follow."""
+    parts = rel.split("/")
+    last = len(parts) - 1
+    dir_fd, dir_is_ours = root_fd, False
+    try:
+        for i, name in enumerate(parts):
+            here = "/".join(parts[:i + 1])
+            try:
+                listing = os.listdir(dir_fd)
+            except OSError as exc:
+                return None, _location_unexaminable_problem(rel, exc)
+            if name not in listing:
+                return None, None          # not recorded at this exact spelling; GitHub looks on too
+            try:
+                # O_NONBLOCK so a FIFO planted at one of these names cannot hang the checker waiting
+                # for a writer; it has no effect on a regular file or a directory.
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    return None, (_leaf_symlink_problem(rel) if i == last
+                                  else _component_symlink_problem(rel, here))
+                if exc.errno in (errno.ENOENT, errno.ENOTDIR):
+                    return None, None      # raced away, or a blob where a directory would be
+                return None, (_unreadable_problem(rel, exc) if i == last
+                              else _location_unexaminable_problem(rel, exc))
+            try:
+                st = os.fstat(fd)
+            except OSError as exc:                                     # pragma: no cover — defensive
+                os.close(fd)
+                return None, _unreadable_problem(rel, exc)
+            if i == last:
+                if not stat.S_ISREG(st.st_mode):
+                    os.close(fd)
+                    return None, _nonregular_leaf_problem(rel)
+                return fd, None
+            if not stat.S_ISDIR(st.st_mode):
+                os.close(fd)
+                return None, None          # a blob where a directory would be; GitHub looks on
+            if dir_is_ours:
+                os.close(dir_fd)
+            dir_fd, dir_is_ours = fd, True
+    finally:
+        if dir_is_ours:
+            os.close(dir_fd)
+    return None, None                                                  # pragma: no cover — unreachable
+
+
+def _leaf_symlink_problem(rel: str) -> str:
+    return ("the CODEOWNERS at {} is a SYMLINK. Git stores a symlink as a mode-120000 blob whose "
+            "content is the TARGET PATH STRING, and GitHub loads that string as the file body — "
+            "so it declares NO owner rules and binds NO reviewer to any protected surface, while "
+            "reading through the link here would certify the target's rules instead. Replace it "
+            "with a regular file holding the rules GitHub must enforce.".format(rel))
+
+
+def _component_symlink_problem(rel: str, component: str) -> str:
+    return ("the CODEOWNERS location {} is reached through {}, which is a SYMLINK. Git stores a "
+            "symlink as a mode-120000 blob and records NOTHING beneath it, so the tree GitHub reads "
+            "has no {} in it at all and binds no reviewer from it — while following the link here "
+            "would certify whatever rules the link's target happens to hold. Replace {} with a real "
+            "directory and commit the CODEOWNERS at the path GitHub reads.".format(
+                rel, component, rel, component))
+
+
+def _nonregular_leaf_problem(rel: str) -> str:
+    return ("the CODEOWNERS at {} is not a regular file. GitHub honors this location ahead of the "
+            "remaining ones, so it cannot be skipped in favour of a lower-precedence CODEOWNERS: "
+            "a location GitHub reads no rules from binds no reviewer to any protected "
+            "surface.".format(rel))
+
+
 def _read_codeowners_sized(repo_root: str):
     """`(relpath, text, size_bytes, read_problem)` for the first CODEOWNERS GitHub would honor, or
     `(None, None, None, None)` when none of the three locations exists. `size_bytes` is the RAW
@@ -289,78 +431,67 @@ def _read_codeowners_sized(repo_root: str):
     are discarded as they are read — so the refusal names a real number rather than a lower bound, and
     an over-limit file is never decoded at all.
 
-    SYMLINKS ARE REFUSED, NOT FOLLOWED (F14). Git stores a symlink as a mode-120000 blob whose CONTENT
-    IS THE TARGET PATH STRING; GitHub loads that string as the file body, parses no owner rules out of
-    it, and binds NO reviewer to any protected surface. `os.path.isfile`/`open` both FOLLOW links, so
-    reading through one certifies the TARGET's rules against a file GitHub reads a path string from —
-    the F6/F39 false-certify class, triggered by the well-intentioned `ln -s ../CODEOWNERS
-    .github/CODEOWNERS` dedupe. A BROKEN link failed worse still: `isfile` was False, so the loop fell
-    THROUGH to a lower-precedence location and certified that, while GitHub honours the
-    higher-precedence blob that does exist. Hence `os.lstat`, and hence a non-regular entry at a
-    higher-precedence location REFUSES instead of falling through. Only "nothing is here" (ENOENT /
-    ENOTDIR) advances to the next location, because that is the only case where GitHub also looks on.
+    THE PATH IS OPENED COMPONENT BY COMPONENT, NEVER FOLLOWING A SYMLINK (F14, F33) — see
+    `_open_repo_file`, which owns that guard and documents which outcomes REFUSE and which fall
+    through to the next location, and why each matches what GitHub loads. This function only decides
+    what to do with a file it has been handed an fd on.
 
     The decoded text reproduces text-mode universal-newline translation exactly (CRLF/CR -> LF),
     because callers compare this string against the committed copy and parse ownership rules out of
     it: only the SIZE's provenance changed here, never the text's meaning."""
-    for rel in CODEOWNERS_RELPATHS:
-        path = os.path.join(repo_root, rel)
-        try:
-            st = os.lstat(path)                          # lstat, NOT stat — never follow the link
-        except (FileNotFoundError, NotADirectoryError):
-            continue                                     # nothing here; GitHub looks on too
-        except OSError as exc:
-            # The entry may or may not exist and we cannot tell — refusing beats falling through to a
-            # lower-precedence file GitHub would not be reading.
-            return rel, None, None, (
-                "the CODEOWNERS location {} could not be examined ({}) — GitHub honors it ahead of "
-                "the remaining locations, so it cannot be skipped in favour of a lower-precedence "
-                "file. Fix the permissions on it (or remove it) before "
-                "installing.".format(rel, exc))
-        if stat.S_ISLNK(st.st_mode):
-            return rel, None, None, (
-                "the CODEOWNERS at {} is a SYMLINK. Git stores a symlink as a mode-120000 blob whose "
-                "content is the TARGET PATH STRING, and GitHub loads that string as the file body — "
-                "so it declares NO owner rules and binds NO reviewer to any protected surface, while "
-                "reading through the link here would certify the target's rules instead. Replace it "
-                "with a regular file holding the rules GitHub must enforce.".format(rel))
-        if not stat.S_ISREG(st.st_mode):
-            return rel, None, None, (
-                "the CODEOWNERS at {} is not a regular file. GitHub honors this location ahead of the "
-                "remaining ones, so it cannot be skipped in favour of a lower-precedence CODEOWNERS: "
-                "a location GitHub reads no rules from binds no reviewer to any protected "
-                "surface.".format(rel))
-        try:
-            with open(path, "rb") as fh:
-                raw = fh.read(CODEOWNERS_MAX_BYTES + 1)
-                if len(raw) > CODEOWNERS_MAX_BYTES:
-                    # Already over the limit. Count the rest without retaining it, so the refusal can
-                    # name the real size, and never decode it.
-                    size = len(raw)
-                    while True:
-                        chunk = fh.read(_SIZE_COUNT_CHUNK)
-                        if not chunk:
-                            break
-                        size += len(chunk)
-                    return rel, None, size, None
-        except OSError as exc:
-            # Readable-as-an-entry but not readable as a FILE (permissions, an I/O error). Reported as
-            # its own cause: routing this through the unknown-size refusal told the operator their
-            # file might exceed 3 MB when the real problem was `chmod 000` (F21). The size gate still
-            # refuses an unknown size on its own — this only makes the message name the true cause.
-            return rel, None, None, (
-                "the CODEOWNERS file {} could not be read ({}) — check its permissions. Neither its "
-                "ownership rules nor its size can be established, and a file that cannot be shown to "
-                "cover the protected surfaces is refused rather than certified.".format(rel, exc))
-        try:
-            text = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            # A CODEOWNERS with invalid UTF-8 is treated as unreadable and fails closed via the
-            # `text is None` path — a clean refusal, never an uncaught UnicodeDecodeError
-            # traceback out of the checker/installer (F35). The size IS known here.
-            return rel, None, len(raw), None
-        return rel, text.replace("\r\n", "\n").replace("\r", "\n"), len(raw), None
-    return None, None, None, None
+    try:
+        # One fd on the checkout root, reused for all three locations. `repo_root` itself is the
+        # BOUNDARY, not part of the certified path: git records paths relative to it, and the operator
+        # may legitimately name it through symlinks (`/tmp` -> `/private/tmp` on macOS), so its own
+        # components are not walked. Everything BELOW it is.
+        root_fd = os.open(repo_root, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError as exc:
+        # `rel` is the highest-precedence location: it is the one whose examination failed first, and
+        # `validate_codeowners_content` only reports a read_problem when a location is named.
+        return CODEOWNERS_RELPATHS[0], None, None, (
+            "the repository checkout at {} could not be opened ({}), so no CODEOWNERS location under "
+            "it could be examined — ownership cannot be shown to cover any protected surface, and an "
+            "unverifiable checkout is refused rather than certified.".format(repo_root, exc))
+    try:
+        for rel in CODEOWNERS_RELPATHS:
+            fd, problem = _open_repo_file(root_fd, rel)
+            if problem:
+                return rel, None, None, problem
+            if fd is None:
+                continue                                 # nothing here; GitHub looks on too
+            try:
+                fh = os.fdopen(fd, "rb")                 # takes ownership of fd
+            except OSError as exc:                       # pragma: no cover — defensive
+                os.close(fd)
+                return rel, None, None, _unreadable_problem(rel, exc)
+            try:
+                with fh:
+                    raw = fh.read(CODEOWNERS_MAX_BYTES + 1)
+                    if len(raw) > CODEOWNERS_MAX_BYTES:
+                        # Already over the limit. Count the rest without retaining it, so the refusal
+                        # can name the real size, and never decode it.
+                        size = len(raw)
+                        while True:
+                            chunk = fh.read(_SIZE_COUNT_CHUNK)
+                            if not chunk:
+                                break
+                            size += len(chunk)
+                        return rel, None, size, None
+            except OSError as exc:
+                # Opened as an entry but not readable as a FILE (an I/O error mid-read). Same cause,
+                # same message as a refused open — see `_unreadable_problem` (F21).
+                return rel, None, None, _unreadable_problem(rel, exc)
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                # A CODEOWNERS with invalid UTF-8 is treated as unreadable and fails closed via the
+                # `text is None` path — a clean refusal, never an uncaught UnicodeDecodeError
+                # traceback out of the checker/installer (F35). The size IS known here.
+                return rel, None, len(raw), None
+            return rel, text.replace("\r\n", "\n").replace("\r", "\n"), len(raw), None
+        return None, None, None, None
+    finally:
+        os.close(root_fd)
 
 
 def _read_codeowners(repo_root: str):
@@ -808,22 +939,35 @@ def _gh_json(args: list, repo_flag=None):
 # output shape for array endpoints varies across gh versions (concatenated arrays vs `--slurp`).
 _RULESETS_PER_PAGE = 100
 
+# The walk stops at an EMPTY page, so a listing that never empties must be bounded by something. At
+# `_RULESETS_PER_PAGE` items per page this is 10,000 rulesets on one repository — orders of magnitude
+# past anything real, so it can only be reached by a backend that is not paginating as documented.
+# Reaching it RAISES rather than returning what was collected: a truncated listing is not proof of
+# absence, which is the same rule the non-list page follows (F36).
+_MAX_LISTING_PAGES = 100
+
 
 def _gh_json_all_pages(path: str, per_page=_RULESETS_PER_PAGE) -> list:
-    """Every item of a paginated GitHub LIST endpoint, walked to exhaustion. A non-list page REFUSES
-    rather than being silently treated as empty — an unparseable listing is not proof of absence."""
+    """Every item of a paginated GitHub LIST endpoint, walked to exhaustion. Shares its termination
+    and refusal contract with the installer's copy — see `idc_ruleset_install._gh_json_all_pages` for
+    the full rationale (a null body, a non-list body, and a listing that never ends all REFUSE; only
+    an EMPTY page ends the walk)."""
     items, page = [], 1
     while True:
+        if page > _MAX_LISTING_PAGES:
+            raise RuntimeError(
+                "`{}` had not returned an empty page after {} pages of up to {} entries — refusing "
+                "to keep walking a listing that does not terminate, and refusing to answer from the "
+                "truncated part of it".format(path, _MAX_LISTING_PAGES, per_page))
         body = _gh_json(["api", "{}?per_page={}&page={}".format(path, per_page, page)])
-        if body is None:
-            break
         if not isinstance(body, list):
             raise RuntimeError(
                 "`{}` returned {}, not the documented JSON array — refusing to read an unparseable "
-                "listing as an empty one".format(path, type(body).__name__))
-        items.extend(body)
-        if len(body) < per_page:
+                "listing as an empty one".format(
+                    path, "an empty body" if body is None else type(body).__name__))
+        if not body:
             break
+        items.extend(body)
         page += 1
     return items
 

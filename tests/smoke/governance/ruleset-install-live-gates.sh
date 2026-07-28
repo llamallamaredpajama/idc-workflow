@@ -84,7 +84,14 @@ esac
 # KeyError/AttributeError — a raw traceback where the module's header promises a REFUSE (F16).
 case "$path" in
   */rulesets)
-    [ "${STUB_RULESET_NO_ID:-0}" = "1" ] && { echo '[{"name":"idc-pathway-integrity"}]'; exit 0; }
+    # PAGE-AWARE, and it must stay that way: the walk ends only on an EMPTY page, so a listing mode
+    # that answers the same non-empty body for EVERY page never terminates. Answering the malformed
+    # entry on page one and `[]` afterwards is also what a real backend does, and it keeps this case
+    # refusing on the MISSING ID rather than on the walker's page ceiling.
+    if [ "${STUB_RULESET_NO_ID:-0}" = "1" ]; then
+      if [ "$page" = "1" ]; then echo '[{"name":"idc-pathway-integrity"}]'; else echo '[]'; fi
+      exit 0
+    fi
     [ "${STUB_RULESET_DICT:-0}" = "1" ] && { echo '{"id":1,"name":"idc-pathway-integrity"}'; exit 0; }
     ;;
   */branches/*)
@@ -250,6 +257,17 @@ probe="$(PATH="$STUB_BIN:$PATH" STUB_RULESETS_SHORT=1 gh api "repos/$REPO/rulese
   || fail "stub self-check: the gh stub failed on the SHORT second page"
 printf '%s' "$probe" | grep -Fq 'idc-pathway-integrity' \
   || fail "stub self-check: the SHORT second page must contain our ruleset; got: $probe"
+# Every listing mode must EMPTY OUT past its content, including the wrong-shape ones: the walk ends
+# only on an empty page, so a mode repeating one non-empty body for every page never terminates and
+# the run refuses at the page ceiling instead of at the gate the case is about.
+probe="$(PATH="$STUB_BIN:$PATH" STUB_RULESET_NO_ID=1 gh api "repos/$REPO/rulesets?per_page=100&page=1")" \
+  || fail "stub self-check: the gh stub failed on a no-id listing"
+printf '%s' "$probe" | grep -Fq 'idc-pathway-integrity' \
+  || fail "stub self-check: the no-id listing must carry our ruleset name on page one; got: $probe"
+probe="$(PATH="$STUB_BIN:$PATH" STUB_RULESET_NO_ID=1 gh api "repos/$REPO/rulesets?per_page=100&page=2")" \
+  || fail "stub self-check: the gh stub failed past the no-id listing's first page"
+[ "$probe" = "[]" ] \
+  || fail "stub self-check: the no-id listing mode must EMPTY OUT past page one, or the walk cannot terminate and W4c refuses at the page ceiling instead of on the missing id; got: $probe"
 # STUB_RULESETS_NULL: exits 0 with NO output — valid to `gh`, and `None` once decoded (F34).
 probe="$(PATH="$STUB_BIN:$PATH" STUB_RULESETS_NULL=1 gh api "repos/$REPO/rulesets?per_page=100&page=1")" \
   || fail "stub self-check: the NULL listing mode must EXIT 0 — a gh failure would refuse for the wrong reason"
@@ -593,8 +611,13 @@ printf '%s\n' "$out" | grep -qiE '^OK: ruleset .* updated' \
 #       mutation, so nothing false-certified — the defect is the broken refusal CONTRACT.
 #       Red-when-broken: restore `match["id"]` / drop an isinstance guard and the matching case prints
 #       a Python traceback.
-w4c() {  # $1=label  $2..=VAR=VAL env assignments
-  local label="$1"; shift
+#       Each case PINS the refusal it is meant to produce, not a bare `^REFUSE:`. Every other gate in
+#       this module also refuses, so a generic assertion passes when the case never reaches the shape
+#       guard at all — which is exactly what happened once the page walk stopped ending on a SHORT
+#       page: the no-id mode answered the same one-entry body for every page, so the run refused at
+#       the walker's page CEILING and this case stayed green having proven nothing.
+w4c() {  # $1=label  $2=text the refusal MUST contain  $3..=VAR=VAL env assignments
+  local label="$1" want="$2"; shift 2
   local rc
   out="$(PATH="$STUB_BIN:$PATH" STUB_BRANCH_SHA="$SHA_USER" env "$@" \
           python3 "$INS" --ruleset "$RS" --repo "$REPO" --repo-root "$TGT_USER" --apply 2>&1)"
@@ -605,10 +628,12 @@ w4c() {  # $1=label  $2..=VAR=VAL env assignments
     && fail "W4c ($label): apply SUCCEEDED on a wrong-shape gh body; got: $out"
   printf '%s\n' "$out" | grep -qiE '^REFUSE:' \
     || fail "W4c ($label): expected a REFUSE line; got: $out"
+  printf '%s\n' "$out" | grep -Fq "$want" \
+    || fail "W4c ($label): the run refused, but NOT on the wrong-shape body it is meant to catch (expected text: '$want') — some earlier gate refused instead, so this case proves nothing; got: $out"
 }
-w4c "listing entry with no 'id'"      STUB_RULESET_NO_ID=1
-w4c "listing is an object, not array" STUB_RULESET_DICT=1
-w4c "branch.commit is a string"       STUB_BRANCH_BAD_SHAPE=1
+w4c "listing entry with no 'id'"      "carries no 'id'"                    STUB_RULESET_NO_ID=1
+w4c "listing is an object, not array" "not the documented JSON array"      STUB_RULESET_DICT=1
+w4c "branch.commit is a string"       "reported no tip commit"             STUB_BRANCH_BAD_SHAPE=1
 
 # (W4d) A NULL/EMPTY listing body must REFUSE, not read as "nothing is installed" (F34). `_gh_json`
 #       decodes an empty stdout as `None`, and the walk used to `break` on it — so a `gh` that exited 0
@@ -669,7 +694,7 @@ except RuntimeError as exc:
 print("NO-CEILING: an endless listing returned %d items instead of refusing" % len(items))
 sys.exit(1)
 PY
-w4c "permission body is an array"     STUB_PRINCIPAL_BAD_SHAPE=1
+w4c "permission body is an array"     "documented permission object"        STUB_PRINCIPAL_BAD_SHAPE=1
 
 # --- W5: the object store behind `git show` must itself verify (F13) --------------------------------
 #

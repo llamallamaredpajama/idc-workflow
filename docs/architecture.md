@@ -48,7 +48,8 @@ IDC names three `pathway_enforcement.mode` profiles: `off | controlled | app-loc
 
 The filesystem tracker remains useful for hermetic tests and local demonstrations. It must stay `off` and makes no hard pathway-security claim.
 
-Everything else flows autonomously and automerges when green.
+Everything else flows autonomously and automerges when green (on the Claude/Codex runtimes; the
+experimental Pi runtime stops at an operator-performed merge — see **Runtime model** below).
 
 ## Write-authority boundaries
 
@@ -110,6 +111,13 @@ The full Think→Plan→Build lifecycle runs end-to-end on Pi against a real LLM
 umbrella (provider-qualified) boots every role, no per-role pinning required — but a parallel Build
 pool and a Pi-side autorun drain remain pending (#66 L1/L4), which is why the runtime stays
 experimental.
+
+**Merge is one of those pending pieces on Pi.** The **Claude and Codex** finishers automerge a green
+PR (`gh pr merge --squash --delete-branch`); the **Pi** Build/Plan/Recirculator finishers instead
+prepare, push, and report the reviewed branch and hand it to an **operator-performed merge**, because
+no sanctioned Pi merge helper has landed yet. So where this document says the pipeline "automerges
+when green," that is the Claude/Codex behavior — a Pi run stops one deliberate step short, at the
+merge gate, until that helper exists.
 
 ## The thirteen commands — one altitude each
 

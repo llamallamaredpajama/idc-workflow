@@ -32,11 +32,26 @@ second half of that promise exist. What the flip does and does not do:
   install — `controlled` works without it. `app-locked` remains the deliberate choice for
   repositories that must stop an ordinary write token from touching the board at all.
 
+**Upgrade note — a Plan finished before this release cannot be built after it.** Planning receipts are
+now proven by a machine witness recorded outside the committed tree, so a receipt minted by an earlier
+version has no witness and Build refuses to borrow it. This is deliberate and cannot be repaired in
+place: nothing inside a receipt distinguishes "written by older code" from "hand-forged", which is
+precisely why the out-of-tree witness exists, so re-anchoring one would reopen the forgery hole. If an
+upgrade lands between a Plan and its Build, **re-run the sanctioned Plan apply** to mint a fresh
+witnessed receipt — the refusal message says so. Plans and Builds that both run on 5.0.0 are unaffected.
+
 Honest boundary, unchanged: `controlled` cannot stop a machine administrator from removing hooks,
 editing `.git`, or disabling GitHub rules, and neither profile protects against repository or
 organization administrators who can remove the rules or the App. It blocks the normal supported
 agent pathways and blocks merge on missing or inconsistent evidence — that is the claim, and it is
 the whole claim.
+
+Runtime caveat (Pi merge): the pipeline "automerges when green" on the **Claude and Codex** runtimes.
+The **experimental Pi runtime does not self-merge** — no sanctioned Pi merge helper has landed yet, so
+the Pi finisher runs the same receipt/gate tail and then hands the reviewed branch to an
+**operator-performed merge**. This is documented consistently in the README, `docs/architecture.md`
+(§Runtime model), `agents/idc-finisher.md` (§Git finalization), and `skills/idc-adapter-pi` — the four
+surfaces now agree on the one behavior.
 
 - **Release evidence has to be measured, not asserted.** `scripts/idc_pilot_metrics.py` is a fixed
   schema validator for the source-heavy pilot's `pilot-metrics.json`: it requires all ten operational
@@ -47,6 +62,11 @@ the whole claim.
   `python3 scripts/idc_release_check.py --require-pilot-evidence <path> --reviewed-sha <sha>` refuses
   release evidence that is missing, malformed, stale, unbound, or not source-heavy. The plain
   invocation is unchanged, so the every-commit lint guard still runs before any pilot exists.
+
+_Review note (correctness-neutral): the trusted commit-history audit over this release flagged 91
+mechanical narrative issues across the 80 commits (subject/body style). They do not affect behavior
+and the history was deliberately not rewritten; the substantive review findings were remediated in
+the code and tests above._
 
 ## 4.2.0 — 2026-07-19
 

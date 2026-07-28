@@ -144,6 +144,17 @@ def classify(repo):
             f"({exc.__class__.__name__}) — the pathway-security claim is INDETERMINATE, never "
             f"honest. Repair {CONFIG_RELPATH}, then re-run `/idc:doctor`.")
 
+    # A readable config that declares an UNRECOGNIZED `mode:` (a typo like `controllled`, or a blank
+    # value) is malformed governed state, not the honest `off` posture. The parser maps it to
+    # UNKNOWN_MODE; the runtime already fails closed on it, and doctor must report it as indeterminate
+    # so a repo that TRIED to claim enforcement (and mistyped it) never reads as a clean bill of health.
+    if mode == PG.UNKNOWN_MODE:
+        return EXIT_INDETERMINATE, (
+            f"{CONFIG_RELPATH} declares a `pathway_enforcement.mode` that is not one of "
+            f"{', '.join(sorted(PG.PATHWAY_MODES))} — the pathway-security claim is INDETERMINATE, "
+            f"never honest (the runtime fails closed on it). Set a recognized mode in "
+            f"{CONFIG_RELPATH}, then re-run `/idc:doctor`.")
+
     if backend == FILESYSTEM_BACKEND and mode in CLAIMING_MODES:
         return EXIT_DISHONEST, (
             f"the `{FILESYSTEM_BACKEND}` tracker backend claims `pathway_enforcement.mode: {mode}` "

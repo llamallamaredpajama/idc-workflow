@@ -128,7 +128,19 @@ The finisher runs its **own** `/fullauto-goal` loop. Its completion contract car
    promoted to `main` only after the staging e2e — see *e2e layering*) with a **direct, blocking**
    `gh pr merge --squash --delete-branch` (default method; pass `--merge-method` for the method the
    repo allows) — **not** GitHub `--auto` (auto-merge would defer the merge and, with the repo's
-   `deleteBranchOnMerge` off, skip the delete). The rest of the tail — branch deletes, tracker
+   `deleteBranchOnMerge` off, skip the delete). **Runtime carve-out (Pi):** the self-merging tail above
+   is the **Claude and Codex** behavior. On the **experimental Pi runtime** no sanctioned Pi merge
+   helper has landed yet, so the Pi finisher does **not** run that self-merging invocation at all.
+   Instead it mints the build receipt (the step-4 `idc_build_receipt.py` call above) and **reports the
+   reviewed branch + receipts to the operator, who performs the merge out-of-band**; only after that
+   does the deterministic post-merge cleanup run, as
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_finish.py" --close-only --pr <N> --issue <M>`
+   — the recovery mode that SKIPS the merge, HARD-REFUSES unless the PR is already merged
+   (`verify_pr_merged` is its receipt — the merged state, not a verdict), and only then deletes the
+   branch, closes the tracker item, and re-verifies the end state. The Pi ordering is therefore
+   **build receipt → operator merge → `--close-only` cleanup** — there is no "prepare/push before merge"
+   step (no `idc_git_finish.py` mode implements one), and the operator is the merge gate (README /
+   `docs/architecture.md` §Runtime model). The rest of the tail — branch deletes, tracker
    close, end-state re-verify — is the script's deterministic step order, verified before it ever
    exits 0; it is not re-narrated here. **Fail-closed:** any unverified step prints a
    machine-readable `finish: <step> failed` line and exits non-zero — never a silent drop; the
@@ -191,9 +203,15 @@ Serialization is two layers — both required:
    multi-resident pool**; under the **single-merger** runtimes it **collapses to structural
    serialization** (one merger, so disjoint areas merge back-to-back, not literally in parallel):
    - **pi** (flat standing pool, **no master orchestrator**) → a **board-backed merge lease**:
-     the authoritative GitHub Projects board is the lock-holder; whichever finisher resident
-     holds the surface lease merges, then releases it; coms-net carries only the liveness/
-     notification. This is the runtime where disjoint surfaces merge **concurrently**.
+     the authoritative GitHub Projects board is the lock-holder; a finisher resident acquires the
+     surface lease before touching the shared integration ref, then releases it; coms-net carries only
+     the liveness/notification. **On the experimental Pi runtime the finisher does not self-merge** —
+     no sanctioned Pi merge helper has landed, so under the lease it prepares/pushes/reports the
+     reviewed branch and an **operator performs the merge** (see the *Git finalization* Pi carve-out
+     and README / `docs/architecture.md` §Runtime model). The board-backed lease is what keeps the
+     disjoint-surface merges serialized-per-surface so they can proceed **concurrently** across
+     surfaces; wiring a Pi resident to hold that lease and merge autonomously (rather than the
+     operator) is the pending helper, which is why the runtime stays experimental.
    - **Claude Teams** / the collapsed fallback → the single Build **orchestrator** is the sole
      merger (no teammate-finisher merges another's surface); the lease is structural and the train
      **collapses to serialized** back-to-back merges through that one merger.

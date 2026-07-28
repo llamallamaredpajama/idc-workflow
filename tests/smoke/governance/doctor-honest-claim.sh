@@ -176,6 +176,19 @@ else
 fi
 chmod 644 "$d/WORKFLOW-config.yaml" 2>/dev/null
 
+# ── 7c. a DECLARED but unrecognized mode is indeterminate, never a silent honest `off` (F10) ──────
+# The parser maps an unknown `mode:` value to "off"; a door that trusts it reports a repo that TRIED
+# to claim `controlled` (and typo'd it) as the honest non-enforcing posture. The declared-but-unknown
+# mode is malformed governed state: cannot-tell, never honest.
+d="$(mkfixture fs-unknown-mode filesystem controllled)" || gov_fail "fixture fs-unknown-mode failed"
+door "$d"; assert_rc 2 "filesystem backend declaring an unrecognized mode (typo 'controllled')"
+assert_not_honest "unrecognized declared mode (filesystem)"
+[ -n "$ERR" ] || gov_fail "an unrecognized-mode indeterminate verdict must carry a named diagnostic on stderr"
+
+d="$(mkfixture gh-unknown-mode github kontrolled)" || gov_fail "fixture gh-unknown-mode failed"
+door "$d"; assert_rc 2 "github backend declaring an unrecognized mode"
+assert_not_honest "unrecognized declared mode (github)"
+
 # ── 8-10. an undeterminable BACKEND is indeterminate too ──────────────────────────────────────────
 d="$(mkfixture no-tracker-config - controlled)" || gov_fail "fixture no-tracker-config failed"
 door "$d"; assert_rc 2 "no docs/workflow/tracker-config.yaml"

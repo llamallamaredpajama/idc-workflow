@@ -552,7 +552,11 @@ def apply_frozen(frozen_path: str, repo: str | None = None, backend: str | None 
             _write_obligation(repo, bundle, "awaiting-receipt", applied_operations, [], final_digest=final_digest)
         receipt = PR.build_receipt(repo, bundle, final_snapshot, applied_operations)
         receipt_path = _repo_path(repo, bundle["receipt_relpath"])
-        PR.atomic_write_json(receipt_path, receipt)
+        # Write the receipt AND record its out-of-tree machine witness in the git common dir, so a
+        # Build contract can prove machine authorship of a borrowed binding without trusting the
+        # receipt's own (forgeable) self-digest (F7), and recognizes a receipt written in a linked
+        # worktree of the same repo (F19). See idc_planning_receipt.write_receipt.
+        PR.write_receipt(repo, receipt_path, receipt)
         return {
             "ok": True,
             "receipt_path": receipt_path,

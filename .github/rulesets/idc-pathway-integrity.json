@@ -7,9 +7,12 @@
       ".github/workflows/**",
       "scripts/hooks/**",
       "scripts/idc_validation_contract.py",
-      "scripts/idc_receipt_check.py"
+      "scripts/idc_receipt_check.py",
+      "scripts/idc_pathway_check.py",
+      ".github/rulesets/**",
+      ".github/CODEOWNERS"
     ],
-    "note": "protected_surfaces is IDC metadata that scripts/idc_ruleset_check.py enforces alongside the GitHub rules below; the workflow/hook/validation/receipt classes must each be represented so a merge cannot strip the governance machinery. Code-owner review (require_code_owner_review) governs these surfaces once a CODEOWNERS file names them — see the U8 report for the operator provisioning step."
+    "note": "protected_surfaces is IDC metadata that scripts/idc_ruleset_check.py enforces alongside the GitHub rules below; the workflow/hook/validation/receipt classes must each be represented so a merge cannot strip the governance machinery, AND the governance-of-governance surfaces (the deterministic checker scripts/idc_pathway_check.py, the ruleset directory, and CODEOWNERS itself) must be owned too so the guard cannot be weakened without a code-owner review (F40). Code-owner review (require_code_owner_review) governs these surfaces once a CODEOWNERS file names them — see the U8 report for the operator provisioning step."
   },
   "github_ruleset": {
     "name": "idc-pathway-integrity",

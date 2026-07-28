@@ -25,6 +25,8 @@ crystallizes into a **PRD** (*what* it does) and a **TRD** (*how* it's built) an
 a reviewable **Think PR** you merge to admit it. From there the pipeline plans, builds, and reviews on its
 own and **automerges when clean**, merging finished code into your repo. It stops
 to ask you exactly **one** question, **once, at the top**: *do you approve these requirements?*
+(Automerge is the Claude and Codex runtimes' behavior; the experimental Pi runtime hands the reviewed
+branch to an operator-performed merge until a sanctioned Pi merge helper lands.)
 
 ## The whole system, in one picture
 
@@ -79,14 +81,15 @@ remains one-way, iterative, and observable through the dashboard.
 IDC — the **Iterative Development Cycle** — is the pipeline in the picture above: a **Think** stage that
 feeds the **one gate** (a Think PR admitting the PRD + TRD), a **planning** stage, a build triplet
 (**implementer → review → finisher**), **two gates** (approval at the top; ship-or-return at the end), and one
-**Recirculator** for the controlled return path. Everything runs autonomously and **automerges when green**;
-the pipeline intervenes only where a real derailment would otherwise ship.
+**Recirculator** for the controlled return path. Everything runs autonomously and **automerges when green**
+(Claude/Codex runtimes; the experimental Pi runtime stops at an operator-performed merge until a sanctioned
+Pi merge helper lands); the pipeline intervenes only where a real derailment would otherwise ship.
 
 | Stage | Command | What happens | Writes |
 |-------|---------|--------------------|--------|
 | **Think** | `/idc:think` | **Idea → the one gate** — free brainstorm (zero teammates) → crystallize a function-first **PRD + TRD** → the **Think PR** gate (admit by merging). | `docs/considerations/`, `docs/prd/`, `docs/specs/` |
 | **Plan** | `/idc:plan` | **Decomposition** — admitted idea → goal-contract issues: domain experts, the **matrix** (domain × phase/wave), **matrix analysis**, the **sequencer** into parallel waves. Pure decomposition — no requirements docs, no gate. | `docs/plans/`, matrices, issues |
-| **Build** | `/idc:build` | **Implementer → review → finisher → ship-or-return** — each issue's goal contract runs as an iterative loop; independent review screens every PR; automerge on PASS. | source, tests, review reports, tracker status |
+| **Build** | `/idc:build` | **Implementer → review → finisher → ship-or-return** — each issue's goal contract runs as an iterative loop; independent review screens every PR; automerge on PASS (Claude/Codex; Pi hands off to an operator merge). | source, tests, review reports, tracker status |
 | **Recirculate** | `/idc:recirculate` | **The return path** — the ship-or-return decision's way back: heals doc/reality drift in one PR (PR body = change order); a requirements change rides the Think-PR gate. | every affected canonical doc |
 | **Autorun** | `/idc:autorun` | **Runs the whole pipeline** — turn it on and it works end to end on its own; loop it with `/loop`. | — |
 

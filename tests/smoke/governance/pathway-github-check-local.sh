@@ -49,10 +49,10 @@ REPO="$WORK/repo"
 mkdir -p "$REPO/.github/workflows" "$REPO/scripts/hooks"
 cp "$WF"    "$REPO/.github/workflows/idc-pathway-integrity.yml"
 cp "$CHECK" "$REPO/scripts/idc_pathway_check.py"
-# the checker asserts these protected surfaces EXIST (their presence is the integrity evidence):
-: > "$REPO/scripts/idc_validation_contract.py"   # validation surface
-: > "$REPO/scripts/idc_receipt_check.py"          # receipt surface
-: > "$REPO/scripts/hooks/idc_ledger.py"           # hook surface
+# the checker asserts these protected surfaces exist AND carry content (not a gutted empty stub):
+printf '# validation surface\n' > "$REPO/scripts/idc_validation_contract.py"   # validation surface
+printf '# receipt surface\n'    > "$REPO/scripts/idc_receipt_check.py"          # receipt surface
+printf '# hook surface\n'       > "$REPO/scripts/hooks/idc_ledger.py"           # hook surface
 git -C "$REPO" init -q
 git -C "$REPO" add -A
 git -C "$REPO" -c user.email=t@t -c user.name=t commit -qm seed
@@ -61,6 +61,12 @@ HEAD="$(git -C "$REPO" rev-parse HEAD)"
 # (A) exact head + correct source + all surfaces present -> PASS
 python3 "$CHECK" --repo "$REPO" --head "$HEAD" --source "$SOURCE" >/dev/null \
   || fail "checker refused a compliant repo (exact head, pinned source, all surfaces present)"
+
+# (A2) ABBREVIATED head (F13) — a hex prefix of the true head is NOT the exact head. A required
+#      "exact head" check that accepts a >=7-char prefix lets a merge bind a commit the checker never
+#      pinned in full, so a proposed head must match the repository HEAD exactly and in full.
+python3 "$CHECK" --repo "$REPO" --head "${HEAD:0:12}" --source "$SOURCE" >/dev/null 2>&1 \
+  && fail "checker admitted an ABBREVIATED head (${HEAD:0:12}) — the exact-head check must require a full SHA"
 
 # (B) STALE head (proposed head != actual head) -> REFUSE
 python3 "$CHECK" --repo "$REPO" --head "0000000000000000000000000000000000000000" --source "$SOURCE" >/dev/null 2>&1 \
@@ -74,5 +80,35 @@ python3 "$CHECK" --repo "$REPO" --head "$HEAD" --source "idc/pathway-integrity@v
 rm -f "$REPO/scripts/idc_receipt_check.py"
 python3 "$CHECK" --repo "$REPO" --head "$HEAD" --source "$SOURCE" >/dev/null 2>&1 \
   && fail "checker admitted a repo MISSING a protected surface (receipt surface removed)"
+printf '# receipt surface\n' > "$REPO/scripts/idc_receipt_check.py"   # restore for the next case
 
-echo "PASS: idc/pathway-integrity binds to the exact head + pinned source, and refuses stale head / wrong source / missing protected surface"
+# (E) HOLLOW protected surface (F1): a surface that EXISTS but was gutted to empty content is not
+#     valid — the check must validate protected content, not mere path existence. Gut the validation
+#     surface to zero bytes, assert refusal, then restore it.
+: > "$REPO/scripts/idc_validation_contract.py"
+python3 "$CHECK" --repo "$REPO" --head "$HEAD" --source "$SOURCE" >/dev/null 2>&1 \
+  && fail "checker admitted a repo whose validation surface was gutted to empty content (presence-only check)"
+printf '# validation surface\n' > "$REPO/scripts/idc_validation_contract.py"
+
+# (F) HOLLOW hook DIRECTORY: the hook surface dir present but empty (every hook removed) -> REFUSE.
+rm -f "$REPO/scripts/hooks/idc_ledger.py"
+python3 "$CHECK" --repo "$REPO" --head "$HEAD" --source "$SOURCE" >/dev/null 2>&1 \
+  && fail "checker admitted a repo whose hook surface directory was emptied (a load-bearing hook removed)"
+printf '# hook surface\n' > "$REPO/scripts/hooks/idc_ledger.py"
+
+# (G) DISCLOSED BOUNDARY (F22): this is a shallow STRUCTURAL check, not content protection, and it says
+#     so. A GUTTED-BUT-NONEMPTY surface — a 1-byte stub replacing the validation surface, or a hook dir
+#     kept nonempty by one junk file while the real hook is deleted — still PASSES here. Deeper "the
+#     right content is present" protection is owned by CODEOWNERS review (F20), NOT this static check.
+#     This case pins that disclosed boundary so a future change to _surface_has_content is a deliberate,
+#     reviewed contract change rather than a silent drift.
+printf '#' > "$REPO/scripts/idc_validation_contract.py"          # 1-byte stub — nonempty but gutted
+rm -f "$REPO/scripts/hooks/idc_ledger.py"
+printf '# junk\n' > "$REPO/scripts/hooks/placeholder.txt"        # dir kept nonempty by a non-hook file
+python3 "$CHECK" --repo "$REPO" --head "$HEAD" --source "$SOURCE" >/dev/null 2>&1 \
+  || fail "structural check unexpectedly REFUSED a gutted-but-nonempty surface — the disclosed boundary (F22) changed; update the docstring/header if this is intentional"
+rm -f "$REPO/scripts/hooks/placeholder.txt"
+printf '# validation surface\n' > "$REPO/scripts/idc_validation_contract.py"
+printf '# hook surface\n'        > "$REPO/scripts/hooks/idc_ledger.py"
+
+echo "PASS: idc/pathway-integrity binds to the exact FULL head + pinned source, refuses stale head / abbreviated head / wrong source / missing OR hollow protected surface, and its gutted-but-nonempty boundary (F22, CODEOWNERS-owned) is pinned"

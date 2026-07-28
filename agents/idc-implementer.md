@@ -51,8 +51,12 @@ API sink). No cache path in the brief → tracker ops fall back to a live board 
    `evidence_kind` pair, any cited verification `handle_id` (resolved + secret-checked by fixed code
    before use), exact `touch` / `off-limits`, and the frozen verification commands are outside the
    builder's authority. High-risk tickets run the bounded fixed-code falsifier
-   `idc_validation_risk_gate.py` before this freeze; trivial tickets deterministically skip it. Then
-   execute the issue's
+   `idc_validation_risk_gate.py` before this freeze; trivial tickets deterministically skip it. Its
+   `--attempt-ceiling` is the repo's resolved ceiling from
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_validation_contract.py" attempt-ceiling --repo "$PWD"`
+   (the config's `pathway_enforcement.attempt_ceiling`, default 3) — the SAME value the freeze
+   records — never an ad-hoc literal, so the configured ceiling governs the falsifier, the frozen
+   contract, and the retry loop from one source. Then execute the issue's
    goal contract as a `/fullauto-goal` loop with full auto-goal discipline:
    - render-before-run (the issue body IS the rendered contract);
    - **failing test first** when the target behavior is untested — write the real functional
@@ -63,7 +67,10 @@ API sink). No cache path in the brief → tracker ops fall back to a live board 
    - re-run the **frozen** gate at the final head through
      `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_validation_contract.py" run --repo "$PWD" --contract <contract.json> --out <execution.json>`
      so review/finish inherit a source-owned execution receipt, never a caller-authored success text;
-   - the **attempt ceiling** (~3 failed hypotheses → blocked-stop with evidence);
+   - the **attempt ceiling** — the frozen contract's `attempt_ceiling` (resolved from the config's
+     `pathway_enforcement.attempt_ceiling`, default 3), read back from the contract rather than a
+     fixed number, so a non-default operator ceiling actually bounds this loop → blocked-stop with
+     evidence when it is reached;
    - the **no-punt rule** — incidental work needed to satisfy the contract is fixed in this
      same loop, never deferred to a follow-up.
 3. **Stay inside BOUNDARIES.** Touch only the issue's owned surfaces; never the off-limits

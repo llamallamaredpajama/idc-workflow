@@ -43,6 +43,18 @@ PROTECTED_MACHINE_RULES = [
 READ_ONLY_COMMANDS = {"doctor", "pause"}
 DEFAULT_TTL_SECONDS = 4 * 60 * 60
 PATHWAY_MODES = {"off", "controlled", "app-locked"}
+# A config that is readable and explicitly declares a `mode:` value we do not recognize (a typo like
+# `controllled`, or a blank value) is MALFORMED, not `off`. Collapsing it to `off` would silently
+# disable enforcement on a config the operator believed was enforcing. The runtime fails closed on it
+# (it is not `off`, so a would-be denial is NOT downgraded to observe) and `/idc:doctor` reports it as
+# indeterminate — never an honest posture (F10).
+UNKNOWN_MODE = "unknown"
+# A readable config that explicitly DECLARES a `pathway_enforcement.attempt_ceiling` we cannot use (a
+# non-integer, zero, or negative) is MALFORMED — distinct from ABSENT (no key at all). The caller warns
+# the operator and falls back to the built-in default rather than silently swallowing the typo: the
+# attempt_ceiling analogue of UNKNOWN_MODE (F23). A distinct sentinel object so it can never collide
+# with a real ceiling value or with `None`.
+MALFORMED_ATTEMPT_CEILING = object()
 
 try:
     import fcntl  # POSIX advisory locks (macOS/Linux — IDC's supported platforms)
@@ -88,7 +100,13 @@ def _is_git_worktree(repo: str) -> bool:
 
 
 def pathway_mode(repo: str) -> str:
-    """Read the scaffolded pathway posture without taking a YAML dependency."""
+    """Read the scaffolded pathway posture without taking a YAML dependency.
+
+    Returns one of PATHWAY_MODES, or `UNKNOWN_MODE` when the config IS readable and explicitly declares
+    a `mode:` whose value is not a recognized mode (a typo / malformed value). A config that is missing,
+    unreadable, or declares no `mode:` returns `off` (an ungoverned or non-enforcing repo). The
+    distinction is load-bearing: `off` downgrades a would-be denial to observe, while `UNKNOWN_MODE`
+    does NOT — a malformed mode must fail closed rather than silently disable enforcement (F10)."""
     config_path = os.path.join(repo_root(repo), "WORKFLOW-config.yaml")
     try:
         with open(config_path, encoding="utf-8") as fh:
@@ -112,8 +130,55 @@ def pathway_mode(repo: str) -> str:
         key, separator, raw_value = stripped.partition(":")
         if separator and key.strip() == "mode":
             value = raw_value.strip().strip("\"'")
-            return value if value in PATHWAY_MODES else "off"
+            return value if value in PATHWAY_MODES else UNKNOWN_MODE
     return "off"
+
+
+def pathway_attempt_ceiling(repo: str):
+    """Read `pathway_enforcement.attempt_ceiling` from WORKFLOW-config.yaml without a YAML dependency.
+
+    Returns one of:
+      * the configured POSITIVE INTEGER, when the config declares a valid one;
+      * `None` — the value is ABSENT: the config is unreadable/missing or declares no `attempt_ceiling`
+        key at all. The caller silently supplies the built-in default (an unset value is not an error).
+      * `MALFORMED_ATTEMPT_CEILING` — the config DECLARES an `attempt_ceiling` that is not a positive
+        integer (a typo like `banana`, `-5`, or a blank value). Distinguished from ABSENT so the caller
+        can surface the operator's mistake instead of silently swallowing it, mirroring `pathway_mode`'s
+        ABSENT(`off`) vs MALFORMED(`UNKNOWN_MODE`) split (F23). Not a fail-open — the ceiling only bounds
+        a retry loop, so a malformed value still errs to the safe default — but the silent swallow hid
+        the config error.
+
+    Mirrors `pathway_mode`'s block parse line for line so the two cannot disagree about the
+    `pathway_enforcement:` block a config declares."""
+    config_path = os.path.join(repo_root(repo), "WORKFLOW-config.yaml")
+    try:
+        with open(config_path, encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return None
+
+    block_indent: int | None = None
+    for raw_line in lines:
+        content = raw_line.split("#", 1)[0].rstrip()
+        if not content.strip():
+            continue
+        indent = len(content) - len(content.lstrip())
+        stripped = content.strip()
+        if block_indent is None:
+            if stripped == "pathway_enforcement:":
+                block_indent = indent
+            continue
+        if indent <= block_indent:
+            break
+        key, separator, raw_value = stripped.partition(":")
+        if separator and key.strip() == "attempt_ceiling":
+            value = raw_value.strip().strip("\"'")
+            try:
+                parsed = int(value)
+            except ValueError:
+                return MALFORMED_ATTEMPT_CEILING          # declared but not an integer
+            return parsed if parsed > 0 else MALFORMED_ATTEMPT_CEILING  # declared but non-positive
+    return None
 
 
 def current_branch(repo: str) -> str:
@@ -328,10 +393,38 @@ def _find_active_record_by_nonce(repo: str, command: str, nonce: str) -> dict[st
     return None
 
 
+MUTATION_ACTIONS = ("write", "edit", "git")
+
+
+def _normalize_actions(actions: list[str]) -> list[str]:
+    """Canonical action tokens: stripped, lowercased, empties dropped, order-preserving de-dupe.
+
+    Enforcement (`_evaluate_request`) already compares the requested action against the stored
+    `allowed_actions` on this normalized form. So an authorization MUST be normalized to the same form
+    BEFORE the role-action-ceiling check and BEFORE storage — otherwise a cased or whitespace-padded
+    token (`Write`, ` write `) slips the ceiling (`"Write" not in MUTATION_ACTIONS`) yet is later
+    matched by a lowercase enforcement request, minting the very grant the ceiling exists to refuse
+    (F17)."""
+    normalized: list[str] = []
+    for raw in actions or []:
+        token = str(raw).strip().lower()
+        if token and token not in normalized:
+            normalized.append(token)
+    return normalized
+
+
 def _default_profile(command: str) -> tuple[list[str], list[str]]:
     if command in READ_ONLY_COMMANDS:
         return ["."], []
     return ["."], ["write", "edit", "git"]
+
+
+def _role_action_ceiling(command: str) -> set[str]:
+    """The mutation actions a command's ROLE may ever be granted. A read-only command
+    (`doctor`/`pause`) has an empty ceiling — it can never mint a write/edit/git grant, no matter what
+    actions a caller passes to `write_authorization` (F2)."""
+    _paths, actions = _default_profile(command)
+    return set(actions)
 
 
 def _digest_payload(record: dict[str, Any], auth: dict[str, Any]) -> str:
@@ -434,13 +527,30 @@ def write_authorization(
         def_paths, def_actions = _default_profile(command)
         allowed_paths = def_paths if allowed_paths is None else allowed_paths
         allowed_actions = def_actions if allowed_actions is None else allowed_actions
+    # Normalize the requested actions to enforcement's canonical form (strip/lowercase/dedupe) ONCE,
+    # before both the ceiling check and storage. This is load-bearing: the ceiling compares against
+    # the lowercase MUTATION_ACTIONS and enforcement matches on the same normalized form, so a cased
+    # or padded token must be canonicalized here or it would slip the ceiling yet still satisfy a
+    # real lowercase request (F17).
+    allowed_actions = _normalize_actions(allowed_actions)
+    # Enforce the command's role action ceiling: a read-only command can never be granted a mutation
+    # action, even when one is explicitly requested. This closes the escalation where any active
+    # record — including a read-only doctor/pause record — could mint a broad write/edit/git grant.
+    ceiling = _role_action_ceiling(command)
+    over_ceiling = [a for a in allowed_actions if a in MUTATION_ACTIONS and a not in ceiling]
+    if over_ceiling:
+        raise RuntimeError(
+            f"command {command!r} is read-only and may not be granted mutation action(s) "
+            f"{sorted(set(over_ceiling))}: a read-only command record cannot mint a write/edit/git "
+            f"authorization"
+        )
     auth = build_authorization(
         repo,
         record=record,
         command=command,
         branch=branch,
         allowed_paths=_normalize_allowed_paths(repo, list(allowed_paths)),
-        allowed_actions=list(dict.fromkeys(allowed_actions)),
+        allowed_actions=allowed_actions,
         ticket=ticket,
         graph_node=graph_node,
         ttl_seconds=ttl_seconds,
@@ -530,6 +640,20 @@ def _evaluate_request(repo: str, plugin_root: str, request: dict[str, Any]) -> d
     if expires_at is None or expires_at <= _utc_now():
         return _deny("IDC Path Gate denied this mutation because the live authorization is expired or unreadable.")
 
+    # Ticket / graph-node identity (spec §3.2). The spec MUST is to deny a mutation "bound to the
+    # WRONG ticket/graph node" — a MISMATCH — and it declares `ticket` explicitly nullable. That is
+    # what these two checks enforce: a request that presents an identity NOT matching the live
+    # authorization is denied.
+    #
+    # F3 (contested): the review asked to additionally "require ticket/graph on every request and deny
+    # missing identity." That is NOT implemented here on purpose, because it would break every
+    # legitimate mutation: the Claude Write/Edit adapter, the Bash/interlock adapter, and the git
+    # adapter all build the request from action/paths[/raw_reason] and NEVER carry a ticket/graph node,
+    # so a raw file write cannot be attributed to a ticket at all. The spec-faithful direction — "mint
+    # non-null ticket/graph/path scopes from the claimed transition" — is a transition-scoped-mint
+    # change that spans the Build-contract->authorization handoff and is incompatible with the current
+    # admission-time mint (the entry gate mints BEFORE the command body determines its transition). It
+    # is a named follow-up, not a one-line runtime denial. See the fix-run notes for the full rationale.
     ticket = request.get("ticket")
     if ticket is not None and ticket != auth.get("ticket"):
         return _deny("IDC Path Gate denied this mutation because the request ticket does not match the live authorization.")

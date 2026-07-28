@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 from unittest import mock
 
@@ -162,6 +163,74 @@ class CommandEntryAuthorizationTransactionTests(unittest.TestCase):
             else:  # pragma: no cover - every entry decision exits through the hook protocol
                 code = None
         return code, stdout.getvalue(), stderr.getvalue(), auth_write
+
+    def _invoke_recovery(
+        self,
+        *,
+        session: str,
+        command: str,
+        args: str = "#101",
+        auth_side_effect: object | None = None,
+    ) -> tuple[int | None, str, str, mock.Mock]:
+        """Drive a RECOVERY/diagnostic command down the invalid-freshness fork
+        (`_fail_closed_or_allow`): the running plugin manifest reads as unreadable, so `_admit` takes
+        the allow-on-invalid path that still opens the record and mints Path Gate auth in the SAME
+        admission transaction. The authorization is forced to fail so the transaction must roll back."""
+        payload = {
+            "session_id": session,
+            "cwd": str(self.repo),
+            "hook_event_name": "UserPromptExpansion",
+            "expansion_type": "command",
+            "command_name": f"idc:{command}",
+            "command_args": args,
+            "command_source": "plugin",
+            "prompt": f"/idc:{command} {args}",
+        }
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        failure = auth_side_effect or RuntimeError("simulated recovery authorization failure")
+        invalid_freshness = types.SimpleNamespace(running_version=None, verdict="current")
+        with (
+            mock.patch.object(gate.freshness, "evaluate", return_value=invalid_freshness),
+            mock.patch.object(gate.PG, "write_authorization", side_effect=failure) as auth_write,
+            mock.patch.dict(os.environ, {"IDC_HOOKS_OBSERVE_ONLY": "0"}),
+            redirect_stdout(stdout),
+            redirect_stderr(stderr),
+        ):
+            try:
+                gate._admit(payload, str(PLUGIN_ROOT), command)
+            except SystemExit as exc:
+                code = exc.code
+            else:  # pragma: no cover - every entry decision exits through the hook protocol
+                code = None
+        return code, stdout.getvalue(), stderr.getvalue(), auth_write
+
+    def test_recovery_command_auth_failure_restores_record_and_prior_auth(self) -> None:
+        # F9: a recovery/diagnostic command (janitor) admitted down the invalid-receipt fork still
+        # opens its lifecycle record and mints Path Gate authorization inside the SAME admission
+        # transaction. When that authorization fails, the transaction must restore BOTH the active
+        # command record it replaced AND the exact prior authorization snapshot — the recovery fork is
+        # not a second, weaker rollback path.
+        prior = self._open("S-recov", "janitor", "prior-janitor-nonce")
+        gate.PG.write_authorization(str(self.repo), session="S-recov", command="janitor")
+        prior_auth = self._auth_path().read_bytes()
+        real_write = gate.PG.write_authorization
+
+        def write_then_fail(*args: object, **kwargs: object) -> None:
+            real_write(*args, **kwargs)
+            raise RuntimeError("simulated recovery authorization replacement failure")
+
+        code, stdout, _stderr, auth_write = self._invoke_recovery(
+            session="S-recov", command="janitor", args="#7", auth_side_effect=write_then_fail
+        )
+
+        self.assertEqual(0, code)
+        self.assertEqual(1, auth_write.call_count)
+        self.assertIn('"decision": "block"', stdout)
+        # The active record it replaced is restored...
+        self.assertEqual([prior], self._active("S-recov"))
+        # ...and the prior authorization snapshot is restored byte-for-byte.
+        self.assertEqual(prior_auth, self._auth_path().read_bytes())
 
     def test_new_record_is_rolled_back_and_failure_detail_is_scrubbed(self) -> None:
         prior_other = self._open("S-new", "think", "other-command-nonce")
@@ -429,6 +498,68 @@ class CommandEntryAuthorizationTransactionTests(unittest.TestCase):
         self.assertIn('"decision": "block"', stdout)
         self.assertIn("authorization state rollback did not persist", stderr.lower())
         self.assertEqual([prior], self._active("S-auth-restore-fail"))
+
+    def test_read_only_command_cannot_mint_a_mutation_grant(self) -> None:
+        # F2: a read-only command record (doctor/pause) must never be usable to mint a
+        # write/edit/git authorization, even when mutating actions are explicitly requested through
+        # write_authorization. A read-only role's action ceiling is empty, so requesting a mutation
+        # action is refused and no authorization is written.
+        self._open("S-ro", "doctor", "doctor-nonce")
+        with self.assertRaises(RuntimeError) as ctx:
+            gate.PG.write_authorization(
+                str(self.repo),
+                session="S-ro",
+                command="doctor",
+                allowed_paths=["."],
+                allowed_actions=["write", "edit", "git"],
+            )
+        self.assertIn("read-only", str(ctx.exception).lower())
+        self.assertFalse(self._auth_path().exists())
+
+        # A read-only command with no mutation actions still mints an (empty-action) authorization.
+        auth = gate.PG.write_authorization(str(self.repo), session="S-ro", command="doctor")
+        self.assertEqual([], auth.get("allowed_actions"))
+
+        # A mutating command CAN still mint the write grant (control — the ceiling is per-role).
+        self._open("S-rw", "build", "build-nonce", build_requested=["#1"])
+        auth2 = gate.PG.write_authorization(
+            str(self.repo),
+            session="S-rw",
+            command="build",
+            allowed_paths=["."],
+            allowed_actions=["write", "edit", "git"],
+        )
+        self.assertEqual(["write", "edit", "git"], auth2.get("allowed_actions"))
+
+    def test_read_only_ceiling_is_not_bypassed_by_action_case_or_whitespace(self) -> None:
+        # F17: the read-only ceiling normalizes actions (strip + lowercase) BEFORE comparing, so a
+        # cased or whitespace-padded mutation action cannot slip past the ceiling and then satisfy a
+        # lowercase enforcement request. Each variant must raise and write no authorization.
+        self._open("S-ro-case", "doctor", "doctor-case-nonce")
+        for variant in ("Write", " write ", "GIT", "Edit"):
+            with self.subTest(variant=variant):
+                with self.assertRaises(RuntimeError) as ctx:
+                    gate.PG.write_authorization(
+                        str(self.repo),
+                        session="S-ro-case",
+                        command="doctor",
+                        allowed_paths=["."],
+                        allowed_actions=[variant],
+                    )
+                self.assertIn("read-only", str(ctx.exception).lower())
+                self.assertFalse(self._auth_path().exists())
+
+        # A mutating command normalizes a cased/padded action rather than storing it verbatim, so the
+        # stored grant matches the lowercase form enforcement compares against.
+        self._open("S-rw-case", "build", "build-case-nonce", build_requested=["#5"])
+        auth3 = gate.PG.write_authorization(
+            str(self.repo),
+            session="S-rw-case",
+            command="build",
+            allowed_paths=["."],
+            allowed_actions=[" Write ", "EDIT", "git", "git"],
+        )
+        self.assertEqual(["write", "edit", "git"], auth3.get("allowed_actions"))
 
 
 if __name__ == "__main__":

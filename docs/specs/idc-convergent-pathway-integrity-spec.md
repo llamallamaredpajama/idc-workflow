@@ -227,6 +227,14 @@ placeholders are allowed there; inline credentials, auth material, `.env` conten
 private URLs are rejected before use. A missing handle creates a named Recirculation or
 blocked-dependency obligation; a warning-only downgrade is forbidden.
 
+The registry compounds: when a ticket's contract cited no `handle_id` and its frozen gate is proven
+green, Build MUST append that newly-proven recipe back to the registry through fixed code, as part of
+finish and before the build receipt is minted, so it lands inside the ticket's own PR as an ordinary
+tracked doc diff. The append is fixed-code-only and fails closed on a duplicate `handle_id`, on
+secret-bearing material, and on any result that would leave the registry invalid; it MUST NOT be a
+side-channel write outside the PR path, and it MUST record the commands that were actually executed
+rather than commands re-declared by the caller.
+
 At Build claim, an independent local validator performs the Fusion-inspired loop:
 
 1. reuse the existing real functional test when it proves the goal;
@@ -302,6 +310,9 @@ Before merge, IDC MUST prove:
 - the frozen acceptance gate ran against the final diff and commit;
 - the merge/close path received the mandatory source-owned build receipt for that exact issue/PR/diff;
 - the execution receipt's declared surface/evidence kind still matches the frozen contract;
+- a contract that cited no `handle_id` has had its newly-proven recipe appended to the governed
+  verification-handle registry by fixed code, inside this PR's diff, before the build receipt is
+  minted — so the next Plan resolves the surface by lookup instead of re-deriving it;
 - existing and new functional verification passed;
 - review executed against that same diff and has no unrouted findings or merge conditions;
 - graph, tracker projection, and authorization remain current;

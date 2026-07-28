@@ -92,4 +92,88 @@ silently_refreshable WORKFLOW-config.yaml \
 cp "$PLUGIN/templates/WORKFLOW-config.yaml" "$CFG"   # update would overwrite it...
 grep -q "$SENTINEL" "$CFG" && fail "negative control: domains should have been wiped without --customized"
 
-echo "PASS: init stamps operator-data files customized → /idc:update can't silently wipe domains/field_ids"
+# ── 7. The verification-handle registry is operator data too ─────────────────────────────────────
+# `docs/workflow/verification-handles.yaml` holds the operator's proven drive recipes. /idc:update
+# documents a preserve-and-validate branch for it, and NO phase7 test mentioned the registry at all —
+# so the branch could be deleted, or quietly turned into a template overwrite, with every update test
+# still green. This replays that branch exactly as commands/update.md prescribes it, in both
+# directions, and asserts the shipped playbook still carries the rule being replayed.
+UPDATE_MD="$PLUGIN/commands/update.md"
+VH="$PLUGIN/scripts/idc_verification_handles.py"
+REG="$SBX/docs/workflow/verification-handles.yaml"
+TEMPLATE_REG="$PLUGIN/templates/docs-tree/verification-handles.yaml"
+[ -f "$UPDATE_MD" ] || fail "commands/update.md not found at $UPDATE_MD"
+[ -f "$VH" ] || fail "verification-handle helper not found at $VH"
+[ -f "$REG" ] || fail "the scaffold no longer lays down docs/workflow/verification-handles.yaml"
+
+# The shipped rule itself: preserve on a clean validate, report-and-stop (never overwrite) otherwise.
+python3 - "$UPDATE_MD" <<'PY' || exit 1
+import re, sys
+text = open(sys.argv[1], encoding='utf-8').read()
+if 'docs/workflow/verification-handles.yaml' not in text:
+    raise SystemExit("FAIL: commands/update.md no longer names the verification-handle registry")
+if not re.search(r'idc_verification_handles\.py"?\s+validate', text):
+    raise SystemExit(
+        "FAIL: commands/update.md no longer validates the registry through the fixed helper before "
+        "preserving it")
+m = re.search(r'idc_verification_handles\.py"?\s+validate', text)
+window = text[max(0, m.start() - 800):m.start() + 1500]
+if 'preserved' not in window:
+    raise SystemExit("FAIL: commands/update.md no longer reports the registry as `preserved`")
+if 'Never overwrite the registry' not in window:
+    raise SystemExit(
+        "FAIL: commands/update.md no longer forbids overwriting a failing registry with the template "
+        "— that prohibition is the whole guard")
+print("ok: /idc:update still documents preserve-and-validate for the verification-handle registry")
+PY
+
+# The operator's own recipe, in the file /idc:init scaffolded.
+python3 "$VH" append --repo "$SBX" --handle-id operator-recipe --surface cli \
+  --verify-command 'bash scripts/drive-the-app.sh' --fixture 'seed:operator' >/dev/null \
+  || fail "could not seed an operator recipe into the scaffolded registry"
+OP_COPY="$SBX/registry.operator.bak"
+cp "$REG" "$OP_COPY"
+
+# 7a. Clean registry → update's branch validates, reports `preserved`, and leaves the bytes alone.
+python3 "$VH" validate --repo "$SBX" >/dev/null \
+  || fail "an operator registry with one appended recipe failed the update preserve-path validation"
+cmp -s "$REG" "$OP_COPY" \
+  || fail "the read-only preserve-path validation modified the operator's registry"
+grep -qF 'operator-recipe' "$REG" \
+  || fail "the operator's recipe did not survive the update preserve path"
+cmp -s "$REG" "$TEMPLATE_REG" \
+  && fail "the operator's registry is byte-identical to the template — the fixture proves nothing"
+
+# 7b. Malformed registry → the helper errors, update reports it and STOPS. Replaying the branch means
+#     the template must NOT be copied over the operator's file to make the warning go away.
+cat > "$REG" <<'YAML'
+schema_version: 1
+handles:
+  - handle_id: operator-recipe
+    surface: cli
+    evidence_kind: response-body
+    build_commands: []
+    launch_commands: []
+    verify_commands: ["bash scripts/drive-the-app.sh"]
+    fixtures: ["seed:operator"]
+    accounts: []
+    emulators: []
+YAML
+cp "$REG" "$SBX/registry.malformed.bak"
+set +e
+vh_out="$(python3 "$VH" validate --repo "$SBX" 2>&1)"
+vh_rc=$?
+set -e
+[ "$vh_rc" -ne 0 ] || fail "a registry whose evidence_kind contradicts its surface passed validation"
+printf '%s\n' "$vh_out" | grep -qi 'evidence_kind' \
+  || fail "the malformed-registry error must name the offending field so update can report it verbatim; got: $vh_out"
+# The branch under test: on failure update reports and stops — it does not refresh from the template.
+if [ "$vh_rc" -eq 0 ]; then
+  cp "$TEMPLATE_REG" "$REG"            # only reachable if validation passed — i.e. never, here
+fi
+cmp -s "$REG" "$SBX/registry.malformed.bak" \
+  || fail "update overwrote a failing operator registry instead of reporting the helper error and stopping"
+grep -qF 'operator-recipe' "$REG" \
+  || fail "the operator's recipe was wiped by the malformed-registry path (F8 class, registry edition)"
+
+echo "PASS: init stamps operator-data files customized → /idc:update can't silently wipe domains/field_ids, and the verification-handle registry is preserved on both the clean and the malformed path"

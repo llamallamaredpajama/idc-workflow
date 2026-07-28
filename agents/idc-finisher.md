@@ -107,7 +107,22 @@ The finisher runs its **own** `/fullauto-goal` loop. Its completion contract car
    simplification, efficiency, altitude). Claude runs it natively; the **adapter maps or skips
    it for Codex** (no native `/simplify` — an equivalent pass or a documented skip). Re-verify
    tests stay green after any simplification edit.
-4. **Git finalization.** Acquire the area's **surface-keyed merge-train lease** (the serialized
+4. **Persist the proven verification recipe.** If the ticket's frozen contract cited **no**
+   `handle_id` — i.e. this triplet derived how to drive its surface from scratch — append that
+   now-proven recipe to the governed registry through the fixed helper, **before** the build receipt
+   is minted, so it lands inside this PR as an ordinary tracked doc diff:
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_verification_handles.py" append \
+     --repo "$PWD" --handle-id <new-id> --from-execution <execution.json>
+   ```
+   `--from-execution` derives the surface, evidence kind, and `verify_commands` from the **passing,
+   witnessed** execution receipt, so the registry records what was *proven*, not what was retyped.
+   The helper refuses a duplicate id, a secret-bearing recipe, and anything that would leave the
+   registry invalid (restoring the file unchanged), so a refusal is a finding to fix, never a reason
+   to hand-edit the YAML. Skip this step when the contract already cited a `handle_id` (nothing new
+   was learned) or when `surface: none`. Then commit the registry change with the triplet's work — it
+   is reviewed and merged through the normal PR path, never written out of band.
+5. **Git finalization.** Acquire the area's **surface-keyed merge-train lease** (the serialized
    merge lock for *this area's* file surface — disjoint areas hold distinct leases and merge
    concurrently; see *Merge serialization*). First mint the verified implementation receipt through
    `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_build_receipt.py" write --repo "$PWD" --contract <contract.json> --execution <execution.json> --verdict <verdict.json> --graph-digest <digest> --projection-digest <digest> --out <build-receipt.json>`
@@ -131,7 +146,7 @@ The finisher runs its **own** `/fullauto-goal` loop. Its completion contract car
    `deleteBranchOnMerge` off, skip the delete). **Runtime carve-out (Pi):** the self-merging tail above
    is the **Claude and Codex** behavior. On the **experimental Pi runtime** no sanctioned Pi merge
    helper has landed yet, so the Pi finisher does **not** run that self-merging invocation at all.
-   Instead it mints the build receipt (the step-4 `idc_build_receipt.py` call above) and **reports the
+   Instead it mints the build receipt (the step-5 `idc_build_receipt.py` call above) and **reports the
    reviewed branch + receipts to the operator, who performs the merge out-of-band**; only after that
    does the deterministic post-merge cleanup run, as
    `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_finish.py" --close-only --pr <N> --issue <M>`
@@ -155,7 +170,7 @@ The finisher runs its **own** `/fullauto-goal` loop. Its completion contract car
    status is already closed by the helper; the lease is held across a bounded in-kitchen retry, or
    released deliberately before escalating a scope/menu defect — never left holding a half-merged
    surface). See *Merge serialization* below — never merge without the lease.
-5. **Close out.** Hand the merged, clean result back to Build (`idc:idc-build`); name the
+6. **Close out.** Hand the merged, clean result back to Build (`idc:idc-build`); name the
    findings cleared, the `/simplify` outcome, any recirculation filed, and **every deferral as a
    structured object** (resolved in-loop, or the dependency-linked board item it became) — never a
    loose prose footnote that nobody parses.

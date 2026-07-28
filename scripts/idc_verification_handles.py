@@ -8,6 +8,7 @@ silently weaken the gate: fixed code returns a NAMED recirculation or blocked-de
 Commands:
   validate        schema-check + secret-free validation
   resolve         resolve one handle for a declared surface, or return a named obligation on miss
+  append          persist a newly-proven recipe back into the registry (Build/Finisher, at finish)
   audit-citations warn (read-only) when a cited handle_id does not exist in the registry
 """
 from __future__ import annotations
@@ -194,19 +195,178 @@ def _audit_contract(path: str, known_ids: set[str]) -> list[str]:
 
 def audit_citations(repo: str, override: str | None = None, contracts: list[str] | None = None,
                     contracts_dir: str | None = None) -> list[str]:
-    _path, doc = load_registry(repo, override)
+    """Read-only citation audit — ADVISORY, so it never raises on an ABSENT input.
+
+    This is `/idc:doctor` Row 9, documented as "advisory; never FAIL". It used to `die()` on a
+    missing registry (exit 2) and raise an unhandled `FileNotFoundError` (exit 1) on a missing
+    contracts directory — and `idc_init_scaffold.sh` never creates `docs/workflow/build-validation/`,
+    so EVERY freshly initialized repo and every pre-registry repo hit the traceback. A traceback is
+    neither a warning nor a SKIP. Absent inputs are now explicit `SKIP:` lines: there is nothing to
+    audit, which is not the same as nothing being wrong. A registry that EXISTS but does not validate
+    stays visible as a `WARNING:` (the hard gate on registry validity is `validate`, which /idc:update
+    and Plan run — this row must not turn an advisory pass into a hard doctor failure)."""
+    lines: list[str] = []
+    path = registry_path(repo, override)
+    if not os.path.exists(path):
+        return [f"SKIP: no verification-handle registry at {path} — nothing to audit"]
+    try:
+        _path, doc = load_registry(repo, override)
+    except HandleError as exc:
+        return [f"WARNING: verification-handle registry {path} does not validate: {exc}"]
     known_ids = {h.get("handle_id") for h in (doc.get("handles") or [])}
     paths: list[str] = []
-    for path in contracts or []:
-        paths.append(os.path.abspath(path))
+    for contract in contracts or []:
+        paths.append(os.path.abspath(contract))
     if contracts_dir:
-        for name in sorted(os.listdir(contracts_dir)):
-            if name.endswith(".json"):
-                paths.append(os.path.join(contracts_dir, name))
-    warnings: list[str] = []
-    for path in paths:
-        warnings.extend(_audit_contract(path, known_ids))
-    return warnings
+        if not os.path.isdir(contracts_dir):
+            lines.append(f"SKIP: no frozen-contract directory at {contracts_dir} — nothing to audit")
+        else:
+            for name in sorted(os.listdir(contracts_dir)):
+                if name.endswith(".json"):
+                    paths.append(os.path.join(contracts_dir, name))
+    for contract_path in paths:
+        lines.extend(_audit_contract(contract_path, known_ids))
+    return lines
+
+
+# ── append: Build/Finisher writes a newly-proven recipe back into the registry --------------------
+# The compounding half of the verification-handle design: the first run that figures out how to drive
+# a surface PERSISTS the recipe, so every later Plan resolves it by lookup instead of re-deriving it
+# and every later Build stops minting a redundant script. It is FIXED CODE (never a model-authored
+# YAML edit) and it writes IN PLACE on the ticket's own branch, so the new recipe arrives as an
+# ordinary tracked doc diff that goes through the normal review/PR path — never a side-channel write.
+APPEND_LIST_FIELDS = ("build_commands", "launch_commands", "verify_commands",
+                      "fixtures", "accounts", "emulators")
+
+
+def _entry_block(entry: dict) -> str:
+    """The new handle as YAML text in the one shape BOTH readers accept — PyYAML and the constrained
+    stdlib fallback parser (2-space `- key: value`, 4-space fields, inline JSON-style lists)."""
+    lines = [f"  - handle_id: {entry['handle_id']}",
+             f"    surface: {entry['surface']}",
+             f"    evidence_kind: {entry['evidence_kind']}"]
+    for key in APPEND_LIST_FIELDS:
+        lines.append(f"    {key}: {json.dumps(entry[key])}")
+    return "\n".join(lines)
+
+
+def _insert_entry(text: str, block: str) -> str:
+    """Splice the entry into the existing file text, preserving every other byte (comments included).
+
+    A whole-file rewrite would work and would also delete the operator's header comments, which is
+    exactly the kind of "helpful" data loss the registry is preserved as operator data to avoid."""
+    lines = text.splitlines()
+    idx = None
+    for i, line in enumerate(lines):
+        if re.fullmatch(r"handles:\s*(\[\s*\])?\s*", line):
+            idx = i
+            break
+    if idx is None:
+        raise HandleError("registry has no top-level `handles:` key to append to")
+    if re.fullmatch(r"handles:\s*\[\s*\]\s*", lines[idx]):
+        lines[idx] = "handles:"                       # an empty inline list cannot host block entries
+    end = idx + 1
+    while end < len(lines) and (not lines[end].strip() or lines[end].startswith((" ", "\t"))):
+        end += 1
+    while end > idx + 1 and not lines[end - 1].strip():
+        end -= 1                                      # append tight, before any trailing blank lines
+    lines[end:end] = block.splitlines()
+    return "\n".join(lines) + "\n"
+
+
+def _entry_from_execution(execution_path: str):
+    """Derive `(surface, evidence_kind, verify_commands)` from a machine-owned execution receipt.
+
+    Only a PROVEN recipe earns a registry entry, so the receipt must be source-owned, witnessed, and
+    PASSING, and must not already cite a handle (a handle-backed run proves nothing new)."""
+    try:
+        import idc_validation_contract as VC  # noqa: E402 — lazy, mirroring VC's own lazy import here
+    except ImportError as exc:
+        raise HandleError(
+            f"cannot read the execution receipt: idc_validation_contract.py is unavailable ({exc})") from exc
+    try:
+        doc = VC.load_execution(execution_path)
+    except VC.ValidationError as exc:
+        raise HandleError(f"execution receipt did not verify: {exc}") from exc
+    if doc.get("result") != "pass":
+        raise HandleError(
+            "only a PROVEN recipe is appended: the execution receipt did not record a passing run")
+    if doc.get("handle_id"):
+        raise HandleError(
+            f"execution receipt already cites handle_id {doc.get('handle_id')!r} — nothing new to append")
+    commands = [str(row.get("command") or "").strip()
+                for row in (doc.get("verification") or []) if isinstance(row, dict)]
+    commands = [cmd for cmd in commands if cmd]
+    if not commands:
+        raise HandleError("execution receipt records no verification commands to persist")
+    return str(doc.get("surface") or ""), str(doc.get("evidence_kind") or ""), commands
+
+
+def append_handle(repo: str, *, handle_id: str, surface: str | None = None,
+                  verify_commands: list[str] | None = None, build_commands: list[str] | None = None,
+                  launch_commands: list[str] | None = None, fixtures: list[str] | None = None,
+                  accounts: list[str] | None = None, emulators: list[str] | None = None,
+                  from_execution: str | None = None, override: str | None = None):
+    path = registry_path(repo, override)
+    if not os.path.exists(path):
+        raise HandleError(
+            f"no verification-handle registry at {path} — run /idc:init or /idc:update to scaffold it "
+            "before appending a proven recipe")
+    _path, doc = load_registry(repo, override)          # fail closed on an already-broken registry
+
+    if from_execution:
+        surface, evidence_kind, proven = _entry_from_execution(from_execution)
+        if verify_commands and [c.strip() for c in verify_commands] != proven:
+            raise HandleError(
+                f"--verify-command {list(verify_commands)!r} does not match the executed commands "
+                f"{proven!r}; the registry records what was PROVEN, not what was retyped")
+        verify_commands = proven
+    else:
+        if not surface:
+            raise HandleError("append requires --surface (or --from-execution to derive it)")
+        evidence_kind = SC.SURFACE_EVIDENCE_TABLE.get(surface)
+    if evidence_kind in (None, "none") or surface in (None, "", "none"):
+        raise HandleError(
+            f"surface must be one of {sorted(set(SC.SURFACE_EVIDENCE_TABLE) - {'none'})}, got {surface!r}")
+
+    entry = {
+        "handle_id": str(handle_id or "").strip(),
+        "surface": surface,
+        "evidence_kind": evidence_kind,
+        "build_commands": [str(c).strip() for c in (build_commands or []) if str(c).strip()],
+        "launch_commands": [str(c).strip() for c in (launch_commands or []) if str(c).strip()],
+        "verify_commands": [str(c).strip() for c in (verify_commands or []) if str(c).strip()],
+        "fixtures": [str(c).strip() for c in (fixtures or []) if str(c).strip()],
+        "accounts": [str(c).strip() for c in (accounts or []) if str(c).strip()],
+        "emulators": [str(c).strip() for c in (emulators or []) if str(c).strip()],
+    }
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", entry["handle_id"]):
+        raise HandleError(f"handle_id must match [a-z0-9][a-z0-9-]*, got {entry['handle_id']!r}")
+    if any(h.get("handle_id") == entry["handle_id"] for h in (doc.get("handles") or [])):
+        raise HandleError(
+            f"handle_id {entry['handle_id']!r} already exists in {path} — a proven recipe never "
+            "silently replaces an operator's entry; pick a new id or edit the existing one by hand")
+    if not entry["verify_commands"]:
+        raise HandleError("append requires at least one verify command")
+    for key in APPEND_LIST_FIELDS:
+        problem = _list_problem(key, entry[key])
+        if problem:
+            raise HandleError(problem)
+
+    original = open(path, encoding="utf-8").read()
+    updated = _insert_entry(original, _entry_block(entry))
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(updated)
+    try:                                                # re-validate the WHOLE file, not just the entry
+        load_registry(repo, override)
+        resolve_handle(repo, entry["handle_id"], entry["surface"], override=override)
+    except HandleError as exc:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(original)                          # leave the operator's registry exactly as found
+        raise HandleError(
+            f"appending {entry['handle_id']!r} would leave {path} invalid ({exc}); the registry was "
+            "restored unchanged") from exc
+    return {"ok": True, "path": path, "handle_id": entry["handle_id"], "handle": entry}
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
@@ -236,12 +396,31 @@ def cmd_resolve(args: argparse.Namespace) -> int:
 
 
 def cmd_audit(args: argparse.Namespace) -> int:
-    warnings = audit_citations(args.repo, args.registry, args.contract or [], args.contracts_dir)
-    if warnings:
-        for line in warnings:
+    lines = audit_citations(args.repo, args.registry, args.contract or [], args.contracts_dir)
+    if lines:
+        for line in lines:
             print(line)
     else:
         print("verification-handles: no citation warnings")
+    return 0
+
+
+def cmd_append(args: argparse.Namespace) -> int:
+    result = append_handle(
+        args.repo,
+        handle_id=args.handle_id,
+        surface=args.surface,
+        verify_commands=args.verify_command,
+        build_commands=args.build_command,
+        launch_commands=args.launch_command,
+        fixtures=args.fixture,
+        accounts=args.account,
+        emulators=args.emulator,
+        from_execution=args.from_execution,
+        override=args.registry,
+    )
+    json.dump(result, sys.stdout, indent=2, sort_keys=True)
+    sys.stdout.write("\n")
     return 0
 
 
@@ -263,6 +442,22 @@ def main(argv: list[str] | None = None) -> int:
     rp.add_argument("--missing-action")
     rp.add_argument("--obligation-name")
     rp.set_defaults(func=cmd_resolve)
+
+    pp = sub.add_parser("append", help="append a newly-proven verification recipe to the registry")
+    pp.add_argument("--repo", required=True)
+    pp.add_argument("--registry")
+    pp.add_argument("--handle-id", required=True)
+    pp.add_argument("--surface")
+    pp.add_argument("--from-execution",
+                    help="derive surface/evidence_kind/verify_commands from a passing, witnessed "
+                         "execution receipt (the only way a recipe is PROVEN)")
+    pp.add_argument("--verify-command", action="append")
+    pp.add_argument("--build-command", action="append")
+    pp.add_argument("--launch-command", action="append")
+    pp.add_argument("--fixture", action="append")
+    pp.add_argument("--account", action="append")
+    pp.add_argument("--emulator", action="append")
+    pp.set_defaults(func=cmd_append)
 
     ap = sub.add_parser("audit-citations", help="read-only warning pass over cited handle ids")
     ap.add_argument("--repo", required=True)

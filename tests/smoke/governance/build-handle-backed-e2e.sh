@@ -133,4 +133,50 @@ if receipt.get('handle_id') != handle:
 print("ok: Build receipt carried the handle metadata through from the frozen contract")
 PY
 
-echo "PASS: a handle-backed contract resolves its verify command from the registry and the handle metadata survives into the execution receipt and the Build receipt"
+# (4) `--handle-id` WITH a disagreeing explicit `--verify` is refused, and the refusal names BOTH
+# command lists. Nothing exercised this before: no test passed the two flags together, so the guard
+# could be replaced with `if False:` and stay green. It is the guard that stops a builder from citing
+# a governed recipe while silently running something else — the citation would then be decoration on
+# a receipt that proves a different command ran.
+mkdir -p "$REPO/other"
+cat > "$REPO/other-verify.sh" <<'SH'
+#!/bin/bash
+true
+SH
+chmod +x "$REPO/other-verify.sh"
+git -C "$REPO" add other-verify.sh
+git -C "$REPO" commit -qm 'add a second gate script'
+MISMATCH="$REPO/docs/workflow/build-validation/handle-mismatch.json"
+out="$(python3 "$VC" freeze \
+  --repo "$REPO" --issue 1 --pr 401 --graph-node alpha \
+  --graph-digest "$GRAPH_DIGEST" --projection-digest "$PROJECTION_DIGEST" \
+  --touch src/allowed/ --off-limits docs/ \
+  --surface cli --handle-id "$HANDLE" --verify 'bash other-verify.sh' \
+  --baseline expected-green --label handle-mismatch --out "$MISMATCH" 2>&1)" \
+  && fail "a contract citing $HANDLE while declaring a DIFFERENT explicit --verify command was accepted"
+printf '%s\n' "$out" | grep -qF "bash verify.sh" \
+  || fail "the handle/explicit-command mismatch refusal must name the RESOLVED command list; got: $out"
+printf '%s\n' "$out" | grep -qF "bash other-verify.sh" \
+  || fail "the handle/explicit-command mismatch refusal must name the EXPLICIT command list; got: $out"
+[ ! -e "$MISMATCH" ] || fail "a refused handle/command mismatch still wrote a frozen contract at $MISMATCH"
+
+# (5) POSITIVE TWIN — the identical command passed explicitly alongside `--handle-id` is ACCEPTED, so
+# the refusal above is about DISAGREEMENT and not about passing both flags at all.
+AGREE="$REPO/docs/workflow/build-validation/handle-agree.json"
+python3 "$VC" freeze \
+  --repo "$REPO" --issue 1 --pr 401 --graph-node alpha \
+  --graph-digest "$GRAPH_DIGEST" --projection-digest "$PROJECTION_DIGEST" \
+  --touch src/allowed/ --off-limits docs/ \
+  --surface cli --handle-id "$HANDLE" --verify 'bash verify.sh' \
+  --baseline expected-green --label handle-agree --out "$AGREE" >/dev/null \
+  || fail "an explicit --verify that exactly matches the handle's verify_commands was wrongly refused"
+python3 - "$AGREE" <<'PY' || exit 1
+import json, sys
+contract = json.load(open(sys.argv[1], encoding='utf-8'))
+cmds = [row.get('command') for row in contract.get('verification') or []]
+if cmds != ['bash verify.sh']:
+    raise SystemExit(f"FAIL: the agreeing contract did not freeze the resolved command, got {cmds!r}")
+print("ok: an explicit --verify identical to the handle's verify_commands is accepted")
+PY
+
+echo "PASS: a handle-backed contract resolves its verify command from the registry, the handle metadata survives into the execution receipt and the Build receipt, and a handle/explicit-command disagreement is refused by name"

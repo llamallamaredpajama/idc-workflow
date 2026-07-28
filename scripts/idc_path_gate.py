@@ -707,20 +707,17 @@ def cmd_auth_path(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_authorize(args: argparse.Namespace) -> int:
-    auth = write_authorization(
-        repo_root(args.repo),
-        session=args.session,
-        command=args.command,
-        branch=args.branch,
-        allowed_paths=args.allow_path,
-        allowed_actions=args.allow_action,
-        ticket=args.ticket,
-        graph_node=args.graph_node,
-        ttl_seconds=args.ttl_seconds,
-    )
-    print(json.dumps(auth, indent=2, sort_keys=True))
-    return 0
+# DELIBERATELY NO `authorize` CLI VERB (V-DOOR). Minting an authorization is an ADMISSION-side
+# privilege, not an agent-side one, so it has no public door: `write_authorization` is reachable only
+# through the Python API, and the only two callers are admission code —
+# `idc_command_entry_gate._ensure_path_gate_auth` (every command minted by the hook, no caller-chosen
+# scope) and `idc_command_contract._mint_or_rollback` (the fixed default profile for a self-minting
+# command, i.e. init). The verb that used to live here honored caller-supplied
+# `--command`/`--allow-action`/`--allow-path`, so ANY Bash in a session whose only precondition was
+# "an active command record exists" could mint itself a broad write/edit/git grant over the whole
+# repo. Do not re-add it: a new legitimate minting need belongs on the Python API behind the
+# admission lock, with the role-action ceiling (`_role_action_ceiling`) intact.
+# `governance/path-gate-boundaries.sh` asserts no CLI path mints a grant.
 
 
 def cmd_evaluate(args: argparse.Namespace) -> int:
@@ -737,18 +734,6 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("auth-path")
     p.add_argument("--repo", required=True)
     p.set_defaults(func=cmd_auth_path)
-
-    p = sub.add_parser("authorize")
-    p.add_argument("--repo", required=True)
-    p.add_argument("--session", required=True)
-    p.add_argument("--command", required=True)
-    p.add_argument("--branch")
-    p.add_argument("--ticket")
-    p.add_argument("--graph-node")
-    p.add_argument("--ttl-seconds", type=int, default=DEFAULT_TTL_SECONDS)
-    p.add_argument("--allow-path", action="append", default=None)
-    p.add_argument("--allow-action", action="append", default=None)
-    p.set_defaults(func=cmd_authorize)
 
     p = sub.add_parser("evaluate")
     p.add_argument("--repo", required=True)

@@ -12,6 +12,9 @@ ENTRY="$GOV_PLUGIN/scripts/hooks/idc_command_entry_gate.py"
 GATE="$GOV_PLUGIN/scripts/hooks/idc_interlock_gate.py"
 CONTRACT="$GOV_PLUGIN/scripts/idc_command_contract.py"
 PATH_GATE="$GOV_PLUGIN/scripts/idc_path_gate.py"
+# TEST-ONLY mint door. idc_path_gate.py has no `authorize` verb (V-DOOR); this fixture calls the
+# same write_authorization Python API the real admission minters use, ceiling and all.
+PG_AUTHORIZE="$GOV_PLUGIN/tests/smoke/lib/path_gate_authorize.py"
 [ -f "$ENTRY" ] || gov_fail "idc_command_entry_gate.py not found at $ENTRY"
 [ -f "$GATE" ] || gov_fail "idc_interlock_gate.py not found at $GATE"
 [ -f "$CONTRACT" ] || gov_fail "idc_command_contract.py not found at $CONTRACT"
@@ -258,7 +261,7 @@ deny_case Bash 'gh issue create --title gate --body-file /tmp/body' "$SID_BUILD"
 
 # NotebookEdit is an Edit transport, not a Write alias. An edit-only authorization must admit the
 # registered NotebookEdit hook path while refusing the same target through Write.
-python3 "$PATH_GATE" authorize --repo "$REPO" --session "$SID_BUILD" --command build \
+python3 "$PG_AUTHORIZE" --repo "$REPO" --session "$SID_BUILD" --command build \
   --branch main --allow-path src --allow-action edit >/dev/null \
   || gov_fail "could not write the edit-only NotebookEdit authorization"
 allow_case NotebookEdit "$REPO/src/demo.ipynb" "$SID_BUILD"
@@ -276,7 +279,7 @@ NONGIT_SID="pg-nongit-$$-$(basename "$WORK")"
 python3 "$CONTRACT" start --repo "$NONGIT" --session "$NONGIT_SID" --command init \
   --plugin-root "$GOV_PLUGIN" --args '' --source user >/dev/null \
   || gov_fail "could not open the non-Git init command record"
-python3 "$PATH_GATE" authorize --repo "$NONGIT" --session "$NONGIT_SID" --command init \
+python3 "$PG_AUTHORIZE" --repo "$NONGIT" --session "$NONGIT_SID" --command init \
   --allow-path . --allow-action write --allow-action edit --allow-action git >/dev/null \
   || gov_fail "non-Git init could not mint its Path Gate authorization without a branch"
 allow_case Write "$NONGIT/src/new.ts" "$SID_NONE" "$NONGIT"

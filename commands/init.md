@@ -141,15 +141,17 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" start \
   --plugin-root "${CLAUDE_PLUGIN_ROOT}" --args "$ARGUMENTS" --source user
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" status \
   --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --json
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_path_gate.py" authorize \
-  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command init \
-  --allow-path . --allow-action write --allow-action edit --allow-action git
 ```
 A stale runtime is refused here too (`start` exits 4) — do not scaffold further on stale logic; run
-`/reload-plugins`. The `authorize` call is init's counterpart to the command entry gate: expansion
-was admitted before the repo was governed, so once governance exists init must mint the shared Path
-Gate authorization itself or later Write/Edit/git mutations fail closed. From here init owes an
-honest closeout (Phase 8).
+`/reload-plugins`.
+
+`start` also mints init's shared Path Gate authorization, in the SAME admission transaction that
+opens the record: expansion was admitted before the repo was governed, so once governance exists
+init needs that authorization or every later Write/Edit/git mutation fails closed. There is no
+separate authorize step and no CLI verb that mints one — the scope is the fixed default profile
+(`write`/`edit`/`git` over `.`), chosen by the command name alone, bound to this record's nonce. If
+the mint fails, `start` rolls the record back and exits non-zero: init must not scaffold on an
+obligation with no authorization behind it. From here init owes an honest closeout (Phase 8).
 
 ## Phase 4 — Provision (or link) the board (github backend)
 Decide create-vs-link:

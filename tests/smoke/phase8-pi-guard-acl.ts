@@ -19,6 +19,9 @@ import registerRoleHarness, { evaluateBashForRole, evaluatePathForRole, type Idc
 const PLUGIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const CONTRACT = path.join(PLUGIN, "scripts", "idc_command_contract.py");
 const PATH_GATE = path.join(PLUGIN, "scripts", "idc_path_gate.py");
+// TEST-ONLY mint door. idc_path_gate.py has no `authorize` verb (V-DOOR); this fixture calls the
+// same write_authorization Python API the real admission minters use, ceiling and all.
+const PG_AUTHORIZE = path.join(PLUGIN, "tests", "smoke", "lib", "path_gate_authorize.py");
 
 // A fake run repo on disk so path-relative cases resolve against a real cwd.
 const CWD = fs.mkdtempSync(path.join(os.tmpdir(), "pi-guard-acl-"));
@@ -38,8 +41,7 @@ const runPy = (args: string[]) => execFileSync("python3", args, { encoding: "utf
 const AUTH_SESSION = "pi-auth-session";
 runPy([CONTRACT, "start", "--repo", CWD, "--session", AUTH_SESSION, "--command", "build", "--plugin-root", PLUGIN, "--args", "demo", "--source", "user"]);
 runPy([
-	PATH_GATE,
-	"authorize",
+	PG_AUTHORIZE,
 	"--repo",
 	CWD,
 	"--session",
@@ -83,8 +85,7 @@ function expectPathAction(tag: string, action: "write" | "edit", allow: boolean)
 
 function authorizeActions(actions: Array<"write" | "edit">) {
 	runPy([
-		PATH_GATE,
-		"authorize",
+		PG_AUTHORIZE,
 		"--repo",
 		CWD,
 		"--session",

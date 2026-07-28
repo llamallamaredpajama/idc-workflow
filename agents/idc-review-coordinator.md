@@ -18,16 +18,21 @@ per PR and at phase close. Reasoning tier.
    utility-tier; judgment dimensions and this coordinator run reasoning-tier.
 2. **Dedup by fingerprint.** Collapse findings sharing a `dimension:file:line:gist`
    fingerprint across reviewers; keep the highest-confidence instance.
-3. **Record seen, then score + floor.** BEFORE flooring, rejecting, or refuting anything,
-   persist every candidate fingerprint for this round into the per-PR seen-fingerprint ledger
-   through the fixed helper — never by writing the ledger file yourself:
-   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_review_seen_ledger.py" record-round --repo <repo> --round <round.json>`
-   (`round.json`: `{"schema_version":1,"pr":<n>,"candidates":[{"fingerprint":…,"disposition":
+3. **Record seen, then score + floor.** BEFORE flooring, rejecting, or refuting anything, write
+   this round's candidate fingerprints to
+   `docs/workflow/code-reviews/pr-<n>-round-<round>.json` — that exact name, because the
+   SubagentStop verdict gate finds round records by it and fires the recorder for you when the
+   review stops. Then persist them into the per-PR seen-fingerprint ledger through the fixed helper
+   — never by writing the ledger file yourself:
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_review_seen_ledger.py" record-round --repo <repo> --round docs/workflow/code-reviews/pr-<n>-round-<round>.json`
+   (round record: `{"schema_version":1,"pr":<n>,"candidates":[{"fingerprint":…,"disposition":
    "below-floor"|"rejected"|"refuted"}]}` — exactly those three; `filed`/`confirmed`/
    `suppressed-seen` are reserved for the fixed-code filer and the helper refuses them). Record the
    round only AFTER the per-reviewer filer has fired for this round's verdicts — recording first
-   would mark first-time findings as already seen. This makes rejected/refuted/below-floor
-   candidates *seen*, so a later round cannot resurface them as new. Then drop any finding below the **0.8**
+   would mark first-time findings as already seen. A round record that would overwrite a
+   still-unrouted `filed` entry is refused: route the finding first, then record. This makes
+   rejected/refuted/below-floor candidates *seen*, so a later round cannot resurface them as new.
+   A round with no below-floor/rejected/refuted candidate writes no round record at all. Then drop any finding below the **0.8**
    confidence floor. A fingerprint the ledger already carries from an earlier round is a
    resurfaced seen finding — never score it as new work. On suspicion that a utility-tier lane
    missed something, re-run that dimension up-tier.

@@ -65,6 +65,16 @@ Each role is the sole writer of its surface and edits nothing upstream of it.
 When a lower role finds a higher layer wrong, it routes through the Recirculator (files a
 recirculation) and pauses only the affected issue — it never edits the upstream doc itself.
 
+**Model-authored orchestration is welcome for read-only fan-outs, and never for authority.** Handing
+a model an objective and letting it draw its own branch structure is fine wherever the whole fan-out
+is read-only and digest-absorbing — Plan's clash checks, domain-expert lookups, Think's opt-in
+divergent risk pass. What those branches produce is discovery, and discovery is never authority.
+**Admission, scheduling, tracker mutation, and completion always go through fixed validators** — the
+single transition write door, the execution graph compiled from authoritative inputs, the frozen
+validation contract, the closeout oracle — and never through a script the model generated for the
+occasion. This boundary is settled rather than open: an arbitrary generated tracker script is
+refused however convincing the plan behind it looks.
+
 ## The one gate (Diverter #1 → the Think PR)
 
 The single human checkpoint fires at the **end of Think**. When an idea crystallizes, Think drafts its

@@ -68,6 +68,24 @@ mechanical narrative issues across the 80 commits (subject/body style). They do 
 and the history was deliberately not rewritten; the substantive review findings were remediated in
 the code and tests above._
 
+_Deliberately PARKED out of this release (named here so the gap is on the record rather than implied
+closed). Four items from the release review were held back and ship as follow-ups:_
+
+- _**SHA-pinned GitHub Actions.** The workflows referenced `actions/checkout@v4` and
+  `oven-sh/setup-bun@v2` by moving tag. Deferred at the time because resolving the exact commit needed
+  network access and a wrong pin would have broken the required check._
+- _**Removal of the public authorization door.** `idc_path_gate.py authorize` was callable from any
+  Bash in a session with caller-chosen scope. An interim role-action ceiling shipped in this release
+  (a read-only command can never mint a write grant); deleting the verb outright was held back because
+  it needed `/idc:init` to gain an internal mint first._
+- _**Transition-scoped path authorization.** The spec calls for authorization minted at the Build
+  claim with the ticket's declared paths; this release mints one whole-repo grant per command at entry.
+  The narrow scope is enforced after the fact at receipt time, not at mutation time._
+- _**Codex per-tool gate coverage.** `scripts/install-codex.sh` wires no hooks, so Codex work is
+  covered only by the git pre-commit/pre-push backstop, not by a per-tool gate like Claude and Pi._
+
+_`controlled` mode's honest limitation list in `templates/WORKFLOW.md` states each of these as open._
+
 ## 4.2.0 — 2026-07-19
 
 Completion honesty.

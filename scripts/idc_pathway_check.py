@@ -65,6 +65,7 @@ PROTECTED_SURFACES = (
     "scripts/idc_validation_contract.py",           # validation surface
     "scripts/idc_receipt_check.py",                 # receipt surface
     "scripts/idc_pathway_check.py",                 # the checker itself
+    "scripts/idc_ruleset_check.py",                 # the OWNERSHIP checker (governed all but itself)
     ".github/rulesets",                             # the ruleset directory (directory)
     ".github/CODEOWNERS",                           # the ownership surface the review rules lean on
 )

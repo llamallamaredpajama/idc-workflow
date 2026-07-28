@@ -122,7 +122,20 @@ case "$path" in
     case " ${STUB_READONLY_USERS:-} " in
       *" $user "*) printf '{"permission":"read","role_name":"read"}\n'; exit 0 ;;
     esac
-    printf '{"permission":"%s","role_name":"%s"}\n' "${STUB_USER_PERM:-write}" "${STUB_USER_ROLE:-write}"
+    # STUB_USER_CAPS: "" = omit the boolean capability map entirely (a body with NO authoritative
+    # access statement); "push"/"none" = emit user.permissions with that capability true/all false.
+    caps=""
+    case "${STUB_USER_CAPS:-}" in
+      push)     caps=',"user":{"permissions":{"pull":true,"triage":true,"push":true,"maintain":false,"admin":false}}' ;;
+      maintain) caps=',"user":{"permissions":{"pull":true,"triage":true,"push":true,"maintain":true,"admin":false}}' ;;
+      none)     caps=',"user":{"permissions":{"pull":true,"triage":false,"push":false,"maintain":false,"admin":false}}' ;;
+    esac
+    if [ -z "${STUB_USER_PERM-unset}" ] && [ "${STUB_USER_PERM+set}" = "set" ]; then
+      # explicitly empty permission -> omit the legacy field entirely
+      printf '{"role_name":"%s"%s}\n' "${STUB_USER_ROLE:-write}" "$caps"
+    else
+      printf '{"permission":"%s","role_name":"%s"%s}\n' "${STUB_USER_PERM:-write}" "${STUB_USER_ROLE:-write}" "$caps"
+    fi
     exit 0 ;;
   orgs/*/teams/*/repos/*)
     team="${path#orgs/*/teams/}"; team="${team%%/repos/*}"
@@ -193,6 +206,8 @@ case "$path" in
     printf '{"commit":{"sha":"%s"}}\n' "${STUB_BRANCH_SHA:-0000000000000000000000000000000000000000}"
     exit 0 ;;
   repos/*)
+    [ "${STUB_REPO_READ_FAILS:-0}" = "1" ] && { echo "gh: Bad gateway (HTTP 502)" >&2; exit 1; }
+    [ "${STUB_REPO_BAD_SHAPE:-0}" = "1" ] && { echo '["not","an","object"]'; exit 0; }
     printf '{"default_branch":"%s"}\n' "${STUB_DEFAULT_BRANCH:-main}"
     exit 0 ;;
 esac
@@ -291,6 +306,7 @@ mk_target() {  # $1=dir  $2=owner token for every rule
 /scripts/idc_validation_contract.py $2
 /scripts/idc_receipt_check.py $2
 /scripts/idc_pathway_check.py $2
+/scripts/idc_ruleset_check.py $2
 /.github/rulesets/ $2
 /.github/CODEOWNERS $2
 CO
@@ -365,6 +381,29 @@ out="$(apply "$TGT_USER" "cafebabe00000000000000000000000000000000")" \
 printf '%s\n' "$out" | grep -qiE 'stale|fetch' \
   || fail "W3e: the stale-checkout refusal must say the checkout is stale / to git fetch; got: $out"
 
+# (W3g) The default-branch cross-check must FAIL CLOSED when the read itself fails. An unreadable
+#        live default branch is a failure to VERIFY, never a pass: certifying here would install
+#        require_code_owner_review while binding validation to a branch nobody confirmed is enforced —
+#        the F39/F44 harm class reached through an unanswered question instead of a wrong answer.
+out="$(PATH="$STUB_BIN:$PATH" STUB_REPO_READ_FAILS=1 STUB_BRANCH_SHA="$SHA_USER" \
+        python3 "$INS" --ruleset "$RS" --repo "$REPO" --repo-root "$TGT_USER" --apply 2>&1)" \
+  && fail "W3g: apply CERTIFIED while the live default-branch read FAILED — an unverifiable default branch must refuse, not pass"
+printf '%s\n' "$out" | grep -Fq "cannot read the default branch" \
+  || fail "W3g: the refusal must name the unreadable default branch as the cause; got: $out"
+
+# (W3g2) A valid-JSON body of the WRONG SHAPE is likewise refused rather than reaching `.get` (F16).
+out="$(PATH="$STUB_BIN:$PATH" STUB_REPO_BAD_SHAPE=1 STUB_BRANCH_SHA="$SHA_USER" \
+        python3 "$INS" --ruleset "$RS" --repo "$REPO" --repo-root "$TGT_USER" --apply 2>&1)" \
+  && fail "W3g2: apply CERTIFIED against a wrong-shape repository body"
+printf '%s\n' "$out" | grep -Fq "refusing to certify" \
+  || fail "W3g2: the wrong-shape refusal must say it refuses to certify; got: $out"
+
+# (W3g3) CONTROL — with the stub healthy again the SAME invocation passes, so W3g/W3g2 refused
+#        because of the broken read and not because this fixture cannot certify at all.
+out="$(PATH="$STUB_BIN:$PATH" STUB_BRANCH_SHA="$SHA_USER" \
+        python3 "$INS" --ruleset "$RS" --repo "$REPO" --repo-root "$TGT_USER" --apply 2>&1)" \
+  || fail "W3g3 CONTROL: the same invocation with a healthy repo read was REFUSED, so W3g/W3g2 prove nothing; got: $out"
+
 # (W3f) GIT-REPLACE TAMPER — the tip check compares `rev-parse`'s oid against GitHub's and passes,
 #       but a `refs/replace/<oid>` ref rewires OBJECT lookup so `git show` returns a DIFFERENT commit's
 #       bytes. The two commands disagree, and the installer runs exactly that pair: it vouched for the
@@ -395,6 +434,7 @@ cat > "$TGT_REPL/.github/CODEOWNERS" <<'CO'
 /scripts/idc_validation_contract.py @alice
 /scripts/idc_receipt_check.py @alice
 /scripts/idc_pathway_check.py @alice
+/scripts/idc_ruleset_check.py @alice
 /.github/rulesets/ @alice
 /.github/CODEOWNERS @alice
 CO
@@ -417,6 +457,7 @@ cat > "$TGT_REPL/.github/CODEOWNERS" <<'CO'
 /scripts/idc_validation_contract.py @alice
 /scripts/idc_receipt_check.py @alice
 /scripts/idc_pathway_check.py @alice
+/scripts/idc_ruleset_check.py @alice
 /.github/rulesets/ @alice
 /.github/CODEOWNERS @alice
 CO
@@ -556,11 +597,35 @@ for perm in maintain admin; do
     || fail "W2k: apply REFUSED an owner holding '$perm' access — $perm is write-or-better and must satisfy require_code_owner_review; got: $out"
 done
 
-# (W2k2) The `role_name`-only path: a body that omits the legacy `permission` field entirely must still
-#        be read off `role_name`. This is the case the field is consulted FOR, and it had no coverage.
-out="$(PATH="$STUB_BIN:$PATH" STUB_BRANCH_SHA="$SHA_USER" STUB_USER_PERM="" STUB_USER_ROLE="maintain" \
+# (W2k2) NO-AUTHORITATIVE-FIELD path. When GitHub omits the legacy `permission` field (some GitHub
+#        Enterprise versions do), the grant is decided on the BOOLEAN capability map GitHub emits —
+#        never on `role_name`, which is a free-form ORG-DEFINED string.
+#
+# W2k2a — COMPATIBILITY: no `permission`, but the boolean map grants push -> ACCEPTED. This is the
+#         real GHE case the old role_name fallback existed to serve, now served without trusting a name.
+out="$(PATH="$STUB_BIN:$PATH" STUB_BRANCH_SHA="$SHA_USER" STUB_USER_PERM="" STUB_USER_CAPS="push" \
+        STUB_USER_ROLE="write" \
         python3 "$INS" --ruleset "$RS" --repo "$REPO" --repo-root "$TGT_USER" --apply 2>&1)" \
-  || fail "W2k2: apply REFUSED an owner whose grant is reported ONLY via role_name=maintain; got: $out"
+  || fail "W2k2a: apply REFUSED an owner whose body omits \`permission\` but whose boolean permissions map grants push — the GHE-compatibility path must still certify; got: $out"
+
+# W2k2b — NEW-12 CLOSURE: no `permission`, NO boolean map, only a free-form role_name that case-folds
+#         to a built-in. An org can define a custom role literally named "maintain" that grants no push
+#         at all, so this is not proof of access and must REFUSE.
+#         Red-when-broken: restore `granted = ... else role in _WRITE_OR_BETTER` and this CERTIFIES.
+out="$(PATH="$STUB_BIN:$PATH" STUB_BRANCH_SHA="$SHA_USER" STUB_USER_PERM="" STUB_USER_CAPS="" \
+        STUB_USER_ROLE="maintain" \
+        python3 "$INS" --ruleset "$RS" --repo "$REPO" --repo-root "$TGT_USER" --apply 2>&1)" \
+  && fail "W2k2b: apply CERTIFIED an owner from a free-form role_name alone — the body carried neither a \`permission\` field nor a boolean permissions map, so nothing proved the owner can approve"
+printf '%s\n' "$out" | grep -Fq "free-form" \
+  || fail "W2k2b: the refusal must say the role name is not proof of access; got: $out"
+
+# W2k2c — CONTROL: no `permission`, boolean map present but grants nothing, role_name still says
+#         "maintain". The booleans decide and the name cannot out-vote them.
+out="$(PATH="$STUB_BIN:$PATH" STUB_BRANCH_SHA="$SHA_USER" STUB_USER_PERM="" STUB_USER_CAPS="none" \
+        STUB_USER_ROLE="maintain" \
+        python3 "$INS" --ruleset "$RS" --repo "$REPO" --repo-root "$TGT_USER" --apply 2>&1)" \
+  && fail "W2k2c: apply CERTIFIED an owner whose boolean permissions map grants no write capability, because role_name case-folded to 'maintain'"
+
 
 # (W2k3) SECURITY CONTROL — `role_name` must NOT out-vote an authoritative `permission`. `role_name`
 #        carries ORG-DEFINED CUSTOM ROLE NAMES, which are free-form: an org can define a custom role
@@ -737,6 +802,7 @@ CO
 /scripts/idc_validation_contract.py @alice
 /scripts/idc_receipt_check.py @alice
 /scripts/idc_pathway_check.py @alice
+/scripts/idc_ruleset_check.py @alice
 /.github/rulesets/ @alice
 /.github/CODEOWNERS @alice
 CO
@@ -853,4 +919,4 @@ PATH="$STUB_BIN:$PATH" STUB_LOG="$DRY_LOG" STUB_BRANCH_SHA="$SHA_USER" \
 [ -s "$DRY_LOG" ] \
   || fail "the stub log stayed EMPTY even under --apply — the log is not recording, so the dry-run assertion proves nothing"
 
-echo "PASS: the installer's --apply path binds certification to the live repository (W2+W3) — the validation ref must NAME GitHub's live default branch (a stale origin/HEAD, a non-default override, and a raw SHA are all refused; both \`D\` and \`origin/D\` spellings pass) and the local checkout must be at the same tip; every CODEOWNERS owner principal must resolve with write-or-better access (missing/read-only user, missing/read-only team, an email owner, a gh failure, and a non-JSON body each refuse fail-closed), with maintain/admin and a role_name-only grant PROVEN to be accepted while a free-form custom role name cannot out-vote an authoritative 'read'; wrong-SHAPE gh bodies REFUSE instead of raising KeyError/AttributeError (F16); the rulesets listing is PAGINATED, so a ruleset on page 2 is updated rather than duplicated (F24), and an already-installed ruleset takes the PUT/update branch (F23); that page walk REFUSES rather than mutating on anything short of a complete listing — a null/empty body is not proof of absence and makes ZERO mutation calls (F34), a backend ignoring per_page cannot truncate it into a duplicate CREATE, and a listing that never empties is refused at a page ceiling instead of looping forever (F36); the git OBJECT STORE behind \`git show\` is itself verified with \`git fsck\` before anything is certified, so substituting the committed blob's object file — or the enclosing tree, which self-consistently re-hashes — is REFUSED in apply AND dry-run while a healthy checkout still passes (F13); the production denylist matches CASE-INSENSITIVELY before any network call (F31); and dry-run still makes ZERO gh calls"
+echo "PASS: the installer's --apply path binds certification to the live repository (W2+W3) — the validation ref must NAME GitHub's live default branch (a stale origin/HEAD, a non-default override, and a raw SHA are all refused; both \`D\` and \`origin/D\` spellings pass) and the local checkout must be at the same tip; every CODEOWNERS owner principal must resolve with write-or-better access (missing/read-only user, missing/read-only team, an email owner, a gh failure, and a non-JSON body each refuse fail-closed), with maintain/admin accepted, a body omitting the legacy \`permission\` field decided on GitHub's BOOLEAN capability map (GHE compatibility) and REFUSED when it carries neither that map nor a \`permission\` field, so a free-form custom role name can neither out-vote an authoritative 'read' nor stand in as proof of access on its own (NEW-12); wrong-SHAPE gh bodies REFUSE instead of raising KeyError/AttributeError (F16); the rulesets listing is PAGINATED, so a ruleset on page 2 is updated rather than duplicated (F24), and an already-installed ruleset takes the PUT/update branch (F23); that page walk REFUSES rather than mutating on anything short of a complete listing — a null/empty body is not proof of absence and makes ZERO mutation calls (F34), a backend ignoring per_page cannot truncate it into a duplicate CREATE, and a listing that never empties is refused at a page ceiling instead of looping forever (F36); the git OBJECT STORE behind \`git show\` is itself verified with \`git fsck\` before anything is certified, so substituting the committed blob's object file — or the enclosing tree, which self-consistently re-hashes — is REFUSED in apply AND dry-run while a healthy checkout still passes (F13); the production denylist matches CASE-INSENSITIVELY before any network call (F31); and dry-run still makes ZERO gh calls"

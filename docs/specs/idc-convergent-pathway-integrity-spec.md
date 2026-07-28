@@ -101,9 +101,34 @@ that:
 - requires pull requests for protected branches;
 - requires the IDC check at the exact proposed head commit;
 - prevents force pushes and protected-branch deletion;
-- protects IDC workflow, hook, validation, and receipt surfaces with review/ownership rules;
-- refuses a merge when tracker, graph, journal, authorization, validation, review, or finish evidence
-  is missing, stale, corrupt, or divergent.
+- protects IDC workflow, hook, validation, receipt, and governance-of-governance surfaces (the
+  deterministic checker, the ownership checker, the ruleset directory, and CODEOWNERS itself) with
+  review/ownership rules.
+
+**The acceptance boundary is enforced by two legs, not one.** An earlier revision of this section
+stated a single requirement — "refuses a merge when tracker, graph, journal, authorization,
+validation, review, or finish evidence is missing, stale, corrupt, or divergent" — and read as though
+the required check evaluated all of it. It does not, and cannot: those are LIVE evidence classes that
+depend on the tracker board, the git-directory receipts, and the review/gate state **at merge time**,
+while the required check runs against a **static checkout** bound to a proposed head SHA. Asking one
+head-bound check to answer both questions is what produced the mismatch between this spec and the
+code. The duty is split:
+
+1. **The STRUCTURAL leg — the required check `idc/pathway-integrity`.** Bound to the exact proposed
+   head, it verifies exact-head binding, the version-pinned check source, and that every protected
+   surface is present AND carries content (not a gutted stub or an emptied directory). Its published
+   contract is exactly that and no more (`scripts/idc_pathway_check.py`). It proves the governance
+   machinery a merge relies on has not been stripped out of the tree being merged.
+2. **The EVIDENCE leg — the mechanisms that actually hold the evidence.** Tracker, graph, journal,
+   authorization, validation, review, and finish evidence is evaluated where it lives, at the time it
+   is true: the finisher and gate receipts (`scripts/idc_build_receipt.py`,
+   `scripts/idc_validation_contract.py`, the review-verdict chain) refuse to produce a passing
+   receipt on missing, stale, corrupt, or divergent evidence, and the ruleset's review/ownership
+   rules (`require_code_owner_review` + CODEOWNERS, enforced by `scripts/idc_ruleset_check.py`)
+   require a human code owner for any change to the surfaces that carry it.
+
+A merge is refused when EITHER leg refuses. The requirement above is unchanged in substance — no
+merge on missing, stale, corrupt, or divergent evidence — only in where it is discharged.
 
 The standard workflow is same-repository and version-pinned. The App-locked profile additionally
 requires the expected check source and makes the App the only credential allowed to mutate tracker
@@ -379,13 +404,28 @@ over unresolved facts.
 |---|---|---|
 | T1 — nonterminal `Done` | Preserve typed terminal operations and add Path Gate/CI coverage around the existing engine. | Transition, hooks, CI |
 | T2 — close/dispose without evidence | Preserve structural checks; require source-owned execution/review witnesses and exact live bindings. | Transition, Finisher, CI |
-| T3 — raw GitHub bypass | Deny outside active commands too; cover all write tools; require Path Gate authorization; protect merge with deterministic CI; optionally make the App sole tracker writer. | Runtime hooks, Git hooks, ruleset, CI/App |
+| T3 — raw GitHub bypass | Deny outside active commands too; cover all write tools; require Path Gate authorization; protect merge with deterministic CI; optionally make the App sole tracker writer. | `scripts/hooks/idc_interlock_gate.py`, `scripts/idc_path_gate.py`, `scripts/idc_git_path_gate.py`, `.github/rulesets/idc-pathway-integrity.json` + `scripts/idc_ruleset_check.py`, `.github/workflows/idc-pathway-integrity.yml` + `scripts/idc_pathway_check.py` (App optional) |
 | T4 — raw filesystem/TRACKER mutation | Make filesystem explicitly non-secure; deny supported-runtime writes; require journal parity for every completion/repair; prohibit Janitor from laundering raw `Done`. | Hooks, replay, Janitor, drain |
 | T5 — premature Stop | Remove fail-open exhaustion; treat corrupt ledger as indeterminate; preserve recovery-only access. | Stop, closeout, command contract |
 | T6 — divergence accepted as complete | Run graph/journal parity in drain, Autorun closeout, Finisher, terminal transitions, and Janitor apply. | Drain, Autorun, Finisher, Janitor |
 | T7 — forged concordant evidence | Mandatory source-owned journals, external execution witnesses, reciprocal live PR/gate/review binding, version/diff freshness, and optional App authority. | Receipts, gate proof, transition, CI |
 
 T1 and T2 are retained as foundations. T3–T7 are release blockers for the new controlled profile.
+
+**T3 traceability.** T3's "Blocking surfaces" column previously named surface CATEGORIES ("Runtime
+hooks, Git hooks, ruleset, CI/App"), which left a reader unable to get from the threat to the code
+that answers it or to the test that proves it. The named files above close that, and each has a
+red-when-broken governance scenario under `tests/smoke/governance/`:
+
+| T3 enforcement point | Proven by |
+|---|---|
+| Raw `gh` board/issue/PR mutations denied — during an active command and outside one | `interlock-terminal-actions.sh`, `interlock-project-mutation-verbs.sh` |
+| The deny survives wrappers, indirection, compounds, and an unlexable segment (the text backstop covers the same command set as the positional path) | `interlock-privilege-wrappers.sh`, `interlock-script-indirection.sh`, `interlock-backstop-parity.sh` |
+| The uncovered channel classes are published rather than implied closed | `interlock-known-bypass-disclosure.sh` |
+| Every write tool transport requires a live Path Gate authorization | `path-gate-boundaries.sh`, `path-gate-mode.sh`, `path-gate-runtime-failclosed.sh` |
+| Git backstops catch what a per-tool hook cannot (Codex has no per-tool gate) | `path-gate-git-backstops.sh` |
+| Merge is protected by the deterministic required check at the exact head | `pathway-github-check-local.sh`, `pathway-check-surface-alignment.sh` |
+| The ruleset actually binds a reviewer to every protected surface | `ruleset-checker-local.sh`, `ruleset-install-live-gates.sh`, `codeowners-ownership-differential.sh` |
 
 ---
 

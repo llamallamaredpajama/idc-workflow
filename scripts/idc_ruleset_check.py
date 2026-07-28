@@ -81,6 +81,10 @@ SURFACE_CLASSES = (
     ("validation", "file", "scripts/idc_validation_contract.py"),
     ("receipt",    "file", "scripts/idc_receipt_check.py"),
     ("checker",    "file", "scripts/idc_pathway_check.py"),
+    # N1: THIS file. The ownership checker governed every surface except itself — an unreviewed PR
+    # could weaken the script that decides whether protected surfaces are owned, and the weakening
+    # would certify clean. Same class as the deterministic checker above, so same treatment.
+    ("ownership",  "file", "scripts/idc_ruleset_check.py"),
     ("ruleset",    "dir",  ".github/rulesets"),
     ("codeowners", "file", CODEOWNERS_CANONICAL),
 )

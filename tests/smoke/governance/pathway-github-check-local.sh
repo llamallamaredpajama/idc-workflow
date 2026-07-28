@@ -49,6 +49,7 @@ REPO="$WORK/repo"
 mkdir -p "$REPO/.github/workflows" "$REPO/scripts/hooks" "$REPO/.github/rulesets"
 cp "$WF"    "$REPO/.github/workflows/idc-pathway-integrity.yml"
 cp "$CHECK" "$REPO/scripts/idc_pathway_check.py"
+printf '# ownership checker surface\n' > "$REPO/scripts/idc_ruleset_check.py"  # ownership-checker surface
 # the checker asserts these protected surfaces exist AND carry content (not a gutted empty stub):
 printf '# validation surface\n' > "$REPO/scripts/idc_validation_contract.py"   # validation surface
 printf '# receipt surface\n'    > "$REPO/scripts/idc_receipt_check.py"          # receipt surface

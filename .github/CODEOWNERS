@@ -20,5 +20,9 @@
 
 # The deterministic checker and the ruleset itself are load-bearing governance too.
 /scripts/idc_pathway_check.py @llamallamaredpajama
+# The OWNERSHIP checker — the script that decides whether every protected surface is owned. It was
+# the one piece of governance machinery that governed everything except itself: an unreviewed PR
+# could weaken the checker that enforces code-owner review and the weakening would certify clean.
+/scripts/idc_ruleset_check.py @llamallamaredpajama
 /.github/rulesets/ @llamallamaredpajama
 /.github/CODEOWNERS @llamallamaredpajama

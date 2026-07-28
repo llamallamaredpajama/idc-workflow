@@ -102,15 +102,24 @@ if ! tr '\n' ' ' < "$WORKFLOW" | grep -qiE 'MCP[^.]{0,180}(explicit|dedicated)[^
   echo "MISSING in WORKFLOW.md: MCP writer tools require an explicit adapter/matcher and are not claimed covered"
   fails=$((fails+1))
 fi
-for limitation in 'mint-at-transition' 'per-worktree|per-worker-worktree' 'Pi and Codex|Pi/Codex' 'finisher/merge helper|merge helper' 'identity binding' 'TTL (heartbeat )?renewal|heartbeat renewal'; do
+for limitation in 'minted per COMMAND, not per transition|mint-at-transition' 'per-worktree|per-worker-worktree|per worktree' 'Pi and Codex|Pi/Codex' 'finisher/merge helper|merge helper' 'identity binding' 'TTL (heartbeat )?renewal|heartbeat renewal'; do
   if ! grep -qiE "$limitation" "$WORKFLOW"; then
-    echo "MISSING in WORKFLOW.md: controlled-mode U8/U9 limitation /$limitation/"
+    echo "MISSING in WORKFLOW.md: controlled-mode limitation /$limitation/"
     fails=$((fails+1))
   fi
 done
 grep -qiE 'default[^.]{0,80}off|off[^.]{0,80}default' "$WORKFLOW" || { echo "MISSING in WORKFLOW.md: pathway enforcement defaults to off"; fails=$((fails+1)); }
 grep -qiE 'controlled[^.]{0,100}(opt-in|opt in)' "$WORKFLOW" || { echo "MISSING in WORKFLOW.md: controlled is opt-in"; fails=$((fails+1)); }
-grep -qiE 'tracked to U8/U9|U8/U9' "$WORKFLOW" || { echo "MISSING in WORKFLOW.md: limitations are tracked to U8/U9"; fails=$((fails+1)); }
+# The limitation list must state STATUS, not point at a unit of work. It used to say the six were
+# "tracked to U8/U9"; U8 and U9 MERGED on 2026-07-23 without closing any of them, so from that day the
+# sentence read as "handled" while every one was still open — and this lane REQUIRED that sentence,
+# so it held the stale claim in place. The invariant is now the honest form, in both directions.
+grep -qiE 'Every one of them is \*\*still open\*\*' "$WORKFLOW" \
+  || { echo "MISSING in WORKFLOW.md: the controlled-mode limitations must be stated as still open"; fails=$((fails+1)); }
+if grep -qiE 'U8/U9|tracked to U[0-9]' "$WORKFLOW"; then
+  echo "STALE in WORKFLOW.md: a controlled-mode limitation is deferred to a named unit of work — that pointer reads as 'handled' the moment the unit merges, whether or not the limitation closed"
+  fails=$((fails+1))
+fi
 if grep -qiE 'automerge|auto-merge' "$WORKFLOW"; then
   echo "STALE in WORKFLOW.md: automatic merge promise remains while merge is operator-performed"
   fails=$((fails+1))
@@ -133,7 +142,7 @@ have "recirculator.md" "idc_recirculator_layers.py|gate:.?no|gate:.?yes|gated Th
 absent "recirculator.md" "NO_RECIRCULATION|MINOR_AUTONOMOUS|MAJOR_GATED" "deleted verdict taxonomy"
 
 if [ "$fails" -eq 0 ]; then
-  echo "PASS: Pi role prompts and Path Gate docs align (operator-performed merge until a sanctioned helper; explicit transport coverage and U8/U9 controlled-mode limits; no retired vocab)"
+  echo "PASS: Pi role prompts and Path Gate docs align (operator-performed merge until a sanctioned helper; explicit transport coverage; the six controlled-mode limits stated as STILL OPEN rather than deferred to a merged unit; no retired vocab)"
   exit 0
 fi
 echo "FAIL: $fails prompt-alignment invariant(s) unmet"

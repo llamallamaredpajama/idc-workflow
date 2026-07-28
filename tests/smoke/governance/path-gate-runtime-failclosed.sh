@@ -114,6 +114,13 @@ for candidate in /usr/bin/python3 python3.9 python3.8 python3.7; do
 done
 [ -n "$REAL_OLD" ] || echo "note: no real <3.10 interpreter on this host — the shim lane carries the proof (never a silent skip)"
 
+# Every probe below runs under an explicit `timeout`, because the guard under test is a fail-CLOSED
+# bound: neutering it makes the hook HANG rather than redden, and a hang looks like a slow pass.
+# `timeout` is NOT on stock macOS (coreutils installs it; some setups provide only `gtimeout`), and
+# without it every probe returns EMPTY — which satisfies every `! is_deny` allow arm in this file.
+# Refuse to run at all rather than emit a verdict whose meaning depends on the host.
+command -v timeout >/dev/null 2>&1 || gov_fail "BLOCKED: \`timeout\` is not on PATH. This lane runs every probe under an explicit timeout so a hung hook REDS instead of looking like a slow pass; without it each probe returns empty, and empty output satisfies this file's allow assertions. Install coreutils and make sure \`timeout\` itself (not only \`gtimeout\`) is on PATH, then re-run."
+
 # gate_via <shim-dir-or-empty> <tool> <value> -> sets OUT / ERRTXT / RC
 gate_via() {
   local shim="$1" tool="$2" value="$3"
@@ -122,6 +129,13 @@ gate_via() {
   OUT="$(payload "$tool" "$value" | ( cd "$REPO" && PATH="$runpath" timeout 30 bash "$WRAPPER" "$GOV_PLUGIN" ) 2>"$WORK/err.txt")"
   RC=$?
   ERRTXT="$(cat "$WORK/err.txt")"
+  # A transport that could not be INVOKED (127 not-found / 126 not-executable) or that was KILLED by
+  # the timeout (124) must never reach an assertion: its empty stdout is indistinguishable from an
+  # ALLOW at every `! is_deny` arm. Treat all three as RED here, at the source.
+  case "$RC" in
+    124) gov_fail "the gate transport was KILLED by the 30s timeout — treat a timeout as RED, never as a slow pass: stderr=[$ERRTXT]" ;;
+    126|127) gov_fail "the gate transport could not be executed (exit $RC) — that is an environment failure, not an allow verdict; its empty output would otherwise read as ALLOW: stderr=[$ERRTXT]" ;;
+  esac
 }
 
 is_deny() { printf '%s' "$OUT" | grep -q '"permissionDecision" *: *"deny"'; }
@@ -130,6 +144,18 @@ is_deny() { printf '%s' "$OUT" | grep -q '"permissionDecision" *: *"deny"'; }
 
 assert_lane() {
   local lane="$1" shim="$2"
+
+  # CONTROL DENIES FIRST. Every allow-shaped assertion in this lane is written `! is_deny`, and EMPTY
+  # output satisfies it. So before any allow result is trusted, this lane must prove it can observe a
+  # DENY through the exact same transport, with actual bytes behind it. Without this control, a
+  # transport that emitted nothing at all — a missing `timeout`, a wrapper that exits 0 silently, a
+  # broken shim — would report every allow arm as PASSING while nothing was enforced, which is the
+  # F57 shape this file exists to pin. A control that cannot deny means the lane is INERT, and an
+  # inert lane must fail rather than certify.
+  set_mode app-locked
+  gate_via "$shim" Write "$REPO/src/x.ts"
+  [ -n "$OUT" ] || gov_fail "[$lane] CONTROL: the enforcing probe produced ZERO bytes — this lane cannot tell an allow from a transport that says nothing, so its allow arms would pass for the wrong reason: rc=$RC stderr=[$ERRTXT]"
+  is_deny || gov_fail "[$lane] CONTROL: the enforcing probe did not DENY, so no allow result from this lane is trustworthy: rc=$RC stdout=[$OUT] stderr=[$ERRTXT]"
 
   # A. an enforcing repo hard-denies rather than silently allowing.
   for mode in app-locked controlled; do

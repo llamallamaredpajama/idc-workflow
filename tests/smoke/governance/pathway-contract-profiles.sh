@@ -73,6 +73,68 @@ need_literal templates/WORKFLOW-config.yaml "$CONTROLLED_SENTENCE" 'must describ
 need_literal templates/WORKFLOW-config.yaml "$APP_LOCKED_SENTENCE" 'must describe the app-locked boundary honestly in WORKFLOW-config.yaml comments'
 need_literal templates/WORKFLOW-config.yaml "$FILESYSTEM_SENTENCE" 'must preserve honest filesystem semantics in WORKFLOW-config.yaml comments'
 
+# ── NEW-2: the controlled-mode limitation list must state STATUS, never point at a unit of work ────
+# The shipped template told every governed repo that six controlled-mode limitations were "tracked to
+# U8/U9". U8 and U9 MERGED on 2026-07-23 (PRs #176/#177) without closing any of the six. From that day
+# the sentence read to an operator as "handled" while all six were still open, and nothing anywhere
+# noticed — a unit pointer in shipped prose goes stale silently the moment the unit merges. These
+# assertions make the honest form load-bearing.
+#
+# CONTROL FIRST: the file must actually contain the limitations section, or every "does not say X"
+# assertion below would pass on an empty/renamed section for the wrong reason.
+LIMITS_HEADER='`controlled` currently has these documented limitations. Every one of them is **still open**'
+need_literal templates/WORKFLOW.md "$LIMITS_HEADER" \
+  'lost the controlled-mode limitations section (or its honest still-open framing) — without it the staleness assertions below are vacuous'
+
+# No shipped operator-facing surface may defer a live limitation to a NAMED unit of work. A unit
+# either ships and closes the limitation (then the line is deleted) or it does not (then the line must
+# say the limitation is open) — a pointer is the one form that can silently become false.
+for f in templates/WORKFLOW.md templates/WORKFLOW-config.yaml README.md; do
+  reject_literal "$f" 'U8/U9' \
+    'still defers a controlled-mode limitation to units U8/U9, which merged on 2026-07-23 without closing any of them — state the ACTUAL status instead of pointing at a unit'
+  reject_literal "$f" 'tracked to U' \
+    'still defers a live limitation to a named unit of work — that pointer reads as "handled" the moment the unit merges, whether or not the limitation closed'
+done
+
+# Each of the six limitations must be present AND marked open. A silently deleted line would otherwise
+# read as "closed" to an operator with no evidence that anything changed.
+for phrase in \
+  'Authorization is minted per COMMAND, not per transition' \
+  'One authorization per repository — not per worktree, not per branch' \
+  'Pi and Codex are not first-class lifecycle producers' \
+  'There is no sanctioned finisher/merge helper' \
+  'Identity binding is optional, not mandatory' \
+  'No TTL renewal'; do
+  need_literal templates/WORKFLOW.md "$phrase" \
+    "dropped the controlled-mode limitation '$phrase' — deleting a line an operator relied on reads as 'closed'; if it really closed, its claim must be removed together with the code that made it true"
+done
+# The one limitation with no per-tool coverage at all must say so in those words.
+need_literal templates/WORKFLOW.md '**Codex has no per-tool gate at all**' \
+  'must state plainly that Codex has no per-tool gate — scripts/install-codex.sh wires no hooks, so Codex is covered only by the git backstop'
+OPEN_COUNT="$(grep -c '\*\*Open\.\*\*' "$ROOT/templates/WORKFLOW.md")"
+[ "$OPEN_COUNT" -eq 6 ] || fail "templates/WORKFLOW.md — expected exactly 6 controlled-mode limitations marked **Open.**, found $OPEN_COUNT; a limitation that closed must have its whole line removed, and a new one must be marked open"
+
+# ── NEW-15: the spec's T3 traceability table must point at scenarios that EXIST ────────────────────
+# T3's "Blocking surfaces" column used to name surface CATEGORIES, so a reader tracing the threat
+# reached neither the code that answers it nor a test that proves it. It now names concrete scenario
+# files — which is only an improvement while those names stay true. A renamed or deleted scenario must
+# turn this red instead of quietly leaving the spec pointing at nothing.
+SPEC=docs/specs/idc-convergent-pathway-integrity-spec.md
+need_file "$SPEC"
+need_literal "$SPEC" '**T3 traceability.**' 'lost the T3 traceability table — T3 is unreachable from the threat matrix again'
+T3_SCENARIOS="$(sed -n '/\*\*T3 traceability\.\*\*/,/^$/p;/\*\*T3 traceability\.\*\*/,/^## /p' "$ROOT/$SPEC" \
+  | grep -oE '[a-z0-9-]+\.sh' | sort -u)"
+[ -n "$T3_SCENARIOS" ] \
+  || fail "$SPEC — the T3 traceability table names no scenario files; either it lost its rows or this extraction is broken (it must never pass by finding nothing)"
+T3_COUNT=0
+for s in $T3_SCENARIOS; do
+  [ -f "$ROOT/tests/smoke/governance/$s" ] \
+    || fail "$SPEC — the T3 traceability table cites tests/smoke/governance/$s, which does not exist; a spec pointing at a missing test is the exact rot this table was added to fix"
+  T3_COUNT=$((T3_COUNT + 1))
+done
+[ "$T3_COUNT" -ge 10 ] \
+  || fail "$SPEC — the T3 traceability table resolved only $T3_COUNT scenario(s); it named 13 when written, so rows have been dropped"
+
 # The config template must surface the stanza explicitly without enabling it by default yet.
 need_literal templates/WORKFLOW-config.yaml 'pathway_enforcement:' 'must mention the pathway_enforcement stanza'
 need_literal templates/WORKFLOW-config.yaml 'mode: off' 'must keep the scaffold non-enforcing by default for now'

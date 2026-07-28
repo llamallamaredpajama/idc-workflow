@@ -309,7 +309,8 @@ def _combo_subject(pos):
         return _mk(f"a raw `gh pr {verb}`", remediation,
                    "pr-merge" if verb == "merge" else f"pr-{verb}")
     # Keep distinct private kinds for precise diagnostics; policy denies every protected combo.
-    kind = {"delete": "project-delete", "item-delete": "project-item-delete",
+    kind = {"create": "project-create", "delete": "project-delete",
+            "item-delete": "project-item-delete",
             "item-create": "project-item-create", "field-create": "project-field-create",
             "field-delete": "project-field-delete", "close": "project-close",
             "mark-template": "project-mark-template",
@@ -468,6 +469,16 @@ def _ws_combos(command):
         return _mk("a raw `gh issue delete`", _CLOSE, "issue-delete")
     if _has(c, "gh issue edit"):
         return _mk("a raw `gh issue edit`", _ENGINE, "issue-edit")
+    # The issue-metadata mutations `_PROTECTED_COMBOS` has always covered on the POSITIONAL path but
+    # this backstop did not. A segment the shell lexer cannot parse (an unbalanced quote) falls here,
+    # so an unlexable `gh issue lock` reached the generic "could not be parsed" refusal instead of
+    # naming the single write door — a narrower backstop than the primary path it backs up. Same door
+    # and same private kind `_combo_subject` assigns, so the lexable and unlexable forms of one
+    # command now refuse identically. `unlock`/`unpin` cannot be matched by the `lock`/`pin` phrases:
+    # `_has` anchors each word on a non-word/non-dash boundary after whitespace.
+    for verb in ("lock", "unlock", "transfer", "pin", "unpin"):
+        if _has(c, f"gh issue {verb}"):
+            return _mk(f"a raw `gh issue {verb}`", _ENGINE, f"issue-{verb}")
     if _has(c, "gh pr close"):
         return _mk("a raw `gh pr close`", _FINISH, "pr-close")
     if _has(c, "gh pr edit"):
@@ -492,6 +503,14 @@ def _ws_combos(command):
         return _mk("a raw `gh project close` board mutation", _ENGINE, "project-close")
     if _has(c, "gh project mark-template"):
         return _mk("a raw `gh project mark-template` board mutation", _ENGINE, "project-mark-template")
+    # The board mutations `_PROTECTED_COMBOS` covers on the POSITIONAL path that this backstop did
+    # not — same gap class as the issue verbs above. `_combo_subject` gives all four the generic
+    # `project-mutation` kind, so they are matched together. Checked BEFORE the `item-edit` rule for
+    # readability only: `_has` is phrase-based, so `gh project edit` cannot match `gh project
+    # item-edit` (nor `gh project link` match `gh project unlink`) in either order.
+    for verb in ("item-archive", "copy", "unlink", "edit"):
+        if _has(c, f"gh project {verb}"):
+            return _mk("a raw `gh project` board mutation", _ENGINE, "project-mutation")
     if _has(c, "gh project item-edit") or _has(c, "gh project item-add"):
         return _mk("a raw `gh project item-{edit,add}` board mutation", _ENGINE, "project-mutation")
     return None

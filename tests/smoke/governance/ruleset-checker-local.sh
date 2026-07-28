@@ -30,6 +30,7 @@ fail() { echo "FAIL: $1"; exit 1; }
 # missing them would refuse for the wrong reason and mask a matcher regression (the checker would still
 # refuse on the governance gap even if the vector surface were wrongly certified).
 GOV='/scripts/idc_pathway_check.py @team
+/scripts/idc_ruleset_check.py @team
 /.github/rulesets/ @team
 /.github/CODEOWNERS @team'
 add_gov() { printf '%s\n' "$GOV" >> "$1/.github/CODEOWNERS"; }   # $1 = repo root
@@ -396,6 +397,7 @@ f46_refute() {
 /scripts/idc_validation_contract.py @team
 /scripts/idc_receipt_check.py @team
 /scripts/idc_pathway_check.py @team
+/scripts/idc_ruleset_check.py @team
 /.github/rulesets/ @team
 /.github/CODEOWNERS @team
 CO
@@ -429,6 +431,7 @@ cat > "$F46_DIR_OK/.github/CODEOWNERS" <<'CO'
 /scripts/idc_validation_contract.py @team
 /scripts/idc_receipt_check.py @team
 /scripts/idc_pathway_check.py @team
+/scripts/idc_ruleset_check.py @team
 /.github/rulesets/ @team
 /.github/CODEOWNERS @team
 CO
@@ -473,6 +476,7 @@ cat > "$F49_ROOT/CODEOWNERS" <<'CO'
 /scripts/idc_validation_contract.py @team
 /scripts/idc_receipt_check.py @team
 /scripts/idc_pathway_check.py @team
+/scripts/idc_ruleset_check.py @team
 /.github/rulesets/ @team
 /.github/CODEOWNERS @team
 CO
@@ -490,6 +494,7 @@ cat > "$F49_OK/CODEOWNERS" <<'CO'
 /scripts/idc_validation_contract.py @team
 /scripts/idc_receipt_check.py @team
 /scripts/idc_pathway_check.py @team
+/scripts/idc_ruleset_check.py @team
 /.github/rulesets/ @team
 /.github/CODEOWNERS @team
 /CODEOWNERS @team
@@ -514,6 +519,7 @@ cat > "$F50_ROOT/.github/CODEOWNERS" <<'CO'
 /scripts/idc_validation_contract.py @team
 /scripts/idc_receipt_check.py @team
 /scripts/idc_pathway_check.py @team
+/scripts/idc_ruleset_check.py @team
 /.github/rulesets/ @team
 /.github/CODEOWNERS @team
 CODEOWNERS
@@ -653,6 +659,7 @@ cat > "$F41_EMAIL/.github/CODEOWNERS" <<'CO'
 /scripts/idc_validation_contract.py dev@example.com
 /scripts/idc_receipt_check.py dev@example.com
 /scripts/idc_pathway_check.py dev@example.com
+/scripts/idc_ruleset_check.py dev@example.com
 /.github/rulesets/ dev@example.com
 /.github/CODEOWNERS dev@example.com
 CO
@@ -687,6 +694,7 @@ mk_target() {  # $1=dir  $2=OWNER/REPO for origin  $3=1 to write+commit a coveri
 /scripts/idc_validation_contract.py @team
 /scripts/idc_receipt_check.py @team
 /scripts/idc_pathway_check.py @team
+/scripts/idc_ruleset_check.py @team
 /.github/rulesets/ @team
 /.github/CODEOWNERS @team
 CO
@@ -786,6 +794,7 @@ cat > "$TGT_EVILHOST/.github/CODEOWNERS" <<'CO'
 /scripts/idc_validation_contract.py @team
 /scripts/idc_receipt_check.py @team
 /scripts/idc_pathway_check.py @team
+/scripts/idc_ruleset_check.py @team
 /.github/rulesets/ @team
 /.github/CODEOWNERS @team
 CO
@@ -817,6 +826,7 @@ for f53 in "file://github.com/$SANDBOX.git|scheme" "https://github.com/decoy/$SA
 /scripts/idc_validation_contract.py @team
 /scripts/idc_receipt_check.py @team
 /scripts/idc_pathway_check.py @team
+/scripts/idc_ruleset_check.py @team
 /.github/rulesets/ @team
 /.github/CODEOWNERS @team
 CO
@@ -844,6 +854,7 @@ cat > "$TGT_UNCOMMITTED/.github/CODEOWNERS" <<'CO'
 /scripts/idc_validation_contract.py @team
 /scripts/idc_receipt_check.py @team
 /scripts/idc_pathway_check.py @team
+/scripts/idc_ruleset_check.py @team
 /.github/rulesets/ @team
 /.github/CODEOWNERS @team
 CO
@@ -897,6 +908,7 @@ cat > "$TGT_FLIP/.github/CODEOWNERS" <<'CO'
 /scripts/idc_validation_contract.py @team
 /scripts/idc_receipt_check.py @team
 /scripts/idc_pathway_check.py @team
+/scripts/idc_ruleset_check.py @team
 /.github/rulesets/ @team
 /.github/CODEOWNERS @team
 CO
@@ -932,7 +944,7 @@ git -C "$TGT_CRLF" config commit.gpgsign false
 git -C "$TGT_CRLF" remote add origin "git@github.com:$SANDBOX.git"
 echo placeholder > "$TGT_CRLF/README.md"
 mkdir -p "$TGT_CRLF/.github"
-printf '/.github/workflows/ @team\r\n/scripts/hooks/ @team\r\n/scripts/idc_validation_contract.py @team\r\n/scripts/idc_receipt_check.py @team\r\n/scripts/idc_pathway_check.py @team\r\n/.github/rulesets/ @team\r\n/.github/CODEOWNERS @team\r\n' > "$TGT_CRLF/.github/CODEOWNERS"
+printf '/.github/workflows/ @team\r\n/scripts/hooks/ @team\r\n/scripts/idc_validation_contract.py @team\r\n/scripts/idc_receipt_check.py @team\r\n/scripts/idc_pathway_check.py @team\r\n/scripts/idc_ruleset_check.py @team\r\n/.github/rulesets/ @team\r\n/.github/CODEOWNERS @team\r\n' > "$TGT_CRLF/.github/CODEOWNERS"
 git -C "$TGT_CRLF" add -A && git -C "$TGT_CRLF" commit -q -m init >/dev/null 2>&1
 git -C "$TGT_CRLF" update-ref refs/remotes/origin/main "$(git -C "$TGT_CRLF" rev-parse HEAD)"
 git -C "$TGT_CRLF" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
@@ -982,7 +994,7 @@ import os, sys
 path, target = sys.argv[1], int(sys.argv[2])
 rules = ("/.github/workflows/ @team\n/scripts/hooks/ @team\n"
          "/scripts/idc_validation_contract.py @team\n/scripts/idc_receipt_check.py @team\n"
-         "/scripts/idc_pathway_check.py @team\n/.github/rulesets/ @team\n/.github/CODEOWNERS @team\n")
+         "/scripts/idc_pathway_check.py @team\n/scripts/idc_ruleset_check.py @team\n/.github/rulesets/ @team\n/.github/CODEOWNERS @team\n")
 os.makedirs(os.path.dirname(path), exist_ok=True)
 need = target - len(rules.encode("utf-8"))
 assert need >= 3, "target size is smaller than the covering rules"
@@ -1031,7 +1043,7 @@ import os, sys
 path, target = sys.argv[1], int(sys.argv[2])
 rules = ["/.github/workflows/ @team", "/scripts/hooks/ @team",
          "/scripts/idc_validation_contract.py @team", "/scripts/idc_receipt_check.py @team",
-         "/scripts/idc_pathway_check.py @team", "/.github/rulesets/ @team",
+         "/scripts/idc_pathway_check.py @team", "/scripts/idc_ruleset_check.py @team", "/.github/rulesets/ @team",
          "/.github/CODEOWNERS @team"]
 # Pad with many SHORT comment lines so there are thousands of CRLFs to undercount.
 body = "\r\n".join(rules) + "\r\n"
@@ -1101,7 +1113,7 @@ import os, sys
 path, target = sys.argv[1], int(sys.argv[2])
 rules = ("/.github/workflows/ @team\n/scripts/hooks/ @team\n"
          "/scripts/idc_validation_contract.py @team\n/scripts/idc_receipt_check.py @team\n"
-         "/scripts/idc_pathway_check.py @team\n/.github/rulesets/ @team\n/.github/CODEOWNERS @team\n")
+         "/scripts/idc_pathway_check.py @team\n/scripts/idc_ruleset_check.py @team\n/.github/rulesets/ @team\n/.github/CODEOWNERS @team\n")
 os.makedirs(os.path.dirname(path), exist_ok=True)
 body = rules
 pad = "# " + ("é" * 40) + "\n"                # 3 ASCII + 80 bytes of payload = 83 bytes, 43 points
@@ -1167,9 +1179,9 @@ if not problem:
 # unknown must still be refused by validate_codeowners_content.
 rules = ("/.github/workflows/ @team\n/scripts/hooks/ @team\n"
          "/scripts/idc_validation_contract.py @team\n/scripts/idc_receipt_check.py @team\n"
-         "/scripts/idc_pathway_check.py @team\n/.github/rulesets/ @team\n/.github/CODEOWNERS @team\n")
+         "/scripts/idc_pathway_check.py @team\n/scripts/idc_ruleset_check.py @team\n/.github/rulesets/ @team\n/.github/CODEOWNERS @team\n")
 surfaces = [".github/workflows", "scripts/hooks", "scripts/idc_validation_contract.py",
-            "scripts/idc_receipt_check.py", "scripts/idc_pathway_check.py", ".github/rulesets",
+            "scripts/idc_receipt_check.py", "scripts/idc_pathway_check.py", "scripts/idc_ruleset_check.py", ".github/rulesets",
             ".github/CODEOWNERS"]
 if not RC.validate_codeowners_content(".github/CODEOWNERS", rules, surfaces, None, None):
     print("UNKNOWN-SIZE-CERTIFIED: validate_codeowners_content certified a covering CODEOWNERS whose "
@@ -1411,6 +1423,7 @@ CO_RULES='/.github/workflows/ @team
 /scripts/idc_validation_contract.py @team
 /scripts/idc_receipt_check.py @team
 /scripts/idc_pathway_check.py @team
+/scripts/idc_ruleset_check.py @team
 /.github/rulesets/ @team
 /.github/CODEOWNERS @team'
 

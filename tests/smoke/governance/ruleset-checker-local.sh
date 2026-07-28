@@ -1357,7 +1357,13 @@ PATH="$W1_WALK:$PATH" WALK_MODE=short gh api 'repos/o/r/rulesets?per_page=100&pa
   && fail "W1m stub self-check: the SHORT first page must not carry our ruleset — that is the point of the case"
 PATH="$W1_WALK:$PATH" WALK_MODE=short gh api 'repos/o/r/rulesets?per_page=100&page=2' | grep -Fq 'idc-pathway-integrity' \
   || fail "W1m stub self-check: the short SECOND page must carry our ruleset"
-PATH="$W1_WALK:$PATH" python3 - "$PLUGIN/scripts" <<'PY' || fail "W1m: the checker's page walk does not hold its termination contract (F34/F36)"
+# HARD per-case alarm (F44), for the `endless` mode below. The stub's own "stop past page 150"
+# safeguard keys on the REQUESTED `page` parameter, so it only bounds a walker that is still
+# INCREMENTING. If `page += 1` in `_gh_json_all_pages` regresses, every request is page 1: the stub
+# never reaches 150, the walker never reaches its own ceiling, and this case HANGS THE LANE instead of
+# redding — and a hang reads as a slow pass, not as a failure. The alarm converts that into rc=142,
+# which the `|| fail` turns into a red case at a bounded 20s.
+PATH="$W1_WALK:$PATH" perl -e 'alarm shift @ARGV; exec @ARGV' 20 python3 - "$PLUGIN/scripts" <<'PY' || fail "W1m: the checker's page walk does not hold its termination contract (F34/F36)"
 import os, sys
 sys.path.insert(0, sys.argv[1])
 import idc_ruleset_check as RC

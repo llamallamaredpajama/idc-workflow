@@ -75,8 +75,19 @@ mutation:
     closes a `--default-branch` pointed at any locally-resolving commit-ish (a SHA, a PR head, a
     feature branch) and a stale `origin/HEAD` left by a default-branch rename — both resolve locally
     while pointing `git show` at bytes GitHub does not enforce.
-Any gh failure, non-JSON body, or missing field REFUSES (fail closed). DRY-RUN MAKES NO NETWORK CALL —
-it keeps the local-only resolution and prints a note that these two gates run at apply.
+Any gh failure, non-JSON body, or missing field REFUSES (fail closed). DRY-RUN MAKES NO API CALL — it
+keeps the local-only resolution and prints a note that these two gates run at apply.
+
+Stated precisely, because "no network" was too broad a guarantee for what the code does (F48): dry-run
+issues no `gh`/GitHub API call at all, and that is what the smoke lane asserts with a recording stub.
+It is not, however, a promise that no PACKET leaves the machine. Reading the committed CODEOWNERS is a
+`git show`, and in a PARTIAL clone (`--filter=blob:none` / `--filter=tree:0`) git materializes the
+promised object with its own lazy fetch. That fetch is deliberately left ENABLED — disabling it would
+turn every partial clone into a refusal and withdraw a checkout shape this module supports, and it
+buys no integrity because git hash-verifies objects on receipt, so a fetched blob is still the bytes
+the pinned oid names. What is guaranteed instead is that the fetch can never HANG the tool or stop it
+on an invisible prompt: `_git` runs every git call with `GIT_TERMINAL_PROMPT=0` and a hard timeout,
+and a failed materialization REFUSES rather than falling through to a lower-precedence CODEOWNERS.
 
 Live sandbox use (the only repos this run may mutate) is gated further by the caller — see
 `tests/live/pathway-github-integration.sh`, which refuses anything but a disposable sandbox.
@@ -184,9 +195,18 @@ def _normalize_remote(url: str):
     return "{}/{}".format(segs[0], segs[1]).lower()
 
 
+# A git read that never returns is a HANG, and a hung gate reads as a slow pass rather than as a
+# refusal. Every git call in this module is therefore bounded. The value is deliberately generous —
+# `git fsck` walks history (~1s on this repo, but minutes on a large monorepo) and a partial clone's
+# promised-object fetch crosses the network — because this bound exists to convert an INDEFINITE hang
+# into a refusal, not to police slow-but-working repositories.
+_GIT_TIMEOUT_SECONDS = 300
+
+
 def _git(repo_root: str, args: list, text=True):
     """Run `git -C <repo_root> <args>` through the ONE hardened door every git read in this module
-    uses. Raises OSError when git cannot be executed (callers fail closed on that).
+    uses. Raises OSError when git cannot be executed OR does not finish inside
+    `_GIT_TIMEOUT_SECONDS` (callers fail closed on that).
 
     REPLACEMENT OBJECTS ARE DISABLED HERE, and that is load-bearing, not hygiene. `git replace`
     installs a `refs/replace/<oid>` mapping that rewires OBJECT lookup: `git show` FOLLOWS it and
@@ -224,10 +244,31 @@ def _git(repo_root: str, args: list, text=True):
     not because either covers a gap the other leaves."""
     env = dict(os.environ)
     env["GIT_NO_REPLACE_OBJECTS"] = "1"
-    kwargs = {"capture_output": True, "env": env}
+    # NO INTERACTIVE PROMPT, EVER (F48). In a PARTIAL clone (`--filter=blob:none` / `--filter=tree:0`
+    # — shapes this module documents as supported) the committed-CODEOWNERS read materializes a
+    # PROMISED object with git's own lazy fetch, which crosses the network. Against a remote whose
+    # credential is not cached, git would stop on a username prompt — and because every call here runs
+    # with `capture_output=True`, that prompt is INVISIBLE: the operator sees a silent, indefinite
+    # hang in the middle of a protection install. Refusing the prompt makes that fetch fail fast, and
+    # `_committed_codeowners` turns a failed materialization into a REFUSE, which is the fail-closed
+    # direction. (The lazy fetch itself is deliberately NOT disabled — see the module docstring's
+    # network paragraph: `GIT_NO_LAZY_FETCH=1` would turn every partial clone into a refusal and
+    # withdraw support this module advertises. Git hash-verifies objects on receipt, so a fetched blob
+    # is still the bytes the pinned oid names.)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    kwargs = {"capture_output": True, "env": env, "timeout": _GIT_TIMEOUT_SECONDS}
     if text:
         kwargs["text"] = True
-    return subprocess.run(["git", "-C", repo_root, "--no-replace-objects"] + args, **kwargs)
+    try:
+        return subprocess.run(["git", "-C", repo_root, "--no-replace-objects"] + args, **kwargs)
+    except subprocess.TimeoutExpired:
+        # Re-raised as OSError ON PURPOSE. Every caller in this module already fails closed on OSError
+        # ("git could not be invoked" -> REFUSE), so bounding the hang needs no new arm at any call
+        # site — including any git read added here later, which is the same reason the replace-object
+        # flags live at this door rather than at the one call that reads content. A timeout is "we
+        # could not check", and that must never resolve to "certify it".
+        raise OSError("`git {}` did not finish within {}s and was killed".format(
+            " ".join(args[:2]), _GIT_TIMEOUT_SECONDS))
 
 
 def _repo_root_identity(repo_root: str):
@@ -374,6 +415,25 @@ def _normalize_newlines(text):
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
+class CommittedReadError(RuntimeError):
+    """`git show` could not MATERIALIZE a committed CODEOWNERS, for a reason that is not "this path is
+    not in the tree" (F45). Raised rather than folded into the `(None, None, None)` "nothing is
+    committed" answer, because those two mean opposite things to the caller: absence is a fact about
+    the tree, while an unreadable object is a failure to establish any fact at all."""
+
+
+# The ONLY stderr signatures that mean "git looked, and this path is genuinely not in that tree".
+# Anything else on a nonzero exit — a missing/undeliverable promisor object in a partial clone, a
+# corrupt object file, a refused lazy fetch, a permissions failure on the object store — is a failure
+# to READ, and is refused instead of being read as "no CODEOWNERS here" (F45). Matching on the
+# ABSENCE signature rather than blocklisting failure signatures is the fail-closed direction: an
+# unrecognized message refuses.
+_GIT_PATH_ABSENT_SIGNATURES = (
+    "does not exist in",              # `fatal: path 'X' does not exist in 'REF'`
+    "exists on disk, but not in",     # `fatal: path 'X' exists on disk, but not in 'REF'`
+)
+
+
 def _committed_codeowners(repo_root: str, ref: str):
     """`(relpath, text, size_bytes)` of the CODEOWNERS COMMITTED at `ref` (first of the GitHub-honored
     locations), or `(None, None, None)` if none is committed. Reads via `git show <ref>:<relpath>` —
@@ -385,21 +445,48 @@ def _committed_codeowners(repo_root: str, ref: str):
     `size_bytes` is the length of the RAW `git show` stdout — the exact byte count GitHub measures
     against its 3 MB load limit. It is taken from the bytes, never from the decoded string, because
     `len(text)` counts CODE POINTS: a multi-byte UTF-8 CODEOWNERS would undercount and could certify a
-    file GitHub silently refuses to load."""
+    file GitHub silently refuses to load.
+
+    A NONZERO `git show` IS NOT AUTOMATICALLY "NOT COMMITTED HERE" (F45). CODEOWNERS locations are a
+    PRECEDENCE list, so reading a failed read as an absent file does not merely lose information — it
+    ADVANCES to a lower-precedence file and certifies that one instead. In a sparse + partial
+    (blobless/treeless) clone whose `.github/` blob is absent and whose promised-object fetch fails,
+    `.github/CODEOWNERS` would read as absent, root `CODEOWNERS` would be validated in its place, the
+    working-tree comparison would agree (the sparse checkout has no `.github/CODEOWNERS` either), and
+    apply would print `OK` while GitHub enforces the higher-precedence file this module never read.
+    Only git's own "path is not in that tree" signatures end the search; every other failure raises
+    `CommittedReadError` so the caller refuses."""
     for rel in RC.CODEOWNERS_RELPATHS:
         try:
             # bytes — decode ourselves, strict UTF-8. Goes through `_git`, which DISABLES replacement
             # objects: a `refs/replace/*` ref would otherwise make this read return a substituted
             # commit's bytes while the tip check saw the real oid and passed.
             out = _git(repo_root, ["show", "{}:{}".format(ref, rel)], text=False)
-        except OSError:
-            return None, None, None
+        except OSError as exc:
+            raise CommittedReadError(
+                "git could not be run to read the CODEOWNERS committed at {} in the checkout at {} "
+                "({}) — the bytes GitHub enforces are read out of that object store, so a store this "
+                "tool cannot read is refused rather than reported as having no CODEOWNERS.".format(
+                    ref[:12], repo_root, exc))
         if out.returncode == 0:
             raw = out.stdout or b""
             try:
                 return rel, raw.decode("utf-8"), len(raw)
             except UnicodeDecodeError:
                 return rel, None, len(raw)
+        # Scrubbed AT THE READ, per `CS.scrub`'s contract — this is the one place these bytes are
+        # read, and they feed both the classification below and the refusal message.
+        stderr = CS.scrub((out.stderr or b"").decode("utf-8", "replace"))
+        if not any(sig in stderr for sig in _GIT_PATH_ABSENT_SIGNATURES):
+            raise CommittedReadError(
+                "the CODEOWNERS candidate {!r} committed at {} in the checkout at {} could NOT be "
+                "materialized — `git show` exited {} without reporting the path as absent from that "
+                "tree ({}). This is a failure to READ, not proof the file is not committed: treating "
+                "it as absent would fall through to a LOWER-PRECEDENCE CODEOWNERS and certify that "
+                "one, while GitHub keeps enforcing this higher-precedence file. In a partial "
+                "(blobless/treeless) clone, run `git fetch` for the missing object, or validate from "
+                "a full clone.".format(
+                    rel, ref[:12], repo_root, out.returncode, stderr.strip()[:200] or "no stderr"))
     return None, None, None
 
 
@@ -508,10 +595,11 @@ def _existing_ruleset_id(owner_repo: str):
 
 
 # --- LIVE apply-path gates ------------------------------------------------------------------------
-# Everything below reaches the network and therefore runs ONLY under --apply. Dry-run stays a purely
-# local, no-network plan (a documented contract of this tool) and prints a note saying these gates run
-# at apply. Each gate FAILS CLOSED: any gh failure, non-JSON body, or missing field REFUSES rather than
-# assuming the permissive answer.
+# Everything below calls the GitHub API and therefore runs ONLY under --apply. Dry-run stays a purely
+# local plan that makes no API call (a documented contract of this tool — see the module docstring for
+# why "no API call" is the honest form of that guarantee and "no network" was not) and prints a note
+# saying these gates run at apply. Each gate FAILS CLOSED: any gh failure, non-JSON body, or missing
+# field REFUSES rather than assuming the permissive answer.
 
 # An effective grant that can actually satisfy `require_code_owner_review`. GitHub's
 # `/collaborators/{user}/permission` reports the legacy `permission` field (admin|write|read|none) and
@@ -853,9 +941,10 @@ def main(argv=None) -> int:
     # pin it to the exact commit live on GitHub. `_default_branch_ref` above only proves the ref
     # resolves LOCALLY — a `--default-branch` naming a SHA/PR head/feature branch, or a stale
     # `origin/HEAD` left behind by a default-branch rename, both resolve cleanly while pointing at
-    # bytes GitHub does not enforce. Runs BEFORE the `git show` read below so the committed CODEOWNERS
-    # that gets validated is the enforced one. Dry-run keeps today's local-only resolution and makes NO
-    # network call.
+    # bytes GitHub does not enforce. It gates the same oid the committed bytes are read from, and
+    # nothing is certified until it passes, so the CODEOWNERS that gets VALIDATED is still the
+    # enforced one even though the read below now happens first (F47). Dry-run keeps today's
+    # local-only resolution and makes NO API call.
     # Resolve the validation ref to an IMMUTABLE oid ONCE, and use that oid for both the live tip
     # comparison and the committed-content read below. A symbolic ref re-read per call is a
     # check-then-act window between "the commit we vouched for" and "the commit we read bytes from";
@@ -880,6 +969,25 @@ def main(argv=None) -> int:
         print("REFUSE: {}".format(chain_problem), file=sys.stderr)
         return 1
 
+    # F47: READ the committed bytes HERE — immediately after the fsck that certifies them, with
+    # nothing in between. The fsck above re-hashes the object chain, but that verdict is only as good
+    # as the interval between the check and the read it certifies. The read used to sit AFTER the two
+    # live GitHub round-trips below, which put a network-latency-sized window between "this store
+    # verifies" and "these are the bytes": an actor holding the `.git` write capability that the fsck
+    # gate exists to defend against could overwrite the loose blob or tree under its existing oid
+    # DURING those round-trips, and `git show` — which does not re-hash on read — would then hand back
+    # forged covering bytes that the working-tree comparison happily matches, printing `OK`.
+    #
+    # Only the READ moves. Every gate below stays exactly where it was, so the refusal an operator
+    # sees for a stale tip, an oversized file, an absent CODEOWNERS or a divergent working tree is
+    # unchanged in both wording and order; nothing is certified before the live gates run. Reading
+    # early is safe precisely BECAUSE the bytes are only held in memory until those gates pass.
+    try:
+        committed_rel, committed_text, committed_size = _committed_codeowners(args.repo_root, ref_oid)
+    except CommittedReadError as exc:
+        print("REFUSE: {}".format(exc), file=sys.stderr)
+        return 1
+
     if args.apply:
         live_problem = live_default_branch_problem(
             args.repo, args.repo_root, ref, args.default_branch, local_sha=ref_oid)
@@ -887,7 +995,6 @@ def main(argv=None) -> int:
             print("REFUSE: {}".format(live_problem), file=sys.stderr)
             return 1
 
-    committed_rel, committed_text, committed_size = _committed_codeowners(args.repo_root, ref_oid)
     # GitHub does not load a CODEOWNERS of 3 MB or more AT ALL, so an oversized file would install
     # require_code_owner_review over ZERO code owners. Gate the raw committed byte size FIRST — ahead
     # of the readability and working-tree-divergence checks — so the refusal names the real reason
@@ -963,7 +1070,7 @@ def main(argv=None) -> int:
         print("(dry-run: pass --apply to create/update; nothing was changed)")
         print("  note: --apply additionally binds validation to {}'s LIVE default branch (and its "
               "current tip) and live-verifies every CODEOWNERS owner principal has write access. "
-              "Dry-run makes no network calls, so neither is checked here.".format(args.repo))
+              "Dry-run makes no GitHub API calls, so neither is checked here.".format(args.repo))
         return 0
 
     # Live mutation — idempotent: PUT to update an existing same-name ruleset, else POST to create.

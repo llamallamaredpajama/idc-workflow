@@ -678,7 +678,14 @@ printf '%s\n' "$out" | grep -qiE '^OK: ruleset .* updated' \
 #       PAGE CEILING rather than the page size, so a message naming the wrong bound cannot pass.
 #       The stub stops serving past page 150 (well beyond the ceiling) and ERRORS: removing the ceiling
 #       makes this case fail on THAT message instead of hanging the lane.
-PATH="$STUB_BIN:$PATH" STUB_RULESETS_ENDLESS=1 python3 - "$PLUGIN/scripts" "$REPO" <<'PY' \
+#       HARD per-case alarm (F44). The stub's own "stop past page 150" safeguard keys on the REQUESTED
+#       `page` parameter, so it only bounds a walker that is still INCREMENTING. If `page += 1` in
+#       `_gh_json_all_pages` regresses, every request is page 1: the stub never reaches 150, the
+#       walker never reaches its own ceiling, and this case HANGS THE LANE instead of redding — and a
+#       hang reads as a slow pass, not as a failure. The alarm converts that into rc=142, which the
+#       `|| fail` below turns into a red case at a bounded 20s.
+PATH="$STUB_BIN:$PATH" STUB_RULESETS_ENDLESS=1 \
+  perl -e 'alarm shift @ARGV; exec @ARGV' 20 python3 - "$PLUGIN/scripts" "$REPO" <<'PY' \
   || fail "W4f: the page walk did not refuse a listing that never terminates (F36)"
 import sys
 sys.path.insert(0, sys.argv[1])

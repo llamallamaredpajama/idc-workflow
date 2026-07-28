@@ -353,6 +353,35 @@ def _witness_age_seconds(validated_at, now_epoch):
     return now_epoch - calendar.timegm(parsed)
 
 
+def _record_validated_at(rec) -> str:
+    """A witness record's `validated_at` as a STRING, always — `""` when the record does not carry a
+    usable one (F43).
+
+    `_witness_age_seconds` is carefully defensive about a stamp it cannot PARSE, but the eviction SORT
+    one caller up was not defensive about a stamp of the wrong TYPE. `sorted()` on a key of
+    `(validated_at or "", digest)` compares tuples element-wise, so a record whose `validated_at` is a
+    JSON number, object or array compares `int`/`dict`/`list` against `str` and raises an uncaught
+    `TypeError`. That crash lands in the WORST place: `record_planning_witness` has already replaced
+    the receipt on disk by then and the witness store is written after eviction, so the new receipt is
+    left UNWITNESSED and a later Build refuses it. Both value-shaped reads of the field go through
+    here, so the shape is normalized once rather than at each call site.
+
+    A NON-DICT record normalizes too. The store's container and its `witnesses` map are shape-checked
+    on read, but the individual records inside were not, so `rec.get(...)` on a hand-edited store
+    raised `AttributeError` on the same line for the same reason.
+
+    `""` is deliberately the answer for every unusable shape, rather than `str(rec)`: it sorts OLDEST
+    and `_witness_age_seconds` reads it as unparseable, so such a record is evicted first and is never
+    grace-protected — identical to the treatment an unparseable STRING stamp already gets, and the
+    same fail-closed direction (an evicted version is refused stale, never false-accepted). Reaching
+    any of this needs a hand-edited or corrupted store: this module is the only writer, and `_now()`
+    has only ever emitted a string."""
+    if not isinstance(rec, dict):
+        return ""
+    stamp = rec.get("validated_at")
+    return stamp if isinstance(stamp, str) else ""
+
+
 def _evict_stale_versions(bucket: dict, receipt_path: str) -> None:
     """Bound the per-path planning-witness bucket (F31). `record_planning_witness` ADDS a version per
     receipt byte digest so a same-label rerun does not clobber the one an in-flight Build still borrows
@@ -388,7 +417,7 @@ def _evict_stale_versions(bucket: dict, receipt_path: str) -> None:
     now_epoch = time.time()
     # newest first by validated_at; digest is a stable tiebreaker for records written the same second.
     ordered = [dg for dg, _rec in sorted(
-        bucket.items(), key=lambda kv: (kv[1].get("validated_at") or "", kv[0]), reverse=True)]
+        bucket.items(), key=lambda kv: (_record_validated_at(kv[1]), kv[0]), reverse=True)]
     # (b) FIRST and on its own counter, then (a) unioned in. Seeding `keep` with the live digest and
     # then filling to RETAIN meant the live version CONSUMED one of the newest-RETAIN slots, so the
     # retained set was `live` + newest-(RETAIN-1) rather than the documented `live` UNION newest-RETAIN
@@ -407,7 +436,7 @@ def _evict_stale_versions(bucket: dict, receipt_path: str) -> None:
             break
         if dg in keep:
             continue
-        age = _witness_age_seconds(bucket[dg].get("validated_at"), now_epoch)
+        age = _witness_age_seconds(_record_validated_at(bucket[dg]), now_epoch)
         # `0 <= age`: a FUTURE `validated_at` (clock skew, a hand-edited store, a record written on a
         # machine running fast) yields a NEGATIVE age, which satisfies `age <= GRACE` and would let a
         # skewed record claim grace protection indefinitely — and, worse, consume hard-cap slots ahead

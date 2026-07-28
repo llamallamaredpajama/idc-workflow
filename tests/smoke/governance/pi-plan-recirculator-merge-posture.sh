@@ -65,8 +65,19 @@ import re, sys
 # Patterns are defined ONCE and shared by BOTH the self-test and the real scan, so a self-test failure
 # is faithful proof that the very regexes doing the real scan have rotted.
 REQUIRED = [
+    # EVERY branch must tie the operator to a MERGE (F46). The original first branch was a bare
+    # `operator[- ]performed`, and `operator (performs|must perform)` was equally unanchored, so any
+    # unrelated "the operator-performed review is required" / "the operator performs the verification"
+    # satisfied this check. A persona that lost its operator-merge handoff but kept some other
+    # operator-performed phrase would still have passed REQUIRED[0]. Proximity is bounded by
+    # `[^.]{0,80}` (sentence-local, like REQUIRED[1]) and asserted in BOTH orders, because the real
+    # personas write it both ways ("the integration merge is operator-performed" and "the operator
+    # performs the merge"). The known-BAD fixtures below pin the tightening.
     ("operator-performed merge",
-     re.compile(r"(?i)operator[- ]performed|operator (performs|must perform|merges)")),
+     re.compile(r"(?i)\bmerge\b[^.]{0,80}operator[- ]performed"
+                r"|operator[- ]performed[^.]{0,80}\bmerge\b"
+                r"|operator (performs|must perform)[^.]{0,80}\bmerge\b"
+                r"|operator merges")),
     ("prohibition on a raw/self-directed/automatic merge command",
      re.compile(r"(?i)(do not|don't|never)[^.]{0,120}\b(raw|self[- ]directed|automatic)\b"
                 r"[^.]{0,80}\bmerge\b")),
@@ -124,6 +135,15 @@ for idx, sample in FORBIDDEN_KNOWN_BAD:
 # that omits the load-bearing word, so a regex degraded to `.*` is caught too.
 REQUIRED_KNOWN_BAD = [
     (0, "the finisher merges the branch when green"),             # no operator anywhere
+    # F46: an operator phrase with NO merge in it must NOT satisfy REQUIRED[0]. These are the exact
+    # shapes the pre-F46 regex waved through — a persona could drop its merge handoff entirely, keep
+    # one of these sentences, and still pass. One fixture per unanchored branch that was tightened.
+    (0, "the operator-performed review is required before the gate closes"),
+    (0, "the operator performs the verification and records the receipts"),
+    (0, "the operator must perform the checks listed above"),
+    # The proximity bound is load-bearing too: a merge mentioned in a DIFFERENT sentence is not the
+    # operator-merge mandate. A period ends the `[^.]{0,80}` run, so this must not match either.
+    (0, "the operator performs the review. the finisher handles the merge"),
     (1, "do not force-push the branch"),                          # a prohibition, but not about merge
 ]
 for idx, sample in REQUIRED_KNOWN_BAD:

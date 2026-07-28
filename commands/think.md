@@ -50,7 +50,23 @@ stay exactly where the manifest left them (their durable disposition is not your
    web, send it to a throwaway subagent / Workflow fan-out (per the runtime adapter) and
    fold back the digest. **Never spawn a durable worker** and never let research stall the
    conversation — the budget here is zero teammates.
-3. **Crystallize: function-first, then PRD + TRD.** Capture what the user gets and how it
+3. **Divergent risk pass — opt-in, and only when the operator asks.** This pass is **never run
+   by default and has no trigger predicate**: it fires only when the operator asks you to
+   stress-test the idea (or names the risk pass) during the interview. When asked, fan out
+   **3–5 bounded branches**, each carrying a **distinct lens** drawn from **user-confusion**,
+   **broken-expectation**, **churn**, **promised-but-missing** (plus at most one lens the
+   operator names). Every branch is **read-only** (it reads the repo, the docs, the web; it
+   writes no file, no tracker state, and no board field) and is a throwaway fan-out exactly
+   like step 2's research — **zero durable workers**, no exceptions. Each branch returns its
+   candidates in the fixed four-field shape
+   `{promise, failure_mode, observable_evidence, executable_check}` — byte-identical to the
+   candidate shape Plan's fixed falsifier (`idc_validation_risk_gate.py`) already enforces, so
+   a risk surfaced here carries into a Plan-stage gate without translation. Fold the branch
+   **digests** (never whole branch bodies) into the **PRD draft before the human gate** — they
+   are input to what the operator gates in Output step 3, never a finding that routes around
+   it. Nothing here is machine-enforced: the pass is human-invoked and its entire output is
+   human-gated, which is exactly the Think stage's standard. Discovery is never authority.
+4. **Crystallize: function-first, then PRD + TRD.** Capture what the user gets and how it
    behaves, organized by domain where natural — function FIRST, not an implementation task
    list. Then draft the **two gated requirements docs**: the **PRD** (the user-facing *what*)
    and the **TRD** (the technical *how* — the `spec` layer). The consideration records the

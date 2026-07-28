@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """idc_review_seen_ledger.py — the fixed per-PR review-round seen-fingerprint ledger (U7 Item 1).
 
-The review→fix→re-review loop converges only when new findings are deduplicated against everything
+The review→fix→re-review loop converges only when new findings are recognized against everything
 ever SEEN — including rejected, refuted, and below-floor candidates — otherwise a finding dropped in
-round 1 resurfaces in round 3 as "new", recycles the attempt counter, and re-files duplicate routed
-board work. This module owns the durable per-PR ledger that closes that loop:
+round 1 resurfaces in round 3 as "new" work and re-files a duplicate of board work that is already
+routed. (There is no mechanical review attempt counter for it to recycle; the attempt ceiling is
+prose guidance to the finisher.) Recognized is not the same as dropped: what a seen fingerprint may
+NOT do is become a duplicate of ROUTED work, and only the board can say what is routed — see
+suppressible_fingerprints. This module owns the durable per-PR ledger that closes that loop:
 
     docs/workflow/code-reviews/pr-<pr>-seen-fingerprints.json
 
@@ -41,10 +44,20 @@ DISPOSITIONS = ("filed", "confirmed", "suppressed-seen", "below-floor", "rejecte
 # suppressed-seen — are decided and written by the fixed-code filer only; "suppressed-seen" in
 # particular buys a routing-gap exemption at finish, so a model-authored round must not mint it.
 ROUND_DISPOSITIONS = ("below-floor", "rejected", "refuted")
-# Prior dispositions that make a resurfaced fingerprint suppressible: terminal, non-routable
-# outcomes only. "filed" is deliberately absent — it records a routing ATTEMPT, so a fingerprint
-# whose filing failed stays retryable on the next run; actually-filed items remain idempotent via
-# the filer's board-key dedupe, which reads the board itself, not this ledger.
+# Which DOOR wrote an entry's current disposition. Audit provenance, carried onto the recirculation
+# ticket a resurfaced fingerprint is filed as, so "why is this back?" is answerable from the board.
+SOURCES = ("filer", "round")
+# Prior dispositions that make a resurfaced fingerprint a SUPPRESSION CANDIDATE: terminal,
+# non-routable outcomes only. "filed" is deliberately absent — it records a routing ATTEMPT, so a
+# fingerprint whose filing failed stays retryable on the next run; actually-filed items remain
+# idempotent via the filer's board-key dedupe, which reads the board itself, not this ledger.
+#
+# CANDIDATE, not verdict: every disposition here is NON-ROUTABLE, i.e. none of them ever put work on
+# the board. Suppressing on one of them therefore prevents no duplicate — it deletes the only routing
+# the finding would ever get, and `idc_git_finish.routing_gap` then exempts the resulting
+# `suppressed-seen` entry, so the merge gate reports converged over work that silently vanished.
+# Spec §8 forbids re-filing duplicate ROUTED work, so suppression requires the BOARD to corroborate
+# that the work really is routed — see suppressible_fingerprints.
 TERMINAL_NON_ROUTABLE = ("suppressed-seen", "below-floor", "rejected", "refuted", "confirmed")
 # The one disposition that records an OWED routing attempt rather than a settled outcome. An entry
 # sitting at "filed" whose ticket is not on the board is a PENDING RETRY: the next filer run owes it
@@ -162,15 +175,41 @@ def seen_fingerprints(ledger: dict[str, Any] | None) -> set[str]:
     return {entry["fingerprint"] for entry in ledger.get("entries", [])}
 
 
-def suppressible_fingerprints(ledger: dict[str, Any] | None) -> set[str]:
-    """The fingerprints a filer run may suppress as resurfaced: seen before AND last recorded in a
-    terminal non-routable disposition. A bare "filed" never suppresses — otherwise a failed filing
-    plus its own prescribed retry would permanently strand the finding as never-routed while the
-    routing gap reads it as converged."""
+def suppressible_fingerprints(ledger: dict[str, Any] | None, routed_lookup: Any = None,
+                              fingerprints: Any = None) -> set[str]:
+    """The fingerprints a filer run may suppress as an ALREADY-ROUTED resurfacing: seen before, not
+    sitting at the pending-retry `filed` state, AND corroborated by the board as actually routed.
+
+    Board corroboration is the whole rule. Every disposition in TERMINAL_NON_ROUTABLE is a
+    NON-ROUTED outcome — `confirmed` is a major/blocker the implementer must fix (the filer never
+    files those), and `below-floor`/`rejected`/`refuted` are a round record's judgement that the
+    candidate was not work. Suppressing on any of them prevents no duplicate: nothing was ever
+    routed, so the suppression deletes the only board item the finding would ever get, while
+    `idc_git_finish.routing_gap` exempts the resulting `suppressed-seen` entry and the merge gate
+    reports converged over work that vanished. Two live consequences of that rule:
+
+      * a `confirmed` (major) finding a later round downgrades to minor is FILED, carrying its
+        provenance — if it is genuinely not worth doing, a human closes the ticket visibly;
+      * a round record and a live verdict finding for the SAME fingerprint is a self-contradiction
+        (the round says "not work", the verdict says "minor/nit work"), so the round-sourced
+        disposition cannot strand it — which is also what makes the filer→recorder ORDER stop being
+        load-bearing at the verdict gate.
+
+    `routed_lookup` is a set or a zero-arg callable (the board read) resolved AT MOST ONCE and ONLY
+    when a suppression candidate actually exists; `fingerprints`, when given, restricts the scan to
+    the fingerprints the current verdict carries, so an ordinary round costs no board read at all.
+    No lookup / an unreadable board ⇒ nothing corroborated ⇒ nothing suppressed (fail closed toward
+    ROUTING the work, never toward dropping it)."""
     if not ledger:
         return set()
-    return {entry["fingerprint"] for entry in ledger.get("entries", [])
-            if entry.get("last_disposition") in TERMINAL_NON_ROUTABLE}
+    limit = None if fingerprints is None else set(fingerprints)
+    candidates = {entry["fingerprint"] for entry in ledger.get("entries", [])
+                  if entry.get("last_disposition") in TERMINAL_NON_ROUTABLE
+                  and (limit is None or entry["fingerprint"] in limit)}
+    if not candidates:
+        return set()
+    routed = frozenset(routed_lookup() if callable(routed_lookup) else (routed_lookup or ()))
+    return candidates & routed
 
 
 def _refuse_pending_retry_downgrade(by_fingerprint: dict[str, Any],
@@ -215,7 +254,8 @@ def _refuse_pending_retry_downgrade(by_fingerprint: dict[str, Any],
 
 def record_observations(repo: str, pr: int, observations: list[dict[str, Any]],
                         model_authored: bool = False,
-                        routed_lookup: Any = None) -> set[str]:
+                        routed_lookup: Any = None,
+                        source: str = "filer") -> set[str]:
     """Record one observation per (fingerprint, disposition) into the per-PR ledger — seen_count
     increments, dispositions update, new fingerprints append. Returns the set of fingerprints that
     were already seen BEFORE this recording (the dedupe set callers suppress against). The load
@@ -224,7 +264,14 @@ def record_observations(repo: str, pr: int, observations: list[dict[str, Any]],
     `model_authored=True` marks the coordinator's `record-round` door and enables the pending-retry
     downgrade guard above; `routed_lookup` supplies (as a set or a zero-arg callable) the
     board-corroborated fingerprints that exempt it. The guard runs BEFORE any mutation, so a refused
-    round leaves the ledger byte-for-byte unchanged."""
+    round leaves the ledger byte-for-byte unchanged.
+
+    `source` ("filer" | "round") and an observation's optional `severity` are recorded as AUDIT
+    PROVENANCE on the entry (`last_source` / `first_severity` / `last_severity`): they answer which
+    door wrote the current disposition and what severity the finding carried when it did, so a
+    resurfaced fingerprint filed in a later round can name — on the ticket itself — what it was
+    before. They are provenance only; they decide nothing (suppression is decided by board
+    corroboration in suppressible_fingerprints)."""
     ledger = read_ledger(repo, pr)
     if ledger is None:
         ledger = {"schema_version": SCHEMA_VERSION, "pr": int(pr), "entries": []}
@@ -233,9 +280,12 @@ def record_observations(repo: str, pr: int, observations: list[dict[str, Any]],
     if model_authored:
         _refuse_pending_retry_downgrade(by_fingerprint, observations, routed_lookup)
     now = _utc_now()
+    if source not in SOURCES:
+        raise SeenLedgerError(f"seen-fingerprint observation source {source!r} is not one of {SOURCES}")
     for obs in observations:
         fingerprint = str(obs.get("fingerprint", "")).strip()
         disposition = str(obs.get("disposition", "")).strip()
+        severity = str(obs.get("severity", "")).strip()
         if not fingerprint:
             raise SeenLedgerError("seen-fingerprint observation fingerprint must be non-empty")
         if disposition not in DISPOSITIONS:
@@ -244,12 +294,19 @@ def record_observations(repo: str, pr: int, observations: list[dict[str, Any]],
         entry = by_fingerprint.get(fingerprint)
         if entry is None:
             entry = {"fingerprint": fingerprint, "seen_count": 1,
-                     "first_seen": now, "last_seen": now, "last_disposition": disposition}
+                     "first_seen": now, "last_seen": now, "last_disposition": disposition,
+                     "last_source": source}
+            if severity:
+                entry["first_severity"] = entry["last_severity"] = severity
             by_fingerprint[fingerprint] = entry
         else:
             entry["seen_count"] = int(entry["seen_count"]) + 1
             entry["last_seen"] = now
             entry["last_disposition"] = disposition
+            entry["last_source"] = source
+            if severity:
+                entry.setdefault("first_severity", severity)
+                entry["last_severity"] = severity
     ledger["entries"] = [by_fingerprint[key] for key in sorted(by_fingerprint)]
     _atomic_write_json(ledger_path(repo, pr), ledger)
     return prior
@@ -282,12 +339,13 @@ def _validate_round(value: Any) -> tuple[int, list[dict[str, Any]]]:
     return pr, observations
 
 
-def _board_routed_fingerprints(repo: str, tracker: str | None) -> frozenset[str]:
+def board_routed_fingerprints(repo: str, tracker: str | None) -> frozenset[str]:
     """The fingerprints whose recirculation ticket the BOARD actually carries — the corroboration
-    set for the pending-retry guard. Delegates to the filer's existing dedupe-key readers (one
-    implementation of "what is already routed", shared with idc_git_finish.routing_gap); imported
-    lazily because the filer imports this module. Any read failure ⇒ empty set ⇒ the guard refuses
-    (fail closed), never a downgrade granted on an unverifiable board."""
+    set for the pending-retry guard AND for suppressible_fingerprints. Delegates to the filer's
+    existing dedupe-key readers (one implementation of "what is already routed", shared with
+    idc_git_finish.routing_gap); imported lazily because the filer imports this module. Any read
+    failure ⇒ empty set ⇒ nothing is corroborated, so the guard refuses and nothing is suppressed
+    (fail closed toward routing the work), never a downgrade granted on an unverifiable board."""
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     try:
         import idc_file_findings as FF  # noqa: PLC0415 — lazy: FF imports this module at load
@@ -308,8 +366,8 @@ def _cmd_record_round(args: argparse.Namespace) -> int:
         raise SeenLedgerError(f"could not read round record {args.round}: {exc}") from exc
     pr, observations = _validate_round(value)
     prior = record_observations(
-        args.repo, pr, observations, model_authored=True,
-        routed_lookup=lambda: _board_routed_fingerprints(args.repo, args.tracker))
+        args.repo, pr, observations, model_authored=True, source="round",
+        routed_lookup=lambda: board_routed_fingerprints(args.repo, args.tracker))
     resurfaced = sum(1 for obs in observations if obs["fingerprint"] in prior)
     print(f"idc-review-seen-ledger: recorded {len(observations)} candidate(s) for PR #{pr} "
           f"({resurfaced} previously seen) at {ledger_relpath(pr)}")

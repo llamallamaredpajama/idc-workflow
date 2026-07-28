@@ -139,10 +139,17 @@ def _gate(payload, plugin_root):
     key = f"verdict-gate.{payload.get('session_id', '?')}.{payload.get('agent_id', '?')}"
     if ok:
         H.counter_clear(key)
-        # On a valid verdict, fire the filer to route its nits/deferrals to the board, THEN persist
-        # the round's pre-floor candidates. That order is the coordinator's documented ordering
-        # (record after the filer, so first-time findings are not marked already-seen) — enforced
-        # here by fixed code instead of relying on the coordinator to run both commands itself.
+        # On a valid verdict, fire the filer to route its nits/deferrals to the board, then persist
+        # the round's pre-floor candidates — both from fixed code instead of relying on the
+        # coordinator to run the commands itself.
+        #
+        # This order is the coordinator's documented one, but it is deliberately NO LONGER
+        # load-bearing: the filer's suppression now requires BOARD corroboration
+        # (idc_review_seen_ledger.suppressible_fingerprints), so a round record naming a fingerprint
+        # the verdict still carries as a live minor/nit cannot strand it whichever door runs first.
+        # It used to be the only thing standing between a pre-filer round record and a silently
+        # dropped finding, and it could not be enforced — a round record recorded by hand, or named
+        # something other than pr-<n>-round-*.json, simply ran earlier.
         _run_filer(plugin_root, cwd, path)
         _run_round_recorder(plugin_root, cwd, _fresh_round_records(cwd, start, referenced))
         H.allow()
@@ -198,7 +205,16 @@ def _run_round_recorder(plugin_root, cwd, round_paths):
     Best-effort, exactly like the filer: the verdict is already valid, so a recorder failure —
     including the pending-retry downgrade refusal — must surface loudly and never block the stop."""
     recorder = os.path.join(plugin_root, "scripts", "idc_review_seen_ledger.py")
-    if not (round_paths and os.path.isfile(recorder)):
+    if not os.path.isfile(recorder):
+        return
+    if not round_paths:
+        # NARROWED, not closed: a review that floored/rejected/refuted nothing legitimately writes no
+        # round record, and fixed code cannot tell that apart from a coordinator that produced
+        # candidates and never wrote one. Saying so out loud is the difference between a known gap
+        # and an invisible one — it never blocks (a warn on a valid verdict is not a failure).
+        H.warn("this review stopped with a valid verdict and NO fresh pre-floor round record under "
+               f"{CODE_REVIEWS}/pr-<n>-round-<n>.json — if it floored, rejected, or refuted any "
+               "candidate, that judgement was not persisted to the seen-fingerprint ledger")
         return
     for round_path in round_paths:
         try:

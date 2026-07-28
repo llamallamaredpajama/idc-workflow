@@ -16,6 +16,8 @@
 # Red-when-broken (observed): delete the _refuse_pending_retry_downgrade call in record_observations
 #   => record-round exits 0, the retry reports "filed 0 ... suppressed 1", the board stays at 0
 #      Recirculation items, and routing_gap returns [] (the merge gate would pass) => FAIL.
+#   Make board_routed_fingerprints return every fingerprint on a read failure instead of none
+#   => the hidden-tracker round record is granted => FAIL.
 #
 # Usage: bash tests/smoke/governance/review-seen-round-downgrade.sh
 set -uo pipefail
@@ -116,6 +118,26 @@ printf '%s' "$OUT2" | grep -q 'filed 1' \
 [ "$(gap_count)" -eq 0 ] \
   || fail "routing_gap still reports a gap ($(gap_count)) after the finding was routed"
 
+# ── an UNREADABLE board corroborates nothing: the refusal must fail CLOSED ───────────────────────
+# The corroboration reader deliberately swallows every failure into an empty set. That breadth is
+# only safe because each outcome REFUSES, so pin the outcome: with the tracker hidden, the entry is
+# on the board in reality yet unverifiable, and the round record must still be refused.
+mv "$REPO/TRACKER.md" "$REPO/TRACKER.md.hidden" || fail "could not hide the tracker"
+set +e
+BLIND="$(python3 "$SEEN" record-round --repo "$REPO" --round "$WORK/downgrade.json" 2>&1)"; BLINDRC=$?
+set -e
+mv "$REPO/TRACKER.md.hidden" "$REPO/TRACKER.md" || fail "could not restore the tracker"
+[ "$BLINDRC" -ne 0 ] \
+  || fail "record-round granted a downgrade on an unverifiable board (it must fail closed): [$BLIND]"
+printf '%s' "$BLIND" | grep -qi 'pending-retry' \
+  || fail "the unverifiable-board refusal did not identify the protected pending-retry entry: [$BLIND]"
+python3 - "$LEDGER" "$FP" <<'PY' || fail "the fail-closed refusal still changed the entry's disposition"
+import json, sys
+entries = json.load(open(sys.argv[1])).get("entries") or []
+hits = [e for e in entries if e.get("fingerprint") == sys.argv[2]]
+assert hits and hits[0].get("last_disposition") == "filed", entries
+PY
+
 # ── corroborated case: once it IS on the board, the same round record is legal ───────────────────
 set +e
 OK="$(python3 "$SEEN" record-round --repo "$REPO" --round "$WORK/downgrade.json" 2>&1)"; OKRC=$?
@@ -124,4 +146,4 @@ set -e
   || fail "record-round refused a downgrade of an entry the board actually carries (blanket refusal would jam the review loop): [$OK]"
 [ "$(count_recirc)" -eq 1 ] || fail "the corroborated round record disturbed the board"
 
-echo "PASS: record-round cannot downgrade an unrouted pending-retry entry (the retry still files it and the routing gap sees it), while a board-corroborated downgrade stays legal"
+echo "PASS: record-round cannot downgrade an unrouted pending-retry entry (the retry still files it and the routing gap sees it) and fails closed on an unreadable board, while a board-corroborated downgrade stays legal"

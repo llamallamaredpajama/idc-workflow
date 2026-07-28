@@ -91,21 +91,29 @@ def ticket_title(item):
     return f"{tag}: {item['what'][:60] or 'review finding'}"
 
 
-def ticket_body(item, parent_issue=None):
+def ticket_body(item, parent_issue=None, provenance=None):
     """A drainable Recirculation body (the same five fields idc_recirc_sweep.recirc_ticket_body
     emits, so /idc:recirculate treats a filer ticket exactly like a swept one) plus the extended
-    idc-recirc-source marker carrying the dedupe `key`."""
+    idc-recirc-source marker carrying the dedupe `key`.
+
+    `provenance` is the seen-ledger audit clause for a fingerprint an EARLIER review round already
+    recorded (see record_verdict_seen): it rides on the existing `Provenance:` line — one line, no
+    new body field — so a ticket filed on a downgraded/resurfaced finding names the review round it
+    was filed in and the severity it carried before."""
     marker = json.dumps({"origin": item["origin"], "what": item["what"], "key": item["key"]},
                         ensure_ascii=False)
     blocks_line = ""
     if item["blocks_goal"] and parent_issue:
         blocks_line = f"Blocks-parent: #{parent_issue}\n"
+    prov = f"filed by idc-file-findings from {item['origin']}"
+    if provenance:
+        prov += f" ({provenance})"
     return (
         f"Stage: {RECIRC_STAGE}\n"
         f"Discovered: {item['what']}\n"
         f"Area: {item['area']}\n"
         f"Suggested-scope: {item['suggested'] or item['what']}\n"
-        f"Provenance: filed by idc-file-findings from {item['origin']}\n"
+        f"Provenance: {prov}\n"
         f"PRD-TRD-impact: unknown\n"
         f"{blocks_line}\n"
         f"<!-- idc-recirc-source: {marker} -->\n"
@@ -113,39 +121,91 @@ def ticket_body(item, parent_issue=None):
 
 
 # ── per-PR seen-fingerprint ledger (U7 Item 1) ───────────────────────────────────────────────────
-def record_verdict_seen(repo, verdict, dry_run=False):
+def seen_provenance(entry):
+    """The audit clause a ticket carries when its fingerprint was already SEEN in an earlier review
+    round: which review round is filing it, and what the ledger held before (disposition, the door
+    that wrote it, the severity it carried). A downgrade must be auditable on the board, not an
+    unexplained new nit."""
+    round_no = int(entry.get("seen_count") or 0) + 1
+    prior_disposition = str(entry.get("last_disposition") or "unknown")
+    prior_severity = str(entry.get("last_severity") or entry.get("first_severity") or "")
+    door = {"round": "a review round record",
+            "filer": "the fixed-code filer"}.get(str(entry.get("last_source") or ""),
+                                                 "an earlier review round")
+    severity_clause = f", original severity {prior_severity}" if prior_severity else ""
+    return (f"review round {round_no}; previously recorded {prior_disposition} by {door}"
+            f"{severity_clause} — resurfaced and filed rather than dropped, because that prior "
+            "disposition routed no board work")
+
+
+def record_verdict_seen(repo, verdict, dry_run=False, tracker=None):
     """Persist EVERY finding fingerprint in this verdict into the per-PR seen ledger BEFORE any
-    filing/flooring disposition, then return the suppression key-set: the `finding:<fp>` keys whose
-    fingerprint was seen in an EARLIER round with a TERMINAL non-routable disposition
-    (SL.TERMINAL_NON_ROUTABLE: suppressed-seen/below-floor/rejected/refuted/confirmed). A bare
-    prior "filed" NEVER suppresses: "filed" records a routing attempt, so a fingerprint whose
-    filing failed stays retryable — the retry re-files it, and actually-filed items stay idempotent
-    via the board-key dedupe (which reads the board, not this ledger). Dispositions are decided by
-    this fixed code (terminal-prior → suppressed-seen; minor/nit → filed; major/blocker →
-    confirmed); model-authored verdict text never writes the ledger itself. Raises
-    SL.SeenLedgerError on invalid ledger state (the caller refuses to file — fail closed). No PR
-    number ⇒ no per-PR ledger scope ⇒ no-op."""
+    filing/flooring disposition, and return `(suppressed_keys, provenance_by_key)`.
+
+    `suppressed_keys` is the `finding:<fp>` set the filer must NOT re-file: a fingerprint seen in an
+    earlier round at a terminal non-routable disposition AND corroborated by the BOARD as already
+    routed (SL.suppressible_fingerprints). Corroboration is the whole rule, and it costs at most one
+    board read, taken only when a fingerprint in THIS verdict is already a suppression candidate:
+
+      * `confirmed` (a major/blocker the filer never routes) is NOT routed work, so a later round
+        downgrading it to minor is FILED, carrying `provenance_by_key` — suppressing it would delete
+        the only routing it ever gets while routing_gap read the merge as converged;
+      * a round-record `below-floor`/`rejected`/`refuted` for a fingerprint the verdict still
+        carries as a live minor/nit is a self-contradiction, and equally routes nothing, so it
+        cannot strand the finding either;
+      * a bare prior `filed` never suppresses — it records a routing ATTEMPT, so a failed filing
+        stays retryable; actually-filed items stay idempotent via the board-key dedupe.
+
+    The same corroboration protects the STATE TRANSITION, not just the suppression: an entry sitting
+    at the pending-retry `filed` state is never overwritten with a terminal disposition the board
+    cannot corroborate (it stays at `filed` — a review must never hard-fail here, only stay honest).
+
+    Dispositions are decided by this fixed code; model-authored verdict text never writes the ledger
+    itself. Raises SL.SeenLedgerError on invalid ledger state (the caller refuses to file — fail
+    closed). No PR number ⇒ no per-PR ledger scope ⇒ no-op."""
     pr = verdict.get("pr")
     if isinstance(pr, bool) or not isinstance(pr, int):
-        return frozenset()
+        return frozenset(), {}
     fingerprints = []
     for f in verdict.get("findings", []):
         if not isinstance(f, dict):
             continue
         fp = str(f.get("fingerprint", "")).strip()
         if fp:
-            fingerprints.append((fp, f.get("severity")))
+            fingerprints.append((fp, str(f.get("severity") or "")))
     if not fingerprints:
-        return frozenset()
-    suppressible = SL.suppressible_fingerprints(SL.read_ledger(repo, pr))
+        return frozenset(), {}
+    ledger = SL.read_ledger(repo, pr)
+    prior_entries = {e["fingerprint"]: e for e in (ledger or {}).get("entries", [])}
+    cache = {}
+
+    def routed():
+        """The board's routed fingerprints — resolved at most once per run, fail-closed to empty."""
+        if "value" not in cache:
+            cache["value"] = SL.board_routed_fingerprints(repo, tracker)
+        return cache["value"]
+
+    suppressible = SL.suppressible_fingerprints(
+        ledger, routed_lookup=routed, fingerprints={fp for fp, _sev in fingerprints})
+    observations, provenance = [], {}
+    for fp, sev in fingerprints:
+        prior = prior_entries.get(fp)
+        if fp in suppressible:
+            disposition = "suppressed-seen"
+        elif sev in MINOR_NIT:
+            disposition = "filed"
+        elif prior is not None and prior.get("last_disposition") == SL.PENDING_RETRY \
+                and fp not in routed():
+            disposition = SL.PENDING_RETRY   # an owed filing outlives a later major re-rating
+        else:
+            disposition = "confirmed"
+        observations.append({"fingerprint": fp, "disposition": disposition, "severity": sev})
+        if disposition == "filed" and prior is not None:
+            provenance[f"finding:{fp}"] = seen_provenance(prior)
     if not dry_run:
-        SL.record_observations(repo, pr, [
-            {"fingerprint": fp,
-             "disposition": ("suppressed-seen" if fp in suppressible
-                             else ("filed" if sev in MINOR_NIT else "confirmed"))}
-            for fp, sev in fingerprints
-        ])
-    return frozenset(f"finding:{fp}" for fp, _sev in fingerprints if fp in suppressible)
+        SL.record_observations(repo, pr, observations, source="filer")
+    return (frozenset(f"finding:{fp}" for fp, _sev in fingerprints if fp in suppressible),
+            provenance)
 
 
 # ── filesystem backend ───────────────────────────────────────────────────────────────────────────
@@ -171,7 +231,8 @@ def _fs_existing_keys(tracker_path):
     return keys
 
 
-def run_filesystem(verdict, repo, tracker_path, parent_issue, dry_run, suppressed_keys=frozenset()):
+def run_filesystem(verdict, repo, tracker_path, parent_issue, dry_run, suppressed_keys=frozenset(),
+                   provenance_by_key=None):
     if not os.path.isfile(tracker_path):
         warn(f"filesystem backend: no TRACKER.md at {tracker_path} — nothing filed")
         return 3
@@ -199,7 +260,9 @@ def run_filesystem(verdict, repo, tracker_path, parent_issue, dry_run, suppresse
             filed += 1
             continue
         try:
-            num = TE.recirculate_intake(ctx, ticket_title(it), ticket_body(it, parent_issue))
+            num = TE.recirculate_intake(
+                ctx, ticket_title(it),
+                ticket_body(it, parent_issue, (provenance_by_key or {}).get(it["key"])))
             if it["blocks_goal"] and parent_issue:
                 TE.link_blocks(ctx, parent=num, child=parent_issue)
         except TE.TransitionError as e:
@@ -245,9 +308,11 @@ def routed_finding_fingerprints(repo, tracker=None):
     """The finding fingerprints the BOARD already carries as Recirculation work — the `finding:<fp>`
     dedupe keys of existing idc-recirc-source markers, stripped back to bare fingerprints.
 
-    One implementation of "what is already routed", reused by the seen ledger's pending-retry
-    downgrade guard (idc_review_seen_ledger._board_routed_fingerprints) so the guard and the finish
-    routing gap can never disagree about what counts as routed. Read failures PROPAGATE (github
+    One implementation of "what is already routed", reused by the seen ledger's corroboration reader
+    (idc_review_seen_ledger.board_routed_fingerprints) so the pending-retry guard, the suppression
+    rule, and the finish routing gap can never disagree about what counts as routed. It is the ONLY
+    thing that may authorize a suppression, precisely because it reads the board rather than a
+    model's account of it. Read failures PROPAGATE (github
     raises BoardReadError) rather than degrading to an empty set here — the caller decides, and its
     decision is to fail closed."""
     backend = SW.read_backend(repo) or "filesystem"
@@ -264,7 +329,7 @@ def routed_finding_fingerprints(repo, tracker=None):
 
 
 def file_github(verdict, repo, owner, project, existing_keys, parent_issue, dry_run,
-                suppressed_keys=frozenset()):
+                suppressed_keys=frozenset(), provenance_by_key=None):
     """Create one atomic Recirculation/Todo item per un-filed nit/deferral, THROUGH the transition
     engine (the single write door — the engine's recirculate-intake wraps idc_gh_board.create_item's
     atomic Stage+Status primitive). Returns the count filed. `existing_keys` is the caller-supplied
@@ -283,7 +348,9 @@ def file_github(verdict, repo, owner, project, existing_keys, parent_issue, dry_
             filed += 1
             continue
         try:
-            TE.recirculate_intake(ctx, ticket_title(it), ticket_body(it, parent_issue))
+            TE.recirculate_intake(
+                ctx, ticket_title(it),
+                ticket_body(it, parent_issue, (provenance_by_key or {}).get(it["key"])))
         except (idc_gh_board.BoardReadError, TE.TransitionError) as e:
             # BoardReadError covers RateLimitError (its subclass) — preserves the filer's prior
             # per-item fail-soft posture (surface + continue; never counted as filed).
@@ -293,7 +360,8 @@ def file_github(verdict, repo, owner, project, existing_keys, parent_issue, dry_
     return filed
 
 
-def run_github(verdict, repo, owner, project, parent_issue, dry_run, suppressed_keys=frozenset()):
+def run_github(verdict, repo, owner, project, parent_issue, dry_run, suppressed_keys=frozenset(),
+               provenance_by_key=None):
     if not (owner and project):
         warn("github backend: could not resolve owner/project_number — nothing filed")
         return 3
@@ -304,7 +372,7 @@ def run_github(verdict, repo, owner, project, parent_issue, dry_run, suppressed_
              "duplicates (will retry next run)")
         return 3
     filed = file_github(verdict, repo, owner, project, existing, parent_issue, dry_run,
-                        suppressed_keys=suppressed_keys)
+                        suppressed_keys=suppressed_keys, provenance_by_key=provenance_by_key)
     print(f"idc-file-findings: filed {filed} (backend=github)")
     return 0
 
@@ -340,9 +408,12 @@ def main():
         parent = None
 
     # U7 Item 1: persist seen fingerprints BEFORE any filing disposition, fail-closed on invalid
-    # ledger state — a resurfaced seen finding must never become duplicate routed board work.
+    # ledger state — a resurfaced seen finding must never become duplicate routed board work, and a
+    # never-routed prior disposition must never silently drop it either.
+    tracker = a.tracker or os.path.join(a.repo, "TRACKER.md")
     try:
-        suppressed_keys = record_verdict_seen(a.repo, verdict, dry_run=a.dry_run)
+        suppressed_keys, provenance = record_verdict_seen(a.repo, verdict, dry_run=a.dry_run,
+                                                          tracker=tracker)
     except SL.SeenLedgerError as e:
         warn(f"refusing to file — review seen-fingerprint ledger did not validate: {e}")
         sys.exit(2)
@@ -352,10 +423,9 @@ def main():
         owner = SW.gh_owner(a.repo)
         project_number, _ = SW.read_config(a.repo)
         sys.exit(run_github(verdict, a.repo, owner, project_number, parent, a.dry_run,
-                            suppressed_keys=suppressed_keys))
-    tracker = a.tracker or os.path.join(a.repo, "TRACKER.md")
+                            suppressed_keys=suppressed_keys, provenance_by_key=provenance))
     sys.exit(run_filesystem(verdict, a.repo, tracker, parent, a.dry_run,
-                            suppressed_keys=suppressed_keys))
+                            suppressed_keys=suppressed_keys, provenance_by_key=provenance))
 
 
 if __name__ == "__main__":

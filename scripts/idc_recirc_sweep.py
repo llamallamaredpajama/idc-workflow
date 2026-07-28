@@ -551,10 +551,21 @@ def apply_filesystem(findings, state, tracker_path, repo):
 
 
 # ── github backend (via gh subprocess; stdlib only) ──────────────────────────
+# Every `gh` call is BOUNDED. A hung `gh` (network stall, an auth prompt on a headless box) used to
+# hang its whole caller indefinitely — the hook paths bound their child at 120s, but the CLI paths a
+# coordinator runs by hand (e.g. idc_review_seen_ledger.py record-round → the board corroboration
+# read) inherited no bound at all. Generous enough for a paginated board read, finite either way.
+GH_TIMEOUT_S = 120
+
+
 def gh(args, repo):
-    """Run `gh <args>` in `repo`. Returns (ok, stdout, stderr); ok=False on missing gh or non-zero."""
+    """Run `gh <args>` in `repo`. Returns (ok, stdout, stderr); ok=False on missing gh, non-zero, or
+    a call that outlives GH_TIMEOUT_S."""
     try:
-        p = subprocess.run(["gh"] + args, cwd=repo, capture_output=True, text=True)
+        p = subprocess.run(["gh"] + args, cwd=repo, capture_output=True, text=True,
+                           timeout=GH_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        return False, "", f"gh {' '.join(args[:2])} timed out after {GH_TIMEOUT_S}s"
     except (OSError, ValueError) as e:
         return False, "", str(e)
     return (p.returncode == 0), p.stdout, CS.scrub(p.stderr)

@@ -278,10 +278,16 @@ JANITOR_PROVENANCE = "idc_git_janitor.py"
 JOURNAL_LOCK_GITIGNORE_LINE = JOURNAL_REL.replace(os.sep, "/") + ".lock"
 # Consecutive passes that discover NO previously-unseen blocker before the bootstrap loop declares
 # stagnation and halts. Two is the smallest count that can distinguish "this pass learned nothing"
-# from "the very first pass of the run" while still letting the canonical stubborn-blocker case run
-# its full three passes (pass 1 discovers the blocker, passes 2+3 are the stagnant pair). It is a
-# FIXED bound, deliberately NOT --max-passes: tying the halt to the loop's own ceiling made the rule
-# unreachable (stagnant can never exceed the pass number), i.e. inert.
+# from "the very first pass of the run". It is a FIXED bound, deliberately NOT --max-passes: tying
+# the halt to the loop's own ceiling made the rule unreachable (stagnant can never exceed the pass
+# number), i.e. inert.
+#
+# What actually SHIPS, so nobody reads more into this than is true: `--max-passes` defaults to 1 and
+# no shipped caller raises it (commands/update.md is the only --bootstrap invocation and passes
+# none), so the shipped bootstrap runs exactly ONE pass and stops with its exact blockers. The
+# stagnation rule can only engage at `--max-passes >= 3` — pass 1 discovers the blocker, passes 2+3
+# are the stagnant pair — which today only the tests supply. It is a real bound on a caller that
+# raises the ceiling, not a behavior of the default path.
 STAGNANT_PASS_LIMIT = 2
 TEST_STUBBORN_ENV = "IDC_JANITOR_TEST_STUBBORN_FINDING"
 TEST_INTERRUPT_ENV = "IDC_JANITOR_TEST_INTERRUPT_AFTER"

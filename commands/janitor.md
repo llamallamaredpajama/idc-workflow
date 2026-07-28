@@ -9,9 +9,11 @@ branches, board↔issue drift) and classifies every finding into four verdict ti
 **read-only by default** (a full report). `--apply-safe` applies the **SAFE-FIX tier only**.
 `--bootstrap` creates or resumes the one-time adoption baseline: it writes the durable
 `reconciliation-baseline-required` / `baseline-pending` state, validates a bounded route/repair plan,
-preserves ambiguous/foreign/default-branch work, writes the adoption receipt last, and stops after
-three non-converging passes with exact blockers rather than fabricating a clean checkpoint. See
-`WORKFLOW.md §A`.
+preserves ambiguous/foreign/default-branch work, writes the adoption receipt last, and stops with
+exact blockers rather than fabricating a clean checkpoint. The repair loop is bounded by
+`--max-passes`, which **defaults to 1**, so a plain `--bootstrap` makes a single pass and reports
+what still blocks; raise the ceiling to let it iterate, and it additionally halts as stagnant after
+two consecutive passes that discover no previously-unseen blocker. See `WORKFLOW.md §A`.
 
 Operator input: `$ARGUMENTS` — pass `--apply-safe` to apply the SAFE-FIX tier; pass `--bootstrap` to
 create or resume adoption bootstrap; otherwise a full, read-only report.

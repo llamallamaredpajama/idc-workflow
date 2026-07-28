@@ -29,8 +29,8 @@ secret-free before citation/use, missing handles route to a named recirculation 
 obligation, never a warning-only pass); and every ticket runs the bounded fixed-code falsifier
 `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_validation_risk_gate.py" evaluate ...` before any frozen
 gate is emitted — the helper itself decides whether falsification is required, deriving risk in
-fixed code from the frozen contract's touch set and baseline, so omitting `--risk-input` cannot
-skip it. The matrix passes `idc:idc-matrix-analysis`'s check; re-sequencing is global but
+fixed code from the touch set it is given (the same set the contract will freeze) and the baseline,
+so on that touch set omitting `--risk-input` cannot skip it. The matrix passes `idc:idc-matrix-analysis`'s check; re-sequencing is global but
 `In Progress` issues are immutable. The authored matrix is descriptive input only —
 `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_execution_graph.py" --matrix <matrix> ... --json` re-derives
 authoritative whole-horizon Waves, and `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_tracker_projection.py"

@@ -15,16 +15,27 @@ therefore satisfied by simply not asking for it, which makes the thing bookkeepi
 gate. So requiredness is now the union of
 
   * DECLARED   — what the caller passed via `--risk-input`, still honored; and
-  * DERIVED    — what FIXED CODE reads out of the frozen contract's own facts (`--touch`, and the
-                 baseline classification when `--baseline` is supplied). `touch` / `off-limits` are
-                 fields of the machine-owned validation contract, outside the builder's authority,
-                 so deriving from them is deriving from the contract rather than from a request.
+  * DERIVED    — what FIXED CODE reads out of THE TOUCH SET IT IS GIVEN (`--touch`, and the baseline
+                 classification when `--baseline` is supplied) — the same set the validation contract
+                 will later freeze. `touch` is a fact about the change, not a request for a verdict:
+                 the caller supplies it, fixed code alone decides what risk it carries.
 
 A caller can add risk but can no longer subtract it, and when the derived set is non-empty the gate
 refuses (exit 2) unless a real falsification scenario is supplied. The output reports the two sets
 separately, plus a `derivation` block naming exactly which risk dimensions fixed code can decide and
 which remain declaration-only — so `required: false` can never be read as "fixed code inspected
 everything and found nothing".
+
+SCOPE OF THE GUARANTEE — stated exactly, because overclaiming it is itself the defect this paragraph
+corrects (F64). GUARANTEED: on a given touch set, falsification can no longer be skipped by simply
+not asking for it; declaring `--risk-input` can only ADD to what fixed code derives. NOT GUARANTEED,
+and deliberately not implied: this gate runs BEFORE any contract is frozen, `--touch` is a plain
+repeatable flag at this call site, and `idc_validation_contract.py freeze` accepts no `--risk*`
+argument — so nothing binds the touch set judged here to the one later frozen, and nothing refuses a
+freeze whose risk gate was never run at all. Narrowing `--touch` therefore narrows derived risk; that
+is self-punishing (the same `touch` bounds what the build may modify) but it is not prevented.
+Binding the risk-gate result digest into the frozen contract, and refusing a missing result when
+derived risk is non-empty, is a tracked follow-up — not something this helper can enforce alone.
 """
 from __future__ import annotations
 
@@ -149,11 +160,13 @@ def _normalize_touch_entry(entry: str) -> str:
 
 
 def derive_risk_inputs(touch: list, baseline: str = "unknown") -> list:
-    """The risk inputs FIXED CODE reads out of the frozen contract's own facts.
+    """The risk inputs FIXED CODE reads out of the touch set it is given.
 
-    Returns them in ALLOWED_RISK_INPUTS order so the result is stable and diffable. Deriving from
-    `touch` is deriving from the machine-owned validation contract (the builder cannot author it),
-    which is the whole point: the caller supplies facts, this function decides risk.
+    Returns them in ALLOWED_RISK_INPUTS order so the result is stable and diffable. The division of
+    labour is the point: the caller supplies the facts (`touch`, `baseline`), this function alone
+    decides what risk they carry — so risk can be ADDED by declaration but never subtracted by
+    omission. It does not read a frozen contract; see the module docstring's SCOPE OF THE GUARANTEE
+    for exactly what that leaves unbound (F64).
     """
     entries = [_normalize_touch_entry(item) for item in (touch or [])]
     entries = [item for item in entries if item]

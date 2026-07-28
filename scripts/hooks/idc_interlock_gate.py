@@ -58,8 +58,22 @@ classifier pattern. Only a RAW terminal command (or one hidden behind interprete
 matches.
 
 KNOWN NON-COVERAGE — the published scope, stated so this gate is not read as a complete barrier
-(F58). Both channels are PRE-EXISTING (they behave identically on `main`) and both are tracked as
-follow-ups rather than closed here, because narrowing either one touches a load-bearing exemption:
+(F58, extended by F63). Every channel below is PRE-EXISTING (they behave identically on `main`) and
+all are tracked as follow-ups rather than closed here, because narrowing any of them touches a
+load-bearing exemption or widens the denial surface well beyond this release's review.
+
+THIS LIST IS NOT A CLOSED WORLD. It enumerates what is KNOWN to be uncovered; a construct that is
+absent from it is NOT thereby guaranteed to be in scope. This is a defense-in-depth classifier, not a
+complete shell parser (see CLASSIFIER above), so treat the list as a floor on the known gaps, never as
+a ceiling on the possible ones.
+
+WHERE THE BOUNDARY ACTUALLY RUNS (the rule the channels below fall outside of). A segment is
+classified when a protected call stands in COMMAND POSITION — `gh` is that segment's command head
+once known wrapper/env prefixes are stripped — or inside a payload/target this gate can FOLLOW
+(`bash|sh|zsh -c '…'`, `bash|sh|zsh FILE`, `source`/`.` FILE, `bash|sh|zsh < FILE`). A conservative
+whole-segment TEXT match runs ONLY as a backstop for a segment that fails to tokenize. Protected
+words carried as DATA — an argument to some other command — are deliberately not a match, or `echo
+"gh pr merge 123"` and every doc example quoting a protected call would be a denial.
 
   1. SANCTIONED PLUGIN SCRIPTS. Rule 5 above returns `[]` — unscanned — for any file whose RESOLVED
      path is under `<plugin_root>/scripts/`. That exemption is what keeps IDC's own helpers, which
@@ -69,16 +83,34 @@ follow-ups rather than closed here, because narrowing either one touches a load-
      (locked by `tests/smoke/governance/path-gate-boundaries.sh`), and the plugin root is outside the
      governed repo. Neither half is a defect alone; the combination is the channel. Closing it means
      replacing "anything under scripts/" with a manifest or hash-pin of the known plugin scripts.
-  2. ARGV-LIST INTERPRETER PAYLOADS. The classifier is a TEXT scanner, so it sees
-     `python3 -c 'os.system("gh pr merge 123")'` (the protected call appears as text) but NOT
-     `python3 -c 'subprocess.run(["gh","pr","merge","123"])'` (the same call carries no matching
-     substring). "Fail-closed on dynamic/opaque" above covers constructs a static reader cannot
-     RESOLVE; this one resolves fine and simply does not match. Closing it means treating
-     child-process-capable interpreter payloads as opaque — deny unless positively classified — which
-     is a much wider denial surface than this release should adopt unreviewed.
+  2. ARGV-LIST INTERPRETER PAYLOADS. `python3` is NOT one of the interpreters this gate follows
+     (INTERPRETERS is bash/sh/zsh), so a `python3 -c '…'` payload is only ever reached by the
+     tokenize-failure TEXT backstop described above. Concretely:
+     `python3 -c 'import os; os.system("gh pr merge 123")'` DENIES — the embedded `;` raw-splits it
+     into a fragment that fails to lex, so the whole-segment matcher runs and sees the call as text —
+     while `python3 -c 'subprocess.run(["gh","pr","merge","123"])'` carries no matching text and does
+     not. The boundary is NARROWER than "it sees the text": the same call written without a `;`
+     (`python3 -c 'os.system("gh pr merge 123")'`) tokenizes cleanly, the backstop never runs, and it
+     is allowed too. Closing this means treating child-process-capable interpreter payloads as opaque
+     — deny unless positively classified — a much wider denial surface than this release should adopt
+     unreviewed.
+  3. PROGRAM TEXT THAT NEVER STANDS IN COMMAND POSITION (F63). Two demonstrated forms:
+     a. AN INTERPRETER FED ITS PROGRAM ON STDIN THROUGH A PIPE — `echo '<protected cmd>' | sh`,
+        `cat payload.sh | bash`, `curl -s <url> | sh`, `echo <base64> | base64 -d | sh`. Segmenting on
+        `|` leaves a producer segment whose command head is `echo`/`cat`/`curl` (the protected words
+        are its DATA, rule above) and a consumer segment that is a bare interpreter with NO target to
+        follow. The redirection sibling `bash|sh|zsh < FILE` IS covered, because there the program
+        source is a file this gate resolves and scans — so this is a genuine blind spot in an intent
+        the gate already holds, not a policy choice.
+     b. A PROTECTED ARGV ASSEMBLED BY A HELPER — `echo "pr merge 123" | xargs gh`, where the segment
+        `xargs gh` names no subcommand and the protected words arrive at runtime out of another
+        segment. (`xargs gh pr merge 123`, with the words present in the same segment, IS covered.)
+     Closing this means treating an interpreter with no resolvable program source, and a helper that
+     execs an argv it reads at runtime, as opaque — the same widen-the-denial-surface change as (2),
+     and it is parked with it.
 
-Anything NOT on that list is in scope. In particular an unusable Python runtime is not a bypass: the
-transport hard-denies rather than allowing silently (F57, `scripts/hooks/idc_interlock_gate_hook.sh`).
+NOT a bypass, and deliberately so: an unusable Python runtime. The transport hard-denies rather than
+allowing silently (F57, `scripts/hooks/idc_interlock_gate_hook.sh`).
 
 Invocation: idc_interlock_gate.py <PLUGIN_ROOT>   (PreToolUse payload on stdin).
 Self-gated: no-op (allow) outside a governed repo, or on a tool/payload the shared Path Gate does not

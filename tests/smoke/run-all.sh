@@ -28,6 +28,20 @@ fi
 rmdir "$_probe" 2>/dev/null || true
 unset _tdir _probe
 
+# Preflight: STATE THE PYTHON REQUIREMENT ONCE, UP FRONT (F65). Several governance lanes execute the
+# shipped PreToolUse interlock gate, which uses 3.10-only syntax, so on an older ambient python3 they
+# fail for an environment reason that has nothing to do with the change under test. Stock macOS ships
+# /usr/bin/python3 3.9.6 and reduced-PATH agent panes hit it routinely. This is deliberately a NOTICE,
+# not a hard stop: the majority of the suite runs fine on 3.9, and no verdict is changed here. Lanes
+# that can honestly skip their un-runnable arms do so themselves with their own SKIP line.
+if ! python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1; then
+  echo "idc smoke: NOTE — the ambient python3 ($(python3 --version 2>&1 || echo 'not found')) predates 3.10." >&2
+  echo "           IDC helpers require Python 3.10+; the governance lanes that execute the interlock" >&2
+  echo "           gate CANNOT pass here. Any failure below naming an import/syntax error, an" >&2
+  echo "           unexpected allow, or 'Python 3.10 or newer' is this environment, not your change." >&2
+  echo "           Put a 3.10+ python3 first on PATH and re-run before trusting a red result." >&2
+fi
+
 fails=0
 n_behavior=0; n_doc=0; n_mixed=0; unclassified=""
 for t in \

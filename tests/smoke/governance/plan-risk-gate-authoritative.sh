@@ -9,10 +9,16 @@
 # falsification requirement was satisfied by simply not asking for it. A verdict that is a function
 # of a caller-supplied flag is bookkeeping, not a gate.
 #
-# The fix derives risk in FIXED CODE from the frozen contract's own facts (`--touch`, and the
-# baseline classification when `--baseline` is supplied — both machine-owned fields the builder
-# cannot author) and unions that with whatever the caller declared. A caller can ADD risk; it can no
-# longer subtract it.
+# The fix derives risk in FIXED CODE from the `--touch` set the gate is given (and the baseline
+# classification when `--baseline` is supplied — the same values the contract will freeze) and unions
+# that with whatever the caller declared. A caller can ADD risk; on that touch set it can no longer
+# subtract it.
+#
+# WHAT THIS LANE DOES NOT PROVE (F64 — stated so the guarantee is not read wider than it is). The
+# gate runs BEFORE the contract is frozen and `idc_validation_contract.py freeze` takes no `--risk*`
+# argument, so nothing here binds the touch set judged by the gate to the one later frozen, and
+# nothing refuses a freeze whose risk gate was never run. Binding the result digest into the frozen
+# contract is a tracked follow-up; this lane covers requiredness only.
 #
 # What it proves:
 #   A. the repro — a security-sensitive touch set with NO --risk-input and NO --scenario is REFUSED

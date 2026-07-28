@@ -673,7 +673,9 @@ printf '%s\n' "$out" | grep -qiE '^OK: ruleset .* updated' \
 #       (F36). `while True:` with no bound is not hypothetical here: the prototype stub for W4b served
 #       a full page one for every page and the walker had to be KILLED rather than debugged from a
 #       failure. Asserted directly on the walker so the ceiling is exercised without driving 100 full
-#       `--apply` runs, and with `per_page=2` so the 100 PAGES are cheap.
+#       `--apply` runs. `per_page=2` is NOT about cost — the stub ignores per_page and serves a
+#       100-entry page regardless; it is what makes the literal 100 in the refusal unambiguously the
+#       PAGE CEILING rather than the page size, so a message naming the wrong bound cannot pass.
 #       The stub stops serving past page 150 (well beyond the ceiling) and ERRORS: removing the ceiling
 #       makes this case fail on THAT message instead of hanging the lane.
 PATH="$STUB_BIN:$PATH" STUB_RULESETS_ENDLESS=1 python3 - "$PLUGIN/scripts" "$REPO" <<'PY' \

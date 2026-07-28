@@ -432,8 +432,13 @@ def record_planning_witness(receipt_path: str, doc: dict, *, write_receipt=None)
     bytes match NO recorded version — is still refused (F7). The retained set is BOUNDED by the
     count+age hybrid in `_evict_stale_versions` — the current on-disk version, the newest
     PLANNING_WITNESS_RETAIN, and anything inside PLANNING_WITNESS_GRACE_SECONDS, all capped at
-    PLANNING_WITNESS_HARD_CAP — so repeated same-label re-applies can neither grow the in-.git store
-    without limit (F31) nor evict the version a not-yet-frozen Build is holding; the read-modify-write runs under
+    PLANNING_WITNESS_HARD_CAP — so repeated same-label re-applies cannot grow the in-.git store without
+    limit (F31), and cannot evict the version a not-yet-frozen Build is holding WITHIN THOSE BOUNDS:
+    while that version is still inside PLANNING_WITNESS_GRACE_SECONDS and not buried under
+    PLANNING_WITNESS_HARD_CAP newer ones. Past either bound it CAN be evicted — `_evict_stale_versions`
+    states that residual and why it stays fail-closed (the Build is refused as stale and re-anchors its
+    receipt; it is never false-accepted). Do not restate this guarantee unqualified: the code delivers
+    the bounded version of it. The read-modify-write runs under
     an exclusive store lock so a concurrent contract-witness write cannot drop it (F30). The receipt is
     read ONCE, under that same lock, so the byte-digest key and the receipt's embedded self-digest are
     taken from a single view — a concurrent same-path rewrite cannot bind one version's bytes to

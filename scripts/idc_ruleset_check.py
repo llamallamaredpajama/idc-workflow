@@ -322,10 +322,19 @@ def _open_repo_file(root_fd: int, rel: str):
       committed symlink under a real local directory). Neither can be told apart from here, and one of
       them false-certifies, so the fail-closed answer is the only one that is right in both. The
       refusal names the component and the remedy.
-    * A NON-DIRECTORY component, or a name absent at that EXACT spelling, is "nothing here" — the
+    * A REGULAR-FILE component, or a name absent at that EXACT spelling, is "nothing here" — the
       caller looks on, because that is precisely what GitHub does. A regular file at `.github` means
       git holds a blob there and no `.github/CODEOWNERS` tree entry exists, so GitHub falls through to
       `CODEOWNERS` / `docs/CODEOWNERS` and so do we.
+    * ANY OTHER component type REFUSES (F37). Those two states above are the only ones git can record
+      as "nothing GitHub reads here": a name that is absent, and a blob. Git cannot record a FIFO or a
+      device AT ALL, so finding one at a CODEOWNERS path component is positive proof that the working
+      tree diverges from the committed tree — and nothing on this side can say which file GitHub is
+      therefore reading. That is the same both-directions ambiguity the symlinked-DIRECTORY arm above
+      refuses on, reached by a type git has no mode for rather than by a link, so it gets the same
+      fail-closed answer. (A UNIX SOCKET never reaches this type check at all: `open(2)` cannot open
+      one, so it is refused one arm earlier by the catch-all errno branch, with the less specific
+      "could not be examined" diagnosis. Both fail closed — do NOT try to unify them.)
     * A non-REGULAR leaf REFUSES, as before: a location GitHub reads no rules from binds no reviewer,
       and it must not be skipped in favour of a lower-precedence file.
 
@@ -376,7 +385,11 @@ def _open_repo_file(root_fd: int, rel: str):
                 return fd, None
             if not stat.S_ISDIR(st.st_mode):
                 os.close(fd)
-                return None, None          # a blob where a directory would be; GitHub looks on
+                if stat.S_ISREG(st.st_mode):
+                    return None, None      # a blob where a directory would be; GitHub looks on
+                # Anything else here is a type git cannot record, so the working tree provably
+                # diverges from the tree GitHub reads: refuse rather than fall through (F37).
+                return None, _component_nonregular_problem(rel, here)
             if dir_is_ours:
                 os.close(dir_fd)
             dir_fd, dir_is_ours = fd, True
@@ -400,6 +413,20 @@ def _component_symlink_problem(rel: str, component: str) -> str:
             "has no {} in it at all and binds no reviewer from it — while following the link here "
             "would certify whatever rules the link's target happens to hold. Replace {} with a real "
             "directory and commit the CODEOWNERS at the path GitHub reads.".format(
+                rel, component, rel, component))
+
+
+def _component_nonregular_problem(rel: str, component: str) -> str:
+    """Refusal reason when a non-last path component is NEITHER a directory NOR a regular file (F37).
+    Deliberately NOT a reuse of `_component_symlink_problem`: that text asserts the component IS a
+    symlink, which would be a false diagnosis for a FIFO or a device — and it is the message the
+    symlinked-directory case pins its assertion on."""
+    return ("the CODEOWNERS location {} is reached through {}, which is NEITHER a directory NOR a "
+            "regular file — it is a named pipe, a device, or another special entry. Git CANNOT RECORD "
+            "an entry of this kind at all, so the working tree here provably diverges from the "
+            "committed tree GitHub reads, and nothing on this side can say which CODEOWNERS (if any) "
+            "GitHub would honor at {}. Remove {} — or restore a real directory in its place — and "
+            "commit the CODEOWNERS at the path GitHub reads.".format(
                 rel, component, rel, component))
 
 
@@ -498,10 +525,22 @@ def _read_codeowners(repo_root: str):
     """`(relpath, text)` for the first CODEOWNERS GitHub would honor, or `(None, None)`. The size-free
     view, for callers that only compare CONTENT (the installer's working-tree-vs-committed check).
 
-    `text` is None whenever the file could not be read AS GITHUB READS IT — unreadable, invalid UTF-8,
-    over the load limit, or a symlink/non-regular entry. Every caller of this view compares the result
-    against the committed copy, so a None text yields a divergence refusal: fail-closed in all four
-    cases."""
+    `text` is None whenever the entry could not be read AS GITHUB READS IT. FIVE causes reach that
+    state: unreadable bytes; invalid UTF-8; a size STRICTLY OVER the load limit; a symlink or other
+    non-regular entry on the path; and — the one that is not about the file at all — a CHECKOUT ROOT
+    that could not be opened, where the returned `rel` names the highest-precedence location as a
+    placeholder for a path that was never actually examined. Every caller of this view compares the
+    result against the committed copy, so a None text yields a divergence refusal: fail-closed in all
+    five cases. The fifth is fail-closed with an IMPRECISE diagnosis — the installer reports divergence
+    at `.github/CODEOWNERS` when the real problem is that the checkout root would not open — and that
+    is accepted deliberately: plumbing the precise cause through this size-free view is a signature
+    change, for a corner in which the checkout root itself cannot be opened.
+
+    THE LIMIT BOUNDARY, precisely. `text` is None only STRICTLY over `CODEOWNERS_MAX_BYTES` (the reader
+    refuses to decode when `len(raw) > CODEOWNERS_MAX_BYTES`). A file of EXACTLY that size returns real
+    text from this view, while `codeowners_size_problem` refuses it independently at `size_bytes >=
+    CODEOWNERS_MAX_BYTES`. The two comparisons deliberately differ: this view is not the size gate, and
+    a caller must not read a non-None text here as "the size gate would pass it"."""
     rel, text, _size, _problem = _read_codeowners_sized(repo_root)
     return rel, text
 

@@ -326,7 +326,8 @@ def _object_chain_problem(repo_root: str, ref_oid: str):
     `git fsck` is exactly that re-hash. Measured on git 2.54.0: exit 3 with `hash-path mismatch` for
     BOTH the loose-blob and the tree-object substitution, exit 0 on the clean control. The gate is the
     EXIT STATUS, never the message text — fsck also reports `dangling`/`unreachable` objects on
-    perfectly healthy repositories (159 such lines on this repo's own history) and still exits 0, so
+    perfectly healthy repositories (well over a hundred such lines on this repo's own history when
+    measured — an exact count would only rot) and still exits 0, so
     parsing output would be both fragile and noisy.
 
     SCOPE, HONESTLY. What this BUYS is narrow and specific: *the bytes this module certifies are the

@@ -1254,7 +1254,10 @@ W1_PAGE="$WORK/paged-checker"; mkdir -p "$W1_PAGE"
 python3 - "$RS" "$W1_PAGE" <<'PY' || fail "W1j fixture: could not build the paged stub bodies"
 import json, sys
 rs, out = sys.argv[1], sys.argv[2]
-# Page one is FULL (== the module's per_page) — that is what makes the walker ask for page two at all.
+# Page one is FULL (== the module's per_page). Fullness is NOT what drives the second fetch any more —
+# F36 removed the short-page break, so ANY non-empty page does. It is kept because it models the real
+# org-inherited listing that puts our ruleset past page one, and because it leaves the consequence of a
+# single-page read identical: our ruleset sits unread on page two.
 json.dump([{"id": 1000 + i, "name": "org-inherited-%d" % i} for i in range(100)],
           open(out + "/page1.json", "w"))
 json.dump([{"id": 4242, "name": "idc-pathway-integrity"}], open(out + "/page2.json", "w"))
@@ -1381,7 +1384,10 @@ if len(items) != 31:
 
 os.environ["WALK_MODE"] = "endless"
 try:
-    got = RC._gh_json_all_pages(PATH, per_page=2)     # per_page=2 only to keep the 100 pages cheap
+    # per_page=2 is NOT about cost — the stub ignores per_page and serves a 100-entry page regardless.
+    # It is what makes the literal 100 in the refusal unambiguously the PAGE CEILING rather than the
+    # page size, so a message naming the wrong bound cannot satisfy the assertion below.
+    got = RC._gh_json_all_pages(PATH, per_page=2)
     print("NO-CEILING: an endless listing returned %d items instead of refusing" % len(got)); sys.exit(1)
 except RuntimeError as exc:
     if "empty page" not in str(exc) or str(RC._MAX_LISTING_PAGES) not in str(exc):
@@ -1408,8 +1414,10 @@ CO_RULES='/.github/workflows/ @team
 #       surface. `os.path.isfile()` and `open()` both FOLLOW links, so the checker read the TARGET's
 #       rules and certified them against a file GitHub reads `"../CODEOWNERS"` out of.
 #       `ln -s ../CODEOWNERS .github/CODEOWNERS` is a common, well-intentioned dedupe.
-#       Red-when-broken: swap `os.lstat` back to `os.path.isfile` in `_read_codeowners_sized` and this
-#       case CERTIFIES.
+#       Red-when-broken: drop `O_NOFOLLOW` from the `os.open` flags in `_open_repo_file` — the kernel
+#       then resolves the leaf link and `fstat` types the TARGET, which is a regular file — and this
+#       case CERTIFIES. (There is no `os.lstat` in the checker to swap any more; the guard moved into
+#       the component walk in F33.)
 W1_LINK="$WORK/co-symlink"; mkdir -p "$W1_LINK/.github"
 printf '%s\n' "$CO_RULES" > "$W1_LINK/CODEOWNERS"          # the real, covering file at the root
 ln -s ../CODEOWNERS "$W1_LINK/.github/CODEOWNERS"          # the higher-precedence location, symlinked
@@ -1512,14 +1520,74 @@ else
   echo "  (W1k3 skipped: case-sensitive filesystem — a .GitHub alias cannot be created here)"
 fi
 
+# (W1k4) A FIFO at the INTERMEDIATE `.github` component (F37). The rule used to be "a component that is
+#        not a directory is nothing here", which is right for a regular file (W1k2) and wrong for
+#        everything else: GIT CANNOT RECORD A FIFO AT ALL, so a named pipe at `.github` is positive
+#        proof the working tree diverges from the committed tree — and from here nobody can tell which
+#        side GitHub is reading. The old rule fell through and CERTIFIED the lower-precedence root
+#        CODEOWNERS off a repo in exactly that state. The walk now types every non-last component from
+#        the fd it opened: a directory descends, a REGULAR FILE falls through, anything else REFUSES.
+#        This is the same both-directions ambiguity the symlinked-directory arm (W1k) already refuses
+#        on, reached by a type git has no mode for rather than by a link.
+#        Red-when-broken: restore `if not stat.S_ISDIR(...): return None, None` for the non-last
+#        component and this case CERTIFIES off the root file (receipt R5-F37).
+W1_FIFODIR="$WORK/co-fifo-dotgithub"; mkdir -p "$W1_FIFODIR"
+mkfifo "$W1_FIFODIR/.github"
+# The root file must certify FULLY on its own — including owning ITSELF (the W1f lesson) — or a
+# fall-through would be refused by a neighbouring gate and this case would pass for the wrong reason.
+printf '%s\n/CODEOWNERS @team\n' "$CO_RULES" > "$W1_FIFODIR/CODEOWNERS"
+[ -p "$W1_FIFODIR/.github" ] || fail "W1k4 fixture: .github is not a FIFO"
+W1K4_PROBE="$WORK/co-fifo-probe"; mkdir -p "$W1K4_PROBE"
+cp "$W1_FIFODIR/CODEOWNERS" "$W1K4_PROBE/CODEOWNERS"
+python3 "$CHK" --ruleset "$RS" --repo-root "$W1K4_PROBE" >/dev/null 2>&1 \
+  || fail "W1k4 fixture: the lower-precedence root CODEOWNERS does not certify on its own, so a fall-through would be caught by another gate and this case could not prove the guard works"
+# HARD per-case alarm. `O_NONBLOCK` on the component open is the ONLY thing standing between a planted
+# FIFO and a read that blocks forever waiting for a writer, so if that flag is ever dropped this case
+# must go RED rather than hang the lane — a hang reads as a slow pass, not as a failure. The alarm
+# survives the `exec`, SIGALRM's default disposition kills the child (exit 142), and the pinned-message
+# assertions below then fail. 20s is ~20x the green-path runtime; `perl` is present on macOS and CI.
+out="$(perl -e 'alarm shift @ARGV; exec @ARGV' 20 python3 "$CHK" --ruleset "$RS" --repo-root "$W1_FIFODIR" 2>&1)" \
+  && fail "checker CERTIFIED through a FIFO at .github — git cannot record a named pipe, so the working tree provably diverges from the tree GitHub reads and the root file it fell through to may be nothing GitHub honors (F37); got: $out"
+printf '%s\n' "$out" | grep -Fq 'reached through .github' \
+  || fail "W1k4: the refusal must name the COMPONENT git cannot record, not just the leaf path; got: $out"
+printf '%s\n' "$out" | grep -qi 'cannot record' \
+  || fail "W1k4: the refusal must say git cannot record an entry of this kind — a FIFO is not a symlink, so the symlink message would be a FALSE diagnosis; got: $out"
+
+# (W1k5) A FIFO at the LEAF `.github/CODEOWNERS` (F40). `_nonregular_leaf_problem` has guarded this
+#        location since F14, but until this case NOTHING EVER REACHED IT: W1e/W1f plant SYMLINKS, which
+#        fail at `open` with ELOOP and are refused before any type is taken. This is the first case to
+#        exercise the leaf TYPE arm itself, and the guard must refuse rather than fall through — GitHub
+#        honors this location ahead of the root file, and a location it reads no rules from binds no
+#        reviewer to any protected surface.
+#        Red-when-broken: return `None, None` from that arm instead of the refusal and this case
+#        CERTIFIES off the root file (receipt R5-F40a).
+W1_FIFOLEAF="$WORK/co-fifo-leaf"; mkdir -p "$W1_FIFOLEAF/.github"
+mkfifo "$W1_FIFOLEAF/.github/CODEOWNERS"
+printf '%s\n/CODEOWNERS @team\n' "$CO_RULES" > "$W1_FIFOLEAF/CODEOWNERS"
+[ -p "$W1_FIFOLEAF/.github/CODEOWNERS" ] || fail "W1k5 fixture: .github/CODEOWNERS is not a FIFO"
+W1K5_PROBE="$WORK/co-fifo-leaf-probe"; mkdir -p "$W1K5_PROBE"
+cp "$W1_FIFOLEAF/CODEOWNERS" "$W1K5_PROBE/CODEOWNERS"
+python3 "$CHK" --ruleset "$RS" --repo-root "$W1K5_PROBE" >/dev/null 2>&1 \
+  || fail "W1k5 fixture: the lower-precedence root CODEOWNERS does not certify on its own, so a fall-through would be caught by another gate and this case could not prove the guard works"
+# Same hard alarm, same reason (see W1k4): without `O_NONBLOCK` the leaf open blocks forever.
+out="$(perl -e 'alarm shift @ARGV; exec @ARGV' 20 python3 "$CHK" --ruleset "$RS" --repo-root "$W1_FIFOLEAF" 2>&1)" \
+  && fail "checker CERTIFIED via the lower-precedence root CODEOWNERS while a FIFO occupies .github/CODEOWNERS, the location GitHub honors FIRST (F40); got: $out"
+printf '%s\n' "$out" | grep -Fq '.github/CODEOWNERS' \
+  || fail "W1k5: the refusal must name the HIGHER-PRECEDENCE location GitHub reads, not the root file it could have fallen through to; got: $out"
+printf '%s\n' "$out" | grep -Fq 'not a regular file' \
+  || fail "W1k5: the refusal must pin the leaf TYPE cause, not a size or missing-file message; got: $out"
+
 # (W1g) UNREADABLE CODEOWNERS — refused with the PERMISSIONS cause, not the size cause (F21). An
 #       OSError leaves the size unknown, and an unknown size is itself a refusal — so this failed
 #       CLOSED already; what was wrong was the MESSAGE. The operator was told their file might exceed
 #       3 MB when the real problem was `chmod 000`, and the module's dedicated "is unreadable" message
 #       had become reachable only for invalid UTF-8. Fixed AT THE READER by distinguishing the two
 #       causes of a None size — NOT by reordering the size and readability gates, which is what F2
-#       closed.  Red-when-broken: drop the `read_problem` return from the reader's OSError arm and this
-#       case reports the 3 MB size message again.
+#       closed.  Red-when-broken: return `None, None` from the LEAF's non-ELOOP `OSError` arm in
+#       `_open_repo_file` instead of `_unreadable_problem`. The unreadable location is then read as
+#       ABSENT and the walk falls through, so the refusal becomes `no CODEOWNERS file found` rather
+#       than the 3 MB size message the pre-F21 code produced: the case still reds, but on the
+#       cause assertion below rather than on a certify.
 #       Skipped when the running user can read a 000-mode file (root), rather than asserted falsely.
 W1_NOREAD="$WORK/co-unreadable"; mkdir -p "$W1_NOREAD/.github"
 printf '%s\n' "$CO_RULES" > "$W1_NOREAD/.github/CODEOWNERS"

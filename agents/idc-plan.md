@@ -195,8 +195,9 @@ pillar-level *file* clashes among the surviving, de-duplicated pillars.
    > **Runtime carve-out.** This automerge step is **Claude/Codex-runtime behavior** (`docs/architecture.md`
    > §Runtime model). The **Pi** runtime's Plan resident does **not** merge: it prepares and pushes the
    > planning PR, reports the SHA + verification receipts, and stops at an **operator-performed merge**.
-   > `runtime/pi/.pi/agents/idc/plan.md` is the authority there, and
-   > `tests/smoke/governance/pi-plan-recirculator-merge-posture.sh` holds that posture.
+   > `runtime/pi/.pi/agents/idc/plan.md` is the authority there, and the IDC plugin's own SOURCE repo
+   > carries the governance lane `pi-plan-recirculator-merge-posture.sh` that holds this posture — it
+   > lives in the plugin's test suite, not in a governed repo, so do not look for it under this repo.
 
    **Advance a consumed intake unit's manifest disposition.** When a consideration being decomposed
    **originated from a reviewed external-intake unit** — its paused-origin / discovered-scope

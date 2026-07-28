@@ -175,7 +175,7 @@ def suppressible_fingerprints(ledger: dict[str, Any] | None) -> set[str]:
 
 def _refuse_pending_retry_downgrade(by_fingerprint: dict[str, Any],
                                     observations: list[dict[str, Any]],
-                                    routed: frozenset[str]) -> None:
+                                    routed_lookup: Any) -> None:
     """Fail-closed guard on the MODEL-AUTHORED write door (`record-round`).
 
     Write-ownership contract, stated as a state-transition rule instead of a value rule: restricting
@@ -190,12 +190,19 @@ def _refuse_pending_retry_downgrade(by_fingerprint: dict[str, Any],
     routed work survives in the tracker), and the legitimate "round-1 nit filed, round-2 coordinator
     rejects the re-raise" flow needs it to stay legal. So the refusal is exactly: downgrade a `filed`
     entry that the board does not corroborate. An unreadable board yields an empty corroboration set
-    → refuse (fail closed), never a silent allow."""
+    → refuse (fail closed), never a silent allow.
+
+    `routed_lookup` is a zero-arg callable resolved AT MOST ONCE and ONLY when a round actually
+    touches a pending-retry entry, so the ordinary round — which touches none — costs no board read
+    (on the github backend that read is a metered API call)."""
+    routed: frozenset[str] | None = None
     for obs in observations:
         fingerprint = str(obs.get("fingerprint", "")).strip()
         entry = by_fingerprint.get(fingerprint)
         if entry is None or entry.get("last_disposition") != PENDING_RETRY:
             continue
+        if routed is None:
+            routed = frozenset(routed_lookup() if callable(routed_lookup) else (routed_lookup or ()))
         if fingerprint in routed:
             continue
         raise SeenLedgerError(
@@ -208,23 +215,23 @@ def _refuse_pending_retry_downgrade(by_fingerprint: dict[str, Any],
 
 def record_observations(repo: str, pr: int, observations: list[dict[str, Any]],
                         model_authored: bool = False,
-                        routed_fingerprints: frozenset[str] | None = None) -> set[str]:
+                        routed_lookup: Any = None) -> set[str]:
     """Record one observation per (fingerprint, disposition) into the per-PR ledger — seen_count
     increments, dispositions update, new fingerprints append. Returns the set of fingerprints that
     were already seen BEFORE this recording (the dedupe set callers suppress against). The load
     validates first, so an invalid ledger refuses the whole recording fail-closed.
 
     `model_authored=True` marks the coordinator's `record-round` door and enables the pending-retry
-    downgrade guard above; `routed_fingerprints` is the board-corroborated set that exempts it. The
-    guard runs BEFORE any mutation, so a refused round leaves the ledger byte-for-byte unchanged."""
+    downgrade guard above; `routed_lookup` supplies (as a set or a zero-arg callable) the
+    board-corroborated fingerprints that exempt it. The guard runs BEFORE any mutation, so a refused
+    round leaves the ledger byte-for-byte unchanged."""
     ledger = read_ledger(repo, pr)
     if ledger is None:
         ledger = {"schema_version": SCHEMA_VERSION, "pr": int(pr), "entries": []}
     prior = seen_fingerprints(ledger)
     by_fingerprint = {entry["fingerprint"]: entry for entry in ledger["entries"]}
     if model_authored:
-        _refuse_pending_retry_downgrade(by_fingerprint, observations,
-                                        frozenset(routed_fingerprints or ()))
+        _refuse_pending_retry_downgrade(by_fingerprint, observations, routed_lookup)
     now = _utc_now()
     for obs in observations:
         fingerprint = str(obs.get("fingerprint", "")).strip()
@@ -300,9 +307,9 @@ def _cmd_record_round(args: argparse.Namespace) -> int:
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise SeenLedgerError(f"could not read round record {args.round}: {exc}") from exc
     pr, observations = _validate_round(value)
-    prior = record_observations(args.repo, pr, observations, model_authored=True,
-                                routed_fingerprints=_board_routed_fingerprints(args.repo,
-                                                                               args.tracker))
+    prior = record_observations(
+        args.repo, pr, observations, model_authored=True,
+        routed_lookup=lambda: _board_routed_fingerprints(args.repo, args.tracker))
     resurfaced = sum(1 for obs in observations if obs["fingerprint"] in prior)
     print(f"idc-review-seen-ledger: recorded {len(observations)} candidate(s) for PR #{pr} "
           f"({resurfaced} previously seen) at {ledger_relpath(pr)}")

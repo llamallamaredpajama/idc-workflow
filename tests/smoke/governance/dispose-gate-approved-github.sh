@@ -1,16 +1,18 @@
 #!/bin/bash
 # dispose-gate-approved-github.sh — governance scenario: the github `gate-approved` disposition
 # verifies a REAL approval artifact BOUND to the gate — the gate's OWN recorded approval PR (the
-# `idc-gate-pr` marker in the gate body) is merged, OR (for an operator-DECISION gate only) the
-# `decision-approved` label — not merely the caller's say-so. An unrelated merged PR or a stray label
-# can never terminalize an unapproved gate.
+# `idc-gate-pr` marker in the gate body) is merged AND reciprocally named by the LIVE PR body, OR
+# (for an operator-DECISION gate only) the `decision-approved` label — not merely the caller's say-so.
+# An unrelated merged PR, a one-sided gate-body marker, or a stray label can never terminalize an
+# unapproved gate.
 #
 # In-process unit (github isn't hermetic): idc_gh_board._gh (issue/pr reads) + fetch_item + the
 # item-id cache + idc_gh_close.close_issue are monkeypatched; assertions are on whether close_issue
 # is called. Red-when-broken: neuter check_gate_approved (return without raising) → an unapproved
 # gate, a PR-mismatch, a bare label on a requirements gate, or a non-gate item calls close_issue →
-# this FAILs. Derive the gate KIND from labels instead of the producer-stamped title (the codex
-# round-10 P1 retype door) → cases (10)/(10b) FAIL. Bind the body marker with `.search()` instead of
+# this FAILs. Drop the reciprocal PR-body proof and trust the gate body alone → case (2c) FAILs.
+# Derive the gate KIND from labels instead of the producer-stamped title (the codex round-10 P1
+# retype door) → cases (10)/(10b) FAIL. Bind the body marker with `.search()` instead of
 # `findall`+deny-on->1 (round-14 P1) → case (12) FAILs (an embedded merged-PR marker binds). Accept a
 # comment-sourced marker on a requirements gate (round-14 P2) → case (6) FAILs.
 #
@@ -23,9 +25,9 @@ python3 - "$GOV_PLUGIN/scripts" "$REPO" <<'PY' || fail "github gate-approved uni
 import sys, json
 sys.path.insert(0, sys.argv[1])
 repo = sys.argv[2]
-import idc_transition as E, idc_gh_board as B, idc_gh_close as GC
+import idc_transition as E, idc_gh_board as B, idc_gh_close as GC, idc_pr_gate_bind as PB
 
-# Board fixtures: issue# -> {title, labels, body}; pr# -> {state, mergedAt}.
+# Board fixtures: issue# -> {title, labels, body}; pr# -> {state, mergedAt, body}.
 GATE_PR = lambda n: f"<!-- idc-gate-pr: {n} -->"
 ISSUES = {
     "5":  {"title": "[operator-action] Requirements change — greet by name", "labels": [], "body": "diff\n" + GATE_PR(9)},
@@ -90,9 +92,13 @@ ISSUES = {
     "23": {"title": "[operator-action] Requirements change — double marker", "labels": [],
            "body": "```diff\n+ migrated a gate doc that shows " + GATE_PR(9) + "\n```\n"
                    "TO APPROVE: merge the Think PR.\n" + GATE_PR(10)},
+    # One-sided gate-body evidence is insufficient: the gate body names a MERGED PR, but the LIVE PR
+    # body reciprocally binds a DIFFERENT gate. The terminal path must refuse this stale/foreign proof.
+    "24": {"title": "[operator-action] Requirements change — one-sided gate body", "labels": [],
+           "body": "diff\n" + GATE_PR(9)},
 }
-PRS = {"9": {"state": "MERGED", "mergedAt": "2026-07-09T00:00:00Z"},
-       "10": {"state": "OPEN", "mergedAt": None}}
+PRS = {"9": {"state": "MERGED", "mergedAt": "2026-07-09T00:00:00Z", "body": "PR\n\n" + GATE_PR(5)},
+       "10": {"state": "OPEN", "mergedAt": None, "body": "PR\n\n" + GATE_PR(8)}}
 
 VIEWS = {}
 def fake_gh(args, r):
@@ -109,6 +115,7 @@ def fake_gh(args, r):
         return json.dumps(PRS[args[2]])
     raise AssertionError(f"unexpected gh call: {args}")
 B._gh = fake_gh
+PB._gh_json = lambda args, repo: json.loads(fake_gh(args, repo))
 FETCHES = {}
 def fake_fetch(iid, r):
     FETCHES[iid] = FETCHES.get(iid, 0) + 1
@@ -118,17 +125,18 @@ def fake_fetch(iid, r):
 B.fetch_item = fake_fetch
 closed = []
 GC.close_issue = lambda o, p, i, r, item_id=None: closed.append(i)
-ctx = E.github_ctx(repo, "o", "1", itemid_cache={n: f"PVTI_{n}" for n in (5, 6, 7, 8, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23)})
+ctx = E.github_ctx(repo, "o", "1", itemid_cache={n: f"PVTI_{n}" for n in (5, 6, 7, 8, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24)})
 
 def is_denied(fn):
     try: fn(); return False
     except E.TransitionError: return True
 
-# (1) requirements gate whose recorded approval PR (idc-gate-pr: 9) is MERGED → the gate closes.
+# (1) requirements gate whose recorded approval PR (idc-gate-pr: 9) is MERGED and reciprocally
+# bound from the LIVE PR body → the gate closes.
 closed.clear()
 E.run("dispose", ctx, num=5, disposition="gate-approved")
-assert closed == [5], f"gate + merged recorded PR did not close: {closed}"
-print("  ok (1) a gate whose recorded idc-gate-pr approval PR is MERGED closes to Done")
+assert closed == [5], f"gate + merged reciprocal approval PR did not close: {closed}"
+print("  ok (1) a gate whose recorded idc-gate-pr approval PR is MERGED and reciprocal closes to Done")
 
 # (2) requirements gate whose recorded approval PR (idc-gate-pr: 10) is UNMERGED → DENIED.
 closed.clear()
@@ -143,6 +151,14 @@ assert is_denied(lambda: E.run("dispose", ctx, num=5, disposition="gate-approved
     "an unrelated --gate-pr (not the gate's recorded PR) was allowed"
 assert closed == [], f"denied unbound --gate-pr still closed: {closed}"
 print("  ok (2b) a --gate-pr that is not the gate's recorded approval PR is DENIED (bound to THIS gate)")
+
+# (2c) one-sided gate-body evidence is DENIED: gate #24 points at MERGED PR #9, but PR #9's LIVE body
+# binds gate #5, not #24. The gate body alone is never enough.
+closed.clear()
+assert is_denied(lambda: E.run("dispose", ctx, num=24, disposition="gate-approved")), \
+    "a one-sided gate-body marker (with no reciprocal PR-body proof) was allowed"
+assert closed == [], f"denied one-sided gate still closed: {closed}"
+print("  ok (2c) a one-sided gate-body marker is DENIED without the reciprocal LIVE PR-body proof")
 
 # (3) an operator-DECISION gate (decision + decision-approved labels) → the gate closes.
 closed.clear()
@@ -282,4 +298,4 @@ assert closed == [], f"the double-marker gate still closed: {closed}"
 print("  ok (12) two idc-gate-pr body markers FAIL CLOSED — an embedded merged-PR marker can never bind (round-14 P1)")
 PY
 
-echo "PASS: github gate-approved closes a gate ONLY on a gate-BOUND approval artifact (the gate's recorded idc-gate-pr marker in the BODY is merged — comment-only markers are refused; or the decision/decision-approved label pair on a DECISION-TITLED gate — the kind is the producer-stamped title, never labels); an unmerged/unbound PR, any label pair on a requirements gate, a non-gate item, a comment-only requirements marker, TWO body markers (ambiguity), and both guard→close races (late NO-GO, mid-flight Status move) perform no gh close"
+echo "PASS: github gate-approved closes a gate ONLY on a gate-BOUND approval artifact (the gate's recorded idc-gate-pr marker in the BODY is merged AND reciprocally bound from the LIVE PR body — comment-only markers are refused; or the decision/decision-approved label pair on a DECISION-TITLED gate — the kind is the producer-stamped title, never labels); an unmerged/unbound/one-sided PR, any label pair on a requirements gate, a non-gate item, a comment-only requirements marker, TWO body markers (ambiguity), and both guard→close races (late NO-GO, mid-flight Status move) perform no gh close"

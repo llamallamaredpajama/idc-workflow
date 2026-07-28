@@ -55,13 +55,18 @@ RECEIPT_RELPATH = "docs/workflow/install-receipt.yaml"
 # Paths the receipt must never list, by exact repo-relative path or basename.
 EXCLUDED_RELPATHS = {"TRACKER.md", ".claude/settings.json"}
 EXCLUDED_BASENAMES = {"install-receipt.yaml"}
-# Data-bearing scaffold files: /idc:init writes operator/board data into these AFTER copying the
-# template (WORKFLOW-config.yaml gets the derived `domains:`; tracker-config.yaml gets
-# project_number + board field_ids). /idc:update must ALWAYS show-diff-and-ask for them regardless
-# of receipt state — a pre-guard receipt (written before init stamped them --customized) marks them
-# `state: stamped`, and silently re-stamping would wipe that data. This set is the single source of
-# truth update consumes (verify --json -> "always_ask"); never silently refresh a path listed here.
-ALWAYS_ASK_RELPATHS = {"WORKFLOW-config.yaml", "docs/workflow/tracker-config.yaml"}
+# Operator-data scaffold files: /idc:init writes operator/board data into the two configs AFTER
+# copying the template (WORKFLOW-config.yaml gets the derived `domains:`; tracker-config.yaml gets
+# project_number + board field_ids), and U6 adds the verification-handle registry as operator-owned
+# evidence/recipe data that update must preserve as-is. /idc:update must ALWAYS route these through
+# its preserve/advisory logic regardless of receipt state — a pre-guard receipt can still mark one
+# `state: stamped`, and silently re-stamping would wipe operator data. This set is the single source
+# of truth update consumes (verify --json -> "always_ask"); never silently refresh a path listed here.
+ALWAYS_ASK_RELPATHS = {
+    "WORKFLOW-config.yaml",
+    "docs/workflow/tracker-config.yaml",
+    "docs/workflow/verification-handles.yaml",
+}
 # Fixed governed dests OUTSIDE the docs-tree, dest -> template source relative to the plugin root
 # (the same mapping idc_template_for.py / idc_init_scaffold.sh encode). Used by verify to derive
 # the CURRENT plugin's expected stamped set: a receipt written by an older plugin version does not
@@ -397,8 +402,8 @@ def main(argv: list[str]) -> int:
                     help="emit JSON instead of TSV. Schema: {\"unchanged\":[paths], "
                          "\"modified\":[paths], \"missing\":[paths], \"ok\": bool (true iff "
                          "modified+missing both empty), \"summary\": str, \"always_ask\":[paths] "
-                         "(data-bearing files update must always diff-and-ask, never silently "
-                         "refresh), \"unrecorded\":[paths] (files the current plugin stamps that "
+                         "(operator-data files update must always preserve/advisory-check rather "
+                         "than silently refresh), \"unrecorded\":[paths] (files the current plugin stamps that "
                          "the receipt does not list — new in a newer plugin version; update "
                          "restores absent ones / diff-and-asks present ones)}")
     vp.set_defaults(func=cmd_verify)

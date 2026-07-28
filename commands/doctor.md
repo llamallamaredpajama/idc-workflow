@@ -79,6 +79,37 @@ ls WORKFLOW.md WORKFLOW-config.yaml docs/workflow/pillar-matrices docs/workflow/
 ```
 A partial tree is a FAIL that lists the missing paths. Fix hint: run `/idc:init`.
 
+**4b — Pathway enforcement claim is honest (spec §2.1).** `controlled` / `app-locked` promise that
+supported runtime hooks deny off-path mutations **and** that a required GitHub check plus repository
+rules block off-path *integration*. The filesystem tracker has no integration boundary, so it MUST
+NOT claim hard pathway security — `/idc:doctor` must FAIL that combination. (`/idc:init`'s scaffold
+door refuses to *create* it; this row catches a `WORKFLOW-config.yaml` hand-edited to `controlled`
+afterwards, or a repo adopted from elsewhere.) Run the deterministic door — read-only, two file
+reads, no board and no network:
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_doctor_pathway_check.py" --repo "$PWD"
+```
+- exit **0** → **PASS** (note the reported `backend=… , pathway_enforcement.mode=…`): the claim
+  matches the backend — any `github` posture, or `filesystem` declaring `off`.
+- exit **1** → **FAIL**, for either of the two ways a claim goes unhonored: the `filesystem` backend
+  claims `controlled`/`app-locked` (fix hint: "set `pathway_enforcement.mode: off` in
+  `WORKFLOW-config.yaml`, or move this repo to the `github` backend (`/idc:init`) — the filesystem
+  tracker makes no hard pathway-security claim (spec §2.1)"), **or** a claiming mode runs on a host
+  whose `python3` is missing/older than 3.10, so the PreToolUse Path Gate cannot evaluate any
+  mutation — it refuses them all, authorized work included, instead of enforcing (fix hint: "install
+  or select Python 3.10 or newer, then re-run `/idc:doctor`"). The exact reason is on stderr; quote
+  it in the row. This is the row that makes an unrunnable enforcement leg visible — the hook wrappers
+  are the only other place the runtime is checked, and they cannot report.
+- exit **2** → **FAIL**, **never PASS**: `WORKFLOW-config.yaml` or the tracker backend is
+  missing/unreadable/unrecognized, or the shared runtime preflight itself could not be run, so the
+  claim could not be established — and an *indeterminate* claim is not an honest one (the runtime
+  Path Gate parser reports an unreadable config as `off`, which is the right fail-closed default for
+  enforcement but is not evidence of honesty). Fix hint: "restore `WORKFLOW-config.yaml` +
+  `docs/workflow/tracker-config.yaml` (`/idc:init`), then re-run `/idc:doctor`."
+This is a **sub-row of check 4** (like `5b` under `5`): report it in the table under row 4 and fold
+its result into row 4's persisted `result` — a `4b` FAIL makes row 4 FAIL — so the ten-row report
+contract stays exactly as it is.
+
 **5 — Install receipt present.** PASS if `docs/workflow/install-receipt.yaml` exists and
 parses with the expected keys (`receipt_version` — exactly `1` legacy or `2`, no other value,
 `fingerprint_method: sha256`, `files[]`, and — for a `2` receipt — a valid `plugin_version`, the
@@ -106,6 +137,13 @@ receipt_version must be 1 or 2, and a `2` receipt requires a valid plugin_versio
 same invalid-receipt state `/idc:update`'s freshness guard refuses to run against (exit 2) —
 repair or re-stamp it (`/idc:init` or `/idc:update`) before continuing." Do **not** recompute or
 verify fingerprints here — that is update's job; doctor only checks presence and parse.
+
+**5b — Adoption baseline state.** If `docs/workflow/reconciliation-baseline-required.json` exists,
+report **FAIL** with the note `baseline-pending — run /idc:janitor --bootstrap (or /idc:update to
+resume it)` until `docs/workflow/reconciliation-adoption.json` exists and the marker is gone. This is
+blocking, not advisory: ordinary mutators must not run on a baseline-pending repo. If neither file
+exists, report `n/a (no adoption baseline yet)`; if only the adoption receipt exists, report PASS and
+note the recorded baseline head.
 
 **6 — Pi runtime (optional).** The IDC Pi runtime (`runtime/pi/`, vendored) needs **Bun** to
 boot the coms-net hub + role harness; the **Pi agent** itself (the `pi` binary / npm package
@@ -182,8 +220,9 @@ Plan, once, at issue creation**. An issue that bypassed Plan — hand-filed, or 
 review-residual — can sit build-eligible (`Status = Todo`, `Stage = Buildable`) while **malformed**
 (fails the schema check) and/or carrying a **prose-only dependency** ("blocked on X" in the body
 with no native *blocked-by* link), and Autorun's drain (which keys on native `blocked_by` only)
-would claim and execute it cold. This row re-runs the existing schema check over that lane and
-flags prose dependencies with no recorded link. It is a **read-only `⚠` heads-up — never a hard
+would claim and execute it cold. This row re-runs the existing schema check over that lane,
+flags prose dependencies with no recorded link, **and warns when a frozen validation contract cites
+an unknown verification-handle id** (read-only: `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_verification_handles.py" audit-citations --repo "$PWD" --contracts-dir "$PWD/docs/workflow/build-validation"`). It is a **read-only `⚠` heads-up — never a hard
 FAIL** (Build still trusts the board; the schema check stays Plan's gate). Branch on
 `docs/workflow/tracker-config.yaml::backend`:
 

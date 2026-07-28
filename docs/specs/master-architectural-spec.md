@@ -29,10 +29,11 @@ admits the idea's requirements (PRD + TRD) by merging the Think PR.
 - **Pipeline:** `Think → Plan → Build`, `Recirculator` the only retrograde path, `Autorun` the
   one-shot drainer. Nine commands total: `init`, `doctor`, `think`, `plan`, `build`,
   `recirculate`, `autorun`, `update`, `uninstall`.
-- **Five guardrails, nothing else:** the one requirements gate at the end of Think; matrix
-  deconfliction; real verification surfaces; recirculator drift-healing; one-way flow through
-  the glass wall. The model is trusted; there are no standing reviewer/fixer/researcher roles,
-  multi-pass plan reviews, claim-state machine, or per-edit gates.
+- **Pathway guardrails, not coding prescriptions.** IDC does not dictate how an agent designs, plans, or writes code. It does require governed work to enter through Think, Intake, Recirculation, Plan, Build, or an operational recovery route; it keeps the tracker synchronized as part of every transition and refuses unproven completion. The model is trusted on coding method; there are no standing reviewer/fixer/researcher roles, multi-pass plan reviews, claim-state machine, or per-edit gates.
+- IDC names three `pathway_enforcement.mode` profiles: `off | controlled | app-locked`.
+- `controlled` blocks supported-runtime off-path mutations and blocks merge when pathway evidence is missing or inconsistent, but it cannot stop a machine administrator from removing hooks, editing `.git`, or disabling GitHub rules.
+- `app-locked` adds a GitHub App as the sole tracker writer and trusted check source; it closes the ordinary-token tracker-write gap but still does not protect against repository or organization administrators removing the rules or the App.
+- The filesystem tracker remains useful for hermetic tests and local demonstrations. It must stay `off` and makes no hard pathway-security claim.
 
 ## 3. Component architecture & naming convention
 

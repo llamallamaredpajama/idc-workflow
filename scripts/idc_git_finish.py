@@ -56,6 +56,7 @@ sys.path.insert(0, SCRIPT_DIR)                          # …but scripts/ stays 
 import idc_review_verdict_check as VC   # noqa: E402 — the verdict validator + PASSING set (reuse)
 import idc_transition as TE             # noqa: E402 — load_verdict + unmet_merge_conditions (reuse)
 import idc_file_findings as FF          # noqa: E402 — work_items + existing-keys readers (reuse)
+import idc_review_seen_ledger as SL     # noqa: E402 — the per-PR seen-fingerprint ledger (U7 Item 1)
 import idc_gh_board                     # noqa: E402 — BoardReadError for fail-closed github routing
 import idc_ledger                       # noqa: E402 — the obligations ledger (the mid_finish taint)
 
@@ -664,15 +665,29 @@ def routing_gap(verdict, backend, repo, tracker_path, owner, project):
     idc_file_findings.work_items derives) whose stable dedupe `key` is NOT yet among the board's filed
     idc-recirc-source keys. [] ⇒ every routable finding is already routed to the board. Raises
     idc_gh_board.BoardReadError (github, unreadable board) so the caller fails CLOSED — never confirm
-    routing (and merge) on an unverifiable board state."""
+    routing (and merge) on an unverifiable board state.
+
+    Seen-ledger convergence (U7 Item 1): a finding the per-PR seen-fingerprint ledger recorded as
+    `suppressed-seen` was deliberately deduplicated by the filer against an EARLIER review round —
+    it is a recognized resurfacing, not a stranded nit, so it is not a routing gap (otherwise every
+    suppressed duplicate would fatally block the finish it just converged). Only that one recorded
+    disposition is exempt; an invalid ledger raises SL.SeenLedgerError → the caller fails closed."""
     items = FF.work_items(verdict)
     if not items:
         return []  # a clean PASS (no nits/deferrals) has nothing to route
+    suppressed_fps = set()
+    pr = verdict.get("pr")
+    if not isinstance(pr, bool) and isinstance(pr, int):
+        ledger = SL.read_ledger(repo, pr)  # raises SeenLedgerError → fail-closed
+        if ledger:
+            suppressed_fps = {e["fingerprint"] for e in ledger.get("entries", [])
+                              if e.get("last_disposition") == "suppressed-seen"}
     if backend == "filesystem":
         existing = FF._fs_existing_keys(tracker_path)
     else:
         existing = FF._github_existing_keys(repo, owner, project)  # raises BoardReadError → fail-closed
-    return [it for it in items if it["key"] not in existing]
+    return [it for it in items if it["key"] not in existing
+            and not (it.get("kind") == "finding" and it.get("fingerprint") in suppressed_fps)]
 
 
 def enforce_receipt_gate(args, backend, repo, tracker_path, owner, project_number):
@@ -703,6 +718,10 @@ def enforce_receipt_gate(args, backend, repo, tracker_path, owner, project_numbe
             _fail("require-routed-findings",
                   f"cannot read the board to confirm finding routing ({str(e)[:160]}) — refusing to "
                   "merge on an unverifiable routing state (re-run once the board is readable)")
+        except SL.SeenLedgerError as e:
+            _fail("require-routed-findings",
+                  f"review seen-fingerprint ledger did not validate ({str(e)[:160]}) — refusing to "
+                  "merge on an unverifiable seen-ledger state (fixed code owns that ledger)")
         if gap:
             keys = ", ".join(it["key"] for it in gap)
             _fail("require-routed-findings",
@@ -715,6 +734,25 @@ def enforce_receipt_gate(args, backend, repo, tracker_path, owner, project_numbe
         _fail("merge-conditions-met",
               f"{len(unmet)} merge_condition(s) unmet [{ids}] — the reviewer set a pre-merge condition "
               "that is not satisfied; refusing to merge (resolve it, re-review, retry)")
+
+
+def enforce_build_receipt(args, repo, branch):
+    """Mandatory U6 implementation-receipt gate for the normal finish path.
+
+    Every supported/public/canonical finish route must supply --build-receipt. The receipt is
+    authoritative: it must be source-owned, bound to THIS issue/PR, bound to THIS branch's current
+    head, and still match the exact final diff before any mutation proceeds.
+    """
+    if not args.build_receipt:
+        _fail("build-receipt",
+              "--build-receipt is required on the normal finish path — final-diff/test/review freshness "
+              "must be proven before merge/close")
+    try:
+        import idc_build_receipt as BR  # noqa: E402 — lazy: only the U6 path needs this helper
+        BR.verify_receipt(repo=repo, receipt_path=args.build_receipt,
+                          expected_issue=args.issue, expected_pr=args.pr, head_ref=branch)
+    except Exception as exc:  # noqa: BLE001 — any stale/forged receipt fails closed here
+        _fail("build-receipt", str(exc))
 
 
 def close_only_recover(args, repo, worktree_abs, tracker_path, backend, project_number, field_ids,
@@ -818,6 +856,11 @@ def main():
                      help="path to the review verdict JSON (the finish RECEIPT) — validated + its "
                           "findings must be routed to the board + its merge_conditions met before any "
                           "merge/close. Required: the finish is a receipt gate.")
+    ap.add_argument("--build-receipt", dest="build_receipt", default=None,
+                     help="required source-owned implementation receipt for THIS issue/PR/diff on the "
+                          "normal finish path. Stale/fake/wrong-head receipts — or omission — refuse "
+                          "the merge before any mutation. (close-only recovery is the only path that "
+                          "does not require it.)")
     ap.add_argument("--session-id", dest="session_id", default=None,
                      help="session id recorded on the mid-finish obligation (default: "
                           "$CLAUDE_CODE_SESSION_ID) — it attributes the in-flight record, and a "
@@ -855,6 +898,7 @@ def main():
     enforce_receipt_gate(args, backend, repo, tracker_path, owner, project_number)
 
     branch = resolve_branch(repo, args.pr)
+    enforce_build_receipt(args, repo, branch)
     worktree_remove(repo, worktree_abs)
     # RECORD IN-FLIGHT STATE, immediately before the point of no return. Set here rather than at the
     # top of the tail on purpose: everything above this line is reversible and leaves no shipped

@@ -85,16 +85,43 @@ plan-chain layers are autonomous (no gate) and survive as files for traceability
 ## Phase 3 — Author the goal contracts
 
 Distill each pillar into a complete contract with `idc:idc-goal-contract`
-(complexity-adaptive; real-functional-test verification surfaces). Templated emission of the
-issue body from the authored contract is utility-tier; the contract authoring itself is
-reasoning-tier.
+(complexity-adaptive; real-functional-test verification surfaces). Then author the machine-owned
+validation contract that sits beside the issue body: declare the fixed `surface` / `evidence_kind`
+pair, cite a reusable `handle_id` from `docs/workflow/verification-handles.yaml` through the fixed
+resolver `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_verification_handles.py" resolve ...` when a
+reusable recipe exists, and if it does not, route a **named** recirculation / blocked-dependency
+obligation instead of weakening the gate. Before **any** contract is frozen, run the bounded
+read-only falsifier `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_validation_risk_gate.py" evaluate ...`
+and let **it** decide whether discovery is required: the helper derives risk in fixed code from the
+`--touch` set you give it — the same set the contract will freeze — (and
+`--baseline expected-red|expected-green` when the
+classification is known), unions that with any risk you declare via the named fixed inputs
+(`security-sensitive-path`, `cross-cutting-surface`, `new-runtime-dependency`,
+`expected-green-baseline`, `large-touch-set`), and deterministically skips only what it judges
+trivial. Declaring inputs can ADD risk; **omitting them cannot suppress a risk the helper derived
+from that touch set**, and it refuses (exit 2) if derived risk arrives without a `--scenario`. The
+candidate branch shape is exact `{promise, failure_mode, observable_evidence, executable_check}` and
+skeptics ask exactly `show how this check passes while the goal is actually broken`; any gate
+defeated by a majority is discarded or repaired before survivors inform the frozen gate. Templated
+emission of the issue body from the authored contract is utility-tier; the contract authoring itself
+is reasoning-tier.
 
 ## Phase 4 — Vertical slice (matrix)
 
 Run `idc:idc-matrix-analysis`: pairwise clash fan-out → synthesize the phase matrix at
 `docs/workflow/pillar-matrices/<phase-tag>-matrix.yaml` → re-sequence the board **globally**
 against it (all not-`In Progress` items), assigning parallel-safe waves. Validate with
-`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_matrix_check.py" <matrix>`. **Re-link paused origins:**
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_matrix_check.py" <matrix>`. Then compile the
+**authoritative** whole-horizon graph and frozen preview — read-only only, never a live tracker
+mutation here:
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_execution_graph.py" --matrix <matrix> ... --json`
+re-derives deterministic Waves, and
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_tracker_projection.py" --matrix <matrix> ... --json`
+emits the frozen projection + pure simulation the later sanctioned apply consumes. The live write then
+runs only through `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_tracker_transaction.py" freeze …` followed by
+`… apply …`, which re-reads for optimistic concurrency, persists the pre-write obligation, applies only
+its frozen sanctioned operations, requires journal corroboration + exact live postcondition, and writes
+the planning receipt last. **Re-link paused origins:**
 the same global re-sequence also re-points any **paused** issue whose recirc ticket was retired (its
 scope admitted as one of the considerations now being decomposed — found via the consideration's
 recorded paused-origin link) **off that retired ticket** and onto the consideration's **new unblocker
@@ -108,31 +135,45 @@ pillar-level *file* clashes among the surviving, de-duplicated pillars.
 ## Phase 5 — Validate + admit
 
 1. Run `idc:idc-schema-check` on every issue body
-   (`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_schema_check.py" <body>`); fix until PASS.
-2. Create issues and set `Status`/`Wave`/`Phase`/`Domain` + native blocked-by through
-   `idc:idc-tracker-adapter`. All issues flow as `Todo` — **there is no gate in Plan**; the
-   requirements were already admitted at the end of Think. **Link each Buildable child back to its
-   consideration pointer** through the **engine** (`idc_transition.py … link --parent <pointer>
-   --child <buildable> --kind sub`) — the engine records the link durably (a journaled `idc-blocked-by`
-   marker on github; native `blocked_by`/`parent` on filesystem). This is the **pointer-decomposition
-   record** the engine's guarded `dispose --disposition retired` verifies (a named Buildable child that
-   references the pointer) before it retires the pointer in step 3; without it the retirement is
-   fail-closed. On the **github** backend, stamp each
-   Buildable issue body with the provenance marker
-   `<!-- idc-provenance: {"matrix":"<phase-tag>-matrix.yaml","pillar":"<id>"} -->`
-   (`idc:idc-goal-contract`), carrying the **exact** `pillars[].id` from the matrix entry just
-   authored in Phase 4 (the same value written to the matrix YAML, so the link is deterministic at
-   source — no fuzzy `Trace:` matching downstream). Filesystem trackers have no issue bodies, so
-   the stamp is github-only. **Provenance post-condition (github, DET-VERIFY):** once this run's
-   Buildables are minted, run
+   (`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_schema_check.py" <body>`) **and** schema-check the
+   governed verification-handle registry before any cited `handle_id` is used
+   (`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_schema_check.py" registry docs/workflow/verification-handles.yaml`);
+   the handle resolver's secret-free validator must also pass. Fix until PASS.
+2. Freeze and apply the board mutation only through the sanctioned planning transaction helper:
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_tracker_transaction.py" freeze …` then
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_tracker_transaction.py" apply …`. That helper owns the
+   live tracker write: it binds the start digest, frozen projection, ordered sanctioned operations,
+   optimistic-concurrency re-read, mandatory journal corroboration, exact live readback, and the final
+   planning receipt. All issues flow as `Todo` — **there is no gate in Plan**; the requirements were
+   already admitted at the end of Think. **Link each Buildable child back to its consideration pointer**
+   through the **engine** (`idc_transition.py … link --parent <pointer> --child <buildable> --kind sub`)
+   — the engine records the link durably (a journaled `idc-blocked-by` marker on github; native
+   `blocked_by`/`parent` on filesystem). This is the **pointer-decomposition record** the engine's
+   guarded `dispose --disposition retired` verifies (a named Buildable child that references the
+   pointer) before it retires the pointer in step 3; without it the retirement is fail-closed. On the
+   **github** backend, Plan authors the per-Buildable goal-contract body (`idc:idc-goal-contract`,
+   reasoning-tier) into a **bodies JSON keyed by `logical_id`** (the matrix `pillars[].id`) **before**
+   freeze, and passes it as `--bodies <bodies.json>` to `idc_tracker_transaction.py freeze`. The
+   sanctioned transaction then creates each github Buildable **with** that body and appends the
+   machine-derived provenance marker
+   `<!-- idc-provenance: {"matrix":"<phase-tag>-matrix.yaml","pillar":"<id>"} -->` in **fixed code**
+   from the matrix pillar id (the model authors prose; the machine owns the marker — global contract
+   #16), carrying the **exact** `pillars[].id` from the matrix entry just authored in Phase 4
+   (deterministic at source — no fuzzy `Trace:` matching downstream). Freeze **fails closed** if any
+   created Buildable has no body, an empty/whitespace body, or a body that already carries a marker —
+   so no empty-body Buildable can be minted. Filesystem trackers have no issue bodies, so `--bodies` is
+   github-only. **Provenance post-condition (github, DET-VERIFY):** the transaction's OWN post-apply
+   body postcondition already re-read each minted issue's LIVE body and proved the marker landed, so
+   running
    `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_provenance_check.py" --matrix <phase-tag>-matrix.yaml --issues <n1,n2,...>`
-   — it re-reads each issue's LIVE body (not Plan's own belief of what it wrote) and confirms a
-   valid marker naming a pillar actually in the matrix just authored. **Exit 0** confirms every
-   minted Buildable is stamped; **exit 2 halts Plan** — it prints the offending issue numbers,
-   which Plan re-stamps (`comment`/body edit through the adapter) and re-checks before continuing
-   to step 3. Plan **cannot report Phase 5 done while this check fails** — a dropped stamp used to
-   silently disarm the Recirculator's provenance regime (`idc_recirc_sweep.py`); this converts that
-   gap from PROSE-ONLY to a verified post-condition.
+   is a belt-and-suspenders verification of an **already-satisfied invariant** — it re-reads each
+   issue's LIVE body (not Plan's own belief of what it wrote) and confirms a valid marker naming a
+   pillar actually in the matrix just authored. **Exit 0** confirms every minted Buildable is stamped.
+   If it **exits 2**, the transaction's own body-postcondition already failed the apply — there is no
+   phantom re-stamp door: fix the authored body / matrix pillar id and **re-freeze/re-apply**
+   (fail-closed). Plan **cannot report Phase 5 done while this check fails** — a dropped marker used to
+   silently disarm the Recirculator's provenance regime (`idc_recirc_sweep.py`); the create-time marker
+   plus this post-condition close that gap.
 3. Advance the consideration pointer `Consideration → Planning` through the **guarded Stage door**
    (the only sanctioned Stage-write — it validates the Stage/Status pair against the machine and
    journals the transition; a raw `set --field Stage` is denied by the mutation interlock):
@@ -156,6 +197,13 @@ pillar-level *file* clashes among the surviving, de-duplicated pillars.
    It is **not** GitHub `--auto`: auto-merge defers the merge server-side and, with the repo's
    `deleteBranchOnMerge` off, would skip the branch delete and leave an orphaned `plan/*`. Branch
    deletion is **atomic with the merge**, not a separate best-effort step.
+
+   > **Runtime carve-out.** This automerge step is **Claude/Codex-runtime behavior** (`docs/architecture.md`
+   > §Runtime model). The **Pi** runtime's Plan resident does **not** merge: it prepares and pushes the
+   > planning PR, reports the SHA + verification receipts, and stops at an **operator-performed merge**.
+   > `runtime/pi/.pi/agents/idc/plan.md` is the authority there, and the IDC plugin's own SOURCE repo
+   > carries the governance lane `pi-plan-recirculator-merge-posture.sh` that holds this posture — it
+   > lives in the plugin's test suite, not in a governed repo, so do not look for it under this repo.
 
    **Advance a consumed intake unit's manifest disposition.** When a consideration being decomposed
    **originated from a reviewed external-intake unit** — its paused-origin / discovered-scope

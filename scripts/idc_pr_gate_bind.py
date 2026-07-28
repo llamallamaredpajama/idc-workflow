@@ -108,6 +108,29 @@ def _verify_body(repo, kind, number, expected_body):
         raise BindError(f"{kind.upper()} #{number} marker write failed readback; stop and rerun safely")
 
 
+def validate_live_binding(repo, pr, gate, require_requirements_gate=True):
+    """The live reciprocal PR↔gate proof the terminal path trusts.
+
+    Reads both bodies fresh and requires EXACT reciprocal markers. By default this is the
+    requirements-gate contract the binder itself owns; callers that already proved the gate kind (the
+    terminal github dispose path) may set `require_requirements_gate=False` and reuse only the live
+    reciprocal-marker proof.
+    """
+    repo = os.path.abspath(repo)
+    pr, gate = _positive_int(pr), _positive_int(gate)
+    pr_body, title, gate_body = _read(repo, pr, gate)
+    if require_requirements_gate and not is_requirements_gate_title(title):
+        raise BindError(f"gate #{gate} is not a {REQUIREMENTS_GATE_PREFIX!r} gate (title: {title!r}); "
+                        "this binder is requirements-change-only")
+    pr_bound = _marker_state(pr_body, gate, f"PR #{pr} body")
+    gate_bound = _marker_state(gate_body, pr, f"gate #{gate} body")
+    if not pr_bound:
+        raise BindError(f"PR #{pr} body does not reciprocally bind gate #{gate}")
+    if not gate_bound:
+        raise BindError(f"gate #{gate} body does not bind PR #{pr}")
+    return {"pr": pr, "gate": gate, "title": title}
+
+
 def bind(repo, pr, gate):
     """Validate and apply the reciprocal binding; return the stable result object."""
     repo = os.path.abspath(repo)
@@ -133,6 +156,7 @@ def bind(repo, pr, gate):
         _gh_json(["issue", "edit", str(gate), "--body", desired], repo)
         _verify_body(repo, "gate", gate, desired)
         wrote.append("gate")
+    validate_live_binding(repo, pr, gate)
     return {"action": "bound", "pr": pr, "gate": gate, "written": wrote}
 
 

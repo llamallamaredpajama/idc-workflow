@@ -1,21 +1,29 @@
 ---
-description: IDC janitor — deterministic board↔git reconciler. Report (read-only by default) worktrees, branches (local+remote), and board↔issue↔PR coherence in four verdict tiers (SAFE-FIX / REPORT-ONLY / RISKY / COHERENT); --apply-safe applies ONLY the SAFE-FIX tier.
-argument-hint: '[--apply-safe]'
+description: IDC janitor — deterministic board↔git reconciler and adoption-baseline convergence controller. Report (read-only by default) worktrees, branches (local+remote), and board↔issue↔PR coherence in four verdict tiers (SAFE-FIX / REPORT-ONLY / RISKY / COHERENT); --apply-safe applies ONLY the SAFE-FIX tier and --bootstrap creates/resumes the one-time adoption baseline.
+argument-hint: '[--apply-safe] [--bootstrap]'
 ---
 
 `/idc:janitor` is the **netting layer** — the deterministic reconciler that scoops up whatever a dead
 or interrupted session leaves outside the guard rail (orphan worktrees, merged-but-surviving
 branches, board↔issue drift) and classifies every finding into four verdict tiers. It is
-**read-only by default** (a full report). `--apply-safe` applies the **SAFE-FIX tier only**. See
+**read-only by default** (a full report). `--apply-safe` applies the **SAFE-FIX tier only**.
+`--bootstrap` creates or resumes the one-time adoption baseline: it writes the durable
+`reconciliation-baseline-required` / `baseline-pending` state, validates a bounded route/repair plan,
+preserves ambiguous/foreign/default-branch work, writes the adoption receipt last, and stops after
+three non-converging passes with exact blockers rather than fabricating a clean checkpoint. See
 `WORKFLOW.md §A`.
 
-Operator input: `$ARGUMENTS` — pass `--apply-safe` to apply the SAFE-FIX tier; otherwise a full,
-read-only report.
+Operator input: `$ARGUMENTS` — pass `--apply-safe` to apply the SAFE-FIX tier; pass `--bootstrap` to
+create or resume adoption bootstrap; otherwise a full, read-only report.
 
 The scanner (`scripts/idc_git_janitor.py`) reconciles board state against git reality and assigns
 every finding a tier. The dimensions it scans, the tier criteria (what counts as IDC-attributable,
-merged, clean), and the exact fix set `--apply-safe` may touch are computed by the scanner — it is
-the source of truth; do not re-derive them here. What each tier means for the operator:
+merged, clean), the exact fix set `--apply-safe` may touch, and the adoption bootstrap's validated
+route/repair plan are computed by the scanner — it is the source of truth; do not re-derive them
+here. Outside PR/branch or default-branch work discovered after adoption must be pinned to the source
+repository, head commit, base commit, and diff digest before routing. Unmerged outside work routes to
+Intake / Build adoption; merged outside-path work routes to a reconciliation audit; foreign-tool work
+is preserved and routed for investigation, never auto-deleted. What each tier means for the operator:
 
 - **SAFE-FIX** — the *only* tier `--apply-safe` touches. Deterministic, no judgment.
 - **REPORT-ONLY** — another tool's artifacts. **Always listed, NEVER touched** — the janitor does

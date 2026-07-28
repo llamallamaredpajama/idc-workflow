@@ -10,7 +10,9 @@ quiet repo just heals board hygiene and drains stragglers. Standard tier (the au
 parent). Loopable via `/loop /idc:autorun` for standing operation.
 
 Autorun is **full-pipeline autonomy that pauses only at human gates**: it **never forces** a gate — a gate-worthy item just **pauses behind its gate** (reported + skipped), exactly like an `[operator-action]` gate issue.
-It drains the pipe in one fixed top-to-bottom order — **recirculate** the Recirculation inbox, then **plan** approved considerations, then **drain** the Buildable waves — starting at the top of the pipe with the Recirculation inbox.
+It drains the pipe in one fixed top-to-bottom order — **recirculate** the Recirculation inbox, then **plan** approved considerations, then **drain** the Buildable waves — starting at the top of the pipe with the Recirculation inbox. A repo still marked
+`reconciliation-baseline-required` / `baseline-pending` is never a terminal fixpoint: the drain must
+surface `baseline: pending` / `drain: baseline-pending`, not `complete`.
 
 ## Recirculation intake, then two lanes
 

@@ -5,17 +5,17 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-4.2.0-e8e7df?style=flat-square&labelColor=1a1a1a" alt="version 4.2.0">
+  <img src="https://img.shields.io/badge/version-5.0.0-e8e7df?style=flat-square&labelColor=1a1a1a" alt="version 5.0.0">
   <img src="https://img.shields.io/badge/Claude%20Code-plugin-e8e7df?style=flat-square&labelColor=1a1a1a" alt="Claude Code plugin">
   <img src="https://img.shields.io/badge/commands-13-e8e7df?style=flat-square&labelColor=1a1a1a" alt="13 commands">
   <img src="https://img.shields.io/badge/runtime-Claude%20%C2%B7%20Codex%20%C2%B7%20Pi-e8e7df?style=flat-square&labelColor=1a1a1a" alt="runtimes">
-  <img src="https://img.shields.io/badge/guardrails-5-c8dc00?style=flat-square&labelColor=1a1a1a" alt="5 guardrails">
+  <img src="https://img.shields.io/badge/pathway-off%20%7C%20controlled%20%7C%20app--locked-c8dc00?style=flat-square&labelColor=1a1a1a" alt="pathway enforcement profiles">
   <img src="https://img.shields.io/badge/license-MIT-e8e7df?style=flat-square&labelColor=1a1a1a" alt="MIT license">
 </p>
 
 <p align="center">
   <b>A <a href="https://claude.com/claude-code">Claude Code</a> plugin that carries software from a raw idea to merged, reviewed code —</b><br>
-  a guardrail-framed, tracker-driven, goal-contract pipeline. <i>Guardrails, not train tracks.</i>
+  a guardrail-framed, tracker-driven, goal-contract pipeline. <i>Pathway guardrails, not coding prescriptions.</i>
 </p>
 
 ---
@@ -25,6 +25,8 @@ crystallizes into a **PRD** (*what* it does) and a **TRD** (*how* it's built) an
 a reviewable **Think PR** you merge to admit it. From there the pipeline plans, builds, and reviews on its
 own and **automerges when clean**, merging finished code into your repo. It stops
 to ask you exactly **one** question, **once, at the top**: *do you approve these requirements?*
+(Automerge is the Claude and Codex runtimes' behavior; the experimental Pi runtime hands the reviewed
+branch to an operator-performed merge until a sanctioned Pi merge helper lands.)
 
 ## The whole system, in one picture
 
@@ -60,7 +62,7 @@ remains one-way, iterative, and observable through the dashboard.
 ## Table of contents
 
 - [What IDC is](#what-idc-is)
-- [The five guardrails](#the-five-guardrails)
+- [Pathway guardrails and enforcement profiles](#pathway-guardrails-and-enforcement-profiles)
 - [Install](#install)
 - [Requirements](#requirements)
 - [Quickstart](#quickstart)
@@ -79,32 +81,32 @@ remains one-way, iterative, and observable through the dashboard.
 IDC — the **Iterative Development Cycle** — is the pipeline in the picture above: a **Think** stage that
 feeds the **one gate** (a Think PR admitting the PRD + TRD), a **planning** stage, a build triplet
 (**implementer → review → finisher**), **two gates** (approval at the top; ship-or-return at the end), and one
-**Recirculator** for the controlled return path. Everything runs autonomously and **automerges when green**;
-the pipeline intervenes only where a real derailment would otherwise ship.
+**Recirculator** for the controlled return path. Everything runs autonomously and **automerges when green**
+(Claude/Codex runtimes; the experimental Pi runtime stops at an operator-performed merge until a sanctioned
+Pi merge helper lands); the pipeline intervenes only where a real derailment would otherwise ship.
 
 | Stage | Command | What happens | Writes |
 |-------|---------|--------------------|--------|
 | **Think** | `/idc:think` | **Idea → the one gate** — free brainstorm (zero teammates) → crystallize a function-first **PRD + TRD** → the **Think PR** gate (admit by merging). | `docs/considerations/`, `docs/prd/`, `docs/specs/` |
 | **Plan** | `/idc:plan` | **Decomposition** — admitted idea → goal-contract issues: domain experts, the **matrix** (domain × phase/wave), **matrix analysis**, the **sequencer** into parallel waves. Pure decomposition — no requirements docs, no gate. | `docs/plans/`, matrices, issues |
-| **Build** | `/idc:build` | **Implementer → review → finisher → ship-or-return** — each issue's goal contract runs as an iterative loop; independent review screens every PR; automerge on PASS. | source, tests, review reports, tracker status |
+| **Build** | `/idc:build` | **Implementer → review → finisher → ship-or-return** — each issue's goal contract runs as an iterative loop; independent review screens every PR; automerge on PASS (Claude/Codex; Pi hands off to an operator merge). | source, tests, review reports, tracker status |
 | **Recirculate** | `/idc:recirculate` | **The return path** — the ship-or-return decision's way back: heals doc/reality drift in one PR (PR body = change order); a requirements change rides the Think-PR gate. | every affected canonical doc |
 | **Autorun** | `/idc:autorun` | **Runs the whole pipeline** — turn it on and it works end to end on its own; loop it with `/loop`. | — |
 
 > **Autorun** runs the whole pipeline: admitted considerations → plan → build eligible waves as they
 > land → exit when nothing actionable remains (an open Think PR is reported + skipped, never bypassed).
 
-## The five guardrails
+## Pathway guardrails and enforcement profiles
 
-IDC v3 trusts the model and keeps only the parts of the pipeline that catch real derailments. There
-are exactly **five**:
+**Pathway guardrails, not coding prescriptions.** IDC does not dictate how an agent designs, plans, or writes code. It does require governed work to enter through Think, Intake, Recirculation, Plan, Build, or an operational recovery route; it keeps the tracker synchronized as part of every transition and refuses unproven completion.
 
-| # | Guardrail (the part) | What it prevents |
-|---|-----------|------------------|
-| 1 | **The one gate at the top** (the Think PR admitting the PRD + TRD) | Your product's function — and, on brownfield, its architecture — never changes without your consent, asked once before any work begins. |
-| 2 | **Parallel waves on separate files** (the matrix + sequencer) | Wide builds never collide. |
-| 3 | **The review stage** (real verification surfaces) | Nothing ships that isn't green on genuine functional tests. |
-| 4 | **The Recirculator** (controlled return path) | Docs and reality never silently diverge. |
-| 5 | **One-way flow + the metered dashboard** | The chain stays auditable end to end. |
+IDC names three `pathway_enforcement.mode` profiles: `off | controlled | app-locked`.
+
+- `off` preserves an explicit non-enforcing development/test setup and makes no pathway-security claim.
+- `controlled` blocks supported-runtime off-path mutations and blocks merge when pathway evidence is missing or inconsistent, but it cannot stop a machine administrator from removing hooks, editing `.git`, or disabling GitHub rules.
+- `app-locked` adds a GitHub App as the sole tracker writer and trusted check source; it closes the ordinary-token tracker-write gap but still does not protect against repository or organization administrators removing the rules or the App.
+
+The filesystem tracker remains useful for hermetic tests and local demonstrations. It must stay `off` and makes no hard pathway-security claim.
 
 **The one gate.** At the **end of Think**, the PRD + TRD ride a **Think PR** — they stay **draft until
 you merge it** (merge = approval = admission). You get a push notification with a plain-terms summary +
@@ -382,7 +384,7 @@ llms.txt          agent-readable index of the whole plugin
 
 <p align="center">
   <br>
-  <img src="https://img.shields.io/badge/%E2%97%89-guardrails%2C%20not%20train%20tracks-1a1a1a?style=flat-square&labelColor=c8dc00" alt="guardrails, not train tracks">
+  <img src="https://img.shields.io/badge/%E2%97%89-pathway%20guardrails%2C%20not%20coding%20prescriptions-1a1a1a?style=flat-square&labelColor=c8dc00" alt="pathway guardrails, not coding prescriptions">
   <br><br>
   <sub>Visual identity in the editorial language of the <a href="https://www.oliverwymanforum.com">Oliver Wyman Forum</a> — paper ground, charcoal ink, and a single chartreuse accent.</sub>
 </p>

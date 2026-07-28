@@ -24,6 +24,9 @@ set -uo pipefail
 ENTRY_GATE="$GOV_PLUGIN/scripts/hooks/idc_command_entry_gate.py"
 [ -f "$ENTRY_GATE" ] || gov_fail "scripts/hooks/idc_command_entry_gate.py not found (not implemented yet)"
 
+python3 "$GOV_PLUGIN/tests/smoke/governance/_command_entry_auth_transaction_unit.py" \
+  || gov_fail "command-entry authorization transaction regression failed"
+
 # The shell wrapper must reject Python older than 3.10 before importing any IDC Python.  Other hook
 # wrappers quietly skip on the same unsupported runtime so normal non-command events are not crashed.
 RUNTIME_BIN="$(mktemp -d)" || gov_fail "could not make runtime fake-bin"

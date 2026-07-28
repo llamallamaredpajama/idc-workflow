@@ -17,6 +17,9 @@
 set -uo pipefail
 . "$(dirname "$0")/lib.sh"
 gov_engine_env
+CHECK="$GOV_PLUGIN/scripts/idc_review_verdict_check.py"
+git -C "$REPO" init -q -b main >/dev/null 2>&1
+mkdir -p "$REPO/docs/workflow/code-reviews"
 
 # ── (1) `dispose` with a MISSING or UNKNOWN disposition is refused on EVERY stage ──────────────────
 # No disposition resolves to zero guards, so the engine refuses before touching the board — on a
@@ -90,10 +93,12 @@ PY
 
 # ── (3) a guarded `close` DOES reach Done (Done is reachable — just only through a guarded door) ────
 n="$(gov_seed_item "$T" --title 'proper build' --stage Buildable --status 'In Progress')" || fail "seed failed"
-cat > "$REPO/v.json" <<JSON
+VERDICT_PATH="$REPO/docs/workflow/code-reviews/2026-07-22-pr-9-pass.json"
+cat > "$VERDICT_PATH" <<JSON
 {"verdict":"PASS","pr":9,"issue":$n,"findings":[]}
 JSON
-eng close --num "$n" --verdict "$REPO/v.json" --pr 9 >/dev/null 2>&1 || fail "the guarded close path to Done is broken"
+python3 "$CHECK" "$VERDICT_PATH" >/dev/null 2>&1 || fail "the guarded close verdict did not validate"
+eng close --num "$n" --verdict "$VERDICT_PATH" --pr 9 >/dev/null 2>&1 || fail "the guarded close path to Done is broken"
 [ "$(gov_field "$T" "$n" Status)" = "Done" ] || fail "guarded close did not reach Done"
 echo "  ok the guarded close (valid, passing, item-owning verdict) DOES reach Done — a guarded door"
 

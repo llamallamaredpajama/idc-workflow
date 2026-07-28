@@ -6,7 +6,8 @@ enforces the review engine's ONE output contract: a review agent may not stop wi
 produced a VALIDATED verdict JSON for *this* review run under docs/workflow/code-reviews/. If it
 did, the stop is allowed (and — task 3 — the filer routes the verdict's nits/deferrals to the
 board). If it did not, the stop is blocked with the exact missing-artifact remediation, bounded
-N=3 then a loud-fail allow (never an infinite nag).
+N=3 then a loud-fail that STILL blocks (never an infinite nag, never permission to stop without a
+verdict).
 
 Why "this run" and not "any verdict": the code-reviews/ dir accumulates verdicts from prior PRs
 (the 394ec6fe board had verdicts through #224 lying around). A naive "a valid verdict exists"
@@ -129,7 +130,7 @@ def _gate(payload, plugin_root):
         "`python3 ${CLAUDE_PLUGIN_ROOT}/scripts/idc_review_verdict_check.py <verdict.json>` "
         "(exit 0) before you stop."
     ).replace("${CLAUDE_PLUGIN_ROOT}", plugin_root or "${CLAUDE_PLUGIN_ROOT}")
-    H.bounded_block(key, reason)
+    H.bounded_block_fail_closed(key, reason)
 
 
 def _run_filer(plugin_root, cwd, verdict_path):

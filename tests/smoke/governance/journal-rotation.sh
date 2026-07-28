@@ -7,11 +7,13 @@ set -euo pipefail
 
 . "$(dirname "$0")/lib.sh"
 gov_engine_env
+CHECK="$GOV_PLUGIN/scripts/idc_review_verdict_check.py"
 
 git -C "$REPO" init -b main >/dev/null 2>&1
 git -C "$REPO" config user.email "test@example.com" >/dev/null 2>&1
 git -C "$REPO" config user.name "Test" >/dev/null 2>&1
 git -C "$REPO" commit --allow-empty -m "initial commit" >/dev/null 2>&1
+mkdir -p "$REPO/docs/workflow/code-reviews"
 
 JOURNAL="$REPO/docs/workflow/transition-journal.ndjson"
 
@@ -20,7 +22,7 @@ eng move --num "$active" --to-status "In Progress" >/dev/null
 
 terminal=$(eng create-ticket --title 'journal rotation terminal' --stage 'Buildable' --status 'Todo')
 eng move --num "$terminal" --to-status "In Progress" >/dev/null
-VERDICT_PATH="$REPO/verdict.json"
+VERDICT_PATH="$REPO/docs/workflow/code-reviews/journal-rotation-pass.json"
 cat > "$VERDICT_PATH" <<EOF
 {
   "verdict": "PASS",
@@ -31,6 +33,7 @@ cat > "$VERDICT_PATH" <<EOF
   ]
 }
 EOF
+python3 "$CHECK" "$VERDICT_PATH" >/dev/null 2>&1 || fail "rotation close verdict did not validate"
 eng close --num "$terminal" --verdict "$VERDICT_PATH" --pr 1 >/dev/null
 
 [ -f "$JOURNAL" ] || fail "canonical transition journal was not created at $JOURNAL"

@@ -19,6 +19,12 @@ checks (stdlib only — the plugin ships to repos without PyYAML):
 An optional `--governance` flag runs the `tests/smoke/governance` lane, asserting that
 all deterministic behavioral guards are green. This is used as a final release gate.
 
+An optional `--require-pilot-evidence PATH` (with `--reviewed-sha`) turns on RELEASE-EVIDENCE
+MODE: the four checks above still run, and the source-heavy pilot artifact at PATH must also
+validate against `scripts/idc_pilot_metrics.py` and bind to the exact reviewed commit (graph
+spec §15.5.7). It is opt-in so the every-commit invocation stays runnable before any pilot has
+been run — see `pilot_evidence_findings`.
+
 Exit 0 = clean. Exit 1 = one finding per line on stderr (lint-references.sh surfaces them).
 """
 from __future__ import annotations
@@ -135,6 +141,40 @@ def run_governance_lane() -> int:
     return 0
 
 
+def pilot_evidence_findings(metrics_path: str, reviewed_sha: str | None) -> list:
+    """Release-evidence mode: the source-heavy pilot artifact must back the release.
+
+    Graph spec §15.5.7 makes a source-heavy pilot a MUST before release, so the final-evidence gate
+    refuses when that artifact is missing, malformed, stale, unbound, or measured on a repository
+    that is not actually source-heavy.
+
+    This is deliberately NOT part of the default invocation. `scripts/lint-references.sh` runs the
+    plain check on every commit and CI run, where no pilot has been run yet and demanding one would
+    make the guard un-runnable; the pilot requirement belongs to the release gate that certifies
+    final evidence, which opts in with `--require-pilot-evidence`.
+
+    The import is lazy and FAILS CLOSED. Several suites copy this module alone into a temp directory
+    to prove a deleted guard was the one doing the work (`governance/release-metadata-lockstep`), so
+    a hard sibling import at module scope would break those lone copies; and if the validator cannot
+    be imported, release evidence is refused rather than waved through unvalidated.
+    """
+    findings: list[str] = []
+    if not reviewed_sha:
+        findings.append(
+            "[release-evidence] --require-pilot-evidence needs --reviewed-sha: pilot evidence must "
+            "bind to the one exact reviewed commit the release is certified at")
+    try:
+        import idc_pilot_metrics as PM  # noqa: E402 — lazy by design (see docstring)
+    except ImportError:
+        return findings + [
+            "[release-evidence] the pilot metrics validator (scripts/idc_pilot_metrics.py) is not "
+            "importable — refusing to certify release evidence it cannot check"]
+
+    for finding in PM.validate(metrics_path, reviewed_sha):
+        findings.append("%s: [release-evidence] pilot metrics — %s" % (metrics_path, finding))
+    return findings
+
+
 def load_json(path: str) -> dict:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -175,6 +215,19 @@ def main() -> int:
         "--governance",
         action="store_true",
         help="Run the governance test lane as a release gate.",
+    )
+    parser.add_argument(
+        "--require-pilot-evidence",
+        metavar="PATH",
+        default=None,
+        help="Release-evidence mode: additionally refuse unless the source-heavy pilot metrics at "
+             "PATH validate against the fixed schema and bind to --reviewed-sha (graph spec "
+             "§15.5.7). Omitted for ordinary local/CI runs.",
+    )
+    parser.add_argument(
+        "--reviewed-sha",
+        default=None,
+        help="The exact reviewed commit SHA release evidence is certified at.",
     )
     args = parser.parse_args()
 
@@ -237,6 +290,9 @@ def main() -> int:
                 "README.md: [release-discipline] version badge URL names "
                 f"{url_version!r}, expected {plugin_version!r}: {badge['src']!r}"
             )
+
+    if args.require_pilot_evidence:
+        findings.extend(pilot_evidence_findings(args.require_pilot_evidence, args.reviewed_sha))
 
     for f in findings:
         print(f, file=sys.stderr)

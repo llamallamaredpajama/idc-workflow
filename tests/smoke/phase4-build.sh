@@ -85,4 +85,18 @@ grep -qiE 'inert deliverable' "$RE" \
 grep -qiE 'flag it at .{0,3}major.{0,3} under' "$RE" \
   || fail "idc-review-engine must file the all-static finding at major ('Flag it at \`major\` under …') — a downgrade to minor/nit must go red (P0-2 severity floor)"
 
-echo "PASS: review-verdict structure/consistency + build claim->close lifecycle green; all-static surface is a review FAIL"
+# ---- (d) U6: Build playbooks route through the frozen validation contract + build receipt -------
+CB="$PLUGIN/commands/build.md"
+IB="$PLUGIN/agents/idc-implementer.md"
+FB="$PLUGIN/agents/idc-finisher.md"
+for path in "$CB" "$IB" "$FB"; do
+  [ -f "$path" ] || fail "missing Build playbook surface $path"
+done
+grep -q 'idc_validation_contract.py' "$CB" || fail "commands/build.md must mention idc_validation_contract.py (freeze/run of the frozen gate)"
+grep -q 'idc_validation_contract.py' "$IB" || fail "agents/idc-implementer.md must freeze and rerun the validation contract"
+grep -q 'expected-red' "$IB" || fail "agents/idc-implementer.md must name expected-red baseline classification"
+grep -q 'expected-green' "$IB" || fail "agents/idc-implementer.md must name expected-green baseline classification"
+grep -q 'idc_build_receipt.py' "$FB" || fail "agents/idc-finisher.md must materialize the verified implementation receipt"
+grep -q -- '--build-receipt' "$FB" || fail "agents/idc-finisher.md must pass --build-receipt to idc_git_finish.py"
+
+echo "PASS: review-verdict structure/consistency + build claim->close lifecycle green; all-static surface is a review FAIL; Build playbooks name the frozen validation-contract + build-receipt path"

@@ -10,7 +10,7 @@
 #   * review agent + only a STALE pre-existing verdict         -> BLOCK (freshness anchor defeats it)
 #   * a non-review agent_type                                  -> ALLOW instantly (self-gate)
 #   * a non-IDC-governed repo (no tracker-config.yaml)         -> ALLOW instantly (repo-gate)
-#   * bounded: after N=3 blocks for the same agent             -> LOUD-FAIL allow (never an infinite nag)
+#   * bounded: after N=3 blocks for the same agent             -> LOUD-FAIL while STILL blocking
 #   * IDC_HOOKS_OBSERVE_ONLY=1                                 -> WARN, never block
 #
 # Red-when-broken: neuter the gate's verdict-check (make it always allow) and cases B/C/D_stale FAIL;
@@ -71,6 +71,7 @@ PY
 }
 
 # run_gate <cwd> <agent_type> <agent_id> <transcript> [extra_json]  -> prints stdout; sets $GATE_RC
+ERRLOG="$WORK/stderr.log"
 run_gate() {
   local cwd="$1" atype="$2" aid="$3" tr="$4"
   local payload
@@ -81,7 +82,8 @@ print(json.dumps({"hook_event_name":"SubagentStop","cwd":cwd,"agent_type":atype,
  "agent_id":aid,"session_id":sess,"agent_transcript_path":tr,"stop_hook_active":False}))
 PY
 )"
-  GATE_OUT="$(printf '%s' "$payload" | python3 "$GATE" "$PLUGIN" 2>/dev/null)"; GATE_RC=$?
+  : > "$ERRLOG"
+  GATE_OUT="$(printf '%s' "$payload" | python3 "$GATE" "$PLUGIN" 2>"$ERRLOG")"; GATE_RC=$?
 }
 blocks()   { printf '%s' "$1" | python3 -c 'import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get("decision")=="block" else 1)' 2>/dev/null; }
 
@@ -138,17 +140,24 @@ run_gate "$NONGOV" "$REVIEW_AGENT" "agentE" "$WORK/tr_E.jsonl"
 blocks "$GATE_OUT" && fail "(E) gate blocked in a non-IDC-governed repo (repo-gate broken)"
 echo "  ok (E) non-governed repo → allow"
 
-# ── (F) bounded: after N=3 blocks for the same agent → LOUD-FAIL allow, never an infinite nag ─────
-# Drive four consecutive gate calls for the same (session,agent) with a no-verdict transcript.
+# ── (F) bounded: after N=3 blocks for the same agent → LOUD-FAIL while STILL blocking ─────────────
+# Drive five consecutive gate calls for the same (session,agent) with a no-verdict transcript.
 mk_transcript "$WORK/tr_F.jsonl" "2020-01-01T00:00:00.000Z" "Bash:echo no verdict"
-blocked=0; allowed_after=""
+blocked=0; loud_on=""
 for i in 1 2 3 4 5; do
   run_gate "$REPO" "$REVIEW_AGENT" "agentF" "$WORK/tr_F.jsonl"
-  if blocks "$GATE_OUT"; then blocked=$((blocked+1)); else allowed_after="$i"; break; fi
+  blocks "$GATE_OUT" || fail "(F) gate allowed on try $i — the bound must never become permission to stop without a verdict"
+  blocked=$((blocked+1))
+  if grep -qi 'LOUD-FAIL' "$ERRLOG"; then
+    [ -z "$loud_on" ] && loud_on="$i"
+    [ "$i" -ge 4 ] || fail "(F) gate LOUD-FAILed before the bound was exhausted (try $i)"
+  else
+    [ "$i" -le 3 ] || fail "(F) gate must LOUD-FAIL once the bound is exhausted, while STILL blocking (try $i)"
+  fi
 done
-[ "$blocked" -le 3 ] || fail "(F) gate blocked $blocked times — the N=3 bound is not enforced (nag risk)"
-[ -n "$allowed_after" ] || fail "(F) gate never stopped blocking within 5 tries (infinite-nag risk)"
-echo "  ok (F) bounded at N=3 then loud-fail allow (blocked ${blocked} times, then allowed on try ${allowed_after})"
+[ "$blocked" -eq 5 ] || fail "(F) gate failed to stay blocked across 5 tries (got $blocked blocks)"
+[ "$loud_on" = "4" ] || fail "(F) expected the FIRST LOUD-FAIL on the 4th stop, got '${loud_on:-<none>}'"
+echo "  ok (F) bounded at N=3 with the first LOUD-FAIL on the 4th stop while STILL blocking"
 
 # ── (G) IDC_HOOKS_OBSERVE_ONLY=1 → never a block, even with a missing verdict ─────────────────────
 # Reuse the one payload builder in run_gate; a command-prefix env assignment scopes OBSERVE_ONLY to
@@ -159,4 +168,4 @@ IDC_HOOKS_OBSERVE_ONLY=1 run_gate "$REPO" "$REVIEW_AGENT" "agentG" "$WORK/tr_G.j
 blocks "$GATE_OUT" && fail "(G) OBSERVE_ONLY still emitted a block decision"
 echo "  ok (G) observe-only → warn, never block"
 
-echo "PASS: SubagentStop verdict gate — a review agent cannot stop without a fresh validated verdict; self-gated to review agents in governed repos; bounded N=3 loud-fail; observe-only downgrades to warn"
+echo "PASS: SubagentStop verdict gate — a review agent cannot stop without a fresh validated verdict; self-gated to review agents in governed repos; bounded N=3 with LOUD-FAIL on the 4th stop while STILL blocking; observe-only downgrades to warn"

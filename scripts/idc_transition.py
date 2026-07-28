@@ -63,6 +63,7 @@ except ImportError:  # pragma: no cover — non-POSIX
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import idc_gate_proof                  # noqa: E402 — owns the shared PR↔gate marker declaration
+import idc_pr_gate_bind as PB          # noqa: E402 — live reciprocal PR↔gate proof
 import idc_review_verdict_check as VC  # noqa: E402 — the verdict validator (close guard)
 import idc_tracker_fs                  # noqa: E402 — filesystem backend (read-back seam)
 import idc_gh_board                    # noqa: E402 — github backend (referenced by attribute so tests monkeypatch)
@@ -330,6 +331,10 @@ def load_verdict(verdict_path):
     if problems:
         raise TransitionError(
             f"close denied: verdict does not validate — {'; '.join(problems[:3])} (guard verdict-validated)")
+    witness_problem = VC.witness_problem(verdict_path, verdict)
+    if witness_problem:
+        raise TransitionError(
+            f"close denied: {witness_problem} (guard source-owned-validator-witness)")
     return verdict
 
 
@@ -649,6 +654,12 @@ def check_gate_approved(ctx, num, kw):
                 f"gate-approved denied: --gate-pr #{kw['gate_pr']} is not gate #{num}'s recorded approval "
                 f"PR #{bound_pr} — the approval artifact must be bound to THIS gate")
         if _pr_merged(ctx["repo"], bound_pr):
+            try:
+                PB.validate_live_binding(ctx["repo"], bound_pr, num, require_requirements_gate=False)
+            except PB.BindError as e:
+                raise TransitionError(
+                    f"gate-approved denied: gate #{num}'s recorded approval PR #{bound_pr} is merged but "
+                    f"its live reciprocal PR↔gate proof failed ({e}) — the gate body alone is not enough")
             return {"approval": "gate-pr", "gate_pr": bound_pr}
         # The recorded PR is not merged. A REQUIREMENTS gate admits ONLY via its merged Think PR, so it
         # is refused here; a DECISION gate has the `decision-approved` label as a documented ALTERNATIVE

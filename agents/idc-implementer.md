@@ -44,14 +44,37 @@ API sink). No cache path in the brief → tracker ops fall back to a live board 
 
 1. **Claim** the issue through `idc:idc-tracker-adapter`: `claim` flips `Status` to
    `In Progress` and posts a claim comment naming this agent. Set the `attempt:<n>` label.
-2. **Execute the issue's goal contract as a `/fullauto-goal` loop** with full auto-goal discipline:
+2. **Freeze and execute the issue's validation contract inside the `/fullauto-goal` loop.** Before
+   the first code change, freeze the machine-owned gate through
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_validation_contract.py" freeze --repo "$PWD" --issue <N> --pr <PR> --surface <cli|api|gui|library|agent|ci|none> --evidence-kind <...> [--handle-id <id>] ...`
+   so baseline classification (`expected-red` vs `expected-green`), the fixed `surface` /
+   `evidence_kind` pair, any cited verification `handle_id` (resolved + secret-checked by fixed code
+   before use), exact `touch` / `off-limits`, and the frozen verification commands are outside the
+   builder's authority. Every ticket runs the bounded fixed-code falsifier
+   `idc_validation_risk_gate.py` before this freeze and the falsifier decides its own requiredness —
+   it derives risk from the `--touch` set it is given, the same set this freeze records (plus
+   `--baseline`, the same `expected-red`/`expected-green` value the freeze records), and skips only
+   what it judges trivial, so on that touch set omitting `--risk-input` cannot suppress a risk it
+   derived. Its
+   `--attempt-ceiling` is the repo's resolved ceiling from
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_validation_contract.py" attempt-ceiling --repo "$PWD"`
+   (the config's `pathway_enforcement.attempt_ceiling`, default 3) — the SAME value the freeze
+   records — never an ad-hoc literal, so the configured ceiling governs the falsifier, the frozen
+   contract, and the retry loop from one source. Then execute the issue's
+   goal contract as a `/fullauto-goal` loop with full auto-goal discipline:
    - render-before-run (the issue body IS the rendered contract);
    - **failing test first** when the target behavior is untested — write the real functional
      test, watch it go red, then implement to green;
    - record-and-vary each round (what changed / what the evidence showed / next experiment);
    - evidence-before-assertion — never claim done without the verification surface's actual
      output;
-   - the **attempt ceiling** (~3 failed hypotheses → blocked-stop with evidence);
+   - re-run the **frozen** gate at the final head through
+     `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_validation_contract.py" run --repo "$PWD" --contract <contract.json> --out <execution.json>`
+     so review/finish inherit a source-owned execution receipt, never a caller-authored success text;
+   - the **attempt ceiling** — the frozen contract's `attempt_ceiling` (resolved from the config's
+     `pathway_enforcement.attempt_ceiling`, default 3), read back from the contract rather than a
+     fixed number, so a non-default operator ceiling actually bounds this loop → blocked-stop with
+     evidence when it is reached;
    - the **no-punt rule** — incidental work needed to satisfy the contract is fixed in this
      same loop, never deferred to a follow-up.
 3. **Stay inside BOUNDARIES.** Touch only the issue's owned surfaces; never the off-limits

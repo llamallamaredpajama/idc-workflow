@@ -1,0 +1,24 @@
+# CODEOWNERS — IDC pathway-integrity protected surfaces (spec §2.3).
+#
+# The ruleset (.github/rulesets/idc-pathway-integrity.json) sets require_code_owner_review, which
+# only binds a reviewer once a CODEOWNERS file names each protected surface. Every surface class the
+# pathway check protects — workflow, hook, validation, and receipt — must have an owner here so a PR
+# cannot strip the governance machinery without a code-owner's review. scripts/idc_ruleset_check.py
+# --repo-root deterministically refuses a ruleset whose protected surfaces are not all owned.
+
+# Workflow surface — the version-pinned pathway workflow and any other CI that gates merges.
+/.github/workflows/ @llamallamaredpajama
+
+# Hook surface — the Path Gate / interlock / entry / stop hooks that enforce off-path denial.
+/scripts/hooks/ @llamallamaredpajama
+
+# Validation surface — the frozen build validation contract.
+/scripts/idc_validation_contract.py @llamallamaredpajama
+
+# Receipt surface — the receipt integrity checker.
+/scripts/idc_receipt_check.py @llamallamaredpajama
+
+# The deterministic checker and the ruleset itself are load-bearing governance too.
+/scripts/idc_pathway_check.py @llamallamaredpajama
+/.github/rulesets/ @llamallamaredpajama
+/.github/CODEOWNERS @llamallamaredpajama

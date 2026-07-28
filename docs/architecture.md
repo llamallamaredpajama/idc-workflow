@@ -1,6 +1,6 @@
 # IDC Architecture (v3)
 
-How the pieces of the IDC plugin fit together: the flow, the five guardrails, the
+How the pieces of the IDC plugin fit together: the flow, the pathway contract, the enforcement profiles, the
 write-authority boundaries, the tracker contract, the runtime model, and how commands,
 agents, and skills compose. It is derived from `templates/WORKFLOW.md` (the contract a
 governed repo installs) and `docs/specs/master-architectural-spec.md` (the plugin's own
@@ -34,21 +34,22 @@ Build only by turning plans into issues, and Build reaches planning only through
 Flow is one-way; the chain is auditable end to end because a sensor on every component reports to the
 dashboard (the board).
 
-## Guardrails, not train tracks
+## Pathway guardrails and enforcement profiles
 
-v1 hand-held a weaker model with standing reviewer/fixer/researcher roles, multi-pass plan
-reviews, a claim-state machine, and per-edit gates. v3 trusts the model and keeps only the
-five parts of the rig that catch real derailments:
+v1 hand-held a weaker model with standing reviewer/fixer/researcher roles, multi-pass plan reviews, a claim-state machine, and per-edit gates. v3 keeps the model's coding method flexible while hardening the route by which repository-changing work becomes accepted state.
 
-1. **The one gate at the top** — the Think PR admitting the PRD + TRD; product function never changes
-   without consent, and it's asked **once**, before any work begins.
-2. **Parallel pipes on separate sections** (the matrix + sequencer manifold) — wide builds never collide.
-3. **The review filter** (real verification surfaces) — nothing reaches the Glass that isn't green on
-   genuine functional tests.
-4. **The Recirculator** (controlled backflow) — docs and reality never silently diverge.
-5. **One-way flow + the metered dashboard** — the chain is auditable end to end.
+**Pathway guardrails, not coding prescriptions.** IDC does not dictate how an agent designs, plans, or writes code. It does require governed work to enter through Think, Intake, Recirculation, Plan, Build, or an operational recovery route; it keeps the tracker synchronized as part of every transition and refuses unproven completion.
 
-Everything else flows autonomously and automerges when green.
+IDC names three `pathway_enforcement.mode` profiles: `off | controlled | app-locked`.
+
+`controlled` blocks supported-runtime off-path mutations and blocks merge when pathway evidence is missing or inconsistent, but it cannot stop a machine administrator from removing hooks, editing `.git`, or disabling GitHub rules.
+
+`app-locked` adds a GitHub App as the sole tracker writer and trusted check source; it closes the ordinary-token tracker-write gap but still does not protect against repository or organization administrators removing the rules or the App.
+
+The filesystem tracker remains useful for hermetic tests and local demonstrations. It must stay `off` and makes no hard pathway-security claim.
+
+Everything else flows autonomously and automerges when green (on the Claude/Codex runtimes; the
+experimental Pi runtime stops at an operator-performed merge — see **Runtime model** below).
 
 ## Write-authority boundaries
 
@@ -110,6 +111,13 @@ The full Think→Plan→Build lifecycle runs end-to-end on Pi against a real LLM
 umbrella (provider-qualified) boots every role, no per-role pinning required — but a parallel Build
 pool and a Pi-side autorun drain remain pending (#66 L1/L4), which is why the runtime stays
 experimental.
+
+**Merge is one of those pending pieces on Pi.** The **Claude and Codex** finishers automerge a green
+PR (`gh pr merge --squash --delete-branch`); the **Pi** Build/Plan/Recirculator finishers instead
+prepare, push, and report the reviewed branch and hand it to an **operator-performed merge**, because
+no sanctioned Pi merge helper has landed yet. So where this document says the pipeline "automerges
+when green," that is the Claude/Codex behavior — a Pi run stops one deliberate step short, at the
+merge gate, until that helper exists.
 
 ## The thirteen commands — one altitude each
 

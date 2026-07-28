@@ -22,9 +22,24 @@ authored and gated at the end of Think) and **never authors the PRD/TRD and neve
 run produces and where it writes (`WORKFLOW.md §4.2`): the plan chain (`docs/plans/` master +
 subphases + pillars), the phase matrix (`docs/workflow/pillar-matrices/`), and goal-contract issues
 on the board via `idc:idc-tracker-adapter`. Every issue body passes `idc:idc-schema-check` before
-admission; the matrix passes `idc:idc-matrix-analysis`'s check; re-sequencing is global but
-`In Progress` issues are immutable. All issues flow as `Todo` — there is no gate here. Close by
-opening the planning PR (body = audit trail) and automerging when green.
+admission; reusable verification recipes resolve through the governed
+`docs/workflow/verification-handles.yaml` registry via
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_verification_handles.py" resolve ...` (schema-checked +
+secret-free before citation/use, missing handles route to a named recirculation / blocked-dependency
+obligation, never a warning-only pass); and every ticket runs the bounded fixed-code falsifier
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_validation_risk_gate.py" evaluate ...` before any frozen
+gate is emitted — the helper itself decides whether falsification is required, deriving risk in
+fixed code from the touch set it is given (the same set the contract will freeze) and the baseline,
+so on that touch set omitting `--risk-input` cannot skip it. The matrix passes `idc:idc-matrix-analysis`'s check; re-sequencing is global but
+`In Progress` issues are immutable. The authored matrix is descriptive input only —
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_execution_graph.py" --matrix <matrix> ... --json` re-derives
+authoritative whole-horizon Waves, and `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_tracker_projection.py"
+--matrix <matrix> ... --json` emits the frozen read-only projection/simulation. Sanctioned live
+application now runs through `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_tracker_transaction.py" freeze …`
+then `… apply …`: the helper re-reads the relevant tracker state for optimistic concurrency, persists
+a pre-write obligation, applies only the frozen sanctioned operations, requires journal corroboration +
+exact live postcondition, and writes the planning receipt last. All issues flow as `Todo` — there is
+no gate here. Close by opening the planning PR (body = audit trail) and automerging when green.
 
 Do not write source or tests; never write the PRD/TRD (Think authors + gates them); do not reorder
 `In Progress` issues. Halt only on the conditions in the playbook's §Authority & halt (including a
@@ -56,8 +71,11 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   `planning_pr` (the PR **number** — the validator **re-reads its merged-state for real (`gh pr view`)**,
   never a caller `state`), `matrix:"<repo-relative path to the matrix YAML you wrote>"` (the validator
   re-runs `idc_matrix_check` on the referenced file — **never a `"pass"` string**),
-  `decompositions:{<consideration>:<child>}`, `pointers_retired:[…]`. The validator **re-derives** the
-  rest: it confirms every decomposition child **exists** (via the tracker reader; on the github backend
+  `decompositions:{<consideration>:<child>}`, `pointers_retired:[…]`,
+  `planning_receipt:"<repo-relative path to the machine-owned planning receipt the sanctioned transaction wrote>"`
+  (the validator re-runs `idc_planning_receipt.py verify` against the **live tracker** — missing,
+  wrong-source, wrong-kind/schema, forged, stale, or readback-mismatched receipts are refused). The
+  validator **re-derives** the rest: it confirms every decomposition child **exists** (via the tracker reader; on the github backend
   it additionally **re-runs the schema + provenance checks** on each child's live body), and it
   cross-checks `pointers_retired` against the decomposed set: `pointers_retired` must **EQUAL** the
   decomposed set — an empty list is valid only when nothing was decomposed, and an **extra** retired

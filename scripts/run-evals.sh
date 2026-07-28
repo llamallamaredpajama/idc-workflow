@@ -88,8 +88,9 @@ done
 
 # v2 note: the behavioral evalset suite is retired (the v1 evalsets tested deleted v1
 # machinery). The v2 verification surface is the functional smoke suite under tests/smoke/.
-# If there are no evalsets, exit cleanly and point there — don't require a sandbox.
-if [ "$WANT_ALL" -eq 1 ] && ! ls "$EVALS_DIR"/*.evalset.json >/dev/null 2>&1; then
+# If there are no evalsets and the operator did not request a specific evalset, exit cleanly and
+# point there — don't require a sandbox.
+if [ -z "$SETS" ] && ! ls "$EVALS_DIR"/*.evalset.json >/dev/null 2>&1; then
   echo "run-evals: no evalsets in $EVALS_DIR."
   echo "run-evals: v2 verification is the functional smoke suite — run: bash tests/smoke/run-all.sh"
   exit 0

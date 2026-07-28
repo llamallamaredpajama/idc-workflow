@@ -1,21 +1,21 @@
 #!/bin/bash
 # idc-assert-class: behavior
 # stop-fixpoint-nonempty-inbox.sh — governance scenario: the Stop fixpoint gate refuses a dishonest
-# orchestrator exit (forensic drop E) and is bounded (N=3 then loud-fail + a one-time board annotation).
+# orchestrator exit (forensic drop E) and stays FAIL-CLOSED when the bounded repair budget is exhausted.
 #
-# The invariant (v4 Phase 3 Stage B, plan §3.4): an autorun/build orchestrator DRAIN session — marked
-# active via the ledger's session-scoped `orchestrator_drain` taint — cannot Stop while the drain
-# predicate reports `drain: recirc-pending` (exit 4: the build lane is drained but the Recirculation/
-# Consideration inbox is non-empty). The Stop hook (scripts/hooks/idc_stop_fixpoint_gate.py) reads a
-# Stop payload on stdin and, when BOTH the board (idc_autorun_drain.py) AND the ledger say work
-# remains, BLOCKS ({"decision":"block", reason}) with the /idc:recirculate remediation — bounded N=3,
-# then a LOUD-FAIL that ALLOWS the stop (never an infinite nag) AND leaves ONE board annotation
-# recording the forced exit.
+# The invariant (v4 Phase 3 Stage B, plan §3.4; convergent-integrity §4.5): an autorun/build
+# orchestrator DRAIN session — marked active via the ledger's session-scoped `orchestrator_drain`
+# taint — cannot Stop while the drain predicate reports `drain: recirc-pending` (exit 4: the build
+# lane is drained but the Recirculation/Consideration inbox is non-empty). The Stop hook
+# (scripts/hooks/idc_stop_fixpoint_gate.py) reads a Stop payload on stdin and, when BOTH the board
+# (idc_autorun_drain.py) AND the ledger say work remains, BLOCKS ({"decision":"block", reason})
+# with the /idc:recirculate remediation. The first three stops are ordinary blocks; on the fourth and
+# later attempts the gate must LOUD-FAIL on stderr and leave ONE board annotation, but it STILL
+# BLOCKS — the attempt ceiling governs repair retries, never permission to falsely finish.
 #
 # Red-when-broken (MANDATORY, reviewed):
-#   * neuter the block (make bounded_block/block a no-op allow) ⇒ the "blocks 3×" assert goes RED;
-#   * neuter the bound (make bounded_block always block / never hit the N=3 branch) ⇒ the "allowed on
-#     the 4th" assert goes RED (the gate would nag forever);
+#   * neuter the block (make bounded_block/block a no-op allow) ⇒ the "still blocks" assert goes RED;
+#   * restore the old loud-fail-allow branch ⇒ the "4th stop is still blocked" assert goes RED;
 #   * neuter the annotation (make _annotate_forced_exit_once a no-op) ⇒ the annotation assert goes RED.
 #
 # Filesystem-backed (hermetic, no gh). Auto-discovered by the governance lane (phase-governance.sh);
@@ -29,8 +29,10 @@ fail() { echo "FAIL: $1"; exit 1; }
 GATE="$GOV_PLUGIN/scripts/hooks/idc_stop_fixpoint_gate.py"
 LEDGER="$GOV_PLUGIN/scripts/hooks/idc_ledger.py"
 DRAIN="$GOV_PLUGIN/scripts/idc_autorun_drain.py"
+DV="$GOV_PLUGIN/scripts/hooks/idc_drain_verdict.py"
 TRK="$GOV_PLUGIN/scripts/idc_tracker_fs.py"
 [ -f "$GATE" ] || fail "stop-fixpoint gate not found at $GATE (not implemented yet)"
+[ -f "$DV" ] || fail "persisted drain verdict helper not found at $DV (github stop path unavailable)"
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 REPO="$WORK/repo"; mkdir -p "$REPO/docs/workflow"
@@ -58,28 +60,36 @@ print(json.dumps({"hook_event_name":"Stop","cwd":cwd,"session_id":sid,
 PY
 }
 ERRLOG="$WORK/stderr.log"
-run_gate() { : > "$ERRLOG"; GATE_OUT="$(mk_payload "$REPO" "$SID" | python3 "$GATE" "$GOV_PLUGIN" 2>"$ERRLOG")"; GATE_RC=$?; }
+run_gate() {
+  local repo="${1:-$REPO}" sid="${2:-$SID}"
+  : > "$ERRLOG"
+  GATE_OUT="$(mk_payload "$repo" "$sid" | python3 "$GATE" "$GOV_PLUGIN" 2>"$ERRLOG")"
+  GATE_RC=$?
+}
 blocks() { printf '%s' "$1" | python3 -c 'import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get("decision")=="block" else 1)' 2>/dev/null; }
 
 # ── precondition: the seeded board really is at drain: recirc-pending (exit 4) ─────────────────────
 python3 "$DRAIN" --tracker "$T" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 4 ] || fail "precondition: the seeded board must be drain: recirc-pending exit 4 (got $rc)"
 
-# ── (1-3) an orchestrator drain stop with a non-empty inbox ⇒ BLOCK, up to N=3, then ALLOW ─────────
-blocked=0; allowed_on=""; FIRST_OUT=""
+# ── (1-3) an orchestrator drain stop with a non-empty inbox ⇒ BLOCK, and stay blocked past N=3 ────
+blocked=0; loud_on=""; FIRST_OUT=""
 for i in 1 2 3 4 5; do
   run_gate
   [ "$i" -eq 1 ] && FIRST_OUT="$GATE_OUT"
-  if blocks "$GATE_OUT"; then
-    blocked=$((blocked + 1))
-    [ "$i" -le 3 ] || fail "gate blocked on try $i — the N=3 bound is not enforced (infinite-nag risk) [neuter the bound ⇒ RED]"
+  blocks "$GATE_OUT" \
+    || fail "gate allowed on try $i — the bounded stop budget must never become permission to falsely finish [restore loud-fail-allow ⇒ RED]"
+  blocked=$((blocked + 1))
+  if grep -qi 'LOUD-FAIL' "$ERRLOG"; then
+    [ -z "$loud_on" ] && loud_on="$i"
+    [ "$i" -ge 4 ] || fail "gate LOUD-FAILed before the bound was exhausted (got loud_on=$i)"
   else
-    allowed_on="$i"; break
+    [ "$i" -le 3 ] || fail "the gate must LOUD-FAIL once the bound is exhausted, while STILL blocking (try $i)"
   fi
 done
-[ "$blocked" -eq 3 ]   || fail "expected exactly 3 blocks before the loud-fail, got $blocked [neuter the block ⇒ RED]"
-[ "$allowed_on" = "4" ] || fail "expected the 4th stop to be ALLOWED (loud-fail), got allowed_on='$allowed_on' (infinite-nag risk)"
-echo "  ok (1-3) non-empty inbox ⇒ blocks 3× then allows on the 4th (bound HIT, no infinite nag)"
+[ "$blocked" -eq 5 ] || fail "expected all 5 stop attempts to stay BLOCKED, got $blocked blocks"
+[ "$loud_on" = "4" ] || fail "expected the FIRST LOUD-FAIL on the 4th stop, got loud_on='${loud_on:-<none>}'"
+echo "  ok (1-3) non-empty inbox ⇒ blocks 5×, with the first LOUD-FAIL on the 4th stop (still fail-closed)"
 
 # ── the block reason names the exact pending conjunct + the /idc:recirculate remediation ──────────
 printf '%s' "$FIRST_OUT" | grep -qi 'recirc'          || fail "block reason must name the recirculation inbox (got: $FIRST_OUT)"
@@ -94,6 +104,36 @@ python3 "$TRK" --tracker "$T" show --num "$INBOX" --comments | grep -qi 'idc-sto
 n="$(python3 "$TRK" --tracker "$T" show --num "$INBOX" --comments | grep -c 'idc-stop-gate. forced exit')"
 [ "$n" -eq 1 ] || fail "the board annotation must be written ONCE at the bound (not per stop), got $n"
 echo "  ok loud-fail on stderr + exactly ONE board annotation on the inbox item (one-time, not per stop)"
+
+# ── (github) the supported github/persisted-verdict stop path stays FAIL-CLOSED at attempt 4 ─────
+# This traverses the REAL github branch: the governed repo says `backend: github`, the ledger marks
+# THIS session as the orchestrator drain, and the local persisted verdict reports recirc-pending.
+# The stop hook must still BLOCK on the 4th+ attempt — the retry budget is never permission to falsely
+# finish on the supported github backend either. Red-when-broken: leave the github path on
+# H.bounded_block (legacy loud-fail-allow) ⇒ try 4 ALLOWS ⇒ this assert goes RED.
+REPO_GH="$WORK/repo-gh"; mkdir -p "$REPO_GH/docs/workflow"
+printf 'backend: github\n' > "$REPO_GH/docs/workflow/tracker-config.yaml"
+SID_GH="stopsess-gh-$$-$(basename "$WORK")"
+python3 "$LEDGER" --cwd "$REPO_GH" set --kind orchestrator_drain --session "$SID_GH" >/dev/null \
+  || fail "(github) could not set the orchestrator_drain marker"
+python3 "$DV" --cwd "$REPO_GH" write --verdict recirc-pending --exit 4 --session "$SID_GH" --gates coherence,live \
+  >/dev/null || fail "(github) could not persist the recirc-pending drain verdict"
+GH_BLOCKED=0; GH_LOUD_ON=""
+for i in 1 2 3 4 5; do
+  run_gate "$REPO_GH" "$SID_GH"
+  blocks "$GATE_OUT" \
+    || fail "(github) gate allowed on try $i from the persisted-verdict github path — the bounded stop budget must never become permission to falsely finish"
+  GH_BLOCKED=$((GH_BLOCKED + 1))
+  if grep -qi 'LOUD-FAIL' "$ERRLOG"; then
+    [ -z "$GH_LOUD_ON" ] && GH_LOUD_ON="$i"
+    [ "$i" -ge 4 ] || fail "(github) gate LOUD-FAILed before the bound was exhausted (got loud_on=$i)"
+  else
+    [ "$i" -le 3 ] || fail "(github) the gate must LOUD-FAIL once the bound is exhausted, while STILL blocking (try $i)"
+  fi
+done
+[ "$GH_BLOCKED" -eq 5 ] || fail "(github) expected all 5 stop attempts to stay BLOCKED, got $GH_BLOCKED blocks"
+[ "$GH_LOUD_ON" = "4" ] || fail "(github) expected the FIRST LOUD-FAIL on the 4th stop, got loud_on='${GH_LOUD_ON:-<none>}'"
+echo "  ok (github) the persisted-verdict stop path blocks 5×, with the first LOUD-FAIL on the 4th stop (still fail-closed)"
 
 # ── (observe-only) IDC_HOOKS_OBSERVE_ONLY=1 ⇒ warn, never block (fresh session, clean counter) ─────
 SID_OO="stopsess-oo-$$-$(basename "$WORK")"
@@ -163,4 +203,4 @@ python3 "$LEDGER" --cwd "$REPO_AG" pending --session "$SID_AG" | grep -qx 'orche
   || fail "(acceptance-gap) the orchestrator_drain marker must survive an acceptance-gap block (clear fires on proven complete only)"
 echo "  ok (acceptance-gap) an inert wave close (Stage E3) blocks the stop via the gate's --acceptance re-run (marker survives)"
 
-echo "PASS: the Stop fixpoint gate refuses a drain-orchestrator exit with a non-empty inbox (drain: recirc-pending) OR an inert wave close (drain: acceptance-gap, Stage E3), names the /idc:recirculate remediation, is bounded at N=3 then loud-fails once (never an infinite nag) with a single board annotation, honors observe-only, and fails CLOSED on a crashing drain"
+echo "PASS: the Stop fixpoint gate refuses a drain-orchestrator exit with a non-empty inbox (drain: recirc-pending) OR an inert wave close (drain: acceptance-gap, Stage E3), stays fail-closed on BOTH the filesystem and supported github/persisted-verdict paths (LOUD-FAIL on the 4th stop while STILL blocking; one board annotation only on filesystem), honors observe-only, and fails CLOSED on a crashing drain"

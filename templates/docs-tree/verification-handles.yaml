@@ -1,0 +1,10 @@
+# verification-handles.yaml — governed verification-surface registry
+#
+# One entry per reusable verification surface recipe. Fixed code validates this file before any
+# handle is cited, resolved, or used. Keep it secret-free: commands / fixtures / account
+# identifiers or placeholders / emulators are allowed; inline credentials, auth material, .env
+# contents, key material, and private URLs are rejected before use.
+#
+# Lists use the same JSON-style inline form the fixed stdlib fallback parser understands.
+schema_version: 1
+handles: []

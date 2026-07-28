@@ -72,8 +72,10 @@ receipt (`cannot stamp missing file`). The scaffold helper converges at that gra
 ## Phase 3 — Scaffold from templates
 Run the deterministic scaffold helper. It copies the templates, substitutes
 `{{PROJECT_NAME}}`, lays down the lean `docs/workflow/` tree (`pillar-matrices/`,
-`code-reviews/`, `intakes/`, README), selects the backend, and — for the `filesystem` backend —
-initializes `TRACKER.md`. It is idempotent: it never clobbers an existing operator file.
+`code-reviews/`, `intakes/`, README, and the governed `verification-handles.yaml` registry stub),
+selects the backend, initializes/refreshes the shared Path Gate git backstops, and — for the
+`filesystem` backend — initializes `TRACKER.md`. It is idempotent: it never clobbers an existing
+operator file.
 `intakes/` is the durable home for the manifests `/idc:intake` compiles; it ships as a tracked
 `.gitkeep` so an empty intake home survives a fresh clone, and it is **not** gitignored — a manifest
 is a durable record of what a foreign artifact compiled to, like a pillar matrix.
@@ -83,6 +85,28 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/idc_init_scaffold.sh" \
 ```
 Then write the Phase-1 derived domains into `WORKFLOW-config.yaml::domains` (replace the
 empty `domains: []` with the list, each `- name: / brief: / surfaces: [...]`).
+
+**Backend-aware pathway default.** The helper also sets `pathway_enforcement.mode` from the backend
+it just scaffolded — you do not set it by hand:
+
+| Backend | Scaffolded `pathway_enforcement.mode` | Why |
+|---|---|---|
+| `github` | `controlled` | The default security claim: supported runtimes deny off-path mutations, and the required `idc/pathway-integrity` check plus the repository ruleset block off-path integration. |
+| `filesystem` | `off` | There is no integration boundary to enforce, so the repo makes no hard pathway-security claim. |
+
+`app-locked` is **never** a default — it stays opt-in, so the GitHub App never becomes a normal
+dependency of an IDC install. A repo that wants it sets `mode: app-locked` deliberately and installs
+the App.
+
+Two rules the helper enforces, so a governed repo can never advertise protection it does not have:
+- it **refuses** to scaffold the `filesystem` backend over a config claiming `controlled` or
+  `app-locked` (exit 2, naming the backend and the offending mode);
+- it applies the default **only to a config it just created**. `WORKFLOW-config.yaml` is operator
+  data, so a re-`init` never rewrites an existing posture.
+
+For a `controlled` github-backed repo, Phase 4's board provisioning and the pathway check/ruleset
+installation are what make the claim real; until those land the repo is configured for enforcement
+but not yet protected by it.
 
 **Type-aware TRD-gating default.** The scaffolded `WORKFLOW-config.yaml` ships the greenfield
 default (`gating.prd: on`, `gating.trd: off`). If Phase 1b classified the repo **brownfield**
@@ -117,9 +141,15 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" start \
   --plugin-root "${CLAUDE_PLUGIN_ROOT}" --args "$ARGUMENTS" --source user
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" status \
   --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --json
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_path_gate.py" authorize \
+  --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command init \
+  --allow-path . --allow-action write --allow-action edit --allow-action git
 ```
 A stale runtime is refused here too (`start` exits 4) — do not scaffold further on stale logic; run
-`/reload-plugins`. From here init owes an honest closeout (Phase 8).
+`/reload-plugins`. The `authorize` call is init's counterpart to the command entry gate: expansion
+was admitted before the repo was governed, so once governance exists init must mint the shared Path
+Gate authorization itself or later Write/Edit/git mutations fail closed. From here init owes an
+honest closeout (Phase 8).
 
 ## Phase 4 — Provision (or link) the board (github backend)
 Decide create-vs-link:
@@ -319,16 +349,20 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_receipt_check.py" stamp \
   --customized WORKFLOW-config.yaml --customized docs/workflow/tracker-config.yaml \
   WORKFLOW.md WORKFLOW-config.yaml \
   docs/workflow/tracker-config.yaml docs/workflow/workflow-machine.yaml docs/workflow/README.md \
+  docs/workflow/verification-handles.yaml \
   docs/workflow/pillar-matrices/.gitkeep docs/workflow/code-reviews/.gitkeep \
   docs/workflow/code-reviews/.gitignore docs/workflow/intakes/.gitkeep
 ```
 Pass **every** file the scaffold laid down: a governed file the stamp list omits is left `unrecorded`
 (`idc_receipt_check.py verify --json`), which is the migration gap `/idc:update` §B then has to
-clean up after — at install time it is simply a bug. `docs/workflow/intakes/.gitkeep` is the durable
-home `/idc:intake` writes its manifests into; the **keepfile is the only intake path the receipt ever
-lists**. A compiled intake manifest is a work product, not scaffold IDC installed, so it is never
-stamped — which is exactly what keeps `/idc:uninstall` (whose removal manifest *is* this receipt)
-from deleting an operator's manifest as if it were pristine scaffold.
+clean up after — at install time it is simply a bug. `docs/workflow/verification-handles.yaml` is the
+fresh scaffold's governed verification-handle registry stub; it must be receipt-listed from the first
+stamp so `/idc:update` can preserve operator-authored recipes and `/idc:doctor` can audit cited
+handle ids against a real file. `docs/workflow/intakes/.gitkeep` is the durable home `/idc:intake`
+writes its manifests into; the **keepfile is the only intake path the receipt ever lists**. A
+compiled intake manifest is a work product, not scaffold IDC installed, so it is never stamped —
+which is exactly what keeps `/idc:uninstall` (whose removal manifest *is* this receipt) from deleting
+an operator's manifest as if it were pristine scaffold.
 `docs/workflow/workflow-machine.yaml` is the transition engine's legal-transition table (v4 Phase 2),
 scaffolded so it is operator-visible + update-managed. It is **pristine** (no operator data written
 into it — unlike the two `--customized` files below), so it is stamped plain and `/idc:update`

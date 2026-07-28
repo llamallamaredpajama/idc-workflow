@@ -15,9 +15,13 @@ Update makes **one, and only one, non-destructive** board change — appending a
 `Stage` option (additive: existing options keep their node ids, so item values survive) — and
 **reports** every other kind of board drift without touching it. It never performs a destructive or
 structural board mutation (no option-set replace, no field rename/delete) and never touches the
-data-bearing configs. Idempotent: a re-run with nothing stale reports `skipped-already-current` and
-the option append is a no-op. The receipt is rewritten **only at the very end of a fully successful
-run**, so a half-finished update can never masquerade as complete.
+data-bearing configs. U7 adds the one-time adoption bootstrap: update writes the durable
+`reconciliation-baseline-required` / `baseline-pending` marker before bootstrap begins, delegates to
+`/idc:janitor --bootstrap`, and clears that marker (keeping the adoption receipt) **last**, only after
+a verified-converged confirming scan (see Phase 3c). Until that bootstrap completes, ordinary mutators
+stay blocked while doctor/update/janitor/recovery remain available. Idempotent: a re-run with nothing stale reports `skipped-already-current` and the option
+append is a no-op. The receipt is rewritten **only at the very end of a fully successful run**, so a
+half-finished update can never masquerade as complete.
 
 ## Phase 0 — Preconditions
 
@@ -64,18 +68,20 @@ run**, so a half-finished update can never masquerade as complete.
   ```bash
   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_receipt_check.py" verify --repo "$ROOT" --json
   ```
-  The JSON's `always_ask` list names the **data-bearing configs** (`WORKFLOW-config.yaml`,
-  `docs/workflow/tracker-config.yaml`). These are **operator-owned data files**: `/idc:init` seeds
-  them from a blank stub template, then fills them with this repo's data (`domains`, `field_ids`,
-  `project_number`, the `prd` path, …). Because the template is a stub by design, a filled config
-  *always* differs from it byte-wise — that difference is the operator's data, **not drift**. So
-  update **never overwrites a data-bearing config and never offers a destructive keep/replace.**
-  Handle every `always_ask` file **present on disk** with the **structure-only rule (Phase 2 §A)**
-  regardless of its drift class or recorded `state`; this takes precedence over the rules below (and
-  subsumes the old legacy-receipt guard — a `state: stamped` data config is preserved, never silently
-  re-stamped). The one exception is a `missing` data config (the operator deleted it): there is no
-  data on disk to preserve and no file for §A's structure check to read, so it follows the `missing`
-  rule below — restore as the blank stub, default leave-removed — which §A also points to.
+  The JSON's `always_ask` list names the **operator-data files** (`WORKFLOW-config.yaml`,
+  `docs/workflow/tracker-config.yaml`, and `docs/workflow/verification-handles.yaml`). The two
+  configs are seeded from blank stubs, then filled with this repo's data (`domains`, `field_ids`,
+  `project_number`, the `prd` path, …). Update therefore **never overwrites a data-bearing config**
+  and never offers a destructive keep/replace over operator data. The verification-handle registry is a governed, secret-free,
+  operator-owned recipe file: update must preserve it and never overwrite a cited or customized
+  recipe with a template refresh. Because these files are operator data by design, update **never
+  overwrites them and never offers a destructive whole-file replace.** Handle every `always_ask`
+  file **present on disk** with the preserve rules in Phase 2 §A regardless of its drift class or
+  recorded `state`; this takes precedence over the rules below (and subsumes the old
+  legacy-receipt guard — a `state: stamped` operator-data file is preserved, never silently
+  re-stamped). The one exception is a `missing` operator-data file (the operator deleted it): there
+  is no data on disk to preserve and no file for §A's advisory checks to read, so it follows the
+  `missing` rule below — restore as the blank stub, default leave-removed — which §A also points to.
   Branch the remaining (non-`always_ask`) files on the drift class **and** the recorded `state`:
   - `unchanged` **and** `state: stamped` → pristine. Safe to refresh
     silently — but only if the installed plugin's template for that file actually differs from
@@ -105,18 +111,21 @@ run**, so a half-finished update can never masquerade as complete.
   error — do not silently treat files as untouched.
 - **No receipt (pre-receipt install):** this is the one-time graduation. **Diff-and-ask for every
   scaffold file** (treat them all as possibly-customized), apply what the operator approves, then
-  Phase 4 writes the repo's first receipt. The two data-bearing configs are the exception even here:
-  apply the **structure-only rule (Phase 2 §A)** — preserve, never offer to overwrite their data.
+  Phase 4 writes the repo's first receipt. The operator-data files are the exception even here:
+  apply the preserve rules in **Phase 2 §A** — the two configs use the structure-only advisory and
+  `verification-handles.yaml` is preserved after fixed-code validation, never overwritten.
 
 ## Phase 2 — Apply the approved refreshes (files only)
 
-### §A — Data-bearing configs (`always_ask`): preserve, structure-only advisory, never overwrite
+### §A — Operator-data files (`always_ask`): preserve, advise, never overwrite
 
 For each `always_ask` file **present on disk**, **leave the file exactly as-is** — it holds the
-operator's data. (A `missing` data config — the operator deleted it — has no data to preserve and no
-file for the check below to read; do **not** run the structure helper against a nonexistent path —
-follow the Phase 1 `missing` rule instead: restore as the blank stub, default leave-removed.) Check
-*only* whether the installed template introduced **new structure** worth adopting: resolve + render
+operator's data. (A `missing` operator-data file — the operator deleted it — has no data to preserve
+and no file for the advisory checks below to read; do **not** run them against a nonexistent path —
+follow the Phase 1 `missing` rule instead: restore as the blank stub, default leave-removed.)
+
+- **`WORKFLOW-config.yaml` + `docs/workflow/tracker-config.yaml`** use the existing
+  **structure-only** advisory: resolve + render the template (the §B mechanics below), then compare
 the template (the §B mechanics below), then compare structural keys (list contents, block scalars,
 and flow values are treated as opaque, so `domains` entries / `field_ids` values / model-routing
 prose never read as drift — only a genuinely new key does):
@@ -130,9 +139,44 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_config_keys.py" --added "$ROOT/<dest>
   hand** (add the key, keep your values). **Never** overwrite the file or offer a whole-file
   replace — that discards the operator's data and is never the right move for these files.
 
-This is the same notion of "structure" `/idc:init` seeds, so a data config can be brought into
+This is the same notion of "structure" `/idc:init` seeds, so a config can be brought into
 structural alignment without ever risking the `domains`, `field_ids`, `project_number`, or `prd`
 values it carries.
+
+**Backend-aware pathway default — advise, never flip.** A fresh `/idc:init` now scaffolds a
+github-backed repo as `pathway_enforcement.mode: controlled` and a filesystem-backed repo as `off`.
+An **already-governed** repo keeps whatever posture it has: `WORKFLOW-config.yaml` is operator data,
+so update **never** rewrites the mode. Read the repo's backend and its declared mode, then report:
+
+```bash
+# read-only: the same shipped parser the Path Gate itself uses, so the advisory can never disagree
+PYTHONPATH="${CLAUDE_PLUGIN_ROOT}/scripts" python3 -c \
+  'import sys; import idc_path_gate as G; print(G.pathway_mode(sys.argv[1]))' "$ROOT"
+```
+
+- **github backend still on `off`** → report `preserved — pathway default advisory: this version
+  scaffolds github-backed repos as controlled; set pathway_enforcement.mode: controlled by hand to
+  adopt it`, and name what adopting it requires (the `idc/pathway-integrity` check + ruleset must be
+  installed, or merges will block with nothing to satisfy them). It is an **advisory**: do not edit
+  the file, do not offer a replace.
+- **filesystem backend claiming `controlled` / `app-locked`** → report it as a **finding**: the
+  filesystem tracker makes no hard pathway-security claim (spec §2.1), so that config advertises
+  protection the repo cannot deliver. Tell the operator to set `mode: off` or migrate to the github
+  backend. Still never rewrite the file yourself.
+- **anything else** → say nothing; the posture is coherent.
+
+`app-locked` is never advised as a default — it stays an opt-in profile.
+
+- **`docs/workflow/verification-handles.yaml`** is preserved as operator-owned recipe data, not
+  a structure-only config. Validate it read-only through the fixed helper:
+  ```bash
+  python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_verification_handles.py" validate \
+    --repo "$ROOT"
+  ```
+  - Validation passes → report `preserved — registry current` and leave the file untouched.
+  - Validation fails (schema mismatch / malformed / secret-bearing) → report the exact helper error
+    and stop. Never overwrite the registry with the template to make the warning disappear; the
+    operator's recipes must be preserved and repaired in-place.
 
 ### §B — Template-stamped files (everything else)
 
@@ -204,6 +248,16 @@ Idempotent: a no-op if the line is already present (report `ledger-gitignore-alr
 appends it (`…-added`). None is a stamped/receipt-tracked file, so they never appear in the Phase 1
 drift classification — they are standing additives the same way the Phase 3 `Stage`-option append is.
 
+### §D — Refresh the shared Path Gate git backstops
+
+Re-install/verify the shared Path Gate pre-commit/pre-push hooks in the repository Git dir. This is
+idempotent and preserves any pre-existing unmanaged hook by chaining it behind the IDC-managed wrapper:
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_path_gate.py" install-hooks --repo "$ROOT" --plugin-root "${CLAUDE_PLUGIN_ROOT}"
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_path_gate.py" verify-hooks  --repo "$ROOT" --plugin-root "${CLAUDE_PLUGIN_ROOT}"
+```
+If verification fails, STOP — the repo would otherwise claim guarded git backstops it does not have.
+
 ## Phase 3 — Board reconcile (one safe additive migration; everything else report-only)
 
 Compare the live tracker against the installed version's expectation. Update performs exactly **one**
@@ -267,6 +321,36 @@ gh repo view --json deleteBranchOnMerge --jq .deleteBranchOnMerge 2>/dev/null
   over, so **do not prompt**; leave it untouched and report `n/a (probe failed: <reason>)` — a
   distinct outcome from `declined`, never silently folded into it.
 
+## Phase 3c — Baseline bootstrap handoff (one-time migration)
+
+After the file/board refresh and before rewriting the install receipt, ensure the governed repo has a
+durable adoption boundary:
+
+- write / preserve `docs/workflow/reconciliation-baseline-required.json` (`baseline-pending`);
+- delegate to `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_janitor.py" --repo "$ROOT" <board args> --bootstrap`;
+- if bootstrap is interrupted or halts with blockers, **leave the marker present** and report the
+  blockers honestly — the repo is explicitly baseline-pending, not falsely current;
+- **receipt-last, gated on a verified-converged confirming scan.** Bootstrap runs two scans: a
+  pass-1 scan and then a "confirming" post-final scan that runs *with* the freshly written adoption
+  receipt so it can establish the post-boundary watermark. The receipt is therefore written
+  **provisionally** before that confirming scan — but `baseline-pending` is cleared **only after** the
+  confirming scan is genuinely clean (validated, no blockers, not indeterminate). The marker-clear is
+  the **last** durable step. If the confirming scan is *not* clean, the provisional
+  `docs/workflow/reconciliation-adoption.json` is rolled back, the marker stays present, and bootstrap
+  exits non-zero with the blockers named — the repo stays honestly baseline-pending, never momentarily
+  "adopted." Because the marker-clear is last, any interrupt (including one right after the provisional
+  receipt) resumes as baseline-pending; a later run re-scans and converges. In short: **only a
+  converged bootstrap clears the marker and keeps `docs/workflow/reconciliation-adoption.json`.**
+
+A legacy governed repo with an **empty board and no transition journal** bootstraps cleanly on its
+own — no operator pre-step is required. An empty board has no post-boundary tracker facts, so a
+missing journal is treated as the lazy pre-journal start rather than an indeterminate gap (the journal
+is created on the first sanctioned mutation). A **non-empty** adopted board with a missing/unreadable
+journal remains a fail-closed blocker: post-boundary coverage genuinely cannot be established there.
+
+This marker is what blocks ordinary mutating workflow commands while still leaving `/idc:doctor`,
+`/idc:update`, `/idc:janitor`, and recovery doors available.
+
 ## Phase 4 — Rewrite the receipt (end of a successful run only)
 
 Once every approved refresh is applied, write a fresh receipt over the stamped set so the next
@@ -275,8 +359,10 @@ version and pass it as `--plugin-version` — this is the value the stale-runtim
 reads back on the next session, so it must always be **this session's real running version**,
 never a guess. Pass the files the operator **kept customized** via `--customized` so the next
 update asks again instead of silently re-stamping over them — this **always includes the two
-data-bearing configs** (preserved in Phase 2 §A), which keeps a pre-guard `state: stamped`
-receipt from re-appearing:
+operator-data configs** (preserved in Phase 2 §A), which keeps a pre-guard `state: stamped`
+receipt from re-appearing. `docs/workflow/verification-handles.yaml` stays preserved by the helper's
+fixed `always_ask` path even when it remains receipt-stamped plain, so its operator-authored recipes
+are never silently refreshed:
 ```bash
 PLUGIN_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' \
   "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json")"

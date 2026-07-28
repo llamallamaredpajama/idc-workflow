@@ -61,7 +61,12 @@ The finisher runs its **own** `/fullauto-goal` loop. Its completion contract car
   internals, never touches another triplet's surface.
 - **Iteration policy** — record-and-vary: log each finding, the fix applied, and the re-review
   delta; re-review after each pass until the verdict clears (attempt ceiling ~3 hypotheses per
-  finding).
+  finding). Rounds converge against the per-PR **seen-fingerprint ledger** (fixed code:
+  `scripts/idc_review_seen_ledger.py` + the filer — the loop's write-owners; never hand-edit it):
+  every fingerprint is persisted before flooring/rejection/refutation, so a resurfaced
+  rejected/refuted/below-floor finding is a recognized *seen* resurfacing — it never recycles the
+  attempt counter, never re-files duplicate routed board work, and never turns into a false
+  routing gap at the finish tail (the receipt gate's routing check is seen-ledger-aware).
 - **Blocked-stop** — at the attempt ceiling, on a finding that can only be resolved upstream
   (the implementation is right but the *pillar/plan* is wrong), **or when the increment is
   inert/acceptance-gapped** (implementation right *and* plan right, but a declared runtime/infra
@@ -104,10 +109,16 @@ The finisher runs its **own** `/fullauto-goal` loop. Its completion contract car
    tests stay green after any simplification edit.
 4. **Git finalization.** Acquire the area's **surface-keyed merge-train lease** (the serialized
    merge lock for *this area's* file surface — disjoint areas hold distinct leases and merge
-   concurrently; see *Merge serialization*). Then run the deterministic tail —
-   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_finish.py" --pr <N> --issue <M> --worktree <path> --verdict <verdict.json>`
-   — **`--verdict` is mandatory**: the tail is a P5 **receipt gate** that refuses to merge/close on
-   any receipt violation (verdict validity/ownership, unrouted findings, unmet `merge_conditions[]`)
+   concurrently; see *Merge serialization*). First mint the verified implementation receipt through
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_build_receipt.py" write --repo "$PWD" --contract <contract.json> --execution <execution.json> --verdict <verdict.json> --graph-digest <digest> --projection-digest <digest> --out <build-receipt.json>`
+   so the exact issue/PR, frozen gate digest, fixed `surface` / `evidence_kind`, any cited
+   verification `handle_id`, graph/projection digests, executed verification, review head, and final
+   diff are bound together by a source-owned artifact. Then run the deterministic tail —
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_finish.py" --pr <N> --issue <M> --worktree <path> --verdict <verdict.json> --build-receipt <build-receipt.json>`
+   — **`--verdict` is mandatory** and `--build-receipt` is the U6 implementation-receipt path: the
+   tail is a P5/U6 **receipt gate** that refuses to merge/close on stale/fake/wrong-head build
+   receipts as well as any review-receipt violation (verdict validity/ownership, unrouted findings,
+   unmet `merge_conditions[]`)
    — `enforce_receipt_gate` in the script is the source of truth and its docstring carries the full
    per-check rationale, not repeated here — so a nit can never merge as stranded prose, and an unmet
    pre-merge condition can never be silently downgraded past the merge. It **removes the build
@@ -117,7 +128,19 @@ The finisher runs its **own** `/fullauto-goal` loop. Its completion contract car
    promoted to `main` only after the staging e2e — see *e2e layering*) with a **direct, blocking**
    `gh pr merge --squash --delete-branch` (default method; pass `--merge-method` for the method the
    repo allows) — **not** GitHub `--auto` (auto-merge would defer the merge and, with the repo's
-   `deleteBranchOnMerge` off, skip the delete). The rest of the tail — branch deletes, tracker
+   `deleteBranchOnMerge` off, skip the delete). **Runtime carve-out (Pi):** the self-merging tail above
+   is the **Claude and Codex** behavior. On the **experimental Pi runtime** no sanctioned Pi merge
+   helper has landed yet, so the Pi finisher does **not** run that self-merging invocation at all.
+   Instead it mints the build receipt (the step-4 `idc_build_receipt.py` call above) and **reports the
+   reviewed branch + receipts to the operator, who performs the merge out-of-band**; only after that
+   does the deterministic post-merge cleanup run, as
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_finish.py" --close-only --pr <N> --issue <M>`
+   — the recovery mode that SKIPS the merge, HARD-REFUSES unless the PR is already merged
+   (`verify_pr_merged` is its receipt — the merged state, not a verdict), and only then deletes the
+   branch, closes the tracker item, and re-verifies the end state. The Pi ordering is therefore
+   **build receipt → operator merge → `--close-only` cleanup** — there is no "prepare/push before merge"
+   step (no `idc_git_finish.py` mode implements one), and the operator is the merge gate (README /
+   `docs/architecture.md` §Runtime model). The rest of the tail — branch deletes, tracker
    close, end-state re-verify — is the script's deterministic step order, verified before it ever
    exits 0; it is not re-narrated here. **Fail-closed:** any unverified step prints a
    machine-readable `finish: <step> failed` line and exits non-zero — never a silent drop; the
@@ -180,9 +203,15 @@ Serialization is two layers — both required:
    multi-resident pool**; under the **single-merger** runtimes it **collapses to structural
    serialization** (one merger, so disjoint areas merge back-to-back, not literally in parallel):
    - **pi** (flat standing pool, **no master orchestrator**) → a **board-backed merge lease**:
-     the authoritative GitHub Projects board is the lock-holder; whichever finisher resident
-     holds the surface lease merges, then releases it; coms-net carries only the liveness/
-     notification. This is the runtime where disjoint surfaces merge **concurrently**.
+     the authoritative GitHub Projects board is the lock-holder; a finisher resident acquires the
+     surface lease before touching the shared integration ref, then releases it; coms-net carries only
+     the liveness/notification. **On the experimental Pi runtime the finisher does not self-merge** —
+     no sanctioned Pi merge helper has landed, so under the lease it prepares/pushes/reports the
+     reviewed branch and an **operator performs the merge** (see the *Git finalization* Pi carve-out
+     and README / `docs/architecture.md` §Runtime model). The board-backed lease is what keeps the
+     disjoint-surface merges serialized-per-surface so they can proceed **concurrently** across
+     surfaces; wiring a Pi resident to hold that lease and merge autonomously (rather than the
+     operator) is the pending helper, which is why the runtime stays experimental.
    - **Claude Teams** / the collapsed fallback → the single Build **orchestrator** is the sole
      merger (no teammate-finisher merges another's surface); the lease is structural and the train
      **collapses to serialized** back-to-back merges through that one merger.

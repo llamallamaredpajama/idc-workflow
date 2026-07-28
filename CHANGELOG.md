@@ -2,6 +2,72 @@
 
 All notable changes for the IDC Workflow plugin are documented in this file.
 
+## 5.0.0 — 2026-07-23
+
+Convergent pathway integrity — governed work has one way in, and completion has to prove itself.
+
+Major version because the **enforcement boundary** changed shape, the way 4.0.0 changed the write
+paths. Governed work now enters through a shared Path Gate, every sanctioned tracker mutation runs as
+a journalled transaction with an exact readback, Build closes only against a source-owned
+implementation receipt, and integration is guarded by a required deterministic GitHub check plus a
+repository ruleset. Repositories with custom tooling that wrote the board directly, or CI that merged
+without the pathway check, must adopt the sanctioned doors before upgrading.
+
+**GitHub-backed repositories now scaffold `pathway_enforcement.mode: controlled` by default.** This
+is the last step of the sequence deliberately, not the first: `controlled` promises that supported
+runtimes deny off-path mutations *and* that off-path integration is blocked, and only now does the
+second half of that promise exist. What the flip does and does not do:
+
+- **New github-backed repos** are created `controlled`. `/idc:init` sets the mode from the backend it
+  scaffolds — it is backend-aware code, not a template edit, because one template serves both
+  backends.
+- **Filesystem-backed repos stay `off`,** and `/idc:init` now **refuses** to scaffold the filesystem
+  backend over a config claiming `controlled` or `app-locked`. The filesystem tracker has no
+  integration boundary, so it must not advertise protection it cannot deliver; it remains fully
+  useful for hermetic tests and local demonstrations.
+- **Existing repos are not flipped.** `WORKFLOW-config.yaml` is operator data: `/idc:update` reports
+  the new default as an advisory and tells you how to adopt it by hand, and re-running `/idc:init`
+  never rewrites a posture you already chose.
+- **`app-locked` stays opt-in.** Nothing here makes the GitHub App a normal dependency of an IDC
+  install — `controlled` works without it. `app-locked` remains the deliberate choice for
+  repositories that must stop an ordinary write token from touching the board at all.
+
+**Upgrade note — a Plan finished before this release cannot be built after it.** Planning receipts are
+now proven by a machine witness recorded outside the committed tree, so a receipt minted by an earlier
+version has no witness and Build refuses to borrow it. This is deliberate and cannot be repaired in
+place: nothing inside a receipt distinguishes "written by older code" from "hand-forged", which is
+precisely why the out-of-tree witness exists, so re-anchoring one would reopen the forgery hole. If an
+upgrade lands between a Plan and its Build, **re-run the sanctioned Plan apply** to mint a fresh
+witnessed receipt — the refusal message says so. Plans and Builds that both run on 5.0.0 are unaffected.
+
+Honest boundary, unchanged: `controlled` cannot stop a machine administrator from removing hooks,
+editing `.git`, or disabling GitHub rules, and neither profile protects against repository or
+organization administrators who can remove the rules or the App. It blocks the normal supported
+agent pathways and blocks merge on missing or inconsistent evidence — that is the claim, and it is
+the whole claim.
+
+Runtime caveat (Pi merge): the pipeline "automerges when green" on the **Claude and Codex** runtimes.
+The **experimental Pi runtime does not self-merge** — no sanctioned Pi merge helper has landed yet, so
+the Pi finisher runs the same receipt/gate tail and then hands the reviewed branch to an
+**operator-performed merge**. This is documented consistently in the README, `docs/architecture.md`
+(§Runtime model), `agents/idc-finisher.md` (§Git finalization), and `skills/idc-adapter-pi` — the four
+surfaces now agree on the one behavior.
+
+- **Release evidence has to be measured, not asserted.** `scripts/idc_pilot_metrics.py` is a fixed
+  schema validator for the source-heavy pilot's `pilot-metrics.json`: it requires all ten operational
+  metrics at their exact field paths, binds the artifact to one exact reviewed commit, verifies every
+  lane receipt by digest (so a receipt that changed after the numbers were written is refused as
+  stale), and enforces a deterministic source-heavy criterion — a docs- or config-dominated
+  repository cannot be used to measure a code-intelligence provider's usefulness.
+  `python3 scripts/idc_release_check.py --require-pilot-evidence <path> --reviewed-sha <sha>` refuses
+  release evidence that is missing, malformed, stale, unbound, or not source-heavy. The plain
+  invocation is unchanged, so the every-commit lint guard still runs before any pilot exists.
+
+_Review note (correctness-neutral): the trusted commit-history audit over this release flagged 91
+mechanical narrative issues across the 80 commits (subject/body style). They do not affect behavior
+and the history was deliberately not rewritten; the substantive review findings were remediated in
+the code and tests above._
+
 ## 4.2.0 — 2026-07-19
 
 Completion honesty.

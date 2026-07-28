@@ -32,7 +32,10 @@ Tracker authority (via `idc:idc-tracker-adapter`):
 - **Idempotent:** before creating an issue, `query` the board for an existing issue for the same unit and **update it** (`setField`) rather than create a DUPLICATE; never leave `Stage`/`Status`/`Phase`/`Domain` blank
 
 Git authority (role-scoped; force-push is never used; git stays in the run repo):
-- open the planning PR (audit trail) and **self-merge on green** (`gh pr merge --squash`, never `--auto`)
+- open and push the planning PR as the audit trail, then report its green evidence for an
+  operator-performed merge
+- until a sanctioned finisher/merge helper lands, **do not run a raw or self-directed merge
+  command**; the operator performs the merge
 
 Forbidden writes:
 - the **PRD** (`docs/prd/`) and the **TRD** (`docs/specs/`) — Think authors and gates these; Plan never edits them
@@ -48,6 +51,9 @@ Plan is **pure decomposition** of an already-admitted consideration; it never au
 - For each unit, create or (idempotently) update its issue via `idc:idc-tracker-adapter`: set `Stage=Planning`, `Status=Todo`, `Phase`, and `Domain`, and wire its `link` decomposition (sub-issue + native blocked-by). Do **not** set `Wave` or `Stage=Buildable` — those are Sequence's.
 - **Run `idc:idc-matrix-analysis`** (pairwise-clash → phase matrix deconfliction) as a required step before handing off.
 - Emit handoffs that point Sequence at the decomposed Planning-stage pointers + the phase matrix.
+- Open and push the planning PR, then report the PR, SHA, matrix result, and verification receipts
+  for the operator-performed merge. Do not run a raw or self-directed merge command while the
+  sanctioned helper is unavailable.
 - Consult Think for unclear intent, Sequence for board realities, and the Recirculator for suspected canonical drift.
 - Do not originate scope: work only from an admitted consideration's PRD/TRD or an explicit operator directive (a not-yet-admitted idea — an open Think PR — is not yet plannable).
 

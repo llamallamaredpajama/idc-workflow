@@ -12,11 +12,17 @@
 set -uo pipefail
 . "$(dirname "$0")/lib.sh"
 gov_engine_env
+CHECK="$GOV_PLUGIN/scripts/idc_review_verdict_check.py"
+git -C "$REPO" init -q -b main >/dev/null 2>&1
+git -C "$REPO" config user.email test@example.com >/dev/null 2>&1
+git -C "$REPO" config user.name Test >/dev/null 2>&1
+mkdir -p "$REPO/docs/workflow/code-reviews"
 
-python3 - "$GOV_PLUGIN/scripts" "$REPO" <<'PY' || fail "github close unit failed (see above)"
-import sys, os, json
+python3 - "$GOV_PLUGIN/scripts" "$REPO" "$CHECK" <<'PY' || fail "github close unit failed (see above)"
+import sys, os, json, subprocess
 sys.path.insert(0, sys.argv[1])
 repo = sys.argv[2]
+check = sys.argv[3]
 import idc_transition as E, idc_gh_board as B, idc_gh_close as GC
 
 B.fetch_item = lambda iid, r: {"stage": "Buildable", "status": "In Progress"}  # existence read
@@ -25,17 +31,21 @@ GC.close_issue = lambda o, p, i, r, item_id=None: closed.append(i)
 ctx = E.github_ctx(repo, "o", "1", itemid_cache={5: "PVTI_5"})
 
 def w(name, doc):
-    path = os.path.join(repo, name); open(path, "w").write(json.dumps(doc)); return path
+    path = os.path.join(repo, "docs", "workflow", "code-reviews", name)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh)
+    subprocess.run([sys.executable, check, path], check=True, capture_output=True, text=True)
+    return path
 
-owning = w("v-own.json", {"verdict": "PASS", "pr": 9, "issue": 5, "findings": []})
-other  = w("v-other.json", {"verdict": "PASS", "pr": 9, "issue": 888, "findings": []})
-failv  = w("v-fail.json", {"verdict": "FAIL", "pr": 9, "issue": 5,
+owning = w("2026-07-22-pr-9-own.json", {"verdict": "PASS", "pr": 9, "issue": 5, "findings": []})
+other  = w("2026-07-22-pr-9-other.json", {"verdict": "PASS", "pr": 9, "issue": 888, "findings": []})
+failv  = w("2026-07-22-pr-9-fail.json", {"verdict": "FAIL", "pr": 9, "issue": 5,
            "findings": [{"dimension": "correctness", "severity": "major", "confidence": 0.95,
                          "evidence": "e", "attack": "a", "unblock": "u", "fingerprint": "fp"}]})
 # NO `pr` field — so the mandatory-`--pr` guard is the SOLE thing denying case (4). (With a verdict
 # that carries pr:9, the separate verdict.pr!=pr check masks the mandatory-pr guard, and neutering
 # it leaves case (4) green — the test would prove less than it claims. See PR #134 review NIT-1.)
-nopr   = w("v-nopr.json", {"verdict": "PASS", "issue": 5, "findings": []})
+nopr   = w("2026-07-22-no-pr.json", {"verdict": "PASS", "issue": 5, "findings": []})
 
 def is_denied(fn):
     try: fn(); return False

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """idc_interlock_gate.py — the PreToolUse mutation interlock (v4 Phase 2 §3.2; Task 3 command integrity).
 
-Fired on PreToolUse for the Bash tool. The transition engine (idc_transition.py), the finisher tail
+Fired on PreToolUse for Bash, Write, Edit, and NotebookEdit. The transition engine
+(idc_transition.py), the finisher tail
 (idc_git_finish.py), and the sanctioned PR finisher (idc_pr_finish.py) are the ONE door to terminal
 workflow state — but an agent can still type a raw `gh issue create` / `gh pr merge` / `gh issue
 close` / state-closing or dependency `gh api` / raw board mutation (`gh project
@@ -11,15 +12,12 @@ C + D). The session-b7a93ff6 incident showed the escape hatch: the raw mutation 
 throwaway `fire_gate.sh` and run as `bash fire_gate.sh`, so a pure command-string match saw only
 `bash fire_gate.sh` and waved it through. This gate now sees THROUGH that indirection.
 
-POSTURE (Task 3): the interlock is a HARD DENY while the session owns an ACTIVE `/idc:*` command
-(idc_ledger.active_commands, scoped to the payload's session) — the window where a raw mutation is
-the improvisation the pipeline forbids. OUTSIDE an active command it is a WARN-INJECT (surface the
-remediation, never block) so ordinary governed-repo work is never bricked. IDC_HOOKS_OBSERVE_ONLY=1
-is the ONE debug escape hatch — it downgrades any deny back to a warning (honored inside
-pre_tool_deny()). There is no second bypass variable; the old IDC_HOOKS_INTERLOCK_ENFORCE opt-in is
-removed (the active-command deny is the shipped enforcement). There are no command-name exceptions:
-Init and Uninstall lifecycle writes run through validating tracker-adapter helpers, while the same raw
-GitHub operations remain denied under every active IDC command.
+POSTURE (U4 shared Path Gate): the core always computes the same allow/deny decision, then observes
+would-be denials when `pathway_enforcement.mode` is `off` (the scaffold default) and hard-denies only
+in `controlled` or `app-locked`. IDC_HOOKS_OBSERVE_ONLY=1 independently forces observe in every mode.
+There are no command-name exceptions: Init and Uninstall lifecycle writes run through validating
+tracker-adapter helpers, while the same raw GitHub operations are would-be denials when typed directly
+into Bash.
 
 CLASSIFIER (round-5 Fix 1): defense-in-depth by PER-SEGMENT classification, NOT a complete shell
 parser. The command is split into shell segments (`&&`/`||`/`;`/`|`/newline) and EACH is classified
@@ -59,8 +57,64 @@ NOT via the Bash tool, so PreToolUse never sees them; and a `python3 …/idc_tra
 classifier pattern. Only a RAW terminal command (or one hidden behind interpreter indirection)
 matches.
 
+KNOWN NON-COVERAGE — the published scope, stated so this gate is not read as a complete barrier
+(F58, extended by F63). Every channel below is PRE-EXISTING (they behave identically on `main`) and
+all are tracked as follow-ups rather than closed here, because narrowing any of them touches a
+load-bearing exemption or widens the denial surface well beyond this release's review.
+
+THIS LIST IS NOT A CLOSED WORLD. It enumerates what is KNOWN to be uncovered; a construct that is
+absent from it is NOT thereby guaranteed to be in scope. This is a defense-in-depth classifier, not a
+complete shell parser (see CLASSIFIER above), so treat the list as a floor on the known gaps, never as
+a ceiling on the possible ones.
+
+WHERE THE BOUNDARY ACTUALLY RUNS (the rule the channels below fall outside of). A segment is
+classified when a protected call stands in COMMAND POSITION — `gh` is that segment's command head
+once known wrapper/env prefixes are stripped — or inside a payload/target this gate can FOLLOW
+(`bash|sh|zsh -c '…'`, `bash|sh|zsh FILE`, `source`/`.` FILE, `bash|sh|zsh < FILE`). A conservative
+whole-segment TEXT match runs ONLY as a backstop for a segment that fails to tokenize. Protected
+words carried as DATA — an argument to some other command — are deliberately not a match, or `echo
+"gh pr merge 123"` and every doc example quoting a protected call would be a denial.
+
+  1. SANCTIONED PLUGIN SCRIPTS. Rule 5 above returns `[]` — unscanned — for any file whose RESOLVED
+     path is under `<plugin_root>/scripts/`. That exemption is what keeps IDC's own helpers, which
+     legitimately shell out to `gh`, from being denied by their own gate. Its cost: a payload written
+     into that directory and then run is never classified, and the Path Gate cannot stop the write
+     either — `idc_path_gate` deliberately treats out-of-repository paths as outside its jurisdiction
+     (locked by `tests/smoke/governance/path-gate-boundaries.sh`), and the plugin root is outside the
+     governed repo. Neither half is a defect alone; the combination is the channel. Closing it means
+     replacing "anything under scripts/" with a manifest or hash-pin of the known plugin scripts.
+  2. ARGV-LIST INTERPRETER PAYLOADS. `python3` is NOT one of the interpreters this gate follows
+     (INTERPRETERS is bash/sh/zsh), so a `python3 -c '…'` payload is only ever reached by the
+     tokenize-failure TEXT backstop described above. Concretely:
+     `python3 -c 'import os; os.system("gh pr merge 123")'` DENIES — the embedded `;` raw-splits it
+     into a fragment that fails to lex, so the whole-segment matcher runs and sees the call as text —
+     while `python3 -c 'subprocess.run(["gh","pr","merge","123"])'` carries no matching text and does
+     not. The boundary is NARROWER than "it sees the text": the same call written without a `;`
+     (`python3 -c 'os.system("gh pr merge 123")'`) tokenizes cleanly, the backstop never runs, and it
+     is allowed too. Closing this means treating child-process-capable interpreter payloads as opaque
+     — deny unless positively classified — a much wider denial surface than this release should adopt
+     unreviewed.
+  3. PROGRAM TEXT THAT NEVER STANDS IN COMMAND POSITION (F63). Two demonstrated forms:
+     a. AN INTERPRETER FED ITS PROGRAM ON STDIN THROUGH A PIPE — `echo '<protected cmd>' | sh`,
+        `cat payload.sh | bash`, `curl -s <url> | sh`, `echo <base64> | base64 -d | sh`. Segmenting on
+        `|` leaves a producer segment whose command head is `echo`/`cat`/`curl` (the protected words
+        are its DATA, rule above) and a consumer segment that is a bare interpreter with NO target to
+        follow. The redirection sibling `bash|sh|zsh < FILE` IS covered, because there the program
+        source is a file this gate resolves and scans — so this is a genuine blind spot in an intent
+        the gate already holds, not a policy choice.
+     b. A PROTECTED ARGV ASSEMBLED BY A HELPER — `echo "pr merge 123" | xargs gh`, where the segment
+        `xargs gh` names no subcommand and the protected words arrive at runtime out of another
+        segment. (`xargs gh pr merge 123`, with the words present in the same segment, IS covered.)
+     Closing this means treating an interpreter with no resolvable program source, and a helper that
+     execs an argv it reads at runtime, as opaque — the same widen-the-denial-surface change as (2),
+     and it is parked with it.
+
+NOT a bypass, and deliberately so: an unusable Python runtime. The transport hard-denies rather than
+allowing silently (F57, `scripts/hooks/idc_interlock_gate_hook.sh`).
+
 Invocation: idc_interlock_gate.py <PLUGIN_ROOT>   (PreToolUse payload on stdin).
-Self-gated: no-op (allow) outside a governed repo, for non-Bash tools, or on a non-matching command.
+Self-gated: no-op (allow) outside a governed repo, or on a tool/payload the shared Path Gate does not
+recognize.
 """
 import dataclasses
 import os
@@ -68,9 +122,12 @@ import re
 import shlex
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.dirname(_HERE))
 import idc_hook_lib as H  # noqa: E402
-import idc_ledger as L    # noqa: E402  (active_commands — the deny-vs-warn signal)
+import idc_ledger as L    # noqa: E402  (kept for the public Task-3 contract context)
+import idc_path_gate as PG  # noqa: E402
 
 # ── bounded interpreter-inspection limits + data (Task 3) ─────────────────────────────────────────
 MAX_SCRIPT_DEPTH = 3
@@ -193,8 +250,9 @@ _PROTECTED_COMBOS = (
     {("issue", v) for v in ("create", "new", "close", "delete", "edit", "reopen", "lock", "unlock",
                             "transfer", "pin", "unpin")}
     | {("pr", v) for v in ("merge", "close", "edit")}
-    | {("project", v) for v in ("create", "item-add", "item-edit", "item-delete", "item-archive",
-                                "field-create", "edit", "delete", "copy", "link", "unlink")}
+    | {("project", v) for v in ("create", "item-add", "item-create", "item-edit", "item-delete",
+                                "item-archive", "field-create", "field-delete", "edit", "delete",
+                                "copy", "close", "mark-template", "link", "unlink")}
 )
 def _gh_positionals(seg):
     """The POSITIONAL word sequence of a `gh …` command SEGMENT — known execution prefixes and options
@@ -252,7 +310,10 @@ def _combo_subject(pos):
                    "pr-merge" if verb == "merge" else f"pr-{verb}")
     # Keep distinct private kinds for precise diagnostics; policy denies every protected combo.
     kind = {"delete": "project-delete", "item-delete": "project-item-delete",
-            "field-create": "project-field-create", "link": "project-link"}.get(verb, "project-mutation")
+            "item-create": "project-item-create", "field-create": "project-field-create",
+            "field-delete": "project-field-delete", "close": "project-close",
+            "mark-template": "project-mark-template",
+            "link": "project-link"}.get(verb, "project-mutation")
     return _mk("a raw `gh project` board mutation", _ENGINE, kind)
 
 
@@ -413,14 +474,24 @@ def _ws_combos(command):
         return _mk("a raw `gh pr edit`", _PR_GATE_BIND, "pr-edit")
     if _has(c, "gh project item-delete"):
         return _mk("a raw `gh project item-delete` board mutation", _ENGINE, "project-item-delete")
+    # `item-create` is checked BEFORE the bare `create` rule so a draft-item mint is named precisely
+    # (the word-boundary lookarounds already keep `item-create` from matching `project create`).
+    if _has(c, "gh project item-create"):
+        return _mk("a raw `gh project item-create` board mutation", _ENGINE, "project-item-create")
     if _has(c, "gh project create"):
         return _mk("a raw `gh project create` board mutation", _ENGINE, "project-create")
     if _has(c, "gh project field-create"):
         return _mk("a raw `gh project field-create` board mutation", _ENGINE, "project-field-create")
+    if _has(c, "gh project field-delete"):
+        return _mk("a raw `gh project field-delete` board mutation", _ENGINE, "project-field-delete")
     if _has(c, "gh project link"):
         return _mk("a raw `gh project link` board mutation", _ENGINE, "project-link")
     if _has(c, "gh project delete"):
         return _mk("a raw `gh project` board mutation", _ENGINE, "project-delete")
+    if _has(c, "gh project close"):
+        return _mk("a raw `gh project close` board mutation", _ENGINE, "project-close")
+    if _has(c, "gh project mark-template"):
+        return _mk("a raw `gh project mark-template` board mutation", _ENGINE, "project-mark-template")
     if _has(c, "gh project item-edit") or _has(c, "gh project item-add"):
         return _mk("a raw `gh project item-{edit,add}` board mutation", _ENGINE, "project-mutation")
     return None
@@ -1180,9 +1251,8 @@ def inspect_command(command, cwd, plugin_root, depth=0, seen=None):
 def classify(command, cwd, plugin_root, active):
     """Public Task-3 contract: classify one Bash command in its repo/session context.
 
-    ``active`` is deliberately part of the interface because the caller uses it to choose hard-deny
-    versus warning posture. Classification itself is identical in both postures so the same raw write
-    remains visible as a warning outside an active IDC command.
+    ``active`` remains part of the compatibility interface, but classification is posture-independent;
+    the shared Path Gate applies the configured observe-versus-enforce posture after classification.
     """
     _ = bool(active)  # normalize truthiness without changing warn-vs-deny classification
     return inspect_command(command, cwd, plugin_root)
@@ -1221,29 +1291,1150 @@ def render_reason(finding, plugin_root=""):
     )
 
 
+@dataclasses.dataclass
+class _ShellGateAnalysis:
+    paths: list[str] = dataclasses.field(default_factory=list)
+    deny_reason: str | None = None
+
+    def add_paths(self, paths):
+        for item in paths:
+            if item and item not in self.paths:
+                self.paths.append(item)
+
+    def deny(self, reason):
+        if reason and not self.deny_reason:
+            self.deny_reason = reason
+
+    def merge(self, other):
+        if other is None:
+            return
+        self.add_paths(getattr(other, "paths", []))
+        self.deny(getattr(other, "deny_reason", None))
+
+
+_TRUNCATE_VALUE_OPTS = {"-s", "--size", "-r", "--reference"}
+_SHRED_VALUE_OPTS = {"-n", "--iterations", "-s", "--size", "--random-source"}
+_ENV_VALUE_OPTS = {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}
+_SPLIT_VALUE_OPTS = {
+    "-a", "--suffix-length", "-b", "--bytes", "-C", "--line-bytes", "-l", "--lines",
+    "-n", "--number", "--additional-suffix", "--filter",
+}
+
+
+def _opaque_mutation_reason(what):
+    return (
+        f"IDC Path Gate denied this mutation because {what}, so the exact repository targets "
+        "cannot be proven before execution. Use a literal command that names the target files or a "
+        "sanctioned IDC command to open the correct write boundary first."
+    )
+
+
+def _no_verify_reason(subcommand):
+    suffix = " (or `-n`)" if subcommand == "commit" else ""
+    return (
+        f"IDC Path Gate denied this Bash command because `git {subcommand} --no-verify`{suffix} "
+        "suppresses IDC's managed Git backstops. Remove the hook-suppression flag and let the "
+        "IDC-managed hooks run."
+    )
+
+
+def _hooks_path_reason():
+    return (
+        "IDC Path Gate denied this Bash command because `core.hooksPath` disables IDC's managed Git "
+        "backstops. Remove the hooksPath override and let the IDC-managed pre-commit/pre-push hooks run."
+    )
+
+
+def _dynamic_git_flag_reason(subcommand):
+    return (
+        f"IDC Path Gate denied this Bash command because a `git {subcommand}` policy-sensitive flag "
+        "contains a shell expansion and is opaque, so IDC cannot prove that managed Git backstops remain enabled. "
+        "Use literal Git flags and let the IDC-managed hooks run."
+    )
+
+
+def _repo_candidate_path(raw_path, cwd, repo_root=None):
+    if not isinstance(raw_path, str):
+        return None
+    candidate = raw_path.strip()
+    if not candidate or candidate == "-" or candidate.startswith("&") or candidate.startswith("-"):
+        return None
+    if candidate in {"/dev/null", "/dev/stdout", "/dev/stderr"} or candidate.startswith("/dev/fd/"):
+        return None
+    if "$" in candidate or "`" in candidate:
+        return None
+    repo_abs = os.path.abspath(cwd if repo_root is None else repo_root)
+    cwd_abs = os.path.abspath(cwd if cwd is not None else repo_abs)
+    abs_path = os.path.abspath(candidate if os.path.isabs(candidate) else os.path.join(cwd_abs, candidate))
+    rel = os.path.relpath(abs_path, repo_abs)
+    if rel.startswith("..") or os.path.isabs(rel):
+        return None
+    return abs_path
+
+
+def _dedupe_paths(paths):
+    out, seen = [], set()
+    for item in paths:
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
+def _is_path_like_arg(arg):
+    return bool(arg) and not arg.startswith("-") and not _ASSIGN_RE.match(arg)
+
+
+def _file_operands(args, value_opts):
+    operands = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            operands.extend(a for a in args[i + 1:] if _is_path_like_arg(a))
+            break
+        if arg in value_opts and i + 1 < len(args):
+            i += 2
+            continue
+        if _is_path_like_arg(arg):
+            operands.append(arg)
+        i += 1
+    return operands
+
+
+def _copy_destination(args):
+    for i, arg in enumerate(args):
+        if arg in {"-t", "--target-directory"}:
+            return [args[i + 1]] if i + 1 < len(args) else []
+        if arg.startswith("--target-directory="):
+            return [arg.split("=", 1)[1]]
+    path_args = [arg for arg in args if _is_path_like_arg(arg)]
+    return [path_args[-1]] if path_args else []
+
+
+def _single_value_targets(args, short_opts=(), long_opts=()):
+    targets = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            break
+        if arg in short_opts or arg in long_opts:
+            if i + 1 < len(args):
+                targets.append(args[i + 1])
+            i += 2
+            continue
+        matched = False
+        for opt in short_opts:
+            if len(opt) == 2 and arg.startswith(opt) and arg != opt:
+                targets.append(arg[len(opt):])
+                matched = True
+                break
+        if matched:
+            i += 1
+            continue
+        for opt in long_opts:
+            if arg.startswith(opt + "="):
+                targets.append(arg.split("=", 1)[1])
+                matched = True
+                break
+        if matched:
+            i += 1
+            continue
+        i += 1
+    return targets
+
+
+def _tar_plan(args):
+    modes = set()
+    output = None
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            break
+        if arg == "--create":
+            modes.add("c")
+            i += 1
+            continue
+        if arg in {"--extract", "--get"}:
+            modes.add("x")
+            i += 1
+            continue
+        if arg == "--append":
+            modes.add("r")
+            i += 1
+            continue
+        if arg == "--update":
+            modes.add("u")
+            i += 1
+            continue
+        if arg == "--delete":
+            modes.add("d")
+            i += 1
+            continue
+        if arg == "--file" and i + 1 < len(args):
+            output = args[i + 1]
+            i += 2
+            continue
+        if arg.startswith("--file="):
+            output = arg.split("=", 1)[1]
+            i += 1
+            continue
+        if arg.startswith("-") and not arg.startswith("--"):
+            cluster = arg[1:]
+            j = 0
+            while j < len(cluster):
+                ch = cluster[j]
+                if ch in {"c", "x", "r", "u", "A", "d", "t"}:
+                    modes.add(ch)
+                if ch == "f":
+                    remainder = cluster[j + 1:]
+                    if remainder:
+                        output = remainder
+                    elif i + 1 < len(args):
+                        output = args[i + 1]
+                        i += 1
+                    break
+                j += 1
+            i += 1
+            continue
+        i += 1
+    return modes, output
+
+
+def _chmod_paths(args):
+    paths = []
+    mode_seen = False
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            paths.extend(a for a in args[i + 1:] if _is_path_like_arg(a))
+            break
+        if arg == "--reference" and i + 1 < len(args):
+            i += 2
+            continue
+        if arg.startswith("--reference="):
+            i += 1
+            continue
+        if arg.startswith("-"):
+            i += 1
+            continue
+        if not mode_seen:
+            mode_seen = True
+        elif _is_path_like_arg(arg):
+            paths.append(arg)
+        i += 1
+    return paths
+
+
+def _last_path_like_arg(args):
+    for arg in reversed(args):
+        if _is_path_like_arg(arg) and not arg.startswith("s/"):
+            return arg
+    return None
+
+
+def _inline_writer_code(args):
+    for i, arg in enumerate(args[:-1]):
+        if arg in {"-c", "-e"}:
+            return args[i + 1]
+    return None
+
+
+_INLINE_WRITER_MUTATION_RE = re.compile(
+    r"(writeFileSync|appendFileSync|writeFile\b|appendFile\b|createWriteStream|rmSync|rmdirSync|unlinkSync|"
+    r"fs\.(?:write|append|rm|unlink|rmdir)|\.write_text\s*\(|\.write_bytes\s*\(|"
+    r"open\s*\([^)]*,\s*['\"](?:w|a|x)|os\.(?:remove|unlink|rmdir|truncate)|"
+    r"shutil\.(?:rmtree|move|copy)|\.unlink\s*\(|\.rmtree\s*\()"
+)
+
+
+def _extract_apply_patch_paths(command, cwd, repo_root=None):
+    if not re.search(r"(^|\s)apply_patch($|\s)", command):
+        return [], False
+    paths = []
+    for match in re.finditer(r"(?m)^\*\*\* (?:Update|Add|Delete) File: (.+?)\s*$", command):
+        candidate = _repo_candidate_path(match.group(1), cwd, repo_root)
+        if candidate:
+            paths.append(candidate)
+    return _dedupe_paths(paths), True
+
+
+def _extract_inline_writer_literals(head, args):
+    code = _inline_writer_code(args)
+    if not isinstance(code, str) or not code:
+        return []
+    patterns = []
+    if head in {"python", "python3"}:
+        patterns = [
+            re.compile(r"open\(\s*(['\"])([^'\"]+)\1\s*,\s*(['\"])[^'\"]*[wax][^'\"]*\3"),
+            re.compile(r"Path\(\s*(['\"])([^'\"]+)\1\s*\)\.(?:write_text|write_bytes)\s*\("),
+        ]
+    elif head in {"node", "bun", "deno"}:
+        patterns = [re.compile(r"(?:writeFileSync|appendFileSync|createWriteStream)\(\s*(['\"])([^'\"]+)\1")]
+    elif head == "ruby":
+        patterns = [re.compile(r"(?:File\.(?:write|binwrite)|File\.open)\(\s*(['\"])([^'\"]+)\1")]
+    out = []
+    for pattern in patterns:
+        for match in pattern.finditer(code):
+            out.append(match.group(2))
+    return _dedupe_paths(out)
+
+
+def _next_cwd(current_cwd, args):
+    operands = [arg for arg in args if not arg.startswith("-") or arg == "-"]
+    if not operands:
+        return None
+    target = operands[0]
+    if len(operands) > 1 or target == "-" or re.search(r"[$`*?\[]", target):
+        return None
+    if target == "~" or target.startswith("~/"):
+        return os.path.abspath(os.path.expanduser(target))
+    if os.path.isabs(target):
+        return os.path.abspath(target)
+    if current_cwd is None:
+        return None
+    return os.path.normpath(os.path.join(current_cwd, target))
+
+
+def _read_balanced_paren(command, start):
+    depth = 1
+    i = start
+    body = []
+    single = False
+    dbl = False
+    while i < len(command) and depth > 0:
+        ch = command[i]
+        if single:
+            if ch == "'":
+                single = False
+            body.append(ch)
+            i += 1
+            continue
+        if dbl:
+            if ch == '"':
+                dbl = False
+            body.append(ch)
+            i += 1
+            continue
+        if ch == "\\":
+            body.append(ch)
+            if i + 1 < len(command):
+                body.append(command[i + 1])
+            i += 2
+            continue
+        if ch == "'":
+            single = True
+            body.append(ch)
+            i += 1
+            continue
+        if ch == '"':
+            dbl = True
+            body.append(ch)
+            i += 1
+            continue
+        if ch == "(":
+            depth += 1
+            body.append(ch)
+            i += 1
+            continue
+        if ch == ")":
+            depth -= 1
+            if depth == 0:
+                i += 1
+                break
+            body.append(ch)
+            i += 1
+            continue
+        body.append(ch)
+        i += 1
+    return "".join(body), i
+
+
+def _extract_command_substitutions(command):
+    bodies = []
+    i = 0
+    single = False
+    while i < len(command):
+        ch = command[i]
+        if single:
+            if ch == "'":
+                single = False
+            i += 1
+            continue
+        if ch == "'":
+            single = True
+            i += 1
+            continue
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == "`":
+            j = i + 1
+            body = []
+            while j < len(command) and command[j] != "`":
+                if command[j] == "\\" and j + 1 < len(command):
+                    body.append(command[j + 1])
+                    j += 2
+                else:
+                    body.append(command[j])
+                    j += 1
+            bodies.append("".join(body))
+            i = j + 1
+            continue
+        if ch == "$" and command[i + 1:i + 3] == "((":
+            _, end = _read_balanced_paren(command, i + 2)
+            i = end + 1 if end < len(command) and command[end:end + 1] == ")" else end
+            continue
+        if ch in "$<>" and command[i + 1:i + 2] == "(":
+            body, end = _read_balanced_paren(command, i + 2)
+            bodies.append(body)
+            i = end
+            continue
+        i += 1
+    return bodies
+
+
+_GIT_GLOBAL_VALUE_OPTS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"}
+
+
+def _git_subcommand_parts(args):
+    prefix = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg in _GIT_GLOBAL_VALUE_OPTS:
+            prefix.append(arg)
+            if i + 1 < len(args):
+                prefix.append(args[i + 1])
+                i += 2
+            else:
+                i += 1
+            continue
+        if arg.startswith("-C") and arg != "-C":
+            prefix.append(arg)
+            i += 1
+            continue
+        if arg.startswith("-c") and arg != "-c":
+            prefix.append(arg)
+            i += 1
+            continue
+        if arg.startswith("--git-dir=") or arg.startswith("--work-tree=") or arg.startswith("--namespace=") or arg.startswith("--config-env="):
+            prefix.append(arg)
+            i += 1
+            continue
+        if arg.startswith("-"):
+            prefix.append(arg)
+            i += 1
+            continue
+        return prefix, arg, args[i + 1:]
+    return prefix, None, []
+
+
+def _git_subcommand_and_args(args):
+    _, subcommand, subargs = _git_subcommand_parts(args)
+    return subcommand, subargs
+
+
+def _git_no_verify_hit(args):
+    subcommand, subargs = _git_subcommand_and_args(args)
+    if subcommand == "commit" and ("--no-verify" in subargs or "-n" in subargs):
+        return "commit"
+    if subcommand == "push" and "--no-verify" in subargs:
+        return "push"
+    return None
+
+
+_GIT_POLICY_VALUE_OPTS = {
+    "commit": {
+        "-m", "--message", "-F", "--file", "-C", "--reuse-message", "-c", "--reedit-message",
+        "--author", "--date", "--cleanup", "--fixup", "--squash", "--pathspec-from-file", "--trailer",
+    },
+    "push": {"--repo", "--receive-pack", "--exec"},
+}
+_GIT_CONFIG_VALUE_OPTS = {"-f", "--file", "--blob", "-t", "--type", "--default", "--url"}
+_GIT_CONFIG_MUTATING_FLAGS = {"--add", "--replace-all", "--unset", "--unset-all", "--remove-section", "--rename-section"}
+
+
+def _git_dynamic_policy_flag(args):
+    subcommand, subargs = _git_subcommand_and_args(args)
+    value_opts = _GIT_POLICY_VALUE_OPTS.get(subcommand)
+    if value_opts is None:
+        return None
+    i = 0
+    while i < len(subargs):
+        arg = subargs[i]
+        if arg == "--":
+            break
+        if arg in value_opts and i + 1 < len(subargs):
+            i += 2
+            continue
+        if _has_shell_expansion(arg):
+            return subcommand
+        i += 1
+    return None
+
+
+def _git_hooks_path_override(args):
+    prefix, _, _ = _git_subcommand_parts(args)
+    i = 0
+    while i < len(prefix):
+        arg = prefix[i]
+        if arg == "-c" and i + 1 < len(prefix):
+            if prefix[i + 1].split("=", 1)[0] == "core.hooksPath":
+                return True
+            i += 2
+            continue
+        if arg.startswith("-c") and arg != "-c":
+            if arg[2:].split("=", 1)[0] == "core.hooksPath":
+                return True
+            i += 1
+            continue
+        if arg == "--config-env" and i + 1 < len(prefix):
+            if prefix[i + 1].split("=", 1)[0] == "core.hooksPath":
+                return True
+            i += 2
+            continue
+        if arg.startswith("--config-env="):
+            if arg[len("--config-env="):].split("=", 1)[0] == "core.hooksPath":
+                return True
+        i += 1
+    return False
+
+
+def _git_config_hooks_path_mutation(args):
+    subcommand, subargs = _git_subcommand_and_args(args)
+    if subcommand != "config":
+        return False
+    mutate = False
+    positional = []
+    i = 0
+    while i < len(subargs):
+        arg = subargs[i]
+        if arg == "--":
+            positional.extend(a for a in subargs[i + 1:] if not a.startswith("-"))
+            break
+        if arg in _GIT_CONFIG_MUTATING_FLAGS:
+            mutate = True
+            i += 1
+            continue
+        if arg in _GIT_CONFIG_VALUE_OPTS and i + 1 < len(subargs):
+            i += 2
+            continue
+        if any(arg.startswith(opt + "=") for opt in _GIT_CONFIG_VALUE_OPTS if opt.startswith("--")):
+            i += 1
+            continue
+        if arg.startswith("-"):
+            i += 1
+            continue
+        positional.append(arg)
+        i += 1
+    if not positional or positional[0] != "core.hooksPath":
+        return False
+    return mutate or len(positional) >= 2
+
+
+_GIT_UNBOUNDED_WORKTREE_WRITERS = {
+    "am", "apply", "cherry-pick", "clean", "merge", "rebase", "revert",
+}
+
+
+def _git_worktree_mutation(args):
+    """Return (literal path operands, opaque reason) for Git commands that rewrite the worktree.
+
+    Branch creation/switching remains a Git lifecycle operation. Explicit file-oriented forms are
+    translated into the same shared path request as direct writers; commands whose touched files
+    cannot be known before execution fail closed in controlled posture.
+    """
+    subcommand, subargs = _git_subcommand_and_args(args)
+    if not subcommand:
+        return [], None
+
+    if subcommand in _GIT_UNBOUNDED_WORKTREE_WRITERS:
+        return [], _opaque_mutation_reason(
+            f"`git {subcommand}` can rewrite repository files without a bounded literal path list"
+        )
+    if subcommand == "reset" and any(
+        arg in {"--hard", "--merge", "--keep"} for arg in subargs
+    ):
+        return [], _opaque_mutation_reason(
+            "a worktree-rewriting `git reset` does not expose a bounded literal path list"
+        )
+    if subcommand == "read-tree" and "-u" in subargs:
+        return [], _opaque_mutation_reason(
+            "`git read-tree -u` can rewrite repository files without a bounded literal path list"
+        )
+    if subcommand == "stash":
+        operation = next((arg for arg in subargs if not arg.startswith("-")), "push")
+        if operation not in {"list", "show"}:
+            return [], _opaque_mutation_reason(
+                f"`git stash {operation}` can rewrite repository state without a bounded literal path list"
+            )
+
+    if subcommand not in {"checkout", "restore", "rm", "mv"}:
+        return [], None
+    if any(
+        arg == "--pathspec-from-file" or arg.startswith("--pathspec-from-file=")
+        for arg in subargs
+    ):
+        return [], _opaque_mutation_reason(
+            f"`git {subcommand} --pathspec-from-file` hides its mutation targets in another file"
+        )
+
+    if subcommand == "checkout":
+        if any(arg in {"-b", "-B", "--orphan"} for arg in subargs):
+            return [], None
+        if "--" in subargs:
+            split = subargs.index("--")
+            return [arg for arg in subargs[split + 1:] if _is_path_like_arg(arg)], None
+        operands = _file_operands(subargs, {"--conflict"})
+        if len(operands) > 1:
+            return operands[1:], None
+        if len(operands) == 1 and (
+            "/" in operands[0] or "." in operands[0] or operands[0] in {"TRACKER.md", "CLAUDE.md"}
+        ):
+            return operands, None
+        return [], None
+
+    value_options = {
+        "restore": {"-s", "--source", "--conflict"},
+        "rm": {},
+        "mv": {},
+    }[subcommand]
+    return _file_operands(subargs, value_options), None
+
+
+def _find_exec_is_read_only(args):
+    saw_exec = False
+    for i, arg in enumerate(args):
+        if arg == "-ok":
+            return False
+        if arg not in {"-exec", "-execdir"}:
+            continue
+        saw_exec = True
+        if i + 1 >= len(args) or os.path.basename(args[i + 1]) not in {"grep", "cat"}:
+            return False
+    return saw_exec
+
+
+_HEREDOC_HEADS = INTERPRETERS | {"python", "python3", "node", "bun", "deno", "ruby"}
+_XARGS_MUTATING_HEADS = {
+    "bash", "sh", "zsh", "source", ".", "python", "python3", "node", "bun", "deno", "ruby",
+    "git", "rm", "mv", "cp", "install", "rsync", "split", "truncate", "find", "dd", "tee",
+    "sed", "perl", "chmod", "tar", "curl", "wget", "mkdir", "touch", "ln", "shred",
+}
+
+
+def _has_interpreter_heredoc(tokens):
+    seg = []
+    saw_heredoc = False
+
+    def flush():
+        nonlocal seg, saw_heredoc
+        if saw_heredoc:
+            peeled = _strip_prefixes(seg)
+            if peeled and os.path.basename(peeled[0]) in _HEREDOC_HEADS:
+                return True
+        seg = []
+        saw_heredoc = False
+        return False
+
+    for tok in tokens:
+        if tok in {"<<", "<<-"} or tok.startswith("<<"):
+            saw_heredoc = True
+            continue
+        if tok in _SEP or (tok and all(ch in "&|;()<>\n\r" for ch in tok)):
+            if flush():
+                return True
+            continue
+        seg.append(tok)
+    return flush()
+
+
+def _xargs_mutation_reason(seg):
+    if not seg or os.path.basename(seg[0]) != "xargs":
+        return None
+    i = 1
+    value_opts = _EXEC_WRAPPERS["xargs"]["value_opts"]
+    while i < len(seg):
+        tok = seg[i]
+        if tok == "--":
+            i += 1
+            break
+        if tok in value_opts and i + 1 < len(seg):
+            i += 2
+            continue
+        if tok.startswith("--") and "=" in tok:
+            i += 1
+            continue
+        if tok.startswith("-") and tok != "-":
+            i += 1
+            continue
+        break
+    if i >= len(seg):
+        return None
+    head = os.path.basename(seg[i])
+    if head in _XARGS_MUTATING_HEADS:
+        return _opaque_mutation_reason(f"`xargs {head}` hides its mutation targets in stdin")
+    return None
+
+
+def _startup_env_targets(seg):
+    targets = []
+    i = 0
+    while i < len(seg) and _ASSIGN_RE.match(seg[i]):
+        m = _STARTUP_ENV_RE.match(seg[i])
+        if m and m.group(1) != "":
+            targets.append(m.group(1))
+        i += 1
+    if i < len(seg) and os.path.basename(seg[i]) == "env":
+        i += 1
+        while i < len(seg):
+            tok = seg[i]
+            if tok == "--":
+                break
+            if tok in {"-S", "--split-string"} or tok.startswith("--split-string=") or (tok.startswith("-S") and not tok.startswith("--") and len(tok) > 2):
+                break
+            if tok in _ENV_VALUE_OPTS and i + 1 < len(seg):
+                i += 2
+                continue
+            if tok.startswith("-"):
+                i += 1
+                continue
+            if _ASSIGN_RE.match(tok):
+                m = _STARTUP_ENV_RE.match(tok)
+                if m and m.group(1) != "":
+                    targets.append(m.group(1))
+                i += 1
+                continue
+            break
+    return targets
+
+
+def _analyze_shell_target(target, cwd, repo_root, plugin_root, depth, seen):
+    analysis = _ShellGateAnalysis()
+    lexical = os.path.normpath(target if os.path.isabs(target) else os.path.join(cwd, target))
+    real = os.path.realpath(lexical)
+    display = target
+    if _is_sensitive(os.path.basename(real)) or _is_sensitive(os.path.basename(lexical)):
+        analysis.deny(_opaque_mutation_reason(f"`{display}` is a sensitive shell target the interlock refuses to open"))
+        return analysis
+    if plugin_root:
+        scripts_dir = os.path.normpath(os.path.realpath(os.path.join(plugin_root, "scripts")))
+        if real == scripts_dir or real.startswith(scripts_dir + os.sep):
+            return analysis
+    if real in seen:
+        analysis.deny(_opaque_mutation_reason(f"`{display}` is a cyclic shell include"))
+        return analysis
+    if depth + 1 > MAX_SCRIPT_DEPTH:
+        analysis.deny(_opaque_mutation_reason(f"`{display}` nests past depth {MAX_SCRIPT_DEPTH}"))
+        return analysis
+    if not os.path.isfile(real):
+        analysis.deny(_opaque_mutation_reason(f"`{display}` is not a readable regular file"))
+        return analysis
+    try:
+        if os.path.getsize(real) > MAX_SCRIPT_BYTES:
+            analysis.deny(_opaque_mutation_reason(f"`{display}` is larger than {MAX_SCRIPT_BYTES} bytes"))
+            return analysis
+        with open(real, "r", encoding="utf-8", errors="replace") as fh:
+            body = fh.read(MAX_SCRIPT_BYTES + 1)
+    except OSError:
+        analysis.deny(_opaque_mutation_reason(f"`{display}` is unreadable"))
+        return analysis
+    analysis.merge(_analyze_shell_mutations(body, cwd, repo_root, plugin_root, depth + 1, seen | {real}))
+    return analysis
+
+
+def _su_command_payload(seg):
+    for i, tok in enumerate(seg[1:], 1):
+        if tok in {"-c", "--command"}:
+            return True, seg[i + 1] if i + 1 < len(seg) else None
+        if tok.startswith("--command="):
+            return True, tok.split("=", 1)[1]
+        if tok.startswith("-c") and not tok.startswith("--") and len(tok) > 2:
+            return True, tok[2:]
+    return False, None
+
+
+def _analyze_su_segment(seg, cwd, repo_root, plugin_root, depth, seen):
+    analysis = _ShellGateAnalysis()
+    has_command, payload = _su_command_payload(seg)
+    if has_command:
+        if not payload or _has_shell_expansion(payload):
+            analysis.deny(_opaque_mutation_reason("a dynamic `su -c` payload could mutate repository paths"))
+            return analysis
+        if depth + 1 > MAX_SCRIPT_DEPTH:
+            analysis.deny(_opaque_mutation_reason(f"a `su -c` payload nests past depth {MAX_SCRIPT_DEPTH}"))
+            return analysis
+        analysis.merge(_analyze_shell_mutations(payload, cwd, repo_root, plugin_root, depth + 1, seen))
+        return analysis
+    for i, tok in enumerate(seg[1:], 1):
+        if os.path.basename(tok) in INTERPRETERS or tok in {"source", "."}:
+            return _analyze_indirection_segment(seg[i:], cwd, repo_root, plugin_root, depth, seen)
+    return analysis
+
+
+def _analyze_indirection_segment(seg, cwd, repo_root, plugin_root, depth, seen):
+    analysis = _ShellGateAnalysis()
+    seg = _peel_to_inspect_head(seg)
+    if not seg:
+        return analysis
+    for target in _startup_env_targets(seg):
+        if "$" in target or "`" in target:
+            analysis.deny(_opaque_mutation_reason("a startup-file target is dynamic"))
+            return analysis
+        analysis.merge(_analyze_shell_target(target, cwd, repo_root, plugin_root, depth, seen))
+        if analysis.deny_reason:
+            return analysis
+    payload = _env_split_payload(seg)
+    if payload is not None:
+        if _has_shell_expansion(payload):
+            analysis.deny(_opaque_mutation_reason("a dynamic `env -S` payload could mutate repository paths"))
+            return analysis
+        if depth + 1 > MAX_SCRIPT_DEPTH:
+            analysis.deny(_opaque_mutation_reason(f"an `env -S` payload nests past depth {MAX_SCRIPT_DEPTH}"))
+            return analysis
+        analysis.merge(_analyze_shell_mutations(payload, cwd, repo_root, plugin_root, depth + 1, seen))
+        return analysis
+    seg = _strip_prefixes(seg)
+    if not seg:
+        return analysis
+    if os.path.basename(seg[0]) == "su":
+        return _analyze_su_segment(seg, cwd, repo_root, plugin_root, depth, seen)
+    if seg[0] in {"source", "."} and len(seg) >= 2:
+        analysis.merge(_analyze_shell_target(seg[1], cwd, repo_root, plugin_root, depth, seen))
+        return analysis
+    head = os.path.basename(seg[0])
+    if head in INTERPRETERS:
+        payload, sources, script = _interpreter_plan(seg[1:])
+        if payload is not None:
+            if _has_shell_expansion(payload):
+                analysis.deny(_opaque_mutation_reason(f"a dynamic `{head} -c` payload could mutate repository paths"))
+                return analysis
+            if depth + 1 > MAX_SCRIPT_DEPTH:
+                analysis.deny(_opaque_mutation_reason(f"a `{head} -c` payload nests past depth {MAX_SCRIPT_DEPTH}"))
+                return analysis
+            analysis.merge(_analyze_shell_mutations(payload, cwd, repo_root, plugin_root, depth + 1, seen))
+            if analysis.deny_reason:
+                return analysis
+        for target in [*sources, *([script] if script is not None else [])]:
+            analysis.merge(_analyze_shell_target(target, cwd, repo_root, plugin_root, depth, seen))
+            if analysis.deny_reason:
+                break
+    return analysis
+
+
+def _analyze_direct_segments(tokens, cwd, repo_root):
+    analysis = _ShellGateAnalysis()
+    current_cwd = os.path.abspath(cwd)
+
+    def candidate(raw):
+        if _has_shell_expansion(raw):
+            analysis.deny(_opaque_mutation_reason("a mutation target contains a shell expansion"))
+            return None
+        if current_cwd is None and not (os.path.isabs(raw) or raw == "~" or raw.startswith("~/")):
+            analysis.deny(_opaque_mutation_reason("a preceding `cd` made later relative paths unprovable"))
+            return None
+        return _repo_candidate_path(raw, current_cwd or repo_root, repo_root)
+
+    for seg in _segments(tokens):
+        if analysis.deny_reason:
+            break
+        reason = _xargs_mutation_reason(seg)
+        if reason:
+            analysis.deny(reason)
+            continue
+        for i, tok in enumerate(seg):
+            if tok in {">", ">>", ">|"} and i + 1 < len(seg):
+                hit = candidate(seg[i + 1])
+                if hit:
+                    analysis.add_paths([hit])
+            elif tok.isdigit() and i + 2 < len(seg) and seg[i + 1] in {">", ">>", ">|"}:
+                hit = candidate(seg[i + 2])
+                if hit:
+                    analysis.add_paths([hit])
+        peeled = _strip_prefixes(seg)
+        if not peeled:
+            continue
+        if _has_shell_expansion(peeled[0]):
+            first_syntax_word = next((tok for tok in seg if not _ASSIGN_RE.match(tok)), "")
+            if first_syntax_word == "case":
+                # `case "$value" in` evaluates a selector; the expansion is not a command head.
+                continue
+            analysis.deny(_opaque_mutation_reason("the command name contains a shell expansion"))
+            continue
+        head = os.path.basename(peeled[0])
+        args = peeled[1:]
+        if head == "eval":
+            analysis.deny(_opaque_mutation_reason("`eval` reparses a command whose mutation targets cannot be bounded safely"))
+            continue
+        if head == "cd":
+            current_cwd = _next_cwd(current_cwd, args)
+            continue
+        if head == "git":
+            if _git_hooks_path_override(args) or _git_config_hooks_path_mutation(args):
+                analysis.deny(_hooks_path_reason())
+                continue
+            dynamic_subcommand = _git_dynamic_policy_flag(args)
+            if dynamic_subcommand:
+                analysis.deny(_dynamic_git_flag_reason(dynamic_subcommand))
+                continue
+            subcommand = _git_no_verify_hit(args)
+            if subcommand:
+                analysis.deny(_no_verify_reason(subcommand))
+                continue
+            git_paths, git_reason = _git_worktree_mutation(args)
+            if git_reason:
+                analysis.deny(git_reason)
+                continue
+            for arg in git_paths:
+                hit = candidate(arg)
+                if hit:
+                    analysis.add_paths([hit])
+            continue
+        if head in {"rm", "mkdir", "touch"}:
+            for arg in args:
+                if _is_path_like_arg(arg):
+                    hit = candidate(arg)
+                    if hit:
+                        analysis.add_paths([hit])
+            continue
+        if head == "shred":
+            for arg in _file_operands(args, _SHRED_VALUE_OPTS):
+                hit = candidate(arg)
+                if hit:
+                    analysis.add_paths([hit])
+            continue
+        if head in {"mv", "ln"}:
+            for arg in args:
+                if _is_path_like_arg(arg):
+                    hit = candidate(arg)
+                    if hit:
+                        analysis.add_paths([hit])
+            continue
+        if head in {"cp", "install"}:
+            for arg in _copy_destination(args):
+                hit = candidate(arg)
+                if hit:
+                    analysis.add_paths([hit])
+            continue
+        if head == "rsync":
+            for arg in _copy_destination(args):
+                hit = candidate(arg)
+                if hit:
+                    analysis.add_paths([hit])
+            continue
+        if head == "split":
+            if any(arg == "--filter" or arg.startswith("--filter=") for arg in args):
+                analysis.deny(_opaque_mutation_reason("`split --filter` executes a writer whose output targets cannot be bounded"))
+                continue
+            operands = _file_operands(args, _SPLIT_VALUE_OPTS)
+            output_prefix = operands[-1] if len(operands) >= 2 else "x"
+            hit = candidate(output_prefix)
+            if hit:
+                analysis.add_paths([hit])
+            continue
+        if head == "truncate":
+            for arg in _file_operands(args, _TRUNCATE_VALUE_OPTS):
+                hit = candidate(arg)
+                if hit:
+                    analysis.add_paths([hit])
+            continue
+        if head == "curl":
+            for arg in _single_value_targets(args, {"-o"}, {"--output"}):
+                hit = candidate(arg)
+                if hit:
+                    analysis.add_paths([hit])
+            continue
+        if head == "wget":
+            for arg in _single_value_targets(args, {"-O"}, {"--output-document"}):
+                hit = candidate(arg)
+                if hit:
+                    analysis.add_paths([hit])
+            continue
+        if head == "tar":
+            modes, output = _tar_plan(args)
+            if modes & {"x", "d"}:
+                analysis.deny(_opaque_mutation_reason("`tar` can rewrite repository paths without a bounded literal target set"))
+                continue
+            if output:
+                hit = candidate(output)
+                if hit:
+                    analysis.add_paths([hit])
+            continue
+        if head == "chmod":
+            for arg in _chmod_paths(args):
+                hit = candidate(arg)
+                if hit:
+                    analysis.add_paths([hit])
+            continue
+        if head == "find":
+            if any(arg in {"-exec", "-execdir", "-ok"} for arg in args) and not _find_exec_is_read_only(args):
+                analysis.deny(_opaque_mutation_reason("`find -exec` can mutate repository paths without a statically provable target set"))
+            elif "-delete" in args:
+                analysis.deny(_opaque_mutation_reason("`find -delete` can mutate repository paths without a statically provable target set"))
+            continue
+        if head == "dd":
+            of_arg = next((arg for arg in args if arg.startswith("of=")), None)
+            if of_arg:
+                hit = candidate(of_arg[3:])
+                if hit:
+                    analysis.add_paths([hit])
+            continue
+        if head == "tee":
+            for arg in args:
+                if _is_path_like_arg(arg):
+                    hit = candidate(arg)
+                    if hit:
+                        analysis.add_paths([hit])
+            continue
+        if head == "sed" and any(arg == "-i" or arg.startswith("-i") for arg in args):
+            hit = _last_path_like_arg(args)
+            if hit:
+                scoped = candidate(hit)
+                if scoped:
+                    analysis.add_paths([scoped])
+            else:
+                analysis.deny(_opaque_mutation_reason("`sed -i` does not name a literal repository target"))
+            continue
+        if head == "perl" and any(re.match(r"^-[A-Za-z]*p[A-Za-z]*i|^-[A-Za-z]*i[A-Za-z]*p", arg) for arg in args):
+            hit = _last_path_like_arg(args)
+            if hit:
+                scoped = candidate(hit)
+                if scoped:
+                    analysis.add_paths([scoped])
+            else:
+                analysis.deny(_opaque_mutation_reason("`perl -pi` does not name a literal repository target"))
+            continue
+        if head in {"python", "python3", "node", "bun", "deno", "ruby"}:
+            literals = _extract_inline_writer_literals(head, args)
+            paths = [candidate_path for literal in literals if (candidate_path := candidate(literal))]
+            if paths:
+                analysis.add_paths(paths)
+            else:
+                code = _inline_writer_code(args)
+                if not literals and isinstance(code, str) and _INLINE_WRITER_MUTATION_RE.search(code):
+                    analysis.deny(_opaque_mutation_reason(f"a `{head}` one-liner mutates files without naming a literal repository path"))
+            continue
+    return analysis
+
+
+def _analyze_shell_mutations(command, cwd, repo_root, plugin_root, depth=0, seen=None):
+    analysis = _ShellGateAnalysis()
+    if seen is None:
+        seen = frozenset()
+    if not command or not command.strip():
+        return analysis
+    cleaned = _join_line_continuations(_strip_shell_comments(command))
+    patch_paths, saw_apply_patch = _extract_apply_patch_paths(cleaned, cwd, repo_root)
+    if saw_apply_patch:
+        if patch_paths:
+            analysis.add_paths(patch_paths)
+        else:
+            analysis.deny(_opaque_mutation_reason("the apply_patch payload did not name any repository files"))
+            return analysis
+    try:
+        tokens = _lex(cleaned)
+    except ValueError:
+        analysis.deny(_opaque_mutation_reason("the shell command could not be parsed safely before execution"))
+        return analysis
+    if _has_interpreter_heredoc(tokens):
+        analysis.deny(_opaque_mutation_reason("an interpreter here-document hides its repository mutation body"))
+        return analysis
+    for i, tok in enumerate(tokens):
+        if tok in {">", ">>", ">|"} and i + 1 < len(tokens):
+            if _has_shell_expansion(tokens[i + 1]):
+                analysis.deny(_opaque_mutation_reason("a redirection target contains a shell expansion"))
+                return analysis
+            hit = _repo_candidate_path(tokens[i + 1], cwd, repo_root)
+            if hit:
+                analysis.add_paths([hit])
+        elif tok.isdigit() and i + 2 < len(tokens) and tokens[i + 1] in {">", ">>", ">|"}:
+            if _has_shell_expansion(tokens[i + 2]):
+                analysis.deny(_opaque_mutation_reason("a redirection target contains a shell expansion"))
+                return analysis
+            hit = _repo_candidate_path(tokens[i + 2], cwd, repo_root)
+            if hit:
+                analysis.add_paths([hit])
+    analysis.merge(_analyze_direct_segments(tokens, cwd, repo_root))
+    if analysis.deny_reason:
+        return analysis
+    bodies = _extract_command_substitutions(cleaned)
+    if depth + 1 > MAX_SCRIPT_DEPTH and bodies:
+        analysis.deny(_opaque_mutation_reason(f"a shell substitution nests past depth {MAX_SCRIPT_DEPTH}"))
+        return analysis
+    for body in bodies:
+        analysis.merge(_analyze_shell_mutations(body, cwd, repo_root, plugin_root, depth + 1, seen))
+        if analysis.deny_reason:
+            return analysis
+    for target in _stdin_script_targets(tokens):
+        analysis.merge(_analyze_shell_target(target, cwd, repo_root, plugin_root, depth, seen))
+        if analysis.deny_reason:
+            return analysis
+    for seg in _segments(tokens):
+        analysis.merge(_analyze_indirection_segment(seg, cwd, repo_root, plugin_root, depth, seen))
+        if analysis.deny_reason:
+            return analysis
+    return analysis
+
+
+def _shell_path_gate_request(command, cwd, plugin_root):
+    repo_root = os.path.abspath(cwd)
+    analysis = _analyze_shell_mutations(command, repo_root, repo_root, plugin_root)
+    if analysis.deny_reason:
+        return {"action": "bash", "raw_reason": analysis.deny_reason}
+    return {"action": "write", "paths": analysis.paths} if analysis.paths else None
+
+
+def _apply_path_gate_decision(decision, fallback_reason):
+    observe = decision.get("observe")
+    if isinstance(observe, str) and observe:
+        H.pre_tool_observe(observe)
+    if decision.get("allowed"):
+        H.pre_tool_allow()
+    H.pre_tool_deny(str(decision.get("reason") or fallback_reason))
+
+
 def _gate(payload, plugin_root):
     cwd = payload.get("cwd") or os.getcwd()
     if not H.is_governed_repo(cwd):
         H.pre_tool_allow()
-    if payload.get("tool_name") != "Bash":
-        H.pre_tool_allow()
-    command = (payload.get("tool_input") or {}).get("command")
-    if not isinstance(command, str) or not command.strip():
-        H.pre_tool_allow()
 
-    # Classification is posture-independent (classify() ignores its `active` flag by contract), so
-    # run it first and read the session ledger only once a finding exists — the overwhelmingly
-    # common clean Bash call never pays the ledger read.
-    finding = classify(command, cwd, plugin_root, False)
-    if not finding:
-        H.pre_tool_allow()
-    # POSTURE: hard deny while the session owns an ACTIVE /idc:* command; warn otherwise. The deny
-    # honors IDC_HOOKS_OBSERVE_ONLY=1 (the ONE debug escape) inside pre_tool_deny().
-    active = bool(L.active_commands(cwd, session_id=payload.get("session_id")))
-    reason = render_reason(finding, plugin_root)
-    if active:
-        H.pre_tool_deny(reason)
-    H.pre_tool_warn(reason)       # non-active governed work: warn-inject, never blocks
+    tool = payload.get("tool_name")
+    tool_input = payload.get("tool_input") or {}
+
+    if tool == "Bash":
+        command = tool_input.get("command")
+        if not isinstance(command, str) or not command.strip():
+            H.pre_tool_allow()
+        # Classification is posture-independent (classify() ignores its `active` flag by contract), so
+        # the adapter translates the Bash payload into one raw-mutation request and the shared Path Gate
+        # decides the deny.
+        finding = classify(command, cwd, plugin_root, False)
+        if finding:
+            decision = PG.evaluate_request(cwd, plugin_root, {"action": "bash", "raw_reason": render_reason(finding, plugin_root)})
+            _apply_path_gate_decision(decision, "IDC interlock denied the raw governed mutation")
+        request = _shell_path_gate_request(command, cwd, plugin_root)
+        if request is None:
+            H.pre_tool_allow()
+        decision = PG.evaluate_request(cwd, plugin_root, request)
+        _apply_path_gate_decision(decision, "IDC Path Gate denied the repository mutation")
+
+    if tool in {"Write", "Edit", "NotebookEdit"}:
+        if tool == "NotebookEdit":
+            path_value = tool_input.get("notebook_path")
+        else:
+            path_value = tool_input.get("file_path") or tool_input.get("path")
+        if not isinstance(path_value, str) or not path_value.strip():
+            H.pre_tool_allow()
+        action = "write" if tool == "Write" else "edit"
+        decision = PG.evaluate_request(cwd, plugin_root, {"action": action, "paths": [path_value]})
+        _apply_path_gate_decision(decision, "IDC Path Gate denied the repository mutation")
+
+    H.pre_tool_allow()
 
 
 if __name__ == "__main__":

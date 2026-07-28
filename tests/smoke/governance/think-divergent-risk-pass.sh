@@ -1,4 +1,5 @@
 #!/bin/bash
+# idc-assert-class: doc
 # think-divergent-risk-pass.sh — prose invariants for Think's OPT-IN divergent risk pass (Part 3a)
 # and the recorded model-authored-orchestration boundary in docs/architecture.md (Part 3b).
 #
@@ -11,7 +12,8 @@
 #
 # Proves commands/think.md states:
 #   (A) the pass is OPT-IN — never run by default, only when the operator asks, no trigger predicate;
-#   (B) all four distinct lenses (user-confusion, broken-expectation, churn, promised-but-missing);
+#   (B) all four lens names stay on the menu a branch draws its distinct lens from (user-confusion,
+#       broken-expectation, churn, promised-but-missing), and the 3–5 branch bound on the fan-out;
 #   (C) the fixed four-field candidate shape, cross-checked BYTE-IDENTICAL against the Plan-stage
 #       falsifier's CANDIDATE_KEYS so the two surfaces cannot drift apart in either direction;
 #   (D) the branch DIGESTS feed the PRD draft BEFORE the human gate;
@@ -36,16 +38,30 @@ fail() { echo "FAIL: $1"; exit 1; }
 # would be brittle: extract the divergent-pass step, flatten whitespace, and strip emphasis markers
 # first. Scoping to the STEP (not the whole file) is what keeps each assertion honest — a phrase that
 # happens to appear elsewhere in think.md cannot satisfy it.
+#
+# The '## How to run it' SECTION is carved out FIRST and the step is anchored as a numbered list item
+# INSIDE it. A file-wide search would let the whole step be lifted out of the numbered playbook and
+# pasted anywhere in think.md — as loose prose above the heading, or under Boundaries — byte-identical
+# and still green, while the operator-facing procedure silently lost the step. Placement IS the
+# invariant here: an instruction that is not in the list Think executes is not an instruction.
 SECTION="$WORK/think-divergent-step.txt"
 python3 - "$THINK" > "$SECTION" <<'PY' || fail "commands/think.md no longer contains an opt-in 'Divergent risk pass' step in its How-to-run-it list"
 import re, sys
 text = open(sys.argv[1], encoding="utf-8").read()
-m = re.search(r'Divergent risk pass(.*?)Crystallize', text, re.S)
+sec = re.search(r'^## How to run it\s*$(.*?)(?=^## |\Z)', text, re.M | re.S)
+if not sec:
+    sys.exit("could not locate the '## How to run it' section of commands/think.md")
+m = re.search(r'^\s*\d+\.\s+\*\*Divergent risk pass(.*?)Crystallize', sec.group(1), re.M | re.S)
 if not m:
-    sys.exit("could not locate the divergent risk pass step (anchored between 'Divergent risk pass' and 'Crystallize')")
-print(re.sub(r'\s+', ' ', m.group(1)).replace('*', ''))
+    sys.exit("could not locate a NUMBERED 'Divergent risk pass' step inside '## How to run it' "
+             "(anchored between the numbered step heading and 'Crystallize') — a step that lives "
+             "outside the how-to-run-it list is not part of the procedure Think executes")
+body = re.sub(r'\s+', ' ', m.group(1)).replace('*', '').strip()
+if not body:
+    sys.exit("the 'Divergent risk pass' step in commands/think.md's '## How to run it' list is empty "
+             "— the anchors matched back-to-back, so every invariant below would be vacuously checked")
+print(body)
 PY
-[ -s "$SECTION" ] || fail "the divergent risk pass step in commands/think.md is empty"
 insection() { grep -qiE "$1" "$SECTION"; }
 
 # --- (A) opt-in trigger: never by default, only on operator request, no trigger predicate ----------
@@ -59,11 +75,16 @@ insection 'fires only when the operator asks' \
 insection 'no trigger predicate' \
   || fail "think.md's divergent risk pass must state it has NO trigger predicate (the deliberate difference from Plan's deterministically-gated falsifier)"
 
-# --- (B) the four distinct lenses ------------------------------------------------------------------
+# --- (B) the four distinct lenses, and the bound on how many branches carry them -------------------
 for lens in user-confusion broken-expectation churn promised-but-missing; do
   insection "(^|[^a-z-])$lens([^a-z-]|$)" \
-    || fail "think.md's divergent risk pass must name the '$lens' lens — all four lenses are required, or the fan-out stops being perspective-diverse"
+    || fail "think.md's divergent risk pass must name the '$lens' lens — all four lenses must stay on the menu, or the fan-out stops being perspective-diverse"
 done
+# The shipped text writes the range with a U+2013 EN DASH, not an ASCII hyphen, so the dash is matched
+# as an explicit two-character alternation. A literal '-' here would never match and the assertion
+# would ship inert — green no matter what the branch count became.
+insection '3(–|-)5 bounded branches' \
+  || fail "think.md's divergent risk pass must bound the fan-out at 3–5 BOUNDED BRANCHES (the one numeric limit in the step; an unbounded 'as many branches as the topic needs' fan-out breaks Think's conversational budget)"
 
 # --- (C) the fixed four-field candidate shape, byte-identical to Plan's CANDIDATE_KEYS -------------
 KEYS="$(python3 - "$RISK" <<'PY'
@@ -101,12 +122,18 @@ DOCTRINE="$WORK/arch-write-authority.txt"
 python3 - "$ARCH" > "$DOCTRINE" <<'PY' || fail "docs/architecture.md no longer has a '## Write-authority boundaries' section to carry the model-authored-orchestration boundary"
 import re, sys
 text = open(sys.argv[1], encoding="utf-8").read()
-m = re.search(r'^## Write-authority boundaries\s*$(.*?)(?=^## )', text, re.M | re.S)
+# `\Z` in the lookahead so the section is still found when it is the LAST one in the file. With a
+# bare `(?=^## )` this fail-closes on a correct document with the wrong reason ("could not locate
+# the section"), which sends the next reader hunting for a deletion that never happened.
+m = re.search(r'^## Write-authority boundaries\s*$(.*?)(?=^## |\Z)', text, re.M | re.S)
 if not m:
     sys.exit("could not locate the '## Write-authority boundaries' section")
-print(re.sub(r'\s+', ' ', m.group(1)).replace('*', ''))
+body = re.sub(r'\s+', ' ', m.group(1)).replace('*', '').strip()
+if not body:
+    sys.exit("the '## Write-authority boundaries' section of docs/architecture.md is empty — the "
+             "heading survived but its body did not, so every invariant below would be vacuously checked")
+print(body)
 PY
-[ -s "$DOCTRINE" ] || fail "the '## Write-authority boundaries' section of docs/architecture.md is empty"
 indoctrine() { grep -qiE "$1" "$DOCTRINE"; }
 indoctrine 'model-authored orchestration is welcome for read-only fan-outs' \
   || fail "docs/architecture.md's Write-authority boundaries section must record that model-authored orchestration IS welcome for read-only fan-outs (the permitted half of the boundary)"
@@ -115,4 +142,4 @@ indoctrine 'admission, scheduling, tracker mutation, and completion always go th
 indoctrine 'never through a script the model generated' \
   || fail "docs/architecture.md's Write-authority boundaries section must record that authority never runs through a model-generated script (the explicit refusal, so future sessions do not relitigate it)"
 
-echo "PASS: Think's divergent risk pass is opt-in, four-lensed, schema-parity with Plan's falsifier, digest-fed before the human gate, read-only with zero durable workers; and the model-authored-orchestration boundary is recorded under Write-authority boundaries"
+echo "PASS: Think's divergent risk pass is a numbered step of '## How to run it' — opt-in, four-lensed, bounded at 3–5 branches, schema-parity with Plan's falsifier, digest-fed before the human gate, read-only with zero durable workers; and the model-authored-orchestration boundary is recorded under Write-authority boundaries"

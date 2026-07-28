@@ -71,9 +71,9 @@ is read-only and digest-absorbing — Plan's clash checks, domain-expert lookups
 divergent risk pass. What those branches produce is discovery, and discovery is never authority.
 **Admission, scheduling, tracker mutation, and completion always go through fixed validators** — the
 single transition write door, the execution graph compiled from authoritative inputs, the frozen
-validation contract, the closeout oracle — and never through a script the model generated for the
-occasion. This boundary is settled rather than open: an arbitrary generated tracker script is
-refused however convincing the plan behind it looks.
+validation contract, the next-action oracle and its closeout validator — and never through a script
+the model generated for the occasion. This boundary is settled rather than open: an arbitrary
+generated tracker script is refused however convincing the plan behind it looks.
 
 ## The one gate (Diverter #1 → the Think PR)
 

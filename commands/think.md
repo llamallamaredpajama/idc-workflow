@@ -53,9 +53,9 @@ stay exactly where the manifest left them (their durable disposition is not your
 3. **Divergent risk pass — opt-in, and only when the operator asks.** This pass is **never run
    by default and has no trigger predicate**: it fires only when the operator asks you to
    stress-test the idea (or names the risk pass) during the interview. When asked, fan out
-   **3–5 bounded branches**, each carrying one **distinct lens** — **user-confusion**,
-   **broken-expectation**, **churn**, **promised-but-missing** — plus at most one lens the
-   operator names. Every branch is **read-only** (it reads the repo, the docs, the web; it
+   **3–5 bounded branches**, each carrying a **distinct lens** drawn from **user-confusion**,
+   **broken-expectation**, **churn**, **promised-but-missing** (plus at most one lens the
+   operator names). Every branch is **read-only** (it reads the repo, the docs, the web; it
    writes no file, no tracker state, and no board field) and is a throwaway fan-out exactly
    like step 2's research — **zero durable workers**, no exceptions. Each branch returns its
    candidates in the fixed four-field shape

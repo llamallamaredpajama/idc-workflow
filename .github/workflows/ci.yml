@@ -10,7 +10,10 @@ jobs:
     name: lint + manifests + templates + scripts
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # SHA-pinned (supply-chain): a tag like `@v4` is mutable and can be re-pointed at
+      # arbitrary code by the action's owner or a compromised account. Full commit SHAs are
+      # immutable. Enforced by lint-references.sh Rule Q.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Setup Bun
         # The pi runtime smoke phases (phase8-pi-*) boot the vendored coms-net hub and
@@ -19,7 +22,7 @@ jobs:
         # ships is actually exercised here, not silently skipped. (The real `pi` agent
         # binary is NOT needed — the phases use --dry-run, the hub itself, and a fake-pi
         # resident seam; verified bun-present/pi-absent runs all phase8-pi-* green.)
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
 
       - name: Declare Python deps
         # PyYAML is preinstalled on today's runner image, but declare it so the

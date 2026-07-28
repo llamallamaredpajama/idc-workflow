@@ -287,6 +287,34 @@ PY
   esac
 fi
 
+# Rule Q — every GitHub Actions `uses:` under .github/workflows/ must be pinned to a FULL 40-hex
+# commit SHA. A tag or branch ref (`@v4`, `@main`) is MUTABLE: the action's owner — or anyone who
+# compromises that account — can re-point it at arbitrary code, which then runs with this workflow's
+# token and secrets. That matters more here than in an ordinary repo, because
+# .github/workflows/idc-pathway-integrity.yml emits the REQUIRED `idc/pathway-integrity` check that
+# gates every governed merge: a swapped action can fail the checkout (blocking all merges) or fake a
+# pass. Verification of a pin value was previously live-CI-only; this rule makes it hermetic.
+# A trailing `# <tag>` comment is the human-readable record of WHICH release the SHA is, and is not
+# checked — the SHA is what runs. Local composite actions (`uses: ./…`) are exempt: they resolve to
+# code inside this repo, already covered by CODEOWNERS and the pathway checker's protected surfaces.
+# Anything else (including a `docker://` ref) must be a 40-hex SHA or it fails here by design.
+# Deliberately NOT lint-allow-exemptible: a supply-chain pin with a per-line bypass is not a pin.
+if [ -d .github/workflows ]; then
+  while IFS= read -r hit; do
+    [ -z "$hit" ] && continue
+    qfile="${hit%%:*}"; qrest="${hit#*:}"; qline="${qrest%%:*}"; qtext="${qrest#*:}"
+    # Strip the leading list dash / `uses:` key, then take the ref token (a trailing `# v4`
+    # comment is whitespace-separated, so the first field IS the ref).
+    qref=$(printf '%s\n' "$qtext" | sed -E 's/^[[:space:]]*(-[[:space:]]*)?uses:[[:space:]]*//' | awk '{print $1}')
+    case "$qref" in
+      ./*) continue ;;   # local composite action — in-repo code, no upstream SHA to pin
+    esac
+    if ! printf '%s\n' "$qref" | grep -qE '@[0-9a-f]{40}$'; then
+      report "$qfile:$qline: [unpinned-action] \`uses: $qref\` is not pinned to a full 40-hex commit SHA — a moving tag/branch ref lets the action owner (or a compromised account) change what runs in this workflow. Resolve it with \`gh api repos/<owner>/<repo>/git/ref/tags/<tag> --jq .object.sha\` and keep a trailing \`# <tag>\` comment for readability"
+    fi
+  done < <(grep -rnE '^[[:space:]]*(-[[:space:]]*)?uses:[[:space:]]*[^[:space:]]' .github/workflows 2>/dev/null || true)
+fi
+
 # Rule A — dangling namespaced references (ignores lint-allow by design).
 ALL_REFS=$(grep -hoE 'idc:[a-z0-9][a-z0-9-]*' $MD_FILES 2>/dev/null | sort -u)
 for ref in $ALL_REFS; do

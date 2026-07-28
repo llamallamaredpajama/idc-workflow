@@ -37,6 +37,7 @@ REPO_RED="$WORK/repo-red"
 setup_repo "$REPO_RED" 'old behavior'
 CONTRACT_RED="$REPO_RED/docs/workflow/build-validation/red.json"
 python3 "$VC" freeze \
+  --surface cli \
   --repo "$REPO_RED" \
   --issue 1 \
   --pr 101 \
@@ -69,6 +70,7 @@ REPO_GREEN="$WORK/repo-green"
 setup_repo "$REPO_GREEN" 'new behavior'
 CONTRACT_GREEN="$REPO_GREEN/docs/workflow/build-validation/green.json"
 python3 "$VC" freeze \
+  --surface cli \
   --repo "$REPO_GREEN" \
   --issue 1 \
   --pr 101 \
@@ -99,6 +101,7 @@ REPO_BAD="$WORK/repo-bad"
 setup_repo "$REPO_BAD" 'new behavior'
 CONTRACT_BAD="$REPO_BAD/docs/workflow/build-validation/unexpected-green.json"
 out="$(python3 "$VC" freeze \
+  --surface cli \
   --repo "$REPO_BAD" \
   --issue 1 \
   --pr 101 \

@@ -185,6 +185,7 @@ CONTRACT_PATH="$REPO/docs/workflow/build-validation/phase9-build.json"
 EXECUTION_PATH="$REPO/docs/workflow/build-validation-executions/phase9-build.json"
 BUILD_RECEIPT="$REPO/docs/workflow/build-receipts/phase9-build.json"
 python3 "$VAL" freeze \
+  --surface cli \
   --repo "$WT" \
   --issue 1 \
   --pr 1 \

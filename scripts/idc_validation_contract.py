@@ -45,28 +45,72 @@ except ImportError:                                      # a lone relocated copy
             lambda text: text and "[child output withheld — the credential table is not importable]")
 
 import idc_matrix_check  # noqa: E402
+import idc_schema_check  # noqa: E402
 
 SCHEMA_VERSION = 1
 CONTRACT_KIND = "build-validation-contract"
 EXECUTION_KIND = "verification-execution"
 WITNESS_FILE = "idc-build-validation-witnesses.json"
-SURFACE_EVIDENCE_TABLE = {
-    "cli": "pane-capture",
-    "api": "response-body",
-    "gui": "screenshot-or-recording",
-    "library": "public-import-sample",
-    "agent": "agent-run-capture",
-    "ci": "check-run",
-    "none": "none",
-}
+
+# THE SINGLE SURFACE→EVIDENCE TABLE. It lives in `idc_schema_check` (the module that owns every fixed
+# schema surface) and is IMPORTED here rather than restated. There were two independent literal copies
+# — one here, one there — with nothing asserting they agreed, and the registry resolver
+# (`idc_verification_handles.resolve_handle`) types handles from the schema-check copy while this
+# module froze contracts from its own. A one-sided edit therefore produced a registry-LEGAL handle that
+# freezes an ILLEGAL contract, and no test in the repo could see it. One name, one dict, no lock-step
+# assertion to forget: an equality test only detects drift, deleting the duplicate makes drift
+# impossible. The import is HARD (not tolerant) exactly like `idc_matrix_check` above — a relocated
+# lone copy of this module has never been able to run without its siblings.
+SURFACE_EVIDENCE_TABLE = idc_schema_check.SURFACE_EVIDENCE_TABLE
+
+# Positive producibility patterns: a command set must contain at least one command that can plausibly
+# emit the declared evidence kind. `pane-capture` deliberately has NO entry here — see
+# `_static_check_problem`: "any command at all produces a pane capture" is true and therefore useless,
+# so the CLI slot is guarded by the all-static rule instead of a pattern that matches everything.
 EVIDENCE_PATTERNS = {
-    "pane-capture": [re.compile(r".")],
     "response-body": [re.compile(r"\b(curl|httpie|wget|fetch)\b", re.I)],
     "screenshot-or-recording": [re.compile(r"\b(playwright|cypress|selenium|puppeteer|screenshot|record)\b", re.I)],
     "public-import-sample": [re.compile(r"\b(import\b|require\(|python\s+-c\b|node\s+-e\b|ruby\s+-e\b)", re.I)],
     "agent-run-capture": [re.compile(r"\b(claude|codex|pi|agent)\b", re.I)],
     "check-run": [re.compile(r"\b(gh\s+run|gh\s+workflow|check-run|ci)\b", re.I)],
 }
+
+# ── the all-static verification surface, as a MACHINE rule ────────────────────────────────────────
+# `skills/idc-review-engine/SKILL.md` already states this as prose a reviewer must judge: "a surface
+# whose commands are ALL static checks (file-exists, parse, lint/typecheck, `terraform validate`/`fmt`,
+# arch-fence `pytest -k arch`, import probes) with NO command exercising the GOAL's observable
+# end-state lets an INERT deliverable pass as Done." Recommendation 1's whole point is that this
+# prose rule generalizes into a machine rule, and this is that rule.
+#
+# A command is decomposed into SEGMENTS on `&&`, `||`, `;` and `|`, and each segment is classed:
+#   STATIC  — a recognized static check (below);
+#   INERT   — a no-op that exercises nothing (`true`, `false`, `:`, `exit N`, `echo …`, `cd …`);
+#   OTHER   — anything else, i.e. something that MIGHT drive the surface.
+# The set is refused only when at least one segment is STATIC and every segment is STATIC-or-INERT.
+# Both halves matter: without the "at least one STATIC" clause a placeholder `true` gate would be
+# refused by a rule that is not about placeholders (a different failure, owned by the baseline
+# classifier), and without the "every segment" clause `test -f x && bash drive-it.sh` — a static
+# precondition guarding a real drive — would be refused for having a static part.
+STATIC_CHECK_PATTERNS = [
+    re.compile(r"^\[\s+-[a-z]\s"),                                        # [ -f path ]
+    re.compile(r"^test\s+-[a-z]\b"),                                      # test -f / -d / -e …
+    re.compile(r"^(e|f|z|r|)grep\b"),                                     # grep family
+    re.compile(r"^(ruff|flake8|pylint|mypy|pyright|tsc|eslint|shellcheck|golangci-lint|clippy)\b", re.I),
+    re.compile(r"\b(lint|typecheck|type-check|format-check|fmt-check)\b", re.I),
+    re.compile(r"^terraform\s+(validate|fmt)\b", re.I),
+    re.compile(r"\bpy_compile\b"),
+    re.compile(r"^python[0-9.]*\s+-c\s+['\"]?\s*import\b", re.I),         # bare import probe
+    re.compile(r"^node\s+-e\s+['\"]?\s*require\([^)]*\)\s*['\"]?$", re.I),  # bare require probe
+    re.compile(r"^pytest\b.*\s-k\s+['\"]?arch", re.I),                    # arch-fence pytest
+]
+INERT_SEGMENT_PATTERNS = [
+    re.compile(r"^(true|false|:)$"),
+    re.compile(r"^exit\s+\d+$"),
+    re.compile(r"^echo\b"),
+    re.compile(r"^cd\s"),
+    re.compile(r"^set\s+-"),
+]
+_SEGMENT_SPLIT = re.compile(r"&&|\|\||[;|]")
 
 
 class ValidationError(Exception):
@@ -663,7 +707,15 @@ def _verification_results(repo: str, commands):
         results.append({
             "command": command,
             "exit_code": int(proc.returncode),
-            "stdout_excerpt": _clip(proc.stdout),
+            # BOTH streams are scrubbed AT THE READ. `CS.scrub`'s docstring reserves itself for
+            # `stderr` because in this repo a child's stdout is usually DATA that its reader PARSES
+            # (parsing redaction markers would be a bug). A gate command's stdout is the exception
+            # that proves the rule: nothing parses it — it is stored verbatim as bounded EVIDENCE in
+            # the frozen contract's `baseline.results` and in the execution receipt's
+            # `declared_evidence.records`, and BOTH are COMMITTED repo files on the ticket's branch.
+            # Bounded-but-raw was half a promise: spec §3.5 requires "bounded REDACTED evidence", and
+            # a gate that prints a token to stdout wrote it verbatim into git history.
+            "stdout_excerpt": _clip(CS.scrub(proc.stdout) or ""),
             "stderr_excerpt": _clip(CS.scrub(proc.stderr) or ""),
         })
     return results
@@ -690,9 +742,57 @@ def _matching_handle_commands(repo: str, handle_registry: str | None, handle_id:
 
 
 
+def _segments(command: str):
+    return [seg.strip() for seg in _SEGMENT_SPLIT.split(command) if seg.strip()]
+
+
+def _classify_segment(segment: str) -> str:
+    for pattern in STATIC_CHECK_PATTERNS:
+        if pattern.search(segment):
+            return "static"
+    for pattern in INERT_SEGMENT_PATTERNS:
+        if pattern.search(segment):
+            return "inert"
+    return "other"
+
+
+def _static_check_problem(commands) -> str | None:
+    """The all-static verification-surface refusal, or None. See STATIC_CHECK_PATTERNS."""
+    classes = [_classify_segment(seg) for cmd in commands for seg in _segments(cmd)]
+    if not classes:
+        return None
+    if "other" in classes or "static" not in classes:
+        return None
+    return ("all-static verification surface refused: every declared command is a static check "
+            "(file-exists / grep / lint / typecheck / parse or import probe / terraform validate|fmt / "
+            "arch-fence pytest) with no command exercising the goal's observable end-state, so an inert "
+            "deliverable would pass this gate — declare a command that runs, applies, queries or drives "
+            "the surface, or declare surface:none with a one-line skip_reason")
+
+
+def _evidence_problem(evidence_kind: str, surface: str, commands) -> str | None:
+    if evidence_kind == "pane-capture":
+        # A CLI pane capture is produced by literally any command that runs, so a positive pattern
+        # here can only ever be `.` — a check that refuses nothing. The rule the CLI slot actually
+        # owns is the all-static one.
+        return _static_check_problem(commands)
+    patterns = EVIDENCE_PATTERNS[evidence_kind]
+    if not any(any(p.search(cmd) for p in patterns) for cmd in commands):
+        return f"declared commands cannot produce evidence_kind {evidence_kind!r} for surface {surface!r}"
+    return None
+
+
 def _validation_surface(surface: str | None, evidence_kind: str | None, skip_reason: str | None, commands):
     commands = [str(cmd).strip() for cmd in (commands or []) if str(cmd).strip()]
-    surface = str(surface or ("cli" if commands else "none")).strip()
+    # AN UNDECLARED SURFACE IS NOT A DECLARATION. This used to default to `cli` whenever any command
+    # was present, which made the whole surface-typing scheme opt-in: omitting `--surface` was easier
+    # and free, and silently stored a gui/api ticket as cli/pane-capture. The declaration is the point
+    # of the contract, so it is required.
+    surface = str(surface or "").strip()
+    if not surface:
+        raise ValidationError(
+            "a validation contract must declare its surface explicitly "
+            f"(--surface {'|'.join(sorted(SURFACE_EVIDENCE_TABLE))}); an undeclared surface is not a declaration")
     if surface not in SURFACE_EVIDENCE_TABLE:
         raise ValidationError(f"surface must be one of {sorted(SURFACE_EVIDENCE_TABLE)}, got {surface!r}")
     expected = SURFACE_EVIDENCE_TABLE[surface]
@@ -711,10 +811,9 @@ def _validation_surface(surface: str | None, evidence_kind: str | None, skip_rea
         raise ValidationError("skip_reason is legal only when surface:none")
     if not commands:
         raise ValidationError("at least one --verify command is required unless surface:none")
-    patterns = EVIDENCE_PATTERNS[expected]
-    if not any(any(p.search(cmd) for p in patterns) for cmd in commands):
-        raise ValidationError(
-            f"declared commands cannot produce evidence_kind {expected!r} for surface {surface!r}")
+    problem = _evidence_problem(expected, surface, commands)
+    if problem:
+        raise ValidationError(problem)
     return surface, expected, None, commands
 
 
@@ -991,6 +1090,39 @@ def load_execution(path: str, require_witness: bool = True):
     return doc
 
 
+def check_surface(*, contract_path: str, execution_path: str | None = None,
+                  require_witness: bool = True):
+    """Re-run the fixed surface/evidence rules read-only, for the review stage (see `check-surface`).
+
+    Raises ValidationError on any refusal — the caller turns that into exit 2 — so the reviewer
+    inherits the machine's answer rather than judging the prose rule by eye."""
+    contract = load_contract(contract_path, require_witness=require_witness)
+    report = {
+        "ok": True,
+        "contract": os.path.abspath(contract_path),
+        "surface": contract.get("surface"),
+        "evidence_kind": contract.get("evidence_kind"),
+        "skip_reason": contract.get("skip_reason"),
+        "handle_id": contract.get("handle_id"),
+        "commands": [row.get("command") for row in contract.get("verification") or []
+                     if isinstance(row, dict)],
+    }
+    if execution_path:
+        execution = load_execution(execution_path, require_witness=require_witness)
+        if (execution.get("surface") != contract.get("surface")
+                or execution.get("evidence_kind") != contract.get("evidence_kind")):
+            raise ValidationError(
+                "contract-drift refused: the execution receipt's declared surface/evidence kind no "
+                "longer match the frozen validation contract")
+        if execution.get("skip_reason") != contract.get("skip_reason"):
+            raise ValidationError(
+                "contract-drift refused: the execution receipt's skip_reason no longer matches the "
+                "frozen validation contract")
+        report["execution"] = os.path.abspath(execution_path)
+        report["result"] = execution.get("result")
+    return report
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Freeze and execute build validation contracts.")
     sp = ap.add_subparsers(dest="command", required=True)
@@ -1006,7 +1138,16 @@ def main(argv=None):
     fp.add_argument("--touch", action="append", required=True)
     fp.add_argument("--off-limits", action="append", required=True)
     fp.add_argument("--verify", action="append")
-    fp.add_argument("--surface")
+    # `--surface` is REQUIRED, but the requirement is NOT declared here. `_validation_surface` is the
+    # single enforcement point (it also runs on every re-read of a frozen contract, where no CLI is
+    # involved), and an argparse `required=True`/`choices=` in front of it is a second copy of the same
+    # rule — one that no test can be red for, because removing it just lets the library refuse the same
+    # input one step later. The help text documents the requirement; the library enforces it.
+    fp.add_argument("--surface",
+                    help="REQUIRED — where a user/system meets the change: "
+                         + "|".join(sorted(SURFACE_EVIDENCE_TABLE))
+                         + " (an undeclared surface is not a declaration; docs-only tickets declare "
+                           "`none` with a one-line --skip-reason)")
     fp.add_argument("--evidence-kind")
     fp.add_argument("--skip-reason")
     fp.add_argument("--handle-registry")
@@ -1027,6 +1168,22 @@ def main(argv=None):
     # the implementer's retry loop read this, so the operator's `pathway_enforcement.attempt_ceiling`
     # (spec §2.1) governs the risk gate, the frozen contract, AND the loop from one value — not a
     # hard-coded 3 that silently disagrees with the config.
+    # THE REVIEWER'S DETERMINISTIC PRE-CHECK (see skills/idc-review-engine/SKILL.md). The surface /
+    # evidence rules are enforced in fixed code at FREEZE and again at FINISH (idc_build_receipt.py),
+    # which left review — the stage between them — with nothing but prose to judge by. This subcommand
+    # exposes the SAME fixed rule, read-only, so a reviewer INHERITS the refusal instead of forming an
+    # opinion about it. It adds no new rule: everything it reports would refuse the merge anyway; it
+    # just reports it while the fix is still cheap.
+    kp = sp.add_parser("check-surface",
+                       help="read-only: re-run the fixed surface/evidence rules over a frozen "
+                            "contract (and optionally its execution receipt) — the reviewer's "
+                            "deterministic pre-check")
+    kp.add_argument("--contract", required=True)
+    kp.add_argument("--execution")
+    kp.add_argument("--no-witness", action="store_true",
+                    help="check the surface rules only, without the out-of-tree witness binding "
+                         "(the witness chain is still enforced at freeze and at finish)")
+
     cp = sp.add_parser("attempt-ceiling",
                        help="print the repo's resolved attempt ceiling (config value, else the "
                             "built-in default) — the single source the risk gate + retry loop consume")
@@ -1059,6 +1216,12 @@ def main(argv=None):
                 handle_registry=args.handle_registry,
                 handle_id=args.handle_id,
             )
+            return 0
+        if args.command == "check-surface":
+            report = check_surface(contract_path=args.contract, execution_path=args.execution,
+                                  require_witness=not args.no_witness)
+            json.dump(report, sys.stdout, indent=2, sort_keys=True)
+            sys.stdout.write("\n")
             return 0
         if args.command == "run":
             doc = run_contract(repo=args.repo, contract_path=args.contract, out=args.out)

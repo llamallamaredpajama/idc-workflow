@@ -134,6 +134,7 @@ run_issue() {  # $1 = issue/PR number
   git -C "$wt" add -A; git -C "$wt" commit -qm "seed $n"
   git -C "$wt" push -q origin "$br" || fail "push $br failed"
   python3 "$VAL" freeze \
+    --surface cli \
     --repo "$wt" \
     --issue "$n" \
     --pr "$n" \

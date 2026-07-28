@@ -50,7 +50,12 @@ API sink). No cache path in the brief → tracker ops fall back to a live board 
    so baseline classification (`expected-red` vs `expected-green`), the fixed `surface` /
    `evidence_kind` pair, any cited verification `handle_id` (resolved + secret-checked by fixed code
    before use), exact `touch` / `off-limits`, and the frozen verification commands are outside the
-   builder's authority. Every ticket runs the bounded fixed-code falsifier
+   builder's authority. **`--surface` is REQUIRED** — an undeclared surface is not a declaration, so
+   the freeze refuses rather than defaulting one for you; a docs-only / no-behavioral-diff ticket
+   declares `--surface none --skip-reason '<one line>'` rather than padding a fake gate. Fixed code
+   also refuses an **all-static** CLI gate (every command a file-exists / grep / lint / typecheck /
+   parse-or-import probe / `terraform validate|fmt` / arch-fence `pytest`, with nothing exercising the
+   goal's observable end-state) — the same rule the review engine states in prose, enforced here. Every ticket runs the bounded fixed-code falsifier
    `idc_validation_risk_gate.py` before this freeze and the falsifier decides its own requiredness —
    it derives risk from the `--touch` set it is given, the same set this freeze records (plus
    `--baseline`, the same `expected-red`/`expected-green` value the freeze records), and skips only

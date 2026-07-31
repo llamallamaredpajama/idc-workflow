@@ -20,6 +20,12 @@
 #
 # Every helper returns non-zero (and the wrapped python's stderr) on failure, so a scenario's
 # `|| fail ...` catches a broken seed instead of asserting against an empty board.
+#
+# SISTER HELPER — read this before writing any fail-closed / skip / refuse assertion:
+#   . "$(dirname "$0")/../lib/fail-closed.sh"     # assert_fail_closed / fc_require_file
+# It enforces the lane's fixture rules (discriminating artifact + positive control, no vacuous skip,
+# no self-satisfying grep, every probe bounded). The rules and the reason they exist are stated in
+# tests/smoke/phase-governance.sh's header.
 
 # Repo root: governance/ is tests/smoke/governance, so ../../.. is the plugin root. Resolved from
 # THIS file's location so a scenario need not compute $PLUGIN itself.

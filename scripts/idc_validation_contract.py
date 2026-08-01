@@ -1126,7 +1126,24 @@ def freeze_contract(*, repo: str, issue: int, pr: int, graph_node: str, graph_di
     doc["contract_digest"] = _contract_digest(doc)
     atomic_write_json(out, doc)
     _record_witness("contract", out, doc)
+    _publish_live_contract(workspace, doc, out)
     return doc
+
+
+def _publish_live_contract(workspace: str, doc: dict, out_path: str):
+    """Publish the frozen contract as the repository's LIVE contract (V-AUTH stage 1).
+
+    The Path Gate's minting side (`idc_path_gate.resolve_entry_profile` / the claim-time mint) reads
+    this pointer to scope authorizations to the contract's `touch` − `off_limits` boundary at
+    MUTATION time, instead of the boundary being enforced first at receipt time. FAIL-CLOSED: a
+    freeze whose pointer cannot be published would leave every later mint silently broad, so the
+    freeze itself refuses."""
+    try:
+        import idc_path_gate as PG  # noqa: PLC0415 — lazy sibling import (PG lazily imports us back)
+        PG.record_live_contract(workspace, doc, out_path)
+    except Exception as exc:  # noqa: BLE001 — never freeze a gate whose scope cannot be published
+        raise ValidationError(
+            f"frozen contract could not be published as the live Path Gate contract: {exc}") from exc
 
 
 def load_contract(path: str, require_witness: bool = True):

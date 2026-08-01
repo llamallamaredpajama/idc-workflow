@@ -29,6 +29,12 @@ import idc_ledger as L  # noqa: E402
 
 AUTH_RELPATH = os.path.join("idc-path-gate", "authorization.json")
 ADMISSION_LOCK_RELPATH = os.path.join("idc-path-gate", "admission.lock")
+# The live-contract pointer: machine-owned state next to the authorization, written ONLY by
+# `idc_validation_contract.freeze_contract` (fixed code) when a Build validation contract is frozen,
+# and cleared when the claimed item reaches a terminal Status. It is how the minting side discovers
+# "the frozen contract that scopes this repository's in-flight Build unit" (spec §3.3/§4.2) without
+# trusting a caller-supplied path.
+LIVE_CONTRACT_RELPATH = os.path.join("idc-path-gate", "live-contract.json")
 PROTECTED_MACHINE_RULES = [
     "TRACKER.md",
     "TRACKER-archive.md",
@@ -214,6 +220,107 @@ def admission_lock_path(repo: str) -> str:
     return git_path(repo, ADMISSION_LOCK_RELPATH)
 
 
+def live_contract_path(repo: str) -> str:
+    return git_path(repo, LIVE_CONTRACT_RELPATH)
+
+
+def _read_live_contract(repo: str) -> tuple[str, dict[str, Any] | None]:
+    """Read the live-contract pointer: ('absent'|'unreadable'|'corrupt'|'ok', doc)."""
+    path = live_contract_path(repo)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return "absent", None
+    except OSError:
+        return "unreadable", None
+    except ValueError:
+        return "corrupt", None
+    if not isinstance(data, dict):
+        return "corrupt", None
+    return "ok", data
+
+
+def record_live_contract(repo: str, doc: dict[str, Any], contract_path: str) -> dict[str, Any]:
+    """Publish the just-frozen validation contract as this repository's live contract.
+
+    Called ONLY by `idc_validation_contract.freeze_contract` (fixed code), immediately after the
+    contract file and its out-of-tree witness are written. The pointer records WHERE the contract
+    lives and its digest; the scope itself is always re-read from the verified contract file (the
+    real data), never from this pointer."""
+    pointer = {
+        "schema": 1,
+        "contract_path": os.path.realpath(os.path.abspath(contract_path)),
+        "contract_digest": doc.get("contract_digest"),
+        "issue": doc.get("issue"),
+        "pr": doc.get("pr"),
+        "graph_node": doc.get("graph_node"),
+        "recorded_at": _iso(_utc_now()),
+    }
+    _atomic_write_json(live_contract_path(repo), pointer)
+    return pointer
+
+
+def clear_live_contract(repo: str, expected_issue=None) -> bool:
+    """Retire the live-contract pointer when its claimed unit reaches a terminal Status.
+
+    With `expected_issue`, a READABLE pointer for a DIFFERENT issue is left in place (never clear
+    another unit's live contract); an unreadable/corrupt pointer is removed either way (repair)."""
+    state, pointer = _read_live_contract(repo)
+    if state == "absent":
+        return True
+    if state == "ok" and expected_issue is not None \
+            and str((pointer or {}).get("issue")) != str(expected_issue):
+        return False
+    try:
+        os.remove(live_contract_path(repo))
+    except FileNotFoundError:
+        pass
+    return True
+
+
+def contract_scope(repo: str) -> dict[str, Any] | None:
+    """The live frozen validation contract's mint scope, or None when no contract is recorded.
+
+    FAIL-CLOSED: an unreadable/corrupt pointer, a contract file that fails `load_contract`
+    verification (self-digest + out-of-tree witness), or a pointer that no longer matches the frozen
+    contract raises RuntimeError — the caller must refuse to mint a broad authorization over a state
+    it cannot verify, never silently widen. The scope is derived from the VERIFIED contract document
+    (its `touch` / `off_limits` sets), not from the pointer."""
+    state, pointer = _read_live_contract(repo)
+    if state == "absent":
+        return None
+    if state != "ok":
+        raise RuntimeError(f"the live validation-contract pointer is {state}")
+    contract_path = str((pointer or {}).get("contract_path") or "")
+    if not contract_path:
+        raise RuntimeError("the live validation-contract pointer names no contract file")
+    # Lazy sibling import: idc_validation_contract lazily imports THIS module for the attempt
+    # ceiling, so a top-level import here would be circular.
+    import idc_validation_contract as VC  # noqa: PLC0415 — see above
+    try:
+        doc = VC.load_contract(contract_path)
+    except Exception as exc:  # noqa: BLE001 — any verification failure fails the mint closed
+        raise RuntimeError(
+            f"the live frozen validation contract failed verification: {CS.scrub(str(exc))}"
+        ) from exc
+    if doc.get("contract_digest") != pointer.get("contract_digest"):
+        raise RuntimeError(
+            "the live validation-contract pointer no longer matches the frozen contract digest")
+    touch = [t for t in (doc.get("touch") or []) if isinstance(t, str) and t.strip()]
+    off_limits = [t for t in (doc.get("off_limits") or []) if isinstance(t, str) and t.strip()]
+    if not touch:
+        raise RuntimeError("the live frozen validation contract declares no touch surfaces")
+    return {
+        "issue": doc.get("issue"),
+        "allowed_paths": touch,
+        "denied_paths": off_limits,
+        "ticket": str(doc.get("issue")),
+        "graph_node": str(doc.get("graph_node") or "") or None,
+        "validation_contract_digest": str(doc.get("contract_digest") or ""),
+    }
+
+
 @contextlib.contextmanager
 def admission_lock(repo: str):
     """Serialize command-entry registration -> authorization/rollback across processes.
@@ -354,6 +461,19 @@ def _normalize_allowed_paths(repo: str, paths: list[str]) -> list[str]:
     return out or ["."]
 
 
+def _normalize_denied_paths(repo: str, paths: list[str]) -> list[str]:
+    """Like _normalize_allowed_paths but an EMPTY set stays empty — the allowed-side default of
+    `["."]` (whole repo) would flip an empty deny set into deny-everything."""
+    out = []
+    for item in paths or []:
+        rel = _normalize_repo_rel(item, repo)
+        if rel.endswith("/") and rel != "/":
+            rel = rel.rstrip("/")
+        if rel not in out:
+            out.append(rel)
+    return out
+
+
 def _path_allowed(relpath: str, allowed_paths: list[str]) -> bool:
     for rule in allowed_paths:
         base = rule.rstrip("/") or "."
@@ -427,6 +547,32 @@ def _role_action_ceiling(command: str) -> set[str]:
     return set(actions)
 
 
+def resolve_entry_profile(repo: str, command: str) -> dict[str, Any]:
+    """The write_authorization kwargs a COMMAND-ENTRY mint uses (V-AUTH stage 1, spec §3.3/§4.2).
+
+    For `build`, when a frozen validation contract is live in this repository, the entry mint is
+    CONTRACT-SCOPED: allowed_paths = the contract's `touch` set, denied_paths = its `off_limits` set
+    (touch − off_limits at evaluation time, deny winning), bound to the contract's ticket/graph-node
+    identity — so a mutation outside the frozen boundary is refused when it is attempted, not first
+    at receipt time. With no live contract (a fresh build, or any non-build command) the command's
+    default profile applies unchanged. A pointer/contract that exists but cannot be VERIFIED raises
+    (contract_scope), so admission fails closed rather than silently minting broad."""
+    paths, actions = _default_profile(command)
+    profile: dict[str, Any] = {"allowed_paths": paths, "allowed_actions": actions}
+    if command != "build":
+        return profile
+    scope = contract_scope(repo)
+    if scope is None:
+        return profile
+    return {
+        "allowed_paths": list(scope["allowed_paths"]),
+        "denied_paths": list(scope["denied_paths"]),
+        "allowed_actions": ["write", "edit", "git"],
+        "ticket": scope["ticket"],
+        "graph_node": scope["graph_node"],
+    }
+
+
 def _digest_payload(record: dict[str, Any], auth: dict[str, Any]) -> str:
     payload = {
         "args_sha256": record.get("args_sha256", ""),
@@ -434,6 +580,7 @@ def _digest_payload(record: dict[str, Any], auth: dict[str, Any]) -> str:
         "allowed_paths": list(auth.get("allowed_paths") or []),
         "branch": auth.get("branch", ""),
         "command": auth.get("command", ""),
+        "denied_paths": list(auth.get("denied_paths") or []),
         "graph_node": auth.get("graph_node", ""),
         "nonce": auth.get("nonce", ""),
         "plugin_version": record.get("plugin_version", ""),
@@ -473,6 +620,7 @@ def build_authorization(
     ticket: str | None,
     graph_node: str | None,
     ttl_seconds: int,
+    denied_paths: list[str] | None = None,
 ) -> dict[str, Any]:
     now = _utc_now()
     auth = {
@@ -482,6 +630,10 @@ def build_authorization(
         "graph_node": graph_node or f"command:{command}",
         "branch": branch,
         "allowed_paths": allowed_paths,
+        # The frozen contract's off-limits surfaces, enforced at mutation time: a path inside
+        # `denied_paths` denies even when an `allowed_paths` prefix also covers it (deny wins),
+        # mirroring the receipt-time `_boundary_problems` semantics.
+        "denied_paths": list(denied_paths or []),
         "allowed_actions": allowed_actions,
         "issued_at": _iso(now),
         "expires_at": _iso(now + dt.timedelta(seconds=max(1, ttl_seconds))),
@@ -503,6 +655,7 @@ def write_authorization(
     graph_node: str | None = None,
     ttl_seconds: int = DEFAULT_TTL_SECONDS,
     expected_nonce: str | None = None,
+    denied_paths: list[str] | None = None,
 ) -> dict[str, Any]:
     records = [rec for rec in C.active_records(repo, session) if rec.get("command") == command]
     if not records:
@@ -554,6 +707,7 @@ def write_authorization(
         ticket=ticket,
         graph_node=graph_node,
         ttl_seconds=ttl_seconds,
+        denied_paths=_normalize_denied_paths(repo, list(denied_paths or [])),
     )
     _atomic_write_json(auth_path(repo), auth)
     return auth
@@ -622,7 +776,7 @@ def _evaluate_request(repo: str, plugin_root: str, request: dict[str, Any]) -> d
 
     if auth.get("schema") != 1:
         return _deny("IDC Path Gate denied this mutation because the authorization object is missing or has the wrong schema.")
-    required = ("command", "branch", "allowed_paths", "allowed_actions", "issued_at", "expires_at", "nonce", "contract_digest")
+    required = ("command", "branch", "allowed_paths", "denied_paths", "allowed_actions", "issued_at", "expires_at", "nonce", "contract_digest")
     for field in required:
         if field not in auth:
             return _deny(f"IDC Path Gate denied this mutation because the authorization object is missing `{field}`.")
@@ -668,6 +822,16 @@ def _evaluate_request(repo: str, plugin_root: str, request: dict[str, Any]) -> d
     expected_digest = _digest_payload(record, auth)
     if auth.get("contract_digest") != expected_digest:
         return _deny("IDC Path Gate denied this mutation because the authorization contract digest is corrupt or stale.")
+
+    # Deny wins over allow: a path inside the authorization's off-limits set is refused even when an
+    # allowed prefix also covers it — the mutation-time twin of the receipt writer's
+    # `_boundary_problems` off-limits refusal (spec §3.4 "declared touch and off-limits paths").
+    denied_paths = _normalize_denied_paths(repo, list(auth.get("denied_paths") or []))
+    for rel in paths:
+        if denied_paths and _path_allowed(rel, denied_paths):
+            return _deny(
+                f"IDC Path Gate denied this mutation because `{rel}` is inside the live authorization's off-limits set ({', '.join(denied_paths)})."
+            )
 
     allowed_paths = _normalize_allowed_paths(repo, list(auth.get("allowed_paths") or []))
     for rel in paths:

@@ -172,6 +172,7 @@ by an IDC command entry/transition. It contains:
   "graph_node": "<stable-node-id>",
   "branch": "<exact-branch>",
   "allowed_paths": ["<normalized-path-or-directory>"],
+  "denied_paths": ["<normalized-path-or-directory>"],
   "allowed_actions": ["write", "git", "tracker-read"],
   "issued_at": "<UTC timestamp>",
   "expires_at": "<UTC timestamp>",
@@ -181,8 +182,11 @@ by an IDC command entry/transition. It contains:
 ```
 
 The Path Gate MUST deny when the authorization is missing, expired, corrupt, on the wrong branch,
-bound to the wrong ticket/graph node, outside the declared paths/actions, or inconsistent with the
-live tracker. Denial MUST explain the correct IDC route. The agent then asks the operator to confirm
+bound to the wrong ticket/graph node, outside the declared paths/actions, inside the declared
+`denied_paths` (the frozen contract's off-limits surfaces — deny wins over an overlapping allowed
+prefix), or inconsistent with the live tracker. When a Build validation contract is frozen for the
+repository's in-flight unit, the authorization's path scope is that contract's `touch` −
+`off_limits` boundary, enforced at mutation time — not first at receipt time. Denial MUST explain the correct IDC route. The agent then asks the operator to confirm
 the relevant existing command—Think, Intake, Plan, Build, or Recirculate—rather than inventing a new
 escape hatch.
 

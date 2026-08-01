@@ -331,11 +331,18 @@ def _ensure_path_gate_auth(payload, command, registration, auth_snapshot):
         return True
     attempt_nonce = registration.get("nonce") if registration else None
     try:
+        # V-AUTH stage 1: the mint profile is resolved from the live frozen validation contract when
+        # one exists (build: allowed = touch, denied = off_limits, contract identity), else the
+        # command's default profile. resolve_entry_profile RAISES on a pointer/contract it cannot
+        # verify, which lands in this except arm — the admission fails closed with rollback, never a
+        # silent broad mint over an unverifiable contract state.
+        profile = PG.resolve_entry_profile(cwd, command)
         auth = PG.write_authorization(
             cwd,
             session=session_id,
             command=command,
             expected_nonce=attempt_nonce,
+            **profile,
         )
         if auth.get("nonce") != attempt_nonce:
             raise RuntimeError("Path Gate authorization did not bind the admission attempt nonce")

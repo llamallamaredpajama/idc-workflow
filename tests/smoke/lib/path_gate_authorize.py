@@ -112,6 +112,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--ttl-seconds", type=int, default=PG.DEFAULT_TTL_SECONDS)
     ap.add_argument("--allow-path", action="append", default=None)
     ap.add_argument("--allow-action", action="append", default=None)
+    ap.add_argument("--deny-path", action="append", default=None,
+                    help="off-limits path(s) — scenario setup for the contract-scoped denied_paths")
     args = ap.parse_args(argv)
     # The gate runs BEFORE the Path Gate is touched and before anything is written.
     refusal = refuse_reason(args.repo)
@@ -129,6 +131,7 @@ def main(argv: list[str] | None = None) -> int:
             ticket=args.ticket,
             graph_node=args.graph_node,
             ttl_seconds=args.ttl_seconds,
+            denied_paths=args.deny_path,
         )
     except Exception as exc:  # noqa: BLE001 — surface the real refusal to the scenario
         print(f"path_gate_authorize fixture: {type(exc).__name__}: {exc}", file=sys.stderr)

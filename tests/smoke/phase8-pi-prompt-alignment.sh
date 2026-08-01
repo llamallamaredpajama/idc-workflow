@@ -102,7 +102,10 @@ if ! tr '\n' ' ' < "$WORKFLOW" | grep -qiE 'MCP[^.]{0,180}(explicit|dedicated)[^
   echo "MISSING in WORKFLOW.md: MCP writer tools require an explicit adapter/matcher and are not claimed covered"
   fails=$((fails+1))
 fi
-for limitation in 'minted per COMMAND, not per transition|mint-at-transition' 'per-worktree|per-worker-worktree|per worktree' 'Pi and Codex|Pi/Codex' 'finisher/merge helper|merge helper' 'identity binding' 'TTL (heartbeat )?renewal|heartbeat renewal'; do
+# V-AUTH (stages 1–3) closed three of the original six limitations, so the pinned phrases track the
+# NEW truth: transition-scoped build minting, mandatory (but not tracker-compared) identity binding,
+# and claim-driven TTL renewal. The stale pre-V-AUTH claims are rejected further down.
+for limitation in 'transition-scoped|mint-at-transition' 'per-worktree|per-worker-worktree|per worktree' 'Pi and Codex|Pi/Codex' 'finisher/merge helper|merge helper' 'identity binding' 'TTL renew|claim-driven'; do
   if ! grep -qiE "$limitation" "$WORKFLOW"; then
     echo "MISSING in WORKFLOW.md: controlled-mode limitation /$limitation/"
     fails=$((fails+1))
@@ -113,9 +116,16 @@ grep -qiE 'controlled[^.]{0,100}(opt-in|opt in)' "$WORKFLOW" || { echo "MISSING 
 # The limitation list must state STATUS, not point at a unit of work. It used to say the six were
 # "tracked to U8/U9"; U8 and U9 MERGED on 2026-07-23 without closing any of them, so from that day the
 # sentence read as "handled" while every one was still open — and this lane REQUIRED that sentence,
-# so it held the stale claim in place. The invariant is now the honest form, in both directions.
-grep -qiE 'Every one of them is \*\*still open\*\*' "$WORKFLOW" \
-  || { echo "MISSING in WORKFLOW.md: the controlled-mode limitations must be stated as still open"; fails=$((fails+1)); }
+# so it held the stale claim in place. The invariant is now the honest form, in both directions —
+# including the V-AUTH direction: after stages 1–3 closed three limitations, the blanket "every one
+# of them is still open" sentence itself became the stale claim, so it is now REJECTED and the
+# per-line status framing is required instead.
+grep -qiE 'each line states what is true of the code' "$WORKFLOW" \
+  || { echo "MISSING in WORKFLOW.md: the controlled-mode limitations must carry the per-line status framing"; fails=$((fails+1)); }
+if grep -qiE 'Every one of them is \*\*still open\*\*' "$WORKFLOW"; then
+  echo "STALE in WORKFLOW.md: the blanket still-open sentence is back — V-AUTH closed three of the six, so this sentence would understate the shipped protection"
+  fails=$((fails+1))
+fi
 if grep -qiE 'U8/U9|tracked to U[0-9]' "$WORKFLOW"; then
   echo "STALE in WORKFLOW.md: a controlled-mode limitation is deferred to a named unit of work — that pointer reads as 'handled' the moment the unit merges, whether or not the limitation closed"
   fails=$((fails+1))
@@ -163,7 +173,7 @@ have "recirculator.md" "idc_recirculator_layers.py|gate:.?no|gate:.?yes|gated Th
 absent "recirculator.md" "NO_RECIRCULATION|MINOR_AUTONOMOUS|MAJOR_GATED" "deleted verdict taxonomy"
 
 if [ "$fails" -eq 0 ]; then
-  echo "PASS: Pi role prompts and Path Gate docs align (the missing merge helper is scoped to the experimental Pi runtime and the self-merging runtimes are named, so no automerge claim goes un-runtime-scoped; explicit transport coverage; the six controlled-mode limits stated as STILL OPEN rather than deferred to a merged unit; no retired vocab)"
+  echo "PASS: Pi role prompts and Path Gate docs align (the missing merge helper is scoped to the experimental Pi runtime and the self-merging runtimes are named, so no automerge claim goes un-runtime-scoped; explicit transport coverage; the controlled-mode limits carry per-line STATUS — post-V-AUTH truths with named residuals, never a deferred-to-a-unit pointer or a stale blanket still-open claim; no retired vocab)"
   exit 0
 fi
 echo "FAIL: $fails prompt-alignment invariant(s) unmet"

@@ -82,9 +82,9 @@ need_literal templates/WORKFLOW-config.yaml "$FILESYSTEM_SENTENCE" 'must preserv
 #
 # CONTROL FIRST: the file must actually contain the limitations section, or every "does not say X"
 # assertion below would pass on an empty/renamed section for the wrong reason.
-LIMITS_HEADER='`controlled` currently has these documented limitations. Every one of them is **still open**'
+LIMITS_HEADER='`controlled` currently has these documented limitations — each line states what is true of the code'
 need_literal templates/WORKFLOW.md "$LIMITS_HEADER" \
-  'lost the controlled-mode limitations section (or its honest still-open framing) — without it the staleness assertions below are vacuous'
+  'lost the controlled-mode limitations section (or its honest status framing) — without it the staleness assertions below are vacuous'
 
 # No shipped operator-facing surface may defer a live limitation to a NAMED unit of work. A unit
 # either ships and closes the limitation (then the line is deleted) or it does not (then the line must
@@ -96,17 +96,31 @@ for f in templates/WORKFLOW.md templates/WORKFLOW-config.yaml README.md; do
     'still defers a live limitation to a named unit of work — that pointer reads as "handled" the moment the unit merges, whether or not the limitation closed'
 done
 
-# Each of the six limitations must be present AND marked open. A silently deleted line would otherwise
-# read as "closed" to an operator with no evidence that anything changed.
+# Each limitation line must be present AND carry its honest status. A silently deleted line would
+# otherwise read as "closed" to an operator with no evidence that anything changed. V-AUTH (stages
+# 1–3) genuinely closed three of the original six — per-command minting, optional identity, and no
+# TTL renewal — so those lines now state the new truth PLUS the named residual that remains open,
+# and this list pins the residual phrasing the same way it pinned the original.
 for phrase in \
-  'Authorization is minted per COMMAND, not per transition' \
+  'Build authorization is transition-scoped; other commands'"'"' grants are still per-command' \
+  '**Open for non-build commands.**' \
   'One authorization per worktree — the newest mint wins' \
   'Pi and Codex are not first-class lifecycle producers' \
   'No sanctioned merge helper on the experimental Pi runtime' \
+  'Identity binding is mandatory, but not tracker-compared' \
+  '**Open for tracker comparison.**' \
+  'TTL renews only through the sanctioned doors' \
+  '**Renewal is claim-driven by design.**'; do
+  need_literal templates/WORKFLOW.md "$phrase" \
+    "dropped the controlled-mode limitation line '$phrase' — deleting a line an operator relied on reads as 'closed'; if it really closed, its claim must be removed together with the code that made it true"
+done
+# And the CLOSED-form claims must not regress back to their pre-V-AUTH wording.
+for stale in \
+  'Authorization is minted per COMMAND, not per transition' \
   'Identity binding is optional, not mandatory' \
   'No TTL renewal'; do
-  need_literal templates/WORKFLOW.md "$phrase" \
-    "dropped the controlled-mode limitation '$phrase' — deleting a line an operator relied on reads as 'closed'; if it really closed, its claim must be removed together with the code that made it true"
+  reject_literal templates/WORKFLOW.md "$stale" \
+    "reverted the V-AUTH claim '$stale' — the code now enforces claim-scoped minting, required identity, and claim-driven renewal, so this line would tell governed repos they have LESS protection than they do"
 done
 
 # ── The two limitations that were OVERSTATED, not understated ─────────────────────────────────────
@@ -134,8 +148,11 @@ need_literal templates/WORKFLOW.md 'Claude and Codex DO self-merge through the s
 # The one limitation with no per-tool coverage at all must say so in those words.
 need_literal templates/WORKFLOW.md '**Codex has no per-tool gate at all**' \
   'must state plainly that Codex has no per-tool gate — scripts/install-codex.sh wires no hooks, so Codex is covered only by the git backstop'
+# Status-marker census: 3 fully-open limitations keep the bare **Open.** marker; the three V-AUTH
+# closures carry their named-residual markers (asserted literally above). A drifted count in either
+# direction means a line was added/removed without updating this truth pin.
 OPEN_COUNT="$(grep -c '\*\*Open\.\*\*' "$ROOT/templates/WORKFLOW.md")"
-[ "$OPEN_COUNT" -eq 6 ] || fail "templates/WORKFLOW.md — expected exactly 6 controlled-mode limitations marked **Open.**, found $OPEN_COUNT; a limitation that closed must have its whole line removed, and a new one must be marked open"
+[ "$OPEN_COUNT" -eq 3 ] || fail "templates/WORKFLOW.md — expected exactly 3 controlled-mode limitations marked **Open.**, found $OPEN_COUNT; a limitation that closed must swap its marker for a named residual (and be pinned above), and a new one must be marked open"
 
 # ── NEW-15: the spec's T3 traceability table must point at scenarios that EXIST ────────────────────
 # T3's "Blocking surfaces" column used to name surface CATEGORIES, so a reader tracing the threat

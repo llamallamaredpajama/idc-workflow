@@ -643,6 +643,20 @@ def tracker_close(backend, repo, issue, tracker_path, project_number, field_ids,
     TE.journal_append(repo, "close", backend, tracker_rel,
                       {"num": issue, "to_status": "Done", "verdict": verdict_path,
                        "agent": "finisher"})
+    # V-AUTH stage 2: the finisher is the SECOND sanctioned close door (the engine's terminal ops
+    # are the first), so it retires the item's claim-scoped Path Gate authorization + live-contract
+    # pointer the same way (spec §4.2 "The authorization expires after finish or block").
+    # Best-effort like the journal append above — the close already landed — but a failure warns
+    # LOUDLY; the grant still dies with its command record and TTL.
+    try:
+        import idc_path_gate as PG  # noqa: PLC0415 — lazy sibling import
+        retired, retire_detail = PG.retire_claim_authorization(repo, issue)
+    except Exception as exc:  # noqa: BLE001 — never fail a landed close on the retire
+        retired, retire_detail = False, f"{type(exc).__name__}: {exc}"
+    if not retired:
+        print(f"finish: WARNING — the claim-scoped Path Gate authorization for #{issue} could not "
+              f"be retired ({retire_detail}); writes may stay authorized until its command record "
+              "finishes or its TTL expires", file=sys.stderr)
 
 
 def verify_tracker_closed(backend, repo, issue, tracker_path, project_number, owner, name):

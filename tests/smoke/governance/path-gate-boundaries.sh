@@ -110,16 +110,19 @@ allow_case write /tmp/idc-note.md T-42 NODE-7
 deny_case write src/app.ts T-42 NODE-7
 reason_has 'authorization.*absent'
 
-# A minimal mint (no explicit scope) applies the standard write/edit/git profile.
+# A minimal mint (no explicit scope) applies the command's default profile. `build` is CLAIM-GATED
+# (V-AUTH stage 2): its entry default carries NO mutation actions — write authority is issued by the
+# claim transaction (spec §3.3), so a source write under the bare entry mint DENIES.
 DEFAULT_AUTH="$(python3 "$PG_AUTHORIZE" --repo "$REPO" --session "$SID" --command build)" \
   || gov_fail "minimal mint failed"
 printf '%s' "$DEFAULT_AUTH" | python3 -c '
 import json, sys
 auth = json.load(sys.stdin)
 assert auth["allowed_paths"] == ["."]
-assert set(auth["allowed_actions"]) == {"write", "edit", "git"}
-' || gov_fail "minimal mint did not apply the standard default profile: $DEFAULT_AUTH"
-allow_case write src/app.ts '' ''
+assert auth["allowed_actions"] == [], "build entry default must be read-only-until-claim"
+' || gov_fail "minimal mint did not apply build's read-only-until-claim default profile: $DEFAULT_AUTH"
+deny_case write src/app.ts '' ''
+reason_has 'not in the live authorization'
 deny_case write tracker.MD '' ''
 reason_has 'protected machine-owned surface'
 
@@ -128,6 +131,19 @@ allow_case write src/app.ts T-42 NODE-7
 deny_case write src/tracker-link.md T-42 NODE-7
 deny_case write docs/notes.md T-42 NODE-7
 deny_case write TRACKER.md T-42 NODE-7
+
+# ── identity is REQUIRED and must match (V-AUTH stage 3 — the F3 flip) ───────────────────────────
+# Adapters echo `ticket`/`graph_node` from the live authorization; a request that arrives WITHOUT
+# that identity was not built by a sanctioned adapter and DENIES, in-scope path or not. This block
+# FLIPS the historical absent-identity ALLOW (proven red against the pre-flip optional-match gate).
+# The `allow_case write src/app.ts T-42 NODE-7` above is the positive control: the same request
+# WITH the echoed identity is admitted.
+deny_case write src/app.ts '' ''
+reason_has 'carries no graph-node identity'
+deny_case write src/app.ts '' NODE-7
+reason_has 'carries no ticket identity'
+deny_case write src/app.ts T-42 ''
+reason_has 'carries no graph-node identity'
 
 # Authorization read failures are distinct and never echo corrupt file contents or local paths.
 printf 'password=hunter2xyzzy this is not json\n' > "$AUTH_PATH"

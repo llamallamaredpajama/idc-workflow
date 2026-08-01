@@ -172,6 +172,7 @@ by an IDC command entry/transition. It contains:
   "graph_node": "<stable-node-id>",
   "branch": "<exact-branch>",
   "allowed_paths": ["<normalized-path-or-directory>"],
+  "denied_paths": ["<normalized-path-or-directory>"],
   "allowed_actions": ["write", "git", "tracker-read"],
   "issued_at": "<UTC timestamp>",
   "expires_at": "<UTC timestamp>",
@@ -181,8 +182,19 @@ by an IDC command entry/transition. It contains:
 ```
 
 The Path Gate MUST deny when the authorization is missing, expired, corrupt, on the wrong branch,
-bound to the wrong ticket/graph node, outside the declared paths/actions, or inconsistent with the
-live tracker. Denial MUST explain the correct IDC route. The agent then asks the operator to confirm
+bound to the wrong ticket/graph node, outside the declared paths/actions, inside the declared
+`denied_paths` (the frozen contract's off-limits surfaces — deny wins over an overlapping allowed
+prefix), or inconsistent with the live tracker. When a Build validation contract is frozen for the
+repository's in-flight unit, the authorization's path scope is that contract's `touch` −
+`off_limits` boundary, enforced at mutation time — not first at receipt time — and the
+authorization's `contract_digest` slot binds to that frozen contract's own digest, so an
+authorization minted under one frozen gate dies when a different gate becomes the live one.
+
+Request identity is REQUIRED, not optional: every adapter echoes the `ticket`/`graph_node` it reads
+from the live authorization into each request, and the gate denies a request whose `graph_node` is
+absent or mismatched, or whose `ticket` is absent while the authorization is ticket-bound (`ticket`
+remains nullable — a null-ticket authorization requires the request to carry none). A request
+without identity was not built by a sanctioned adapter consulting the live authorization. Denial MUST explain the correct IDC route. The agent then asks the operator to confirm
 the relevant existing command—Think, Intake, Plan, Build, or Recirculate—rather than inventing a new
 escape hatch.
 
@@ -337,8 +349,17 @@ planning-application receipt.
 ### 4.2 Build and Finisher
 
 Build entry verifies graph readiness, goal/validation contract identity, current tracker state,
-branch ownership, and reconciliation blockers. A successful claim transaction issues the limited
-Path Gate authorization.
+branch ownership, and reconciliation blockers. Build's ENTRY authorization carries no mutation
+actions (read-only-until-claim) — *except* on a RE-ENTRY while this item's validation contract is
+already frozen and live, where the entry mint inherits the contract's `touch` − `off_limits` write
+scope directly. This is not a hole in "no write before a proven claim": a contract only becomes live
+*after* a claim froze it, so no entry mint can carry write before that first claim. A successful
+claim transaction — the board write read back and journaled — issues the limited Path Gate
+authorization, bound to the claimed ticket. Freezing the
+unit's validation contract then narrows that authorization to the contract's `touch` −
+`off_limits` boundary. The claim is idempotent on the board, and re-running it re-mints the
+authorization with a fresh TTL — that idempotent re-claim is the sanctioned renewal door, and it
+is also why a long drain no longer expires mid-run: every claimed item re-mints a fresh window.
 
 Before merge, IDC MUST prove:
 
@@ -351,7 +372,10 @@ Before merge, IDC MUST prove:
 - graph, tracker projection, and authorization remain current;
 - the merge and close transaction can be completed through Finisher.
 
-The authorization expires after finish or block. It cannot be reused for another ticket.
+The authorization expires after finish or block — both sanctioned close doors (the transition
+engine's terminal operations and the Finisher's tracker-close) retire the claim-scoped
+authorization and the live-contract pointer, dropping a claim-gated command back to its read-only
+entry posture. It cannot be reused for another ticket.
 
 Finisher additionally carries the §3.4 compounding obligation: when the frozen contract cited no
 `handle_id` and the surface is not `none`, it appends the newly-proven recipe to the governed

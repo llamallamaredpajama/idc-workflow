@@ -649,17 +649,29 @@ printf '%s\n' "$out" | grep -Fq "read" \
 
 # --- W4: the idempotent update path, a paginated listing, and wrong-shape bodies ---------------------
 
+# EVERY paged-listing case below runs under a HARD per-case alarm (F44, extended by F53). The
+# original F44 fix alarmed only the two ENDLESS stub modes (W4f here, W1m's endless in the checker
+# lane) — but a `page += 1` regression in `_gh_json_all_pages` makes EVERY request page 1, so the
+# ordinary paged modes (W4a/W4b/W4e, whose stubs serve a non-empty page 1 forever in that state)
+# hang FIRST, long before the alarmed endless case is reached — and a hung lane reads as a slow
+# pass, never as a failure. `perl alarm` survives exec (POSIX preserves the timer), so a frozen walk
+# dies at rc=142 and the case reds at the bound. Inlined per case (never a shell function behind an
+# env-assignment prefix — `VAR=x fn` semantics differ between bash modes).
+W4_ALARM=60
+
 # (W4a) EXISTING RULESET -> the PUT/update branch. The stub used to answer `[]` for every listing, so
 #       `_existing_ruleset_id` was always None and ONLY the POST/create branch was ever exercised —
 #       while the PUT branch is what runs on every re-install of an already-governed repo (F23).
 out="$(PATH="$STUB_BIN:$PATH" STUB_BRANCH_SHA="$SHA_USER" STUB_EXISTING_RULESET_ID=4242 \
+        perl -e 'alarm shift @ARGV; exec @ARGV' "$W4_ALARM" \
         python3 "$INS" --ruleset "$RS" --repo "$REPO" --repo-root "$TGT_USER" --apply 2>&1)" \
-  || fail "W4a: apply failed against a repo that already carries the ruleset; got: $out"
+  || fail "W4a: apply failed (or hung past ${W4_ALARM}s — a frozen page walk is RED, not slow) against a repo that already carries the ruleset; got: $out"
 printf '%s\n' "$out" | grep -qiE '^OK: ruleset .* updated' \
   || fail "W4a: an already-installed ruleset must be UPDATED (PUT), not re-created; got: $out"
 # And the call log proves it was a PUT to the existing id, not a POST.
 W4_LOG="$WORK/w4-update.log"; : > "$W4_LOG"
 PATH="$STUB_BIN:$PATH" STUB_LOG="$W4_LOG" STUB_BRANCH_SHA="$SHA_USER" STUB_EXISTING_RULESET_ID=4242 \
+  perl -e 'alarm shift @ARGV; exec @ARGV' "$W4_ALARM" \
   python3 "$INS" --ruleset "$RS" --repo "$REPO" --repo-root "$TGT_USER" --apply >/dev/null 2>&1
 grep -Fq -- "--method PUT" "$W4_LOG" \
   || fail "W4a: the mutation was not a PUT; the gh call log was: $(cat "$W4_LOG")"
@@ -672,8 +684,9 @@ grep -Fq "rulesets/4242" "$W4_LOG" \
 #       turns into a POST that creates a DUPLICATE over a live ruleset.
 #       Red-when-broken: drop the pagination loop (read one page) and this case reports 'created'.
 out="$(PATH="$STUB_BIN:$PATH" STUB_BRANCH_SHA="$SHA_USER" STUB_RULESETS_PAGES=1 STUB_EXISTING_RULESET_ID=8181 \
+        perl -e 'alarm shift @ARGV; exec @ARGV' "$W4_ALARM" \
         python3 "$INS" --ruleset "$RS" --repo "$REPO" --repo-root "$TGT_USER" --apply 2>&1)" \
-  || fail "W4b: apply failed while walking a paginated rulesets listing; got: $out"
+  || fail "W4b: apply failed (or hung past ${W4_ALARM}s — a frozen page walk is RED, not slow) while walking a paginated rulesets listing; got: $out"
 printf '%s\n' "$out" | grep -qiE '^OK: ruleset .* updated' \
   || fail "W4b: a ruleset listed on PAGE 2 was read as absent, so the idempotent update became a duplicate CREATE (F24); got: $out"
 
@@ -738,8 +751,9 @@ grep -Fq -- "--method" "$W4D_LOG" \
 #       Red-when-broken: restore `if len(body) < per_page: break` and this case reports 'created'
 #       (a DUPLICATE) instead of 'updated'.
 out="$(PATH="$STUB_BIN:$PATH" STUB_BRANCH_SHA="$SHA_USER" STUB_RULESETS_SHORT=1 STUB_EXISTING_RULESET_ID=8282 \
+        perl -e 'alarm shift @ARGV; exec @ARGV' "$W4_ALARM" \
         python3 "$INS" --ruleset "$RS" --repo "$REPO" --repo-root "$TGT_USER" --apply 2>&1)" \
-  || fail "W4e: apply failed against a backend serving 30-item pages; got: $out"
+  || fail "W4e: apply failed (or hung past ${W4_ALARM}s — a frozen page walk is RED, not slow) against a backend serving 30-item pages; got: $out"
 printf '%s\n' "$out" | grep -qiE '^OK: ruleset .* updated' \
   || fail "W4e: a backend ignoring per_page truncated the listing at page one, so an installed ruleset was read as ABSENT and the idempotent update became a duplicate CREATE (F36); got: $out"
 
@@ -907,7 +921,7 @@ PATH="$STUB_BIN:$PATH" python3 "$INS" --ruleset "$RS" --repo "llamallamaredpajam
   --repo-root "$TGT_USER" --apply >/dev/null 2>&1
 [ "$?" = "3" ] || fail "W6 control: the exact-case protected repo was not refused with exit 3"
 
-# --- the dry-run contract: NO network calls, at all -------------------------------------------------
+# --- the dry-run contract: ZERO gh calls ------------------------------------------------------------
 # The strongest available form of the assertion: run dry-run with the stub on PATH and a LOG, then
 # require the log to be EMPTY. Exiting 0 would not be enough — it would still pass if the gates ran
 # and happened to succeed. STUB_FAIL_ALL=1 is belt and braces: any call at all would also break it.
@@ -918,7 +932,7 @@ out="$(PATH="$STUB_BIN:$PATH" STUB_LOG="$DRY_LOG" STUB_FAIL_ALL=1 \
   || fail "dry-run REFUSED a covered target — dry-run must stay local-only and succeed; got: $out"
 if [ -s "$DRY_LOG" ]; then
   echo "--- gh calls made during dry-run:"; cat "$DRY_LOG"
-  fail "dry-run made NETWORK calls — the live gates must be inside \`if args.apply:\` (dry-run makes no network calls)"
+  fail "dry-run made gh calls — the live gates must be inside \`if args.apply:\` (dry-run makes ZERO gh calls; 'no network' is deliberately NOT the claim, since a partial clone's lazy git fetch may cross the network)"
 fi
 printf '%s\n' "$out" | grep -qiE 'note:.*(apply|live)' \
   || fail "dry-run must print a note that the live gates run at --apply; got: $out"
@@ -930,5 +944,244 @@ PATH="$STUB_BIN:$PATH" STUB_LOG="$DRY_LOG" STUB_BRANCH_SHA="$SHA_USER" \
   python3 "$INS" --ruleset "$RS" --repo "$REPO" --repo-root "$TGT_USER" --apply >/dev/null 2>&1
 [ -s "$DRY_LOG" ] \
   || fail "the stub log stayed EMPTY even under --apply — the log is not recording, so the dry-run assertion proves nothing"
+
+# --- W7: the committed CODEOWNERS entry is gated STRUCTURALLY (F51 + F52) ---------------------------
+. "$(dirname "$0")/../lib/fail-closed.sh"
+
+# (W7a) A committed DIRECTORY at `.github/CODEOWNERS` REFUSES — the F51 false-certify. `git show
+#       <ref>:<dir>` exits 0 and prints a tree LISTING; the old exit-0-means-file-bytes read parsed a
+#       child literally named `* @alice` as a covering rule, the working tree below holds a regular
+#       file matching those listing bytes so the divergence gate agreed, and dry-run printed a green
+#       plan over a repository where GitHub — finding no CODEOWNERS *file* — binds NO code owner.
+#       Red-when-broken: treat any exit-0 read as file bytes again and this case prints the green
+#       DRY-RUN plan (rc=0), which assert_fail_closed reds on.
+TGT_DIRCO="$WORK/tgt-dir-codeowners"
+git init -q -b main "$TGT_DIRCO"
+git -C "$TGT_DIRCO" config user.email idc-test@example.com
+git -C "$TGT_DIRCO" config user.name "IDC Test"
+git -C "$TGT_DIRCO" config commit.gpgsign false
+git -C "$TGT_DIRCO" remote add origin "git@github.com:$REPO.git"
+echo placeholder > "$TGT_DIRCO/README.md"
+mkdir -p "$TGT_DIRCO/.github/CODEOWNERS"
+printf 'x\n' > "$TGT_DIRCO/.github/CODEOWNERS/* @alice"
+git -C "$TGT_DIRCO" add -A
+git -C "$TGT_DIRCO" commit -q -m "a DIRECTORY at the CODEOWNERS path" >/dev/null 2>&1
+git -C "$TGT_DIRCO" update-ref refs/remotes/origin/main "$(git -C "$TGT_DIRCO" rev-parse HEAD)"
+git -C "$TGT_DIRCO" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+SHA_DIRCO="$(git -C "$TGT_DIRCO" rev-parse HEAD)"
+# Fixture realness: the committed entry must BE a tree, and `git show` on it must print the child as
+# a covering-rule line — otherwise this case cannot catch the exit-0-means-file regression.
+[ "$(git -C "$TGT_DIRCO" cat-file -t "$SHA_DIRCO:.github/CODEOWNERS")" = "tree" ] \
+  || fail "W7a fixture: the committed .github/CODEOWNERS is not a tree"
+git -C "$TGT_DIRCO" show "$SHA_DIRCO:.github/CODEOWNERS" | grep -Fqx '* @alice' \
+  || fail "W7a fixture: \`git show\` on the committed directory does not print the '* @alice' child line"
+# ...and the working tree holds a REGULAR FILE equal to that listing, so the old code's divergence
+# gate agreed and the false-certify was complete (a fixture the old code merely refused elsewhere
+# would prove nothing about this guard).
+rm -rf "$TGT_DIRCO/.github/CODEOWNERS"
+git -C "$TGT_DIRCO" show "$SHA_DIRCO:.github/CODEOWNERS" > "$TGT_DIRCO/.github/CODEOWNERS"
+assert_fail_closed "W7a: a committed CODEOWNERS DIRECTORY must refuse, never parse as file content (F51)" \
+  "not a regular committed file" \
+  -- python3 "$INS" --ruleset "$RS" --repo "$REPO" --repo-root "$TGT_DIRCO" \
+  -- python3 "$INS" --ruleset "$RS" --repo "$REPO" --repo-root "$TGT_USER"
+printf '%s\n' "$FC_GUARDED_OUT" | grep -Fq "mode 040000 type tree" \
+  || fail "W7a: the refusal must name the entry's recorded mode/type; got: $FC_GUARDED_OUT"
+
+# (W7b) A committed SYMLINK at `.github/CODEOWNERS` REFUSES on the same gate. Git records it as a
+#       mode-120000 blob whose content is the TARGET PATH STRING — a target crafted as '* @alice'
+#       parses as a covering rule if read as file bytes, while GitHub reads no rules from a symlink.
+#       The checker refuses this on the WORKING-TREE side (F14); this is the committed-side twin.
+TGT_SYMCO="$WORK/tgt-symlink-codeowners"
+git init -q -b main "$TGT_SYMCO"
+git -C "$TGT_SYMCO" config user.email idc-test@example.com
+git -C "$TGT_SYMCO" config user.name "IDC Test"
+git -C "$TGT_SYMCO" config commit.gpgsign false
+git -C "$TGT_SYMCO" remote add origin "git@github.com:$REPO.git"
+echo placeholder > "$TGT_SYMCO/README.md"
+mkdir -p "$TGT_SYMCO/.github"
+ln -s "* @alice" "$TGT_SYMCO/.github/CODEOWNERS"
+git -C "$TGT_SYMCO" add -A
+git -C "$TGT_SYMCO" commit -q -m "a SYMLINK at the CODEOWNERS path" >/dev/null 2>&1
+git -C "$TGT_SYMCO" update-ref refs/remotes/origin/main "$(git -C "$TGT_SYMCO" rev-parse HEAD)"
+git -C "$TGT_SYMCO" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+git -C "$TGT_SYMCO" ls-tree HEAD .github/CODEOWNERS | grep -q '^120000' \
+  || fail "W7b fixture: the committed .github/CODEOWNERS is not a mode-120000 symlink entry"
+assert_fail_closed "W7b: a committed CODEOWNERS SYMLINK must refuse on the committed side (F51)" \
+  "not a regular committed file" \
+  -- python3 "$INS" --ruleset "$RS" --repo "$REPO" --repo-root "$TGT_SYMCO" \
+  -- python3 "$INS" --ruleset "$RS" --repo "$REPO" --repo-root "$TGT_USER"
+printf '%s\n' "$FC_GUARDED_OUT" | grep -Fq "mode 120000" \
+  || fail "W7b: the refusal must name the symlink's recorded mode; got: $FC_GUARDED_OUT"
+
+# (W7c) ABSENCE IS DECIDED STRUCTURALLY, never from git's translatable MESSAGE text (F52). A repo
+#       whose CODEOWNERS legitimately lives at the ROOT probes `.github/CODEOWNERS` first; the old
+#       classifier matched two English `die(_(...))` signatures on that miss, so a gettext-localized
+#       git — modelled here by a shim that runs the REAL git and rewrites those exact signatures the
+#       way a translation catalog would — turned every ordinary root-CODEOWNERS repo into a hard
+#       refusal claiming a missing object. The structural read (`git ls-tree` exit status + empty
+#       listing) carries no locale, so this must CERTIFY.
+#       Red-when-broken: classify absence off stderr text again and this case refuses (rc!=0).
+TGT_ROOTCO="$WORK/tgt-root-codeowners"
+git init -q -b main "$TGT_ROOTCO"
+git -C "$TGT_ROOTCO" config user.email idc-test@example.com
+git -C "$TGT_ROOTCO" config user.name "IDC Test"
+git -C "$TGT_ROOTCO" config commit.gpgsign false
+git -C "$TGT_ROOTCO" remote add origin "git@github.com:$REPO.git"
+echo placeholder > "$TGT_ROOTCO/README.md"
+cat > "$TGT_ROOTCO/CODEOWNERS" <<CO
+/.github/workflows/ @alice
+/scripts/hooks/ @alice
+/scripts/idc_validation_contract.py @alice
+/scripts/idc_receipt_check.py @alice
+/scripts/idc_pathway_check.py @alice
+/scripts/idc_ruleset_check.py @alice
+/scripts/idc_path_gate.py @alice
+/scripts/idc_git_path_gate.py @alice
+/scripts/idc_build_receipt.py @alice
+/.github/rulesets/ @alice
+/.github/CODEOWNERS @alice
+/CODEOWNERS @alice
+CO
+git -C "$TGT_ROOTCO" add -A
+git -C "$TGT_ROOTCO" commit -q -m "root CODEOWNERS only" >/dev/null 2>&1
+git -C "$TGT_ROOTCO" update-ref refs/remotes/origin/main "$(git -C "$TGT_ROOTCO" rev-parse HEAD)"
+git -C "$TGT_ROOTCO" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+REAL_GIT="$(command -v git)"
+LOCALE_SHIM="$WORK/locale-shim"; mkdir -p "$LOCALE_SHIM"
+cat > "$LOCALE_SHIM/git" <<SHIM
+#!/usr/bin/env python3
+# A "localized git": runs the real git, then rewrites the English absence signatures in stderr the
+# way a translation catalog would. A classifier keying on those strings stops recognizing absence.
+import subprocess, sys
+r = subprocess.run(["$REAL_GIT"] + sys.argv[1:], capture_output=True)
+err = r.stderr.decode("utf-8", "replace")
+err = err.replace("does not exist in", "n'existe pas dans")
+err = err.replace("exists on disk, but not in", "existe sur le disque, mais pas dans")
+sys.stdout.buffer.write(r.stdout)
+sys.stderr.write(err)
+sys.exit(r.returncode)
+SHIM
+chmod +x "$LOCALE_SHIM/git"
+# Shim self-check: it must really rewrite the signature on a genuinely-absent path, or this case
+# proves nothing about locale independence. Invoked by ABSOLUTE path — a bare `git` here would hit
+# bash's command-hash of the real git from earlier in this lane, silently bypassing the shim.
+shim_probe="$("$LOCALE_SHIM/git" -C "$TGT_ROOTCO" show "HEAD:.github/CODEOWNERS" 2>&1 || true)"
+printf '%s\n' "$shim_probe" | grep -Fq "n'existe pas dans" \
+  || fail "W7c shim self-check: the localizing git shim did not rewrite the absence signature; got: $shim_probe"
+out="$(PATH="$LOCALE_SHIM:$PATH" python3 "$INS" --ruleset "$RS" --repo "$REPO" --repo-root "$TGT_ROOTCO" 2>&1)" \
+  || fail "W7c: a LOCALIZED git turned an ordinary root-CODEOWNERS repo into a refusal — absence must be decided structurally, never from git's message text (F52); got: $out"
+printf '%s\n' "$out" | grep -qiE '^DRY-RUN:' \
+  || fail "W7c: expected the green dry-run plan for the root-CODEOWNERS repo under a localized git; got: $out"
+# Control: the same repo certifies under the UNSHIMMED git too, so W7c is about the locale and the
+# fixture is not green for some other reason.
+python3 "$INS" --ruleset "$RS" --repo "$REPO" --repo-root "$TGT_ROOTCO" >/dev/null 2>&1 \
+  || fail "W7c control: the root-CODEOWNERS fixture does not certify under the real git"
+
+# --- W8: round-5 guard durability — permanent lane fixtures (F50) -----------------------------------
+
+# (W8a / F45) A read failure on a PRESENT entry must REFUSE with the materialization cause — never
+#       fall through to a lower-precedence CODEOWNERS, never escape as a traceback. Modelled with a
+#       shim that fails ONLY the `cat-file blob` byte-read (a promised object a partial clone cannot
+#       fetch), leaving every other git call real — so the tree listing sees the entry, and the only
+#       question is what a failed byte-read does.
+#       Red-when-broken: treat a failed read as absent and this falls through to root/none — the
+#       marker disappears (a different refusal or a green plan), so the case reds.
+CATFAIL_SHIM="$WORK/catfail-shim"; mkdir -p "$CATFAIL_SHIM"
+cat > "$CATFAIL_SHIM/git" <<SHIM
+#!/usr/bin/env python3
+import subprocess, sys
+args = sys.argv[1:]
+if "cat-file" in args and "blob" in args:
+    sys.stderr.write("fatal: unable to read the object (stub: promised object, promisor unreachable)\n")
+    sys.exit(128)
+sys.exit(subprocess.run(["$REAL_GIT"] + args).returncode)
+SHIM
+chmod +x "$CATFAIL_SHIM/git"
+assert_fail_closed "W8a: a failed committed byte-read must refuse as unmaterializable, never read as absent (F45)" \
+  "could NOT be materialized" \
+  -- env PATH="$CATFAIL_SHIM:$PATH" python3 "$INS" --ruleset "$RS" --repo "$REPO" --repo-root "$TGT_USER" \
+  -- python3 "$INS" --ruleset "$RS" --repo "$REPO" --repo-root "$TGT_USER"
+printf '%s\n' "$FC_GUARDED_OUT" | grep -qi 'traceback' \
+  && fail "W8a: the materialization failure escaped as a traceback; got: $FC_GUARDED_OUT"
+
+# (W8b / F47) The committed read runs IMMEDIATELY after fsck, BEFORE any live gate: under --apply
+#       with the same failing byte-read, the refusal must arrive with ZERO gh calls logged. If the
+#       read is ever hoisted back below the live round-trips, the log fills and this reds.
+W8B_LOG="$WORK/w8b-read-order.log"; : > "$W8B_LOG"
+out="$(PATH="$CATFAIL_SHIM:$STUB_BIN:$PATH" STUB_LOG="$W8B_LOG" STUB_BRANCH_SHA="$SHA_USER" \
+        python3 "$INS" --ruleset "$RS" --repo "$REPO" --repo-root "$TGT_USER" --apply 2>&1)" \
+  && fail "W8b: apply CERTIFIED through a failed committed read; got: $out"
+printf '%s\n' "$out" | grep -Fq "could NOT be materialized" \
+  || fail "W8b: the apply refusal must be the materialization cause; got: $out"
+if [ -s "$W8B_LOG" ]; then
+  echo "--- gh calls made before the committed-read refusal:"; cat "$W8B_LOG"
+  fail "W8b: gh was called BEFORE the committed read refused — the read must sit immediately after fsck, ahead of every live gate (F47)"
+fi
+
+# (W8c / F48) Every `_git` child is BOUNDED and prompt-suppressed. Asserted on the module directly:
+#       a sleeping git under a 2s bound must refuse via the OSError conversion (never hang — the
+#       alarm reds a neutered bound), and the child must actually receive GIT_TERMINAL_PROMPT=0 +
+#       GIT_NO_REPLACE_OBJECTS=1.
+#       Red-when-broken: drop the `timeout=` kwarg in `_git` and the sleeping child hangs -> rc=142;
+#       drop either env pin and the env assertion fails.
+SLEEP_GIT="$WORK/sleep-git"; mkdir -p "$SLEEP_GIT"
+printf '#!/bin/sh\nsleep 60\n' > "$SLEEP_GIT/git"; chmod +x "$SLEEP_GIT/git"
+ENV_GIT="$WORK/env-git"; mkdir -p "$ENV_GIT"
+cat > "$ENV_GIT/git" <<SHIM
+#!/bin/sh
+printf 'GIT_TERMINAL_PROMPT=[%s] GIT_NO_REPLACE_OBJECTS=[%s]\n' "\${GIT_TERMINAL_PROMPT:-}" "\${GIT_NO_REPLACE_OBJECTS:-}" > "$WORK/w8c-env.txt"
+exec "$REAL_GIT" "\$@"
+SHIM
+chmod +x "$ENV_GIT/git"
+PATH="$SLEEP_GIT:$PATH" perl -e 'alarm shift @ARGV; exec @ARGV' 30 \
+  python3 - "$PLUGIN/scripts" "$TGT_USER" <<'PY' \
+  || fail "W8c: a hung git child was not killed at the bound (F48) — a neutered timeout HANGS, and a hang is RED"
+import sys
+sys.path.insert(0, sys.argv[1])
+import idc_ruleset_install as INS
+INS._GIT_TIMEOUT_SECONDS = 2
+try:
+    INS._git(sys.argv[2], ["rev-parse", "HEAD"])
+except OSError as exc:
+    if "did not finish within" not in str(exc):
+        print("WRONG-REFUSAL: %s" % exc)
+        sys.exit(1)
+    print("W8c ok: sleeping git killed at the 2s bound -> %s" % exc)
+    sys.exit(0)
+print("NO-BOUND: the sleeping git call returned without a timeout refusal")
+sys.exit(1)
+PY
+PATH="$ENV_GIT:$PATH" python3 - "$PLUGIN/scripts" "$TGT_USER" <<'PY' >/dev/null 2>&1
+import sys
+sys.path.insert(0, sys.argv[1])
+import idc_ruleset_install as INS
+INS._git(sys.argv[2], ["rev-parse", "HEAD"])
+PY
+grep -Fq 'GIT_TERMINAL_PROMPT=[0] GIT_NO_REPLACE_OBJECTS=[1]' "$WORK/w8c-env.txt" 2>/dev/null \
+  || fail "W8c: the git child did not receive GIT_TERMINAL_PROMPT=0 + GIT_NO_REPLACE_OBJECTS=1 (F48); got: $(cat "$WORK/w8c-env.txt" 2>/dev/null || echo 'no capture')"
+
+# (W8d / F55) Every `gh` call is bounded the same way: a sleeping gh under a 2s bound must refuse
+#       through `_gh_json`'s RuntimeError door (the arm every call site already fails closed on).
+#       Red-when-broken: drop the `timeout=` kwarg in `_gh_json` and this hangs -> rc=142 -> red.
+SLEEP_GH="$WORK/sleep-gh"; mkdir -p "$SLEEP_GH"
+printf '#!/bin/sh\nsleep 60\n' > "$SLEEP_GH/gh"; chmod +x "$SLEEP_GH/gh"
+PATH="$SLEEP_GH:$PATH" perl -e 'alarm shift @ARGV; exec @ARGV' 30 \
+  python3 - "$PLUGIN/scripts" <<'PY' \
+  || fail "W8d: a hung gh child was not killed at the bound (F55) — a neutered timeout HANGS, and a hang is RED"
+import sys
+sys.path.insert(0, sys.argv[1])
+import idc_ruleset_install as INS
+INS._GH_TIMEOUT_SECONDS = 2
+try:
+    INS._gh_json(["api", "repos/idc-stub-owner/idc-stub-target"])
+except RuntimeError as exc:
+    if "did not finish within" not in str(exc):
+        print("WRONG-REFUSAL: %s" % exc)
+        sys.exit(1)
+    print("W8d ok: sleeping gh killed at the 2s bound -> %s" % exc)
+    sys.exit(0)
+print("NO-BOUND: the sleeping gh call returned without a timeout refusal")
+sys.exit(1)
+PY
 
 echo "PASS: the installer's --apply path binds certification to the live repository (W2+W3) — the validation ref must NAME GitHub's live default branch (a stale origin/HEAD, a non-default override, and a raw SHA are all refused; both \`D\` and \`origin/D\` spellings pass) and the local checkout must be at the same tip; every CODEOWNERS owner principal must resolve with write-or-better access (missing/read-only user, missing/read-only team, an email owner, a gh failure, and a non-JSON body each refuse fail-closed), with maintain/admin accepted, a body omitting the legacy \`permission\` field decided on GitHub's BOOLEAN capability map (GHE compatibility) and REFUSED when it carries neither that map nor a \`permission\` field, so a free-form custom role name can neither out-vote an authoritative 'read' nor stand in as proof of access on its own (NEW-12); wrong-SHAPE gh bodies REFUSE instead of raising KeyError/AttributeError (F16); the rulesets listing is PAGINATED, so a ruleset on page 2 is updated rather than duplicated (F24), and an already-installed ruleset takes the PUT/update branch (F23); that page walk REFUSES rather than mutating on anything short of a complete listing — a null/empty body is not proof of absence and makes ZERO mutation calls (F34), a backend ignoring per_page cannot truncate it into a duplicate CREATE, and a listing that never empties is refused at a page ceiling instead of looping forever (F36); the git OBJECT STORE behind \`git show\` is itself verified with \`git fsck\` before anything is certified, so substituting the committed blob's object file — or the enclosing tree, which self-consistently re-hashes — is REFUSED in apply AND dry-run while a healthy checkout still passes (F13); the production denylist matches CASE-INSENSITIVELY before any network call (F31); and dry-run still makes ZERO gh calls"

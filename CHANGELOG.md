@@ -69,22 +69,37 @@ and the history was deliberately not rewritten; the substantive review findings 
 the code and tests above._
 
 _Deliberately PARKED out of this release (named here so the gap is on the record rather than implied
-closed). Four items from the release review were held back and ship as follow-ups:_
+closed). Four items from the release review were held back and ship as follow-ups. **Two of the four
+have since been fixed on the `followup/part4a-vpin-vdoor` branch and are marked below; the status
+lines are part of this record precisely so a reader does not have to guess which of the four are still
+open.** They carry no version heading of their own because they are not released yet — the release
+that carries them will restate them under its own dated heading:_
 
-- _**SHA-pinned GitHub Actions.** The workflows referenced `actions/checkout@v4` and
-  `oven-sh/setup-bun@v2` by moving tag. Deferred at the time because resolving the exact commit needed
-  network access and a wrong pin would have broken the required check._
-- _**Removal of the public authorization door.** `idc_path_gate.py authorize` was callable from any
-  Bash in a session with caller-chosen scope. An interim role-action ceiling shipped in this release
-  (a read-only command can never mint a write grant); deleting the verb outright was held back because
-  it needed `/idc:init` to gain an internal mint first._
-- _**Transition-scoped path authorization.** The spec calls for authorization minted at the Build
-  claim with the ticket's declared paths; this release mints one whole-repo grant per command at entry.
-  The narrow scope is enforced after the fact at receipt time, not at mutation time._
-- _**Codex per-tool gate coverage.** `scripts/install-codex.sh` wires no hooks, so Codex work is
-  covered only by the git pre-commit/pre-push backstop, not by a per-tool gate like Claude and Pi._
+- _**SHA-pinned GitHub Actions.** — **FIXED (unreleased, V-PIN).** The workflows referenced
+  `actions/checkout@v4` and `oven-sh/setup-bun@v2` by moving tag. Deferred at the time because
+  resolving the exact commit needed network access and a wrong pin would have broken the required
+  check. Every `uses:` under `.github/workflows/` is now pinned to a full 40-hex commit SHA, and
+  `scripts/lint-references.sh` Rule Q enforces it on every commit — including the `uses :`,
+  `- {uses: …}`, quoted-ref and `./../..` spellings that a naive detector misses._
+- _**Removal of the public authorization door.** — **FIXED, WITH A NAMED RESIDUAL (unreleased,
+  V-DOOR).** `idc_path_gate.py authorize` was callable from any Bash in a session with caller-chosen
+  scope. An interim role-action ceiling shipped in this release (a read-only command can never mint a
+  write grant); deleting the verb outright was held back because it needed `/idc:init` to gain an
+  internal mint first. The verb is now DELETED and init mints internally, so **no caller-chosen-scope
+  door remains anywhere.** The residual: `idc_command_contract.py start --command init` is still a CLI
+  whose only precondition is a governed repository, so init's FIXED profile is self-servable. That is
+  narrowed, not closed — recorded in `docs/dev/known-debts.md` and characterized by
+  `tests/smoke/governance/path-gate-boundaries.sh` D2 §3c._
+- _**Transition-scoped path authorization.** — **STILL OPEN.** The spec calls for authorization
+  minted at the Build claim with the ticket's declared paths; this release mints one whole-repo grant
+  per command at entry. The narrow scope is enforced after the fact at receipt time, not at mutation
+  time._
+- _**Codex per-tool gate coverage.** — **STILL OPEN.** `scripts/install-codex.sh` wires no hooks, so
+  Codex work is covered only by the git pre-commit/pre-push backstop, not by a per-tool gate like
+  Claude and Pi._
 
-_`controlled` mode's honest limitation list in `templates/WORKFLOW.md` states each of these as open._
+_`controlled` mode's honest limitation list in `templates/WORKFLOW.md` states each still-open item as
+open._
 
 ## 4.2.0 — 2026-07-19
 

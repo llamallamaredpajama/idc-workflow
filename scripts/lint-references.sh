@@ -36,6 +36,10 @@
 #      backend adapter skill idc-tracker-github IS the sanctioned low-level implementation the engine
 #      wraps, so it is exempt; a PROHIBITION ("no raw …", "never …") naming the snippet to forbid it
 #      is exempt (negation cue on the line); an explicit `lint-allow` marker is exempt.
+#   R. No shipped surface may DIRECT a caller at a Path Gate minting door — neither the deleted
+#      `idc_path_gate.py authorize` verb (V-DOOR) nor the scenario mint fixture
+#      `tests/smoke/lib/path_gate_authorize.py`, which ships inside the plugin package. Minting is
+#      admission-side. Negation cue / lint-allow exempt, exactly as Rule N.
 #
 # Exit 0 = clean. Exit 1 = findings printed as <file>:<line>: <rule> <excerpt>.
 # Lines containing "lint-allow" are exempt for Rules B–K (use sparingly, with a reason);
@@ -209,6 +213,27 @@ for f in $MD_FILES; do
       done < <(filtered_grep 'gh project item-(edit|add|delete)|updateProjectV2ItemFieldValue|addProjectV2ItemById|deleteProjectV2Item' "$f")
       ;;
   esac
+
+  # Rule R — no shipped surface may direct a caller at a Path Gate MINTING door. Minting an
+  # authorization is an admission-side privilege: production mints happen inside
+  # `idc_command_entry_gate._ensure_path_gate_auth` and `idc_command_contract._mint_or_rollback`, and
+  # `scripts/idc_path_gate.py` deliberately exposes NO `authorize` verb (V-DOOR) because the one it
+  # used to expose honored caller-chosen --command/--allow-action/--allow-path. Two doors could
+  # reappear in prose alone, with nothing to catch them:
+  #   * `idc_path_gate.py authorize …` — a playbook re-adding the deleted verb. The verb's ABSENCE is
+  #     asserted structurally by `governance/path-gate-boundaries.sh` D2 §3b; this catches the shipped
+  #     INSTRUCTION, which is what would motivate someone to re-add it.
+  #   * `tests/smoke/lib/path_gate_authorize.py` — the scenario mint fixture. `tests/` IS inside the
+  #     published package (marketplace source is "./"), so that path exists on every governed machine;
+  #     it now refuses outside a signalled scratch tree, but a shipped playbook must never point at it.
+  # A prohibition naming the door in order to forbid it carries a negation cue → exempt. `lint-allow`
+  # (via filtered_grep) exempts an explicit, reasoned exception. A bare directive fails.
+  while IFS= read -r hit; do
+    [ -z "$hit" ] && continue
+    lineno="${hit%%:*}"; line_txt="${hit#*:}"
+    printf '%s\n' "$line_txt" | grep -qiE '\b(no|never|not|without|dont|don.t|deleted|removed|refuses)\b' && continue
+    report "$f:$lineno: [path-gate-mint-directive] shipped prose points a caller at a Path Gate minting door; minting is admission-side (idc_command_entry_gate / idc_command_contract), idc_path_gate.py has no authorize verb, and the scenario fixture is not an authorization door: ${line_txt}"
+  done < <(filtered_grep "idc_path_gate\.py['\"\`]?[[:space:]]+authorize([[:space:]]|['\"\`]|$)|path_gate_authorize\.py" "$f")
 done
 
 # Rule O — workflow-machine.yaml cross-check.
@@ -299,20 +324,45 @@ fi
 # code inside this repo, already covered by CODEOWNERS and the pathway checker's protected surfaces.
 # Anything else (including a `docker://` ref) must be a 40-hex SHA or it fails here by design.
 # Deliberately NOT lint-allow-exemptible: a supply-chain pin with a per-line bypass is not a pin.
+#
+# The MATCHING is the security-relevant half of this rule: a `uses:` spelling the detector does not
+# see is an unpinned action that lints CLEAN. Four spellings previously slipped through, all of them
+# valid YAML that GitHub Actions executes exactly like the canonical form:
+#   * `uses : actions/checkout@v4` — YAML permits whitespace before the `:`;
+#   * `- {uses: actions/checkout@v4}` and `- {name: x, uses: y@v4}` — FLOW mappings, where `uses`
+#     is not the first thing on the line;
+#   * `uses: "actions/checkout@<40-hex>"` — a correctly pinned but QUOTED ref, whose trailing quote
+#     broke the `@<sha>$` anchor and produced a FALSE POSITIVE on a good pin;
+#   * `uses: ./../../elsewhere` — the local-action exemption matched any `./` prefix, so a `..`
+#     traversal out of this repository's own action surface was silently exempted.
+# So: the detector accepts whitespace before the colon and `uses` after a `{` or `,`; the extractor
+# strips flow-mapping punctuation and surrounding quotes before the anchor test; and the local
+# exemption requires a `./` path with NO `..` component.
 if [ -d .github/workflows ]; then
   while IFS= read -r hit; do
     [ -z "$hit" ] && continue
     qfile="${hit%%:*}"; qrest="${hit#*:}"; qline="${qrest%%:*}"; qtext="${qrest#*:}"
-    # Strip the leading list dash / `uses:` key, then take the ref token (a trailing `# v4`
-    # comment is whitespace-separated, so the first field IS the ref).
-    qref=$(printf '%s\n' "$qtext" | sed -E 's/^[[:space:]]*(-[[:space:]]*)?uses:[[:space:]]*//' | awk '{print $1}')
+    # Take everything after the LAST `uses` key on the line (so `{name: a, uses: b}` yields `b`),
+    # then the first whitespace-separated field (a trailing `# v4` comment falls away), then peel
+    # flow-mapping punctuation and surrounding quotes off the ref itself.
+    qref=$(printf '%s\n' "$qtext" \
+      | sed -E 's/^.*uses[[:space:]]*:[[:space:]]*//' \
+      | awk '{print $1}' \
+      | sed -E 's/[},]+$//' \
+      | sed -E "s/^['\"]//; s/['\"]\$//")
+    [ -z "$qref" ] && continue
     case "$qref" in
+      *..*)
+        # A `..` component leaves this repository's action surface, so the in-repo rationale for the
+        # local exemption does not hold; it is neither exempt nor pinnable as written.
+        report "$qfile:$qline: [unpinned-action] \`uses: $qref\` is a LOCAL action reference containing a \`..\` component, which points outside this repository's own action surface — the local-action exemption covers only in-repo \`./\` paths (already governed by CODEOWNERS and the pathway checker). Use a path with no \`..\`, or reference the upstream action pinned to a full 40-hex commit SHA"
+        continue ;;
       ./*) continue ;;   # local composite action — in-repo code, no upstream SHA to pin
     esac
     if ! printf '%s\n' "$qref" | grep -qE '@[0-9a-f]{40}$'; then
       report "$qfile:$qline: [unpinned-action] \`uses: $qref\` is not pinned to a full 40-hex commit SHA — a moving tag/branch ref lets the action owner (or a compromised account) change what runs in this workflow. Resolve it with \`gh api repos/<owner>/<repo>/git/ref/tags/<tag> --jq .object.sha\` and keep a trailing \`# <tag>\` comment for readability"
     fi
-  done < <(grep -rnE '^[[:space:]]*(-[[:space:]]*)?uses:[[:space:]]*[^[:space:]]' .github/workflows 2>/dev/null || true)
+  done < <(grep -rnE '(^[[:space:]]*(-[[:space:]]*)?\{?|[{,])[[:space:]]*uses[[:space:]]*:[[:space:]]*[^[:space:]]' .github/workflows 2>/dev/null || true)
 fi
 
 # Rule A — dangling namespaced references (ignores lint-allow by design).

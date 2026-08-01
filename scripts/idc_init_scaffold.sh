@@ -103,9 +103,26 @@ for f in WORKFLOW.md WORKFLOW-config.yaml docs/workflow/tracker-config.yaml; do
 done
 
 # Select the backend; for filesystem, initialize TRACKER.md.
+#
+# `project_number` is a GITHUB-ONLY key — this template's own header says the filesystem backend needs
+# neither it nor `field_ids`. But only the github path ever substituted `{{TRACKER_PROJECT_NUMBER}}`
+# (init Phase 4, which a filesystem scaffold SKIPS), so a filesystem-backed repo shipped a governance
+# contract reading `backend: filesystem` on one line and `project_number: "{{TRACKER_PROJECT_NUMBER}}"`
+# on the next: an unrendered template token, in the operator's repo, forever. Nothing caught it because
+# CI's smoke-render substitutes every token UNCONDITIONALLY before scanning, which structurally cannot
+# reproduce a token the real scaffold leaves behind.
+#
+# The filesystem branch therefore EMPTIES the value and KEEPS the key, which is exactly how this same
+# file already treats the other github-only keys (`field_ids: Status: ""` …). Keeping the key matters:
+# `/idc:update` compares STRUCTURE against the template (`idc_config_keys.py`), so deleting or
+# commenting the line would make every future update advise a filesystem repo to adopt a key it must
+# never have. And an empty value is not a usable one — the github readers all extract an integer
+# (`grep -oE '[0-9]+'`) and `/idc:doctor` only requires a real integer on the github backend.
 if [ "$BACKEND" = "filesystem" ]; then
   tmp="$(mktemp)"
-  sed "s|^backend: .*|backend: filesystem|" docs/workflow/tracker-config.yaml > "$tmp" \
+  sed -e "s|^backend: .*|backend: filesystem|" \
+      -e "s|^project_number:.*|project_number: \"\"                             # github backend only; the filesystem tracker is TRACKER.md at the repo root|" \
+      docs/workflow/tracker-config.yaml > "$tmp" \
     && mv "$tmp" docs/workflow/tracker-config.yaml
   python3 "$PLUGIN_ROOT/scripts/idc_tracker_fs.py" --tracker "$REPO_ROOT/TRACKER.md" init
 fi

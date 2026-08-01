@@ -708,16 +708,29 @@ def cmd_auth_path(args: argparse.Namespace) -> int:
 
 
 # DELIBERATELY NO `authorize` CLI VERB (V-DOOR). Minting an authorization is an ADMISSION-side
-# privilege, not an agent-side one, so it has no public door: `write_authorization` is reachable only
-# through the Python API, and the only two callers are admission code —
-# `idc_command_entry_gate._ensure_path_gate_auth` (every command minted by the hook, no caller-chosen
-# scope) and `idc_command_contract._mint_or_rollback` (the fixed default profile for a self-minting
-# command, i.e. init). The verb that used to live here honored caller-supplied
+# privilege, not an agent-side one, so THIS module exposes no minting verb: `write_authorization` is
+# reachable only through the Python API. The verb that used to live here honored caller-supplied
 # `--command`/`--allow-action`/`--allow-path`, so ANY Bash in a session whose only precondition was
 # "an active command record exists" could mint itself a broad write/edit/git grant over the whole
-# repo. Do not re-add it: a new legitimate minting need belongs on the Python API behind the
-# admission lock, with the role-action ceiling (`_role_action_ceiling`) intact.
-# `governance/path-gate-boundaries.sh` asserts no CLI path mints a grant.
+# repo, at any scope it named. Do not re-add it: a new legitimate minting need belongs on the Python
+# API behind the admission lock, with the role-action ceiling (`_role_action_ceiling`) intact.
+#
+# WHAT IS AND IS NOT TRUE, PRECISELY (this comment previously claimed "the only two callers are
+# admission code", which reads as "no agent-reachable mint remains" and is FALSE):
+#   * Both production callers are admission code — `idc_command_entry_gate._ensure_path_gate_auth`
+#     (every command minted by the UserPromptExpansion hook) and
+#     `idc_command_contract._mint_or_rollback` (a self-minting command, i.e. init). Neither takes a
+#     caller-chosen scope; the profile comes from the command name alone.
+#   * BUT `idc_command_contract.py start --command init` is a CLI, and its only precondition is a
+#     governed repository. Any Bash in a governed session can therefore still open an init record and
+#     receive init's FIXED default profile (write/edit/git over `.`). No caller-chosen-scope door
+#     remains; a fixed-profile self-serve one does. It is NOT a regression — the equivalent route
+#     predates V-DOOR — and it is not closed here because the only admission-side signal that could
+#     gate it comes from the Claude-only entry gate, which Codex and Pi never run: init's self-mint is
+#     the ONLY mint path those runtimes have, so requiring an entry-gate token would deny every commit
+#     they make in a `controlled` repository through the git backstops. Tracked in
+#     `docs/dev/known-debts.md` ("init self-mint is self-servable").
+# `governance/path-gate-boundaries.sh` asserts BOTH CLIs, each enumerated off its own parser.
 
 
 def cmd_evaluate(args: argparse.Namespace) -> int:

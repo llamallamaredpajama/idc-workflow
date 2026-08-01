@@ -12,8 +12,11 @@ ENTRY="$GOV_PLUGIN/scripts/hooks/idc_command_entry_gate.py"
 GATE="$GOV_PLUGIN/scripts/hooks/idc_interlock_gate.py"
 CONTRACT="$GOV_PLUGIN/scripts/idc_command_contract.py"
 PATH_GATE="$GOV_PLUGIN/scripts/idc_path_gate.py"
-# TEST-ONLY mint door. idc_path_gate.py has no `authorize` verb (V-DOOR); this fixture calls the
-# same write_authorization Python API the real admission minters use, ceiling and all.
+# SCENARIO mint door. idc_path_gate.py has no `authorize` verb (V-DOOR); this fixture calls the
+# same write_authorization Python API the real admission minters use, ceiling and all. It SHIPS
+# with the plugin (marketplace source is "./"), so it refuses unless BOTH IDC_SMOKE_FIXTURE=1 is
+# exported AND --repo is a scratch tree; every repo below is built with `mktemp -d`.
+export IDC_SMOKE_FIXTURE=1
 PG_AUTHORIZE="$GOV_PLUGIN/tests/smoke/lib/path_gate_authorize.py"
 [ -f "$ENTRY" ] || gov_fail "idc_command_entry_gate.py not found at $ENTRY"
 [ -f "$GATE" ] || gov_fail "idc_interlock_gate.py not found at $GATE"

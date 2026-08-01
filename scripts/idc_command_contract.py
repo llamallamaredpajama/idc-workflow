@@ -103,6 +103,18 @@ COMMANDS = {
 # a privilege-escalation door with exactly one production caller that needed none of its flexibility.
 # The verb is gone; `start` mints the FIXED default profile for these commands instead, with no
 # caller input beyond the command name, bound to the nonce of the record it just wrote.
+#
+# HONEST RESIDUAL — `start` IS a CLI, so this is a narrowing, not a closure. Its only precondition is
+# a governed repository, so any Bash in a governed session can open an init record and receive init's
+# fixed profile (write/edit/git over `.`). What that no longer buys is a caller-chosen SCOPE: there
+# are no --allow-path/--allow-action flags anywhere on this parser, and a read-only command's role
+# ceiling still refuses a mutation grant. Closing the residual needs a single-use admission token
+# issued by `idc_command_entry_gate`, and that gate is a Claude `UserPromptExpansion` hook that Codex
+# and Pi never run — for those runtimes this self-mint is the ONLY mint path in the system (verified:
+# `write_authorization` has exactly two production callers, and the other is that hook), so requiring
+# a token would leave every Codex/Pi commit denied by the git backstops in a `controlled` repository.
+# Tracked in `docs/dev/known-debts.md`; asserted, not claimed away, by
+# `governance/path-gate-boundaries.sh` (D2 §3c).
 SELF_MINTING_COMMANDS = {"init"}
 # The honest ways a command lifecycle can END (the GLOBAL set). Task 6 narrows the legal subset
 # PER COMMAND (LEGAL_STATUSES) and attaches command-specific evidence to each.

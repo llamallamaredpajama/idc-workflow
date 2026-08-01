@@ -100,14 +100,37 @@ done
 # read as "closed" to an operator with no evidence that anything changed.
 for phrase in \
   'Authorization is minted per COMMAND, not per transition' \
-  'One authorization per repository — not per worktree, not per branch' \
+  'One authorization per worktree — the newest mint wins' \
   'Pi and Codex are not first-class lifecycle producers' \
-  'There is no sanctioned finisher/merge helper' \
+  'No sanctioned merge helper on the experimental Pi runtime' \
   'Identity binding is optional, not mandatory' \
   'No TTL renewal'; do
   need_literal templates/WORKFLOW.md "$phrase" \
     "dropped the controlled-mode limitation '$phrase' — deleting a line an operator relied on reads as 'closed'; if it really closed, its claim must be removed together with the code that made it true"
 done
+
+# ── The two limitations that were OVERSTATED, not understated ─────────────────────────────────────
+# Both of these lines used to tell every governed repo something FALSE about its own guarantees, in
+# the safe-sounding direction (claiming LESS protection than exists), which is why nothing caught them:
+#
+#   * "One authorization per repository … Parallel workers in separate worktrees share a single grant."
+#     The authorization lives at `git rev-parse --git-path idc-path-gate/authorization.json`, which
+#     resolves into each LINKED WORKTREE'S OWN git directory, and `assert_allowed` refuses a mutation
+#     whose live branch differs from the grant's. Worktrees do not share a grant and the grant IS
+#     branch-bound. An operator reading the old line would have serialized parallel work for nothing.
+#   * "There is no sanctioned finisher/merge helper. The operator performs every merge." True on the
+#     experimental Pi runtime ONLY. Claude and Codex self-merge through `idc_pr_finish.py autonomous`
+#     and `idc_git_finish.py` — and this same file says so in §4.3a, so the file contradicted itself.
+#
+# These reject the corrected claims from regressing back to the false ones.
+reject_literal templates/WORKFLOW.md 'separate worktrees share a single grant' \
+  'still tells governed repos that parallel worktrees share one Path Gate grant — they do not: the authorization resolves into each linked worktree'"'"'s own git dir and every grant is branch-bound'
+reject_literal templates/WORKFLOW.md 'There is no sanctioned finisher/merge helper' \
+  'still universalises a Pi-ONLY limitation — Claude and Codex self-merge through idc_pr_finish.py autonomous / idc_git_finish.py, which this same file describes in §4.3a'
+need_literal templates/WORKFLOW.md 'resolves to each linked worktree'"'"'s OWN git directory' \
+  'must state where the authorization actually lives, or the corrected worktree claim is just a different assertion with no reason attached'
+need_literal templates/WORKFLOW.md 'Claude and Codex DO self-merge through the sanctioned finishers' \
+  'must name the runtimes that DO have a sanctioned merge helper, so the Pi carve-out cannot be read as a system-wide gap again'
 # The one limitation with no per-tool coverage at all must say so in those words.
 need_literal templates/WORKFLOW.md '**Codex has no per-tool gate at all**' \
   'must state plainly that Codex has no per-tool gate — scripts/install-codex.sh wires no hooks, so Codex is covered only by the git backstop'

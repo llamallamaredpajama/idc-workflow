@@ -85,6 +85,15 @@ SURFACE_CLASSES = (
     # could weaken the script that decides whether protected surfaces are owned, and the weakening
     # would certify clean. Same class as the deterministic checker above, so same treatment.
     ("ownership",  "file", "scripts/idc_ruleset_check.py"),
+    # F4: the three ENFORCEMENT scripts the spec names as blocking surfaces. The spec claimed
+    # code-owner protection over them (§2.2 evidence leg, §5 T3 row) while none was owned by anyone
+    # and no catch-all rule existed — the N1 defect one file over. The Path Gate decides every
+    # mutation, the git backstop is the only gate Codex/Pi get at all, and the build receipt is the
+    # evidence artifact Build closes against; an unreviewed edit to any of them silently removes the
+    # protection the other guards are measured against.
+    ("pathgate",   "file", "scripts/idc_path_gate.py"),
+    ("gitgate",    "file", "scripts/idc_git_path_gate.py"),
+    ("receiptmint", "file", "scripts/idc_build_receipt.py"),
     ("ruleset",    "dir",  ".github/rulesets"),
     ("codeowners", "file", CODEOWNERS_CANONICAL),
 )

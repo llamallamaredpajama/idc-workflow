@@ -307,6 +307,9 @@ mk_target() {  # $1=dir  $2=owner token for every rule
 /scripts/idc_receipt_check.py $2
 /scripts/idc_pathway_check.py $2
 /scripts/idc_ruleset_check.py $2
+/scripts/idc_path_gate.py $2
+/scripts/idc_git_path_gate.py $2
+/scripts/idc_build_receipt.py $2
 /.github/rulesets/ $2
 /.github/CODEOWNERS $2
 CO
@@ -435,6 +438,9 @@ cat > "$TGT_REPL/.github/CODEOWNERS" <<'CO'
 /scripts/idc_receipt_check.py @alice
 /scripts/idc_pathway_check.py @alice
 /scripts/idc_ruleset_check.py @alice
+/scripts/idc_path_gate.py @alice
+/scripts/idc_git_path_gate.py @alice
+/scripts/idc_build_receipt.py @alice
 /.github/rulesets/ @alice
 /.github/CODEOWNERS @alice
 CO
@@ -458,6 +464,9 @@ cat > "$TGT_REPL/.github/CODEOWNERS" <<'CO'
 /scripts/idc_receipt_check.py @alice
 /scripts/idc_pathway_check.py @alice
 /scripts/idc_ruleset_check.py @alice
+/scripts/idc_path_gate.py @alice
+/scripts/idc_git_path_gate.py @alice
+/scripts/idc_build_receipt.py @alice
 /.github/rulesets/ @alice
 /.github/CODEOWNERS @alice
 CO
@@ -803,6 +812,9 @@ CO
 /scripts/idc_receipt_check.py @alice
 /scripts/idc_pathway_check.py @alice
 /scripts/idc_ruleset_check.py @alice
+/scripts/idc_path_gate.py @alice
+/scripts/idc_git_path_gate.py @alice
+/scripts/idc_build_receipt.py @alice
 /.github/rulesets/ @alice
 /.github/CODEOWNERS @alice
 CO

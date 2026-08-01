@@ -31,6 +31,9 @@ fail() { echo "FAIL: $1"; exit 1; }
 # refuse on the governance gap even if the vector surface were wrongly certified).
 GOV='/scripts/idc_pathway_check.py @team
 /scripts/idc_ruleset_check.py @team
+/scripts/idc_path_gate.py @team
+/scripts/idc_git_path_gate.py @team
+/scripts/idc_build_receipt.py @team
 /.github/rulesets/ @team
 /.github/CODEOWNERS @team'
 add_gov() { printf '%s\n' "$GOV" >> "$1/.github/CODEOWNERS"; }   # $1 = repo root
@@ -92,13 +95,70 @@ refute "protected RULESET-DIR surface removed (.github/rulesets)" \
   'contract["protected_surfaces"] = [s for s in contract["protected_surfaces"] if ".github/rulesets" not in s]'
 refute "protected CODEOWNERS-self surface removed (.github/CODEOWNERS)" \
   'contract["protected_surfaces"] = [s for s in contract["protected_surfaces"] if "CODEOWNERS" not in s]'
+# N1 — the OWNERSHIP checker is its own mandatory class. It was added to SURFACE_CLASSES with no
+# refute of its own, so removing it from the shipped contract reded nowhere near this lane.
+refute "protected OWNERSHIP surface removed (idc_ruleset_check.py)" \
+  'contract["protected_surfaces"] = [s for s in contract["protected_surfaces"] if "idc_ruleset_check.py" not in s]'
+# F4 — the three ENFORCEMENT surfaces are mandatory classes for the same reason.
+refute "protected PATH-GATE surface removed (idc_path_gate.py)" \
+  'contract["protected_surfaces"] = [s for s in contract["protected_surfaces"] if s != "scripts/idc_path_gate.py"]'
+refute "protected GIT-BACKSTOP surface removed (idc_git_path_gate.py)" \
+  'contract["protected_surfaces"] = [s for s in contract["protected_surfaces"] if s != "scripts/idc_git_path_gate.py"]'
+refute "protected BUILD-RECEIPT surface removed (idc_build_receipt.py)" \
+  'contract["protected_surfaces"] = [s for s in contract["protected_surfaces"] if s != "scripts/idc_build_receipt.py"]'
+
+# ── N1 (the direction with no net) — SURFACE_CLASSES <-> protected_surfaces, BOTH WAYS ─────────────
+# Every refute above deletes an entry from the ruleset JSON. That direction was already covered three
+# times over. The direction that had NO guard at all is deleting a CLASS from
+# `idc_ruleset_check.SURFACE_CLASSES`: the shipped ruleset keeps declaring the surface, nothing
+# mandates it any more, and the whole governance suite stays green — the exact shape of F61, which
+# `pathway-check-surface-alignment.sh` was written for, reintroduced one file over in the commit that
+# claimed to fix it.
+#
+# This assertion is DERIVED and BIDIRECTIONAL, so it needs no maintenance when a class is added:
+#   forward  — every declared class must be covered by some protected_surfaces entry (this is what
+#              validate_contract already enforces; asserted here so the reverse leg cannot be
+#              satisfied vacuously by an empty class list);
+#   reverse  — every protected_surfaces entry must be claimed by some declared class, so an entry
+#              orphaned by a class deletion is a FAILURE instead of being tolerated as unclassified.
+# Red-when-broken: delete any tuple from SURFACE_CLASSES and the reverse leg names the orphan.
+timeout 60 python3 - "$PLUGIN" "$RS" <<'PY' || fail "SURFACE_CLASSES and the shipped ruleset's protected_surfaces are not in bidirectional agreement (see message above)"
+import json, sys
+sys.path.insert(0, sys.argv[1] + "/scripts")
+import idc_ruleset_check as RC
+
+declared = json.load(open(sys.argv[2], encoding="utf-8"))["idc_contract"]["protected_surfaces"]
+classes = list(RC.SURFACE_CLASSES)
+if not classes:
+    print("FAIL: SURFACE_CLASSES is EMPTY — both legs below would hold vacuously"); sys.exit(1)
+if not declared:
+    print("FAIL: protected_surfaces is EMPTY — both legs below would hold vacuously"); sys.exit(1)
+
+uncovered = [label for label, kind, canonical in classes
+             if not any(RC._surface_declares_class(s, kind, canonical) for s in declared)]
+if uncovered:
+    print("FAIL: SURFACE_CLASSES declares governance class(es) the shipped ruleset does not protect: "
+          f"{uncovered}"); sys.exit(1)
+
+orphans = [s for s in declared
+           if not any(RC._surface_declares_class(s, kind, canonical)
+                      for _label, kind, canonical in classes)]
+if orphans:
+    print("FAIL: the shipped ruleset protects surface(s) no SURFACE_CLASSES entry claims: "
+          f"{orphans}. Either a class tuple was deleted (the surface is now mandated by nothing and "
+          "an unreviewed weakening of it certifies clean) or a surface was added without declaring "
+          "its class. The two lists are ONE contract."); sys.exit(1)
+print(f"ok: {len(classes)} governance classes and {len(declared)} declared surfaces agree both ways")
+PY
 
 # --- F6: protected-surface OWNERSHIP (CODEOWNERS) validation ------------------------------------
 # require_code_owner_review in the ruleset only binds a reviewer once a CODEOWNERS file names each
 # protected surface. With --repo-root, the checker verifies that coverage and REFUSES an absent or
-# incomplete CODEOWNERS. The shipped repo carries a CODEOWNERS covering all four surface classes.
-python3 "$CHK" --ruleset "$RS" --repo-root "$PLUGIN" >/dev/null \
-  || fail "the shipped ruleset + repo CODEOWNERS was rejected (every protected surface must be owned)"
+# incomplete CODEOWNERS. The shipped repo carries a CODEOWNERS covering every declared surface class.
+# The checker's diagnostic is CAPTURED, not discarded: it is the only thing that names WHICH surface
+# lost its owner, and sending it to /dev/null turned a precise refusal into "something was rejected".
+out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$PLUGIN" 2>&1)" \
+  || fail "the shipped ruleset + repo CODEOWNERS was rejected (every protected surface must be owned); the checker said: $out"
 
 # A CODEOWNERS that leaves one protected surface unowned is refused.
 CO_ROOT="$WORK/co-incomplete"; mkdir -p "$CO_ROOT/.github"
@@ -398,6 +458,9 @@ f46_refute() {
 /scripts/idc_receipt_check.py @team
 /scripts/idc_pathway_check.py @team
 /scripts/idc_ruleset_check.py @team
+/scripts/idc_path_gate.py @team
+/scripts/idc_git_path_gate.py @team
+/scripts/idc_build_receipt.py @team
 /.github/rulesets/ @team
 /.github/CODEOWNERS @team
 CO
@@ -432,6 +495,9 @@ cat > "$F46_DIR_OK/.github/CODEOWNERS" <<'CO'
 /scripts/idc_receipt_check.py @team
 /scripts/idc_pathway_check.py @team
 /scripts/idc_ruleset_check.py @team
+/scripts/idc_path_gate.py @team
+/scripts/idc_git_path_gate.py @team
+/scripts/idc_build_receipt.py @team
 /.github/rulesets/ @team
 /.github/CODEOWNERS @team
 CO
@@ -477,6 +543,9 @@ cat > "$F49_ROOT/CODEOWNERS" <<'CO'
 /scripts/idc_receipt_check.py @team
 /scripts/idc_pathway_check.py @team
 /scripts/idc_ruleset_check.py @team
+/scripts/idc_path_gate.py @team
+/scripts/idc_git_path_gate.py @team
+/scripts/idc_build_receipt.py @team
 /.github/rulesets/ @team
 /.github/CODEOWNERS @team
 CO
@@ -495,6 +564,9 @@ cat > "$F49_OK/CODEOWNERS" <<'CO'
 /scripts/idc_receipt_check.py @team
 /scripts/idc_pathway_check.py @team
 /scripts/idc_ruleset_check.py @team
+/scripts/idc_path_gate.py @team
+/scripts/idc_git_path_gate.py @team
+/scripts/idc_build_receipt.py @team
 /.github/rulesets/ @team
 /.github/CODEOWNERS @team
 /CODEOWNERS @team
@@ -520,6 +592,9 @@ cat > "$F50_ROOT/.github/CODEOWNERS" <<'CO'
 /scripts/idc_receipt_check.py @team
 /scripts/idc_pathway_check.py @team
 /scripts/idc_ruleset_check.py @team
+/scripts/idc_path_gate.py @team
+/scripts/idc_git_path_gate.py @team
+/scripts/idc_build_receipt.py @team
 /.github/rulesets/ @team
 /.github/CODEOWNERS @team
 CODEOWNERS
@@ -660,6 +735,9 @@ cat > "$F41_EMAIL/.github/CODEOWNERS" <<'CO'
 /scripts/idc_receipt_check.py dev@example.com
 /scripts/idc_pathway_check.py dev@example.com
 /scripts/idc_ruleset_check.py dev@example.com
+/scripts/idc_path_gate.py dev@example.com
+/scripts/idc_git_path_gate.py dev@example.com
+/scripts/idc_build_receipt.py dev@example.com
 /.github/rulesets/ dev@example.com
 /.github/CODEOWNERS dev@example.com
 CO
@@ -695,6 +773,9 @@ mk_target() {  # $1=dir  $2=OWNER/REPO for origin  $3=1 to write+commit a coveri
 /scripts/idc_receipt_check.py @team
 /scripts/idc_pathway_check.py @team
 /scripts/idc_ruleset_check.py @team
+/scripts/idc_path_gate.py @team
+/scripts/idc_git_path_gate.py @team
+/scripts/idc_build_receipt.py @team
 /.github/rulesets/ @team
 /.github/CODEOWNERS @team
 CO
@@ -795,6 +876,9 @@ cat > "$TGT_EVILHOST/.github/CODEOWNERS" <<'CO'
 /scripts/idc_receipt_check.py @team
 /scripts/idc_pathway_check.py @team
 /scripts/idc_ruleset_check.py @team
+/scripts/idc_path_gate.py @team
+/scripts/idc_git_path_gate.py @team
+/scripts/idc_build_receipt.py @team
 /.github/rulesets/ @team
 /.github/CODEOWNERS @team
 CO
@@ -827,6 +911,9 @@ for f53 in "file://github.com/$SANDBOX.git|scheme" "https://github.com/decoy/$SA
 /scripts/idc_receipt_check.py @team
 /scripts/idc_pathway_check.py @team
 /scripts/idc_ruleset_check.py @team
+/scripts/idc_path_gate.py @team
+/scripts/idc_git_path_gate.py @team
+/scripts/idc_build_receipt.py @team
 /.github/rulesets/ @team
 /.github/CODEOWNERS @team
 CO
@@ -855,6 +942,9 @@ cat > "$TGT_UNCOMMITTED/.github/CODEOWNERS" <<'CO'
 /scripts/idc_receipt_check.py @team
 /scripts/idc_pathway_check.py @team
 /scripts/idc_ruleset_check.py @team
+/scripts/idc_path_gate.py @team
+/scripts/idc_git_path_gate.py @team
+/scripts/idc_build_receipt.py @team
 /.github/rulesets/ @team
 /.github/CODEOWNERS @team
 CO
@@ -909,6 +999,9 @@ cat > "$TGT_FLIP/.github/CODEOWNERS" <<'CO'
 /scripts/idc_receipt_check.py @team
 /scripts/idc_pathway_check.py @team
 /scripts/idc_ruleset_check.py @team
+/scripts/idc_path_gate.py @team
+/scripts/idc_git_path_gate.py @team
+/scripts/idc_build_receipt.py @team
 /.github/rulesets/ @team
 /.github/CODEOWNERS @team
 CO
@@ -944,7 +1037,7 @@ git -C "$TGT_CRLF" config commit.gpgsign false
 git -C "$TGT_CRLF" remote add origin "git@github.com:$SANDBOX.git"
 echo placeholder > "$TGT_CRLF/README.md"
 mkdir -p "$TGT_CRLF/.github"
-printf '/.github/workflows/ @team\r\n/scripts/hooks/ @team\r\n/scripts/idc_validation_contract.py @team\r\n/scripts/idc_receipt_check.py @team\r\n/scripts/idc_pathway_check.py @team\r\n/scripts/idc_ruleset_check.py @team\r\n/.github/rulesets/ @team\r\n/.github/CODEOWNERS @team\r\n' > "$TGT_CRLF/.github/CODEOWNERS"
+printf '/.github/workflows/ @team\r\n/scripts/hooks/ @team\r\n/scripts/idc_validation_contract.py @team\r\n/scripts/idc_receipt_check.py @team\r\n/scripts/idc_pathway_check.py @team\r\n/scripts/idc_ruleset_check.py @team\r\n/scripts/idc_path_gate.py @team\r\n/scripts/idc_git_path_gate.py @team\r\n/scripts/idc_build_receipt.py @team\r\n/.github/rulesets/ @team\r\n/.github/CODEOWNERS @team\r\n' > "$TGT_CRLF/.github/CODEOWNERS"
 git -C "$TGT_CRLF" add -A && git -C "$TGT_CRLF" commit -q -m init >/dev/null 2>&1
 git -C "$TGT_CRLF" update-ref refs/remotes/origin/main "$(git -C "$TGT_CRLF" rev-parse HEAD)"
 git -C "$TGT_CRLF" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
@@ -994,7 +1087,9 @@ import os, sys
 path, target = sys.argv[1], int(sys.argv[2])
 rules = ("/.github/workflows/ @team\n/scripts/hooks/ @team\n"
          "/scripts/idc_validation_contract.py @team\n/scripts/idc_receipt_check.py @team\n"
-         "/scripts/idc_pathway_check.py @team\n/scripts/idc_ruleset_check.py @team\n/.github/rulesets/ @team\n/.github/CODEOWNERS @team\n")
+         "/scripts/idc_pathway_check.py @team\n/scripts/idc_ruleset_check.py @team\n"
+         "/scripts/idc_path_gate.py @team\n/scripts/idc_git_path_gate.py @team\n"
+         "/scripts/idc_build_receipt.py @team\n/.github/rulesets/ @team\n/.github/CODEOWNERS @team\n")
 os.makedirs(os.path.dirname(path), exist_ok=True)
 need = target - len(rules.encode("utf-8"))
 assert need >= 3, "target size is smaller than the covering rules"
@@ -1043,7 +1138,9 @@ import os, sys
 path, target = sys.argv[1], int(sys.argv[2])
 rules = ["/.github/workflows/ @team", "/scripts/hooks/ @team",
          "/scripts/idc_validation_contract.py @team", "/scripts/idc_receipt_check.py @team",
-         "/scripts/idc_pathway_check.py @team", "/scripts/idc_ruleset_check.py @team", "/.github/rulesets/ @team",
+         "/scripts/idc_pathway_check.py @team", "/scripts/idc_ruleset_check.py @team",
+         "/scripts/idc_path_gate.py @team", "/scripts/idc_git_path_gate.py @team",
+         "/scripts/idc_build_receipt.py @team", "/.github/rulesets/ @team",
          "/.github/CODEOWNERS @team"]
 # Pad with many SHORT comment lines so there are thousands of CRLFs to undercount.
 body = "\r\n".join(rules) + "\r\n"
@@ -1113,7 +1210,9 @@ import os, sys
 path, target = sys.argv[1], int(sys.argv[2])
 rules = ("/.github/workflows/ @team\n/scripts/hooks/ @team\n"
          "/scripts/idc_validation_contract.py @team\n/scripts/idc_receipt_check.py @team\n"
-         "/scripts/idc_pathway_check.py @team\n/scripts/idc_ruleset_check.py @team\n/.github/rulesets/ @team\n/.github/CODEOWNERS @team\n")
+         "/scripts/idc_pathway_check.py @team\n/scripts/idc_ruleset_check.py @team\n"
+         "/scripts/idc_path_gate.py @team\n/scripts/idc_git_path_gate.py @team\n"
+         "/scripts/idc_build_receipt.py @team\n/.github/rulesets/ @team\n/.github/CODEOWNERS @team\n")
 os.makedirs(os.path.dirname(path), exist_ok=True)
 body = rules
 pad = "# " + ("é" * 40) + "\n"                # 3 ASCII + 80 bytes of payload = 83 bytes, 43 points
@@ -1179,7 +1278,9 @@ if not problem:
 # unknown must still be refused by validate_codeowners_content.
 rules = ("/.github/workflows/ @team\n/scripts/hooks/ @team\n"
          "/scripts/idc_validation_contract.py @team\n/scripts/idc_receipt_check.py @team\n"
-         "/scripts/idc_pathway_check.py @team\n/scripts/idc_ruleset_check.py @team\n/.github/rulesets/ @team\n/.github/CODEOWNERS @team\n")
+         "/scripts/idc_pathway_check.py @team\n/scripts/idc_ruleset_check.py @team\n"
+         "/scripts/idc_path_gate.py @team\n/scripts/idc_git_path_gate.py @team\n"
+         "/scripts/idc_build_receipt.py @team\n/.github/rulesets/ @team\n/.github/CODEOWNERS @team\n")
 surfaces = [".github/workflows", "scripts/hooks", "scripts/idc_validation_contract.py",
             "scripts/idc_receipt_check.py", "scripts/idc_pathway_check.py", "scripts/idc_ruleset_check.py", ".github/rulesets",
             ".github/CODEOWNERS"]
@@ -1424,6 +1525,9 @@ CO_RULES='/.github/workflows/ @team
 /scripts/idc_receipt_check.py @team
 /scripts/idc_pathway_check.py @team
 /scripts/idc_ruleset_check.py @team
+/scripts/idc_path_gate.py @team
+/scripts/idc_git_path_gate.py @team
+/scripts/idc_build_receipt.py @team
 /.github/rulesets/ @team
 /.github/CODEOWNERS @team'
 
@@ -1691,4 +1795,4 @@ printf '%s\n' "$out" | grep -Fq "$HUGE_BYTES" \
   || fail "W1h: the over-limit refusal must name the file's TRUE size, not the read bound; got: $out"
 rm -f "$W1_HUGE/.github/CODEOWNERS"
 
-echo "PASS: ruleset checker enforces PR flow, exact-head required check, force-push/deletion prevention, all seven protected surfaces (incl. the F40 governance-of-governance set: the checker, the ruleset dir, and CODEOWNERS itself), GitHub any-depth/last-match-wins ownership with a strict class allowlist that fails closed on unmodeled patterns, re-types a dotted-basename DIRECTORY surface off the file guess so an interior ownerless hole cannot false-certify (F28), treats a '**/name/' trailing-slash pattern as directory-only (F32) and a bare '/' as matching-nothing (F33), and counts only valid owner tokens so a bare '@' cannot false-certify (F41); installer refuses without --repo, refuses a production repo, requires --repo-root, BINDS it to --repo via a local origin-identity check (F34), and validates the CODEOWNERS COMMITTED on the default branch — refusing an uncommitted or working-tree-diverged copy (F39); reads the enforced branch from origin/HEAD and REFUSES rather than trusting the checked-out branch when it is unset, accepting a validated --default-branch override (F44); and normalizes newlines before the divergence compare so a byte-identical CRLF-committed CODEOWNERS is not false-refused (F45); types KNOWN governance surfaces authoritatively so a directory-only '/<file>/' rule can never certify a protected FILE surface (F46), rejects lookalike substrings standing in for a real governance file (F47), requires the installer's origin-identity remote to be on the GitHub host so a non-GitHub checkout ending in the same owner/repo cannot certify the target (F48), and requires the EFFECTIVE committed CODEOWNERS file (root/docs, not just .github) to own its own path (F49); and — separating class MEMBERSHIP from surface TYPING — reads a bare-name rule as matching the FILE of that name so a later ownerless slashless rule un-owns it instead of being invisible (F50), demands each mandatory class be declared at its CANONICAL path so a same-basename decoy cannot leave the executed checker unprotected (F51), and never lets a descendant entry inherit its directory class's kind, so a directory-only rule cannot certify a FILE beneath a governance directory (F52); and refuses a CODEOWNERS at or over GitHub's 3 MB load limit — measured in RAW BYTES so a CRLF file cannot undercount its way past the gate — in the checker's working-tree read and in the installer's committed-content read alike, while a file one byte under the limit still certifies (W1); the limit is the DECIMAL 3,000,000 reading of GitHub's ambiguous '3 MB', pinned against a literal so a wrong threshold turns this lane red rather than moving the fixtures with it (F29), and the over-limit read is BOUNDED — a 40 MB CODEOWNERS is refused with its exact size while peak allocation stays at the read buffer instead of the file size (F30); the reader reads what GITHUB reads: a SYMLINKED CODEOWNERS is REFUSED rather than followed to its target's rules, a BROKEN symlink refuses at its own (higher-precedence) location instead of falling through to a lower-precedence file, and an OS-unreadable file names the permissions cause instead of being reported as possibly over the size limit (F14/F21); the path is opened COMPONENT BY COMPONENT rather than lstat-ed whole, so a symlinked \`.github\` DIRECTORY — the leaf guard's blind spot — is refused instead of certifying the link target's rules, and a case-variant spelling on a case-insensitive filesystem is read as absent as GitHub reads it, while a plain FILE at \`.github\` still falls through to the root CODEOWNERS exactly as GitHub does (F33); and the checker's own live door refuses through 'REFUSE (live)' when \`gh\` is absent instead of raising a traceback (F15) and WALKS the paginated rulesets listing so a ruleset sitting past page one is not read as absent (F24) — ending only on an EMPTY page, refusing a null body rather than reading it as 'nothing is installed', and refusing at a page ceiling rather than looping forever (F34/F36)"
+echo "PASS: ruleset checker enforces PR flow, exact-head required check, force-push/deletion prevention, every declared protected surface (the F40 governance-of-governance set — the deterministic checker, the ruleset dir, CODEOWNERS itself — plus the N1 ownership checker and the F4 enforcement scripts), with SURFACE_CLASSES and the shipped ruleset's protected_surfaces asserted to agree in BOTH directions so deleting a class tuple reds here instead of silently un-mandating a surface, GitHub any-depth/last-match-wins ownership with a strict class allowlist that fails closed on unmodeled patterns, re-types a dotted-basename DIRECTORY surface off the file guess so an interior ownerless hole cannot false-certify (F28), treats a '**/name/' trailing-slash pattern as directory-only (F32) and a bare '/' as matching-nothing (F33), and counts only valid owner tokens so a bare '@' cannot false-certify (F41); installer refuses without --repo, refuses a production repo, requires --repo-root, BINDS it to --repo via a local origin-identity check (F34), and validates the CODEOWNERS COMMITTED on the default branch — refusing an uncommitted or working-tree-diverged copy (F39); reads the enforced branch from origin/HEAD and REFUSES rather than trusting the checked-out branch when it is unset, accepting a validated --default-branch override (F44); and normalizes newlines before the divergence compare so a byte-identical CRLF-committed CODEOWNERS is not false-refused (F45); types KNOWN governance surfaces authoritatively so a directory-only '/<file>/' rule can never certify a protected FILE surface (F46), rejects lookalike substrings standing in for a real governance file (F47), requires the installer's origin-identity remote to be on the GitHub host so a non-GitHub checkout ending in the same owner/repo cannot certify the target (F48), and requires the EFFECTIVE committed CODEOWNERS file (root/docs, not just .github) to own its own path (F49); and — separating class MEMBERSHIP from surface TYPING — reads a bare-name rule as matching the FILE of that name so a later ownerless slashless rule un-owns it instead of being invisible (F50), demands each mandatory class be declared at its CANONICAL path so a same-basename decoy cannot leave the executed checker unprotected (F51), and never lets a descendant entry inherit its directory class's kind, so a directory-only rule cannot certify a FILE beneath a governance directory (F52); and refuses a CODEOWNERS at or over GitHub's 3 MB load limit — measured in RAW BYTES so a CRLF file cannot undercount its way past the gate — in the checker's working-tree read and in the installer's committed-content read alike, while a file one byte under the limit still certifies (W1); the limit is the DECIMAL 3,000,000 reading of GitHub's ambiguous '3 MB', pinned against a literal so a wrong threshold turns this lane red rather than moving the fixtures with it (F29), and the over-limit read is BOUNDED — a 40 MB CODEOWNERS is refused with its exact size while peak allocation stays at the read buffer instead of the file size (F30); the reader reads what GITHUB reads: a SYMLINKED CODEOWNERS is REFUSED rather than followed to its target's rules, a BROKEN symlink refuses at its own (higher-precedence) location instead of falling through to a lower-precedence file, and an OS-unreadable file names the permissions cause instead of being reported as possibly over the size limit (F14/F21); the path is opened COMPONENT BY COMPONENT rather than lstat-ed whole, so a symlinked \`.github\` DIRECTORY — the leaf guard's blind spot — is refused instead of certifying the link target's rules, and a case-variant spelling on a case-insensitive filesystem is read as absent as GitHub reads it, while a plain FILE at \`.github\` still falls through to the root CODEOWNERS exactly as GitHub does (F33); and the checker's own live door refuses through 'REFUSE (live)' when \`gh\` is absent instead of raising a traceback (F15) and WALKS the paginated rulesets listing so a ruleset sitting past page one is not read as absent (F24) — ending only on an EMPTY page, refusing a null body rather than reading it as 'nothing is installed', and refusing at a page ceiling rather than looping forever (F34/F36)"

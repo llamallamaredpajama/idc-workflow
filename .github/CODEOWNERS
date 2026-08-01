@@ -1,10 +1,15 @@
 # CODEOWNERS — IDC pathway-integrity protected surfaces (spec §2.3).
 #
 # The ruleset (.github/rulesets/idc-pathway-integrity.json) sets require_code_owner_review, which
-# only binds a reviewer once a CODEOWNERS file names each protected surface. Every surface class the
-# pathway check protects — workflow, hook, validation, and receipt — must have an owner here so a PR
-# cannot strip the governance machinery without a code-owner's review. scripts/idc_ruleset_check.py
-# --repo-root deterministically refuses a ruleset whose protected surfaces are not all owned.
+# only binds a reviewer once a CODEOWNERS file names each protected surface. ALL ELEVEN surface
+# classes the pathway check protects must have an owner here so a PR cannot strip the governance
+# machinery without a code-owner's review: the four original classes (workflow, hook, validation,
+# receipt), the three governance-of-governance classes (the deterministic checker, the ownership
+# checker, the ruleset directory), CODEOWNERS itself, and the three enforcement scripts (the Path
+# Gate, the git backstop, the build-receipt minter). scripts/idc_ruleset_check.py --repo-root
+# deterministically refuses a ruleset whose protected surfaces are not all owned, and the class list
+# it enforces (SURFACE_CLASSES) is checked BOTH WAYS against the ruleset's protected_surfaces — so
+# this header cannot drift from the enforced set without a governance lane going red.
 
 # Workflow surface — the version-pinned pathway workflow and any other CI that gates merges.
 /.github/workflows/ @llamallamaredpajama
@@ -24,5 +29,15 @@
 # the one piece of governance machinery that governed everything except itself: an unreviewed PR
 # could weaken the checker that enforces code-owner review and the weakening would certify clean.
 /scripts/idc_ruleset_check.py @llamallamaredpajama
+
+# The ENFORCEMENT scripts the spec names as blocking surfaces (§2.2 evidence leg, §5 row T3). They
+# were claimed code-owner-protected while nobody owned them and no catch-all rule existed — the same
+# defect as the ownership checker above, one file over. The Path Gate decides every mutation; the git
+# backstop is the ONLY gate the Codex and Pi runtimes get; the build receipt is the evidence artifact
+# Build closes against.
+/scripts/idc_path_gate.py @llamallamaredpajama
+/scripts/idc_git_path_gate.py @llamallamaredpajama
+/scripts/idc_build_receipt.py @llamallamaredpajama
+
 /.github/rulesets/ @llamallamaredpajama
 /.github/CODEOWNERS @llamallamaredpajama

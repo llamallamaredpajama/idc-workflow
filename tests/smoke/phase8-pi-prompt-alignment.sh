@@ -120,14 +120,35 @@ if grep -qiE 'U8/U9|tracked to U[0-9]' "$WORKFLOW"; then
   echo "STALE in WORKFLOW.md: a controlled-mode limitation is deferred to a named unit of work — that pointer reads as 'handled' the moment the unit merges, whether or not the limitation closed"
   fails=$((fails+1))
 fi
+# ── The merge posture is PI-SCOPED, and these invariants used to universalise it ───────────────────
+# This lane previously demanded that WORKFLOW.md say merges are operator-performed, full stop, and
+# BANNED the word "automerge" outright. Both were wrong in the direction that is hardest to notice —
+# they described the experimental Pi runtime's carve-out as the whole system's behavior. Claude and
+# Codex DO self-merge, through `idc_pr_finish.py autonomous` (planning / intake / recirculation) and
+# `idc_git_finish.py` (build PRs); `agents/idc-finisher.md` §Git finalization and `agents/idc-plan.md`
+# are the code-level sources, and WORKFLOW.md §4.3a already described `idc_git_finish.py --close-only`,
+# so the file CONTRADICTED ITSELF while this lane held the false half in place. A doc lane that
+# enforces a false claim is worse than no lane: it turns the correction red.
+#
+# The honest invariants, in both directions:
+#   * Pi's carve-out must be stated AND scoped to Pi (not to "the system").
+#   * The runtimes that DO self-merge must be named, so the carve-out cannot re-universalise.
+#   * An automerge claim is fine — REQUIRED, even — but it must never appear un-runtime-scoped.
+tr '\n' ' ' < "$WORKFLOW" | grep -qiE 'Pi[^.]{0,200}no sanctioned merge helper|no sanctioned merge helper[^.]{0,200}Pi' \
+  || { echo "MISSING in WORKFLOW.md: the missing merge helper must be scoped to the experimental Pi runtime, not stated as a system-wide gap"; fails=$((fails+1)); }
+grep -qiE 'Claude and Codex[^.]{0,120}self-merge' "$WORKFLOW" \
+  || { echo "MISSING in WORKFLOW.md: the runtimes that DO self-merge (Claude and Codex, via idc_pr_finish.py autonomous / idc_git_finish.py) must be named, or the Pi carve-out reads as system-wide"; fails=$((fails+1)); }
 if grep -qiE 'automerge|auto-merge' "$WORKFLOW"; then
-  echo "STALE in WORKFLOW.md: automatic merge promise remains while merge is operator-performed"
-  fails=$((fails+1))
+  # NOTE the window is `.{0,160}`, not `[^.]{0,160}`: the sentence that scopes the claim names the
+  # helper (`idc_pr_finish.py`), and a dot-excluding window stops dead at that filename's dot — the
+  # check would then demand a scoping that IS present. Proximity is the assertion here.
+  tr '\n' ' ' < "$WORKFLOW" | grep -qiE '(automerge|auto-merge).{0,160}(Claude|Codex|Pi)|(Claude|Codex|Pi).{0,160}(automerge|auto-merge)' \
+    || { echo "STALE in WORKFLOW.md: an UNSCOPED automerge promise — automerge is Claude/Codex behavior and the experimental Pi runtime does not self-merge, so the claim must name the runtime it applies to"; fails=$((fails+1)); }
 fi
-tr '\n' ' ' < "$WORKFLOW" | grep -qiE 'planning PRs[^.]{0,180}operator|operator[^.]{0,180}planning PRs' \
-  || { echo "MISSING in WORKFLOW.md: planning PR merge is operator-performed until the helper lands"; fails=$((fails+1)); }
-tr '\n' ' ' < "$WORKFLOW" | grep -qiE 'build PRs[^.]{0,180}operator|operator[^.]{0,180}build PRs' \
-  || { echo "MISSING in WORKFLOW.md: build PR merge is operator-performed until the helper lands"; fails=$((fails+1)); }
+tr '\n' ' ' < "$WORKFLOW" | grep -qiE 'planning PRs[^.]{0,200}(finisher|operator)|(finisher|operator)[^.]{0,200}planning PRs' \
+  || { echo "MISSING in WORKFLOW.md: planning PR merge posture (sanctioned finisher on Claude/Codex, operator on Pi)"; fails=$((fails+1)); }
+tr '\n' ' ' < "$WORKFLOW" | grep -qiE 'build PRs[^.]{0,200}(finisher|operator)|(finisher|operator)[^.]{0,200}build PRs' \
+  || { echo "MISSING in WORKFLOW.md: build PR merge posture (sanctioned finisher on Claude/Codex, operator on Pi)"; fails=$((fails+1)); }
 
 python3 - "$HOOKS" <<'PY' || { echo "MISSING in hooks.json: honest Bash/Write/Edit/NotebookEdit coverage description"; fails=$((fails+1)); }
 import json, sys
@@ -142,7 +163,7 @@ have "recirculator.md" "idc_recirculator_layers.py|gate:.?no|gate:.?yes|gated Th
 absent "recirculator.md" "NO_RECIRCULATION|MINOR_AUTONOMOUS|MAJOR_GATED" "deleted verdict taxonomy"
 
 if [ "$fails" -eq 0 ]; then
-  echo "PASS: Pi role prompts and Path Gate docs align (operator-performed merge until a sanctioned helper; explicit transport coverage; the six controlled-mode limits stated as STILL OPEN rather than deferred to a merged unit; no retired vocab)"
+  echo "PASS: Pi role prompts and Path Gate docs align (the missing merge helper is scoped to the experimental Pi runtime and the self-merging runtimes are named, so no automerge claim goes un-runtime-scoped; explicit transport coverage; the six controlled-mode limits stated as STILL OPEN rather than deferred to a merged unit; no retired vocab)"
   exit 0
 fi
 echo "FAIL: $fails prompt-alignment invariant(s) unmet"

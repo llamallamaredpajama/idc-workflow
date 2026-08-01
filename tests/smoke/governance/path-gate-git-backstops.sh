@@ -9,8 +9,11 @@ set -uo pipefail
 . "$(dirname "$0")/lib.sh"
 
 PATH_GATE="$GOV_PLUGIN/scripts/idc_path_gate.py"
-# TEST-ONLY mint door. idc_path_gate.py has no `authorize` verb (V-DOOR); this fixture calls the
-# same write_authorization Python API the real admission minters use, ceiling and all.
+# SCENARIO mint door. idc_path_gate.py has no `authorize` verb (V-DOOR); this fixture calls the
+# same write_authorization Python API the real admission minters use, ceiling and all. It SHIPS
+# with the plugin (marketplace source is "./"), so it refuses unless BOTH IDC_SMOKE_FIXTURE=1 is
+# exported AND --repo is a scratch tree; every repo below is built with `mktemp -d`.
+export IDC_SMOKE_FIXTURE=1
 PG_AUTHORIZE="$GOV_PLUGIN/tests/smoke/lib/path_gate_authorize.py"
 GIT_GATE="$GOV_PLUGIN/scripts/idc_git_path_gate.py"
 INTERLOCK="$GOV_PLUGIN/scripts/hooks/idc_interlock_gate.py"

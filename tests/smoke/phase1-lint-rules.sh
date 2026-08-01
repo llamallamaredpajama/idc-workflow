@@ -124,4 +124,73 @@ printf 'Legacy doc path /Users/Jeremy/old kept on purpose. lint-allow: historica
   > "$R/templates/probe.md"
 expect_clean "allow-marker: lint-allow line is exempt from the new path rule" "$R"
 
-echo "PASS: lint-references catches all five MIN-9 blind-spot classes (and honors lint-allow)"
+# ---- Rule Q: the DETECTOR, not just the pin test -----------------------------------------------
+# Rule Q's security value lives entirely in what its grep SEES. Every spelling below is valid YAML
+# that GitHub Actions runs exactly like the canonical `uses: owner/action@ref` form, and each one
+# used to slip past the detector — an unpinned action that lints CLEAN is worse than no rule, because
+# the CLEAN line is read as evidence the workflow is pinned. `uses` never appeared in the fixture
+# skeleton, so these repos also prove the rule runs at all.
+SHA40=1111111111111111111111111111111111111111
+mk_wf() {                # $1 = fixture name, $2 = the `uses:` line to plant (already indented)
+  local d; d="$(mk_repo "$1")"
+  mkdir -p "$d/.github/workflows"
+  { printf 'name: probe\non: [push]\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n'
+    printf '%s\n' "$2"
+  } > "$d/.github/workflows/probe.yml"
+  printf '%s' "$d"
+}
+
+# The canonical unpinned form — the control that proves the fixture reaches the rule at all.
+R="$(mk_wf q-canonical '      - uses: actions/checkout@v4')"
+expect_fail "Rule Q: canonical unpinned tag ref" "$R" "[unpinned-action]"
+
+# (a) YAML permits whitespace before the `:`; the old anchor required `uses:` with none.
+R="$(mk_wf q-spacecolon '      - uses : actions/checkout@v4')"
+expect_fail "Rule Q: 'uses :' with a space before the colon is still an unpinned action" "$R" "[unpinned-action]"
+
+# (b) FLOW mapping — `uses` is not the first token on the line, so a line-anchored pattern missed it.
+R="$(mk_wf q-flow '      - {uses: actions/checkout@v4}')"
+expect_fail "Rule Q: '- {uses: ...}' flow mapping is still an unpinned action" "$R" "[unpinned-action]"
+
+# (c) Flow mapping where `uses` follows another key — the ref must be read from the LAST uses key and
+#     its trailing `}` stripped, or a correctly pinned flow entry would false-positive instead.
+R="$(mk_wf q-flow2 '      - {name: checkout, uses: actions/checkout@v4}')"
+expect_fail "Rule Q: '{name: x, uses: y@tag}' flow mapping is still an unpinned action" "$R" "[unpinned-action]"
+
+# (d) FALSE-POSITIVE control: a correctly pinned but QUOTED ref must lint CLEAN. The quote broke the
+#     `@<40-hex>$` anchor, so the rule reported a good pin as unpinned — the failure mode that gets a
+#     supply-chain rule disabled. Asserted in all three spellings the extractor must now handle.
+R="$(mk_wf q-quoted "      - uses: \"actions/checkout@$SHA40\" # v4")"
+expect_clean "Rule Q control: a double-quoted 40-hex pin is correctly pinned" "$R"
+R="$(mk_wf q-quoted1 "      - uses: 'actions/checkout@$SHA40'")"
+expect_clean "Rule Q control: a single-quoted 40-hex pin is correctly pinned" "$R"
+R="$(mk_wf q-flowpin "      - {uses: actions/checkout@$SHA40}")"
+expect_clean "Rule Q control: a flow-mapping 40-hex pin is correctly pinned" "$R"
+
+# (e) The local-action exemption must not cover a `..` traversal out of this repo's action surface.
+R="$(mk_wf q-dotdot '      - uses: ./../../elsewhere/action')"
+expect_fail "Rule Q: './../..' local ref escapes the repo and is not exempt" "$R" "[unpinned-action]"
+# ...while a genuine in-repo local action stays exempt (or the rule above is a blanket refusal).
+R="$(mk_wf q-local '      - uses: ./.github/actions/probe')"
+expect_clean "Rule Q control: an in-repo './' local action stays exempt" "$R"
+
+# ---- Rule R: no shipped surface may direct a caller at a Path Gate minting door -----------------
+# `scripts/idc_path_gate.py` has no `authorize` verb (V-DOOR) and the scenario mint fixture
+# `tests/smoke/lib/path_gate_authorize.py` ships inside the plugin package — a playbook pointing at
+# either is a privilege-escalation instruction shipped to every governed repo, and nothing caught it.
+R="$(mk_repo r-verb)"
+printf 'Then run `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_path_gate.py" authorize --repo "$PWD"`.\n' \
+  > "$R/templates/probe.md"
+expect_fail "Rule R: prose re-adding the deleted idc_path_gate.py authorize verb" "$R" "[path-gate-mint-directive]"
+R="$(mk_repo r-fixture)"
+printf 'Set up the grant with `python3 "${CLAUDE_PLUGIN_ROOT}/tests/smoke/lib/path_gate_authorize.py" --repo .`.\n' \
+  > "$R/templates/probe.md"
+expect_fail "Rule R: prose pointing at the shipped scenario mint fixture" "$R" "[path-gate-mint-directive]"
+# Control: a PROHIBITION naming the door in order to forbid it must stay clean, or the honest
+# documentation of the deleted verb becomes unwritable and the rule gets suppressed instead.
+R="$(mk_repo r-prohibition)"
+printf 'There is no `idc_path_gate.py authorize` verb; minting is admission-side.\n' \
+  > "$R/templates/probe.md"
+expect_clean "Rule R control: a prohibition naming the deleted verb is exempt" "$R"
+
+echo "PASS: lint-references catches all five MIN-9 blind-spot classes, sees every valid uses: spelling without false-positiving a quoted pin (Rule Q), refuses a '..' local-action ref, blocks shipped prose that points at a Path Gate minting door (Rule R), and honors lint-allow"

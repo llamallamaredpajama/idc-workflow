@@ -69,6 +69,35 @@ got="$(mode_of "$FS")"
 [ "$got" = "off" ] \
   || fail "a filesystem-backed scaffold must stay 'off' — it makes no hard pathway-security claim (spec §2.1) — read '$got'"
 
+# ── B2. a filesystem scaffold leaves NO unrendered template token ──────────────────────────────────
+# The github-only `{{TRACKER_PROJECT_NUMBER}}` is substituted in init PHASE 4, which a filesystem
+# scaffold skips — so every filesystem-backed repo shipped `backend: filesystem` directly above
+# `project_number: "{{TRACKER_PROJECT_NUMBER}}"`, a literal template token in the operator's own
+# governance contract. This was invisible to CI by CONSTRUCTION: .github/workflows/ci.yml renders the
+# scaffold output through an UNCONDITIONAL `sed` over all four tokens before it scans, so a token the
+# real scaffold leaves behind is substituted by the test harness itself and can never be observed.
+# This arm therefore reads the scaffold's OWN output, with no rendering step in between.
+#
+# CONTROL FIRST — the token must really be present in the template, or "no token in the output" would
+# hold for the wrong reason (a renamed token, or a template that stopped carrying one).
+grep -qF '{{TRACKER_PROJECT_NUMBER}}' "$PLUGIN/templates/tracker-config.yaml" \
+  || fail "templates/tracker-config.yaml no longer carries the {{TRACKER_PROJECT_NUMBER}} token — the assertion below would pass vacuously; re-point it at whatever token replaced it"
+LEFTOVER="$(grep -rn '{{[A-Z_]*}}' "$FS/docs/workflow/tracker-config.yaml" "$FS/WORKFLOW.md" "$FS/WORKFLOW-config.yaml" 2>/dev/null)"
+[ -z "$LEFTOVER" ] \
+  || fail "a filesystem-backed scaffold left an UNRENDERED template token in the operator's repo — a governed repo must never ship a literal {{…}} placeholder on any backend:
+$LEFTOVER"
+# ...and the github-only key is EMPTIED, not given a placeholder integer and not deleted. Deleting it
+# would make `/idc:update`'s structural compare (idc_config_keys.py) advise every filesystem repo to
+# adopt a key it must never have; a fake integer would be a value the github readers could act on.
+grep -qE '^project_number:[[:space:]]*""' "$FS/docs/workflow/tracker-config.yaml" \
+  || fail "the filesystem scaffold must leave project_number present but EMPTY (as it already does for the other github-only keys, e.g. field_ids Status: \"\"); got: $(grep -n '^project_number' "$FS/docs/workflow/tracker-config.yaml" || echo '<key absent — /idc:update would advise adopting it>')"
+grep -q 'backend: filesystem' "$FS/docs/workflow/tracker-config.yaml" \
+  || fail "the filesystem scaffold did not select the filesystem backend, so the token assertions above were made against the wrong file"
+# The GITHUB path must be UNTOUCHED — the token is Phase 4's to substitute, and retiring it there
+# would silently break board provisioning.
+grep -qF 'project_number: "{{TRACKER_PROJECT_NUMBER}}"' "$GH/docs/workflow/tracker-config.yaml" \
+  || fail "the github scaffold must LEAVE {{TRACKER_PROJECT_NUMBER}} in place for init Phase 4 to fill with the real board number; retiring it on the github path breaks board provisioning"
+
 # ── C. the flip is fixed code, not a template edit ─────────────────────────────────────────────────
 # templates/WORKFLOW-config.yaml is backend-agnostic (both backends copy it), so it must keep the
 # honest non-enforcing literal; only the backend-aware scaffold step may raise the claim.

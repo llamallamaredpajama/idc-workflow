@@ -123,10 +123,15 @@ fi
 ```
 `gating.prd` stays `on` for both repo types. The operator can toggle either gate anytime.
 
-For the **filesystem** backend the board is now ready (`TRACKER.md` initialized) — skip
-Phase 4. For **github**, the `{{TRACKER_PROJECT_NUMBER}}` token stays until Phase 4 fills
-it. (The helper does only the mechanical, testable scaffold; domain derivation, board
-provisioning, and the receipt are this command's agent-driven phases.)
+For the **filesystem** backend the board is now ready (`TRACKER.md` initialized) — skip Phase 4. The
+helper also **retires the github-only `project_number` key** on that path (it comments the line out,
+naming the reason), because Phase 4 is the only place `{{TRACKER_PROJECT_NUMBER}}` is ever substituted:
+skipping it used to leave a filesystem-backed repo's `docs/workflow/tracker-config.yaml` reading
+`backend: filesystem` above a literal `project_number: "{{TRACKER_PROJECT_NUMBER}}"`. **A scaffolded
+repo must never carry an unrendered `{{…}}` template token on any backend** — check for one before you
+stamp the receipt. For **github**, the token stays until Phase 4 fills it with the real board number.
+(The helper does only the mechanical, testable scaffold; domain derivation, board provisioning, and
+the receipt are this command's agent-driven phases.)
 
 ### Phase 3b — Open this command's lifecycle record (init registers itself)
 
@@ -148,10 +153,13 @@ A stale runtime is refused here too (`start` exits 4) — do not scaffold furthe
 `start` also mints init's shared Path Gate authorization, in the SAME admission transaction that
 opens the record: expansion was admitted before the repo was governed, so once governance exists
 init needs that authorization or every later Write/Edit/git mutation fails closed. There is no
-separate authorize step and no CLI verb that mints one — the scope is the fixed default profile
-(`write`/`edit`/`git` over `.`), chosen by the command name alone, bound to this record's nonce. If
-the mint fails, `start` rolls the record back and exits non-zero: init must not scaffold on an
-obligation with no authorization behind it. From here init owes an honest closeout (Phase 8).
+separate authorize step and **no verb anywhere that accepts a caller-chosen scope** — the scope is the
+fixed default profile (`write`/`edit`/`git` over `.`), chosen by the command name alone, bound to this
+record's nonce. (`start` is still a CLI, and a governed repository is its only precondition, so the
+fixed profile is self-servable; that residual is recorded in `docs/dev/known-debts.md` rather than
+claimed closed.) If the mint fails, `start` rolls the record back and exits non-zero: init must not
+scaffold on an obligation with no authorization behind it. From here init owes an honest closeout
+(Phase 8).
 
 ## Phase 4 — Provision (or link) the board (github backend)
 Decide create-vs-link:

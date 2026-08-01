@@ -30,21 +30,31 @@ git history + `docs/dev/2026-06-11-fidelity-audit.md`.
 
 ## Open debts (post-2026-06-19 sweep)
 
-- **`init`'s Path Gate self-mint is self-servable (V-DOOR residual).** Deleting the public
-  `idc_path_gate.py authorize` verb removed every *caller-chosen-scope* minting door. It did not
-  remove every minting door: `idc_command_contract.py start --command init` mints init's fixed
-  default profile (`write`/`edit`/`git` over the whole repository) and its only precondition is that
-  the repository is governed — so any Bash in a governed session can open an init record and receive
-  that grant. Not a regression (the equivalent route predates the V-DOOR change), and materially
-  narrower than the deleted verb (no scope, no ticket/graph/branch of the caller's choosing, and the
-  read-only role ceiling still applies).
+- **Fixed-profile Path Gate self-mints remain self-servable (V-DOOR residual) — TWO paths.** Deleting
+  the public `idc_path_gate.py authorize` verb removed every *caller-chosen-scope* minting door. It
+  did not remove every minting door; two FIXED-profile ones remain, each self-servable from raw Bash
+  in any governed session:
+  1. `idc_command_contract.py start --command init` mints init's fixed default profile
+     (`write`/`edit`/`git` over the whole repository); its only precondition is that the repository is
+     governed.
+  2. **(added by V-AUTH stage 2)** `idc_command_contract.py start --command build` opens a build
+     record (which mints *nothing* on its own), then `idc_transition.py claim --num N` mints the
+     claim-scoped grant: `write`/`edit`/`git` over the whole repository (`.`), bound to ticket N.
+     Its extra precondition over path 1 is a claimable board item N; the scope is still FIXED (the
+     ticket's own whole-repo grant), never the caller's to choose. Once the unit's contract is frozen
+     the grant narrows to `touch` − `off_limits`, but the pre-freeze claim window is repo-wide.
+  Neither is a regression (init's route predates V-DOOR; the build claim is the sanctioned write seam
+  itself), and both are materially narrower than the deleted verb — no scope, no ticket/graph/branch
+  of the caller's choosing (path 2's ticket must be a real claimable item), and the read-only role
+  ceiling still applies. They are ACCEPTED residuals, documented here honestly, not closed.
   **Why it is not closed here.** The natural fix is a single-use admission token issued by
   `scripts/hooks/idc_command_entry_gate.py`, which DOES run on `/idc:init`'s expansion. But that gate
   is a Claude `UserPromptExpansion` hook and neither Codex nor Pi runs Claude hooks, while
   `idc_path_gate.write_authorization`'s production callers are all fixed admission/transition code —
-  that hook, this self-mint, and (since V-AUTH stage 2) the claim-time mint/narrow/retire in
+  that hook, both self-mints above, and (since V-AUTH stage 2) the claim-time mint/narrow/retire in
   `idc_path_gate.py`, which requires an ACTIVE build/autorun command record to bind. A Codex/Pi run
-  that opens no command record therefore still has the init self-mint as its ONLY mint path, and
+  therefore has two runtime-neutral self-serve paths (open an init record, or open a build record and
+  claim a board item — both above), each granting a FIXED whole-repo profile, and
   github-backed repositories scaffold `pathway_enforcement.mode: controlled` by default with the
   git pre-commit/pre-push backstops installed. Gating the self-mint on a Claude-only token would
   therefore deny every Codex/Pi commit in a default governed repository (verified directly: with no

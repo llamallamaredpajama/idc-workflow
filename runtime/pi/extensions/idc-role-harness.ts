@@ -724,8 +724,11 @@ function evaluateSharedPathGate(request: Record<string, unknown>, cwd: string, p
 	if (!fs.existsSync(script)) {
 		return { allowed: false, reason: `shared Path Gate missing at ${script}`, allowedRoots: policy.allowedRoots, blockedSurfaces: policy.blockedSurfaces };
 	}
+	// Live identity is spread LAST so it always WINS over anything the request carries: the model is
+	// "echo the identity the live authorization holds", so the request may never override it (V-AUTH
+	// stage 3). Inert today — Pi builders send no identity — but the spread order is the invariant.
 	const proc = spawnSync("python3", [script, "evaluate", "--repo", cwd, "--plugin-root", sharedPathGatePluginRoot()], {
-		input: JSON.stringify({ ...liveAuthorizationIdentity(cwd), ...request }),
+		input: JSON.stringify({ ...request, ...liveAuthorizationIdentity(cwd) }),
 		encoding: "utf8",
 	});
 	if (proc.error) {

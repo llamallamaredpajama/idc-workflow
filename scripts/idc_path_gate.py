@@ -1102,15 +1102,22 @@ def cmd_auth_path(args: argparse.Namespace) -> int:
 #     and — since V-AUTH stage 2 — this module's own `mint_claim_authorization` /
 #     `narrow_authorization_to_contract` / `retire_claim_authorization`, whose scopes come from the
 #     claim's board item and the machine-verified frozen validation contract, never from the caller.
-#   * BUT `idc_command_contract.py start --command init` is a CLI, and its only precondition is a
-#     governed repository. Any Bash in a governed session can therefore still open an init record and
-#     receive init's FIXED default profile (write/edit/git over `.`). No caller-chosen-scope door
-#     remains; a fixed-profile self-serve one does. It is NOT a regression — the equivalent route
-#     predates V-DOOR — and it is not closed here because the only admission-side signal that could
-#     gate it comes from the Claude-only entry gate, which Codex and Pi never run: init's self-mint is
-#     the ONLY mint path those runtimes have, so requiring an entry-gate token would deny every commit
-#     they make in a `controlled` repository through the git backstops. Tracked in
-#     `docs/dev/known-debts.md` ("init self-mint is self-servable").
+#   * BUT two FIXED-profile self-serve mint paths remain, each self-servable from raw Bash in a
+#     governed session — no caller-chosen scope, but no admission-side gate either:
+#       (a) `idc_command_contract.py start --command init` opens an init record and receives init's
+#           FIXED default profile (write/edit/git over `.`); precondition = a governed repository.
+#       (b) `idc_command_contract.py start --command build` opens a build record (which mints NOTHING
+#           on its own), then `idc_transition.py claim --num N` mints the claim-scoped grant —
+#           write/edit/git over the whole repo (`.`), bound to ticket N — via mint_claim_authorization
+#           below. Precondition = a claimable board item N; the scope is still the ticket's own FIXED
+#           whole-repo grant (narrowed to touch/off_limits once the contract freezes), never the
+#           caller's to name.
+#     Neither is a caller-chosen-scope door; neither is a regression (init predates V-DOOR; the build
+#     claim IS the sanctioned write seam). They are not closed here because the only admission-side
+#     signal that could gate them comes from the Claude-only entry gate, which Codex and Pi never run:
+#     these are the mint paths those runtimes have, so requiring an entry-gate token would deny every
+#     commit they make in a `controlled` repository through the git backstops. Tracked in
+#     `docs/dev/known-debts.md` ("Fixed-profile Path Gate self-mints remain self-servable").
 # `governance/path-gate-boundaries.sh` asserts BOTH CLIs, each enumerated off its own parser.
 
 

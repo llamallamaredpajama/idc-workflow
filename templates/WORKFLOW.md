@@ -92,7 +92,10 @@ you are running, not what some future unit of work is expected to do about it (a
 shipped change names its remaining residual instead of vanishing):
 
 - **Build authorization is transition-scoped; other commands' grants are still per-command.** Build's
-  entry grant is read-only; the CLAIM transaction (proven In Progress and journaled) mints the
+  entry grant is read-only — *except* on a re-entry while this item's validation contract is already
+  frozen and live, where the entry mint inherits the contract's `touch` − `off_limits` write scope
+  (that contract only exists because an earlier claim froze it, so "no write before a proven claim"
+  still holds). The CLAIM transaction (proven In Progress and journaled) mints the
   ticket-bound mutation grant, the frozen validation contract narrows it to its `touch` −
   `off_limits` boundary — a write outside the planned surface is refused at mutation time — and the
   terminal close retires it. What is still open: every NON-build mutating command (think, plan,

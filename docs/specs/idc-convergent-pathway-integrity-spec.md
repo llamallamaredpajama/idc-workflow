@@ -350,8 +350,12 @@ planning-application receipt.
 
 Build entry verifies graph readiness, goal/validation contract identity, current tracker state,
 branch ownership, and reconciliation blockers. Build's ENTRY authorization carries no mutation
-actions (read-only-until-claim); a successful claim transaction — the board write read back and
-journaled — issues the limited Path Gate authorization, bound to the claimed ticket. Freezing the
+actions (read-only-until-claim) — *except* on a RE-ENTRY while this item's validation contract is
+already frozen and live, where the entry mint inherits the contract's `touch` − `off_limits` write
+scope directly. This is not a hole in "no write before a proven claim": a contract only becomes live
+*after* a claim froze it, so no entry mint can carry write before that first claim. A successful
+claim transaction — the board write read back and journaled — issues the limited Path Gate
+authorization, bound to the claimed ticket. Freezing the
 unit's validation contract then narrows that authorization to the contract's `touch` −
 `off_limits` boundary. The claim is idempotent on the board, and re-running it re-mints the
 authorization with a fresh TTL — that idempotent re-claim is the sanctioned renewal door, and it

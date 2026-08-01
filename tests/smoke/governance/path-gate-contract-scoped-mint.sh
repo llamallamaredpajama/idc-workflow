@@ -8,9 +8,12 @@
 # the command default applies, and an UNVERIFIABLE pointer fails the admission closed.
 #
 # RED-WHEN-BROKEN (both probes executed 2026-07-31, under timeout):
-#   * revert the stage-1 mint change (drop `**profile` from _ensure_path_gate_auth so the entry mint
-#     falls back to the bare default) → the entry auth is whole-repo again and the outside-`touch`
-#     guarded arm FAILS (the write is allowed);
+#   * revert the stage-1 mint change (make resolve_entry_profile skip its live-contract branch so
+#     build's entry mint falls back to the bare command default) → post-stage-2 that default is
+#     READ-ONLY (allowed_paths `.`, NO mutation actions, no contract identity, graph_node
+#     `command:build`), so the lane reds at the SCOPE-INHERITANCE assertion ("the entry mint did not
+#     inherit the frozen contract's touch/off-limits scope + identity"), well before the mutation
+#     arms — and the outside-`touch` write is denied READ-ONLY, never allowed;
 #   * delete the denied_paths enforcement loop in idc_path_gate._evaluate_request → the off-limits
 #     guarded arm FAILS (the off-limits write inside `touch` is allowed).
 set -uo pipefail

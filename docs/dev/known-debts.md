@@ -30,6 +30,29 @@ git history + `docs/dev/2026-06-11-fidelity-audit.md`.
 
 ## Open debts (post-2026-06-19 sweep)
 
+- **`init`'s Path Gate self-mint is self-servable (V-DOOR residual).** Deleting the public
+  `idc_path_gate.py authorize` verb removed every *caller-chosen-scope* minting door. It did not
+  remove every minting door: `idc_command_contract.py start --command init` mints init's fixed
+  default profile (`write`/`edit`/`git` over the whole repository) and its only precondition is that
+  the repository is governed — so any Bash in a governed session can open an init record and receive
+  that grant. Not a regression (the equivalent route predates the V-DOOR change), and materially
+  narrower than the deleted verb (no scope, no ticket/graph/branch of the caller's choosing, and the
+  read-only role ceiling still applies).
+  **Why it is not closed here.** The natural fix is a single-use admission token issued by
+  `scripts/hooks/idc_command_entry_gate.py`, which DOES run on `/idc:init`'s expansion. But that gate
+  is a Claude `UserPromptExpansion` hook and neither Codex nor Pi runs Claude hooks, while
+  `idc_path_gate.write_authorization` has exactly two production callers — that hook, and this
+  self-mint. So for Codex and Pi the init self-mint is the ONLY way an authorization is ever minted,
+  and github-backed repositories scaffold `pathway_enforcement.mode: controlled` by default with the
+  git pre-commit/pre-push backstops installed. Gating the self-mint on a Claude-only token would
+  therefore deny every Codex/Pi commit in a default governed repository (verified directly: with no
+  authorization present and `mode: controlled`, `git commit` is refused by the backstop with "the live
+  authorization is absent"; after `start --command init` the same commit succeeds).
+  **What closing it needs:** a runtime-neutral admission signal — e.g. the entry gate issues the token
+  when it runs, and the Codex/Pi adapters gain an equivalent admission step of their own — so the
+  token requirement can be made unconditional without stranding those runtimes.
+  Characterized (not claimed away) by `tests/smoke/governance/path-gate-boundaries.sh` D2 §3c.
+
 - **Experimental Pi runtime maturity — L1 / L3 / L4 (issue #66).** The autonomous-IDC-lifecycle gaps
   that need a live multi-provider Pi runtime to build and verify, so they were NOT closed in the sweep.
   Only **L2** (model-selection doc-truth) was fixed — `skills/idc-adapter-pi/SKILL.md` now describes the

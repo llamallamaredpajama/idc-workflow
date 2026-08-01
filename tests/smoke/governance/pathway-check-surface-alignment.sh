@@ -71,9 +71,13 @@ REPO="$WORK/repo"
 mkdir -p "$REPO/.github/workflows" "$REPO/.github/rulesets" "$REPO/scripts/hooks"
 cp "$WF" "$REPO/.github/workflows/idc-pathway-integrity.yml"
 cp "$CHECK" "$REPO/scripts/idc_pathway_check.py"
+printf '# ownership checker surface\n' > "$REPO/scripts/idc_ruleset_check.py"
 printf '# validation surface\n' > "$REPO/scripts/idc_validation_contract.py"
 printf '# receipt surface\n'    > "$REPO/scripts/idc_receipt_check.py"
 printf '# hook surface\n'       > "$REPO/scripts/hooks/idc_ledger.py"
+printf '# path gate surface\n'  > "$REPO/scripts/idc_path_gate.py"
+printf '# git backstop surface\n' > "$REPO/scripts/idc_git_path_gate.py"
+printf '# build receipt surface\n' > "$REPO/scripts/idc_build_receipt.py"
 cp "$RULESET" "$REPO/.github/rulesets/idc-pathway-integrity.json"
 printf '* @owner\n'             > "$REPO/.github/CODEOWNERS"
 git -C "$REPO" init -q
@@ -85,7 +89,7 @@ SOURCE="$(timeout 60 python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); im
 run_check() { timeout 60 python3 "$CHECK" --repo "$REPO" --head "$HEAD_SHA" --source "$SOURCE"; }
 
 run_check >/dev/null 2>"$WORK/intact.err" \
-  || fail "the checker refused an intact tree carrying all seven surfaces: $(cat "$WORK/intact.err")"
+  || fail "the checker refused an intact tree carrying all declared surfaces: $(cat "$WORK/intact.err")"
 
 mv "$REPO/.github/CODEOWNERS" "$WORK/CODEOWNERS.bak"
 run_check >"$WORK/no-co.out" 2>&1 \

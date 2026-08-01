@@ -19,6 +19,11 @@ import registerRoleHarness, { evaluateBashForRole, evaluatePathForRole, type Idc
 const PLUGIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const CONTRACT = path.join(PLUGIN, "scripts", "idc_command_contract.py");
 const PATH_GATE = path.join(PLUGIN, "scripts", "idc_path_gate.py");
+// SCENARIO mint door. idc_path_gate.py has no `authorize` verb (V-DOOR); this fixture calls the
+// same write_authorization Python API the real admission minters use, ceiling and all. It SHIPS with
+// the plugin (marketplace source is "./"), so it refuses unless BOTH IDC_SMOKE_FIXTURE=1 is exported
+// AND --repo is a scratch tree; CWD below is an os.tmpdir() mkdtemp.
+const PG_AUTHORIZE = path.join(PLUGIN, "tests", "smoke", "lib", "path_gate_authorize.py");
 
 // A fake run repo on disk so path-relative cases resolve against a real cwd.
 const CWD = fs.mkdtempSync(path.join(os.tmpdir(), "pi-guard-acl-"));
@@ -33,13 +38,16 @@ fs.writeFileSync(path.join(CWD, "TRACKER.md"), "ticket: demo\n");
 fs.writeFileSync(path.join(CWD, "src", "x.ts"), "export const x = 1;\n");
 
 const inRepo = (rel: string) => path.join(CWD, rel);
-const runPy = (args: string[]) => execFileSync("python3", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+const runPy = (args: string[]) => execFileSync("python3", args, {
+	encoding: "utf8",
+	stdio: ["ignore", "pipe", "pipe"],
+	env: { ...process.env, IDC_SMOKE_FIXTURE: "1" },
+});
 
 const AUTH_SESSION = "pi-auth-session";
 runPy([CONTRACT, "start", "--repo", CWD, "--session", AUTH_SESSION, "--command", "build", "--plugin-root", PLUGIN, "--args", "demo", "--source", "user"]);
 runPy([
-	PATH_GATE,
-	"authorize",
+	PG_AUTHORIZE,
 	"--repo",
 	CWD,
 	"--session",
@@ -83,8 +91,7 @@ function expectPathAction(tag: string, action: "write" | "edit", allow: boolean)
 
 function authorizeActions(actions: Array<"write" | "edit">) {
 	runPy([
-		PATH_GATE,
-		"authorize",
+		PG_AUTHORIZE,
 		"--repo",
 		CWD,
 		"--session",

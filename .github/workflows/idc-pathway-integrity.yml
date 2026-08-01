@@ -27,9 +27,14 @@ name: idc-pathway-integrity
 # review / finish evidence) is owned by the finisher/gate receipts at merge time, NOT by this static
 # head-bound check.
 #
-# Follow-up (supply-chain hardening): pin `actions/checkout` to a full commit SHA rather than the
-# moving `@v4` tag. Left as `@v4` here because resolving the exact SHA needs network access; a wrong
-# SHA would break the required check.
+# SUPPLY CHAIN. Both checkout steps are pinned to a full, immutable commit SHA, not the moving `@v4`
+# tag — a tag can be re-pointed at arbitrary code by the action's owner or a compromised account, and
+# this workflow emits a REQUIRED check that gates every governed merge. The trailing `# v4` comment
+# records which release the SHA is, for readability only; the SHA is what runs. A pin is enforced
+# mechanically by `scripts/lint-references.sh` Rule Q: any `uses:` under `.github/workflows/` that is
+# not a 40-hex SHA fails the lint. To bump: resolve the new tag with
+# `gh api repos/<owner>/<repo>/git/ref/tags/<tag> --jq .object.sha` and replace both the SHA and the
+# comment.
 
 on:
   pull_request:
@@ -49,7 +54,7 @@ jobs:
       HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - name: Checkout the TRUSTED checker (base ref on a PR; the pushed commit on a push)
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # The base ref is the already-merged, trusted tree — a PR cannot modify it, so the checker
           # taken from here cannot be weakened by the PR it is judging.
@@ -58,7 +63,7 @@ jobs:
           fetch-depth: 1
 
       - name: Checkout the exact proposed head (the tree being judged)
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # Check out the head commit itself (not the synthetic PR merge commit) so the checker
           # binds to the exact SHA a merge would land.

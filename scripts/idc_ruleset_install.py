@@ -617,12 +617,38 @@ _WRITE_OR_BETTER = frozenset({"admin", "write", "maintain"})
 # absent or empty — the case the fallback was documented for — so it can still rescue a body that omits
 # the legacy field, but can no longer OVERRIDE one that reports read/triage/none.
 #
-# Residual, stated honestly: when `permission` is missing entirely, a colliding custom role name is
-# still accepted. There is nothing more authoritative left to consult at that point, and refusing every
-# body that omits the legacy field would break any GitHub Enterprise version that does not send it.
-# The exposure needs an org to have BOTH defined a custom role named like a built-in AND be served a
-# body with no `permission` field.
-_ROLE_ONLY_ACCEPTED = _WRITE_OR_BETTER
+# The no-authoritative-field FALLBACK is now a BOOLEAN map, not a name. When `permission` is missing
+# entirely, the residual used to be "a colliding custom role name is still accepted, because there is
+# nothing more authoritative left to consult." There is: the same response carries a BOOLEAN capability
+# map (`user.permissions` on the collaborator endpoint — `{"pull":…,"push":…,"maintain":…,"admin":…}`),
+# the same shape the TEAM branch above already decides on. Booleans are emitted by GitHub, not named by
+# an org, so a custom role called "maintain" cannot forge one. Precedence is therefore:
+#
+#   1. `permission` (the authoritative legacy field) decides whenever it is present;
+#   2. else the boolean capability map decides — this keeps every GitHub Enterprise version that omits
+#      the legacy field working, which is the compatibility the old fallback existed for;
+#   3. else REFUSE. A body carrying no authoritative statement of access at all cannot prove a code
+#      owner CAN approve, and a free-form name is not a substitute for that proof — inferring access
+#      from it is the false-certify class this whole module exists to prevent.
+#
+# `role_name` is consequently no longer a grant source anywhere; it is retained only so a refusal can
+# report what GitHub said.
+_BOOLEAN_WRITE_CAPS = ("push", "maintain", "admin")
+
+
+def _capability_map(doc: dict):
+    """The BOOLEAN capability map in a collaborator-permission body, or None when absent.
+
+    GitHub documents it at `user.permissions`; a top-level `permissions` is accepted too because the
+    team endpoint reports it there and tolerating both cannot fail open — either way the decision is
+    made on booleans GitHub emits, never on a name an org chooses."""
+    for candidate in (
+        (doc.get("user") or {}).get("permissions") if isinstance(doc.get("user"), dict) else None,
+        doc.get("permissions"),
+    ):
+        if isinstance(candidate, dict):
+            return candidate
+    return None
 
 
 def _distinct_owner_tokens(text: str) -> list:
@@ -698,14 +724,29 @@ def _principal_problem(owner_repo: str, tok: str):
                     tok, type(doc).__name__, owner_repo))
     perm = str(doc.get("permission") or "").strip().lower()
     role = str(doc.get("role_name") or "").strip().lower()
-    # `permission` decides when it is present; `role_name` is consulted only to rescue a body that
-    # omits it (see `_ROLE_ONLY_ACCEPTED`). A free-form custom role name must not out-vote the
-    # authoritative field.
-    granted = perm in _WRITE_OR_BETTER if perm else role in _ROLE_ONLY_ACCEPTED
-    if not granted:
+    if perm:
+        # The authoritative field is present and decides on its own — a free-form custom role name
+        # must never out-vote it.
+        if perm in _WRITE_OR_BETTER:
+            return None
         return ("owner {!r} has {!r} access on {} — a code owner without write access cannot satisfy "
-                "require_code_owner_review.".format(tok, perm or role or "no", owner_repo))
-    return None
+                "require_code_owner_review.".format(tok, perm, owner_repo))
+    caps = _capability_map(doc)
+    if caps is None:
+        # No authoritative statement of access at all. `role_name` is an ORG-DEFINED, free-form string:
+        # an org can name a custom role "maintain" while granting no push, so accepting it here would
+        # certify a code owner who cannot approve — the exact false-certify this gate exists to stop.
+        return ("owner {!r} on {}: GitHub reported neither a `permission` field nor a boolean "
+                "permissions map, so this module cannot confirm write-or-better access. The only value "
+                "offered was role_name={!r}, which is a free-form org-defined name and is not proof of "
+                "access. Refusing rather than inferring a grant from a role name.".format(
+                    tok, owner_repo, role or ""))
+    # Decide on booleans GitHub emits, never on a name an org chooses.
+    if any(caps.get(cap) is True for cap in _BOOLEAN_WRITE_CAPS):
+        return None
+    return ("owner {!r} has no write-or-better capability on {} (permissions map grants none of {}) — "
+            "a code owner without write access cannot satisfy require_code_owner_review.".format(
+                tok, owner_repo, ", ".join(_BOOLEAN_WRITE_CAPS)))
 
 
 def verify_owner_principals(owner_repo: str, text: str) -> list:

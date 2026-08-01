@@ -9,10 +9,14 @@
       "scripts/idc_validation_contract.py",
       "scripts/idc_receipt_check.py",
       "scripts/idc_pathway_check.py",
+      "scripts/idc_ruleset_check.py",
+      "scripts/idc_path_gate.py",
+      "scripts/idc_git_path_gate.py",
+      "scripts/idc_build_receipt.py",
       ".github/rulesets/**",
       ".github/CODEOWNERS"
     ],
-    "note": "protected_surfaces is IDC metadata that scripts/idc_ruleset_check.py enforces alongside the GitHub rules below; the workflow/hook/validation/receipt classes must each be represented so a merge cannot strip the governance machinery, AND the governance-of-governance surfaces (the deterministic checker scripts/idc_pathway_check.py, the ruleset directory, and CODEOWNERS itself) must be owned too so the guard cannot be weakened without a code-owner review (F40). Code-owner review (require_code_owner_review) governs these surfaces once a CODEOWNERS file names them — see the U8 report for the operator provisioning step."
+    "note": "protected_surfaces is IDC metadata that scripts/idc_ruleset_check.py enforces alongside the GitHub rules below; the workflow/hook/validation/receipt classes must each be represented so a merge cannot strip the governance machinery, AND the governance-of-governance surfaces (the deterministic checker scripts/idc_pathway_check.py, the OWNERSHIP checker scripts/idc_ruleset_check.py, the ruleset directory, and CODEOWNERS itself) must be owned too so the guard cannot be weakened without a code-owner review (F40). The ownership checker is listed for the same reason as the deterministic one: it governed every surface except itself, so an unreviewed change to the script that decides whether surfaces are owned would have certified clean (N1). The three ENFORCEMENT scripts (scripts/idc_path_gate.py, scripts/idc_git_path_gate.py, scripts/idc_build_receipt.py) are listed for the same reason one file over (F4): the spec names them as blocking surfaces, so an unreviewed edit to the gate that decides every mutation, to the git backstop that is Codex/Pi's only gate, or to the receipt minter Build closes against would remove protection while every other guard still certified. Code-owner review (require_code_owner_review) governs these surfaces once a CODEOWNERS file names them — see the U8 report for the operator provisioning step. This list, idc_ruleset_check.SURFACE_CLASSES and idc_pathway_check.PROTECTED_SURFACES are ONE contract, enforced BIDIRECTIONALLY: governance/ruleset-checker-local.sh reds when a class is declared here but not in SURFACE_CLASSES (or the reverse), and governance/pathway-check-surface-alignment.sh reds when this list and PROTECTED_SURFACES diverge."
   },
   "github_ruleset": {
     "name": "idc-pathway-integrity",

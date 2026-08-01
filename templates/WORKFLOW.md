@@ -87,16 +87,38 @@ The Claude mutation hook covers exactly these tool transports: `Bash`, `Write`, 
 `NotebookEdit`. MCP writer tools need an explicit Path Gate adapter and hook matcher before they
 join this boundary, and are not claimed covered until then.
 
-`controlled` currently has these documented limitations, tracked to U8/U9 rather than silently
-claimed as complete:
+`controlled` currently has these documented limitations. Every one of them is **still open** — each
+line states what is true of the code you are running, not what some future unit of work is expected
+to do about it:
 
-- real ticket, graph-node, and declared-path mint-at-transition;
-- per-worker-worktree and per-branch authorization with matching ledger visibility;
-- first-class Pi and Codex lifecycle producers;
-- a sanctioned finisher/merge helper (until it lands, Pi agents prepare, push, and report the
-  gates; the operator performs the merge);
-- mandatory identity binding plus live-tracker comparison in every adapter; and
-- TTL heartbeat renewal for long drains.
+- **Authorization is minted per COMMAND, not per transition.** A command's Path Gate grant covers the
+  whole repository (`.`) for the command's duration. The real ticket, graph node, and declared paths
+  are not bound at the transition that authorizes the work, so a write outside the planned surface is
+  caught after the fact at receipt time rather than refused at mutation time. **Open.**
+- **One authorization per worktree — the newest mint wins, and nothing shows you the whole picture.**
+  (Not "one per repository": the authorization lives at `git rev-parse --git-path
+  idc-path-gate/authorization.json`, which resolves to each linked worktree's OWN git directory, and
+  every grant is bound to the branch it was minted on — a mutation on a different branch is refused.
+  Parallel workers in separate worktrees therefore do **not** share a grant.) What is still open: a
+  worktree holds exactly ONE live authorization, so a second command minted in the same worktree
+  replaces the first, and no view — ledger or otherwise — aggregates who is currently authorized to do
+  what across the worktrees of one repository. **Open.**
+- **Pi and Codex are not first-class lifecycle producers.** Pi runs under a per-role guard that
+  consults the shared Path Gate. **Codex has no per-tool gate at all** — `scripts/install-codex.sh`
+  wires no hooks, so Codex work is covered only by the git pre-commit/pre-push backstop, which sees a
+  change when it is committed rather than when it is written. **Open.**
+- **No sanctioned merge helper on the experimental Pi runtime** (Pi-only — this is NOT a
+  system-wide limitation). Claude and Codex DO self-merge through the sanctioned finishers:
+  `idc_git_finish.py` for build PRs (receipt-gated merge + close) and `idc_pr_finish.py autonomous`
+  for planning / intake / recirculation PRs. On **Pi** no equivalent helper has landed, so the Pi
+  finisher mints the build receipt, reports the reviewed branch + receipts, and the **operator**
+  merges out-of-band before the `idc_git_finish.py --close-only` cleanup runs
+  (`idc:idc-finisher` §Git finalization). **Open.**
+- **Identity binding is optional, not mandatory.** The gate denies a request whose ticket or graph
+  node MISMATCHES the live authorization, but a request that carries no identity at all is not
+  refused, and nothing compares the bound identity against the live tracker. **Open.**
+- **No TTL renewal.** An authorization is a flat 4-hour grant with no heartbeat, so a drain that runs
+  longer expires mid-run instead of renewing. **Open.**
 
 `app-locked` adds a GitHub App as the sole tracker writer and trusted check source; it closes the ordinary-token tracker-write gap but still does not protect against repository or organization administrators removing the rules or the App.
 
@@ -220,8 +242,10 @@ already fired at Think). One run decomposes an **admitted** consideration → is
 fan-out → goal-contract authoring → **pairwise clash/matrix analysis** (parallel work never
 collides) → global re-sequencing against the live board (`In Progress` issues immutable;
 re-sequencing happens ONLY here) → mechanical schema check → board admission, opening a
-planning PR whose body is the audit trail. Plan prepares and pushes the green PR; until U8/U9 lands
-the sanctioned merge helper, the operator performs the merge (this is not a product-approval gate).
+planning PR whose body is the audit trail. Plan automerges that PR when green through the sanctioned
+finisher (`idc_pr_finish.py autonomous --kind planning`) on Claude and Codex — no human touchpoint,
+since this is not a product-approval gate; on the experimental **Pi** runtime, which has no sanctioned
+merge helper, Plan prepares and pushes the green PR and the operator performs the merge.
 **Zero durable workers** (bounded fan-out only). The only plan review is matrix deconfliction +
 the schema check.
 
@@ -356,8 +380,11 @@ every role.
 ## 7. Commit / PR conventions
 
 Every commit traces to the issue or change order it advances. Never commit with
-`--no-verify`. Until the U8/U9 sanctioned merge helper lands, the operator performs merges for
-planning PRs, non-gated recirculation PRs, and build PRs after their required green/PASS checks.
+`--no-verify`. Planning PRs, non-gated recirculation PRs, and build PRs merge through the sanctioned
+finishers (`idc_pr_finish.py autonomous` / `idc_git_finish.py`) once their required green/PASS checks
+pass — never a raw `gh pr merge` typed into a tool, which the mutation interlock denies. On the
+experimental **Pi** runtime there is no sanctioned merge helper, so there the operator performs those
+merges out-of-band and the finisher runs `idc_git_finish.py --close-only` afterwards.
 The **Think PR** is the one product-approval touchpoint
 (§2) — it stays **draft until the operator merges it** (= approval = admission); a gated
 recirculation rides the same Think-PR gate.

@@ -65,6 +65,10 @@ PROTECTED_SURFACES = (
     "scripts/idc_validation_contract.py",           # validation surface
     "scripts/idc_receipt_check.py",                 # receipt surface
     "scripts/idc_pathway_check.py",                 # the checker itself
+    "scripts/idc_ruleset_check.py",                 # the OWNERSHIP checker (governed all but itself)
+    "scripts/idc_path_gate.py",                     # the Path Gate itself (F4)
+    "scripts/idc_git_path_gate.py",                 # the git backstop — Codex/Pi's only gate (F4)
+    "scripts/idc_build_receipt.py",                 # the build-receipt minter (F4)
     ".github/rulesets",                             # the ruleset directory (directory)
     ".github/CODEOWNERS",                           # the ownership surface the review rules lean on
 )

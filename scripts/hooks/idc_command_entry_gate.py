@@ -64,7 +64,12 @@ RECOVERY_COMMANDS = {"doctor", "update", "uninstall", "janitor", "pause"}
 # entry gate — commands/init.md opens its own lifecycle record right after it writes
 # tracker-config.yaml (Task 6). So init is the one governed command whose registration the entry gate
 # DEFERS; every other command's record is opened here.
-DEFERS_REGISTRATION = {"init"}
+#
+# Deriving it from `idc_command_contract.SELF_MINTING_COMMANDS` keeps ONE source of truth: a command
+# whose registration is deferred here MUST mint its own Path Gate authorization in `start` (there is
+# no public authorize verb to fall back on), so the two sets are the same set by construction and
+# cannot drift apart into a command that self-registers but never gets an authorization.
+DEFERS_REGISTRATION = set(C.SELF_MINTING_COMMANDS)
 ALLOW_ON_INVALID = RECOVERY_COMMANDS | DEFERS_REGISTRATION
 
 STALE_REASON = (

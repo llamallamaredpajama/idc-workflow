@@ -5,6 +5,12 @@ set -uo pipefail
 . "$(dirname "$0")/lib.sh"
 
 PATH_GATE="$GOV_PLUGIN/scripts/idc_path_gate.py"
+# SCENARIO mint door. idc_path_gate.py has no `authorize` verb (V-DOOR); this fixture calls the
+# same write_authorization Python API the real admission minters use, ceiling and all. It SHIPS
+# with the plugin (marketplace source is "./"), so it refuses unless BOTH IDC_SMOKE_FIXTURE=1 is
+# exported AND --repo is a scratch tree; every repo below is built with `mktemp -d`.
+export IDC_SMOKE_FIXTURE=1
+PG_AUTHORIZE="$GOV_PLUGIN/tests/smoke/lib/path_gate_authorize.py"
 CONTRACT="$GOV_PLUGIN/scripts/idc_command_contract.py"
 [ -f "$PATH_GATE" ] || gov_fail "idc_path_gate.py not found at $PATH_GATE (shared core not implemented yet)"
 [ -f "$CONTRACT" ] || gov_fail "idc_command_contract.py not found at $CONTRACT"
@@ -25,7 +31,7 @@ python3 "$CONTRACT" start --repo "$REPO" --session "$SID" --command build \
   --plugin-root "$GOV_PLUGIN" --args 'demo' --source user >/dev/null \
   || gov_fail "could not open the active /idc:build command record for $SID"
 BRANCH="$(git -C "$REPO" branch --show-current)"
-python3 "$PATH_GATE" authorize --repo "$REPO" --session "$SID" --command build \
+python3 "$PG_AUTHORIZE" --repo "$REPO" --session "$SID" --command build \
   --branch "$BRANCH" --ticket T-42 --graph-node NODE-7 \
   --allow-action write --allow-action edit --allow-action git --allow-path src >/dev/null \
   || gov_fail "could not write a shared Path Gate authorization"

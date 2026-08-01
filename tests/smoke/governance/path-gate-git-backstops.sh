@@ -9,6 +9,12 @@ set -uo pipefail
 . "$(dirname "$0")/lib.sh"
 
 PATH_GATE="$GOV_PLUGIN/scripts/idc_path_gate.py"
+# SCENARIO mint door. idc_path_gate.py has no `authorize` verb (V-DOOR); this fixture calls the
+# same write_authorization Python API the real admission minters use, ceiling and all. It SHIPS
+# with the plugin (marketplace source is "./"), so it refuses unless BOTH IDC_SMOKE_FIXTURE=1 is
+# exported AND --repo is a scratch tree; every repo below is built with `mktemp -d`.
+export IDC_SMOKE_FIXTURE=1
+PG_AUTHORIZE="$GOV_PLUGIN/tests/smoke/lib/path_gate_authorize.py"
 GIT_GATE="$GOV_PLUGIN/scripts/idc_git_path_gate.py"
 INTERLOCK="$GOV_PLUGIN/scripts/hooks/idc_interlock_gate.py"
 CONTRACT="$GOV_PLUGIN/scripts/idc_command_contract.py"
@@ -100,7 +106,7 @@ python3 "$CONTRACT" start --repo "$REPO" --session "$SID" --command build \
   --plugin-root "$GOV_PLUGIN" --args 'demo' --source user >/dev/null \
   || gov_fail "could not open the active /idc:build command record for $SID"
 BRANCH="$(git -C "$REPO" branch --show-current)"
-python3 "$PATH_GATE" authorize --repo "$REPO" --session "$SID" --command build \
+python3 "$PG_AUTHORIZE" --repo "$REPO" --session "$SID" --command build \
   --branch "$BRANCH" --ticket T-42 --graph-node NODE-7 \
   --allow-action write --allow-action edit --allow-action git --allow-path src >/dev/null \
   || gov_fail "could not write a shared Path Gate authorization"
@@ -210,7 +216,7 @@ git -C "$REPO" commit --no-verify -qm 'test: protected lower commit'
 printf 'export const x = 3;\n' > "$REPO/src/app.ts"
 git -C "$REPO" add src/app.ts
 git -C "$REPO" commit --no-verify -qm 'test: ordinary tip commit'
-python3 "$PATH_GATE" authorize --repo "$REPO" --session "$SID" --command build \
+python3 "$PG_AUTHORIZE" --repo "$REPO" --session "$SID" --command build \
   --branch smuggled --ticket T-42 --graph-node NODE-7 \
   --allow-action write --allow-action edit --allow-action git --allow-path src >/dev/null \
   || gov_fail "could not authorize the new-branch smuggling fixture's ordinary source path"
@@ -227,7 +233,7 @@ grep -qi 'path gate' "$WORK/smuggled-push.out" \
   || gov_fail "new-ref smuggling denial did not mention the Path Gate: $(cat "$WORK/smuggled-push.out")"
 git -C "$REPO" checkout -q main
 git -C "$REPO" reset --hard -q origin/main
-python3 "$PATH_GATE" authorize --repo "$REPO" --session "$SID" --command build \
+python3 "$PG_AUTHORIZE" --repo "$REPO" --session "$SID" --command build \
   --branch main --ticket T-42 --graph-node NODE-7 \
   --allow-action write --allow-action edit --allow-action git --allow-path src >/dev/null \
   || gov_fail "could not restore the main-branch Path Gate authorization"
@@ -246,7 +252,7 @@ git -C "$REPO" commit --no-verify -qm 'test: innocent tip behind stale ghost'
 git -C "$REPO" update-ref refs/remotes/origin/ghost "$GHOST_LOWER_SHA"
 git --git-dir="$REMOTE" show-ref --verify --quiet refs/heads/ghost \
   && gov_fail "stale-ghost fixture accidentally created a real server ghost ref"
-python3 "$PATH_GATE" authorize --repo "$REPO" --session "$SID" --command build \
+python3 "$PG_AUTHORIZE" --repo "$REPO" --session "$SID" --command build \
   --branch ghost-smuggled --ticket T-42 --graph-node NODE-7 \
   --allow-action write --allow-action edit --allow-action git --allow-path src >/dev/null \
   || gov_fail "could not authorize the stale-ghost fixture's ordinary source path"
@@ -264,7 +270,7 @@ grep -qi 'path gate' "$WORK/ghost-push.out" \
 git -C "$REPO" update-ref -d refs/remotes/origin/ghost
 git -C "$REPO" checkout -q main
 git -C "$REPO" reset --hard -q origin/main
-python3 "$PATH_GATE" authorize --repo "$REPO" --session "$SID" --command build \
+python3 "$PG_AUTHORIZE" --repo "$REPO" --session "$SID" --command build \
   --branch main --ticket T-42 --graph-node NODE-7 \
   --allow-action write --allow-action edit --allow-action git --allow-path src >/dev/null \
   || gov_fail "could not restore main authorization after the stale-ghost proof"

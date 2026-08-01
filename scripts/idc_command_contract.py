@@ -86,6 +86,36 @@ COMMANDS = {
     "autorun", "build", "doctor", "init", "intake", "janitor", "pause",
     "plan", "recirculate", "resume", "think", "uninstall", "update",
 }
+
+# Commands whose Path Gate authorization is minted BY `start` ITSELF, inside the same admission
+# transaction that opens the lifecycle record (V-DOOR).
+#
+# For every OTHER command the UserPromptExpansion entry gate mints the authorization
+# (`idc_command_entry_gate._ensure_path_gate_auth`) with NO caller-chosen scope. `init` cannot use
+# that path: at init's expansion the repo is not governed yet (no docs/workflow/tracker-config.yaml,
+# no ledger), so the gate DEFERS registration entirely
+# (`idc_command_entry_gate.DEFERS_REGISTRATION`, which is derived from this set) and init opens its
+# own record from commands/init.md once governance exists.
+#
+# That deferral used to be paid for with a PUBLIC `idc_path_gate.py authorize` CLI verb that honored
+# caller-chosen `--command`/`--allow-action`/`--allow-path`. Any Bash in any session could call it,
+# so the only precondition on minting a broad write grant was "some active command record exists" —
+# a privilege-escalation door with exactly one production caller that needed none of its flexibility.
+# The verb is gone; `start` mints the FIXED default profile for these commands instead, with no
+# caller input beyond the command name, bound to the nonce of the record it just wrote.
+#
+# HONEST RESIDUAL — `start` IS a CLI, so this is a narrowing, not a closure. Its only precondition is
+# a governed repository, so any Bash in a governed session can open an init record and receive init's
+# fixed profile (write/edit/git over `.`). What that no longer buys is a caller-chosen SCOPE: there
+# are no --allow-path/--allow-action flags anywhere on this parser, and a read-only command's role
+# ceiling still refuses a mutation grant. Closing the residual needs a single-use admission token
+# issued by `idc_command_entry_gate`, and that gate is a Claude `UserPromptExpansion` hook that Codex
+# and Pi never run — for those runtimes this self-mint is the ONLY mint path in the system (verified:
+# `write_authorization` has exactly two production callers, and the other is that hook), so requiring
+# a token would leave every Codex/Pi commit denied by the git backstops in a `controlled` repository.
+# Tracked in `docs/dev/known-debts.md`; asserted, not claimed away, by
+# `governance/path-gate-boundaries.sh` (D2 §3c).
+SELF_MINTING_COMMANDS = {"init"}
 # The honest ways a command lifecycle can END (the GLOBAL set). Task 6 narrows the legal subset
 # PER COMMAND (LEGAL_STATUSES) and attaches command-specific evidence to each.
 #
@@ -3478,6 +3508,65 @@ def active_records(cwd: str, session_id: str) -> list:
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────────────────────────
+def _register_for_start(args, running_version: str) -> tuple[int, dict | None, dict | None]:
+    """Open the record for `start` and report it honestly. Returns (exit_code, record, capture).
+
+    `capture` carries the exact `{prior, written}` of this write so a SELF-MINTING command can roll
+    back precisely what it wrote (delete a new record, restore the one an idempotent re-entry
+    replaced) if its authorization mint then fails."""
+    with idc_ledger.capture_command_start() as captured:
+        try:
+            rec = register_start(args.repo, args.session, args.command, running_version,
+                                 args.args or "", args.source or "")
+        except idc_ledger.ObligationConflict as exc:
+            # A narrowing/replacing restart (rule A) is refused; the prior obligation record is intact.
+            print(f"idc-command-contract: refusing to open the command record — {exc}", file=sys.stderr)
+            return 2, None, None
+    if rec is None:
+        # A governed repo where the ledger write did NOT persist. Never report success for an
+        # obligation that was not recorded (Fix 2) — the Stop gate could not enforce its closeout.
+        print("idc-command-contract: could not persist the command record (the session state "
+              "ledger write failed — check that the repo root is writable), so no obligation was "
+              "opened.", file=sys.stderr)
+        return 1, None, None
+    return 0, rec, dict(captured)
+
+
+def _mint_or_rollback(args, rec: dict, capture: dict | None, PG) -> int:
+    """Mint the FIXED default Path Gate profile for a self-minting command, or undo the record.
+
+    No caller input reaches this: `write_authorization` is called with only the repo/session/command
+    and this start's nonce, so the scope is exactly `_default_profile(command)` and the role-action
+    ceiling still applies. Register + mint is all-or-nothing — on any mint failure the exact record
+    this start just wrote is rolled back by nonce CAS, so a governed repo is never left carrying an
+    obligation that has no authorization behind it."""
+    nonce = rec.get("nonce") or ""
+    try:
+        auth = PG.write_authorization(
+            args.repo, session=args.session, command=args.command, expected_nonce=nonce)
+        if auth.get("nonce") != nonce:
+            raise RuntimeError("the Path Gate authorization did not bind this start's admission nonce")
+        return 0
+    except Exception as exc:  # noqa: BLE001 — start fails closed after a scrubbed diagnostic
+        detail = CS.scrub(str(exc)).strip() or "[no exception detail]"
+        print(f"idc-command-contract: refusing to open the {args.command!r} record — its Path Gate "
+              f"authorization could not be minted ({type(exc).__name__}): {detail}", file=sys.stderr)
+        try:
+            rolled_back = bool(idc_ledger.rollback_command_start(
+                args.repo, args.session, args.command, nonce,
+                prior_record=(capture or {}).get("prior")))
+        except Exception as rollback_exc:  # noqa: BLE001 — warn, then keep the original refusal
+            rolled_back = False
+            rb_detail = CS.scrub(str(rollback_exc)).strip() or "[no exception detail]"
+            print(f"idc-command-contract: record rollback raised ({type(rollback_exc).__name__}): "
+                  f"{rb_detail}", file=sys.stderr)
+        if not rolled_back:
+            print("idc-command-contract: the just-opened record could NOT be rolled back — it is "
+                  "still active with no authorization behind it; close it with `finish` before "
+                  "retrying.", file=sys.stderr)
+        return 1
+
+
 def _cmd_start(args) -> int:
     if args.command not in COMMANDS:
         print(f"idc-command-contract: unknown command {args.command!r}", file=sys.stderr)
@@ -3504,21 +3593,21 @@ def _cmd_start(args) -> int:
               f"(running {result.running_version}, required {result.required_version}); "
               "run /reload-plugins, then retry.", file=sys.stderr)
         return 4
-    try:
-        rec = register_start(args.repo, args.session, args.command, result.running_version or "",
-                             args.args or "", args.source or "")
-    except idc_ledger.ObligationConflict as exc:
-        # A narrowing/replacing restart (rule A) is refused; the prior obligation record is intact.
-        print(f"idc-command-contract: refusing to open the command record — {exc}", file=sys.stderr)
-        return 2
-    if rec is None:
-        # A governed repo where the ledger write did NOT persist. Never report success for an
-        # obligation that was not recorded (Fix 2) — the Stop gate could not enforce its closeout.
-        print("idc-command-contract: could not persist the command record (the session state "
-              "ledger write failed — check that the repo root is writable), so no obligation was "
-              "opened.", file=sys.stderr)
-        return 1
-    return 0
+    if args.command not in SELF_MINTING_COMMANDS:
+        rc, _rec, _cap = _register_for_start(args, result.running_version or "")
+        return rc
+    # Self-minting command (init): register AND mint inside ONE admission transaction. The lock is
+    # the same cross-process lock the entry gate holds for every other command, taken in the same
+    # order (admission lock -> ledger write lock -> authorization atomic write), so a concurrent
+    # admission cannot land between this start and its authorization. Importing the Path Gate here
+    # rather than at module scope is deliberate: idc_path_gate imports THIS module, so a top-level
+    # import would be circular.
+    import idc_path_gate as PG  # noqa: PLC0415 — see above
+    with PG.admission_lock(args.repo):
+        rc, rec, capture = _register_for_start(args, result.running_version or "")
+        if rc != 0:
+            return rc
+        return _mint_or_rollback(args, rec, capture, PG)
 
 
 def _cmd_finish(args) -> int:

@@ -985,11 +985,18 @@ def _seen_fingerprint(f):
     return f"{classification}:{root_id}" if classification else root_id
 
 
-def _apply_seen_ledger(ctx, findings):
+def _apply_seen_ledger(ctx, findings, persist=True):
     """Record every deduped finding into the durable all-seen ledger BEFORE any disposition, then
     mark resurfaced findings `seen_before`. Only this fixed code writes the ledger (spec §4.4); a
     ledger that does not validate raises RB.BaselineError so the caller fails closed (exit 2, never
-    a hollow clean or an amnesty rescan). Returns the set of fingerprints seen on earlier passes."""
+    a hollow clean or an amnesty rescan). Returns the set of fingerprints seen on earlier passes.
+
+    persist=False is the DIAGNOSTIC posture (doctor Row 10, `--no-persist-seen-ledger`): the ledger
+    is READ for the `seen_before` marks — an invalid ledger still refuses fail-closed through the
+    same BaselineError — but never written, because `/idc:doctor` promises its probes are read-only
+    for tracker/board state and `docs/workflow/reconciliation-seen-findings.json` is a durable
+    governed-tree file. A REAL janitor run keeps persist=True: that recording is the U7 dedupe
+    feature a resurfaced finding must never escape."""
     observations = []
     for f in findings:
         fp = _seen_fingerprint(f)
@@ -998,7 +1005,11 @@ def _apply_seen_ledger(ctx, findings):
             "fingerprint": fp,
             "disposition": f.get("route") or ("blocker" if f.get("blocker") else "finding"),
         })
-    prior = RB.record_seen_findings(ctx["repo"], observations)
+    if persist:
+        prior = RB.record_seen_findings(ctx["repo"], observations)
+    else:
+        ledger = RB.read_seen_ledger(ctx["repo"])
+        prior = {entry["fingerprint"] for entry in ((ledger or {}).get("entries") or [])}
     for f in findings:
         f["seen_before"] = f["fingerprint"] in prior
     return prior
@@ -1772,7 +1783,19 @@ def main():
     ap.add_argument("--report-nonce",
                     help="bind the written janitor report to the active command record's nonce "
                          "(the closeout requires the report's nonce to match)")
+    ap.add_argument("--no-persist-seen-ledger", action="store_true",
+                    help="diagnostic invocation (doctor Row 10): READ the durable all-seen ledger "
+                         "for the seen_before marks but never write it, so a strictly-read-only "
+                         "diagnostic leaves no docs/workflow/reconciliation-seen-findings.json "
+                         "behind. Refused with --bootstrap/--apply-safe, whose dedupe and "
+                         "stagnation accounting require the recording.")
     args = ap.parse_args()
+
+    if args.no_persist_seen_ledger and (args.bootstrap or args.apply_safe):
+        print("janitor: --no-persist-seen-ledger is a diagnostic read-only posture and cannot be "
+              "combined with --bootstrap or --apply-safe — those modes' dedupe/stagnation "
+              "accounting requires the durable seen-ledger recording", file=sys.stderr)
+        sys.exit(_JANITOR_BLOCKED_EXIT)
 
     # Scaffold/update step: no board read needed — ensure the sidecar is ignored and exit.
     if args.ensure_gitignore:
@@ -1830,7 +1853,7 @@ def main():
         # seen finding (including rejected/below-threshold ones) can never count as new again. An
         # invalid or model-authored ledger refuses the scan fail-closed — exit 2, never amnesty.
         try:
-            _apply_seen_ledger(context, findings0)
+            _apply_seen_ledger(context, findings0, persist=not args.no_persist_seen_ledger)
         except RB.BaselineError as exc:
             print(f"janitor: {exc}", file=sys.stderr)
             _write_scan_report(context["repo"], args.report_session, args.report_nonce,

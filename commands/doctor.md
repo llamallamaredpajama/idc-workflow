@@ -462,12 +462,15 @@ Row 9 only *reads* the board (the paginating reader `idc_gh_board.py`, `gh issue
 doctor's strictly-read-only contract (guarded by `phase7-command-prose-invariants.sh`).
 
 **10 — Board↔git reconciliation (advisory; never FAIL; read-only report).** Run the janitor scanner
-(`idc_git_janitor.py`) in its **default report mode** — read-only, it mutates nothing — to surface
+(`idc_git_janitor.py`) in its report mode **with `--no-persist-seen-ledger`** to surface
 debris that a dead/interrupted session left outside the guard rail: orphan worktrees,
 merged-but-surviving branches (local + remote), and board↔issue drift, tiered SAFE-FIX / REPORT-ONLY
 / RISKY / COHERENT. This is the same scanner `/idc:janitor` drives; doctor only ever *reports* it
-(**never** `--apply-safe`), so the strictly-read-only contract holds. Reuses `$num` / `$owner` from
-check 3 on github:
+(**never** `--apply-safe`), and `--no-persist-seen-ledger` is **not optional**: a real `/idc:janitor`
+run durably records every finding in `docs/workflow/reconciliation-seen-findings.json` (the U7 dedupe
+ledger), and doctor writing that governed-tree file would break this command's strictly-read-only
+contract — the flag reads the ledger for the `seen_before` marks but never writes it. Reuses `$num` /
+`$owner` from check 3 on github:
 Pass `--report-session` + `--report-nonce` (the `nonce` from this command's active record — read it
 with the `status` call in the lifecycle section below, BEFORE this row runs). That makes the SCANNER
 itself persist `{scanner_exit}` in its source-owned provenance envelope bound to this record, which is what the closeout
@@ -481,10 +484,12 @@ backend=$(grep -E '^backend:' docs/workflow/tracker-config.yaml | awk '{print $2
 if [ "$backend" = "github" ]; then
   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_janitor.py" \
     --repo "$PWD" --backend github --owner "$owner" --project "$num" --check-journal-divergence \
+    --no-persist-seen-ledger \
     --report-session "$CLAUDE_CODE_SESSION_ID" --report-nonce "$nonce"
 else
   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_janitor.py" --repo "$PWD" --tracker "$PWD/TRACKER.md" \
-    --check-journal-divergence --report-session "$CLAUDE_CODE_SESSION_ID" --report-nonce "$nonce"
+    --check-journal-divergence --no-persist-seen-ledger \
+    --report-session "$CLAUDE_CODE_SESSION_ID" --report-nonce "$nonce"
 fi
 ```
 Read the scanner's exit code + its `janitor: N safe-fix, M risky, K report-only` summary:

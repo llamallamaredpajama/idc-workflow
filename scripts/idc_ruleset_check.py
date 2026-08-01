@@ -1000,10 +1000,30 @@ _MAX_LISTING_PAGES = 100
 
 
 def _gh_json_all_pages(path: str, per_page=_RULESETS_PER_PAGE) -> list:
-    """Every item of a paginated GitHub LIST endpoint, walked to exhaustion. Shares its termination
-    and refusal contract with the installer's copy — see `idc_ruleset_install._gh_json_all_pages` for
-    the full rationale (a null body, a non-list body, and a listing that never ends all REFUSE; only
-    an EMPTY page ends the walk)."""
+    """Every item of a paginated GitHub LIST endpoint, walked to exhaustion.
+
+    THE ONE canonical page walker for the ruleset tools: `idc_ruleset_install` used to carry a
+    copy-pasted twin that had to be kept behaviorally identical by hand; it now imports THIS one
+    (the installer already depends on this module for its validators, so the import direction was
+    settled — the reverse would be circular).
+
+    EVERY WAY THIS CAN FAIL TO ESTABLISH THE FULL LISTING REFUSES, because the installer turns the
+    answer into a MUTATION: "our ruleset is not in this listing" is what makes `--apply` POST a new
+    one, so a listing that is merely unfinished must never be read as a complete one (F34, F36).
+
+    * A NULL/empty body REFUSES. `_gh_json` maps a `gh` that exits 0 with no output to `None`, and
+      `None` used to `break` — reading an unverifiable body as "the listing ended", so `--apply`
+      created a duplicate ruleset off a read it could not verify. It now goes through the same
+      refusal: not a list, not proof of absence.
+    * A NON-LIST page REFUSES: an unparseable listing is not proof of absence.
+    * ONLY AN EMPTY PAGE ENDS THE WALK. Stopping on a SHORT page (`len(body) < per_page`) trusted
+      the server to honor `per_page`: a backend serving its 30-item default would end the walk after
+      page one holding 30 entries, silently reinstating the very truncation this function exists to
+      close. An empty page is the one end-of-listing signal that needs no such trust, at the cost of
+      one extra request per listing (GitHub returns `[]` past the last page).
+    * A LISTING THAT NEVER EMPTIES REFUSES at `_MAX_LISTING_PAGES` rather than looping forever. Not
+      hypothetical: a stub written for these very tests served a full page one for every page and
+      hung the walker, which had to be killed rather than debugged from a failure."""
     items, page = [], 1
     while True:
         if page > _MAX_LISTING_PAGES:

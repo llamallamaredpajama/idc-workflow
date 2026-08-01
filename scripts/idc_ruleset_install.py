@@ -520,60 +520,18 @@ def _gh_json(args: list):
     return json.loads(out.stdout or "null")
 
 
-# The walk below stops at an EMPTY page, so a listing that never empties must be bounded by something.
-# At the default 100 items per page this is 10,000 rulesets on a single repository — orders of
-# magnitude past anything real, so it can only be reached by a backend that is not paginating as
-# documented. See `_gh_json_all_pages` for why reaching it RAISES (F36).
-_MAX_LISTING_PAGES = 100
-
-
-def _gh_json_all_pages(path: str, per_page=100) -> list:
-    """Every item of a paginated GitHub LIST endpoint, walked to exhaustion.
-
-    GitHub paginates `repos/{repo}/rulesets` at 30 per page by DEFAULT and the listing INCLUDES
-    org-inherited rulesets, so a repository governed by a handful of org rulesets can push ours off
-    page one. Reading one page then silently reads "absent from page 1" as "not installed", and the
-    idempotent PUT/update becomes a POST/create against a ruleset that already exists — the same
-    30-item truncation class this repo already documents in `idc_gh_board.py` and defends against in
-    `idc_git_janitor.py` (F24). Pages are walked explicitly rather than with `gh --paginate`, whose
-    output shape for array endpoints varies across gh versions (concatenated arrays vs `--slurp`).
-
-    EVERY WAY THIS CAN FAIL TO ESTABLISH THE FULL LISTING REFUSES, because the caller turns the answer
-    into a MUTATION: "our ruleset is not in this listing" is what makes `--apply` POST a new one, so a
-    listing that is merely unfinished must never be read as a complete one (F34, F36).
-
-    * A NULL/empty body REFUSES. `_gh_json` maps a `gh` that exits 0 with no output to `None`, and
-      `None` used to `break` — reading an unverifiable body as "the listing ended", so `--apply`
-      created a duplicate ruleset off a read it could not verify, one line above a guard that refuses
-      a `{}` body for exactly that reason. It now goes through the same refusal: not a list, not proof
-      of absence.
-    * A NON-LIST page REFUSES: an unparseable listing is not proof of absence.
-    * ONLY AN EMPTY PAGE ENDS THE WALK. Stopping on a SHORT page (`len(body) < per_page`) trusted the
-      server to honor `per_page`: a backend serving its 30-item default would end the walk after page
-      one holding 30 entries, silently reinstating the very truncation this function exists to close.
-      An empty page is the one end-of-listing signal that needs no such trust, at the cost of one
-      extra request per listing (GitHub returns `[]` past the last page).
-    * A LISTING THAT NEVER EMPTIES REFUSES at `_MAX_LISTING_PAGES` rather than looping forever. This
-      is not hypothetical: a stub written for these very tests served a full page one for every page
-      and hung the walker, which had to be killed rather than debugged from a failure."""
-    items, page = [], 1
-    while True:
-        if page > _MAX_LISTING_PAGES:
-            raise RuntimeError(
-                "`{}` had not returned an empty page after {} pages of up to {} entries — refusing "
-                "to keep walking a listing that does not terminate, and refusing to answer from the "
-                "truncated part of it".format(path, _MAX_LISTING_PAGES, per_page))
-        body = _gh_json(["api", "{}?per_page={}&page={}".format(path, per_page, page)])
-        if not isinstance(body, list):
-            raise RuntimeError(
-                "`{}` returned {}, not the documented JSON array — refusing to read an unparseable "
-                "listing as an empty one".format(
-                    path, "an empty body" if body is None else type(body).__name__))
-        if not body:
-            break
-        items.extend(body)
-        page += 1
-    return items
+# ONE canonical page walker (F24/F34/F36): `idc_ruleset_check._gh_json_all_pages` is the single
+# implementation — this module used to carry a copy-pasted twin that had to be kept behaviorally
+# identical by hand. This module already imports the checker (`RC`) for its validators, so the import
+# direction was settled (the reverse would be circular). The module-level aliases keep every internal
+# call site and the test seams (`INS._gh_json_all_pages` / `INS._MAX_LISTING_PAGES` in
+# tests/smoke/governance/ruleset-install-live-gates.sh W4b/W4e/W4f) working unchanged; the checker's
+# `_gh_json` door is behaviorally identical to the one this module's copy used (same subprocess `gh`
+# invocation, same OSError→RuntimeError conversion, same scrubbed `` `gh …` failed`` message). The
+# full refusal contract — only an EMPTY page ends the walk; null, non-list, and never-ending
+# listings all REFUSE — is documented on the canonical function.
+_MAX_LISTING_PAGES = RC._MAX_LISTING_PAGES
+_gh_json_all_pages = RC._gh_json_all_pages
 
 
 def _existing_ruleset_id(owner_repo: str):

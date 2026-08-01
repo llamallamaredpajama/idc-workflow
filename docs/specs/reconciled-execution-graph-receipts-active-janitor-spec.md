@@ -689,8 +689,12 @@ worktrees, rewrite history, close unproven work, or weaken gates/tests/security.
 ### 9.8 Bounded convergence
 
 Repairs MUST be idempotent and deduplicated. A finding already represented by a durable obligation is
-not filed again. After three non-converging passes, Janitor MUST stop with exact blockers and MUST NOT
-advance the clean checkpoint past unresolved facts.
+not filed again. The bootstrap repair loop is bounded by `--max-passes`, which defaults to 1 and
+which no shipped caller raises, so the shipped default runs a single pass and stops with its exact
+blockers rather than fabricating a clean checkpoint. Where a caller does raise that ceiling, a second
+bound applies: two consecutive passes that discover no previously-unseen blocker halt the run as
+stagnant (so the canonical stubborn-blocker case halts on the third pass). Janitor MUST NOT advance
+the clean checkpoint past unresolved facts.
 
 ---
 
@@ -969,7 +973,10 @@ Tests MUST cover:
 - findings deduplicate across passes;
 - checkpoint refuses to advance over unresolved facts;
 - lost local cache causes rescan, not data loss;
-- three non-converging passes halt with named blockers;
+- the shipped default (`--max-passes` 1, no shipped caller raises it) stops after a single pass with
+  its exact blockers, and a raised ceiling halts as stagnant after two consecutive passes discovering
+  no previously-unseen blocker (the canonical stubborn-blocker case halts on the third pass), with
+  named blockers;
 - filesystem and GitHub backend parity;
 - kill/restart resumes bootstrap or repair without false completion.
 

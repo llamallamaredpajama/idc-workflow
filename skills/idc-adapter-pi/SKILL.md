@@ -181,6 +181,16 @@ python3 "$PLUGIN_ROOT/scripts/idc_command_contract.py" finish \
   --repo "$PWD" --session "$SESSION" --command <command> \
   --status <validated-status> --evidence-json '<envelope>'
 ```
+**`<envelope>` — the full required shape, because YOU construct it here.** Every command playbook's
+`--evidence-json '<envelope>'` means the common evidence envelope
+`'{"schema_version":1,"refs":{…}}'`: `finish` validates that envelope BEFORE the per-command
+evidence matrix, so a hand-constructed envelope missing either key is rejected outright —
+`schema_version` must be the JSON **integer** `1` (a string `"1"`, a float, or omitting it all die
+with `evidence.schema_version must be the integer 1`), and `refs` must be an object carrying exactly
+the refs the command's closeout section names (`{}` where the playbook says `refs:{}`). Under the
+Claude runtime the harness supplies this wrapper, which is why command playbooks only enumerate the
+`refs` contents; a Pi resident gets no such help and must emit the whole envelope itself.
+
 The evidence matrix and the terminal-status rules are **identical across runtimes** (one
 `scripts/idc_command_contract.py`), and every pipeline command still derives its final handoff from
 `idc_next_action.py`.

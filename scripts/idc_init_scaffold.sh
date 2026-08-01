@@ -227,6 +227,29 @@ python3 "$PLUGIN_ROOT/scripts/idc_git_janitor.py" --repo "$REPO_ROOT" --ensure-g
 # board. Module owns the filename + ignore rule; idempotent + append-only, same as the ledger.
 python3 "$PLUGIN_ROOT/scripts/idc_pause_state.py" --cwd "$REPO_ROOT" ensure-gitignore
 
+# Gitignore the two remaining machine-local state files that lack an ensure-gitignore door of their
+# own (issue #184 operator-experience pair). Both are machine-written working state, exactly like the
+# sidecars above, and leaving them unignored is what made a bare `git add -A` stage the receipt —
+# which the Path Gate then (correctly) denies as a protected machine-owned surface, wedging the
+# operator's scaffold commit:
+#   * docs/workflow/install-receipt.yaml — the fingerprint manifest /idc:init stamps and
+#     /idc:doctor//idc:update consume. Machine-owned, re-mintable by /idc:update on any checkout.
+#   * docs/workflow/reconciliation-seen-findings.json — the janitor/doctor dedup ledger
+#     (idc_reconciliation_baseline.py), created as a side effect of read-only reporting runs.
+# Same contract as the sibling ensure steps: idempotent, append-only, never clobbers the operator's
+# .gitignore. (Inline here rather than in each owner module because idc_reconciliation_baseline.py
+# is a concurrently-owned surface at the time of this fix; folding these into per-module
+# ensure-gitignore doors is fine later.)
+for entry in "docs/workflow/install-receipt.yaml" "docs/workflow/reconciliation-seen-findings.json"; do
+  if [ ! -f .gitignore ] || ! grep -qxF "$entry" .gitignore; then
+    # keep the file newline-terminated before appending, so two entries never fuse into one line
+    if [ -f .gitignore ] && [ -s .gitignore ] && [ "$(tail -c 1 .gitignore)" != "" ]; then
+      printf '\n' >> .gitignore
+    fi
+    printf '%s\n' "$entry" >> .gitignore
+  fi
+done
+
 # Install/refresh the shared Path Gate git backstops when this scaffold target is a git repo. The hook
 # files live in the repository Git dir (common hooks path), not the worktree, so this is the
 # deterministic scaffold point that gives every governed git repo the pre-commit/pre-push deny path.

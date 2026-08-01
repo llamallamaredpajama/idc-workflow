@@ -401,10 +401,31 @@ re-passing each with `--customized <path>`, so a file the operator kept at `/idc
 diff-and-ask is never silently re-stamped. If nothing was created or changed, the rewritten
 receipt is byte-identical — report `skipped-existing`.
 
-## Phase 8 — Summary
-Print a table of every target (`created` / `skipped-existing`), the receipt status, the
+## Phase 8 — Commit the scaffold, then summarize
+
+**Commit the scaffold NOW, while this command's record is still active.** On a `controlled` repo the
+git backstops authorize mutations only inside an active `/idc:*` command window, so a commit
+attempted after the Closeout below is denied with "the bound command record is no longer active" —
+by design, and unrecoverable without re-opening a command. The working recipe:
+
+```bash
+git add WORKFLOW.md WORKFLOW-config.yaml docs/workflow/   # filesystem backend: also TRACKER.md
+git commit -m "chore: initialize IDC workflow"
+git push   # skip when the repo has no remote yet
+```
+
+Two files deliberately stay OUT of the commit, and the scaffold's `.gitignore` entries keep a bare
+`git add -A` from staging them: `docs/workflow/install-receipt.yaml` (the machine-owned fingerprint
+manifest — a protected surface the pre-commit gate refuses to see staged) and
+`docs/workflow/reconciliation-seen-findings.json` (the janitor's dedup ledger). Both are
+machine-local working state, re-created on any checkout; committing them is never required and the
+receipt is never committable. If the commit is denied naming one of them, unstage it
+(`git restore --staged <file>`) rather than bypassing the hook.
+
+Then print a table of every target (`created` / `skipped-existing`), the receipt status, the
 board number + URL with the repo-link outcome (`linked` / `skipped-existing`) for github, or
-`TRACKER.md` (filesystem), whether the Codex adapter was installed, and the
+`TRACKER.md` (filesystem), whether the Codex adapter was installed, the scaffold-commit outcome
+(`committed` / `denied: <reason>`), and the
 `deleteBranchOnMerge` outcome (`enabled` / `declined` / `skipped-existing` / `n/a`). End by
 suggesting `/idc:doctor`, and — if any scope/probe was skipped — name exactly what remains.
 

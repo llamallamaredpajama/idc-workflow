@@ -38,7 +38,26 @@ ALLOWED_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "example.com", "www.exam
 # machine/model-supplied text, so the MACHINE_OUTPUT profile is the right one (see that module on why
 # provenance, not caller identity, picks a profile), and a rule added there reaches this gate with no
 # second edit.
+#
+# THE SHARED TABLE IS A FLOOR, NOT A CEILING. Two of its rules are shaped for a REWRITER — built to
+# redact a capture in place — while this door is a REFUSER over a command string, where the same
+# material appears without the structure a rewriter anchors on. `_REGISTRY_ONLY_SHAPES` closes exactly
+# that gap, and each entry records which shared rule cannot cover it and why.
 _REGISTRY_ONLY_SHAPES = (
+    # A PEM header WITH NO FOOTER REQUIRED. The shared `PEM_PRIVATE_KEY_BLOCK` rule is anchored on both
+    # delimiters because it REWRITES a capture and must not run away past the key it is destroying.
+    # This gate does not rewrite anything — it REFUSES a registry entry, and a registry entry is a
+    # COMMAND, never a key body, so the footer requirement buys nothing here and costs everything:
+    # `printf -- '-----BEGIN RSA PRIVATE KEY-----' >> k.pem && bash drive.sh` is a command that writes
+    # a private key, carries no footer, and walked straight into a COMMITTED repo file. The delimiter
+    # is REUSED from the shared table (never hand-copied) so a change to it reaches this door too.
+    (CS.PEM_BLOCK_OPEN, "{marker}"),
+    # `private_key=…` / `PRIVATE_KEY=…`. The shared `NAMED_SECRET_ASSIGNMENT` names
+    # secret/password/token/api_key/apikey/credential/auth — but NOT a bare `key`, deliberately, so
+    # `private_key` is not in it and was accepted here. It is added as a registry-only rule rather
+    # than to the shared table because "key" alone is exactly the substring that makes the shared rule
+    # unsafe over prose; `private[_-]?key` is a whole word pair and carries no such risk.
+    (re.compile(r"(?i)\bprivate[_-]?key\b\s{0,64}[:=]\s{0,64}\S{1,512}"), "{marker}"),
     # Two shapes the shared table deliberately does not carry, because they are not credentials —
     # they are POINTERS AT a credential store, which is exactly what a stored recipe must not contain.
     (re.compile(r"op://"), "{marker}"),

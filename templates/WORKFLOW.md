@@ -225,6 +225,16 @@ the sanctioned merge helper, the operator performs the merge (this is not a prod
 **Zero durable workers** (bounded fan-out only). The only plan review is matrix deconfliction +
 the schema check.
 
+**Boundaries must let a newly-proven verification recipe land.** When an issue's validation contract
+cites **no** reusable `handle_id` and its `surface` is not `none`, that triplet works out how to
+drive its surface from scratch and Build persists the proven recipe back to
+`docs/workflow/verification-handles.yaml` (§4.3). So Plan MUST put
+`docs/workflow/verification-handles.yaml` in that issue's `BOUNDARIES: touch` set, and MUST NOT put
+`docs/` — or any ancestor of it — in `off-limits`. **Both halves, because `off-limits` beats
+`touch`:** the merge-blocking implementation receipt refuses any changed path outside `touch` *or*
+inside `off-limits`, so a blanket `docs/` off-limits re-forbids the file `touch` just allowed, the
+append cannot be committed, and the recipe is lost to every later issue that would have reused it.
+
 ### 4.3 Build — real verification surfaces
 
 The only board-polled role. One **durable worker per parallel-safe issue** executes the

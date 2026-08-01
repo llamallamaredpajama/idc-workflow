@@ -740,7 +740,33 @@ def git_diff_info(repo: str, base_commit: str, ref: str = "HEAD"):
 # The backstop is a GUESS ("a long opaque run is a credential we have no name for"), so it is declared
 # HERE rather than in the shared table — see that module on why it must never run over prose or over a
 # structured diagnostic, where a 40-character run is the commit sha the message exists to carry.
-_OPAQUE_RUN_BACKSTOP = re.compile(r"\b[A-Za-z0-9_\-]{40,4096}\b")
+#
+# THE ALPHABET IS BASE64's, NOT `\w`'s, AND THAT IS THE WHOLE RULE. The first version of this backstop
+# was `\b[A-Za-z0-9_\-]{40,4096}\b`, which is the alphabet of a git sha or a node id — not of a
+# credential. REAL base64 carries `+` and `/`, and every one of those splits such a run into sub-40
+# fragments that each survive: an Azure `AccountKey=<44-char base64>` and a PEM body reached a
+# git-committed file in full, with the guard "on". The alphabet here is therefore base64's (plus the
+# URL-safe `-`/`_` variant and `=` padding), and the boundaries are LOOKAROUNDS over that same class
+# rather than `\b`, because `\b` is defined against `\w` and would happily start a match in the middle
+# of a run at the first `+`.
+#
+# WHAT IT COSTS, stated plainly: `/` is in the alphabet, so a long path with no `.` in it (a temp dir,
+# a deep package path) is redacted too. That is the intended direction of the error — this module's
+# shared table declares the bias for exactly this kind of text: "an unreadable excerpt costs a re-run;
+# a leaked token costs a rotation". The surrounding prose survives, because a space, a `.` or a `:`
+# ends the run.
+_OPAQUE_RUN_BACKSTOP = re.compile(
+    r"(?<![A-Za-z0-9_\-+/=])[A-Za-z0-9_\-+/=]{40,4096}(?![A-Za-z0-9_\-+/=])")
+
+# A PEM block whose FOOTER never arrived — a truncated key dump, a gate that printed a key and died,
+# a capture cut by the bound below. `CS.scrub` has already replaced every COMPLETE block, by design:
+# its rule is anchored on both delimiters so that a rewriter can never run away past the key it is
+# destroying. That leaves the unterminated case, where the body is the part that matters and there is
+# no right-hand anchor at all — so this arm takes the only safe boundary available and redacts from
+# the BEGIN line to the end of the capture. Anything after a stray private-key header is lost; a
+# private key in git history is not recoverable at all.
+_UNTERMINATED_PEM = re.compile(CS.PEM_BLOCK_OPEN.pattern + r".*\Z", re.S)
+
 MAX_CAPTURE_CHARS = 17 * 1024
 
 
@@ -753,10 +779,15 @@ def _gate_evidence(scrubbed: str | None) -> str:
     a truncation inside a scrub call outright. So the shared profile still walks the whole capture
     (every quantifier in it is bounded), and only this last rule is bounded to the head `_clip` keeps
     anyway. Cutting the HEAD, not the tail, is what makes that lossless: nothing that reaches the
-    stored excerpt was ever outside the bound."""
+    stored excerpt was ever outside the bound.
+
+    ORDER: bound, then the unterminated-PEM arm, then the opaque run. The PEM arm runs first so the
+    reader sees the informative `[REDACTED PRIVATE KEY]` marker rather than a generic one, and so the
+    key body is gone before the opaque-run rule has to chew through it fragment by fragment."""
     out = scrubbed or ""
     if len(out) > MAX_CAPTURE_CHARS:
         out = out[:MAX_CAPTURE_CHARS] + f"\n[capture bounded at {MAX_CAPTURE_CHARS} characters]"
+    out = _UNTERMINATED_PEM.sub(CS.PEM_MARKER, out)
     return _OPAQUE_RUN_BACKSTOP.sub("[REDACTED]", out)
 
 

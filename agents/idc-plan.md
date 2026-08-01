@@ -90,7 +90,21 @@ validation contract that sits beside the issue body: declare the fixed `surface`
 pair, cite a reusable `handle_id` from `docs/workflow/verification-handles.yaml` through the fixed
 resolver `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_verification_handles.py" resolve ...` when a
 reusable recipe exists, and if it does not, route a **named** recirculation / blocked-dependency
-obligation instead of weakening the gate. Before **any** contract is frozen, run the bounded
+obligation instead of weakening the gate.
+
+**When the contract will cite NO `handle_id` and `surface` is not `none`, the boundaries MUST let the
+newly-proven recipe land.** That triplet works out how to drive its surface from scratch, so the
+Finisher appends the proven recipe back to `docs/workflow/verification-handles.yaml` and re-runs the
+frozen gate over the post-append commit (`agents/idc-finisher.md` step 4). For that commit to be
+legal, the issue's `BOUNDARIES` — the same set frozen into `--touch` / `--off-limits` — **MUST** list
+`docs/workflow/verification-handles.yaml` under `touch`, and **MUST NOT** list `docs/` or any
+ancestor of it under `off-limits`. **Both halves, because `off-limits` beats `touch`:** the
+implementation receipt refuses any changed path that is outside `touch` *or* inside `off-limits`, so
+a blanket `docs/` off-limits entry re-forbids the very file the `touch` entry just allowed, the
+append cannot be committed, and the recipe is lost to every later issue that would have resolved it
+by lookup.
+
+Before **any** contract is frozen, run the bounded
 read-only falsifier `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_validation_risk_gate.py" evaluate ...`
 and let **it** decide whether discovery is required: the helper derives risk in fixed code from the
 `--touch` set you give it — the same set the contract will freeze — (and

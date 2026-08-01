@@ -341,8 +341,13 @@ planning-application receipt.
 ### 4.2 Build and Finisher
 
 Build entry verifies graph readiness, goal/validation contract identity, current tracker state,
-branch ownership, and reconciliation blockers. A successful claim transaction issues the limited
-Path Gate authorization.
+branch ownership, and reconciliation blockers. Build's ENTRY authorization carries no mutation
+actions (read-only-until-claim); a successful claim transaction — the board write read back and
+journaled — issues the limited Path Gate authorization, bound to the claimed ticket. Freezing the
+unit's validation contract then narrows that authorization to the contract's `touch` −
+`off_limits` boundary. The claim is idempotent on the board, and re-running it re-mints the
+authorization with a fresh TTL — that idempotent re-claim is the sanctioned renewal door, and it
+is also why a long drain no longer expires mid-run: every claimed item re-mints a fresh window.
 
 Before merge, IDC MUST prove:
 
@@ -355,7 +360,10 @@ Before merge, IDC MUST prove:
 - graph, tracker projection, and authorization remain current;
 - the merge and close transaction can be completed through Finisher.
 
-The authorization expires after finish or block. It cannot be reused for another ticket.
+The authorization expires after finish or block — both sanctioned close doors (the transition
+engine's terminal operations and the Finisher's tracker-close) retire the claim-scoped
+authorization and the live-contract pointer, dropping a claim-gated command back to its read-only
+entry posture. It cannot be reused for another ticket.
 
 Finisher additionally carries the §3.4 compounding obligation: when the frozen contract cited no
 `handle_id` and the surface is not `none`, it appends the newly-proven recipe to the governed

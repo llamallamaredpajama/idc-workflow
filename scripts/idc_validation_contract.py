@@ -1141,6 +1141,12 @@ def _publish_live_contract(workspace: str, doc: dict, out_path: str):
     try:
         import idc_path_gate as PG  # noqa: PLC0415 — lazy sibling import (PG lazily imports us back)
         PG.record_live_contract(workspace, doc, out_path)
+        # V-AUTH stage 2: the freeze NARROWS the live claim-scoped authorization to this contract's
+        # touch/off-limits boundary — from here the builder's write authority is exactly the frozen
+        # gate's boundary (spec §3.4 step 5 "freeze the gate digest and exclude it from the
+        # builder's allowed paths"). No live authorization / no active bound record is a no-op (the
+        # next mint inherits the scope from the pointer instead).
+        PG.narrow_authorization_to_contract(workspace)
     except Exception as exc:  # noqa: BLE001 — never freeze a gate whose scope cannot be published
         raise ValidationError(
             f"frozen contract could not be published as the live Path Gate contract: {exc}") from exc

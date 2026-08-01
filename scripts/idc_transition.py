@@ -1480,6 +1480,42 @@ def _already_done_disposition(repo, num, requested):
     return f"prior dispose history conflicts with {requested!r} (recorded: {sorted(prior)!r})"
 
 
+# ── claim-time Path Gate authorization (V-AUTH stage 2 — spec §3.3/§4.2) ───────────────────────
+def _mint_claim_authorization(ctx, num):
+    """The claim transaction's write-authority mint, AFTER the board write is proven (read back) and
+    journaled — "No source-write authorization is issued before a Build claim is proven In Progress"
+    (spec §3.3). Not-applicable states (no git worktree, no active build/autorun command record)
+    mint nothing and stay silent: nothing could enforce a recordless grant anyway. A REAL mint
+    failure fails the op CLOSED with the recovery named — the board transition already landed and
+    the claim is idempotent, so re-running it re-attempts exactly this mint (the sanctioned renew
+    door)."""
+    import idc_path_gate as PG  # noqa: PLC0415 — lazy sibling import (PG has no engine dependency)
+    try:
+        PG.mint_claim_authorization(ctx["repo"], num)
+    except Exception as exc:  # noqa: BLE001 — fail closed, name the recovery
+        raise TransitionError(
+            f"claim #{num}: the board transition landed and was journaled, but the claim-scoped "
+            f"Path Gate authorization could not be minted ({exc}); the claim is idempotent — "
+            "re-run it to mint the authorization") from exc
+
+
+def _retire_claim_authorization(ctx, num):
+    """Retire the claim-scoped authorization at a terminal transition (spec §4.2: "The authorization
+    expires after finish or block"). Best-effort BY DESIGN: the terminal board write has already
+    landed and journaled, so a retire failure must not convert a completed close into a failed op —
+    it warns LOUDLY instead, and the grant still dies with its command record and TTL."""
+    import idc_path_gate as PG  # noqa: PLC0415 — lazy sibling import
+    try:
+        ok, detail = PG.retire_claim_authorization(ctx["repo"], num)
+    except Exception as exc:  # noqa: BLE001 — warn, never fail the completed terminal op
+        ok, detail = False, f"{type(exc).__name__}: {exc}"
+    if not ok:
+        sys.stderr.write(
+            f"idc-transition: WARNING — the claim-scoped Path Gate authorization for #{num} could "
+            f"not be retired ({detail}); writes may stay authorized until its command record "
+            "finishes or its TTL expires\n")
+
+
 # ── the op dispatcher ──────────────────────────────────────────────────────────────────────────
 def run(op, ctx, **kw):
     """Execute one typed op end-to-end (validate → mutate → read-back → normalize → journal).
@@ -1613,6 +1649,12 @@ def run(op, ctx, **kw):
             if is_unblock_by:
                 journal_append(ctx["repo"], op, backend, tracker_rel,
                                dict(kw, to_status=to_status), cur=cur)
+            if op == "claim":
+                # The sanctioned RENEW door (V-AUTH stage 2): re-claiming an already-In Progress item
+                # is a board no-op, but it RE-MINTS the claim-scoped authorization with a fresh TTL —
+                # the recovery for a mint that failed after the board write, and the renewal for a
+                # unit whose implementation outlives one TTL window.
+                _mint_claim_authorization(ctx, num)
             return
         if cur["status"] == machine.get("terminal_status"):
             raise TransitionError(
@@ -1628,6 +1670,10 @@ def run(op, ctx, **kw):
         if spec.get("records_agent") and kw.get("agent"):
             record_owner(ctx, num, kw["agent"])
         journal_append(ctx["repo"], op, backend, tracker_rel, dict(kw, to_status=to_status), cur=cur)
+        if op == "claim":
+            # V-AUTH stage 2: a successful claim transaction — board write read back AND journaled —
+            # issues the claim-scoped Path Gate authorization (spec §4.2).
+            _mint_claim_authorization(ctx, num)
 
     elif kind == "terminal":
         num = kw["num"]
@@ -1687,6 +1733,9 @@ def run(op, ctx, **kw):
         term_stage = evidence.get("stage") or None
         journal_append(ctx["repo"], op, backend, tracker_rel,
                        dict(kw, to_status=spec.get("to_status"), to_stage=term_stage), cur=cur)
+        # V-AUTH stage 2: the item is terminal — retire its claim-scoped authorization and live
+        # contract (spec §4.2 "The authorization expires after finish or block").
+        _retire_claim_authorization(ctx, num)
 
     elif kind == "field":
         num = kw["num"]

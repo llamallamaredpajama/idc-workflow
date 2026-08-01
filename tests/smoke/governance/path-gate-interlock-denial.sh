@@ -217,6 +217,14 @@ deny_case NotebookEdit "$REPO/src/demo.ipynb" "$SID_NONE"
 deny_case Bash 'gh issue create --title gate --body-file /tmp/body' "$SID_NONE"
 
 authorize_build
+# V-AUTH stage 2: the ENTRY mint for build is read-only-until-claim — before any claim, even an
+# ordinary source write DENIES at the interlock transport. Write authority arrives with the claim
+# transaction; the fixture mint below models exactly that post-claim grant.
+deny_case Write "$REPO/src/x.ts" "$SID_BUILD"
+deny_case Bash "$RAW_SRC_PY" "$SID_BUILD"
+python3 "$PG_AUTHORIZE" --repo "$REPO" --session "$SID_BUILD" --command build \
+  --branch main --allow-path . --allow-action write --allow-action edit --allow-action git \
+  >/dev/null || gov_fail "could not mint the post-claim build authorization"
 allow_case Bash "$RAW_SRC_PY" "$SID_BUILD"
 allow_case Bash "$RAW_SRC_CP" "$SID_BUILD"
 allow_case Bash "$RAW_SRC_MV" "$SID_BUILD"

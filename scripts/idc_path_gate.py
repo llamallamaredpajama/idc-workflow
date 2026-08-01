@@ -533,8 +533,17 @@ def _normalize_actions(actions: list[str]) -> list[str]:
     return normalized
 
 
+# Commands whose ENTRY mint carries no mutation actions: write authority for them is issued by the
+# CLAIM transaction (spec §3.3 "No source-write authorization is issued before a Build claim is
+# proven In Progress", §4.2 "A successful claim transaction issues the limited Path Gate
+# authorization"). `build` is claim-gated; `autorun` deliberately is NOT — its entry mint stays
+# broad because the drain performs sanctioned non-claim mutations between items, and every claim it
+# makes still re-mints the claim-scoped grant below.
+CLAIM_GATED_COMMANDS = {"build"}
+
+
 def _default_profile(command: str) -> tuple[list[str], list[str]]:
-    if command in READ_ONLY_COMMANDS:
+    if command in READ_ONLY_COMMANDS or command in CLAIM_GATED_COMMANDS:
         return ["."], []
     return ["."], ["write", "edit", "git"]
 
@@ -542,21 +551,26 @@ def _default_profile(command: str) -> tuple[list[str], list[str]]:
 def _role_action_ceiling(command: str) -> set[str]:
     """The mutation actions a command's ROLE may ever be granted. A read-only command
     (`doctor`/`pause`) has an empty ceiling — it can never mint a write/edit/git grant, no matter what
-    actions a caller passes to `write_authorization` (F2)."""
-    _paths, actions = _default_profile(command)
-    return set(actions)
+    actions a caller passes to `write_authorization` (F2). Deliberately NOT derived from
+    `_default_profile`: a claim-gated command (build) has an EMPTY entry default yet a full mutation
+    ceiling — the claim transaction, not the entry, is what grants it."""
+    if command in READ_ONLY_COMMANDS:
+        return set()
+    return set(MUTATION_ACTIONS)
 
 
 def resolve_entry_profile(repo: str, command: str) -> dict[str, Any]:
-    """The write_authorization kwargs a COMMAND-ENTRY mint uses (V-AUTH stage 1, spec §3.3/§4.2).
+    """The write_authorization kwargs a COMMAND-ENTRY mint uses (V-AUTH stages 1+2, spec §3.3/§4.2).
 
     For `build`, when a frozen validation contract is live in this repository, the entry mint is
     CONTRACT-SCOPED: allowed_paths = the contract's `touch` set, denied_paths = its `off_limits` set
     (touch − off_limits at evaluation time, deny winning), bound to the contract's ticket/graph-node
     identity — so a mutation outside the frozen boundary is refused when it is attempted, not first
-    at receipt time. With no live contract (a fresh build, or any non-build command) the command's
-    default profile applies unchanged. A pointer/contract that exists but cannot be VERIFIED raises
-    (contract_scope), so admission fails closed rather than silently minting broad."""
+    at receipt time. With no live contract, build's entry mint is READ-ONLY-UNTIL-CLAIM (paths `.`
+    but NO mutation actions — the claim transaction is what issues write authority, spec §3.3); any
+    non-build command keeps its default profile. A pointer/contract that exists but cannot be
+    VERIFIED raises (contract_scope), so admission fails closed rather than silently minting
+    broad."""
     paths, actions = _default_profile(command)
     profile: dict[str, Any] = {"allowed_paths": paths, "allowed_actions": actions}
     if command != "build":
@@ -571,6 +585,148 @@ def resolve_entry_profile(repo: str, command: str) -> dict[str, Any]:
         "ticket": scope["ticket"],
         "graph_node": scope["graph_node"],
     }
+
+
+# ── claim-time authorization (V-AUTH stage 2 — the spec's seam, §3.3/§4.2) ───────────────────────
+# Write authority for a claim-gated command is issued by the CLAIM transaction, after the board
+# write is proven and journaled, and retired when the item reaches a terminal Status. The mint binds
+# to the newest ACTIVE record of a command that legitimately drives claims, so the grant dies with
+# that record exactly like every other authorization.
+CLAIM_BACKING_COMMANDS = ("build", "autorun")
+
+
+def _active_claim_backing_record(repo: str) -> dict[str, Any] | None:
+    state = L.read_state(repo)
+    candidates = [
+        rec for rec in state.get("commands", [])
+        if rec.get("state") == "active" and rec.get("command") in CLAIM_BACKING_COMMANDS
+        and rec.get("nonce") and rec.get("session_id")
+    ]
+    return candidates[-1] if candidates else None
+
+
+def mint_claim_authorization(repo: str, num) -> dict[str, Any] | None:
+    """Mint the claim-scoped authorization for board item `num` (spec §4.2: "A successful claim
+    transaction issues the limited Path Gate authorization").
+
+    Returns None when the mint is NOT APPLICABLE — a non-Git repo, or no active build/autorun
+    command record to bind (the legacy/recordless flows, where nothing could enforce the grant
+    anyway: evaluation requires the bound record to be active). When a frozen validation contract is
+    live FOR THIS ISSUE (a re-claim of an in-flight unit), the mint inherits its touch/off-limits
+    scope; otherwise the claim grants the full mutation profile over the repository — the freeze
+    that follows the claim narrows it (`narrow_authorization_to_contract`).
+
+    TTL + RENEWAL (closes the "long drain dies at 4h" debt): every claim re-mints a FRESH
+    DEFAULT_TTL_SECONDS window, so a drain's authorization renews at each item it claims instead of
+    one entry mint covering the whole run; and because a claim of an already-In Progress item is an
+    idempotent no-op on the board, RE-RUNNING THE CLAIM IS THE SANCTIONED RENEW DOOR for a single
+    unit whose implementation outlives the window."""
+    if not _is_git_worktree(repo):
+        return None
+    record = _active_claim_backing_record(repo)
+    if record is None:
+        return None
+    scope = contract_scope(repo)  # raises on an unverifiable pointer/contract → the claim reports it
+    kwargs: dict[str, Any] = {
+        "ticket": str(num),
+        "graph_node": f"ticket:{num}",
+        "allowed_paths": ["."],
+        "denied_paths": [],
+        "allowed_actions": list(MUTATION_ACTIONS),
+    }
+    if scope is not None and str(scope.get("issue")) == str(num):
+        kwargs.update({
+            "allowed_paths": list(scope["allowed_paths"]),
+            "denied_paths": list(scope["denied_paths"]),
+            "graph_node": scope["graph_node"] or kwargs["graph_node"],
+        })
+    with admission_lock(repo):
+        return write_authorization(
+            repo,
+            session=str(record.get("session_id")),
+            command=str(record.get("command")),
+            expected_nonce=str(record.get("nonce")),
+            ttl_seconds=DEFAULT_TTL_SECONDS,
+            **kwargs,
+        )
+
+
+def narrow_authorization_to_contract(repo: str) -> dict[str, Any] | None:
+    """Re-mint the live authorization down to the just-frozen contract's boundary (V-AUTH stage 2).
+
+    Called by `freeze_contract` immediately after the live-contract pointer is published. Returns
+    None when there is nothing to narrow (no live authorization, or its bound record is no longer
+    active — the next mint inherits the scope from the pointer instead). FAIL-CLOSED on state it
+    cannot verify, and REFUSES a cross-unit freeze: a live authorization bound to a DIFFERENT ticket
+    than the contract's issue is a unit-identity confusion, not a narrowing."""
+    scope = contract_scope(repo)
+    if scope is None:
+        raise RuntimeError("no live validation contract is recorded")
+    if not _is_git_worktree(repo):
+        return None
+    auth_state, auth = _read_authorization(repo)
+    if auth_state == "absent":
+        return None
+    if auth_state != "ok" or not isinstance(auth, dict):
+        raise RuntimeError(f"the live authorization is {auth_state}")
+    record = _find_active_record_by_nonce(
+        repo, str(auth.get("command") or ""), str(auth.get("nonce") or ""))
+    if record is None:
+        return None
+    ticket = auth.get("ticket")
+    if ticket is not None and str(ticket) != str(scope.get("issue")):
+        raise RuntimeError(
+            f"the live authorization is bound to ticket {ticket!r} but the frozen contract is for "
+            f"issue {scope.get('issue')!r} — refusing the cross-unit narrowing")
+    with admission_lock(repo):
+        return write_authorization(
+            repo,
+            session=str(record.get("session_id")),
+            command=str(auth.get("command")),
+            expected_nonce=str(auth.get("nonce")),
+            allowed_paths=list(scope["allowed_paths"]),
+            denied_paths=list(scope["denied_paths"]),
+            allowed_actions=list(MUTATION_ACTIONS),
+            ticket=str(scope["issue"]),
+            graph_node=scope["graph_node"],
+            ttl_seconds=DEFAULT_TTL_SECONDS,
+        )
+
+
+def retire_claim_authorization(repo: str, num) -> tuple[bool, str]:
+    """Retire the claim-scoped authorization when item `num` reaches a terminal Status (spec §4.2:
+    "The authorization expires after finish or block. It cannot be reused for another ticket.").
+
+    Clears the live-contract pointer for this issue, then — when the live authorization is bound to
+    this item's ticket and its command record is still active — re-mints that record's ENTRY profile
+    (build: read-only-until-claim; autorun: its broad default, with a fresh TTL — which is how a
+    drain's authorization also renews at each finish). Returns (ok, detail); the caller decides how
+    loudly a failure surfaces (the terminal board write has already landed)."""
+    clear_live_contract(repo, expected_issue=num)
+    if not _is_git_worktree(repo):
+        return True, "not a Git worktree"
+    auth_state, auth = _read_authorization(repo)
+    if auth_state == "absent":
+        return True, "no live authorization"
+    if auth_state != "ok" or not isinstance(auth, dict):
+        return False, f"the live authorization is {auth_state}"
+    if auth.get("ticket") != str(num):
+        return True, "the live authorization is not bound to this item"
+    command = str(auth.get("command") or "")
+    record = _find_active_record_by_nonce(repo, command, str(auth.get("nonce") or ""))
+    if record is None:
+        # The bound record is gone, so evaluation already denies everything under this auth.
+        return True, "the bound command record is no longer active"
+    profile = resolve_entry_profile(repo, command)
+    with admission_lock(repo):
+        write_authorization(
+            repo,
+            session=str(record.get("session_id")),
+            command=command,
+            expected_nonce=str(record.get("nonce")),
+            **profile,
+        )
+    return True, "retired to the command entry profile"
 
 
 def _digest_payload(record: dict[str, Any], auth: dict[str, Any]) -> str:
@@ -795,19 +951,9 @@ def _evaluate_request(repo: str, plugin_root: str, request: dict[str, Any]) -> d
         return _deny("IDC Path Gate denied this mutation because the live authorization is expired or unreadable.")
 
     # Ticket / graph-node identity (spec §3.2). The spec MUST is to deny a mutation "bound to the
-    # WRONG ticket/graph node" — a MISMATCH — and it declares `ticket` explicitly nullable. That is
-    # what these two checks enforce: a request that presents an identity NOT matching the live
-    # authorization is denied.
-    #
-    # F3 (contested): the review asked to additionally "require ticket/graph on every request and deny
-    # missing identity." That is NOT implemented here on purpose, because it would break every
-    # legitimate mutation: the Claude Write/Edit adapter, the Bash/interlock adapter, and the git
-    # adapter all build the request from action/paths[/raw_reason] and NEVER carry a ticket/graph node,
-    # so a raw file write cannot be attributed to a ticket at all. The spec-faithful direction — "mint
-    # non-null ticket/graph/path scopes from the claimed transition" — is a transition-scoped-mint
-    # change that spans the Build-contract->authorization handoff and is incompatible with the current
-    # admission-time mint (the entry gate mints BEFORE the command body determines its transition). It
-    # is a named follow-up, not a one-line runtime denial. See the fix-run notes for the full rationale.
+    # WRONG ticket/graph node" — a MISMATCH — and it declares `ticket` explicitly nullable: a request
+    # that presents an identity NOT matching the live authorization is denied. (V-AUTH stage 3 flips
+    # this to required-and-must-match once every adapter echoes identity.)
     ticket = request.get("ticket")
     if ticket is not None and ticket != auth.get("ticket"):
         return _deny("IDC Path Gate denied this mutation because the request ticket does not match the live authorization.")

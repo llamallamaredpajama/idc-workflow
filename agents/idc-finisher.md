@@ -64,9 +64,11 @@ The finisher runs its **own** `/fullauto-goal` loop. Its completion contract car
   finding). Rounds converge against the per-PR **seen-fingerprint ledger** (fixed code:
   `scripts/idc_review_seen_ledger.py` + the filer — the loop's write-owners; never hand-edit it):
   every fingerprint is persisted before flooring/rejection/refutation, so a resurfaced
-  rejected/refuted/below-floor finding is a recognized *seen* resurfacing — it never recycles the
-  attempt counter, never re-files duplicate routed board work, and never turns into a false
-  routing gap at the finish tail (the receipt gate's routing check is seen-ledger-aware).
+  rejected/refuted/below-floor finding is a recognized *seen* resurfacing — never scored as new
+  work, and never re-filed as duplicate **routed** work (suppression requires the board to
+  corroborate that the work really is routed; a resurfacing the board does not carry is filed, so
+  nothing silently vanishes) — and it never turns into a false routing gap at the finish tail (the
+  receipt gate's routing check is seen-ledger-aware).
 - **Blocked-stop** — at the attempt ceiling, on a finding that can only be resolved upstream
   (the implementation is right but the *pillar/plan* is wrong), **or when the increment is
   inert/acceptance-gapped** (implementation right *and* plan right, but a declared runtime/infra

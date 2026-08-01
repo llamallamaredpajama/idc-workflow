@@ -276,6 +276,19 @@ JANITOR_PROVENANCE = "idc_git_janitor.py"
 # runtime-only token both rotation and journal_append create when they lock — never committed. Derived
 # from JOURNAL_REL so the ignore rule and the lock path can't drift.
 JOURNAL_LOCK_GITIGNORE_LINE = JOURNAL_REL.replace(os.sep, "/") + ".lock"
+# Consecutive passes that discover NO previously-unseen blocker before the bootstrap loop declares
+# stagnation and halts. Two is the smallest count that can distinguish "this pass learned nothing"
+# from "the very first pass of the run". It is a FIXED bound, deliberately NOT --max-passes: tying
+# the halt to the loop's own ceiling made the rule unreachable (stagnant can never exceed the pass
+# number), i.e. inert.
+#
+# What actually SHIPS, so nobody reads more into this than is true: `--max-passes` defaults to 1 and
+# no shipped caller raises it (commands/update.md is the only --bootstrap invocation and passes
+# none), so the shipped bootstrap runs exactly ONE pass and stops with its exact blockers. The
+# stagnation rule can only engage at `--max-passes >= 3` — pass 1 discovers the blocker, passes 2+3
+# are the stagnant pair — which today only the tests supply. It is a real bound on a caller that
+# raises the ceiling, not a behavior of the default path.
+STAGNANT_PASS_LIMIT = 2
 TEST_STUBBORN_ENV = "IDC_JANITOR_TEST_STUBBORN_FINDING"
 TEST_INTERRUPT_ENV = "IDC_JANITOR_TEST_INTERRUPT_AFTER"
 BOOTSTRAP_INTERRUPT_POINT = "after-baseline-marker"
@@ -1784,7 +1797,11 @@ def main():
         rotate_journal(ctx, journal_path)
         sys.exit(0)
 
+    # Scan counter for the deterministic stubborn-finding test hook's per-scan schedule (below).
+    scan_no = [0]
+
     def perform_scan(context):
+        scan_no[0] += 1
         findings0, indeterminate0 = scan(context)
         journal_path0 = os.path.join(context["repo"], JOURNAL_REL)
         # OPT-IN until #150: sanctioned mutation doors outside the engine (adapter claim/move/close
@@ -1792,12 +1809,22 @@ def main():
         # documented normal traffic as RISKY divergence. Doctor Row 10 passes the flag explicitly.
         if args.check_journal_divergence:
             indeterminate0 = check_journal_divergence(context, findings0, journal_path0) or indeterminate0
+        # Deterministic stubborn-finding hook. `NAME` injects one blocker on every scan (the original
+        # shape). `A;A,B;A` is a per-SCAN schedule — comma-separated names within a scan, `;` between
+        # scans — so a test can drive an OSCILLATING blocker set (the shape that used to recycle the
+        # convergence counter) without mutating a live tracker or depending on timing. The last group
+        # repeats once the schedule is exhausted, so the run stays deterministic past its end.
         stubborn = os.environ.get(TEST_STUBBORN_ENV)
         if stubborn:
-            findings0.append(finding(
-                RISKY, "plan", stubborn, "test-only stubborn finding", "leave blocked for the next pass",
-                classification="test-stubborn", root_id=stubborn, blocker=True,
-            ))
+            schedule = stubborn.split(";")
+            group = schedule[min(scan_no[0] - 1, len(schedule) - 1)]
+            for name in (n.strip() for n in group.split(",")):
+                if not name:
+                    continue
+                findings0.append(finding(
+                    RISKY, "plan", name, "test-only stubborn finding", "leave blocked for the next pass",
+                    classification="test-stubborn", root_id=name, blocker=True,
+                ))
         findings0 = dedupe_findings(findings0)
         # U7 Item 1: persist the durable all-seen ledger BEFORE disposition/planning, so a resurfaced
         # seen finding (including rejected/below-threshold ones) can never count as new again. An
@@ -1829,8 +1856,7 @@ def main():
             resume={"resumed": resume},
         )
         _interrupt(BOOTSTRAP_INTERRUPT_POINT)
-        previous_blockers = None
-        stagnant = 0
+        stagnant = 0   # consecutive passes that discovered no previously-unseen blocker
         for pass_no in range(1, max_passes + 1):
             ctx = build_ctx(args)
             rescanned = bool(ctx.get("reconciliation", {}).get("receipt")) and not bool(ctx.get("reconciliation", {}).get("cursor"))
@@ -1890,11 +1916,18 @@ def main():
                 code = _exit_code(findings_done, indeterminate_done)
                 _write_scan_report(ctx_done["repo"], args.report_session, args.report_nonce, code)
                 sys.exit(code)
-            blockers = tuple(plan["blockers"])
-            stagnant = (stagnant + 1) if blockers == previous_blockers else 1
-            previous_blockers = blockers
+            # Convergence is measured on NEW debris, never on the raw blocker SET (spec §8: "a
+            # resurfaced seen finding cannot recycle the Janitor pass counter"). Comparing
+            # plan["blockers"] to the previous pass's made the rule two ways wrong: a blocker that
+            # disappeared and resurfaced looked like progress and reset the counter, and — because
+            # `stagnant` can never exceed the pass number — the halt could never fire before the
+            # loop's own --max-passes ceiling anyway, so the rule was inert. A pass makes PROGRESS
+            # only when it discovers a blocker the durable all-seen ledger has never recorded
+            # (plan["new_blocker_count"], which build_plan already computes from `seen_before`);
+            # STAGNANT_PASS_LIMIT consecutive passes without one halt the run.
+            stagnant = 0 if plan["new_blocker_count"] else (stagnant + 1)
             RB.write_checkpoint(ctx["repo"], _checkpoint_payload(findings, advanced=False))
-            if stagnant >= max_passes:
+            if stagnant >= STAGNANT_PASS_LIMIT:
                 plan["halted"] = True
                 if args.json:
                     emit_json(findings, ctx, indeterminate, plan=plan)

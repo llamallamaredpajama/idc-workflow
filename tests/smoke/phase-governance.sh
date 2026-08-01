@@ -20,6 +20,34 @@
 #
 # Exit non-zero if the self-check is missing/fails OR any discovered scenario fails.
 #
+# ── FIXTURE RULES (read before adding or editing a scenario) ─────────────────────────────────────
+# 1. RED-WHEN-BROKEN, PROVEN. A scenario is not "coverage" until it has been observed to FAIL with
+#    the line it guards deleted. Record that probe in the file header, in terms a reader can re-run.
+#
+# 2. A FAIL-CLOSED / SKIP / REFUSE ASSERTION MUST KEY ON A DISCRIMINATING ARTIFACT — an artifact
+#    ONLY that path produces (a unique stderr sentence, a distinct exit code) — never on the outcome
+#    the guarded path and some ordinary path both produce. And it MUST carry a POSITIVE CONTROL
+#    showing that artifact is ABSENT off the guarded path.
+#    Use `. "$(dirname "$0")/../lib/fail-closed.sh"` and `assert_fail_closed`, which will not run
+#    without both. This is a rule, not a preference: the same defect — a negative assertion whose
+#    SETUP NEVER REACHES THE GUARD — has shipped SEVEN times here. Two of them looked like this:
+#    hiding TRACKER.md to simulate an unreadable board (the filesystem backend degrades a missing
+#    tracker to an EMPTY board, so the fail-closed handler was never entered and the test passed on
+#    the ordinary refusal), and a whole suppression feature that could be hard-wired off with all
+#    150 scenarios still green. The sibling lesson lives in tests/smoke/lib/stderr_census.py: a
+#    guard whose real-tree answer is silence needs a PLANTED POSITIVE EXAMPLE.
+#
+# 3. NO VACUOUS SKIPS. Never wrap assertions in `if [ -f "$HELPER" ]; then … fi` — the day the path
+#    is wrong the assertions vanish and the scenario still prints PASS. Hard-guard every input at the
+#    top with `fc_require_file <path> <what>` (or `[ -f … ] || fail`).
+#
+# 4. NO SELF-SATISFYING GREPS. An assertion whose pattern can match the fixture's own filename, temp
+#    path, input, or scaffolding proves nothing. `assert_fail_closed` refuses such a marker outright.
+#
+# 5. BOUND EVERY PROBE. A neutered bound HANGS rather than reddens, and a hang reads as a slow pass.
+#    Run each probe under an explicit `timeout` and treat exit 124 as RED (`assert_fail_closed`
+#    does this for you).
+#
 # Usage: bash tests/smoke/phase-governance.sh   (exit 0 = all green)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"

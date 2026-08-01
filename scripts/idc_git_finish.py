@@ -671,7 +671,10 @@ def routing_gap(verdict, backend, repo, tracker_path, owner, project):
     `suppressed-seen` was deliberately deduplicated by the filer against an EARLIER review round —
     it is a recognized resurfacing, not a stranded nit, so it is not a routing gap (otherwise every
     suppressed duplicate would fatally block the finish it just converged). Only that one recorded
-    disposition is exempt; an invalid ledger raises SL.SeenLedgerError → the caller fails closed."""
+    disposition is exempt, and the filer only writes it when the BOARD corroborated that the work is
+    already routed (idc_review_seen_ledger.suppressible_fingerprints) — so this exemption can no
+    longer let a never-routed finding read as converged. An invalid ledger raises
+    SL.SeenLedgerError → the caller fails closed."""
     items = FF.work_items(verdict)
     if not items:
         return []  # a clean PASS (no nits/deferrals) has nothing to route

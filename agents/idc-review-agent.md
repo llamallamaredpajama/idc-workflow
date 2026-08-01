@@ -70,10 +70,13 @@ validated verdict.
    board as a non-blocking `Stage=Recirculation` item. The filer persists every finding
    fingerprint into the per-PR seen-fingerprint ledger (fixed code:
    `scripts/idc_review_seen_ledger.py`) before disposition and suppresses a resurfaced fingerprint
-   **only when an earlier round left it in a terminal non-routable disposition** (`rejected`,
-   `refuted`, `below-floor`, `confirmed`, or already `suppressed-seen`) — such a finding never
-   becomes duplicate routed board work, while a fingerprint last left merely `filed` is not
-   suppressed, so a filing that did not persist can be retried. The reviewer never files tickets,
+   **only when the BOARD corroborates that its work is already routed** — that is the entire rule,
+   because every other prior disposition (`rejected`, `refuted`, `below-floor`, `confirmed`, or a
+   bare `filed` whose filing did not persist) routed no board work, so suppressing on one of them
+   would delete the only routing the finding ever gets rather than prevent a duplicate. A finding a
+   later round downgrades or re-raises is therefore FILED, carrying provenance naming the round and
+   the severity it had before; if it is not worth doing, a human closes the ticket visibly. The
+   reviewer never files tickets,
    emits markers, writes the seen ledger, or mutates the tracker itself; it emits only the verdict.
 
 ## Invocation sites

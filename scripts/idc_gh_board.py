@@ -173,6 +173,11 @@ _RATE_LIMIT_MARKERS = (
 # check per board-read process, not per `_gh` call.
 _PREFLIGHT_DONE = False
 
+# Every `gh` child is BOUNDED: a hung `gh` (network stall, an auth prompt on a headless box) would
+# otherwise hang its caller forever — including CLI paths with no outer timeout of their own, such as
+# the seen ledger's board-corroboration read. Generous enough for a paginated board page.
+GH_TIMEOUT_S = 120
+
 
 def _is_rate_limit_stderr(text):
     low = (text or "").lower()
@@ -187,8 +192,9 @@ def _rate_limit_info(repo):
     on an unknowable quota; reactive detection still guards the real call). Prefers the GraphQL resource
     (IDC's heavy path) and falls back to core. `gh api rate_limit` does not itself consume quota."""
     try:
-        p = subprocess.run(["gh", "api", "rate_limit"], cwd=repo, capture_output=True, text=True)
-    except (OSError, ValueError):
+        p = subprocess.run(["gh", "api", "rate_limit"], cwd=repo, capture_output=True, text=True,
+                           timeout=GH_TIMEOUT_S)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
         return None
     if p.returncode != 0:
         return None
@@ -228,7 +234,10 @@ def _gh(args, repo):
     of treating a resumable throttle as a hard error. Any OTHER non-zero exit is a hard BoardReadError."""
     _preflight_rate_limit(repo)
     try:
-        p = subprocess.run(["gh"] + args, cwd=repo, capture_output=True, text=True)
+        p = subprocess.run(["gh"] + args, cwd=repo, capture_output=True, text=True,
+                           timeout=GH_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        raise BoardReadError(f"gh {' '.join(args[:2])} timed out after {GH_TIMEOUT_S}s")
     except (OSError, ValueError) as e:
         raise BoardReadError(f"gh invocation failed: {e}")
     if p.returncode != 0:

@@ -346,17 +346,30 @@ Recirculation for scope/canonical drift, and uses existing guarded doors for non
 
 Janitor persists a durable seen-finding ledger across passes and deduplicates against all previously
 seen findings, including rejected: every finding is recorded before disposition, and a resurfaced
-seen finding is recognized rather than counted as new — it cannot reset the three-pass counter,
-duplicate a routed obligation, or advance a checkpoint as if it were new. Fixed code alone validates
-and writes the ledger; model-authored report text never mutates it, and invalid direct ledger writes
-fail closed. The per-PR review→fix→re-review path keeps the same convergence discipline: seen
-fingerprints are persisted before flooring/rejection/refutation, so a resurfaced rejected, refuted,
-or below-floor finding cannot recycle the review attempt counter or re-file duplicate routed work.
+seen finding is recognized rather than counted as new — it cannot reset the bootstrap loop's
+stagnation counter, duplicate a routed obligation, or advance a checkpoint as if it were new. Fixed
+code alone validates and writes the ledger; model-authored report text never mutates it, and invalid
+direct ledger writes fail closed.
+
+The per-PR review→fix→re-review path keeps the same convergence discipline with one deliberate
+boundary. Seen fingerprints are persisted before flooring/rejection/refutation, so a resurfaced
+rejected, refuted, or below-floor finding is never scored as new work and never re-filed as
+duplicate **routed** work. Suppression is decided by the BOARD, not by the ledger: a resurfaced
+fingerprint is dropped only when the board corroborates that its recirculation work is already
+routed. Every other prior disposition — `rejected`, `refuted`, `below-floor`, a `confirmed`
+major/blocker, or a `filed` whose filing did not persist — routed no board work, so a later round
+that carries the fingerprint as a live minor/nit files it, carrying provenance naming the review
+round and the severity it held before. Work decided against is closed visibly on the board; it does
+not vanish, and a merge gate never reports convergence over a finding that was silently dropped.
 
 Janitor does not write product code, author requirements, create arbitrary Buildables, hand-edit the
 tracker, or fabricate history. Repairs are frozen, simulated, idempotent, read back, and receipted.
-After three non-converging passes it stops with exact blockers; it never advances a clean checkpoint
-over unresolved facts.
+The bootstrap repair loop is bounded by `--max-passes`, which **defaults to 1** and which no shipped
+caller raises, so the shipped default runs a single pass and stops with its exact blockers rather
+than fabricating a clean checkpoint. Where a caller does raise that ceiling, a second bound applies:
+two consecutive passes that discover no previously-unseen blocker halt the run as stagnant (so the
+canonical stubborn-blocker case halts on the third pass). It never advances a clean checkpoint over
+unresolved facts.
 
 ### 4.5 Autorun, Doctor, and Stop
 
@@ -472,11 +485,21 @@ Tests MUST prove at least:
 - outside PR/branch work is preserved, pinned, and routed; merged outside work receives reconciliation
   rather than forged implementation history;
 - Janitor deduplicates against all previously seen findings, including rejected, refuses
-  unvalidated operations, and halts after three non-converging passes;
+  unvalidated operations, and halts on a bounded repair loop: `--max-passes` (default **1**, and no
+  shipped caller raises it) caps the passes, and a raised ceiling additionally halts after two
+  consecutive passes that discover no previously-unseen blocker;
 - seen-finding ledgers are persisted before disposition across Janitor passes and review→fix→
-  re-review rounds — covering rejected, refuted, below-floor, and filed findings — and a resurfaced
-  seen finding cannot recycle the Janitor pass counter or the review attempt counter, cannot re-file
-  duplicate routed work, and an unvalidated direct (model-authored) ledger write fails closed;
+  re-review rounds — covering rejected, refuted, below-floor, confirmed, and filed findings — and a
+  resurfaced seen finding cannot recycle the Janitor stagnation counter, cannot be scored as new
+  work, cannot re-file duplicate **routed** work, and an unvalidated direct (model-authored) ledger
+  write fails closed. There is no mechanical review attempt counter to recycle: the review attempt
+  ceiling is prose guidance to the finisher (`agents/idc-finisher.md`), and what ships mechanically
+  is persistence-before-disposition plus board-corroborated suppression;
+- a resurfaced review finding is suppressed ONLY when the board corroborates that its recirculation
+  work is already routed; a prior disposition that routed nothing (`rejected`, `refuted`,
+  `below-floor`, `confirmed`, or an unpersisted `filed`) files the finding with provenance instead
+  of dropping it, so work decided against is closed visibly rather than vanishing under a green
+  merge gate;
 - adoption tolerates pre-boundary missing receipts but detects all post-boundary unreceipted facts;
 - filesystem mode remains functional for hermetic tests while refusing the controlled security claim.
 

@@ -186,7 +186,15 @@ bound to the wrong ticket/graph node, outside the declared paths/actions, inside
 `denied_paths` (the frozen contract's off-limits surfaces — deny wins over an overlapping allowed
 prefix), or inconsistent with the live tracker. When a Build validation contract is frozen for the
 repository's in-flight unit, the authorization's path scope is that contract's `touch` −
-`off_limits` boundary, enforced at mutation time — not first at receipt time. Denial MUST explain the correct IDC route. The agent then asks the operator to confirm
+`off_limits` boundary, enforced at mutation time — not first at receipt time — and the
+authorization's `contract_digest` slot binds to that frozen contract's own digest, so an
+authorization minted under one frozen gate dies when a different gate becomes the live one.
+
+Request identity is REQUIRED, not optional: every adapter echoes the `ticket`/`graph_node` it reads
+from the live authorization into each request, and the gate denies a request whose `graph_node` is
+absent or mismatched, or whose `ticket` is absent while the authorization is ticket-bound (`ticket`
+remains nullable — a null-ticket authorization requires the request to carry none). A request
+without identity was not built by a sanctioned adapter consulting the live authorization. Denial MUST explain the correct IDC route. The agent then asks the operator to confirm
 the relevant existing command—Think, Intake, Plan, Build, or Recirculate—rather than inventing a new
 escape hatch.
 

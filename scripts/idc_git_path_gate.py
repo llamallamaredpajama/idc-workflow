@@ -279,7 +279,13 @@ def _collect_pre_push_paths(
 
 
 def _gate(repo: str, plugin_root: str, action: str, paths: list[str]) -> dict[str, object]:
-    return PG.evaluate_request(_repo_root(repo), plugin_root, {"action": action, "paths": paths})
+    # V-AUTH stage 3: echo the live authorization's ticket/graph-node identity into the request —
+    # the shared gate now REQUIRES it. This backstop is Codex's per-tool coverage path (Codex runs no
+    # per-tool hook), so the echo here is what keeps sanctioned Codex commits/pushes admissible
+    # under the identity-required gate.
+    request: dict[str, object] = {"action": action, "paths": paths}
+    request.update(PG.request_identity(_repo_root(repo)))
+    return PG.evaluate_request(_repo_root(repo), plugin_root, request)
 
 
 def _gate_exit(decision: dict[str, object]) -> int:

@@ -584,6 +584,7 @@ def resolve_entry_profile(repo: str, command: str) -> dict[str, Any]:
         "allowed_actions": ["write", "edit", "git"],
         "ticket": scope["ticket"],
         "graph_node": scope["graph_node"],
+        "validation_contract_digest": scope["validation_contract_digest"],
     }
 
 
@@ -639,6 +640,7 @@ def mint_claim_authorization(repo: str, num) -> dict[str, Any] | None:
             "allowed_paths": list(scope["allowed_paths"]),
             "denied_paths": list(scope["denied_paths"]),
             "graph_node": scope["graph_node"] or kwargs["graph_node"],
+            "validation_contract_digest": scope["validation_contract_digest"],
         })
     with admission_lock(repo):
         return write_authorization(
@@ -690,6 +692,7 @@ def narrow_authorization_to_contract(repo: str) -> dict[str, Any] | None:
             ticket=str(scope["issue"]),
             graph_node=scope["graph_node"],
             ttl_seconds=DEFAULT_TTL_SECONDS,
+            validation_contract_digest=scope["validation_contract_digest"],
         )
 
 
@@ -738,6 +741,7 @@ def _digest_payload(record: dict[str, Any], auth: dict[str, Any]) -> str:
         "command": auth.get("command", ""),
         "denied_paths": list(auth.get("denied_paths") or []),
         "graph_node": auth.get("graph_node", ""),
+        "validation_contract_digest": auth.get("validation_contract_digest") or "",
         "nonce": auth.get("nonce", ""),
         "plugin_version": record.get("plugin_version", ""),
         "source": record.get("source", ""),
@@ -777,6 +781,7 @@ def build_authorization(
     graph_node: str | None,
     ttl_seconds: int,
     denied_paths: list[str] | None = None,
+    validation_contract_digest: str | None = None,
 ) -> dict[str, Any]:
     now = _utc_now()
     auth = {
@@ -794,6 +799,13 @@ def build_authorization(
         "issued_at": _iso(now),
         "expires_at": _iso(now + dt.timedelta(seconds=max(1, ttl_seconds))),
         "nonce": record.get("nonce", ""),
+        # The spec's §3.2 schema calls this slot the "<validation-and-goal-contract-digest>": when
+        # the mint was scoped by a frozen validation contract, this is THAT contract's own digest,
+        # binding the authorization to the exact frozen gate it was minted from (V-AUTH stage 3).
+        # Null when no contract scoped the mint. Folded into `contract_digest` below AND re-checked
+        # against the live contract pointer at evaluation, so neither the field nor the live
+        # contract can drift without the authorization dying.
+        "validation_contract_digest": validation_contract_digest or None,
     }
     auth["contract_digest"] = _digest_payload(record, auth)
     return auth
@@ -812,6 +824,7 @@ def write_authorization(
     ttl_seconds: int = DEFAULT_TTL_SECONDS,
     expected_nonce: str | None = None,
     denied_paths: list[str] | None = None,
+    validation_contract_digest: str | None = None,
 ) -> dict[str, Any]:
     records = [rec for rec in C.active_records(repo, session) if rec.get("command") == command]
     if not records:
@@ -864,9 +877,32 @@ def write_authorization(
         graph_node=graph_node,
         ttl_seconds=ttl_seconds,
         denied_paths=_normalize_denied_paths(repo, list(denied_paths or [])),
+        validation_contract_digest=validation_contract_digest,
     )
     _atomic_write_json(auth_path(repo), auth)
     return auth
+
+
+def request_identity(repo: str) -> dict[str, Any]:
+    """The ticket/graph-node identity a sanctioned adapter ECHOES into its request (V-AUTH stage 3).
+
+    Reads the LIVE authorization: its `graph_node` always echoes; its `ticket` echoes only when
+    non-null (the spec declares ticket nullable). An absent/unreadable/corrupt authorization echoes
+    nothing — evaluation denies those states on its own, before identity is consulted. This is
+    deliberately the ONLY sanctioned source of request identity: the gate then requires the request
+    identity to be present and to match the live authorization, so a request built without
+    consulting it is denied."""
+    state, auth = _read_authorization(repo)
+    if state != "ok" or not isinstance(auth, dict):
+        return {}
+    identity: dict[str, Any] = {}
+    graph_node = auth.get("graph_node")
+    if isinstance(graph_node, str) and graph_node:
+        identity["graph_node"] = graph_node
+    ticket = auth.get("ticket")
+    if ticket is not None:
+        identity["ticket"] = ticket
+    return identity
 
 
 def _read_authorization(repo: str) -> tuple[str, dict[str, Any] | None]:
@@ -932,7 +968,7 @@ def _evaluate_request(repo: str, plugin_root: str, request: dict[str, Any]) -> d
 
     if auth.get("schema") != 1:
         return _deny("IDC Path Gate denied this mutation because the authorization object is missing or has the wrong schema.")
-    required = ("command", "branch", "allowed_paths", "denied_paths", "allowed_actions", "issued_at", "expires_at", "nonce", "contract_digest")
+    required = ("command", "branch", "allowed_paths", "denied_paths", "allowed_actions", "issued_at", "expires_at", "nonce", "contract_digest", "validation_contract_digest")
     for field in required:
         if field not in auth:
             return _deny(f"IDC Path Gate denied this mutation because the authorization object is missing `{field}`.")
@@ -950,16 +986,36 @@ def _evaluate_request(repo: str, plugin_root: str, request: dict[str, Any]) -> d
     if expires_at is None or expires_at <= _utc_now():
         return _deny("IDC Path Gate denied this mutation because the live authorization is expired or unreadable.")
 
-    # Ticket / graph-node identity (spec §3.2). The spec MUST is to deny a mutation "bound to the
-    # WRONG ticket/graph node" — a MISMATCH — and it declares `ticket` explicitly nullable: a request
-    # that presents an identity NOT matching the live authorization is denied. (V-AUTH stage 3 flips
-    # this to required-and-must-match once every adapter echoes identity.)
-    ticket = request.get("ticket")
-    if ticket is not None and ticket != auth.get("ticket"):
-        return _deny("IDC Path Gate denied this mutation because the request ticket does not match the live authorization.")
+    # Ticket / graph-node identity (spec §3.2) — REQUIRED AND MUST MATCH (V-AUTH stage 3, closing
+    # review Blocker #3's denial clause). Every sanctioned adapter (the Claude interlock, the Pi
+    # harness, the git backstops) ECHOES the identity it reads from the live authorization
+    # (`request_identity`) into its request, so:
+    #   * `graph_node` is required on every request — the live authorization always carries one — and
+    #     must match exactly;
+    #   * `ticket` is required exactly when the live authorization is ticket-bound (the spec declares
+    #     `ticket` nullable — a null-ticket authorization requires the request to carry none), and
+    #     must match exactly when present.
+    # A request that arrives WITHOUT identity was not built by an adapter that consulted the live
+    # authorization, and is denied. (The historical F3 objection — "denying missing identity breaks
+    # every legitimate mutation because no adapter carries identity" — is resolved by the echo: all
+    # three adapters now carry it.)
     graph_node = request.get("graph_node")
-    if graph_node is not None and graph_node != auth.get("graph_node"):
+    if graph_node is None:
+        return _deny(
+            "IDC Path Gate denied this mutation because the request carries no graph-node identity. "
+            "Sanctioned adapters echo `ticket`/`graph_node` from the live authorization into every request."
+        )
+    if graph_node != auth.get("graph_node"):
         return _deny("IDC Path Gate denied this mutation because the request graph node does not match the live authorization.")
+    ticket = request.get("ticket")
+    auth_ticket = auth.get("ticket")
+    if auth_ticket is not None and ticket is None:
+        return _deny(
+            "IDC Path Gate denied this mutation because the request carries no ticket identity while the live authorization is ticket-bound. "
+            "Sanctioned adapters echo `ticket`/`graph_node` from the live authorization into every request."
+        )
+    if ticket is not None and ticket != auth_ticket:
+        return _deny("IDC Path Gate denied this mutation because the request ticket does not match the live authorization.")
 
     record = _find_active_record_by_nonce(repo, str(auth.get("command") or ""), str(auth.get("nonce") or ""))
     if not record:
@@ -968,6 +1024,19 @@ def _evaluate_request(repo: str, plugin_root: str, request: dict[str, Any]) -> d
     expected_digest = _digest_payload(record, auth)
     if auth.get("contract_digest") != expected_digest:
         return _deny("IDC Path Gate denied this mutation because the authorization contract digest is corrupt or stale.")
+
+    # Frozen-contract binding (V-AUTH stage 3, spec §3.2 "<validation-and-goal-contract-digest>"):
+    # an authorization minted under a frozen validation contract dies the moment that contract stops
+    # being the LIVE one — a re-frozen gate, a cleared/tampered pointer. Re-mint through the
+    # sanctioned doors (the claim, or the freeze) to continue.
+    auth_vcd = auth.get("validation_contract_digest")
+    if auth_vcd:
+        pointer_state, pointer = _read_live_contract(repo)
+        if pointer_state != "ok" or (pointer or {}).get("contract_digest") != auth_vcd:
+            return _deny(
+                "IDC Path Gate denied this mutation because the authorization is bound to a frozen validation contract that is no longer the live contract. "
+                "Re-mint through the sanctioned claim/freeze doors."
+            )
 
     # Deny wins over allow: a path inside the authorization's off-limits set is refused even when an
     # allowed prefix also covers it — the mutation-time twin of the receipt writer's

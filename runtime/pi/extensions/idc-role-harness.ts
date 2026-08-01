@@ -696,13 +696,36 @@ function sharedPathGateScript(): string {
 	return path.join(sharedPathGatePluginRoot(), "scripts", "idc_path_gate.py");
 }
 
+// V-AUTH stage 3: the ticket/graph-node identity a sanctioned adapter ECHOES into every shared-gate
+// request, read from the LIVE authorization under the repository's Git directory — the TS mirror of
+// idc_path_gate.request_identity. The gate now REQUIRES request identity to be present and to match
+// the live authorization; an absent/unreadable authorization echoes nothing (evaluation denies those
+// states on its own, before identity is consulted).
+function liveAuthorizationIdentity(cwd: string): Record<string, unknown> {
+	try {
+		const proc = spawnSync("git", ["-C", cwd, "rev-parse", "--git-path", "idc-path-gate/authorization.json"], { encoding: "utf8" });
+		if (proc.status !== 0) return {};
+		let authPath = (proc.stdout || "").trim();
+		if (!authPath) return {};
+		if (!path.isAbsolute(authPath)) authPath = path.join(cwd, authPath);
+		const auth = JSON.parse(fs.readFileSync(authPath, "utf8")) as Record<string, unknown>;
+		if (!auth || typeof auth !== "object") return {};
+		const identity: Record<string, unknown> = {};
+		if (typeof auth.graph_node === "string" && auth.graph_node) identity.graph_node = auth.graph_node;
+		if (auth.ticket !== null && auth.ticket !== undefined) identity.ticket = auth.ticket;
+		return identity;
+	} catch {
+		return {};
+	}
+}
+
 function evaluateSharedPathGate(request: Record<string, unknown>, cwd: string, policy: PathPolicy): GuardEvaluation {
 	const script = sharedPathGateScript();
 	if (!fs.existsSync(script)) {
 		return { allowed: false, reason: `shared Path Gate missing at ${script}`, allowedRoots: policy.allowedRoots, blockedSurfaces: policy.blockedSurfaces };
 	}
 	const proc = spawnSync("python3", [script, "evaluate", "--repo", cwd, "--plugin-root", sharedPathGatePluginRoot()], {
-		input: JSON.stringify(request),
+		input: JSON.stringify({ ...liveAuthorizationIdentity(cwd), ...request }),
 		encoding: "utf8",
 	});
 	if (proc.error) {

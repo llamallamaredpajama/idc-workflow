@@ -145,6 +145,28 @@ assert_fail_closed "post-freeze, a write outside the frozen touch set denies whi
   -- bash "$EVAL" "$REQ_FROZEN_OUT" \
   -- bash "$EVAL" "$REQ_FROZEN_IN"
 
+# ── 3b. the authorization is BOUND to the frozen contract (V-AUTH stage 3) ───────────────────────
+# The post-freeze authorization carries the frozen contract's own digest; if a DIFFERENT contract
+# becomes the live one (here: the pointer's digest is swapped), the authorization dies — even
+# though every other field still verifies. The in-touch ALLOW above/below is the positive control.
+LIVE_POINTER="$(printf '%s' "$AUTH_PATH" | sed 's/authorization\.json$/live-contract.json/')"
+cp "$LIVE_POINTER" "$WORK/pointer.good"
+LIVE_POINTER="$LIVE_POINTER" python3 - <<'PY'
+import json, os
+path = os.environ["LIVE_POINTER"]
+doc = json.load(open(path, encoding="utf-8"))
+doc["contract_digest"] = "f" * 64
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(doc, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+PY
+# The positive control restores the true pointer FIRST, then re-runs the identical request — the
+# marker must vanish with the tamper, proving it discriminates the binding, not the request shape.
+assert_fail_closed "an authorization minted under one frozen contract dies when a different contract becomes the live one" \
+  "no longer the live contract" \
+  -- bash "$EVAL" "$REQ_FROZEN_IN" \
+  -- bash -c "cp '$WORK/pointer.good' '$LIVE_POINTER' && bash '$EVAL' '$REQ_FROZEN_IN'"
+
 # ── 4. renewal: the idempotent re-claim re-mints a fresh TTL window ──────────────────────────────
 EXPIRES_BEFORE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["expires_at"])' "$AUTH_PATH")"
 sleep 1

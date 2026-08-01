@@ -132,6 +132,19 @@ deny_case write src/tracker-link.md T-42 NODE-7
 deny_case write docs/notes.md T-42 NODE-7
 deny_case write TRACKER.md T-42 NODE-7
 
+# ── identity is REQUIRED and must match (V-AUTH stage 3 — the F3 flip) ───────────────────────────
+# Adapters echo `ticket`/`graph_node` from the live authorization; a request that arrives WITHOUT
+# that identity was not built by a sanctioned adapter and DENIES, in-scope path or not. This block
+# FLIPS the historical absent-identity ALLOW (proven red against the pre-flip optional-match gate).
+# The `allow_case write src/app.ts T-42 NODE-7` above is the positive control: the same request
+# WITH the echoed identity is admitted.
+deny_case write src/app.ts '' ''
+reason_has 'carries no graph-node identity'
+deny_case write src/app.ts '' NODE-7
+reason_has 'carries no ticket identity'
+deny_case write src/app.ts T-42 ''
+reason_has 'carries no graph-node identity'
+
 # Authorization read failures are distinct and never echo corrupt file contents or local paths.
 printf 'password=hunter2xyzzy this is not json\n' > "$AUTH_PATH"
 deny_case write src/app.ts T-42 NODE-7

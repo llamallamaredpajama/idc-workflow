@@ -2439,6 +2439,10 @@ def _gate(payload, plugin_root):
         request = _shell_path_gate_request(command, cwd, plugin_root)
         if request is None:
             H.pre_tool_allow()
+        # V-AUTH stage 3: echo the live authorization's ticket/graph-node identity into the request
+        # — the gate now REQUIRES it (a request without identity was not built by a sanctioned
+        # adapter and is denied).
+        request.update(PG.request_identity(cwd))
         decision = PG.evaluate_request(cwd, plugin_root, request)
         _apply_path_gate_decision(decision, "IDC Path Gate denied the repository mutation")
 
@@ -2450,7 +2454,10 @@ def _gate(payload, plugin_root):
         if not isinstance(path_value, str) or not path_value.strip():
             H.pre_tool_allow()
         action = "write" if tool == "Write" else "edit"
-        decision = PG.evaluate_request(cwd, plugin_root, {"action": action, "paths": [path_value]})
+        request = {"action": action, "paths": [path_value]}
+        # V-AUTH stage 3: the identity echo — see the Bash arm above.
+        request.update(PG.request_identity(cwd))
+        decision = PG.evaluate_request(cwd, plugin_root, request)
         _apply_path_gate_decision(decision, "IDC Path Gate denied the repository mutation")
 
     H.pre_tool_allow()

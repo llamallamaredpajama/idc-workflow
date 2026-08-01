@@ -87,14 +87,17 @@ The Claude mutation hook covers exactly these tool transports: `Bash`, `Write`, 
 `NotebookEdit`. MCP writer tools need an explicit Path Gate adapter and hook matcher before they
 join this boundary, and are not claimed covered until then.
 
-`controlled` currently has these documented limitations. Every one of them is **still open** — each
-line states what is true of the code you are running, not what some future unit of work is expected
-to do about it:
+`controlled` currently has these documented limitations — each line states what is true of the code
+you are running, not what some future unit of work is expected to do about it (a line closed by a
+shipped change names its remaining residual instead of vanishing):
 
-- **Authorization is minted per COMMAND, not per transition.** A command's Path Gate grant covers the
-  whole repository (`.`) for the command's duration. The real ticket, graph node, and declared paths
-  are not bound at the transition that authorizes the work, so a write outside the planned surface is
-  caught after the fact at receipt time rather than refused at mutation time. **Open.**
+- **Build authorization is transition-scoped; other commands' grants are still per-command.** Build's
+  entry grant is read-only; the CLAIM transaction (proven In Progress and journaled) mints the
+  ticket-bound mutation grant, the frozen validation contract narrows it to its `touch` −
+  `off_limits` boundary — a write outside the planned surface is refused at mutation time — and the
+  terminal close retires it. What is still open: every NON-build mutating command (think, plan,
+  intake, recirculate, autorun between claims) keeps a whole-repository (`.`) grant for the
+  command's duration. **Open for non-build commands.**
 - **One authorization per worktree — the newest mint wins, and nothing shows you the whole picture.**
   (Not "one per repository": the authorization lives at `git rev-parse --git-path
   idc-path-gate/authorization.json`, which resolves to each linked worktree's OWN git directory, and
@@ -114,11 +117,17 @@ to do about it:
   finisher mints the build receipt, reports the reviewed branch + receipts, and the **operator**
   merges out-of-band before the `idc_git_finish.py --close-only` cleanup runs
   (`idc:idc-finisher` §Git finalization). **Open.**
-- **Identity binding is optional, not mandatory.** The gate denies a request whose ticket or graph
-  node MISMATCHES the live authorization, but a request that carries no identity at all is not
-  refused, and nothing compares the bound identity against the live tracker. **Open.**
-- **No TTL renewal.** An authorization is a flat 4-hour grant with no heartbeat, so a drain that runs
-  longer expires mid-run instead of renewing. **Open.**
+- **Identity binding is mandatory, but not tracker-compared.** Every adapter echoes the
+  ticket/graph-node identity it reads from the live authorization into its request, and the gate
+  denies a request whose identity is absent or mismatched. What is still open: nothing compares the
+  bound identity against the live tracker board state (a claim that was reverted on the board does
+  not by itself kill the grant — the grant dies with its command record, TTL, or terminal close).
+  **Open for tracker comparison.**
+- **TTL renews only through the sanctioned doors.** Every claim (and every terminal retire) re-mints
+  a fresh 4-hour window, so a drain renews at each item; a single unit whose implementation outlives
+  one window renews by RE-RUNNING its claim (idempotent on the board). There is no passive
+  heartbeat: a session that performs no sanctioned transition for 4 hours expires and must re-claim.
+  **Renewal is claim-driven by design.**
 
 `app-locked` adds a GitHub App as the sole tracker writer and trusted check source; it closes the ordinary-token tracker-write gap but still does not protect against repository or organization administrators removing the rules or the App.
 

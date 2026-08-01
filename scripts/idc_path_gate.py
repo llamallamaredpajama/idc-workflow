@@ -1096,10 +1096,12 @@ def cmd_auth_path(args: argparse.Namespace) -> int:
 #
 # WHAT IS AND IS NOT TRUE, PRECISELY (this comment previously claimed "the only two callers are
 # admission code", which reads as "no agent-reachable mint remains" and is FALSE):
-#   * Both production callers are admission code — `idc_command_entry_gate._ensure_path_gate_auth`
-#     (every command minted by the UserPromptExpansion hook) and
-#     `idc_command_contract._mint_or_rollback` (a self-minting command, i.e. init). Neither takes a
-#     caller-chosen scope; the profile comes from the command name alone.
+#   * Every production caller is fixed admission/transition code with NO caller-chosen scope:
+#     `idc_command_entry_gate._ensure_path_gate_auth` (the UserPromptExpansion hook, profile from
+#     `resolve_entry_profile`), `idc_command_contract._mint_or_rollback` (the self-minting init),
+#     and — since V-AUTH stage 2 — this module's own `mint_claim_authorization` /
+#     `narrow_authorization_to_contract` / `retire_claim_authorization`, whose scopes come from the
+#     claim's board item and the machine-verified frozen validation contract, never from the caller.
 #   * BUT `idc_command_contract.py start --command init` is a CLI, and its only precondition is a
 #     governed repository. Any Bash in a governed session can therefore still open an init record and
 #     receive init's FIXED default profile (write/edit/git over `.`). No caller-chosen-scope door

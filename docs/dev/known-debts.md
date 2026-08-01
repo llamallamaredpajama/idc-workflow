@@ -41,9 +41,11 @@ git history + `docs/dev/2026-06-11-fidelity-audit.md`.
   **Why it is not closed here.** The natural fix is a single-use admission token issued by
   `scripts/hooks/idc_command_entry_gate.py`, which DOES run on `/idc:init`'s expansion. But that gate
   is a Claude `UserPromptExpansion` hook and neither Codex nor Pi runs Claude hooks, while
-  `idc_path_gate.write_authorization` has exactly two production callers — that hook, and this
-  self-mint. So for Codex and Pi the init self-mint is the ONLY way an authorization is ever minted,
-  and github-backed repositories scaffold `pathway_enforcement.mode: controlled` by default with the
+  `idc_path_gate.write_authorization`'s production callers are all fixed admission/transition code —
+  that hook, this self-mint, and (since V-AUTH stage 2) the claim-time mint/narrow/retire in
+  `idc_path_gate.py`, which requires an ACTIVE build/autorun command record to bind. A Codex/Pi run
+  that opens no command record therefore still has the init self-mint as its ONLY mint path, and
+  github-backed repositories scaffold `pathway_enforcement.mode: controlled` by default with the
   git pre-commit/pre-push backstops installed. Gating the self-mint on a Claude-only token would
   therefore deny every Codex/Pi commit in a default governed repository (verified directly: with no
   authorization present and `mode: controlled`, `git commit` is refused by the backstop with "the live

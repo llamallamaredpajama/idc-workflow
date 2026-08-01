@@ -116,7 +116,11 @@ trivial. Declaring inputs can ADD risk; **omitting them cannot suppress a risk t
 from that touch set**, and it refuses (exit 2) if derived risk arrives without a `--scenario`. The
 candidate branch shape is exact `{promise, failure_mode, observable_evidence, executable_check}` and
 skeptics ask exactly `show how this check passes while the goal is actually broken`; any gate
-defeated by a majority is discarded or repaired before survivors inform the frozen gate. Templated
+defeated by a majority is discarded or repaired before survivors inform the frozen gate. Write the
+gate's result to a file (`--out`) and carry that file to Build: the contract freeze digest-verifies
+it and freezes it in (`--risk-gate-result`), and a freeze whose touch set derives risk REFUSES
+without one — the judged touch set/baseline must EQUAL the frozen ones, so a verdict formed on
+different facts (or a gate never run) cannot back a frozen contract (F64). Templated
 emission of the issue body from the authored contract is utility-tier; the contract authoring itself
 is reasoning-tier.
 

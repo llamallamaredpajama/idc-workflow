@@ -292,8 +292,9 @@ done
 # envelope ({"schema_version":1,"refs":{…}}) BEFORE the per-command evidence matrix, and Codex/Pi
 # hand-construct that envelope from the adapter skill (no Claude hook runs there). So both non-Claude
 # adapter skills' "Command lifecycle envelope" sections must spell out the required shape, including
-# that schema_version is the JSON INTEGER 1. Red-when-broken: drop the envelope line (or just its
-# "integer" qualifier) from either adapter skill and the matching grep fails.
+# that schema_version is the JSON INTEGER 1. Red-when-broken: drop the envelope line (or every
+# statement of integer-ness — the quoted error string alone still legitimately satisfies the grep,
+# since the doc would still state it) from either adapter skill and the matching grep fails.
 for sk in idc-adapter-codex idc-adapter-pi; do
   f="$PLUGIN/skills/$sk/SKILL.md"
   [ -f "$f" ] || fail "skills/$sk/SKILL.md missing"

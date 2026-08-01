@@ -286,4 +286,21 @@ done
 [ -z "$_infer_offenders" ] \
   || fail "shipped prose still lets Build infer work from foreign Markdown:$_infer_offenders"
 
+# --- non-Claude runtimes must be told the FULL closeout evidence envelope -----------------------
+# Verified live: a Codex closeout was rejected with `evidence.schema_version must be the integer 1,
+# got None` because the playbook prose only said `refs:{}` — the contract layer validates the common
+# envelope ({"schema_version":1,"refs":{…}}) BEFORE the per-command evidence matrix, and Codex/Pi
+# hand-construct that envelope from the adapter skill (no Claude hook runs there). So both non-Claude
+# adapter skills' "Command lifecycle envelope" sections must spell out the required shape, including
+# that schema_version is the JSON INTEGER 1. Red-when-broken: drop the envelope line (or just its
+# "integer" qualifier) from either adapter skill and the matching grep fails.
+for sk in idc-adapter-codex idc-adapter-pi; do
+  f="$PLUGIN/skills/$sk/SKILL.md"
+  [ -f "$f" ] || fail "skills/$sk/SKILL.md missing"
+  grep -q '"schema_version":1' "$f" \
+    || fail "skills/$sk must document the full closeout evidence envelope {\"schema_version\":1,\"refs\":{…}} — a runtime that hand-constructs it without schema_version dies at finish with 'evidence.schema_version must be the integer 1, got None'"
+  grep -qiE 'schema_version[^.]{0,120}integer|integer[^.]{0,120}schema_version' "$f" \
+    || fail "skills/$sk must state schema_version is the JSON INTEGER 1 (a string \"1\" is rejected too)"
+done
+
 echo "PASS: file-changing command markdown holds its must-never/must-say invariants"

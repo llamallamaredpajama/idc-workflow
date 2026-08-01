@@ -108,8 +108,17 @@ def _is_merged(info):
     return info.get("state") == "MERGED" or bool(info.get("mergedAt"))
 
 
-def _merge_pr(repo, pr):
-    """Squash-merge + delete the branch atomically (never GitHub --auto), then confirm MERGED.
+def _hex40(value):
+    text = str(value or "").strip().lower()
+    return text if len(text) == 40 and all(c in "0123456789abcdef" for c in text) else None
+
+
+def _merge_pr(repo, pr, match_head):
+    """Squash-merge + delete the branch atomically (never GitHub --auto), then confirm MERGED —
+    binding the merge to EXACTLY the inspected head (F62). `match_head` is the `headRefOid` the
+    caller's own validation read; `--match-head-commit` makes GitHub refuse server-side if a push
+    landed between that read and this call, so the PR that merges is the PR that was validated.
+    A missing/malformed oid REFUSES before any merge attempt (an unbindable merge is not attempted).
 
     Robust to a NONZERO merge CLI result (round-5 Fix 6): the server can merge the PR and THEN fail a
     later branch-cleanup step, returning nonzero — so we re-read PR state EVEN when `gh pr merge`
@@ -117,9 +126,15 @@ def _merge_pr(repo, pr):
     is a real failure (the CLI error, if any, is surfaced). Returns (info, branch_deleted): a clean
     merge exit deletes the branch atomically → True; a nonzero exit after a server-side merge means the
     branch-delete step did not complete → False (reported, never silently dropped)."""
+    head_oid = _hex40(match_head)
+    if head_oid is None:
+        raise FinishError(f"refusing to merge PR #{pr}: no valid headRefOid to bind the merge to "
+                          f"(got {match_head!r}) — the merge must land exactly the head that was "
+                          "validated (F62)")
     merge_err = None
     try:
-        _gh(["pr", "merge", str(int(pr)), "--squash", "--delete-branch"], repo)
+        _gh(["pr", "merge", str(int(pr)), "--squash", "--delete-branch",
+             "--match-head-commit", head_oid], repo)
     except FinishError as e:
         merge_err = e
     after = pr_view(repo, pr, ["state", "mergedAt"])
@@ -203,7 +218,7 @@ def _pointer_step(plan):
 # ── autonomous: merge a planning/recirculation/intake PR that closes NO tracker item ──────────────
 def cmd_autonomous(args):
     prefix = KIND_PREFIX[args.kind]
-    info = pr_view(args.repo, args.pr, ["state", "mergeable", "headRefName"])
+    info = pr_view(args.repo, args.pr, ["state", "mergeable", "headRefName", "headRefOid"])
     if info.get("state") != "OPEN":
         raise FinishError(f"autonomous: PR #{args.pr} is {info.get('state')!r}, not OPEN — nothing to finish")
     if info.get("mergeable") != "MERGEABLE":
@@ -213,7 +228,9 @@ def cmd_autonomous(args):
     if not head.startswith(prefix):
         raise FinishError(f"autonomous: PR #{args.pr} head branch {head!r} does not match --kind {args.kind} "
                           f"(expected prefix {prefix!r}) — refuse to merge a mismatched PR")
-    _, branch_deleted = _merge_pr(args.repo, args.pr)
+    # F62: merge exactly the head this validation just inspected — a push landing after the reads
+    # above would otherwise merge a head the prefix/mergeable checks never saw.
+    _, branch_deleted = _merge_pr(args.repo, args.pr, info.get("headRefOid"))
     receipt = {"op": "pr-finish", "mode": "autonomous", "kind": args.kind, "pr": int(args.pr),
                "head": head, "state": "MERGED", "branch_deleted": branch_deleted,
                "tracker_mutation": "none"}
@@ -255,7 +272,7 @@ def _bound_pr(args):
 
 def cmd_requirements(args):
     _bound_pr(args)   # fail-closed BEFORE any tracker mutation (markerless / double / other-PR-bound)
-    info = pr_view(args.repo, args.pr, ["state", "mergeable", "mergedAt"])
+    info = pr_view(args.repo, args.pr, ["state", "mergeable", "mergedAt", "headRefOid"])
     branch_deleted = None   # only a merge THIS run has a branch-deletion outcome to report
     if not _is_merged(info):
         # OPEN path: an explicit in-session operator approval is REQUIRED (IDC never infers it).
@@ -266,7 +283,8 @@ def cmd_requirements(args):
             raise FinishError(f"requirements: PR #{args.pr} is {info.get('state')!r}, neither MERGED nor OPEN")
         if info.get("mergeable") != "MERGEABLE":
             raise FinishError(f"requirements: PR #{args.pr} is not mergeable (mergeable={info.get('mergeable')!r})")
-        _, branch_deleted = _merge_pr(args.repo, args.pr)
+        # F62: the operator's GO covered the head THIS run read — merge exactly that head.
+        _, branch_deleted = _merge_pr(args.repo, args.pr, info.get("headRefOid"))
     # MERGED confirmed → the guarded dispose-before-unblock tail (dispose FIRST; if it fails, no unblock).
     _transition(args, ["dispose", "--disposition", "gate-approved", "--num", str(int(args.gate))])
 

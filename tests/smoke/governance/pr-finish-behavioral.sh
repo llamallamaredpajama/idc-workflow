@@ -108,25 +108,31 @@ def check(cond, msg):
         fails.append(msg)
 
 SQUASH_DELETE = ["--squash", "--delete-branch"]
+# F62: every merge is bound to the EXACT head the validation read (`--match-head-commit <oid>`), so a
+# push landing between the `pr view` and the merge is refused server-side rather than merged unseen.
+OID = "12ab34cd" * 5                       # a valid 40-hex headRefOid for the fixtures
+MERGE_TAIL = SQUASH_DELETE + ["--match-head-commit", OID]
 
 # ── autonomous ────────────────────────────────────────────────────────────────────────────────────
 # (1) wrong branch prefix → rejected BEFORE any merge.
-st = {"pr": {"state": "OPEN", "mergeable": "MERGEABLE", "headRefName": "feature/x"}}
+st = {"pr": {"state": "OPEN", "mergeable": "MERGEABLE", "headRefName": "feature/x", "headRefOid": OID}}
 rc, merges, trans = run(st, ["autonomous", "--repo", ".", "--pr", "12", "--kind", "planning"])
 check(rc == 2, f"autonomous wrong-prefix should exit 2, got {rc}")
 check(merges == [], f"autonomous wrong-prefix must NOT merge, merged={merges}")
 print("  ok autonomous REJECTS a mismatched-prefix PR before merging")
 
-# (2) valid open+mergeable, matching prefix → merges with EXACTLY `--squash --delete-branch`, does a
-#     SECOND `pr view` re-read to MERGED, and mutates NO tracker item.
-st = {"pr": {"state": "OPEN", "mergeable": "MERGEABLE", "headRefName": "plan/x"}}
+# (2) valid open+mergeable, matching prefix → merges with EXACTLY `--squash --delete-branch
+#     --match-head-commit <the oid the validation read>`, does a SECOND `pr view` re-read to MERGED,
+#     and mutates NO tracker item.
+st = {"pr": {"state": "OPEN", "mergeable": "MERGEABLE", "headRefName": "plan/x", "headRefOid": OID}}
 rc, merges, trans = run(st, ["autonomous", "--repo", ".", "--pr", "12", "--kind", "planning"])
 check(rc == 0, f"autonomous valid should exit 0, got {rc}")
 check(merges == [12], f"autonomous valid must merge #12, merged={merges}")
 check(trans == [], f"autonomous must NEVER mutate a tracker item, transitions={trans}")
-# EXACT merge flags: a mutation to `--auto` (or dropping the flags) makes this FAIL.
-check(st["merge_args"] and st["merge_args"][0][3:] == SQUASH_DELETE,
-      f"merge must be EXACTLY `--squash --delete-branch` (never --auto), got {st['merge_args']}")
+# EXACT merge flags: a mutation to `--auto`, dropping the flags, or dropping the F62 head binding
+# makes this FAIL.
+check(st["merge_args"] and st["merge_args"][0][3:] == MERGE_TAIL,
+      f"merge must be EXACTLY `--squash --delete-branch --match-head-commit {OID}`, got {st['merge_args']}")
 # The SECOND `pr view` re-read: the initial state read + the post-merge MERGED re-read = 2. Removing
 # the re-read drops this to 1 and FAILs.
 check(st["pr_views"] >= 2, f"autonomous must RE-READ pr state after merge (>=2 pr view), got {st['pr_views']}")
@@ -140,29 +146,42 @@ print("  ok autonomous merges with EXACTLY --squash --delete-branch, RE-READS ME
 
 # (2r) recirculation + intake kinds honor their branch prefixes and merge.
 for kind, head in (("recirculation", "recirc/x"), ("intake", "intake/x")):
-    st = {"pr": {"state": "OPEN", "mergeable": "MERGEABLE", "headRefName": head}}
+    st = {"pr": {"state": "OPEN", "mergeable": "MERGEABLE", "headRefName": head, "headRefOid": OID}}
     rc, merges, trans = run(st, ["autonomous", "--repo", ".", "--pr", "12", "--kind", kind])
     check(rc == 0, f"autonomous {kind} should exit 0, got {rc}")
-    check(merges == [12] and st["merge_args"][0][3:] == SQUASH_DELETE,
-          f"autonomous {kind} must merge with --squash --delete-branch, got {st['merge_args']}")
+    check(merges == [12] and st["merge_args"][0][3:] == MERGE_TAIL,
+          f"autonomous {kind} must merge with --squash --delete-branch --match-head-commit, got {st['merge_args']}")
 # wrong prefix for a recirculation PR → refuse.
-st = {"pr": {"state": "OPEN", "mergeable": "MERGEABLE", "headRefName": "plan/x"}}
+st = {"pr": {"state": "OPEN", "mergeable": "MERGEABLE", "headRefName": "plan/x", "headRefOid": OID}}
 rc, merges, trans = run(st, ["autonomous", "--repo", ".", "--pr", "12", "--kind", "recirculation"])
 check(rc == 2 and merges == [], f"autonomous recirculation with a plan/ head must refuse, rc={rc} merged={merges}")
 print("  ok autonomous honors recirculation/intake prefixes and refuses a cross-kind head")
 
 # (2n) NEGATIVE fail-closed: a not-OPEN PR and a not-MERGEABLE PR both refuse BEFORE any merge.
-st = {"pr": {"state": "CLOSED", "mergeable": "MERGEABLE", "headRefName": "plan/x"}}
+st = {"pr": {"state": "CLOSED", "mergeable": "MERGEABLE", "headRefName": "plan/x", "headRefOid": OID}}
 rc, merges, trans = run(st, ["autonomous", "--repo", ".", "--pr", "12", "--kind", "planning"])
 check(rc == 2 and merges == [], f"autonomous must refuse a not-OPEN PR before merging, rc={rc} merged={merges}")
-st = {"pr": {"state": "OPEN", "mergeable": "CONFLICTING", "headRefName": "plan/x"}}
+st = {"pr": {"state": "OPEN", "mergeable": "CONFLICTING", "headRefName": "plan/x", "headRefOid": OID}}
 rc, merges, trans = run(st, ["autonomous", "--repo", ".", "--pr", "12", "--kind", "planning"])
 check(rc == 2 and merges == [], f"autonomous must refuse a not-MERGEABLE PR before merging, rc={rc} merged={merges}")
 print("  ok autonomous fail-closes on a not-OPEN / not-MERGEABLE PR (no merge)")
 
+# (2h) F62 fail-closed: a PR body carrying NO usable headRefOid refuses BEFORE any merge — an
+#      unbindable merge is never attempted. Red-when-broken: drop the `_hex40` refusal (merge without
+#      the binding when the oid is missing) and this case merges, so `merges == []` fails.
+for label, oid in (("missing", None), ("malformed", "not-a-sha")):
+    st = {"pr": {"state": "OPEN", "mergeable": "MERGEABLE", "headRefName": "plan/x"}}
+    if oid is not None:
+        st["pr"]["headRefOid"] = oid
+    rc, merges, trans = run(st, ["autonomous", "--repo", ".", "--pr", "12", "--kind", "planning"])
+    check(rc == 2, f"autonomous with a {label} headRefOid should exit 2, got {rc}")
+    check(merges == [], f"autonomous with a {label} headRefOid must NOT merge, merged={merges}")
+print("  ok autonomous refuses to merge when the head oid cannot be bound (F62)")
+
 # (2x) ROBUSTNESS: a NONZERO merge CLI result whose server-side merge DID land is still recognized
 #      MERGED (success), with branch_deleted reported False (the nonzero cleanup step failed).
-st = {"pr": {"state": "OPEN", "mergeable": "MERGEABLE", "headRefName": "plan/x"}, "merge_cli_fails": True}
+st = {"pr": {"state": "OPEN", "mergeable": "MERGEABLE", "headRefName": "plan/x", "headRefOid": OID},
+      "merge_cli_fails": True}
 rc, merges, trans = run(st, ["autonomous", "--repo", ".", "--pr", "12", "--kind", "planning"])
 check(rc == 0, f"a server-merged PR with a nonzero cleanup step must still succeed, got rc={rc}")
 check(st["receipt"] and st["receipt"].get("state") == "MERGED",
@@ -176,7 +195,8 @@ def req(state_extra, argv_extra=()):
     """Drive requirements mode; `st` is rebound to THIS run's state so the assertions below can read
     back its receipt / finish_calls."""
     global st
-    st = {"pr": {"state": "MERGED", "mergeable": "MERGEABLE", "mergedAt": "2026-01-01T00:00:00Z"}}
+    st = {"pr": {"state": "MERGED", "mergeable": "MERGEABLE", "mergedAt": "2026-01-01T00:00:00Z",
+                 "headRefOid": OID}}
     st.update(state_extra)
     return run(st, ["requirements", "--repo", ".", "--pr", "12", "--gate", "5", "--pointer", "7",
                     *argv_extra])
@@ -194,7 +214,8 @@ print("  ok requirements exits before mutation on markerless / double-marked / o
 
 # unmerged (open) with no --operator-approved → refuse (IDC never infers approval), no mutation/merge.
 rc, merges, trans = req({"gate_body": MARK % 12,
-                         "pr": {"state": "OPEN", "mergeable": "MERGEABLE", "mergedAt": None}})
+                         "pr": {"state": "OPEN", "mergeable": "MERGEABLE", "mergedAt": None,
+                                "headRefOid": OID}})
 check(rc == 2, f"requirements open-no-approval should exit 2, got {rc}")
 check(trans == [] and merges == [], f"open-no-approval must not merge/mutate: merged={merges} trans={trans}")
 print("  ok requirements refuses an OPEN PR with no --operator-approved (no merge, no mutation)")
@@ -239,10 +260,13 @@ print("  ok requirements refuses a pointer held by OTHER blockers — dispose st
 
 # open + --operator-approved → merges the bound PR, re-verifies MERGED, then the same tail.
 rc, merges, trans = req({"gate_body": MARK % 12,
-                         "pr": {"state": "OPEN", "mergeable": "MERGEABLE", "mergedAt": None}},
+                         "pr": {"state": "OPEN", "mergeable": "MERGEABLE", "mergedAt": None,
+                                "headRefOid": OID}},
                         ("--operator-approved",))
 check(rc == 0, f"requirements open+approved should exit 0, got {rc}")
 check(merges == [12], f"open+approved must merge the bound PR, merged={merges}")
+check(st["merge_args"] and st["merge_args"][0][3:] == MERGE_TAIL,
+      f"open+approved must bind the merge to the read head (F62), got {st['merge_args']}")
 check([t[0] for t in trans] == ["dispose"], f"open+approved's only engine op must be the dispose, got {trans}")
 check(st["finish_calls"] == [False, True],
       f"open+approved must finish the pointer through the door, got {st['finish_calls']}")

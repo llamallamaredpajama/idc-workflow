@@ -169,6 +169,7 @@ SH
   git -C "$WT" push -q origin "$BRANCH"
 
   python3 "$VAL" freeze \
+    --surface cli \
     --repo "$WT" \
     --issue 1 \
     --pr 501 \

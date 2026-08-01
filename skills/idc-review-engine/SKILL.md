@@ -73,6 +73,24 @@ never *applied* to a provisioned store does not make the data live. Flag it at `
 rejects a `test-genuineness` finding filed at `minor`/`nit`, so the floor is machine-enforced, not
 just convention.
 
+**Surface/evidence typing is a deterministic pre-check, not a judgment call.** Before any reviewer
+forms an opinion about the verification surface, run the fixed rule and **inherit** its answer:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_validation_contract.py" check-surface \
+  --contract <frozen-contract.json> [--execution <execution.json>]
+```
+
+Exit 0 = the frozen `surface`/`evidence_kind` pair is legal, the declared commands can produce that
+evidence kind, the all-static rule above is satisfied, and (with `--execution`) the execution
+receipt has not drifted from the frozen contract. **A non-zero exit is a machine refusal, not
+input to a debate**: file it verbatim at `major` under `contract-drift` (or `test-genuineness` when
+the refusal names the all-static rule) — the same severity floor as above. The same fixed code runs
+at freeze and again at finish (`idc_build_receipt.py`), so a refusal reported here is a merge that
+was going to be blocked anyway; surfacing it at review is what makes the fix cheap. Reviewers add
+judgment *on top of* this result — they never overrule it, and a PASS here is not evidence the
+surface tests the right thing.
+
 ## Finding shape + verdict
 
 Each finding carries: `dimension`, `severity ∈ {blocker, major, minor, nit}`, `confidence`

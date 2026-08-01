@@ -29,6 +29,7 @@ git -C "$REPO" commit -qm init
 
 CONTRACT="$REPO/docs/workflow/build-validation/frozen.json"
 python3 "$VC" freeze \
+  --surface cli \
   --repo "$REPO" \
   --issue 1 \
   --pr 101 \

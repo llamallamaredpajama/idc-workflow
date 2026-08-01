@@ -260,6 +260,7 @@ make_build_receipt() {  # $1 = repo, $2 = issue, $3 = pr, $4 = label
   git -C "$repo" add "$touch" >/dev/null 2>&1 || gov_fail "could not stage red fixture $label"
   git -C "$repo" commit -qm "seed $label" >/dev/null 2>&1 || gov_fail "could not commit red fixture $label"
   python3 "$VAL" freeze \
+    --surface cli \
     --repo "$repo" \
     --issue "$issue" \
     --pr "$pr" \

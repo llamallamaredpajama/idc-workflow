@@ -109,7 +109,50 @@ The finisher runs its **own** `/fullauto-goal` loop. Its completion contract car
    simplification, efficiency, altitude). Claude runs it natively; the **adapter maps or skips
    it for Codex** (no native `/simplify` — an equivalent pass or a documented skip). Re-verify
    tests stay green after any simplification edit.
-4. **Git finalization.** Acquire the area's **surface-keyed merge-train lease** (the serialized
+4. **Persist the proven verification recipe — then re-bind the gate and the verdict.** If the
+   ticket's frozen contract cited **no** `handle_id` — i.e. this triplet derived how to drive its
+   surface from scratch — append that now-proven recipe to the governed registry through the fixed
+   helper. This runs **before** the final gate run, the final review pass, and the build-receipt mint,
+   so the entry lands inside this PR as an ordinary tracked doc diff **and** inside the receipt-bound
+   diff:
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_verification_handles.py" append \
+     --repo "$PWD" --handle-id <new-id> --from-execution <execution.json>
+   ```
+   `--from-execution` derives the surface, evidence kind, and `verify_commands` from the **passing,
+   witnessed** execution receipt, so the registry records what was *proven*, not what was retyped.
+   The helper refuses a duplicate id, a secret-bearing recipe, and anything that would leave the
+   registry invalid (restoring the file unchanged), so a refusal is a finding to fix, never a reason
+   to hand-edit the YAML. `--from-execution` is the helper's **only** mode — there is no
+   caller-declared form — and `--registry` must resolve inside this repo. Skip this step when the
+   contract already cited a `handle_id` (nothing new was learned) or when `surface: none`.
+   **Then, in this order — the order is the whole step:**
+   1. **Commit** the registry change onto the ticket's branch with the rest of the triplet's work
+      (`git add docs/workflow/verification-handles.yaml` + commit). Never write it out of band, and
+      never leave it uncommitted: the deterministic tail removes the build worktree with a plain
+      `git worktree remove`, which refuses a dirty tree — an uncommitted append is destroyed at
+      finalization, not carried.
+   2. **Re-run the frozen gate** against the post-append commit:
+      `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_validation_contract.py" run --repo "$PWD" --contract <contract.json> --out <execution.json>`
+      The contract stays frozen — this re-*runs* the same gate, it does not re-author it. The new
+      execution receipt is bound to the post-append head and final diff, which is exactly what the
+      step-5 build receipt checks.
+   3. **Re-run the review pass** — the step-2 review-until-`PASS`/`PASS-WITH-NITS` loop — so the
+      verdict binds that same head and diff. This is mechanically identical to what already happens
+      after a `/simplify` commit in step 3; no new machinery, and no gate is weakened.
+
+   Step 5 then mints the build receipt from *those* artifacts. Minting first and committing after is
+   refused three separate ways (stale head, stale diff, and a changed path outside `touch`), so that
+   ordering leaves the append unlandable.
+   **The plan-side half is a Plan obligation, not a finisher workaround** (`agents/idc-plan.md`
+   Phase 3, `WORKFLOW.md` §4.2): a contract that cites no `handle_id` with `surface != none` must
+   carry `docs/workflow/verification-handles.yaml` in `touch` **and** must not carry `docs/` (or any
+   ancestor of it) in `off-limits` — `off-limits` beats `touch`, so both halves are required. If the
+   frozen contract does not allow the path, that is a **plan defect**: still make the append and
+   commit it on the branch, and route the contract's boundaries through **recirculation**. Do **not**
+   widen the frozen contract yourself, and do **not** skip the append. No fixed code checks that this
+   step ran (spec §4.2).
+5. **Git finalization.** Acquire the area's **surface-keyed merge-train lease** (the serialized
    merge lock for *this area's* file surface — disjoint areas hold distinct leases and merge
    concurrently; see *Merge serialization*). First mint the verified implementation receipt through
    `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_build_receipt.py" write --repo "$PWD" --contract <contract.json> --execution <execution.json> --verdict <verdict.json> --graph-digest <digest> --projection-digest <digest> --out <build-receipt.json>`
@@ -133,7 +176,7 @@ The finisher runs its **own** `/fullauto-goal` loop. Its completion contract car
    `deleteBranchOnMerge` off, skip the delete). **Runtime carve-out (Pi):** the self-merging tail above
    is the **Claude and Codex** behavior. On the **experimental Pi runtime** no sanctioned Pi merge
    helper has landed yet, so the Pi finisher does **not** run that self-merging invocation at all.
-   Instead it mints the build receipt (the step-4 `idc_build_receipt.py` call above) and **reports the
+   Instead it mints the build receipt (the step-5 `idc_build_receipt.py` call above) and **reports the
    reviewed branch + receipts to the operator, who performs the merge out-of-band**; only after that
    does the deterministic post-merge cleanup run, as
    `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_finish.py" --close-only --pr <N> --issue <M>`
@@ -157,7 +200,7 @@ The finisher runs its **own** `/fullauto-goal` loop. Its completion contract car
    status is already closed by the helper; the lease is held across a bounded in-kitchen retry, or
    released deliberately before escalating a scope/menu defect — never left holding a half-merged
    surface). See *Merge serialization* below — never merge without the lease.
-5. **Close out.** Hand the merged, clean result back to Build (`idc:idc-build`); name the
+6. **Close out.** Hand the merged, clean result back to Build (`idc:idc-build`); name the
    findings cleared, the `/simplify` outcome, any recirculation filed, and **every deferral as a
    structured object** (resolved in-loop, or the dependency-linked board item it became) — never a
    loose prose footnote that nobody parses.

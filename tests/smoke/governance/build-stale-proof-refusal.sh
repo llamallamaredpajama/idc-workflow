@@ -44,6 +44,7 @@ SH
 freeze_contract() {
   local repo="$1" contract="$2"
   python3 "$VC" freeze \
+    --surface cli \
     --repo "$repo" \
     --issue 1 \
     --pr 301 \

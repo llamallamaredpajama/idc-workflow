@@ -200,4 +200,47 @@ unrecorded=obj.get("unrecorded") or []
 assert not unrecorded, f"FAIL: fresh scaffold left governed files unrecorded: {unrecorded}"
 print("ok: scaffolded verification-handle registry is receipt-listed and preserved as operator data")' <<<"$vout" || exit 1
 
-echo "PASS: verification handles are schema-checked, secret-free, obligation-backed on misses, doctor-warned on nonexistent citations, and scaffolded as preserved operator data"
+# (G) PLAN'S LOOKUP STEP IS A SHIPPED INVARIANT, not decoration. `handle_id` is OPTIONAL in fixed
+# code — by design, since a first-of-its-kind surface has no entry to cite — so a Plan that quietly
+# stopped citing handles would emit contracts that pass every validator while the registry decayed
+# into a write-only file. Nothing asserted the playbook still tells Plan to look one up: deleting all
+# five registry/resolver lines from agents/idc-plan.md + commands/plan.md left lint and twelve
+# plan-touching tests green. These are prose invariants over the SHIPPED playbooks, scoped to the
+# phase that owns each step so a mention drifting into an unrelated section does not satisfy them.
+PLAN_AGENT="$PLUGIN/agents/idc-plan.md"
+PLAN_CMD="$PLUGIN/commands/plan.md"
+[ -f "$PLAN_AGENT" ] || fail "agents/idc-plan.md not found at $PLAN_AGENT"
+[ -f "$PLAN_CMD" ] || fail "commands/plan.md not found at $PLAN_CMD"
+
+phase_slice() {  # $1 = file, $2 = heading prefix — the text of that phase section only
+  python3 - "$1" "$2" <<'PY'
+import re, sys
+path, heading = sys.argv[1:3]
+text = open(path, encoding='utf-8').read()
+m = re.search(rf"^##\s+{re.escape(heading)}.*?$(.*?)(?=^##\s|\Z)", text, re.M | re.S)
+if not m:
+    sys.exit(f"could not find a '## {heading}' section in {path}")
+print(m.group(1))
+PY
+}
+
+P3="$(phase_slice "$PLAN_AGENT" 'Phase 3')" || fail "$P3"
+printf '%s\n' "$P3" | grep -qF 'idc_verification_handles.py' \
+  || fail "agents/idc-plan.md Phase 3 no longer routes contract authoring through idc_verification_handles.py — the registry lookup is gone and Plan re-derives every recipe"
+printf '%s\n' "$P3" | grep -qE 'idc_verification_handles\.py"? resolve' \
+  || fail 'agents/idc-plan.md Phase 3 must name the fixed RESOLVER (idc_verification_handles.py resolve ...), not merely mention the registry'
+printf '%s\n' "$P3" | grep -qiE 'recirculation|blocked-dependency' \
+  || fail "agents/idc-plan.md Phase 3 must route a MISSING handle into a named recirculation / blocked-dependency obligation — without it a miss silently weakens the gate"
+
+P5="$(phase_slice "$PLAN_AGENT" 'Phase 5')" || fail "$P5"
+printf '%s\n' "$P5" | grep -qE 'idc_schema_check\.py"? registry' \
+  || fail 'agents/idc-plan.md Phase 5 must schema-check the governed registry (idc_schema_check.py registry ...) before any cited handle_id is used'
+
+grep -qF 'docs/workflow/verification-handles.yaml' "$PLAN_CMD" \
+  || fail "commands/plan.md no longer names the governed registry path docs/workflow/verification-handles.yaml"
+grep -qF 'idc_verification_handles.py' "$PLAN_CMD" \
+  || fail "commands/plan.md no longer names the fixed verification-handle helper"
+
+echo "ok: Plan's registry lookup + miss-routing + schema-check steps are still in the shipped playbooks"
+
+echo "PASS: verification handles are schema-checked, secret-free, obligation-backed on misses, doctor-warned on nonexistent citations, cited by Plan's shipped playbook, and scaffolded as preserved operator data"

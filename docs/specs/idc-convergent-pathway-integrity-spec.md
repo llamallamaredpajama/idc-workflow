@@ -252,6 +252,25 @@ placeholders are allowed there; inline credentials, auth material, `.env` conten
 private URLs are rejected before use. A missing handle creates a named Recirculation or
 blocked-dependency obligation; a warning-only downgrade is forbidden.
 
+The registry compounds: when a ticket's contract cited no `handle_id` and its frozen gate is proven
+green, Build MUST append that newly-proven recipe back to the registry through fixed code, as part of
+finish, so it can be reviewed and merged on the ticket's own branch as an ordinary tracked doc diff.
+The append is fixed-code-only and fails closed on a duplicate `handle_id`, on secret-bearing material,
+and on any result that would leave the registry invalid; it MUST NOT be a side-channel write outside
+the governed repo, and it MUST record the commands that were actually executed rather than commands
+re-declared by the caller — the fixed helper therefore accepts a proven execution receipt as its only
+source of commands and has no caller-declared mode.
+
+This is a **Build/Finisher obligation carried by the playbook, not a condition the build receipt
+proves.** Two other fixed-code rules in the same receipt writer bound when the appended entry can also
+land inside the receipt-bound diff: the receipt refuses an execution receipt that no longer matches the
+current head/diff, and it refuses any changed path outside `touch` or inside `off-limits`. Committing
+the registry after the gate ran moves the head and trips the first; the registry sits under `docs/`,
+which the default plan shape marks off-limits, and trips the second. So the append lands inside the
+ticket's own PR diff only when Plan puts `docs/workflow/verification-handles.yaml` inside `touch` and
+the frozen gate is re-run against the post-append commit. Where that is not true the append is still
+committed on the ticket's branch, but outside the diff the receipt binds.
+
 At Build claim, an independent local validator performs the Fusion-inspired loop:
 
 1. reuse the existing real functional test when it proves the goal;
@@ -333,6 +352,15 @@ Before merge, IDC MUST prove:
 - the merge and close transaction can be completed through Finisher.
 
 The authorization expires after finish or block. It cannot be reused for another ticket.
+
+Finisher additionally carries the §3.4 compounding obligation: when the frozen contract cited no
+`handle_id` and the surface is not `none`, it appends the newly-proven recipe to the governed
+verification-handle registry through the fixed helper before minting the build receipt. That is a
+**playbook obligation, not a receipt condition** — the list above is exactly what fixed code proves,
+and no fixed code checks the append. Keeping it out of the list is deliberate: §3.4 records the two
+receipt rules (head/diff freshness and `touch`/`off-limits`) that decide whether the appended entry can
+also sit inside the receipt-bound diff, and a "MUST prove" bullet no enforcer backs is the drift this
+spec exists to stop.
 
 ### 4.3 Expanded Intake for off-path work
 

@@ -115,6 +115,7 @@ SH
   EXECUTION="$REPO/docs/workflow/build-validation-executions/${BRANCH}.json"
   BUILD_RECEIPT="$REPO/docs/workflow/build-receipts/${BRANCH}.json"
   python3 "$VAL" freeze \
+    --surface cli \
     --repo "$WT" \
     --issue 1 \
     --pr 501 \

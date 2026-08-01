@@ -30,7 +30,13 @@ via `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_validation_contract.py" freeze .
 classification (`expected-red` vs `expected-green`), the fixed `surface` / `evidence_kind` pair,
 any cited `handle_id` from `docs/workflow/verification-handles.yaml` (resolved and secret-checked by
 fixed code before use), exact `touch` / `off-limits`, graph/projection binding, and the frozen
-verification commands. Every ticket additionally runs the bounded fixed-code falsifier
+verification commands. `--surface` is **required** — an undeclared surface is not a declaration, and a
+docs-only ticket says `--surface none --skip-reason '<one line>'` rather than padding a fake gate —
+and fixed code refuses an **all-static** gate (every command a file-exists / grep / lint / typecheck /
+parse-or-import probe, with nothing exercising the goal's observable end-state). At finish, a ticket
+that cited **no** `handle_id` appends its newly-proven recipe back to that registry through
+`idc_verification_handles.py append`, inside the same PR, so the next Plan resolves the surface by
+lookup instead of re-deriving it. Every ticket additionally runs the bounded fixed-code falsifier
 `idc_validation_risk_gate.py` before the contract is frozen; the falsifier decides its own
 requiredness from the contract's touch set and baseline and deterministically skips only trivial
 tickets. The same frozen gate is then re-run through `idc_validation_contract.py run ...` at the final

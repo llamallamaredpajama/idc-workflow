@@ -222,9 +222,27 @@ review-residual — can sit build-eligible (`Status = Todo`, `Stage = Buildable`
 with no native *blocked-by* link), and Autorun's drain (which keys on native `blocked_by` only)
 would claim and execute it cold. This row re-runs the existing schema check over that lane,
 flags prose dependencies with no recorded link, **and warns when a frozen validation contract cites
-an unknown verification-handle id** (read-only: `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_verification_handles.py" audit-citations --repo "$PWD" --contracts-dir "$PWD/docs/workflow/build-validation"`). It is a **read-only `⚠` heads-up — never a hard
-FAIL** (Build still trusts the board; the schema check stays Plan's gate). Branch on
-`docs/workflow/tracker-config.yaml::backend`:
+an unknown verification-handle id**. It is a **read-only `⚠` heads-up — never a hard
+FAIL** (Build still trusts the board; the schema check stays Plan's gate).
+
+**Dangling verification-handle citations (backend-neutral; run this on every backend):**
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_verification_handles.py" audit-citations \
+  --repo "$PWD" --contracts-dir "$PWD/docs/workflow/build-validation"
+```
+
+- **PASS** — `verification-handles: no citation warnings`, or the run printed only `SKIP:` lines.
+- **PASS with ⚠** — one or more `WARNING: … cites unknown handle_id …` lines: a frozen contract
+  names a recipe the registry no longer has (the entry was renamed or removed after the contract was
+  frozen). Report the contract path and the id; do not edit either file.
+- **SKIP** — the helper prints `SKIP: no verification-handle registry …` on a repo scaffolded before
+  the registry existed, and `SKIP: no frozen-contract directory …` on any repo that has not yet run a
+  Build (`docs/workflow/build-validation/` is created by the first frozen contract, not by
+  `/idc:init`). Both are the ordinary state of a fresh repo, not findings. The helper **exits 0 in
+  every one of these cases** — this row is advisory and never FAILs.
+
+Branch on `docs/workflow/tracker-config.yaml::backend`:
 
 - **`filesystem` → run the backend-neutral INDEX rules only** (read-only). The body-schema /
   prose-dependency re-scan stays skipped (the filesystem board carries no issue bodies — the schema

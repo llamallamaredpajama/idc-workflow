@@ -120,9 +120,12 @@ def write_receipt(*, repo: str, contract_path: str, execution_path: str, verdict
         raise ReceiptError("verification run against stale code is refused until the frozen gate records a passing execution")
     if execution.get("surface") != contract.get("surface") or execution.get("evidence_kind") != contract.get("evidence_kind"):
         raise ReceiptError("contract-drift refused: the execution receipt's declared surface/evidence kind no longer match the frozen validation contract")
-    declared = execution.get("declared_evidence") or {}
-    if declared.get("kind") != execution.get("evidence_kind") or declared.get("surface") != execution.get("surface"):
-        raise ReceiptError("contract-drift refused: the execution receipt's declared evidence no longer matches its recorded surface/evidence kind")
+    # NOTE — there is no write-path re-check of `declared_evidence` against the execution receipt's own
+    # recorded surface/evidence kind. `VC.load_execution` above makes exactly that comparison and
+    # raises "execution receipt contract-drift: declared evidence no longer matches its recorded
+    # surface/evidence kind", so a second copy here is a guard no test can ever be red for: neutering
+    # it to `if False:` changes nothing an input can observe. The RECEIPT-side twin below (in
+    # `verify_receipt`) is a different comparison — `load_receipt` does not make it — and is covered.
 
     graph_digest = _ensure_hex("graph_digest", graph_digest)
     projection_digest = _ensure_hex("projection_digest", projection_digest)

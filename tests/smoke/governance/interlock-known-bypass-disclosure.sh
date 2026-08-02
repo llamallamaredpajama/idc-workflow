@@ -1,25 +1,26 @@
 #!/bin/bash
 # idc-assert-class: mixed
-# interlock-known-bypass-disclosure.sh — F58 (+F63): the interlock's PUBLISHED scope matches what it
-# actually classifies. THREE demonstrated channel classes are outside its reach; all are disclosed,
-# and this lane keeps the disclosure and the behavior from drifting apart in EITHER direction.
+# interlock-known-bypass-disclosure.sh — F58 (+F63, narrowed by #192): the interlock's PUBLISHED
+# scope matches what it actually classifies. ONE demonstrated channel class remains outside its
+# reach; it is disclosed, and this lane keeps the disclosure and the behavior from drifting apart
+# in EITHER direction.
 #
-# WHY A DISCLOSURE LANE AND NOT A FIX. Every channel is pre-existing (they behave identically on
-# `main`) and each sits on a load-bearing exemption or a wide denial surface:
-#   1. any file resolving under `<plugin_root>/scripts/` is deliberately UNSCANNED — that exemption is
-#      what stops IDC's own `gh`-calling helpers from being denied by their own gate — and the Path
-#      Gate treats out-of-repository paths as outside its jurisdiction (a deliberate boundary locked
-#      by path-gate-boundaries.sh), so the write that plants the payload is not stoppable either;
-#   2. `python3` is not a followed interpreter, so a `python3 -c` payload is reached only by the
-#      tokenize-failure TEXT backstop — an argv LIST (and even the text form written without a `;`)
-#      carries no match;
-#   3. program text that never stands in COMMAND POSITION — an interpreter fed its program on stdin
-#      through a pipe (`… | sh`), and a protected argv assembled by a helper (`… | xargs gh`).
-# Narrowing any of them (a hash-pinned script manifest; treating interpreter payloads or targetless
-# interpreters as opaque) is a design change with real blast radius on the sanctioned path. It is
-# parked as a follow-up. What is NOT acceptable is shipping a gate whose published description implies
-# coverage it does not have — so the scope is stated in both operator-facing surfaces, and asserted
-# here.
+# HISTORY. F58 originally disclosed THREE channel classes. #192 CLOSED two of them:
+#   * the sanctioned-plugin-scripts channel — the blanket "anything under <plugin_root>/scripts/"
+#     exemption became the pinned _SHIPPED_SCRIPTS manifest, so an agent-dropped helper in that
+#     directory is scanned like any other target (section C holds it CLOSED, and holds the manifest
+#     exemption OPEN for the plugin's own shipped names);
+#   * the argv-list interpreter-payload channel — a scripting interpreter's inline `-c`/`-e`
+#     payload is now text-matched in string form AND argv-list form, so
+#     `python3 -c 'subprocess.run(["gh","pr","merge",…])'` and the `;`-less os.system string form
+#     both DENY (section C holds them CLOSED).
+# The remaining channel is PROGRAM TEXT THAT NEVER STANDS IN COMMAND POSITION (F63): an interpreter
+# fed its program on stdin through a pipe (`… | sh`), and a protected argv assembled by a helper
+# (`… | xargs gh`). Closing it means treating a targetless interpreter / runtime-argv helper as
+# opaque — a widen-the-denial-surface design change that stays parked until reviewed. What is NOT
+# acceptable is a published description implying coverage the gate does not have — or still
+# publishing a CLOSED gap as an open one — so the scope is stated in both operator-facing surfaces
+# and asserted here.
 #
 # F63 IS WHY THE CLOSED-WORLD SENTENCE IS BANNED. An earlier revision of this disclosure ended
 # "Anything NOT on that list is in scope." That was FALSE — channel 3 was undisclosed at the time —
@@ -27,17 +28,22 @@
 # disclosure exists to prevent. Section E asserts neither surface carries it again.
 #
 # THIS LANE IS NOT A BUG LOCK-IN. It never asserts "the bypass must keep working". It asserts that
-# the DISCLOSURE and the BEHAVIOR agree. If a later change closes a channel, this lane goes red with
-# an explicit instruction to delete that channel from the disclosure — the gap closing must be
-# accompanied by the published scope widening, in the same commit.
+# the DISCLOSURE and the BEHAVIOR agree. If a later change closes the remaining channel, this lane
+# goes red with an explicit instruction to delete it from the disclosure — the gap closing must be
+# accompanied by the published scope widening, in the same commit. (That is exactly how the two
+# #192 closures landed.)
 #
 # What it proves:
-#   A. hooks.json's operator-facing description names all three channel classes as known non-coverage;
-#   B. the gate module's own docstring names all three, and says they are pre-existing follow-ups;
+#   A. hooks.json's operator-facing description names the remaining channel class as known
+#      non-coverage, publishes the two #192 closures as COVERAGE, and no longer lists them as gaps;
+#   B. the gate module's own docstring does the same, with honest scoping;
 #   C. the controls still deny — the gate genuinely enforces in app-locked mode, so a "pass" here
-#      can never come from a gate that denies nothing — INCLUDING the covered siblings that keep
-#      channel 3's scoping honest (`sh < FILE`, `xargs gh pr merge …`);
-#   D. reality matches the disclosure: each disclosed channel is in fact still uncovered (and if one
+#      can never come from a gate that denies nothing — INCLUDING the two channels #192 closed
+#      (a flip back to allow is a reopened bypass AND a stale disclosure) and the covered siblings
+#      that keep the remaining channel's scoping honest (`sh < FILE`, `xargs gh pr merge …`);
+#      plus the POSITIVE control: a manifest-NAMED plugin script stays sanctioned (the denials
+#      above cannot come from a gate that denies everything under scripts/);
+#   D. reality matches the disclosure: the disclosed channel is in fact still uncovered (and if it
 #      becomes covered, this fails LOUDLY telling you to update the disclosure);
 #   E. neither surface republishes a closed-world completeness claim (F63).
 #
@@ -64,26 +70,31 @@ SKIPPED_BEHAVIOR=""
 GATE_RUNNABLE=1
 sh "$RUNTIME" || GATE_RUNNABLE=0
 
-# --- A. the operator-facing description discloses every channel class -----------------------------
-timeout 60 python3 - "$HOOKS" <<'PY' || gov_fail "hooks.json does not disclose the interlock's known non-coverage"
+# --- A. the operator-facing description discloses the remaining channel, not the closed ones ------
+timeout 60 python3 - "$HOOKS" <<'PY' || gov_fail "hooks.json does not match the interlock's published scope"
 import json, re, sys
 description = json.load(open(sys.argv[1], encoding="utf-8"))["description"]
 assert "KNOWN NON-COVERAGE" in description, "no known-non-coverage section in the hooks description"
-assert re.search(r"scripts/`? directory is deliberately NOT scanned|sanctioned plugin scripts", description, re.I), \
-    "the sanctioned-plugin-scripts channel is not disclosed"
-assert re.search(r"argv[- ]list", description, re.I), "the argv-list interpreter channel is not disclosed"
-assert re.search(r"out[- ]of[- ]repository paths", description, re.I), \
-    "the disclosure omits the jurisdiction half that makes channel 1 reachable"
-# F63 channel 3 — BOTH halves, each named in the operator-facing surface.
+# The remaining channel (F63) — BOTH halves, each named in the operator-facing surface.
 assert re.search(r"command position", description, re.I), \
-    "the disclosure does not state the command-position boundary the channel-3 forms fall outside of"
+    "the disclosure does not state the command-position boundary the remaining forms fall outside of"
 assert re.search(r"stdin through a pipe", description, re.I), \
     "the stdin-piped-interpreter channel (`... | sh`) is not disclosed (F63)"
 assert re.search(r"xargs", description), \
     "the helper-assembled-argv channel (`... | xargs gh`) is not disclosed (F63)"
 assert re.search(r"assembled by a helper", description, re.I), \
     "the helper-assembled-argv channel is not named as a channel class (F63)"
-print("ok: hooks.json discloses all three known channel classes")
+# The two #192 closures are published as COVERAGE …
+assert re.search(r"shipped-scripts manifest", description, re.I), \
+    "the pinned shipped-scripts manifest (#192 closure of the plugin-scripts channel) is not published"
+assert re.search(r"argv[- ]list", description, re.I), \
+    "the argv-list interpreter-payload coverage (#192 closure) is not published"
+# … and no longer listed as open gaps (the old channel headings must stay deleted — case-sensitive).
+assert "SANCTIONED PLUGIN SCRIPTS" not in description, \
+    "the CLOSED sanctioned-plugin-scripts channel is still published as an open gap (#192 closed it)"
+assert "ARGV-LIST INTERPRETER PAYLOADS" not in description, \
+    "the CLOSED argv-list interpreter channel is still published as an open gap (#192 closed it)"
+print("ok: hooks.json discloses the remaining channel class and publishes the #192 closures as coverage")
 PY
 
 # --- B. the module's own docstring discloses them, and scopes them honestly -----------------------
@@ -91,20 +102,22 @@ timeout 60 python3 - "$GATE" <<'PY' || gov_fail "the interlock gate docstring do
 import ast, re, sys
 doc = ast.get_docstring(ast.parse(open(sys.argv[1], encoding="utf-8").read())) or ""
 assert "KNOWN NON-COVERAGE" in doc, "the gate docstring publishes no non-coverage section"
-assert re.search(r"SANCTIONED PLUGIN SCRIPTS", doc), "channel 1 is not named in the docstring"
-assert re.search(r"ARGV-LIST INTERPRETER PAYLOADS", doc), "channel 2 is not named in the docstring"
 assert re.search(r"PROGRAM TEXT THAT NEVER STANDS IN COMMAND POSITION", doc), \
-    "channel 3 (F63) is not named in the docstring"
+    "the remaining channel (F63) is not named in the docstring"
 assert re.search(r"STDIN THROUGH A PIPE", doc), \
-    "the docstring does not name the stdin-piped-interpreter form of channel 3 (F63)"
+    "the docstring does not name the stdin-piped-interpreter form of the remaining channel (F63)"
 assert re.search(r"ASSEMBLED BY A HELPER", doc), \
-    "the docstring does not name the helper-assembled-argv form of channel 3 (F63)"
+    "the docstring does not name the helper-assembled-argv form of the remaining channel (F63)"
 assert re.search(r"WHERE THE BOUNDARY ACTUALLY RUNS", doc), \
-    "the docstring states no classification boundary, so channel 2/3's rationale cannot be checked (F63)"
-assert re.search(r"pre-existing", doc, re.I), "the docstring does not scope the channels as pre-existing"
-assert re.search(r"path-gate-boundaries", doc), \
-    "the docstring does not point at the test that locks the jurisdiction boundary"
-print("ok: the gate docstring publishes all three channel classes with honest scoping")
+    "the docstring states no classification boundary, so the channel's rationale cannot be checked (F63)"
+assert re.search(r"pre-existing", doc, re.I), "the docstring does not scope the channel as pre-existing"
+assert re.search(r"_SHIPPED_SCRIPTS", doc), \
+    "the docstring does not name the pinned shipped-scripts manifest that replaced the Rule 5 blanket exemption (#192)"
+assert "SANCTIONED PLUGIN SCRIPTS" not in doc, \
+    "the CLOSED sanctioned-plugin-scripts channel is still listed in the docstring as an open gap (#192 closed it)"
+assert "ARGV-LIST INTERPRETER PAYLOADS" not in doc, \
+    "the CLOSED argv-list interpreter channel is still listed in the docstring as an open gap (#192 closed it)"
+print("ok: the gate docstring publishes the remaining channel class with honest scoping, closed channels deleted")
 PY
 
 if [ "$GATE_RUNNABLE" -eq 0 ]; then
@@ -119,10 +132,13 @@ mkdir -p "$REPO/docs/workflow"
 printf 'backend: github\n' > "$REPO/docs/workflow/tracker-config.yaml"
 printf 'pathway_enforcement:\n  mode: app-locked\n' > "$REPO/WORKFLOW-config.yaml"
 
-# A stand-in plugin root, so the sanctioned-scripts probe never writes into the real checkout.
+# A stand-in plugin root, so the scripts-manifest probes never write into the real checkout.
+# `payload.sh` is NOT a shipped-manifest name (the #192 deny control); `lint-references.sh` IS one
+# (the positive sanctioned control) — same protected body in both, so the NAME alone decides.
 FAKE_ROOT="$WORK/plugin"
 mkdir -p "$FAKE_ROOT/scripts"
 printf '#!/bin/sh\ngh pr merge 123 --squash\ngh issue close 5\n' > "$FAKE_ROOT/scripts/payload.sh"
+printf '#!/bin/sh\ngh pr merge 123 --squash\ngh issue close 5\n' > "$FAKE_ROOT/scripts/lint-references.sh"
 printf '#!/bin/sh\ngh pr merge 123 --squash\ngh issue close 5\n' > "$FAKE_ROOT/outside.sh"
 
 # verdict <command> -> "deny" | "allow"
@@ -136,35 +152,39 @@ print(json.dumps({"cwd": os.environ["REPO"], "tool_name": "Bash", "session_id": 
       | grep -q '"permissionDecision" *: *"deny"'; then echo deny; else echo allow; fi
 }
 
-# --- C. controls — the gate really is enforcing, and the COVERED siblings stay covered -------------
+# --- C. controls — the gate really is enforcing, the #192 closures hold, covered siblings stay ----
 # Every "allow" asserted in section D is only meaningful if this section's denials hold: a gate that
 # denies nothing (a broken import, a missing helper binary, a mis-built fixture) reads as all-allow.
 [ "$(verdict 'gh pr merge 123 --squash')" = deny ] \
   || gov_fail "the control (inline gh pr merge, app-locked, no authorization) was NOT denied — this lane cannot distinguish a disclosed gap from a gate that denies nothing"
 [ "$(verdict "bash '$FAKE_ROOT/outside.sh'")" = deny ] \
   || gov_fail "indirection through a script OUTSIDE the plugin's scripts/ dir was not denied — the indirection classifier itself has regressed, which is not a disclosed gap"
-# Channel 3's scoping depends on these two staying DENIED. `sh < FILE` is the redirection sibling of
-# the piped form, and `xargs gh <subcommand>` is the same-segment sibling of the helper form; if
-# either flips to allow, the published non-coverage silently widens past what F63 disclosed.
+# The remaining channel's scoping depends on these two staying DENIED. `sh < FILE` is the redirection
+# sibling of the piped form, and `xargs gh <subcommand>` is the same-segment sibling of the helper
+# form; if either flips to allow, the published non-coverage silently widens past what F63 disclosed.
 [ "$(verdict "sh < '$FAKE_ROOT/outside.sh'")" = deny ] \
-  || gov_fail "the redirection sibling (\`sh < FILE\`) was NOT denied — the disclosure scopes channel 3 to a program arriving on a PIPE, and says the file-redirection form is covered; that scoping is now false"
+  || gov_fail "the redirection sibling (\`sh < FILE\`) was NOT denied — the disclosure scopes the remaining channel to a program arriving on a PIPE, and says the file-redirection form is covered; that scoping is now false"
 [ "$(verdict 'xargs gh pr merge 123')" = deny ] \
-  || gov_fail "a same-segment helper form (\`xargs gh pr merge 123\`) was NOT denied — the disclosure scopes channel 3(b) to an argv assembled at RUNTIME out of another segment, so this widens undisclosed non-coverage"
+  || gov_fail "a same-segment helper form (\`xargs gh pr merge 123\`) was NOT denied — the disclosure scopes the helper form to an argv assembled at RUNTIME out of another segment, so this widens undisclosed non-coverage"
+# #192 closure 1 — a NON-manifest file dropped into <plugin_root>/scripts/ is scanned and denied.
+[ "$(verdict "bash '$FAKE_ROOT/scripts/payload.sh'")" = deny ] \
+  || gov_fail "an agent-dropped helper under the plugin's scripts/ dir was NOT denied — the #192 shipped-scripts manifest has regressed to the blanket dir-prefix exemption, reopening a channel the disclosure says is CLOSED"
+# … while a manifest-NAMED shipped script stays sanctioned (the positive control: the deny above is
+# the manifest discriminating, not a gate that denies everything under scripts/).
+[ "$(verdict "bash '$FAKE_ROOT/scripts/lint-references.sh'")" = allow ] \
+  || gov_fail "a shipped-manifest script name was DENIED — the Rule 5 manifest exemption has stopped admitting the plugin's own helpers (sanctioned-path regression)"
+# #192 closure 2 — scripting-interpreter inline payloads deny in argv-list AND string form.
+[ "$(verdict 'python3 -c '"'"'import subprocess; subprocess.run(["gh","pr","merge","123"])'"'"'')" = deny ] \
+  || gov_fail "an argv-list interpreter payload (subprocess.run([\"gh\",\"pr\",\"merge\",…])) was NOT denied — the #192 payload text-matcher has regressed, reopening a channel the disclosure says is CLOSED"
+[ "$(verdict 'python3 -c '"'"'os.system("gh pr merge 123 --squash")'"'"'')" = deny ] \
+  || gov_fail "a cleanly-tokenizing text-form interpreter payload (os.system with no embedded \`;\`) was NOT denied — the #192 payload text-matcher has regressed, reopening a channel the disclosure says is CLOSED"
+# The `;`-bearing text form was covered even BEFORE #192 (the tokenize-failure backstop) — it must
+# obviously stay covered now that the whole payload channel is closed.
+[ "$(verdict 'python3 -c '"'"'import os; os.system("gh pr merge 123 --squash")'"'"'')" = deny ] \
+  || gov_fail "a text-form interpreter payload (os.system with the call as a string, split by an embedded \`;\`) was NOT denied — this form has been covered since before #192, so the payload classifier has regressed"
 
 # --- D. reality matches the disclosure ------------------------------------------------------------
-if [ "$(verdict "bash '$FAKE_ROOT/scripts/payload.sh'")" = deny ]; then
-  gov_fail "GOOD NEWS, STALE DOCS: the sanctioned-plugin-scripts channel is now COVERED. Delete channel 1 from the KNOWN NON-COVERAGE sections in hooks/hooks.json and scripts/hooks/idc_interlock_gate.py, and retire this assertion — a closed gap must never stay published as an open one."
-fi
-if [ "$(verdict 'python3 -c '"'"'import subprocess; subprocess.run(["gh","pr","merge","123"])'"'"'')" = deny ]; then
-  gov_fail "GOOD NEWS, STALE DOCS: the argv-list interpreter channel is now COVERED. Delete channel 2 from the KNOWN NON-COVERAGE sections in hooks/hooks.json and scripts/hooks/idc_interlock_gate.py, and retire this assertion."
-fi
-# Channel 2's CORRECTED rationale (F63): the text form is caught by the tokenize-failure backstop, not
-# by "the classifier sees the text" — so the SAME call without a `;` tokenizes cleanly and is allowed.
-# The disclosure says so explicitly; this keeps that sentence honest.
-if [ "$(verdict 'python3 -c '"'"'os.system("gh pr merge 123 --squash")'"'"'')" = deny ]; then
-  gov_fail "GOOD NEWS, STALE DOCS: a cleanly-tokenizing text-form interpreter payload (os.system with no embedded \`;\`) is now COVERED. The KNOWN NON-COVERAGE sections state it is NOT — correct channel 2's rationale in hooks/hooks.json and scripts/hooks/idc_interlock_gate.py."
-fi
-# F63 channel 3(a) — an interpreter fed its program on stdin through a pipe.
+# F63 — an interpreter fed its program on stdin through a pipe.
 for piped in \
   'echo "gh pr merge 123 --squash" | sh' \
   "cat '$FAKE_ROOT/outside.sh' | bash" \
@@ -172,18 +192,13 @@ for piped in \
   'echo Z2ggcHIgbWVyZ2UgMTIz | base64 -d | sh'
 do
   if [ "$(verdict "$piped")" = deny ]; then
-    gov_fail "GOOD NEWS, STALE DOCS: the stdin-piped-interpreter channel is now COVERED (denied: $piped). Delete channel 3(a) from the KNOWN NON-COVERAGE sections in hooks/hooks.json and scripts/hooks/idc_interlock_gate.py, and retire this assertion."
+    gov_fail "GOOD NEWS, STALE DOCS: the stdin-piped-interpreter channel is now COVERED (denied: $piped). Delete form (a) of the remaining channel from the KNOWN NON-COVERAGE sections in hooks/hooks.json and scripts/hooks/idc_interlock_gate.py, and retire this assertion — a closed gap must never stay published as an open one."
   fi
 done
-# F63 channel 3(b) — a protected argv assembled by a helper at runtime.
+# F63 — a protected argv assembled by a helper at runtime.
 if [ "$(verdict 'echo "pr merge 123" | xargs gh')" = deny ]; then
-  gov_fail "GOOD NEWS, STALE DOCS: the helper-assembled-argv channel is now COVERED. Delete channel 3(b) from the KNOWN NON-COVERAGE sections in hooks/hooks.json and scripts/hooks/idc_interlock_gate.py, and retire this assertion."
+  gov_fail "GOOD NEWS, STALE DOCS: the helper-assembled-argv channel is now COVERED. Delete form (b) of the remaining channel from the KNOWN NON-COVERAGE sections in hooks/hooks.json and scripts/hooks/idc_interlock_gate.py, and retire this assertion."
 fi
-
-# The `;`-bearing text form of channel 2 must stay COVERED — the disclosure scopes the unseen forms
-# precisely, and this is what keeps that scoping honest rather than a blanket interpreter excuse.
-[ "$(verdict 'python3 -c '"'"'import os; os.system("gh pr merge 123 --squash")'"'"'')" = deny ] \
-  || gov_fail "a text-form interpreter payload (os.system with the call as a string, split by an embedded \`;\`) was NOT denied — the disclosure says the tokenize-failure backstop catches this one, so that published boundary is now false"
 
 fi
 
@@ -221,4 +236,4 @@ for name, text in surfaces.items():
 print("ok: neither surface claims a closed world, and both say so explicitly")
 PY
 
-echo "PASS: the interlock publishes all three known uncovered channel classes in both operator-facing surfaces, still denies the controls and every covered sibling (inline, outside-script indirection, \`sh < FILE\`, same-segment \`xargs gh <sub>\`, the \`;\`-split text payload), claims no closed world, and the disclosure matches observed behavior (this lane reds if the disclosure, the gap, or the honest scoping disappears)${SKIPPED_BEHAVIOR}"
+echo "PASS: the interlock publishes its one remaining uncovered channel class in both operator-facing surfaces, holds the two #192 closures CLOSED (dropped-helper scripts under scripts/, argv-list + string interpreter payloads) while the shipped-manifest names stay sanctioned, still denies the controls and every covered sibling (inline, outside-script indirection, \`sh < FILE\`, same-segment \`xargs gh <sub>\`, the \`;\`-split text payload), claims no closed world, and the disclosure matches observed behavior (this lane reds if the disclosure, the gap, or the honest scoping disappears)${SKIPPED_BEHAVIOR}"

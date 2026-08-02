@@ -25,6 +25,7 @@ CLI:  idc_gh_board.py --owner <o> --project <n> [--repo <dir>]   → prints {"it
       idc_gh_board.py --owner <o> --project <n> --emit-idmap      → prints the item-id map (below)
       idc_gh_board.py ensure-project|reconcile-status|ensure-field|ensure-link ...
       idc_gh_board.py close-project-issues|delete-project ...      → validating lifecycle writes
+      idc_gh_board.py lease-acquire|lease-release|lease-show ...   → the fail-closed merge lease
       (exit 0 = ok; exit 2 = any gh / parse failure; exit 3 = rate-limited, with a stdout verdict).
 API:  fetch_items(owner, project_number, repo=".") -> list[dict]  (raises BoardReadError on failure).
 """
@@ -34,6 +35,8 @@ import os
 import re
 import subprocess
 import sys
+import time
+import uuid
 
 # THE CREDENTIAL SCRUB DOOR — see `idc_credential_shapes.scrub`. Every read of a CHILD PROCESS's
 # stderr in this module passes through it AT THE READ, and `tests/smoke/phase11-honesty-repro.sh` R28
@@ -1009,6 +1012,186 @@ def delete_project(owner, project, confirmation, repo="."):
     return {"action": "deleted", "number": int(project), "id": node_id, "title": info["title"]}
 
 
+# ── merge lease (single-holder serialization primitive, github backend) ──────────────────────────
+# The github realization of the tracker adapter's fail-closed merge lease (issue #104, design §B.6),
+# with the SAME token + TTL semantics as the filesystem backend's flock lease (idc_tracker_fs.py):
+# acquire-if-empty-or-expired returning an opaque token, release-by-token, TTL expiry, and never two
+# concurrent holders.
+#
+# GitHub has no compare-and-set on a Projects field — a field write-then-read-back lets two racing
+# writers each read back their own value and both "win". What GitHub DOES have is an atomic append
+# with a server-assigned total order: issue creation. So a lease claim is an ISSUE titled
+# `[idc-lease] <name>` carrying the claim record in an `<!-- idc-lease: {...} -->` marker, and the
+# holder is the lowest-numbered LIVE claim (open + unexpired). An acquirer appends its claim, reads
+# every claim back, and either wins (its number is the lowest live) or withdraws its own claim and
+# fails closed — two racers always agree on the winner because the loser's read-back necessarily
+# includes the winner's earlier-numbered claim. Claim issues are plain repo issues, never board
+# items, so board reads/lint/lifecycle closes never see them; a released or withdrawn claim is
+# CLOSED, and a successful acquire retires (closes) any expired stragglers it observed — the analog
+# of the filesystem lease overwriting an expired record.
+
+_LEASE_MARKER = re.compile(r"<!--\s*idc-lease:\s*(.*?)\s*-->", re.S)
+_LEASE_RECORD_KEYS = ("owner", "token", "acquired_at", "expires_at", "expires_at_epoch")
+
+
+def _lease_title(lease):
+    return f"[idc-lease] {lease}"
+
+
+def _lease_iso(epoch):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def _lease_claims(lease, repo="."):
+    """Every OPEN claim issue for `lease`, lowest issue number first, each as the parsed claim
+    record plus its `number`. MALFORMED is NOT ignorable (the filesystem backend's corrupt-sidecar
+    posture): an open `[idc-lease] <name>` issue whose body does not parse as a claim record is
+    UNKNOWN lock state — treating it as "no claim" could grant a second holder, so fail closed."""
+    out = _gh(["api", "repos/{owner}/{repo}/issues?state=open&per_page=100", "--paginate",
+               "--jq", ".[] | {number: .number, title: .title, body: .body}"], repo)
+    claims = []
+    for line_no, line in enumerate(out.splitlines(), 1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError as e:
+            raise BoardReadError(f"lease claim read returned malformed JSON record {line_no} ({e})")
+        if not isinstance(obj, dict):
+            raise BoardReadError(f"lease claim read returned non-object record {line_no}")
+        if obj.get("title") != _lease_title(lease):
+            continue
+        number = obj.get("number")
+        if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+            raise MalformedBoardDataError(
+                f"lease claim read returned an invalid issue number in record {line_no}")
+        body = obj.get("body")
+        m = _LEASE_MARKER.search(body) if isinstance(body, str) else None
+        if not m:
+            raise MalformedBoardDataError(
+                f"lease claim issue #{number} has no idc-lease marker — unknown lock state; "
+                f"fail-closed — repair or close it")
+        try:
+            rec = json.loads(m.group(1))
+        except ValueError as e:
+            raise MalformedBoardDataError(
+                f"lease claim issue #{number} marker is malformed JSON ({e}) — fail-closed; "
+                f"repair or close it")
+        if not isinstance(rec, dict) or any(k not in rec for k in _LEASE_RECORD_KEYS):
+            raise MalformedBoardDataError(
+                f"lease claim issue #{number} marker is missing required fields — fail-closed; "
+                f"repair or close it")
+        try:
+            rec["expires_at_epoch"] = float(rec["expires_at_epoch"])
+        except (TypeError, ValueError):
+            raise MalformedBoardDataError(
+                f"lease claim issue #{number} has a non-numeric expiry — fail-closed; "
+                f"repair or close it")
+        rec["number"] = number
+        claims.append(rec)
+    claims.sort(key=lambda c: c["number"])
+    return claims
+
+
+def _live_holder(claims):
+    """The current holder — the lowest-numbered unexpired claim — or None when the lease is free.
+    A new claim always carries a HIGHER number than any existing live claim, so an unexpired holder
+    can never be displaced by a newcomer; expired claims simply stop counting."""
+    now = time.time()
+    live = [c for c in claims if c["expires_at_epoch"] > now]
+    return live[0] if live else None
+
+
+def _close_claim(number, repo):
+    """Close one claim issue and read it back CLOSED. The read-back is the verdict, not the close
+    call's exit — so a concurrent closer winning the race (gh: "already closed", non-zero) still
+    counts as landed, while a close that did NOT land can never pass silently."""
+    try:
+        _gh(["issue", "close", str(number)], repo)
+    except RateLimitError:
+        raise
+    except BoardReadError:
+        pass  # judged by the read-back below
+    if _issue_state(number, repo) != "CLOSED":
+        raise BoardWriteError(f"lease claim issue #{number} did not read back CLOSED")
+
+
+def lease_acquire(lease, owner, ttl, repo="."):
+    """Acquire the named lease for `owner`: returns the opaque token, or raises BoardWriteError when
+    held (fail-closed: no lease -> no merge). Raises RateLimitError UNCHANGED mid-acquire (the
+    create_item convention — teardown gh calls would hit the same live limit)."""
+    if ttl <= 0:
+        raise BoardWriteError("lease --ttl must be a positive number of seconds")
+    claims = _lease_claims(lease, repo)
+    cur = _live_holder(claims)
+    if cur is not None:
+        # Held and unexpired -> fail-closed: never hand out a second concurrent holder.
+        raise BoardWriteError(f"lease '{lease}' held by {cur.get('owner')!r} until "
+                              f"{cur.get('expires_at')} (no lease -> no merge)")
+    for c in claims:
+        # Every observed claim is expired (dead by the winner rule) — retire it BEFORE minting ours,
+        # the analog of the filesystem lease overwriting an expired record on acquire.
+        _close_claim(c["number"], repo)
+    now = time.time()
+    token = uuid.uuid4().hex
+    exp = now + ttl
+    rec = {"owner": owner, "token": token, "acquired_at": _lease_iso(now),
+           "expires_at": _lease_iso(exp), "expires_at_epoch": exp}
+    url = _gh(["issue", "create", "--title", _lease_title(lease),
+               "--body", f"<!-- idc-lease: {json.dumps(rec)} -->"], repo).strip()
+    url = url.splitlines()[-1] if url else ""
+    if not url:
+        raise BoardWriteError("lease claim create returned no URL — not acquired")
+    try:
+        mine = int(url.rstrip("/").split("/")[-1])
+    except ValueError:
+        raise BoardWriteError(f"lease claim create returned no issue number ({url!r}) — not acquired")
+    # The optimistic-concurrency read-back: our claim is appended, now EVERY claim decides the
+    # winner. A racing acquirer that appended first holds the lower live number and wins; we must
+    # then withdraw OUR claim, or it becomes the holder the moment the winner releases.
+    winner = _live_holder(_lease_claims(lease, repo))
+    if winner is None or winner["number"] != mine:
+        try:
+            _close_claim(mine, repo)
+        except RateLimitError:
+            raise
+        except BoardReadError as e:
+            raise BoardWriteError(
+                f"lease '{lease}' acquire lost the race AND withdrawing claim issue #{mine} failed "
+                f"({e}) — close issue #{mine} by hand or it becomes the holder when the lease frees")
+        if winner is None:
+            raise BoardWriteError(f"lease '{lease}' claim #{mine} did not read back live — not acquired")
+        raise BoardWriteError(f"lease '{lease}' held by {winner.get('owner')!r} until "
+                              f"{winner.get('expires_at')} (no lease -> no merge)")
+    return token
+
+
+def lease_release(lease, token, repo="."):
+    """Release the named lease by token. Idempotent when unheld; a wrong token is rejected (the
+    filesystem backend's contract — a stale holder can never release the current one's lease)."""
+    cur = _live_holder(_lease_claims(lease, repo))
+    if cur is None:
+        return  # idempotent: nothing to release
+    if cur.get("token") != token:
+        raise BoardWriteError(f"lease '{lease}' release rejected — token mismatch "
+                              f"(held by {cur.get('owner')!r})")
+    _close_claim(cur["number"], repo)
+
+
+def lease_show(lease, repo="."):
+    """The current claim record (token omitted) with `held`, or None when no claim issue is open —
+    the filesystem backend's lease-show shape, plus `number` (the claim issue, for hand repair)."""
+    claims = _lease_claims(lease, repo)
+    if not claims:
+        return None
+    cur = _live_holder(claims)
+    rec = cur if cur is not None else claims[0]
+    out = {k: v for k, v in rec.items() if k != "token"}
+    out["held"] = cur is not None
+    return out
+
+
 def idmap_lines(items):
     """Return `issue#<TAB>item_id` lines for every issue-backed item on the board.
 
@@ -1064,6 +1247,51 @@ _LIFECYCLE_COMMANDS = {
     "close-project-issues", "delete-project",
 }
 
+_LEASE_COMMANDS = {"lease-acquire", "lease-release", "lease-show"}
+
+
+def _lease_main(argv):
+    # Output mirrors the filesystem backend's lease CLI byte-shape (bare token / nothing / one JSON
+    # record), so a caller following the adapter's leaseAcquire/leaseRelease recipe stays
+    # backend-blind. `--owner` here is the HOLDER name (the filesystem CLI's flag), not the project
+    # owner login — these ops work repo-level claim issues and never touch the project.
+    ap = argparse.ArgumentParser(
+        description="The github backend's fail-closed merge lease (claim-issue append; "
+                    "lowest live claim holds).")
+    sub = ap.add_subparsers(dest="command", required=True)
+
+    la = sub.add_parser("lease-acquire")
+    la.add_argument("--repo", default=".", help="repo dir the gh calls run in")
+    la.add_argument("--lease", default="merge")
+    la.add_argument("--owner", required=True, help="holder name recorded on the claim")
+    la.add_argument("--ttl", type=float, default=900.0, help="lease lifetime in seconds")
+
+    lr = sub.add_parser("lease-release")
+    lr.add_argument("--repo", default=".", help="repo dir the gh calls run in")
+    lr.add_argument("--lease", default="merge")
+    lr.add_argument("--token", required=True)
+
+    lsw = sub.add_parser("lease-show")
+    lsw.add_argument("--repo", default=".", help="repo dir the gh calls run in")
+    lsw.add_argument("--lease", default="merge")
+
+    args = ap.parse_args(argv)
+    try:
+        if args.command == "lease-acquire":
+            print(lease_acquire(args.lease, args.owner, args.ttl, os.path.abspath(args.repo)))
+        elif args.command == "lease-release":
+            lease_release(args.lease, args.token, os.path.abspath(args.repo))
+        else:
+            rec = lease_show(args.lease, os.path.abspath(args.repo))
+            if rec is not None:
+                print(json.dumps(rec, indent=2, ensure_ascii=False))
+    except RateLimitError as e:
+        emit_rate_limit_verdict(e)
+    except BoardReadError as e:
+        sys.stderr.write(f"idc-gh-board: {e}\n")
+        sys.exit(2)
+    sys.exit(0)
+
 
 def _lifecycle_main(argv):
     ap = argparse.ArgumentParser(
@@ -1116,10 +1344,12 @@ def _lifecycle_main(argv):
 
 
 def main():
-    # Preserve the long-shipped flag-first board-reader CLI while adding explicit lifecycle
-    # subcommands. A first token not in this fixed set follows the legacy parser unchanged.
+    # Preserve the long-shipped flag-first board-reader CLI while adding explicit lifecycle and
+    # lease subcommands. A first token not in these fixed sets follows the legacy parser unchanged.
     if len(sys.argv) > 1 and sys.argv[1] in _LIFECYCLE_COMMANDS:
         _lifecycle_main(sys.argv[1:])
+    if len(sys.argv) > 1 and sys.argv[1] in _LEASE_COMMANDS:
+        _lease_main(sys.argv[1:])
     _read_main()
 
 

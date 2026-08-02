@@ -108,9 +108,10 @@ decision 7`, `agents/idc-build.md`). Worked example for one wave:
    (`leaseRelease(merge, token)`); coms-net carries only the liveness/notification. The lease is
    a real, atomic primitive — **on the filesystem backend** it is `lease-acquire`/`lease-release`
    (flock-backed acquire-if-empty-or-expired, opaque token, TTL expiry, release-by-token; see
-   `idc:idc-tracker-filesystem`); **on the GitHub backend** there is no native compare-and-set
-   lease yet, so the interim is **single-holder fail-closed** (a native Projects-field CAS lease is a
-   tracked follow-up). **On the experimental Pi runtime the finisher does not self-merge at all:** no
+   `idc:idc-tracker-filesystem`); **on the GitHub backend** it is the same `lease-acquire`/
+   `lease-release` contract on `scripts/idc_gh_board.py` — a claim-issue append where the
+   lowest-numbered live claim is the single holder (see `idc:idc-tracker-github`), same token +
+   TTL semantics. **On the experimental Pi runtime the finisher does not self-merge at all:** no
    sanctioned Pi merge helper has landed, so under the lease the Pi finisher prepares/pushes/reports
    the reviewed branch and the integration-ref merge is **operator-performed** (README /
    `docs/architecture.md` §Runtime model; `agents/idc-finisher.md` §Git finalization Pi carve-out) —

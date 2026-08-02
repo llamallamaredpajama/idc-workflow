@@ -1650,10 +1650,19 @@ def run(op, ctx, **kw):
                 journal_append(ctx["repo"], op, backend, tracker_rel,
                                dict(kw, to_status=to_status), cur=cur)
             if op == "claim":
+                # A RECLAIM (#160): only the Status write is redundant on an already-In Progress
+                # claim — the documented claim contract (status + attribution) still owes the rest.
+                # A session resumed after a rate-limit death re-claims through here, so record the
+                # CURRENT agent and journal the (re)claim — its record self-identifies as a reclaim
+                # ("claim #N In Progress -> In Progress"), and replay is unchanged (same to-state).
+                if spec.get("records_agent") and kw.get("agent"):
+                    record_owner(ctx, num, kw["agent"])
+                journal_append(ctx["repo"], op, backend, tracker_rel,
+                               dict(kw, to_status=to_status), cur=cur)
                 # The sanctioned RENEW door (V-AUTH stage 2): re-claiming an already-In Progress item
-                # is a board no-op, but it RE-MINTS the claim-scoped authorization with a fresh TTL —
-                # the recovery for a mint that failed after the board write, and the renewal for a
-                # unit whose implementation outlives one TTL window.
+                # RE-MINTS the claim-scoped authorization with a fresh TTL — the recovery for a mint
+                # that failed after the board write, and the renewal for a unit whose implementation
+                # outlives one TTL window.
                 _mint_claim_authorization(ctx, num)
             return
         if cur["status"] == machine.get("terminal_status"):
@@ -1878,20 +1887,45 @@ def build_parser():
 
 
 def resolve_backend(args):
+    """The backend for this invocation: an explicit --backend wins; else the `backend:` declared in
+    <repo>/docs/workflow/tracker-config.yaml; else — ONLY when no config file exists at all (the
+    genuinely pre-scaffold repo) — the filesystem default. FAIL-CLOSED (#153): a config that EXISTS
+    but cannot be read, or does not declare a known backend, is a REFUSAL (TransitionError, exit 2),
+    never a silent filesystem retarget — the old broad-except fallback would land a github repo's
+    create in TRACKER.md, a quiet misroute the operator only notices by absence."""
     if args.backend:
         return args.backend
-    try:
-        import idc_recirc_sweep as SW
-        return SW.read_backend(os.path.abspath(args.repo)) or "filesystem"
-    except Exception:
+    cfg = os.path.join(os.path.abspath(args.repo), "docs", "workflow", "tracker-config.yaml")
+    if not os.path.exists(cfg):
         return "filesystem"
+    try:
+        with open(cfg, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError as e:
+        raise TransitionError(
+            f"tracker-config.yaml exists but is unreadable ({e}) — refusing to guess a backend "
+            "(a silent filesystem fallback misroutes board writes); repair the config or pass --backend")
+    m = re.search(r"^\s*backend:\s*([A-Za-z0-9_-]+)", text, re.M)
+    declared = m.group(1) if m else None
+    if declared not in ("filesystem", "github"):
+        raise TransitionError(
+            f"tracker-config.yaml exists but declares no usable backend (found {declared!r}) — "
+            "refusing to guess (a silent filesystem fallback misroutes board writes); repair the "
+            "config or pass --backend")
+    return declared
 
 
 def main():
     args = build_parser().parse_args()
     repo = os.path.abspath(args.repo)
     machine = load_machine(machine_path_for(repo, args.machine))
-    backend = resolve_backend(args)
+    # Backend resolution can REFUSE (#153: a present-but-unreadable/corrupt tracker-config.yaml) —
+    # map that to the same exit-2 denial contract as every other TransitionError, before any write.
+    try:
+        backend = resolve_backend(args)
+    except TransitionError as e:
+        sys.stderr.write(f"idc-transition: {e}\n")
+        sys.exit(2)
     tracker = args.tracker or os.path.join(repo, "TRACKER.md")
     if backend == "github":
         ctx = github_ctx(repo, args.owner, args.project, machine)

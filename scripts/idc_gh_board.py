@@ -25,6 +25,7 @@ CLI:  idc_gh_board.py --owner <o> --project <n> [--repo <dir>]   → prints {"it
       idc_gh_board.py --owner <o> --project <n> --emit-idmap      → prints the item-id map (below)
       idc_gh_board.py ensure-project|reconcile-status|ensure-field|ensure-link ...
       idc_gh_board.py close-project-issues|delete-project ...      → validating lifecycle writes
+      idc_gh_board.py lease-acquire|lease-release|lease-show ...   → the fail-closed merge lease
       (exit 0 = ok; exit 2 = any gh / parse failure; exit 3 = rate-limited, with a stdout verdict).
 API:  fetch_items(owner, project_number, repo=".") -> list[dict]  (raises BoardReadError on failure).
 """
@@ -34,6 +35,8 @@ import os
 import re
 import subprocess
 import sys
+import time
+import uuid
 
 # THE CREDENTIAL SCRUB DOOR — see `idc_credential_shapes.scrub`. Every read of a CHILD PROCESS's
 # stderr in this module passes through it AT THE READ, and `tests/smoke/phase11-honesty-repro.sh` R28
@@ -57,7 +60,8 @@ except ImportError:                                      # a lone relocated copy
 # Query the items connection by the project NODE id (resolved once) so this works for a user- OR an
 # org-owned project without branching on owner type. `$cursor` is nullable: omitted on the first
 # page (→ after: null), then set from the prior page's endCursor. pageInfo drives the loop.
-ITEMS_QUERY = """
+# The `%s` slot holds the OPTIONAL per-Issue details fragment (below).
+_ITEMS_QUERY_TEMPLATE = """
 query($pid: ID!, $cursor: String) {
   node(id: $pid) {
     ... on ProjectV2 {
@@ -76,7 +80,7 @@ query($pid: ID!, $cursor: String) {
           }
           content {
             __typename
-            ... on Issue       { number title repository { nameWithOwner } }
+            ... on Issue       { number title repository { nameWithOwner }%s }
             ... on PullRequest { number title repository { nameWithOwner } }
             ... on DraftIssue  { title }
           }
@@ -86,6 +90,24 @@ query($pid: ID!, $cursor: String) {
   }
 }
 """
+
+# The read-amplification fold-in (issue #109, graphql-cost sinks #2-#4): a caller that passes
+# `include_details=True` gets each Issue's `body`, its comment bodies, and its native `blockedBy`
+# issue numbers ON the same paginated board read — collapsing the recirc sweep's per-issue
+# `gh issue view --json body,comments` loop and the drain's per-candidate REST blocked_by call to
+# ZERO extra requests. OFF by default: the extras multiply the GraphQL node cost per item, so only
+# a caller that actually consumes them pays. (Shape live-verified against the GitHub schema:
+# Issue.blockedBy is a paginated IssueConnection.) The truncation bounds below are deliberate parity
+# with the per-issue reads they replace (`gh issue view --json body,comments` caps comments the same
+# way); the fold does NOT page these inner connections, so a consumer that could see >100 comments
+# or >50 blockers on ONE issue must decide at wiring time whether that bound is acceptable — the
+# drain's blocked_by consumer (idc_autorun_drain.py, #109 sink #2) is the open wiring handoff.
+_ISSUE_DETAILS_FRAGMENT = (" body"
+                           " comments(first: 100) { nodes { body } }"
+                           " blockedBy(first: 50) { nodes { number } }")
+
+ITEMS_QUERY = _ITEMS_QUERY_TEMPLATE % ""
+ITEMS_QUERY_DETAILED = _ITEMS_QUERY_TEMPLATE % _ISSUE_DETAILS_FRAGMENT
 
 # Single-item field read by project-item node id — the budget-friendly way for the transition engine
 # to read ONE item's current (Stage, Status) for a guard/read-back WITHOUT re-paginating the whole
@@ -322,6 +344,54 @@ def discard_partial_item(owner, project, repo, item_id, issue_num):
     return "; ".join(problems) if problems else None
 
 
+def _resolve_stage_status_ids(owner, project, repo, stage, status, action):
+    """(project node id, Stage field/option ids, Status field/option ids) for a Stage+Status write.
+    Fail-closed BEFORE any mutation: an unresolvable project/field/option id refuses the whole
+    `action` ("create"/"adopt") up front, so no dangling issue or half-set item is ever minted."""
+    pnode = _resolve_project_node_id(owner, project, repo)
+    fields_out = _gh(["project", "field-list", str(project), "--owner", owner, "--format", "json"], repo)
+    try:
+        fields = (json.loads(fields_out) or {}).get("fields") or []
+    except json.JSONDecodeError as e:
+        raise BoardWriteError(f"unparseable field list ({e}) — refusing to {action}")
+    stage_fid, stage_oid = _field_and_option(fields, "Stage", stage)
+    status_fid, status_oid = _field_and_option(fields, "Status", status)
+    if not (stage_fid and stage_oid):
+        raise BoardWriteError(f"Stage field or option {stage!r} not on the board — refusing to {action}")
+    if not (status_fid and status_oid):
+        raise BoardWriteError(f"Status field or option {status!r} not on the board — refusing to {action}")
+    return pnode, stage_fid, stage_oid, status_fid, status_oid
+
+
+def adopt_item(owner, project, repo, url, stage, status):
+    """Put an EXISTING issue onto the board with Stage AND Status set together — the recirc sweep's
+    orphan-adoption door (issue #152). The issue pre-exists (a prior throttled filing left it
+    off-board), so unlike create_item there is NOTHING to discard on failure: the issue is the
+    operator's ticket and must always survive. Resumable by construction — `item-add` is idempotent
+    (an issue already on the board returns its existing item id), so a partially-adopted orphan is
+    simply re-driven by the next sweep, and a Stage-set/Status-throttled partial is the empty-Status
+    shape the sweep's partial-heal already completes. Raises RateLimitError UNCHANGED mid-adopt
+    (the create_item convention — teardown gh calls would hit the same live limit) and
+    BoardWriteError on any other failure. Returns the item node id."""
+    pnode, stage_fid, stage_oid, status_fid, status_oid = _resolve_stage_status_ids(
+        owner, project, repo, stage, status, "adopt")
+    item_id = _gh(["project", "item-add", str(project), "--owner", owner, "--url", url,
+                   "--format", "json", "--jq", ".id"], repo).strip()
+    if not item_id:
+        raise BoardWriteError("item-add returned no item id — the orphan stays off-board (retried next sweep)")
+    try:
+        _gh(["project", "item-edit", "--id", item_id, "--project-id", pnode,
+             "--field-id", stage_fid, "--single-select-option-id", stage_oid], repo)
+        _gh(["project", "item-edit", "--id", item_id, "--project-id", pnode,
+             "--field-id", status_fid, "--single-select-option-id", status_oid], repo)
+    except RateLimitError:
+        raise
+    except BoardReadError as e:
+        raise BoardWriteError(f"adopt step failed ({e}) — the orphan is re-adopted next sweep "
+                              "(item-add is idempotent)")
+    return item_id
+
+
 def create_item(owner, project, repo, title, body, stage, status, labels=None, issue_type=None):
     """Create a board item with Stage AND Status set together — ATOMICALLY.
 
@@ -345,18 +415,8 @@ def create_item(owner, project, repo, title, body, stage, status, labels=None, i
     # Resolve the project node id + Stage/Status field+option ids up front (item-edit needs the PVT_
     # node id, not the integer project number — the documented gotcha). Any unresolved id → refuse to
     # create, so we never leave a dangling issue behind.
-    pnode = _resolve_project_node_id(owner, project, repo)
-    fields_out = _gh(["project", "field-list", str(project), "--owner", owner, "--format", "json"], repo)
-    try:
-        fields = (json.loads(fields_out) or {}).get("fields") or []
-    except json.JSONDecodeError as e:
-        raise BoardWriteError(f"unparseable field list ({e}) — refusing to create")
-    stage_fid, stage_oid = _field_and_option(fields, "Stage", stage)
-    status_fid, status_oid = _field_and_option(fields, "Status", status)
-    if not (stage_fid and stage_oid):
-        raise BoardWriteError(f"Stage field or option {stage!r} not on the board — refusing to create")
-    if not (status_fid and status_oid):
-        raise BoardWriteError(f"Status field or option {status!r} not on the board — refusing to create")
+    pnode, stage_fid, stage_oid, status_fid, status_oid = _resolve_stage_status_ids(
+        owner, project, repo, stage, status, "create")
 
     # 1. Create the backing issue (with any labels / type label). Nothing to discard yet, so a failure
     #    here just propagates.
@@ -430,19 +490,36 @@ def _flatten(node):
         repository = (content.get("repository") or {}).get("nameWithOwner")
         if repository:
             c["repository"] = repository
+        # Detailed-read extras (#109) — present ONLY when the caller asked include_details=True, so
+        # the lean shape is byte-identical to before: `body` (str), `comments` (list of comment-body
+        # strings), `blocked_by` (list of the native blockedBy issue numbers).
+        if "body" in content:
+            c["body"] = content.get("body") or ""
+        comments = content.get("comments")
+        if isinstance(comments, dict):
+            c["comments"] = [str((n or {}).get("body") or "") for n in (comments.get("nodes") or [])]
+        blocked = content.get("blockedBy")
+        if isinstance(blocked, dict):
+            c["blocked_by"] = [n.get("number") for n in (blocked.get("nodes") or [])
+                               if isinstance(n, dict) and isinstance(n.get("number"), int)]
         item["content"] = c
     return item
 
 
-def fetch_items(owner, project_number, repo="."):
+def fetch_items(owner, project_number, repo=".", include_details=False):
     """Return ALL project items (every page), each flattened to gh's item-list shape.
+
+    `include_details=True` folds each Issue's body + comment bodies + native blockedBy numbers into
+    the SAME paginated read (issue #109) — surfaced as content.body/.comments/.blocked_by — so a
+    consumer like the recirc sweep costs one board read, with no per-issue follow-up calls.
 
     Raises BoardReadError on any gh / parse failure — fail-closed, never a silent partial board."""
     pid = _resolve_project_node_id(owner, project_number, repo)
+    query = ITEMS_QUERY_DETAILED if include_details else ITEMS_QUERY
     items = []
     cursor = None
     for _ in range(MAX_PAGES):
-        args = ["api", "graphql", "-f", f"query={ITEMS_QUERY}", "-f", f"pid={pid}"]
+        args = ["api", "graphql", "-f", f"query={query}", "-f", f"pid={pid}"]
         if cursor:
             args += ["-f", f"cursor={cursor}"]
         out = _gh(args, repo)
@@ -935,6 +1012,186 @@ def delete_project(owner, project, confirmation, repo="."):
     return {"action": "deleted", "number": int(project), "id": node_id, "title": info["title"]}
 
 
+# ── merge lease (single-holder serialization primitive, github backend) ──────────────────────────
+# The github realization of the tracker adapter's fail-closed merge lease (issue #104, design §B.6),
+# with the SAME token + TTL semantics as the filesystem backend's flock lease (idc_tracker_fs.py):
+# acquire-if-empty-or-expired returning an opaque token, release-by-token, TTL expiry, and never two
+# concurrent holders.
+#
+# GitHub has no compare-and-set on a Projects field — a field write-then-read-back lets two racing
+# writers each read back their own value and both "win". What GitHub DOES have is an atomic append
+# with a server-assigned total order: issue creation. So a lease claim is an ISSUE titled
+# `[idc-lease] <name>` carrying the claim record in an `<!-- idc-lease: {...} -->` marker, and the
+# holder is the lowest-numbered LIVE claim (open + unexpired). An acquirer appends its claim, reads
+# every claim back, and either wins (its number is the lowest live) or withdraws its own claim and
+# fails closed — two racers always agree on the winner because the loser's read-back necessarily
+# includes the winner's earlier-numbered claim. Claim issues are plain repo issues, never board
+# items, so board reads/lint/lifecycle closes never see them; a released or withdrawn claim is
+# CLOSED, and a successful acquire retires (closes) any expired stragglers it observed — the analog
+# of the filesystem lease overwriting an expired record.
+
+_LEASE_MARKER = re.compile(r"<!--\s*idc-lease:\s*(.*?)\s*-->", re.S)
+_LEASE_RECORD_KEYS = ("owner", "token", "acquired_at", "expires_at", "expires_at_epoch")
+
+
+def _lease_title(lease):
+    return f"[idc-lease] {lease}"
+
+
+def _lease_iso(epoch):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def _lease_claims(lease, repo="."):
+    """Every OPEN claim issue for `lease`, lowest issue number first, each as the parsed claim
+    record plus its `number`. MALFORMED is NOT ignorable (the filesystem backend's corrupt-sidecar
+    posture): an open `[idc-lease] <name>` issue whose body does not parse as a claim record is
+    UNKNOWN lock state — treating it as "no claim" could grant a second holder, so fail closed."""
+    out = _gh(["api", "repos/{owner}/{repo}/issues?state=open&per_page=100", "--paginate",
+               "--jq", ".[] | {number: .number, title: .title, body: .body}"], repo)
+    claims = []
+    for line_no, line in enumerate(out.splitlines(), 1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError as e:
+            raise BoardReadError(f"lease claim read returned malformed JSON record {line_no} ({e})")
+        if not isinstance(obj, dict):
+            raise BoardReadError(f"lease claim read returned non-object record {line_no}")
+        if obj.get("title") != _lease_title(lease):
+            continue
+        number = obj.get("number")
+        if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+            raise MalformedBoardDataError(
+                f"lease claim read returned an invalid issue number in record {line_no}")
+        body = obj.get("body")
+        m = _LEASE_MARKER.search(body) if isinstance(body, str) else None
+        if not m:
+            raise MalformedBoardDataError(
+                f"lease claim issue #{number} has no idc-lease marker — unknown lock state; "
+                f"fail-closed — repair or close it")
+        try:
+            rec = json.loads(m.group(1))
+        except ValueError as e:
+            raise MalformedBoardDataError(
+                f"lease claim issue #{number} marker is malformed JSON ({e}) — fail-closed; "
+                f"repair or close it")
+        if not isinstance(rec, dict) or any(k not in rec for k in _LEASE_RECORD_KEYS):
+            raise MalformedBoardDataError(
+                f"lease claim issue #{number} marker is missing required fields — fail-closed; "
+                f"repair or close it")
+        try:
+            rec["expires_at_epoch"] = float(rec["expires_at_epoch"])
+        except (TypeError, ValueError):
+            raise MalformedBoardDataError(
+                f"lease claim issue #{number} has a non-numeric expiry — fail-closed; "
+                f"repair or close it")
+        rec["number"] = number
+        claims.append(rec)
+    claims.sort(key=lambda c: c["number"])
+    return claims
+
+
+def _live_holder(claims):
+    """The current holder — the lowest-numbered unexpired claim — or None when the lease is free.
+    A new claim always carries a HIGHER number than any existing live claim, so an unexpired holder
+    can never be displaced by a newcomer; expired claims simply stop counting."""
+    now = time.time()
+    live = [c for c in claims if c["expires_at_epoch"] > now]
+    return live[0] if live else None
+
+
+def _close_claim(number, repo):
+    """Close one claim issue and read it back CLOSED. The read-back is the verdict, not the close
+    call's exit — so a concurrent closer winning the race (gh: "already closed", non-zero) still
+    counts as landed, while a close that did NOT land can never pass silently."""
+    try:
+        _gh(["issue", "close", str(number)], repo)
+    except RateLimitError:
+        raise
+    except BoardReadError:
+        pass  # judged by the read-back below
+    if _issue_state(number, repo) != "CLOSED":
+        raise BoardWriteError(f"lease claim issue #{number} did not read back CLOSED")
+
+
+def lease_acquire(lease, owner, ttl, repo="."):
+    """Acquire the named lease for `owner`: returns the opaque token, or raises BoardWriteError when
+    held (fail-closed: no lease -> no merge). Raises RateLimitError UNCHANGED mid-acquire (the
+    create_item convention — teardown gh calls would hit the same live limit)."""
+    if ttl <= 0:
+        raise BoardWriteError("lease --ttl must be a positive number of seconds")
+    claims = _lease_claims(lease, repo)
+    cur = _live_holder(claims)
+    if cur is not None:
+        # Held and unexpired -> fail-closed: never hand out a second concurrent holder.
+        raise BoardWriteError(f"lease '{lease}' held by {cur.get('owner')!r} until "
+                              f"{cur.get('expires_at')} (no lease -> no merge)")
+    for c in claims:
+        # Every observed claim is expired (dead by the winner rule) — retire it BEFORE minting ours,
+        # the analog of the filesystem lease overwriting an expired record on acquire.
+        _close_claim(c["number"], repo)
+    now = time.time()
+    token = uuid.uuid4().hex
+    exp = now + ttl
+    rec = {"owner": owner, "token": token, "acquired_at": _lease_iso(now),
+           "expires_at": _lease_iso(exp), "expires_at_epoch": exp}
+    url = _gh(["issue", "create", "--title", _lease_title(lease),
+               "--body", f"<!-- idc-lease: {json.dumps(rec)} -->"], repo).strip()
+    url = url.splitlines()[-1] if url else ""
+    if not url:
+        raise BoardWriteError("lease claim create returned no URL — not acquired")
+    try:
+        mine = int(url.rstrip("/").split("/")[-1])
+    except ValueError:
+        raise BoardWriteError(f"lease claim create returned no issue number ({url!r}) — not acquired")
+    # The optimistic-concurrency read-back: our claim is appended, now EVERY claim decides the
+    # winner. A racing acquirer that appended first holds the lower live number and wins; we must
+    # then withdraw OUR claim, or it becomes the holder the moment the winner releases.
+    winner = _live_holder(_lease_claims(lease, repo))
+    if winner is None or winner["number"] != mine:
+        try:
+            _close_claim(mine, repo)
+        except RateLimitError:
+            raise
+        except BoardReadError as e:
+            raise BoardWriteError(
+                f"lease '{lease}' acquire lost the race AND withdrawing claim issue #{mine} failed "
+                f"({e}) — close issue #{mine} by hand or it becomes the holder when the lease frees")
+        if winner is None:
+            raise BoardWriteError(f"lease '{lease}' claim #{mine} did not read back live — not acquired")
+        raise BoardWriteError(f"lease '{lease}' held by {winner.get('owner')!r} until "
+                              f"{winner.get('expires_at')} (no lease -> no merge)")
+    return token
+
+
+def lease_release(lease, token, repo="."):
+    """Release the named lease by token. Idempotent when unheld; a wrong token is rejected (the
+    filesystem backend's contract — a stale holder can never release the current one's lease)."""
+    cur = _live_holder(_lease_claims(lease, repo))
+    if cur is None:
+        return  # idempotent: nothing to release
+    if cur.get("token") != token:
+        raise BoardWriteError(f"lease '{lease}' release rejected — token mismatch "
+                              f"(held by {cur.get('owner')!r})")
+    _close_claim(cur["number"], repo)
+
+
+def lease_show(lease, repo="."):
+    """The current claim record (token omitted) with `held`, or None when no claim issue is open —
+    the filesystem backend's lease-show shape, plus `number` (the claim issue, for hand repair)."""
+    claims = _lease_claims(lease, repo)
+    if not claims:
+        return None
+    cur = _live_holder(claims)
+    rec = cur if cur is not None else claims[0]
+    out = {k: v for k, v in rec.items() if k != "token"}
+    out["held"] = cur is not None
+    return out
+
+
 def idmap_lines(items):
     """Return `issue#<TAB>item_id` lines for every issue-backed item on the board.
 
@@ -990,6 +1247,51 @@ _LIFECYCLE_COMMANDS = {
     "close-project-issues", "delete-project",
 }
 
+_LEASE_COMMANDS = {"lease-acquire", "lease-release", "lease-show"}
+
+
+def _lease_main(argv):
+    # Output mirrors the filesystem backend's lease CLI byte-shape (bare token / nothing / one JSON
+    # record), so a caller following the adapter's leaseAcquire/leaseRelease recipe stays
+    # backend-blind. `--owner` here is the HOLDER name (the filesystem CLI's flag), not the project
+    # owner login — these ops work repo-level claim issues and never touch the project.
+    ap = argparse.ArgumentParser(
+        description="The github backend's fail-closed merge lease (claim-issue append; "
+                    "lowest live claim holds).")
+    sub = ap.add_subparsers(dest="command", required=True)
+
+    la = sub.add_parser("lease-acquire")
+    la.add_argument("--repo", default=".", help="repo dir the gh calls run in")
+    la.add_argument("--lease", default="merge")
+    la.add_argument("--owner", required=True, help="holder name recorded on the claim")
+    la.add_argument("--ttl", type=float, default=900.0, help="lease lifetime in seconds")
+
+    lr = sub.add_parser("lease-release")
+    lr.add_argument("--repo", default=".", help="repo dir the gh calls run in")
+    lr.add_argument("--lease", default="merge")
+    lr.add_argument("--token", required=True)
+
+    lsw = sub.add_parser("lease-show")
+    lsw.add_argument("--repo", default=".", help="repo dir the gh calls run in")
+    lsw.add_argument("--lease", default="merge")
+
+    args = ap.parse_args(argv)
+    try:
+        if args.command == "lease-acquire":
+            print(lease_acquire(args.lease, args.owner, args.ttl, os.path.abspath(args.repo)))
+        elif args.command == "lease-release":
+            lease_release(args.lease, args.token, os.path.abspath(args.repo))
+        else:
+            rec = lease_show(args.lease, os.path.abspath(args.repo))
+            if rec is not None:
+                print(json.dumps(rec, indent=2, ensure_ascii=False))
+    except RateLimitError as e:
+        emit_rate_limit_verdict(e)
+    except BoardReadError as e:
+        sys.stderr.write(f"idc-gh-board: {e}\n")
+        sys.exit(2)
+    sys.exit(0)
+
 
 def _lifecycle_main(argv):
     ap = argparse.ArgumentParser(
@@ -1042,10 +1344,12 @@ def _lifecycle_main(argv):
 
 
 def main():
-    # Preserve the long-shipped flag-first board-reader CLI while adding explicit lifecycle
-    # subcommands. A first token not in this fixed set follows the legacy parser unchanged.
+    # Preserve the long-shipped flag-first board-reader CLI while adding explicit lifecycle and
+    # lease subcommands. A first token not in these fixed sets follows the legacy parser unchanged.
     if len(sys.argv) > 1 and sys.argv[1] in _LIFECYCLE_COMMANDS:
         _lifecycle_main(sys.argv[1:])
+    if len(sys.argv) > 1 and sys.argv[1] in _LEASE_COMMANDS:
+        _lease_main(sys.argv[1:])
     _read_main()
 
 

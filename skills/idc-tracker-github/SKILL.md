@@ -272,6 +272,33 @@ absence, then moves the child `Blocked → Todo`) — never a raw `blocked_by` D
   active board views and no consumer acts on a `Done`+`Planning` item (Build/drain pair `Stage` with
   `Status=Todo`) — leaving `Stage` is the correct, backend-consistent, doubly-guarded terminal state.
 
+## Merge lease (single-holder serialization)
+
+Where a single holder must be proven **atomically** — e.g. flat pi finisher residents with no
+orchestrator contending to update the integration ref — use the fail-closed **merge lease**. Like
+the sibling filesystem backend, leases are a primitive with **no engine op** (they serialize the
+merge, not the board): invoke the backend helper directly, same flags and output shape as
+`idc:idc-tracker-filesystem`'s lease CLI (`--owner` is the HOLDER name here, not the project owner):
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gh_board.py" lease-acquire --lease merge \
+  --owner "$AGENT" --ttl 900        # → prints an opaque token, or exits non-zero if held
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gh_board.py" lease-release --lease merge \
+  --token "$TOKEN"                  # release-by-token; idempotent when unheld; wrong token rejected
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gh_board.py" lease-show --lease merge
+                                    # → JSON {owner, acquired_at, expires_at, number, held} or empty
+```
+
+GitHub has no compare-and-set on a Projects field (a field write-then-read-back lets two racing
+writers both "win"), so the helper leans on the one atomic append GitHub does provide: each acquire
+files a claim **issue** titled `[idc-lease] <name>`, and the **lowest-numbered live claim** (open +
+unexpired) is the single holder — two racing acquirers always agree on the winner, and the loser
+withdraws (closes) its own claim and exits non-zero. Token + TTL semantics mirror the filesystem
+flock lease exactly: opaque token on acquire, release-by-token, TTL expiry re-acquire. Claim issues
+are plain repo issues, **never board items** — board reads, board lint, and lifecycle closes never
+see them — and a released/withdrawn/expired claim ends CLOSED. A malformed open claim issue is
+UNKNOWN lock state and fail-closes every lease op (repair or close it by hand). No lease → no merge.
+
 ## Provisioning caveat (read before any option write)
 
 Board + the four fields are provisioned by `/idc:init`, **not** here — this skill assumes the

@@ -92,9 +92,11 @@ token)`. Backends realize it differently:
 
 - **filesystem** — implemented: `lease-acquire`/`lease-release` (flock-backed acquire-if-empty-
   or-expired, release-by-token, TTL expiry). See `idc:idc-tracker-filesystem`.
-- **github** — **interim**: no native compare-and-set lease yet, so merge stays **single-holder
-  fail-closed** — exactly one orchestrator merges (no lease → no merge); a finisher never
-  self-merges concurrently. A native Projects-field CAS lease is a tracked follow-up.
+- **github** — implemented: `lease-acquire`/`lease-release` on the backend helper
+  (`scripts/idc_gh_board.py`), same token + TTL semantics — each acquire appends a claim issue
+  and the lowest-numbered live claim is the single holder (optimistic concurrency over GitHub's
+  server-assigned issue numbers; a losing acquirer withdraws its claim and fails closed). See
+  `idc:idc-tracker-github`.
 
 ## Fail-closed posture
 

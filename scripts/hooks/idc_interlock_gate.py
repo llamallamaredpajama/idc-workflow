@@ -32,10 +32,18 @@ INDIRECTION-AWARE (bounded interpreter inspection). Beyond the direct command-st
 inspect_command resolves:
   * quoted `bash -c '…'` / `sh -c '…'` / `zsh -c '…'` payloads (recursively);
   * `bash|sh|zsh FILE`, `source FILE`, and `. FILE` script targets (resolved against cwd), scanning
-    the file body for a protected operation.
+    the file body for a protected operation;
+  * scripting-interpreter INLINE payloads (`python3|python|node|bun|deno|ruby` with `-c`/`-e` CODE,
+    #192): opaque program text this gate cannot follow, so it is judged by the conservative
+    whole-segment TEXT matcher instead — on the raw payload (a string-form spawn,
+    `os.system("gh pr merge …")`) AND on every comma-separated quoted-literal argv-list run it
+    carries (`subprocess.run(["gh","pr","merge",…])`); a payload that spawns a child with the
+    denied gh-mutation tokens in either shape is DENIED.
 It is BOUNDED and SAFE: at most MAX_SCRIPT_DEPTH levels of nesting, files up to MAX_SCRIPT_BYTES,
-regular files only, cycle-guarded. Files under the plugin's own `scripts/` dir are sanctioned (not
-scanned). Sensitive targets (`.env`, `.envrc`, `*.pem`, `id_rsa*`, or names containing `credential`/
+regular files only, cycle-guarded. ONLY a file on the pinned shipped-scripts manifest
+(_SHIPPED_SCRIPTS, #192) under the plugin's own `scripts/` dir is sanctioned (not scanned) — a
+non-manifest file there, e.g. an agent-dropped helper, is scanned like any other target.
+Sensitive targets (`.env`, `.envrc`, `*.pem`, `id_rsa*`, or names containing `credential`/
 `secret`) are REFUSED WITHOUT being opened; unreadable / non-regular / too-large / cyclic /
 depth-exhausted targets are refused as `opaque-script-indirection`. A denial NEVER echoes script
 contents — only the normalized display path and the matched operation.
@@ -58,43 +66,30 @@ classifier pattern. Only a RAW terminal command (or one hidden behind interprete
 matches.
 
 KNOWN NON-COVERAGE — the published scope, stated so this gate is not read as a complete barrier
-(F58, extended by F63). Every channel below is PRE-EXISTING (they behave identically on `main`) and
-all are tracked as follow-ups rather than closed here, because narrowing any of them touches a
-load-bearing exemption or widens the denial surface well beyond this release's review.
+(F58, extended by F63; narrowed by #192). The channel below is PRE-EXISTING (it behaves identically
+on `main`) and is tracked as a follow-up rather than closed here, because closing it means treating
+an interpreter with no resolvable program source — and a helper that execs an argv it reads at
+runtime — as opaque, a widen-the-denial-surface change this release does not adopt unreviewed.
+(F58's other two channels are CLOSED by #192: the blanket plugin-scripts exemption became the
+pinned _SHIPPED_SCRIPTS manifest, and scripting-interpreter inline payloads are text-matched,
+argv-list runs included — see INDIRECTION-AWARE above.)
 
 THIS LIST IS NOT A CLOSED WORLD. It enumerates what is KNOWN to be uncovered; a construct that is
 absent from it is NOT thereby guaranteed to be in scope. This is a defense-in-depth classifier, not a
 complete shell parser (see CLASSIFIER above), so treat the list as a floor on the known gaps, never as
 a ceiling on the possible ones.
 
-WHERE THE BOUNDARY ACTUALLY RUNS (the rule the channels below fall outside of). A segment is
+WHERE THE BOUNDARY ACTUALLY RUNS (the rule the channel below falls outside of). A segment is
 classified when a protected call stands in COMMAND POSITION — `gh` is that segment's command head
 once known wrapper/env prefixes are stripped — or inside a payload/target this gate can FOLLOW
-(`bash|sh|zsh -c '…'`, `bash|sh|zsh FILE`, `source`/`.` FILE, `bash|sh|zsh < FILE`). A conservative
-whole-segment TEXT match runs ONLY as a backstop for a segment that fails to tokenize. Protected
-words carried as DATA — an argument to some other command — are deliberately not a match, or `echo
-"gh pr merge 123"` and every doc example quoting a protected call would be a denial.
+(`bash|sh|zsh -c '…'`, `bash|sh|zsh FILE`, `source`/`.` FILE, `bash|sh|zsh < FILE`, and — matched
+as opaque text rather than followed — a scripting interpreter's inline `-c`/`-e` payload, string
+form and argv-list form alike, #192). A conservative whole-segment TEXT match runs ONLY as a
+backstop for a segment that fails to tokenize. Protected words carried as DATA — an argument to
+some other command — are deliberately not a match, or `echo "gh pr merge 123"` and every doc
+example quoting a protected call would be a denial.
 
-  1. SANCTIONED PLUGIN SCRIPTS. Rule 5 above returns `[]` — unscanned — for any file whose RESOLVED
-     path is under `<plugin_root>/scripts/`. That exemption is what keeps IDC's own helpers, which
-     legitimately shell out to `gh`, from being denied by their own gate. Its cost: a payload written
-     into that directory and then run is never classified, and the Path Gate cannot stop the write
-     either — `idc_path_gate` deliberately treats out-of-repository paths as outside its jurisdiction
-     (locked by `tests/smoke/governance/path-gate-boundaries.sh`), and the plugin root is outside the
-     governed repo. Neither half is a defect alone; the combination is the channel. Closing it means
-     replacing "anything under scripts/" with a manifest or hash-pin of the known plugin scripts.
-  2. ARGV-LIST INTERPRETER PAYLOADS. `python3` is NOT one of the interpreters this gate follows
-     (INTERPRETERS is bash/sh/zsh), so a `python3 -c '…'` payload is only ever reached by the
-     tokenize-failure TEXT backstop described above. Concretely:
-     `python3 -c 'import os; os.system("gh pr merge 123")'` DENIES — the embedded `;` raw-splits it
-     into a fragment that fails to lex, so the whole-segment matcher runs and sees the call as text —
-     while `python3 -c 'subprocess.run(["gh","pr","merge","123"])'` carries no matching text and does
-     not. The boundary is NARROWER than "it sees the text": the same call written without a `;`
-     (`python3 -c 'os.system("gh pr merge 123")'`) tokenizes cleanly, the backstop never runs, and it
-     is allowed too. Closing this means treating child-process-capable interpreter payloads as opaque
-     — deny unless positively classified — a much wider denial surface than this release should adopt
-     unreviewed.
-  3. PROGRAM TEXT THAT NEVER STANDS IN COMMAND POSITION (F63). Two demonstrated forms:
+  1. PROGRAM TEXT THAT NEVER STANDS IN COMMAND POSITION (F63). Two demonstrated forms:
      a. AN INTERPRETER FED ITS PROGRAM ON STDIN THROUGH A PIPE — `echo '<protected cmd>' | sh`,
         `cat payload.sh | bash`, `curl -s <url> | sh`, `echo <base64> | base64 -d | sh`. Segmenting on
         `|` leaves a producer segment whose command head is `echo`/`cat`/`curl` (the protected words
@@ -106,8 +101,8 @@ words carried as DATA — an argument to some other command — are deliberately
         `xargs gh` names no subcommand and the protected words arrive at runtime out of another
         segment. (`xargs gh pr merge 123`, with the words present in the same segment, IS covered.)
      Closing this means treating an interpreter with no resolvable program source, and a helper that
-     execs an argv it reads at runtime, as opaque — the same widen-the-denial-surface change as (2),
-     and it is parked with it.
+     execs an argv it reads at runtime, as opaque — the widen-the-denial-surface change named above,
+     and it stays parked until that widening is reviewed.
 
 NOT a bypass, and deliberately so: an unusable Python runtime. The transport hard-denies rather than
 allowing silently (F57, `scripts/hooks/idc_interlock_gate_hook.sh`).
@@ -134,6 +129,60 @@ MAX_SCRIPT_DEPTH = 3
 MAX_SCRIPT_BYTES = 65536
 INTERPRETERS = {"bash", "sh", "zsh"}
 SENSITIVE_BASENAMES = {".env", ".envrc", "id_rsa", "id_dsa", "id_ed25519"}
+
+# Rule 5 manifest (#192): the EXACT relative paths of the scripts this plugin SHIPS under its
+# `scripts/` dir. The sanctioned-scripts exemption matches THIS pinned list, never the directory
+# prefix — the old blanket "anything under scripts/" let an agent drop a helper script there (a
+# location the Path Gate deliberately treats as outside its jurisdiction) and run it unscanned. A
+# file under scripts/ that is NOT on this list is scanned like any other interpreter target.
+# Kept in lockstep with the shipped tree by tests/smoke/governance/interlock-scripts-manifest.sh.
+_SHIPPED_SCRIPTS = frozenset({
+    ".gitkeep", "hooks/idc_command_closeout_gate_hook.sh", "hooks/idc_command_closeout_gate.py",
+    "hooks/idc_command_entry_gate_hook.sh", "hooks/idc_command_entry_gate.py",
+    "hooks/idc_command_report.py", "hooks/idc_drain_verdict.py", "hooks/idc_git_pre_commit.sh",
+    "hooks/idc_git_pre_push.sh", "hooks/idc_hook_lib.py", "hooks/idc_interlock_gate_hook.sh",
+    "hooks/idc_interlock_gate.py", "hooks/idc_ledger.py", "hooks/idc_post_commit_sync_hook.sh",
+    "hooks/idc_post_commit_sync.py", "hooks/idc_post_issue_create_hook.sh",
+    "hooks/idc_post_issue_create.py", "hooks/idc_recirc_closeout_gate_hook.sh",
+    "hooks/idc_recirc_closeout_gate.py", "hooks/idc_stop_fixpoint_gate_hook.sh",
+    "hooks/idc_stop_fixpoint_gate.py", "hooks/idc_verdict_gate_hook.sh",
+    "hooks/idc_verdict_gate.py", "idc_acceptance_check.py", "idc_autorun_drain.py",
+    "idc_board_lint.py", "idc_brownfield_scan.py", "idc_build_receipt.py",
+    "idc_command_contract.py", "idc_config_keys.py", "idc_consideration_check.py",
+    "idc_credential_shapes.py", "idc_dag.py", "idc_doctor_pathway_check.py", "idc_emit_marker.py",
+    "idc_execution_graph.py", "idc_file_findings.py", "idc_finish_coherence.py",
+    "idc_finish_recover.py", "idc_gate_proof.py", "idc_gate_repair.py", "idc_gh_board.py",
+    "idc_gh_close.py", "idc_git_finish.py", "idc_git_janitor.py", "idc_git_path_gate.py",
+    "idc_governance_check.py", "idc_governance_compile.py", "idc_init_scaffold.sh",
+    "idc_intake_manifest.py", "idc_journal_replay.py", "idc_lint_machine_yaml_refs.py",
+    "idc_live_check.py", "idc_matrix_check.py", "idc_next_action.py", "idc_path_gate.py",
+    "idc_pathway_check.py", "idc_pathway_posture_probe.py", "idc_pause_check.py",
+    "idc_pause_state.py", "idc_pilot_metrics.py", "idc_planning_receipt.py",
+    "idc_plugin_freshness.py", "idc_pr_finish.py", "idc_pr_gate_bind.py",
+    "idc_provenance_check.py", "idc_python_runtime.sh", "idc_receipt_check.py",
+    "idc_recirc_caps.py", "idc_recirc_closeout.py", "idc_recirc_reconcile.py",
+    "idc_recirc_sweep_hook.sh", "idc_recirc_sweep.py", "idc_recirculator_layers.py",
+    "idc_reconciliation_baseline.py", "idc_release_check.py", "idc_review_seen_ledger.py",
+    "idc_review_verdict_check.py", "idc_ruleset_check.py", "idc_ruleset_install.py",
+    "idc_schema_check.py", "idc_settings_json.py", "idc_stage_options.py", "idc_stdio.py",
+    "idc_teammate_idle_synth.py", "idc_template_for.py", "idc_tracker_fs.py",
+    "idc_tracker_projection.py", "idc_tracker_transaction.py", "idc_transition.py",
+    "idc_validation_contract.py", "idc_validation_risk_gate.py", "idc_verification_handles.py",
+    "idc_worktree_stability.py", "install-codex.sh", "install-pi.sh", "lint-references.sh",
+    "materialize-sandbox.sh", "run-evals.sh",
+})
+
+
+def _sanctioned_plugin_script(real, plugin_root):
+    """True iff the RESOLVED path `real` is one of the scripts the plugin ships — the Rule 5
+    manifest test (#192). Both endpoints are realpath()-resolved, so a symlink under scripts/
+    aliasing an external target resolves OUT of the manifest and is scanned."""
+    if not plugin_root:
+        return False
+    scripts_dir = os.path.normpath(os.path.realpath(os.path.join(plugin_root, "scripts")))
+    if not real.startswith(scripts_dir + os.sep):
+        return False
+    return os.path.relpath(real, scripts_dir) in _SHIPPED_SCRIPTS
 
 
 @dataclasses.dataclass(frozen=True)
@@ -776,13 +825,12 @@ def _inspect_target(target, cwd, plugin_root, depth, seen):
     # resolved basename (a symlink → .env) AND the lexical basename (a .env → innocuous alias).
     if _is_sensitive(os.path.basename(real)) or _is_sensitive(os.path.basename(lexical)):
         return [_opaque(display, "a sensitive file the interlock refuses to open")]
-    # Rule 5: files whose RESOLVED path is beneath the plugin's own scripts/ dir are sanctioned — do not
-    # scan their bodies. Resolving first means a symlink placed under scripts/ can no longer smuggle an
-    # unscanned external target through this sanctioned adapter boundary.
-    if plugin_root:
-        scripts_dir = os.path.normpath(os.path.realpath(os.path.join(plugin_root, "scripts")))
-        if real == scripts_dir or real.startswith(scripts_dir + os.sep):
-            return []
+    # Rule 5 (#192): ONLY a file on the pinned shipped-scripts manifest is sanctioned — do not scan
+    # its body. Resolving first means a symlink placed under scripts/ can no longer smuggle an
+    # unscanned external target through this sanctioned adapter boundary, and a NON-manifest file
+    # dropped into scripts/ falls through to the ordinary scan below like any other target.
+    if _sanctioned_plugin_script(real, plugin_root):
+        return []
     # cycle + depth guards (rule 6): a self/mutually-including script, or nesting past the bound.
     if real in seen:
         return [_opaque(display, "a cyclic include")]
@@ -1102,6 +1150,57 @@ def _interpreter_plan(args):
     return payload, sources, script
 
 
+# Scripting interpreters whose INLINE `-c`/`-e` payloads can spawn a `gh` child process (#192,
+# closing F58 channel 2). The payload is opaque program text this gate cannot follow, so it is
+# judged by the conservative whole-segment TEXT matcher instead: on the raw payload (a string-form
+# spawn, e.g. an os.system call quoting the mutation) and on each comma-separated quoted-literal
+# argv-list run it carries (`subprocess.run(["gh","pr","merge",…])`). Protected tokens inside such
+# a payload have no sanctioned use — the plugin's own inline payloads (version reads, JSON parsing,
+# the runtime preflight) carry none.
+_PAYLOAD_INTERPRETERS = {"python", "python3", "node", "bun", "deno", "ruby"}
+_QUOTED_LITERAL_RE = re.compile(r"'([^']*)'|\"([^\"]*)\"")
+# The text BETWEEN two literals of one argv run: commas plus list/tuple punctuation only — this
+# joins `execFileSync("gh", ["issue","close","5"])` across the program/args boundary, while any
+# intervening word (`, b="pr"`) breaks the run so keyword arguments never concatenate.
+_ARGV_SEP_RE = re.compile(r"[\s,\[\]()]*")
+
+
+def _argv_list_runs(code):
+    """Each comma-separated run of quoted string literals in `code`, joined into the whitespace
+    command line its argv would form — `subprocess.run(["gh","pr","merge","123"])` yields
+    `gh pr merge 123`. Only literals adjacent through comma/list punctuation group into one run, so
+    unrelated strings elsewhere in the payload never concatenate into a phantom command."""
+    runs, current, last_end = [], [], None
+    for m in _QUOTED_LITERAL_RE.finditer(code):
+        literal = m.group(1) if m.group(1) is not None else m.group(2)
+        between = code[last_end:m.start()] if last_end is not None else None
+        if current and between is not None and "," in between and _ARGV_SEP_RE.fullmatch(between):
+            current.append(literal)
+        else:
+            if len(current) >= 2:
+                runs.append(" ".join(current))
+            current = [literal]
+        last_end = m.end()
+    if len(current) >= 2:
+        runs.append(" ".join(current))
+    return runs
+
+
+def _interpreter_payload_findings(head, code):
+    """Findings for a child-process-capable scripting interpreter's INLINE payload (#192). The raw
+    payload text catches the string-form spawn; each reconstructed argv-list run catches the
+    list-form spawn (`["gh","pr","merge",…]`). Both routes reuse the conservative whole-segment
+    matcher, so the denied set is exactly the protected-operation set — a payload carrying no
+    protected tokens is untouched."""
+    out = []
+    for text in [code, *_argv_list_runs(code)]:
+        inner = _classify_string_backstop(text)
+        if inner:
+            out.append(_Finding(f"{inner.subject}, carried in a `{head}` interpreter payload",
+                                inner.remediation, "interpreter-payload", inner.kind))
+    return out
+
+
 def _su_command_payload(seg):
     """Return ``(seen_command_flag, payload)`` for BSD/GNU ``su`` command forms.
 
@@ -1214,6 +1313,12 @@ def _inspect_segment(seg, cwd, plugin_root, depth, seen):
         for target in [*sources, *([script] if script is not None else [])]:
             out.extend(_inspect_target(target, cwd, plugin_root, depth, seen))
         return out
+    # #192 (F58 channel 2): a scripting interpreter's inline `-c`/`-e` payload is opaque program
+    # text — text-match it for a denied gh mutation in string OR argv-list form.
+    if head in _PAYLOAD_INTERPRETERS:
+        code = _inline_writer_code(seg[1:])
+        if isinstance(code, str) and code:
+            return _interpreter_payload_findings(head, code)
     opaque = _opaque_privilege_interpreter(original_seg)
     return [opaque] if opaque else []
 
@@ -2041,10 +2146,8 @@ def _analyze_shell_target(target, cwd, repo_root, plugin_root, depth, seen):
     if _is_sensitive(os.path.basename(real)) or _is_sensitive(os.path.basename(lexical)):
         analysis.deny(_opaque_mutation_reason(f"`{display}` is a sensitive shell target the interlock refuses to open"))
         return analysis
-    if plugin_root:
-        scripts_dir = os.path.normpath(os.path.realpath(os.path.join(plugin_root, "scripts")))
-        if real == scripts_dir or real.startswith(scripts_dir + os.sep):
-            return analysis
+    if _sanctioned_plugin_script(real, plugin_root):
+        return analysis
     if real in seen:
         analysis.deny(_opaque_mutation_reason(f"`{display}` is a cyclic shell include"))
         return analysis

@@ -50,6 +50,7 @@ for t in \
   phase1-tracker-stage \
   phase1-stage-recirc-append \
   phase1-tracker-lease \
+  phase1-tracker-lease-github \
   phase1-init-doctor \
   phase1-doctor-board-lint \
   phase1-recirc-sweep \

@@ -6,10 +6,18 @@
 #   (1) Field-swapped values are rejected (Status: Buildable is a FAIL).
 #   (2) The regex is line-oriented and does not miss multi-line blocks.
 #   (3) The test lives in the smoke suite and is discovered by run-all.sh.
+#   (4) #157: the dominant `Stage = X` / `Stage=X` / `Status=X` forms are cross-checked too
+#       (the shell-side [machine-yaml-eq-ref] rule in lint-references.sh), WITHOUT false-positives
+#       on the known edge forms: multiword `Status = In Progress`, slash `Stage =
+#       Consideration/Planning`, compound `Stage = Recirculation ∧ Todo`, prose continuation
+#       `Status = Todo Because …`, and lint-allow-exempt lines.
 #
 # Red-when-broken:
 #   - Weaken the python script's validation to a union check -> (1) fails to fail.
 #   - Use a multi-line regex in the python script -> (2) fails to fail.
+#   - Stash the [machine-yaml-eq-ref] block out of lint-references.sh -> the (4) asserts FAIL
+#     ("did not report unknown stage 'Eqwibble' in = form") while the colon-form seeds still
+#     make the linter exit 1 — proven against the pre-#157 linter.
 #
 # Usage: bash tests/smoke/governance/machine-yaml-crosscheck.sh (exit 0 = pass)
 set -uo pipefail
@@ -83,6 +91,19 @@ cat >> "$TARGET_FILE" <<EOF
 5. Valid engine op invocation (should not fail):
    - eng move --num 123 --to-status Todo
 
+6. Bogus =-form references (#157 — each must FAIL via [machine-yaml-eq-ref]):
+   - Stage = Eqwibble
+   - Stage=Eqwobble
+   - Status = Eqflibber
+
+7. Valid =-form edge cases (#157 — none may false-positive):
+   - Status = In Progress
+   - Status=In Progress
+   - Stage = Consideration/Planning
+   - Stage = Recirculation ∧ Todo
+   - Status = Todo Because Reasons Follow
+   - Stage = Eqzork  <!-- lint-allow: seeded exemption fixture -->
+
 EOF
 
 echo "  (2) Running linter on modified repo, expecting FAIL..."
@@ -95,6 +116,16 @@ echo "$output" | grep -q "Invalid Status reference: 'Buildable'" || fail "Linter
 echo "$output" | grep -q "Invalid Stage reference: 'BogusStage'" || fail "Linter did not report unknown stage 'BogusStage' in yaml block"
 echo "$output" | grep -q "Invalid Status reference: 'Planning'" || fail "Linter did not report field-swapped status 'Planning' in yaml block"
 echo "$output" | grep -q "Invalid transition engine op: 'eng teleport-ticket'" || fail "Linter did not report invalid op 'teleport-ticket'"
+
+# #157 — the =-forms are cross-checked by the shell-side [machine-yaml-eq-ref] rule. The tag is the
+# discriminating artifact: only the =-form rule prints it (the python's colon-form findings don't).
+echo "$output" | grep -q "\[machine-yaml-eq-ref\] Invalid Stage reference: 'Eqwibble'" || fail "Linter did not report unknown stage 'Eqwibble' in = form"
+echo "$output" | grep -q "\[machine-yaml-eq-ref\] Invalid Stage reference: 'Eqwobble'" || fail "Linter did not report unknown stage 'Eqwobble' in no-space = form"
+echo "$output" | grep -q "\[machine-yaml-eq-ref\] Invalid Status reference: 'Eqflibber'" || fail "Linter did not report unknown status 'Eqflibber' in = form"
+# No false positives on the valid edge forms: exactly the 3 seeded bogus =-refs, nothing else.
+eq_count=$(echo "$output" | grep -c "machine-yaml-eq-ref")
+[ "$eq_count" -eq 3 ] || fail "Expected exactly 3 [machine-yaml-eq-ref] findings (the seeded bogus refs), got $eq_count — an edge form (multiword/slash/compound/prose/lint-allow) false-positived: $(echo "$output" | grep 'machine-yaml-eq-ref')"
+echo "$output" | grep -q "machine-yaml-eq-ref.*Eqzork" && fail "lint-allow line was not exempt from the =-form rule"
 echo "    ok: linter failed as expected and reported the correct errors."
 
 

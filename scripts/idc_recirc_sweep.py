@@ -48,6 +48,8 @@ and `idc_tracker_fs` for the filesystem write.
 Usage:
   idc_recirc_sweep.py --repo <dir> --auto-correct [--tracker <TRACKER.md>] [--matrices <dir>]
   idc_recirc_sweep.py --repo <dir> --report       [--tracker <TRACKER.md>] [--matrices <dir>]
+  idc_recirc_sweep.py --repo <dir> --derive-recirc-count <N>   # issue N's board-derived recirc_count
+                                                               # (#108) — bare int; exit 2 = uncomputable
 """
 import argparse
 import json
@@ -237,6 +239,25 @@ def discovery_source(marker, host_number):
     so the (origin, what) key is hashable and stable across runs."""
     origin = marker.get("origin") or f"#{host_number}"
     return {"origin": str(origin), "what": str(marker.get("what", "")).strip()}
+
+
+def origin_issue(origin):
+    """The issue number an idc-recirc-source `origin` names ("#42|finisher" / "#42" / 9), or None.
+    A prefix parse (the origin's role suffix is free-form), stringified first so numeric origins
+    (older markers carry bare ints) resolve the same way."""
+    m = re.match(r"#?(\d+)", str(origin or "").strip())
+    return int(m.group(1)) if m else None
+
+
+def derived_recirc_count(issue_number, tickets):
+    """The BOARD-DERIVED recirc_count for `issue_number` (issue #108): how many DISTINCT
+    Recirculation tickets — ANY Status, including retired/Done — carry an idc-recirc-source marker
+    whose origin names that issue. The runaway caps (`idc_recirc_caps.py`) decide over a
+    consultant-maintained bump today; a consultant that forgets to increment lets an issue loop
+    past the ceiling. Counting the issue's historical tickets from the board itself removes that
+    trust: every recirc event that ever filed (or adopted) a ticket is counted, whether or not the
+    bump happened. PURE (unit-testable): `tickets` is [{"number": int, "origins": {int, ...}}]."""
+    return sum(1 for t in tickets if issue_number in (t.get("origins") or set()))
 
 
 def recirc_ticket_body(src, area, suggested_scope):
@@ -471,13 +492,18 @@ def _heal_partial_intake(repo, ctx, partial, log):
     issue, no duplicate) + journal the now-complete intake. The partial is a ticket create_item left
     Stage=Recirculation with an EMPTY Status when a rate limit hit between its Stage and Status writes;
     without healing, the marker-dedupe would skip it FOREVER (#150 / codex R4 P1a — SELF-HEAL, not skip).
-    Fail-soft: a gh failure (BoardReadError covers BoardWriteError + RateLimitError) logs and returns
-    False (re-healed next sweep). Returns True iff the heal landed."""
+    Fail-soft: a gh failure (BoardReadError, covering BoardWriteError) logs and returns False
+    (re-healed next sweep) — EXCEPT RateLimitError (a BoardReadError SUBCLASS, so it is caught FIRST):
+    a throttled heal RE-RAISES so apply_github stops the WHOLE sweep (the capture loop's
+    throttle-stop) instead of hammering the throttled API through every remaining partial and
+    capture (#156). Returns True iff the heal landed."""
     number, item_id = partial["number"], partial["item_id"]
     if not item_id:
         return False
     try:
         idc_gh_board.set_status(ctx["owner"], ctx["project_number"], repo, item_id, TODO_STATUS)
+    except idc_gh_board.RateLimitError:
+        raise   # a throttle is the caller's sweep-wide stop (#156), never a per-ticket fail-soft
     except idc_gh_board.BoardReadError as e:
         log(f"github: could not heal partial Recirculation ticket #{number} "
             f"({str(e).strip()[:120]}) — will retry next sweep")
@@ -576,16 +602,26 @@ def gh_owner(repo):
     return out.strip() if ok else ""
 
 
+def _item_text(item):
+    """One board item's issue body + comment bodies as a single text blob, straight off the DETAILED
+    board read (issue #109) — the text every marker scan in this module consumes, with no per-issue
+    `gh issue view` follow-up call."""
+    content = item.get("content") or {}
+    return (content.get("body") or "") + "\n" + "\n".join(content.get("comments") or [])
+
+
 def scan_github(repo, matrices, project_number, log):
     """Build (findings, ctx) for the github backend. Reads the WHOLE board once (paginated — gh's own
-    item-list truncates at 30 items, blinding a grown board's Buildable lane), then each issue's
-    body+comments. Fail-soft: any board-read failure logs + yields an empty sweep."""
+    item-list truncates at 30 items, blinding a grown board's Buildable lane) — a DETAILED read
+    (issue #109): each issue's body + comments ride the same paginated query, so the marker scan
+    below and the dedupe in apply_github (ctx["items"]) cost no further reads. Fail-soft: any
+    board-read failure logs + yields an empty sweep."""
     owner = gh_owner(repo)
     if not owner or not project_number:
         log("github: could not resolve owner/project_number — skipping sweep")
         return [], None
     try:
-        items = idc_gh_board.fetch_items(owner, project_number, repo)
+        items = idc_gh_board.fetch_items(owner, project_number, repo, include_details=True)
     except idc_gh_board.BoardReadError as e:
         log(f"github: board read failed — skipping sweep ({str(e)[:120]})")
         return [], None
@@ -595,6 +631,9 @@ def scan_github(repo, matrices, project_number, log):
                            "--format", "json", "--jq", ".id"], repo)
     project_node = node_out.strip() if okn else ""
     ctx = {"owner": owner, "project_node": project_node, "project_number": project_number,
+           # THE single detailed board snapshot (issue #109): apply_github's dedupe scan reads it
+           # instead of re-fetching the whole board a second time per sweep.
+           "items": items,
            # A throttle-partial is a Recirculation item with an EMPTY Status (create_item left it when a
            # rate limit hit between its Stage and Status writes). Flag their presence from THIS single
            # board read so apply_github heals them independently of captures WITHOUT a second scan on a
@@ -622,15 +661,7 @@ def scan_github(repo, matrices, project_number, log):
             continue  # an [operator-action] gate is a human gate, not rogue build work (drain parity)
         if (it.get("stage") or BUILDABLE_STAGE) != BUILDABLE_STAGE:
             continue
-        okb, body_out, _ = gh(["issue", "view", str(number), "--json", "body,comments"], repo)
-        text = ""
-        if okb:
-            try:
-                jd = json.loads(body_out)
-                text = (jd.get("body") or "") + "\n" + \
-                    "\n".join(str((c or {}).get("body", "")) for c in jd.get("comments", []))
-            except json.JSONDecodeError:
-                text = ""
+        text = _item_text(it)   # body + comments off the single detailed read (#109)
         scanned.append({
             "number": number,
             "status": it.get("status"),
@@ -663,8 +694,8 @@ def scan_github(repo, matrices, project_number, log):
 
 
 def github_existing_sources(repo, ctx, log):
-    """Scan the WHOLE board (paginated) for Recirculation tickets carrying the hidden source marker and
-    split them by completeness:
+    """Scan the board's Recirculation tickets for the hidden source marker and split them by
+    completeness:
 
       * `seen`     — {(origin, what)} for FULLY-filed tickets (Status set): the stateless dedupe set
                      that keeps ticket-filing idempotent across runs.
@@ -675,16 +706,24 @@ def github_existing_sources(repo, ctx, log):
                      P1a); a source marker + empty Status is unambiguously such a partial (only
                      create_item ever writes that marker).
 
-    Returns (seen, partials) on success, or None when the board read FAILS — a VISIBLE degraded state
-    (logged) the caller treats as "cannot dedupe → do not file" (fail-closed against blind duplicates)."""
+    Reads the SINGLE detailed board snapshot scan_github already fetched (ctx["items"], issue #109 —
+    marker keys come from each item's content.body on that same read), so a sweep costs one board
+    read and no per-ticket `gh issue view`. A ctx built WITHOUT a snapshot (a direct caller) falls
+    back to its own detailed fetch — NEVER to an empty board, which would file blind duplicates.
+
+    Returns (seen, partials) on success, or None when no snapshot exists AND the fallback read FAILS
+    — a VISIBLE degraded state (logged) the caller treats as "cannot dedupe → do not file"."""
     seen = set()
     partials = []
-    try:
-        items = idc_gh_board.fetch_items(ctx["owner"], ctx["project_number"], repo)
-    except idc_gh_board.BoardReadError as e:
-        log(f"github: existing-ticket dedupe read FAILED ({str(e)[:120]}) — skipping ticket-filing "
-            "this sweep to avoid duplicates (will retry next run)")
-        return None
+    items = ctx.get("items")
+    if items is None:
+        try:
+            items = idc_gh_board.fetch_items(ctx["owner"], ctx["project_number"], repo,
+                                             include_details=True)
+        except idc_gh_board.BoardReadError as e:
+            log(f"github: existing-ticket dedupe read FAILED ({str(e)[:120]}) — skipping ticket-filing "
+                "this sweep to avoid duplicates (will retry next run)")
+            return None
     for it in items:
         if (it.get("stage") or "") != RECIRC_STAGE:
             continue
@@ -692,15 +731,8 @@ def github_existing_sources(repo, ctx, log):
         number = content.get("number")
         if number is None:
             continue
-        okb, body_out, _ = gh(["issue", "view", str(number), "--json", "body"], repo)
-        if not okb:
-            continue
-        try:
-            body = json.loads(body_out).get("body") or ""
-        except json.JSONDecodeError:
-            continue
         keys = [(str(obj.get("origin", "")), str(obj.get("what", "")).strip())
-                for obj in parse_markers(body, RECIRC_SOURCE_MARKER)]
+                for obj in parse_markers(content.get("body") or "", RECIRC_SOURCE_MARKER)]
         if not keys:
             continue
         if it.get("status"):          # a real, fully-filed ticket → dedupe
@@ -708,6 +740,50 @@ def github_existing_sources(repo, ctx, log):
         else:                         # marker present but EMPTY Status → a throttle-partial to HEAL
             partials.append({"number": number, "item_id": it.get("id"), "keys": keys})
     return seen, partials
+
+
+def github_orphan_sources(repo, log):
+    """Open repo issues carrying the hidden idc-recirc-source marker, keyed by the same
+    (origin, what) dedupe identity the board scan uses — the OFF-BOARD orphan map (issue #152).
+    A rate limit EARLY in a prior sweep's filing chain (issue created, never added to the board —
+    or added but Stage never set) leaves an orphan the board-scan dedupe cannot see; without this
+    map the next sweep re-files the capture as a DUPLICATE issue. ONE `gh issue list` call — the
+    real-time list API (newest first, bounded at 500: orphans are recent by construction), never
+    the search index, whose lag could hide a minutes-old orphan. Values are {"number","title",
+    "url"}; on a key collision (an already-duplicated pair) the OLDEST issue wins. Returns None
+    when the read fails — the caller treats that as "cannot rule an orphan out → do not file"
+    (the github_existing_sources posture); a rate-limited read raises RateLimitError so the caller
+    throttle-stops instead."""
+    ok, out, err = gh(["issue", "list", "--state", "open", "--json", "number,title,body,url",
+                       "--limit", "500"], repo)
+    if not ok:
+        if idc_gh_board._is_rate_limit_stderr(err):
+            # reset omitted: a fail-soft SessionEnd defer needs no pause-and-resume epoch, and
+            # skipping the extra `gh api rate_limit` probe avoids one more call while throttled.
+            raise idc_gh_board.RateLimitError()
+        log(f"github: orphan-scan issue list FAILED ({err.strip()[:120]}) — skipping ticket-filing "
+            "this sweep to avoid duplicates (will retry next run)")
+        return None
+    try:
+        issues = json.loads(out)
+    except json.JSONDecodeError as e:
+        log(f"github: orphan-scan issue list unparseable ({e}) — skipping ticket-filing "
+            "this sweep to avoid duplicates (will retry next run)")
+        return None
+    if not isinstance(issues, list):
+        log("github: orphan-scan issue list unparseable (not a list) — skipping ticket-filing "
+            "this sweep to avoid duplicates (will retry next run)")
+        return None
+    orphans = {}
+    for it in issues:
+        if not isinstance(it, dict) or not isinstance(it.get("number"), int):
+            continue
+        for obj in parse_markers(str(it.get("body") or ""), RECIRC_SOURCE_MARKER):
+            key = (str(obj.get("origin", "")), str(obj.get("what", "")).strip())
+            if key not in orphans or it["number"] < orphans[key]["number"]:
+                orphans[key] = {"number": it["number"], "title": str(it.get("title") or ""),
+                                "url": str(it.get("url") or "")}
+    return orphans
 
 
 def apply_github(findings, repo, ctx, log):
@@ -780,13 +856,65 @@ def apply_github(findings, repo, ctx, log):
         # only a successful heal as a board change.
         for p in partials:
             already.update(p["keys"])
-            if _heal_partial_intake(repo, ctx, p, log):
+            try:
+                healed = _heal_partial_intake(repo, ctx, p, log)
+            except idc_gh_board.RateLimitError as e:
+                # A throttle on a heal WRITE activates the SAME throttle-stop as the mid-create path
+                # below (#156): every remaining partial and capture would fire the same doomed gh
+                # call while the API is already throttled — in the SessionEnd hook. Stop the sweep as
+                # a whole; the un-healed partials stay empty-Status → re-detected next sweep.
+                log(f"github: partial-heal rate-limited ({e}) — deferring the remaining "
+                    "partials and captures to the next sweep")
+                throttled = True
+                break
+            if healed:
                 changed += 1
+        # Off-board orphan map (issue #152): a throttle EARLY in a prior sweep's filing chain left an
+        # open marker-bearing issue the BOARD-scan dedupe above cannot see — re-filing would mint a
+        # DUPLICATE. Scanned only when a capture survives the board dedupe (a clean sweep costs no
+        # extra call); an unreadable list fails closed (do not file blind); a throttled list read
+        # activates the shared throttle-stop.
+        orphans = {}
+        if not throttled and any((c["origin"], c["what"]) not in already for c in captures):
+            try:
+                orphans = github_orphan_sources(repo, log)
+            except idc_gh_board.RateLimitError as e:
+                log(f"github: orphan-scan rate-limited ({e}) — deferring the remaining "
+                    "captures to the next sweep")
+                throttled = True
+            if orphans is None:
+                return changed
         for c in captures:
+            if throttled:
+                break   # a partial-heal throttle defers filing too (same stop as the mid-create throttle)
             key = (c["origin"], c["what"])
             if key in already:
                 continue
             already.add(key)             # in-run dedupe too (two markers, same scope)
+            orphan = orphans.get(key)
+            if orphan is not None:
+                # ADOPT the orphan in place of a duplicate create (issue #152): put the existing
+                # issue on the board with Stage AND Status set together, then journal the now-
+                # complete intake under the orphan's own issue number — the same record a fresh
+                # filing writes. adopt_item is resumable (item-add is idempotent), so a failed
+                # adopt logs and retries next sweep; it never touches the pre-existing issue.
+                try:
+                    iid = idc_gh_board.adopt_item(owner, project_number, repo, orphan["url"],
+                                                  RECIRC_STAGE, TODO_STATUS)
+                except idc_gh_board.RateLimitError as e:
+                    log(f"github: orphan adoption rate-limited ({e}) — deferring the remaining "
+                        "captures to the next sweep")
+                    throttled = True
+                    break
+                except idc_gh_board.BoardReadError as e:
+                    log(f"github: could not adopt orphan Recirculation issue #{orphan['number']} "
+                        f"({str(e).strip()[:120]}) — will retry next sweep")
+                    continue
+                _journal_intake(repo, iid, orphan["number"], orphan["title"])
+                log(f"github: adopted off-board Recirculation orphan #{orphan['number']} for "
+                    f"{c['origin']} — healed onto the board instead of re-filing a duplicate")
+                changed += 1
+                continue
             body = recirc_ticket_body(c, c.get("area", ""), c.get("suggested_scope", ""))
             title = f"recirc: {c['what'][:60] or 'discovered scope'}"
             # Mint the ticket through the ATOMIC create primitive (issue #130): create_item sets Stage
@@ -952,6 +1080,85 @@ def render_report(findings, backend, matrices):
     return lines
 
 
+# ── derived recirc_count (issue #108) ────────────────────────────────────────
+def _fs_recirc_tickets(state):
+    """[{number, origins}] for every Stage=Recirculation issue in a loaded filesystem tracker —
+    ANY Status (retired/Done tickets count, #108). Markers ride issue comments on this backend."""
+    out = []
+    for it in state.get("issues", []):
+        if not isinstance(it, dict) or (it.get("stage") or "") != RECIRC_STAGE:
+            continue
+        if it.get("number") is None:
+            continue
+        text = "\n".join(str(c) for c in (it.get("comments") or []) if c is not None)
+        origins = {origin_issue(obj.get("origin"))
+                   for obj in parse_markers(text, RECIRC_SOURCE_MARKER)}
+        origins.discard(None)
+        out.append({"number": it.get("number"), "origins": origins})
+    return out
+
+
+def _github_recirc_tickets(repo, owner, project_number):
+    """[{number, origins}] for every Stage=Recirculation board item — ANY Status (retired/Done
+    tickets count, #108). ONE detailed board read (issue #109): ticket bodies ride the paginated
+    query itself, so there is no per-ticket follow-up call and no partially-read board — the whole
+    read either lands or raises idc_gh_board.BoardReadError. That all-or-nothing shape matters
+    here: the derivation feeds the runaway caps, where a silently missed marker UNDER-counts and
+    un-parks a runaway, so an uncomputable input must fail closed (the caps caller treats a
+    non-zero exit as PARK+surface)."""
+    items = idc_gh_board.fetch_items(owner, project_number, repo, include_details=True)
+    out = []
+    for it in items:
+        if (it.get("stage") or "") != RECIRC_STAGE:
+            continue
+        content = it.get("content") or {}
+        number = content.get("number")
+        if number is None:
+            continue
+        origins = {origin_issue(obj.get("origin"))
+                   for obj in parse_markers(content.get("body") or "", RECIRC_SOURCE_MARKER)}
+        origins.discard(None)
+        out.append({"number": number, "origins": origins})
+    return out
+
+
+def run_derive(repo, issue_number, tracker):
+    """(exit_code, lines) for --derive-recirc-count: the board-derived count for one issue, printed
+    as a bare integer — composable straight into `idc_recirc_caps.py --recirc-count`. FAIL-CLOSED:
+    an unreadable backend/tracker/board exits 2 and prints NO count (never a guessed 0 — the caps
+    caller treats a non-zero exit as PARK+surface, so an uncomputable count can't wave the loop on)."""
+    backend = read_backend(repo)
+    if backend is None:
+        sys.stderr.write("idc-recirc-sweep: no tracker-config.yaml backend — cannot derive recirc_count\n")
+        return 2, []
+    if backend == "filesystem":
+        if not os.path.isfile(tracker):
+            sys.stderr.write("idc-recirc-sweep: no TRACKER.md — cannot derive recirc_count\n")
+            return 2, []
+        try:
+            state = idc_tracker_fs.load(tracker)
+        except SystemExit:
+            sys.stderr.write("idc-recirc-sweep: unreadable TRACKER.md — cannot derive recirc_count\n")
+            return 2, []
+        return 0, [str(derived_recirc_count(issue_number, _fs_recirc_tickets(state)))]
+    if backend == "github":
+        project_number, _ = read_config(repo)
+        owner = gh_owner(repo)
+        if not owner or not project_number:
+            sys.stderr.write(
+                "idc-recirc-sweep: could not resolve owner/project_number — cannot derive recirc_count\n")
+            return 2, []
+        try:
+            tickets = _github_recirc_tickets(repo, owner, project_number)
+        except idc_gh_board.BoardReadError as e:
+            sys.stderr.write(
+                f"idc-recirc-sweep: board read failed — cannot derive recirc_count ({str(e)[:160]})\n")
+            return 2, []
+        return 0, [str(derived_recirc_count(issue_number, tickets))]
+    sys.stderr.write(f"idc-recirc-sweep: unknown backend '{backend}' — cannot derive recirc_count\n")
+    return 2, []
+
+
 # ── entry point ──────────────────────────────────────────────────────────────
 def run(repo, mode, tracker, matrices_dir):
     """Returns (exit_code, output_lines). Never raises in --auto-correct (fail-soft)."""
@@ -1027,6 +1234,11 @@ def main():
                       help="SessionEnd hook: mutate the board through the active backend (fail-soft)")
     mode.add_argument("--report", dest="mode", action="store_const", const="report",
                       help="/idc:doctor: read-only, mutate nothing, exit 0")
+    mode.add_argument("--derive-recirc-count", dest="derive_issue", type=int, metavar="N",
+                      help="print issue N's BOARD-DERIVED recirc_count (issue #108) — the runaway "
+                           "caps' input counted from the board's Recirculation tickets (any Status, "
+                           "retired included) instead of a trusted consultant bump; exits 2 when the "
+                           "board cannot be read (fail-closed: never a guessed count)")
     ap.add_argument("--tracker", default=None, help="TRACKER.md path (default: <repo>/TRACKER.md)")
     ap.add_argument("--matrices", default=None,
                     help="pillar-matrices dir (default: <repo>/docs/workflow/pillar-matrices)")
@@ -1035,6 +1247,13 @@ def main():
     repo = os.path.abspath(args.repo)
     tracker = args.tracker or os.path.join(repo, "TRACKER.md")
     matrices_dir = args.matrices or os.path.join(repo, "docs", "workflow", "pillar-matrices")
+
+    if args.derive_issue is not None:
+        # Derived recirc_count (issue #108) — read-only, fail-closed (exit 2 = uncomputable → PARK).
+        code, out = run_derive(repo, args.derive_issue, tracker)
+        for ln in out:
+            print(ln)
+        sys.exit(code)
 
     if args.mode == "auto-correct":
         # The SessionEnd hook must NEVER block session exit: swallow every error, always exit 0.

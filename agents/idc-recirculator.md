@@ -150,10 +150,11 @@ mode only changes what gets fed in:
      rejects those fail-closed so the trivial path can never authorize a gate-disciplined or non-doc
      surface.
    `ticket` is a positive integer and `recirc_count`/`cascade_depth` are non-negative integers — the
-   consultant is the **designated owner** of the runaway-cap counts: it bumps `recirc_count` each time
-   it processes a recirc event for the issue and stamps the `cascade_depth` a recirc-originated
-   consideration carries, so the parent's `idc_recirc_caps.py` bound reads a single authoritative
-   handoff (never invents or skips the counts). The `provenance` stamp is **mandatory** — the
+   consultant is the **designated owner** of `cascade_depth`: it stamps the `cascade_depth` a
+   recirc-originated consideration carries, so the parent's `idc_recirc_caps.py` bound reads that
+   depth from a single authoritative handoff. (`recirc_count` is **board-derived** by the parent —
+   `idc_recirc_sweep.py --derive-recirc-count` — so the closeout's copy is an informational
+   cross-check, not the count the caps read.) The `provenance` stamp is **mandatory** — the
    consultant never emits a closeout without it, and a malformed or absent closeout (or a missing
    count) fails the validator closed, so the parent **halts rather than stranding** the ticket. In
    Autorun's in-session inbox-drain the closeout is the same record the drain loop reads; the

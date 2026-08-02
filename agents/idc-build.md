@@ -137,15 +137,17 @@ The loop is **bounded** by the deterministic guard
 consulted **before** spawning a consultant on an issue: a **per-issue recirc ceiling** (default 2) parks
 a chronically-recirculating issue, and a **cascade-depth cap** (default 3) parks-and-reports a deep
 recirc→build→recirc cascade. The caps only **decide** given counts (that decision is deterministic),
-and the **closeout is the authoritative source of those counts** — every closeout carries validated
-non-negative-integer `recirc_count` and `cascade_depth`, because the **recirc consultant is the
-designated owner** that supplies them: it bumps the issue's `recirc_count` each time it processes a
-recirc event for that issue, and stamps the `cascade-depth` a recirc-originated consideration carries
-(inherited by its decomposed issues). For the **first** recirc on an issue (no prior closeout) the
-counts read `0`/`0`; thereafter Build uses the most recent closeout's counts and stamps them on the
-issue, so it never invents or skips them. So the bound holds **as long as that count is maintained** (a
-future hardening can derive `recirc_count` from board state — counting the issue's `Stage = Recirculation`
-tickets, incl. retired — to drop the dependence on the bump). On a `verdict: park` — or any
+and each count has one deterministic source. `recirc_count` is **derived from board state**: Build
+sources it with
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_recirc_sweep.py" --repo <repo> --derive-recirc-count <issue>`
+— a bare integer on stdout, fed straight to `--recirc-count`; **ANY non-zero exit = PARK** (the CLI
+is fail-closed by design, so an uncomputable count can never wave the loop on). It counts the issue's
+distinct `Stage = Recirculation` tickets (incl. retired), so the bound never depends on a bump being
+remembered. `cascade_depth` stays **consultant-stamped**: the recirc consultant stamps the
+`cascade-depth` a recirc-originated consideration carries (inherited by its decomposed issues), every
+closeout carries it as a validated non-negative integer, and Build uses the most recent closeout's
+value (`0` for the first recirc on an issue). The closeout still carries a validated `recirc_count`
+as an informational cross-check — the derived count is the one the caps read. On a `verdict: park` — or any
 non-zero/uncomputable result, **fail-closed** — Build does **not** re-spawn the loop on that issue: it
 sets it `Blocked` + an operator-action marker + a cmux/push ping and moves on, so the loop always
 **drains or parks for the operator, never churns**. The whole loop adds **no orchestrator monitoring** — Build's existing freed-worker frontier

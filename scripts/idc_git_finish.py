@@ -88,6 +88,14 @@ MERGE_METHODS = ("squash", "merge", "rebase")
 # flight. `scripts/idc_finish_recover.py` is the cross-session consumer.
 MID_FINISH_TAINT = "mid_finish"
 
+# The close-only recovery door's journal attribution (#159). Its close record stays op="close" —
+# replay reconstruction keys on the op plus the structured item/to fields, so every existing journal
+# consumer keeps working — but carries this `door` marker plus the merged-state evidence that
+# authorized it, so a merged-state RECOVERY close is distinguishable from the verdict-guarded close
+# door in the audit trail forever (the same provenance rule that gives the janitor's reconciliation
+# its own `janitor-repair` attribution instead of an engine-`close` look-alike).
+CLOSE_ONLY_RECOVERY_DOOR = "close-only-recovery"
+
 # Branch → item resolution for the close-only OWNERSHIP accident-guard (reviewer P2-1 + P2-A). An
 # INDEPENDENT copy of idc_teammate_idle_synth._resolve_ref_item, kept local per this helper's
 # established doctrine of owning its parsers with no cross-unit import dependency (see read_backend/
@@ -646,7 +654,7 @@ def verify_filesystem_closed(tracker_path, issue):
 
 
 def tracker_close(backend, repo, issue, tracker_path, project_number, field_ids, owner, name,
-                  verdict_path=None):
+                  verdict_path=None, recovery_evidence=None):
     if backend == "filesystem":
         filesystem_close(tracker_path, issue)
     else:
@@ -656,9 +664,15 @@ def tracker_close(backend, repo, issue, tracker_path, project_number, field_ids,
     # finished item as a false journal↔board divergence. Best-effort like every journal_append: the
     # close above already happened, a journal failure must not fail the finish.
     tracker_rel = os.path.relpath(tracker_path, repo) if backend == "filesystem" else None
-    TE.journal_append(repo, "close", backend, tracker_rel,
-                      {"num": issue, "to_status": "Done", "verdict": verdict_path,
-                       "agent": "finisher"})
+    entry = {"num": issue, "to_status": "Done", "verdict": verdict_path, "agent": "finisher"}
+    # A close-only RECOVERY close must never be a LOOK-ALIKE of the verdict-guarded close in the
+    # audit trail (#159): stamp WHICH door closed the item plus the merged-state evidence that
+    # authorized it — this door's receipt is the proven merged PR, not a verdict. The op stays
+    # "close" so replay reconstruction and every existing journal reader are untouched.
+    if recovery_evidence is not None:
+        entry["door"] = CLOSE_ONLY_RECOVERY_DOOR
+        entry["disposition_evidence"] = recovery_evidence
+    TE.journal_append(repo, "close", backend, tracker_rel, entry)
     # V-AUTH stage 2: the finisher is the SECOND sanctioned close door (the engine's terminal ops
     # are the first), so it retires the item's claim-scoped Path Gate authorization + live-contract
     # pointer the same way (spec §4.2 "The authorization expires after finish or block").
@@ -854,7 +868,10 @@ def close_only_recover(args, repo, worktree_abs, tracker_path, backend, project_
         push_delete_remote_best_effort(repo, branch)   # idempotent — a squash-merge may have left it
         verify_remote_branch_gone(repo, branch)
     branch_delete_local(repo, branch)
-    tracker_close(backend, repo, args.issue, tracker_path, project_number, field_ids, owner, name)
+    # The recovery close journals its own door marker + the merged-state receipt (#159) — see
+    # tracker_close: the verdict-guarded close and this recovery close must stay distinguishable.
+    tracker_close(backend, repo, args.issue, tracker_path, project_number, field_ids, owner, name,
+                  recovery_evidence={"pr": args.pr, "pr_state": "MERGED"})
 
     # Final end-state verify (same belt-and-suspenders as the normal path).
     verify_pr_merged(repo, args.pr)

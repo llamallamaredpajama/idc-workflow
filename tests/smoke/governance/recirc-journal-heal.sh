@@ -210,6 +210,8 @@ views = []   # every heal-side issue read lands here (via _github_issue_text →
 def gh(args, r):
     if args[:2] == ["project", "field-list"]:
         return True, "OPT_recirc", ""
+    if args[:2] == ["issue", "list"]:
+        return True, "[]", ""   # orphan scan (#152): no off-board orphans in this scenario
     if args[:2] == ["issue", "view"]:
         views.append(args[2]); return True, json.dumps({"body": "", "comments": []}), ""
     return True, "", ""

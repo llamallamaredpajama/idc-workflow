@@ -68,6 +68,8 @@ def gh_record(args, repo):
     calls.append(list(args))
     if args[:2] == ["project", "field-list"]:
         return True, "OPT_recirc", ""
+    if args[:2] == ["issue", "list"]:
+        return True, "[]", ""   # orphan scan (#152): no off-board orphans in these scenarios
     return True, "", ""
 m.gh = gh_record
 m.idc_gh_board.fetch_items = boom   # the dedupe read fails
@@ -91,6 +93,8 @@ m.idc_gh_board.fetch_item = lambda iid, repo: {"content": {"number": 99, "title"
 def gh_filing(args, repo):
     if args[:2] == ["project", "field-list"]:
         return True, "OPT_recirc", ""
+    if args[:2] == ["issue", "list"]:
+        return True, "[]", ""   # orphan scan (#152): no off-board orphans in these scenarios
     return True, "", ""
 
 def run_filing(create_fn):

@@ -322,6 +322,54 @@ def discard_partial_item(owner, project, repo, item_id, issue_num):
     return "; ".join(problems) if problems else None
 
 
+def _resolve_stage_status_ids(owner, project, repo, stage, status, action):
+    """(project node id, Stage field/option ids, Status field/option ids) for a Stage+Status write.
+    Fail-closed BEFORE any mutation: an unresolvable project/field/option id refuses the whole
+    `action` ("create"/"adopt") up front, so no dangling issue or half-set item is ever minted."""
+    pnode = _resolve_project_node_id(owner, project, repo)
+    fields_out = _gh(["project", "field-list", str(project), "--owner", owner, "--format", "json"], repo)
+    try:
+        fields = (json.loads(fields_out) or {}).get("fields") or []
+    except json.JSONDecodeError as e:
+        raise BoardWriteError(f"unparseable field list ({e}) — refusing to {action}")
+    stage_fid, stage_oid = _field_and_option(fields, "Stage", stage)
+    status_fid, status_oid = _field_and_option(fields, "Status", status)
+    if not (stage_fid and stage_oid):
+        raise BoardWriteError(f"Stage field or option {stage!r} not on the board — refusing to {action}")
+    if not (status_fid and status_oid):
+        raise BoardWriteError(f"Status field or option {status!r} not on the board — refusing to {action}")
+    return pnode, stage_fid, stage_oid, status_fid, status_oid
+
+
+def adopt_item(owner, project, repo, url, stage, status):
+    """Put an EXISTING issue onto the board with Stage AND Status set together — the recirc sweep's
+    orphan-adoption door (issue #152). The issue pre-exists (a prior throttled filing left it
+    off-board), so unlike create_item there is NOTHING to discard on failure: the issue is the
+    operator's ticket and must always survive. Resumable by construction — `item-add` is idempotent
+    (an issue already on the board returns its existing item id), so a partially-adopted orphan is
+    simply re-driven by the next sweep, and a Stage-set/Status-throttled partial is the empty-Status
+    shape the sweep's partial-heal already completes. Raises RateLimitError UNCHANGED mid-adopt
+    (the create_item convention — teardown gh calls would hit the same live limit) and
+    BoardWriteError on any other failure. Returns the item node id."""
+    pnode, stage_fid, stage_oid, status_fid, status_oid = _resolve_stage_status_ids(
+        owner, project, repo, stage, status, "adopt")
+    item_id = _gh(["project", "item-add", str(project), "--owner", owner, "--url", url,
+                   "--format", "json", "--jq", ".id"], repo).strip()
+    if not item_id:
+        raise BoardWriteError("item-add returned no item id — the orphan stays off-board (retried next sweep)")
+    try:
+        _gh(["project", "item-edit", "--id", item_id, "--project-id", pnode,
+             "--field-id", stage_fid, "--single-select-option-id", stage_oid], repo)
+        _gh(["project", "item-edit", "--id", item_id, "--project-id", pnode,
+             "--field-id", status_fid, "--single-select-option-id", status_oid], repo)
+    except RateLimitError:
+        raise
+    except BoardReadError as e:
+        raise BoardWriteError(f"adopt step failed ({e}) — the orphan is re-adopted next sweep "
+                              "(item-add is idempotent)")
+    return item_id
+
+
 def create_item(owner, project, repo, title, body, stage, status, labels=None, issue_type=None):
     """Create a board item with Stage AND Status set together — ATOMICALLY.
 
@@ -345,18 +393,8 @@ def create_item(owner, project, repo, title, body, stage, status, labels=None, i
     # Resolve the project node id + Stage/Status field+option ids up front (item-edit needs the PVT_
     # node id, not the integer project number — the documented gotcha). Any unresolved id → refuse to
     # create, so we never leave a dangling issue behind.
-    pnode = _resolve_project_node_id(owner, project, repo)
-    fields_out = _gh(["project", "field-list", str(project), "--owner", owner, "--format", "json"], repo)
-    try:
-        fields = (json.loads(fields_out) or {}).get("fields") or []
-    except json.JSONDecodeError as e:
-        raise BoardWriteError(f"unparseable field list ({e}) — refusing to create")
-    stage_fid, stage_oid = _field_and_option(fields, "Stage", stage)
-    status_fid, status_oid = _field_and_option(fields, "Status", status)
-    if not (stage_fid and stage_oid):
-        raise BoardWriteError(f"Stage field or option {stage!r} not on the board — refusing to create")
-    if not (status_fid and status_oid):
-        raise BoardWriteError(f"Status field or option {status!r} not on the board — refusing to create")
+    pnode, stage_fid, stage_oid, status_fid, status_oid = _resolve_stage_status_ids(
+        owner, project, repo, stage, status, "create")
 
     # 1. Create the backing issue (with any labels / type label). Nothing to discard yet, so a failure
     #    here just propagates.

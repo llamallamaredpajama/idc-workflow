@@ -715,6 +715,50 @@ def github_existing_sources(repo, ctx, log):
     return seen, partials
 
 
+def github_orphan_sources(repo, log):
+    """Open repo issues carrying the hidden idc-recirc-source marker, keyed by the same
+    (origin, what) dedupe identity the board scan uses — the OFF-BOARD orphan map (issue #152).
+    A rate limit EARLY in a prior sweep's filing chain (issue created, never added to the board —
+    or added but Stage never set) leaves an orphan the board-scan dedupe cannot see; without this
+    map the next sweep re-files the capture as a DUPLICATE issue. ONE `gh issue list` call — the
+    real-time list API (newest first, bounded at 500: orphans are recent by construction), never
+    the search index, whose lag could hide a minutes-old orphan. Values are {"number","title",
+    "url"}; on a key collision (an already-duplicated pair) the OLDEST issue wins. Returns None
+    when the read fails — the caller treats that as "cannot rule an orphan out → do not file"
+    (the github_existing_sources posture); a rate-limited read raises RateLimitError so the caller
+    throttle-stops instead."""
+    ok, out, err = gh(["issue", "list", "--state", "open", "--json", "number,title,body,url",
+                       "--limit", "500"], repo)
+    if not ok:
+        if idc_gh_board._is_rate_limit_stderr(err):
+            # reset omitted: a fail-soft SessionEnd defer needs no pause-and-resume epoch, and
+            # skipping the extra `gh api rate_limit` probe avoids one more call while throttled.
+            raise idc_gh_board.RateLimitError()
+        log(f"github: orphan-scan issue list FAILED ({err.strip()[:120]}) — skipping ticket-filing "
+            "this sweep to avoid duplicates (will retry next run)")
+        return None
+    try:
+        issues = json.loads(out)
+    except json.JSONDecodeError as e:
+        log(f"github: orphan-scan issue list unparseable ({e}) — skipping ticket-filing "
+            "this sweep to avoid duplicates (will retry next run)")
+        return None
+    if not isinstance(issues, list):
+        log("github: orphan-scan issue list unparseable (not a list) — skipping ticket-filing "
+            "this sweep to avoid duplicates (will retry next run)")
+        return None
+    orphans = {}
+    for it in issues:
+        if not isinstance(it, dict) or not isinstance(it.get("number"), int):
+            continue
+        for obj in parse_markers(str(it.get("body") or ""), RECIRC_SOURCE_MARKER):
+            key = (str(obj.get("origin", "")), str(obj.get("what", "")).strip())
+            if key not in orphans or it["number"] < orphans[key]["number"]:
+                orphans[key] = {"number": it["number"], "title": str(it.get("title") or ""),
+                                "url": str(it.get("url") or "")}
+    return orphans
+
+
 def apply_github(findings, repo, ctx, log):
     """Re-stage rogues (+ clear Wave) and file untickered-marker Recirculation tickets, all via gh.
     Fail-soft per issue — one gh error logs and continues, never aborting the sweep."""
@@ -798,6 +842,21 @@ def apply_github(findings, repo, ctx, log):
                 break
             if healed:
                 changed += 1
+        # Off-board orphan map (issue #152): a throttle EARLY in a prior sweep's filing chain left an
+        # open marker-bearing issue the BOARD-scan dedupe above cannot see — re-filing would mint a
+        # DUPLICATE. Scanned only when a capture survives the board dedupe (a clean sweep costs no
+        # extra call); an unreadable list fails closed (do not file blind); a throttled list read
+        # activates the shared throttle-stop.
+        orphans = {}
+        if not throttled and any((c["origin"], c["what"]) not in already for c in captures):
+            try:
+                orphans = github_orphan_sources(repo, log)
+            except idc_gh_board.RateLimitError as e:
+                log(f"github: orphan-scan rate-limited ({e}) — deferring the remaining "
+                    "captures to the next sweep")
+                throttled = True
+            if orphans is None:
+                return changed
         for c in captures:
             if throttled:
                 break   # a partial-heal throttle defers filing too (same stop as the mid-create throttle)
@@ -805,6 +864,30 @@ def apply_github(findings, repo, ctx, log):
             if key in already:
                 continue
             already.add(key)             # in-run dedupe too (two markers, same scope)
+            orphan = orphans.get(key)
+            if orphan is not None:
+                # ADOPT the orphan in place of a duplicate create (issue #152): put the existing
+                # issue on the board with Stage AND Status set together, then journal the now-
+                # complete intake under the orphan's own issue number — the same record a fresh
+                # filing writes. adopt_item is resumable (item-add is idempotent), so a failed
+                # adopt logs and retries next sweep; it never touches the pre-existing issue.
+                try:
+                    iid = idc_gh_board.adopt_item(owner, project_number, repo, orphan["url"],
+                                                  RECIRC_STAGE, TODO_STATUS)
+                except idc_gh_board.RateLimitError as e:
+                    log(f"github: orphan adoption rate-limited ({e}) — deferring the remaining "
+                        "captures to the next sweep")
+                    throttled = True
+                    break
+                except idc_gh_board.BoardReadError as e:
+                    log(f"github: could not adopt orphan Recirculation issue #{orphan['number']} "
+                        f"({str(e).strip()[:120]}) — will retry next sweep")
+                    continue
+                _journal_intake(repo, iid, orphan["number"], orphan["title"])
+                log(f"github: adopted off-board Recirculation orphan #{orphan['number']} for "
+                    f"{c['origin']} — healed onto the board instead of re-filing a duplicate")
+                changed += 1
+                continue
             body = recirc_ticket_body(c, c.get("area", ""), c.get("suggested_scope", ""))
             title = f"recirc: {c['what'][:60] or 'discovered scope'}"
             # Mint the ticket through the ATOMIC create primitive (issue #130): create_item sets Stage

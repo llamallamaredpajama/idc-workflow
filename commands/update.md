@@ -14,8 +14,10 @@ when the receipt proves it untouched; anything else is shown as a diff and the o
 Update makes **one, and only one, non-destructive** board change — appending a missing *required*
 `Stage` option (additive: existing options keep their node ids, so item values survive) — and
 **reports** every other kind of board drift without touching it. It never performs a destructive or
-structural board mutation (no option-set replace, no field rename/delete) and never touches the
-data-bearing configs. U7 adds the one-time adoption bootstrap: update writes the durable
+structural board mutation (no option-set replace, no field rename/delete) and never edits what a
+data-bearing config already says — the one consent-gated config mutation is Phase 2 §A's
+**comment-only append** of a new version's optional keys, which leaves every existing line
+byte-identical. U7 adds the one-time adoption bootstrap: update writes the durable
 `reconciliation-baseline-required` / `baseline-pending` marker before bootstrap begins, delegates to
 `/idc:janitor --bootstrap`, and clears that marker (keeping the adoption receipt) **last**, only after
 a verified-converged confirming scan (see Phase 3c). Until that bootstrap completes, ordinary mutators
@@ -135,9 +137,148 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_config_keys.py" --added "$ROOT/<dest>
 - **Nothing printed** → the file is already structurally current; report `preserved — config
   current`. **Do not show a diff, do not ask anything.**
 - **Key-paths printed** → the new version added that structure (e.g. a new `field_ids.*` field).
-  Report `preserved — N new optional key(s): <list>` and tell the operator how to adopt them **by
-  hand** (add the key, keep your values). **Never** overwrite the file or offer a whole-file
-  replace — that discards the operator's data and is never the right move for these files.
+  First drop every key-path the file already carries as a `# idc-new-key: <key-path>` marker line
+  (a previous update's offer-yes appended it — the appender below writes those markers), report
+  those as `preserved — N optional key(s) pending adoption`, and never re-ask about them. For the
+  keys that remain, **offer the one safe additive adoption** (the 3.1.3 doctrine — update performs
+  the safe *additive* migration itself rather than report-and-point, exactly like the
+  `Stage`-option append): *"append these N new optional keys, commented out, with their template
+  doc comments and defaults, at the end of the file — no existing line is touched."*
+  - Explicit **yes** → run the fixed appender below; report `preserved — N optional key(s)
+    appended (commented)`.
+  - **No**, or no operator to ask (a headless/non-interactive run) → keep the report-only
+    behavior: report `preserved — N new optional key(s): <list>` and tell the operator how to
+    adopt them **by hand** (add the key, keep your values); the next update re-offers, the same
+    way a declined Phase 3b offer does.
+
+  **Never** overwrite the file or offer a whole-file replace — that discards the operator's data
+  and is never the right move for these files. The appender is not an exception: every line it
+  writes is a comment, at the end, so the operator's values and the file's parse are untouched.
+
+The offer-yes appender — deterministic, idempotent, fail-closed. Exit `0` = appended; exit `3` =
+every named key already carries its `# idc-new-key:` marker (the re-run no-op); any other exit =
+the file was rolled back untouched. Per key it appends one commented block: the marker line, then
+the template's own doc comments + default lines for that key, each `# `-prefixed. Because every
+appended line is a comment, the file parses exactly as before — proven by re-reading the
+structural key set through the same `idc_config_keys.py` walker and requiring it UNCHANGED
+(anything else rolls back):
+
+```bash
+python3 - "$ROOT/<dest>" "<rendered-template>" "${CLAUDE_PLUGIN_ROOT}" <key-path> [<key-path> ...] <<'PY'
+import os, sys
+
+dest, template, plugin_root = sys.argv[1], sys.argv[2], sys.argv[3]
+keys = sys.argv[4:]
+if not keys:
+    sys.exit("config-append: usage: DEST TEMPLATE PLUGIN_ROOT KEY [KEY ...]")
+
+sys.path.insert(0, os.path.join(plugin_root, "scripts"))
+import idc_config_keys as CK
+
+orig = open(dest, encoding="utf-8").read()
+already = set()
+for ln in orig.splitlines():
+    s = ln.strip()
+    if s.startswith("# idc-new-key: "):
+        already.add(s[len("# idc-new-key: "):].strip())
+todo = [k for k in keys if k not in already]
+if not todo:
+    print("config-keys-already-appended: " + ", ".join(keys))
+    sys.exit(3)
+
+tlines = open(template, encoding="utf-8").read().splitlines()
+
+def template_block(path):
+    """PATH's lines in the rendered template: the contiguous doc comments directly above the key,
+    the key line, and everything nested under it — the same walk (same list/block-scalar opacity)
+    idc_config_keys uses, so the block can never be cut from inside opaque operator data."""
+    segs = path.split(".")
+    stack = []            # (indent, key) ancestry
+    comments = []         # the comment run directly above the current line
+    skip = None           # inside a list item / block-scalar body
+    grab = None           # the found key's indent — capturing its nested lines now
+    got = []
+    for raw in tlines:
+        stripped = raw.strip()
+        indent = len(raw) - len(raw.lstrip(" "))
+        if grab is not None:
+            if not stripped or indent > grab:
+                got.append(raw)
+                continue
+            break
+        if not stripped:
+            comments = []
+            continue
+        if stripped.startswith("#"):
+            comments.append(raw)
+            continue
+        if skip is not None:
+            if indent > skip:
+                continue
+            skip = None
+        if stripped.startswith("- "):
+            skip = indent
+            comments = []
+            continue
+        m = CK._KEY.match(raw)
+        if not m:
+            comments = []
+            continue
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        stack.append((indent, m.group(2)))
+        if [k for _, k in stack] == segs:
+            got = comments + [raw]
+            grab = indent
+            continue
+        if CK._BLOCK.match(m.group(3).strip()):
+            skip = indent
+        comments = []
+    while got and not got[-1].strip():
+        got.pop()
+    if not got:
+        sys.exit("config-append: key-path %s not found in the rendered template %s" % (path, template))
+    return got
+
+before = CK.structural_keys(dest)
+add = []
+for k in todo:
+    add.append("# idc-new-key: " + k)
+    for ln in template_block(k):
+        add.append("# " + ln if ln.strip() else "#")
+
+header = [
+    "",
+    "# -- /idc:update: new OPTIONAL config key(s) this plugin version's template added — appended",
+    "# -- commented out, with their template doc comments and defaults. No existing line was",
+    "# -- touched. Adopt one by adding it (uncommented) inside the section its idc-new-key path",
+    "# -- names, keeping your values; the commented copy below can then be deleted.",
+]
+suffix = "\n".join(header + add) + "\n"
+bad = [ln for ln in suffix.splitlines() if ln and not ln.startswith("#")]
+if bad:
+    sys.exit("config-append: refusing a non-comment append line: %r" % bad[0])
+
+out = orig if (not orig or orig.endswith("\n")) else orig + "\n"
+out += suffix
+tmp = dest + ".idc-append.tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+    f.write(out)
+os.replace(tmp, dest)
+
+after = CK.structural_keys(dest)
+if after != before:
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(orig)
+    os.replace(tmp, dest)
+    sys.exit("config-append: the append changed the structural key set — rolled back untouched")
+print("config-keys-appended: " + ", ".join(todo))
+PY
+```
+
+The appended block lands inside an operator-data file that Phase 4 always stamps `--customized`,
+so the `--customized` state (and with it the next update's ask-first posture) is preserved
+automatically — adopting keys never silently re-classifies the config as pristine.
 
 This is the same notion of "structure" `/idc:init` seeds, so a config can be brought into
 structural alignment without ever risking the `domains`, `field_ids`, `project_number`, or `prd`
@@ -383,7 +524,8 @@ If a receipt already existed and nothing changed this run, leave it untouched an
 ## Phase 5 — Summary
 
 Print one table of every stamped file (`refreshed` / `preserved — config current` / `preserved — N
-new optional key(s)` / `restored` / `skipped-already-current`), then:
+new optional key(s)` / `preserved — N optional key(s) appended (commented)` / `preserved — N
+optional key(s) pending adoption` / `restored` / `skipped-already-current`), then:
 - the board-reconcile outcome (one of: no drift / `stage-recirc-appended` /
   `stage-recirc-already-present` / other drift reported / could not verify),
 - the gitignore-additive outcomes (`ledger-gitignore-added`/`-already-present`, and likewise for

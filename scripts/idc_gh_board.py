@@ -57,7 +57,8 @@ except ImportError:                                      # a lone relocated copy
 # Query the items connection by the project NODE id (resolved once) so this works for a user- OR an
 # org-owned project without branching on owner type. `$cursor` is nullable: omitted on the first
 # page (→ after: null), then set from the prior page's endCursor. pageInfo drives the loop.
-ITEMS_QUERY = """
+# The `%s` slot holds the OPTIONAL per-Issue details fragment (below).
+_ITEMS_QUERY_TEMPLATE = """
 query($pid: ID!, $cursor: String) {
   node(id: $pid) {
     ... on ProjectV2 {
@@ -76,7 +77,7 @@ query($pid: ID!, $cursor: String) {
           }
           content {
             __typename
-            ... on Issue       { number title repository { nameWithOwner } }
+            ... on Issue       { number title repository { nameWithOwner }%s }
             ... on PullRequest { number title repository { nameWithOwner } }
             ... on DraftIssue  { title }
           }
@@ -86,6 +87,24 @@ query($pid: ID!, $cursor: String) {
   }
 }
 """
+
+# The read-amplification fold-in (issue #109, graphql-cost sinks #2-#4): a caller that passes
+# `include_details=True` gets each Issue's `body`, its comment bodies, and its native `blockedBy`
+# issue numbers ON the same paginated board read — collapsing the recirc sweep's per-issue
+# `gh issue view --json body,comments` loop and the drain's per-candidate REST blocked_by call to
+# ZERO extra requests. OFF by default: the extras multiply the GraphQL node cost per item, so only
+# a caller that actually consumes them pays. (Shape live-verified against the GitHub schema:
+# Issue.blockedBy is a paginated IssueConnection.) The truncation bounds below are deliberate parity
+# with the per-issue reads they replace (`gh issue view --json body,comments` caps comments the same
+# way); the fold does NOT page these inner connections, so a consumer that could see >100 comments
+# or >50 blockers on ONE issue must decide at wiring time whether that bound is acceptable — the
+# drain's blocked_by consumer (idc_autorun_drain.py, #109 sink #2) is the open wiring handoff.
+_ISSUE_DETAILS_FRAGMENT = (" body"
+                           " comments(first: 100) { nodes { body } }"
+                           " blockedBy(first: 50) { nodes { number } }")
+
+ITEMS_QUERY = _ITEMS_QUERY_TEMPLATE % ""
+ITEMS_QUERY_DETAILED = _ITEMS_QUERY_TEMPLATE % _ISSUE_DETAILS_FRAGMENT
 
 # Single-item field read by project-item node id — the budget-friendly way for the transition engine
 # to read ONE item's current (Stage, Status) for a guard/read-back WITHOUT re-paginating the whole
@@ -322,6 +341,54 @@ def discard_partial_item(owner, project, repo, item_id, issue_num):
     return "; ".join(problems) if problems else None
 
 
+def _resolve_stage_status_ids(owner, project, repo, stage, status, action):
+    """(project node id, Stage field/option ids, Status field/option ids) for a Stage+Status write.
+    Fail-closed BEFORE any mutation: an unresolvable project/field/option id refuses the whole
+    `action` ("create"/"adopt") up front, so no dangling issue or half-set item is ever minted."""
+    pnode = _resolve_project_node_id(owner, project, repo)
+    fields_out = _gh(["project", "field-list", str(project), "--owner", owner, "--format", "json"], repo)
+    try:
+        fields = (json.loads(fields_out) or {}).get("fields") or []
+    except json.JSONDecodeError as e:
+        raise BoardWriteError(f"unparseable field list ({e}) — refusing to {action}")
+    stage_fid, stage_oid = _field_and_option(fields, "Stage", stage)
+    status_fid, status_oid = _field_and_option(fields, "Status", status)
+    if not (stage_fid and stage_oid):
+        raise BoardWriteError(f"Stage field or option {stage!r} not on the board — refusing to {action}")
+    if not (status_fid and status_oid):
+        raise BoardWriteError(f"Status field or option {status!r} not on the board — refusing to {action}")
+    return pnode, stage_fid, stage_oid, status_fid, status_oid
+
+
+def adopt_item(owner, project, repo, url, stage, status):
+    """Put an EXISTING issue onto the board with Stage AND Status set together — the recirc sweep's
+    orphan-adoption door (issue #152). The issue pre-exists (a prior throttled filing left it
+    off-board), so unlike create_item there is NOTHING to discard on failure: the issue is the
+    operator's ticket and must always survive. Resumable by construction — `item-add` is idempotent
+    (an issue already on the board returns its existing item id), so a partially-adopted orphan is
+    simply re-driven by the next sweep, and a Stage-set/Status-throttled partial is the empty-Status
+    shape the sweep's partial-heal already completes. Raises RateLimitError UNCHANGED mid-adopt
+    (the create_item convention — teardown gh calls would hit the same live limit) and
+    BoardWriteError on any other failure. Returns the item node id."""
+    pnode, stage_fid, stage_oid, status_fid, status_oid = _resolve_stage_status_ids(
+        owner, project, repo, stage, status, "adopt")
+    item_id = _gh(["project", "item-add", str(project), "--owner", owner, "--url", url,
+                   "--format", "json", "--jq", ".id"], repo).strip()
+    if not item_id:
+        raise BoardWriteError("item-add returned no item id — the orphan stays off-board (retried next sweep)")
+    try:
+        _gh(["project", "item-edit", "--id", item_id, "--project-id", pnode,
+             "--field-id", stage_fid, "--single-select-option-id", stage_oid], repo)
+        _gh(["project", "item-edit", "--id", item_id, "--project-id", pnode,
+             "--field-id", status_fid, "--single-select-option-id", status_oid], repo)
+    except RateLimitError:
+        raise
+    except BoardReadError as e:
+        raise BoardWriteError(f"adopt step failed ({e}) — the orphan is re-adopted next sweep "
+                              "(item-add is idempotent)")
+    return item_id
+
+
 def create_item(owner, project, repo, title, body, stage, status, labels=None, issue_type=None):
     """Create a board item with Stage AND Status set together — ATOMICALLY.
 
@@ -345,18 +412,8 @@ def create_item(owner, project, repo, title, body, stage, status, labels=None, i
     # Resolve the project node id + Stage/Status field+option ids up front (item-edit needs the PVT_
     # node id, not the integer project number — the documented gotcha). Any unresolved id → refuse to
     # create, so we never leave a dangling issue behind.
-    pnode = _resolve_project_node_id(owner, project, repo)
-    fields_out = _gh(["project", "field-list", str(project), "--owner", owner, "--format", "json"], repo)
-    try:
-        fields = (json.loads(fields_out) or {}).get("fields") or []
-    except json.JSONDecodeError as e:
-        raise BoardWriteError(f"unparseable field list ({e}) — refusing to create")
-    stage_fid, stage_oid = _field_and_option(fields, "Stage", stage)
-    status_fid, status_oid = _field_and_option(fields, "Status", status)
-    if not (stage_fid and stage_oid):
-        raise BoardWriteError(f"Stage field or option {stage!r} not on the board — refusing to create")
-    if not (status_fid and status_oid):
-        raise BoardWriteError(f"Status field or option {status!r} not on the board — refusing to create")
+    pnode, stage_fid, stage_oid, status_fid, status_oid = _resolve_stage_status_ids(
+        owner, project, repo, stage, status, "create")
 
     # 1. Create the backing issue (with any labels / type label). Nothing to discard yet, so a failure
     #    here just propagates.
@@ -430,19 +487,36 @@ def _flatten(node):
         repository = (content.get("repository") or {}).get("nameWithOwner")
         if repository:
             c["repository"] = repository
+        # Detailed-read extras (#109) — present ONLY when the caller asked include_details=True, so
+        # the lean shape is byte-identical to before: `body` (str), `comments` (list of comment-body
+        # strings), `blocked_by` (list of the native blockedBy issue numbers).
+        if "body" in content:
+            c["body"] = content.get("body") or ""
+        comments = content.get("comments")
+        if isinstance(comments, dict):
+            c["comments"] = [str((n or {}).get("body") or "") for n in (comments.get("nodes") or [])]
+        blocked = content.get("blockedBy")
+        if isinstance(blocked, dict):
+            c["blocked_by"] = [n.get("number") for n in (blocked.get("nodes") or [])
+                               if isinstance(n, dict) and isinstance(n.get("number"), int)]
         item["content"] = c
     return item
 
 
-def fetch_items(owner, project_number, repo="."):
+def fetch_items(owner, project_number, repo=".", include_details=False):
     """Return ALL project items (every page), each flattened to gh's item-list shape.
+
+    `include_details=True` folds each Issue's body + comment bodies + native blockedBy numbers into
+    the SAME paginated read (issue #109) — surfaced as content.body/.comments/.blocked_by — so a
+    consumer like the recirc sweep costs one board read, with no per-issue follow-up calls.
 
     Raises BoardReadError on any gh / parse failure — fail-closed, never a silent partial board."""
     pid = _resolve_project_node_id(owner, project_number, repo)
+    query = ITEMS_QUERY_DETAILED if include_details else ITEMS_QUERY
     items = []
     cursor = None
     for _ in range(MAX_PAGES):
-        args = ["api", "graphql", "-f", f"query={ITEMS_QUERY}", "-f", f"pid={pid}"]
+        args = ["api", "graphql", "-f", f"query={query}", "-f", f"pid={pid}"]
         if cursor:
             args += ["-f", f"cursor={cursor}"]
         out = _gh(args, repo)

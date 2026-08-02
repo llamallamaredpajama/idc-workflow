@@ -27,13 +27,16 @@ CTX = {"owner": "o", "project_node": "PVT_node", "project_number": "7"}
 m.read_config = lambda r: ("7", {"Stage": "PVTF_stage", "Wave": "PVTF_wave"})
 
 # Scripted gh: only field-list (recirc option id) is still gh-driven; the ticket-filing create is
-# create_item now, and the dedupe read is fetch_items.
+# create_item now, and the dedupe read is fetch_items. The orphan scan (#152) reads an empty open-
+# issue list — no off-board orphans in these scenarios.
 def gh(args, r):
     if args[:2] == ["project", "field-list"]:
         return True, "OPT_recirc", ""
+    if args[:2] == ["issue", "list"]:
+        return True, "[]", ""
     return True, "", ""
 m.gh = gh
-idc_gh_board.fetch_items = lambda owner, pn, r: []          # dedupe read OK, no existing tickets
+idc_gh_board.fetch_items = lambda owner, pn, r, include_details=False: []   # dedupe read OK, no existing tickets
 
 # create_item is the atomic primitive — capture its call so we can assert Stage AND Status land together.
 create_calls = []

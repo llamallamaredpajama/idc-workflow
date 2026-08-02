@@ -39,10 +39,10 @@ CTX = {"owner": "o", "project_node": "PVT_node", "project_number": "7"}
 # chains have resolvable ids (this test exercises apply_github, not the parser — covered elsewhere).
 m.read_config = lambda repo: ("7", {"Stage": "PVTF_stage", "Wave": "PVTF_wave"})
 
-def boom(owner, pn, repo):
+def boom(owner, pn, repo, include_details=False):
     raise idc_gh_board.BoardReadError("simulated board outage")
 
-def empty_board(owner, pn, repo):
+def empty_board(owner, pn, repo, include_details=False):
     return []   # dedupe read OK but no existing Recirculation tickets → nothing deduped
 
 def capture():
@@ -68,6 +68,8 @@ def gh_record(args, repo):
     calls.append(list(args))
     if args[:2] == ["project", "field-list"]:
         return True, "OPT_recirc", ""
+    if args[:2] == ["issue", "list"]:
+        return True, "[]", ""   # orphan scan (#152): no off-board orphans in these scenarios
     return True, "", ""
 m.gh = gh_record
 m.idc_gh_board.fetch_items = boom   # the dedupe read fails
@@ -91,6 +93,8 @@ m.idc_gh_board.fetch_item = lambda iid, repo: {"content": {"number": 99, "title"
 def gh_filing(args, repo):
     if args[:2] == ["project", "field-list"]:
         return True, "OPT_recirc", ""
+    if args[:2] == ["issue", "list"]:
+        return True, "[]", ""   # orphan scan (#152): no off-board orphans in these scenarios
     return True, "", ""
 
 def run_filing(create_fn):

@@ -25,17 +25,18 @@ m.read_config = lambda r: ("7", {"Stage": "PVTF_stage", "Wave": "PVTF_wave"})
 
 # The board carries ONE Recirculation ticket that is a throttle-partial: source marker present, but NO
 # "status" key (empty Status — what create_item leaves when a rate limit hits between Stage and Status).
-PARTIAL = {"stage": "Recirculation", "id": "PVTI_partial",
-           "content": {"number": 42, "title": "recirc: shared limiter"}}
-idc_gh_board.fetch_items = lambda owner, pn, r: [PARTIAL]
-
+# The marker rides content.body — the single DETAILED board read the dedupe consumes (#109).
 MARKER_BODY = ('Stage: Recirculation\n'
                '<!-- idc-recirc-source: {"origin": "#42|finisher", "what": "shared limiter"} -->\n')
+PARTIAL = {"stage": "Recirculation", "id": "PVTI_partial",
+           "content": {"number": 42, "title": "recirc: shared limiter", "body": MARKER_BODY}}
+idc_gh_board.fetch_items = lambda owner, pn, r, include_details=False: [PARTIAL]
+
 def gh(args, r):
     if args[:2] == ["project", "field-list"]:
         return True, "OPT_recirc", ""
-    if args[:2] == ["issue", "view"]:
-        return True, json.dumps({"body": MARKER_BODY}), ""
+    if args[:2] == ["issue", "list"]:
+        return True, "[]", ""   # orphan scan (#152): no off-board orphans in these scenarios
     return True, "", ""
 m.gh = gh
 
@@ -117,9 +118,10 @@ check(changed3 == 0, f"a failed heal must not count as a board change, got {chan
 #     RateLimitError (a BoardReadError SUBCLASS) was swallowed by _heal_partial_intake's fail-soft
 #     `except BoardReadError` → the sweep kept hammering the already-throttled API.
 heals.clear(); creates.clear()
+MARKER_BODY2 = '<!-- idc-recirc-source: {"origin": "#43|finisher", "what": "second scope"} -->\n'
 PARTIAL2 = {"stage": "Recirculation", "id": "PVTI_partial2",
-            "content": {"number": 43, "title": "recirc: second partial"}}
-idc_gh_board.fetch_items = lambda owner, pn, r: [PARTIAL, PARTIAL2]
+            "content": {"number": 43, "title": "recirc: second partial", "body": MARKER_BODY2}}
+idc_gh_board.fetch_items = lambda owner, pn, r, include_details=False: [PARTIAL, PARTIAL2]
 throttle_calls = []
 def throttling_set_status(owner, project, r, item_id, status):
     throttle_calls.append(item_id)

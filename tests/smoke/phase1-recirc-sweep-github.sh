@@ -39,10 +39,10 @@ CTX = {"owner": "o", "project_node": "PVT_node", "project_number": "7"}
 # chains have resolvable ids (this test exercises apply_github, not the parser — covered elsewhere).
 m.read_config = lambda repo: ("7", {"Stage": "PVTF_stage", "Wave": "PVTF_wave"})
 
-def boom(owner, pn, repo):
+def boom(owner, pn, repo, include_details=False):
     raise idc_gh_board.BoardReadError("simulated board outage")
 
-def empty_board(owner, pn, repo):
+def empty_board(owner, pn, repo, include_details=False):
     return []   # dedupe read OK but no existing Recirculation tickets → nothing deduped
 
 def capture():

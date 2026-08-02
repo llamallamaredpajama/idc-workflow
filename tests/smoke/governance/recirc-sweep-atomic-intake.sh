@@ -36,7 +36,7 @@ def gh(args, r):
         return True, "[]", ""
     return True, "", ""
 m.gh = gh
-idc_gh_board.fetch_items = lambda owner, pn, r: []          # dedupe read OK, no existing tickets
+idc_gh_board.fetch_items = lambda owner, pn, r, include_details=False: []   # dedupe read OK, no existing tickets
 
 # create_item is the atomic primitive — capture its call so we can assert Stage AND Status land together.
 create_calls = []

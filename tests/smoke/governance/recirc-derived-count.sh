@@ -36,20 +36,23 @@ check(m.derived_recirc_count(55, tickets) == 0, "55 must derive 0")
 check(m.origin_issue("#42|finisher") == 42 and m.origin_issue(9) == 9 and m.origin_issue("") is None,
       "origin_issue must prefix-parse '#42|role', bare ints, and reject empties")
 
-# GITHUB collection: only Stage=Recirculation items are counted, ANY status; markers come from bodies.
+# GITHUB collection: only Stage=Recirculation items are counted, ANY status; markers ride each
+# item's content.body on the single DETAILED board read (#109) — no per-ticket gh issue view.
 BOARD = [
-    {"stage": "Recirculation", "status": "Done", "id": "PVTI_1", "content": {"number": 101}},
-    {"stage": "Recirculation", "status": "Todo", "id": "PVTI_2", "content": {"number": 102}},
-    {"stage": "Buildable",     "status": "Todo", "id": "PVTI_3", "content": {"number": 42}},
+    {"stage": "Recirculation", "status": "Done", "id": "PVTI_1",
+     "content": {"number": 101, "body": '<!-- idc-recirc-source: {"origin": "#42|finisher", "what": "a"} -->'}},
+    {"stage": "Recirculation", "status": "Todo", "id": "PVTI_2",
+     "content": {"number": 102, "body": '<!-- idc-recirc-source: {"origin": "#42|reviewer", "what": "b"} -->'}},
+    {"stage": "Buildable",     "status": "Todo", "id": "PVTI_3", "content": {"number": 42, "body": ""}},
 ]
-BODIES = {
-    "101": '<!-- idc-recirc-source: {"origin": "#42|finisher", "what": "a"} -->',
-    "102": '<!-- idc-recirc-source: {"origin": "#42|reviewer", "what": "b"} -->',
-}
-idc_gh_board.fetch_items = lambda owner, pn, r: BOARD
+views = []
+def fake_fetch(owner, pn, r, include_details=False):
+    return BOARD if include_details else [
+        {k: (dict(v, body=None) if k == "content" else v) for k, v in it.items()} for it in BOARD]
+idc_gh_board.fetch_items = fake_fetch
 def gh(args, r):
     if args[:2] == ["issue", "view"]:
-        return True, json.dumps({"body": BODIES.get(args[2], "")}), ""
+        views.append(list(args))
     return True, "", ""
 m.gh = gh
 tickets = m._github_recirc_tickets("/x", "o", "7")
@@ -57,19 +60,16 @@ check(m.derived_recirc_count(42, tickets) == 2,
       f"github derivation for #42 must be 2 (Done ticket counts), got {m.derived_recirc_count(42, tickets)}")
 check(m.derived_recirc_count(101, tickets) == 0,
       "the ticket's own number must not count as an origin")
+check(views == [], f"derivation must ride the single detailed board read — no per-ticket issue view, got {views}")
 
-# FAIL-CLOSED: one unreadable ticket body must fail the WHOLE derivation (an under-count would
-# un-park a runaway), never return a partial count.
-def gh_body_fail(args, r):
-    if args[:2] == ["issue", "view"] and args[2] == "102":
-        return False, "", "simulated body outage"
-    if args[:2] == ["issue", "view"]:
-        return True, json.dumps({"body": BODIES.get(args[2], "")}), ""
-    return True, "", ""
-m.gh = gh_body_fail
+# FAIL-CLOSED: an unreadable board must fail the WHOLE derivation (an under-count would un-park a
+# runaway), never return a partial count.
+def fetch_boom(owner, pn, r, include_details=False):
+    raise idc_gh_board.BoardReadError("simulated board outage")
+idc_gh_board.fetch_items = fetch_boom
 try:
     m._github_recirc_tickets("/x", "o", "7")
-    errs.append("an unreadable ticket body must raise BoardReadError (fail-closed), not under-count")
+    errs.append("an unreadable board must raise BoardReadError (fail-closed), not under-count")
 except idc_gh_board.BoardReadError:
     pass
 

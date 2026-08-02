@@ -57,7 +57,8 @@ except ImportError:                                      # a lone relocated copy
 # Query the items connection by the project NODE id (resolved once) so this works for a user- OR an
 # org-owned project without branching on owner type. `$cursor` is nullable: omitted on the first
 # page (→ after: null), then set from the prior page's endCursor. pageInfo drives the loop.
-ITEMS_QUERY = """
+# The `%s` slot holds the OPTIONAL per-Issue details fragment (below).
+_ITEMS_QUERY_TEMPLATE = """
 query($pid: ID!, $cursor: String) {
   node(id: $pid) {
     ... on ProjectV2 {
@@ -76,7 +77,7 @@ query($pid: ID!, $cursor: String) {
           }
           content {
             __typename
-            ... on Issue       { number title repository { nameWithOwner } }
+            ... on Issue       { number title repository { nameWithOwner }%s }
             ... on PullRequest { number title repository { nameWithOwner } }
             ... on DraftIssue  { title }
           }
@@ -86,6 +87,20 @@ query($pid: ID!, $cursor: String) {
   }
 }
 """
+
+# The read-amplification fold-in (issue #109, graphql-cost sinks #2-#4): a caller that passes
+# `include_details=True` gets each Issue's `body`, its comment bodies, and its native `blockedBy`
+# issue numbers ON the same paginated board read — collapsing the recirc sweep's per-issue
+# `gh issue view --json body,comments` loop and the drain's per-candidate REST blocked_by call to
+# ZERO extra requests. OFF by default: the extras multiply the GraphQL node cost per item, so only
+# a caller that actually consumes them pays. (Shape live-verified against the GitHub schema:
+# Issue.blockedBy is a paginated IssueConnection.)
+_ISSUE_DETAILS_FRAGMENT = (" body"
+                           " comments(first: 100) { nodes { body } }"
+                           " blockedBy(first: 50) { nodes { number } }")
+
+ITEMS_QUERY = _ITEMS_QUERY_TEMPLATE % ""
+ITEMS_QUERY_DETAILED = _ITEMS_QUERY_TEMPLATE % _ISSUE_DETAILS_FRAGMENT
 
 # Single-item field read by project-item node id — the budget-friendly way for the transition engine
 # to read ONE item's current (Stage, Status) for a guard/read-back WITHOUT re-paginating the whole
@@ -468,19 +483,36 @@ def _flatten(node):
         repository = (content.get("repository") or {}).get("nameWithOwner")
         if repository:
             c["repository"] = repository
+        # Detailed-read extras (#109) — present ONLY when the caller asked include_details=True, so
+        # the lean shape is byte-identical to before: `body` (str), `comments` (list of comment-body
+        # strings), `blocked_by` (list of the native blockedBy issue numbers).
+        if "body" in content:
+            c["body"] = content.get("body") or ""
+        comments = content.get("comments")
+        if isinstance(comments, dict):
+            c["comments"] = [str((n or {}).get("body") or "") for n in (comments.get("nodes") or [])]
+        blocked = content.get("blockedBy")
+        if isinstance(blocked, dict):
+            c["blocked_by"] = [n.get("number") for n in (blocked.get("nodes") or [])
+                               if isinstance(n, dict) and isinstance(n.get("number"), int)]
         item["content"] = c
     return item
 
 
-def fetch_items(owner, project_number, repo="."):
+def fetch_items(owner, project_number, repo=".", include_details=False):
     """Return ALL project items (every page), each flattened to gh's item-list shape.
+
+    `include_details=True` folds each Issue's body + comment bodies + native blockedBy numbers into
+    the SAME paginated read (issue #109) — surfaced as content.body/.comments/.blocked_by — so a
+    consumer like the recirc sweep costs one board read, with no per-issue follow-up calls.
 
     Raises BoardReadError on any gh / parse failure — fail-closed, never a silent partial board."""
     pid = _resolve_project_node_id(owner, project_number, repo)
+    query = ITEMS_QUERY_DETAILED if include_details else ITEMS_QUERY
     items = []
     cursor = None
     for _ in range(MAX_PAGES):
-        args = ["api", "graphql", "-f", f"query={ITEMS_QUERY}", "-f", f"pid={pid}"]
+        args = ["api", "graphql", "-f", f"query={query}", "-f", f"pid={pid}"]
         if cursor:
             args += ["-f", f"cursor={cursor}"]
         out = _gh(args, repo)

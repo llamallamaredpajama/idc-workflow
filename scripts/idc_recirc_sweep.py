@@ -602,16 +602,26 @@ def gh_owner(repo):
     return out.strip() if ok else ""
 
 
+def _item_text(item):
+    """One board item's issue body + comment bodies as a single text blob, straight off the DETAILED
+    board read (issue #109) — the text every marker scan in this module consumes, with no per-issue
+    `gh issue view` follow-up call."""
+    content = item.get("content") or {}
+    return (content.get("body") or "") + "\n" + "\n".join(content.get("comments") or [])
+
+
 def scan_github(repo, matrices, project_number, log):
     """Build (findings, ctx) for the github backend. Reads the WHOLE board once (paginated — gh's own
-    item-list truncates at 30 items, blinding a grown board's Buildable lane), then each issue's
-    body+comments. Fail-soft: any board-read failure logs + yields an empty sweep."""
+    item-list truncates at 30 items, blinding a grown board's Buildable lane) — a DETAILED read
+    (issue #109): each issue's body + comments ride the same paginated query, so the marker scan
+    below and the dedupe in apply_github (ctx["items"]) cost no further reads. Fail-soft: any
+    board-read failure logs + yields an empty sweep."""
     owner = gh_owner(repo)
     if not owner or not project_number:
         log("github: could not resolve owner/project_number — skipping sweep")
         return [], None
     try:
-        items = idc_gh_board.fetch_items(owner, project_number, repo)
+        items = idc_gh_board.fetch_items(owner, project_number, repo, include_details=True)
     except idc_gh_board.BoardReadError as e:
         log(f"github: board read failed — skipping sweep ({str(e)[:120]})")
         return [], None
@@ -621,6 +631,9 @@ def scan_github(repo, matrices, project_number, log):
                            "--format", "json", "--jq", ".id"], repo)
     project_node = node_out.strip() if okn else ""
     ctx = {"owner": owner, "project_node": project_node, "project_number": project_number,
+           # THE single detailed board snapshot (issue #109): apply_github's dedupe scan reads it
+           # instead of re-fetching the whole board a second time per sweep.
+           "items": items,
            # A throttle-partial is a Recirculation item with an EMPTY Status (create_item left it when a
            # rate limit hit between its Stage and Status writes). Flag their presence from THIS single
            # board read so apply_github heals them independently of captures WITHOUT a second scan on a
@@ -648,15 +661,7 @@ def scan_github(repo, matrices, project_number, log):
             continue  # an [operator-action] gate is a human gate, not rogue build work (drain parity)
         if (it.get("stage") or BUILDABLE_STAGE) != BUILDABLE_STAGE:
             continue
-        okb, body_out, _ = gh(["issue", "view", str(number), "--json", "body,comments"], repo)
-        text = ""
-        if okb:
-            try:
-                jd = json.loads(body_out)
-                text = (jd.get("body") or "") + "\n" + \
-                    "\n".join(str((c or {}).get("body", "")) for c in jd.get("comments", []))
-            except json.JSONDecodeError:
-                text = ""
+        text = _item_text(it)   # body + comments off the single detailed read (#109)
         scanned.append({
             "number": number,
             "status": it.get("status"),
@@ -689,8 +694,8 @@ def scan_github(repo, matrices, project_number, log):
 
 
 def github_existing_sources(repo, ctx, log):
-    """Scan the WHOLE board (paginated) for Recirculation tickets carrying the hidden source marker and
-    split them by completeness:
+    """Scan the board's Recirculation tickets for the hidden source marker and split them by
+    completeness:
 
       * `seen`     — {(origin, what)} for FULLY-filed tickets (Status set): the stateless dedupe set
                      that keeps ticket-filing idempotent across runs.
@@ -701,16 +706,24 @@ def github_existing_sources(repo, ctx, log):
                      P1a); a source marker + empty Status is unambiguously such a partial (only
                      create_item ever writes that marker).
 
-    Returns (seen, partials) on success, or None when the board read FAILS — a VISIBLE degraded state
-    (logged) the caller treats as "cannot dedupe → do not file" (fail-closed against blind duplicates)."""
+    Reads the SINGLE detailed board snapshot scan_github already fetched (ctx["items"], issue #109 —
+    marker keys come from each item's content.body on that same read), so a sweep costs one board
+    read and no per-ticket `gh issue view`. A ctx built WITHOUT a snapshot (a direct caller) falls
+    back to its own detailed fetch — NEVER to an empty board, which would file blind duplicates.
+
+    Returns (seen, partials) on success, or None when no snapshot exists AND the fallback read FAILS
+    — a VISIBLE degraded state (logged) the caller treats as "cannot dedupe → do not file"."""
     seen = set()
     partials = []
-    try:
-        items = idc_gh_board.fetch_items(ctx["owner"], ctx["project_number"], repo)
-    except idc_gh_board.BoardReadError as e:
-        log(f"github: existing-ticket dedupe read FAILED ({str(e)[:120]}) — skipping ticket-filing "
-            "this sweep to avoid duplicates (will retry next run)")
-        return None
+    items = ctx.get("items")
+    if items is None:
+        try:
+            items = idc_gh_board.fetch_items(ctx["owner"], ctx["project_number"], repo,
+                                             include_details=True)
+        except idc_gh_board.BoardReadError as e:
+            log(f"github: existing-ticket dedupe read FAILED ({str(e)[:120]}) — skipping ticket-filing "
+                "this sweep to avoid duplicates (will retry next run)")
+            return None
     for it in items:
         if (it.get("stage") or "") != RECIRC_STAGE:
             continue
@@ -718,15 +731,8 @@ def github_existing_sources(repo, ctx, log):
         number = content.get("number")
         if number is None:
             continue
-        okb, body_out, _ = gh(["issue", "view", str(number), "--json", "body"], repo)
-        if not okb:
-            continue
-        try:
-            body = json.loads(body_out).get("body") or ""
-        except json.JSONDecodeError:
-            continue
         keys = [(str(obj.get("origin", "")), str(obj.get("what", "")).strip())
-                for obj in parse_markers(body, RECIRC_SOURCE_MARKER)]
+                for obj in parse_markers(content.get("body") or "", RECIRC_SOURCE_MARKER)]
         if not keys:
             continue
         if it.get("status"):          # a real, fully-filed ticket → dedupe
@@ -1094,28 +1100,23 @@ def _fs_recirc_tickets(state):
 
 def _github_recirc_tickets(repo, owner, project_number):
     """[{number, origins}] for every Stage=Recirculation board item — ANY Status (retired/Done
-    tickets count, #108). Raises idc_gh_board.BoardReadError on ANY failed read, including a single
-    unreadable ticket body: unlike the sweep's fail-soft dedupe, the derivation feeds the runaway
-    caps, where a silently missed marker UNDER-counts and un-parks a runaway — so an uncomputable
-    input must fail closed (the caps caller treats a non-zero exit as PARK+surface)."""
-    items = idc_gh_board.fetch_items(owner, project_number, repo)
+    tickets count, #108). ONE detailed board read (issue #109): ticket bodies ride the paginated
+    query itself, so there is no per-ticket follow-up call and no partially-read board — the whole
+    read either lands or raises idc_gh_board.BoardReadError. That all-or-nothing shape matters
+    here: the derivation feeds the runaway caps, where a silently missed marker UNDER-counts and
+    un-parks a runaway, so an uncomputable input must fail closed (the caps caller treats a
+    non-zero exit as PARK+surface)."""
+    items = idc_gh_board.fetch_items(owner, project_number, repo, include_details=True)
     out = []
     for it in items:
         if (it.get("stage") or "") != RECIRC_STAGE:
             continue
-        number = (it.get("content") or {}).get("number")
+        content = it.get("content") or {}
+        number = content.get("number")
         if number is None:
             continue
-        okb, body_out, err = gh(["issue", "view", str(number), "--json", "body"], repo)
-        if not okb:
-            raise idc_gh_board.BoardReadError(
-                f"could not read Recirculation ticket #{number} body ({err.strip()[:120]})")
-        try:
-            body = json.loads(body_out).get("body") or ""
-        except json.JSONDecodeError as e:
-            raise idc_gh_board.BoardReadError(f"unparseable body payload for #{number} ({e})")
         origins = {origin_issue(obj.get("origin"))
-                   for obj in parse_markers(body, RECIRC_SOURCE_MARKER)}
+                   for obj in parse_markers(content.get("body") or "", RECIRC_SOURCE_MARKER)}
         origins.discard(None)
         out.append({"number": number, "origins": origins})
     return out

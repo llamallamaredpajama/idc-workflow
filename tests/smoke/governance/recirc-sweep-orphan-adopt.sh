@@ -26,7 +26,7 @@ journal = os.path.join(repo, "docs", "workflow", "transition-journal.ndjson")
 
 CTX = {"owner": "o", "project_node": "PVT_node", "project_number": "7"}
 m.read_config = lambda r: ("7", {"Stage": "PVTF_stage", "Wave": "PVTF_wave"})
-idc_gh_board.fetch_items = lambda owner, pn, r: []   # board dedupe: NO tickets on the board
+idc_gh_board.fetch_items = lambda owner, pn, r, include_details=False: []   # board dedupe: NO tickets on the board
 
 # The off-board orphan: an OPEN issue carrying the source marker, invisible to the board scan.
 ORPHAN_BODY = ('Stage: Recirculation\n'
@@ -119,19 +119,18 @@ check(any("skipping ticket-filing" in l for l in logs4),
 #     scan (gh issue list) never fires.
 m.gh = gh
 issue_lists.clear()
+# The board ticket's marker rides content.body — the single DETAILED board read the dedupe consumes (#109).
 BOARD_TICKET = {"stage": "Recirculation", "status": "Todo", "id": "PVTI_board",
-                "content": {"number": 301, "title": "recirc: shared limiter"}}
+                "content": {"number": 301, "title": "recirc: shared limiter", "body": ORPHAN_BODY}}
 def gh_with_board_body(args, r):
     if args[:2] == ["project", "field-list"]:
         return True, "OPT_recirc", ""
-    if args[:2] == ["issue", "view"]:
-        return True, json.dumps({"body": ORPHAN_BODY}), ""
     if args[:2] == ["issue", "list"]:
         issue_lists.append(list(args))
         return True, json.dumps([]), ""
     return True, "", ""
 m.gh = gh_with_board_body
-idc_gh_board.fetch_items = lambda owner, pn, r: [BOARD_TICKET]
+idc_gh_board.fetch_items = lambda owner, pn, r, include_details=False: [BOARD_TICKET]
 f4 = m.Finding(88, m.LEAVE, "host", item_id="PVTI_host")
 f4.captures = [{"origin": "#42|finisher", "what": "shared limiter", "area": "a", "suggested_scope": "s"}]
 m.apply_github([f4], repo, CTX, lambda _l: None)

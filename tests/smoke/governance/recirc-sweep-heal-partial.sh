@@ -111,6 +111,34 @@ check(len(creates) == 0,
       "a partial whose heal FAILED must still dedupe its marker — the matching capture must NOT create a duplicate")
 check(changed3 == 0, f"a failed heal must not count as a board change, got {changed3}")
 
+# (6) issue #156 — a THROTTLED heal (RateLimitError on the Status write) must activate the SAME
+#     throttle-stop the mid-create path uses: STOP after the first attempt (no second partial heal),
+#     defer every capture (no create_item), skip the journal-backfill heal, count nothing. Pre-fix,
+#     RateLimitError (a BoardReadError SUBCLASS) was swallowed by _heal_partial_intake's fail-soft
+#     `except BoardReadError` → the sweep kept hammering the already-throttled API.
+heals.clear(); creates.clear()
+PARTIAL2 = {"stage": "Recirculation", "id": "PVTI_partial2",
+            "content": {"number": 43, "title": "recirc: second partial"}}
+idc_gh_board.fetch_items = lambda owner, pn, r: [PARTIAL, PARTIAL2]
+throttle_calls = []
+def throttling_set_status(owner, project, r, item_id, status):
+    throttle_calls.append(item_id)
+    raise idc_gh_board.RateLimitError("2026-08-02T00:00:00Z")
+idc_gh_board.set_status = throttling_set_status
+logs6 = []
+f6 = m.Finding(88, m.LEAVE, "host", item_id="PVTI_host")
+f6.captures = [{"origin": "#88|x", "what": "unrelated capture", "area": "a", "suggested_scope": "s"}]
+changed6 = m.apply_github([f6], repo, CTX, logs6.append)
+check(len(throttle_calls) == 1,
+      f"a throttled heal must STOP the partial loop after the FIRST attempt, got {len(throttle_calls)}")
+check(len(creates) == 0,
+      f"a throttled heal must defer the capture loop too (throttle-stop), got {len(creates)} create(s)")
+check(changed6 == 0, f"a throttled heal must count nothing, got {changed6}")
+check(any("rate-limited" in l for l in logs6),
+      f"the heal throttle must be surfaced as the sweep-wide throttle-stop, logs: {logs6}")
+check(any("skipping the journal-backfill heal" in l for l in logs6),
+      f"a heal throttle must skip the journal-backfill heal like the mid-create stop, logs: {logs6}")
+
 if errs:
     for e in errs:
         sys.stderr.write("ASSERT FAILED: " + e + "\n")
@@ -118,4 +146,4 @@ if errs:
 print("ok")
 PY
 
-echo "PASS: a throttle-partial (marker + empty Status) is SELF-HEALED in place (Status=Todo + journaled), not skipped forever, and not re-created as a duplicate."
+echo "PASS: a throttle-partial (marker + empty Status) is SELF-HEALED in place (Status=Todo + journaled), not skipped forever, not re-created as a duplicate — and a THROTTLED heal stops the whole sweep (#156)."

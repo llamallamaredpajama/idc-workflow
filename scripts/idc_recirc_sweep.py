@@ -471,13 +471,18 @@ def _heal_partial_intake(repo, ctx, partial, log):
     issue, no duplicate) + journal the now-complete intake. The partial is a ticket create_item left
     Stage=Recirculation with an EMPTY Status when a rate limit hit between its Stage and Status writes;
     without healing, the marker-dedupe would skip it FOREVER (#150 / codex R4 P1a — SELF-HEAL, not skip).
-    Fail-soft: a gh failure (BoardReadError covers BoardWriteError + RateLimitError) logs and returns
-    False (re-healed next sweep). Returns True iff the heal landed."""
+    Fail-soft: a gh failure (BoardReadError, covering BoardWriteError) logs and returns False
+    (re-healed next sweep) — EXCEPT RateLimitError (a BoardReadError SUBCLASS, so it is caught FIRST):
+    a throttled heal RE-RAISES so apply_github stops the WHOLE sweep (the capture loop's
+    throttle-stop) instead of hammering the throttled API through every remaining partial and
+    capture (#156). Returns True iff the heal landed."""
     number, item_id = partial["number"], partial["item_id"]
     if not item_id:
         return False
     try:
         idc_gh_board.set_status(ctx["owner"], ctx["project_number"], repo, item_id, TODO_STATUS)
+    except idc_gh_board.RateLimitError:
+        raise   # a throttle is the caller's sweep-wide stop (#156), never a per-ticket fail-soft
     except idc_gh_board.BoardReadError as e:
         log(f"github: could not heal partial Recirculation ticket #{number} "
             f"({str(e).strip()[:120]}) — will retry next sweep")
@@ -780,9 +785,22 @@ def apply_github(findings, repo, ctx, log):
         # only a successful heal as a board change.
         for p in partials:
             already.update(p["keys"])
-            if _heal_partial_intake(repo, ctx, p, log):
+            try:
+                healed = _heal_partial_intake(repo, ctx, p, log)
+            except idc_gh_board.RateLimitError as e:
+                # A throttle on a heal WRITE activates the SAME throttle-stop as the mid-create path
+                # below (#156): every remaining partial and capture would fire the same doomed gh
+                # call while the API is already throttled — in the SessionEnd hook. Stop the sweep as
+                # a whole; the un-healed partials stay empty-Status → re-detected next sweep.
+                log(f"github: partial-heal rate-limited ({e}) — deferring the remaining "
+                    "partials and captures to the next sweep")
+                throttled = True
+                break
+            if healed:
                 changed += 1
         for c in captures:
+            if throttled:
+                break   # a partial-heal throttle defers filing too (same stop as the mid-create throttle)
             key = (c["origin"], c["what"])
             if key in already:
                 continue

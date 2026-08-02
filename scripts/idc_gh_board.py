@@ -94,7 +94,11 @@ query($pid: ID!, $cursor: String) {
 # `gh issue view --json body,comments` loop and the drain's per-candidate REST blocked_by call to
 # ZERO extra requests. OFF by default: the extras multiply the GraphQL node cost per item, so only
 # a caller that actually consumes them pays. (Shape live-verified against the GitHub schema:
-# Issue.blockedBy is a paginated IssueConnection.)
+# Issue.blockedBy is a paginated IssueConnection.) The truncation bounds below are deliberate parity
+# with the per-issue reads they replace (`gh issue view --json body,comments` caps comments the same
+# way); the fold does NOT page these inner connections, so a consumer that could see >100 comments
+# or >50 blockers on ONE issue must decide at wiring time whether that bound is acceptable — the
+# drain's blocked_by consumer (idc_autorun_drain.py, #109 sink #2) is the open wiring handoff.
 _ISSUE_DETAILS_FRAGMENT = (" body"
                            " comments(first: 100) { nodes { body } }"
                            " blockedBy(first: 50) { nodes { number } }")

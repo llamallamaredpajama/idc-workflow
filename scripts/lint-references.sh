@@ -249,6 +249,56 @@ if [ -f scripts/idc_lint_machine_yaml_refs.py ]; then
   fi
 fi
 
+# Rule O (=-forms, #157) — the python cross-check above matches only the `Stage: X` prose form,
+# but the DOMINANT shipped forms are `Stage = Buildable` / `Stage=Recirculation` / `Status=Todo`
+# (commands/autorun.md, agents/idc-autorun.md, agents/idc-recirculator.md, templates/WORKFLOW.md, …),
+# so a stale or misspelled state name in those forms passed the cross-check. Validate them here
+# against the same machine table. One awk pass (POSIX-only — runs identically on /usr/bin/awk,
+# mawk, gawk; the interactive shell's grep is ugrep, so nothing here may lean on GNU extensions):
+# the first file loads the `stages:`/`statuses:` inline flow lists, every later file is scanned.
+# The value grammar mirrors the python's `:`-form ([A-Z]-anchored words), with the #157
+# false-positive traps handled explicitly:
+#   * multiword values: `Status = In Progress` validates as one name;
+#   * prose continuation: `Status = Todo Because …` validates by its FIRST word when the full
+#     capture is not a name (the value is Todo; the prose is commentary);
+#   * compound/slash forms: `Stage = Recirculation ∧ Todo`, `Stage = Consideration/Planning` —
+#     the capture stops at the non-name char and the leading name validates (same as the `:` form);
+#   * `lint-allow` lines are exempt, like every other shell rule here.
+if [ -f templates/workflow-machine.yaml ]; then
+  while IFS= read -r hit; do
+    [ -z "$hit" ] && continue
+    report "$hit"
+  done < <(awk '
+    function loadset(line, set,    n, parts, i, v) {
+      sub(/^[^[]*\[/, "", line); sub(/\].*$/, "", line)
+      n = split(line, parts, ",")
+      for (i = 1; i <= n; i++) {
+        v = parts[i]; gsub(/^[ \t]+/, "", v); gsub(/[ \t]+$/, "", v)
+        if (v != "") set[v] = 1
+      }
+    }
+    NR == FNR {
+      if ($0 ~ /^stages:[ \t]*\[/) loadset($0, vstage)
+      else if ($0 ~ /^statuses:[ \t]*\[/) loadset($0, vstatus)
+      next
+    }
+    index($0, "lint-allow") { next }
+    {
+      s = $0
+      while (match(s, /(^|[^A-Za-z_])(Stage|Status)[ \t]*=[ \t]*[A-Z][A-Za-z]*([ \t][A-Z][A-Za-z]*)*/)) {
+        m = substr(s, RSTART, RLENGTH)
+        s = substr(s, RSTART + RLENGTH)
+        sub(/^[^A-Za-z_]/, "", m)
+        key = (substr(m, 1, 6) == "Status") ? "Status" : "Stage"
+        val = m; sub(/^(Stage|Status)[ \t]*=[ \t]*/, "", val)
+        first = val; sub(/[ \t].*$/, "", first)
+        if (key == "Stage") ok = (val in vstage) || (first in vstage)
+        else ok = (val in vstatus) || (first in vstatus)
+        if (!ok) printf "%s:%d: [machine-yaml-eq-ref] Invalid %s reference: \047%s\047 (= form; must name a templates/workflow-machine.yaml state)\n", FILENAME, FNR, key, val
+      }
+    }' templates/workflow-machine.yaml $MD_FILES)
+fi
+
 # Rule C (runtime/) — the vendored runtime tree ships to users but is not markdown and sits
 # outside the surfaces globbed above. Scan every regular file under runtime/ for machine-local
 # paths so a personal-path leak (e.g. /Users/<user> in the launcher) cannot hide there.

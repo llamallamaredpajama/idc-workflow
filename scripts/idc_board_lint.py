@@ -29,7 +29,9 @@ FAILED — e.g. the `gh api` dependencies call errored). UNKNOWN ≠ "no link": 
 issue we could not disprove is never flagged.
 `stage`/`status` are **optional** and **backward-compatible**: a caller that supplies the whole board
 (each issue's `stage`/`status`) enables the **retired-recirc** rule; the legacy thin shape (no
-`stage`/`status`) leaves that rule silent. Two roles per object — an object IN the build-eligible lane
+`stage`/`status`) leaves that rule silent. Stage/Status VALUES are compared case- and
+whitespace-insensitively (#132): the board is hand-editable, so `recirculation` / `TODO` must match
+their canonical spellings rather than silently missing a rule. Two roles per object — an object IN the build-eligible lane
 (`stage` absent or `Buildable`, `status` absent or `Todo`) is **scanned**; an object explicitly
 outside it (e.g. a Done `Recirculation` ticket a paused issue is `blocked_by`) is **index-only**: it
 is never schema-scanned (its non-contract body would false-flag) and never counted in `scanned`, it
@@ -86,8 +88,11 @@ schema-scanned, not counted in `scanned`).
 `would-fix: #<n> Status=Todo` line per empty-Status item, printed after the summary, for a caller to
 apply (future-tense token — the tool proposes the repair, it does not perform it).
 
-Usage: idc_board_lint.py [--fix] [--journal <path>] < issues.json  (exit 0 = ran OK; 2 = bad input)
+Usage: idc_board_lint.py [--fix] [--journal <path>] < issues.json
+       (exit 0 = ran OK; 2 = bad input; 64 = usage error — a typo'd flag must stay
+        distinguishable from unreadable stdin, #132)
 """
+import argparse
 import json
 import os
 import re
@@ -140,6 +145,19 @@ BUILDABLE_STAGE = "Buildable"
 TODO_STATUS = "Todo"
 # The stranded-gate rule's subject lane: a gate-parked dependent whose gate has since gone Done.
 BLOCKED_STATUS = "Blocked"
+
+
+def lane_is(value, canonical):
+    """Whether a board Stage/Status value equals its canonical spelling, compared case- and
+    whitespace-insensitively (#132).
+
+    The board is hand-editable, so a value can arrive as `recirculation` / `TODO ` and must still
+    match — a case-varied Stage silently missing a rule is exactly the false-clean this lint exists
+    to prevent. `None` (absent) never matches: the tri-state and legacy-thin semantics depend on
+    absence staying distinct from any real value."""
+    if value is None:
+        return False
+    return str(value).strip().lower() == canonical.lower()
 
 # Prose dependency phrases — the SPACE/free-text forms a human writes in a body, deliberately NOT
 # the hyphenated structured tokens `blocked-by` / `blocks-on:` (those ARE recorded links / the
@@ -233,11 +251,11 @@ def retired_recirc_evidence(blocked_by, stage_status):
         return stage_status.get(num, (None, None))
 
     # A live or unknown blocker still holds the issue -> NOT spuriously eligible.
-    if not all(_entry(b)[1] == DONE_STATUS for b in blocked_by):
+    if not all(lane_is(_entry(b)[1], DONE_STATUS) for b in blocked_by):
         return ""
     # Every blocker is satisfied (Done). Flag iff at least one is a retired Recirculation ticket.
     for b in blocked_by:
-        if _entry(b)[0] == RECIRC_STAGE:
+        if lane_is(_entry(b)[0], RECIRC_STAGE):
             return (f"carries retired (Done) {RECIRC_STAGE} ticket #{b} as a (satisfied) blocker — "
                     "paused-issue re-link skipped (idc-plan Phase 4); re-point onto real unblockers")
     return ""
@@ -298,9 +316,9 @@ def stranded_gate_evidence(status, blocked_by, stage_status, titles, proven_gate
     AND at least one Done blocker is an `[operator-action]` gate (title from the index; an
     untitled/unknown blocker never reads as a gate). `blocked_by` tri-state as everywhere:
     `None` = UNKNOWN → silent."""
-    if status != BLOCKED_STATUS or not blocked_by:
+    if not lane_is(status, BLOCKED_STATUS) or not blocked_by:
         return ("", "")
-    if not all(stage_status.get(b, (None, None))[1] == DONE_STATUS for b in blocked_by):
+    if not all(lane_is(stage_status.get(b, (None, None))[1], DONE_STATUS) for b in blocked_by):
         return ("", "")  # a live or unknown blocker still genuinely holds the issue — not stranded
     gate_blockers = [b for b in blocked_by
                      if str(titles.get(b, "")).strip().startswith(OPERATOR_GATE_PREFIX)]
@@ -363,7 +381,7 @@ def empty_status_evidence(stage, status):
     silently never drains. This enforces the Stage∈{Consideration,Recirculation} invariant: those
     stages MUST carry a Status. Evaluated on a SEPARATE path from in_scan_lane so the item's
     non-contract body is never schema-scanned."""
-    if stage not in INVARIANT_STAGES or not is_empty_status(status):
+    if not any(lane_is(stage, s) for s in INVARIANT_STAGES) or not is_empty_status(status):
         return ""
     return (f"Stage={stage} carries an empty/missing Status — invisible to the dropped-handoff "
             f"detector (#255/#256); --fix sets Status={FIX_STATUS}")
@@ -388,7 +406,7 @@ def in_scan_lane(it):
     status = it.get("status")
     if stage is None and status is None:
         return True                                   # legacy thin shape — pre-filtered by the caller
-    return stage == BUILDABLE_STAGE and status == TODO_STATUS
+    return lane_is(stage, BUILDABLE_STAGE) and lane_is(status, TODO_STATUS)
 
 
 def lint(issues, proven_gates=None):
@@ -441,7 +459,7 @@ def lint(issues, proven_gates=None):
             else:
                 stranded_count += 1
             lines.append(f"{label}: {stranded_kind} — {stranded_ev}")
-        elif it.get("status") == BLOCKED_STATUS and it.get("blocked_by") is None:
+        elif lane_is(it.get("status"), BLOCKED_STATUS) and it.get("blocked_by") is None:
             # A `Status = Blocked` item whose dependency lookup FAILED (`blocked_by: null`) makes the
             # stranded-gate check INDETERMINATE, not clean — but a Blocked item is index-only, so it
             # exits below BEFORE the scan-lane `unknown_count` increment. Count it here (surfaced in
@@ -483,10 +501,21 @@ def lint(issues, proven_gates=None):
             empty_status_count, stranded_count, unproven_count, fixes)
 
 
+class _UsageErrorParser(argparse.ArgumentParser):
+    """argparse's default usage-error exit is 2 — the SAME code the unreadable-stdin path uses, so
+    automation could not tell a typo'd flag from bad input (#132). Usage errors exit 64 (EX_USAGE)
+    instead: 2 stays bad-input, and 64 collides with no load-bearing IDC verdict code (0/1/2/4 —
+    see idc_stdio) nor the broken-pipe 141. `--help` still exits 0 (it never enters error())."""
+
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        sys.stderr.write(f"idc-board-lint: usage error: {message}\n")
+        sys.exit(64)
+
+
 def main():
-    import argparse
     # argparse with a single optional flag; a bare `python3 idc_board_lint.py` (no args) is unchanged.
-    ap = argparse.ArgumentParser(
+    ap = _UsageErrorParser(
         prog="idc_board_lint.py",
         description="Advisory board-lane lint (reads issue JSON on stdin).")
     ap.add_argument("--fix", action="store_true",

@@ -1411,10 +1411,15 @@ PATH="$W1_PAGE:$PATH" STUB_PAGES="$W1_PAGE" gh api "repos/o/r/rulesets?per_page=
   || fail "W1j stub self-check: past the last page the stub must return the EMPTY ARRAY GitHub returns, or the page walk cannot terminate"
 PATH="$W1_PAGE:$PATH" STUB_PAGES="$W1_PAGE" gh api "repos/o/r/rulesets?per_page=100&page=4" >/dev/null 2>&1 \
   && fail "W1j stub self-check: an unmodelled page must ERROR, so a runaway walk fails instead of hanging"
-out="$(PATH="$W1_PAGE:$PATH" STUB_PAGES="$W1_PAGE" python3 "$CHK" --ruleset "$RS" \
-        --repo "idc-stub-owner/idc-stub-target" 2>&1)"
+# HARD per-case alarm (F53): with `page += 1` frozen in the checker's `_gh_json_all_pages`, every
+# request is page 1 and this stub serves its full page1.json forever — the walk never ends and the
+# LANE hangs instead of redding (the unmodelled-page error at the stub only fires for a walker still
+# incrementing). The alarm converts that hang into rc=142 at a bounded 60s, which reads as RED.
+out="$(PATH="$W1_PAGE:$PATH" STUB_PAGES="$W1_PAGE" \
+        perl -e 'alarm shift @ARGV; exec @ARGV' 60 \
+        python3 "$CHK" --ruleset "$RS" --repo "idc-stub-owner/idc-stub-target" 2>&1)"
 [ $? -eq 0 ] \
-  || fail "W1j: a ruleset listed on PAGE 2 was read as ABSENT, so --repo mode refused a repo where it IS installed (F24); got: $out"
+  || fail "W1j: a ruleset listed on PAGE 2 was read as ABSENT (or the page walk hung past 60s — a frozen walk is RED, not slow), so --repo mode refused a repo where it IS installed (F24); got: $out"
 printf '%s\n' "$out" | grep -Fq 'OK (PR flow' \
   || fail "W1j: --repo mode did not certify the paged live ruleset; got: $out"
 
@@ -1794,5 +1799,30 @@ out="$(python3 "$CHK" --ruleset "$RS" --repo-root "$W1_HUGE" 2>&1)" \
 printf '%s\n' "$out" | grep -Fq "$HUGE_BYTES" \
   || fail "W1h: the over-limit refusal must name the file's TRUE size, not the read bound; got: $out"
 rm -f "$W1_HUGE/.github/CODEOWNERS"
+
+# (W1n / F55) The checker's own `_gh_json` is BOUNDED: a sleeping gh under a 2s bound must refuse
+#       through the module's RuntimeError door (the arm `--repo` mode already fails closed on),
+#       never hang. Red-when-broken: drop the `timeout=` kwarg in the checker's `_gh_json` and the
+#       sleeping child hangs -> the alarm reds this at rc=142 (a hang is RED, never a slow pass).
+W1N_SLEEP="$WORK/sleep-gh-checker"; mkdir -p "$W1N_SLEEP"
+printf '#!/bin/sh\nsleep 60\n' > "$W1N_SLEEP/gh"; chmod +x "$W1N_SLEEP/gh"
+PATH="$W1N_SLEEP:$PATH" perl -e 'alarm shift @ARGV; exec @ARGV' 30 \
+  python3 - "$PLUGIN/scripts" <<'PY' \
+  || fail "W1n: the checker's hung gh child was not killed at the bound (F55)"
+import sys
+sys.path.insert(0, sys.argv[1])
+import idc_ruleset_check as RC
+RC._GH_TIMEOUT_SECONDS = 2
+try:
+    RC._gh_json(["api", "repos/idc-stub-owner/idc-stub-target"])
+except RuntimeError as exc:
+    if "did not finish within" not in str(exc):
+        print("WRONG-REFUSAL: %s" % exc)
+        sys.exit(1)
+    print("W1n ok: sleeping gh killed at the 2s bound -> %s" % exc)
+    sys.exit(0)
+print("NO-BOUND: the sleeping gh call returned without a timeout refusal")
+sys.exit(1)
+PY
 
 echo "PASS: ruleset checker enforces PR flow, exact-head required check, force-push/deletion prevention, every declared protected surface (the F40 governance-of-governance set — the deterministic checker, the ruleset dir, CODEOWNERS itself — plus the N1 ownership checker and the F4 enforcement scripts), with SURFACE_CLASSES and the shipped ruleset's protected_surfaces asserted to agree in BOTH directions so deleting a class tuple reds here instead of silently un-mandating a surface, GitHub any-depth/last-match-wins ownership with a strict class allowlist that fails closed on unmodeled patterns, re-types a dotted-basename DIRECTORY surface off the file guess so an interior ownerless hole cannot false-certify (F28), treats a '**/name/' trailing-slash pattern as directory-only (F32) and a bare '/' as matching-nothing (F33), and counts only valid owner tokens so a bare '@' cannot false-certify (F41); installer refuses without --repo, refuses a production repo, requires --repo-root, BINDS it to --repo via a local origin-identity check (F34), and validates the CODEOWNERS COMMITTED on the default branch — refusing an uncommitted or working-tree-diverged copy (F39); reads the enforced branch from origin/HEAD and REFUSES rather than trusting the checked-out branch when it is unset, accepting a validated --default-branch override (F44); and normalizes newlines before the divergence compare so a byte-identical CRLF-committed CODEOWNERS is not false-refused (F45); types KNOWN governance surfaces authoritatively so a directory-only '/<file>/' rule can never certify a protected FILE surface (F46), rejects lookalike substrings standing in for a real governance file (F47), requires the installer's origin-identity remote to be on the GitHub host so a non-GitHub checkout ending in the same owner/repo cannot certify the target (F48), and requires the EFFECTIVE committed CODEOWNERS file (root/docs, not just .github) to own its own path (F49); and — separating class MEMBERSHIP from surface TYPING — reads a bare-name rule as matching the FILE of that name so a later ownerless slashless rule un-owns it instead of being invisible (F50), demands each mandatory class be declared at its CANONICAL path so a same-basename decoy cannot leave the executed checker unprotected (F51), and never lets a descendant entry inherit its directory class's kind, so a directory-only rule cannot certify a FILE beneath a governance directory (F52); and refuses a CODEOWNERS at or over GitHub's 3 MB load limit — measured in RAW BYTES so a CRLF file cannot undercount its way past the gate — in the checker's working-tree read and in the installer's committed-content read alike, while a file one byte under the limit still certifies (W1); the limit is the DECIMAL 3,000,000 reading of GitHub's ambiguous '3 MB', pinned against a literal so a wrong threshold turns this lane red rather than moving the fixtures with it (F29), and the over-limit read is BOUNDED — a 40 MB CODEOWNERS is refused with its exact size while peak allocation stays at the read buffer instead of the file size (F30); the reader reads what GITHUB reads: a SYMLINKED CODEOWNERS is REFUSED rather than followed to its target's rules, a BROKEN symlink refuses at its own (higher-precedence) location instead of falling through to a lower-precedence file, and an OS-unreadable file names the permissions cause instead of being reported as possibly over the size limit (F14/F21); the path is opened COMPONENT BY COMPONENT rather than lstat-ed whole, so a symlinked \`.github\` DIRECTORY — the leaf guard's blind spot — is refused instead of certifying the link target's rules, and a case-variant spelling on a case-insensitive filesystem is read as absent as GitHub reads it, while a plain FILE at \`.github\` still falls through to the root CODEOWNERS exactly as GitHub does (F33); and the checker's own live door refuses through 'REFUSE (live)' when \`gh\` is absent instead of raising a traceback (F15) and WALKS the paginated rulesets listing so a ruleset sitting past page one is not read as absent (F24) — ending only on an EMPTY page, refusing a null body rather than reading it as 'nothing is installed', and refusing at a page ceiling rather than looping forever (F34/F36)"

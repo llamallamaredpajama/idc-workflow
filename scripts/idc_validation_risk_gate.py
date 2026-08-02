@@ -27,19 +27,25 @@ which remain declaration-only — so `required: false` can never be read as "fix
 everything and found nothing".
 
 SCOPE OF THE GUARANTEE — stated exactly, because overclaiming it is itself the defect this paragraph
-corrects (F64). GUARANTEED: on a given touch set, falsification can no longer be skipped by simply
-not asking for it; declaring `--risk-input` can only ADD to what fixed code derives. NOT GUARANTEED,
-and deliberately not implied: this gate runs BEFORE any contract is frozen, `--touch` is a plain
-repeatable flag at this call site, and `idc_validation_contract.py freeze` accepts no `--risk*`
-argument — so nothing binds the touch set judged here to the one later frozen, and nothing refuses a
-freeze whose risk gate was never run at all. Narrowing `--touch` therefore narrows derived risk; that
-is self-punishing (the same `touch` bounds what the build may modify) but it is not prevented.
-Binding the risk-gate result digest into the frozen contract, and refusing a missing result when
-derived risk is non-empty, is a tracked follow-up — not something this helper can enforce alone.
+corrects (F64). GUARANTEED here: on a given touch set, falsification can no longer be skipped by
+simply not asking for it; declaring `--risk-input` can only ADD to what fixed code derives. What
+this helper alone still cannot enforce — `--touch` is a plain repeatable flag at this call site, so
+nothing IN THIS PROCESS binds the judged touch set to anything — is now enforced at the freeze door
+instead (F64 closure): the result carries a `result_digest` over its own canonical JSON, and
+`idc_validation_contract.py freeze --risk-gate-result <file>` verifies that digest, requires the
+result's touch set and baseline to EQUAL the ones being frozen, requires everything fixed code
+derives from the frozen facts to appear in the result's risk inputs, and embeds the digest inside
+the digest-bound contract — while a freeze whose touch set carries fixed-code-derived risk REFUSES
+outright when no result is supplied. Narrowing `--touch` at THIS call site therefore no longer
+narrows what the freeze demands: the freeze derives from its own frozen touch set and refuses a
+result judged on a different one. What remains a caller choice is running this gate on facts nothing
+ever freezes (a scratch invocation binds nothing and proves nothing — only the freeze-bound result
+counts).
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -106,6 +112,16 @@ BASELINE_DERIVED_WHEN = "--baseline is supplied (declaration-only otherwise)"
 
 class RiskGateError(Exception):
     pass
+
+
+def result_digest(doc: dict) -> str:
+    """The canonical digest of a risk-gate result: sha256 over the sorted-key JSON of everything in
+    `doc` EXCEPT the `result_digest` field itself. One function, used both to STAMP the result at
+    `evaluate` and to VERIFY it at `idc_validation_contract.py freeze` (F64) — a re-implementation on
+    either side is how the two would silently diverge."""
+    body = {k: v for k, v in doc.items() if k != "result_digest"}
+    blob = json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
 
 
 def die(message: str, code: int = 2) -> None:
@@ -287,6 +303,7 @@ def evaluate(*, validator_digest: str, frozen_gate_digest: str, attempt_ceiling:
         "discarded_indexes": [],
     }
     if not effective:
+        result["result_digest"] = result_digest(result)
         return result
     if not scenario_path:
         source = "declared" if declared else "derived from the frozen contract"
@@ -305,6 +322,9 @@ def evaluate(*, validator_digest: str, frozen_gate_digest: str, attempt_ceiling:
         selected.append(candidate)
     result["selected"] = selected
     result["discarded_indexes"] = discarded
+    # Stamped LAST, over the complete result, so the digest the freeze verifies covers the verdict
+    # and the falsification outcome — not a prefix of them (F64).
+    result["result_digest"] = result_digest(result)
     return result
 
 

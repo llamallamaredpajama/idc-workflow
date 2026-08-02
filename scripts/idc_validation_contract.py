@@ -46,6 +46,7 @@ except ImportError:                                      # a lone relocated copy
 
 import idc_matrix_check  # noqa: E402
 import idc_schema_check  # noqa: E402
+import idc_validation_risk_gate as RG  # noqa: E402 — the F64 freeze-door binding (fixed derivation + digest)
 
 SCHEMA_VERSION = 1
 CONTRACT_KIND = "build-validation-contract"
@@ -436,8 +437,10 @@ def _record_validated_at(rec) -> str:
     `_witness_age_seconds` is carefully defensive about a stamp it cannot PARSE, but the eviction SORT
     one caller up was not defensive about a stamp of the wrong TYPE. `sorted()` on a key of
     `(validated_at or "", digest)` compares tuples element-wise, so a record whose `validated_at` is a
-    JSON number, object or array compares `int`/`dict`/`list` against `str` and raises an uncaught
-    `TypeError`. That crash lands in the WORST place: `record_planning_witness` has already replaced
+    TRUTHY non-string (a nonzero JSON number, a non-empty object or array) compares
+    `int`/`dict`/`list` against `str` and raises an uncaught `TypeError` — a FALSY non-string (`0`,
+    `[]`, `{}`, `false`) took the `or ""` branch and never crashed, which is why the hole survived:
+    the cheap fixtures all happened to be falsy. That crash lands in the WORST place: `record_planning_witness` has already replaced
     the receipt on disk by then and the witness store is written after eviction, so the new receipt is
     left UNWITNESSED and a later Build refuses it. Both value-shaped reads of the field go through
     here, so the shape is normalized once rather than at each call site.
@@ -448,10 +451,12 @@ def _record_validated_at(rec) -> str:
 
     `""` is deliberately the answer for every unusable shape, rather than `str(rec)`: it sorts OLDEST
     and `_witness_age_seconds` reads it as unparseable, so such a record is evicted first and is never
-    grace-protected — identical to the treatment an unparseable STRING stamp already gets, and the
-    same fail-closed direction (an evicted version is refused stale, never false-accepted). Reaching
-    any of this needs a hand-edited or corrupted store: this module is the only writer, and `_now()`
-    has only ever emitted a string."""
+    grace-protected. For GRACE that is identical to the treatment an unparseable STRING stamp gets;
+    for the SORT it is deliberately harsher — a non-empty unparseable string ("0000-not-a-timestamp")
+    sorts wherever its characters land among the ISO stamps, while `""` always sorts oldest — and
+    harsher-toward-eviction is the same fail-closed direction (an evicted version is refused stale,
+    never false-accepted). Reaching any of this needs a hand-edited or corrupted store: this module
+    is the only writer, and `_now()` has only ever emitted a string."""
     if not isinstance(rec, dict):
         return ""
     stamp = rec.get("validated_at")
@@ -1057,12 +1062,87 @@ def _resolve_attempt_ceiling(workspace: str, attempt_ceiling: int | None) -> int
     return configured if configured is not None else DEFAULT_ATTEMPT_CEILING
 
 
+def _risk_gate_binding(touch_surfaces, baseline: str, risk_gate_result: str | None):
+    """The `risk_gate` block frozen into the contract, or None when the frozen touch set carries no
+    fixed-code-derived risk and no result was offered (F64).
+
+    THE FREEZE IS THE BINDING POINT. The risk gate derives requiredness from the touch set IT IS
+    GIVEN (F59), but `--touch` there is a plain flag: nothing in that process stops a builder from
+    judging a narrowed set and freezing the real one. So the freeze door re-derives from the facts
+    being FROZEN, and:
+      * derived risk (from the frozen touch set) + NO result  -> REFUSE. Falsification cannot be
+        skipped by simply not running the gate.
+      * a result whose digest does not verify                 -> REFUSE (tampered/hand-edited).
+      * a result judged on a DIFFERENT touch set or baseline  -> REFUSE. The gate's verdict binds
+        only the facts it judged; equality — not subset — because a result judged on a superset
+        would attach falsification scenarios derived from work this contract does not freeze.
+      * a result missing something fixed code derives here    -> REFUSE (an older/patched gate).
+    What passes is embedded (digest + verdict + inputs) INSIDE the contract, which `_contract_digest`
+    then seals — so the execution/receipt chain that already proves the contract was not edited now
+    proves the risk verdict it froze, too. The touch comparison normalizes both sides through the
+    gate's own `_normalize_touch_entry`, so a `./`-prefix or case spelling difference is not read as
+    a different set."""
+    derived = RG.derive_risk_inputs(list(touch_surfaces), "unknown")
+    if not risk_gate_result:
+        if derived:
+            raise ValidationError(
+                "risk-gated falsification is required and no risk-gate result was supplied: fixed "
+                "code derives {} from the touch set being frozen, so this freeze needs "
+                "--risk-gate-result <file> (run idc_validation_risk_gate.py evaluate with this "
+                "same --touch/--baseline and an --out file) — a freeze must not skip the gate the "
+                "touch set demands (F64)".format(", ".join(derived)))
+        return None
+    try:
+        doc = _read_json(risk_gate_result)
+    except OSError as exc:
+        raise ValidationError(f"could not read risk-gate result {risk_gate_result}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValidationError(f"risk-gate result {risk_gate_result} is invalid JSON: {exc}") from exc
+    if not isinstance(doc, dict):
+        raise ValidationError(f"risk-gate result {risk_gate_result} is not an object")
+    recorded = doc.get("result_digest")
+    if recorded != RG.result_digest(doc):
+        raise ValidationError(
+            "risk-gate result digest mismatch — the result was modified after the gate produced it "
+            "(or was not produced by idc_validation_risk_gate.py); re-run the gate (F64)")
+    judged_touch = {RG._normalize_touch_entry(t) for t in (doc.get("touch") or [])}
+    frozen_touch = {RG._normalize_touch_entry(t) for t in touch_surfaces}
+    if judged_touch != frozen_touch:
+        raise ValidationError(
+            "the risk-gate result was judged on a DIFFERENT touch set than the one being frozen "
+            "(judged {} vs frozen {}) — the gate's verdict binds only the facts it judged; re-run "
+            "it with this contract's --touch (F64)".format(
+                sorted(judged_touch), sorted(frozen_touch)))
+    if doc.get("baseline") != baseline:
+        raise ValidationError(
+            "the risk-gate result was judged with baseline {!r} but this contract freezes {!r} — "
+            "re-run the gate with the frozen baseline (F64)".format(doc.get("baseline"), baseline))
+    result_inputs = doc.get("risk_inputs") or []
+    derived_full = RG.derive_risk_inputs(list(touch_surfaces), baseline)
+    missing = [name for name in derived_full if name not in result_inputs]
+    if missing:
+        raise ValidationError(
+            "the risk-gate result does not carry risk input(s) fixed code derives from the frozen "
+            "facts ({}) — the result predates the gate's derivation table or was not produced by "
+            "it; re-run the gate (F64)".format(", ".join(missing)))
+    if result_inputs and doc.get("required") is not True:
+        raise ValidationError(
+            "the risk-gate result names risk inputs but records required != true — malformed "
+            "result; re-run the gate (F64)")
+    return {
+        "result_digest": recorded,
+        "required": doc.get("required"),
+        "risk_inputs": list(result_inputs),
+        "baseline": doc.get("baseline"),
+    }
+
+
 def freeze_contract(*, repo: str, issue: int, pr: int, graph_node: str, graph_digest: str | None,
                     projection_digest: str | None, planning_receipt: str | None, touch, off_limits,
                     verify_commands, baseline: str, label: str, out: str, attempt_ceiling: int | None = None,
                     surface: str | None = None, evidence_kind: str | None = None,
                     skip_reason: str | None = None, handle_registry: str | None = None,
-                    handle_id: str | None = None):
+                    handle_id: str | None = None, risk_gate_result: str | None = None):
     workspace = _abs_repo(repo)
     attempt_ceiling = _resolve_attempt_ceiling(workspace, attempt_ceiling)
     repo = _repo_identity(workspace)
@@ -1083,6 +1163,7 @@ def freeze_contract(*, repo: str, issue: int, pr: int, graph_node: str, graph_di
     surface, evidence_kind, skip_reason, commands = _validation_surface(surface, evidence_kind, skip_reason, commands)
     touch_surfaces = _normalize_surfaces(touch, "touch")
     off_limits_surfaces = _normalize_surfaces(off_limits, "off-limits")
+    risk_gate = _risk_gate_binding(touch_surfaces, baseline, risk_gate_result)
     base_commit = git_head(workspace)
     baseline_results = _verification_results(workspace, commands)
     actual = _baseline_state(baseline_results)
@@ -1116,6 +1197,10 @@ def freeze_contract(*, repo: str, issue: int, pr: int, graph_node: str, graph_di
             else ("docs/workflow/verification-handles.yaml" if handle_id else None)
         ),
         "verification": [{"command": cmd} for cmd in commands],
+        # F64: the risk-gate verdict is INSIDE the digest-bound contract — None only when the frozen
+        # touch set carries no fixed-code-derived risk and no result was offered (see
+        # `_risk_gate_binding`, which refuses every other shape).
+        "risk_gate": risk_gate,
         "baseline": {
             "expected": baseline,
             "actual": actual,
@@ -1318,6 +1403,10 @@ def main(argv=None):
     fp.add_argument("--baseline", required=True, choices=("expected-red", "expected-green"))
     fp.add_argument("--label", required=True)
     fp.add_argument("--out", required=True)
+    fp.add_argument("--risk-gate-result", dest="risk_gate_result", default=None,
+                    help="the idc_validation_risk_gate.py evaluate --out file for THIS touch set + "
+                         "baseline; digest-verified and frozen into the contract. REQUIRED whenever "
+                         "fixed code derives risk from the touch set being frozen (F64).")
     fp.add_argument("--attempt-ceiling", type=int, default=None,
                     help="explicit attempt ceiling; when omitted, defaults from the repo config's "
                          "pathway_enforcement.attempt_ceiling, then the built-in %d" % DEFAULT_ATTEMPT_CEILING)
@@ -1378,6 +1467,7 @@ def main(argv=None):
                 skip_reason=args.skip_reason,
                 handle_registry=args.handle_registry,
                 handle_id=args.handle_id,
+                risk_gate_result=args.risk_gate_result,
             )
             return 0
         if args.command == "check-surface":

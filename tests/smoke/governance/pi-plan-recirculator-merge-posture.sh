@@ -101,6 +101,12 @@ FORBIDDEN = [
 REQUIRED_KNOWN_GOOD = [
     (0, "the integration merge is operator-performed"),          # `operator[- ]performed` (hyphen)
     (0, "the integration merge is operator performed"),           # ... and the space form
+    # The OTHER order — `operator-performed … merge` — is its own alternation branch and needs its
+    # own known-good line (F54): both lines above put `merge` FIRST, so with this branch deleted
+    # they still matched and nothing redded. These two match ONLY the operator-performed-first
+    # branch (no `performs`/`must perform`/`merges` inflection, `merge` strictly after).
+    (0, "the operator-performed merge of the planning PR"),       # `operator-performed … merge` (hyphen)
+    (0, "the operator performed merge of the planning PR"),       # ... and the space form
     (0, "the operator performs the merge"),                       # `operator (performs`
     (0, "the operator must perform the merge"),                   # `operator (must perform`
     (0, "the operator merges the planning PR"),                   # `operator (merges`

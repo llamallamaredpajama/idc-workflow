@@ -59,6 +59,21 @@ if args[:2] == ["pr", "merge"]:
     if "--squash" not in args or "--delete-branch" not in args:
         sys.stderr.write("gh stub: pr merge missing --squash/--delete-branch\n")
         sys.exit(1)
+    # F62: the merge MUST be bound to the verified receipt head, exactly as GitHub's
+    # --match-head-commit refuses a mismatched head server-side. The stub models that check
+    # faithfully: a merge without the flag, or with a flag naming anything but the branch's real
+    # tip, is refused — so dropping the binding from pr_merge turns the finish lane red.
+    if "--match-head-commit" not in args:
+        sys.stderr.write("gh stub: pr merge missing --match-head-commit — the merge is not bound "
+                         "to the verified receipt head (F62)\n")
+        sys.exit(1)
+    claimed = args[args.index("--match-head-commit") + 1]
+    tip = subprocess.run(["git", "-C", ORIGIN, "rev-parse", "refs/heads/" + BRANCH],
+                         capture_output=True, text=True).stdout.strip()
+    if not tip or claimed != tip:
+        sys.stderr.write("gh stub: pull request head %r does not match --match-head-commit %r "
+                         "(F62 mismatch refusal)\n" % (tip, claimed))
+        sys.exit(1)
     open(STATE_FILE, "w").close()
     if os.environ.get("GH_SKIP_REMOTE_DELETE") != "1":
         subprocess.run(["git", "-C", ORIGIN, "branch", "-D", BRANCH], capture_output=True)

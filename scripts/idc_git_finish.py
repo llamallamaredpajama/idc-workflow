@@ -288,10 +288,26 @@ def resolve_branch(repo, pr):
     return out.strip()
 
 
-def pr_merge(repo, pr, merge_method):
-    rc, out, err = _run(["gh", "pr", "merge", str(pr), f"--{merge_method}", "--delete-branch"], repo)
+def pr_merge(repo, pr, merge_method, match_head):
+    """Merge EXACTLY the verified head, or refuse (F62). `match_head` is the head commit the build
+    receipt attested (review + verification both bind to it); `--match-head-commit` makes GitHub
+    refuse the merge server-side if the PR head is anything else. Without it there is a race the
+    local checks cannot close: `enforce_build_receipt` proves the branch tip matches the receipt,
+    but a push landing between that read and this call would merge a head NO receipt attests — the
+    ruleset's own protections (`require_last_push_approval`, strict status checks) mitigate that on
+    installed repos, and this makes the guarantee LOCAL rather than dependent on the ruleset having
+    been installed. A mismatch is a refusal requiring fresh evidence (re-run verification/review on
+    the new head), never a retry with a re-read head."""
+    if not re.fullmatch(r"[0-9a-f]{40}", str(match_head or "")):
+        _fail("merge", f"refusing to merge PR #{pr} without a valid verified head commit to bind "
+                       f"(got {match_head!r}) — the merge must land exactly the head the receipts attest")
+    rc, out, err = _run(["gh", "pr", "merge", str(pr), f"--{merge_method}", "--delete-branch",
+                         "--match-head-commit", match_head], repo)
     if rc != 0:
-        _fail("merge", f"gh pr merge --{merge_method} --delete-branch #{pr} failed: {err.strip()[:300]}")
+        _fail("merge", f"gh pr merge --{merge_method} --delete-branch --match-head-commit "
+                       f"{match_head[:12]} #{pr} failed: {err.strip()[:300]} — if the head moved "
+                       f"after verification, this is the F62 guard working: produce fresh "
+                       f"receipts/review for the new head, never merge past them")
 
 
 def push_delete_remote_best_effort(repo, branch):
@@ -754,7 +770,9 @@ def enforce_receipt_gate(args, backend, repo, tracker_path, owner, project_numbe
 
 
 def enforce_build_receipt(args, repo, branch):
-    """Mandatory U6 implementation-receipt gate for the normal finish path.
+    """Mandatory U6 implementation-receipt gate for the normal finish path. Returns the VERIFIED
+    HEAD commit the receipt attests, so the merge can be bound to exactly that commit (F62) —
+    the receipt is the one artifact that proves which head was reviewed and verified.
 
     Every supported/public/canonical finish route must supply --build-receipt. The receipt is
     authoritative: it must be source-owned, bound to THIS issue/PR, bound to THIS branch's current
@@ -766,10 +784,11 @@ def enforce_build_receipt(args, repo, branch):
               "must be proven before merge/close")
     try:
         import idc_build_receipt as BR  # noqa: E402 — lazy: only the U6 path needs this helper
-        BR.verify_receipt(repo=repo, receipt_path=args.build_receipt,
-                          expected_issue=args.issue, expected_pr=args.pr, head_ref=branch)
+        verified = BR.verify_receipt(repo=repo, receipt_path=args.build_receipt,
+                                     expected_issue=args.issue, expected_pr=args.pr, head_ref=branch)
     except Exception as exc:  # noqa: BLE001 — any stale/forged receipt fails closed here
         _fail("build-receipt", str(exc))
+    return (verified or {}).get("head")
 
 
 def close_only_recover(args, repo, worktree_abs, tracker_path, backend, project_number, field_ids,
@@ -915,7 +934,7 @@ def main():
     enforce_receipt_gate(args, backend, repo, tracker_path, owner, project_number)
 
     branch = resolve_branch(repo, args.pr)
-    enforce_build_receipt(args, repo, branch)
+    verified_head = enforce_build_receipt(args, repo, branch)
     worktree_remove(repo, worktree_abs)
     # RECORD IN-FLIGHT STATE, immediately before the point of no return. Set here rather than at the
     # top of the tail on purpose: everything above this line is reversible and leaves no shipped
@@ -924,7 +943,7 @@ def main():
     _require_mid_finish_obligation(repo, args.issue, session_id, pr=args.pr, branch=branch,
                                    worktree=worktree_abs or "", backend=backend,
                                    tracker=(tracker_path if backend == "filesystem" else ""))
-    pr_merge(repo, args.pr, args.merge_method)
+    pr_merge(repo, args.pr, args.merge_method, verified_head)
     verify_remote_branch_gone(repo, branch)
     branch_delete_local(repo, branch)
     tracker_close(backend, repo, args.issue, tracker_path, project_number, field_ids, owner, name,

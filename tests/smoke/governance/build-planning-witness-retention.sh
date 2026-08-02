@@ -297,6 +297,52 @@ if live_dg not in synth:
     sys.exit(1)
 print("ok: keep is live UNION newest-%d (%d entries), not live + newest-%d"
       % (RETAIN, len(synth), RETAIN - 1))
+
+# (C6) WRONG-TYPE `validated_at` shapes and a NON-DICT record must not crash the eviction sort and
+#      must never be grace-retained (F43 durability — this is the permanent fixture behind the
+#      one-off round-5 receipt). C3 above plants an unparseable STRING and a MISSING key — both of
+#      which the PRE-fix `(rec.get("validated_at") or "", dg)` key SURVIVED (falsy -> `or ""`), so
+#      C3 does not cover F43 at all. The F43 crash needs a TRUTHY non-string (a nonzero number, a
+#      non-empty dict/list), which compares int/dict/list against str inside `sorted()`, or a
+#      non-dict RECORD, which raises AttributeError on `.get` — and it lands after the receipt was
+#      already replaced on disk, leaving it unwitnessed. Red-when-broken: restore the pre-fix sort
+#      key (or `.get` without the dict check) and this case CRASHES the lane red; drop only the
+#      never-grace-retained half and the retention assertions fire.
+synth = {
+    "truthy-int":  {"validated_at": 1234567890},        # the F43 crash shape
+    "truthy-list": {"validated_at": ["2026-01-01"]},
+    "truthy-dict": {"validated_at": {"at": "2026"}},
+    "falsy-zero":  {"validated_at": 0},                 # pre-fix survivor — kept for the grace half
+    "not-a-dict":  "corrupted-record",                  # the AttributeError shape
+}
+for i in range(RETAIN + 2):
+    synth["fresh%02d" % i] = {"validated_at": stamp(60 * (i + 1))}
+try:
+    VC._evict_stale_versions(synth, NOWHERE)
+except (TypeError, AttributeError) as exc:
+    print("F43-CRASH: a wrong-type validated_at (or non-dict record) crashed the eviction sort — "
+          "the receipt is left UNWITNESSED when this happens after the on-disk replace: %r" % (exc,))
+    sys.exit(1)
+poisoned = [k for k in ("truthy-int", "truthy-list", "truthy-dict", "falsy-zero", "not-a-dict")
+            if k in synth]
+if poisoned:
+    print("WRONG-TYPE-TREATED-AS-GRACE: records with unusable validated_at shapes were retained "
+          "past %d fresh versions: %r" % (RETAIN + 2, poisoned))
+    sys.exit(1)
+# ...and boundedness holds through the real write door even with a poisoned bucket at scale.
+big = {"poison%03d" % i: {"validated_at": [i]} for i in range(CAP + 20)}
+big.update({"fresh%03d" % i: {"validated_at": stamp(60 * (i + 1))} for i in range(RETAIN + 2)})
+try:
+    VC._evict_stale_versions(big, NOWHERE)
+except (TypeError, AttributeError) as exc:
+    print("F43-CRASH-AT-SCALE: %r" % (exc,))
+    sys.exit(1)
+if len(big) > CAP:
+    print("CAP-EXCEEDED-POISONED: %d entries retained in a poisoned bucket (hard cap %d)"
+          % (len(big), CAP))
+    sys.exit(1)
+print("ok: wrong-type validated_at shapes and non-dict records evict cleanly, never crash, never "
+      "grace-retain (F43)")
 PY
 
-echo "PASS: planning-witness retention is a BOUNDED count+age hybrid (F31/W5) — the hard cap holds even when every version is inside the grace window and evicts oldest-first, a version inside the grace window survives >RETAIN newer re-applies and stays borrowable, a version past the window is still evicted, an unparseable stamp is never grace-retained, and the current receipt stays borrowable while an evicted version is refused fail-closed"
+echo "PASS: planning-witness retention is a BOUNDED count+age hybrid (F31/W5) — the hard cap holds even when every version is inside the grace window and evicts oldest-first, a version inside the grace window survives >RETAIN newer re-applies and stays borrowable, a version past the window is still evicted, an unparseable stamp is never grace-retained, the current receipt stays borrowable while an evicted version is refused fail-closed, and a WRONG-TYPE validated_at (truthy number/list/dict) or a non-dict record neither crashes the eviction sort nor earns grace (F43)"

@@ -27,10 +27,14 @@ admission; reusable verification recipes resolve through the governed
 `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_verification_handles.py" resolve ...` (schema-checked +
 secret-free before citation/use, missing handles route to a named recirculation / blocked-dependency
 obligation, never a warning-only pass); and every ticket runs the bounded fixed-code falsifier
-`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_validation_risk_gate.py" evaluate ...` before any frozen
-gate is emitted — the helper itself decides whether falsification is required, deriving risk in
-fixed code from the touch set it is given (the same set the contract will freeze) and the baseline,
-so on that touch set omitting `--risk-input` cannot skip it. The matrix passes `idc:idc-matrix-analysis`'s check; re-sequencing is global but
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_validation_risk_gate.py" evaluate ... --out <result.json>`
+before any frozen gate is emitted — the helper itself decides whether falsification is required,
+deriving risk in fixed code from the touch set it is given (the same set the contract will freeze)
+and the baseline, so on that touch set omitting `--risk-input` cannot skip it. Keep the `--out`
+result: Build's contract freeze verifies its digest and freezes it in
+(`idc_validation_contract.py freeze --risk-gate-result <result.json>`), and REFUSES to freeze a
+touch set that derives risk without one — so the judged facts and the frozen facts are the same
+facts (F64). The matrix passes `idc:idc-matrix-analysis`'s check; re-sequencing is global but
 `In Progress` issues are immutable. The authored matrix is descriptive input only —
 `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_execution_graph.py" --matrix <matrix> ... --json` re-derives
 authoritative whole-horizon Waves, and `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_tracker_projection.py"

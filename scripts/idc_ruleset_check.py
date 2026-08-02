@@ -173,9 +173,39 @@ def validate_github_ruleset(gh: dict) -> list:
     if gh.get("enforcement") != "active":
         reasons.append("ruleset enforcement is not 'active' (a disabled ruleset enforces nothing)")
 
-    # required PR flow
-    if _rule(rules, "pull_request") is None:
+    # required PR flow — and the PR rule's require_code_owner_review parameter (F38). The whole
+    # protected-surface/CODEOWNERS half of this module exists to make that ONE flag bind a real
+    # reviewer, and it was the one property never verified: a ruleset that set it false (or omitted
+    # it) passed clean, so every ownership gate downstream was measuring protection GitHub was not
+    # applying. `is not True` deliberately — a truthy non-boolean in a hand-edited/proxied payload is
+    # not the documented value and refuses (the same rule the installer's permission booleans follow).
+    pr_rule = _rule(rules, "pull_request")
+    if pr_rule is None:
         reasons.append("no 'pull_request' rule — pull requests are not required for protected branches")
+    else:
+        pr_params = pr_rule.get("parameters")
+        if not isinstance(pr_params, dict):
+            reasons.append("the pull_request rule carries no parameters object — "
+                           "require_code_owner_review cannot be confirmed on")
+        elif pr_params.get("require_code_owner_review") is not True:
+            reasons.append(
+                "pull_request.parameters.require_code_owner_review is not true — without it, "
+                "CODEOWNERS binds no required reviewer to any protected surface and the whole "
+                "ownership contract this ruleset carries enforces nothing (F38)")
+
+    # bypass actors (F38). A bypass actor steps past EVERY rule above for the branches this ruleset
+    # protects, so a non-empty list silently withdraws the protection the rest of this validation
+    # certifies. The shipped ruleset declares none; absent or an empty list are the only shapes that
+    # pass. A non-list is a malformed payload and refuses rather than being read as "none".
+    bypass = gh.get("bypass_actors")
+    if bypass is not None and not isinstance(bypass, list):
+        reasons.append("bypass_actors is {}, not a list — refusing to read a malformed bypass "
+                       "list as empty".format(type(bypass).__name__))
+    elif bypass:
+        reasons.append(
+            "bypass_actors names {} actor(s) — a bypass actor can push/merge past every rule in "
+            "this ruleset, so the protection being certified does not apply to them; remove the "
+            "bypass grants (F38)".format(len(bypass)))
 
     # required status check at the exact head
     rsc = _rule(rules, "required_status_checks")
@@ -582,7 +612,20 @@ def _is_owner_token(tok: str) -> bool:
 
 def _codeowners_rules(text: str) -> list:
     """Parse CODEOWNERS into `(pattern, owners)` pairs, dropping comments and blank lines. Only
-    syntactically valid owner tokens count as owners (`_is_owner_token`, F41)."""
+    syntactically valid owner tokens count as owners (`_is_owner_token`, F41).
+
+    A LINE CARRYING ANY SYNTAX-INVALID OWNER TOKEN CONTRIBUTES NO OWNERS AT ALL (F49). GitHub
+    documents that a CODEOWNERS line containing invalid syntax is SKIPPED ENTIRELY — so
+    `docs/** @alice docs@` binds NOBODY on GitHub (`docs@` is the errors API's syntax-class
+    `Invalid owner`, not a merely-unresolvable handle). The old parse dropped `docs@` and KEPT
+    `@alice`, certifying a surface GitHub leaves unowned off a single typo. The line is modeled as
+    PRESENT-BUT-OWNERLESS rather than deleted, deliberately: an ownerless rule can only ever UN-own
+    (it never certifies), whereas deleting the line reproduces GitHub exactly only if this parser's
+    syntax judgment matches GitHub's byte for byte — wherever they might disagree, ownerless refuses
+    and deleted could certify through an earlier broad rule. Fail closed costs at most a false
+    refusal that names the surface, and the fix it demands (remove the malformed token) is the fix
+    the file needs anyway. A line with a pattern and NO tokens at all is untouched — that is valid
+    CODEOWNERS syntax GitHub honors (it un-owns), not an invalid line."""
     rules = []
     for line in text.splitlines():
         line = line.split("#", 1)[0].strip()
@@ -590,7 +633,10 @@ def _codeowners_rules(text: str) -> list:
             continue
         parts = line.split()
         pattern = parts[0]
-        owners = [tok for tok in parts[1:] if _is_owner_token(tok)]
+        tokens = parts[1:]
+        owners = [tok for tok in tokens if _is_owner_token(tok)]
+        if len(owners) != len(tokens):
+            owners = []            # an invalid token voids the LINE's owners on GitHub (F49)
         rules.append((pattern, owners))
     return rules
 
@@ -967,10 +1013,20 @@ def validate_codeowners(repo_root: str, surfaces) -> list:
                                        read_problem=read_problem)
 
 
+# Every `gh` call is BOUNDED (F55). The pattern and the rationale are the installer's `_git` bound:
+# an unbounded child converts a refusal into an invisible, indefinite hang — and these are the calls
+# that actually cross the network, where a wedged proxy or a half-open connection is the ordinary
+# failure, not the exotic one. `_gh_json_all_pages` can issue up to `_MAX_LISTING_PAGES` sequential
+# requests, so without a per-call bound the walk's own ceiling bounds nothing in TIME. A timeout is
+# "we could not check", and that must never resolve to "certify it" — it converts to the same
+# RuntimeError every caller already refuses on. Availability only: a hang never certified anything.
+_GH_TIMEOUT_SECONDS = 120
+
+
 def _gh_json(args: list, repo_flag=None):
     cmd = ["gh"] + args
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True)
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=_GH_TIMEOUT_SECONDS)
     except OSError as exc:
         # An absent or unexecutable `gh` is a FAILURE TO VERIFY, not a pass. Converted here — at the
         # single door every live read in this module goes through — so `--repo` mode refuses through
@@ -978,6 +1034,10 @@ def _gh_json(args: list, repo_flag=None):
         # traceback past the gates. The installer carries the identical conversion (F10); this module
         # is its own door and did not inherit it (F15).
         raise RuntimeError("could not invoke gh: {}".format(exc))
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("`{}` did not finish within {}s and was killed — an unanswerable live "
+                           "read is a failure to verify, not a pass (F55)".format(
+                               " ".join(cmd), _GH_TIMEOUT_SECONDS))
     if out.returncode != 0:
         raise RuntimeError("`{}` failed: {}".format(" ".join(cmd), CS.scrub(out.stderr).strip()[:200]))
     return json.loads(out.stdout or "null")
@@ -1094,6 +1154,17 @@ def main(argv=None) -> int:
                 doc = json.load(fh)
             contract = doc.get("idc_contract") or {}
             reasons += validate_contract(contract)
+        elif args.repo_root:
+            # F41: ownership validation was REQUESTED (--repo-root) but no local ruleset names the
+            # protected surfaces, so `surfaces` below would be the EMPTY list and the ownership loop
+            # would validate NOTHING — then print `OK (... protected surfaces)` as a vacuous green.
+            # File mode refuses a missing ruleset outright; live mode must not quietly certify past
+            # the same absence when a caller asked for the one check that needs the file.
+            reasons.append(
+                "--repo-root ownership validation needs the protected-surface list, and no local "
+                "ruleset file is available to supply it (looked at {}) — with no surface list the "
+                "ownership check would validate ZERO surfaces and certify vacuously (F41). Pass "
+                "--ruleset <file> alongside --repo-root.".format(local))
         else:
             print("  note: protected-surface metadata not checked (no local ruleset file available)")
     else:
@@ -1131,8 +1202,17 @@ def main(argv=None) -> int:
             print("  - {}".format(r))
         return 1
 
-    print("idc-pathway-integrity ruleset: OK (PR flow, exact-head {} check, force-push/deletion "
-          "prevention, protected surfaces)".format(REQUIRED_CHECK))
+    # The OK line enumerates exactly what was validated. "protected surfaces" is claimed only when a
+    # contract was actually available to check them from — in live mode with no local ruleset file
+    # (and no --repo-root, which refuses above — F41) that claim would be vacuous, so it is replaced
+    # by an explicit not-checked note rather than printed anyway.
+    claims = ("PR flow + code-owner review, exact-head {} check, force-push/deletion prevention, "
+              "no bypass actors".format(REQUIRED_CHECK))
+    if contract is not None:
+        claims += ", protected surfaces"
+    else:
+        claims += "; protected surfaces NOT checked (no local ruleset file)"
+    print("idc-pathway-integrity ruleset: OK ({})".format(claims))
     return 0
 
 

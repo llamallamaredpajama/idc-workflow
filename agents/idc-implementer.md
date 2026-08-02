@@ -60,7 +60,11 @@ API sink). No cache path in the brief → tracker ops fall back to a live board 
    it derives risk from the `--touch` set it is given, the same set this freeze records (plus
    `--baseline`, the same `expected-red`/`expected-green` value the freeze records), and skips only
    what it judges trivial, so on that touch set omitting `--risk-input` cannot suppress a risk it
-   derived. Its
+   derived. Save its `--out` result file and pass it to the freeze as `--risk-gate-result`: the
+   freeze digest-verifies the result, requires its touch set + baseline to EQUAL the frozen ones,
+   freezes the verdict into the contract, and REFUSES to freeze a risk-deriving touch set without
+   it (F64) — so the falsifier cannot be satisfied by judging a narrower change than the one being
+   frozen, or by not being run at all. Its
    `--attempt-ceiling` is the repo's resolved ceiling from
    `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_validation_contract.py" attempt-ceiling --repo "$PWD"`
    (the config's `pathway_enforcement.attempt_ceiling`, default 3) — the SAME value the freeze

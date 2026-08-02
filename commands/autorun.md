@@ -1,6 +1,6 @@
 ---
 description: IDC Autorun — fixpoint full-pipe loop drainer (drain the Recirculation inbox, plan unplanned considerations, heal the board, build eligible Buildable waves; re-loop to a fixpoint, not one-shot)
-argument-hint: '[--consideration <path>...] [free-form notes]'
+argument-hint: '[--consideration <path>...] [--allow-stale-plugin] [free-form notes]'
 ---
 
 You are running `/idc:autorun`, the one button. Operate as the Autorun orchestrator **in this
@@ -21,6 +21,51 @@ at expansion; verify it before the drain, and **close it with a validated termin
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" status \
   --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --json
 ```
+
+**Stale-plugin gate (fail closed — run FIRST, before the orchestrator marker or any preflight).**
+Autorun is the unattended entry point, and an autonomous run executing stale cached plugin code is
+the RC7 failure class: sessions re-discovering and ad-hoc re-patching bugs the plugin already fixed,
+compounded across every issue the drain touches before a human notices. `/idc:doctor` check 8
+surfaces a stale cache as an advisory; **here it is a refusal.** Read both freshness signals,
+read-only:
+
+```bash
+# 1) the running version vs this repo's install receipt + the version-keyed cache siblings
+#    (the same guard /idc:update's Phase 0 runs; exit 4 = stale, exit 2 = invalid receipt)
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_plugin_freshness.py" \
+  --plugin-root "${CLAUDE_PLUGIN_ROOT}" --repo "$PWD" --json
+# 2) the running version vs the marketplace clone (doctor check 8's compare — catches an installed
+#    cache that is ITSELF behind what `claude plugin marketplace update` already pulled)
+ver() { grep -E '"version"' "$1" 2>/dev/null | head -1 \
+  | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/'; }
+run_ver=$(ver "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json")
+clone_ver=$(ver "$HOME/.claude/plugins/marketplaces/idc-workflow/.claude-plugin/plugin.json")
+echo "running ${run_ver:-unknown}; marketplace ${clone_ver:-absent}"
+```
+
+If the helper reports `"verdict": "stale"` (exit 4), **or** both versions are readable and
+`clone_ver` differs from `run_ver` → **REFUSE TO START THE DRAIN.** Do not set the orchestrator
+marker, run no preflight, touch no board item. Print exactly this remedy and stop:
+
+```
+stale plugin cache — autorun refuses to drain on stale code (issue #106 / RC7).
+Fix: claude plugin update idc@idc-workflow --scope project    (terminal command)
+     then /reload-plugins (or restart the session) and re-run /idc:autorun
+     (`/clear` does NOT reload plugin commands or hooks)
+Override: /idc:autorun --allow-stale-plugin    (explicit operator decision only)
+```
+
+If the helper instead exits `2` (invalid receipt), stop the same way — the repo's install receipt
+needs repair before an autonomous run may trust any version claim (`/idc:update` Phase 0's rule).
+An unreadable `run_ver` or an absent marketplace clone makes signal 2 indeterminate, not stale —
+only the helper's verdict decides then (doctor check 8 treats that row as advisory SKIP for the
+same reason). A `--plugin-dir` dev load reports `development-current`, never `stale`, so this gate
+does not obstruct sandbox e2e runs.
+
+**The override is explicit, never assumed:** only `--allow-stale-plugin` in `$ARGUMENTS` proceeds
+past a stale signal (an operator deliberately draining on a pinned or dev version). Record it in
+the exit report as `stale-plugin: overridden by operator (--allow-stale-plugin)`; a headless run
+without the flag never proceeds stale.
 
 **Mark this session as a drain orchestrator (deterministic liveness — run ONCE, at drain start).**
 Before the loop below, record in the obligations ledger that THIS session is an active autorun drain,

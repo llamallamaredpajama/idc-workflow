@@ -48,6 +48,8 @@ and `idc_tracker_fs` for the filesystem write.
 Usage:
   idc_recirc_sweep.py --repo <dir> --auto-correct [--tracker <TRACKER.md>] [--matrices <dir>]
   idc_recirc_sweep.py --repo <dir> --report       [--tracker <TRACKER.md>] [--matrices <dir>]
+  idc_recirc_sweep.py --repo <dir> --derive-recirc-count <N>   # issue N's board-derived recirc_count
+                                                               # (#108) — bare int; exit 2 = uncomputable
 """
 import argparse
 import json
@@ -237,6 +239,25 @@ def discovery_source(marker, host_number):
     so the (origin, what) key is hashable and stable across runs."""
     origin = marker.get("origin") or f"#{host_number}"
     return {"origin": str(origin), "what": str(marker.get("what", "")).strip()}
+
+
+def origin_issue(origin):
+    """The issue number an idc-recirc-source `origin` names ("#42|finisher" / "#42" / 9), or None.
+    A prefix parse (the origin's role suffix is free-form), stringified first so numeric origins
+    (older markers carry bare ints) resolve the same way."""
+    m = re.match(r"#?(\d+)", str(origin or "").strip())
+    return int(m.group(1)) if m else None
+
+
+def derived_recirc_count(issue_number, tickets):
+    """The BOARD-DERIVED recirc_count for `issue_number` (issue #108): how many DISTINCT
+    Recirculation tickets — ANY Status, including retired/Done — carry an idc-recirc-source marker
+    whose origin names that issue. The runaway caps (`idc_recirc_caps.py`) decide over a
+    consultant-maintained bump today; a consultant that forgets to increment lets an issue loop
+    past the ceiling. Counting the issue's historical tickets from the board itself removes that
+    trust: every recirc event that ever filed (or adopted) a ticket is counted, whether or not the
+    bump happened. PURE (unit-testable): `tickets` is [{"number": int, "origins": {int, ...}}]."""
+    return sum(1 for t in tickets if issue_number in (t.get("origins") or set()))
 
 
 def recirc_ticket_body(src, area, suggested_scope):
@@ -1053,6 +1074,90 @@ def render_report(findings, backend, matrices):
     return lines
 
 
+# ── derived recirc_count (issue #108) ────────────────────────────────────────
+def _fs_recirc_tickets(state):
+    """[{number, origins}] for every Stage=Recirculation issue in a loaded filesystem tracker —
+    ANY Status (retired/Done tickets count, #108). Markers ride issue comments on this backend."""
+    out = []
+    for it in state.get("issues", []):
+        if not isinstance(it, dict) or (it.get("stage") or "") != RECIRC_STAGE:
+            continue
+        if it.get("number") is None:
+            continue
+        text = "\n".join(str(c) for c in (it.get("comments") or []) if c is not None)
+        origins = {origin_issue(obj.get("origin"))
+                   for obj in parse_markers(text, RECIRC_SOURCE_MARKER)}
+        origins.discard(None)
+        out.append({"number": it.get("number"), "origins": origins})
+    return out
+
+
+def _github_recirc_tickets(repo, owner, project_number):
+    """[{number, origins}] for every Stage=Recirculation board item — ANY Status (retired/Done
+    tickets count, #108). Raises idc_gh_board.BoardReadError on ANY failed read, including a single
+    unreadable ticket body: unlike the sweep's fail-soft dedupe, the derivation feeds the runaway
+    caps, where a silently missed marker UNDER-counts and un-parks a runaway — so an uncomputable
+    input must fail closed (the caps caller treats a non-zero exit as PARK+surface)."""
+    items = idc_gh_board.fetch_items(owner, project_number, repo)
+    out = []
+    for it in items:
+        if (it.get("stage") or "") != RECIRC_STAGE:
+            continue
+        number = (it.get("content") or {}).get("number")
+        if number is None:
+            continue
+        okb, body_out, err = gh(["issue", "view", str(number), "--json", "body"], repo)
+        if not okb:
+            raise idc_gh_board.BoardReadError(
+                f"could not read Recirculation ticket #{number} body ({err.strip()[:120]})")
+        try:
+            body = json.loads(body_out).get("body") or ""
+        except json.JSONDecodeError as e:
+            raise idc_gh_board.BoardReadError(f"unparseable body payload for #{number} ({e})")
+        origins = {origin_issue(obj.get("origin"))
+                   for obj in parse_markers(body, RECIRC_SOURCE_MARKER)}
+        origins.discard(None)
+        out.append({"number": number, "origins": origins})
+    return out
+
+
+def run_derive(repo, issue_number, tracker):
+    """(exit_code, lines) for --derive-recirc-count: the board-derived count for one issue, printed
+    as a bare integer — composable straight into `idc_recirc_caps.py --recirc-count`. FAIL-CLOSED:
+    an unreadable backend/tracker/board exits 2 and prints NO count (never a guessed 0 — the caps
+    caller treats a non-zero exit as PARK+surface, so an uncomputable count can't wave the loop on)."""
+    backend = read_backend(repo)
+    if backend is None:
+        sys.stderr.write("idc-recirc-sweep: no tracker-config.yaml backend — cannot derive recirc_count\n")
+        return 2, []
+    if backend == "filesystem":
+        if not os.path.isfile(tracker):
+            sys.stderr.write("idc-recirc-sweep: no TRACKER.md — cannot derive recirc_count\n")
+            return 2, []
+        try:
+            state = idc_tracker_fs.load(tracker)
+        except SystemExit:
+            sys.stderr.write("idc-recirc-sweep: unreadable TRACKER.md — cannot derive recirc_count\n")
+            return 2, []
+        return 0, [str(derived_recirc_count(issue_number, _fs_recirc_tickets(state)))]
+    if backend == "github":
+        project_number, _ = read_config(repo)
+        owner = gh_owner(repo)
+        if not owner or not project_number:
+            sys.stderr.write(
+                "idc-recirc-sweep: could not resolve owner/project_number — cannot derive recirc_count\n")
+            return 2, []
+        try:
+            tickets = _github_recirc_tickets(repo, owner, project_number)
+        except idc_gh_board.BoardReadError as e:
+            sys.stderr.write(
+                f"idc-recirc-sweep: board read failed — cannot derive recirc_count ({str(e)[:160]})\n")
+            return 2, []
+        return 0, [str(derived_recirc_count(issue_number, tickets))]
+    sys.stderr.write(f"idc-recirc-sweep: unknown backend '{backend}' — cannot derive recirc_count\n")
+    return 2, []
+
+
 # ── entry point ──────────────────────────────────────────────────────────────
 def run(repo, mode, tracker, matrices_dir):
     """Returns (exit_code, output_lines). Never raises in --auto-correct (fail-soft)."""
@@ -1128,6 +1233,11 @@ def main():
                       help="SessionEnd hook: mutate the board through the active backend (fail-soft)")
     mode.add_argument("--report", dest="mode", action="store_const", const="report",
                       help="/idc:doctor: read-only, mutate nothing, exit 0")
+    mode.add_argument("--derive-recirc-count", dest="derive_issue", type=int, metavar="N",
+                      help="print issue N's BOARD-DERIVED recirc_count (issue #108) — the runaway "
+                           "caps' input counted from the board's Recirculation tickets (any Status, "
+                           "retired included) instead of a trusted consultant bump; exits 2 when the "
+                           "board cannot be read (fail-closed: never a guessed count)")
     ap.add_argument("--tracker", default=None, help="TRACKER.md path (default: <repo>/TRACKER.md)")
     ap.add_argument("--matrices", default=None,
                     help="pillar-matrices dir (default: <repo>/docs/workflow/pillar-matrices)")
@@ -1136,6 +1246,13 @@ def main():
     repo = os.path.abspath(args.repo)
     tracker = args.tracker or os.path.join(repo, "TRACKER.md")
     matrices_dir = args.matrices or os.path.join(repo, "docs", "workflow", "pillar-matrices")
+
+    if args.derive_issue is not None:
+        # Derived recirc_count (issue #108) — read-only, fail-closed (exit 2 = uncomputable → PARK).
+        code, out = run_derive(repo, args.derive_issue, tracker)
+        for ln in out:
+            print(ln)
+        sys.exit(code)
 
     if args.mode == "auto-correct":
         # The SessionEnd hook must NEVER block session exit: swallow every error, always exit 0.

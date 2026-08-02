@@ -210,7 +210,9 @@ echo "running ${run_ver:-unknown}; marketplace ${clone_ver:-absent}"
   hint: `claude plugin update idc@idc-workflow --scope project`, then run `/reload-plugins` (or
   restart the session) to rebuild the cache. **`/clear` does not reload plugin commands or
   hooks** and will not fix this — it only clears conversation context. (Still counts as PASS — a
-  stale cache is a heads-up, not a broken repo.)
+  stale cache is a heads-up, not a broken repo. But it is a **refusal at the autonomous entry
+  point**: `/idc:autorun`'s stale-plugin gate declines to start a drain on this same signal
+  unless the operator explicitly passes `--allow-stale-plugin`.)
 - **SKIP** — `run_ver` unreadable (a managed / `--plugin-dir` load with no manifest on the cache
   path). This row is **advisory and is never FAIL.**
 

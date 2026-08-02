@@ -183,7 +183,10 @@ pillar-level *file* clashes among the surviving, de-duplicated pillars.
    github-only. **Provenance post-condition (github, DET-VERIFY):** the transaction's OWN post-apply
    body postcondition already re-read each minted issue's LIVE body and proved the marker landed, so
    running
-   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_provenance_check.py" --matrix <phase-tag>-matrix.yaml --issues <n1,n2,...>`
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_provenance_check.py" --matrix docs/workflow/pillar-matrices/<phase-tag>-matrix.yaml --issues <n1,n2,...>`
+   from the repo root (`--matrix` is a real path resolved against the cwd — a bare basename fails
+   with `cannot read matrix` from the repo root; the marker's `matrix` value stays the basename,
+   which the checker derives itself)
    is a belt-and-suspenders verification of an **already-satisfied invariant** — it re-reads each
    issue's LIVE body (not Plan's own belief of what it wrote) and confirms a valid marker naming a
    pillar actually in the matrix just authored. **Exit 0** confirms every minted Buildable is stamped.

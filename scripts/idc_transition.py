@@ -1650,10 +1650,19 @@ def run(op, ctx, **kw):
                 journal_append(ctx["repo"], op, backend, tracker_rel,
                                dict(kw, to_status=to_status), cur=cur)
             if op == "claim":
+                # A RECLAIM (#160): only the Status write is redundant on an already-In Progress
+                # claim — the documented claim contract (status + attribution) still owes the rest.
+                # A session resumed after a rate-limit death re-claims through here, so record the
+                # CURRENT agent and journal the (re)claim — its record self-identifies as a reclaim
+                # ("claim #N In Progress -> In Progress"), and replay is unchanged (same to-state).
+                if spec.get("records_agent") and kw.get("agent"):
+                    record_owner(ctx, num, kw["agent"])
+                journal_append(ctx["repo"], op, backend, tracker_rel,
+                               dict(kw, to_status=to_status), cur=cur)
                 # The sanctioned RENEW door (V-AUTH stage 2): re-claiming an already-In Progress item
-                # is a board no-op, but it RE-MINTS the claim-scoped authorization with a fresh TTL —
-                # the recovery for a mint that failed after the board write, and the renewal for a
-                # unit whose implementation outlives one TTL window.
+                # RE-MINTS the claim-scoped authorization with a fresh TTL — the recovery for a mint
+                # that failed after the board write, and the renewal for a unit whose implementation
+                # outlives one TTL window.
                 _mint_claim_authorization(ctx, num)
             return
         if cur["status"] == machine.get("terminal_status"):

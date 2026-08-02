@@ -1878,20 +1878,45 @@ def build_parser():
 
 
 def resolve_backend(args):
+    """The backend for this invocation: an explicit --backend wins; else the `backend:` declared in
+    <repo>/docs/workflow/tracker-config.yaml; else — ONLY when no config file exists at all (the
+    genuinely pre-scaffold repo) — the filesystem default. FAIL-CLOSED (#153): a config that EXISTS
+    but cannot be read, or does not declare a known backend, is a REFUSAL (TransitionError, exit 2),
+    never a silent filesystem retarget — the old broad-except fallback would land a github repo's
+    create in TRACKER.md, a quiet misroute the operator only notices by absence."""
     if args.backend:
         return args.backend
-    try:
-        import idc_recirc_sweep as SW
-        return SW.read_backend(os.path.abspath(args.repo)) or "filesystem"
-    except Exception:
+    cfg = os.path.join(os.path.abspath(args.repo), "docs", "workflow", "tracker-config.yaml")
+    if not os.path.exists(cfg):
         return "filesystem"
+    try:
+        with open(cfg, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError as e:
+        raise TransitionError(
+            f"tracker-config.yaml exists but is unreadable ({e}) — refusing to guess a backend "
+            "(a silent filesystem fallback misroutes board writes); repair the config or pass --backend")
+    m = re.search(r"^\s*backend:\s*([A-Za-z0-9_-]+)", text, re.M)
+    declared = m.group(1) if m else None
+    if declared not in ("filesystem", "github"):
+        raise TransitionError(
+            f"tracker-config.yaml exists but declares no usable backend (found {declared!r}) — "
+            "refusing to guess (a silent filesystem fallback misroutes board writes); repair the "
+            "config or pass --backend")
+    return declared
 
 
 def main():
     args = build_parser().parse_args()
     repo = os.path.abspath(args.repo)
     machine = load_machine(machine_path_for(repo, args.machine))
-    backend = resolve_backend(args)
+    # Backend resolution can REFUSE (#153: a present-but-unreadable/corrupt tracker-config.yaml) —
+    # map that to the same exit-2 denial contract as every other TransitionError, before any write.
+    try:
+        backend = resolve_backend(args)
+    except TransitionError as e:
+        sys.stderr.write(f"idc-transition: {e}\n")
+        sys.exit(2)
     tracker = args.tracker or os.path.join(repo, "TRACKER.md")
     if backend == "github":
         ctx = github_ctx(repo, args.owner, args.project, machine)

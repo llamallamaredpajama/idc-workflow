@@ -261,16 +261,18 @@ python3 "$SCRIPT" --repo "$WORK/plain" ensure-gitignore >/dev/null 2>&1
 # enough to stay meaningful instead of becoming a file-level allowlist that hides real reads:
 #   * `__pycache__` holds compiled bytecode of these same sources — a `.pyc` of the mirror IS the
 #     mirror, not a reader, and those dirs exist in any checkout where the suite has run.
-#   * NAMING the module is not READING it. Two shipped sites must name it and neither consults its
-#     data: the scaffold's `ensure-gitignore` invocation (wiring the gitignore door) and the
-#     interlock gate's `_SHIPPED_SCRIPTS` manifest entry, which EVERY shipped script is required to
-#     carry (governance/interlock-scripts-manifest.sh fails the build without it). Both are excluded
-#     by their exact line shape, so an `import idc_trace_mirror` — or any other real consumption,
-#     including one added to those same two files — still trips this.
+#   * NAMING the module is not READING it. Three shipped sites must name it and none consults its
+#     data: the scaffold's `ensure-gitignore` invocation and /idc:update's §C migration of the SAME
+#     door (wiring the gitignore rule for a fresh repo and for an upgraded one — arm K asserts both
+#     exist), and the interlock gate's `_SHIPPED_SCRIPTS` manifest entry, which EVERY shipped script
+#     is required to carry (governance/interlock-scripts-manifest.sh fails the build without it).
+#     All three are excluded by their exact line shape, so an `import idc_trace_mirror` — or any
+#     other real consumption, including one added to those same three files — still trips this.
 READERS="$(grep -rn "idc_trace_mirror" --exclude-dir=__pycache__ --exclude="*.pyc" \
             "$PLUGIN/scripts" "$PLUGIN/hooks" "$PLUGIN/agents" "$PLUGIN/skills" "$PLUGIN/commands" 2>/dev/null \
             | grep -v "/idc_trace_mirror\.py:" \
             | grep -v "/idc_init_scaffold\.sh:.*idc_trace_mirror\.py.*ensure-gitignore" \
+            | grep -v "/update\.md:.*idc_trace_mirror\.py.*ensure-gitignore" \
             | grep -v "/idc_interlock_gate\.py:.*\"idc_trace_mirror\.py\",")"
 [ -z "$READERS" ] || fail "the derived mirror must never be read by a gate/command, but it is referenced by:
 $READERS"
@@ -280,5 +282,407 @@ head -40 "$SCRIPT" | grep -qi "never authoritative" \
   || fail "the script docstring must state that the mirror is NEVER authoritative"
 head -40 "$SCRIPT" | grep -qi "disposable" \
   || fail "the script docstring must state that the mirror is disposable"
+
+# =================================================================================================
+# Codex review round 1 (PR #198): nine findings, each pinned below by the property it broke.
+# =================================================================================================
+
+# ---- M. THE CONVERGENCE INVARIANT — an incrementally-grown mirror == a rebuilt one ----------------
+# Arm G proved a rebuild converges over an UNCHANGING repo. The P1 was the case where the raw record
+# MOVES OR SHRINKS underneath rows already mirrored: the hook receipt sidecars are last-write-wins,
+# so a normal multi-pass drain rewrites `.idc-drain-verdict.json` between polls. Keyed by content
+# alone, the mirror kept BOTH versions while the sidecar kept only the newest — so `rebuild` (which
+# can only see the newest) DELETED trace history, which means the db had been the only place that
+# history existed. A disposable cache that is the sole holder of anything is not disposable.
+#
+# Red-when-broken: drop `_prune_vanished` (or key receipts by content alone without it) → the
+# superseded verdict row survives an ingest, the rebuild does not have it, and (1) FAILs.
+MR="$WORK/converge"
+mkdir -p "$MR/docs/workflow/journal-archive"
+cat > "$MR/docs/workflow/tracker-config.yaml" <<'YAML'
+backend: filesystem
+tracker: docs/workflow/TRACKER.md
+YAML
+cat > "$MR/docs/workflow/transition-journal.ndjson" <<'JSON'
+{"item":11,"op":"create-ticket","to":{"stage":"Consideration","status":"Todo"},"what":"create-ticket 'converge me'","when":"2026-08-06T09:00:00Z","who":"idc-think"}
+{"item":11,"op":"move","to":{"status":"In Progress"},"what":"move #11 Todo -> In Progress","when":"2026-08-06T09:10:00Z","who":"idc-build"}
+JSON
+printf '{"version":2,"verdict":"incomplete","exit":1,"session_id":"S-drain","ts":1785974400.0}\n' \
+  > "$MR/.idc-drain-verdict.json"
+python3 "$SCRIPT" --repo "$MR" ingest >/dev/null 2>&1 || fail "(M) first ingest failed"
+V1_ID="$(python3 - "$MR" "select id from events where op='drain-verdict'" <<'PY'
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1] + "/.idc-trace-mirror.db")
+print("\n".join("|".join("" if c is None else str(c) for c in r) for r in con.execute(sys.argv[2])))
+PY
+)"
+
+# The drain rewrites its verdict (pass 2 of the same run) — the raw sidecar now holds ONLY this.
+printf '{"version":2,"verdict":"complete","exit":0,"session_id":"S-drain","ts":1785974500.0}\n' \
+  > "$MR/.idc-drain-verdict.json"
+python3 "$SCRIPT" --repo "$MR" ingest >/dev/null 2>&1 || fail "(M) ingest after the receipt rewrite failed"
+cat >> "$MR/docs/workflow/transition-journal.ndjson" <<'JSON'
+{"item":11,"op":"close","to":{"stage":"Build","status":"Done"},"what":"close #11 In Progress -> Done","when":"2026-08-06T09:40:00Z","who":"idc-build"}
+JSON
+python3 "$SCRIPT" --repo "$MR" ingest >/dev/null 2>&1 || fail "(M) ingest after the journal append failed"
+# ...and the janitor rotates #11's now-terminal history into the archive, under the mirror.
+python3 - "$MR" "$PLUGIN" <<'PY' >/dev/null 2>&1 || fail "(M) the janitor rotation fixture failed"
+import os, sys
+repo, plugin = sys.argv[1], sys.argv[2]
+sys.path.insert(0, os.path.join(plugin, "scripts")); sys.path.insert(0, os.path.join(plugin, "scripts", "hooks"))
+import idc_git_janitor as J
+J.rotate_journal({"repo": repo, "board": [{"number": 11, "status": "Done"}]},
+                 os.path.join(repo, "docs/workflow/transition-journal.ndjson"))
+PY
+python3 "$SCRIPT" --repo "$MR" ingest >/dev/null 2>&1 || fail "(M) ingest after the rotation failed"
+
+CONTENT_COLS="run_id,source,artifact,seq,ts,op,item,stage,status,who,summary,event_key,payload"
+MQ() { python3 - "$MR" "$1" <<'PY'
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1] + "/.idc-trace-mirror.db")
+for r in con.execute(sys.argv[2]).fetchall():
+    print("|".join("" if c is None else str(c) for c in r))
+PY
+}
+INCR="$(MQ "select $CONTENT_COLS from events order by event_key")"
+INCR_PH="$(MQ "select run_id,item,phase,stage,entered_ts,exited_ts,duration_s from phases order by id")"
+V2_ID="$(MQ "select id from events where op='drain-verdict'")"
+rm -f "$MR"/.idc-trace-mirror.db*
+python3 "$SCRIPT" --repo "$MR" ingest >/dev/null 2>&1 || fail "(M) the rebuild-from-scratch ingest failed"
+REBUILT="$(MQ "select $CONTENT_COLS from events order by event_key")"
+REBUILT_PH="$(MQ "select run_id,item,phase,stage,entered_ts,exited_ts,duration_s from phases order by id")"
+
+# (1) THE INVARIANT itself — every mirrored column, events AND derived phases.
+[ "$INCR" = "$REBUILT" ] || fail "(M1) an incrementally-grown mirror DIVERGED from a rebuild — it is
+holding state the raw record cannot reproduce, i.e. it has become a source of truth.
+  incremental: $INCR
+  rebuilt:     $REBUILT"
+[ "$INCR_PH" = "$REBUILT_PH" ] || fail "(M1) the derived phase spans diverged from a rebuild's.
+  incremental: $INCR_PH
+  rebuilt:     $REBUILT_PH"
+
+# (2) concretely: ONE receipt row, holding the sidecar's CURRENT content — not a private history.
+VN="$(MQ "select count(*) from events where op='drain-verdict'")"
+[ "$VN" = "1" ] || fail "(M2) a rewritten receipt must leave exactly ONE row (its current content), got: $VN"
+MQ "select payload from events where op='drain-verdict'" | grep -q '"verdict": *"complete"' \
+  || fail "(M2) the surviving receipt row is not the sidecar's current content: $(MQ "select payload from events where op='drain-verdict'")"
+
+# (3) the replacement row lands ABOVE the old cursor id, so a live `watch` DELIVERS the new state
+#     instead of swapping it in under an id the watcher has already passed.
+[ "$V2_ID" -gt "$V1_ID" ] \
+  || fail "(M3) the replacement receipt row reused/undercut the old cursor id ($V1_ID -> $V2_ID) — a
+watcher past that cursor would never see the drain's new verdict"
+echo "  ok (M) convergence: incremental == rebuild across a receipt rewrite, an append and a rotation"
+
+# ---- N. the journal is read under its OWN sidecar lock (the rotation race) ------------------------
+# A rotation moves terminal records with two os.replace calls (archive first, live second). An
+# UNLOCKED scan can read the archive BEFORE the first and the live segment AFTER the second — the
+# moved records are then in NEITHER read, and the mirror reports a complete-looking trace with a
+# run's history silently missing. The mirror must borrow the guards' discipline
+# (idc_journal_replay.read_journal_locked), not re-roll a lockless read.
+#
+# Deterministic, not timing-hopeful: the mirror's archive read is paused (patched `open`) and a REAL
+# janitor rotation runs in a subprocess during exactly that pause. Bounded by a wait timeout so a
+# blocked rotation can never hang the lane.
+# Red-when-broken: call `_parse_segments` directly instead of through `read_journal_locked` → item 4
+# vanishes from the mirror and this FAILs.
+NR="$WORK/lockrace"
+mkdir -p "$NR/docs/workflow/journal-archive"
+cat > "$NR/docs/workflow/tracker-config.yaml" <<'YAML'
+backend: filesystem
+tracker: docs/workflow/TRACKER.md
+YAML
+cat > "$NR/docs/workflow/journal-archive/2026-07-01.ndjson" <<'JSON'
+{"item":1,"op":"create-ticket","to":{"stage":"Consideration","status":"Todo"},"what":"create-ticket 'ancient'","when":"2026-07-01T09:00:00Z","who":"idc-think"}
+JSON
+cat > "$NR/docs/workflow/transition-journal.ndjson" <<'JSON'
+{"item":4,"op":"create-ticket","to":{"stage":"Consideration","status":"Todo"},"what":"create-ticket 'about to rotate'","when":"2026-08-01T09:00:00Z","who":"idc-think"}
+{"item":4,"op":"close","to":{"stage":"Build","status":"Done"},"what":"close #4 In Progress -> Done","when":"2026-08-01T09:30:00Z","who":"idc-build"}
+{"item":7,"op":"create-ticket","to":{"stage":"Consideration","status":"Todo"},"what":"create-ticket 'stays live'","when":"2026-08-06T10:00:00Z","who":"idc-think"}
+JSON
+# The lock sidecar EXISTS, as it does in any repo that has journaled (journal_append mints it as its
+# first act) — so this exercises the shared-lock path a real governed repo takes.
+: > "$NR/docs/workflow/transition-journal.ndjson.lock"
+python3 - "$NR" "$PLUGIN" <<'PY' || fail "(N) the mirror lost records to a concurrent journal rotation"
+import builtins, os, subprocess, sys, sqlite3
+repo, plugin = sys.argv[1], sys.argv[2]
+sys.path.insert(0, os.path.join(plugin, "scripts"))
+sys.path.insert(0, os.path.join(plugin, "scripts", "hooks"))
+import idc_trace_mirror as TM
+
+journal = os.path.join(repo, "docs/workflow/transition-journal.ndjson")
+rotator = (
+    "import sys\n"
+    "sys.path.insert(0, %r); sys.path.insert(0, %r)\n"
+    "import idc_git_janitor as J\n"
+    "J.rotate_journal({'repo': %r, 'board': [{'number': 4, 'status': 'Done'}]}, %r)\n"
+) % (os.path.join(plugin, "scripts"), os.path.join(plugin, "scripts", "hooks"), repo, journal)
+
+state = {"fired": False, "proc": None}
+real_open = builtins.open
+def slow_open(path, *a, **k):
+    # Pause INSIDE the segment scan, at the archive read, and let a real rotation try to run.
+    if not state["fired"] and "journal-archive" in str(path):
+        state["fired"] = True
+        fh = real_open(path, *a, **k)
+        state["proc"] = subprocess.Popen([sys.executable, "-c", rotator],
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            state["proc"].wait(timeout=1.5)   # a LOCKED mirror keeps it waiting; an unlocked one does not
+        except subprocess.TimeoutExpired:
+            pass
+        return fh
+    return real_open(path, *a, **k)
+
+builtins.open = slow_open
+try:
+    con = TM.connect(TM.db_path(repo))
+    TM.ingest(repo, con)
+finally:
+    builtins.open = real_open
+    con.close()
+    if state["proc"] is not None:
+        state["proc"].wait()
+
+assert state["fired"], "test setup: the archive read was never reached"
+con = sqlite3.connect(os.path.join(repo, ".idc-trace-mirror.db"))
+items = sorted(r[0] for r in con.execute("select distinct item from events where item is not null"))
+assert items == [1, 4, 7], (
+    "an ingest racing a rotation lost records: mirrored items %s, expected [1, 4, 7] — item 4's "
+    "history was mid-move between the live segment and the archive and landed in neither read" % items)
+PY
+echo "  ok (N) an ingest racing a journal rotation loses nothing (the read holds the sidecar lock)"
+
+# ---- O. provenance FOLLOWS the record across a rotation -------------------------------------------
+# Rows are content-keyed, so a rotated line is correctly not re-inserted — but `artifact`/`seq` must
+# then be re-pointed at where the record ACTUALLY is, or the mirror sends an auditor to a file and
+# line that no longer hold it. (Arm M catches the resulting divergence; this names the symptom.)
+# Red-when-broken: drop `_refresh_provenance` → the archived record still claims the live segment.
+ARCH_ART="$(MQ "select artifact from events where source='journal' and op='close' and item=11")"
+case "$ARCH_ART" in
+  docs/workflow/journal-archive/*.ndjson) : ;;
+  *) fail "(O) a rotated record still points at its pre-rotation location: $ARCH_ART" ;;
+esac
+echo "  ok (O) a rotated record's artifact/seq follow it into the archive segment"
+
+# ---- P. watch's default cursor is the CURRENT end, taken AFTER the first ingest -------------------
+# `watch` documents tail-follow semantics. On the first watch of a repo that already has history but
+# no mirror yet, an end-of-mirror cursor read from the still-EMPTY db is 0 — and the ingest that
+# follows then replays the repo's entire history as though it had just happened.
+# Red-when-broken: move the initial ingest back inside/after the cursor read → (P1) FAILs.
+PR2="$WORK/watchcursor"
+mkdir -p "$PR2/docs/workflow"
+cat > "$PR2/docs/workflow/tracker-config.yaml" <<'YAML'
+backend: filesystem
+tracker: docs/workflow/TRACKER.md
+YAML
+cat > "$PR2/docs/workflow/transition-journal.ndjson" <<'JSON'
+{"item":21,"op":"create-ticket","to":{"stage":"Consideration","status":"Todo"},"what":"create-ticket 'ancient history'","when":"2026-08-06T10:00:00Z","who":"idc-think"}
+JSON
+WOUT2="$(python3 "$SCRIPT" --repo "$PR2" watch --interval 0.1 --max-polls 1 2>/dev/null)"
+printf '%s\n' "$WOUT2" | grep -q "ancient history" \
+  && fail "(P1) the first watch replayed pre-existing history instead of following from the current end: $WOUT2"
+# ...while an EXPLICIT --since is the operator's own choice and is honored verbatim.
+WOUT3="$(python3 "$SCRIPT" --repo "$PR2" watch --since 0 --interval 0.1 --max-polls 1 2>/dev/null)"
+printf '%s\n' "$WOUT3" | grep -q "ancient history" \
+  || fail "(P2) watch --since 0 must replay from the start, got: $WOUT3"
+echo "  ok (P) watch follows from the current end by default, and honors an explicit --since"
+
+# ---- Q. tail and watch REPORT the skipped count ---------------------------------------------------
+# "a short trace must never read as a quiet one" — `ingest` said so, but `tail` discarded the count
+# and exited 0 with a short trace, and `watch` discarded it on every poll. On stderr, so a --json
+# stdout stays parseable; once per CHANGE, so a poll loop neither spams nor goes silent.
+# Red-when-broken: drop the `report_skipped` call from cmd_tail/cmd_watch → (Q1)/(Q3) FAIL.
+QR="$WORK/skipreport"
+mkdir -p "$QR/docs/workflow"
+cat > "$QR/docs/workflow/tracker-config.yaml" <<'YAML'
+backend: filesystem
+tracker: docs/workflow/TRACKER.md
+YAML
+cat > "$QR/docs/workflow/transition-journal.ndjson" <<'JSON'
+{"item":31,"op":"create-ticket","to":{"stage":"Consideration","status":"Todo"},"what":"create-ticket 'good line'","when":"2026-08-06T10:00:00Z","who":"idc-think"}
+{"item":32,"op":"move","to":{"status":"In Pro
+JSON
+TERR="$WORK/tail.err"; TJSON="$WORK/tail.out"
+python3 "$SCRIPT" --repo "$QR" tail --since 0 --json > "$TJSON" 2> "$TERR" \
+  || fail "(Q1) tail must not fail on a half-written line: $(cat "$TERR")"
+grep -q "skipped: 1" "$TERR" \
+  || fail "(Q1) tail returned a SHORT trace without reporting the skipped record: $(cat "$TERR")"
+# stdout stays machine-readable — the warning must not be mixed into the JSON stream.
+python3 - "$TJSON" <<'PY' || fail "(Q2) tail --json stdout is not clean JSON (the warning leaked into it)"
+import json, sys
+for line in open(sys.argv[1]):
+    if line.strip():
+        json.loads(line)
+PY
+WERR="$WORK/watch.err"
+python3 "$SCRIPT" --repo "$QR" watch --interval 0.1 --max-polls 3 >/dev/null 2> "$WERR"
+[ "$(grep -c "skipped: 1" "$WERR" | tr -d ' ')" = "1" ] \
+  || fail "(Q3) watch must report the skipped count exactly once per change across 3 polls, got: $(cat "$WERR")"
+echo "  ok (Q) tail and watch report skipped records on stderr, once per change"
+
+# ---- R. a parseable record asserting a NON-SCALAR state is skipped, not fatal ---------------------
+# `{"to":{"status":[]}}` parses as JSON and reaches the replay parser, which faithfully hands back a
+# list — which SQLite then refuses to bind, crashing ingest (and every watch poll) with a traceback.
+# The observer's contract is skip-and-count, and it must hold for damage that parses too.
+# Red-when-broken: remove the `_state_scalar` guard → ingest exits non-zero with ProgrammingError.
+RR="$WORK/nonscalar"
+mkdir -p "$RR/docs/workflow"
+cat > "$RR/docs/workflow/tracker-config.yaml" <<'YAML'
+backend: filesystem
+tracker: docs/workflow/TRACKER.md
+YAML
+cat > "$RR/docs/workflow/transition-journal.ndjson" <<'JSON'
+{"item":41,"op":"create-ticket","to":{"stage":"Consideration","status":"Todo"},"what":"create-ticket 'good'","when":"2026-08-06T10:00:00Z","who":"idc-think"}
+{"item":42,"op":"move","to":{"status":[]},"what":"move #42","when":"2026-08-06T10:05:00Z","who":"idc-build"}
+{"item":43,"op":"move","to":{"stage":{"nested":1},"status":"Todo"},"what":"move #43","when":"2026-08-06T10:06:00Z","who":"idc-build"}
+JSON
+ROUT="$(python3 "$SCRIPT" --repo "$RR" ingest 2>&1)" \
+  || fail "(R1) ingest CRASHED on a parseable record with a non-scalar state: $ROUT"
+printf '%s\n' "$ROUT" | grep -q "skipped: 2" \
+  || fail "(R1) the two non-scalar records must be counted as skipped: $ROUT"
+RGOOD="$(python3 - "$RR" "select count(*) from events where item=41" <<'PY'
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1] + "/.idc-trace-mirror.db")
+print(con.execute(sys.argv[2]).fetchone()[0])
+PY
+)"
+[ "$RGOOD" = "1" ] || fail "(R2) the good record next to the damaged ones was lost: $RGOOD"
+echo "  ok (R) a non-scalar stage/status is skipped and counted, and its neighbours still land"
+
+# ---- S. phases follow CANONICAL journal order, not the wall clock ---------------------------------
+# The journal is an append log: its own order IS the sequence of state changes. Ordering spans by
+# `ts` lets a clock that steps backwards between two ops (or an out-of-order legacy timestamp)
+# reverse them — leaving an EARLIER status standing as the item's open phase, which is the one thing
+# an operator reads a timeline to learn. Timestamps are for durations only.
+# Red-when-broken: restore `ORDER BY ts, id` in _rebuild_phases → (S1) FAILs.
+SR="$WORK/clockskew"
+mkdir -p "$SR/docs/workflow"
+cat > "$SR/docs/workflow/tracker-config.yaml" <<'YAML'
+backend: filesystem
+tracker: docs/workflow/TRACKER.md
+YAML
+cat > "$SR/docs/workflow/transition-journal.ndjson" <<'JSON'
+{"item":51,"op":"create-ticket","to":{"stage":"Consideration","status":"Todo"},"what":"create-ticket 'skewed'","when":"2026-08-06T10:00:00Z","who":"idc-think"}
+{"item":51,"op":"move","to":{"status":"In Progress"},"what":"move #51 Todo -> In Progress","when":"2026-08-06T09:55:00Z","who":"idc-build"}
+{"item":51,"op":"move","to":{"status":"In Review"},"what":"move #51 In Progress -> In Review","when":"2026-08-06T10:25:00Z","who":"idc-build"}
+JSON
+python3 "$SCRIPT" --repo "$SR" ingest >/dev/null 2>&1 || fail "(S) ingest failed on the skewed journal"
+SQ() { python3 - "$SR" "$1" <<'PY'
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1] + "/.idc-trace-mirror.db")
+for r in con.execute(sys.argv[2]).fetchall():
+    print("|".join("" if c is None else str(c) for c in r))
+PY
+}
+SORDER="$(SQ "select phase from phases where item=51 order by id" | tr '\n' '>')"
+[ "$SORDER" = "Todo>In Progress>In Review>" ] \
+  || fail "(S1) phases must follow the journal's own order, got: $SORDER (expected Todo>In Progress>In Review>)"
+# The open phase is the LAST one the record establishes — the skewed clock must not hand that role
+# to an earlier status.
+SOPEN="$(SQ "select phase from phases where item=51 and exited_ts is null")"
+[ "$SOPEN" = "In Review" ] || fail "(S2) the open phase should be the journal's last status, got: $SOPEN"
+# A span whose recorded exit precedes its entry has NO duration — never a negative one presented as
+# a measurement. (Todo: entered 10:00, left at the backwards-stamped 09:55.)
+SDUR="$(SQ "select duration_s from phases where item=51 and phase='Todo'")"
+[ -z "$SDUR" ] || fail "(S3) a backwards-stamped span must yield NO duration, got: $SDUR"
+echo "  ok (S) phase spans follow canonical journal order; a backwards clock yields no duration"
+
+# ---- T. the ignore door is wired for UPGRADED repos too, not just fresh ones ----------------------
+# The scaffold (arm K) covers `/idc:init`. An existing governed repo upgrades through `/idc:update`,
+# whose §C additive-sidecar migration is a SEPARATE list — so a door added only to the scaffold
+# leaves every already-governed repo to strand an untracked db + two WAL sidecars on first ingest.
+# Asserted as PARITY rather than as one grep, because this is a class of miss, not one instance:
+# every ensure-gitignore door the scaffold wires must also appear in update.md's migration.
+# Red-when-broken: delete the mirror's line from commands/update.md → (T) FAILs and names it.
+SCAFFOLD_DOORS="$(grep 'ensure-gitignore' "$PLUGIN/scripts/idc_init_scaffold.sh" \
+                  | grep '^python3' | grep -oE '[A-Za-z0-9_]+\.(py|sh)' | sort -u)"
+[ -n "$SCAFFOLD_DOORS" ] || fail "(T) could not extract the scaffold's ensure-gitignore doors — the guard would pass vacuously"
+MISSING=""
+for door in $SCAFFOLD_DOORS; do
+  grep -q "$door.*ensure-gitignore" "$PLUGIN/commands/update.md" || MISSING="${MISSING} ${door}"
+done
+[ -z "${MISSING}" ] || fail "(T) ensure-gitignore door(s) wired into /idc:init's scaffold but MISSING from
+/idc:update's section C migration:${MISSING} — so an already-governed repo never gets the ignore rule
+and strands untracked machine-local state on its first run"
+echo "  ok (T) every scaffold ensure-gitignore door is also in /idc:update's migration ($(printf '%s' "$SCAFFOLD_DOORS" | wc -w | tr -d ' ') doors)"
+
+# ---- U. the mirror db is owner-only, like the sidecars whose payloads it holds --------------------
+# The rows carry the verbatim content of receipts their own writers create 0600 (mkstemp). A db left
+# at the ambient umask (0644) re-publishes those same bytes to every account on the machine — a
+# derived view must never be a wider door onto its source than the source is.
+# Red-when-broken: drop `_create_private` from connect() → the db is 0644 under umask 022 and (U) FAILs.
+UR="$WORK/perms"
+mkdir -p "$UR/docs/workflow"
+cat > "$UR/docs/workflow/tracker-config.yaml" <<'YAML'
+backend: filesystem
+tracker: docs/workflow/TRACKER.md
+YAML
+printf '{"version":2,"verdict":"complete","exit":0,"session_id":"S-perm","ts":1785974400.0}\n' \
+  > "$UR/.idc-drain-verdict.json"
+( umask 022; python3 "$SCRIPT" --repo "$UR" ingest >/dev/null 2>&1 ) || fail "(U) ingest failed"
+UMODE="$(python3 - "$UR/.idc-trace-mirror.db" <<'PY'
+import os, stat, sys
+print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))[-3:])
+PY
+)"
+[ "$UMODE" = "600" ] \
+  || fail "(U) the mirror db is $UMODE under umask 022 — it mirrors 0600 receipt payloads and must not widen access to them"
+# The WAL/SHM sidecars inherit the db's mode, so a live watch never leaks through them either.
+python3 - "$UR" "$SCRIPT" <<'PY' || fail "(U) the WAL sidecar is not owner-only while the mirror is open"
+import os, stat, subprocess, sys
+repo, script = sys.argv[1], sys.argv[2]
+sys.path.insert(0, os.path.dirname(script))
+sys.path.insert(0, os.path.join(os.path.dirname(script), "hooks"))
+os.umask(0o022)
+import idc_trace_mirror as TM
+con = TM.connect(TM.db_path(repo))
+TM.ingest(repo, con)          # a live WAL exists while the connection is open
+wal = TM.db_path(repo) + "-wal"
+assert os.path.exists(wal), "test setup: no WAL sidecar to inspect"
+mode = oct(stat.S_IMODE(os.stat(wal).st_mode))[-3:]
+con.close()
+assert mode == "600", "the WAL sidecar is %s, not owner-only — it holds the same mirrored payloads" % mode
+PY
+echo "  ok (U) the mirror db and its WAL sidecar are owner-only (0600)"
+
+# ---- V. a mirror written by another schema version is DROPPED and re-derived ----------------------
+# The disposability doctrine's practical payoff: a derived cache never needs a migration path, and
+# writing one would be the first step toward treating its contents as something that must survive.
+# Red-when-broken: remove the user_version check from connect() → the stale-shaped table survives and
+# ingest fails (or serves rows from a schema the queries no longer match).
+VR="$WORK/staleschema"
+mkdir -p "$VR/docs/workflow"
+cat > "$VR/docs/workflow/tracker-config.yaml" <<'YAML'
+backend: filesystem
+tracker: docs/workflow/TRACKER.md
+YAML
+cat > "$VR/docs/workflow/transition-journal.ndjson" <<'JSON'
+{"item":61,"op":"create-ticket","to":{"stage":"Consideration","status":"Todo"},"what":"create-ticket 'after the schema change'","when":"2026-08-06T10:00:00Z","who":"idc-think"}
+JSON
+python3 - "$VR" <<'PY'
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1] + "/.idc-trace-mirror.db")   # a db from an OLDER mirror version
+con.executescript("CREATE TABLE events (id INTEGER PRIMARY KEY, event_key TEXT UNIQUE);"
+                  "INSERT INTO events (event_key) VALUES ('stale-shaped-row');")
+con.commit(); con.close()
+PY
+python3 "$SCRIPT" --repo "$VR" ingest >/dev/null 2>&1 \
+  || fail "(V) ingest failed against a db written by an older schema version instead of re-deriving it"
+VSTALE="$(python3 - "$VR" <<'PY'
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1] + "/.idc-trace-mirror.db")
+print(con.execute("select count(*) from events where event_key = 'stale-shaped-row'").fetchone()[0])
+PY
+)"
+[ "$VSTALE" = "0" ] || fail "(V) the stale-schema rows survived the version bump: $VSTALE"
+VNEW="$(python3 - "$VR" <<'PY'
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1] + "/.idc-trace-mirror.db")
+print(con.execute("select count(*) from events where item = 61").fetchone()[0])
+PY
+)"
+[ "$VNEW" = "1" ] || fail "(V) the re-derived mirror is missing the raw record: $VNEW"
+echo "  ok (V) a mirror at another schema version is dropped and re-derived from the raw record"
 
 echo "PASS: phase12-trace-mirror"

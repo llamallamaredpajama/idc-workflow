@@ -111,6 +111,23 @@ def scan_journal_strict(journal_path):
     tolerate it. A journal that simply does not exist yet is NOT an error: ``([], None)`` — a
     pre-adoption board (journaling has not begun) is the caller's principled legacy carve-out, not
     damage.
+
+    The LOCK discipline lives in ``read_journal_locked`` (one copy, several readers); this function
+    is that discipline applied to the fail-closed segment parser.
+    """
+    return read_journal_locked(journal_path, _read_journal_segments)
+
+
+def read_journal_locked(journal_path, reader):
+    """Run ``reader(journal_path) -> (value, error)`` against ONE consistent view of the journal's
+    segments, under the transition journal's STABLE SIDECAR lock discipline.
+
+    THE DISCIPLINE LIVES HERE ONCE. Every reader that must not be torn by a concurrent rotation goes
+    through it — the fail-closed corroboration scan (``scan_journal_strict``) and the derived
+    run-trace mirror's ingester — because a second hand-rolled copy is how the subtle parts below
+    (no minting, the lock-appearance re-check) drift apart. The reader owns the PARSE (fail-closed
+    or tolerant, its choice) and must enumerate the segments ITSELF, inside this call: globbing the
+    archive outside the lock is half the race.
     """
     # Take the journal's STABLE sidecar lock (`<journal>.lock` — the shared convention with
     # journal_append and the janitor's rotation) across the path snapshot AND all reads: an
@@ -131,7 +148,9 @@ def scan_journal_strict(journal_path):
     #     blocks until the writer finishes). No mint; no fail-open — a legitimate lockless legacy board
     #     still reads (never denied), so the dispose corroboration guards keep working on upgraded repos.
     if not os.path.isdir(os.path.dirname(journal_path)):
-        return [], None   # no workflow dir → no journal, and no rotation to race
+        # No workflow dir → no journal, and no rotation to race. The READER still decides what
+        # "nothing" looks like in its own return shape.
+        return reader(journal_path)
     try:
         import fcntl
     except ImportError:  # pragma: no cover - simulated by governance; absent on non-POSIX Python
@@ -150,10 +169,10 @@ def scan_journal_strict(journal_path):
                     fcntl.flock(lock_fh.fileno(), fcntl.LOCK_SH)
                 except OSError as exc:
                     return None, f"journal sidecar lock unavailable: {exc}"
-                return _read_journal_segments(journal_path)
+                return reader(journal_path)
             finally:
                 lock_fh.close()   # closing the fd releases the flock
-        entries, err = _read_journal_segments(journal_path)
+        entries, err = reader(journal_path)
         if not os.path.exists(lock_path):
             # No writer intervened during the unlocked read → trust its result: the entries, or a
             # GENUINE corruption error (not a transient partial line, since no writer was active).

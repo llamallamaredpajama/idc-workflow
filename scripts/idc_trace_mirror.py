@@ -14,7 +14,14 @@ THE DOCTRINE, and it is the whole reason a derived cache is safe here:
     be the mirror claiming board state the record never made.
   * DISPOSABLE. Deleting the db loses NOTHING. `rebuild` (or `rm` + `ingest`) converges to the same
     content, which is the property that keeps the mirror honest: anything it holds that the raw
-    record cannot reproduce would mean it had quietly become a source of truth.
+    record cannot reproduce would mean it had quietly become a source of truth. THE INVARIANT,
+    enforced on every ingest and asserted by the lane: after any ingest over a CLEANLY READ source,
+    the mirror's content is exactly what a rebuild-from-scratch would produce. So a row is dropped
+    when the record behind it is gone — a receipt sidecar rewritten (last-write-wins: the previous
+    content no longer exists anywhere) or deleted, a journal line no longer in any segment — and a
+    journal row's `artifact`/`seq` FOLLOW their record when a rotation moves it into the archive.
+    The mirror shows the last observed state of each sidecar, never a history the sidecar itself
+    does not keep.
   * NEVER AUTHORITATIVE, AND NO GATE MAY READ IT. Gates, guards, the janitor's divergence pass and
     every closeout keep reading the RAW artifacts (`idc_journal_replay`, `idc_ledger`,
     `idc_drain_verdict`, the board). This module is an OPERATOR SURFACE only — a read-only lens.
@@ -28,7 +35,10 @@ THE ONE CURSOR-POLL CONTRACT — live view and history are the SAME query at dif
 No server, no websocket, no ingest endpoint: `watch` is that query in a sleep loop, and a poll is
 `ingest` (cheap, incremental) followed by the same read. `id` IS the rowid and is MIRROR-ARRIVAL
 order, not record time — so a cursor is valid for the lifetime of one mirror, and a rebuild (which
-renumbers deterministically from the raw record) restarts it.
+renumbers deterministically from the raw record) restarts it. Ids are AUTOINCREMENT, hence never
+reused: a superseded receipt version is really deleted, and the row that replaces it lands ABOVE
+every cursor a watcher can be holding, so the new state is delivered rather than silently swapped in
+under an id the watcher has already passed.
 
 RUN IDENTITY, stated rather than guessed. A hook receipt carries its `session_id`, so it lands under
 that `run_id`. A journal record carries NO session — `idc_transition.journal_append` never stamps one
@@ -36,10 +46,18 @@ that `run_id`. A journal record carries NO session — `idc_transition.journal_a
 timestamp would be fabricated provenance, so the mirror does not do it.
 
 FAIL MODES. Ingest is TOLERANT by design: a malformed or half-written journal line (a live append
-caught mid-write) is SKIPPED and COUNTED in the run's summary, never a crash — a post-hoc observer
-must never break, and the completed line is picked up on the next poll (records are content-keyed, so
-nothing is double-counted). Ingest is REPO-GATED: outside an IDC-governed repo it refuses rather than
-littering a directory that is none of IDC's business.
+caught mid-write) — including one that PARSES but asserts a non-scalar stage/status the mirror
+cannot honestly store — is SKIPPED and COUNTED in the run's summary, never a crash: a post-hoc
+observer must never break, and the completed line is picked up on the next poll (records are
+content-keyed, so nothing is double-counted). Every surface that ingests REPORTS that count —
+`ingest`, `tail` and `watch` alike — because a short trace must never read as a quiet one; `tail`
+and `watch` report on stderr so a `--json` stdout stays machine-readable, and `watch` reports only
+when the count CHANGES so a poll loop neither spams nor goes quiet. Ingest is REPO-GATED: outside an
+IDC-governed repo it refuses rather than littering a directory that is none of IDC's business. The
+journal is read through the SAME sidecar-lock discipline the guards use (`idc_journal_replay.
+read_journal_locked`): an unlocked scan racing a rotation reads the pre-rotation archive and the
+post-rotation live segment, and the records moved in between appear in NEITHER — a silent hole in
+a trace whose whole job is to be complete.
 
 USAGE:
     python3 idc_trace_mirror.py --repo <root> ingest                 # idempotent; safe to re-run
@@ -79,9 +97,15 @@ JOURNAL_REL = os.path.join("docs", "workflow", "transition-journal.ndjson")
 UNATTRIBUTED = "unattributed"
 _TS_FMT = "%Y-%m-%dT%H:%M:%SZ"
 
+# Bump on ANY change to SCHEMA below. A mirror carrying another version is DROPPED and re-derived
+# (see `connect`) — a DISPOSABLE cache never needs a migration path, and writing one would be the
+# first step toward treating its contents as something that must survive.
+SCHEMA_VERSION = 2
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
-    id         INTEGER PRIMARY KEY,   -- == rowid; THE CURSOR (mirror-arrival order)
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,   -- == rowid; THE CURSOR (mirror-arrival order,
+                                        -- never reused: a replaced receipt row must land ABOVE a
+                                        -- live watcher's cursor, not back under it)
     run_id     TEXT    NOT NULL,      -- receipt session_id, or 'unattributed' for journal records
     source     TEXT    NOT NULL,      -- 'journal' | 'receipt'
     artifact   TEXT    NOT NULL,      -- repo-relative path of the raw file this came from
@@ -112,7 +136,7 @@ CREATE TABLE IF NOT EXISTS phases (
     entered_event_id INTEGER NOT NULL,
     exited_event_id  INTEGER
 );
-CREATE INDEX IF NOT EXISTS phases_item_idx ON phases(item, entered_ts);
+CREATE INDEX IF NOT EXISTS phases_item_idx ON phases(item, id);
 """
 
 
@@ -121,12 +145,40 @@ def db_path(repo, override=None):
     return override or os.path.join(repo or ".", DB_FILENAME)
 
 
+def _create_private(path):
+    """Make the mirror db OWNER-ONLY before SQLite opens it.
+
+    The rows carry the verbatim payloads of receipt sidecars whose own writers create them 0600
+    (`idc_hook_lib.atomic_write_json` → `mkstemp`). A db created at the ambient umask (0644 under the
+    common 022) would mirror those same bytes to every account on the machine — a derived view must
+    never be a wider door onto its source than the source is. SQLite creates `-wal`/`-shm` with the
+    database file's own mode, so tightening the db tightens the sidecars with it.
+
+    BEST-EFFORT: on any failure the mirror still works, it is simply no tighter than the umask —
+    an observer must never break the run it is watching over its own bookkeeping."""
+    try:
+        if os.path.exists(path):
+            os.chmod(path, 0o600)
+        else:
+            os.close(os.open(path, os.O_CREAT | os.O_WRONLY | os.O_EXCL, 0o600))
+    except OSError:
+        pass   # a racing creator already made it, or the fs has no say — SQLite proceeds either way
+
+
 def connect(path):
     """Open (creating if needed) the mirror in WAL mode — a live reader must never block the writer,
-    which is what makes polling a mirror that an ingest is actively appending to safe."""
+    which is what makes polling a mirror that an ingest is actively appending to safe.
+
+    A db written by a DIFFERENT schema version is dropped and re-derived rather than migrated: the
+    mirror is disposable, so "throw it away and rebuild from the raw record" is always available and
+    is the only reconciliation that cannot invent state."""
+    _create_private(path)
     con = sqlite3.connect(path)
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA synchronous=NORMAL")
+    if con.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
+        con.executescript("DROP TABLE IF EXISTS events; DROP TABLE IF EXISTS phases;")
+        con.execute("PRAGMA user_version = %d" % SCHEMA_VERSION)
     con.executescript(SCHEMA)
     return con
 
@@ -146,27 +198,55 @@ def _iso(epoch):
 
 def _duration_s(start, end):
     """Whole seconds between two journal timestamps, or None when either is unparseable (an
-    unreadable time yields NO duration rather than a fabricated one)."""
+    unreadable time yields NO duration rather than a fabricated one).
+
+    A span whose recorded exit PRECEDES its entry also yields None. Spans are ordered by CANONICAL
+    journal order, not by clock, so a clock that moved backwards between two journaled ops leaves
+    the sequence correct while the timestamps simply cannot express its length — and "no duration"
+    is the honest answer, where a negative one would be arithmetic presented as a measurement."""
     try:
         a = datetime.datetime.strptime(start, _TS_FMT)
         b = datetime.datetime.strptime(end, _TS_FMT)
     except (TypeError, ValueError):
         return None
-    return int((b - a).total_seconds())
+    seconds = int((b - a).total_seconds())
+    return seconds if seconds >= 0 else None
 
 
 # ── reading the raw record ───────────────────────────────────────────────────────────────────────
-def journal_segments(repo):
+def journal_segments(journal_path):
     """Every journal segment in REPLAY'S OWN ORDER — archived terminal segments first, then the live
-    one — so the mirror's history reads exactly like a replay of the same repo."""
-    return [p for p in RP._journal_paths(os.path.join(repo, JOURNAL_REL)) if os.path.exists(p)]
+    one — so the mirror's history reads exactly like a replay of the same repo.
+
+    Enumerated INSIDE the sidecar lock (see `journal_events`): globbing the archive outside it is
+    half the rotation race — the other half is reading the live segment after the rotation lands."""
+    return [p for p in RP._journal_paths(journal_path) if os.path.exists(p)]
 
 
-def journal_events(repo):
-    """`(events, skipped)` from every journal segment. A malformed / half-written line is SKIPPED and
-    counted, never fatal: ingest runs against a journal another process is appending to."""
+_INVALID = object()   # "the record asserts something the mirror cannot honestly store" sentinel
+
+
+def _state_scalar(value):
+    """A stage/status the mirror can store, or `_INVALID`.
+
+    Replay's parser hands back whatever the record's `to` block held. A malformed record can put a
+    list or an object there (`{"to": {"status": []}}`) — parseable JSON, but not a state. Binding it
+    raises deep inside SQLite and takes the ingest down, so the observer would CRASH on exactly the
+    damaged input its contract promises to skip-and-count. NULL is a real answer (the record asserted
+    an empty stage); a container is not."""
+    if value is None or isinstance(value, str):
+        return value
+    return _INVALID
+
+
+def _parse_segments(repo, journal_path):
+    """`((events, skipped), None)` from every journal segment — the READER half of the locked read.
+
+    A malformed / half-written line is SKIPPED and counted, never fatal: ingest runs against a
+    journal another process is appending to. Tolerant by contract, so it never returns an error —
+    the `(value, error)` shape is `read_journal_locked`'s, shared with the fail-closed scan."""
     events, skipped = [], 0
-    for path in journal_segments(repo):
+    for path in journal_segments(journal_path):
         rel = os.path.relpath(path, repo)
         try:
             with open(path, "r", encoding="utf-8") as fh:
@@ -189,6 +269,11 @@ def journal_events(repo):
             # Replay's own parsers decide what the record MEANS (item, asserted stage/status), so the
             # mirror can never disagree with the guards about a record it is showing the operator.
             state = RP._entry_to_state(rec)
+            stage = _state_scalar(state.get("stage"))
+            status = _state_scalar(state.get("status"))
+            if stage is _INVALID or status is _INVALID:
+                skipped += 1   # parseable, but its asserted state is not a state — see _state_scalar
+                continue
             events.append({
                 "run_id": UNATTRIBUTED,
                 "source": "journal",
@@ -197,14 +282,36 @@ def journal_events(repo):
                 "ts": str(rec.get("when") or "") or None,
                 "op": str(rec.get("op") or "") or None,
                 "item": RP.journal_item_id(rec),
-                "stage": state.get("stage"),
-                "status": state.get("status"),
+                "stage": stage,
+                "status": status,
                 "who": str(rec.get("who") or "") or None,
                 "summary": str(rec.get("what") or "") or None,
                 "event_key": "journal:" + _sha(line),
                 "payload": line,
             })
-    return events, skipped
+    return (events, skipped), None
+
+
+def journal_events(repo):
+    """`(events, skipped, note)` from every journal segment, read under the journal's OWN sidecar
+    lock — the same discipline `scan_journal_strict` uses, borrowed rather than re-rolled.
+
+    WHY THE LOCK. The janitor's rotation moves terminal records out of the live segment into an
+    archive one with two `os.replace`s. An UNLOCKED scan can read the archive before the first and
+    the live segment after the second, and the moved records are then in neither read — the mirror
+    reports a clean, complete-looking trace with a run's history silently missing from it.
+
+    A lock that cannot be taken (or a writer that keeps racing) yields NO journal rows this pass and
+    a NOTE saying so, counted as a skip: an incomplete view the operator is told about, never a
+    partial view presented as whole."""
+    journal_path = os.path.join(repo, JOURNAL_REL)
+    value, error = RP.read_journal_locked(
+        journal_path, lambda path: _parse_segments(repo, path))
+    if error:
+        return [], 1, ("the transition journal could not be read consistently (%s) — no journal "
+                       "records mirrored this pass; re-run once the writer settles" % error)
+    events, skipped = value
+    return events, skipped, None
 
 
 def _receipt_summary(rec):
@@ -221,9 +328,16 @@ def receipt_events(repo):
     THE RULE, declared rather than hard-coded per file: a root-level `.idc-*.json` whose top-level
     object carries a `session_id` IS a per-run receipt (`.idc-drain-verdict.json`,
     `.idc-<kind>-report.json`, …). One that does not — the obligations ledger, whose session ids live
-    per-record inside it — is NOT a run receipt and is left to its own module. Each distinct CONTENT
-    of a receipt is one event, so the last-write-wins sidecars contribute one row per state they were
-    actually observed in."""
+    per-record inside it — is NOT a run receipt and is left to its own module.
+
+    ONE ROW PER SIDECAR, HOLDING ITS CURRENT CONTENT. The key is content-based so a re-ingest of an
+    unchanged receipt is a no-op; when the content DOES change, `ingest` inserts the new state and
+    prunes the old row, because these sidecars are last-write-wins and the previous version no longer
+    exists in the raw record. Retaining both would give the mirror a history nothing else can
+    reproduce — the exact shape of a derived cache becoming a source of truth, and a `rebuild` (which
+    can only ever see the current content) would then silently DELETE trace the operator had come to
+    rely on. A live watcher still sees each change: the replacement row is appended at a fresh
+    cursor id rather than edited in place."""
     events, skipped = [], 0
     for path in sorted(glob.glob(os.path.join(repo, ".idc-*.json"))):
         base = os.path.basename(path)
@@ -265,25 +379,81 @@ _COLS = ("run_id", "source", "artifact", "seq", "ts", "op", "item",
 
 
 def ingest(repo, con):
-    """Mirror every raw record not already present. Returns `(inserted, skipped)`.
+    """Mirror the raw record as it stands NOW. Returns `(inserted, skipped, note)`.
 
     IDEMPOTENT by CONTENT: `event_key` is a hash of the record itself, so re-running is a no-op, a
     rotated line (moved from the live segment into the archive) is not re-ingested under its new
     path, and only genuinely new records advance the cursor. Insertion order is deterministic —
     journal segments in replay order, then receipts by filename — so two rebuilds of the same raw
-    record assign identical cursor ids."""
-    j_events, j_skipped = journal_events(repo)
+    record assign identical cursor ids.
+
+    CONVERGENT, which is the disposability doctrine made operational: what stands here after any
+    number of incremental ingests equals what a rebuild-from-scratch produces. Two things beyond the
+    insert are needed for that, both of them cases where the raw record MOVED or SHRANK under a row
+    that was already mirrored — see `_refresh_provenance` and `_prune_vanished`."""
+    j_events, j_skipped, note = journal_events(repo)
     r_events, r_skipped = receipt_events(repo)
     inserted = 0
     with con:
+        # INSERT FIRST, prune second. A replaced receipt's new row must be allocated while the old
+        # one is still present, so it can never be handed the id the pruned row just freed (belt to
+        # AUTOINCREMENT's braces) — a live watcher advances its cursor past ids, never back to them.
         for ev in j_events + r_events:
             cur = con.execute(
                 "INSERT OR IGNORE INTO events (%s) VALUES (%s)"
                 % (", ".join(_COLS), ", ".join("?" * len(_COLS))),
                 tuple(ev[c] for c in _COLS))
-            inserted += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+            if cur.rowcount and cur.rowcount > 0:
+                inserted += 1
+            elif ev["source"] == "journal":
+                _refresh_provenance(con, ev)
+        _prune_vanished(con, "journal", j_events, j_skipped)
+        _prune_vanished(con, "receipt", r_events, r_skipped)
         _rebuild_phases(con)
-    return inserted, j_skipped + r_skipped
+    return inserted, j_skipped + r_skipped, note
+
+
+def _refresh_provenance(con, ev):
+    """Point an already-mirrored journal row at where its record ACTUALLY IS NOW.
+
+    A rotation moves a line from the live segment into an archive segment and renumbers the lines
+    that stay behind. The row is content-keyed, so it is correctly NOT re-inserted — but its
+    `artifact`/`seq` still name the pre-rotation location, sending an auditor to a file and line
+    that no longer hold the record, and disagreeing with what a rebuild would derive from the same
+    repo. The content, the identity and the cursor id are untouched: only the pointer follows."""
+    con.execute(
+        "UPDATE events SET artifact = ?, seq = ? "
+        "WHERE event_key = ? AND (artifact IS NOT ? OR seq IS NOT ?)",
+        (ev["artifact"], ev["seq"], ev["event_key"], ev["artifact"], ev["seq"]))
+
+
+def _prune_vanished(con, source, events, skipped):
+    """Drop mirrored rows whose record the raw artifacts NO LONGER HOLD — a receipt sidecar that has
+    been rewritten (last-write-wins: its previous content is gone) or deleted, a journal line no
+    longer present in any segment. Without this the mirror accumulates state that only IT has, which
+    is precisely the point at which a derived view stops being disposable and starts being a source.
+
+    ONLY ON A CLEAN READ of that source (`skipped == 0`). A pass that could not parse everything has
+    not established that a missing row is really gone: a half-written line or a momentarily
+    unreadable sidecar would otherwise delete a good row and re-insert it on the next poll, which a
+    watcher reads as a brand-new event that never happened."""
+    if skipped:
+        return
+    con.execute("CREATE TEMP TABLE IF NOT EXISTS _seen (event_key TEXT PRIMARY KEY)")
+    con.execute("DELETE FROM _seen")
+    con.executemany("INSERT OR IGNORE INTO _seen (event_key) VALUES (?)",
+                    [(ev["event_key"],) for ev in events])
+    con.execute("DELETE FROM events WHERE source = ? "
+                "AND event_key NOT IN (SELECT event_key FROM _seen)", (source,))
+
+
+def _canonical_key(artifact, seq, ev_id):
+    """A journal row's position in CANONICAL replay order, read off its own provenance: archived
+    segments (sorted by name — the order `RP._journal_paths` replays them in) before the live
+    segment, then line number. Derived from the record's location, not from when the mirror happened
+    to see it, so an incrementally-grown mirror and a fresh rebuild order identically."""
+    return (1 if artifact == JOURNAL_REL else 0,
+            artifact, seq if seq is not None else 0, ev_id)
 
 
 def _rebuild_phases(con):
@@ -294,15 +464,22 @@ def _rebuild_phases(con):
     ONLY `to.status`, while Stage is asserted at create and at terminal ops. The stage last KNOWN at
     entry rides along as context, never carried past a later Stage assertion. A phase that has not
     been left has no `exited_ts` and no duration — the mirror does not close a span the record
-    leaves open. Derived-of-derived and cheap, so it is rebuilt rather than incrementally patched."""
+    leaves open. Derived-of-derived and cheap, so it is rebuilt rather than incrementally patched.
+
+    THE ORDER IS CANONICAL JOURNAL ORDER — archived segments then the live one, by line within each,
+    exactly what a replay reads — and NOT wall-clock `ts`. The journal is an append log, so its own
+    order IS the sequence of state changes; a clock that steps backwards between two ops (or an
+    out-of-order legacy timestamp) would otherwise sort them the wrong way round and leave an
+    EARLIER status standing as the item's open phase. Timestamps are used for durations only."""
     con.execute("DELETE FROM phases")
     rows = con.execute(
-        "SELECT id, run_id, item, stage, status, ts FROM events "
-        "WHERE source = 'journal' AND item IS NOT NULL ORDER BY ts, id").fetchall()
+        "SELECT id, run_id, item, stage, status, ts, artifact, seq FROM events "
+        "WHERE source = 'journal' AND item IS NOT NULL").fetchall()
+    rows.sort(key=lambda r: _canonical_key(r[6], r[7], r[0]))
     open_span = {}      # item -> the span currently accruing
     last_stage = {}     # item -> the most recent stage the record asserted
     out = []
-    for ev_id, run_id, item, stage, status, ts in rows:
+    for ev_id, run_id, item, stage, status, ts, _artifact, _seq in rows:
         if stage:
             last_stage[item] = stage
         if not status:
@@ -357,22 +534,49 @@ def print_events(rows, as_json=False):
 
 
 # ── subcommands ──────────────────────────────────────────────────────────────────────────────────
+_SKIP_MSG = "skipped: %d unparseable record(s) — half-written or damaged; re-run to pick them up"
+
+
+def report_skipped(skipped, note, last=None):
+    """Tell the operator THE VIEW IS INCOMPLETE. Returns the state to pass back as `last`.
+
+    On STDERR, so `tail --json` / `watch --json` stdout stays a clean stream of records for whatever
+    is parsing it. Only when the count or the note CHANGES: a poll loop that reprinted the same
+    warning every two seconds would train the operator to ignore it, and one that printed it only
+    once would let a later skip pass unnoticed. A count that falls back to zero is reported too —
+    "the trace is whole again" is news, and silence there reads as an unresolved gap."""
+    if (skipped, note) == last:
+        return last
+    if skipped:
+        sys.stderr.write((_SKIP_MSG + "\n") % skipped)
+    elif last is not None and last[0]:
+        sys.stderr.write("skipped: 0 — the previously unreadable record(s) parsed cleanly\n")
+    if note:
+        sys.stderr.write("note: %s\n" % note)
+    sys.stderr.flush()
+    return (skipped, note)
+
+
 def cmd_ingest(args, con):
-    inserted, skipped = ingest(args.repo, con)
+    inserted, skipped, note = ingest(args.repo, con)
     total = con.execute("SELECT count(*) FROM events").fetchone()[0]
     cursor = con.execute("SELECT coalesce(max(id), 0) FROM events").fetchone()[0]
     print("ingested: %d new · %d total · cursor %d" % (inserted, total, cursor))
     if skipped:
         # Never silent: a skipped line means the VIEW is incomplete, and the operator has to know
         # that rather than read a short trace as a quiet run.
-        print("skipped: %d unparseable record(s) — half-written or damaged; re-run to pick them up"
-              % skipped)
+        print(_SKIP_MSG % skipped)
+    if note:
+        print("note: %s" % note)
     return 0
 
 
 def cmd_tail(args, con):
-    ingest(args.repo, con)
+    _, skipped, note = ingest(args.repo, con)
     print_events(cursor_query(con, args.since, args.run), as_json=args.json)
+    # AFTER the rows, where a terminal reader will actually see it: a tail that returned three lines
+    # because two records were unreadable must not look like a tail that returned three lines.
+    report_skipped(skipped, note)
     return 0
 
 
@@ -380,13 +584,19 @@ def cmd_watch(args, con):
     """The cursor query in a sleep loop — that is the entire live surface. Starts at the CURRENT end
     of the mirror (tail -f semantics) unless `--since` names a cursor to replay from. `--max-polls`
     bounds a run so a watch can be scripted; Ctrl-C exits cleanly."""
+    # INGEST BEFORE TAKING THE DEFAULT CURSOR. On the first watch of a repo that already has history
+    # but no mirror yet, an end-of-mirror cursor read from the still-empty db is 0, and the ingest
+    # that follows then replays every record the repo has ever had as though it had just happened —
+    # the opposite of the tail-follow default. An explicit `--since` is the operator's own choice and
+    # is left exactly as given.
+    _, skipped, note = ingest(args.repo, con)
+    reported = report_skipped(skipped, note)
     cursor = args.since
     if cursor is None:
         cursor = con.execute("SELECT coalesce(max(id), 0) FROM events").fetchone()[0]
     polls = 0
     try:
         while True:
-            ingest(args.repo, con)
             rows = cursor_query(con, cursor, args.run)
             if rows:
                 print_events(rows, as_json=args.json)
@@ -395,6 +605,8 @@ def cmd_watch(args, con):
             if args.max_polls and polls >= args.max_polls:
                 return 0
             time.sleep(args.interval)
+            _, skipped, note = ingest(args.repo, con)
+            reported = report_skipped(skipped, note, reported)
     except KeyboardInterrupt:
         print("", flush=True)
         return 0
@@ -414,9 +626,11 @@ def cmd_sessions(args, con):
 
 
 def cmd_timeline(args, con):
+    # ORDER BY id — the spans were written in canonical journal order, so this displays the item's
+    # phases in the order the record puts them in, not in whatever order the clocks suggest.
     rows = con.execute(
         "SELECT phase, stage, entered_ts, exited_ts, duration_s FROM phases "
-        "WHERE item = ? ORDER BY entered_ts, id", (args.item,)).fetchall()
+        "WHERE item = ? ORDER BY id", (args.item,)).fetchall()
     if not rows:
         print("no phases mirrored for item %s" % args.item)
         return 0

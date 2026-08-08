@@ -383,6 +383,12 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_janitor.py" --repo "$ROOT" --ensu
 # Local run state, never committed; a repo scaffolded before pause/resume has no ignore for it. Ensure
 # it too (the pause-state module owns the filename + ignore rule; additive, idempotent):
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_pause_state.py" --cwd "$ROOT" ensure-gitignore
+# The derived run-trace mirror (.idc-trace-mirror.db + its -wal/-shm sidecars, #195) — the read-only
+# operator lens over the transition journal + hook receipts. Derived, disposable, never committed; a
+# repo scaffolded before #195 has no ignore for it, so its FIRST ingest would strand an untracked db
+# plus two WAL sidecars the janitor then flags as debris. Ensure it too (the mirror module owns the
+# filename glob + ignore rule; additive, idempotent):
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_trace_mirror.py" --repo "$ROOT" ensure-gitignore
 ```
 Idempotent: a no-op if the line is already present (report `ledger-gitignore-already-present` /
 `drain-verdict-gitignore-already-present` / `journal-lock-gitignore-already-present`), otherwise

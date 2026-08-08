@@ -84,6 +84,15 @@ half-finished update can never masquerade as complete.
   re-stamped). The one exception is a `missing` operator-data file (the operator deleted it): there
   is no data on disk to preserve and no file for §A's advisory checks to read, so it follows the
   `missing` rule below — restore as the blank stub, default leave-removed — which §A also points to.
+
+  A present `always_ask` file whose bytes have diverged from the stamped fingerprint is reported in
+  its own `ask` bucket rather than under `modified`, and `ok` stays a modified+missing contract. That
+  divergence is the **designed steady state**, not drift: `/idc:init` fills the two configs with this
+  repo's data, and the finish contract has fixed code append each build's newly-proven verification
+  handle to the registry. Grading it as drift meant every successful build ended in `ok: false`,
+  which teaches the operator to ignore the receipt. `ask` routes to §A exactly as the sentence above
+  requires — it changes what update *reports*, never what it *preserves*.
+
   Branch the remaining (non-`always_ask`) files on the drift class **and** the recorded `state`:
   - `unchanged` **and** `state: stamped` → pristine. Safe to refresh
     silently — but only if the installed plugin's template for that file actually differs from

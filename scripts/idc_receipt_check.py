@@ -6,8 +6,9 @@ it stamped, each with a SHA-256 fingerprint of its final on-disk bytes. This hel
 deterministic, dependency-free core that the two lifecycle commands consume:
 
   * `/idc:update`   — `verify` proves which stamped files are untouched (safe to re-stamp) vs
-                      customized (show-diff-and-ask); `stamp` rewrites a fresh receipt at the
-                      end of a successful run (and graduates a pre-receipt repo).
+                      customized (show-diff-and-ask) vs `ask` (operator-data files whose bytes the
+                      lifecycle is DESIGNED to grow — see classify_receipt); `stamp` rewrites a fresh
+                      receipt at the end of a successful run (and graduates a pre-receipt repo).
   * `/idc:uninstall`— `verify` turns the receipt into the removal manifest ("only delete what
                       IDC created"), and flags operator-customized files before removal.
 
@@ -304,11 +305,35 @@ def governed_expected_paths() -> list[str]:
 def classify_receipt(repo: str, entries: list[dict[str, str]]) -> tuple[dict[str, int], list[tuple[str, str]]]:
     """Fingerprint-verify every receipt entry against the repo's CURRENT on-disk bytes, returning
     (counts, classified) where each classification is `unchanged` (bytes match the stamped
-    fingerprint), `modified` (bytes differ), or `missing` (file gone). This is the deterministic
-    fingerprint check — not a syntax parse — the /idc:init and /idc:update closeouts re-run to prove
-    the scaffold actually landed intact (a modified or missing stamped file fails the closeout closed)."""
+    fingerprint), `modified` (bytes differ), `ask` (bytes differ on an operator-data file whose bytes
+    were never template-owned), or `missing` (file gone). This is the deterministic fingerprint check
+    — not a syntax parse — the /idc:init and /idc:update closeouts re-run to prove the scaffold
+    actually landed intact (a modified or missing stamped file fails the closeout closed).
+
+    WHY `ask` IS A CLASS AND NOT A FLAVOUR OF `modified`. Two populations sit in one receipt. A
+    template-owned scaffold file (WORKFLOW.md, workflow-machine.yaml, the keepfiles) is supposed to
+    hold exactly the bytes /idc:init laid down, so byte-equality IS its integrity test and any
+    divergence is real drift. The three `ALWAYS_ASK_RELPATHS` files are not: their bytes are operator
+    and machine DATA that the lifecycle is designed to grow — /idc:init fills the two configs with
+    this repo's domains and board ids, and the finish contract REQUIRES fixed code to append each
+    build's newly-proven verification handle to the registry (agents/idc-finisher.md step 4). Grading
+    them by the template rule reported designed growth as drift, so a fully green build ended in
+    `ok: false / modified: [docs/workflow/verification-handles.yaml]` — an alarm on every successful
+    lifecycle, which trains the operator to ignore the one signal the receipt exists to raise
+    (issue #194).
+
+    The receipt already drew this line: `ALWAYS_ASK_RELPATHS` is its own statement that these files
+    are never silently refreshed. Publishing it as a side list while still grading them by the
+    template rule left every consumer that reads `ok`/`modified` — the operator at the prompt, the
+    init/update closeout, uninstall's keep-or-remove prompt — inheriting the false alarm. `ask` is
+    the honest answer: the divergence stays VISIBLE and per-file, it just stops being scored as
+    scaffold damage.
+
+    ABSENCE IS NOT DIVERGENCE. A `missing` always-ask file stays `missing` and still fails `ok` — the
+    operator deleted real data, /idc:update restores it from the blank stub, and the scaffold is
+    genuinely not intact. `ask` covers divergent bytes only."""
     classified: list[tuple[str, str]] = []
-    counts = {"unchanged": 0, "modified": 0, "missing": 0}
+    counts = {"unchanged": 0, "modified": 0, "ask": 0, "missing": 0}
     for entry in sorted(entries, key=lambda e: e["path"]):
         rel = entry["path"]
         abs_path = os.path.join(repo, rel)
@@ -316,6 +341,8 @@ def classify_receipt(repo: str, entries: list[dict[str, str]]) -> tuple[dict[str
             state = "missing"
         elif fingerprint(abs_path) == entry["fingerprint"]:
             state = "unchanged"
+        elif rel in ALWAYS_ASK_RELPATHS:
+            state = "ask"
         else:
             state = "modified"
         counts[state] += 1
@@ -327,7 +354,11 @@ def verify_receipt_fingerprints(repo: str, receipt_path: str) -> tuple[bool, dic
     """Parse `receipt_path` and fingerprint-verify every listed file, returning (ok, counts) where
     ok == (no modified AND no missing entries). Raises SystemExit (via parse_receipt_document/die) on
     an invalid/unreadable receipt — a caller that must fail closed catches SystemExit. The one library
-    entry point the command contract re-runs to re-derive an init/update `complete`."""
+    entry point the command contract re-runs to re-derive an init/update `complete`.
+
+    `ask` entries are deliberately outside this contract: they are the operator-data files whose bytes
+    the lifecycle is designed to grow, so they say nothing about whether the SCAFFOLD landed intact,
+    which is the only question this predicate asks (see classify_receipt)."""
     _top, entries = parse_receipt_document(receipt_path)
     counts, _classified = classify_receipt(repo, entries)
     return counts["modified"] == 0 and counts["missing"] == 0, counts
@@ -341,15 +372,18 @@ def cmd_verify(args: argparse.Namespace) -> int:
     counts, classified = classify_receipt(repo, entries)
 
     if args.json:
-        out: dict[str, object] = {"unchanged": [], "modified": [], "missing": []}
+        out: dict[str, object] = {"unchanged": [], "modified": [], "ask": [], "missing": []}
         for state, rel in classified:
             out[state].append(rel)  # type: ignore[union-attr]
         # Additive top-level pass/fail + human summary (existing buckets unchanged for
         # back-compat): a consumer no longer has to derive "ok" from two empty lists.
         out["ok"] = counts["modified"] == 0 and counts["missing"] == 0
+        # `ask` is NAMED in the summary even at zero. A class that appears only when non-empty reads
+        # as an anomaly the one time it shows up; a fixed field reads as a standing category, which is
+        # what it is — the honest reporting `ok` alone cannot carry.
         out["summary"] = (
             f"{counts['unchanged']} unchanged, "
-            f"{counts['modified']} modified, {counts['missing']} missing"
+            f"{counts['modified']} modified, {counts['ask']} ask, {counts['missing']} missing"
         )
         # Data-bearing files /idc:update must always show-diff-and-ask for, never silently refresh —
         # even when classified unchanged + state: stamped (legacy-receipt guard). Single source of
@@ -366,11 +400,14 @@ def cmd_verify(args: argparse.Namespace) -> int:
                              if rel not in receipt_paths]
         print(json.dumps(out, indent=2, sort_keys=True))
     else:
+        # Every receipt entry keeps a TSV row, `ask` included: /idc:uninstall consumes this stream as
+        # its removal manifest, so a class that fell out of it would be an IDC-created file uninstall
+        # never sees — neither removed nor asked about, just stranded.
         for state, rel in classified:
             print(f"{state}\t{rel}")
         print(
             f"summary: {counts['unchanged']} unchanged, "
-            f"{counts['modified']} modified, {counts['missing']} missing",
+            f"{counts['modified']} modified, {counts['ask']} ask, {counts['missing']} missing",
             file=sys.stderr,
         )
     return 0
@@ -400,7 +437,10 @@ def main(argv: list[str]) -> int:
     vp.add_argument("--receipt", help=f"receipt path (default: <repo>/{RECEIPT_RELPATH})")
     vp.add_argument("--json", action="store_true",
                     help="emit JSON instead of TSV. Schema: {\"unchanged\":[paths], "
-                         "\"modified\":[paths], \"missing\":[paths], \"ok\": bool (true iff "
+                         "\"modified\":[paths], \"ask\":[paths] (an always_ask operator-data file "
+                         "PRESENT on disk whose bytes diverge from the stamped fingerprint — designed "
+                         "growth, not scaffold drift, so it is reported separately and is NOT part of "
+                         "\"ok\"), \"missing\":[paths], \"ok\": bool (true iff "
                          "modified+missing both empty), \"summary\": str, \"always_ask\":[paths] "
                          "(operator-data files update must always preserve/advisory-check rather "
                          "than silently refresh), \"unrecorded\":[paths] (files the current plugin stamps that "

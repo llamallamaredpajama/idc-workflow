@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import hashlib
+import io
 import json
 import os
 import re
@@ -16,6 +19,7 @@ from typing import Iterable
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 
+import idc_command_contract as C  # noqa: E402
 import idc_credential_shapes as CS  # noqa: E402
 import idc_path_gate as PG  # noqa: E402
 
@@ -343,6 +347,110 @@ def _tree_has(repo: str, commit: str, relpath: str) -> bool:
     return proc.returncode == 0
 
 
+def _tree_blob(repo: str, commit: str, relpath: str) -> bytes | None:
+    """The exact bytes `relpath` had in `commit`'s tree, or None when the tree has no such file."""
+    proc = subprocess.run(
+        ["git", "-C", repo, "cat-file", "blob", f"{commit}:{relpath}"], capture_output=True
+    )
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def _receipt_entries_in_tree(repo: str, commit: str):
+    """`(entries, problem)` for the install receipt as of `commit`'s tree.
+
+    `entries is None, problem is None` means this tree carries no receipt at all — a pre-receipt
+    install, whose removal manifest is the fixed legacy list. A receipt that is THERE but does not
+    parse is a hard problem and never falls back, mirroring `_uninstall_owned_files`: a damaged
+    manifest must not be able to shrink the set of files an uninstall is required to have removed."""
+    import idc_receipt_check as RC  # noqa: PLC0415 — lazy; the one canonical receipt parser
+
+    blob = _tree_blob(repo, commit, RC.RECEIPT_RELPATH)
+    if blob is None:
+        return None, None
+    fd, tmp = tempfile.mkstemp(prefix=".idc-uninstall-receipt.", suffix=".yaml")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(blob)
+        noise = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(noise):        # `die` narrates to stderr; we re-report it
+                _top, entries = RC.parse_receipt_document(tmp)
+        except (Exception, SystemExit) as exc:  # noqa: BLE001 — any unparseable receipt fails closed
+            detail = (noise.getvalue().strip() or str(exc)).splitlines()
+            return None, (
+                f"the install receipt `{RC.RECEIPT_RELPATH}` carried by commit {commit} does not "
+                f"parse, so the removal manifest cannot be derived ({detail[-1] if detail else exc})"
+            )
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    return entries, None
+
+
+def _incomplete_removal_problem(repo: str, oid: str, parent: str) -> str | None:
+    """None when `oid` removes the WHOLE IDC footprint its parent still carried, else what survived.
+
+    This is what binds the witness to a genuinely completed `/idc:uninstall` rather than to any commit
+    that merely drops the anchor (#202 review). Without it, a hand-made two-file commit deleting
+    `docs/workflow/tracker-config.yaml` and `TRACKER.md` has the ungoverning shape while leaving every
+    other IDC footprint in place — and its protected deletion would then be waved through the push
+    gate forever after the next `/idc:init`.
+
+    THE MANIFEST IS RE-DERIVED FROM THE PARENT TREE, never from the caller and never from the
+    worktree: the parent is the last governed state, so it still carries both the receipt and the
+    files the receipt lists. That keeps the answer identical at witness time and at every later push,
+    which is the property the whole door rests on.
+
+    AN OPERATOR-CUSTOMIZED FILE IS EXEMPT, BY BOTH OF THE TWO SIGNALS `/idc:uninstall` Phase 1 asks
+    keep-or-remove on (defaulting to KEEPING, so either may legitimately survive the removal commit):
+      * bytes in the parent tree that diverge from the stamped fingerprint (`modified` / `ask`), and
+      * `state: customized` on the entry itself — what `/idc:update` stamps for a file the operator
+        kept at its diff-and-ask. Its fingerprint is taken from those KEPT bytes, so it matches and
+        would otherwise read as `unchanged` (`classify_receipt` grades by bytes alone and never reads
+        `state`). Demanding its removal would refuse a genuine uninstall of any repo whose operator
+        ever kept a scaffold file through an update.
+    Only entries that are neither may a completed uninstall be required to have removed."""
+    entries, problem = _receipt_entries_in_tree(repo, parent)
+    if problem:
+        return problem
+
+    import idc_receipt_check as RC  # noqa: PLC0415 — lazy; the one canonical receipt parser
+
+    if entries is None:
+        source = "the pre-receipt legacy owned-file list"
+        required = sorted(C.LEGACY_UNINSTALL_OWNED_FILES)
+    else:
+        source = f"the install receipt carried by commit {parent}"
+        # The receipt never lists ITSELF, and uninstall Phase 3c removes it with the anchor.
+        required = [RC.RECEIPT_RELPATH]
+        for entry in entries:
+            rel = entry.get("path") or ""
+            if entry.get("state") == "customized":
+                continue    # operator-kept at update's diff-and-ask — uninstall asks, defaults to keep
+            blob = _tree_blob(repo, parent, rel)
+            if blob is None:
+                continue    # already gone before this commit — nothing left for it to remove
+            if hashlib.sha256(blob).hexdigest() == entry.get("fingerprint"):
+                required.append(rel)
+
+    survivors = [
+        rel for rel in required if _tree_has(repo, parent, rel) and _tree_has(repo, oid, rel)
+    ]
+    if not survivors:
+        return None
+    shown = ", ".join(f"`{rel}`" for rel in survivors[:5])
+    if len(survivors) > 5:
+        shown += f" (and {len(survivors) - 5} more)"
+    return (
+        f"commit {oid} is not a completed IDC uninstall: it drops the governance anchor but leaves "
+        f"{len(survivors)} file(s) from {source} in place — {shown}. Run `/idc:uninstall`, which "
+        "removes the whole receipt-derived footprint in one commit, rather than witnessing a partial "
+        "removal"
+    )
+
+
 def uninstall_commit_problem(repo: str, commit: str) -> str | None:
     """None when `commit` has the sanctioned uninstall shape, else why it does not.
 
@@ -352,7 +460,14 @@ def uninstall_commit_problem(repo: str, commit: str) -> str | None:
         carries the repository out of IDC governance;
       * every protected machine surface it touches is touched by DELETION ONLY. Without this clause
         "delete the anchor" would be a universal key for writing machine-owned state in the same
-        commit."""
+        commit;
+      * it REMOVES THE WHOLE FOOTPRINT its parent still carried, derived from the install receipt in
+        the parent tree (or the fixed legacy list when that tree predates receipts). This is the
+        clause that binds the door to a completed `/idc:uninstall` instead of to any commit that
+        happens to drop the anchor — see `_incomplete_removal_problem`.
+
+    ORDER IS DELIBERATE: the cheap structural clauses answer first, so a near-miss is refused with
+    the most specific reason available rather than with the manifest complaint."""
     try:
         oid = _run_git(repo, "rev-parse", "--verify", "--quiet", f"{commit}^{{commit}}")
     except RuntimeError as exc:
@@ -385,7 +500,7 @@ def uninstall_commit_problem(repo: str, commit: str) -> str | None:
                 f"commit {oid} does not only REMOVE machine-owned state: it applies `{status}` to the "
                 f"protected surface `{rel}`"
             )
-    return None
+    return _incomplete_removal_problem(repo, oid, parent)
 
 
 def _exempt_witnessed_uninstall_paths(
@@ -465,9 +580,11 @@ def cmd_pre_push(args: argparse.Namespace) -> int:
 def cmd_witness_uninstall(args: argparse.Namespace) -> int:
     """The sanctioned uninstall push door: prove the shape, then record the commit.
 
-    Called by `/idc:uninstall` Phase 3c right after it lands the removal commit, and by an operator
-    recovering a repository that an older plugin version already stranded. It is safe to point at any
-    commit: anything that is not the ungoverning shape is refused here AND, independently, at push."""
+    Called from the `/idc:uninstall` playbook — Phase 3c right after it lands the removal commit, and
+    its recovery section for a repository an older plugin version already stranded. Both are COMMAND
+    paths; the operator is never told to run this helper by hand (AGENTS.md: the `scripts/idc_*.py`
+    helpers are called by the commands). It is safe to point at any commit: anything that is not a
+    completed uninstall is refused here AND, independently, at push."""
     repo = _repo_root(args.repo)
     problem = uninstall_commit_problem(repo, args.commit)
     if problem:

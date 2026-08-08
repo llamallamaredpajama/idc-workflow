@@ -31,6 +31,13 @@
 #      protected surface; a hand-forged witness naming an ordinary commit is refused at push, because
 #      the gate re-derives the shape and never takes the witness's word.
 #   5. FORWARD — an uninstall that witnesses its own commit pushes with no recovery step at all.
+#   6. PARTIAL — a commit that drops the anchor but leaves the rest of the footprint installed is
+#      refused: witnessing is bound to a COMPLETED uninstall, not to "the anchor is gone".
+#   7. MANIFEST — the receipt-derived removal set both refuses a partial removal in a receipt-backed
+#      repo AND still admits a real uninstall that kept an operator-customized file.
+#   8. WORKTREE — a witness written from a linked worktree is visible to a push from the primary
+#      checkout and survives that worktree's removal (it is repository-wide evidence).
+#   9. RETENTION — no fixed ceiling evicts a witness the outgoing range still needs.
 set -uo pipefail
 . "$(dirname "$0")/lib.sh"
 
@@ -56,6 +63,7 @@ REPO=""; REMOTE=""      # set by new_governed_repo; every helper below acts on t
 # written here but deliberately NOT part of any init commit: it is runtime-created and not
 # receipt-listed (commands/uninstall.md Phase 1), so only the baseline — seeded before the backstops
 # exist, exactly as governance/path-gate-git-backstops.sh does — ever tracks it.
+SCAFFOLD_RECEIPT=0      # 1 → also stamp a real install receipt over the scaffold (see new_receipt_repo)
 write_scaffold() {
   mkdir -p "$REPO/docs/workflow" "$REPO/.claude"
   printf 'backend: filesystem\n'                          > "$REPO/docs/workflow/tracker-config.yaml"
@@ -64,6 +72,11 @@ write_scaffold() {
   printf '# workflow docs\n'                              > "$REPO/docs/workflow/README.md"
   printf 'ticket: demo\n'                                 > "$REPO/TRACKER.md"
   printf '{"enabledPlugins":{"idc@idc-workflow":true}}\n' > "$REPO/.claude/settings.json"
+  [ "$SCAFFOLD_RECEIPT" = "1" ] || return 0
+  python3 "$GOV_PLUGIN/scripts/idc_receipt_check.py" stamp --repo "$REPO" \
+    --plugin-version 9.9.9 --out "$REPO/docs/workflow/install-receipt.yaml" \
+    WORKFLOW.md WORKFLOW-config.yaml docs/workflow/tracker-config.yaml docs/workflow/README.md \
+    >/dev/null 2>&1 || gov_fail "could not stamp the install receipt over the scaffold"
 }
 
 # A governed repo published to a bare origin, with the real backstops installed afterwards.
@@ -93,13 +106,28 @@ new_governed_repo() {
 # The uninstall removal commit, exactly as commands/uninstall.md Phase 3c lands it: every footprint
 # removed (governance anchor last), the enablement key stripped, one revertable commit. No
 # --no-verify — the point is that this commit is legitimately admissible when it is made.
+# $1 (optional) — the worktree to commit in, so arm 8 can run the same removal from a LINKED one.
 make_uninstall_commit() {
-  git -C "$REPO" rm -q TRACKER.md WORKFLOW.md WORKFLOW-config.yaml \
+  local dir="${1:-$REPO}"
+  git -C "$dir" rm -q TRACKER.md WORKFLOW.md WORKFLOW-config.yaml \
     docs/workflow/README.md docs/workflow/tracker-config.yaml
-  printf '{"enabledPlugins":{}}\n' > "$REPO/.claude/settings.json"
-  git -C "$REPO" add .claude/settings.json
-  git -C "$REPO" commit -q -m 'idc: uninstall — remove IDC footprints (revert this commit to reinstate)' \
+  printf '{"enabledPlugins":{}}\n' > "$dir/.claude/settings.json"
+  git -C "$dir" add .claude/settings.json
+  git -C "$dir" commit -q -m 'idc: uninstall — remove IDC footprints (revert this commit to reinstate)' \
     || gov_fail "the uninstall removal commit was refused at pre-commit (it must land: the anchor is already gone)"
+}
+
+# A governed repo whose scaffold is covered by a REAL install receipt — the MODERN install shape,
+# where the removal manifest is derived from the receipt rather than from the legacy fixed list. The
+# receipt rides the BASELINE, seeded before the backstops exist, for the same reason TRACKER.md does:
+# it is a protected machine surface, so a later commit of it would be gated on its own account and
+# the arm would stop being about the manifest.
+new_receipt_repo() {
+  SCAFFOLD_RECEIPT=1
+  new_governed_repo "$1"
+  SCAFFOLD_RECEIPT=0
+  git -C "$REPO" cat-file -e HEAD:docs/workflow/install-receipt.yaml \
+    || gov_fail "the receipt-backed baseline for $1 does not actually track an install receipt"
 }
 
 # A fresh `/idc:init` on top: the scaffold returns, the repo is governed again, and from here every
@@ -258,4 +286,152 @@ git -C "$REPO" push origin main >"$WORK/forward.out" 2>&1 \
 [ "$(git -C "$REPO" rev-parse origin/main)" = "$(git -C "$REPO" rev-parse HEAD)" ] \
   || gov_fail "the forward-path push reported success but the remote did not advance"
 
-echo "PASS: the sanctioned uninstall removal commit is publishable through a witnessed, shape-verified door; stray protected mutations, non-ungoverning commits, protected re-additions and forged witnesses are all still refused"
+# ── 6. PARTIAL REMOVAL: dropping the anchor is not, by itself, an uninstall ───────────────────────
+# The near-miss the shape checks alone could not tell from the real thing: a hand-made commit that
+# deletes the governance anchor AND a protected surface, deletion-only, single parent — while leaving
+# every other IDC footprint installed. It satisfies every structural clause, so ONLY the
+# receipt-derived removal manifest can refuse it. Without that clause this commit is witnessed, and
+# its protected deletion is then exempt at every push the repo ever makes.
+new_governed_repo partial-legacy
+git -C "$REPO" rm -q docs/workflow/tracker-config.yaml TRACKER.md
+git -C "$REPO" commit -q -m 'chore: drop the tracker config and the tracker file'
+PARTIAL_SHA="$(git -C "$REPO" rev-parse HEAD)"
+if python3 "$GIT_GATE" witness-uninstall --repo "$REPO" --commit "$PARTIAL_SHA" >"$WORK/partial.out" 2>&1; then
+  gov_fail "witness-uninstall recorded a PARTIAL removal that left the rest of the IDC footprint installed"
+fi
+grep -qF 'WORKFLOW.md' "$WORK/partial.out" \
+  || gov_fail "the partial-removal refusal did not name a surviving footprint: $(cat "$WORK/partial.out")"
+# ...and the push gate refuses it independently. The re-init is what makes this assertion mean
+# anything: while the anchor is gone the repo is ungoverned and the hook exits before gating at all,
+# so a partial removal is only ever re-litigated once the repo is governed again — which is also why
+# an `/idc:*` command is always available in the state that actually needs repairing.
+make_init_commit
+if git -C "$REPO" push origin main >"$WORK/partial-push.out" 2>&1; then
+  gov_fail "a partial removal published without any witness at all"
+fi
+grep -qF "$DENY_MARK" "$WORK/partial-push.out" \
+  || gov_fail "the partial-removal push refusal did not cite the protected surface: $(cat "$WORK/partial-push.out")"
+
+# ── 7. RECEIPT-DERIVED MANIFEST: the modern install shape, both directions ────────────────────────
+# The manifest is re-derived from the install receipt in the PARENT tree, so it must (a) refuse a
+# removal that leaves a receipt-listed file behind and (b) still admit a real uninstall that KEPT an
+# operator-customized file — which `/idc:uninstall` Phase 1 explicitly asks about and defaults to
+# keeping. (b) is the false-refusal guard: over-tightening here would break every real uninstall of a
+# repo whose operator ever edited a scaffold file.
+new_receipt_repo receipt-manifest
+git -C "$REPO" rm -q docs/workflow/tracker-config.yaml TRACKER.md
+git -C "$REPO" commit -q -m 'chore: drop the anchor while the receipt-listed scaffold stays'
+RECEIPT_PARTIAL_SHA="$(git -C "$REPO" rev-parse HEAD)"
+if python3 "$GIT_GATE" witness-uninstall --repo "$REPO" --commit "$RECEIPT_PARTIAL_SHA" >"$WORK/receipt-partial.out" 2>&1; then
+  gov_fail "witness-uninstall recorded a partial removal in a RECEIPT-backed repo"
+fi
+grep -qF 'install receipt' "$WORK/receipt-partial.out" \
+  || gov_fail "the receipt-backed refusal did not cite the receipt-derived manifest: $(cat "$WORK/receipt-partial.out")"
+git -C "$REPO" reset --hard -q origin/main
+
+# (b) An operator-customized file diverges from its stamped fingerprint, the operator keeps it at the
+#     Phase-1 ask, and the uninstall commit removes everything else. This MUST still be witnessable.
+printf '# IDC workflow — locally edited by the operator\n' > "$REPO/WORKFLOW.md"
+git -C "$REPO" add WORKFLOW.md
+git -C "$REPO" commit -q --no-verify -m 'test: operator customizes a scaffold file'
+git -C "$REPO" rm -q TRACKER.md WORKFLOW-config.yaml docs/workflow/README.md \
+  docs/workflow/tracker-config.yaml docs/workflow/install-receipt.yaml
+printf '{"enabledPlugins":{}}\n' > "$REPO/.claude/settings.json"
+git -C "$REPO" add .claude/settings.json
+git -C "$REPO" commit -q -m 'idc: uninstall — remove IDC footprints (revert this commit to reinstate)' \
+  || gov_fail "the customized-keep uninstall commit was refused at pre-commit"
+KEEP_SHA="$(git -C "$REPO" rev-parse HEAD)"
+python3 "$GIT_GATE" witness-uninstall --repo "$REPO" --commit "$KEEP_SHA" >"$WORK/receipt-keep.out" 2>&1 \
+  || gov_fail "the door refused a real uninstall that kept an operator-customized file: $(cat "$WORK/receipt-keep.out")"
+git -C "$REPO" cat-file -e "$KEEP_SHA:WORKFLOW.md" \
+  || gov_fail "the customized-keep fixture is not discriminating — WORKFLOW.md was removed after all"
+
+# (c) The OTHER keep signal: `state: customized`, which /idc:update stamps for a file the operator
+#     kept at its diff-and-ask. Its fingerprint is taken from those kept bytes, so it still MATCHES
+#     and reads as `unchanged` by bytes alone — uninstall Phase 1 nonetheless asks and defaults to
+#     keeping it. Requiring its removal would refuse a genuine uninstall of any repo whose operator
+#     ever kept a scaffold file through an update.
+SCAFFOLD_RECEIPT=0
+new_governed_repo customized-state
+python3 "$GOV_PLUGIN/scripts/idc_receipt_check.py" stamp --repo "$REPO" \
+  --plugin-version 9.9.9 --out "$REPO/docs/workflow/install-receipt.yaml" \
+  --customized WORKFLOW.md \
+  WORKFLOW.md WORKFLOW-config.yaml docs/workflow/tracker-config.yaml docs/workflow/README.md \
+  >/dev/null 2>&1 || gov_fail "could not stamp a receipt marking WORKFLOW.md customized"
+grep -q 'state: customized' "$REPO/docs/workflow/install-receipt.yaml" \
+  || gov_fail "the customized-state fixture is not discriminating — no entry was stamped customized"
+git -C "$REPO" add docs/workflow/install-receipt.yaml
+git -C "$REPO" commit -q --no-verify -m 'test: stamp a receipt with a customized entry'
+git -C "$REPO" rm -q TRACKER.md WORKFLOW-config.yaml docs/workflow/README.md \
+  docs/workflow/tracker-config.yaml docs/workflow/install-receipt.yaml
+printf '{"enabledPlugins":{}}\n' > "$REPO/.claude/settings.json"
+git -C "$REPO" add .claude/settings.json
+git -C "$REPO" commit -q -m 'idc: uninstall — remove IDC footprints (revert this commit to reinstate)' \
+  || gov_fail "the customized-state uninstall commit was refused at pre-commit"
+CUSTOM_SHA="$(git -C "$REPO" rev-parse HEAD)"
+python3 "$GIT_GATE" witness-uninstall --repo "$REPO" --commit "$CUSTOM_SHA" >"$WORK/receipt-custom.out" 2>&1 \
+  || gov_fail "the door refused a real uninstall that kept a state:customized file: $(cat "$WORK/receipt-custom.out")"
+git -C "$REPO" cat-file -e "$CUSTOM_SHA:WORKFLOW.md" \
+  || gov_fail "the customized-state fixture is not discriminating — WORKFLOW.md was removed after all"
+
+# ── 8. LINKED WORKTREE: repository-wide evidence, resolved through the COMMON git dir ─────────────
+# `/idc:uninstall` may run in a linked worktree while the push happens from the primary checkout.
+# Under a per-worktree resolution the witness lands in that worktree's private git dir — invisible to
+# the primary, and DELETED with the worktree — so the genuine uninstall commit is refused again.
+new_governed_repo worktree-door
+WT="$WORK/worktree-door-wt"
+git -C "$REPO" worktree add -q -b teardown "$WT" >/dev/null 2>&1 \
+  || gov_fail "could not create the linked worktree"
+make_uninstall_commit "$WT"
+WT_SHA="$(git -C "$WT" rev-parse HEAD)"
+python3 "$GIT_GATE" witness-uninstall --repo "$WT" --commit "$WT_SHA" >"$WORK/wt-witness.out" 2>&1 \
+  || gov_fail "the door refused a genuine uninstall commit made in a linked worktree: $(cat "$WORK/wt-witness.out")"
+# The witness must be readable from the PRIMARY checkout, and must survive the worktree's removal.
+git -C "$REPO" worktree remove --force "$WT" \
+  || gov_fail "could not remove the linked worktree"
+python3 - "$GOV_PLUGIN" "$REPO" "$WT_SHA" <<'PY' || gov_fail "the uninstall witness is not repository-wide evidence"
+import sys
+sys.path.insert(0, sys.argv[1] + "/scripts")
+import idc_path_gate as PG
+repo, sha = sys.argv[2], sys.argv[3].lower()
+seen = PG.read_uninstall_witness(repo)
+if sha not in seen:
+    print(f"the primary checkout cannot see the witness written from the linked worktree: {sorted(seen)}")
+    raise SystemExit(1)
+PY
+# End to end: fast-forward the removal into main, re-govern with a fresh init, and push from primary.
+git -C "$REPO" merge -q --ff-only teardown || gov_fail "could not fast-forward the removal into main"
+make_init_commit
+git -C "$REPO" push origin main >"$WORK/wt-push.out" 2>&1 \
+  || gov_fail "an uninstall witnessed in a linked worktree is unpushable from the primary checkout: $(cat "$WORK/wt-push.out")"
+[ "$(git -C "$REPO" rev-parse origin/main)" = "$(git -C "$REPO" rev-parse HEAD)" ] \
+  || gov_fail "the linked-worktree push reported success but the remote did not advance"
+
+# ── 9. RETENTION: every still-outgoing witness is kept, with no fixed ceiling ─────────────────────
+# Pre-push inspects EVERY commit of the outgoing range, so a store that remembers only the last N
+# makes a range carrying more than N genuine uninstall commits permanently unpushable — re-witnessing
+# an evicted entry just evicts another one the same range needs. This drives the REAL storage door
+# (`record_uninstall_commit`, real OIDs, the real witness file), which is where the ceiling lived.
+new_governed_repo retention
+python3 - "$GOV_PLUGIN" "$REPO" <<'PY' || gov_fail "the witness store evicts entries an outgoing range still needs"
+import subprocess, sys
+sys.path.insert(0, sys.argv[1] + "/scripts")
+import idc_path_gate as PG
+repo = sys.argv[2]
+oids = []
+for i in range(70):
+    subprocess.run(["git", "-C", repo, "commit", "-q", "--no-verify", "--allow-empty",
+                    "-m", f"test: witness fodder {i}"], check=True)
+    oid = subprocess.run(["git", "-C", repo, "rev-parse", "HEAD"],
+                         capture_output=True, text=True, check=True).stdout.strip()
+    oids.append(oid.lower())
+    PG.record_uninstall_commit(repo, oid)
+stored = PG.ordered_uninstall_witness(repo)
+missing = [o for o in oids if o not in stored]
+if missing:
+    print(f"{len(missing)} of {len(oids)} witnesses were evicted (store holds {len(stored)})")
+    raise SystemExit(1)
+print(f"all {len(oids)} witnesses retained")
+PY
+
+echo "PASS: the sanctioned uninstall removal commit is publishable through a witnessed, shape-verified, receipt-bound door; partial removals, stray protected mutations, non-ungoverning commits, protected re-additions and forged witnesses are all still refused; the witness is repository-wide and uncapped"

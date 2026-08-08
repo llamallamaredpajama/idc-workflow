@@ -61,12 +61,11 @@ PROTECTED_MACHINE_RULES = [
 GOVERNANCE_ANCHOR_RELPATH = "docs/workflow/tracker-config.yaml"
 # Machine-owned witness of the uninstall removal commits a sanctioned door admitted. Written ONLY by
 # `idc_git_path_gate.py witness-uninstall` (fixed code) and only after that door re-derives the
-# commit's shape from git. It lives beside the authorization UNDER THE REPOSITORY GIT DIRECTORY — not
-# in the worktree, which uninstall is in the middle of emptying — so it survives the very removal it
-# attests to, and it never travels to a remote.
+# commit's shape from git. It lives UNDER THE COMMON GIT DIRECTORY (`uninstall_witness_path`) — not in
+# the worktree, which uninstall is in the middle of emptying — so it survives the very removal it
+# attests to, it never travels to a remote, and unlike the per-worktree authorization beside it every
+# checkout of the repository reads the same one.
 UNINSTALL_WITNESS_RELPATH = os.path.join("idc-path-gate", "uninstall-witness.json")
-# Newest-last retention bound. An uninstall is rare; this is a runaway-growth backstop, not a policy.
-UNINSTALL_WITNESS_CEILING = 64
 _OID_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 READ_ONLY_COMMANDS = {"doctor", "pause"}
 DEFAULT_TTL_SECONDS = 4 * 60 * 60
@@ -246,8 +245,34 @@ def live_contract_path(repo: str) -> str:
     return git_path(repo, LIVE_CONTRACT_RELPATH)
 
 
+def git_common_path(repo: str, relpath: str) -> str:
+    """`relpath` under the repository's COMMON git directory — the one every worktree shares.
+
+    `git_path` resolves PER WORKTREE: inside a linked worktree `--git-path X` lands under
+    `.git/worktrees/<name>/X`. That is right for per-worktree session state (the authorization, the
+    admission lock) and WRONG for repository-wide evidence, which must read the same from every
+    checkout. Same resolution the build-validation witness store uses (#197/#199)."""
+    try:
+        out = _run_git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    except RuntimeError:
+        try:
+            out = _run_git(repo, "rev-parse", "--git-common-dir")   # git < 2.31 has no --path-format
+        except RuntimeError:
+            if _has_git_metadata(repo):
+                raise
+            return os.path.normpath(os.path.join(repo_root(repo), ".idc", relpath))
+    common = out if os.path.isabs(out) else os.path.join(repo, out)
+    return os.path.normpath(os.path.join(common, relpath))
+
+
 def uninstall_witness_path(repo: str) -> str:
-    return git_path(repo, UNINSTALL_WITNESS_RELPATH)
+    """REPOSITORY-WIDE, so it resolves through the COMMON git dir, never `git_path` (#202 review).
+
+    `/idc:uninstall` may run in a linked worktree, while the push that must honor its witness happens
+    wherever the operator pushes from. Under `--git-path` the witness would be written to that
+    worktree's private git dir: invisible to a push from the primary checkout or a sibling worktree,
+    and DELETED outright with the worktree — stranding the very commit it attests to."""
+    return git_common_path(repo, UNINSTALL_WITNESS_RELPATH)
 
 
 def _read_live_contract(repo: str) -> tuple[str, dict[str, Any] | None]:
@@ -426,18 +451,51 @@ def read_uninstall_witness(repo: str) -> set[str]:
     return set(ordered_uninstall_witness(repo))
 
 
+def _commits_present(repo: str, oids: list[str]) -> set[str] | None:
+    """The subset of `oids` that still resolve to a commit object here, or None if git cannot answer.
+
+    One `cat-file --batch-check` for the whole set. None means "do not prune" — every uncertainty
+    (git missing, non-zero exit, a reply that does not line up one-to-one with the request) keeps
+    every entry, because dropping a witness the repository still needs re-strands its commit."""
+    if not oids:
+        return set()
+    proc = subprocess.run(
+        ["git", "-C", repo, "cat-file", "--batch-check=%(objecttype)"],
+        input="".join(f"{oid}^{{commit}}\n" for oid in oids),
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return None
+    lines = (proc.stdout or "").splitlines()
+    if len(lines) != len(oids):
+        return None
+    return {oid for oid, line in zip(oids, lines) if line.strip() == "commit"}
+
+
 def record_uninstall_commit(repo: str, oid: str) -> list[str]:
-    """Record one uninstall commit OID in the witness (idempotent, newest-last, capped).
+    """Record one uninstall commit OID in the witness (idempotent, newest-last, UNBOUNDED).
 
     The CALLER is responsible for having proven the commit's shape first; this is the storage half
     only. `idc_git_path_gate.py witness-uninstall` is the sole production caller and it refuses
-    anything that is not the ungoverning shape."""
+    anything that is not the ungoverning shape.
+
+    NO FIXED RETENTION CAP (#202 review). A cap is unsound here however large it is set, because
+    pre-push inspects EVERY commit of the outgoing range while the store remembers only the last N:
+    a range carrying more than N genuine uninstall commits — a first push to a new mirror after many
+    uninstall/re-init cycles — can never be made pushable, since re-witnessing an evicted entry just
+    evicts another one the same range still needs. Growth is bounded instead by the only prune that
+    is provably lossless: an OID whose commit is no longer in this object database can never be
+    exempted anyway (`uninstall_commit_problem` refuses what it cannot resolve), so dropping it
+    changes no decision."""
     normalized = str(oid).strip().lower()
     if not _OID_RE.fullmatch(normalized):
         raise ValueError("an uninstall witness entry must be a full commit object id")
     entries = [e for e in ordered_uninstall_witness(repo) if e != normalized]
+    present = _commits_present(repo, entries)
+    if present is not None:
+        entries = [e for e in entries if e in present]
     entries.append(normalized)
-    entries = entries[-UNINSTALL_WITNESS_CEILING:]
     _atomic_write_json(uninstall_witness_path(repo), {"schema": 1, "uninstall_commits": entries})
     return entries
 

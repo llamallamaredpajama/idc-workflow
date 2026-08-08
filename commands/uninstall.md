@@ -274,7 +274,7 @@ manifest), then:
 | Footprint | Status |
 |-----------|--------|
 
-## Recovering a repository an earlier uninstall already stranded
+## Repairing a repository an earlier uninstall already stranded
 
 A repo uninstalled by a plugin version that predates the Phase-3c witness door carries an
 **unwitnessed** removal commit. Its symptom is unmistakable: the repo sits ahead of its remote and
@@ -285,20 +285,34 @@ one — dies with
 IDC Path Gate denied this mutation because `TRACKER.md` is or contains a protected machine-owned surface.
 ```
 
-The same door repairs it retroactively, from the repo root. Find the removal commit in the outgoing
-range and witness it; do **not** reach for `--no-verify`, and do **not** rewrite the history:
+This only ever bites a repo that is **governed again** (a fresh `/idc:init`, or a `git revert` of the
+removal) — while the anchor is absent the backstops are dormant and the push simply goes through.
 
-```bash
-git -C "$ROOT" log --oneline "$(git -C "$ROOT" rev-parse --abbrev-ref '@{upstream}')"..HEAD
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_path_gate.py" witness-uninstall \
-  --repo "$ROOT" --commit <the removal commit's sha>
-git -C "$ROOT" push
-```
+**This repair is a step YOU run, not a snippet to hand the operator** (`AGENTS.md`: the
+`scripts/idc_*.py` helpers are called by the commands). When an operator reports this symptom, run the
+door for them from this playbook. It **removes nothing** — reaching Phase 0 and doing a real uninstall
+is the wrong answer here. Do **not** reach for `--no-verify`, and do **not** rewrite history:
 
-The door re-derives the commit's shape before recording anything, so a wrong SHA is refused with the
-reason rather than silently widening what may be pushed. If several uninstall commits are stranded in
-one range, witness each of them. Nothing else in the range is exempted: any other commit touching a
-protected surface still has to be dealt with on its own terms.
+1. **List the outgoing range** and identify every uninstall removal commit in it (there may be more
+   than one — repeated uninstall/re-init cycles stack them):
+   ```bash
+   git -C "$ROOT" log --oneline "$(git -C "$ROOT" rev-parse --abbrev-ref '@{upstream}')"..HEAD
+   ```
+2. **Witness each candidate** through the door, which re-derives its shape from git before recording
+   anything:
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_path_gate.py" witness-uninstall \
+     --repo "$ROOT" --commit <the removal commit's sha>
+   ```
+   A commit that is not a completed uninstall is **refused with the reason** — including a partial
+   removal that drops the governance anchor but leaves other IDC footprints installed. That refusal
+   is the door working: report it and stop rather than trying to force the commit through. Pointing
+   the door at a wrong SHA is safe and inert.
+3. **Report** which commits were witnessed and tell the operator the repo is publishable
+   (`git push`). Do not push on their behalf.
+
+Nothing else in the range is exempted: any other commit touching a protected surface still has to be
+dealt with on its own terms.
 
 ## Command lifecycle — verify at entry, close BEFORE ungoverning
 

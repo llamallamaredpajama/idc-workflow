@@ -2905,7 +2905,10 @@ _RUNTIME_UNINSTALL_ARTIFACTS = {"TRACKER.md"}
 # Exact IDC-owned files in installations made before install receipts existed. Directories are
 # deliberately absent: matrices, reviews, and intake manifests are operator work products. Only the
 # ownership keepfiles (and the review ignore file shipped by the scaffold) may be removed.
-_LEGACY_UNINSTALL_OWNED_FILES = frozenset({
+#
+# PUBLIC because the uninstall push door re-derives the same removal manifest from git (#202 review):
+# one list, so the shape the door demands can never drift from the set the closeout validates.
+LEGACY_UNINSTALL_OWNED_FILES = frozenset({
     "WORKFLOW.md",
     "WORKFLOW-config.yaml",
     _GOVERNANCE_ANCHOR,
@@ -2944,7 +2947,7 @@ def _uninstall_owned_files(repo: str, expected_source: object = None,
                 "the canonical install receipt existed when uninstall started but is now absent; "
                 "retain docs/workflow/install-receipt.yaml through finish so the modern removal "
                 "manifest cannot silently downgrade to the legacy fallback")
-        return set(_LEGACY_UNINSTALL_OWNED_FILES), "legacy-fallback", None
+        return set(LEGACY_UNINSTALL_OWNED_FILES), "legacy-fallback", None
     if expected_source == "legacy-fallback":
         return None, None, _fail(
             "uninstall-receipt-source-changed",

@@ -2287,6 +2287,149 @@ contract finish --repo "$REPO_UPD" --session "$SU2" --command update --status co
 echo "  ok (14-update, F6/F7) update complete re-derives receipt v2 + plugin_version == running + RUNS the fingerprint verify (modified scaffold refused)"
 
 # ============================================================================================
+# (14-strict, issue #194 follow-up) A LIFECYCLE CLOSEOUT IS AN EXACT-MATCH DOOR; THE STEADY-STATE
+# REPORT IS NOT. Two different questions are asked of one receipt, and they must not share an answer.
+#
+#   * STEADY STATE ("is the scaffold intact?", days after init, run by `verify --json` / the operator
+#     at the prompt): the three ALWAYS_ASK_RELPATHS files hold operator and machine DATA the lifecycle
+#     is DESIGNED to grow — the finisher is REQUIRED to append each build's newly-proven handle to
+#     docs/workflow/verification-handles.yaml. Grading that sanctioned growth as drift raised a false
+#     alarm after EVERY green build (issue #194), so a PRESENT-but-diverged always-ask file reports
+#     `ask` and stays outside `ok`.
+#   * CLOSEOUT ("did what I just stamped survive?", run by init/update's own `finish` a moment after
+#     that same command wrote a FRESH receipt over the stamped set): nothing legitimately diverges in
+#     that window. commands/init.md Phase 7 and commands/update.md Phase 4 are the LAST steps that
+#     touch these files; only a git add + a summary table stand between the stamp and this door. So a
+#     divergence here is real corruption — a tracker config, workflow config, or handle registry that
+#     was mangled after the run stamped it — and certifying `complete` over it publishes an intact
+#     scaffold that is not intact.
+#
+# #194's fix routed BOTH doors through the same lenient answer, so the closeout inherited the
+# leniency it must not have: an always-ask file corrupted right after the fresh stamp certified
+# `complete`. The mirror gap is worse — commands/update.md Phase 2 §A tells update to STOP on a
+# registry the fixed validator refuses, and `idc_receipt_check.py` is update's ONLY allowlisted
+# blocked_external helper (_BLOCKED_EXTERNAL_ALLOWLIST), so a clean-reading re-run left update with NO
+# honest terminal status at all: `complete` was a lie and `blocked_external` was refused for want of a
+# failing re-run.
+#
+# RED-WHEN-BROKEN, PROVEN (re-runnable): drop the `strict` argument at the
+# `RC.verify_receipt_fingerprints(...)` call in scripts/idc_command_contract.py::_receipt_fingerprints_ok
+# (or flip its default in scripts/idc_receipt_check.py) and this section FAILs three ways — both
+# `complete` certifications land and the grounded blocker is refused.
+#
+# The CONTROLS are what keep this from being a blanket "refuse everything": every case restores the
+# exact stamped bytes and requires the SAME closeout to LAND, and each case re-asserts #194's own
+# guarantee on the very same corrupted repo — steady-state `verify` must still say `ok: true` with the
+# file in `ask`. The two doors are asserted to DISAGREE, which is the whole point.
+REPO_ASK="$WORK/repo-ask"
+ask_seed() {   # (re)write the fixture to the exact bytes the receipt below stamps
+  mkdir -p "$REPO_ASK/docs/workflow" "$REPO_ASK/.claude"
+  printf 'backend: filesystem\nproject_number: 7\n'      > "$REPO_ASK/docs/workflow/tracker-config.yaml"
+  printf 'workflow\n'                                    > "$REPO_ASK/WORKFLOW.md"
+  printf 'domains:\n  - core\n'                          > "$REPO_ASK/WORKFLOW-config.yaml"
+  printf 'schema_version: 1\nhandles: []\n'              > "$REPO_ASK/docs/workflow/verification-handles.yaml"
+  printf '{"enabledPlugins":{"idc@idc-workflow":true}}\n' > "$REPO_ASK/.claude/settings.json"
+}
+ask_stamp() {  # $1 = written-by command — the run's OWN fresh receipt (init Phase 7 / update Phase 4)
+  python3 "$RECEIPT" stamp --repo "$REPO_ASK" --out "$REPO_ASK/docs/workflow/install-receipt.yaml" \
+    --plugin-version "$RUN_VER" --written-by "idc:$1" \
+    WORKFLOW.md WORKFLOW-config.yaml docs/workflow/tracker-config.yaml \
+    docs/workflow/verification-handles.yaml >/dev/null \
+    || gov_fail "(14-strict) could not stamp the always-ask fixture receipt"
+}
+strict_case() {  # $1 = command (init|update)   $2 = always-ask relpath to corrupt after the stamp
+  local CMD="$1" TARGET="$2" S vout
+  S="sask-$$-$RANDOM"
+  ask_seed
+  contract start --repo "$REPO_ASK" --session "$S" --command "$CMD" --plugin-root "$GOV_PLUGIN" \
+    --args 'x' --source user >/dev/null || gov_fail "(14-strict) could not open the $CMD record for $TARGET"
+  ask_stamp "$CMD"
+  printf '{{{ CORRUPTED — not parseable as anything\n' > "$REPO_ASK/$TARGET"
+  if contract finish --repo "$REPO_ASK" --session "$S" --command "$CMD" --status complete \
+       --evidence-json '{"schema_version":1,"refs":{}}' 2>/dev/null; then
+    gov_fail "(14-strict) a $CMD complete was CERTIFIED with the operator-data file $TARGET corrupted AFTER this run's own fresh stamp — the lifecycle closeout must be an exact-match door (issue #194 follow-up)"
+  fi
+  # #194's guarantee, on the SAME corrupted repo: the steady-state report must NOT have hardened.
+  vout="$(python3 "$RECEIPT" verify --repo "$REPO_ASK" --json)" \
+    || gov_fail "(14-strict) steady-state verify exited non-zero on the corrupted $TARGET"
+  printf '%s' "$vout" | python3 -c '
+import json, sys
+rel = sys.argv[1]
+o = json.load(sys.stdin)
+if rel not in set(o.get("ask") or []):
+    raise SystemExit("the diverged operator-data file must still report as ask, got ask=" + repr(o.get("ask")))
+if rel in set(o.get("modified") or []):
+    raise SystemExit("issue #194 REGRESSION: the diverged operator-data file is graded modified again")
+if o.get("ok") is not True:
+    raise SystemExit("issue #194 REGRESSION: steady-state ok flipped false on an ask-only divergence: "
+                     + repr(o.get("summary")))
+' "$TARGET" || gov_fail "(14-strict) steady-state verify no longer honours issue #194 for $TARGET (see above)"
+  ask_seed   # restore every stamped file to its exact stamped bytes
+  contract finish --repo "$REPO_ASK" --session "$S" --command "$CMD" --status complete \
+    --evidence-json '{"schema_version":1,"refs":{}}' \
+    || gov_fail "(14-strict) CONTROL: a $CMD complete was refused with every stamped file at its exact stamped bytes — the strict closeout must not be a blanket refusal"
+}
+strict_case init   docs/workflow/tracker-config.yaml
+strict_case init   WORKFLOW-config.yaml
+strict_case init   docs/workflow/verification-handles.yaml
+strict_case update docs/workflow/tracker-config.yaml
+strict_case update docs/workflow/verification-handles.yaml
+echo "  ok (14-strict) init/update complete refuse an always-ask file corrupted after the run's own stamp, while steady-state verify still reports it ask + ok:true (issue #194 intact)"
+
+# (14-strict-growth) THE SANCTIONED-GROWTH CASE, which is what makes strictness safe to ship. A
+# fingerprint cannot tell the finisher's REQUIRED handle append from a mangled config — only whether
+# the receipt is CURRENT can — so an exact-match closeout is only honest if every successful run
+# leaves the receipt describing the repo. commands/update.md Phase 4 used to let an already-current
+# update leave an existing receipt untouched, so a repo whose registry had grown since the last stamp
+# (i.e. any repo where builds have shipped) would hit the strict door and stop — re-creating issue
+# #194's false alarm at a different door. Phase 4 now scopes `skipped-already-current` to a receipt
+# that still matches EXACTLY, and re-stamps otherwise. This asserts the whole loop: the refusal
+# happens, it NAMES the remedy, the remedy WORKS, and the data survives it.
+S_GROW="sgrow-$$-$RANDOM"
+ask_seed
+ask_stamp update            # an earlier update stamped this receipt at the running version
+cat >> "$REPO_ASK/docs/workflow/verification-handles.yaml" <<'Y'
+  - handle_id: cli-drive
+    surface: cli
+Y
+contract start --repo "$REPO_ASK" --session "$S_GROW" --command update --plugin-root "$GOV_PLUGIN" \
+  --args 'resync' --source user >/dev/null || gov_fail "(14-strict-growth) could not open the update record"
+grow_out="$(contract finish --repo "$REPO_ASK" --session "$S_GROW" --command update --status complete \
+  --evidence-json '{"schema_version":1,"refs":{}}' 2>&1)" \
+  && gov_fail "(14-strict-growth) an update complete was CERTIFIED over a receipt that no longer describes the repo"
+printf '%s' "$grow_out" | grep -qi 're-stamp' \
+  || gov_fail "(14-strict-growth) the refusal must NAME the re-stamp remedy (a strict door with no stated way out is a dead end), got: $grow_out"
+# #194's guarantee is untouched: the steady-state report still calls sanctioned growth `ask`, not drift.
+printf '%s' "$(python3 "$RECEIPT" verify --repo "$REPO_ASK" --json)" | python3 -c '
+import json, sys
+o = json.load(sys.stdin)
+if o.get("ok") is not True or "docs/workflow/verification-handles.yaml" not in set(o.get("ask") or []):
+    raise SystemExit("issue #194 REGRESSION: a sanctioned handle append no longer reads ask+ok:true: "
+                     + repr(o.get("summary")))
+' || gov_fail "(14-strict-growth) steady-state verify no longer honours issue #194 (see above)"
+ask_stamp update            # the remedy commands/update.md Phase 4 now mandates
+grep -q 'handle_id: cli-drive' "$REPO_ASK/docs/workflow/verification-handles.yaml" \
+  || gov_fail "(14-strict-growth) re-stamping the receipt destroyed the grown operator data — it must record the current bytes, never overwrite them"
+contract finish --repo "$REPO_ASK" --session "$S_GROW" --command update --status complete \
+  --evidence-json '{"schema_version":1,"refs":{}}' \
+  || gov_fail "(14-strict-growth) update complete was still refused after the receipt was re-stamped over the grown data — the named remedy must actually work"
+echo "  ok (14-strict-growth) sanctioned registry growth refuses the closeout with a NAMED re-stamp remedy that works and preserves the data (issue #194 not re-broken at the closeout door)"
+
+# The mirror gap: the ONLY blocked_external helper update is allowed to cite must be able to GROUND
+# the stop that a mangled registry forces. Without a strict re-run this close is refused and update
+# has no honest terminal status left.
+S_BLK="sblk-$$-$RANDOM"
+ask_seed
+contract start --repo "$REPO_ASK" --session "$S_BLK" --command update --plugin-root "$GOV_PLUGIN" \
+  --args 'resync' --source user >/dev/null || gov_fail "(14-strict) could not open the blocker update record"
+ask_stamp update
+printf 'schema_version: 99\n  {{{ not a registry at all\n' > "$REPO_ASK/docs/workflow/verification-handles.yaml"
+contract finish --repo "$REPO_ASK" --session "$S_BLK" --command update --status blocked_external \
+  --evidence-json '{"schema_version":1,"refs":{"blocker":{"helper":"idc_receipt_check.py","exit":2,"diagnostic":"malformed verification-handle registry"}}}' \
+  || gov_fail "(14-strict) an update blocked_external citing the receipt checker was REFUSED while the registry it stamped is genuinely mangled — update's only allowlisted blocker must ground the stop its own playbook mandates"
+echo "  ok (14-strict) a mangled always-ask file grounds the receipt-checker blocked_external stop update's playbook mandates"
+
+# ============================================================================================
 # (15, F7) THE INCIDENT-SIZED REGRESSION. Run the full U0–U8/B1/B2 fixture through Think closeout,
 # materializing ONLY Drive. The exact 2026-07-12 incident shape: the remainder units "disappear" from
 # the exact-once manifest — Think closeout must REFUSE until every unit has a durable disposition.

@@ -1397,9 +1397,21 @@ def _receipt_document(repo: str, receipt_rel: object = None):
 def _receipt_fingerprints_ok(repo: str, receipt_rel: object) -> CloseoutResult:
     """RUN the real receipt FINGERPRINT verification (idc_receipt_check.verify_receipt_fingerprints —
     not a syntax parse): every stamped file's current on-disk bytes must match its recorded SHA-256
-    (wave-4 finding 7). A modified or missing stamped file — or an invalid/unreadable receipt — fails
-    the closeout closed. This is what proves the scaffold actually landed intact, which the old
-    version/syntax parse never checked."""
+    (wave-4 finding 7). A stamped file that is modified, missing, or a diverged operator-data file —
+    or an invalid/unreadable receipt — fails the closeout closed. This is what proves the scaffold
+    actually landed intact, which the old version/syntax parse never checked.
+
+    STRICT, DELIBERATELY (issue #194 follow-up). This helper serves the two doors that CERTIFY —
+    init/update `complete`, and the read-only re-run that grounds a `blocked_external` citing the
+    receipt checker — so it asks for the EXACT-MATCH answer: an `ask`-class divergence (a diverged
+    always-ask operator-data file) fails it too. #194 taught `verify` to report that class as `ask`
+    rather than drift, which is right for the STEADY-STATE report — the finisher is required to grow
+    the handle registry on every green build, and grading that as drift alarmed after every success.
+    It is wrong here. Both doors run a moment after the calling command wrote its OWN fresh receipt
+    over the stamped set, so there is no sanctioned growth to forgive in that window: a divergence is
+    corruption, `complete` must refuse it, and — since `idc_receipt_check.py` is the ONLY blocking
+    helper init/update/uninstall may cite — the re-run must FAIL so the stop those playbooks mandate
+    over a mangled config or registry has an honest terminal status to close with."""
     rel = receipt_rel if _ne_str(receipt_rel) else _RECEIPT_RELPATH
     path = _confined_repo_path(repo, rel)
     if path is None or not os.path.isfile(path):
@@ -1407,16 +1419,32 @@ def _receipt_fingerprints_ok(repo: str, receipt_rel: object) -> CloseoutResult:
                      "the install receipt could not be resolved to run the fingerprint verification")
     try:
         import idc_receipt_check as RC  # noqa: E402 — lazy
-        ok, counts = RC.verify_receipt_fingerprints(repo, path)
+        ok, counts = RC.verify_receipt_fingerprints(repo, path, strict=True)
     except SystemExit as exc:  # parse_receipt_document dies (invalid receipt) with SystemExit
         return _fail("receipt-fingerprint-invalid",
                      f"the install receipt is invalid, so the fingerprint check could not run ({exc})")
     except Exception as exc:  # noqa: BLE001 — any verification failure fails closed
         return _fail("receipt-fingerprint-error", f"the receipt fingerprint verification failed: {exc}")
     if not ok:
+        ask = counts.get("ask", 0)
+        detail = (f"{counts['modified']} modified, {ask} operator-data file(s) diverged from the "
+                  f"stamped bytes, {counts['missing']} missing")
+        # An ask-ONLY divergence is the one case with a benign explanation AND a named remedy, so it
+        # gets its own diagnostic instead of the generic "scaffold is damaged" one. The fingerprint
+        # cannot tell the finisher's sanctioned handle append from a mangled config — only the receipt
+        # being CURRENT can — so the closeout refuses either way and points at the resolution that
+        # makes the receipt describe the repo again (commands/update.md Phase 4).
+        if ask and not counts["modified"] and not counts["missing"]:
+            return _fail("receipt-fingerprint-stale",
+                         f"the install receipt no longer describes the repo ({detail}) — operator-data "
+                         "file(s) changed since it was stamped. If that growth is sanctioned (the "
+                         "finisher appending a newly-proven verification handle), RE-STAMP the receipt "
+                         "so it matches on-disk truth, then close again; if it is not, restore the "
+                         "file. Re-stamping preserves the data — it records the current bytes. A "
+                         "closeout never certifies a receipt it cannot vouch for.")
         return _fail("receipt-fingerprint-mismatch",
-                     f"the receipt fingerprint verification found drift ({counts['modified']} modified, "
-                     f"{counts['missing']} missing) — the scaffold is not intact at the stamped version")
+                     f"the receipt fingerprint verification found drift ({detail}) — the scaffold is "
+                     "not intact at the stamped version")
     return CloseoutResult(True, "ok", "receipt fingerprints verify (scaffold intact)", {})
 
 

@@ -350,18 +350,38 @@ def classify_receipt(repo: str, entries: list[dict[str, str]]) -> tuple[dict[str
     return counts, classified
 
 
-def verify_receipt_fingerprints(repo: str, receipt_path: str) -> tuple[bool, dict[str, int]]:
-    """Parse `receipt_path` and fingerprint-verify every listed file, returning (ok, counts) where
-    ok == (no modified AND no missing entries). Raises SystemExit (via parse_receipt_document/die) on
-    an invalid/unreadable receipt — a caller that must fail closed catches SystemExit. The one library
-    entry point the command contract re-runs to re-derive an init/update `complete`.
+def verify_receipt_fingerprints(repo: str, receipt_path: str,
+                                strict: bool = True) -> tuple[bool, dict[str, int]]:
+    """Parse `receipt_path` and fingerprint-verify every listed file, returning (ok, counts). Raises
+    SystemExit (via parse_receipt_document/die) on an invalid/unreadable receipt — a caller that must
+    fail closed catches SystemExit. The one library entry point the command contract re-runs to
+    re-derive an init/update `complete`.
 
-    `ask` entries are deliberately outside this contract: they are the operator-data files whose bytes
-    the lifecycle is designed to grow, so they say nothing about whether the SCAFFOLD landed intact,
-    which is the only question this predicate asks (see classify_receipt)."""
+    TWO QUESTIONS, TWO ANSWERS — do not collapse them (issue #194 follow-up):
+
+      * `strict=True` (THE DEFAULT, and what every lifecycle closeout and blocker re-run asks):
+        EXACT MATCH. Every stamped file's current bytes equal its recorded fingerprint — `ask` counts
+        as divergence alongside `modified` and `missing`. This door is only ever opened a moment
+        AFTER the calling command wrote a FRESH receipt over the stamped set (commands/init.md Phase 7,
+        commands/update.md Phase 4 — the last steps that touch these files; only a git add and a
+        summary table follow), so nothing legitimately diverges in that window and there is no growth
+        to forgive. A divergence here is a tracker config, workflow config, or handle registry that
+        was mangled after this run stamped it, and certifying `complete` over it would publish an
+        intact scaffold that is not intact.
+
+      * `strict=False`: the SCAFFOLD-INTACT question the steady-state report asks — `ask` is excluded,
+        matching the `ok` that `verify --json` publishes. Correct days after init, when the finisher
+        has appended each build's newly-proven handle to the registry exactly as the finish contract
+        REQUIRES; grading that sanctioned growth as drift is the false alarm issue #194 removed.
+
+    The default is the strict one because the two wrong answers are not equally bad. A closeout that
+    silently inherits the lenient answer certifies corruption and says nothing; a reporting caller
+    that forgets the flag raises a visible, checkable alarm. Loud-wrong beats silent-wrong for a
+    safety-critical compare, so leniency must be asked for by name."""
     _top, entries = parse_receipt_document(receipt_path)
     counts, _classified = classify_receipt(repo, entries)
-    return counts["modified"] == 0 and counts["missing"] == 0, counts
+    diverged = counts["modified"] + counts["missing"] + (counts["ask"] if strict else 0)
+    return diverged == 0, counts
 
 
 def cmd_verify(args: argparse.Namespace) -> int:

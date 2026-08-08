@@ -528,7 +528,16 @@ partial update never leaves a receipt that claims more than was actually done. T
 lists itself, `TRACKER.md`, or `.claude/settings.json` (the helper drops them).
 
 If a receipt already existed and nothing changed this run, leave it untouched and report
-`skipped-already-current`.
+`skipped-already-current` — **but only when that receipt still matches the repo exactly**, i.e.
+`verify --json` reports every stamped file `unchanged`, with an empty `ask` list as well as no
+`modified` and no `missing`. A **non-empty `ask`** means an operator-data file has legitimately
+GROWN since the last stamp — most often `docs/workflow/verification-handles.yaml`, which the finish
+contract REQUIRES the finisher to append to on every build that proves a new surface. That growth is
+sanctioned, not drift, and the correct response is to **re-stamp** (run the block above and report
+`rewritten`), never to leave a receipt that no longer describes the repo. A successful update ends
+with the install receipt matching on-disk truth exactly; that is precisely what this command's
+closeout re-runs and refuses to certify without (issue #194 follow-up), and re-stamping preserves
+the grown data — it records the file's current bytes, it does not overwrite them.
 
 ## Phase 5 — Summary
 
@@ -565,10 +574,14 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
 - **`complete`** — the v2 receipt verifies **and** the running version equals the receipt version. The
   closeout **re-derives** this: it parses the install receipt (must be `receipt_version: 2`), reads the
   **running** plugin version live from `plugin.json` (refusing unless the receipt's `plugin_version`
-  equals it), **and RUNS the real fingerprint verification** (every stamped file's bytes match its
-  recorded SHA-256 — a modified/missing scaffold file fails closed) — **never two caller-typed
-  versions**. Evidence refs: `refs:{}` (optionally `receipt:"<repo-rel receipt path>"` if non-default).
+  equals it), **and RUNS the real fingerprint verification in EXACT-MATCH mode** (every stamped file's
+  bytes match its recorded SHA-256 — a modified, missing, *or diverged operator-data* file fails
+  closed) — **never two caller-typed versions**. This is why Phase 4 re-stamps whenever `verify`
+  reports a non-empty `ask`: a successful update ends with the receipt describing the repo exactly.
+  Evidence refs: `refs:{}` (optionally `receipt:"<repo-rel receipt path>"` if non-default).
 - **`blocked_external`** — an update failure the validator can RE-DERIVE by a read-only re-run: cite
-  `idc_receipt_check.py` (the fingerprint re-run must actually find drift — an invalid receipt or a
-  modified/missing stamped file): `blocker:{helper:"idc_receipt_check.py", exit (nonzero), diagnostic}`.
+  `idc_receipt_check.py` (the fingerprint re-run must actually find drift — an invalid receipt, or a
+  stamped file that is modified, missing, or an operator-data file no longer matching the receipt —
+  which is what grounds the stop Phase 2 §A mandates over a registry the validator refuses):
+  `blocker:{helper:"idc_receipt_check.py", exit (nonzero), diagnostic}`.
   A caller exit/diagnostic alone is never accepted.

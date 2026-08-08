@@ -202,10 +202,27 @@ land ALL removals as one revertable commit:
 git -C "$ROOT" rm --quiet --ignore-unmatch \
   docs/workflow/install-receipt.yaml docs/workflow/tracker-config.yaml
 git -C "$ROOT" commit -m "idc: uninstall — remove IDC footprints (revert this commit to reinstate)"
+# MANDATORY, and only once that commit exists: make it publishable.
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_path_gate.py" witness-uninstall \
+  --repo "$ROOT" --commit "$(git -C "$ROOT" rev-parse HEAD)"
 ```
 Stage only the removed paths and `.claude/settings.json` — **not** the archive tarball (it must
 stay untracked). Capture the commit SHA for the summary. On a re-run with nothing left to remove,
-make no commit and report `skipped-absent` across the board.
+make no commit and report `skipped-absent` across the board — and run no witness door, because there
+is no commit to witness.
+
+**Why the witness door is not optional.** This commit necessarily DELETES protected machine-owned
+surfaces (`TRACKER.md`, the install receipt). It lands fine — both git backstops are already dormant,
+because the governance anchor left the worktree a line earlier. But the pre-push backstop inspects the
+whole **outgoing range** under whatever posture the repo has **later**, so the first time the repo is
+governed again — a fresh `/idc:init`, a `git revert` — that historical deletion is re-litigated and the
+push is refused permanently, taking every commit stacked behind it down with it. The door records this
+commit's own SHA in machine-owned state under the repository Git directory: it survives the removal
+because it is not in the worktree, and it never travels to a remote. It is **not** a message check —
+the door re-derives the commit's shape from git (exactly one parent, the anchor present in the parent
+tree and absent from this one, every protected surface touched by deletion only), and the pre-push
+gate re-derives that same shape independently on every push. A commit that is not the ungoverning
+removal commit is refused at both ends, so pointing the door at a wrong SHA is safe and inert.
 
 ## Phase 4 — GitHub side (opt-in; default leaves it untouched)
 
@@ -246,6 +263,7 @@ Print one table of every footprint (`removed` / `skipped-absent` / `kept (custom
 manifest), then:
 - the archive path from Phase 2,
 - the single revert command — `git revert <sha>` — to reinstate everything,
+- that the removal commit is local and **publishable** (`git push`) because Phase 3c witnessed it,
 - the board disposition (untouched / N issues closed / board deleted),
 - and the **machine-global** surfaces that uninstall deliberately does not touch, for the operator
   to run separately if they want a full removal:
@@ -255,6 +273,32 @@ manifest), then:
 
 | Footprint | Status |
 |-----------|--------|
+
+## Recovering a repository an earlier uninstall already stranded
+
+A repo uninstalled by a plugin version that predates the Phase-3c witness door carries an
+**unwitnessed** removal commit. Its symptom is unmistakable: the repo sits ahead of its remote and
+every `git push` — including pushes of unrelated later commits, because the range still contains that
+one — dies with
+
+```
+IDC Path Gate denied this mutation because `TRACKER.md` is or contains a protected machine-owned surface.
+```
+
+The same door repairs it retroactively, from the repo root. Find the removal commit in the outgoing
+range and witness it; do **not** reach for `--no-verify`, and do **not** rewrite the history:
+
+```bash
+git -C "$ROOT" log --oneline "$(git -C "$ROOT" rev-parse --abbrev-ref '@{upstream}')"..HEAD
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_path_gate.py" witness-uninstall \
+  --repo "$ROOT" --commit <the removal commit's sha>
+git -C "$ROOT" push
+```
+
+The door re-derives the commit's shape before recording anything, so a wrong SHA is refused with the
+reason rather than silently widening what may be pushed. If several uninstall commits are stranded in
+one range, witness each of them. Nothing else in the range is exempted: any other commit touching a
+protected surface still has to be dealt with on its own terms.
 
 ## Command lifecycle — verify at entry, close BEFORE ungoverning
 

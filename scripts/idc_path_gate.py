@@ -13,6 +13,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -53,6 +54,20 @@ PROTECTED_MACHINE_RULES = [
     # Hard-denied for the same reason as its peers: machine-owned state is never a hand-edited one.
     ".idc-trace-mirror.db*",
 ]
+# The governance anchor: its presence in the worktree is what arms every IDC gate, `/idc:init` writes
+# it, and `/idc:uninstall` removes it LAST (commands/uninstall.md Phase 3c). A commit that carries the
+# repository ACROSS that boundary — its parent's tree has the anchor, its own tree does not — is THE
+# ungoverning commit, and is the only shape the uninstall push door can ever admit (issue #201).
+GOVERNANCE_ANCHOR_RELPATH = "docs/workflow/tracker-config.yaml"
+# Machine-owned witness of the uninstall removal commits a sanctioned door admitted. Written ONLY by
+# `idc_git_path_gate.py witness-uninstall` (fixed code) and only after that door re-derives the
+# commit's shape from git. It lives beside the authorization UNDER THE REPOSITORY GIT DIRECTORY — not
+# in the worktree, which uninstall is in the middle of emptying — so it survives the very removal it
+# attests to, and it never travels to a remote.
+UNINSTALL_WITNESS_RELPATH = os.path.join("idc-path-gate", "uninstall-witness.json")
+# Newest-last retention bound. An uninstall is rare; this is a runaway-growth backstop, not a policy.
+UNINSTALL_WITNESS_CEILING = 64
+_OID_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 READ_ONLY_COMMANDS = {"doctor", "pause"}
 DEFAULT_TTL_SECONDS = 4 * 60 * 60
 PATHWAY_MODES = {"off", "controlled", "app-locked"}
@@ -231,6 +246,10 @@ def live_contract_path(repo: str) -> str:
     return git_path(repo, LIVE_CONTRACT_RELPATH)
 
 
+def uninstall_witness_path(repo: str) -> str:
+    return git_path(repo, UNINSTALL_WITNESS_RELPATH)
+
+
 def _read_live_contract(repo: str) -> tuple[str, dict[str, Any] | None]:
     """Read the live-contract pointer: ('absent'|'unreadable'|'corrupt'|'ok', doc)."""
     path = live_contract_path(repo)
@@ -376,6 +395,53 @@ def _atomic_write_json(path: str, payload: dict[str, Any]) -> None:
         raise
 
 
+def ordered_uninstall_witness(repo: str) -> list[str]:
+    """The uninstall commit OIDs a sanctioned door recorded, oldest first.
+
+    TOLERANT ON READ AND FAIL-CLOSED ON DOUBT: a missing, unreadable, corrupt or wrong-shaped witness
+    reads as EMPTY. Empty grants no exemption, so every failure mode of this file lands on "the push
+    is gated normally" — never on "the push is waved through"."""
+    try:
+        with open(uninstall_witness_path(repo), encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    if not isinstance(doc, dict) or doc.get("schema") != 1:
+        return []
+    entries = doc.get("uninstall_commits")
+    if not isinstance(entries, list):
+        return []
+    ordered: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, str):
+            continue
+        oid = entry.strip().lower()
+        if _OID_RE.fullmatch(oid) and oid not in ordered:
+            ordered.append(oid)
+    return ordered
+
+
+def read_uninstall_witness(repo: str) -> set[str]:
+    """Set form of `ordered_uninstall_witness` — the membership test the push gate uses."""
+    return set(ordered_uninstall_witness(repo))
+
+
+def record_uninstall_commit(repo: str, oid: str) -> list[str]:
+    """Record one uninstall commit OID in the witness (idempotent, newest-last, capped).
+
+    The CALLER is responsible for having proven the commit's shape first; this is the storage half
+    only. `idc_git_path_gate.py witness-uninstall` is the sole production caller and it refuses
+    anything that is not the ungoverning shape."""
+    normalized = str(oid).strip().lower()
+    if not _OID_RE.fullmatch(normalized):
+        raise ValueError("an uninstall witness entry must be a full commit object id")
+    entries = [e for e in ordered_uninstall_witness(repo) if e != normalized]
+    entries.append(normalized)
+    entries = entries[-UNINSTALL_WITNESS_CEILING:]
+    _atomic_write_json(uninstall_witness_path(repo), {"schema": 1, "uninstall_commits": entries})
+    return entries
+
+
 def authorization_snapshot(repo: str) -> bytes | None:
     """Exact authorization bytes for command-entry rollback, or None when absent."""
     try:
@@ -510,6 +576,14 @@ def _contains_protected_machine_path(relpath: str) -> bool:
         if fixed_prefix and fixed_prefix.startswith(candidate + "/"):
             return True
     return False
+
+
+def is_protected_machine_surface(relpath: str) -> bool:
+    """Public form of the protected-surface test, for sanctioned adapters (the git backstops).
+
+    Deliberately the SAME disjunction `_evaluate_request` denies on, so an adapter that needs to know
+    which of its paths the gate would refuse cannot drift from the gate's own answer."""
+    return _is_protected_machine_path(relpath) or _contains_protected_machine_path(relpath)
 
 
 def _find_active_record_by_nonce(repo: str, command: str, nonce: str) -> dict[str, Any] | None:

@@ -6,11 +6,13 @@
 #   (c) secret-bearing / credential-bearing fields are rejected before citation or use;
 #   (d) a missing handle returns a NAMED recirculation / blocked-dependency obligation, never a warning-only pass;
 #   (e) doctor's read-only citation audit warns on nonexistent handle ids;
-#   (f) the scaffolded registry is receipt-listed and preserved as operator data (`always_ask`).
+#   (f) the scaffolded registry is receipt-listed and preserved as operator data (`always_ask`);
+#   (g) a GREEN BUILD's sanctioned handle append does not raise a false install-receipt drift alarm.
 set -uo pipefail
 PLUGIN="$(cd "$(dirname "$0")/../../.." && pwd)"
 SCHEMA="$PLUGIN/scripts/idc_schema_check.py"
 VH="$PLUGIN/scripts/idc_verification_handles.py"
+VC="$PLUGIN/scripts/idc_validation_contract.py"
 RCHK="$PLUGIN/scripts/idc_receipt_check.py"
 SCAFFOLD="$PLUGIN/scripts/idc_init_scaffold.sh"
 INIT_MD="$PLUGIN/commands/init.md"
@@ -19,6 +21,8 @@ fail() { echo "FAIL: $1"; exit 1; }
 
 [ -f "$SCHEMA" ] || fail "missing schema checker: verification-handle registry validation is still absent"
 [ -f "$VH" ] || fail "missing verification-handle helper: fixed registry resolution is still absent"
+[ -f "$VC" ] || fail "missing build validation helper at $VC"
+[ -f "$RCHK" ] || fail "missing install-receipt helper at $RCHK"
 [ -f "$SCAFFOLD" ] || fail "scaffold helper not found at $SCAFFOLD"
 
 REPO="$WORK/repo"
@@ -200,7 +204,135 @@ unrecorded=obj.get("unrecorded") or []
 assert not unrecorded, f"FAIL: fresh scaffold left governed files unrecorded: {unrecorded}"
 print("ok: scaffolded verification-handle registry is receipt-listed and preserved as operator data")' <<<"$vout" || exit 1
 
-# (G) PLAN'S LOOKUP STEP IS A SHIPPED INVARIANT, not decoration. `handle_id` is OPTIONAL in fixed
+# ── (G) A GREEN BUILD MUST NOT RAISE A FALSE INSTALL-RECEIPT DRIFT ALARM (issue #194) ────────────
+# The finish contract REQUIRES the finisher to append the build's newly-proven verification handle to
+# this registry (agents/idc-finisher.md step 4) — fixed code, through the one write door, on every
+# triplet that drives a surface for the first time. The registry is also receipt-listed, so a
+# classifier that grades it by "current bytes == the bytes /idc:init stamped" reported that sanctioned,
+# machine-owned growth as `modified` and flipped `verify` to `ok: false`. That is a drift alarm after
+# EVERY successful build, which is worse than no alarm: it trains the operator to ignore the one
+# signal the receipt exists to raise (2026-08-02 triage e2e — "9 unchanged, 1 modified, 0 missing"
+# immediately after a fully green lifecycle).
+#
+# The receipt already knows this file is not template-owned: `always_ask` is its own published list of
+# operator-data files /idc:update must never silently refresh. `verify` therefore grades a PRESENT
+# always_ask file whose bytes diverge as `ask` — visible, distinct from `modified`, and outside the
+# `ok` contract, which stays modified+missing.
+#
+# RED-WHEN-BROKEN, PROVEN (re-runnable): delete the `rel in ALWAYS_ASK_RELPATHS` branch in
+# scripts/idc_receipt_check.py::classify_receipt so every divergence is `modified` again, and this
+# section FAILs at "a green build's sanctioned handle append must not report install-receipt drift".
+#
+# The two CONTROLS below are what keep this from being a blanket mute of the drift signal — without
+# them, deleting the fingerprint compare entirely would also pass:
+#   * a hand-edited TEMPLATE file (WORKFLOW.md) is still `modified` and still flips `ok: false`;
+#   * a DELETED registry is still `missing` and still flips `ok: false` — `ask` never swallows loss.
+git -C "$SBX" config user.email tester@example.invalid
+git -C "$SBX" config user.name tester
+# `--no-verify` throughout: the scaffold installs the IDC path-gate pre-commit hook, which requires
+# python 3.10+, and this machine's ambient python3 spread includes 3.9. The hook is not what this
+# scenario is testing, and skipping it keeps the lane deterministic across that spread.
+mkdir -p "$SBX/src/allowed" "$SBX/docs/workflow/build-validation" \
+         "$SBX/docs/workflow/build-validation-executions"
+cat > "$SBX/drive-surface.sh" <<'SH'
+#!/bin/bash
+set -euo pipefail
+grep -qx 'new behavior' src/allowed/feature.txt
+SH
+chmod +x "$SBX/drive-surface.sh"
+printf 'old behavior\n' > "$SBX/src/allowed/feature.txt"
+git -C "$SBX" add -A
+git -C "$SBX" commit -q --no-verify -m 'governed scaffold + build fixture' \
+  || fail "could not commit the scaffolded fixture repo"
+
+# A handle-LESS contract — this triplet is the first to drive its surface, which is exactly the case
+# the finisher's append step exists for. The plan-side half puts the registry inside `touch`.
+python3 "$VC" freeze --repo "$SBX" --issue 194 --pr 900 --graph-node alpha \
+  --graph-digest cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
+  --projection-digest dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
+  --touch src/allowed/ --touch docs/workflow/verification-handles.yaml \
+  --off-limits src/forbidden/ --surface cli --evidence-kind pane-capture \
+  --verify 'bash drive-surface.sh' --baseline expected-red --label drift \
+  --out "$SBX/docs/workflow/build-validation/drift.json" >/dev/null \
+  || fail "could not freeze the handle-less contract for the drift scenario"
+printf 'new behavior\n' > "$SBX/src/allowed/feature.txt"
+git -C "$SBX" add src/allowed/feature.txt
+git -C "$SBX" commit -q --no-verify -m 'implement the behavior'
+python3 "$VC" run --repo "$SBX" --contract "$SBX/docs/workflow/build-validation/drift.json" \
+  --out "$SBX/docs/workflow/build-validation-executions/drift-1.json" >/dev/null \
+  || fail "the frozen gate did not execute green — the drift scenario needs a PROVEN recipe"
+python3 "$VH" append --repo "$SBX" --handle-id 'drift-cli-drive' \
+  --from-execution "$SBX/docs/workflow/build-validation-executions/drift-1.json" >/dev/null \
+  || fail "the sanctioned finish-time handle append was refused"
+git -C "$SBX" add docs/workflow/verification-handles.yaml
+git -C "$SBX" commit -q --no-verify -m 'persist the proven verification recipe'
+
+# THE ASSERTION: a fully green lifecycle leaves the install receipt reporting no drift.
+gout="$(python3 "$RCHK" verify --repo "$SBX" --json)" \
+  || fail "receipt verification exited non-zero after the sanctioned append"
+python3 -c '
+import json, sys
+o = json.load(sys.stdin)
+REG = "docs/workflow/verification-handles.yaml"
+ask = set(o.get("ask") or [])
+modified = set(o.get("modified") or [])
+ok = o.get("ok")
+summary = o.get("summary")
+if REG in modified or ok is not True:
+    raise SystemExit(
+        "FAIL: a green builds sanctioned handle append must not report install-receipt drift. The "
+        "finish contract REQUIRES that append, yet verify says ok=" + repr(ok) + " (" + str(summary) +
+        ") with modified=" + repr(sorted(modified)) + ". Every successful build would raise this "
+        "alarm, training the operator to ignore drift.")
+if REG not in ask:
+    raise SystemExit("FAIL: the diverged operator-data registry must surface as ask, never vanish: "
+                     + repr(sorted(ask)))
+if REG in set(o.get("unchanged") or []):
+    raise SystemExit("FAIL: a diverged registry must never be reported unchanged")
+print("ok: the finishers sanctioned append reads as ask, not drift, and the receipt stays ok")
+' <<<"$gout" || exit 1
+
+# The TSV form is /idc:uninstall's removal manifest — an `ask` file that fell out of it would be an
+# IDC-created file uninstall never sees, so it would be neither removed nor asked about.
+python3 "$RCHK" verify --repo "$SBX" 2>/dev/null \
+  | grep -qE '^ask[[:space:]]+docs/workflow/verification-handles\.yaml$' \
+  || fail "the `ask` class must still appear in the TSV removal manifest, or /idc:uninstall silently strands the registry"
+
+# CONTROL 1 — a hand-edited TEMPLATE file is still real drift. Without this, muting the compare
+# entirely would pass the assertion above.
+printf '\n<!-- operator edit -->\n' >> "$SBX/WORKFLOW.md"
+cout="$(python3 "$RCHK" verify --repo "$SBX" --json)" || fail "receipt verification exited non-zero on the edited template"
+python3 -c '
+import json, sys
+o = json.load(sys.stdin)
+if "WORKFLOW.md" not in set(o.get("modified") or []):
+    raise SystemExit("CONTROL FAILED: an edited template file must still be modified: "
+                     + repr(o.get("modified")))
+if o.get("ok") is not False:
+    raise SystemExit("CONTROL FAILED: real template drift must still flip ok:false")
+print("ok: control - genuine template drift is still reported as modified + ok:false")
+' <<<"$cout" || exit 1
+git -C "$SBX" checkout -- WORKFLOW.md
+
+# CONTROL 2 — a DELETED operator-data file is still `missing` and still fails. `ask` covers divergent
+# bytes, never absence: /idc:update's restore rule and the scaffold-intact contract both depend on it.
+mv "$SBX/docs/workflow/verification-handles.yaml" "$WORK/registry.parked"
+mout="$(python3 "$RCHK" verify --repo "$SBX" --json)" || fail "receipt verification exited non-zero on the deleted registry"
+python3 -c '
+import json, sys
+o = json.load(sys.stdin)
+REG = "docs/workflow/verification-handles.yaml"
+if REG not in set(o.get("missing") or []):
+    raise SystemExit("CONTROL FAILED: a deleted registry must still be missing: " + repr(o))
+if REG in set(o.get("ask") or []):
+    raise SystemExit("CONTROL FAILED: ask must never swallow an absent file")
+if o.get("ok") is not False:
+    raise SystemExit("CONTROL FAILED: a missing stamped file must still flip ok:false")
+print("ok: control - a deleted operator-data file is still missing + ok:false")
+' <<<"$mout" || exit 1
+mv "$WORK/registry.parked" "$SBX/docs/workflow/verification-handles.yaml"
+
+# (H) PLAN'S LOOKUP STEP IS A SHIPPED INVARIANT, not decoration. `handle_id` is OPTIONAL in fixed
 # code — by design, since a first-of-its-kind surface has no entry to cite — so a Plan that quietly
 # stopped citing handles would emit contracts that pass every validator while the registry decayed
 # into a write-only file. Nothing asserted the playbook still tells Plan to look one up: deleting all

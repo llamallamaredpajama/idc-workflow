@@ -71,6 +71,14 @@ Decide the file set deterministically, then classify it:
   - `modified` (or an entry the receipt marked `state: customized`) → **operator-customized**:
     surface it ("this IDC file was edited locally") and ask keep-or-remove per file. Default to
     keeping; never silently delete a customization.
+  - `ask` → an **operator-data file** (`WORKFLOW-config.yaml`, `docs/workflow/tracker-config.yaml`,
+    `docs/workflow/verification-handles.yaml`) whose bytes have diverged from the stamped
+    fingerprint. That divergence is the designed steady state, not drift — `/idc:init` fills the two
+    configs with this repo's data and the finish contract appends each build's proven verification
+    handle to the registry — so it is reported apart from `modified` and does **not** make the
+    receipt verification fail. For removal it is handled **exactly like `modified`**: surface it and
+    ask keep-or-remove per file, defaulting to keeping. Never silently delete it, and never skip it
+    (it is still an IDC-created file that a full uninstall must offer to remove).
   - `missing` → already gone; record `skipped-absent`.
   If the receipt is present but **invalid** (the helper exits non-zero), STOP and report the parse
   error — do not fall back silently to the hardcoded list.

@@ -166,8 +166,19 @@ The finisher runs its **own** `/fullauto-goal` loop. Its completion contract car
    unmet `merge_conditions[]`)
    — `enforce_receipt_gate` in the script is the source of truth and its docstring carries the full
    per-check rationale, not repeated here — so a nit can never merge as stranded prose, and an unmet
-   pre-merge condition can never be silently downgraded past the merge. It **removes the build
-   worktree first** (so `build/*` is no longer checked
+   pre-merge condition can never be silently downgraded past the merge.
+   **Where you write the four witness artifacts is not a trap.** Build runs in a linked worktree, so
+   the contract, execution receipt, review verdict and implementation receipt are normally written
+   beside the code, inside it — and they are machine artifacts you must **never commit** (committing
+   after the receipt is sealed moves the head and the tail refuses as stale; the shipped
+   `docs/workflow/code-reviews/.gitignore` makes the verdict uncommittable regardless). The tail
+   handles that itself: `persist_build_witness_artifacts` copies all four onto the **same logical repo
+   paths** in the governed checkout, re-verifies the receipt there, and only then removes the
+   worktree — so `docs/workflow/build-receipts/<file>.json` is still readable, and still verifies, for
+   the Build closeout that re-checks it after the merge. Nothing is committed and the sealed head
+   never moves. This is the ONE exception to "an uncommitted file is destroyed at finalization" in
+   step 4 — it applies to those four receipt-named artifacts only, never to source or docs.
+   The tail **removes the build worktree first** (so `build/*` is no longer checked
    out — otherwise its local delete fails: `cannot delete branch … used by worktree`), **then
    merges** the triplet's PR into the **staging** branch (the merge train's shared integration ref,
    promoted to `main` only after the staging e2e — see *e2e layering*) with a **direct, blocking**

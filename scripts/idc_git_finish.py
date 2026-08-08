@@ -46,8 +46,10 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(SCRIPT_DIR, "hooks"))   # the ledger lives one level down
@@ -542,13 +544,37 @@ def worktree_for_branch(repo, branch):
     return None
 
 
-def worktree_remove(repo, worktree_abs):
+def worktree_remove(repo, worktree_abs, relocated=()):
+    """Remove the build worktree with a plain, NON-FORCE `git worktree remove` — the refusal on a dirty
+    tree is a guard, not an obstacle (agents/idc-finisher.md relies on it to make an uncommitted
+    verification-handle append impossible to lose).
+
+    `relocated` is the (source, durable copy) pairs `persist_build_witness_artifacts` produced. Their
+    sources are machine artifacts that are deliberately never committed, so they would make this
+    removal refuse; they are dropped HERE, at the last possible moment, and PUT BACK if the removal
+    refuses anyway (an unrelated untracked file). That keeps the refusal's promise — nothing shipped,
+    re-run the same command — literally true, instead of leaving the operator with a command line
+    whose `--build-receipt` and `--verdict` paths no longer exist."""
     registered = git_worktree_list(repo)
     is_registered = any(os.path.realpath(p) == os.path.realpath(worktree_abs) for p in registered)
     if not os.path.isdir(worktree_abs) and not is_registered:
         return  # idempotent: already gone
+    for src, _dest in relocated:
+        try:
+            os.remove(src)
+        except OSError:
+            pass    # already gone, or unreadable — `git worktree remove` below is the real check
     rc, _out, err = _run(["git", "worktree", "remove", worktree_abs], repo)
     if rc != 0:
+        for src, dest in relocated:
+            try:
+                if not os.path.exists(src):
+                    os.makedirs(os.path.dirname(src), exist_ok=True)
+                    shutil.copyfile(dest, src)
+            except OSError as exc:
+                _warn(f"could not restore the build artifact {src} after the worktree removal was "
+                      f"refused ({exc}); its durable copy at {dest} is intact — re-run this finish "
+                      f"with --build-receipt/--verdict pointing at the copies under {os.path.dirname(dest)}")
         _fail("worktree-remove", f"git worktree remove {worktree_abs} failed: {err.strip()[:300]}")
 
 
@@ -805,6 +831,146 @@ def enforce_build_receipt(args, repo, branch):
     return (verified or {}).get("head")
 
 
+# ── the build witness artifacts must outlive the ephemeral build worktree (#197 follow-up) ───────
+# The four artifacts the receipt binds together, as the receipt itself names them. `contract_path` /
+# `execution_path` / `verdict_path` are already LOGICAL repo paths (idc_build_receipt._rel); the
+# receipt's own logical path is derived from where it sits.
+BUILD_WITNESS_FIELDS = ("contract_path", "execution_path", "verdict_path")
+
+
+def _same_path(a, b):
+    return os.path.realpath(a) == os.path.realpath(b)
+
+
+def _logical_dest(dest_root, rel, label):
+    """`dest_root/rel` for a logical repo path, refusing anything that escapes the destination root."""
+    if os.path.isabs(rel) or rel.split(os.sep)[0] == os.pardir:
+        _fail("persist-build-artifacts",
+              f"the build receipt's {label} {rel!r} is not a repo-relative logical path — refusing to "
+              "relocate an artifact outside the governed checkout")
+    dest = os.path.realpath(os.path.join(dest_root, rel))
+    if not dest.startswith(os.path.realpath(dest_root) + os.sep):
+        _fail("persist-build-artifacts",
+              f"the build receipt's {label} {rel!r} resolves outside the governed checkout "
+              f"{dest_root} — refusing to relocate it")
+    return dest
+
+
+def _copy_artifact(src, dest, label):
+    """Copy `src` onto `dest`, atomically (a temp file in the destination directory, then `os.replace`)
+    and WITHOUT touching the source — dropping it is `worktree_remove`'s job, so that every refusal
+    between here and the removal leaves the caller's own `--build-receipt` / `--verdict` paths intact
+    and the finish straightforwardly re-runnable. Copy rather than rename so a build worktree on a
+    different filesystem works."""
+    try:
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".idc-finish.", suffix=".tmp", dir=os.path.dirname(dest))
+        os.close(fd)
+        shutil.copyfile(src, tmp)
+        os.replace(tmp, dest)
+    except OSError as exc:
+        _fail("persist-build-artifacts",
+              f"could not persist the build {label} to {dest}: {exc} — the build worktree is about to "
+              "be removed, so refusing rather than letting it take the artifact with it (nothing has "
+              "shipped; fix the destination and re-run this finish)")
+
+
+def persist_build_witness_artifacts(args, repo, branch, worktree_abs, verified_head):
+    """Make the receipt's four witness artifacts durable before the ephemeral build worktree is
+    removed: copy them onto the SAME logical repo paths in the governed checkout. Returns
+    `(verified head re-proved at the durable location, [(source, durable copy), …])` — the pairs
+    `worktree_remove` drops just before the removal and restores if it refuses. A no-op when the
+    artifacts already live outside the worktree (the split shape tests/smoke/phase4-git-finish.sh
+    drives).
+
+    WHY THIS STEP EXISTS. Build runs in a linked worktree by design (#197), and the freeze → run →
+    review → receipt chain writes its artifacts next to the code, inside that worktree. They are
+    machine artifacts, and there was no way to get them through this tail:
+
+      * COMMITTING them after the receipt is sealed advances the branch head, and `enforce_build_receipt`
+        above (which binds `head_ref=branch`) then refuses the whole finish — "stale build receipt
+        refused: the live review/verification head no longer matches the branch tip being merged";
+      * the shipped `docs/workflow/code-reviews/.gitignore` ignores `*`, so the review VERDICT cannot
+        be committed at all — `git add` refuses it without `-f` — which leaves the receipt's
+        `verdict_path` dangling after teardown even if the head problem were solved;
+      * leaving them UNCOMMITTED makes the next step's plain `git worktree remove` refuse — "contains
+        modified or untracked files, use --force to delete it".
+
+    So the finish died either way, and the artifacts the post-merge Build closeout re-verifies
+    (`idc_command_contract._valid_build_receipt` re-reads `docs/workflow/build-receipts/<file>.json`
+    from the governed repo and runs `verify_receipt` over it) died with the worktree.
+
+    Relocating is the fix, and it only works because #197 keys every witness by the artifact's LOGICAL
+    repo path: the same bytes at the same logical path in another worktree of the same repository have
+    the same witness key, the same digest, and the same repo identity. So the copies verify at their
+    durable location with NO new witness written and NO gate relaxed — nothing is committed, the
+    sealed head never moves, the removal stays non-force, and the receipt is RE-VERIFIED (head binding
+    included) at the durable path before any mutation runs.
+
+    A destination file at the same logical path is OVERWRITTEN, which is the only correct answer: the
+    witness store holds exactly one current witness per logical key, so an older same-path artifact was
+    already superseded — and unwitnessed — the moment this build's artifact was written.
+
+    TRANSACTIONAL, so a refusal stays RE-RUNNABLE with the SAME command line. This step COPIES; it does
+    not move. The in-worktree originals — the very paths `--build-receipt` and `--verdict` name — are
+    dropped only by `worktree_remove`, immediately before the removal that needs a clean tree, and are
+    RESTORED from the durable copies if that removal refuses. Otherwise the tail's own recovery story
+    ("nothing has shipped yet — fix it and re-run this finish") would be a lie the first time an
+    unrelated untracked file blocked the removal: the operator would re-run the identical command and
+    be told its verdict receipt does not exist. The durable copies are left in place either way — they
+    are where the artifacts belong."""
+    if not args.build_receipt or not worktree_abs:
+        return verified_head, []
+    try:
+        import idc_build_receipt as BR          # noqa: PLC0415 — lazy, like enforce_build_receipt
+        import idc_validation_contract as BVC   # noqa: PLC0415 — NB: `VC` here is the verdict checker
+        receipt_abs = os.path.realpath(os.path.abspath(args.build_receipt))
+        src_root = BR._artifact_root(repo, receipt_abs)
+        dest_root = BVC._worktree_toplevel(repo)
+        receipt = BR.load_receipt(receipt_abs)
+    except Exception as exc:  # noqa: BLE001 — an unreadable receipt/root fails closed, as everywhere else
+        _fail("persist-build-artifacts", str(exc))
+    if not _same_path(src_root, worktree_abs):
+        return verified_head, []    # already durable (the split shape) — nothing to relocate
+    if _same_path(dest_root, worktree_abs):
+        _fail("persist-build-artifacts",
+              f"--repo {repo} resolves to the very build worktree being removed ({worktree_abs}), so "
+              "the build receipt has nowhere durable to land — run the finish from the governed "
+              "checkout the tracker lives in")
+
+    moves = [(os.path.relpath(receipt_abs, src_root), "receipt")]
+    for field in BUILD_WITNESS_FIELDS:
+        rel = receipt.get(field)
+        if not rel:
+            _fail("persist-build-artifacts",
+                  f"the build receipt does not name a {field} — it cannot be made durable")
+        moves.append((rel, field))
+
+    relocated, durable = [], {}
+    for rel, label in moves:
+        src = os.path.join(src_root, rel)
+        dest = _logical_dest(dest_root, rel, label)
+        durable[label] = dest
+        if _same_path(src, dest):
+            continue                # already durable at this exact path — nothing to do
+        if not os.path.isfile(src) and os.path.isfile(dest):
+            continue                # an earlier attempt's copy already landed and its source is gone
+        _copy_artifact(src, dest, label)
+        relocated.append((src, dest))
+
+    if not relocated:
+        return verified_head, []
+    print(f"finish: persisted {len(relocated)} build witness artifact(s) out of the ephemeral build "
+          f"worktree onto their durable repo paths under {dest_root}")
+    # The durable copies must satisfy the SAME gate the in-worktree ones just did — head binding and
+    # all. This runs before `worktree_remove`, so a failure here still ships nothing, and the
+    # originals are still in place for a straight re-run.
+    args.build_receipt = durable["receipt"]
+    if args.verdict and _same_path(args.verdict, os.path.join(src_root, receipt["verdict_path"])):
+        args.verdict = durable["verdict_path"]   # the journal must record the path that still exists
+    return enforce_build_receipt(args, repo, branch), relocated
+
+
 def close_only_recover(args, repo, worktree_abs, tracker_path, backend, project_number, field_ids,
                        owner, name, session_id=None):
     """CLOSE-ONLY recovery for an ALREADY-MERGED PR whose board was never advanced — the phantom-idle
@@ -952,7 +1118,12 @@ def main():
 
     branch = resolve_branch(repo, args.pr)
     verified_head = enforce_build_receipt(args, repo, branch)
-    worktree_remove(repo, worktree_abs)
+    # The build worktree is about to be deleted. If the receipt and the artifacts it binds still live
+    # INSIDE it, make them durable first — on the same logical repo paths, re-verified there, with
+    # nothing committed and the sealed head untouched. See persist_build_witness_artifacts.
+    verified_head, relocated = persist_build_witness_artifacts(args, repo, branch, worktree_abs,
+                                                               verified_head)
+    worktree_remove(repo, worktree_abs, relocated)
     # RECORD IN-FLIGHT STATE, immediately before the point of no return. Set here rather than at the
     # top of the tail on purpose: everything above this line is reversible and leaves no shipped
     # work, so a taint set earlier would describe an item that never merged — an obligation no

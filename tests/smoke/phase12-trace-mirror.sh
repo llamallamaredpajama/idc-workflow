@@ -384,8 +384,8 @@ echo "  ok (M) convergence: incremental == rebuild across a receipt rewrite, an 
 # Deterministic, not timing-hopeful: the mirror's archive read is paused (patched `open`) and a REAL
 # janitor rotation runs in a subprocess during exactly that pause. Bounded by a wait timeout so a
 # blocked rotation can never hang the lane.
-# Red-when-broken: call `_parse_segments` directly instead of through `read_journal_locked` → item 4
-# vanishes from the mirror and this FAILs.
+# Red-when-broken: call `_snapshot_segments` directly instead of through `read_journal_locked` →
+# item 4 vanishes from the mirror and this FAILs.
 NR="$WORK/lockrace"
 mkdir -p "$NR/docs/workflow/journal-archive"
 cat > "$NR/docs/workflow/tracker-config.yaml" <<'YAML'
@@ -684,5 +684,374 @@ PY
 )"
 [ "$VNEW" = "1" ] || fail "(V) the re-derived mirror is missing the raw record: $VNEW"
 echo "  ok (V) a mirror at another schema version is dropped and re-derived from the raw record"
+
+# =================================================================================================
+# Codex review round 2 (PR #198): one P1 + seven P2s, each pinned below by the property it broke.
+# Every one of them pokes a hole in a promise the doctrine above makes — never committed, never
+# lying about the record, never crashing on damage, never breaking the run it watches.
+# =================================================================================================
+
+# ---- W. [P1] the mirror db is a PROTECTED MACHINE PATH, not an ordinary file ----------------------
+# The db is gitignored (arm K) — but an ignore rule is ADVISORY. `git add -f`, or a db already
+# tracked from before the rule existed, walks straight past it, and the repo-wide claim window would
+# then treat it as an ordinary allowed path and COMMIT it: a file whose rows hold the verbatim
+# payloads of receipt sidecars their own writers create 0600 (arm U). "Never committed" has to be
+# enforced by the gate that enforces it for every other .idc-* machine file, not by gitignore alone.
+# Red-when-broken: drop `.idc-trace-mirror.db*` from PROTECTED_MACHINE_RULES → (W1) FAILs.
+python3 - "$PLUGIN" <<'PY' || fail "(W) the trace-mirror db is not a protected machine-owned path"
+import os, sys, tempfile
+plugin = sys.argv[1]
+sys.path.insert(0, os.path.join(plugin, "scripts"))
+sys.path.insert(0, os.path.join(plugin, "scripts", "hooks"))
+import idc_path_gate as G
+
+repo = os.path.join(tempfile.mkdtemp(), "r")
+os.makedirs(os.path.join(repo, "docs/workflow"))
+open(os.path.join(repo, "docs/workflow/tracker-config.yaml"), "w").write("backend: filesystem\n")
+
+def verdict(path, action="git"):
+    d = G._evaluate_request(repo, plugin, {"action": action, "paths": [path]})
+    return bool(d.get("allowed")), str(d.get("reason") or "")
+
+# (W1) the db AND its WAL/SHM sidecars are hard-denied, for the machine-owned reason — on every
+# mutating action, since a `write`/`edit` of the db is as much a forgery as a commit of it.
+for path in (".idc-trace-mirror.db", ".idc-trace-mirror.db-wal", ".idc-trace-mirror.db-shm"):
+    for action in ("git", "write", "edit"):
+        allowed, reason = verdict(path, action)
+        assert not allowed, (
+            "(W1) `%s` is ALLOWED for action `%s` — the derived mirror holds verbatim 0600 receipt "
+            "payloads and must never be committable/hand-editable: %s" % (path, action, reason))
+        assert "protected machine-owned surface" in reason, (
+            "(W1) `%s` was denied, but not as a protected machine-owned path (%s) — a deny for an "
+            "incidental reason would evaporate the moment that reason did" % (path, reason))
+
+# (W2) the guard is not vacuous: an established peer denies the same way, and an ORDINARY repo file
+# still gets past this check (the deny is specific to machine-owned state, not a blanket refusal).
+allowed, reason = verdict(".idc-drain-verdict.json")
+assert not allowed and "protected machine-owned surface" in reason, \
+    "(W2) test setup: the peer machine file is not denied as protected — the assertion above proves nothing"
+allowed, _ = verdict("README.md")
+assert allowed, "(W2) an ordinary repo file must not be caught by the protected-machine rule"
+PY
+echo "  ok (W) the mirror db + its WAL/SHM sidecars are protected machine paths (git/write/edit denied)"
+
+# ---- X. [P2] two BYTE-IDENTICAL journal lines are two records, not one ----------------------------
+# The engine deliberately journals a RECLAIM of an already-In-Progress item (idc_transition), and
+# `when` has one-second granularity with no nonce — so a session that reclaims twice inside one
+# second writes two byte-identical NDJSON lines, both of them REAL claims. Keyed by content alone the
+# second collided with the first and INSERT OR IGNORE dropped it: the mirror showing one claim where
+# the record holds two, which is the mirror disagreeing with the raw record it exists to reflect.
+#
+# The fix cannot be per-segment position, because a rotation MOVES lines between segments — so this
+# arm pins the whole property triangle at once: distinct rows, NO re-ingest across a rotation, and
+# convergence with a rebuild. Red-when-broken: key journal rows by content alone → (X1) FAILs;
+# key them by (artifact, seq) → (X3) FAILs with 4 rows where the record has 2.
+XR="$WORK/identical"
+mkdir -p "$XR/docs/workflow/journal-archive"
+cat > "$XR/docs/workflow/tracker-config.yaml" <<'YAML'
+backend: filesystem
+tracker: docs/workflow/TRACKER.md
+YAML
+# Exactly what idc_transition's reclaim path writes, twice inside one timestamp second.
+CLAIM='{"backend":"filesystem","guard_evidence_hash":null,"item":71,"op":"claim","repo-relative tracker":"docs/workflow/TRACKER.md","to":{"status":"In Progress"},"what":"claim #71 In Progress -> In Progress","when":"2026-08-06T10:05:00Z","who":"idc-build"}'
+{ printf '%s\n' "$CLAIM"; printf '%s\n' "$CLAIM"; } > "$XR/docs/workflow/transition-journal.ndjson"
+python3 "$SCRIPT" --repo "$XR" ingest >/dev/null 2>&1 || fail "(X) ingest failed on identical lines"
+XQ() { python3 - "$XR" "$1" <<'PY'
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1] + "/.idc-trace-mirror.db")
+for r in con.execute(sys.argv[2]).fetchall():
+    print("|".join("" if c is None else str(c) for c in r))
+PY
+}
+X1="$(XQ "select count(*) from events where source='journal'")"
+[ "$X1" = "2" ] \
+  || fail "(X1) two byte-identical journal lines are two REAL records (a double reclaim), but the
+mirror stored $X1 — the second claim was silently dropped by a content-only event key"
+
+# (X2) still IDEMPOTENT: re-ingesting the unchanged journal must not grow it to 4.
+python3 "$SCRIPT" --repo "$XR" ingest >/dev/null 2>&1 || fail "(X) re-ingest failed"
+X2="$(XQ "select count(*) from events where source='journal'")"
+[ "$X2" = "2" ] || fail "(X2) re-ingesting unchanged identical lines duplicated them: $X2 (expected 2)"
+
+# (X3) THE ROTATION TRAP the occurrence identity has to survive: the janitor moves #71's records into
+# an archive segment. Their content is unchanged, so they must NOT re-ingest under the new path.
+#
+# The ROW COUNT alone cannot see this, and that matters: a positional identity DOES re-ingest, but
+# `_prune_vanished` then deletes the pre-rotation rows in the same pass, leaving the count at 2 and
+# the bug invisible. The visible damage is to the CURSOR — the same two records are deleted and
+# re-inserted at fresh ids, which every live watcher reads as two brand-new claims that never
+# happened. So the assertion is that a rotation leaves the already-mirrored rows' IDS UNTOUCHED.
+XIDS_BEFORE="$(XQ "select id from events where source='journal' order by id" | tr '\n' ',')"
+python3 - "$XR" "$PLUGIN" <<'PY' >/dev/null 2>&1 || fail "(X) the janitor rotation fixture failed"
+import os, sys
+repo, plugin = sys.argv[1], sys.argv[2]
+sys.path.insert(0, os.path.join(plugin, "scripts")); sys.path.insert(0, os.path.join(plugin, "scripts", "hooks"))
+import idc_git_janitor as J
+J.rotate_journal({"repo": repo, "board": [{"number": 71, "status": "Done"}]},
+                 os.path.join(repo, "docs/workflow/transition-journal.ndjson"))
+PY
+python3 "$SCRIPT" --repo "$XR" ingest >/dev/null 2>&1 || fail "(X) ingest after the rotation failed"
+X3="$(XQ "select count(*) from events where source='journal'")"
+[ "$X3" = "2" ] \
+  || fail "(X3) a rotation re-ingested the identical lines under their new path: $X3 rows for 2
+records — the occurrence identity is positional and moved with them instead of staying stable"
+XIDS_AFTER="$(XQ "select id from events where source='journal' order by id" | tr '\n' ',')"
+[ "$XIDS_BEFORE" = "$XIDS_AFTER" ] \
+  || fail "(X3) a rotation RE-DELIVERED the identical lines at fresh cursor ids ($XIDS_BEFORE ->
+$XIDS_AFTER) — the occurrence identity moved with the record instead of staying stable, so every
+live watcher sees two brand-new claims that never happened"
+# ...and their provenance still followed the record into the archive (arm O's property, here on the
+# pair that shares a content hash).
+X3A="$(XQ "select count(*) from events where source='journal' and artifact like 'docs/workflow/journal-archive/%'")"
+[ "$X3A" = "2" ] || fail "(X3) the rotated identical lines' artifact did not follow them: $X3A of 2"
+
+# (X4) a THIRD identical claim, appended live, is a THIRD record — delivered ABOVE the old cursor so
+# a watcher sees it, rather than vanishing into the two keys that already exist.
+XCUR="$(XQ "select max(id) from events")"
+printf '%s\n' "$CLAIM" >> "$XR/docs/workflow/transition-journal.ndjson"
+python3 "$SCRIPT" --repo "$XR" ingest >/dev/null 2>&1 || fail "(X) ingest of the third claim failed"
+X4="$(XQ "select count(*) from events where source='journal'")"
+[ "$X4" = "3" ] || fail "(X4) a third identical claim did not land as its own record: $X4 (expected 3)"
+X4ID="$(XQ "select max(id) from events")"
+[ "$X4ID" -gt "$XCUR" ] \
+  || fail "(X4) the third claim did not land above the live cursor ($XCUR -> $X4ID) — a watcher would never see it"
+
+# (X5) CONVERGENCE still holds over identical lines: incremental == rebuild (arm M's invariant, on
+# the one input where a naive occurrence identity would renumber between the two).
+XCOLS="run_id,source,artifact,seq,ts,op,item,stage,status,who,summary,event_key,payload"
+XINCR="$(XQ "select $XCOLS from events order by event_key")"
+rm -f "$XR"/.idc-trace-mirror.db*
+python3 "$SCRIPT" --repo "$XR" ingest >/dev/null 2>&1 || fail "(X) the rebuild-from-scratch ingest failed"
+XREBUILT="$(XQ "select $XCOLS from events order by event_key")"
+[ "$XINCR" = "$XREBUILT" ] || fail "(X5) with identical lines present, an incrementally-grown mirror
+DIVERGED from a rebuild.
+  incremental: $XINCR
+  rebuilt:     $XREBUILT"
+echo "  ok (X) byte-identical journal lines are distinct records, survive a rotation without re-ingest, and converge"
+
+# ---- Y. [P2] a DAMAGED mirror db is discarded and re-derived, not fatal ---------------------------
+# SQLite raises at the first PRAGMA on a corrupt/foreign file — which is BEFORE any subcommand
+# dispatches, so a truncated db (killed process, full disk) killed every door with the same
+# traceback, INCLUDING `rebuild`, the advertised recovery. The operator's only way out was knowing to
+# `rm` a file the tool never named. Damage to a derived, disposable cache has exactly one right
+# answer and the mirror can always take it itself.
+# Red-when-broken: remove the DatabaseError recovery from connect() → (Y1) FAILs with rc!=0.
+YR="$WORK/corruptdb"
+mkdir -p "$YR/docs/workflow"
+cat > "$YR/docs/workflow/tracker-config.yaml" <<'YAML'
+backend: filesystem
+tracker: docs/workflow/TRACKER.md
+YAML
+cat > "$YR/docs/workflow/transition-journal.ndjson" <<'JSON'
+{"item":72,"op":"create-ticket","to":{"stage":"Consideration","status":"Todo"},"what":"create-ticket 'survives corruption'","when":"2026-08-06T10:00:00Z","who":"idc-think"}
+JSON
+# Not a SQLite file at all — the shape a killed writer or a full disk leaves behind.
+printf 'PLAIN TEXT, DEFINITELY NOT A DATABASE\n' > "$YR/.idc-trace-mirror.db"
+YOUT="$(python3 "$SCRIPT" --repo "$YR" rebuild 2>&1)" \
+  || fail "(Y1) \`rebuild\` — the advertised recovery — could not run against a damaged mirror: $YOUT"
+printf '%s\n' "$YOUT" | grep -qi "unreadable" \
+  || fail "(Y1) the mirror was silently re-derived; the operator must be TOLD their trace restarted: $YOUT"
+YN="$(python3 - "$YR" <<'PY'
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1] + "/.idc-trace-mirror.db")
+print(con.execute("select count(*) from events where item = 72").fetchone()[0])
+PY
+)"
+[ "$YN" = "1" ] || fail "(Y1) the re-derived mirror is missing the raw record: $YN"
+# ...and the ordinary doors recover too, not just `rebuild`.
+printf 'CORRUPT AGAIN\n' > "$YR/.idc-trace-mirror.db"
+python3 "$SCRIPT" --repo "$YR" ingest >/dev/null 2>&1 || fail "(Y2) ingest could not recover a damaged mirror"
+printf 'CORRUPT ONCE MORE\n' > "$YR/.idc-trace-mirror.db"
+python3 "$SCRIPT" --repo "$YR" tail --since 0 >/dev/null 2>&1 || fail "(Y2) tail could not recover a damaged mirror"
+# The re-derived db is still owner-only — recovery must not quietly widen access (arm U's property).
+printf 'CORRUPT YET AGAIN\n' > "$YR/.idc-trace-mirror.db"
+( umask 022; python3 "$SCRIPT" --repo "$YR" ingest >/dev/null 2>&1 ) || fail "(Y3) the umask-022 recovery ingest failed"
+YMODE="$(python3 - "$YR/.idc-trace-mirror.db" <<'PY'
+import os, stat, sys
+print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))[-3:])
+PY
+)"
+[ "$YMODE" = "600" ] || fail "(Y3) the mirror re-derived after corruption is $YMODE, not owner-only"
+echo "  ok (Y) a corrupt mirror db is discarded, re-derived and reported — by every door, still 0600"
+
+# ---- Z. [P2] one undecodable LINE costs that line, not its whole segment --------------------------
+# `readlines()` decodes the entire file, so a single invalid UTF-8 byte raised — the handler counted
+# ONE skip and every valid record in that segment was silently omitted. A trace that drops a whole
+# segment while reporting "skipped: 1" is worse than a crash: it reads as an almost-complete view.
+# Red-when-broken: restore the whole-file text read → (Z1) FAILs with 0 mirrored records.
+ZR="$WORK/badutf8"
+mkdir -p "$ZR/docs/workflow"
+cat > "$ZR/docs/workflow/tracker-config.yaml" <<'YAML'
+backend: filesystem
+tracker: docs/workflow/TRACKER.md
+YAML
+python3 - "$ZR" <<'PY'
+import os, sys
+p = os.path.join(sys.argv[1], "docs/workflow/transition-journal.ndjson")
+before = b'{"item":81,"op":"create-ticket","to":{"stage":"Consideration","status":"Todo"},"what":"create-ticket good-before","when":"2026-08-06T10:00:00Z","who":"idc-think"}\n'
+bad    = b'{"item":82,"op":"move","to":{"status":"In Progress"},"what":"move \xff\xfe damaged","when":"2026-08-06T10:05:00Z","who":"idc-build"}\n'
+after  = b'{"item":83,"op":"create-ticket","to":{"stage":"Consideration","status":"Todo"},"what":"create-ticket good-after","when":"2026-08-06T10:10:00Z","who":"idc-think"}\n'
+open(p, "wb").write(before + bad + after)
+PY
+ZOUT="$(python3 "$SCRIPT" --repo "$ZR" ingest 2>&1)" || fail "(Z) ingest crashed on an undecodable line: $ZOUT"
+ZQ() { python3 - "$ZR" "$1" <<'PY'
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1] + "/.idc-trace-mirror.db")
+print(con.execute(sys.argv[2]).fetchone()[0])
+PY
+}
+Z1="$(ZQ "select count(*) from events where item in (81,83)")"
+[ "$Z1" = "2" ] \
+  || fail "(Z1) an undecodable line took its segment's VALID records with it: $Z1 of 2 mirrored"
+printf '%s\n' "$ZOUT" | grep -q "skipped: 1" \
+  || fail "(Z1) exactly the damaged line must be counted as skipped: $ZOUT"
+# The damaged record is genuinely absent — skipped means skipped, not half-stored.
+Z2="$(ZQ "select count(*) from events where item = 82")"
+[ "$Z2" = "0" ] || fail "(Z2) the undecodable line was stored anyway: $Z2"
+echo "  ok (Z) one undecodable line is skipped and counted; its neighbours in the segment still land"
+
+# ---- AA. [P2] an item number outside SQLite's integer range is skipped, not fatal -----------------
+# SQLite stores signed 64-bit integers. `json.loads` hands back a 26-digit int quite happily, and
+# binding it raised OverflowError from inside the INSERT — so a single damaged record terminated
+# `watch` and rolled back every good event sharing that poll's transaction.
+# Red-when-broken: drop the _INT64 range check → (AA1) FAILs with a non-zero exit.
+AR="$WORK/bigitem"
+mkdir -p "$AR/docs/workflow"
+cat > "$AR/docs/workflow/tracker-config.yaml" <<'YAML'
+backend: filesystem
+tracker: docs/workflow/TRACKER.md
+YAML
+cat > "$AR/docs/workflow/transition-journal.ndjson" <<'JSON'
+{"item":91,"op":"create-ticket","to":{"stage":"Consideration","status":"Todo"},"what":"create-ticket 'good neighbour'","when":"2026-08-06T10:00:00Z","who":"idc-think"}
+{"item":99999999999999999999999999,"op":"move","to":{"status":"In Progress"},"what":"move #huge","when":"2026-08-06T10:05:00Z","who":"idc-build"}
+{"item":-99999999999999999999999999,"op":"move","to":{"status":"In Progress"},"what":"move #hugeneg","when":"2026-08-06T10:06:00Z","who":"idc-build"}
+JSON
+AOUT="$(python3 "$SCRIPT" --repo "$AR" ingest 2>&1)" \
+  || fail "(AA1) ingest CRASHED on a journal item beyond signed 64-bit: $AOUT"
+printf '%s\n' "$AOUT" | grep -q "skipped: 2" \
+  || fail "(AA1) the out-of-range items must be counted as skipped: $AOUT"
+AGOOD="$(python3 - "$AR" <<'PY'
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1] + "/.idc-trace-mirror.db")
+print(con.execute("select count(*) from events where item = 91").fetchone()[0])
+PY
+)"
+[ "$AGOOD" = "1" ] || fail "(AA2) the good record sharing the poll's transaction was rolled back: $AGOOD"
+echo "  ok (AA) an item number outside SQLite's range is skipped and counted, and its neighbours land"
+
+# ---- AB. [P2] an out-of-range receipt timestamp is tolerated, not fatal ---------------------------
+# `1e999` is VALID JSON and parses to inf; `time.gmtime(inf)` raises OverflowError — neither of the
+# two exceptions `_iso` caught. One damaged receipt sidecar therefore crashed ingest and every watch
+# poll, in a module whose entire contract is that it never breaks the run it observes.
+# Red-when-broken: narrow the catch back to (TypeError, ValueError) → (AB1) FAILs with a traceback.
+BR="$WORK/bigts"
+mkdir -p "$BR/docs/workflow"
+cat > "$BR/docs/workflow/tracker-config.yaml" <<'YAML'
+backend: filesystem
+tracker: docs/workflow/TRACKER.md
+YAML
+printf '{"version":2,"verdict":"complete","exit":0,"session_id":"S-inf","ts":1e999}\n' \
+  > "$BR/.idc-drain-verdict.json"
+printf '{"version":2,"kind":"doctor","session_id":"S-ok","producer":"doctor-command","ts":1785974460.0}\n' \
+  > "$BR/.idc-doctor-report.json"
+BOUT="$(python3 "$SCRIPT" --repo "$BR" ingest 2>&1)" \
+  || fail "(AB1) ingest CRASHED on a receipt whose ts is out of the platform's range: $BOUT"
+BQ() { python3 - "$BR" "$1" <<'PY'
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1] + "/.idc-trace-mirror.db")
+for r in con.execute(sys.argv[2]).fetchall():
+    print("|".join("" if c is None else str(c) for c in r))
+PY
+}
+# The receipt still mirrors — only its unusable timestamp is dropped (NULL), never invented, and its
+# verbatim payload keeps whatever was actually written.
+BTS="$(BQ "select count(*) from events where op='drain-verdict' and ts is null")"
+[ "$BTS" = "1" ] || fail "(AB2) the out-of-range ts should mirror as NULL on an otherwise-intact receipt: $BTS"
+BQ "select payload from events where op='drain-verdict'" | grep -q '1e999' \
+  || fail "(AB2) the receipt's verbatim payload was not preserved: $(BQ "select payload from events where op='drain-verdict'")"
+BOK="$(BQ "select count(*) from events where op='doctor-report'")"
+[ "$BOK" = "1" ] || fail "(AB3) the healthy receipt beside the damaged one was lost: $BOK"
+echo "  ok (AB) an out-of-range receipt ts mirrors as NULL instead of crashing ingest"
+
+# ---- AC. [P2] the journal's lock is released BEFORE the parse ------------------------------------
+# THE OBSERVER MUST NOT DELAY THE RUN IT WATCHES. Every watch poll re-read AND re-parsed all segments
+# while holding the journal's SHARED sidecar lock — and `journal_append` / the janitor's rotation need
+# the EXCLUSIVE one, so the run's own writers queued behind the observer's full historical scan, for
+# a time that grows with total history (measured: 11ms/41ms/125ms of lock at 5k/20k/60k lines, ~99%
+# of it parsing). Only the raw byte read has to be inside the lock; everything else is bookkeeping.
+#
+# Asserted DETERMINISTICALLY (no timing threshold, which would flake on a loaded runner): the two
+# dominant costs — JSON decoding and per-line hashing — must not be called at all while the locked
+# reader is running. Red-when-broken: parse inside the locked reader again → (AC1) FAILs.
+CR="$WORK/lockhold"
+mkdir -p "$CR/docs/workflow/journal-archive"
+cat > "$CR/docs/workflow/tracker-config.yaml" <<'YAML'
+backend: filesystem
+tracker: docs/workflow/TRACKER.md
+YAML
+cat > "$CR/docs/workflow/journal-archive/2026-07-01.ndjson" <<'JSON'
+{"item":101,"op":"create-ticket","to":{"stage":"Consideration","status":"Todo"},"what":"create-ticket 'archived'","when":"2026-07-01T09:00:00Z","who":"idc-think"}
+JSON
+cat > "$CR/docs/workflow/transition-journal.ndjson" <<'JSON'
+{"item":102,"op":"create-ticket","to":{"stage":"Consideration","status":"Todo"},"what":"create-ticket 'live'","when":"2026-08-06T10:00:00Z","who":"idc-think"}
+{"item":102,"op":"move","to":{"status":"In Progress"},"what":"move #102 Todo -> In Progress","when":"2026-08-06T10:05:00Z","who":"idc-build"}
+JSON
+: > "$CR/docs/workflow/transition-journal.ndjson.lock"
+python3 - "$CR" "$PLUGIN" <<'PY' || fail "(AC) the mirror parses the journal while holding its lock"
+import json, os, sqlite3, sys
+repo, plugin = sys.argv[1], sys.argv[2]
+sys.path.insert(0, os.path.join(plugin, "scripts"))
+sys.path.insert(0, os.path.join(plugin, "scripts", "hooks"))
+import idc_trace_mirror as TM
+
+state = {"locked": False, "parsed": [], "read_bytes": False}
+
+real_locked = TM.RP.read_journal_locked
+def watched_locked(path, reader):
+    state["locked"] = True
+    try:
+        return real_locked(path, reader)
+    finally:
+        state["locked"] = False
+TM.RP.read_journal_locked = watched_locked
+
+real_loads = TM.json.loads
+def watched_loads(*a, **k):
+    if state["locked"]:
+        state["parsed"].append("json.loads")
+    return real_loads(*a, **k)
+TM.json.loads = watched_loads
+
+real_sha = TM._sha
+def watched_sha(text):
+    if state["locked"]:
+        state["parsed"].append("_sha")
+    return real_sha(text)
+TM._sha = watched_sha
+
+real_snapshot = TM._snapshot_segments
+def watched_snapshot(r, p):
+    out = real_snapshot(r, p)
+    state["read_bytes"] = bool(out[0][0])
+    return out
+TM._snapshot_segments = watched_snapshot
+
+con = TM.connect(TM.db_path(repo))
+TM.ingest(repo, con)
+con.close()
+
+# (AC1) nothing but the raw read happened under the lock.
+assert not state["parsed"], (
+    "(AC1) the locked reader still does %d parse/hash call(s) (%s) — the watched run's own "
+    "journal_append/rotation wait behind ALL of it, on every poll, forever"
+    % (len(state["parsed"]), sorted(set(state["parsed"]))))
+# (AC2) the guard is not vacuous: the lock WAS taken, bytes WERE read inside it, and the parse
+# really did happen (just afterwards) — so a mirror that simply stopped reading cannot pass this.
+assert state["read_bytes"], "(AC2) test setup: no segment bytes were read inside the lock"
+con = sqlite3.connect(os.path.join(repo, ".idc-trace-mirror.db"))
+items = sorted(r[0] for r in con.execute("select distinct item from events where item is not null"))
+assert items == [101, 102], "(AC2) the ingest did not mirror both segments' records: %s" % items
+PY
+echo "  ok (AC) only the raw byte read happens under the journal's lock; the parse runs after release"
 
 echo "PASS: phase12-trace-mirror"

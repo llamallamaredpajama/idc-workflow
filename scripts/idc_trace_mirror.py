@@ -57,7 +57,12 @@ IDC-governed repo it refuses rather than littering a directory that is none of I
 journal is read through the SAME sidecar-lock discipline the guards use (`idc_journal_replay.
 read_journal_locked`): an unlocked scan racing a rotation reads the pre-rotation archive and the
 post-rotation live segment, and the records moved in between appear in NEITHER — a silent hole in
-a trace whose whole job is to be complete.
+a trace whose whole job is to be complete. Damage is bounded to the damaged THING: one undecodable
+line costs that line and not its segment, an unstorable item number or timestamp costs that record,
+and a corrupt mirror db is discarded and re-derived rather than raising out of every door (including
+the `rebuild` that is meant to BE the recovery). And only the segment BYTES are read under the
+journal's lock — the parse happens after it is released, so the observer never makes the watched
+run's own writers queue behind its bookkeeping.
 
 USAGE:
     python3 idc_trace_mirror.py --repo <root> ingest                 # idempotent; safe to re-run
@@ -97,10 +102,14 @@ JOURNAL_REL = os.path.join("docs", "workflow", "transition-journal.ndjson")
 UNATTRIBUTED = "unattributed"
 _TS_FMT = "%Y-%m-%dT%H:%M:%SZ"
 
-# Bump on ANY change to SCHEMA below. A mirror carrying another version is DROPPED and re-derived
-# (see `connect`) — a DISPOSABLE cache never needs a migration path, and writing one would be the
-# first step toward treating its contents as something that must survive.
-SCHEMA_VERSION = 2
+# Bump on ANY change to SCHEMA below — or to the IDENTITY of what it stores (the `event_key`
+# encoding), since a mirror keyed the old way would have every journal row pruned and re-inserted on
+# first contact, which a live watcher reads as a burst of brand-new events that never happened. A
+# mirror carrying another version is DROPPED and re-derived (see `connect`) — a DISPOSABLE cache
+# never needs a migration path, and writing one would be the first step toward treating its contents
+# as something that must survive.
+# v3: journal event_key gained its occurrence ordinal (identical lines are distinct records).
+SCHEMA_VERSION = 3
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,   -- == rowid; THE CURSOR (mirror-arrival order,
@@ -165,22 +174,57 @@ def _create_private(path):
         pass   # a racing creator already made it, or the fs has no say — SQLite proceeds either way
 
 
+def discard(path):
+    """Delete the mirror and its WAL/SHM sidecars. Safe by doctrine: nothing here was ever the
+    record, so the worst case is the next ingest re-deriving it."""
+    for suffix in ("", "-wal", "-shm"):
+        try:
+            os.remove(path + suffix)
+        except OSError:
+            pass
+
+
+def _open(path):
+    _create_private(path)
+    con = sqlite3.connect(path)
+    try:
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA synchronous=NORMAL")
+        if con.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
+            con.executescript("DROP TABLE IF EXISTS events; DROP TABLE IF EXISTS phases;")
+            con.execute("PRAGMA user_version = %d" % SCHEMA_VERSION)
+        con.executescript(SCHEMA)
+    except sqlite3.DatabaseError:
+        con.close()          # release the handle before the caller discards the file
+        raise
+    return con
+
+
 def connect(path):
     """Open (creating if needed) the mirror in WAL mode — a live reader must never block the writer,
     which is what makes polling a mirror that an ingest is actively appending to safe.
 
     A db written by a DIFFERENT schema version is dropped and re-derived rather than migrated: the
     mirror is disposable, so "throw it away and rebuild from the raw record" is always available and
-    is the only reconciliation that cannot invent state."""
-    _create_private(path)
-    con = sqlite3.connect(path)
-    con.execute("PRAGMA journal_mode=WAL")
-    con.execute("PRAGMA synchronous=NORMAL")
-    if con.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
-        con.executescript("DROP TABLE IF EXISTS events; DROP TABLE IF EXISTS phases;")
-        con.execute("PRAGMA user_version = %d" % SCHEMA_VERSION)
-    con.executescript(SCHEMA)
-    return con
+    is the only reconciliation that cannot invent state.
+
+    A db that is CORRUPT — truncated by a full disk, half-written by a killed process, or simply not
+    a SQLite file at all — takes the same road, and must, because the alternative is worse than it
+    sounds: SQLite raises at the first PRAGMA, i.e. before any subcommand dispatches, so EVERY door
+    including `rebuild` — the advertised recovery — died with the same traceback and the operator's
+    only way out was knowing to `rm` a file the tool never named. Damage to a derived, disposable
+    cache has exactly one correct answer, and the mirror can always take it itself. Reported on
+    stderr, never silently: the operator is told their trace restarted (cursors reset with it)."""
+    try:
+        return _open(path)
+    except sqlite3.DatabaseError as exc:
+        discard(path)
+        sys.stderr.write(
+            "idc-trace-mirror: the mirror db at %s was unreadable (%s) — discarded and re-derived "
+            "from the raw record. Nothing is lost (the mirror is derived); cursors restart.\n"
+            % (path, exc))
+        sys.stderr.flush()
+        return _open(path)   # a second failure is the filesystem's, not the mirror's — let it raise
 
 
 def _sha(text):
@@ -189,10 +233,16 @@ def _sha(text):
 
 def _iso(epoch):
     """A receipt's POSIX `ts` -> the same ISO-8601 UTC shape the journal writes, so one `ts` column
-    is comparable across both sources."""
+    is comparable across both sources. An unusable time yields None — the receipt still mirrors,
+    simply without a normalized timestamp; its verbatim `payload` keeps whatever was written.
+
+    OverflowError/OSError are caught alongside the obvious two because a time can be VALID JSON and
+    still be outside the platform's `time_t`: `1e999` parses to `inf`, and `time.gmtime(inf)` raises
+    OverflowError on macOS/Linux (OSError on some platforms) rather than ValueError. One damaged
+    receipt must never take the ingest — or a live `watch` poll — down with it."""
     try:
         return time.strftime(_TS_FMT, time.gmtime(float(epoch)))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError, OSError):
         return None
 
 
@@ -239,23 +289,69 @@ def _state_scalar(value):
     return _INVALID
 
 
-def _parse_segments(repo, journal_path):
-    """`((events, skipped), None)` from every journal segment — the READER half of the locked read.
+def _snapshot_segments(repo, journal_path):
+    """`((blobs, unreadable), None)` — the READER half of the locked read, and NOTHING ELSE.
 
-    A malformed / half-written line is SKIPPED and counted, never fatal: ingest runs against a
-    journal another process is appending to. Tolerant by contract, so it never returns an error —
-    the `(value, error)` shape is `read_journal_locked`'s, shared with the fail-closed scan."""
-    events, skipped = [], 0
+    THE LOCK IS THE RUN'S, NOT THE OBSERVER'S. `read_journal_locked` holds the journal's SHARED
+    sidecar lock across this call, and `journal_append` / the janitor's rotation need the EXCLUSIVE
+    one — so every microsecond spent in here is a microsecond the watched run's own writers may sit
+    blocked. A `watch` polls every couple of seconds forever, so whatever this does is paid again and
+    again against a journal that only grows.
+
+    So it does the one thing that genuinely HAS to happen inside the lock — enumerate the segments
+    and slurp their raw bytes, which is what makes the read atomic with respect to a rotation — and
+    hands the bytes back. Decoding, JSON, the per-line hashing and every parse decision happen in
+    `_parse_snapshot`, OUTSIDE the lock, where they block nobody. Measured on a 60k-line journal that
+    moves ~99% of the hold out (0.125s -> ~0.001s per poll).
+
+    RESIDUAL, stated rather than papered over: the mirror still RE-READS every segment's bytes on
+    every poll — this is a shorter lock, not an incremental reader — so the hold still grows with
+    total journal history, just with a ~100x smaller constant. Holding the bytes is also the cost of
+    moving the parse out: peak memory is now the segments PLUS the event list they parse into, both
+    bounded by total journal size. A real incremental reader (per-segment offsets, or skipping
+    unchanged segments by size/mtime) is a cache with its own staleness failure mode, and a derived
+    view earns none of that risk for a sequential byte read.
+
+    An unreadable segment is counted, not raised: the parser turns the count into skips, so the
+    tolerant contract is unchanged."""
+    blobs, unreadable = [], 0
     for path in journal_segments(journal_path):
         rel = os.path.relpath(path, repo)
         try:
-            with open(path, "r", encoding="utf-8") as fh:
-                lines = fh.readlines()
-        except (OSError, UnicodeDecodeError):
-            skipped += 1
-            continue
-        for num, line in enumerate(lines, 1):
-            line = line.strip()
+            with open(path, "rb") as fh:
+                blobs.append((rel, fh.read()))
+        except OSError:
+            unreadable += 1
+        # NOTE: bytes, not text. A segment is decoded PER LINE in the parser, so one undecodable line
+        # costs that line — a whole-file `read(encoding="utf-8")` here would raise on it and take
+        # every valid record in the segment with it.
+    return (blobs, unreadable), None
+
+
+# SQLite stores integers as signed 64-bit. A journal record naming an item outside that range is
+# damage (no tracker mints one), but `json.loads` will happily hand back a 26-digit int, and binding
+# it raises OverflowError from deep inside the INSERT — taking down the whole poll, including the
+# good events sharing its transaction. Range-checked at parse time so it is skipped and counted like
+# any other unstorable record.
+_INT64_MIN, _INT64_MAX = -(2 ** 63), 2 ** 63 - 1
+
+
+def _parse_snapshot(snapshot):
+    """`(events, skipped)` from the raw segment bytes — every parse decision, OUTSIDE the lock.
+
+    A malformed / half-written line is SKIPPED and counted, never fatal: ingest runs against a
+    journal another process is appending to."""
+    blobs, unreadable = snapshot
+    events, skipped = [], unreadable
+    # OCCURRENCE ORDINAL — see the event_key below.
+    occurrences = {}
+    for rel, blob in blobs:
+        for num, raw in enumerate(blob.split(b"\n"), 1):
+            try:
+                line = raw.decode("utf-8").strip()
+            except UnicodeDecodeError:
+                skipped += 1   # THIS line is damaged; its neighbours in the segment still land
+                continue
             if not line:
                 continue
             try:
@@ -274,6 +370,27 @@ def _parse_segments(repo, journal_path):
             if stage is _INVALID or status is _INVALID:
                 skipped += 1   # parseable, but its asserted state is not a state — see _state_scalar
                 continue
+            item = RP.journal_item_id(rec)
+            if item is not None and not (_INT64_MIN <= item <= _INT64_MAX):
+                skipped += 1   # unstorable item number — see _INT64_MIN/_INT64_MAX
+                continue
+            # IDENTITY = CONTENT + OCCURRENCE ORDINAL. Content alone is not an identity: the engine
+            # deliberately journals a RECLAIM of an already-In-Progress item (idc_transition), and two
+            # of them inside one timestamp second are BYTE-IDENTICAL lines. Keyed by content alone the
+            # second real claim collided with the first and INSERT OR IGNORE silently dropped it — the
+            # mirror showing one claim where the record holds two.
+            #
+            # The ordinal is "the Nth line with this content, in CANONICAL replay order" — archived
+            # segments then the live one, by line within each. It is deliberately NOT per-segment
+            # position: a rotation MOVES lines between segments, and a key that moved with them would
+            # re-ingest the same record under its new path, breaking the rotation no-re-ingest
+            # property. A rotation preserves the MULTISET of lines, so the ordinal of each identical
+            # line is stable across one — the set of keys is unchanged, and only `artifact`/`seq`
+            # follow the record (`_refresh_provenance`). Rebuild walks the same order and assigns the
+            # same ordinals, so convergence holds.
+            digest = _sha(line)
+            ordinal = occurrences.get(digest, 0)
+            occurrences[digest] = ordinal + 1
             events.append({
                 "run_id": UNATTRIBUTED,
                 "source": "journal",
@@ -281,15 +398,15 @@ def _parse_segments(repo, journal_path):
                 "seq": num,
                 "ts": str(rec.get("when") or "") or None,
                 "op": str(rec.get("op") or "") or None,
-                "item": RP.journal_item_id(rec),
+                "item": item,
                 "stage": stage,
                 "status": status,
                 "who": str(rec.get("who") or "") or None,
                 "summary": str(rec.get("what") or "") or None,
-                "event_key": "journal:" + _sha(line),
+                "event_key": "journal:%s:%d" % (digest, ordinal),
                 "payload": line,
             })
-    return (events, skipped), None
+    return events, skipped
 
 
 def journal_events(repo):
@@ -303,14 +420,19 @@ def journal_events(repo):
 
     A lock that cannot be taken (or a writer that keeps racing) yields NO journal rows this pass and
     a NOTE saying so, counted as a skip: an incomplete view the operator is told about, never a
-    partial view presented as whole."""
+    partial view presented as whole.
+
+    ONLY THE BYTES ARE READ UNDER THE LOCK (`_snapshot_segments`); the parse runs after it is
+    released (`_parse_snapshot`). The lock exists to make the segment set atomic against a rotation,
+    which the read achieves — holding it through the parse as well would just make the run's own
+    writers queue behind the observer's bookkeeping."""
     journal_path = os.path.join(repo, JOURNAL_REL)
-    value, error = RP.read_journal_locked(
-        journal_path, lambda path: _parse_segments(repo, path))
+    snapshot, error = RP.read_journal_locked(
+        journal_path, lambda path: _snapshot_segments(repo, path))
     if error:
         return [], 1, ("the transition journal could not be read consistently (%s) — no journal "
                        "records mirrored this pass; re-run once the writer settles" % error)
-    events, skipped = value
+    events, skipped = _parse_snapshot(snapshot)
     return events, skipped, None
 
 
@@ -664,11 +786,7 @@ def cmd_rebuild(args, con):
     record. Nothing is lost, because nothing here was ever the record."""
     con.close()
     path = db_path(args.repo, args.db)
-    for suffix in ("", "-wal", "-shm"):
-        try:
-            os.remove(path + suffix)
-        except OSError:
-            pass
+    discard(path)
     fresh = connect(path)
     try:
         return cmd_ingest(args, fresh)

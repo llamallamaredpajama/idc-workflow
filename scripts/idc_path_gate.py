@@ -45,6 +45,13 @@ PROTECTED_MACHINE_RULES = [
     ".idc-drain-verdict.json*",
     ".idc-*-report.json*",
     ".idc-pause-state.json*",
+    # The derived run-trace mirror db and its WAL/SHM sidecars (see docs/architecture.md). It is
+    # gitignored, but an ignore rule is ADVISORY: `git add -f`, or a db already tracked from before
+    # the rule existed, walks straight past it. Its rows hold the VERBATIM payloads of the receipt
+    # sidecars listed above, whose own writers create them 0600 — so committing it would publish
+    # exactly what those modes withhold, and its contract is "derived, disposable, never committed".
+    # Hard-denied for the same reason as its peers: machine-owned state is never a hand-edited one.
+    ".idc-trace-mirror.db*",
 ]
 READ_ONLY_COMMANDS = {"doctor", "pause"}
 DEFAULT_TTL_SECONDS = 4 * 60 * 60

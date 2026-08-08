@@ -88,8 +88,53 @@ def _load_verdict(path: str):
     return doc
 
 
+def _nearest_existing_dir(path: str) -> str:
+    """The closest existing ancestor directory of `path` — git needs a real directory to answer from,
+    and an artifact's containment must be decided BEFORE it is written."""
+    current = os.path.dirname(os.path.abspath(path)) or os.sep
+    while not os.path.isdir(current):
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    return current
+
+
+def _artifact_root(repo: str, path: str) -> str:
+    """The root a build-receipt PATH is measured against: the worktree that path itself lives in,
+    required to belong to the same repository as `repo`.
+
+    Identity (`repo`/`repo_root` fields, and every "bound to a different repo identity" refusal) stays
+    `VC._repo_identity` — the primary checkout, shared by every linked worktree. Paths are a separate
+    question, and answering it with the primary checkout root broke Build, which always runs in a
+    linked worktree (#197): a receipt in a worktree BESIDE the primary checkout was refused outright
+    ("must live under the governed repo root"), and one in a worktree UNDER it recorded
+    `.claude/worktrees/<name>/docs/…` paths that stop resolving the moment that worktree is torn down.
+    Measured against the worktree it lives in, the receipt records the durable LOGICAL path, which
+    still resolves after the branch merges and the worktree is gone.
+
+    Deriving the root from the artifact rather than from `--repo` also keeps the split shape working —
+    the finish stage legitimately points `--repo` at the build worktree while the artifacts sit in the
+    primary checkout (tests/smoke/phase4-git-finish.sh) — and mirrors how `VC._repo_context` keys its
+    witnesses, so the two agree on one logical path per artifact.
+
+    This is not a loosening. Containment is still enforced, against a root chosen by git rather than
+    by the caller, and the artifact must live in a worktree of THIS repository — a path in some other
+    checkout is refused here exactly as it was before."""
+    anchor = _nearest_existing_dir(path)
+    try:
+        root = VC._worktree_toplevel(anchor)
+        same_repo = VC._repo_identity(anchor) == VC._repo_identity(repo)
+    except VC.ValidationError as exc:
+        raise ReceiptError(str(exc)) from exc
+    if not same_repo:
+        raise ReceiptError(
+            f"{path} must live under the governed repo root {VC._repo_identity(repo)}")
+    return root
+
+
 def _resolve_receipt_path(repo: str, path: str) -> str:
-    repo_root = os.path.abspath(VC._repo_identity(repo))
+    repo_root = _artifact_root(repo, path)
     abs_path = os.path.realpath(os.path.abspath(path))
     if not abs_path.startswith(repo_root + os.sep) and abs_path != repo_root:
         raise ReceiptError(f"{path} must live under the governed repo root {repo_root}")
@@ -97,7 +142,7 @@ def _resolve_receipt_path(repo: str, path: str) -> str:
 
 
 def _rel(repo: str, path: str) -> str:
-    return os.path.relpath(os.path.realpath(os.path.abspath(path)), os.path.abspath(VC._repo_identity(repo)))
+    return os.path.relpath(os.path.realpath(os.path.abspath(path)), _artifact_root(repo, path))
 
 
 def write_receipt(*, repo: str, contract_path: str, execution_path: str, verdict_path: str,
@@ -156,7 +201,7 @@ def write_receipt(*, repo: str, contract_path: str, execution_path: str, verdict
     if outside:
         raise ReceiptError("actual path(s) outside `touch` refused: " + ", ".join(outside))
 
-    out_abs = _resolve_receipt_path(repo_root, out)
+    out_abs = _resolve_receipt_path(workspace, out)
     doc = {
         "schema_version": SCHEMA_VERSION,
         "kind": RECEIPT_KIND,
@@ -230,9 +275,13 @@ def verify_receipt(*, repo: str, receipt_path: str, expected_issue: int | None =
     if expected_pr is not None and int(expected_pr) != int(receipt.get("pr")):
         raise ReceiptError(f"wrong PR refused: build receipt owns PR #{receipt.get('pr')}, not #{expected_pr}")
 
-    contract_path = os.path.join(repo_root, receipt.get("contract_path"))
-    execution_path = os.path.join(repo_root, receipt.get("execution_path"))
-    verdict_path = os.path.join(repo_root, receipt.get("verdict_path"))
+    # The receipt records LOGICAL repo paths (see `_artifact_root`), resolved against the worktree the
+    # RECEIPT itself lives in — the one its siblings were written beside. That is the build worktree
+    # while the build is live, and the checkout the branch merged into once the worktree is gone.
+    path_root = _artifact_root(workspace, receipt_path)
+    contract_path = os.path.join(path_root, receipt.get("contract_path"))
+    execution_path = os.path.join(path_root, receipt.get("execution_path"))
+    verdict_path = os.path.join(path_root, receipt.get("verdict_path"))
     contract = VC.load_contract(contract_path)
     execution = VC.load_execution(execution_path)
     verdict = _load_verdict(verdict_path)

@@ -86,6 +86,18 @@ def _wrong_source_problem(verdict_path):
 
 
 def _code_reviews_context(verdict_path):
+    """`(repo_identity, common_git_dir, rel, err)` for a review verdict.
+
+    `rel` is already the stable logical repo path (`docs/workflow/code-reviews/<file>.json`) — it is
+    split out of the path itself, so it is identical in every linked worktree. `repo_identity` is the
+    PRIMARY checkout root, shared by all of them.
+
+    Identity is deliberately not this worktree's toplevel (#197). Review runs in the same ephemeral
+    Build worktree the rest of the chain does, and a witness stamped with that worktree's path stops
+    matching the moment the branch merges and the worktree is torn down — the durable verdict at
+    `docs/workflow/code-reviews/…` was then refused with "names repo <deleted worktree>, not this
+    repo", which takes the whole implementation receipt down with it. The primary checkout root is the
+    one name every worktree of this repo agrees on, and it still refuses a foreign repo's verdict."""
     abs_path = os.path.abspath(verdict_path)
     marker = os.path.join(os.sep, CODE_REVIEWS_DIR, "")
     idx = abs_path.rfind(marker)
@@ -107,7 +119,8 @@ def _code_reviews_context(verdict_path):
     top, common = os.path.abspath(lines[0]), lines[1]
     if not os.path.isabs(common):
         common = os.path.abspath(os.path.join(top, common))
-    return top, common, rel, None
+    common = os.path.realpath(common)
+    return os.path.realpath(os.path.dirname(common)), common, rel, None
 
 
 def _witness_path(common_git_dir):

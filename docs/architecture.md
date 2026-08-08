@@ -202,6 +202,48 @@ could not be attributed to the commit the receipt would name. A repo that declar
 anything — opting in is the only way to be gated. `attested: true` is the one hand-written escape
 hatch, for surfaces that genuinely cannot be automated, and it rides its own visible verdict line.
 
+## Observability — the derived run trace (`scripts/idc_trace_mirror.py`)
+
+Every durable observability surface in IDC is a **file**: the transition journal
+(`docs/workflow/transition-journal.ndjson` plus its rotated `journal-archive/` segments), the hook
+receipt sidecars (`.idc-drain-verdict.json`, `.idc-<kind>-report.json`), the board itself. Those files
+stay the record. Watching a run *while it happens*, though, meant tailing NDJSON and cross-reading the
+board — so `idc_trace_mirror.py` mirrors those same files into a local WAL SQLite view and gives the
+operator one query instead:
+
+```sql
+select * from events where run_id = ? and rowid > ? order by rowid
+```
+
+That is the whole contract. The live view and the history are the **same query at different cadence**
+— `watch` is it in a sleep loop (each poll = an incremental `ingest` + that read), `tail --since` is
+it once. No server, no websocket, no ingest endpoint. Canned lenses on top: `sessions` (runs, counts,
+span), `timeline --item N` (one item's phases), `timing` (per-phase durations).
+
+**The doctrine that makes a derived cache safe here**, and it is not negotiable:
+
+- **Derived.** Every row is parsed from the raw artifacts, using the journal's own replay parsers
+  (`idc_journal_replay`) so the mirror can never disagree with the guards about what a record means.
+  It parses; it never invents. A `move` record journals only a Status, so the mirrored row carries no
+  Stage — filling one in would be the mirror asserting board state the record never made. Likewise a
+  journal record carries no session id, so journal events land under the sentinel run `unattributed`
+  rather than being correlated onto a session by timestamp.
+- **Disposable.** Deleting the db loses nothing; `rebuild` re-derives it. That convergence is the
+  honesty check: anything the mirror held that the raw record could not reproduce would mean it had
+  quietly become a source of truth. It is gitignored (`.idc-trace-mirror.db*`, wired into the
+  scaffold beside the other transient sidecars).
+- **Never authoritative — and no gate reads it.** Gates, guards, the janitor's divergence pass and
+  every closeout keep reading the raw artifacts. This module is an operator lens only, and
+  `tests/smoke/phase12-trace-mirror.sh` asserts that mechanically: nothing else in the plugin may
+  reference it, so the day a gate starts consulting the derived view, that lane goes red and the
+  choice gets made deliberately instead of by drift.
+
+Two practical notes. `id` is the cursor and is **mirror-arrival order, not record time** — a cursor is
+valid for the lifetime of one mirror, and a rebuild (which renumbers deterministically from the raw
+record) restarts it. And ingest is deliberately tolerant: a half-written journal line caught mid-append
+is skipped, **counted, and reported**, then picked up on the next poll — a post-hoc observer must
+never break the run it is watching, and a short trace must never read as a quiet one.
+
 ## Stale runtime — `/reload-plugins`, not `/clear`
 
 A Claude Code session loads a plugin's commands, agents, and skills **once, at session start**.

@@ -227,6 +227,13 @@ python3 "$PLUGIN_ROOT/scripts/idc_git_janitor.py" --repo "$REPO_ROOT" --ensure-g
 # board. Module owns the filename + ignore rule; idempotent + append-only, same as the ledger.
 python3 "$PLUGIN_ROOT/scripts/idc_pause_state.py" --cwd "$REPO_ROOT" ensure-gitignore
 
+# Gitignore the derived run-trace mirror (.idc-trace-mirror.db + its WAL sidecars, issue #195): the
+# read-only operator lens that mirrors the transition journal + hook receipts into a local SQLite
+# view for live watching. It is DERIVED and DISPOSABLE — deleting it loses nothing and a rebuild
+# re-derives it from the raw record — so it is working state, never committed. Module owns the
+# filename glob + ignore rule; idempotent + append-only, same as the ledger.
+python3 "$PLUGIN_ROOT/scripts/idc_trace_mirror.py" --repo "$REPO_ROOT" ensure-gitignore
+
 # Gitignore the two remaining machine-local state files that lack an ensure-gitignore door of their
 # own (issue #184 operator-experience pair). Both are machine-written working state, exactly like the
 # sidecars above, and leaving them unignored is what made a bare `git add -A` stage the receipt —

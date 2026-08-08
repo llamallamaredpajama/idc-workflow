@@ -459,6 +459,29 @@ gh project field-list "$num" --owner "$owner" --format json --jq \
   the `Stage` field absent entirely — a legacy 4-field board — note that instead; `Stage` is additive
   and its absence is never a FAIL.)
 
+**9d — `Wave` carries ONE taxonomy (github only; read-only detection + offer).** `/idc:init`
+provisions `Wave` with LABEL options (`Wave 1`), and Plan freezes that same label (issue #206).
+A board drained by a pre-#206 runtime can also carry bare-number options (`1`, `2`) — added when a
+recovery step provisioned an option to make a `set-field Wave "1"` fit — leaving **two disjoint wave
+taxonomies on one field**: items sitting in `Wave 1` and items sitting in `1` are the same wave to a
+human and different waves to every reader. **SKIP** for `filesystem` (no option constraint). Probe
+read-only (reuses `$num` / `$owner` from check 3):
+```bash
+gh project field-list "$num" --owner "$owner" --format json --jq \
+  '.fields[] | select(.name=="Wave") | .options[].name' | grep -qxE '[0-9]+' \
+  && echo wave-options-split || echo wave-options-ok
+```
+- `wave-options-ok` → **PASS**, no note.
+- `wave-options-split` (the `Wave` field carries at least one bare-number option alongside the
+  `Wave N` labels) → **PASS with ⚠**, note: "the board's `Wave` field carries two wave taxonomies
+  (`Wave N` labels *and* bare numbers) — items in `1` and items in `Wave 1` are the same wave but
+  read as different ones. The emission bug is fixed, so **no new item can land in a bare-number
+  option**; the residue is historical. Re-file the affected items onto the `Wave N` option by hand
+  (or leave them — a `Done` item's wave is only reporting scope), then delete the empty bare-number
+  options from the board UI. Deleting a single-select option that still has items assigned CLEARS
+  those items' values, so move the items first." **doctor only detects and points — it never mutates
+  the board.**
+
 Row 9 only *reads* the board (the paginating reader `idc_gh_board.py`, `gh issue view`,
 `gh api … GET`, `gh project field-list`, and the helpers' read-only `--report` mode), preserving
 doctor's strictly-read-only contract (guarded by `phase7-command-prose-invariants.sh`).

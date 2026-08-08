@@ -69,8 +69,40 @@ def parse_matrix(text):
 
 
 def wave_number(value):
+    """The wave a MATRIX declares (`wave: 3`). Strict: the matrix contract is a bare positive
+    integer, and `check()` reports anything else as an authoring error. For a value read back off
+    the tracker use `tracker_wave_number` — the board stores the `Wave N` label, not a bare int."""
     text = str(value).strip() if value is not None else ""
     return int(text) if re.fullmatch(r"[1-9][0-9]*", text) else None
+
+
+def wave_label(number):
+    """The canonical TRACKER value for wave `number` — `3` -> `'Wave 3'` (issue #206).
+
+    Waves are derived as integers because scheduling is arithmetic, but the tracker's `Wave` field is
+    a single-select whose options `/idc:init` provisions as LABELS (`Wave 1`; see commands/init.md).
+    Every value crossing a tracker boundary goes through here, so a github option lookup — which
+    matches by exact label — always finds the option that already exists, and never needs a new one
+    minted to fit a write. `None`/absent projects as `''` (the "no wave" value both backends use).
+
+    Total and idempotent by construction: it parses through `tracker_wave_number`, so an int, a bare
+    `'3'`, and an already-canonical `'Wave 3'` all land on `'Wave 3'`, and anything unparseable
+    lands on `''`. Re-labelling an already-labelled value can therefore never double-prefix it."""
+    parsed = tracker_wave_number(number)
+    return f"Wave {parsed}" if parsed is not None else ""
+
+
+def tracker_wave_number(value):
+    """The wave number a TRACKER value carries, accepting both shapes it can legitimately hold:
+    the canonical `'Wave 3'` label and a bare `'3'`.
+
+    The bare form is not merely legacy tolerance — boards written by the pre-#206 emission path hold
+    it, and refusing to read them back would silently drop an occupied wave out of the scheduler's
+    `start_wave`, which is exactly the parallel-safety failure #206 caused. Returns None for
+    anything else (empty, unset, or unparseable), which callers treat as "no wave"."""
+    text = str(value).strip() if value is not None else ""
+    match = re.fullmatch(r"(?:[Ww]ave\s+)?([1-9][0-9]*)", text)
+    return int(match.group(1)) if match else None
 
 
 def normalize_surface(raw):

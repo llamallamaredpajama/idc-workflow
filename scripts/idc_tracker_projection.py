@@ -13,6 +13,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import idc_execution_graph  # noqa: E402
+import idc_matrix_check  # noqa: E402
 
 
 def die(message, code=1):
@@ -42,7 +43,10 @@ def expected_projection(graph):
             "title": pid,
             "stage": "Buildable",
             "status": expected_status(node, live),
-            "wave": node.get("derived_wave"),
+            # The projection is the tracker-facing boundary: waves are derived as ints, but every
+            # projected/frozen value is the canonical `Wave N` label the board's options carry
+            # (issue #206). Emitting the bare int made apply fail closed on a github board.
+            "wave": idc_matrix_check.wave_label(node.get("derived_wave")),
             "phase": phase,
             "domain": node.get("domain") or "",
             "blocked_by": list(node.get("blocks_on", [])),

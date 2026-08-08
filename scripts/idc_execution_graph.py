@@ -173,7 +173,11 @@ def derive_waves(pillars, live_by_id):
     blockers = {pid: [] for pid in pillar_by_id}
 
     for pid in done | occupied:
-        live_wave = idc_matrix_check.wave_number(live_by_id[pid].get("wave"))
+        # A LIVE tracker value, not a matrix declaration — it carries the canonical `Wave N` label
+        # (issue #206). Parsing it strictly returned None for every board-formatted wave, so an
+        # immutable `In Progress` item contributed nothing to `start_wave` below and new work was
+        # scheduled into the wave it already occupies.
+        live_wave = idc_matrix_check.tracker_wave_number(live_by_id[pid].get("wave"))
         derived[pid] = live_wave
 
     start_wave = max((wave for pid, wave in derived.items() if pid in occupied and wave is not None), default=0) + 1

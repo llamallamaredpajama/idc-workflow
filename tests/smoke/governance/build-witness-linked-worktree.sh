@@ -33,16 +33,25 @@
 # removal still non-force. That only works because half 1 made the witness key logical.
 #
 # What this fixture pins, in the shapes production actually takes:
-#   A — a build worktree BESIDE the primary checkout: freeze → run → receipt all succeed and re-verify.
-#   B — a build worktree UNDER it (`.claude/worktrees/<branch>`), artifacts written INSIDE it, driven
-#       through the REAL `scripts/idc_git_finish.py` (real bare origin, real branch, real pushes,
-#       filesystem tracker, the shipped code-reviews/.gitignore; only `gh pr view`/`gh pr merge` are
-#       stubbed, and the stub enforces --match-head-commit exactly as GitHub does). The finish must
-#       reach `finish: ok`, and the durable artifacts must then pass the SAME `verify_receipt` the
-#       Build closeout runs after the merge.
-#   D — no gate was loosened to get there: an unrelated untracked file in the build worktree still
-#       stops the finish with git's own non-force refusal, before any mutation.
-#   C — no widening: a contract carried into a FOREIGN repository is still refused.
+#   A  — a build worktree BESIDE the primary checkout: freeze → run → receipt all succeed and re-verify.
+#   A2 — one receipt, ONE checkout: a receipt minted from artifacts spread across two linked worktrees
+#        is refused AT WRITE TIME, because verification resolves every component against the receipt's
+#        own root and such a receipt could therefore never verify.
+#   B  — a build worktree UNDER it (`.claude/worktrees/<branch>`), artifacts written INSIDE it, driven
+#        through the REAL `scripts/idc_git_finish.py` **exactly as agents/idc-finisher.md step 5
+#        documents it**: the finisher stands IN the build worktree and passes no `--repo` and no
+#        `--tracker` (real bare origin, real branch, real pushes, filesystem tracker, the shipped
+#        code-reviews/.gitignore; only `gh pr view`/`gh pr merge` are stubbed, and the stub enforces
+#        --match-head-commit exactly as GitHub does). The finish must reach `finish: ok`; the durable
+#        artifacts must then pass the SAME `verify_receipt` the Build closeout runs after the merge;
+#        and the review's own work products (report, round record, seen-fingerprint ledger) must have
+#        come out with them.
+#   D  — no gate was loosened to get there: an unrelated untracked file in the build worktree still
+#        stops the finish with git's own non-force refusal, before any mutation.
+#   E  — the durable destination is not a dumping ground: an existing, DIFFERENT file at a logical
+#        destination stops the finish instead of being overwritten (the removal restores sources; it
+#        can never restore a clobbered destination).
+#   C  — no widening: a contract carried into a FOREIGN repository is still refused.
 #
 # RED-WHEN-BROKEN, OBSERVED. Each fix point reds this fixture on its own:
 #   1. idc_validation_contract.py::_repo_context — replace `worktree_root = _worktree_toplevel(parent)`
@@ -64,6 +73,20 @@
 #   6. idc_git_finish.worktree_remove — drop the loop that RESTORES those sources when the removal is
 #      refused anyway: case D2 reds, "the refused finish consumed the very verdict its command line
 #      names — the operator cannot re-run it".
+#   7. idc_git_finish.resolve_governed_checkout — `return repo` at the top (i.e. the whole file at
+#      d11cc2b): case B reds at the REAL tail with "finish: persist-build-artifacts failed: --repo …
+#      resolves to the very build worktree being removed …, so the build receipt has nowhere durable
+#      to land". That is the SHIPPED invocation aborting before it merges anything — the round-2
+#      finding, and the reason this fixture may never be "helped" with an explicit `--repo`.
+#   8. idc_git_finish._copy_artifact — drop the `_guard_destination` call: case E reds with "the
+#      guarded path exited 0 — it did not fail closed", the finish having consumed the operator's
+#      bytes at the destination and merged on top.
+#   9. idc_git_finish.persist_build_witness_artifacts — drop the `_review_work_products` loop: case
+#      B3b reds, "the finish deleted the build worktree without carrying out the human review report".
+#  10. idc_build_receipt.write_receipt — drop the single-root check (i.e. that file at d11cc2b): case
+#      A2 reds with "the guarded path exited 0 — it did not fail closed", the split write having
+#      produced a receipt on disk whose very next `verify` dies with "could not read frozen contract
+#      …/primary-a/docs/workflow/build-validation/sibling.json".
 #
 # ONE GUARD IS DELIBERATELY NOT REDDENABLE ALONE, and saying so is part of the record. Neutering the
 # durable-path RE-VERIFY at the end of persist_build_witness_artifacts (`return verified_head,
@@ -203,6 +226,30 @@ out="$(python3 "$BR" write --repo "$WT" --contract "$CONTRACT_A" --execution "$E
 out="$(python3 "$BR" verify --repo "$WT" --receipt "$RECEIPT_A" 2>&1)" \
   || fail "the implementation receipt written in a linked worktree did not re-verify there: $out"
 
+# --- A2: one receipt, ONE checkout ----------------------------------------------------------------
+# Each path a receipt records is relativized against the worktree that artifact itself lives in, but
+# `verify` resolves them ALL against the root the RECEIPT lives in. So a receipt minted in the primary
+# checkout from artifacts still in the build worktree used to WRITE cleanly and then fail its very
+# first verification with a missing contract — a sealed receipt that could never be honoured. The
+# write refuses that split now, while the operator can still fix it.
+SPLIT_RECEIPT="$PRIMARY_A/docs/workflow/build-receipts/split.json"
+mkdir -p "$(dirname "$SPLIT_RECEIPT")"
+
+assert_fail_closed \
+  "a receipt minted from artifacts in a different checkout is refused at write time" \
+  "split-worktree receipt refused" \
+  -- python3 "$BR" write --repo "$WT" --contract "$CONTRACT_A" --execution "$EXEC_A" \
+       --verdict "$VERDICT_A" --graph-digest "$GD" --projection-digest "$PD" --out "$SPLIT_RECEIPT" \
+  -- python3 "$BR" write --repo "$WT" --contract "$CONTRACT_A" --execution "$EXEC_A" \
+       --verdict "$VERDICT_A" --graph-digest "$GD" --projection-digest "$PD" --out "$RECEIPT_A"
+
+[ "$FC_CONTROL_RC" -eq 0 ] \
+  || fail "the positive control must be the SUCCEEDING path (the same four artifacts written colocated in the build worktree), but it exited $FC_CONTROL_RC: $FC_CONTROL_OUT"
+[ -f "$SPLIT_RECEIPT" ] \
+  && fail "the refused split write still left a receipt on disk — a refusal must write nothing"
+out="$(python3 "$BR" verify --repo "$WT" --receipt "$RECEIPT_A" 2>&1)" \
+  || fail "the colocated receipt no longer verifies after the split write was refused: $out"
+
 # ==================================================================================================
 # CASE B — the REAL production shape, driven through the REAL finish tail.
 # ==================================================================================================
@@ -254,13 +301,24 @@ build_case_b() {
   local tag="$1" pr="$2" out
   B_PRIMARY="$WORK/primary-$tag"; B_BRANCH="worktree-build-197"
   setup_primary "$B_PRIMARY"
+
+  # The governed scaffold is COMMITTED, exactly as `/idc:init` leaves it — so the build worktree gets
+  # its own checked-out copy of the tracker config and of TRACKER.md. That is precisely what makes
+  # the shipped `--repo`-less finish invocation (the runner below) dangerous: from inside the
+  # worktree, a worktree-local config reads as a valid backend and a worktree-local TRACKER.md reads
+  # as a valid tracker, right up until the tail deletes the directory they live in.
+  printf 'backend: filesystem\n' > "$B_PRIMARY/docs/workflow/tracker-config.yaml"
+  B_TRACKER="$B_PRIMARY/TRACKER.md"
+  python3 "$TRK" --tracker "$B_TRACKER" init >/dev/null || fail "could not init the tracker ($tag)"
+  git -C "$B_PRIMARY" add docs/workflow/tracker-config.yaml TRACKER.md
+  git -C "$B_PRIMARY" commit -qm 'scaffold the governed tracker' >/dev/null \
+    || fail "could not commit the governed scaffold ($tag)"
+  git -C "$B_PRIMARY" push -q origin main || fail "could not push the governed scaffold ($tag)"
+
   B_WT="$B_PRIMARY/.claude/worktrees/$B_BRANCH"
   git -C "$B_PRIMARY" worktree add -q -b "$B_BRANCH" "$B_WT" \
     || fail "could not create the nested build worktree ($tag)"
 
-  printf 'backend: filesystem\n' > "$B_PRIMARY/docs/workflow/tracker-config.yaml"
-  B_TRACKER="$B_PRIMARY/TRACKER.md"
-  python3 "$TRK" --tracker "$B_TRACKER" init >/dev/null || fail "could not init the tracker ($tag)"
   python3 "$TRK" --tracker "$B_TRACKER" create --title "linked-worktree build" >/dev/null \
     || fail "could not seed the tracker item ($tag)"
   python3 "$TRK" --tracker "$B_TRACKER" claim --num 1 --agent tester >/dev/null \
@@ -288,12 +346,29 @@ build_case_b() {
           --out "$B_RECEIPT" 2>&1)" \
     || fail "the implementation receipt could not be written in a nested build worktree ($tag): $out"
 
+  # The review ran in this same worktree, and it wrote more than the verdict: a human report, the
+  # per-round record `agents/idc-review-coordinator.md` mandates, and the per-PR seen-fingerprint
+  # ledger `scripts/idc_review_seen_ledger.py` owns. All three are covered by the shipped
+  # code-reviews/.gitignore, so — unlike the four receipt-bound artifacts — they do NOT make the
+  # removal refuse. They are deleted silently, which is why the tail has to carry them out.
+  B_REPORT="$B_WT/docs/workflow/code-reviews/pr-$pr-report.md"
+  B_ROUND="$B_WT/docs/workflow/code-reviews/pr-$pr-round-1.json"
+  B_LEDGER="$B_WT/docs/workflow/code-reviews/pr-$pr-seen-fingerprints.json"
+  printf '# Review report — PR %s\n\nNo blocking findings; two nits routed.\n' "$pr" > "$B_REPORT"
+  printf '{"schema_version":1,"pr":%s,"candidates":[]}\n' "$pr" > "$B_ROUND"
+  printf '{"schema_version":1,"pr":%s,"fingerprints":{}}\n' "$pr" > "$B_LEDGER"
+
+  # THE SHIPPED INVOCATION, VERBATIM (agents/idc-finisher.md step 5). The finisher is standing in the
+  # build worktree — it froze the contract, ran the gate and minted the receipt there with
+  # `--repo "$PWD"` — and the documented finish command passes NO `--repo` and NO `--tracker`.
+  # Driving it instead from the primary checkout with an explicit `--repo` would test a shape no
+  # finisher ever runs, and would mask a tail that cannot find the durable checkout on its own.
   cat > "$WORK/run-finish-$tag.sh" <<RUNNER
 #!/bin/bash
-cd "$B_PRIMARY" || exit 97
+cd "$B_WT" || exit 97
 export PATH="$WORK/bin:\$PATH" WORK_B="$WORK" ORIGIN_B="$B_PRIMARY.git" BRANCH_B="$B_BRANCH"
-exec python3 "$FIN" --pr $pr --issue $ISSUE --worktree "$B_WT" --repo "$B_PRIMARY" \\
-  --tracker "$B_TRACKER" --verdict "$B_VERDICT" --build-receipt "$B_RECEIPT"
+exec python3 "$FIN" --pr $pr --issue $ISSUE --worktree "$B_WT" \\
+  --verdict "$B_VERDICT" --build-receipt "$B_RECEIPT"
 RUNNER
   chmod +x "$WORK/run-finish-$tag.sh"
 }
@@ -315,6 +390,16 @@ SEALED_EXEC_D="$(digest_of "$B_EXEC")"
 SEALED_VERDICT_D="$(digest_of "$B_VERDICT")"
 SEALED_RECEIPT_D="$(digest_of "$B_RECEIPT")"
 VERDICT_BASENAME="$(basename "$B_VERDICT")"
+# The review work products must be IGNORED here, not merely untracked: an untracked one would make
+# the non-force removal refuse, which is the loud failure. The silent one under test is the ignored
+# file that git deletes without a word.
+for wp in "$B_REPORT" "$B_ROUND" "$B_LEDGER"; do
+  git -C "$B_WT" check-ignore -q "$wp" \
+    || fail "$(basename "$wp") is not covered by the shipped code-reviews gitignore — this case would be exercising a removal refusal, not the silent deletion of a review work product"
+done
+SEALED_REPORT_D="$(digest_of "$B_REPORT")"
+SEALED_ROUND_D="$(digest_of "$B_ROUND")"
+SEALED_LEDGER_D="$(digest_of "$B_LEDGER")"
 
 # --- B1: the REAL finish tail completes ----------------------------------------------------------
 out="$(bash "$WORK/run-finish-b.sh" 2>&1)"; rc=$?
@@ -351,6 +436,27 @@ done
   || fail "the persisted validation contract is not byte-identical to the sealed one"
 [ "$(digest_of "$DUR_EXEC")" = "$SEALED_EXEC_D" ] \
   || fail "the persisted execution receipt is not byte-identical to the sealed one"
+
+# --- B3b: the review's OPERATOR WORK PRODUCTS came out too ----------------------------------------
+# The verdict is receipt-bound, so it was already covered. The human report, the round record and the
+# per-PR seen-fingerprint ledger are not — and commands/uninstall.md classifies review reports as
+# operator work products that must be preserved. They are ignored, so the removal never complained
+# about them; it just deleted them along with everything else in the worktree.
+DUR_REPORT="$B_PRIMARY/docs/workflow/code-reviews/$(basename "$B_REPORT")"
+DUR_ROUND="$B_PRIMARY/docs/workflow/code-reviews/$(basename "$B_ROUND")"
+DUR_LEDGER="$B_PRIMARY/docs/workflow/code-reviews/$(basename "$B_LEDGER")"
+[ -f "$DUR_REPORT" ] \
+  || fail "the finish deleted the build worktree without carrying out the human review report — an operator work product commands/uninstall.md says must be preserved"
+[ -f "$DUR_ROUND" ] \
+  || fail "the finish deleted the build worktree without carrying out the review round record — the seen-fingerprint history a later review round depends on"
+[ -f "$DUR_LEDGER" ] \
+  || fail "the finish deleted the build worktree without carrying out the per-PR seen-fingerprint ledger"
+[ "$(digest_of "$DUR_REPORT")" = "$SEALED_REPORT_D" ] \
+  || fail "the persisted review report is not byte-identical to the one the review wrote"
+[ "$(digest_of "$DUR_ROUND")" = "$SEALED_ROUND_D" ] \
+  || fail "the persisted review round record is not byte-identical to the one the review wrote"
+[ "$(digest_of "$DUR_LEDGER")" = "$SEALED_LEDGER_D" ] \
+  || fail "the persisted seen-fingerprint ledger is not byte-identical to the one the review wrote"
 
 # --- B4: the POST-MERGE Build closeout re-verification passes ------------------------------------
 # Exactly what idc_command_contract._valid_build_receipt runs once the PR is merged: the receipt read
@@ -411,7 +517,7 @@ build_case_b ctl 902
 build_case_b d 903
 printf 'a stray note the finisher was never told about\n' > "$B_WT/stray-note.txt"
 D_WT="$B_WT"; D_TRACKER="$B_TRACKER"; D_PRIMARY="$B_PRIMARY"
-D_VERDICT_SRC="$B_VERDICT"; D_RECEIPT_SRC="$B_RECEIPT"
+D_VERDICT_SRC="$B_VERDICT"; D_RECEIPT_SRC="$B_RECEIPT"; D_REPORT_SRC="$B_REPORT"
 
 assert_fail_closed \
   "an unrelated untracked file in the build worktree still stops the finish (the removal is non-force)" \
@@ -438,6 +544,8 @@ assert_fail_closed \
   || fail "the refused finish consumed the very verdict its command line names — the operator cannot re-run it"
 [ -f "$D_RECEIPT_SRC" ] \
   || fail "the refused finish consumed the very build receipt its command line names — the operator cannot re-run it"
+[ -f "$D_REPORT_SRC" ] \
+  || fail "the refused finish consumed the review report it had already copied out — a refusal must leave the worktree as it found it"
 rm -f "$D_WT/stray-note.txt"
 out="$(bash "$WORK/run-finish-d.sh" 2>&1)"; rc=$?
 [ "$rc" -eq 0 ] \
@@ -447,6 +555,35 @@ printf '%s\n' "$out" | grep -qx 'finish: ok' \
 out="$(python3 "$BR" verify --repo "$D_PRIMARY" \
         --receipt "$D_PRIMARY/docs/workflow/build-receipts/nested.json" --issue "$ISSUE" --pr 903 2>&1)" \
   || fail "the artifacts persisted by the FIRST (refused) attempt do not verify after the retry completed: $out"
+
+# ==================================================================================================
+# CASE E — a durable destination is not a dumping ground. A logical destination that is ALREADY
+# occupied by different bytes — a committed file the receipt's path collides with, an operator's own
+# file, a stale artifact — is REFUSED, never overwritten. `worktree_remove` restores SOURCES; it has
+# never had a copy of a destination it clobbered, so an overwrite here is unrecoverable, and it would
+# happen two steps before the merge. The refusal lands before any mutation.
+# ==================================================================================================
+build_case_b ectl 904
+build_case_b e 905
+E_WT="$B_WT"; E_TRACKER="$B_TRACKER"
+E_DEST="$B_PRIMARY/docs/workflow/build-receipts/nested.json"
+mkdir -p "$(dirname "$E_DEST")"
+printf 'operator bytes the finish must not consume\n' > "$E_DEST"
+
+assert_fail_closed \
+  "an occupied durable destination stops the finish instead of being overwritten" \
+  "already holds different bytes" \
+  -- bash "$WORK/run-finish-e.sh" \
+  -- bash "$WORK/run-finish-ectl.sh"
+
+[ "$FC_CONTROL_RC" -eq 0 ] \
+  || fail "the positive control must be the SUCCEEDING path (the same finish onto an unoccupied destination), but it exited $FC_CONTROL_RC: $FC_CONTROL_OUT"
+grep -qx 'operator bytes the finish must not consume' "$E_DEST" \
+  || fail "the finish consumed the bytes already at the durable destination — nothing in this tail can restore them"
+[ -d "$E_WT" ] \
+  || fail "the refused finish still removed the build worktree — a destination collision must stop the tail before any mutation"
+[ "$(python3 "$TRK" --tracker "$E_TRACKER" show --num "$ISSUE" --field Status)" = "In Progress" ] \
+  || fail "the refused finish still closed the tracker item"
 
 # ==================================================================================================
 # CASE C — no widening. A contract carried into a FOREIGN repository is still refused: the witness
@@ -466,4 +603,4 @@ assert_fail_closed \
 [ "$FC_CONTROL_RC" -eq 0 ] \
   || fail "the positive control must be the SUCCEEDING path (the legitimately witnessed durable contract), but it exited $FC_CONTROL_RC: $FC_CONTROL_OUT"
 
-echo "PASS: the build witness chain freezes, runs and finishes inside a linked build worktree; the REAL finish tail persists its artifacts onto durable logical repo paths that still pass the post-merge closeout re-verification; the worktree removal stays non-force; and a foreign-repo contract is still refused"
+echo "PASS: the build witness chain freezes, runs and finishes inside a linked build worktree; the REAL finish tail — driven by the SHIPPED --repo-less invocation from inside that worktree — persists its artifacts and the review's work products onto durable logical repo paths that still pass the post-merge closeout re-verification; an occupied destination and a split-checkout receipt write are both refused; the worktree removal stays non-force; and a foreign-repo contract is still refused"

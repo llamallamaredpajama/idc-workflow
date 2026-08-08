@@ -202,6 +202,23 @@ def write_receipt(*, repo: str, contract_path: str, execution_path: str, verdict
         raise ReceiptError("actual path(s) outside `touch` refused: " + ", ".join(outside))
 
     out_abs = _resolve_receipt_path(workspace, out)
+    # ONE ROOT PER RECEIPT. Each path below is relativized against the worktree it lives in (#197),
+    # but `verify_receipt` resolves ALL of them against the root the RECEIPT lives in — so a receipt
+    # minted from artifacts spread across two linked worktrees writes cleanly and then fails its very
+    # first verification with a missing contract/execution/verdict. Refuse the split here, where the
+    # operator can still fix it, instead of shipping a receipt that can never verify.
+    paths_root = _artifact_root(repo, out)
+    for label, path in (("validation contract", contract_path),
+                        ("execution receipt", execution_path),
+                        ("review verdict", verdict_path)):
+        component_root = _artifact_root(repo, path)
+        if os.path.realpath(component_root) != os.path.realpath(paths_root):
+            raise ReceiptError(
+                f"split-worktree receipt refused: the {label} lives in the checkout {component_root}, "
+                f"but the receipt is being written in {paths_root}. Verification resolves every "
+                "artifact a receipt names against the receipt's own checkout, so this receipt could "
+                "never verify — write all four artifacts in the same checkout (the one the build ran "
+                "in), which is what the finish then makes durable.")
     doc = {
         "schema_version": SCHEMA_VERSION,
         "kind": RECEIPT_KIND,

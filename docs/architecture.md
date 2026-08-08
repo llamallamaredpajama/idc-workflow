@@ -231,7 +231,9 @@ span), `timeline --item N` (one item's phases), `timing` (per-phase durations).
 - **Disposable.** Deleting the db loses nothing; `rebuild` re-derives it. That convergence is the
   honesty check: anything the mirror held that the raw record could not reproduce would mean it had
   quietly become a source of truth. It is gitignored (`.idc-trace-mirror.db*`, wired into the
-  scaffold beside the other transient sidecars).
+  scaffold beside the other transient sidecars), and the Path Gate hard-denies it as a
+  machine-owned surface — the gitignore keeps it out of casual staging, the gate is the
+  load-bearing half that refuses `git add -f`, hand edits, and an already-tracked copy.
 - **Never authoritative — and no gate reads it.** Gates, guards, the janitor's divergence pass and
   every closeout keep reading the raw artifacts. This module is an operator lens only, and
   `tests/smoke/phase12-trace-mirror.sh` asserts that mechanically: nothing else in the plugin may

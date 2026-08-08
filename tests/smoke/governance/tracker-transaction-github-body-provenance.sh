@@ -68,7 +68,10 @@ def save(s):
 _FIELD_OPTS = {
     "Stage":  ["Buildable", "Consideration", "Planning", "Recirculation"],
     "Status": ["Todo", "In Progress", "Blocked", "Done"],
-    "Wave":   [str(i) for i in range(1, 8)],
+    # The fake board must carry the options /idc:init actually provisions. Wave is a LABEL
+    # single-select (`Wave 1`), like Phase below — bare numbers modelled a board no init ever
+    # creates, and let a bare-number `set-field Wave` resolve here that fails on a real one (#206).
+    "Wave":   ["Wave %d" % i for i in range(1, 8)],
     "Phase":  ["Phase 1", "Phase 2", "Phase 3"],
     "Domain": ["core", "api", "cli", "docs"],
 }

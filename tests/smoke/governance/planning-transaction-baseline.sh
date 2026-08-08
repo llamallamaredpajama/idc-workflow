@@ -51,7 +51,11 @@ PY
 
 # (B) expected-green: board already equals the frozen projection.
 T_GREEN="$(gov_new_tracker)" || fail "could not init throwaway TRACKER.md for expected-green"
-gov_seed_item "$T_GREEN" --title alpha --stage Buildable --status Todo --wave 1 --phase "Phase 1" --domain core >/dev/null \
+# The seed must be what the pipeline would actually have WRITTEN, or "exact no-op rerun" is a
+# fiction. Wave is stored in the board's own option format (`Wave 1`, as /idc:init provisions and
+# Plan freezes — issue #206), exactly like the `Phase 1` alongside it; a bare `1` here would seed a
+# value no backend ever emits and manufacture a delta.
+gov_seed_item "$T_GREEN" --title alpha --stage Buildable --status Todo --wave "Wave 1" --phase "Phase 1" --domain core >/dev/null \
   || fail "could not seed exact-green Buildable"
 REPO_GREEN="$(dirname "$T_GREEN")"
 python3 "$TXN" freeze \

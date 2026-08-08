@@ -38,6 +38,13 @@
 #   8. WORKTREE — a witness written from a linked worktree is visible to a push from the primary
 #      checkout and survives that worktree's removal (it is repository-wide evidence).
 #   9. RETENTION — no fixed ceiling evicts a witness the outgoing range still needs.
+#  10. RUNTIME ARTIFACTS — the completion manifest also covers what NEITHER the receipt nor the legacy
+#      list names (`TRACKER.md`), in both install shapes, without refusing a complete removal.
+#  11. RECEIPT TYPE — only a GENUINELY ABSENT receipt falls back to the legacy list; a directory or a
+#      gitlink at that path fails closed instead of silently downgrading the manifest.
+#  12. CONCURRENCY — simultaneous recorders never discard each other's witness.
+#  13. RECOVERY RANGE — the documented repair lists the range PRE-PUSH inspects (the intended push
+#      remote and ref), including a branch with no upstream and a push to a non-upstream mirror.
 set -uo pipefail
 . "$(dirname "$0")/lib.sh"
 
@@ -80,6 +87,10 @@ write_scaffold() {
 }
 
 # A governed repo published to a bare origin, with the real backstops installed afterwards.
+# NO_PUBLISH=1 → create the bare origin and wire the remote but never push, so the branch has NO
+# upstream at all: the state arm 13's first-push case needs (and one an `@{upstream}` range cannot
+# describe). Everything else about the fixture is identical.
+NO_PUBLISH=0
 new_governed_repo() {
   REPO="$WORK/$1"; REMOTE="$WORK/$1.git"
   mkdir -p "$REPO"
@@ -95,7 +106,7 @@ new_governed_repo() {
   write_scaffold
   git -C "$REPO" add -A
   git -C "$REPO" commit -qm 'test: governed baseline'
-  git -C "$REPO" push -q -u origin main >/dev/null 2>&1 \
+  [ "$NO_PUBLISH" = "1" ] || git -C "$REPO" push -q -u origin main >/dev/null 2>&1 \
     || gov_fail "could not publish the governed baseline for $1"
   python3 "$GIT_GATE" install-hooks --repo "$REPO" --plugin-root "$GOV_PLUGIN" >/dev/null \
     || gov_fail "could not install the git backstops in $1"
@@ -434,4 +445,204 @@ if missing:
 print(f"all {len(oids)} witnesses retained")
 PY
 
-echo "PASS: the sanctioned uninstall removal commit is publishable through a witnessed, shape-verified, receipt-bound door; partial removals, stray protected mutations, non-ungoverning commits, protected re-additions and forged witnesses are all still refused; the witness is repository-wide and uncapped"
+# ── 10. RUNTIME ARTIFACTS: the completion manifest covers what NEITHER list names ─────────────────
+# `TRACKER.md` is runtime-created, so the install receipt deliberately does not list it and the
+# pre-receipt legacy list does not name it either — yet an applied uninstall must still remove it
+# (`_receipt_removal_set` unions the same set into what the closeout validates). A manifest built from
+# the receipt alone therefore accepts a commit that deletes the whole receipt-listed footprint and the
+# anchor while LEAVING THE TRACKER INSTALLED, and that commit's protected deletions are then exempt at
+# every push the repository ever makes. Both install shapes are pinned, because the gap is in both
+# lists.
+new_receipt_repo runtime-artifact
+git -C "$REPO" rm -q WORKFLOW.md WORKFLOW-config.yaml docs/workflow/README.md \
+  docs/workflow/tracker-config.yaml docs/workflow/install-receipt.yaml
+printf '{"enabledPlugins":{}}\n' > "$REPO/.claude/settings.json"
+git -C "$REPO" add .claude/settings.json
+git -C "$REPO" commit -q -m 'idc: uninstall — every receipt-listed file goes, the tracker stays' \
+  || gov_fail "could not create the surviving-runtime-artifact fixture"
+RUNTIME_SHA="$(git -C "$REPO" rev-parse HEAD)"
+git -C "$REPO" cat-file -e "$RUNTIME_SHA:TRACKER.md" \
+  || gov_fail "the runtime-artifact fixture is not discriminating — TRACKER.md was removed after all"
+if python3 "$GIT_GATE" witness-uninstall --repo "$REPO" --commit "$RUNTIME_SHA" >"$WORK/runtime.out" 2>&1; then
+  gov_fail "witness-uninstall recorded a removal that left the runtime tracker installed"
+fi
+grep -qF 'TRACKER.md' "$WORK/runtime.out" \
+  || gov_fail "the runtime-artifact refusal did not name the surviving tracker: $(cat "$WORK/runtime.out")"
+
+# POSITIVE CONTROL — the SAME removal with the tracker gone stays witnessable, so the new manifest
+# clause refuses the near-miss without refusing the real thing.
+git -C "$REPO" rm -q TRACKER.md
+git -C "$REPO" commit -q --amend --no-edit --no-verify
+RUNTIME_FULL_SHA="$(git -C "$REPO" rev-parse HEAD)"
+python3 "$GIT_GATE" witness-uninstall --repo "$REPO" --commit "$RUNTIME_FULL_SHA" >"$WORK/runtime-full.out" 2>&1 \
+  || gov_fail "the door refused a COMPLETE removal that also removed the runtime tracker: $(cat "$WORK/runtime-full.out")"
+
+# The pre-receipt install shape has the same gap: the legacy list names no runtime artifact either.
+new_governed_repo runtime-artifact-legacy
+git -C "$REPO" rm -q WORKFLOW.md WORKFLOW-config.yaml docs/workflow/README.md \
+  docs/workflow/tracker-config.yaml
+printf '{"enabledPlugins":{}}\n' > "$REPO/.claude/settings.json"
+git -C "$REPO" add .claude/settings.json
+git -C "$REPO" commit -q -m 'idc: uninstall — pre-receipt install, the tracker stays' \
+  || gov_fail "could not create the legacy surviving-runtime-artifact fixture"
+LEGACY_RUNTIME_SHA="$(git -C "$REPO" rev-parse HEAD)"
+if python3 "$GIT_GATE" witness-uninstall --repo "$REPO" --commit "$LEGACY_RUNTIME_SHA" >"$WORK/runtime-legacy.out" 2>&1; then
+  gov_fail "witness-uninstall recorded a pre-receipt removal that left the runtime tracker installed"
+fi
+grep -qF 'TRACKER.md' "$WORK/runtime-legacy.out" \
+  || gov_fail "the legacy runtime-artifact refusal did not name the surviving tracker: $(cat "$WORK/runtime-legacy.out")"
+
+# ── 11. RECEIPT TYPE: only a GENUINELY ABSENT receipt may fall back to the legacy list ─────────────
+# The manifest source is chosen by asking the parent tree for the receipt. Deciding that by BYTES
+# alone cannot tell "no receipt at all" from "a receipt that is there but unusable": a directory, a
+# gitlink and a missing blob object all read as "no bytes". Silently reading any of those as a
+# pre-receipt install swaps a repo's real, larger manifest for the fixed legacy list — the same
+# downgrade `_uninstall_owned_files` refuses on the filesystem side.
+receipt_shape_refused() {          # $1 repo label, $2 how the receipt path is planted, $3 what to grep
+  new_governed_repo "$1"
+  case "$2" in
+    directory)
+      mkdir -p "$REPO/docs/workflow/install-receipt.yaml"
+      printf 'not a receipt\n' > "$REPO/docs/workflow/install-receipt.yaml/inner.yaml"
+      git -C "$REPO" add docs/workflow/install-receipt.yaml ;;
+    gitlink)
+      git -C "$REPO" update-index --add \
+        --cacheinfo 160000,0000000000000000000000000000000000000001,docs/workflow/install-receipt.yaml \
+        || gov_fail "could not plant a gitlink at the receipt path" ;;
+  esac
+  git -C "$REPO" commit -q --no-verify -m "test: a $2 sits where the install receipt belongs"
+  [ "$(git -C "$REPO" cat-file -t "HEAD:docs/workflow/install-receipt.yaml" 2>/dev/null || echo none)" != "blob" ] \
+    || gov_fail "the $2 receipt fixture is not discriminating — a real blob was planted"
+  # A removal that satisfies the LEGACY manifest completely, so only the receipt-type check can refuse
+  # it. Under a bytes-only source choice this commit is witnessed.
+  git -C "$REPO" rm -q -r TRACKER.md WORKFLOW.md WORKFLOW-config.yaml docs/workflow/README.md \
+    docs/workflow/tracker-config.yaml docs/workflow/install-receipt.yaml
+  printf '{"enabledPlugins":{}}\n' > "$REPO/.claude/settings.json"
+  git -C "$REPO" add .claude/settings.json
+  git -C "$REPO" commit -q -m "idc: uninstall over a $2 receipt path" \
+    || gov_fail "could not create the $2-receipt removal commit"
+  local sha; sha="$(git -C "$REPO" rev-parse HEAD)"
+  if python3 "$GIT_GATE" witness-uninstall --repo "$REPO" --commit "$sha" >"$WORK/receipt-$2.out" 2>&1; then
+    gov_fail "witness-uninstall treated a $2 at the receipt path as a pre-receipt install and witnessed the commit"
+  fi
+  grep -qF "$3" "$WORK/receipt-$2.out" \
+    || gov_fail "the $2-receipt refusal did not name the unusable receipt: $(cat "$WORK/receipt-$2.out")"
+}
+receipt_shape_refused receipt-directory directory 'not a regular file'
+receipt_shape_refused receipt-gitlink   gitlink   'not a regular file'
+
+# POSITIVE CONTROL — the identical removal in a repo whose receipt path is GENUINELY ABSENT still
+# falls back to the legacy list and is witnessed. Without this the check above could be passing by
+# refusing every pre-receipt install.
+new_governed_repo receipt-absent-control
+git -C "$REPO" cat-file -e HEAD:docs/workflow/install-receipt.yaml 2>/dev/null \
+  && gov_fail "the absent-receipt control is not discriminating — the baseline carries a receipt"
+make_uninstall_commit
+ABSENT_SHA="$(git -C "$REPO" rev-parse HEAD)"
+python3 "$GIT_GATE" witness-uninstall --repo "$REPO" --commit "$ABSENT_SHA" >"$WORK/receipt-absent.out" 2>&1 \
+  || gov_fail "the door refused a pre-receipt install whose receipt path is genuinely absent: $(cat "$WORK/receipt-absent.out")"
+
+# ── 12. CONCURRENCY: two worktrees witnessing at once must not discard each other's entry ─────────
+# One shared store under the COMMON git dir (arm 8), written by processes that can run concurrently in
+# different linked worktrees. `os.replace` makes the final swap atomic, but read-whole-store → prune →
+# replace is not: two recorders that both read the pre-image lose-update, and the discarded entry
+# re-strands the commit it attested to — the permanent unpushability this whole door exists to end.
+# This drives the REAL storage door with REAL OIDs, like arm 9.
+new_governed_repo witness-concurrency
+python3 - "$GOV_PLUGIN" "$REPO" <<'PY' || gov_fail "concurrent witness recorders discard each other's entries"
+import os, subprocess, sys
+sys.path.insert(0, sys.argv[1] + "/scripts")
+import idc_path_gate as PG
+repo = sys.argv[2]
+oids = []
+for i in range(24):
+    subprocess.run(["git", "-C", repo, "commit", "-q", "--no-verify", "--allow-empty",
+                    "-m", f"test: concurrent witness fodder {i}"], check=True)
+    oids.append(subprocess.run(["git", "-C", repo, "rev-parse", "HEAD"],
+                               capture_output=True, text=True, check=True).stdout.strip().lower())
+# Fork AFTER the commits exist, so every writer starts from the same pre-image — the interleaving a
+# lock has to survive.
+pids = []
+for oid in oids:
+    pid = os.fork()
+    if pid == 0:
+        try:
+            PG.record_uninstall_commit(repo, oid)
+        except BaseException:                      # noqa: BLE001 — a crashed writer must fail the arm
+            os._exit(1)
+        os._exit(0)
+    pids.append(pid)
+failed = sum(1 for pid in pids if os.waitpid(pid, 0)[1] != 0)
+if failed:
+    print(f"{failed} of {len(pids)} concurrent recorders failed outright")
+    raise SystemExit(1)
+stored = PG.ordered_uninstall_witness(repo)
+missing = [o for o in oids if o not in stored]
+if missing:
+    print(f"{len(missing)} of {len(oids)} concurrent witnesses were lost (store holds {len(stored)})")
+    raise SystemExit(1)
+print(f"all {len(oids)} concurrent witnesses retained")
+PY
+
+# ── 13. RECOVERY RANGE: the repair lists the commits the gate actually inspects ────────────────────
+# commands/uninstall.md's repair opens by listing the outgoing range. `@{upstream}..HEAD` answers the
+# wrong question twice: a branch on its first push HAS no upstream (the command simply fails), and a
+# push to a non-upstream mirror is inspected against THAT remote, not the upstream. In both cases the
+# repair cannot name the uninstall commits the pre-push gate is refusing, so the documented path is
+# unusable exactly where it is needed. This mirrors the documented derivation and pins both cases.
+UNINSTALL_MD="$GOV_PLUGIN/commands/uninstall.md"
+grep -qF 'ls-remote --refs "$REMOTE"' "$UNINSTALL_MD" \
+  || gov_fail "the repair step no longer derives its range from the intended push remote"
+if grep -qF "rev-parse --abbrev-ref '@{upstream}'" "$UNINSTALL_MD"; then
+  gov_fail "the repair step still derives its range from @{upstream}"
+fi
+
+# The documented derivation, mirrored: what the remote already has for this ref, or — when the ref is
+# new there — everything that remote has on any ref, exactly as pre-push's `_remote_ref_shas` does.
+doc_outgoing_range() {
+  local remote="$1" branch head remote_sha exclude
+  branch="$(git -C "$REPO" symbolic-ref --quiet --short HEAD)"
+  head="$(git -C "$REPO" rev-parse HEAD)"
+  remote_sha="$(git -C "$REPO" ls-remote --refs "$remote" "refs/heads/$branch" | cut -f1)"
+  if [ -n "$remote_sha" ]; then
+    exclude="$remote_sha"
+  else
+    exclude="$(git -C "$REPO" ls-remote --refs "$remote" | cut -f1 | while read -r sha; do
+      git -C "$REPO" cat-file -e "$sha^{commit}" 2>/dev/null && printf '%s\n' "$sha"
+    done)"
+  fi
+  # shellcheck disable=SC2086 — the exclusion list is intentionally word-split into --not arguments
+  git -C "$REPO" log --format=%H "$head" ${exclude:+--not $exclude}
+}
+
+# (a) FIRST PUSH — the branch has no upstream at all. The old form cannot even run.
+NO_PUBLISH=1
+new_governed_repo repair-first-push
+NO_PUBLISH=0
+make_uninstall_commit
+FIRST_PUSH_SHA="$(git -C "$REPO" rev-parse HEAD)"
+if git -C "$REPO" rev-parse --abbrev-ref '@{upstream}' >/dev/null 2>&1; then
+  gov_fail "the first-push fixture is not discriminating — the branch still has an upstream"
+fi
+doc_outgoing_range origin | grep -qF "$FIRST_PUSH_SHA" \
+  || gov_fail "the documented repair range omits the uninstall commit on a branch with no upstream"
+
+# (b) MIRROR — the upstream already has everything, so an upstream-derived range is EMPTY, while the
+#     push the operator is actually making (to the mirror) carries the uninstall commit.
+new_governed_repo repair-mirror
+MIRROR="$WORK/repair-mirror-mirror.git"
+git init --bare -q "$MIRROR"
+git -C "$REPO" remote add mirror "$MIRROR"
+make_uninstall_commit
+MIRROR_SHA="$(git -C "$REPO" rev-parse HEAD)"
+python3 "$GIT_GATE" witness-uninstall --repo "$REPO" --commit "$MIRROR_SHA" >"$WORK/mirror-witness.out" 2>&1 \
+  || gov_fail "the door refused the mirror fixture's uninstall commit: $(cat "$WORK/mirror-witness.out")"
+make_init_commit
+git -C "$REPO" push -q origin main >/dev/null 2>&1 \
+  || gov_fail "could not publish the fixture to its upstream (the mirror case needs origin current)"
+doc_outgoing_range origin | grep -qF "$MIRROR_SHA" \
+  && gov_fail "the mirror fixture is not discriminating — the upstream range still carries the uninstall commit"
+doc_outgoing_range mirror | grep -qF "$MIRROR_SHA" \
+  || gov_fail "the documented repair range omits the uninstall commit when the push target is a non-upstream mirror"
+
+echo "PASS: the sanctioned uninstall removal commit is publishable through a witnessed, shape-verified, receipt-bound door; partial removals, surviving runtime artifacts, unusable receipts, stray protected mutations, non-ungoverning commits, protected re-additions and forged witnesses are all still refused; the witness is repository-wide, uncapped, and safe under concurrent recorders; and the documented repair lists the range the gate inspects"

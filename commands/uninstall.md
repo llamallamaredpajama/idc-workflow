@@ -294,9 +294,27 @@ door for them from this playbook. It **removes nothing** — reaching Phase 0 an
 is the wrong answer here. Do **not** reach for `--no-verify`, and do **not** rewrite history:
 
 1. **List the outgoing range** and identify every uninstall removal commit in it (there may be more
-   than one — repeated uninstall/re-init cycles stack them):
+   than one — repeated uninstall/re-init cycles stack them). Derive that range from the remote the
+   operator will actually push to, with the **same semantics pre-push uses** — never from
+   `@{upstream}`, which does not exist on a branch's first push and names the wrong remote when they
+   publish to a mirror. In both of those cases an `@{upstream}` range cannot list the very commits
+   the gate is inspecting, which is the whole point of this step:
    ```bash
-   git -C "$ROOT" log --oneline "$(git -C "$ROOT" rev-parse --abbrev-ref '@{upstream}')"..HEAD
+   REMOTE=origin      # ask the operator when they push somewhere else; this must be the push target
+   BRANCH="$(git -C "$ROOT" symbolic-ref --quiet --short HEAD)"
+   HEAD_SHA="$(git -C "$ROOT" rev-parse HEAD)"
+   # What that remote already has for this ref. EMPTY means the ref is new there (a first push, or a
+   # mirror that has never seen this branch, or a detached HEAD) — and for a new ref pre-push excludes
+   # everything the remote already has on ANY ref, so mirror that here.
+   REMOTE_SHA="$(git -C "$ROOT" ls-remote --refs "$REMOTE" "refs/heads/$BRANCH" | cut -f1)"
+   if [ -n "$REMOTE_SHA" ]; then
+     EXCLUDE="$REMOTE_SHA"
+   else
+     EXCLUDE="$(git -C "$ROOT" ls-remote --refs "$REMOTE" | cut -f1 | while read -r sha; do
+       git -C "$ROOT" cat-file -e "$sha^{commit}" 2>/dev/null && printf '%s\n' "$sha"
+     done)"
+   fi
+   git -C "$ROOT" log --oneline "$HEAD_SHA" ${EXCLUDE:+--not $EXCLUDE}
    ```
 2. **Witness each candidate** through the door, which re-derives its shape from git before recording
    anything:
@@ -305,9 +323,11 @@ is the wrong answer here. Do **not** reach for `--no-verify`, and do **not** rew
      --repo "$ROOT" --commit <the removal commit's sha>
    ```
    A commit that is not a completed uninstall is **refused with the reason** — including a partial
-   removal that drops the governance anchor but leaves other IDC footprints installed. That refusal
-   is the door working: report it and stop rather than trying to force the commit through. Pointing
-   the door at a wrong SHA is safe and inert.
+   removal that drops the governance anchor but leaves other IDC footprints installed. The door
+   demands the SAME removal set the Phase-3b closeout validates: the receipt-derived (or legacy)
+   footprints **union the runtime artifacts** (`TRACKER.md`), so a commit that leaves the tracker
+   behind is refused too. That refusal is the door working: report it and stop rather than trying to
+   force the commit through. Pointing the door at a wrong SHA is safe and inert.
 3. **Report** which commits were witnessed and tell the operator the repo is publishable
    (`git push`). Do not push on their behalf.
 

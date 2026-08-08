@@ -473,6 +473,35 @@ def _commits_present(repo: str, oids: list[str]) -> set[str] | None:
     return {oid for oid, line in zip(oids, lines) if line.strip() == "commit"}
 
 
+@contextlib.contextmanager
+def uninstall_witness_lock(repo: str):
+    """Serialize the uninstall-witness read → prune → write across concurrent recorders (#202 review).
+
+    Same mechanism as the build-validation witness store's `_witness_store_lock`, for the same reason
+    and on the same kind of file: ONE shared store in the git COMMON dir, written by processes that
+    can run concurrently in different linked worktrees of the same repository. `os.replace` makes the
+    final swap atomic, but each recorder does read-whole-store → mutate → replace, and the read→mutate
+    is NOT inside that atom: two recorders that both read the pre-image lose-update, and the discarded
+    entry re-strands the uninstall commit it attested to — the exact permanent-unpushability this door
+    exists to prevent. The lock lives beside the store under the common git dir, so every worktree
+    contends for the same one. On a platform without `fcntl` it degrades to a no-op (best-effort, as
+    in the validation store); the plugin's supported hosts are POSIX."""
+    if fcntl is None:
+        yield
+        return
+    path = uninstall_witness_path(repo) + ".lock"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
 def record_uninstall_commit(repo: str, oid: str) -> list[str]:
     """Record one uninstall commit OID in the witness (idempotent, newest-last, UNBOUNDED).
 
@@ -487,16 +516,21 @@ def record_uninstall_commit(repo: str, oid: str) -> list[str]:
     evicts another one the same range still needs. Growth is bounded instead by the only prune that
     is provably lossless: an OID whose commit is no longer in this object database can never be
     exempted anyway (`uninstall_commit_problem` refuses what it cannot resolve), so dropping it
-    changes no decision."""
+    changes no decision.
+
+    THE WHOLE READ → PRUNE → WRITE RUNS UNDER `uninstall_witness_lock` (#202 review). Concurrent
+    recorders in different linked worktrees share one store, and without the lock the second writer's
+    replace discards the first writer's entry — re-stranding a commit that was correctly witnessed."""
     normalized = str(oid).strip().lower()
     if not _OID_RE.fullmatch(normalized):
         raise ValueError("an uninstall witness entry must be a full commit object id")
-    entries = [e for e in ordered_uninstall_witness(repo) if e != normalized]
-    present = _commits_present(repo, entries)
-    if present is not None:
-        entries = [e for e in entries if e in present]
-    entries.append(normalized)
-    _atomic_write_json(uninstall_witness_path(repo), {"schema": 1, "uninstall_commits": entries})
+    with uninstall_witness_lock(repo):
+        entries = [e for e in ordered_uninstall_witness(repo) if e != normalized]
+        present = _commits_present(repo, entries)
+        if present is not None:
+            entries = [e for e in entries if e in present]
+        entries.append(normalized)
+        _atomic_write_json(uninstall_witness_path(repo), {"schema": 1, "uninstall_commits": entries})
     return entries
 
 

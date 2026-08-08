@@ -348,25 +348,71 @@ def _tree_has(repo: str, commit: str, relpath: str) -> bool:
 
 
 def _tree_blob(repo: str, commit: str, relpath: str) -> bytes | None:
-    """The exact bytes `relpath` had in `commit`'s tree, or None when the tree has no such file."""
+    """The exact bytes `relpath` had in `commit`'s tree, or None when those bytes are unavailable.
+
+    None is AMBIGUOUS on purpose-of-caller: no entry, an entry that is not a blob, and a blob whose
+    object is missing all answer None. Any caller for whom "absent" means something different from
+    "present but unusable" must ask `_tree_entry_type` first (#202 review)."""
     proc = subprocess.run(
         ["git", "-C", repo, "cat-file", "blob", f"{commit}:{relpath}"], capture_output=True
     )
     return proc.stdout if proc.returncode == 0 else None
 
 
+def _tree_entry_type(repo: str, commit: str, relpath: str) -> str:
+    """What `commit`'s tree records AT `relpath`: `blob`, `tree`, `commit` (a gitlink), `absent` when
+    the tree carries no entry there, or `unknown` when git could not answer.
+
+    Read straight off the TREE rather than by resolving the object, so a gitlink whose commit is not
+    in this object database still answers `commit` instead of collapsing into "absent"."""
+    proc = subprocess.run(
+        ["git", "-C", repo, "ls-tree", "--full-tree", "-z", commit, "--", relpath],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return "unknown"
+    record = (proc.stdout or "").split("\0")[0]
+    if not record.strip():
+        return "absent"
+    header = record.split("\t", 1)[0].split()
+    return header[1] if len(header) >= 2 else "unknown"
+
+
 def _receipt_entries_in_tree(repo: str, commit: str):
     """`(entries, problem)` for the install receipt as of `commit`'s tree.
 
     `entries is None, problem is None` means this tree carries no receipt at all — a pre-receipt
-    install, whose removal manifest is the fixed legacy list. A receipt that is THERE but does not
-    parse is a hard problem and never falls back, mirroring `_uninstall_owned_files`: a damaged
-    manifest must not be able to shrink the set of files an uninstall is required to have removed."""
+    install, whose removal manifest is the fixed legacy list. A receipt that is THERE but unusable —
+    it does not parse, or the tree records something other than a regular file at that path — is a
+    hard problem and never falls back, mirroring `_uninstall_owned_files`: a damaged manifest must
+    not be able to shrink the set of files an uninstall is required to have removed.
+
+    ONLY A GENUINELY ABSENT RECEIPT MAY FALL BACK (#202 review). Blob bytes alone cannot tell the two
+    apart — a directory, a gitlink, and an unreadable blob all read as "no bytes" — so the tree entry
+    is inspected FIRST, and every present-but-not-a-blob shape is refused by name."""
     import idc_receipt_check as RC  # noqa: PLC0415 — lazy; the one canonical receipt parser
 
+    kind = _tree_entry_type(repo, commit, RC.RECEIPT_RELPATH)
+    if kind == "absent":
+        return None, None
+    if kind == "unknown":
+        return None, (
+            f"git could not report what commit {commit} carries at the install receipt path "
+            f"`{RC.RECEIPT_RELPATH}`, so the removal manifest cannot be derived"
+        )
+    if kind != "blob":
+        return None, (
+            f"commit {commit} carries a {kind} at the install receipt path `{RC.RECEIPT_RELPATH}`, "
+            "not a regular file, so the removal manifest cannot be derived; only a genuinely ABSENT "
+            "receipt may fall back to the pre-receipt legacy list"
+        )
     blob = _tree_blob(repo, commit, RC.RECEIPT_RELPATH)
     if blob is None:
-        return None, None
+        return None, (
+            f"the install receipt `{RC.RECEIPT_RELPATH}` carried by commit {commit} cannot be read "
+            "from this object database, so the removal manifest cannot be derived"
+        )
     fd, tmp = tempfile.mkstemp(prefix=".idc-uninstall-receipt.", suffix=".yaml")
     try:
         with os.fdopen(fd, "wb") as fh:
@@ -418,25 +464,39 @@ def _incomplete_removal_problem(repo: str, oid: str, parent: str) -> str | None:
 
     import idc_receipt_check as RC  # noqa: PLC0415 — lazy; the one canonical receipt parser
 
+    runtime = "plus the runtime artifacts an applied uninstall always removes"
     if entries is None:
-        source = "the pre-receipt legacy owned-file list"
-        required = sorted(C.LEGACY_UNINSTALL_OWNED_FILES)
+        source = f"the pre-receipt legacy owned-file list ({runtime})"
+        required = set(C.LEGACY_UNINSTALL_OWNED_FILES)
     else:
-        source = f"the install receipt carried by commit {parent}"
+        source = f"the install receipt carried by commit {parent} ({runtime})"
         # The receipt never lists ITSELF, and uninstall Phase 3c removes it with the anchor.
-        required = [RC.RECEIPT_RELPATH]
+        required = {RC.RECEIPT_RELPATH}
         for entry in entries:
             rel = entry.get("path") or ""
             if entry.get("state") == "customized":
                 continue    # operator-kept at update's diff-and-ask — uninstall asks, defaults to keep
             blob = _tree_blob(repo, parent, rel)
             if blob is None:
-                continue    # already gone before this commit — nothing left for it to remove
+                continue    # gone before this commit, or no longer a plain file — either way what the
+                            # parent carries is not the stamped bytes, so the divergence keep-signal
+                            # below covers it and nothing is left for this commit to be required to remove
             if hashlib.sha256(blob).hexdigest() == entry.get("fingerprint"):
-                required.append(rel)
+                required.add(rel)
 
+    # THE SAME SET the uninstall closeout unions into its removal set (`_receipt_removal_set`), taken
+    # from the one definition rather than copied (#202 review). `TRACKER.md` is runtime-created, so it
+    # is deliberately absent from BOTH the receipt and the legacy list — yet an applied uninstall must
+    # still remove it. Without this union a commit could delete the whole receipt-listed footprint and
+    # the anchor, leave the tracker behind, and be witnessed as a completed uninstall anyway; its
+    # protected deletions would then be exempt at every push the repository ever makes.
+    required |= set(C.RUNTIME_UNINSTALL_ARTIFACTS)
+
+    # Only what the parent actually CARRIED can be required: a manifest file that never existed there
+    # (a runtime artifact never created, a footprint removed in an earlier commit) leaves nothing for
+    # this commit to remove.
     survivors = [
-        rel for rel in required if _tree_has(repo, parent, rel) and _tree_has(repo, oid, rel)
+        rel for rel in sorted(required) if _tree_has(repo, parent, rel) and _tree_has(repo, oid, rel)
     ]
     if not survivors:
         return None
@@ -462,9 +522,10 @@ def uninstall_commit_problem(repo: str, commit: str) -> str | None:
         "delete the anchor" would be a universal key for writing machine-owned state in the same
         commit;
       * it REMOVES THE WHOLE FOOTPRINT its parent still carried, derived from the install receipt in
-        the parent tree (or the fixed legacy list when that tree predates receipts). This is the
-        clause that binds the door to a completed `/idc:uninstall` instead of to any commit that
-        happens to drop the anchor — see `_incomplete_removal_problem`.
+        the parent tree (or the fixed legacy list when that tree predates receipts) UNION the runtime
+        artifacts neither of those lists names. This is the clause that binds the door to a completed
+        `/idc:uninstall` instead of to any commit that happens to drop the anchor — see
+        `_incomplete_removal_problem`.
 
     ORDER IS DELIBERATE: the cheap structural clauses answer first, so a near-miss is refused with
     the most specific reason available rather than with the manifest complaint."""

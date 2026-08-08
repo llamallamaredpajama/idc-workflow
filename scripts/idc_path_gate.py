@@ -13,6 +13,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -53,6 +54,19 @@ PROTECTED_MACHINE_RULES = [
     # Hard-denied for the same reason as its peers: machine-owned state is never a hand-edited one.
     ".idc-trace-mirror.db*",
 ]
+# The governance anchor: its presence in the worktree is what arms every IDC gate, `/idc:init` writes
+# it, and `/idc:uninstall` removes it LAST (commands/uninstall.md Phase 3c). A commit that carries the
+# repository ACROSS that boundary — its parent's tree has the anchor, its own tree does not — is THE
+# ungoverning commit, and is the only shape the uninstall push door can ever admit (issue #201).
+GOVERNANCE_ANCHOR_RELPATH = "docs/workflow/tracker-config.yaml"
+# Machine-owned witness of the uninstall removal commits a sanctioned door admitted. Written ONLY by
+# `idc_git_path_gate.py witness-uninstall` (fixed code) and only after that door re-derives the
+# commit's shape from git. It lives UNDER THE COMMON GIT DIRECTORY (`uninstall_witness_path`) — not in
+# the worktree, which uninstall is in the middle of emptying — so it survives the very removal it
+# attests to, it never travels to a remote, and unlike the per-worktree authorization beside it every
+# checkout of the repository reads the same one.
+UNINSTALL_WITNESS_RELPATH = os.path.join("idc-path-gate", "uninstall-witness.json")
+_OID_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 READ_ONLY_COMMANDS = {"doctor", "pause"}
 DEFAULT_TTL_SECONDS = 4 * 60 * 60
 PATHWAY_MODES = {"off", "controlled", "app-locked"}
@@ -231,6 +245,36 @@ def live_contract_path(repo: str) -> str:
     return git_path(repo, LIVE_CONTRACT_RELPATH)
 
 
+def git_common_path(repo: str, relpath: str) -> str:
+    """`relpath` under the repository's COMMON git directory — the one every worktree shares.
+
+    `git_path` resolves PER WORKTREE: inside a linked worktree `--git-path X` lands under
+    `.git/worktrees/<name>/X`. That is right for per-worktree session state (the authorization, the
+    admission lock) and WRONG for repository-wide evidence, which must read the same from every
+    checkout. Same resolution the build-validation witness store uses (#197/#199)."""
+    try:
+        out = _run_git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    except RuntimeError:
+        try:
+            out = _run_git(repo, "rev-parse", "--git-common-dir")   # git < 2.31 has no --path-format
+        except RuntimeError:
+            if _has_git_metadata(repo):
+                raise
+            return os.path.normpath(os.path.join(repo_root(repo), ".idc", relpath))
+    common = out if os.path.isabs(out) else os.path.join(repo, out)
+    return os.path.normpath(os.path.join(common, relpath))
+
+
+def uninstall_witness_path(repo: str) -> str:
+    """REPOSITORY-WIDE, so it resolves through the COMMON git dir, never `git_path` (#202 review).
+
+    `/idc:uninstall` may run in a linked worktree, while the push that must honor its witness happens
+    wherever the operator pushes from. Under `--git-path` the witness would be written to that
+    worktree's private git dir: invisible to a push from the primary checkout or a sibling worktree,
+    and DELETED outright with the worktree — stranding the very commit it attests to."""
+    return git_common_path(repo, UNINSTALL_WITNESS_RELPATH)
+
+
 def _read_live_contract(repo: str) -> tuple[str, dict[str, Any] | None]:
     """Read the live-contract pointer: ('absent'|'unreadable'|'corrupt'|'ok', doc)."""
     path = live_contract_path(repo)
@@ -376,6 +420,120 @@ def _atomic_write_json(path: str, payload: dict[str, Any]) -> None:
         raise
 
 
+def ordered_uninstall_witness(repo: str) -> list[str]:
+    """The uninstall commit OIDs a sanctioned door recorded, oldest first.
+
+    TOLERANT ON READ AND FAIL-CLOSED ON DOUBT: a missing, unreadable, corrupt or wrong-shaped witness
+    reads as EMPTY. Empty grants no exemption, so every failure mode of this file lands on "the push
+    is gated normally" — never on "the push is waved through"."""
+    try:
+        with open(uninstall_witness_path(repo), encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    if not isinstance(doc, dict) or doc.get("schema") != 1:
+        return []
+    entries = doc.get("uninstall_commits")
+    if not isinstance(entries, list):
+        return []
+    ordered: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, str):
+            continue
+        oid = entry.strip().lower()
+        if _OID_RE.fullmatch(oid) and oid not in ordered:
+            ordered.append(oid)
+    return ordered
+
+
+def read_uninstall_witness(repo: str) -> set[str]:
+    """Set form of `ordered_uninstall_witness` — the membership test the push gate uses."""
+    return set(ordered_uninstall_witness(repo))
+
+
+def _commits_present(repo: str, oids: list[str]) -> set[str] | None:
+    """The subset of `oids` that still resolve to a commit object here, or None if git cannot answer.
+
+    One `cat-file --batch-check` for the whole set. None means "do not prune" — every uncertainty
+    (git missing, non-zero exit, a reply that does not line up one-to-one with the request) keeps
+    every entry, because dropping a witness the repository still needs re-strands its commit."""
+    if not oids:
+        return set()
+    proc = subprocess.run(
+        ["git", "-C", repo, "cat-file", "--batch-check=%(objecttype)"],
+        input="".join(f"{oid}^{{commit}}\n" for oid in oids),
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return None
+    lines = (proc.stdout or "").splitlines()
+    if len(lines) != len(oids):
+        return None
+    return {oid for oid, line in zip(oids, lines) if line.strip() == "commit"}
+
+
+@contextlib.contextmanager
+def uninstall_witness_lock(repo: str):
+    """Serialize the uninstall-witness read → prune → write across concurrent recorders (#202 review).
+
+    Same mechanism as the build-validation witness store's `_witness_store_lock`, for the same reason
+    and on the same kind of file: ONE shared store in the git COMMON dir, written by processes that
+    can run concurrently in different linked worktrees of the same repository. `os.replace` makes the
+    final swap atomic, but each recorder does read-whole-store → mutate → replace, and the read→mutate
+    is NOT inside that atom: two recorders that both read the pre-image lose-update, and the discarded
+    entry re-strands the uninstall commit it attested to — the exact permanent-unpushability this door
+    exists to prevent. The lock lives beside the store under the common git dir, so every worktree
+    contends for the same one. On a platform without `fcntl` it degrades to a no-op (best-effort, as
+    in the validation store); the plugin's supported hosts are POSIX."""
+    if fcntl is None:
+        yield
+        return
+    path = uninstall_witness_path(repo) + ".lock"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def record_uninstall_commit(repo: str, oid: str) -> list[str]:
+    """Record one uninstall commit OID in the witness (idempotent, newest-last, UNBOUNDED).
+
+    The CALLER is responsible for having proven the commit's shape first; this is the storage half
+    only. `idc_git_path_gate.py witness-uninstall` is the sole production caller and it refuses
+    anything that is not the ungoverning shape.
+
+    NO FIXED RETENTION CAP (#202 review). A cap is unsound here however large it is set, because
+    pre-push inspects EVERY commit of the outgoing range while the store remembers only the last N:
+    a range carrying more than N genuine uninstall commits — a first push to a new mirror after many
+    uninstall/re-init cycles — can never be made pushable, since re-witnessing an evicted entry just
+    evicts another one the same range still needs. Growth is bounded instead by the only prune that
+    is provably lossless: an OID whose commit is no longer in this object database can never be
+    exempted anyway (`uninstall_commit_problem` refuses what it cannot resolve), so dropping it
+    changes no decision.
+
+    THE WHOLE READ → PRUNE → WRITE RUNS UNDER `uninstall_witness_lock` (#202 review). Concurrent
+    recorders in different linked worktrees share one store, and without the lock the second writer's
+    replace discards the first writer's entry — re-stranding a commit that was correctly witnessed."""
+    normalized = str(oid).strip().lower()
+    if not _OID_RE.fullmatch(normalized):
+        raise ValueError("an uninstall witness entry must be a full commit object id")
+    with uninstall_witness_lock(repo):
+        entries = [e for e in ordered_uninstall_witness(repo) if e != normalized]
+        present = _commits_present(repo, entries)
+        if present is not None:
+            entries = [e for e in entries if e in present]
+        entries.append(normalized)
+        _atomic_write_json(uninstall_witness_path(repo), {"schema": 1, "uninstall_commits": entries})
+    return entries
+
+
 def authorization_snapshot(repo: str) -> bytes | None:
     """Exact authorization bytes for command-entry rollback, or None when absent."""
     try:
@@ -510,6 +668,14 @@ def _contains_protected_machine_path(relpath: str) -> bool:
         if fixed_prefix and fixed_prefix.startswith(candidate + "/"):
             return True
     return False
+
+
+def is_protected_machine_surface(relpath: str) -> bool:
+    """Public form of the protected-surface test, for sanctioned adapters (the git backstops).
+
+    Deliberately the SAME disjunction `_evaluate_request` denies on, so an adapter that needs to know
+    which of its paths the gate would refuse cannot drift from the gate's own answer."""
+    return _is_protected_machine_path(relpath) or _contains_protected_machine_path(relpath)
 
 
 def _find_active_record_by_nonce(repo: str, command: str, nonce: str) -> dict[str, Any] | None:

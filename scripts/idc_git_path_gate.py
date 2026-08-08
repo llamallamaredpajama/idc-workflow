@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import hashlib
+import io
 import json
 import os
 import re
@@ -16,6 +19,7 @@ from typing import Iterable
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 
+import idc_command_contract as C  # noqa: E402
 import idc_credential_shapes as CS  # noqa: E402
 import idc_path_gate as PG  # noqa: E402
 
@@ -238,14 +242,19 @@ def _remote_ref_shas(repo: str, remote: str) -> list[str]:
     return shas
 
 
-def _collect_pre_push_paths(
+def _collect_pre_push_commits(
     repo: str,
     lines: Iterable[str],
     *,
     remote: str | None = None,
-) -> list[str]:
-    paths: list[str] = []
-    seen: set[str] = set()
+) -> list[tuple[str, list[str]]]:
+    """Every outgoing commit paired with the paths IT touches, in push order.
+
+    Attribution is per commit, not a flattened union, because a path's admissibility can depend on
+    WHICH commit carries it: the sanctioned uninstall removal commit may delete a protected machine
+    surface, while the identical path in any other commit may not (issue #201)."""
+    commits: list[tuple[str, list[str]]] = []
+    seen_commits: set[str] = set()
     server_shas: list[str] | None = None
     for line in lines:
         parts = line.strip().split()
@@ -261,20 +270,321 @@ def _collect_pre_push_paths(
                 server_shas = _remote_ref_shas(repo, remote or "")
             exclusions = server_shas
         try:
-            commits = _run_git(repo, "rev-list", local_sha, "--not", *exclusions).splitlines()
+            reachable = _run_git(repo, "rev-list", local_sha, "--not", *exclusions).splitlines()
         except RuntimeError:
-            commits = [local_sha]
-        outputs = [
-            _run_git(repo, "diff-tree", "--root", "--no-commit-id", "--name-only", "-r", commit)
-            for commit in commits
-            if commit.strip()
-        ]
-        for out in outputs:
-            for rel in out.splitlines():
-                rel = rel.strip()
-                if rel and rel not in seen:
-                    seen.add(rel)
-                    paths.append(rel)
+            reachable = [local_sha]
+        for commit in reachable:
+            commit = commit.strip()
+            if not commit or commit in seen_commits:
+                continue
+            seen_commits.add(commit)
+            out = _run_git(repo, "diff-tree", "--root", "--no-commit-id", "--name-only", "-r", commit)
+            commits.append((commit, [rel.strip() for rel in out.splitlines() if rel.strip()]))
+    return commits
+
+
+def _collect_pre_push_paths(
+    repo: str,
+    lines: Iterable[str],
+    *,
+    remote: str | None = None,
+) -> list[str]:
+    """Flattened, de-duplicated outgoing paths — the full unexempted set."""
+    paths: list[str] = []
+    seen: set[str] = set()
+    for _, rels in _collect_pre_push_commits(repo, lines, remote=remote):
+        for rel in rels:
+            if rel not in seen:
+                seen.add(rel)
+                paths.append(rel)
+    return paths
+
+
+# ── the uninstall push door (issue #201) ─────────────────────────────────────────────────────────
+# `/idc:uninstall` must land its removal as ONE revertable commit, and that commit necessarily
+# DELETES protected machine surfaces (`TRACKER.md`, the install receipt) alongside the governance
+# anchor. The commit itself is admissible when it is made — both backstops are already dormant by
+# then, because the anchor has left the worktree. But the pre-push backstop re-examines the whole
+# OUTGOING RANGE under TODAY's posture, so the moment the repo is governed again (a fresh
+# `/idc:init`, a `git revert`) that historical deletion is re-litigated and the push is refused
+# forever, poisoning every later commit in the range.
+#
+# The door that resolves it binds to evidence, never to a commit message. Two INDEPENDENT checks must
+# both hold before a commit's protected deletions are exempted:
+#   1. a sanctioned door recorded the commit's own OID in the machine-owned witness, and
+#   2. the gate re-derives the commit's shape from git AT PUSH TIME and confirms it.
+# Check 2 is what makes the witness un-forgeable in practice: hand-editing the witness file buys
+# nothing, because the shape is re-proven from the object database on every push.
+
+
+def _commit_name_status(repo: str, commit: str) -> list[tuple[str, str]]:
+    """(status, path) for every path the commit touches; a rename/copy yields BOTH endpoints."""
+    out = _run_git(
+        repo, "diff-tree", "--root", "--no-commit-id", "--name-status", "-r", "-z", commit
+    )
+    fields = [field for field in out.split("\0") if field != ""]
+    records: list[tuple[str, str]] = []
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        index += 1
+        # Rename/copy records carry two paths; every other status carries one.
+        arity = 2 if status[:1] in {"R", "C"} else 1
+        for _ in range(arity):
+            if index >= len(fields):
+                break
+            records.append((status[:1], fields[index]))
+            index += 1
+    return records
+
+
+def _tree_has(repo: str, commit: str, relpath: str) -> bool:
+    proc = subprocess.run(
+        ["git", "-C", repo, "cat-file", "-e", f"{commit}:{relpath}"],
+        capture_output=True,
+        text=True,
+    )
+    return proc.returncode == 0
+
+
+def _tree_blob(repo: str, commit: str, relpath: str) -> bytes | None:
+    """The exact bytes `relpath` had in `commit`'s tree, or None when those bytes are unavailable.
+
+    None is AMBIGUOUS on purpose-of-caller: no entry, an entry that is not a blob, and a blob whose
+    object is missing all answer None. Any caller for whom "absent" means something different from
+    "present but unusable" must ask `_tree_entry_type` first (#202 review)."""
+    proc = subprocess.run(
+        ["git", "-C", repo, "cat-file", "blob", f"{commit}:{relpath}"], capture_output=True
+    )
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def _tree_entry_type(repo: str, commit: str, relpath: str) -> str:
+    """What `commit`'s tree records AT `relpath`: `blob`, `tree`, `commit` (a gitlink), `absent` when
+    the tree carries no entry there, or `unknown` when git could not answer.
+
+    Read straight off the TREE rather than by resolving the object, so a gitlink whose commit is not
+    in this object database still answers `commit` instead of collapsing into "absent"."""
+    proc = subprocess.run(
+        ["git", "-C", repo, "ls-tree", "--full-tree", "-z", commit, "--", relpath],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return "unknown"
+    record = (proc.stdout or "").split("\0")[0]
+    if not record.strip():
+        return "absent"
+    header = record.split("\t", 1)[0].split()
+    return header[1] if len(header) >= 2 else "unknown"
+
+
+def _receipt_entries_in_tree(repo: str, commit: str):
+    """`(entries, problem)` for the install receipt as of `commit`'s tree.
+
+    `entries is None, problem is None` means this tree carries no receipt at all — a pre-receipt
+    install, whose removal manifest is the fixed legacy list. A receipt that is THERE but unusable —
+    it does not parse, or the tree records something other than a regular file at that path — is a
+    hard problem and never falls back, mirroring `_uninstall_owned_files`: a damaged manifest must
+    not be able to shrink the set of files an uninstall is required to have removed.
+
+    ONLY A GENUINELY ABSENT RECEIPT MAY FALL BACK (#202 review). Blob bytes alone cannot tell the two
+    apart — a directory, a gitlink, and an unreadable blob all read as "no bytes" — so the tree entry
+    is inspected FIRST, and every present-but-not-a-blob shape is refused by name."""
+    import idc_receipt_check as RC  # noqa: PLC0415 — lazy; the one canonical receipt parser
+
+    kind = _tree_entry_type(repo, commit, RC.RECEIPT_RELPATH)
+    if kind == "absent":
+        return None, None
+    if kind == "unknown":
+        return None, (
+            f"git could not report what commit {commit} carries at the install receipt path "
+            f"`{RC.RECEIPT_RELPATH}`, so the removal manifest cannot be derived"
+        )
+    if kind != "blob":
+        return None, (
+            f"commit {commit} carries a {kind} at the install receipt path `{RC.RECEIPT_RELPATH}`, "
+            "not a regular file, so the removal manifest cannot be derived; only a genuinely ABSENT "
+            "receipt may fall back to the pre-receipt legacy list"
+        )
+    blob = _tree_blob(repo, commit, RC.RECEIPT_RELPATH)
+    if blob is None:
+        return None, (
+            f"the install receipt `{RC.RECEIPT_RELPATH}` carried by commit {commit} cannot be read "
+            "from this object database, so the removal manifest cannot be derived"
+        )
+    fd, tmp = tempfile.mkstemp(prefix=".idc-uninstall-receipt.", suffix=".yaml")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(blob)
+        noise = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(noise):        # `die` narrates to stderr; we re-report it
+                _top, entries = RC.parse_receipt_document(tmp)
+        except (Exception, SystemExit) as exc:  # noqa: BLE001 — any unparseable receipt fails closed
+            detail = (noise.getvalue().strip() or str(exc)).splitlines()
+            return None, (
+                f"the install receipt `{RC.RECEIPT_RELPATH}` carried by commit {commit} does not "
+                f"parse, so the removal manifest cannot be derived ({detail[-1] if detail else exc})"
+            )
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    return entries, None
+
+
+def _incomplete_removal_problem(repo: str, oid: str, parent: str) -> str | None:
+    """None when `oid` removes the WHOLE IDC footprint its parent still carried, else what survived.
+
+    This is what binds the witness to a genuinely completed `/idc:uninstall` rather than to any commit
+    that merely drops the anchor (#202 review). Without it, a hand-made two-file commit deleting
+    `docs/workflow/tracker-config.yaml` and `TRACKER.md` has the ungoverning shape while leaving every
+    other IDC footprint in place — and its protected deletion would then be waved through the push
+    gate forever after the next `/idc:init`.
+
+    THE MANIFEST IS RE-DERIVED FROM THE PARENT TREE, never from the caller and never from the
+    worktree: the parent is the last governed state, so it still carries both the receipt and the
+    files the receipt lists. That keeps the answer identical at witness time and at every later push,
+    which is the property the whole door rests on.
+
+    AN OPERATOR-CUSTOMIZED FILE IS EXEMPT, BY BOTH OF THE TWO SIGNALS `/idc:uninstall` Phase 1 asks
+    keep-or-remove on (defaulting to KEEPING, so either may legitimately survive the removal commit):
+      * bytes in the parent tree that diverge from the stamped fingerprint (`modified` / `ask`), and
+      * `state: customized` on the entry itself — what `/idc:update` stamps for a file the operator
+        kept at its diff-and-ask. Its fingerprint is taken from those KEPT bytes, so it matches and
+        would otherwise read as `unchanged` (`classify_receipt` grades by bytes alone and never reads
+        `state`). Demanding its removal would refuse a genuine uninstall of any repo whose operator
+        ever kept a scaffold file through an update.
+    Only entries that are neither may a completed uninstall be required to have removed."""
+    entries, problem = _receipt_entries_in_tree(repo, parent)
+    if problem:
+        return problem
+
+    import idc_receipt_check as RC  # noqa: PLC0415 — lazy; the one canonical receipt parser
+
+    runtime = "plus the runtime artifacts an applied uninstall always removes"
+    if entries is None:
+        source = f"the pre-receipt legacy owned-file list ({runtime})"
+        required = set(C.LEGACY_UNINSTALL_OWNED_FILES)
+    else:
+        source = f"the install receipt carried by commit {parent} ({runtime})"
+        # The receipt never lists ITSELF, and uninstall Phase 3c removes it with the anchor.
+        required = {RC.RECEIPT_RELPATH}
+        for entry in entries:
+            rel = entry.get("path") or ""
+            if entry.get("state") == "customized":
+                continue    # operator-kept at update's diff-and-ask — uninstall asks, defaults to keep
+            blob = _tree_blob(repo, parent, rel)
+            if blob is None:
+                continue    # gone before this commit, or no longer a plain file — either way what the
+                            # parent carries is not the stamped bytes, so the divergence keep-signal
+                            # below covers it and nothing is left for this commit to be required to remove
+            if hashlib.sha256(blob).hexdigest() == entry.get("fingerprint"):
+                required.add(rel)
+
+    # THE SAME SET the uninstall closeout unions into its removal set (`_receipt_removal_set`), taken
+    # from the one definition rather than copied (#202 review). `TRACKER.md` is runtime-created, so it
+    # is deliberately absent from BOTH the receipt and the legacy list — yet an applied uninstall must
+    # still remove it. Without this union a commit could delete the whole receipt-listed footprint and
+    # the anchor, leave the tracker behind, and be witnessed as a completed uninstall anyway; its
+    # protected deletions would then be exempt at every push the repository ever makes.
+    required |= set(C.RUNTIME_UNINSTALL_ARTIFACTS)
+
+    # Only what the parent actually CARRIED can be required: a manifest file that never existed there
+    # (a runtime artifact never created, a footprint removed in an earlier commit) leaves nothing for
+    # this commit to remove.
+    survivors = [
+        rel for rel in sorted(required) if _tree_has(repo, parent, rel) and _tree_has(repo, oid, rel)
+    ]
+    if not survivors:
+        return None
+    shown = ", ".join(f"`{rel}`" for rel in survivors[:5])
+    if len(survivors) > 5:
+        shown += f" (and {len(survivors) - 5} more)"
+    return (
+        f"commit {oid} is not a completed IDC uninstall: it drops the governance anchor but leaves "
+        f"{len(survivors)} file(s) from {source} in place — {shown}. Run `/idc:uninstall`, which "
+        "removes the whole receipt-derived footprint in one commit, rather than witnessing a partial "
+        "removal"
+    )
+
+
+def uninstall_commit_problem(repo: str, commit: str) -> str | None:
+    """None when `commit` has the sanctioned uninstall shape, else why it does not.
+
+    THE SHAPE, re-derived from git every time and never read from any caller-supplied claim:
+      * it resolves to exactly one commit with exactly ONE parent (a merge is not an uninstall);
+      * its parent's tree HAS the governance anchor and its own tree does NOT — it is the commit that
+        carries the repository out of IDC governance;
+      * every protected machine surface it touches is touched by DELETION ONLY. Without this clause
+        "delete the anchor" would be a universal key for writing machine-owned state in the same
+        commit;
+      * it REMOVES THE WHOLE FOOTPRINT its parent still carried, derived from the install receipt in
+        the parent tree (or the fixed legacy list when that tree predates receipts) UNION the runtime
+        artifacts neither of those lists names. This is the clause that binds the door to a completed
+        `/idc:uninstall` instead of to any commit that happens to drop the anchor — see
+        `_incomplete_removal_problem`.
+
+    ORDER IS DELIBERATE: the cheap structural clauses answer first, so a near-miss is refused with
+    the most specific reason available rather than with the manifest complaint."""
+    try:
+        oid = _run_git(repo, "rev-parse", "--verify", "--quiet", f"{commit}^{{commit}}")
+    except RuntimeError as exc:
+        return f"`{commit}` does not resolve to a commit in this repository ({exc})"
+    if not oid:
+        return f"`{commit}` does not resolve to a commit in this repository"
+
+    parents = _run_git(repo, "rev-list", "--parents", "-n", "1", oid).split()[1:]
+    if len(parents) != 1:
+        return (
+            f"commit {oid} has {len(parents)} parent(s); the uninstall removal commit is a single "
+            "ordinary commit on top of the governed history"
+        )
+    parent = parents[0]
+
+    if not _tree_has(repo, parent, PG.GOVERNANCE_ANCHOR_RELPATH):
+        return (
+            f"commit {oid} is not the ungoverning commit: its parent does not carry the governance "
+            f"anchor `{PG.GOVERNANCE_ANCHOR_RELPATH}`, so this commit cannot be the one that removes it"
+        )
+    if _tree_has(repo, oid, PG.GOVERNANCE_ANCHOR_RELPATH):
+        return (
+            f"commit {oid} is not the ungoverning commit: it leaves the governance anchor "
+            f"`{PG.GOVERNANCE_ANCHOR_RELPATH}` in place, so the repository stays IDC-governed"
+        )
+
+    for status, rel in _commit_name_status(repo, oid):
+        if PG.is_protected_machine_surface(rel) and status != "D":
+            return (
+                f"commit {oid} does not only REMOVE machine-owned state: it applies `{status}` to the "
+                f"protected surface `{rel}`"
+            )
+    return _incomplete_removal_problem(repo, oid, parent)
+
+
+def _exempt_witnessed_uninstall_paths(
+    repo: str, commits: list[tuple[str, list[str]]]
+) -> list[str]:
+    """Flatten the outgoing commits into the gated path set, dropping ONLY the protected deletions of
+    commits that are both witnessed and still shape-verified.
+
+    Everything else in an exempted commit — its ordinary paths — stays in the gated set and is still
+    judged against the live authorization boundary, so the exemption removes exactly the part no
+    authorization could ever cover and nothing more."""
+    witnessed = PG.read_uninstall_witness(repo)
+    paths: list[str] = []
+    seen: set[str] = set()
+    for commit, rels in commits:
+        exempt: set[str] = set()
+        if commit.lower() in witnessed and uninstall_commit_problem(repo, commit) is None:
+            exempt = {rel for rel in rels if PG.is_protected_machine_surface(rel)}
+        for rel in rels:
+            if rel in exempt or rel in seen:
+                continue
+            seen.add(rel)
+            paths.append(rel)
     return paths
 
 
@@ -321,10 +631,33 @@ def cmd_pre_commit(args: argparse.Namespace) -> int:
 
 def cmd_pre_push(args: argparse.Namespace) -> int:
     repo = _repo_root(args.repo)
-    paths = _collect_pre_push_paths(repo, sys.stdin.read().splitlines(), remote=args.remote)
+    commits = _collect_pre_push_commits(repo, sys.stdin.read().splitlines(), remote=args.remote)
+    paths = _exempt_witnessed_uninstall_paths(repo, commits)
     if not paths:
         return 0
     return _gate_exit(_gate(repo, args.plugin_root, "git", paths))
+
+
+def cmd_witness_uninstall(args: argparse.Namespace) -> int:
+    """The sanctioned uninstall push door: prove the shape, then record the commit.
+
+    Called from the `/idc:uninstall` playbook — Phase 3c right after it lands the removal commit, and
+    its recovery section for a repository an older plugin version already stranded. Both are COMMAND
+    paths; the operator is never told to run this helper by hand (AGENTS.md: the `scripts/idc_*.py`
+    helpers are called by the commands). It is safe to point at any commit: anything that is not a
+    completed uninstall is refused here AND, independently, at push."""
+    repo = _repo_root(args.repo)
+    problem = uninstall_commit_problem(repo, args.commit)
+    if problem:
+        print(
+            "IDC Path Gate refused to witness this commit as an IDC uninstall removal: " + problem,
+            file=sys.stderr,
+        )
+        return 1
+    oid = _run_git(repo, "rev-parse", "--verify", f"{args.commit}^{{commit}}")
+    PG.record_uninstall_commit(repo, oid)
+    print(f"IDC Path Gate: witnessed uninstall removal commit {oid}; it is now publishable.")
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -351,6 +684,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--plugin-root", required=True)
     p.add_argument("--remote")
     p.set_defaults(func=cmd_pre_push)
+
+    p = sub.add_parser(
+        "witness-uninstall",
+        help="record an IDC uninstall removal commit so it can be pushed (shape-verified)",
+    )
+    p.add_argument("--repo", required=True)
+    p.add_argument("--commit", required=True)
+    p.set_defaults(func=cmd_witness_uninstall)
 
     return ap
 

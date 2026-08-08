@@ -202,10 +202,27 @@ land ALL removals as one revertable commit:
 git -C "$ROOT" rm --quiet --ignore-unmatch \
   docs/workflow/install-receipt.yaml docs/workflow/tracker-config.yaml
 git -C "$ROOT" commit -m "idc: uninstall — remove IDC footprints (revert this commit to reinstate)"
+# MANDATORY, and only once that commit exists: make it publishable.
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_path_gate.py" witness-uninstall \
+  --repo "$ROOT" --commit "$(git -C "$ROOT" rev-parse HEAD)"
 ```
 Stage only the removed paths and `.claude/settings.json` — **not** the archive tarball (it must
 stay untracked). Capture the commit SHA for the summary. On a re-run with nothing left to remove,
-make no commit and report `skipped-absent` across the board.
+make no commit and report `skipped-absent` across the board — and run no witness door, because there
+is no commit to witness.
+
+**Why the witness door is not optional.** This commit necessarily DELETES protected machine-owned
+surfaces (`TRACKER.md`, the install receipt). It lands fine — both git backstops are already dormant,
+because the governance anchor left the worktree a line earlier. But the pre-push backstop inspects the
+whole **outgoing range** under whatever posture the repo has **later**, so the first time the repo is
+governed again — a fresh `/idc:init`, a `git revert` — that historical deletion is re-litigated and the
+push is refused permanently, taking every commit stacked behind it down with it. The door records this
+commit's own SHA in machine-owned state under the repository Git directory: it survives the removal
+because it is not in the worktree, and it never travels to a remote. It is **not** a message check —
+the door re-derives the commit's shape from git (exactly one parent, the anchor present in the parent
+tree and absent from this one, every protected surface touched by deletion only), and the pre-push
+gate re-derives that same shape independently on every push. A commit that is not the ungoverning
+removal commit is refused at both ends, so pointing the door at a wrong SHA is safe and inert.
 
 ## Phase 4 — GitHub side (opt-in; default leaves it untouched)
 
@@ -246,6 +263,7 @@ Print one table of every footprint (`removed` / `skipped-absent` / `kept (custom
 manifest), then:
 - the archive path from Phase 2,
 - the single revert command — `git revert <sha>` — to reinstate everything,
+- that the removal commit is local and **publishable** (`git push`) because Phase 3c witnessed it,
 - the board disposition (untouched / N issues closed / board deleted),
 - and the **machine-global** surfaces that uninstall deliberately does not touch, for the operator
   to run separately if they want a full removal:
@@ -255,6 +273,66 @@ manifest), then:
 
 | Footprint | Status |
 |-----------|--------|
+
+## Repairing a repository an earlier uninstall already stranded
+
+A repo uninstalled by a plugin version that predates the Phase-3c witness door carries an
+**unwitnessed** removal commit. Its symptom is unmistakable: the repo sits ahead of its remote and
+every `git push` — including pushes of unrelated later commits, because the range still contains that
+one — dies with
+
+```
+IDC Path Gate denied this mutation because `TRACKER.md` is or contains a protected machine-owned surface.
+```
+
+This only ever bites a repo that is **governed again** (a fresh `/idc:init`, or a `git revert` of the
+removal) — while the anchor is absent the backstops are dormant and the push simply goes through.
+
+**This repair is a step YOU run, not a snippet to hand the operator** (`AGENTS.md`: the
+`scripts/idc_*.py` helpers are called by the commands). When an operator reports this symptom, run the
+door for them from this playbook. It **removes nothing** — reaching Phase 0 and doing a real uninstall
+is the wrong answer here. Do **not** reach for `--no-verify`, and do **not** rewrite history:
+
+1. **List the outgoing range** and identify every uninstall removal commit in it (there may be more
+   than one — repeated uninstall/re-init cycles stack them). Derive that range from the remote the
+   operator will actually push to, with the **same semantics pre-push uses** — never from
+   `@{upstream}`, which does not exist on a branch's first push and names the wrong remote when they
+   publish to a mirror. In both of those cases an `@{upstream}` range cannot list the very commits
+   the gate is inspecting, which is the whole point of this step:
+   ```bash
+   REMOTE=origin      # ask the operator when they push somewhere else; this must be the push target
+   BRANCH="$(git -C "$ROOT" symbolic-ref --quiet --short HEAD)"
+   HEAD_SHA="$(git -C "$ROOT" rev-parse HEAD)"
+   # What that remote already has for this ref. EMPTY means the ref is new there (a first push, or a
+   # mirror that has never seen this branch, or a detached HEAD) — and for a new ref pre-push excludes
+   # everything the remote already has on ANY ref, so mirror that here.
+   REMOTE_SHA="$(git -C "$ROOT" ls-remote --refs "$REMOTE" "refs/heads/$BRANCH" | cut -f1)"
+   if [ -n "$REMOTE_SHA" ]; then
+     EXCLUDE="$REMOTE_SHA"
+   else
+     EXCLUDE="$(git -C "$ROOT" ls-remote --refs "$REMOTE" | cut -f1 | while read -r sha; do
+       git -C "$ROOT" cat-file -e "$sha^{commit}" 2>/dev/null && printf '%s\n' "$sha"
+     done)"
+   fi
+   git -C "$ROOT" log --oneline "$HEAD_SHA" ${EXCLUDE:+--not $EXCLUDE}
+   ```
+2. **Witness each candidate** through the door, which re-derives its shape from git before recording
+   anything:
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_path_gate.py" witness-uninstall \
+     --repo "$ROOT" --commit <the removal commit's sha>
+   ```
+   A commit that is not a completed uninstall is **refused with the reason** — including a partial
+   removal that drops the governance anchor but leaves other IDC footprints installed. The door
+   demands the SAME removal set the Phase-3b closeout validates: the receipt-derived (or legacy)
+   footprints **union the runtime artifacts** (`TRACKER.md`), so a commit that leaves the tracker
+   behind is refused too. That refusal is the door working: report it and stop rather than trying to
+   force the commit through. Pointing the door at a wrong SHA is safe and inert.
+3. **Report** which commits were witnessed and tell the operator the repo is publishable
+   (`git push`). Do not push on their behalf.
+
+Nothing else in the range is exempted: any other commit touching a protected surface still has to be
+dealt with on its own terms.
 
 ## Command lifecycle — verify at entry, close BEFORE ungoverning
 

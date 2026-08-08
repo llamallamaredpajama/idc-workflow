@@ -2900,12 +2900,20 @@ def _plugin_still_enabled(settings_path: str) -> bool:
 # Runtime-created IDC artifacts the receipt deliberately does NOT list (idc_receipt_check excludes
 # TRACKER.md as a runtime footprint), but which an applied uninstall must STILL remove (wave-4 finding
 # 6): the removal set is the receipt footprints UNION these documented runtime artifacts.
-_RUNTIME_UNINSTALL_ARTIFACTS = {"TRACKER.md"}
+#
+# PUBLIC for the same reason `LEGACY_UNINSTALL_OWNED_FILES` is (#202 review): the uninstall push door
+# re-derives the completion manifest from git and must union the IDENTICAL set. Two copies would let
+# the shape the door demands drift from the set the closeout validates — and a file in the gap can be
+# left behind by a commit the door still witnesses as a completed uninstall.
+RUNTIME_UNINSTALL_ARTIFACTS = frozenset({"TRACKER.md"})
 
 # Exact IDC-owned files in installations made before install receipts existed. Directories are
 # deliberately absent: matrices, reviews, and intake manifests are operator work products. Only the
 # ownership keepfiles (and the review ignore file shipped by the scaffold) may be removed.
-_LEGACY_UNINSTALL_OWNED_FILES = frozenset({
+#
+# PUBLIC because the uninstall push door re-derives the same removal manifest from git (#202 review):
+# one list, so the shape the door demands can never drift from the set the closeout validates.
+LEGACY_UNINSTALL_OWNED_FILES = frozenset({
     "WORKFLOW.md",
     "WORKFLOW-config.yaml",
     _GOVERNANCE_ANCHOR,
@@ -2944,7 +2952,7 @@ def _uninstall_owned_files(repo: str, expected_source: object = None,
                 "the canonical install receipt existed when uninstall started but is now absent; "
                 "retain docs/workflow/install-receipt.yaml through finish so the modern removal "
                 "manifest cannot silently downgrade to the legacy fallback")
-        return set(_LEGACY_UNINSTALL_OWNED_FILES), "legacy-fallback", None
+        return set(LEGACY_UNINSTALL_OWNED_FILES), "legacy-fallback", None
     if expected_source == "legacy-fallback":
         return None, None, _fail(
             "uninstall-receipt-source-changed",
@@ -2985,7 +2993,7 @@ def _receipt_removal_set(repo: str, session: str):
     owned, _source, err = _uninstall_owned_files(repo, receipt_source, receipt_sha256)
     if err is not None:
         return None, err
-    footprints = (owned | _RUNTIME_UNINSTALL_ARTIFACTS) - {_GOVERNANCE_ANCHOR}
+    footprints = (owned | RUNTIME_UNINSTALL_ARTIFACTS) - {_GOVERNANCE_ANCHOR}
     return footprints, None
 
 
@@ -3123,7 +3131,7 @@ def _claim_uninstall(refs: dict, repo: str, session: str) -> CloseoutResult:
                          "uninstall no-action rejected — this run was invoked with board flag(s) "
                          f"{sorted(flags)} that requested board work; a run that requested "
                          "--close-issues/--delete-board is an 'applied', never a no-action")
-        for rel in sorted(_RUNTIME_UNINSTALL_ARTIFACTS):
+        for rel in sorted(RUNTIME_UNINSTALL_ARTIFACTS):
             p = _confined_repo_path(repo, rel)
             if p is not None and os.path.exists(p):
                 return _fail("uninstall-no-action-runtime-artifact",

@@ -580,8 +580,11 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   reports a non-empty `ask`: a successful update ends with the receipt describing the repo exactly.
   Evidence refs: `refs:{}` (optionally `receipt:"<repo-rel receipt path>"` if non-default).
 - **`blocked_external`** — an update failure the validator can RE-DERIVE by a read-only re-run: cite
-  `idc_receipt_check.py` (the fingerprint re-run must actually find drift — an invalid receipt, or a
-  stamped file that is modified, missing, or an operator-data file no longer matching the receipt —
+  `idc_receipt_check.py` (the re-run must actually find a REAL failure — an invalid receipt, a stamped
+  file that is `modified` or `missing`, or an operator-data file a **fixed-code validator REFUSES**,
   which is what grounds the stop Phase 2 §A mandates over a registry the validator refuses):
   `blocker:{helper:"idc_receipt_check.py", exit (nonzero), diagnostic}`.
-  A caller exit/diagnostic alone is never accepted.
+  A caller exit/diagnostic alone is never accepted, **and neither is an operator-data file that has
+  merely GROWN since the receipt was stamped**. A fingerprint cannot tell the finisher's required
+  handle append from a mangled registry — the validator can, so the validator is what grounds the
+  stop. Growth alone is not a blocker: re-stamp per Phase 4 and close `complete`.

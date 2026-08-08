@@ -454,7 +454,10 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   Evidence refs: `refs:{}` (optionally `receipt:"<repo-rel receipt path>"` /
   `settings:"<repo-rel settings path>"` if non-default).
 - **`blocked_external`** — a deterministic init helper failure the validator can RE-DERIVE by a
-  read-only re-run: cite `idc_receipt_check.py` (the receipt fingerprint re-run must actually find drift
-  — an invalid receipt, or a stamped file that is modified, missing, or an operator-data file no longer
-  matching what this run stamped): `blocker:{helper:"idc_receipt_check.py",
-  exit (nonzero), diagnostic}`. A caller exit/diagnostic alone is never accepted.
+  read-only re-run: cite `idc_receipt_check.py` (the re-run must actually find a REAL failure — an
+  invalid receipt, a stamped file that is `modified` or `missing`, or an operator-data file a
+  fixed-code validator REFUSES): `blocker:{helper:"idc_receipt_check.py",
+  exit (nonzero), diagnostic}`. A caller exit/diagnostic alone is never accepted, **and neither is an
+  operator-data file that has merely GROWN since the receipt was stamped** — that is what the finish
+  contract requires on every green build, so it proves nothing failed. Re-stamp the receipt and close
+  honestly instead.

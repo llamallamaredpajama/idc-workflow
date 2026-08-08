@@ -474,15 +474,13 @@ def _check_blocker(command: str, refs: dict, repo: str, session: str) -> Closeou
         if not _ne_str(report.get("operation")) or report.get("session_id") != session:
             return _fail("blocked-external-intake-invalid", "Intake failure receipt is incomplete")
     elif base == _RECEIPT_HELPER:
-        # RE-RUN the receipt fingerprint checker READ-ONLY (safely re-runnable): the blocker is grounded
-        # ONLY when the re-run actually FAILS (an invalid receipt, or a modified/missing stamped file).
-        # A clean re-run refuses the blocker (a helper that succeeds cannot ground a blocked stop).
-        fp = _receipt_fingerprints_ok(repo, refs.get("receipt"))
-        if fp.ok:
-            return _fail("blocked-external-receipt-not-failing",
-                         "blocked_external citing the receipt checker requires a re-run to actually FAIL "
-                         "(an invalid receipt or a modified/missing stamped file); the read-only re-run "
-                         "passed — there is no deterministic failure to ground a blocked stop")
+        # RE-RUN the receipt checker READ-ONLY (safely re-runnable): the blocker is grounded ONLY when
+        # the re-run finds a failure that can be told apart from the growth the lifecycle DESIGNS —
+        # see `_receipt_blocker_grounded`. A clean re-run, or a divergence that is only an always-ask
+        # file having grown, refuses the blocker (a helper that did not fail cannot ground a stop).
+        grounded = _receipt_blocker_grounded(repo, refs.get("receipt"))
+        if not grounded.ok:
+            return grounded
     elif base == _PAUSE_STATE_HELPER:
         # THE DEADLOCK THIS RESOLVES. `/idc:resume` clears the pause record; when the REMOVAL fails
         # (an unwritable path), `commands/resume.md` step 1 correctly says STOP — resuming over a
@@ -1401,17 +1399,20 @@ def _receipt_fingerprints_ok(repo: str, receipt_rel: object) -> CloseoutResult:
     or an invalid/unreadable receipt — fails the closeout closed. This is what proves the scaffold
     actually landed intact, which the old version/syntax parse never checked.
 
-    STRICT, DELIBERATELY (issue #194 follow-up). This helper serves the two doors that CERTIFY —
-    init/update `complete`, and the read-only re-run that grounds a `blocked_external` citing the
-    receipt checker — so it asks for the EXACT-MATCH answer: an `ask`-class divergence (a diverged
-    always-ask operator-data file) fails it too. #194 taught `verify` to report that class as `ask`
-    rather than drift, which is right for the STEADY-STATE report — the finisher is required to grow
-    the handle registry on every green build, and grading that as drift alarmed after every success.
-    It is wrong here. Both doors run a moment after the calling command wrote its OWN fresh receipt
-    over the stamped set, so there is no sanctioned growth to forgive in that window: a divergence is
-    corruption, `complete` must refuse it, and — since `idc_receipt_check.py` is the ONLY blocking
-    helper init/update/uninstall may cite — the re-run must FAIL so the stop those playbooks mandate
-    over a mangled config or registry has an honest terminal status to close with."""
+    STRICT, DELIBERATELY (issue #194 follow-up). This helper serves the doors that CERTIFY SUCCESS —
+    init/update `complete` — so it asks for the EXACT-MATCH answer: an `ask`-class divergence (a
+    diverged always-ask operator-data file) fails it too. #194 taught `verify` to report that class as
+    `ask` rather than drift, which is right for the STEADY-STATE report — the finisher is required to
+    grow the handle registry on every green build, and grading that as drift alarmed after every
+    success. It is wrong here. This door runs a moment after the calling command wrote its OWN fresh
+    receipt over the stamped set, so there is no sanctioned growth to forgive in that window: a
+    divergence means what this run just stamped did not survive, and certifying `complete` over it
+    would publish an intact scaffold that is not intact.
+
+    IT IS NOT THE BLOCKER DOOR, and must not be reused as one. Strictness makes a SUCCESS claim harder
+    and a FAILURE claim easier, so the same answer that safely refuses `complete` would wrongly ACCEPT
+    a `blocked_external` on a healthy repo whose registry has simply grown. `_receipt_blocker_grounded`
+    below is that door, and it is bound to a signal that can tell growth from corruption."""
     rel = receipt_rel if _ne_str(receipt_rel) else _RECEIPT_RELPATH
     path = _confined_repo_path(repo, rel)
     if path is None or not os.path.isfile(path):
@@ -1446,6 +1447,118 @@ def _receipt_fingerprints_ok(repo: str, receipt_rel: object) -> CloseoutResult:
                      f"the receipt fingerprint verification found drift ({detail}) — the scaffold is "
                      "not intact at the stamped version")
     return CloseoutResult(True, "ok", "receipt fingerprints verify (scaffold intact)", {})
+
+
+# WHICH ALWAYS-ASK FILES A FIXED-CODE VALIDATOR CAN PRONOUNCE ON. An `ask` classification says only
+# "these bytes are not the bytes the receipt stamped". That is the IDENTICAL answer for the finisher's
+# REQUIRED handle append and for a registry somebody mangled — verified: both leave `verify` reporting
+# `0 modified, 1 ask, 0 missing, ok: true` — which is exactly why a fingerprint alone must never ground
+# a blocked stop. A validator CAN separate them, so the blocker asks one.
+#
+# Only the verification-handle registry has such a validator, and it is also the only always-ask file
+# any playbook mandates a stop over (commands/update.md Phase 2 §A: stop on a registry the fixed
+# validator refuses). The two configs have no validity checker in fixed code — `idc_config_keys.py` is
+# a structural DIFF that walks anything it is handed, not a parser that refuses — so a diverged config
+# cannot be SHOWN to be corrupt. It therefore grounds nothing: an unprovable claim is refused, never
+# assumed, and the honest close stays reachable either way (restore the file, or re-stamp the receipt
+# and close `complete`).
+def _handle_registry_refused(repo: str):
+    """(refused, detail) — does the fixed-code verification-handle validator REFUSE this registry?
+
+    Only an ACTUAL refusal counts. A validator that cannot be imported or cannot run leaves the claim
+    UNPROVEN, and an unproven blocked stop is refused — never upgraded to a proven one by the fact
+    that the check itself broke."""
+    try:
+        import idc_verification_handles as VH  # noqa: E402 — lazy
+    except Exception as exc:  # noqa: BLE001 — a validator that will not load proves nothing
+        return False, f"the verification-handle validator could not be loaded ({exc})"
+    try:
+        VH.validate_registry(repo)
+    except VH.HandleError as exc:
+        return True, str(exc)
+    except SystemExit as exc:
+        return True, f"the validator exited nonzero ({exc})"
+    except Exception as exc:  # noqa: BLE001 — a check that broke is not a check that refused
+        return False, f"the verification-handle validator could not run ({exc})"
+    return False, "the registry passes fixed-code validation"
+
+
+_ALWAYS_ASK_VALIDATORS = {"docs/workflow/verification-handles.yaml": _handle_registry_refused}
+
+
+def _receipt_blocker_grounded(repo: str, receipt_rel: object) -> CloseoutResult:
+    """Does a `blocked_external` citing `idc_receipt_check.py` have a REAL failure under it?
+
+    THE DOOR THIS IS NOT. `_receipt_fingerprints_ok` above certifies SUCCESS and is deliberately
+    exact-match. Reusing that same strict answer to validate a BLOCKER inverts the safety it buys:
+    strictness makes a success claim harder to make and a FAILURE claim EASIER, and
+    `idc_receipt_check.py` is the ONLY blocking helper init/update/uninstall may cite. So on any repo
+    where builds have shipped — where the finisher has appended each newly-proven handle to
+    docs/workflow/verification-handles.yaml exactly as the finish contract REQUIRES — a strict re-run
+    "fails" on a perfectly healthy scaffold, and all three commands could close `blocked_external`
+    with a typed exit: lifecycle record cleared, work never done, an external block reported that
+    nothing caused.
+
+    SO THE GROUNDING IS BOUND TO A SIGNAL THAT CAN TELL CORRUPTION FROM SANCTIONED GROWTH, which a
+    fingerprint provably cannot:
+
+      * An unresolvable or invalid receipt, or a stamped file `modified` or `missing` — unambiguous. A
+        template-owned scaffold file is supposed to hold exactly the bytes init laid down, and an
+        absent file is absent whoever owns it. This is what `verify` exits nonzero on, and it is
+        commands/uninstall.md Phase 1's mandated stop verbatim.
+      * An `ask`-only divergence — ambiguous BY CONSTRUCTION, so it grounds nothing by itself. It
+        grounds the stop only when a fixed-code VALIDATOR refuses one of the diverged files, which is
+        precisely the stop commands/update.md Phase 2 §A mandates over a registry the validator
+        refuses. A grown-but-valid registry is not a failure; it is the finish contract working.
+
+    The refusal NAMES the honest close, because there always is one: re-stamp the receipt so it
+    describes the repo again and close `complete` (commands/update.md Phase 4 now re-stamps for exactly
+    this reason), or cite the cause that actually blocked the run. A blocked stop is a claim about an
+    ATTEMPT that failed, and "the receipt is older than the registry" is not one."""
+    rel = receipt_rel if _ne_str(receipt_rel) else _RECEIPT_RELPATH
+    path = _confined_repo_path(repo, rel)
+    if path is None or not os.path.isfile(path):
+        return CloseoutResult(True, "ok", "the install receipt could not be resolved, which is what "
+                                          "the checker itself exits nonzero on", {})
+    try:
+        import idc_receipt_check as RC  # noqa: E402 — lazy
+        _top, entries = RC.parse_receipt_document(path)
+        counts, classified = RC.classify_receipt(repo, entries)
+    except SystemExit as exc:  # an invalid receipt — the helper's own documented nonzero exit
+        return CloseoutResult(True, "ok", f"the install receipt is invalid ({exc})", {})
+    except Exception as exc:  # noqa: BLE001 — a re-derivation that BROKE is not a helper that FAILED
+        return _fail("blocked-external-receipt-unprovable",
+                     f"the read-only receipt re-run could not be completed ({exc}), so nothing "
+                     "re-derives the failure this blocked stop claims")
+    if counts["modified"] or counts["missing"]:
+        return CloseoutResult(True, "ok", "the receipt re-run finds real scaffold drift "
+                                          f"({counts['modified']} modified, {counts['missing']} missing)", {})
+    ask_paths = [ask_rel for state, ask_rel in classified if state == "ask"]
+    if not ask_paths:
+        return _fail("blocked-external-receipt-not-failing",
+                     "blocked_external citing the receipt checker requires a re-run to actually FAIL "
+                     "(an invalid receipt or a modified/missing stamped file); the read-only re-run "
+                     "passed — there is no deterministic failure to ground a blocked stop")
+    refusals = []
+    for ask_rel in ask_paths:
+        validator = _ALWAYS_ASK_VALIDATORS.get(ask_rel)
+        if validator is None:
+            continue
+        refused, detail = validator(repo)
+        if refused:
+            refusals.append(f"{ask_rel} ({detail})")
+    if refusals:
+        return CloseoutResult(True, "ok", "a fixed-code validator REFUSES the diverged operator-data "
+                                          "file(s): " + "; ".join(refusals), {})
+    return _fail("blocked-external-receipt-sanctioned-growth",
+                 "blocked_external citing the receipt checker requires a REAL failure — an invalid "
+                 "receipt, a stamped file that is modified or missing, or an operator-data file a "
+                 "fixed-code validator REFUSES. The only divergence here is "
+                 f"{', '.join(ask_paths)}, and no validator refuses it: an always-ask file whose bytes "
+                 "grew since the receipt was stamped is what the finish contract REQUIRES on every "
+                 "green build, so it is not proof that anything failed. Re-stamp the receipt so it "
+                 "describes the repo again and close honestly, or cite the cause that actually "
+                 "blocked this run.")
 
 
 def _running_plugin_version():

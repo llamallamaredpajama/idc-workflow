@@ -43,11 +43,14 @@ tail runs. Idempotent — safe to re-run when the item is already Done / branch 
 `finish: ok (close-only)`.
 """
 import argparse
+import filecmp
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(SCRIPT_DIR, "hooks"))   # the ledger lives one level down
@@ -542,13 +545,37 @@ def worktree_for_branch(repo, branch):
     return None
 
 
-def worktree_remove(repo, worktree_abs):
+def worktree_remove(repo, worktree_abs, relocated=()):
+    """Remove the build worktree with a plain, NON-FORCE `git worktree remove` — the refusal on a dirty
+    tree is a guard, not an obstacle (agents/idc-finisher.md relies on it to make an uncommitted
+    verification-handle append impossible to lose).
+
+    `relocated` is the (source, durable copy) pairs `persist_build_witness_artifacts` produced. Their
+    sources are machine artifacts that are deliberately never committed, so they would make this
+    removal refuse; they are dropped HERE, at the last possible moment, and PUT BACK if the removal
+    refuses anyway (an unrelated untracked file). That keeps the refusal's promise — nothing shipped,
+    re-run the same command — literally true, instead of leaving the operator with a command line
+    whose `--build-receipt` and `--verdict` paths no longer exist."""
     registered = git_worktree_list(repo)
     is_registered = any(os.path.realpath(p) == os.path.realpath(worktree_abs) for p in registered)
     if not os.path.isdir(worktree_abs) and not is_registered:
         return  # idempotent: already gone
+    for src, _dest in relocated:
+        try:
+            os.remove(src)
+        except OSError:
+            pass    # already gone, or unreadable — `git worktree remove` below is the real check
     rc, _out, err = _run(["git", "worktree", "remove", worktree_abs], repo)
     if rc != 0:
+        for src, dest in relocated:
+            try:
+                if not os.path.exists(src):
+                    os.makedirs(os.path.dirname(src), exist_ok=True)
+                    shutil.copyfile(dest, src)
+            except OSError as exc:
+                _warn(f"could not restore the build artifact {src} after the worktree removal was "
+                      f"refused ({exc}); its durable copy at {dest} is intact — re-run this finish "
+                      f"with --build-receipt/--verdict pointing at the copies under {os.path.dirname(dest)}")
         _fail("worktree-remove", f"git worktree remove {worktree_abs} failed: {err.strip()[:300]}")
 
 
@@ -805,6 +832,287 @@ def enforce_build_receipt(args, repo, branch):
     return (verified or {}).get("head")
 
 
+# ── the build witness artifacts must outlive the ephemeral build worktree (#197 follow-up) ───────
+# The four artifacts the receipt binds together, as the receipt itself names them. `contract_path` /
+# `execution_path` / `verdict_path` are already LOGICAL repo paths (idc_build_receipt._rel); the
+# receipt's own logical path is derived from where it sits.
+BUILD_WITNESS_FIELDS = ("contract_path", "execution_path", "verdict_path")
+
+
+def _same_path(a, b):
+    return os.path.realpath(a) == os.path.realpath(b)
+
+
+def resolve_governed_checkout(repo, worktree_abs):
+    """The durable checkout this tail must run against, given `--repo` (default: the cwd).
+
+    THE SHIPPED INVOCATION RUNS FROM THE BUILD WORKTREE. Build always runs in a linked worktree
+    (#197): agents/idc-implementer.md freezes with `--repo "$PWD"`, agents/idc-finisher.md step 5
+    mints the receipt with `--repo "$PWD"` and then calls this tail with NO `--repo` at all. So
+    `--repo` defaults to the cwd, and the cwd is the very worktree step 1 removes — which broke
+    every step that follows it: the witness artifacts had nowhere durable to land (the
+    `persist-build-artifacts` refusal below), `tracker_close` would edit a `TRACKER.md` inside the
+    deleted directory, `journal_append` would write the transition record under it, and every later
+    `git`/`gh` call would run with a cwd deleted out from under it.
+
+    The governed checkout is the PRIMARY checkout — `VC._repo_identity`, the one root every linked
+    worktree of this repository already agrees on and the same derivation #197 uses for artifact
+    identity. It is DERIVED from git, never guessed, and only when `--repo` actually resolves to the
+    worktree being removed: an explicit `--repo` pointing anywhere else is left exactly as given, so
+    the split shape tests/smoke/phase4-git-finish.sh drives is untouched."""
+    if not worktree_abs:
+        return repo
+    try:
+        import idc_validation_contract as BVC   # noqa: PLC0415 — lazy, like the receipt gate
+        top = BVC._worktree_toplevel(repo)
+    except Exception:  # noqa: BLE001 — a --repo that is not a git worktree at all is diagnosed by
+        return repo    # `read_backend` (unknown backend) with its own message; nothing to derive here
+    if not _same_path(top, worktree_abs):
+        return repo
+    primary = None
+    try:
+        primary = BVC._repo_identity(repo)
+        primary_top = BVC._worktree_toplevel(primary)
+    except Exception as exc:  # noqa: BLE001 — no derivable governed checkout: fail closed, loudly
+        _fail("resolve-governed-checkout",
+              f"--repo resolves to the build worktree this finish removes ({worktree_abs}) and its "
+              f"governed primary checkout could not be resolved ({str(exc)[:160]}) — re-run with "
+              "--repo pointing at the checkout the tracker lives in")
+    if _same_path(primary, worktree_abs) or not _same_path(primary_top, primary):
+        _fail("resolve-governed-checkout",
+              f"--repo resolves to the build worktree this finish removes ({worktree_abs}) and the "
+              f"derived governed checkout {primary} is not a usable working tree — re-run with "
+              "--repo pointing at the checkout the tracker lives in")
+    print(f"finish: --repo resolved to the build worktree being removed; running the tail against "
+          f"the governed checkout {primary}")
+    return primary
+
+
+def _logical_dest(dest_root, rel, label):
+    """`dest_root/rel` for a logical repo path, refusing anything that escapes the destination root."""
+    if os.path.isabs(rel) or rel.split(os.sep)[0] == os.pardir:
+        _fail("persist-build-artifacts",
+              f"the build receipt's {label} {rel!r} is not a repo-relative logical path — refusing to "
+              "relocate an artifact outside the governed checkout")
+    dest = os.path.realpath(os.path.join(dest_root, rel))
+    if not dest.startswith(os.path.realpath(dest_root) + os.sep):
+        _fail("persist-build-artifacts",
+              f"the build receipt's {label} {rel!r} resolves outside the governed checkout "
+              f"{dest_root} — refusing to relocate it")
+    return dest
+
+
+def _guard_destination(src, dest, label):
+    """REFUSE to destroy anything already sitting at a durable destination. Returns True when the
+    copy still has to happen, False when the destination already holds byte-identical content.
+
+    THIS TAIL PERSISTS MACHINE ARTIFACTS; IT NEVER OVERWRITES REPO CONTENT. A logical destination
+    can already be occupied — by a committed file the receipt's path happens to collide with, by an
+    operator's own file, or by an older artifact from a previous attempt — and the merge is two
+    steps away, so an unconditional replace would consume those bytes with nothing to restore them
+    from (`worktree_remove` restores SOURCES; it has never had a copy of a destination it clobbered).
+
+    Byte-identical is the one case that is provably nothing: the re-runnable refusal path
+    (tests/smoke/governance/build-witness-linked-worktree.sh case D2) re-runs the identical finish
+    over destinations its own first attempt wrote, and those must stay a silent no-op. Anything else
+    is a collision only the operator can adjudicate, and it is refused BEFORE the worktree removal —
+    so nothing has shipped, the build worktree is intact, and the same command line still works once
+    the destination is cleared."""
+    if not os.path.exists(dest):
+        return True
+    if not os.path.isfile(dest):
+        _fail("persist-build-artifacts",
+              f"refusing to persist the build {label}: {dest} exists and is not a regular file, so "
+              "the artifact has nowhere to land (nothing has shipped; clear that path and re-run "
+              "this finish)")
+    try:
+        identical = filecmp.cmp(src, dest, shallow=False)
+    except OSError:
+        identical = False       # unreadable either side — cannot prove sameness, so refuse below
+    if identical:
+        return False
+    _fail("persist-build-artifacts",
+          f"refusing to overwrite {dest}: the governed checkout already holds different bytes at the "
+          f"build {label}'s logical path. This tail makes machine artifacts durable — it never "
+          "destroys existing repo content. Nothing has shipped and the build worktree is intact: "
+          "move that file aside (it is superseded if it is an older artifact of this build) and "
+          "re-run the identical finish.")
+
+
+def _copy_artifact(src, dest, label):
+    """Copy `src` onto `dest`, atomically (a temp file in the destination directory, then `os.replace`)
+    and WITHOUT touching the source — dropping it is `worktree_remove`'s job, so that every refusal
+    between here and the removal leaves the caller's own `--build-receipt` / `--verdict` paths intact
+    and the finish straightforwardly re-runnable. Copy rather than rename so a build worktree on a
+    different filesystem works. A destination that already exists is adjudicated by
+    `_guard_destination` first — this function never silently replaces one."""
+    if not _guard_destination(src, dest, label):
+        return
+    try:
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".idc-finish.", suffix=".tmp", dir=os.path.dirname(dest))
+        os.close(fd)
+        shutil.copyfile(src, tmp)
+        os.replace(tmp, dest)
+    except OSError as exc:
+        _fail("persist-build-artifacts",
+              f"could not persist the build {label} to {dest}: {exc} — the build worktree is about to "
+              "be removed, so refusing rather than letting it take the artifact with it (nothing has "
+              "shipped; fix the destination and re-run this finish)")
+
+
+REVIEW_WORK_PRODUCT = "review work product"
+
+
+def _review_work_products(src_root, review_rel, already):
+    """The files the review left BESIDE its verdict that git does not track — the human report, the
+    per-round records (`pr-<n>-round-<r>.json`, agents/idc-review-coordinator.md) and the per-PR
+    seen-fingerprint ledger (`scripts/idc_review_seen_ledger.py`).
+
+    They are in the same doomed directory as the verdict, and the shipped
+    `docs/workflow/code-reviews/.gitignore` ignores `*` — which is exactly why they need rescuing
+    rather than refusing: an IGNORED file does not make `git worktree remove` complain, so the
+    removal succeeds and takes the review's whole paper trail with it. `commands/uninstall.md`
+    classifies review reports as operator work products that must be preserved; this is the one
+    place in the lifecycle that can honour that for a review run inside a build worktree.
+
+    TRACKED files are excluded on purpose: they are in the commit, so they travel with the merge and
+    already exist in the governed checkout. Nothing here is committed, and nothing is required — a
+    review that wrote only its verdict simply yields an empty list."""
+    if not review_rel or review_rel in (os.curdir, os.sep):
+        return []
+    abs_dir = os.path.join(src_root, review_rel)
+    if not os.path.isdir(abs_dir):
+        return []
+    rc, out, err = _run(["git", "ls-files", "-z", "--full-name", "--", review_rel], src_root)
+    if rc != 0:
+        _fail("persist-build-artifacts",
+              f"could not list the tracked files under {review_rel} in the build worktree "
+              f"({err.strip()[:160]}) — refusing to guess which review work products are durable "
+              "(nothing has shipped; re-run this finish)")
+    tracked = {p for p in out.split("\0") if p}
+    found = []
+    for dirpath, _dirnames, filenames in os.walk(abs_dir):
+        for name in filenames:
+            rel = os.path.relpath(os.path.join(dirpath, name), src_root)
+            if rel not in already and rel not in tracked:
+                found.append(rel)
+    return sorted(found)
+
+
+def persist_build_witness_artifacts(args, repo, branch, worktree_abs, verified_head):
+    """Make the receipt's four witness artifacts durable before the ephemeral build worktree is
+    removed: copy them onto the SAME logical repo paths in the governed checkout. Returns
+    `(verified head re-proved at the durable location, [(source, durable copy), …])` — the pairs
+    `worktree_remove` drops just before the removal and restores if it refuses. A no-op when the
+    artifacts already live outside the worktree (the split shape tests/smoke/phase4-git-finish.sh
+    drives).
+
+    WHY THIS STEP EXISTS. Build runs in a linked worktree by design (#197), and the freeze → run →
+    review → receipt chain writes its artifacts next to the code, inside that worktree. They are
+    machine artifacts, and there was no way to get them through this tail:
+
+      * COMMITTING them after the receipt is sealed advances the branch head, and `enforce_build_receipt`
+        above (which binds `head_ref=branch`) then refuses the whole finish — "stale build receipt
+        refused: the live review/verification head no longer matches the branch tip being merged";
+      * the shipped `docs/workflow/code-reviews/.gitignore` ignores `*`, so the review VERDICT cannot
+        be committed at all — `git add` refuses it without `-f` — which leaves the receipt's
+        `verdict_path` dangling after teardown even if the head problem were solved;
+      * leaving them UNCOMMITTED makes the next step's plain `git worktree remove` refuse — "contains
+        modified or untracked files, use --force to delete it".
+
+    So the finish died either way, and the artifacts the post-merge Build closeout re-verifies
+    (`idc_command_contract._valid_build_receipt` re-reads `docs/workflow/build-receipts/<file>.json`
+    from the governed repo and runs `verify_receipt` over it) died with the worktree.
+
+    Relocating is the fix, and it only works because #197 keys every witness by the artifact's LOGICAL
+    repo path: the same bytes at the same logical path in another worktree of the same repository have
+    the same witness key, the same digest, and the same repo identity. So the copies verify at their
+    durable location with NO new witness written and NO gate relaxed — nothing is committed, the
+    sealed head never moves, the removal stays non-force, and the receipt is RE-VERIFIED (head binding
+    included) at the durable path before any mutation runs.
+
+    A destination that is already occupied by DIFFERENT bytes is REFUSED, not overwritten
+    (`_guard_destination`). Superseding an older artifact is usually what the operator means, but this
+    step runs two mutations away from the merge and cannot tell a superseded artifact from a committed
+    file the receipt's path collides with, or from the operator's own work — and `worktree_remove`'s
+    restore only ever puts back SOURCES, so a clobbered destination would be gone for good. Refusing
+    costs one manual `mv` in the rare case; the alternative silently destroys repo content. A
+    byte-identical destination is a no-op, which is what keeps a re-run of a refused finish (case D2)
+    working.
+
+    THE REVIEW'S OWN WORK PRODUCTS RIDE ALONG. The review runs in the same worktree and writes more
+    than the verdict — a human report, per-round records, the per-PR seen-fingerprint ledger — and
+    because `docs/workflow/code-reviews/.gitignore` ignores `*`, those files do not make the removal
+    refuse; it deletes them silently. Everything untracked beside the verdict is persisted with the
+    four receipt-bound artifacts, under the same rules (see `_review_work_products`).
+
+    TRANSACTIONAL, so a refusal stays RE-RUNNABLE with the SAME command line. This step COPIES; it does
+    not move. The in-worktree originals — the very paths `--build-receipt` and `--verdict` name — are
+    dropped only by `worktree_remove`, immediately before the removal that needs a clean tree, and are
+    RESTORED from the durable copies if that removal refuses. Otherwise the tail's own recovery story
+    ("nothing has shipped yet — fix it and re-run this finish") would be a lie the first time an
+    unrelated untracked file blocked the removal: the operator would re-run the identical command and
+    be told its verdict receipt does not exist. The durable copies are left in place either way — they
+    are where the artifacts belong."""
+    if not args.build_receipt or not worktree_abs:
+        return verified_head, []
+    try:
+        import idc_build_receipt as BR          # noqa: PLC0415 — lazy, like enforce_build_receipt
+        import idc_validation_contract as BVC   # noqa: PLC0415 — NB: `VC` here is the verdict checker
+        receipt_abs = os.path.realpath(os.path.abspath(args.build_receipt))
+        src_root = BR._artifact_root(repo, receipt_abs)
+        dest_root = BVC._worktree_toplevel(repo)
+        receipt = BR.load_receipt(receipt_abs)
+    except Exception as exc:  # noqa: BLE001 — an unreadable receipt/root fails closed, as everywhere else
+        _fail("persist-build-artifacts", str(exc))
+    if not _same_path(src_root, worktree_abs):
+        return verified_head, []    # already durable (the split shape) — nothing to relocate
+    if _same_path(dest_root, worktree_abs):
+        _fail("persist-build-artifacts",
+              f"--repo {repo} resolves to the very build worktree being removed ({worktree_abs}), so "
+              "the build receipt has nowhere durable to land — run the finish from the governed "
+              "checkout the tracker lives in")
+
+    moves = [(os.path.relpath(receipt_abs, src_root), "receipt")]
+    for field in BUILD_WITNESS_FIELDS:
+        rel = receipt.get(field)
+        if not rel:
+            _fail("persist-build-artifacts",
+                  f"the build receipt does not name a {field} — it cannot be made durable")
+        moves.append((rel, field))
+    # …and everything else the review left in the verdict's own directory: ignored, so the removal
+    # deletes it silently rather than refusing over it. See _review_work_products.
+    for rel in _review_work_products(src_root, os.path.dirname(receipt["verdict_path"]),
+                                     {rel for rel, _label in moves}):
+        moves.append((rel, REVIEW_WORK_PRODUCT))
+
+    relocated, durable = [], {}
+    for rel, label in moves:
+        src = os.path.join(src_root, rel)
+        dest = _logical_dest(dest_root, rel, label)
+        if label != REVIEW_WORK_PRODUCT:
+            durable[label] = dest
+        if _same_path(src, dest):
+            continue                # already durable at this exact path — nothing to do
+        if not os.path.isfile(src) and os.path.isfile(dest):
+            continue                # an earlier attempt's copy already landed and its source is gone
+        _copy_artifact(src, dest, label)
+        relocated.append((src, dest))
+
+    if not relocated:
+        return verified_head, []
+    print(f"finish: persisted {len(relocated)} build witness artifact(s) / review work product(s) out "
+          f"of the ephemeral build worktree onto their durable repo paths under {dest_root}")
+    # The durable copies must satisfy the SAME gate the in-worktree ones just did — head binding and
+    # all. This runs before `worktree_remove`, so a failure here still ships nothing, and the
+    # originals are still in place for a straight re-run.
+    args.build_receipt = durable["receipt"]
+    if args.verdict and _same_path(args.verdict, os.path.join(src_root, receipt["verdict_path"])):
+        args.verdict = durable["verdict_path"]   # the journal must record the path that still exists
+    return enforce_build_receipt(args, repo, branch), relocated
+
+
 def close_only_recover(args, repo, worktree_abs, tracker_path, backend, project_number, field_ids,
                        owner, name, session_id=None):
     """CLOSE-ONLY recovery for an ALREADY-MERGED PR whose board was never advanced — the phantom-idle
@@ -931,6 +1239,10 @@ def main():
     worktree_abs = None
     if args.worktree:
         worktree_abs = args.worktree if os.path.isabs(args.worktree) else os.path.join(repo, args.worktree)
+    # A relative --worktree is resolved against the caller's own frame FIRST (above), and only then
+    # is --repo re-pointed at the governed checkout when it named the doomed worktree itself — the
+    # shipped, `--repo`-less finisher invocation. See resolve_governed_checkout.
+    repo = resolve_governed_checkout(repo, worktree_abs)
     tracker_path = args.tracker or os.path.join(repo, "TRACKER.md")
     session_id = args.session_id or os.environ.get("CLAUDE_CODE_SESSION_ID") or None
 
@@ -952,7 +1264,12 @@ def main():
 
     branch = resolve_branch(repo, args.pr)
     verified_head = enforce_build_receipt(args, repo, branch)
-    worktree_remove(repo, worktree_abs)
+    # The build worktree is about to be deleted. If the receipt and the artifacts it binds still live
+    # INSIDE it, make them durable first — on the same logical repo paths, re-verified there, with
+    # nothing committed and the sealed head untouched. See persist_build_witness_artifacts.
+    verified_head, relocated = persist_build_witness_artifacts(args, repo, branch, worktree_abs,
+                                                               verified_head)
+    worktree_remove(repo, worktree_abs, relocated)
     # RECORD IN-FLIGHT STATE, immediately before the point of no return. Set here rather than at the
     # top of the tail on purpose: everything above this line is reversible and leaves no shipped
     # work, so a taint set earlier would describe an item that never merged — an obligation no

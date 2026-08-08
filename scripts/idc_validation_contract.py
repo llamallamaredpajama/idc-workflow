@@ -215,18 +215,50 @@ def _repo_identity(path: str) -> str:
     return os.path.realpath(os.path.dirname(_common_git_dir(path)))
 
 
+def _worktree_toplevel(path: str) -> str:
+    proc = subprocess.run(
+        ["git", "-C", path, "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True, timeout=15)
+    if proc.returncode != 0:
+        detail = _clip(CS.scrub(proc.stderr or proc.stdout or "git rev-parse failed"), 200)
+        raise ValidationError(f"{path} is not inside a git worktree ({detail})")
+    return os.path.realpath(proc.stdout.strip())
+
+
 def _repo_context(path: str):
+    """`(repo_identity, common_git_dir, rel)` for a witnessed artifact.
+
+    `rel` is the artifact's path relative to the worktree it actually lives in — the stable LOGICAL
+    repo path (`docs/workflow/build-validation/<label>.json`), identical in every linked worktree and
+    unchanged when the branch merges. `repo_identity` is the shared primary checkout root; the store
+    is the shared git common dir.
+
+    The base is the artifact's OWN worktree root, not `dirname(--git-common-dir)` (#197). Build always
+    runs in a linked worktree (agents/idc-build.md gives each durable worker a pre-created one;
+    agents/idc-implementer.md freezes with `--repo "$PWD"`), and the common dir resolves to the
+    PRIMARY checkout — a root the artifact does not live under. That measured every witness against
+    the wrong root: a worktree beside the primary checkout was refused outright ("must live under the
+    governed repo root"), so freeze and run both died and no witness was ever recorded; a worktree
+    under it (`.claude/worktrees/<name>`, what skills/idc-adapter-claude/SKILL.md creates) instead
+    keyed the witness by a path containing the worktree subdir, so the key died when the worktree did
+    and the merged artifact at `docs/workflow/…` was left unwitnessed.
+
+    This does NOT widen where a witness may be written. The store still lives in this repo's shared
+    git common dir, the recorded `repo_root` is still the primary checkout identity (so a foreign-repo
+    artifact is still refused), and the artifact must still resolve inside a real worktree of this
+    repo — the base is chosen by git, never by the caller."""
     abs_path = os.path.realpath(os.path.abspath(path))
     parent = os.path.dirname(abs_path) or "."
     common_git_dir = _common_git_dir(parent)
-    repo_root = os.path.realpath(os.path.dirname(common_git_dir))
+    repo_identity = os.path.realpath(os.path.dirname(common_git_dir))
+    worktree_root = _worktree_toplevel(parent)
     try:
-        rel = os.path.relpath(abs_path, repo_root)
+        rel = os.path.relpath(abs_path, worktree_root)
     except ValueError as exc:
         raise ValidationError(f"could not relativize {path} under the repo root ({exc})") from exc
     if rel == ".." or rel.startswith(".." + os.sep):
-        raise ValidationError(f"{path} must live under the governed repo root {repo_root}")
-    return repo_root, common_git_dir, rel
+        raise ValidationError(f"{path} must live under its worktree root {worktree_root}")
+    return repo_identity, common_git_dir, rel
 
 
 def _witness_path(common_git_dir: str) -> str:
@@ -343,26 +375,20 @@ def _witness_problem(kind: str, path: str, doc: dict):
 
 
 # --- Planning-receipt witness -------------------------------------------------------------------
-# A planning receipt is written during Plan and BORROWED at Build freeze, so — unlike the contract /
-# execution / build-receipt witnesses, which are recorded and verified within a single Build worktree
-# lifecycle — its witness must survive travelling from the checkout Plan ran in to a DIFFERENT Build
-# worktree of the same repo. It is therefore keyed by the receipt's path relative to its OWN worktree
-# toplevel (the stable logical repo path `docs/workflow/planning-receipts/<label>.json`, identical in
-# every worktree) rather than the primary-checkout-relative path (`_repo_context`, which embeds the
-# worktree subdir and so differs per worktree). The store still lives in the shared git common dir and
-# still binds the stable repo identity (the primary checkout root), so a foreign-repo receipt is
-# refused (F7) while a legitimate cross-worktree receipt is recognized (F19).
+# A planning receipt is written during Plan and BORROWED at Build freeze, so its witness must survive
+# travelling from the checkout Plan ran in to a DIFFERENT Build worktree of the same repo. It is
+# therefore keyed by the receipt's path relative to its OWN worktree toplevel (the stable logical repo
+# path `docs/workflow/planning-receipts/<label>.json`, identical in every worktree). The store lives
+# in the shared git common dir and binds the stable repo identity (the primary checkout root), so a
+# foreign-repo receipt is refused (F7) while a legitimate cross-worktree receipt is recognized (F19).
+#
+# `_repo_context` now keys the contract / execution / build-receipt witnesses the same way (#197):
+# those three are recorded and verified within a single Build worktree lifecycle, but that worktree is
+# ephemeral — the artifacts outlive it, at the same logical path, in whatever checkout the branch
+# merges into. What remains distinct here is the VERSIONED store below: a planning receipt is
+# legitimately re-applied under one label, so its key holds several digest-addressed versions, while a
+# contract/execution/receipt key holds exactly one current witness.
 PLANNING_WITNESS_KIND = "planning-receipt"
-
-
-def _worktree_toplevel(path: str) -> str:
-    proc = subprocess.run(
-        ["git", "-C", path, "rev-parse", "--show-toplevel"],
-        capture_output=True, text=True, timeout=15)
-    if proc.returncode != 0:
-        detail = _clip(CS.scrub(proc.stderr or proc.stdout or "git rev-parse failed"), 200)
-        raise ValidationError(f"{path} is not inside a git worktree ({detail})")
-    return os.path.realpath(proc.stdout.strip())
 
 
 def _planning_witness_context(receipt_path: str):

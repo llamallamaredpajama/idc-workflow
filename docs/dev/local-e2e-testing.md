@@ -39,6 +39,28 @@ must report-and-skip it). All buildable work is tiny additive files under `scrat
   reset --hard autorun-baseline` (the git tag on the post-`/idc:init` scaffold commit) + recreate the
   seeded considerations. Safety-guarded to refuse any repo but this one. (Backed up in
   `_idc-observability/bin/`.)
+
+  **THE SEED CONTRACT (#205), and it is not optional.** Every fixture item must be created through
+  the **sanctioned transition engine** (`scripts/idc_transition.py create-ticket`, then `set-field`
+  for Wave/Phase/Domain) — never `gh issue create` + `gh project item-add` + a raw
+  `gh project item-edit`. A seeded board is not just "some items": it is the BASELINE an e2e run
+  certifies against, so it has to be indistinguishable from a board the plugin itself produced.
+
+  The 2026-08-08 release e2e is the worked example of what goes wrong otherwise. The drain was fully
+  green at GitHub fidelity — both lanes drained, four builds finished with durable witness
+  persistence — and it still could not certify `drain: complete`, because the seeded items had been
+  created outside the engine and therefore had **no transition-journal history**: "no sanctioned
+  no-op can establish its journal history without changing its machine state." The same seed left the
+  `[operator-action]` gate issue with **no Stage**, which the janitor correctly reported RISKY
+  ("board carries a Stage field but this item has none") and which failed the post-condition gate;
+  and the seeded Think branch was classified foreign-tool-work for the same reason.
+
+  Two rules follow, and they are the ones to re-check whenever the seed is edited:
+  - **Stage on every item**, the gate issue included. `create-ticket --stage … --status …` sets the
+    pair as one legal move and journals it; Stage is never a `set-field`.
+  - **Board SCHEMA is the one exception.** Provisioning a missing single-select *option* has no
+    engine op and stays a direct call — it runs while the board is empty, so GitHub's re-ID on
+    replace cannot wipe any item value. Item STATE has no such exception.
 - **Run the e2e:** `bash /Users/jeremy/dev/sandbox/_idc-observability/bin/run-autorun-e2e.sh <label>`
   — spawns a sandbox-rooted `claude -p "/idc:autorun"`, handles the dead-key + MCP-hang traps, and
   captures to `_idc-observability/`.

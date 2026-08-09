@@ -193,23 +193,41 @@ def governed_root(cwd):
     FAIL-SOFT: anything unresolvable (not a git repo, no git binary, a bare/odd layout) returns `cwd`
     unchanged, so non-git callers and the test fixtures behave exactly as before."""
     base = cwd or "."
+
+    def _git(*args):
+        proc = subprocess.run(["git", "-C", base, *args], capture_output=True, text=True, timeout=15)
+        return proc.stdout.strip() if proc.returncode == 0 else ""
+
     try:
-        proc = subprocess.run(
-            ["git", "-C", base, "rev-parse", "--path-format=absolute", "--git-common-dir"],
-            capture_output=True, text=True, timeout=15)
-        if proc.returncode != 0:
-            proc = subprocess.run(["git", "-C", base, "rev-parse", "--git-common-dir"],
-                                  capture_output=True, text=True, timeout=15)
-            if proc.returncode != 0:
-                return base
-            raw = proc.stdout.strip()
-            common = raw if os.path.isabs(raw) else os.path.abspath(os.path.join(base, raw))
-        else:
-            common = proc.stdout.strip()
-        if not common:
-            return base
-        root = os.path.dirname(os.path.realpath(common))
-        return root if os.path.isdir(root) else base
+        top = _git("rev-parse", "--show-toplevel")
+        if not top or not os.path.isdir(top):
+            return base                       # bare repo, or not a repo at all
+        git_dir = _git("rev-parse", "--path-format=absolute", "--git-dir")
+        common = _git("rev-parse", "--path-format=absolute", "--git-common-dir")
+        if not git_dir or not common:
+            return os.path.realpath(top)
+        # NOT a linked worktree -> this checkout IS the governed one. `--show-toplevel` is right for
+        # every layout here, including `--separate-git-dir` and SUBMODULES: git reports a submodule's
+        # common dir as `super/.git/modules/<name>`, whose PARENT (`super/.git/modules`) is shared by
+        # every sibling submodule and is not a checkout at all — deriving a root from it would merge
+        # two INDEPENDENT repositories' lifecycle records into one ledger.
+        if os.path.realpath(git_dir) == os.path.realpath(common):
+            return os.path.realpath(top)
+        # A LINKED worktree: the main worktree is the first `git worktree list` entry.
+        listing = _git("worktree", "list", "--porcelain")
+        for line in listing.splitlines():
+            if not line.startswith("worktree "):
+                continue
+            root = line[len("worktree "):].strip()
+            if not root:
+                break
+            root = os.path.realpath(root)
+            # Guard the answer rather than trusting it: git can report a path INSIDE the git dir for
+            # some layouts, and a "root" that is not a real checkout must never hold repo-wide state.
+            if os.path.isdir(root) and not root.startswith(os.path.realpath(common) + os.sep):
+                return root
+            break
+        return os.path.realpath(top)
     except Exception:  # noqa: BLE001 — never let root resolution break a gate
         return base
 

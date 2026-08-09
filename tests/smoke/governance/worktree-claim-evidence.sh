@@ -145,6 +145,51 @@ grep -q "at_root=True" "$WORK/plain.out" \
   || fail "#210: an ordinary (non-worktree) governed repo no longer resolves its ledger at its own
 root — the fix must change nothing outside a linked worktree. Got: $(cat "$WORK/plain.out")"
 
+# ── 4b. SIBLING SUBMODULES must never share a ledger ─────────────────────────────────────────────
+# The obvious resolver — `dirname(--git-common-dir)` — is the checkout root ONLY for the ordinary
+# `<root>/.git` layout. For a submodule git reports `super/.git/modules/<name>`, whose parent is
+# `super/.git/modules`, SHARED by every sibling. That would merge two INDEPENDENT repositories'
+# lifecycle records into one ledger and send their receipt lookups to a directory that is not a
+# checkout at all. `git worktree list --porcelain` names the real main worktree in every layout.
+SUPER="$WORK/super"
+git init -q -b main "$SUPER"
+git -C "$SUPER" config user.email t@t; git -C "$SUPER" config user.name t
+git -C "$SUPER" commit -q --allow-empty -m init
+for name in suba subb; do
+  SRC="$WORK/src-$name"
+  git init -q -b main "$SRC"
+  git -C "$SRC" config user.email t@t; git -C "$SRC" config user.name t
+  mkdir -p "$SRC/docs/workflow"
+  printf 'backend: filesystem\n' > "$SRC/docs/workflow/tracker-config.yaml"
+  git -C "$SRC" add -A && git -C "$SRC" commit -qm init
+  git -C "$SUPER" -c protocol.file.allow=always submodule add -q "$SRC" "$name" 2>/dev/null
+done
+git -C "$SUPER" commit -qm "add submodules" >/dev/null 2>&1
+if [ -d "$SUPER/suba/.git" ] || [ -f "$SUPER/suba/.git" ]; then
+  timeout "$T_S" python3 - "$PLUGIN/scripts/hooks" "$SUPER/suba" "$SUPER/subb" <<'PY' >"$WORK/sub.out" 2>&1
+import os, sys
+hooks, a, b = sys.argv[1:4]
+sys.path.insert(0, hooks)
+import idc_ledger as L
+pa, pb = L.ledger_path(a), L.ledger_path(b)
+print("distinct=%s" % (os.path.realpath(pa) != os.path.realpath(pb)))
+print("a_in_checkout=%s" % (os.path.realpath(os.path.dirname(pa)) == os.path.realpath(a)))
+print("a=%s" % pa)
+print("b=%s" % pb)
+PY
+  grep -q "distinct=True" "$WORK/sub.out" \
+    || fail "#210: two SIBLING SUBMODULES resolved to the SAME ledger. They are independent
+repositories; sharing one ledger merges their lifecycle records and lets one repo's obligations gate
+the other. Got:
+$(cat "$WORK/sub.out")"
+  grep -q "a_in_checkout=True" "$WORK/sub.out" \
+    || fail "#210: a submodule's ledger resolved OUTSIDE its own checkout (git reports its common dir
+as super/.git/modules/<name>, whose parent is not a checkout at all). Got:
+$(cat "$WORK/sub.out")"
+else
+  echo "note: submodule fixture unavailable in this environment — 4b skipped" >&2
+fi
+
 # ── 5. a non-git directory still resolves, fail-soft ─────────────────────────────────────────────
 NOGIT="$WORK/nogit"; mkdir -p "$NOGIT"
 timeout "$T_S" python3 - "$PLUGIN/scripts/hooks" "$NOGIT" <<'PY' >"$WORK/nogit.out" 2>&1
@@ -158,4 +203,4 @@ grep -q "path=$NOGIT/" "$WORK/nogit.out" \
   || fail "#210: a non-git directory must resolve to itself (fail-soft) — the resolver runs inside
 gates that must never break on an odd layout. Got: $(cat "$WORK/nogit.out")"
 
-echo "PASS: a claim in a linked worktree sees the governed checkout's lifecycle record and gitignored install receipt through the common git dir, with no copies, and ordinary repos are unaffected"
+echo "PASS: a claim in a linked worktree sees the governed checkout's lifecycle record and gitignored install receipt through the common git dir, with no copies, ordinary repos are unaffected, and sibling submodules keep separate ledgers"

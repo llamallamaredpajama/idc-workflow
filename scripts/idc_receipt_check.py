@@ -53,6 +53,30 @@ RECEIPT_VERSION = 2
 PLUGIN_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 FINGERPRINT_METHOD = "sha256"
 RECEIPT_RELPATH = "docs/workflow/install-receipt.yaml"
+
+
+def receipt_path(repo):
+    """Where to READ this repository's install receipt from (#210).
+
+    The receipt is gitignored, so it exists only in the checkout that was scaffolded — a LINKED
+    WORKTREE never has one, and Build creates its durable workers in linked worktrees by design. A
+    claim there therefore read "no receipt" and refused, which the 2026-08-09 e2e worked around by
+    copying the file in by hand.
+
+    Resolution is local-first, then the governed checkout: a worktree that genuinely has its own
+    receipt still uses it, and only its ABSENCE falls back to the primary checkout's copy. Read-only
+    — nothing is copied, and writes still target whatever path the caller names."""
+    local = os.path.join(repo or ".", RECEIPT_RELPATH)
+    if os.path.exists(local):
+        return local
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "hooks"))
+        import idc_ledger  # noqa: PLC0415 — lazy: only this fallback needs the resolver
+        root = idc_ledger.governed_root(repo or ".")
+    except Exception:  # noqa: BLE001
+        return local
+    shared = os.path.join(root, RECEIPT_RELPATH)
+    return shared if os.path.exists(shared) else local
 # Paths the receipt must never list, by exact repo-relative path or basename.
 EXCLUDED_RELPATHS = {"TRACKER.md", ".claude/settings.json"}
 EXCLUDED_BASENAMES = {"install-receipt.yaml"}

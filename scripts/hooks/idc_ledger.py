@@ -98,6 +98,7 @@ import contextlib
 import contextvars
 import json
 import os
+import subprocess
 import sys
 import tempfile
 
@@ -175,9 +176,50 @@ def _write_lock(cwd):
 
 
 # ── paths ──────────────────────────────────────────────────────────────────────────────────────────
+def governed_root(cwd):
+    """The GOVERNED CHECKOUT root for `cwd` — the primary worktree, not a linked one (#210).
+
+    Build runs its durable workers in LINKED worktrees by design, and a linked worktree has its own
+    root. Resolving repository-wide session state against that root gave every worktree its own empty
+    ledger, so a claim there could not see the command lifecycle record the governed checkout holds —
+    the 2026-08-09 e2e had to hand-mint an auxiliary authorization inside the worktree to get past it.
+
+    The primary checkout is `dirname(--git-common-dir)`: `--git-dir` resolves per worktree
+    (`.git/worktrees/<name>`), the COMMON dir is the one every worktree shares. This is the same
+    pattern the validation witness store and the uninstall witness already use, and it is a READ/WRITE
+    RELOCATION, not a copy — there is exactly one ledger per repository, which is what "repository-wide
+    session state" always meant.
+
+    FAIL-SOFT: anything unresolvable (not a git repo, no git binary, a bare/odd layout) returns `cwd`
+    unchanged, so non-git callers and the test fixtures behave exactly as before."""
+    base = cwd or "."
+    try:
+        proc = subprocess.run(
+            ["git", "-C", base, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            capture_output=True, text=True, timeout=15)
+        if proc.returncode != 0:
+            proc = subprocess.run(["git", "-C", base, "rev-parse", "--git-common-dir"],
+                                  capture_output=True, text=True, timeout=15)
+            if proc.returncode != 0:
+                return base
+            raw = proc.stdout.strip()
+            common = raw if os.path.isabs(raw) else os.path.abspath(os.path.join(base, raw))
+        else:
+            common = proc.stdout.strip()
+        if not common:
+            return base
+        root = os.path.dirname(os.path.realpath(common))
+        return root if os.path.isdir(root) else base
+    except Exception:  # noqa: BLE001 — never let root resolution break a gate
+        return base
+
+
 def ledger_path(cwd):
-    """The `.idc-session-state.json` path at the governed workspace root `cwd`."""
-    return os.path.join(cwd or ".", LEDGER_FILENAME)
+    """The `.idc-session-state.json` path for the governed repository `cwd` belongs to.
+
+    Resolved against `governed_root` so every linked worktree reads and writes the SAME ledger as the
+    governed checkout (#210) — one obligations ledger per repository, never one per worktree."""
+    return os.path.join(governed_root(cwd), LEDGER_FILENAME)
 
 
 # ── tolerant read ────────────────────────────────────────────────────────────────────────────────

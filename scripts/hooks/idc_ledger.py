@@ -98,6 +98,7 @@ import contextlib
 import contextvars
 import json
 import os
+import subprocess
 import sys
 import tempfile
 
@@ -175,9 +176,68 @@ def _write_lock(cwd):
 
 
 # ── paths ──────────────────────────────────────────────────────────────────────────────────────────
+def governed_root(cwd):
+    """The GOVERNED CHECKOUT root for `cwd` — the primary worktree, not a linked one (#210).
+
+    Build runs its durable workers in LINKED worktrees by design, and a linked worktree has its own
+    root. Resolving repository-wide session state against that root gave every worktree its own empty
+    ledger, so a claim there could not see the command lifecycle record the governed checkout holds —
+    the 2026-08-09 e2e had to hand-mint an auxiliary authorization inside the worktree to get past it.
+
+    The primary checkout is `dirname(--git-common-dir)`: `--git-dir` resolves per worktree
+    (`.git/worktrees/<name>`), the COMMON dir is the one every worktree shares. This is the same
+    pattern the validation witness store and the uninstall witness already use, and it is a READ/WRITE
+    RELOCATION, not a copy — there is exactly one ledger per repository, which is what "repository-wide
+    session state" always meant.
+
+    FAIL-SOFT: anything unresolvable (not a git repo, no git binary, a bare/odd layout) returns `cwd`
+    unchanged, so non-git callers and the test fixtures behave exactly as before."""
+    base = cwd or "."
+
+    def _git(*args):
+        proc = subprocess.run(["git", "-C", base, *args], capture_output=True, text=True, timeout=15)
+        return proc.stdout.strip() if proc.returncode == 0 else ""
+
+    try:
+        top = _git("rev-parse", "--show-toplevel")
+        if not top or not os.path.isdir(top):
+            return base                       # bare repo, or not a repo at all
+        git_dir = _git("rev-parse", "--path-format=absolute", "--git-dir")
+        common = _git("rev-parse", "--path-format=absolute", "--git-common-dir")
+        if not git_dir or not common:
+            return os.path.realpath(top)
+        # NOT a linked worktree -> this checkout IS the governed one. `--show-toplevel` is right for
+        # every layout here, including `--separate-git-dir` and SUBMODULES: git reports a submodule's
+        # common dir as `super/.git/modules/<name>`, whose PARENT (`super/.git/modules`) is shared by
+        # every sibling submodule and is not a checkout at all — deriving a root from it would merge
+        # two INDEPENDENT repositories' lifecycle records into one ledger.
+        if os.path.realpath(git_dir) == os.path.realpath(common):
+            return os.path.realpath(top)
+        # A LINKED worktree: the main worktree is the first `git worktree list` entry.
+        listing = _git("worktree", "list", "--porcelain")
+        for line in listing.splitlines():
+            if not line.startswith("worktree "):
+                continue
+            root = line[len("worktree "):].strip()
+            if not root:
+                break
+            root = os.path.realpath(root)
+            # Guard the answer rather than trusting it: git can report a path INSIDE the git dir for
+            # some layouts, and a "root" that is not a real checkout must never hold repo-wide state.
+            if os.path.isdir(root) and not root.startswith(os.path.realpath(common) + os.sep):
+                return root
+            break
+        return os.path.realpath(top)
+    except Exception:  # noqa: BLE001 — never let root resolution break a gate
+        return base
+
+
 def ledger_path(cwd):
-    """The `.idc-session-state.json` path at the governed workspace root `cwd`."""
-    return os.path.join(cwd or ".", LEDGER_FILENAME)
+    """The `.idc-session-state.json` path for the governed repository `cwd` belongs to.
+
+    Resolved against `governed_root` so every linked worktree reads and writes the SAME ledger as the
+    governed checkout (#210) — one obligations ledger per repository, never one per worktree."""
+    return os.path.join(governed_root(cwd), LEDGER_FILENAME)
 
 
 # ── tolerant read ────────────────────────────────────────────────────────────────────────────────

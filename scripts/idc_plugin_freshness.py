@@ -151,7 +151,15 @@ def read_required_version(repo: str | None) -> str | None:
     """
     if not repo:
         return None
-    receipt = os.path.join(repo, "docs", "workflow", "install-receipt.yaml")
+    # Resolved through the shared resolver so a claim running in a LINKED WORKTREE sees the governed
+    # checkout's receipt instead of refusing on its absence (#210) — the receipt is gitignored, so a
+    # linked worktree never carries one of its own.
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import idc_receipt_check  # noqa: PLC0415 — lazy sibling import
+        receipt = idc_receipt_check.receipt_path(repo)
+    except Exception:  # noqa: BLE001 — fall back to the literal path, exactly as before
+        receipt = os.path.join(repo, "docs", "workflow", "install-receipt.yaml")
     if not os.path.isfile(receipt):
         return None
     receipt_version: str | None = None

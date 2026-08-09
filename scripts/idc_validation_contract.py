@@ -225,6 +225,24 @@ def _worktree_toplevel(path: str) -> str:
     return os.path.realpath(proc.stdout.strip())
 
 
+def _nearest_existing_dir(start: str) -> str:
+    """The first existing directory at or above `start` (falling back to `start` itself).
+
+    Both git probes below run WITH CWD at the artifact's parent, so a not-yet-created output
+    directory — the ordinary case on the first freeze in a freshly scaffolded repo — made
+    `git -C` fail and turned a resolvable context into a refusal. Walking up changes no answer for a
+    directory that does exist: every ancestor inside the same worktree reports the same common git
+    dir and the same worktree root, and `rel` is computed from the artifact's OWN absolute path
+    regardless. It only stops the lookup from depending on whether a directory has been made yet."""
+    cur = os.path.abspath(start)
+    while not os.path.isdir(cur):
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return os.path.abspath(start)
+        cur = parent
+    return cur
+
+
 def _repo_context(path: str):
     """`(repo_identity, common_git_dir, rel)` for a witnessed artifact.
 
@@ -248,7 +266,7 @@ def _repo_context(path: str):
     artifact is still refused), and the artifact must still resolve inside a real worktree of this
     repo — the base is chosen by git, never by the caller."""
     abs_path = os.path.realpath(os.path.abspath(path))
-    parent = os.path.dirname(abs_path) or "."
+    parent = _nearest_existing_dir(os.path.dirname(abs_path) or ".")
     common_git_dir = _common_git_dir(parent)
     repo_identity = os.path.realpath(os.path.dirname(common_git_dir))
     worktree_root = _worktree_toplevel(parent)
@@ -726,13 +744,18 @@ def atomic_write_json_bytes(path: str, blob: bytes) -> None:
 
 
 def atomic_write_json(path: str, data):
+    """Atomically write `data` as JSON and RETURN the sha256 of the exact bytes written.
+
+    The digest is the freeze rollback's ownership token: it is the same value `_record_witness`
+    stores, so a rollback can tell "the witness entry I wrote" from "an entry another freeze wrote
+    after me" without a second read of a file that may already be gone."""
     parent = os.path.dirname(os.path.abspath(path)) or "."
     os.makedirs(parent, exist_ok=True)
+    blob = (json.dumps(data, indent=2, sort_keys=True) + "\n").encode("utf-8")
     fd, tmp = tempfile.mkstemp(prefix=".idc-build-validation-", suffix=".tmp", dir=parent)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(data, fh, indent=2, sort_keys=True)
-            fh.write("\n")
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(blob)
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, path)
@@ -740,6 +763,7 @@ def atomic_write_json(path: str, data):
     finally:
         if tmp and os.path.exists(tmp):
             os.unlink(tmp)
+    return hashlib.sha256(blob).hexdigest()
 
 
 def _ensure_hex(label: str, value: str, width: int = 64) -> str:
@@ -1193,8 +1217,8 @@ def _risk_gate_binding(touch_surfaces, baseline: str, risk_gate_result: str | No
 
 
 @contextlib.contextmanager
-def _freeze_rollback(out: str):
-    """Make a contract freeze all-or-nothing across the file AND its out-of-tree witness (#200).
+def _freeze_rollback(out: str, workspace: str, owner: dict):
+    """Make a contract freeze all-or-nothing across every surface it writes (#200).
 
     `freeze_contract` performs three writes that each have their own refusal path: the contract file,
     the witness record, and the live-contract pointer + authorization narrowing. Only the first is
@@ -1203,15 +1227,25 @@ def _freeze_rollback(out: str):
     are inert-but-confusing: `load_contract` fail-closes on them, and the operator is left holding an
     artifact that looks like a frozen gate and is not one.
 
-    Restore semantics, deliberately conservative:
-      * the file did NOT exist  -> remove whatever this freeze created;
-      * the file DID exist      -> put its exact prior bytes back, so a refused RE-freeze cannot
-                                   destroy the contract a previous successful freeze left behind;
-      * the file existed but could not be READ -> leave it alone. Nothing here may delete state it
-        could not snapshot.
-    The witness entry is restored the same way (re-set, or removed when there was none), under the
-    store lock, so a rolled-back freeze does not leave a witness pointing at bytes that no longer
-    exist. An unreadable store is left untouched for the same reason.
+    THREE surfaces are snapshotted, because a partial rollback strands a different artifact than the
+    one it repairs:
+      * the contract FILE — absent before: remove what this freeze created; present before: restore
+        its exact prior BYTES (not a re-serialization — the prior witness keys on its sha256, so
+        anything else leaves a contract its own witness rejects); present but UNREADABLE: left alone,
+        since nothing here may delete state it could not snapshot.
+      * the WITNESS entry — re-set, or removed when there was none, so a rolled-back freeze never
+        leaves a witness pointing at bytes that are gone.
+      * the LIVE-CONTRACT pointer — `_publish_live_contract` writes the pointer BEFORE it narrows the
+        authorization, and only the narrowing can refuse. Rolling back the file while leaving the
+        pointer would aim it at a contract that no longer exists, and `contract_scope()` fail-closes
+        on that for every later mint until some other freeze happens to repair it.
+
+    COMPARE-AND-SWAP on the witness, not a blind restore. Two linked worktrees can freeze the same
+    logical path concurrently, so their entries share one `rel` key. If this freeze refuses AFTER a
+    second one has recorded its own witness for that key, restoring the snapshot would delete a
+    witness that belongs to a SUCCEEDED freeze and make its contract unverifiable. `owner["digest"]`
+    is the sha256 `atomic_write_json` returned for the bytes THIS freeze wrote — the same value
+    `_record_witness` stores — so the entry is only touched while it is still ours.
     """
     existed = os.path.exists(out)
     prior_bytes = None
@@ -1226,13 +1260,30 @@ def _freeze_rollback(out: str):
     prior_witness = None
     store_readable = False
     try:
+        # Resolved from the artifact path, which `_repo_context` now handles even when the output
+        # directory does not exist yet (`_nearest_existing_dir`); `workspace` is the fallback for a
+        # path git cannot place at all.
         _, common_git_dir, rel = _repo_context(out)
         witnesses = _read_witnesses(common_git_dir)
         if witnesses is not None:
             store_readable = True
             prior_witness = witnesses.get(rel)
-    except Exception:                           # noqa: BLE001 — an unresolvable context just means
-        common_git_dir = rel = None             # there is no witness to roll back
+    except Exception:                           # noqa: BLE001 — an unresolvable artifact context
+        try:                                    # still leaves the workspace's store rollback-able
+            common_git_dir = _common_git_dir(workspace)
+            rel = None
+        except Exception:                       # noqa: BLE001 — no store to roll back
+            common_git_dir = rel = None
+
+    live_path = _live_contract_path(workspace)
+    live_existed = live_path is not None and os.path.exists(live_path)
+    live_prior = None
+    if live_existed:
+        try:
+            with open(live_path, "rb") as fh:
+                live_prior = fh.read()
+        except OSError:
+            live_existed = None                 # unsnapshotable — leave it alone
 
     try:
         yield
@@ -1251,7 +1302,12 @@ def _freeze_rollback(out: str):
             try:
                 with _witness_store_lock(common_git_dir):
                     witnesses = _read_witnesses(common_git_dir)
-                    if witnesses is not None:
+                    current = witnesses.get(rel) if isinstance(witnesses, dict) else None
+                    mine = owner.get("digest")
+                    # Only OUR entry is rolled back. A `current` written by another freeze (different
+                    # digest) is left exactly as it is; so is an entry we cannot identify.
+                    if witnesses is not None and mine is not None and isinstance(current, dict) \
+                            and current.get("digest") == mine:
                         if prior_witness is None:
                             witnesses.pop(rel, None)
                         else:
@@ -1259,7 +1315,26 @@ def _freeze_rollback(out: str):
                         _write_witness_store(common_git_dir, witnesses, rel)
             except Exception:                   # noqa: BLE001 — rollback is best-effort; the original
                 pass                            # refusal is what the caller must see
+        if live_path is not None:
+            try:
+                if live_existed is False:
+                    if os.path.exists(live_path):
+                        os.remove(live_path)
+                elif live_existed and live_prior is not None:
+                    atomic_write_json_bytes(live_path, live_prior)
+            except OSError:
+                pass
         raise
+
+
+def _live_contract_path(workspace: str):
+    """Where the Path Gate keeps this repo's live-contract pointer, or None when it cannot be
+    resolved (in which case the freeze rollback simply has no pointer to restore)."""
+    try:
+        import idc_path_gate as PG  # noqa: PLC0415 — lazy sibling import, as in _publish_live_contract
+        return PG.live_contract_path(workspace)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def freeze_contract(*, repo: str, issue: int, pr: int, graph_node: str, graph_digest: str | None,
@@ -1339,8 +1414,9 @@ def freeze_contract(*, repo: str, issue: int, pr: int, graph_node: str, graph_di
     # right after it) stranded a contract file on disk that nothing vouched for — an artifact without
     # its proof is precisely the ambiguity the witness chain exists to remove. Snapshot both the file
     # and its witness entry, then undo both on ANY failure of the three steps below.
-    with _freeze_rollback(out):
-        atomic_write_json(out, doc)
+    owner: dict = {}
+    with _freeze_rollback(out, workspace, owner):
+        owner["digest"] = atomic_write_json(out, doc)
         _record_witness("contract", out, doc)
         _publish_live_contract(workspace, doc, out)
     return doc

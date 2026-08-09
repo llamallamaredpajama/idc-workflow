@@ -62,8 +62,20 @@ LIVE="$GITDIR/idc-path-gate/live-contract.json"
 # The label is parameterized ONLY so case 2 can re-freeze with a DIFFERENT document: a re-freeze that
 # serialized to identical bytes would make its byte-exactness assertion pass vacuously, since a
 # missing restore and a correct restore would be indistinguishable.
+# BOUND EVERY PROBE (phase-governance rule 5): a regression that deadlocks the witness-store lock
+# would otherwise wedge the whole glob-driven lane instead of reddening. Exit 124 is RED, checked by
+# `freeze_rc` below — never treated as a slow pass.
+FREEZE_TIMEOUT_S="${FREEZE_TIMEOUT_S:-120}"
+# `timeout` is NOT on stock macOS (coreutils provides it; tests/smoke/smoke-path-preflight.sh puts it
+# on PATH for the suite). REFUSE to run rather than emit an unbounded verdict — without the bound a
+# hung witness lock reads as a slow pass, which is exactly the failure this rule exists to prevent.
+# Same hard-block idiom as governance/path-gate-runtime-failclosed.sh.
+command -v timeout >/dev/null 2>&1 \
+  || fail "BLOCKED: \`timeout\` is not on PATH. Every freeze probe here runs under an explicit bound so a
+deadlocked witness-store lock REDS instead of looking like a slow pass. Install coreutils, or run via
+tests/smoke/run-all.sh (which sources tests/smoke/smoke-path-preflight.sh), then re-run."
 do_freeze() {
-  python3 "$VC" freeze \
+  timeout "$FREEZE_TIMEOUT_S" python3 "$VC" freeze \
     --surface cli \
     --repo "$REPO" \
     --issue 7 \
@@ -79,11 +91,23 @@ do_freeze() {
     --out "$1"
 }
 
+# run_freeze <out> [label] <stderr-file> — run one probe, set FRC, and treat the bound as RED.
+run_freeze() {
+  local out="$1" label="$2" errf="$3"
+  do_freeze "$out" "$label" >/dev/null 2>"$errf"
+  FRC=$?
+  [ "$FRC" -ne 124 ] \
+    && return 0
+  fail "the freeze probe for $out did not terminate within ${FREEZE_TIMEOUT_S}s — a neutered witness
+lock or verifier HANGS instead of reddening, and a hang reads as a slow pass; treat it as RED"
+}
+
 # ── control: a HEALTHY freeze still writes the contract and its witness ───────────────────────────
 # Without this the "no file survives" assertions below could pass for the wrong reason (a freeze that
 # never writes anything at all).
 GOOD="$REPO/docs/workflow/build-validation/good.json"
-do_freeze "$GOOD" >/dev/null 2>"$WORK/good.err" \
+run_freeze "$GOOD" "" "$WORK/good.err"
+[ "$FRC" -eq 0 ] \
   || fail "control: a healthy freeze was refused — the fixture is wrong, not the code: $(cat "$WORK/good.err")"
 [ -f "$GOOD" ] || fail "control: a SUCCESSFUL freeze must leave its contract on disk at $GOOD"
 [ -f "$STORE" ] || fail "control: a successful freeze must record a witness in $STORE"
@@ -95,9 +119,9 @@ GOOD_SHA="$(shasum -a 256 "$GOOD" | awk '{print $1}')"
 cp "$STORE" "$WORK/store.bak"
 printf 'not json at all {{{\n' > "$STORE"
 NEW="$REPO/docs/workflow/build-validation/refused.json"
-if do_freeze "$NEW" >/dev/null 2>"$WORK/refused.err"; then
-  fail "case 1: a freeze whose witness could not be recorded must FAIL, not succeed"
-fi
+run_freeze "$NEW" "" "$WORK/refused.err"
+[ "$FRC" -ne 0 ] \
+  || fail "case 1: a freeze whose witness could not be recorded must FAIL, not succeed"
 grep -qi 'witness' "$WORK/refused.err" \
   || fail "case 1: the refusal must name the witness step (got: $(cat "$WORK/refused.err"))"
 [ ! -e "$NEW" ] \
@@ -110,9 +134,9 @@ the witness chain exists to prevent."
 # sha256, so a byte-different restore would leave a valid contract its own witness rejects. The
 # re-freeze carries a DIFFERENT label, so its document differs from the one on disk — without that,
 # "the bytes are unchanged" would hold even if nothing were restored at all.
-if do_freeze "$GOOD" build-red-v2 >/dev/null 2>"$WORK/refreeze.err"; then
-  fail "case 2: a re-freeze whose witness could not be recorded must FAIL, not succeed"
-fi
+run_freeze "$GOOD" build-red-v2 "$WORK/refreeze.err"
+[ "$FRC" -ne 0 ] \
+  || fail "case 2: a re-freeze whose witness could not be recorded must FAIL, not succeed"
 [ -f "$GOOD" ] || fail "case 2: a REFUSED re-freeze deleted the contract a previous successful freeze left behind"
 [ "$GOOD_SHA" = "$(shasum -a 256 "$GOOD" | awk '{print $1}')" ] \
   || fail "case 2: a refused re-freeze rewrote the existing contract's bytes — the prior contract's
@@ -130,9 +154,9 @@ cp "$WORK/store.bak" "$STORE"
 # mint scope cannot be published must never succeed). Making the pointer path a directory forces it.
 rm -f "$LIVE"; mkdir -p "$LIVE"
 PUB="$REPO/docs/workflow/build-validation/publish-refused.json"
-if do_freeze "$PUB" >/dev/null 2>"$WORK/pub.err"; then
-  fail "case 3: a freeze whose live contract could not be published must FAIL, not succeed"
-fi
+run_freeze "$PUB" "" "$WORK/pub.err"
+[ "$FRC" -ne 0 ] \
+  || fail "case 3: a freeze whose live contract could not be published must FAIL, not succeed"
 [ ! -e "$PUB" ] \
   || fail "case 3: a freeze refused at the PUBLISH step left a contract on disk at $PUB — the same
 #200 defect one step later (the witness was already recorded, so the file is not even unwitnessed:
@@ -150,9 +174,119 @@ rmdir "$LIVE"
 
 # ── case 4: the door still works after all that — no rollback wedged the repo ─────────────────────
 AFTER="$REPO/docs/workflow/build-validation/after.json"
-do_freeze "$AFTER" >/dev/null 2>"$WORK/after.err" \
+run_freeze "$AFTER" "" "$WORK/after.err"
+[ "$FRC" -eq 0 ] \
   || fail "case 4: a healthy freeze was refused AFTER the rollback paths ran — rollback wedged the
 repository or the witness store: $(cat "$WORK/after.err")"
 [ -f "$AFTER" ] || fail "case 4: the recovered freeze wrote no contract"
 
-echo "PASS: a refused contract freeze leaves no artifact behind — no unwitnessed contract at the witness step, no published-gate contract at the publish step, an existing contract byte-intact, and the door still works afterwards"
+# ── case 5: the LIVE-CONTRACT POINTER is part of the transaction ──────────────────────────────────
+# `_publish_live_contract` writes the pointer FIRST and only then narrows the authorization, and only
+# the narrowing can refuse. Rolling back the contract file while leaving the pointer aims it at a
+# contract that no longer exists — `contract_scope()` then fail-closes for every later authorization
+# mint until some unrelated freeze happens to repair it. Forced by making the AUTHORIZATION state
+# unreadable while the pointer path itself stays writable.
+AUTHDIR="$GITDIR/idc-path-gate"
+mkdir -p "$AUTHDIR"
+LIVE_BEFORE=""
+[ -f "$LIVE" ] && LIVE_BEFORE="$(shasum -a 256 "$LIVE" | awk '{print $1}')"
+# A directory where the narrowing step expects a readable authorization file.
+rm -rf "$AUTHDIR/authorization.json"; mkdir -p "$AUTHDIR/authorization.json"
+P5="$REPO/docs/workflow/build-validation/pointer.json"
+run_freeze "$P5" "" "$WORK/p5.err"
+if [ "$FRC" -ne 0 ]; then
+  [ ! -e "$P5" ] \
+    || fail "case 5: a refused freeze left its contract on disk at $P5"
+  NOW=""; [ -f "$LIVE" ] && NOW="$(shasum -a 256 "$LIVE" | awk '{print $1}')"
+  [ "$LIVE_BEFORE" = "$NOW" ] \
+    || fail "case 5: the refused freeze left the LIVE-CONTRACT POINTER changed while rolling its
+contract back — the pointer now names a contract that does not exist, and contract_scope() fail-closes
+on that for every later authorization mint"
+fi
+rmdir "$AUTHDIR/authorization.json" 2>/dev/null || rm -rf "$AUTHDIR/authorization.json"
+
+# ── case 6: rollback is COMPARE-AND-SWAP, never a blind restore ───────────────────────────────────
+# Two linked worktrees can freeze the same LOGICAL path concurrently, so their witness entries share
+# one `rel` key. If THIS freeze refuses after a SECOND one has recorded its own witness for that key,
+# a blind restore of the snapshot deletes a witness belonging to a freeze that SUCCEEDED, leaving its
+# contract unverifiable.
+#
+# Staged deterministically rather than raced: enter the real `_freeze_rollback`, let it take its
+# snapshot, then replace the store entry from inside the context (standing in for the second freeze
+# recording its own witness) and raise. Only a compare-and-swap leaves the second entry alone — note
+# the snapshot and the planted entry DIFFER, which is what makes a blind restore observable.
+timeout "$FREEZE_TIMEOUT_S" python3 - "$PLUGIN/scripts" "$REPO" "$GOOD" "$STORE" <<'PY'
+import json, sys
+scripts, repo, out, store_path = sys.argv[1:5]
+sys.path.insert(0, scripts)
+import idc_validation_contract as VC
+
+OTHER = "OTHER-FREEZE-WITNESS"
+_, common, rel = VC._repo_context(out)
+
+def load():
+    return json.load(open(store_path, encoding="utf-8"))
+
+before = load()
+assert rel in before, f"fixture: no witness entry for {rel} to contend over"
+
+class Boom(Exception):
+    pass
+
+try:
+    # owner names a digest that is NOT what will be in the store at rollback time.
+    with VC._freeze_rollback(out, repo, {"digest": "THIS-FREEZE-WROTE-THIS"}):
+        store = load()
+        entry = dict(store[rel])
+        entry["digest"] = OTHER
+        entry["validator"] = OTHER
+        store[rel] = entry
+        json.dump(store, open(store_path, "w", encoding="utf-8"), indent=2, sort_keys=True)
+        raise Boom("forced refusal after another freeze recorded its witness")
+except Boom:
+    pass
+
+after = load()
+got = (after.get(rel) or {}).get("digest")
+if got != OTHER:
+    print("FAIL: case 6: the rollback CLOBBERED a witness entry it did not write (digest is now %r, "
+          "expected the other freeze's %r). Two worktrees freezing the same logical path share one "
+          "witness key; a blind restore by the REFUSING freeze destroys the witness of one that "
+          "SUCCEEDED, leaving that contract unverifiable. Roll back only OUR entry." % (got, OTHER))
+    raise SystemExit(1)
+PY
+rc=$?
+[ "$rc" -eq 124 ] && fail "case 6 probe did not terminate within ${FREEZE_TIMEOUT_S}s (a hang is RED)"
+[ "$rc" -eq 0 ] || exit 1
+cp "$WORK/store.bak" "$STORE"
+
+# ── case 7: a REFUSED first freeze into a not-yet-created output directory ────────────────────────
+# `_repo_context` runs git WITH CWD at the artifact's parent. When that directory does not exist yet
+# — the ordinary case for the first freeze in a freshly scaffolded repo — the lookup failed, the
+# rollback silently lost its witness context, and a later refusal left a STALE WITNESS behind
+# pointing at a contract it had just removed. `atomic_write_json` creates the directory on its way
+# past, so a SUCCESSFUL freeze hides this entirely: only a refused one shows it, which is why this
+# case forces a publish-step refusal rather than asserting a happy path.
+FRESH="$REPO/docs/workflow/build-validation/nested/deeper/fresh.json"
+[ ! -d "$(dirname "$FRESH")" ] || fail "case 7 fixture: the nested output dir must NOT exist yet"
+rm -f "$LIVE"; mkdir -p "$LIVE"
+run_freeze "$FRESH" fresh-dir "$WORK/fresh.err"
+rmdir "$LIVE" 2>/dev/null || rm -rf "$LIVE"
+[ "$FRC" -ne 0 ] \
+  || fail "case 7: the freeze should have been refused at the publish step; the fixture is wrong"
+[ ! -e "$FRESH" ] \
+  || fail "case 7: a refused freeze into a fresh directory left its contract on disk at $FRESH"
+python3 - "$STORE" <<'PY' || exit 1
+import json, sys
+store = json.load(open(sys.argv[1], encoding="utf-8"))
+stale = [k for k in store if "nested/deeper/fresh.json" in k]
+if stale:
+    print("FAIL: case 7 left witness entries %r for a contract that was rolled back. The witness "
+          "context must resolve from the nearest EXISTING ancestor — resolving it from a directory "
+          "nothing has created yet fails, the rollback silently loses its store handle, and the "
+          "stale entry survives." % stale)
+    raise SystemExit(1)
+PY
+
+echo "PASS: a refused contract freeze leaves no artifact behind — no unwitnessed contract at the witness step, no published-gate contract at the publish step, an existing contract byte-intact, the live-contract pointer untouched, a concurrent worktree's witness never clobbered, and the door
+still works afterwards — including a first freeze into a directory that does not exist yet"

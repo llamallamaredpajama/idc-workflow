@@ -308,6 +308,18 @@ existing item values. Adding a new `Wave`/`Phase`/`Domain` option (the only sanc
 mutation) is done with snapshot-safe care and **pre-seeded** before a `setField` that needs
 it — never inline during the value write.
 
+**What performs that pre-seeding.** For years nothing did, so a two-wave plan on a fresh board failed
+closed at `Wave 2` (#208): `/idc:init` creates `Wave` with exactly one option and `Phase` with one,
+and the field-creation helper reports "already exists" rather than appending. The Plan apply path now
+performs it — `idc_tracker_transaction.apply_frozen` derives the needed values from the FROZEN
+transaction (so an option is created only because an operation is about to set that exact value) and
+appends each missing one through `idc_stage_options.ensure_options`, which is this file's
+non-destructive append: existing options re-sent WITH their node ids, the new one without. It is
+fail-SOFT on purpose — `setField`'s own missing-option refusal stays the fail-closed gate, so a
+pre-seed that cannot reach the board reports and changes nothing. `Status` and `Stage` are excluded:
+their option sets are the machine's own enums, and minting one from a plan's data would let a
+transaction invent a workflow state.
+
 ## Fail-closed posture
 
 `die_gh` is the only error path: on any `gh` exit ≠ 0, GraphQL error, **or an empty resolved

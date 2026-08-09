@@ -67,6 +67,7 @@ for t in \
   phase3-plan \
   phase3-dag-matrix \
   phase3-provenance-gate \
+  phase3-wave-label-format \
   phase4-build \
   phase4-review-agent \
   phase4-triplet \

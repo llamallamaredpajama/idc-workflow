@@ -13,6 +13,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import idc_execution_graph  # noqa: E402
+import idc_matrix_check  # noqa: E402
 
 
 def die(message, code=1):
@@ -42,7 +43,11 @@ def expected_projection(graph):
             "title": pid,
             "stage": "Buildable",
             "status": expected_status(node, live),
-            "wave": node.get("derived_wave"),
+            # The projection is the tracker-facing boundary: waves are derived as ints, but every
+            # value projected for a row Plan may WRITE is the canonical `Wave N` label the board's
+            # options carry (issue #206). Emitting the bare int made apply fail closed on a github
+            # board. Immutable rows are the exception, applied below — see there for why.
+            "wave": idc_matrix_check.wave_label(node.get("derived_wave")),
             "phase": phase,
             "domain": node.get("domain") or "",
             "blocked_by": list(node.get("blocks_on", [])),
@@ -52,12 +57,50 @@ def expected_projection(graph):
         if live and live.get("status") == "In Progress":
             mismatches = []
             for field in ("stage", "status", "wave", "phase", "domain"):
-                live_value = live.get(field if field != "stage" else "stage")
+                live_value = live.get(field)
                 expected_value = entry.get(field)
-                if (live_value or "") != (expected_value or ""):
+                if field == "wave":
+                    # `wave` is the ONLY projected field that passes through a canonicalizing
+                    # transform (`wave_label` above), so it is the only one a RAW comparison can
+                    # misjudge. A pre-#206 board legitimately stores the bare `1` that
+                    # `tracker_wave_number` exists to accept — the same tolerance `derive_waves`
+                    # relies on to keep an occupied wave in `start_wave`. Comparing the spellings
+                    # would call that legacy form an immutable mismatch and abort `/idc:plan` on
+                    # exactly the boards this fix exists to keep readable. Compare what the two
+                    # values MEAN.
+                    live_wave = idc_matrix_check.tracker_wave_number(live_value)
+                    if live_wave is None and str(live_value or "").strip():
+                        # …but only a value that PARSES has a meaning to compare. A nonempty wave in
+                        # neither accepted shape is unknowable, not "no wave": comparing it would
+                        # find `None` on both sides — the live value unreadable, the derived value
+                        # absent BECAUSE it was unreadable — and read that shared failure as
+                        # agreement, waving the row through. It is equal to nothing, so the
+                        # immutability abort below names it. (`derive_waves` refuses to compile such
+                        # a board at all; this keeps the comparator honest on its own terms.)
+                        same = False
+                    else:
+                        same = live_wave == idc_matrix_check.tracker_wave_number(expected_value)
+                else:
+                    # stage/status/phase/domain are projected verbatim — a fixed `Buildable`, the
+                    # live status echoed back, and the matrix's own literal phase/domain strings.
+                    # No transform sits between the two sides, so raw equality is the right test.
+                    same = (live_value or "") == (expected_value or "")
+                if not same:
                     mismatches.append(f"{field}: live={live_value!r} projected={expected_value!r}")
             if mismatches:
                 die(f"In Progress item '{pid}' is immutable: " + "; ".join(mismatches))
+        if live and live.get("status") in {"Done", "In Progress"}:
+            # Canonicalizing a wave is a WRITE, and these two statuses are exactly the rows Plan may
+            # not write — `action_plan` skips both. Projecting the canonical label for them anyway
+            # left the projection disagreeing with the live row over nothing but spelling, and
+            # `idc_tracker_transaction.build_operations` diffs projection against the live snapshot
+            # with no status guard of its own: it turned that cosmetic disagreement into a frozen
+            # `set-field Wave` aimed at an immutable item (and on a board lacking the matching
+            # option, a mid-transaction apply failure). Report what an immutable row actually holds,
+            # so a board whose only divergence is legacy spelling freezes an EMPTY transaction.
+            # Nothing is lost: the migration to canonical labels still runs through every row that
+            # is legitimately mutable, which keeps the `wave_label` value set above.
+            entry["wave"] = live.get("wave") or ""
         projection.append(entry)
     return sorted(projection, key=lambda row: row["logical_id"])
 

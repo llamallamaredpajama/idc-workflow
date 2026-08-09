@@ -339,8 +339,9 @@ only when a full pass leaves nothing actionable:
    start-of-run snapshot — the build lane writes files mid-run, so a stale snapshot under-counts any
    uncommitted/untracked artifact), and anything waiting on the operator.
 
-   **Close the command contract from the oracle, not from prose.** Call the read-only next-action
-   oracle and finish the record; the final prose quotes the oracle's command/reason or states
+   **Close the command contract from `scripts/idc_next_action.py` — the read-only next-action
+   oracle — not from prose.** Call it, then finish the record; the final prose quotes the oracle's
+   command/reason or states
    `waiting_gate`/`fixpoint` — never an invented handoff:
    ```bash
    python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_next_action.py" --repo "$PWD" --json

@@ -435,7 +435,8 @@ suggesting `/idc:doctor`, and — if any scope/probe was skipped — name exactl
 ## Closeout — finish the init lifecycle record
 
 Close the record opened in Phase 3b with a validated terminal status (the Stop closeout gate refuses a
-walk-away from an open command). Init is a **scaffold/setup** command — no pipeline oracle handoff:
+walk-away from an open command). Init is a **scaffold/setup** command — no pipeline handoff, so
+`scripts/idc_next_action.py` (the next-action oracle) is not called here:
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \

@@ -49,7 +49,7 @@ Do not write source or tests; never write the PRD/TRD (Think authors + gates the
 `In Progress` issues. Halt only on the conditions in the playbook's §Authority & halt (including a
 consideration that is not yet admitted — an open Think PR).
 
-## Command lifecycle — verify at entry, close out through the oracle
+## Command lifecycle — verify at entry, close out through the oracle (`scripts/idc_next_action.py`)
 
 The command entry gate opened this command's lifecycle record at expansion; verify it, and **close it
 with a validated terminal status** before your final answer (the Stop closeout gate refuses a

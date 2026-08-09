@@ -565,8 +565,8 @@ optional key(s) pending adoption` / `restored` / `skipped-already-current`), the
 
 The command entry gate opened this command's lifecycle record at expansion; verify it, and **close it
 with a validated terminal status** before your final answer (the Stop closeout gate refuses a
-walk-away from an open command). Update is a **resync/maintenance** command — no pipeline oracle
-handoff:
+walk-away from an open command). Update is a **resync/maintenance** command — no pipeline handoff,
+so `scripts/idc_next_action.py` (the next-action oracle) is not called here:
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" status \

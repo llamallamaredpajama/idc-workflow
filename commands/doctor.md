@@ -618,5 +618,5 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   bound to this record, then cite `blocker:{helper:"idc_git_janitor.py", exit:2, diagnostic}` (the only
   re-derivable doctor blocker; the cited exit must MATCH the report).
 
-Doctor is a **diagnostic**, not a pipeline stage: it does not call the next-action oracle and never
-claims a pipeline handoff.
+Doctor is a **diagnostic**, not a pipeline stage: it never claims a pipeline handoff and does not
+call `scripts/idc_next_action.py`, the read-only next-action oracle.

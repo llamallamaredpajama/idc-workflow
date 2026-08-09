@@ -282,15 +282,24 @@ python3 "$PROJ" --matrix "$H/matrix.yaml" --backend filesystem --tracker "$H/TRA
 grep -q "is immutable" "$H/proj.err" \
   && fail "H: projection reported a false immutability mismatch on a legacy bare wave: $(cat "$H/proj.err")"
 
-# Tolerance is READ-side only: what the projection EMITS stays canonical, or the emission fix
-# (arms A/B) would be quietly undone by accepting the legacy spelling.
-python3 - "$H/proj.json" <<'PY' || fail "H: projection stopped emitting the canonical label"
-import json, sys
+# What the projection EMITS is split by whether Plan may WRITE the row, because canonicalizing a
+# wave IS a write. `pillar-a` is In Progress (immutable), so it reports the spelling it actually
+# holds — projecting the canonical label there manufactured a set-field against an immutable item
+# (arm J). `pillar-b` has no live row, so Plan creates it and the canonical label stands: that is
+# where the emission fix (arms A/B) lives, and it must NOT be undone.
+python3 - "$H/proj.json" <<'PY' || fail "H: projection emits the wrong wave for a mutable/immutable row"
+import json, re, sys
 rows = {r["logical_id"]: r["wave"] for r in json.load(open(sys.argv[1]))["projection"]}
-if rows.get("pillar-a") != "Wave 1":
-    print("legacy live '1' projected as %r, not the canonical 'Wave 1'" % (rows.get("pillar-a"),))
-    raise SystemExit(1)
-print("  H ok — legacy bare '1' accepted as wave 1; projection still emits %r" % rows["pillar-a"])
+errs = []
+if rows.get("pillar-a") != "1":
+    errs.append("immutable In Progress row's live '1' was respelled to %r — a write Plan may not make"
+                % (rows.get("pillar-a"),))
+if not re.fullmatch(r"Wave [1-9][0-9]*", str(rows.get("pillar-b"))):
+    errs.append("a row Plan MAY write projected %r, not the canonical 'Wave N' label" % (rows.get("pillar-b"),))
+if errs:
+    print("\n".join("  - " + e for e in errs)); raise SystemExit(1)
+print("  H ok — legacy bare '1' accepted as wave 1; immutable row keeps %r, writable row gets %r"
+      % (rows["pillar-a"], rows["pillar-b"]))
 PY
 
 # H2 — the OTHER immutable fields are still compared verbatim. They are projected with no transform
@@ -379,5 +388,163 @@ gh() { printf 'Wave 1\nWave 2\n1\n2\n'; }
 [ "$(probe_9d)" = "wave-options-split" ] || fail "I: a split board no longer reports split (got $(probe_9d))"
 unset -f gh
 echo "  I ok — 9c/9d SKIP on an unreadable read; clean/split boards still classify"
+
+# ── (J) legacy spelling on an IMMUTABLE row is not a divergence to write ─────────────────────────
+# The projection is diffed against the live snapshot by `idc_tracker_transaction.build_operations`,
+# which has NO status guard of its own — it freezes an op for any field that differs. So projecting
+# the canonical label for a Done / In Progress row (whose wave Plan may not touch; `action_plan`
+# skips both) manufactured a `set-field Wave` aimed at an immutable item: `/idc:plan` rewrote a row
+# it treats as frozen, and on a board without the matching option that write fails mid-apply.
+# The invariant: a board whose ONLY divergence is legacy spelling on immutable rows has NOTHING to
+# do — it must freeze expected-GREEN — while a row Plan may legitimately write still migrates.
+for spec in "In Progress:2" "Done:1"; do
+  st="${spec%%:*}"; bw="${spec##*:}"
+  J="$WORK/j-${st// /-}"; mkdir -p "$J"
+  python3 "$TRK" --tracker "$J/TRACKER.md" init >/dev/null || fail "J($st): tracker init failed"
+  mk_matrix "$J/matrix.yaml"
+  # pillar-a is immutable and still stores the PRE-#206 bare wave; pillar-b is seeded at exactly the
+  # wave derive_waves puts it in, in the canonical format. Nothing else differs.
+  n=$(python3 "$TRK" --tracker "$J/TRACKER.md" create --title "pillar-a" --stage Buildable \
+        --wave "1" --phase "Phase 1" --domain ui) || fail "J($st): create pillar-a failed"
+  python3 "$TRK" --tracker "$J/TRACKER.md" move --num "$n" --status "$st" >/dev/null \
+    || fail "J($st): move to $st failed"
+  python3 "$TRK" --tracker "$J/TRACKER.md" create --title "pillar-b" --stage Buildable \
+    --wave "Wave $bw" --phase "Phase 1" --domain api >/dev/null || fail "J($st): create pillar-b failed"
+
+  python3 "$TXN" freeze --repo "$J" --backend filesystem --tracker "$J/TRACKER.md" \
+    --matrix "$J/matrix.yaml" --baseline expected-green --label "wave-fmt-j" --out "$J/frozen.json" \
+    2> "$J/freeze.err" >/dev/null \
+    || fail "J($st): a board diverging only by legacy spelling on an immutable row did not freeze clean: $(cat "$J/freeze.err")"
+  python3 - "$J/frozen.json" "$st" <<'PY' || fail "J: a write was frozen against an immutable item"
+import json, sys
+ops = json.load(open(sys.argv[1]))["operations"]
+aimed = [o for o in ops if o.get("logical_id") == "pillar-a"]
+if aimed:
+    print("operations frozen against the immutable ('%s') pillar-a: %r" % (sys.argv[2], aimed))
+    raise SystemExit(1)
+PY
+  echo "  J ok — a legacy bare wave on a '$st' row freezes an EMPTY transaction"
+done
+
+# J2 — the other half of the contract: a row Plan MAY write still migrates to the canonical label,
+# so "stop rewriting immutable rows" cannot be satisfied by never canonicalizing anything.
+J2="$WORK/j2"; mkdir -p "$J2"
+python3 "$TRK" --tracker "$J2/TRACKER.md" init >/dev/null || fail "J2: tracker init failed"
+mk_matrix "$J2/matrix.yaml"
+python3 "$TRK" --tracker "$J2/TRACKER.md" create --title "pillar-a" --stage Buildable \
+  --wave "1" --phase "Phase 1" --domain ui >/dev/null || fail "J2: create failed"   # Todo = mutable
+python3 "$TXN" freeze --repo "$J2" --backend filesystem --tracker "$J2/TRACKER.md" \
+  --matrix "$J2/matrix.yaml" --baseline expected-red --label wave-fmt-j2 --out "$J2/frozen.json" >/dev/null \
+  || fail "J2: could not freeze"
+python3 - "$J2/frozen.json" <<'PY' || fail "J2: a MUTABLE row's legacy wave was left un-migrated"
+import json, sys
+ops = json.load(open(sys.argv[1]))["operations"]
+mig = [o for o in ops if o.get("op") == "set-field" and o.get("field") == "Wave"
+       and o.get("logical_id") == "pillar-a"]
+if not mig or mig[0].get("value") != "Wave 1":
+    print("a Todo row holding legacy '1' froze %r, not a migration to 'Wave 1'" % (mig,))
+    raise SystemExit(1)
+print("  J2 ok — a writable row still migrates: %r" % (mig[0]["value"],))
+PY
+
+# J3 — the projection is also read BACK against the live board by
+# `idc_planning_receipt.compare_projection_to_live`, which compares wave by RAW equality. So the
+# projected value for an immutable row has to be what the board actually holds — canonicalizing it
+# there while issuing no write to match would fail the planning receipt's own verification.
+python3 - "$SCRIPTS" "$WORK/j-In-Progress" <<'PY' || fail "J3: the projection no longer reads back clean against a legacy board"
+import os, sys
+sys.path.insert(0, sys.argv[1])
+import idc_execution_graph as G, idc_tracker_projection as P, idc_planning_receipt as PR
+work = sys.argv[2]
+graph = G.compile_graph(matrix_path=os.path.join(work, "matrix.yaml"), backend="filesystem",
+                        tracker=os.path.join(work, "TRACKER.md"), repo=work)
+mismatches = PR.compare_projection_to_live(P.expected_projection(graph), graph["_tracker_items"])
+if mismatches:
+    print("projection does not match the live board it was derived from: %r" % (mismatches,))
+    raise SystemExit(1)
+print("  J3 ok — the frozen projection reads back clean against the legacy board")
+PY
+
+# ── (K) an In Progress item whose wave NOBODY can read fails closed ──────────────────────────────
+# An occupied wave sets `start_wave`, the floor new waves are placed above. A nonempty value in
+# neither accepted shape is not "no wave" — the item occupies one and which is unknowable — but it
+# parsed to None on BOTH sides, so the immutability check read that shared failure as agreement and
+# waved it through, and derive_waves then dropped it from start_wave and scheduled new work into
+# wave 1. Pre-#206 this aborted; that fail-closed contract is restored here.
+K="$WORK/k"; mkdir -p "$K"
+python3 "$TRK" --tracker "$K/TRACKER.md" init >/dev/null || fail "K: tracker init failed"
+mk_matrix "$K/matrix.yaml"
+n=$(python3 "$TRK" --tracker "$K/TRACKER.md" create --title "pillar-a" --stage Buildable \
+      --wave "Later" --phase "Phase 1" --domain ui) || fail "K: create failed"
+python3 "$TRK" --tracker "$K/TRACKER.md" move --num "$n" --status "In Progress" >/dev/null \
+  || fail "K: move to In Progress failed"
+
+python3 "$GRAPH" --matrix "$K/matrix.yaml" --backend filesystem --tracker "$K/TRACKER.md" \
+  > "$K/graph.json" 2> "$K/graph.err" \
+  && fail "K: the graph compiled around an In Progress item whose wave is unreadable — pillar-b was scheduled anyway: $(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["waves"])' "$K/graph.json" 2>/dev/null)"
+grep -q "unreadable Wave on In Progress" "$K/graph.err" \
+  || fail "K: compile failed for the wrong reason: $(cat "$K/graph.err")"
+grep -q "'Later'" "$K/graph.err" \
+  || fail "K: the refusal does not name the value it could not read: $(cat "$K/graph.err")"
+grep -q "pillar-a" "$K/graph.err" \
+  || fail "K: the refusal does not name the item holding it: $(cat "$K/graph.err")"
+# Plan reaches the same wall (it compiles this graph first), so no plan is built on the guess.
+python3 "$PROJ" --matrix "$K/matrix.yaml" --backend filesystem --tracker "$K/TRACKER.md" \
+  >/dev/null 2> "$K/proj.err" \
+  && fail "K: the projection accepted an In Progress item whose wave is unreadable"
+grep -q "unreadable Wave on In Progress" "$K/proj.err" \
+  || fail "K: the projection failed for the wrong reason: $(cat "$K/proj.err")"
+echo "  K ok — unreadable occupied wave refused: $(head -1 "$K/proj.err" | sed 's/^idc-execution-graph: //')"
+
+# K2 — an ABSENT wave is a different fact and stays ACCEPTED. That is the pre-#206 contract (such an
+# item still holds conflicting work back through surface overlap), so the new guard must not
+# over-reach into "every In Progress item must carry a wave".
+K2="$WORK/k2"; mkdir -p "$K2"
+python3 "$TRK" --tracker "$K2/TRACKER.md" init >/dev/null || fail "K2: tracker init failed"
+mk_matrix "$K2/matrix.yaml"
+n=$(python3 "$TRK" --tracker "$K2/TRACKER.md" create --title "pillar-a" --stage Buildable \
+      --phase "Phase 1" --domain ui) || fail "K2: create failed"
+python3 "$TRK" --tracker "$K2/TRACKER.md" move --num "$n" --status "In Progress" >/dev/null \
+  || fail "K2: move to In Progress failed"
+python3 "$PROJ" --matrix "$K2/matrix.yaml" --backend filesystem --tracker "$K2/TRACKER.md" \
+  >/dev/null 2> "$K2/proj.err" \
+  || fail "K2: an In Progress item with NO wave was rejected — the guard over-reached: $(cat "$K2/proj.err")"
+echo "  K2 ok — an In Progress item with no wave at all is still accepted"
+
+# K3 — the comparator itself, driven directly (arm K's end-to-end path now dies upstream in
+# derive_waves, so without this the projection's own guard is never exercised). `None == None` from
+# two failed parses must NOT read as agreement.
+python3 - "$SCRIPTS" <<'PY' || fail "K3: the projection's wave comparator treats an unreadable wave as agreement"
+import contextlib, io, sys
+sys.path.insert(0, sys.argv[1])
+import idc_tracker_projection as P
+
+def project(g):
+    with contextlib.redirect_stderr(io.StringIO()):
+        return P.expected_projection(g)
+
+def graph(live_wave, derived_wave):
+    live = {"number": 1, "status": "In Progress", "stage": "Buildable",
+            "wave": live_wave, "phase": "Phase 1", "domain": "ui"}
+    return {"phase": "Phase 1", "_live_by_id": {"pillar-a": live},
+            "nodes": [{"id": "pillar-a", "derived_wave": derived_wave, "domain": "ui",
+                       "blocks_on": [], "blocked_reasons": [], "surfaces": ["src/a/"]}]}
+
+errs = []
+# An unreadable live wave derives to nothing; both sides parse to None and must NOT compare equal.
+try:
+    project(graph("Later", None))
+    errs.append("live 'Later' vs an absent derived wave was ACCEPTED (two failed parses read as agreement)")
+except SystemExit:
+    pass
+# A genuinely absent wave on both sides is real agreement and stays accepted.
+try:
+    project(graph("", None))
+except SystemExit:
+    errs.append("an In Progress item with no wave was rejected — the guard over-reached")
+if errs:
+    print("\n".join("  - " + e for e in errs)); raise SystemExit(1)
+print("  K3 ok — an unreadable wave equals nothing; a genuinely empty one still matches")
+PY
 
 echo "PASS: phase3-wave-label-format"

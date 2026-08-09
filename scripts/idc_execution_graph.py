@@ -163,6 +163,32 @@ def assert_done_closure(done, pred):
               "is consistent, then re-compile.")
 
 
+def assert_occupied_waves_readable(occupied, live_by_id, derived):
+    """Refuse to schedule around an `In Progress` item whose wave nobody can read.
+
+    An occupied wave sets `start_wave` — the floor every newly derived wave is placed above. A
+    nonempty value in neither shape `tracker_wave_number` accepts is not "no wave": the item DOES
+    occupy one, and which one is unknowable. Dropping it from the `max()` below silently schedules
+    new work into a wave that may already be occupied — the exact parallel-safety failure #206
+    caused, arriving through a different door — so it fails closed instead.
+
+    An ABSENT wave is a different fact and stays allowed: that is the pre-existing contract, and
+    such an item still holds conflicting work back through `occupied_blockers` (surface overlap).
+    """
+    unreadable = sorted(
+        pid for pid in occupied
+        if derived.get(pid) is None and str(live_by_id[pid].get("wave") or "").strip()
+    )
+    if unreadable:
+        die("unreadable Wave on In Progress item(s) — refusing to schedule around a guess:\n- "
+            + "\n- ".join(
+                "'{0}' holds Wave {1!r}".format(pid, str(live_by_id[pid].get("wave")).strip())
+                for pid in unreadable)
+            + "\nAn In Progress item occupies a wave, so its Wave must be readable as the board's "
+              "canonical `Wave N` label (a bare integer is still accepted for pre-#206 boards). "
+              "Set it to the board's `Wave N` option — or clear it — then re-compile.")
+
+
 def derive_waves(pillars, live_by_id):
     pillar_by_id = {pillar["id"]: pillar for pillar in pillars if pillar.get("id")}
     depth, _succ, pred = downstream_depths(pillars)
@@ -180,6 +206,7 @@ def derive_waves(pillars, live_by_id):
         live_wave = idc_matrix_check.tracker_wave_number(live_by_id[pid].get("wave"))
         derived[pid] = live_wave
 
+    assert_occupied_waves_readable(occupied, live_by_id, derived)
     start_wave = max((wave for pid, wave in derived.items() if pid in occupied and wave is not None), default=0) + 1
     completed = set(done)
     assigned = set()

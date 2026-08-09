@@ -1944,7 +1944,10 @@ def _config_project_number(repo):
                     q = re.match(r'^"([^"]*)"\s*(?:#.*)?$', raw)
                     values.append(q.group(1).strip() if q else "")
                 else:
-                    values.append(raw.split("#", 1)[0].strip())
+                    # A `#` starts an inline comment ONLY after whitespace (YAML rule): unquoted
+                    # `7#8` is the non-integer scalar "7#8", not 7-with-a-comment — same wrong-board
+                    # hazard as the quoted variant above.
+                    values.append(re.split(r"\s#", raw, maxsplit=1)[0].strip())
     except (OSError, UnicodeError):
         return None
     return values[0] if len(values) == 1 and values[0].isdigit() else None

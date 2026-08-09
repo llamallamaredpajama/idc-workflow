@@ -160,6 +160,27 @@ run_engine --owner tester move --num 708 --to-status Todo
 [ "$RC" = "2" ] || fail "non-integer quoted project_number must refuse with exit 2, got exit $RC: $(printf '%s' "$OUT" | tail -3)"
 printf '%s' "$OUT" | grep -q "project_number" || fail "non-integer-project refusal must name project_number"
 [ ! -s "$WORK/gh.log" ] || fail "non-integer project_number must refuse before any gh call; saw: $(tr '\n' ',' < "$WORK/gh.log")"
+
+# C3. The UNQUOTED twin: YAML only starts an inline comment at a WHITESPACE-preceded `#`, so
+#     `project_number: 7#8` is the non-integer scalar "7#8" — the unconditional comment-split read
+#     it as 7 (same wrong-board hazard). Must refuse; `7 # comment` must still parse as 7.
+#     (Red: split on every "#" instead of only whitespace-preceded ones.)
+: > "$WORK/gh.log"
+cat > "$REPO/docs/workflow/tracker-config.yaml" <<'CFG'
+backend: github
+project_number: 7#8
+CFG
+run_engine --owner tester move --num 708 --to-status Todo
+[ "$RC" = "2" ] || fail "unquoted 7#8 project_number must refuse with exit 2, got exit $RC: $(printf '%s' "$OUT" | tail -3)"
+printf '%s' "$OUT" | grep -q "project_number" || fail "unquoted-7#8 refusal must name project_number"
+[ ! -s "$WORK/gh.log" ] || fail "unquoted 7#8 must refuse before any gh call; saw: $(tr '\n' ',' < "$WORK/gh.log")"
+printf 'In Progress' > "$WORK/status.txt"
+cat > "$REPO/docs/workflow/tracker-config.yaml" <<'CFG'
+backend: github
+project_number: 7 # unquoted with a real comment
+CFG
+run_engine --owner tester move --num 708 --to-status Todo
+[ "$RC" = "0" ] || fail "unquoted '7 # comment' must still parse as 7 and succeed, got exit $RC: $(printf '%s' "$OUT" | tail -3)"
 cat > "$REPO/docs/workflow/tracker-config.yaml" <<'CFG'
 backend: github
 project_number: "7"

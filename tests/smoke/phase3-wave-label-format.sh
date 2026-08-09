@@ -261,4 +261,86 @@ if errs:
 print("  G ok — an unseeded 'Wave 2' is refused by name, with no board mutation")
 PY
 
+# ── (H) the immutability check compares waves SEMANTICALLY, so a LEGACY bare wave on an In Progress
+#        item reads as equivalent — the very tolerance tracker_wave_number exists to provide ───────
+# Arm D covers a board already written in the canonical format. The board this fix is FOR is the
+# pre-#206 one: its In Progress item still stores a bare `1`. derive_waves reads that fine (arm C's
+# tolerance), so the projection canonicalizes it to `Wave 1` — and a RAW comparison then called the
+# item an immutable mismatch and aborted `/idc:plan` on exactly the legacy board the tolerant reader
+# was added to support ("is immutable: wave: live='1' projected='Wave 1'").
+H="$WORK/h"; mkdir -p "$H"
+python3 "$TRK" --tracker "$H/TRACKER.md" init >/dev/null || fail "H: tracker init failed"
+mk_matrix "$H/matrix.yaml"
+n=$(python3 "$TRK" --tracker "$H/TRACKER.md" create --title "pillar-a" --stage Buildable \
+      --wave "1" --phase "Phase 1" --domain ui) || fail "H: create failed"
+python3 "$TRK" --tracker "$H/TRACKER.md" move --num "$n" --status "In Progress" >/dev/null \
+  || fail "H: move to In Progress failed"
+
+python3 "$PROJ" --matrix "$H/matrix.yaml" --backend filesystem --tracker "$H/TRACKER.md" \
+  > "$H/proj.json" 2> "$H/proj.err" \
+  || fail "H: projection aborted on a LEGACY bare-wave In Progress item: $(cat "$H/proj.err")"
+grep -q "is immutable" "$H/proj.err" \
+  && fail "H: projection reported a false immutability mismatch on a legacy bare wave: $(cat "$H/proj.err")"
+
+# Tolerance is READ-side only: what the projection EMITS stays canonical, or the emission fix
+# (arms A/B) would be quietly undone by accepting the legacy spelling.
+python3 - "$H/proj.json" <<'PY' || fail "H: projection stopped emitting the canonical label"
+import json, sys
+rows = {r["logical_id"]: r["wave"] for r in json.load(open(sys.argv[1]))["projection"]}
+if rows.get("pillar-a") != "Wave 1":
+    print("legacy live '1' projected as %r, not the canonical 'Wave 1'" % (rows.get("pillar-a"),))
+    raise SystemExit(1)
+print("  H ok — legacy bare '1' accepted as wave 1; projection still emits %r" % rows["pillar-a"])
+PY
+
+# H2 — the OTHER immutable fields are still compared verbatim. They are projected with no transform
+# between the two sides (a fixed `Buildable`, the live status echoed back, the matrix's own literal
+# phase/domain), so raw equality stays correct there and must keep firing.
+python3 "$TRK" --tracker "$H/TRACKER.md" set --num "$n" --field Phase --value "Phase 9" >/dev/null \
+  || fail "H2: could not skew the live phase"
+python3 "$PROJ" --matrix "$H/matrix.yaml" --backend filesystem --tracker "$H/TRACKER.md" \
+  >/dev/null 2> "$H/skew.err" \
+  && fail "H2: a genuinely-divergent immutable field no longer aborts the projection"
+grep -q "is immutable" "$H/skew.err" \
+  || fail "H2: projection failed for the wrong reason: $(cat "$H/skew.err")"
+grep -q "phase:" "$H/skew.err" \
+  || fail "H2: the abort did not name the divergent phase field: $(cat "$H/skew.err")"
+echo "  H2 ok — non-wave immutable fields still abort: $(sed 's/^idc-tracker-projection: //' "$H/skew.err")"
+
+# H3 — the wave comparison is SEMANTIC, not deleted. Through the real compiler an In Progress item's
+# derived wave IS its own live wave, so a true wave divergence is unreachable end-to-end; drive
+# expected_projection directly to prove the comparator still separates wave 1 from wave 2. Without
+# this, "compare semantically" and "drop wave from the loop entirely" would both look green.
+python3 - "$SCRIPTS" <<'PY' || fail "H3: the wave arm of the immutability check no longer discriminates"
+import contextlib, io, sys
+sys.path.insert(0, sys.argv[1])
+import idc_tracker_projection as P
+
+def project(g):   # the expected aborts are the assertion here; keep their stderr off the lane's log
+    with contextlib.redirect_stderr(io.StringIO()):
+        return P.expected_projection(g)
+
+def graph(live_wave, derived_wave):
+    live = {"number": 1, "status": "In Progress", "stage": "Buildable",
+            "wave": live_wave, "phase": "Phase 1", "domain": "ui"}
+    return {"phase": "Phase 1", "_live_by_id": {"pillar-a": live},
+            "nodes": [{"id": "pillar-a", "derived_wave": derived_wave, "domain": "ui",
+                       "blocks_on": [], "blocked_reasons": [], "surfaces": ["src/a/"]}]}
+
+errs = []
+for live_wave in ("1", "Wave 1"):
+    try:
+        project(graph(live_wave, 1))
+    except SystemExit:
+        errs.append("live %r vs derived wave 1 was reported as a mismatch (both mean wave 1)" % live_wave)
+    try:
+        project(graph(live_wave, 2))
+        errs.append("live %r vs derived wave 2 passed — the wave check no longer discriminates" % live_wave)
+    except SystemExit:
+        pass
+if errs:
+    print("\n".join("  - " + e for e in errs)); raise SystemExit(1)
+print("  H3 ok — wave compared by meaning: 1 == 'Wave 1', and 1 != 2 still aborts")
+PY
+
 echo "PASS: phase3-wave-label-format"

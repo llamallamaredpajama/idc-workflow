@@ -56,9 +56,25 @@ def expected_projection(graph):
         if live and live.get("status") == "In Progress":
             mismatches = []
             for field in ("stage", "status", "wave", "phase", "domain"):
-                live_value = live.get(field if field != "stage" else "stage")
+                live_value = live.get(field)
                 expected_value = entry.get(field)
-                if (live_value or "") != (expected_value or ""):
+                if field == "wave":
+                    # `wave` is the ONLY projected field that passes through a canonicalizing
+                    # transform (`wave_label` above), so it is the only one a RAW comparison can
+                    # misjudge. A pre-#206 board legitimately stores the bare `1` that
+                    # `tracker_wave_number` exists to accept — the same tolerance `derive_waves`
+                    # relies on to keep an occupied wave in `start_wave`. Comparing the spellings
+                    # would call that legacy form an immutable mismatch and abort `/idc:plan` on
+                    # exactly the boards this fix exists to keep readable. Compare what the two
+                    # values MEAN; emission stays canonical `Wave N`.
+                    same = (idc_matrix_check.tracker_wave_number(live_value)
+                            == idc_matrix_check.tracker_wave_number(expected_value))
+                else:
+                    # stage/status/phase/domain are projected verbatim — a fixed `Buildable`, the
+                    # live status echoed back, and the matrix's own literal phase/domain strings.
+                    # No transform sits between the two sides, so raw equality is the right test.
+                    same = (live_value or "") == (expected_value or "")
+                if not same:
                     mismatches.append(f"{field}: live={live_value!r} projected={expected_value!r}")
             if mismatches:
                 die(f"In Progress item '{pid}' is immutable: " + "; ".join(mismatches))

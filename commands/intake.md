@@ -10,7 +10,7 @@ When the source is a PR or branch, Intake must pin the source repository, head c
 and diff digest before classification, and must preserve the work for downstream adoption or
 reconciliation rather than blessing it in place.
 
-## Command lifecycle — verify at entry, close out through the oracle
+## Command lifecycle — verify at entry, close out through the oracle (`scripts/idc_next_action.py`)
 
 The command entry gate opened this command's lifecycle record at expansion; verify it before working
 and **close it with a validated terminal status** before your final answer (the Stop closeout gate

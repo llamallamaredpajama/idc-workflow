@@ -53,7 +53,7 @@ race). The dependency-aware acceptance gate retriggers continuously — at per-a
 convergence checkpoints, and at wave-close — running the full suite each time; Wave survives only as
 that gate's reporting scope. Phase close files a delta review's findings as non-blocking issues.
 
-## Command lifecycle — verify at entry, close out through the oracle
+## Command lifecycle — verify at entry, close out through the oracle (`scripts/idc_next_action.py`)
 
 The command entry gate opened this command's lifecycle record at expansion; verify it, and **close it
 with a validated terminal status** before your final answer (the Stop closeout gate refuses a

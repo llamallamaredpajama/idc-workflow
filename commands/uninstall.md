@@ -343,8 +343,8 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" status \
   --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --json
 ```
 
-Uninstall is a **removal** command — no pipeline handoff, so the next-action oracle
-(`scripts/idc_next_action.py`) is not called here. Its closeout `finish` is called in
+Uninstall is a **removal** command — no pipeline handoff, so `scripts/idc_next_action.py` (the
+next-action oracle) is not called here. Its closeout `finish` is called in
 **Phase 3, immediately BEFORE the removal deletes `docs/workflow/tracker-config.yaml`** — because that
 deletion ungoverns the repo, after which a `finish` is a repo-gated no-op (exit 2), never a valid
 close. Close the record while the repo is still governed, then remove. **Do not re-initialize the

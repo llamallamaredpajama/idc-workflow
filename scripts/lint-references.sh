@@ -40,18 +40,21 @@
 #      `idc_path_gate.py authorize` verb (V-DOOR) nor the scenario mint fixture
 #      `tests/smoke/lib/path_gate_authorize.py`, which ships inside the plugin package. Minting is
 #      admission-side. Negation cue / lint-allow exempt, exactly as Rule N.
-#   S. Every BARE repo-relative shipped-path token (`scripts/x.py`, `templates/x.yaml`) resolves to a
-#      real file. Rule B covers only the `${CLAUDE_PLUGIN_ROOT}/…` and `../…` spellings, but the
-#      DOMINANT way shipped prose names a helper is the bare form — so a helper renamed out from
-#      under its prose stayed lint-CLEAN (#211). Only PLUGIN-OWNED top dirs are checked: a
-#      `docs/workflow/…` token names the GOVERNED repo's file, never one of ours. Negation
-#      cue / lint-allow exempt, exactly as Rule N (prose that names a path to say it is NOT the one).
+#   S. Every BARE repo-relative shipped-path token (`scripts/x.py`, `runtime/x.md`) resolves to a
+#      real file INSIDE this checkout. Rule B covers only the `${CLAUDE_PLUGIN_ROOT}/…` and `../…`
+#      spellings, but the DOMINANT way shipped prose names a helper is the bare form — so a helper
+#      renamed out from under its prose stayed lint-CLEAN (#211). Only PLUGIN-OWNED top dirs are
+#      checked: a `docs/workflow/…` token names the GOVERNED repo's file, never one of ours. A token
+#      that escapes the checkout via `..` is refused even when it resolves on this machine, so the
+#      result is machine-independent. Exempt: `lint-allow`, and a negation cue IMMEDIATELY BEFORE the
+#      token (per-token, not per-line — the Rule N/R idiom, without silencing every other path on a
+#      sentence that merely contains the word "not").
 #   T. No shipped surface names a helper by ALIAS alone. IDC calls the read-only next-action helper
 #      "the oracle"; its shipped file is `scripts/idc_next_action.py`. A playbook that says "call the
-#      oracle" without naming that file ANYWHERE in the document leaves the reader to guess it — and
-#      a real e2e driver guessed `scripts/idc_oracle.py`, which has never shipped (#211). Rule S
-#      cannot catch that class: there is no stale token to dangle, only an unbound alias. Each alias
-#      in ALIAS_BINDINGS must therefore be bound to its real helper at least once per file.
+#      oracle" before naming that file leaves the reader to guess it — and a real e2e driver guessed
+#      `scripts/idc_oracle.py`, which has never shipped (#211). Rule S cannot catch that class: there
+#      is no stale token to dangle, only an unbound alias. Each alias in ALIAS_BINDINGS must be bound
+#      to its real helper AT OR BEFORE its first use in the file.
 #
 # Exit 0 = clean. Exit 1 = findings printed as <file>:<line>: <rule> <excerpt>.
 # Lines containing "lint-allow" are exempt for Rules B–K (use sparingly, with a reason);
@@ -83,18 +86,6 @@ HISTORY_ALLOW='^(CHANGELOG\.md|docs/dev/)'
 # class is case-insensitive so a Capitalized `/Users/Jeremy` is caught too.
 PERSONAL_PATH_RE='~/\.claude/(agents|skills|commands|plugins)[A-Za-z0-9._/-]|/Users/[A-Za-z]+'
 
-# Rule S — the BARE repo-relative shipped-path token. One definition, used by both the detector and
-# the per-line extractor so the two can never drift (a token the extractor cannot re-find would make
-# a detected line silently report nothing). The leading class deliberately excludes `/` `$` `{` `-`
-# and the path chars, so `${CLAUDE_PLUGIN_ROOT}/scripts/x.py`, `../scripts/x.py` and
-# `docs/workflow/scripts/x.py` are NOT matched — the first two are Rule B's, the third is a governed
-# repo's file. `-` is last inside the bracket expression (literal), per POSIX.
-BARE_PATH_RE='(^|[^A-Za-z0-9._/${-])(scripts|hooks|templates|agents|skills|commands|tests)/[A-Za-z0-9._/-]+\.(py|sh|ya?ml|json|md|ts)'
-
-# Rule T — alias→helper bindings, `<alias-regex>|<helper-file>`. Add a row when shipped prose starts
-# calling a helper by a spoken name; the row is what forces that name to stay attached to a real
-# shipping file. Kept as data so the rule never needs editing to cover a new alias.
-ALIAS_BINDINGS='oracle|idc_next_action.py'
 
 filtered_grep() { # pattern, file — grep -n minus lint-allow lines
   grep -nE -- "$1" "$2" 2>/dev/null | grep -v 'lint-allow' || true
@@ -260,39 +251,99 @@ for f in $MD_FILES; do
     report "$f:$lineno: [path-gate-mint-directive] shipped prose points a caller at a Path Gate minting door; minting is admission-side (idc_command_entry_gate / idc_command_contract), idc_path_gate.py has no authorize verb, and the scenario fixture is not an authorization door: ${line_txt}"
   done < <(filtered_grep "idc_path_gate\.py['\"\`]?[[:space:]]+authorize([[:space:]]|['\"\`]|$)|path_gate_authorize\.py" "$f")
 
-  # Rule S — BARE shipped-path integrity (the other half of Rule B). Rule B resolves only the
-  # `${CLAUDE_PLUGIN_ROOT}/…` and `../…` spellings; the bare repo-relative form is how most shipped
-  # prose actually names a helper (`scripts/idc_next_action.py`, `templates/workflow-machine.yaml`),
-  # and it was unchecked — so a helper renamed out from under its prose left a stale name shipping
-  # CLEAN (#211). Scope is deliberately the PLUGIN-OWNED top dirs only: `docs/workflow/…` and
-  # `.claude/…` tokens name files in the GOVERNED repo, which does not exist at lint time.
-  # The leading-char class excludes `/` and `$`, so a ${CLAUDE_PLUGIN_ROOT}- or ../-prefixed token is
-  # left to Rule B and never double-reported here. A negation cue on the line is exempt — the Rule N/R
-  # idiom for prose that names a path precisely to say it is NOT the one (commands/update.md's
-  # "**not** templates/docs-tree/workflow-machine.yaml" is the live example).
-  while IFS= read -r hit; do
-    [ -z "$hit" ] && continue
-    lineno="${hit%%:*}"; line_txt="${hit#*:}"
-    printf '%s\n' "$line_txt" | grep -qiE '\b(no|never|not|without|dont|don.t|instead|rather|unrelated)\b' && continue
-    for tok in $(printf '%s\n' "$line_txt" \
-        | grep -oE "$BARE_PATH_RE" \
-        | sed -E 's|^[^A-Za-z]+||' | sort -u); do
-      [ -f "$tok" ] || report "$f:$lineno: [dangling-shipped-path] $tok does not resolve to a file in this repo"
-    done
-  done < <(filtered_grep "$BARE_PATH_RE" "$f")
-
-  # Rule T — an alias must be BOUND to the helper it names. See the header note: the failure this
-  # closes is a reader guessing a filename the alias never gave them. One entry per line,
-  # `<alias-regex>|<helper-file>`; a file that uses the alias must name the helper somewhere in it.
-  while IFS='|' read -r alias helper; do
-    [ -z "$alias" ] && continue
-    grep -qiE -- "$alias" "$f" 2>/dev/null || continue
-    grep -qF -- "$helper" "$f" 2>/dev/null && continue
-    report "$f: [unbound-helper-alias] this file calls it the \"${alias}\" but never names \`$helper\` — bind the alias to its real shipped helper at least once, or a reader must guess the filename"
-  done <<EOF
-$ALIAS_BINDINGS
-EOF
 done
+
+# Rules S + T — bare shipped-path integrity, and alias→helper binding (#211).
+#
+# Both are one PYTHON pass rather than per-file greps, because both need character OFFSETS that a
+# line-oriented grep cannot give: Rule S must exempt only the specifically negated path on a line
+# (not every path on a line that happens to contain the word "not" — several correct playbook
+# sentences read "... the oracle (`scripts/idc_next_action.py`) is NOT called here", and a
+# line-level skip would leave exactly those paths unchecked), and Rule T must compare the POSITION
+# of a binding against the position of the first alias use. Delegating to python here is the same
+# shape Rule O already uses.
+MD_FILES="$MD_FILES" python3 - <<'PY' || FAIL=1
+import os, re, sys
+
+root = os.path.realpath(os.getcwd())
+files = os.environ["MD_FILES"].split()
+findings = []
+
+# Plugin-owned top dirs ONLY. `docs/workflow/…` names a file in the GOVERNED repo — it exists after
+# /idc:init runs in the USER's checkout, never here, so resolving it against this tree would red-flag
+# every correct playbook. `runtime/` IS shipped (the vendored Pi launcher + role prompts) and Rule C
+# already scans it for personal paths, so its bare references are in scope for staleness too.
+ROOTS = "scripts|hooks|templates|agents|skills|commands|tests|runtime"
+# The leading-char exclusion keeps `${CLAUDE_PLUGIN_ROOT}/scripts/x.py`, `../scripts/x.py` and
+# `docs/workflow/scripts/x.py` out — the first two are Rule B's finding, the third is not ours.
+TOKEN = re.compile(r"(?<![A-Za-z0-9._/${-])((?:%s)/[A-Za-z0-9._/-]+\.(?:py|sh|ya?ml|json|md|ts|toml))" % ROOTS)
+# A negation cue must sit IMMEDIATELY before the token to exempt it — the Rule N/R idiom for prose
+# naming a path in order to say it is NOT the one (commands/update.md's "**not**
+# `templates/docs-tree/workflow-machine.yaml`"). The short trailing run of punctuation absorbs
+# markdown emphasis and the opening backtick.
+NEG = re.compile(r"(?:^|[^A-Za-z0-9])(?:not|never|no|unrelated|instead|rather)[^A-Za-z0-9]{0,6}$", re.I)
+
+ALIAS_BINDINGS = [
+    # (alias regex, the real shipped helper it must be bound to)
+    (r"oracle", "idc_next_action.py"),
+]
+
+for f in files:
+    try:
+        lines = open(f, encoding="utf-8").read().splitlines()
+    except OSError as exc:
+        findings.append("%s: [unreadable] %s" % (f, exc))
+        continue
+
+    # ---- Rule S ---------------------------------------------------------------------------------
+    for n, line in enumerate(lines, 1):
+        if "lint-allow" in line:
+            continue
+        for m in TOKEN.finditer(line):
+            tok = m.group(1)
+            if NEG.search(line[:m.start(1)]):
+                continue
+            full = os.path.realpath(os.path.join(root, tok))
+            # A `..` component can walk out of the checkout entirely and land on a file that happens
+            # to exist on THIS machine — lint would then certify a reference that ships broken. The
+            # containment test is what makes the result machine-independent.
+            if full != root and not full.startswith(root + os.sep):
+                findings.append("%s:%d: [escaping-shipped-path] %s resolves outside this repository "
+                                "(%s) — a shipped reference must name a file inside the plugin" % (f, n, tok, full))
+            elif not os.path.isfile(full):
+                findings.append("%s:%d: [dangling-shipped-path] %s does not resolve to a file in this repo" % (f, n, tok))
+
+    # ---- Rule T ---------------------------------------------------------------------------------
+    # The binding must land AT OR BEFORE the first alias use. "Somewhere in the file" is not enough:
+    # commands/build.md said "close out through the oracle" fifteen lines before it first named
+    # idc_next_action.py, and a reader who acts on the earlier sentence has nothing to resolve the
+    # alias against — which is exactly how `idc_oracle.py` got invented.
+    for alias, helper in ALIAS_BINDINGS:
+        rx = re.compile(alias, re.I)
+        first_alias = first_bind = None
+        for n, line in enumerate(lines, 1):
+            if "lint-allow" in line:
+                continue
+            if first_bind is None and helper in line:
+                first_bind = n
+            if first_alias is None and rx.search(line):
+                first_alias = n
+        if first_alias is None:
+            continue
+        if first_bind is None:
+            findings.append('%s: [unbound-helper-alias] this file calls it the "%s" (line %d) but never '
+                            "names `%s` — bind the alias to its real shipped helper, or a reader must "
+                            "guess the filename" % (f, alias, first_alias, helper))
+        elif first_bind > first_alias:
+            findings.append('%s: [unbound-helper-alias] this file uses the "%s" alias at line %d but does '
+                            "not name `%s` until line %d — bind it at or before first use, so a reader "
+                            "acting on the earlier sentence already knows which file is meant"
+                            % (f, alias, first_alias, helper, first_bind))
+
+for row in findings:
+    print(row)
+sys.exit(1 if findings else 0)
+PY
 
 # Rule O — workflow-machine.yaml cross-check.
 # Every workflow state/transition NAME referenced in shipped prose must exist in

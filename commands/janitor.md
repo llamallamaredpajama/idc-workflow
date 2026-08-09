@@ -86,8 +86,8 @@ and the default report mutates nothing.
 
 The command entry gate opened this command's lifecycle record at expansion; verify it, and **close it
 with a validated terminal status** before your final answer (the Stop closeout gate refuses a
-walk-away from an open command). Janitor is a **reconciler/diagnostic** — no pipeline handoff, so the
-next-action oracle (`scripts/idc_next_action.py`) is not called here:
+walk-away from an open command). Janitor is a **reconciler/diagnostic** — no pipeline handoff, so
+`scripts/idc_next_action.py` (the next-action oracle) is not called here:
 
 ```bash
 # Read this command record's `nonce` (the entry gate stamped it), then RUN THE SCANNER ITSELF so IT

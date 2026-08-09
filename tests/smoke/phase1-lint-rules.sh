@@ -232,6 +232,32 @@ R="$(mk_repo s-negation)"
 printf 'It resolves to the top-level table, **not** `templates/docs-tree/workflow-machine.yaml`.\n' \
   > "$R/templates/probe.md"
 expect_clean "Rule S control: a negation-cue line naming a deliberately-absent path is exempt" "$R"
+# ...but the cue exempts only the path it NEGATES, never the whole line. Several correct playbook
+# sentences read "the oracle (scripts/idc_next_action.py) is NOT called here" — a line-level skip
+# would leave exactly those paths unchecked, which is the shape of every path this rule protects.
+# The first token below is a live reference and must still be existence-checked.
+R="$(mk_repo s-mixed)"
+printf 'Update never calls `scripts/idc_typo_here.py`, and **not** `templates/absent.yaml` either.\n' \
+  > "$R/templates/probe.md"
+expect_fail "Rule S: a live path on a line that also negates a DIFFERENT path is still checked" \
+  "$R" "[dangling-shipped-path]"
+out="$(run_lint "$R")"
+printf '%s' "$out" | grep -qF "templates/absent.yaml" \
+  && fail "Rule S must exempt the specifically negated path, not report it. Output:
+$out"
+# The vendored runtime/ tree ships to users (the linter scans it for personal paths for that very
+# reason), so its bare references are in scope for staleness too — agents/idc-plan.md and
+# agents/idc-recirculator.md both cite runtime/pi/.pi/agents/idc/*.md in the bare form.
+R="$(mk_repo s-runtime)"
+printf 'The authority there is `runtime/pi/.pi/agents/idc/gone.md`.\n' > "$R/templates/probe.md"
+expect_fail "Rule S: a bare runtime/ token that does not resolve" "$R" "[dangling-shipped-path]"
+# A `..` component can walk out of the checkout and land on a file that happens to exist on THIS
+# machine, certifying a reference that ships broken and making lint results machine-dependent.
+R="$(mk_repo s-escape)"
+: > "$ROOT/outside-target.py"
+printf 'Call `scripts/../../outside-target.py` to finish.\n' > "$R/templates/probe.md"
+expect_fail "Rule S: a token escaping the checkout is refused even when it resolves locally" \
+  "$R" "[escaping-shipped-path]"
 # Control: a ${CLAUDE_PLUGIN_ROOT}-prefixed dangling token stays RULE B's finding and must not be
 # double-reported — two tags for one defect makes the report unreadable and the counts wrong.
 R="$(mk_repo s-noclash)"
@@ -265,5 +291,18 @@ R="$(mk_repo t-boundfar)"
   printf 'Later: call the oracle. Then the oracle again. The oracle decides the handoff.\n'; } \
   > "$R/templates/probe.md"
 expect_clean "Rule T control: one binding covers every later alias use in the file" "$R"
+# ...but the binding must come FIRST. "Somewhere in the file" is not enough: commands/build.md said
+# "close out through the oracle" eleven lines before it first named idc_next_action.py, and a reader
+# who acts on the earlier sentence has nothing to resolve the alias against — which is exactly how
+# `idc_oracle.py` got invented. Same two sentences as the control above, order swapped.
+R="$(mk_repo t-late)"
+: > "$R/scripts/idc_next_action.py"
+{ printf 'Later: call the oracle. The oracle decides the handoff.\n\n'
+  printf 'The next-action oracle is `scripts/idc_next_action.py`.\n'; } > "$R/templates/probe.md"
+expect_fail "Rule T: a binding that lands AFTER the first alias use" "$R" "[unbound-helper-alias]"
+out="$(run_lint "$R")"
+printf '%s' "$out" | grep -qF "bind it at or before first use" \
+  || fail "Rule T's late-binding message must name the ordering requirement, not read as 'never named'. Output:
+$out"
 
 echo "PASS: lint-references catches all five MIN-9 blind-spot classes, sees every valid uses: spelling without false-positiving a quoted pin (Rule Q), refuses a '..' local-action ref, blocks shipped prose that points at a Path Gate minting door (Rule R), and honors lint-allow"

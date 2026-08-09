@@ -16,7 +16,7 @@ manifest and the unit(s) that route to `think`). A foreign plan is **evidence, n
 authority** — Think consumes only units the intake compiled and an independent review PASSED, and
 never routes one to Build or Autorun.
 
-## Command lifecycle — verify at entry, close out through the oracle
+## Command lifecycle — verify at entry, close out through the oracle (`scripts/idc_next_action.py`)
 
 The command entry gate opened this command's lifecycle record at expansion; verify it before working,
 and **close it with a validated terminal status** before your final answer (the Stop closeout gate

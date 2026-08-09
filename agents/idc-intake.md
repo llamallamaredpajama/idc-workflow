@@ -84,9 +84,9 @@ normal implementation history.
    review. The command entry (`commands/intake.md`) runs the sanctioned door
    `idc_pr_finish.py autonomous --repo "$PWD" --pr <n> --kind intake` (never a raw `gh pr merge` — the
    interlock denies it during an active command).
-9. **Call the oracle and report the durable route of all units.** Intake **ends after compilation** —
-   it does **not** run Think, Recirculation, Plan, Build, or Autorun inside itself. The next action
-   is whatever `idc_next_action.py` reports (typically `/idc:think --doc … --unit …` for the first
+9. **Call `scripts/idc_next_action.py` (the oracle) and report the durable route of all units.**
+   Intake **ends after compilation** — it does **not** run Think, Recirculation, Plan, Build, or
+   Autorun inside itself. The next action is whatever `idc_next_action.py` reports (typically `/idc:think --doc … --unit …` for the first
    queued new-requirement unit).
 
 ## Authority & halt

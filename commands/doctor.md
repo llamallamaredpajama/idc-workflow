@@ -442,13 +442,25 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_recirc_sweep.py" --repo "$PWD" --repo
 **9c — `Stage` carries the `Recirculation` option (github only; read-only detection + offer).** The
 sweep can only re-stage a rogue if the board's `Stage` single-select actually has a `Recirculation`
 option. This is a `github`-backend check (the `filesystem` backend's `Stage` is enum-validated in
-code, so it always accepts `Recirculation`); **SKIP** for `filesystem`. Probe read-only (reuses
-`$num` / `$owner` from check 3):
+code, so it always accepts `Recirculation`); **SKIP** for `filesystem`. As in 9d below, the read and
+the classification are **separate steps**: piping `gh` into `grep` discards `gh`'s exit status, so a
+transient/rate-limited field-list would be misreported as a real answer — here, as a missing
+`Recirculation` option that sends the operator to `/idc:update` for an option the board may already
+carry. Probe read-only, capturing the read and checking *it* first (reuses `$num` / `$owner` from
+check 3):
 ```bash
-gh project field-list "$num" --owner "$owner" --format json --jq \
-  '.fields[] | select(.name=="Stage") | .options[].name' | grep -qx "Recirculation" \
-  && echo stage-recirc-ok || echo stage-recirc-missing
+if ! stage_opts=$(gh project field-list "$num" --owner "$owner" --format json --jq \
+      '.fields[] | select(.name=="Stage") | .options[].name'); then
+  echo stage-recirc-unreadable
+elif printf '%s\n' "$stage_opts" | grep -qx "Recirculation"; then
+  echo stage-recirc-ok
+else
+  echo stage-recirc-missing
+fi
 ```
+- `stage-recirc-unreadable` (the field-list read itself failed) → **SKIP** ("could not determine"),
+  **never PASS and never FAIL**: no option was inspected. Note the `gh` error and suggest re-running
+  `/idc:doctor`. Still read-only.
 - `stage-recirc-ok` → **PASS**, no note.
 - `stage-recirc-missing` (the `Stage` field exists but has no `Recirculation` option) → **PASS with
   ⚠**, note: "the board's `Stage` field has no `Recirculation` option, so the recirculation sweep
@@ -464,13 +476,25 @@ provisions `Wave` with LABEL options (`Wave 1`), and Plan freezes that same labe
 A board drained by a pre-#206 runtime can also carry bare-number options (`1`, `2`) — added when a
 recovery step provisioned an option to make a `set-field Wave "1"` fit — leaving **two disjoint wave
 taxonomies on one field**: items sitting in `Wave 1` and items sitting in `1` are the same wave to a
-human and different waves to every reader. **SKIP** for `filesystem` (no option constraint). Probe
-read-only (reuses `$num` / `$owner` from check 3):
+human and different waves to every reader. **SKIP** for `filesystem` (no option constraint). The read
+and the classification are kept as **separate steps on purpose**: piping `gh` straight into `grep`
+throws away `gh`'s exit status, so a transient/rate-limited field-list would emit no lines, match
+nothing, and be reported as a clean single taxonomy — a PASS that inspected zero options. Probe
+read-only, capturing the read and checking *it* first (reuses `$num` / `$owner` from check 3):
 ```bash
-gh project field-list "$num" --owner "$owner" --format json --jq \
-  '.fields[] | select(.name=="Wave") | .options[].name' | grep -qxE '[0-9]+' \
-  && echo wave-options-split || echo wave-options-ok
+if ! wave_opts=$(gh project field-list "$num" --owner "$owner" --format json --jq \
+      '.fields[] | select(.name=="Wave") | .options[].name'); then
+  echo wave-options-unreadable
+elif printf '%s\n' "$wave_opts" | grep -qxE '[0-9]+'; then
+  echo wave-options-split
+else
+  echo wave-options-ok
+fi
 ```
+- `wave-options-unreadable` (the field-list read itself failed — transient error, rate limit, revoked
+  scope) → **SKIP** ("could not determine"), **never PASS and never FAIL**: no option was inspected,
+  so the board's taxonomy is simply unknown on this run. Note the `gh` error and suggest re-running
+  `/idc:doctor`. Still read-only — a failed read mutates nothing.
 - `wave-options-ok` → **PASS**, no note.
 - `wave-options-split` (the `Wave` field carries at least one bare-number option alongside the
   `Wave N` labels) → **PASS with ⚠**, note: "the board's `Wave` field carries two wave taxonomies

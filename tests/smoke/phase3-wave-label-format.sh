@@ -343,4 +343,41 @@ if errs:
 print("  H3 ok — wave compared by meaning: 1 == 'Wave 1', and 1 != 2 still aborts")
 PY
 
+# ── (I) doctor's 9c/9d probes keep `gh`'s exit status, so an UNREADABLE board is SKIP, never a
+#        verdict about options nobody managed to read ────────────────────────────────────────────
+# Piping `gh` straight into `grep` discards `gh`'s exit: a rate-limited field-list emits no lines,
+# matches nothing, and lands on the `||` branch — 9d reported `wave-options-ok` (a PASS that
+# inspected zero options) and 9c reported `stage-recirc-missing` (a ⚠ sending the operator to
+# `/idc:update` for an option the board may already carry).
+grep -q 'wave-options-unreadable' "$DOC" || fail "I: doctor.md 9d has no unreadable-read branch"
+grep -q 'stage-recirc-unreadable' "$DOC" || fail "I: doctor.md 9c has no unreadable-read branch"
+grep -qF 'if ! wave_opts=$(gh project field-list' "$DOC" \
+  || fail "I: doctor.md 9d no longer captures the field-list read before classifying it"
+grep -qF 'if ! stage_opts=$(gh project field-list' "$DOC" \
+  || fail "I: doctor.md 9c no longer captures the field-list read before classifying it"
+grep -qE "^gh project field-list .*\| grep" "$DOC" \
+  && fail "I: a doctor probe still pipes gh directly into grep, discarding gh's exit status"
+
+# Rehearse the published shape against a FAILING gh and both real board shapes, so the prose is
+# proven to classify rather than merely to mention the marker (the technique arm F uses).
+probe_9d() {   # mirrors doctor.md 9d; `gh` is whatever the caller defined
+  if ! wave_opts=$(gh project field-list 7 --owner o --format json --jq \
+        '.fields[] | select(.name=="Wave") | .options[].name' 2>/dev/null); then
+    echo wave-options-unreadable
+  elif printf '%s\n' "$wave_opts" | grep -qxE '[0-9]+'; then
+    echo wave-options-split
+  else
+    echo wave-options-ok
+  fi
+}
+gh() { return 1; }
+[ "$(probe_9d)" = "wave-options-unreadable" ] \
+  || fail "I: a failing field-list did not report as unreadable (got $(probe_9d))"
+gh() { printf 'Wave 1\nWave 2\n'; }
+[ "$(probe_9d)" = "wave-options-ok" ] || fail "I: a clean board no longer reports ok (got $(probe_9d))"
+gh() { printf 'Wave 1\nWave 2\n1\n2\n'; }
+[ "$(probe_9d)" = "wave-options-split" ] || fail "I: a split board no longer reports split (got $(probe_9d))"
+unset -f gh
+echo "  I ok — 9c/9d SKIP on an unreadable read; clean/split boards still classify"
+
 echo "PASS: phase3-wave-label-format"

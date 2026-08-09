@@ -88,9 +88,50 @@ for want in docs/workflow/install-receipt.yaml .idc-session-state.json .idc-doct
 behind as residue for the next install. Listing was:
 $LIST"
 done
-# ...and REMOVE them.
+# The BASELINE MARKER must NOT be in this set: the scaffold does not gitignore it, so it is durable
+# clone-portable state that CAN be tracked. Purging it here would remove it only AFTER the removal
+# commit, leaving a tracked deletion in the worktree and breaking the one-commit uninstall contract.
+printf '{}\n' > "$REPO/docs/workflow/reconciliation-baseline-required.json"
+git -C "$REPO" check-ignore -q docs/workflow/reconciliation-baseline-required.json \
+  && fail "control: the baseline marker is now gitignored, so this assertion's premise changed —
+re-decide whether it belongs to the ignored-sidecar sweep or the tracked manifest"
+timeout "$T_S" python3 "$CC" uninstall-sidecars --repo "$REPO" 2>&1 \
+  | grep -q 'reconciliation-baseline-required' \
+  && fail "#209: the ignored-sidecar sweep claims the baseline marker, which git can TRACK — it must
+be handled by the tracked removal manifest before the commit, not purged after it"
+
+# THE REMOVAL GATE. `.idc-session-state.json` is the obligations LEDGER: it holds the ACTIVE command
+# records the Stop closeout gate reads, and a missing ledger reads as "no obligations". So a removal
+# verb callable at any time could erase the current command's obligation and let a session walk away
+# from an unfinished command — strictly worse than the residue it cleans. The gate is the ordering
+# requirement made mechanical: refuse while the governance anchor is still present.
+[ -f "$REPO/docs/workflow/tracker-config.yaml" ] \
+  || fail "control: the fixture must still be GOVERNED here, or the refusal below proves nothing"
+timeout "$T_S" python3 "$CC" uninstall-sidecars --repo "$REPO" --remove >"$WORK/gated.out" 2>&1
+RC=$?
+[ "$RC" -eq 2 ] \
+  || fail "#209: purging sidecars in a repo that is STILL GOVERNED must be refused (exit 2), got
+$RC. An ungated removal verb deletes the obligations ledger mid-command and lets the session stop
+without finishing: $(cat "$WORK/gated.out")"
+[ -f "$REPO/.idc-session-state.json" ] \
+  || fail "#209: the refused purge deleted the ledger anyway — a refusal must change nothing"
+grep -qi 'still governed' "$WORK/gated.out" \
+  || fail "#209: the refusal must name the condition (still governed): $(cat "$WORK/gated.out")"
+
+# SYMLINK SAFETY: a sidecar NAME pointing at an operator file must never delete that file.
+printf 'operator data\n' > "$REPO/operator-notes.md"
+mv "$REPO/.idc-drain-verdict.json" "$WORK/dv.bak" 2>/dev/null || true
+ln -s operator-notes.md "$REPO/.idc-drain-verdict.json"
+
+# Now ungovern the repo (what 3c's commit does) so the purge is legitimately allowed.
+rm -f "$REPO/docs/workflow/tracker-config.yaml"
 timeout "$T_S" python3 "$CC" uninstall-sidecars --repo "$REPO" --remove >/dev/null 2>&1 \
-  || fail "the sidecar removal door exited non-zero"
+  || fail "the sidecar removal door exited non-zero once the repo was ungoverned"
+[ -f "$REPO/operator-notes.md" ] \
+  || fail "#209: the purge followed a symlink and deleted the operator file it pointed at. A sidecar
+is a machine-written REGULAR file; a symlink at that name must be left alone, never resolved and
+unlinked at its target."
+rm -f "$REPO/.idc-drain-verdict.json"
 for gone in docs/workflow/install-receipt.yaml .idc-session-state.json .idc-doctor-report.json; do
   [ ! -e "$REPO/$gone" ] \
     || fail "#209: '$gone' survived the removal door — an ignored sidecar that outlives uninstall is
@@ -114,6 +155,12 @@ git -C "$SREPO" config user.name t
 git -C "$SREPO" remote add origin "$BARE"
 git -C "$SREPO" commit -q --allow-empty -m init
 git -C "$SREPO" push -q origin main 2>/dev/null
+# GOVERNED, because that is the state a repair actually runs in (recovery is needed precisely when a
+# later /idc:init has re-armed the gate over the historical removal) — and because the ledger's
+# command_start is repo-gated: an ungoverned fixture would silently record no flags at all, so every
+# "the mode was stamped" assertion below would pass for the wrong reason.
+timeout "$T_S" bash "$SCAFFOLD" "$PLUGIN" "$SREPO" "Repair Proj" filesystem >/dev/null 2>&1 \
+  || fail "the scaffold helper failed on the repair fixture"
 
 # CONTROL: a clean range audits ok (exit 0). Without this, the "would-refuse" arm below could pass
 # because the auditor reports trouble for everything.
@@ -139,6 +186,35 @@ $(cat "$WORK/a2.out")"
 grep -qi 'indeterminate' "$WORK/a2.out" \
   || fail "#203: the indeterminate verdict must say so in its own output: $(cat "$WORK/a2.out")"
 
+# A remote that HANGS must become an honest indeterminate, not a wedged /idc:doctor. Driven by
+# forcing the timeout the bounded probe uses, rather than by waiting on a real unreachable host:
+# a lane that actually blocks for the bound would be indistinguishable from the hang it tests.
+timeout "$T_S" python3 - "$PLUGIN" "$SREPO" <<'PY' >"$WORK/a3.out" 2>&1
+import subprocess, sys
+plugin, repo = sys.argv[1:3]
+sys.path.insert(0, plugin + "/scripts")
+import idc_git_path_gate as G
+
+real_run = subprocess.run
+def hang(cmd, *a, **kw):
+    if isinstance(cmd, list) and "ls-remote" in cmd:
+        raise subprocess.TimeoutExpired(cmd, kw.get("timeout", 1))
+    return real_run(cmd, *a, **kw)
+subprocess.run = hang
+
+v = G.audit_outgoing(repo, plugin, "origin")
+print("status=%s" % v["status"])
+if not isinstance(getattr(G, "AUDIT_REMOTE_TIMEOUT_S", None), int):
+    print("NO-BOUND: the remote probe declares no timeout constant")
+PY
+RC=$?
+[ "$RC" -ne 124 ] || fail "#203: the timeout-mapping probe itself hung — the bound is not applied"
+grep -q 'status=indeterminate' "$WORK/a3.out"   || fail "#203: a remote probe that TIMES OUT must map to indeterminate, never to a clean range —
+otherwise a slow or prompting remote either wedges /idc:doctor or reports the range publishable
+without ever having read it. Got:
+$(cat "$WORK/a3.out")"
+grep -q 'NO-BOUND' "$WORK/a3.out"   && fail "#203: the remote probe must declare an explicit timeout bound"
+
 # The audit is READ-ONLY: it must never witness anything on the operator's behalf.
 WITNESS_DIR="$(git -C "$SREPO" rev-parse --path-format=absolute --git-common-dir)/idc-path-gate"
 [ ! -f "$WITNESS_DIR/uninstall-witness.json" ] \
@@ -154,20 +230,51 @@ import sys
 scripts, repo = sys.argv[1:3]
 sys.path.insert(0, scripts)
 import idc_command_contract as CC
+sys.path.insert(0, scripts + "/hooks")
+import idc_ledger
 
-fake = "0" * 40
-res = CC._claim_uninstall({"outcome": "repaired-push", "repaired": {"commits": [fake]}}, repo, "s1")
+fake = "0" * 40                       # resolves to nothing at all
+import subprocess
+real = subprocess.run(["git", "-C", repo, "rev-parse", "HEAD"],
+                      capture_output=True, text=True).stdout.strip()   # exists, but unwitnessed
+assert len(real) == 40, "fixture: could not read the fixture repo's HEAD"
+
+# (a) UNREQUESTED: no --repair-push stamped. The witness store is repository-WIDE, so without this
+# gate an ordinary uninstall could cite some earlier repair's commit and close as a repair.
+res0 = CC._claim_uninstall({"outcome": "repaired-push", "repaired": {"commits": [real]}}, repo, "s0")
+print("unrequested ok=%s code=%s" % (res0.ok, res0.reason_code))
+
+# Stamp the mode for every case below.
+rec = idc_ledger.command_start(repo, session_id="s1", command="uninstall", plugin_version="test",
+                               args_sha256="x", source="user", uninstall_flags=["repair-push"])
+assert rec, "fixture: the ledger refused the --repair-push stamp (is the fixture repo governed?)"
+res = CC._claim_uninstall({"outcome": "repaired-push", "repaired": {"commits": [real]}}, repo, "s1")
 print("ok=%s code=%s detail=%s" % (res.ok, res.reason_code, res.message))
+resU = CC._claim_uninstall({"outcome": "repaired-push", "repaired": {"commits": [fake]}}, repo, "s1")
+print("unresolvable ok=%s code=%s" % (resU.ok, resU.reason_code))
+# An ABBREVIATED sha must reach the witness check, not die on a literal string compare: the
+# documented recovery reads candidates from `git log --oneline`, which prints short ones.
+resA = CC._claim_uninstall({"outcome": "repaired-push", "repaired": {"commits": [real[:8]]}},
+                           repo, "s1")
+print("abbrev ok=%s code=%s" % (resA.ok, resA.reason_code))
 res2 = CC._claim_uninstall({"outcome": "repaired-push", "repaired": {"commits": []}}, repo, "s1")
 print("empty ok=%s code=%s" % (res2.ok, res2.reason_code))
 res3 = CC._claim_uninstall({"outcome": "repaired-push"}, repo, "s1")
 print("shape ok=%s code=%s" % (res3.ok, res3.reason_code))
 res4 = CC._claim_uninstall(
-    {"outcome": "repaired-push", "repaired": {"commits": [fake], "removed": ["WORKFLOW.md"]}},
+    {"outcome": "repaired-push", "repaired": {"commits": [real], "removed": ["WORKFLOW.md"]}},
     repo, "s1")
 print("removed ok=%s code=%s" % (res4.ok, res4.reason_code))
 res5 = CC._claim_uninstall({"outcome": "nonsense"}, repo, "s1")
 print("bogus ok=%s code=%s detail=%s" % (res5.ok, res5.reason_code, res5.message))
+
+# (b) BOARD FLAGS alongside the repair mode: one record cannot owe two outcomes.
+rec2 = idc_ledger.command_start(repo, session_id="s2", command="uninstall", plugin_version="test",
+                                args_sha256="x", source="user",
+                                uninstall_flags=["repair-push", "delete-board"])
+assert rec2, "fixture: the ledger refused the two-flag stamp"
+res6 = CC._claim_uninstall({"outcome": "repaired-push", "repaired": {"commits": [real]}}, repo, "s2")
+print("boardflags ok=%s code=%s" % (res6.ok, res6.reason_code))
 PY
 RC=$?
 [ "$RC" -ne 124 ] || fail "#204: the closeout probe hung (RED)"
@@ -194,6 +301,23 @@ grep -q "bogus ok=False" "$WORK/r1.out" \
 grep -q "repaired-push" "$WORK/r1.out" \
   || fail "#204: the outcome refusal must NAME 'repaired-push' among the legal outcomes — a
 validator that refuses without naming the legal set leaves the caller guessing. Got:
+$(cat "$WORK/r1.out")"
+grep -q 'unrequested ok=False code=uninstall-repair-unrequested' "$WORK/r1.out" \
+  || fail "#204: repaired-push must be UNAVAILABLE to a run that was not invoked with --repair-push.
+The uninstall witness is repository-wide, so an ordinary uninstall could otherwise cite an older
+repair's commit and close as a repair while the repo stayed installed. Got:
+$(cat "$WORK/r1.out")"
+grep -q 'unresolvable ok=False code=uninstall-repair-unresolvable' "$WORK/r1.out" \
+  || fail "#204: a sha that resolves to no commit here must be refused as unresolvable. Got:
+$(cat "$WORK/r1.out")"
+grep -q 'abbrev ok=False code=uninstall-repair-unwitnessed' "$WORK/r1.out" \
+  || fail "#204: an ABBREVIATED sha must be resolved to its full OID before the witness lookup — the
+documented recovery reads candidates from \`git log --oneline\`, which prints short shas, while the
+witness door stores full ones. A literal string compare makes a genuine repair unclosable. Got:
+$(cat "$WORK/r1.out")"
+grep -q 'boardflags ok=False code=uninstall-repair-board-flags' "$WORK/r1.out" \
+  || fail "#204: --repair-push combined with a board flag must be refused — recovery removes nothing
+and touches no board, and one command record cannot owe two outcomes. Got:
 $(cat "$WORK/r1.out")"
 
 # ══ prose contracts ══════════════════════════════════════════════════════════════════════════════

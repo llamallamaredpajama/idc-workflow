@@ -2930,7 +2930,10 @@ RUNTIME_UNINSTALL_ARTIFACTS = frozenset({"TRACKER.md"})
 IGNORED_UNINSTALL_SIDECARS = (
     "docs/workflow/install-receipt.yaml",
     "docs/workflow/reconciliation-seen-findings.json",
-    "docs/workflow/reconciliation-baseline-required.json",
+    # NOT `reconciliation-baseline-required.json`: the scaffold does not gitignore it, so it is
+    # durable clone-portable state that CAN be tracked. Purging it here would remove it only after
+    # the removal commit, leaving a tracked deletion in the worktree and breaking the one-commit
+    # uninstall contract. It belongs to the TRACKED manifest, not to this ignored-sidecar sweep.
     "docs/workflow/transition-journal.ndjson.lock",
     ".idc-session-state.json*",
     ".idc-drain-verdict.json*",
@@ -2952,7 +2955,11 @@ def uninstall_sidecar_paths(repo: str):
     seen = set()
     for pattern in IGNORED_UNINSTALL_SIDECARS:
         for hit in sorted(_glob.glob(os.path.join(root, pattern))):
-            if not os.path.isfile(hit):
+            # NEVER follow a symlink. `os.path.isfile` resolves one, and `_confined_repo_path`
+            # returns the TARGET's real path — so `.idc-session-state.json -> README.md` would have
+            # deleted the operator's README and left the link. A sidecar is a machine-written regular
+            # file; anything else is reported by its absence from this list, never removed.
+            if os.path.islink(hit) or not os.path.isfile(hit):
                 continue
             rel = os.path.relpath(hit, root)
             if rel in seen:
@@ -2969,9 +2976,13 @@ def remove_uninstall_sidecars(repo: str):
     root = os.path.abspath(repo or ".")
     removed, failed = [], []
     for rel in uninstall_sidecar_paths(root):
-        path = _confined_repo_path(root, rel)
-        if path is None:
+        if _confined_repo_path(root, rel) is None:
             failed.append(rel)
+            continue
+        # Unlink the LEXICAL path (containment already checked above), never the resolved target: a
+        # symlink planted at a sidecar name must not turn this into a delete of whatever it points at.
+        path = os.path.join(root, rel)
+        if os.path.islink(path) or not os.path.isfile(path):
             continue
         try:
             os.remove(path)
@@ -3184,7 +3195,7 @@ def _board_absent(repo: str):
         return None
 
 
-def _claim_repaired_push(refs: dict, repo: str) -> CloseoutResult:
+def _claim_repaired_push(refs: dict, repo: str, session: str) -> CloseoutResult:
     """The `repaired-push` outcome (#204): this run REPAIRED a push-stranded repo and removed nothing.
 
     Why a third outcome existed as a gap. `/idc:uninstall --repair-push` was built during the #202
@@ -3202,6 +3213,20 @@ def _claim_repaired_push(refs: dict, repo: str) -> CloseoutResult:
         would let a run claim credit for a commit no door ever admitted.
       * the run must have removed nothing — a repair that also deleted footprints is an `applied`
         uninstall and must be validated as one, so this outcome refuses when it is offered any."""
+    # The MODE must have been requested at start. Without this the outcome is reachable from any
+    # uninstall: the witness store is repository-GLOBAL, so citing a SHA some earlier uninstall
+    # witnessed would close a run that removed nothing and repaired nothing.
+    flags = _uninstall_flags_from_record(repo, session)
+    if "repair-push" not in flags:
+        return _fail("uninstall-repair-unrequested",
+                     "uninstall repaired-push requires the run to have been invoked with "
+                     "--repair-push (stamped on the active record at start) — the uninstall witness "
+                     "is repository-wide, so any run could otherwise cite an older repair's commit")
+    board_flags = sorted(flags - {"repair-push"})
+    if board_flags:
+        return _fail("uninstall-repair-board-flags",
+                     f"uninstall --repair-push was combined with {board_flags} — recovery removes "
+                     "nothing and touches no board, and one command record cannot owe two outcomes")
     repaired = refs.get("repaired")
     if not isinstance(repaired, dict):
         return _fail("uninstall-repair-shape",
@@ -3225,27 +3250,53 @@ def _claim_repaired_push(refs: dict, repo: str) -> CloseoutResult:
                      f"uninstall repaired-push could not read the uninstall witness to verify its "
                      f"claim ({exc}) — an unverifiable repair is refused, not trusted")
     for sha in commits:
-        if str(sha).lower() not in witnessed:
+        # The documented recovery reads candidates from `git log --oneline`, so the operator's SHA is
+        # normally ABBREVIATED. The witness door resolves and stores the full OID, so an unexpanded
+        # literal would never match and a genuine repair could not close.
+        try:
+            full = GPG._run_git(repo, "rev-parse", "--verify", f"{sha}^{{commit}}").strip().lower()
+        except Exception:  # noqa: BLE001 — an unresolvable revision is a refusal, never a pass
+            return _fail("uninstall-repair-unresolvable",
+                         f"uninstall repaired-push names {sha}, which does not resolve to a commit "
+                         "in this repository")
+        if full not in witnessed:
             return _fail("uninstall-repair-unwitnessed",
                          f"uninstall repaired-push names commit {sha} but the machine-owned "
                          "uninstall witness does not record it — the repair did not happen")
         try:
-            problem = GPG.uninstall_commit_problem(repo, str(sha))
+            problem = GPG.uninstall_commit_problem(repo, full)
         except Exception as exc:  # noqa: BLE001
             problem = f"could not re-derive the commit shape ({exc})"
         if problem:
             return _fail("uninstall-repair-bad-shape",
                          f"uninstall repaired-push names commit {sha}, which is not a completed IDC "
                          f"uninstall removal commit: {problem}")
+    # The claim is "this repo is publishable again", so VERIFY THAT, not just the citations. Witness
+    # membership alone is satisfiable by an OLD repair: a run could witness commit A while a
+    # different, unwitnessed removal commit B still strands the very push it reports fixed. Re-deriving
+    # the outgoing verdict binds the close to the CURRENT range instead of to the caller's list.
+    try:
+        verdict = GPG.audit_outgoing(repo, os.path.dirname(os.path.abspath(__file__)) + "/..",
+                                     refs.get("remote") or "origin")
+    except Exception as exc:  # noqa: BLE001
+        return _fail("uninstall-repair-unverifiable",
+                     f"uninstall repaired-push could not re-audit the outgoing range ({exc})")
+    status = str(verdict.get("status"))
+    if status != "ok":
+        return _fail("uninstall-repair-still-stranded",
+                     "uninstall repaired-push claims the repository is publishable, but re-auditing "
+                     f"the outgoing range says {status}: {verdict.get('reason')}. Witnessing one "
+                     "commit does not clear a range that still carries another refused one")
     return CloseoutResult(True, "ok",
                           f"uninstall repaired-push (verified: {len(commits)} witnessed, "
-                          "shape-checked removal commit(s); nothing removed)", {})
+                          "shape-checked removal commit(s); outgoing range re-audited publishable; "
+                          "nothing removed)", {})
 
 
 def _claim_uninstall(refs: dict, repo: str, session: str) -> CloseoutResult:
     outcome = refs.get("outcome")
     if outcome == "repaired-push":
-        return _claim_repaired_push(refs, repo)
+        return _claim_repaired_push(refs, repo, session)
     if outcome not in ("applied", "no-action"):
         return _fail("uninstall-outcome",
                      "uninstall complete requires refs.outcome of 'applied', 'no-action' or "
@@ -3601,7 +3652,7 @@ def recirc_requested_from_args(command: str, args_text: str):
 
 
 _ISSUE_REF_RE = re.compile(r"(?:^|\s)#(\d+)\b")
-_UNINSTALL_FLAG_RE = re.compile(r"(?:^|\s)--(close-issues|delete-board)\b")
+_UNINSTALL_FLAG_RE = re.compile(r"(?:^|\s)--(close-issues|delete-board|repair-push)\b")
 
 
 def build_requested_from_args(command: str, args_text: str):
@@ -3616,9 +3667,13 @@ def build_requested_from_args(command: str, args_text: str):
 
 
 def uninstall_flags_from_args(command: str, args_text: str):
-    """The Uninstall opt-in board flags (`--close-issues` / `--delete-board`) from its raw arg text
-    (wave-4 finding 6). Recorded durably at start so the closeout verifies each was actually honored
-    (issues closed / board gone) by a real read BEFORE finish. Every other command yields None."""
+    """The Uninstall opt-in modes (`--close-issues` / `--delete-board` / `--repair-push`) from its raw
+    arg text (wave-4 finding 6). Recorded durably at start so the closeout verifies each was actually
+    honored (issues closed / board gone / push repaired) by a real read BEFORE finish. `--repair-push`
+    joins them because the `repaired-push` closeout outcome must be UNAVAILABLE to a run that did not
+    ask for it: the witness store is repository-global, so an ordinary uninstall could otherwise cite
+    any previously-witnessed SHA and close as a repair while the repo stayed installed (#204 review).
+    Every other command yields None."""
     if command != "uninstall" or not args_text:
         return None
     flags = _UNINSTALL_FLAG_RE.findall(args_text)
@@ -3937,6 +3992,29 @@ def _cmd_status(args) -> int:
     return 0
 
 
+def uninstall_sidecar_removal_block(repo: str):
+    """Why `--remove` may be refused, or None when it is safe. FAIL-CLOSED.
+
+    `.idc-session-state.json` is the obligations LEDGER: it carries the ACTIVE command records the
+    Stop closeout gate reads, and a missing ledger reads as "no obligations". So an ungated removal
+    verb could be run mid-command and let a session walk away from an unfinished command — which is
+    strictly worse than the residue it exists to clean up.
+
+    The gate is the ordering requirement itself, made mechanical: the governance ANCHOR
+    (`docs/workflow/tracker-config.yaml`) must be ABSENT. Uninstall removes it in Phase 3c, one step
+    after the 3b closeout `finish` and one step before this purge, so the anchor's absence is exactly
+    "the uninstall removal has landed and its record is already closed". In every other situation —
+    any governed repo, any active command — the anchor is present and this refuses."""
+    anchor = _confined_repo_path(repo, _GOVERNANCE_ANCHOR)
+    if anchor is None or os.path.exists(anchor):
+        return (f"this repo is still governed ({_GOVERNANCE_ANCHOR} is present), so the ignored "
+                "sidecars are live state, not residue. The purge runs only AFTER uninstall's removal "
+                "commit has taken the anchor out — running it earlier would delete the obligations "
+                "ledger that the Stop closeout gate reads, letting a session walk away from an "
+                "unfinished command")
+    return None
+
+
 def _cmd_uninstall_sidecars(args) -> int:
     """List or remove the gitignored sidecars (#209). Read-only by default so the same door can be
     used as a residue CHECK — /idc:doctor and the uninstall report both want the listing, and only
@@ -3946,6 +4024,10 @@ def _cmd_uninstall_sidecars(args) -> int:
         for rel in uninstall_sidecar_paths(repo):
             print(rel)
         return 0
+    block = uninstall_sidecar_removal_block(repo)
+    if block is not None:
+        sys.stderr.write(f"idc-command-contract: refusing to purge IDC sidecars — {block}\n")
+        return 2
     removed, failed = remove_uninstall_sidecars(repo)
     for rel in removed:
         print(f"removed {rel}")

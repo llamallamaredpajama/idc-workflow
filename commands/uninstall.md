@@ -211,7 +211,8 @@ stay untracked). Capture the commit SHA for the summary. On a re-run with nothin
 make no commit and report `skipped-absent` across the board — and run no witness door, because there
 is no commit to witness.
 
-**3d — Purge the gitignored machine-owned sidecars.** `git rm` above removes only what git TRACKS,
+**3d — Purge the gitignored machine-owned sidecars.** *(runs only once 3c's commit has landed — the
+door refuses while the governance anchor is still present, which is exactly the ordering below.)* `git rm` above removes only what git TRACKS,
 and `/idc:init` deliberately gitignores IDC's machine-written sidecars — so every one of them
 survives an otherwise-complete uninstall and lands as residue in the next install. Two of them do
 real damage: the install receipt (doctor then reports the repo as still carrying an IDC footprint)
@@ -359,16 +360,26 @@ is the wrong answer here. Do **not** reach for `--no-verify`, and do **not** rew
      --evidence-json '{"schema_version":1,"refs":{"outcome":"repaired-push",
        "repaired":{"commits":["<sha>", …]}}}'
    ```
-   The validator re-derives the claim rather than trusting it: every named commit must be recorded in
-   the machine-owned uninstall witness **and** still pass the removal-commit shape check. Offering a
-   removal set here is refused — a run that removed footprints is an `applied` uninstall.
+   The validator re-derives the claim rather than trusting it, on four counts:
+   - the run must have been invoked with `--repair-push` (stamped on its record at start). The
+     uninstall witness is **repository-wide**, so without this an ordinary uninstall could cite some
+     earlier repair's commit and close as a repair while the repo stayed installed;
+   - abbreviated SHAs are resolved to full OIDs first — step 1's `git log --oneline` hands you short
+     ones, and the witness stores full ones;
+   - every named commit must be recorded in the machine-owned witness **and** still pass the
+     removal-commit shape check;
+   - the outgoing range is **re-audited** and must come back publishable. Witnessing one commit does
+     not clear a range that still carries another refused one, so the close is bound to the repo's
+     current state rather than to the list you passed.
+   Offering a removal set here is refused — a run that removed footprints is an `applied` uninstall.
 
 **Entering recovery: `/idc:uninstall --repair-push`.** When `$ARGUMENTS` carries `--repair-push`,
 this section IS the whole command: skip Phases 0–5 entirely (there is nothing to remove and no
-archive to take), run steps 1–4 above, and stop. Every other uninstall flag is refused alongside it —
-`--repair-push` neither closes issues nor deletes a board, and combining them would mean one command
-record owing two different outcomes. Preflight still applies in one respect: a dirty tree is fine
-here, because recovery writes nothing to the worktree.
+archive to take), run steps 1–4 above, and stop. The flag is **stamped on the command record at
+start**, and the `repaired-push` outcome is available only to a run that carries it. Every other
+uninstall flag is refused alongside it — `--repair-push` neither closes issues nor deletes a board,
+and combining them would mean one command record owing two different outcomes. Preflight still
+applies in one respect: a dirty tree is fine here, because recovery writes nothing to the worktree.
 
 Nothing else in the range is exempted: any other commit touching a protected surface still has to be
 dealt with on its own terms.

@@ -660,6 +660,36 @@ def cmd_witness_uninstall(args: argparse.Namespace) -> int:
     return 0
 
 
+# How long a single read-only network probe may take before the diagnosis gives up and reports
+# INDETERMINATE. Doctor must never hang: a slow or unreachable remote has to become an honest "could
+# not determine", not a wedged command.
+AUDIT_REMOTE_TIMEOUT_S = 20
+
+
+def _ls_remote_bounded(repo: str, remote: str, ref: str):
+    """`git ls-remote` under a hard timeout with EVERY interactive prompt disabled, or None.
+
+    Unbounded, this is the one call in the audit that can block forever: an unreachable host at the
+    TCP layer, or git/ssh waiting on a credential or host-key prompt with nobody there to answer.
+    `/idc:doctor` would hang instead of returning its documented SKIP. None means "could not answer",
+    which the caller maps to INDETERMINATE — never to a clean range."""
+    env = dict(os.environ)
+    env["GIT_TERMINAL_PROMPT"] = "0"        # no username/password prompt
+    env["GIT_ASKPASS"] = "echo"             # no GUI/askpass helper
+    env.setdefault("GIT_SSH_COMMAND",
+                   "ssh -oBatchMode=yes -oStrictHostKeyChecking=accept-new -oConnectTimeout=10")
+    try:
+        proc = subprocess.run(
+            ["git", "-C", repo, "ls-remote", "--refs", remote, ref],
+            capture_output=True, text=True, env=env, timeout=AUDIT_REMOTE_TIMEOUT_S,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout
+
+
 def _outgoing_push_lines(repo: str, remote: str) -> list[str]:
     """Synthesize the pre-push stdin lines git would feed for `HEAD -> <remote>/<branch>`.
 
@@ -677,7 +707,9 @@ def _outgoing_push_lines(repo: str, remote: str) -> list[str]:
         return []
     remote_sha = ""
     try:
-        out = _run_git(repo, "ls-remote", "--refs", remote, f"refs/heads/{branch}")
+        out = _ls_remote_bounded(repo, remote, f"refs/heads/{branch}")
+        if out is None:
+            return []
         if out.strip():
             remote_sha = out.split()[0]
     except RuntimeError:
@@ -743,11 +775,15 @@ def cmd_audit_outgoing(args: argparse.Namespace) -> int:
         print(json.dumps(verdict, indent=2, sort_keys=True))
     else:
         print(f"outgoing-range: {verdict['status']} — {verdict['reason']}")
+        # The remediation is meant to be RUN, so emit a real path — a literal `<plugin>` placeholder
+        # is parsed by the shell as a redirection and the sanctioned repair fails. Both operands are
+        # shell-quoted because a repo path may contain spaces.
+        door = os.path.join(os.path.abspath(args.plugin_root), "scripts", "idc_git_path_gate.py")
         for commit in verdict.get("recoverable_uninstall_commits") or []:
             print(f"  recoverable: {commit} is a completed IDC uninstall removal commit with no "
                   f"witness; witness it, then push:")
-            print(f"    python3 <plugin>/scripts/idc_git_path_gate.py witness-uninstall "
-                  f"--repo {repo} --commit {commit}")
+            print(f"    python3 {shlex.quote(door)} witness-uninstall "
+                  f"--repo {shlex.quote(repo)} --commit {commit}")
     return {"ok": 0, "would-refuse": 1}.get(str(verdict["status"]), 2)
 
 

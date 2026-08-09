@@ -26,12 +26,14 @@
 #      goes red.
 #
 #      Arm G originally asserted the announcement against whatever section was NEWEST, which was
-#      right for the release that flipped the default and wrong for every release after it: 6.0.1's
-#      notes had to restate 6.0.0's news as a "standing defaults" paragraph purely to keep this lane
+#      right only for the release that flipped the default and wrong for every release after it:
+#      6.0.0 and then 6.0.1 each had to carry the announcement forward purely to keep this lane
 #      green, and so would every future release forever (#214). The version-lockstep half still
 #      measures the NEWEST section — that is what "the four surfaces move together" means — while the
 #      announcement half is pinned to the section that actually made the claim. Nothing is weakened:
-#      the literal is still asserted, and deleting it from the 6.0.0 section still turns this lane red.
+#      the literal is still asserted, and deleting it from the FLIP_VERSION section turns this lane
+#      red. Note the carry-forward is exactly why the binding must be derived from the CODE and not
+#      from which notes happen to mention it: three sections contain the literal today.
 #
 # Red-when-broken: delete the github default flip (A), the filesystem refusal (D), stale any one
 # release surface, or delete the announcement from the flip section (G), and the matching assertion
@@ -166,9 +168,14 @@ python3 "$PLUGIN/scripts/idc_release_check.py" >"$WORK/rc.out" 2>"$WORK/rc.err" 
   || fail "the shipped release surfaces are not in lockstep: $(cat "$WORK/rc.err")"
 
 ANNOUNCE='GitHub-backed repositories now scaffold `pathway_enforcement.mode: controlled` by default'
-# The release whose notes MADE the controlled-default claim. This moves only if the effective
-# default itself changes again — in which case the new flip's release notes become the binding.
-FLIP_VERSION='6.0.0'
+# The release whose notes MADE the controlled-default claim. Verified from the code, not from the
+# release notes' own retelling: `git log -S controlled -- scripts/idc_init_scaffold.sh` has exactly
+# one introducing commit (b958738, "feat(u9): green — controlled default for github-backed repos"),
+# and plugin.json read 5.0.0 at that commit. The 6.0.0 and 6.0.1 sections RESTATE the announcement;
+# binding to either of those would leave the release that actually made the claim unguarded, so
+# deleting the 5.0.0 announcement would go unnoticed. This moves only if the effective default itself
+# changes again — in which case the new flip's release notes become the binding.
+FLIP_VERSION='5.0.0'
 PLUGIN="$PLUGIN" ANNOUNCE="$ANNOUNCE" FLIP_VERSION="$FLIP_VERSION" python3 - <<'PY' || exit 1
 import json, os, re, sys
 

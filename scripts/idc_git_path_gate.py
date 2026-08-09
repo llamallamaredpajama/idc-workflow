@@ -660,6 +660,133 @@ def cmd_witness_uninstall(args: argparse.Namespace) -> int:
     return 0
 
 
+# How long a single read-only network probe may take before the diagnosis gives up and reports
+# INDETERMINATE. Doctor must never hang: a slow or unreachable remote has to become an honest "could
+# not determine", not a wedged command.
+AUDIT_REMOTE_TIMEOUT_S = 20
+
+
+def _ls_remote_bounded(repo: str, remote: str, ref: str):
+    """`git ls-remote` under a hard timeout with EVERY interactive prompt disabled, or None.
+
+    Unbounded, this is the one call in the audit that can block forever: an unreachable host at the
+    TCP layer, or git/ssh waiting on a credential or host-key prompt with nobody there to answer.
+    `/idc:doctor` would hang instead of returning its documented SKIP. None means "could not answer",
+    which the caller maps to INDETERMINATE — never to a clean range."""
+    env = dict(os.environ)
+    env["GIT_TERMINAL_PROMPT"] = "0"        # no username/password prompt
+    env["GIT_ASKPASS"] = "echo"             # no GUI/askpass helper
+    env.setdefault("GIT_SSH_COMMAND",
+                   "ssh -oBatchMode=yes -oStrictHostKeyChecking=accept-new -oConnectTimeout=10")
+    try:
+        proc = subprocess.run(
+            ["git", "-C", repo, "ls-remote", "--refs", remote, ref],
+            capture_output=True, text=True, env=env, timeout=AUDIT_REMOTE_TIMEOUT_S,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout
+
+
+def _outgoing_push_lines(repo: str, remote: str) -> list[str]:
+    """Synthesize the pre-push stdin lines git would feed for `HEAD -> <remote>/<branch>`.
+
+    Read-only. Mirrors the range derivation `commands/uninstall.md`'s recovery section documents:
+    what the remote already has for THIS ref, or — when the ref is new there — the empty sha, which
+    `_collect_pre_push_commits` already expands into "everything the remote has on ANY ref". Returns
+    [] when there is no branch or the remote cannot be listed, so the caller reports rather than
+    guesses."""
+    try:
+        branch = _run_git(repo, "symbolic-ref", "--quiet", "--short", "HEAD")
+        head = _run_git(repo, "rev-parse", "HEAD")
+    except RuntimeError:
+        return []
+    if not branch or not head:
+        return []
+    remote_sha = ""
+    try:
+        out = _ls_remote_bounded(repo, remote, f"refs/heads/{branch}")
+        if out is None:
+            return []
+        if out.strip():
+            remote_sha = out.split()[0]
+    except RuntimeError:
+        return []
+    zero = "0" * 40
+    return [f"refs/heads/{branch} {head} refs/heads/{branch} {remote_sha or zero}"]
+
+
+def audit_outgoing(repo: str, plugin_root: str, remote: str) -> dict[str, object]:
+    """Would a push of the current branch be REFUSED by the pre-push path gate? Read-only (#203).
+
+    Walks the unpublished range through the SAME code path the hook uses — `_collect_pre_push_commits`
+    -> `_exempt_witnessed_uninstall_paths` -> `_gate` — so the diagnosis can never disagree with the
+    thing that actually refuses. Nothing is written and no witness is recorded.
+
+    The value is naming the condition BEFORE the operator hits it. A repo stranded by a pre-#202
+    uninstall (its removal commit sitting unwitnessed in the outgoing range) is indistinguishable
+    from a healthy repo until a push fails with a path-gate refusal that reads as if the CURRENT
+    change were at fault. So when a refusal is predicted, the unwitnessed-but-genuine uninstall
+    removal commits are named separately from everything else, because they have their OWN sanctioned
+    recovery door and the rest do not."""
+    result: dict[str, object] = {
+        "status": "ok", "remote": remote, "reason": "", "recoverable_uninstall_commits": [],
+    }
+    lines = _outgoing_push_lines(repo, remote)
+    if not lines:
+        result["status"] = "indeterminate"
+        result["reason"] = (
+            f"could not derive the unpublished range for remote {remote!r} (no branch, no such "
+            "remote, or it is unreachable) — publishability is unknown, not proven")
+        return result
+    commits = _collect_pre_push_commits(repo, lines, remote=remote)
+    if not commits:
+        result["reason"] = "nothing to publish — the remote already has this branch's commits"
+        return result
+    paths = _exempt_witnessed_uninstall_paths(repo, commits)
+    if not paths:
+        result["reason"] = f"{len(commits)} unpublished commit(s), none touching a gated path"
+        return result
+    decision = _gate(repo, plugin_root, "git", paths)
+    if decision.get("allowed"):
+        result["reason"] = f"{len(commits)} unpublished commit(s), all admissible"
+        return result
+    result["status"] = "would-refuse"
+    result["reason"] = str(decision.get("reason") or "the Path Gate would deny this push")
+    # A genuine, still-unwitnessed uninstall removal commit is the recoverable case: it has a
+    # sanctioned door. Anything else is ordinary path-gate guidance.
+    witnessed = PG.read_uninstall_witness(repo)
+    recoverable = [
+        commit for commit, _ in commits
+        if commit.lower() not in witnessed and uninstall_commit_problem(repo, commit) is None
+    ]
+    result["recoverable_uninstall_commits"] = recoverable
+    return result
+
+
+def cmd_audit_outgoing(args: argparse.Namespace) -> int:
+    """0 = publishable, 1 = a push would be refused, 2 = indeterminate (fail-closed for a diagnosis:
+    'we could not tell' must never print as 'fine')."""
+    repo = _repo_root(args.repo)
+    verdict = audit_outgoing(repo, args.plugin_root, args.remote)
+    if args.json:
+        print(json.dumps(verdict, indent=2, sort_keys=True))
+    else:
+        print(f"outgoing-range: {verdict['status']} — {verdict['reason']}")
+        # The remediation is meant to be RUN, so emit a real path — a literal `<plugin>` placeholder
+        # is parsed by the shell as a redirection and the sanctioned repair fails. Both operands are
+        # shell-quoted because a repo path may contain spaces.
+        door = os.path.join(os.path.abspath(args.plugin_root), "scripts", "idc_git_path_gate.py")
+        for commit in verdict.get("recoverable_uninstall_commits") or []:
+            print(f"  recoverable: {commit} is a completed IDC uninstall removal commit with no "
+                  f"witness; witness it, then push:")
+            print(f"    python3 {shlex.quote(door)} witness-uninstall "
+                  f"--repo {shlex.quote(repo)} --commit {commit}")
+    return {"ok": 0, "would-refuse": 1}.get(str(verdict["status"]), 2)
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="op", required=True)
@@ -692,6 +819,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--repo", required=True)
     p.add_argument("--commit", required=True)
     p.set_defaults(func=cmd_witness_uninstall)
+
+    p = sub.add_parser(
+        "audit-outgoing",
+        help="read-only: would a push of this branch be refused by the pre-push path gate? (#203)",
+    )
+    p.add_argument("--repo", required=True)
+    p.add_argument("--plugin-root", required=True)
+    p.add_argument("--remote", default="origin")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_audit_outgoing)
 
     return ap
 

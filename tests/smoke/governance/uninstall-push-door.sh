@@ -188,6 +188,30 @@ grep -qF "$DENY_MARK" "$WORK/stranded.out" \
 [ "$(git -C "$REPO" rev-parse origin/main)" != "$(git -C "$REPO" rev-parse HEAD)" ] \
   || gov_fail "the remote advanced despite the refusal"
 
+# ── 1b. DIAGNOSIS (#203): doctor can NAME this condition before a push ever fails ────────────────
+# The repo is now stranded, and that is invisible: nothing in the worktree differs from a healthy
+# repo, so the operator discovers it only when the push above fails — and the refusal reads as if
+# whatever they just committed were at fault. `audit-outgoing` is the read-only row that walks this
+# same range through the SAME code path the hook uses, so the diagnosis cannot disagree with the
+# thing that actually refuses. Asserted HERE, between the repro and the recovery, because this is the
+# only point in the suite where a genuinely stranded repo exists.
+python3 "$GIT_GATE" audit-outgoing --repo "$REPO" --plugin-root "$GOV_PLUGIN" --remote origin   >"$WORK/audit-stranded.out" 2>&1
+AUDIT_RC=$?
+[ "$AUDIT_RC" -eq 1 ]   || gov_fail "#203: the read-only audit must report a stranded repo as would-refuse (exit 1); got exit $AUDIT_RC. A push-stranded range that audits CLEAN is the whole defect — the operator learns of it only when the push fails: $(cat "$WORK/audit-stranded.out")"
+grep -q 'would-refuse' "$WORK/audit-stranded.out"   || gov_fail "#203: the audit's verdict line must name the would-refuse status: $(cat "$WORK/audit-stranded.out")"
+grep -qF "$UNINSTALL_SHA" "$WORK/audit-stranded.out"   || gov_fail "#203: the audit must NAME the recoverable uninstall commit ($UNINSTALL_SHA). Naming the condition without naming the commit leaves the operator with a refusal and no remedy: $(cat "$WORK/audit-stranded.out")"
+grep -q 'witness-uninstall' "$WORK/audit-stranded.out"   || gov_fail "#203: the audit must quote the sanctioned recovery door (witness-uninstall) for a genuine uninstall removal commit — that is the difference between a diagnosis and a dead end: $(cat "$WORK/audit-stranded.out")"
+# The remediation must be RUNNABLE. A literal `<plugin>` placeholder is parsed by the shell as a
+# redirection, so an agent that does what doctor tells it gets a syntax error instead of a repair.
+grep -q '<plugin>' "$WORK/audit-stranded.out" \
+  && gov_fail "#203: the audit printed a literal <plugin> placeholder in the command it tells the operator to RUN — the shell reads that as a redirection and the sanctioned repair fails: $(cat "$WORK/audit-stranded.out")"
+AUDIT_DOOR="$(sed -n 's/^ *python3 \(.*\) witness-uninstall.*/\1/p' "$WORK/audit-stranded.out" | head -1 | sed "s/^'//; s/'$//")"
+[ -n "$AUDIT_DOOR" ] && [ -f "$AUDIT_DOOR" ] \
+  || gov_fail "#203: the witness command the audit prints does not name a real script path (got '$AUDIT_DOOR') — the remediation has to be executable as printed: $(cat "$WORK/audit-stranded.out")"
+
+# READ-ONLY: the diagnosis must not make the condition disappear. The push must STILL fail.
+git -C "$REPO" push origin main >"$WORK/still-stranded.out" 2>&1   && gov_fail "#203: the repo became pushable after a READ-ONLY audit — the diagnosis witnessed something on the operator's behalf, which is a mutation no read-only row may make"
+
 # ── 2. RECOVERY: the door admits an already-stranded uninstall commit, retroactively ──────────────
 # This is the path a repo stranded by an older plugin version needs: the commit already exists, no
 # witness was ever written, and the operator must still be able to publish it.

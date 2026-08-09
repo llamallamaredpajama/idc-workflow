@@ -550,6 +550,28 @@ Read the scanner's exit code + its `janitor: N safe-fix, M risky, K report-only`
   indeterminate dimension) → **SKIP** ("could not determine"), **never FAIL** — surface the stderr
   diagnostic. Like Rows 8/9, Row 10 is never a hollow clean and never a FAIL.
 
+**10b — The unpublished range is publishable (advisory; never FAIL; read-only).** A repo stranded by
+a pre-6.0.1 uninstall — its removal commit sitting unwitnessed in the outgoing range — is
+indistinguishable from a healthy one until a `git push` fails, and the refusal then reads as if
+whatever the operator just committed were at fault. This row walks the unpublished range through the
+**same code path the pre-push hook uses** (so the diagnosis can never disagree with the thing that
+actually refuses) and names the condition before it is hit. It writes nothing and witnesses nothing:
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_path_gate.py" audit-outgoing \
+  --repo "$PWD" --plugin-root "${CLAUDE_PLUGIN_ROOT}" --remote origin
+```
+- exit **0** → no note (the range is admissible, or there is nothing to publish).
+- exit **1** → **PASS with ⚠**, quoting the refusal reason. When the tool names
+  `recoverable: <sha>`, that commit is a **completed IDC uninstall removal** with no witness, and it
+  has its own sanctioned door — quote the `witness-uninstall` command the tool prints, which is the
+  same recovery `commands/uninstall.md` documents. When it names none, this is ordinary path-gate
+  guidance: the refusal reason says which surface is at fault.
+- exit **2** → **SKIP** ("could not determine"), never FAIL: no branch, no such remote, or the
+  remote is unreachable. Publishability is then *unknown*, which is not the same as fine.
+This is a **sub-row of check 10** (like `4b` under `4`, `5b` under `5`): report it under row 10 and
+leave row 10's persisted `result` as row 10's own scanner verdict — 10b is advisory and never
+changes it — so the ten-row report contract stays exactly as it is.
+
 ## Output
 
 Emit a single table, then a one-line verdict. Tally PASS / FAIL / SKIP across the ten rows (rows

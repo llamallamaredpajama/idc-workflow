@@ -1804,6 +1804,14 @@ def load_itemid_cache(path=None):
 
 
 def github_ctx(repo, owner, project, machine=None, itemid_cache=None):
+    # Fail-fast guard (session 4731f696): a None/empty owner or project used to flow unchecked into
+    # the `gh` argv and die deep in subprocess with a raw TypeError — a crashed door forces the raw
+    # `gh project item-edit` fallback the mutation interlock exists to forbid. Refuse HERE, by name.
+    if not owner or project in (None, ""):
+        raise TransitionError(
+            f"github backend needs a non-empty owner and project (owner={owner!r}, "
+            f"project={project!r}) — pass --owner/--project, or run against a governed repo where "
+            "they resolve (docs/workflow/tracker-config.yaml::project_number + `gh repo view`)")
     if machine is None:
         machine = load_machine(machine_path_for(repo))
     if itemid_cache is None:
@@ -1915,22 +1923,80 @@ def resolve_backend(args):
     return declared
 
 
+def _config_project_number(repo):
+    """tracker-config.yaml::project_number as a digit string, or None when the file/key is absent,
+    unreadable, or still an unfilled template token. Grep-parse, an independent copy per the repo's
+    no-yq convention (mirrors idc_git_finish.read_config; deliberately no cross-unit dependency)."""
+    cfg = os.path.join(repo, "docs", "workflow", "tracker-config.yaml")
+    try:
+        with open(cfg, encoding="utf-8") as fh:
+            for line in fh:
+                m = re.match(r'^project_number:\s*"?([^"#\n]*)"?', line)
+                if m:
+                    val = m.group(1).strip()
+                    return val if val.isdigit() else None
+    except OSError:
+        return None
+    return None
+
+
+def resolve_github_defaults(repo, owner, project):
+    """Fill in the github owner/project the CLI did not receive — the STANDALONE door path (session
+    4731f696: an agent journaling a board write outside an active /idc:* command, where no playbook
+    preamble resolved the flags first). Resolution mirrors that preamble's own recipe: project from
+    docs/workflow/tracker-config.yaml::project_number, owner from `gh repo view` inside the repo.
+    Anything unresolvable raises TransitionError (exit 2) NAMING the missing prerequisite — the door
+    works standalone or refuses cleanly, never tracebacks (a crashed door forces the raw
+    `gh project item-edit` fallback the mutation interlock forbids). Explicit flags skip their half
+    of the resolution, so an active command's fully-flagged invocation runs ZERO extra gh calls."""
+    problems = []
+    if project is None:
+        project = _config_project_number(repo)
+        if project is None:
+            problems.append(
+                "project: docs/workflow/tracker-config.yaml carries no filled integer "
+                "project_number — pass --project, or scaffold the config (/idc:init fills it)")
+    if owner is None:
+        detail = "empty output"
+        try:
+            proc = subprocess.run(["gh", "repo", "view", "--json", "owner", "-q", ".owner.login"],
+                                  cwd=repo, capture_output=True, text=True, timeout=60)
+        except OSError as e:
+            proc, detail = None, str(e)
+        except subprocess.TimeoutExpired:
+            proc, detail = None, "gh timed out"
+        if proc is not None:
+            owner = (proc.stdout.strip() or None) if proc.returncode == 0 else None
+            if owner is None:
+                detail = _child_stderr(proc) or detail
+        if owner is None:
+            problems.append(
+                f"owner: `gh repo view` could not name the repo owner ({detail}) — pass --owner, "
+                "or run inside a repo with a GitHub remote and an authenticated gh")
+    if problems:
+        raise TransitionError(
+            "github backend: cannot resolve the board context standalone — " + "; ".join(problems))
+    return owner, project
+
+
 def main():
     args = build_parser().parse_args()
     repo = os.path.abspath(args.repo)
     machine = load_machine(machine_path_for(repo, args.machine))
-    # Backend resolution can REFUSE (#153: a present-but-unreadable/corrupt tracker-config.yaml) —
-    # map that to the same exit-2 denial contract as every other TransitionError, before any write.
+    # Backend + ctx resolution can REFUSE (#153: a present-but-unreadable/corrupt tracker-config;
+    # session 4731f696: a standalone github invocation whose owner/project cannot be resolved) — map
+    # both to the same exit-2 denial contract as every other TransitionError, before any write.
     try:
         backend = resolve_backend(args)
+        tracker = args.tracker or os.path.join(repo, "TRACKER.md")
+        if backend == "github":
+            owner, project = resolve_github_defaults(repo, args.owner, args.project)
+            ctx = github_ctx(repo, owner, project, machine)
+        else:
+            ctx = fs_ctx(repo, tracker, machine)
     except TransitionError as e:
         sys.stderr.write(f"idc-transition: {e}\n")
         sys.exit(2)
-    tracker = args.tracker or os.path.join(repo, "TRACKER.md")
-    if backend == "github":
-        ctx = github_ctx(repo, args.owner, args.project, machine)
-    else:
-        ctx = fs_ctx(repo, tracker, machine)
 
     kw = {}
     op = args.op

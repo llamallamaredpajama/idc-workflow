@@ -2,6 +2,118 @@
 
 All notable changes for the IDC Workflow plugin are documented in this file.
 
+## 6.0.0 — 2026-08-08
+
+Completion honesty at every door — the receipt tells the truth in three different ways, the
+lifecycle cannot be cleared by growth it designed, and runs become watchable while they happen.
+
+Major version because the **closeout contract** changed behavior. `/idc:init` and `/idc:update`
+completion certification is now exact-match strict, `blocked_external` claims citing the receipt
+checker now require a provable failure, and the receipt's `verify --json` schema gained a fourth
+class (`ask`). Consumers that parsed the three-class summary line, or depended on an always-ask
+divergence flipping `ok: false`, must adapt.
+
+The enforcement posture is unchanged from 5.0.0 and remains in effect:
+GitHub-backed repositories now scaffold `pathway_enforcement.mode: controlled` by default
+(filesystem-backed repos stay `off` and may not claim hard pathway security); existing repos are
+never flipped in place, and the `app-locked` mode (the GitHub App) remains strictly opt-in.
+
+### The receipt's three doors (issue #194, PR #196)
+
+- **Steady-state report:** an always-ask operator-data file (the two configs, the verification-handle
+  registry) that is present but diverged now reports `ask`, not `modified` — and no longer fails
+  `ok`. The finisher's REQUIRED handle append stops raising a false drift alarm after every green
+  build. Controls: real template drift is still `modified` + `ok:false`; a deleted data file is still
+  `missing` + `ok:false`.
+- **Completion certification (strict):** init/update `complete` re-runs the fingerprint check
+  exact-match — `ask` counts as divergence there, because that door opens moments after the run
+  stamped its own fresh receipt, when nothing legitimately diverges. An ask-only divergence gets its
+  own `receipt-fingerprint-stale` diagnostic naming the re-stamp remedy. Update's
+  `skipped-already-current` path now re-stamps when the receipt no longer matches exactly, so
+  sanctioned growth never wedges an honest update.
+- **Blocked-stop grounding:** `blocked_external` citing the receipt checker is accepted only on a
+  REAL failure — an invalid receipt, a modified/missing stamped file, or an always-ask file a
+  fixed-code validator refuses. Sanctioned growth alone can no longer clear init/update/uninstall
+  without doing the work.
+
+### Live, queryable run trace (issue #195, PR #198)
+
+`scripts/idc_trace_mirror.py`: a derived, disposable, gitignored WAL SQLite mirror of the transition
+journal (live + rotated archives) and the hook receipt sidecars. One cursor-poll contract
+(`select * from events where run_id = ? and rowid > ?`) serves live watching and history alike;
+subcommands: ingest · tail · watch · sessions · timeline · timing · rebuild. Doctrine, enforced by
+test: never authoritative, no gate reads it, incremental ingest and rebuild-from-scratch converge to
+identical content, damage is skipped + counted + reported, and the observer reads the journal under
+its own lock so it cannot corrupt — or meaningfully delay — the run it watches. The mirror db is
+created owner-only and is hard-denied by the path gate like every other machine-owned `.idc-*` file
+(the gitignore keeps it out of casual staging; the gate refuses `git add -f`, hand edits, and an
+already-tracked copy).
+
+### Build can actually finish in the worktree it always runs in (issue #197, PR #199)
+
+The witness chain derived the repo root from git's shared directory, which in a linked worktree
+resolves to the primary checkout — so freeze was refused outright for sibling worktrees, and for the
+plugin's own worktree shape the receipt key embedded the throwaway worktree path and died with it
+(the "manual witness bridging" the 2026-08-02 e2e recorded). Now: **paths are logical (relative to
+the worktree the artifact lives in); identity stays the main checkout** — across the validation
+contract, the build receipt, and the review verdict. And the finish tail itself was unlandable from
+the shipped invocation: the finisher now derives the governed checkout when `--repo` resolves to the
+worktree being removed, carries the witness artifacts (and the review's ignored work products — the
+human report, round records, seen-ledger) to their logical paths in the governed checkout,
+re-verifies the receipt there head-binding included, refuses to overwrite differing destination
+bytes, and restores everything if the non-force worktree removal is refused. The build receipt now
+refuses split-worktree components at write time instead of failing at verify. Nothing loosened:
+nothing committed, the sealed head never moves, foreign-repo contracts still refused.
+
+### Uninstall's removal commit is publishable — through a witnessed door (issue #201, PR #202)
+
+Found by this release's own e2e: uninstall commits the deletion of machine-owned files
+(`TRACKER.md`, the install receipt), and the init-installed pre-push gate refused any commit
+touching them — so a filesystem-backend repo could never publish its own uninstall, and the stuck
+commit poisoned every later push. Now the uninstall playbook witnesses its removal commit
+(`idc_git_path_gate.py witness-uninstall` records the SHA in machine-owned state under the repo's
+COMMON git directory — worktree-safe, never pushed), and the pre-push gate exempts ONLY a witnessed
+commit whose shape it re-derives from git on every push: single parent, governance anchor removed,
+the parent's full receipt-listed footprint PLUS runtime artifacts deleted (nothing merely claimed),
+protected paths touched by deletion only. The exemption is per-commit; the witness store is
+lock-serialized and uncapped; a present-but-malformed receipt fails closed; and a stray hand edit to
+`TRACKER.md` is still refused. A repository stranded by a pre-6.0.0 uninstall has a documented
+recovery path in the uninstall playbook.
+
+### One wave taxonomy, and waves that actually exclude (issue #206, PR #207)
+
+Also found by this release's e2e: waves are derived internally as numbers, but the board's Wave
+field stores the labels `/idc:init` provisions (`Wave 1`) — and nothing translated at the tracker
+boundary. On the github backend every plan either failed closed mid-transaction (`Wave field or
+option '1' not on the board`) or, recovered by hand, split the board into two disjoint wave
+taxonomies (`Wave 1` vs `1`) — and, silently worse, an in-progress item's wave could not be read
+back, so NEW work could be scheduled into a wave someone was already building in, defeating the
+parallel-safety guarantee waves exist for. Now: waves are emitted as the board's own `Wave N` label
+at every tracker boundary and read back tolerantly (legacy bare numbers still parse, so polluted
+boards keep scheduling correctly); immutable rows keep their live spelling (a legacy board whose
+only divergence is spelling freezes an EMPTY transaction; mutable rows migrate to the canonical
+label on their next legitimate write); an active item whose wave is unreadable fails the compile
+closed by name instead of being scheduled around; and `/idc:doctor` gained check 9d, which flags a
+Wave field carrying both naming styles and explains the manual repair (9c and 9d now also report
+SKIP, never PASS, when the board simply could not be read). Known limitation, unchanged from 5.0.0:
+`/idc:init` seeds only `Wave 1` / `Phase 1` options and nothing pre-seeds more, so a multi-wave plan
+on a fresh github board still refuses (by name, mutating nothing) at `Wave 2` — tracked as #208.
+
+### Since 5.0.0 (previously merged, first released here)
+
+- **Think:** opt-in divergent risk pass with a recorded orchestration boundary (#185).
+- **Review dedup:** the board — not the seen-ledger — authorizes suppressing a review finding (#186).
+- **Supply-chain pins:** every GitHub Action SHA-pinned; the public authorization door deleted; the
+  mint fixture gated (#187).
+- **Write doors:** secret gaps closed, the verification-handle append made landable, nine guards
+  given receipts (#188).
+- **Doctor:** stops writing during read-only checks; docs stop overstating; closeout envelope
+  documented; pagination helper deduplicated (#189).
+- **V-AUTH:** write access granted per-claim, scoped to the ticket's declared files, requiring
+  identity (#191).
+- **Validators:** ownership/ruleset gaps closed (#190).
+- **Determinism backlog:** the 2026-08 triage resolved the ranked 12-issue backlog (#193).
+
 ## 5.0.0 — 2026-07-23
 
 Convergent pathway integrity — governed work has one way in, and completion has to prove itself.

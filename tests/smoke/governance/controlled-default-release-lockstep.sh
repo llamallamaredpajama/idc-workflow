@@ -21,11 +21,21 @@
 #      (the idempotency contract phase7-file-commands-noop-default.sh also depends on);
 #   F. /idc:init and /idc:update state the backend-aware default in their prose contract;
 #   G. release lockstep — plugin.json, marketplace.json, the latest CHANGELOG heading and the one
-#      README version badge all name the SAME version, and THAT release section is the one that
-#      announces the controlled default. Stale any single surface and this goes red.
+#      README version badge all name the SAME version; and the release that INTRODUCED the flip
+#      (FLIP_VERSION below) is the section that announces it. Stale any single surface and this
+#      goes red.
 #
-# Red-when-broken: delete the github default flip (A), the filesystem refusal (D), or stale any one
-# release surface (G) and the matching assertion fails.
+#      Arm G originally asserted the announcement against whatever section was NEWEST, which was
+#      right for the release that flipped the default and wrong for every release after it: 6.0.1's
+#      notes had to restate 6.0.0's news as a "standing defaults" paragraph purely to keep this lane
+#      green, and so would every future release forever (#214). The version-lockstep half still
+#      measures the NEWEST section — that is what "the four surfaces move together" means — while the
+#      announcement half is pinned to the section that actually made the claim. Nothing is weakened:
+#      the literal is still asserted, and deleting it from the 6.0.0 section still turns this lane red.
+#
+# Red-when-broken: delete the github default flip (A), the filesystem refusal (D), stale any one
+# release surface, or delete the announcement from the flip section (G), and the matching assertion
+# fails.
 #
 # Usage: bash tests/smoke/governance/controlled-default-release-lockstep.sh   (exit 0 = pass)
 set -uo pipefail
@@ -151,12 +161,15 @@ grep -qiE 'backend-aware pathway default' "$U" \
 grep -qiE 'advis' "$U" \
   || fail "commands/update.md must surface the controlled default as an ADVISORY (it never overwrites a data-bearing config)"
 
-# ── G. release lockstep, bound to the section that announces the flip ─────────────────────────────
+# ── G. release lockstep, bound to the section that INTRODUCED the flip ────────────────────────────
 python3 "$PLUGIN/scripts/idc_release_check.py" >"$WORK/rc.out" 2>"$WORK/rc.err" \
   || fail "the shipped release surfaces are not in lockstep: $(cat "$WORK/rc.err")"
 
 ANNOUNCE='GitHub-backed repositories now scaffold `pathway_enforcement.mode: controlled` by default'
-PLUGIN="$PLUGIN" ANNOUNCE="$ANNOUNCE" python3 - <<'PY' || exit 1
+# The release whose notes MADE the controlled-default claim. This moves only if the effective
+# default itself changes again — in which case the new flip's release notes become the binding.
+FLIP_VERSION='6.0.0'
+PLUGIN="$PLUGIN" ANNOUNCE="$ANNOUNCE" FLIP_VERSION="$FLIP_VERSION" python3 - <<'PY' || exit 1
 import json, os, re, sys
 
 root = os.environ["PLUGIN"]
@@ -195,14 +208,24 @@ if latest != version:
     die("the latest CHANGELOG release heading is %r but plugin.json says %r "
         "(the version claim and its release notes must move together)" % (latest, version))
 
-body = "\n".join(sections.get(version, []))
+# The announcement is bound to the section that INTRODUCED the flip, not to whatever section is
+# newest. Presence of that section is checked FIRST: without it the two assertions below would pass
+# or fail for the wrong reason, and a changelog rewrite that dropped 6.0.0 could quietly retire the
+# announcement contract instead of failing loudly.
+flip = os.environ["FLIP_VERSION"]
+if flip not in sections:
+    die("the CHANGELOG has no %r section, so the controlled-default announcement has nothing to bind "
+        "to — this lane asserts the announcement against the release that INTRODUCED the flip; if the "
+        "history was rewritten or the default moved, update FLIP_VERSION in this scenario" % flip)
+
+body = "\n".join(sections[flip])
 if announce not in body:
-    die("the %s CHANGELOG section does not announce the controlled default — the release that flips "
-        "the effective default for GitHub-backed repositories must say so in the release notes "
-        "(expected the literal: %s)" % (version, announce))
+    die("the %s CHANGELOG section does not announce the controlled default — the release that flipped "
+        "the effective default for GitHub-backed repositories must say so in its release notes "
+        "(expected the literal: %s)" % (flip, announce))
 if "app-locked" not in body:
-    die("the %s CHANGELOG section must state that app-locked stays OPT-IN — nothing in this release "
-        "may make the GitHub App a normal dependency" % version)
+    die("the %s CHANGELOG section must state that app-locked stays OPT-IN — the release that flipped "
+        "the default may not make the GitHub App a normal dependency" % flip)
 PY
 
 echo "PASS: controlled is the backend-aware default for github-backed repos, filesystem cannot claim it, and the release surfaces that announce it move in lockstep"

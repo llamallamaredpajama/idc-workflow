@@ -38,6 +38,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 
 # THE CREDENTIAL SCRUB DOOR — see `idc_credential_shapes.scrub`. Every read of a CHILD PROCESS's
 # stderr in this module passes through it AT THE READ, and `tests/smoke/phase11-honesty-repro.sh` R28
@@ -144,6 +145,106 @@ def _build_append_mutation(args):
         "}"
     )
     return mutation, field_id
+
+
+# ── Plan-side option PRE-SEEDING (#208) ──────────────────────────────────────────────────────────
+# /idc:init creates `Wave` with exactly one option (`Wave 1`) and `Phase` with one (`Phase 1`), and
+# the field-creation helper never appends afterwards — it reports "already exists" and moves on. So a
+# two-wave plan on a fresh board fails closed at `Wave 2`, and so does any domain Plan invents (the
+# plan agent is explicitly allowed to invent domains). The tracker skill's own doctrine says options
+# are "pre-seeded before a setField that needs it"; nothing performed that pre-seeding.
+#
+# This is that step, and it deliberately adds no machinery: it reuses THIS module's non-destructive
+# append — existing options re-sent WITH their node ids, the new one without — because GitHub re-IDs
+# every option when the set is replaced wholesale, which silently wipes the values already on items.
+# Each append still goes through `cmd_apply`, so it keeps the positive readback and the
+# `schema-reconciliation` journal record; nothing here is a second write path.
+
+_FIELD_QUERY = (
+    'query($owner:String!,$number:Int!){'
+    'user(login:$owner){projectV2(number:$number){field(name:"%s"){'
+    '... on ProjectV2SingleSelectField{id options{id name color description}}}}}'
+    'organization(login:$owner){projectV2(number:$number){field(name:"%s"){'
+    '... on ProjectV2SingleSelectField{id options{id name color description}}}}}}'
+)
+
+
+def _read_single_select_field(repo, owner, project, field_name):
+    """The live `{id, options[{id,name,color,description}]}` for one single-select field, or None.
+
+    Read through `gh api graphql` because `gh project field-list` omits option COLOR, and a
+    non-destructive append must re-send every existing option with its color intact — dropping it
+    would rewrite the option set rather than extend it. Owner may be a user or an org, so both are
+    queried and whichever resolves is used."""
+    import subprocess
+    query = _FIELD_QUERY % (field_name, field_name)
+    try:
+        p = subprocess.run(
+            ["gh", "api", "graphql", "-f", "query=" + query,
+             "-F", f"owner={owner}", "-F", f"number={int(project)}"],
+            cwd=repo, capture_output=True, text=True)
+    except (OSError, ValueError):
+        return None
+    if p.returncode != 0:
+        return None
+    try:
+        data = json.loads(p.stdout).get("data") or {}
+    except (json.JSONDecodeError, ValueError):
+        return None
+    for holder in ("user", "organization"):
+        node = ((data.get(holder) or {}).get("projectV2") or {}).get("field")
+        if isinstance(node, dict) and node.get("id"):
+            return node
+    return None
+
+
+def ensure_options(repo, owner, project, wanted, color="GRAY"):
+    """Pre-seed every single-select option a pending transaction is about to set.
+
+    `wanted` is {field_name: [value, …]}. Returns (appended, problems): `appended` is the list of
+    "<field>=<value>" pairs this call created, `problems` the human-readable reasons any could not be.
+
+    FAIL-SOFT BY DESIGN, and that is the point: this runs BEFORE the apply, and the apply's own
+    `set-field` still refuses a missing option with the refusal PR #207 pinned honest. So a pre-seed
+    that cannot reach the board must not invent a second failure mode — it reports, and the existing
+    fail-closed refusal remains the thing that stops the run. Never silently widens anything: an
+    option is created only when the caller's frozen transaction actually needs that exact value."""
+    appended, problems = [], []
+    for field_name, values in sorted((wanted or {}).items()):
+        needed = [v for v in dict.fromkeys(values) if str(v).strip()]
+        if not needed:
+            continue
+        field = _read_single_select_field(repo, owner, project, field_name)
+        if field is None:
+            problems.append(f"could not read the {field_name!r} field's options")
+            continue
+        have = {o.get("name") for o in (field.get("options") or []) if isinstance(o, dict)}
+        missing = [v for v in needed if v not in have]
+        if not missing:
+            continue
+        with tempfile.TemporaryDirectory() as tmp:
+            for value in missing:
+                # Re-read between appends: each one changes the option set, and re-sending a stale
+                # set would drop the option the previous iteration just created.
+                current = _read_single_select_field(repo, owner, project, field_name)
+                if current is None:
+                    problems.append(f"could not re-read {field_name!r} before appending {value!r}")
+                    break
+                blob = os.path.join(tmp, "field.json")
+                with open(blob, "w", encoding="utf-8") as fh:
+                    json.dump(current, fh)
+                ns = argparse.Namespace(
+                    repo=repo, options_json=blob, field_id="", ensure_option=value,
+                    color=color, field_name=field_name)
+                try:
+                    cmd_apply(ns)
+                except SystemExit as exc:                 # 0 = applied, 3 = already present
+                    if exc.code not in (0, 3):
+                        problems.append(f"append of {field_name}={value!r} failed (exit {exc.code})")
+                        break
+                if_added = f"{field_name}={value}"
+                appended.append(if_added)
+    return appended, problems
 
 
 def cmd_append(args):

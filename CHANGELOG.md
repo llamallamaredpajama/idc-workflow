@@ -2,6 +2,63 @@
 
 All notable changes for the IDC Workflow plugin are documented in this file.
 
+## 6.1.0 — 2026-08-09
+
+The backlog release: ten open issues closed, each one a door that could not be walked through
+without a hand-repair. Every fix is additive — no contract changed shape, so an existing governed
+repo needs no migration.
+
+**A plan beyond wave 1 no longer fails closed (#208).** `/idc:init` created `Wave` and `Phase` with
+exactly one option each and never appended, so the first `Wave 2` — or any domain Plan invented —
+hit a board that had no such option. The tracker skill had always *stated* that options are
+pre-seeded before the write that needs them; nothing performed it. A new pre-seeding door
+(`scripts/idc_stage_options.py`) appends the options a frozen plan is about to set, re-sending the
+existing option set with its node ids so an append can never re-ID options and wipe item values.
+
+**A build in a linked worktree sees its own evidence (#210).** Build gives each durable worker a
+linked worktree, but two pieces of claim-side evidence resolved per-worktree and were invisible
+there: the obligations ledger (stored in the governed checkout) and the gitignored install receipt
+(which exists only where the repo was scaffolded). The 2026-08-08 release e2e hand-bridged both.
+Both now resolve to the governed checkout.
+
+**A finished item's missing Stage has a sanctioned repair (#213).** A `Done` row whose `Stage` was
+absent could not be fixed through any door — every transition refuses a terminal item and
+`set-field` refuses Stage by design — so the only way through was the raw `gh project item-edit`
+the mutation interlock forbids. The janitor **reconciler** now performs that repair, in the same
+role it already held: it copies the Stage the journal already recorded, decides nothing, and
+journals `janitor-repair` rather than an engine op, so replay converges instead of re-reporting the
+divergence forever. When both sides assert a Stage and they *differ*, it stays a manual `RISKY`
+finding — choosing between two asserted values is a decision, and the reconciler makes none.
+
+**Uninstall leaves no residue; doctor names a stranded repo (#209, #203, #204).** `git rm` removes
+only what git tracks, so every gitignored machine-owned sidecar survived an otherwise-complete
+uninstall — including the install receipt (doctor then reported a lingering footprint) and the
+obligations ledger, whose lifecycle records outlived the board they named and collided with the
+next install. Uninstall now purges them through a door that enumerates them in fixed code. Doctor
+gains check **10b**: an unpublished range that the pre-push hook would refuse is reported as a
+warning *before* a push fails, diagnosed through the same code path that does the refusing, and
+`/idc:uninstall --repair-push` closes the recovery case for a re-governed repo.
+
+**A refused freeze leaves nothing behind (#200).** `freeze_contract` wrote the contract file first
+and recorded its witness second, so a refusal at the witness step stranded an unwitnessed contract
+on disk. The artifact now appears only once its witness is recorded.
+
+**The autorun fixture seeds through the sanctioned door (#205).** The seed script minted items with
+raw `gh` calls, so seeded items carried no transition-journal history and the completion path could
+not certify a drain that had in fact drained green. Seeding now goes through the write door, and the
+fixture's contract is recorded.
+
+**Reference lint closes a class it could not see (#211).** The stale helper name that prompted the
+issue appears in no commit in this repo's history — it was *invented at read time* from prose that
+named the helper by role rather than by file. The prose now binds the alias to its real helper, and
+lint fails on that class of unbound reference.
+
+**Release discipline stops taxing every future release (#214).** The governance lockstep lane bound
+its controlled-default announcement to whatever CHANGELOG section was newest, so every release
+forever had to restate it. The announcement is now pinned to the release that actually flipped the
+default; the four-surface version lockstep still checks the newest section. Nothing was weakened —
+deleting the announcement from that section still turns the lane red.
+
 ## 6.0.1 — 2026-08-09
 
 The single sanctioned write door works standalone — or refuses in plain language, never a crash.

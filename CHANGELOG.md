@@ -2,6 +2,38 @@
 
 All notable changes for the IDC Workflow plugin are documented in this file.
 
+## 6.0.1 — 2026-08-09
+
+The single sanctioned write door works standalone — or refuses in plain language, never a crash.
+
+Patch release fixing the first live-use failure of 6.0.0 (knowledge-engine, session 4731f696):
+`idc_transition.py` run outside an active `/idc:*` command built its GitHub context from the
+absent `--owner`/`--project` flags and died with a raw `TypeError` deep in `subprocess` — and a
+crashed door pushes agents into exactly the raw `gh project item-edit` fallback the mutation
+interlock forbids.
+
+- **Standalone resolution.** With no `--owner`/`--project`, the door now resolves them from the
+  governed repo itself: the project number from `docs/workflow/tracker-config.yaml::project_number`,
+  the owner from `gh repo view` inside the repo — the same recipe the command playbooks' preamble
+  uses. Explicit flags bypass resolution entirely, so active-command invocations run zero extra
+  `gh` calls.
+- **Clean refusals, never tracebacks.** Anything unresolvable is a standard exit-2 denial naming
+  the missing prerequisite and the flag that supplies it. Hardened against the whole class found
+  in two Codex review rounds: a config file with broken text encoding, a duplicated
+  `project_number:` key (ambiguous — refused before any board call), a non-integer scalar in
+  quoted (`"7#8"`) or unquoted (`7#8`) form that the old comment-stripping parse silently read as
+  board 7 (the wrong-board hazard), and non-UTF-8 bytes from `gh` output.
+- **Throttles stay resumable.** A rate-limited `gh repo view` during owner resolution takes the
+  module's pinned `rate-limited until <reset>` exit-3 verdict, never a false exit-2 denial — so a
+  drain pauses instead of recording a refusal.
+- **New smoke lane** `phase1-transition-standalone-github`: a full standalone move through a
+  stateful `gh` stub plus every refusal shape above, each proven red against the unfixed engine.
+
+Standing security defaults, unchanged by this patch (since 6.0.0):
+GitHub-backed repositories now scaffold `pathway_enforcement.mode: controlled` by default, and
+the GitHub `app-locked` mode remains strictly opt-in — nothing in this release makes the GitHub
+App a normal dependency.
+
 ## 6.0.0 — 2026-08-08
 
 Completion honesty at every door — the receipt tells the truth in three different ways, the

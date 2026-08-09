@@ -95,6 +95,11 @@ BUILD_ISSUE_RE = re.compile(r"build[-/]?(\d+)\b")
 
 SAFE_FIX, REPORT_ONLY, RISKY, COHERENT = "SAFE-FIX", "REPORT-ONLY", "RISKY", "COHERENT"
 
+# The board's one terminal Status. Mirrors templates/workflow-machine.yaml::terminal_status — the
+# Stage backfill (#213) is authorized for a TERMINAL item only, because that is the item no
+# sanctioned door can repair.
+TERMINAL_STATUS = "Done"
+
 
 def is_idc(name):
     return bool(IDC_NAME_RE.match(name or ""))
@@ -1080,7 +1085,7 @@ def apply_safe(findings, ctx):
     results = []
     blocked_board_nums = {f.get("number") for f in findings
                           if f.get("dim") == "journal" and f.get("number") is not None}
-    order = {"worktree": 0, "branch": 1, "remote-branch": 2, "board": 3}
+    order = {"worktree": 0, "branch": 1, "remote-branch": 2, "board": 3, "stage": 4}
     for f in sorted((f for f in findings if f["tier"] == SAFE_FIX), key=lambda f: order.get(f["dim"], 9)):
         dim = f["dim"]
         if dim == "worktree":
@@ -1102,7 +1107,98 @@ def apply_safe(findings, ctx):
                 continue
             ok, note = _apply_board(f, ctx)
             results.append((f, ok, note))
+        elif dim == "stage":
+            # Deliberately NOT gated by `blocked_board_nums`. That guard exists so a SAFE-FIX board
+            # CLOSE cannot launder an unsupported raw terminal state into a sanctioned clean-up. A
+            # Stage backfill closes nothing and decides nothing — it copies the journal's own value
+            # onto a row that lost it — and the divergence it repairs IS the finding, so blocking it
+            # on the presence of a journal finding would make it permanently inapplicable.
+            ok, note = _apply_stage(f, ctx)
+            results.append((f, ok, note))
     return results
+
+
+def _journal_stage_fix(ctx, backend, number, stage, verified):
+    """Journal a Stage backfill as the janitor's OWN op — `janitor-repair`, never an engine op.
+
+    Same rule as the SAFE-FIX board close: the engine's `move` is a guarded transition, and a
+    look-alike record would launder a reconciliation into a sanctioned transition in the audit trail.
+    It carries `to_stage`, which the replay reads (`_entry_to_state`), so the very divergence this
+    repaired converges on the next scan instead of being re-reported forever. Best-effort by the
+    journal contract: the board write already happened, so a journal failure must not fail the fix."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import idc_transition
+    tracker = ctx.get("tracker")
+    tracker_rel = os.path.relpath(tracker, ctx["repo"]) if (backend == "filesystem" and tracker) else None
+    idc_transition.journal_append(ctx["repo"], "janitor-repair", backend, tracker_rel,
+                                  {"num": number, "to_stage": stage, "agent": "janitor",
+                                   "disposition_evidence": {"door": "janitor-stage-backfill",
+                                                            "verified": verified}})
+
+
+def _apply_stage(f, ctx):
+    """Stamp the journal's Stage onto a board row that has none (#213).
+
+    RE-PROVES the precondition immediately before writing. The finding was classified during the scan,
+    and between then and here another actor can fill the Stage in — with a DIFFERENT value. Applying
+    the cached finding would then overwrite an asserted value and journal a stale repair, which is
+    exactly the conflict case this door refuses to decide. Re-read, and refuse if it is no longer
+    blank; the next scan reclassifies it as the manual conflict it has become."""
+    stage = f.get("stage")
+    number = f.get("number")
+    if not stage or number is None:
+        return False, "stage backfill finding is missing its value or item number"
+    backend = "github" if ctx.get("owner") else "filesystem"
+    live = _live_stage(number, backend, ctx)
+    if live is None:
+        return False, "could not re-read the item's Stage before repairing it (refusing to write blind)"
+    if live:
+        return False, (f"Stage is no longer blank (now {live!r}) — another writer filled it after the "
+                       "scan; a value that contradicts the journal is a manual reconcile, never an "
+                       "automatic overwrite")
+    if backend == "github":
+        ok, note = _github_set_single_select("Stage", stage, f.get("item_id"), ctx)
+    else:
+        ok, note = _fs_set_stage(number, stage, ctx)
+    if ok:
+        _journal_stage_fix(ctx, backend, number, stage,
+                           f.get("detail") or "journal-recorded Stage")
+    return ok, note
+
+
+def _live_stage(number, backend, ctx):
+    """This item's CURRENT board Stage ('' when blank), or None when it cannot be read."""
+    try:
+        if backend == "github":
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import idc_gh_board
+            for row in idc_gh_board.fetch_items(ctx["owner"], ctx["project"], ctx["repo"]):
+                if row.get("number") == number:
+                    return row.get("stage") or ""
+            return None
+        helper = os.path.join(os.path.dirname(os.path.abspath(__file__)), "idc_tracker_fs.py")
+        p = subprocess.run(["python3", helper, "--tracker", ctx["tracker"], "show",
+                            "--num", str(number), "--field", "Stage"],
+                           capture_output=True, text=True)
+        if p.returncode != 0:
+            return None
+        value = p.stdout.strip()
+        return "" if value in ("", "\u2014", "-") else value
+    except Exception:  # noqa: BLE001 — unreadable is None (refuse), never "blank" (write)
+        return None
+
+
+def _fs_set_stage(number, stage, ctx):
+    """Filesystem backend: the tracker helper's own set-field door."""
+    helper = os.path.join(os.path.dirname(os.path.abspath(__file__)), "idc_tracker_fs.py")
+    try:
+        p = subprocess.run(["python3", helper, "--tracker", ctx["tracker"], "set",
+                            "--num", str(number), "--field", "Stage", "--value", stage],
+                           capture_output=True, text=True)
+    except (OSError, ValueError):
+        return False, "tracker set invocation failed"
+    return p.returncode == 0, (f"set Stage={stage}" if p.returncode == 0
+                               else "tracker set failed")
 
 
 def _journal_board_fix(ctx, backend, number, verified):
@@ -1159,6 +1255,26 @@ def _apply_board(f, ctx):
             _journal_board_fix(ctx, "github", f["number"], f.get("detail") or "issue completed on GitHub")
         return ok, note
     return False, "unknown board op"
+
+
+def _github_set_single_select(field_name, option_name, item_id, ctx):
+    """Set a single-select field through the SHIPPED github primitive.
+
+    `idc_gh_board.set_single_select` is the one sanctioned field-write door: it resolves the project
+    NODE id (item-edit --project-id needs PVT_…, not the integer) and runs through that module's
+    timeout- and rate-limit-aware `_gh` path. Reusing it keeps this repair BOUNDED — a raw
+    subprocess here could hang `/idc:janitor --apply-safe` on a network or auth stall — and avoids a
+    second `gh project item-edit` call site that would drift from the first."""
+    if not item_id:
+        return False, "no project item id"
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import idc_gh_board
+        idc_gh_board.set_single_select(ctx["owner"], ctx["project"], ctx["repo"],
+                                       item_id, field_name, option_name)
+    except Exception as exc:  # noqa: BLE001 — every failure becomes the reported (False, note)
+        return False, f"{field_name} write failed: {exc}"
+    return True, f"set {field_name}={option_name}"
 
 
 def _github_set_status_done(item_id, ctx):
@@ -1379,7 +1495,9 @@ def check_journal_divergence(ctx, findings, journal_path):
         if item_id is not None:
             actual_state[item_id] = {
                 "stage": item.get("stage") or "",
-                "status": item.get("status")
+                "status": item.get("status"),
+                # Carried so a Stage backfill can address the board row it is repairing (#213).
+                "item_id": item.get("item_id"),
             }
 
     all_item_ids = set(expected_state.keys()) | set(actual_state.keys())
@@ -1413,9 +1531,39 @@ def check_journal_divergence(ctx, findings, journal_path):
         act_status = actual_item.get("status")
 
         if "stage" in expected_item and expected_item.get("stage") != act_stage:
-            detail = (f"Stage mismatch: journal says '{expected_item.get('stage')}', "
-                      f"board says '{act_stage}'")
-            findings.append(finding(RISKY, "journal", f"#{item_id}", detail, "reconcile manually", number=item_id))
+            want = expected_item.get("stage")
+            # TERMINAL ONLY. The machine contract authorizes the reconciler for a Done item, whose
+            # Stage no door can repair; a NON-terminal item is still `move`-able, so it needs no
+            # backdoor and keeps its manual finding. Restricting it also removes a real hazard: with
+            # a blank Stage and Status="In Progress", stamping a journal-expected "Recirculation"
+            # would write the worked_forbidden_stages pair the engine refuses outright.
+            if not act_stage and want and act_status == TERMINAL_STATUS:
+                # BACKFILL (#213). The board carries NO Stage and the journal — the sanctioned record
+                # of how this item got here — carries exactly one. Writing it decides nothing: it
+                # copies the value a guarded door already recorded onto the row that lost it.
+                #
+                # This is the ONLY door that can repair a TERMINAL (Done) item, and that is not an
+                # exception carved into the terminal invariant, it is the invariant working as
+                # written: `move` and every transition refuse a Done item, and `set-field` refuses
+                # Stage/Status by design, so a Done item with a missing Stage had no sanctioned path
+                # at all and the only way through was the raw `gh project item-edit` the mutation
+                # interlock forbids. Repair belongs to the RECONCILER, which
+                # templates/workflow-machine.yaml already discloses as the one non-engine door that
+                # may stamp board truth — it journals `janitor-repair`, never an engine `close`/
+                # `move`, so the audit trail always tells a reconciliation from a guarded transition.
+                findings.append(finding(
+                    SAFE_FIX, "stage", f"#{item_id}",
+                    f"board carries no Stage but the journal records '{want}'",
+                    f"set Stage={want} from the journal (reconciliation, not a transition)",
+                    number=item_id, op="set-stage", stage=want,
+                    item_id=actual_item.get("item_id")))
+            else:
+                # CONFLICT: both sides assert a Stage and they differ. Choosing between two asserted
+                # values is a DECISION, and the reconciler decides nothing — it stays manual.
+                detail = (f"Stage mismatch: journal says '{want}', board says '{act_stage}'")
+                findings.append(finding(RISKY, "journal", f"#{item_id}", detail,
+                                        "reconcile manually — two asserted Stages; the reconciler "
+                                        "copies board truth, it never picks a winner", number=item_id))
 
         if "status" in expected_item and expected_item.get("status") != act_status:
             detail = (f"Status mismatch: journal says '{expected_item.get('status')}', "

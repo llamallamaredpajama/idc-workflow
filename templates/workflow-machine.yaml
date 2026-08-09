@@ -40,7 +40,15 @@
 #   stamp Done when the truth already happened elsewhere — the issue completed on GitHub / the IDC
 #   build branch merged clean — but it DECIDES nothing, and it journals its repair as its own
 #   `janitor-repair` record carrying that verified truth, never as an engine `close`/`dispose`, so
-#   the audit trail can always tell a reconciliation from a guarded close.)
+#   the audit trail can always tell a reconciliation from a guarded close.
+#   The SAME reconciler is also the only repair for a TERMINAL item's missing `Stage` (#213). A Done
+#   item whose Stage is absent had no sanctioned path at all — every transition refuses a terminal
+#   item, and `set-field` refuses Stage by design — so the only way through was the raw
+#   `gh project item-edit` the mutation interlock forbids. The reconciler copies the Stage the
+#   JOURNAL already recorded onto the row that lost it: it asserts nothing new, and it journals
+#   `janitor-repair` with that `to_stage` so replay CONVERGES instead of re-reporting the divergence
+#   forever. When BOTH sides assert a Stage and they differ it stays a manual RISKY finding — picking
+#   a winner between two asserted values is a decision, and the reconciler makes none.)
 #
 # Two more machine-level invariants the engine enforces for EVERY write (create AND transition), so
 # there is no second path around a per-op rule:

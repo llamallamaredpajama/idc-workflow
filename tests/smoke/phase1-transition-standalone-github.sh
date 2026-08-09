@@ -131,7 +131,51 @@ project_number: "7"
 CFG
 
 # ============================================================================================
-# D. Explicit --owner/--project (the active-command path) BYPASS resolution: the move lands
+# D. Unreadable UTF-8 in tracker-config: clean exit-2 refusal, never a decode traceback. The
+#    ordinary no-flag path first exercises resolve_backend; the explicit-backend path reaches the
+#    new project-only fallback directly. Both readers used to leak UnicodeDecodeError / exit 1.
+# ============================================================================================
+printf '\377' > "$REPO/docs/workflow/tracker-config.yaml"
+run_engine move --num 708 --to-status Todo
+[ "$RC" = "2" ] || fail "invalid-UTF8 backend config must refuse with exit 2, got exit $RC: $(printf '%s' "$OUT" | tail -3)"
+printf '%s' "$OUT" | grep -q "tracker-config.yaml" || fail "invalid-UTF8 backend refusal must name tracker-config.yaml"
+printf '%s' "$OUT" | grep -q "Traceback" && fail "invalid-UTF8 backend config must refuse cleanly, never traceback"
+
+run_engine --backend github --owner tester move --num 708 --to-status Todo
+[ "$RC" = "2" ] || fail "invalid-UTF8 project config must refuse with exit 2, got exit $RC: $(printf '%s' "$OUT" | tail -3)"
+printf '%s' "$OUT" | grep -q "project_number" || fail "invalid-UTF8 project refusal must name project_number"
+printf '%s' "$OUT" | grep -q -- "--project" || fail "invalid-UTF8 project refusal must name --project as the way through"
+printf '%s' "$OUT" | grep -q "Traceback" && fail "invalid-UTF8 project config must refuse cleanly, never traceback"
+cat > "$REPO/docs/workflow/tracker-config.yaml" <<'CFG'
+backend: github
+project_number: "7"
+CFG
+
+# ============================================================================================
+# E. Duplicate project_number keys are ambiguous durable state: refuse before ANY board call.
+#    The old first-match parser silently selected project 7 and performed the write even though
+#    the same config also declared project 8.
+# ============================================================================================
+printf 'In Progress' > "$WORK/status.txt"
+: > "$WORK/gh.log"
+cat > "$REPO/docs/workflow/tracker-config.yaml" <<'CFG'
+backend: github
+project_number: "7"
+project_number: "8"
+CFG
+run_engine --owner tester move --num 708 --to-status Todo
+[ "$RC" = "2" ] || fail "duplicate project_number must refuse with exit 2, got exit $RC: $(printf '%s' "$OUT" | tail -3)"
+printf '%s' "$OUT" | grep -q "project_number" || fail "duplicate-project refusal must name project_number"
+printf '%s' "$OUT" | grep -q "Traceback" && fail "duplicate project_number must refuse cleanly, never traceback"
+[ ! -s "$WORK/gh.log" ] || fail "duplicate project_number must refuse before any gh call; saw: $(tr '\n' ',' < "$WORK/gh.log")"
+[ "$(cat "$WORK/status.txt")" = "In Progress" ] || fail "duplicate project_number must not mutate board state"
+cat > "$REPO/docs/workflow/tracker-config.yaml" <<'CFG'
+backend: github
+project_number: "7"
+CFG
+
+# ============================================================================================
+# F. Explicit --owner/--project (the active-command path) BYPASS resolution: the move lands
 #    and `gh repo view` is never called — zero extra gh calls for every playbook invocation.
 #    (Red: make the fallback resolve unconditionally -> a repo-view line appears in the log.)
 # ============================================================================================
@@ -142,5 +186,5 @@ run_engine --owner tester --project 7 move --num 708 --to-status Todo
 grep -q "^repo view$" "$WORK/gh.log" && fail "explicit --owner/--project must bypass gh repo view resolution"
 [ "$(cat "$WORK/status.txt")" = "Todo" ] || fail "explicit-flags move must land the Status write"
 
-echo "PASS: phase1-transition-standalone-github (standalone resolution, clean refusals, explicit-flag bypass)"
+echo "PASS: phase1-transition-standalone-github (standalone resolution, missing/malformed/ambiguous config refusals, explicit-flag bypass)"
 exit 0

@@ -1909,7 +1909,7 @@ def resolve_backend(args):
     try:
         with open(cfg, encoding="utf-8") as fh:
             text = fh.read()
-    except OSError as e:
+    except (OSError, UnicodeError) as e:
         raise TransitionError(
             f"tracker-config.yaml exists but is unreadable ({e}) — refusing to guess a backend "
             "(a silent filesystem fallback misroutes board writes); repair the config or pass --backend")
@@ -1925,19 +1925,20 @@ def resolve_backend(args):
 
 def _config_project_number(repo):
     """tracker-config.yaml::project_number as a digit string, or None when the file/key is absent,
-    unreadable, or still an unfilled template token. Grep-parse, an independent copy per the repo's
-    no-yq convention (mirrors idc_git_finish.read_config; deliberately no cross-unit dependency)."""
+    unreadable, ambiguous, or still an unfilled template token. Grep-parse, an independent copy per
+    the repo's no-yq convention (mirrors idc_git_finish.read_config; deliberately no cross-unit
+    dependency)."""
     cfg = os.path.join(repo, "docs", "workflow", "tracker-config.yaml")
+    values = []
     try:
         with open(cfg, encoding="utf-8") as fh:
             for line in fh:
                 m = re.match(r'^project_number:\s*"?([^"#\n]*)"?', line)
                 if m:
-                    val = m.group(1).strip()
-                    return val if val.isdigit() else None
-    except OSError:
+                    values.append(m.group(1).strip())
+    except (OSError, UnicodeError):
         return None
-    return None
+    return values[0] if len(values) == 1 and values[0].isdigit() else None
 
 
 def resolve_github_defaults(repo, owner, project):

@@ -2907,6 +2907,80 @@ def _plugin_still_enabled(settings_path: str) -> bool:
 # left behind by a commit the door still witnesses as a completed uninstall.
 RUNTIME_UNINSTALL_ARTIFACTS = frozenset({"TRACKER.md"})
 
+# Machine-owned sidecars a governed repo carries that `/idc:init` deliberately GITIGNORES. They are
+# therefore never TRACKED, so `git rm --ignore-unmatch` — the uninstall removal commit's only deletion
+# verb — cannot touch them, and they survive an "applied" uninstall as residue into the next install
+# (#209, observed twice in the 2026-08-08/09 release e2e). Two of them do real damage rather than just
+# looking untidy:
+#   * `docs/workflow/install-receipt.yaml` — doctor reports it after the uninstall as a leftover
+#     footprint, so the removal reads as incomplete;
+#   * `.idc-session-state.json` — the obligations LEDGER, which is where command lifecycle records
+#     live. A Plan record naming a board that `--delete-board` just deleted survived into the next
+#     install and collided with its plan. That is #209's second half, and it needs no separate
+#     mechanism: purging the ledger with the other sidecars purges the stale records with it.
+#
+# Entries are repo-relative and may be GLOBS — the gitignore lines they mirror are globs too
+# (`.idc-*-report.json*`), and a per-session suffix must not be able to survive by not being named.
+# Kept beside LEGACY_UNINSTALL_OWNED_FILES and RUNTIME_UNINSTALL_ARTIFACTS, and PUBLIC for the same
+# reason: one list, so what uninstall removes cannot drift from what the doors reason about.
+#
+# ORDERING NOTE, load-bearing: these are removed strictly AFTER the closeout `finish`, never before.
+# The ledger substrate must still exist for `finish` to close the record against, which is why the
+# closeout validator does NOT (and must not) require them absent.
+IGNORED_UNINSTALL_SIDECARS = (
+    "docs/workflow/install-receipt.yaml",
+    "docs/workflow/reconciliation-seen-findings.json",
+    "docs/workflow/reconciliation-baseline-required.json",
+    "docs/workflow/transition-journal.ndjson.lock",
+    ".idc-session-state.json*",
+    ".idc-drain-verdict.json*",
+    ".idc-*-report.json*",
+    ".idc-pause-state.json*",
+    ".idc-trace-mirror.db*",
+)
+
+
+def uninstall_sidecar_paths(repo: str):
+    """Existing repo-relative paths matching IGNORED_UNINSTALL_SIDECARS, sorted and de-duplicated.
+
+    Confined: a glob is expanded under `repo` and every hit is re-checked with `_confined_repo_path`,
+    so a symlinked or traversing entry can never widen what a removal touches."""
+    import glob as _glob  # noqa: PLC0415 — only this door needs it
+
+    root = os.path.abspath(repo or ".")
+    found = []
+    seen = set()
+    for pattern in IGNORED_UNINSTALL_SIDECARS:
+        for hit in sorted(_glob.glob(os.path.join(root, pattern))):
+            if not os.path.isfile(hit):
+                continue
+            rel = os.path.relpath(hit, root)
+            if rel in seen:
+                continue
+            if _confined_repo_path(root, rel) is None:
+                continue
+            seen.add(rel)
+            found.append(rel)
+    return sorted(found)
+
+
+def remove_uninstall_sidecars(repo: str):
+    """Remove every sidecar in `uninstall_sidecar_paths`. Returns (removed, failed) rel-path lists."""
+    root = os.path.abspath(repo or ".")
+    removed, failed = [], []
+    for rel in uninstall_sidecar_paths(root):
+        path = _confined_repo_path(root, rel)
+        if path is None:
+            failed.append(rel)
+            continue
+        try:
+            os.remove(path)
+            removed.append(rel)
+        except OSError:
+            failed.append(rel)
+    return removed, failed
+
+
 # Exact IDC-owned files in installations made before install receipts existed. Directories are
 # deliberately absent: matrices, reviews, and intake manifests are operator work products. Only the
 # ownership keepfiles (and the review ignore file shipped by the scaffold) may be removed.
@@ -3110,10 +3184,72 @@ def _board_absent(repo: str):
         return None
 
 
+def _claim_repaired_push(refs: dict, repo: str) -> CloseoutResult:
+    """The `repaired-push` outcome (#204): this run REPAIRED a push-stranded repo and removed nothing.
+
+    Why a third outcome existed as a gap. `/idc:uninstall --repair-push` was built during the #202
+    wave and deliberately REVERTED, because `idc_command_closeout_gate.py` requires every command
+    record to close and this validator accepted only `applied` / `no-action`. A re-governed repo —
+    the NORMAL state when recovery is needed, since it is a later `/idc:init` that re-arms the
+    pre-push gate over the historical removal — satisfies neither: nothing was removed (not
+    `applied`) and IDC footprints are plainly present (not `no-action`). The flag would have
+    stranded a command record, which is worse than the bare-helper status quo.
+
+    The evidence contract is the witness itself, re-derived, never the caller's word:
+      * `refs.repaired.commits` — non-empty; every entry must be RECORDED in the machine-owned
+        uninstall witness AND still pass `uninstall_commit_problem` shape verification at close time.
+        Both halves matter: the witness alone is a file an operator could edit, and the shape alone
+        would let a run claim credit for a commit no door ever admitted.
+      * the run must have removed nothing — a repair that also deleted footprints is an `applied`
+        uninstall and must be validated as one, so this outcome refuses when it is offered any."""
+    repaired = refs.get("repaired")
+    if not isinstance(repaired, dict):
+        return _fail("uninstall-repair-shape",
+                     "uninstall repaired-push requires refs.repaired = {\"commits\": [<sha>, …]}")
+    commits = repaired.get("commits")
+    if not isinstance(commits, list) or not commits or not all(_ne_str(c) for c in commits):
+        return _fail("uninstall-repair-empty",
+                     "uninstall repaired-push requires a non-empty refs.repaired.commits list — a "
+                     "repair that witnessed nothing repaired nothing")
+    if repaired.get("removed"):
+        return _fail("uninstall-repair-removed",
+                     "uninstall repaired-push was offered a removal set — a run that removed "
+                     "footprints is an 'applied' uninstall and must close as one")
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import idc_git_path_gate as GPG  # noqa: PLC0415 — lazy: only this outcome needs the door
+        import idc_path_gate as PG       # noqa: PLC0415
+        witnessed = {w.lower() for w in PG.read_uninstall_witness(repo)}
+    except Exception as exc:  # noqa: BLE001 — an unreadable witness is a refusal, never a pass
+        return _fail("uninstall-repair-unverifiable",
+                     f"uninstall repaired-push could not read the uninstall witness to verify its "
+                     f"claim ({exc}) — an unverifiable repair is refused, not trusted")
+    for sha in commits:
+        if str(sha).lower() not in witnessed:
+            return _fail("uninstall-repair-unwitnessed",
+                         f"uninstall repaired-push names commit {sha} but the machine-owned "
+                         "uninstall witness does not record it — the repair did not happen")
+        try:
+            problem = GPG.uninstall_commit_problem(repo, str(sha))
+        except Exception as exc:  # noqa: BLE001
+            problem = f"could not re-derive the commit shape ({exc})"
+        if problem:
+            return _fail("uninstall-repair-bad-shape",
+                         f"uninstall repaired-push names commit {sha}, which is not a completed IDC "
+                         f"uninstall removal commit: {problem}")
+    return CloseoutResult(True, "ok",
+                          f"uninstall repaired-push (verified: {len(commits)} witnessed, "
+                          "shape-checked removal commit(s); nothing removed)", {})
+
+
 def _claim_uninstall(refs: dict, repo: str, session: str) -> CloseoutResult:
     outcome = refs.get("outcome")
+    if outcome == "repaired-push":
+        return _claim_repaired_push(refs, repo)
     if outcome not in ("applied", "no-action"):
-        return _fail("uninstall-outcome", "uninstall complete requires refs.outcome of 'applied' or 'no-action'")
+        return _fail("uninstall-outcome",
+                     "uninstall complete requires refs.outcome of 'applied', 'no-action' or "
+                     "'repaired-push'")
     anchor = _confined_repo_path(repo, _GOVERNANCE_ANCHOR)
     anchor_present = anchor is not None and os.path.exists(anchor)
     flags = _uninstall_flags_from_record(repo, session)
@@ -3801,6 +3937,25 @@ def _cmd_status(args) -> int:
     return 0
 
 
+def _cmd_uninstall_sidecars(args) -> int:
+    """List or remove the gitignored sidecars (#209). Read-only by default so the same door can be
+    used as a residue CHECK — /idc:doctor and the uninstall report both want the listing, and only
+    the post-finish teardown wants the removal."""
+    repo = os.path.abspath(args.repo)
+    if not args.remove:
+        for rel in uninstall_sidecar_paths(repo):
+            print(rel)
+        return 0
+    removed, failed = remove_uninstall_sidecars(repo)
+    for rel in removed:
+        print(f"removed {rel}")
+    for rel in failed:
+        sys.stderr.write(f"idc-command-contract: could not remove sidecar {rel}\n")
+    if not removed and not failed:
+        print("no ignored IDC sidecars remain")
+    return 1 if failed else 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="IDC command lifecycle contract (runtime-neutral)")
     sub = ap.add_subparsers(dest="op", required=True)
@@ -3825,7 +3980,17 @@ def main(argv=None) -> int:
     tp.add_argument("--session", default=None)
     tp.add_argument("--json", action="store_true")
 
+    up = sub.add_parser(
+        "uninstall-sidecars",
+        help="list (or --remove) the gitignored machine-owned sidecars an applied uninstall must "
+             "also delete; `git rm` cannot reach them because they are never tracked")
+    up.add_argument("--repo", required=True)
+    up.add_argument("--remove", action="store_true",
+                    help="delete them (default is a read-only listing)")
+
     args = ap.parse_args(argv)
+    if args.op == "uninstall-sidecars":
+        return _cmd_uninstall_sidecars(args)
     if args.op == "start":
         return _cmd_start(args)
     if args.op == "finish":

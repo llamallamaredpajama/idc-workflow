@@ -1,6 +1,6 @@
 ---
 description: IDC Uninstall — remove every IDC repo footprint safely in ONE revertable commit (receipt-driven; work products archived; GitHub untouched by default)
-argument-hint: "[--close-issues] [--delete-board]"
+argument-hint: "[--close-issues] [--delete-board] | --repair-push"
 ---
 
 You are running `/idc:uninstall`. Remove IDC's repo footprints — the phased, idempotent
@@ -211,6 +211,24 @@ stay untracked). Capture the commit SHA for the summary. On a re-run with nothin
 make no commit and report `skipped-absent` across the board — and run no witness door, because there
 is no commit to witness.
 
+**3d — Purge the gitignored machine-owned sidecars.** `git rm` above removes only what git TRACKS,
+and `/idc:init` deliberately gitignores IDC's machine-written sidecars — so every one of them
+survives an otherwise-complete uninstall and lands as residue in the next install. Two of them do
+real damage: the install receipt (doctor then reports the repo as still carrying an IDC footprint)
+and `.idc-session-state.json`, the obligations ledger, whose **command lifecycle records** outlive
+the board they name — a Plan record pointing at a board `--delete-board` just deleted collided with
+the next install's plan. Run the door, which enumerates them in fixed code so this list cannot drift
+from what the closeout reasons about:
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" uninstall-sidecars \
+  --repo "$ROOT" --remove
+```
+**Order is load-bearing: this runs AFTER the 3b `finish`, never before.** The ledger substrate is
+what `finish` closes the command record against, so purging it earlier would strip the run's own
+lifecycle record out from under its closeout. Report each removed path in the Phase 5 summary. They
+are untracked, so nothing here changes the removal commit — re-run it any time to confirm the repo
+is clean (without `--remove` it only lists).
+
 **Why the witness door is not optional.** This commit necessarily DELETES protected machine-owned
 surfaces (`TRACKER.md`, the install receipt). It lands fine — both git backstops are already dormant,
 because the governance anchor left the worktree a line earlier. But the pre-push backstop inspects the
@@ -330,6 +348,27 @@ is the wrong answer here. Do **not** reach for `--no-verify`, and do **not** rew
    force the commit through. Pointing the door at a wrong SHA is safe and inert.
 3. **Report** which commits were witnessed and tell the operator the repo is publishable
    (`git push`). Do not push on their behalf.
+4. **Close the command record as `repaired-push`.** Recovery is a governed command with a closable
+   record, not a bare helper invocation (#204). This run removed nothing, and the repo is normally
+   re-governed by the time recovery is needed — so it is neither an `applied` uninstall nor a
+   `no-action`, and both of those would be refused. Finish with the third outcome, naming exactly the
+   commits step 2 witnessed:
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
+     --repo "$ROOT" --session "$CLAUDE_CODE_SESSION_ID" --command uninstall --status complete \
+     --evidence-json '{"schema_version":1,"refs":{"outcome":"repaired-push",
+       "repaired":{"commits":["<sha>", …]}}}'
+   ```
+   The validator re-derives the claim rather than trusting it: every named commit must be recorded in
+   the machine-owned uninstall witness **and** still pass the removal-commit shape check. Offering a
+   removal set here is refused — a run that removed footprints is an `applied` uninstall.
+
+**Entering recovery: `/idc:uninstall --repair-push`.** When `$ARGUMENTS` carries `--repair-push`,
+this section IS the whole command: skip Phases 0–5 entirely (there is nothing to remove and no
+archive to take), run steps 1–4 above, and stop. Every other uninstall flag is refused alongside it —
+`--repair-push` neither closes issues nor deletes a board, and combining them would mean one command
+record owing two different outcomes. Preflight still applies in one respect: a dirty tree is fine
+here, because recovery writes nothing to the worktree.
 
 Nothing else in the range is exempted: any other commit touching a protected surface still has to be
 dealt with on its own terms.

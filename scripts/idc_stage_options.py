@@ -34,9 +34,12 @@ Exit codes:
     2  fail-closed: bad args or malformed/short option data — nothing printed.
 """
 import argparse
+import contextlib
+import fcntl
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 
@@ -160,6 +163,10 @@ def _build_append_mutation(args):
 # Each append still goes through `cmd_apply`, so it keeps the positive readback and the
 # `schema-reconciliation` journal record; nothing here is a second write path.
 
+# Every `gh` read here is BOUNDED: this runs inside a live Plan apply, and an unbounded call would
+# hang the apply rather than degrade to the fail-soft path this function promises.
+GH_READ_TIMEOUT_S = 30
+
 _FIELD_QUERY = (
     'query($owner:String!,$number:Int!){'
     'user(login:$owner){projectV2(number:$number){field(name:"%s"){'
@@ -182,8 +189,10 @@ def _read_single_select_field(repo, owner, project, field_name):
         p = subprocess.run(
             ["gh", "api", "graphql", "-f", "query=" + query,
              "-F", f"owner={owner}", "-F", f"number={int(project)}"],
-            cwd=repo, capture_output=True, text=True)
-    except (OSError, ValueError):
+            cwd=repo, capture_output=True, text=True, timeout=GH_READ_TIMEOUT_S)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        # A stalled `gh` — network failure, or an auth prompt with nobody to answer — must become a
+        # reported pre-seed problem, never an unbounded wait inside a real Plan apply.
         return None
     if p.returncode != 0:
         return None
@@ -196,6 +205,40 @@ def _read_single_select_field(repo, owner, project, field_name):
         if isinstance(node, dict) and node.get("id"):
             return node
     return None
+
+
+@contextlib.contextmanager
+def _preseed_lock(repo):
+    """Serialize option-set read-build-write across concurrent callers on this machine.
+
+    Same idiom as the validation witness store's lock: an exclusive advisory flock on a stable
+    sidecar under the repository Git directory (never a worktree file, so it neither pollutes the
+    tree nor travels to a remote). FAIL-SOFT: if the lock cannot be taken the append still proceeds —
+    a missing lock must not stop a legitimate pre-seed — and the disappearance check remains as the
+    backstop."""
+    fd = None
+    try:
+        gitdir = subprocess.run(["git", "-C", repo, "rev-parse", "--path-format=absolute",
+                                 "--git-common-dir"], capture_output=True, text=True, timeout=15)
+        if gitdir.returncode == 0 and gitdir.stdout.strip():
+            path = os.path.join(gitdir.stdout.strip(), "idc-option-preseed.lock")
+            fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+    except Exception:  # noqa: BLE001 — never let locking failure block a legitimate pre-seed
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            fd = None
+    try:
+        yield
+    finally:
+        if fd is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
 
 
 def ensure_options(repo, owner, project, wanted, color="GRAY"):
@@ -224,26 +267,50 @@ def ensure_options(repo, owner, project, wanted, color="GRAY"):
             continue
         with tempfile.TemporaryDirectory() as tmp:
             for value in missing:
-                # Re-read between appends: each one changes the option set, and re-sending a stale
-                # set would drop the option the previous iteration just created.
-                current = _read_single_select_field(repo, owner, project, field_name)
-                if current is None:
-                    problems.append(f"could not re-read {field_name!r} before appending {value!r}")
-                    break
-                blob = os.path.join(tmp, "field.json")
-                with open(blob, "w", encoding="utf-8") as fh:
-                    json.dump(current, fh)
-                ns = argparse.Namespace(
-                    repo=repo, options_json=blob, field_id="", ensure_option=value,
-                    color=color, field_name=field_name)
-                try:
-                    cmd_apply(ns)
-                except SystemExit as exc:                 # 0 = applied, 3 = already present
-                    if exc.code not in (0, 3):
-                        problems.append(f"append of {field_name}={value!r} failed (exit {exc.code})")
+                # ONE critical section per append: read -> build -> write. The mutation re-sends the
+                # WHOLE option set, so two concurrent appends that both read before either writes
+                # would each resend a snapshot missing the other's option — the last writer silently
+                # DELETES it, and with it every item value assigned to it. The lock serializes callers
+                # on this machine (where IDC's concurrent Plan applies actually live); the
+                # disappearance check below is the backstop that catches anyone it cannot serialize.
+                # A fresh context per append: a @contextmanager generator is SINGLE-USE, so a lock
+                # object hoisted out of the loop works once and then raises on re-entry.
+                with _preseed_lock(repo):
+                    # Re-read INSIDE the section: each append changes the set, and re-sending a stale
+                    # set would drop the option the previous iteration just created.
+                    current = _read_single_select_field(repo, owner, project, field_name)
+                    if current is None:
+                        problems.append(f"could not re-read {field_name!r} before appending {value!r}")
                         break
-                if_added = f"{field_name}={value}"
-                appended.append(if_added)
+                    before_ids = {o.get("id") for o in (current.get("options") or [])
+                                  if isinstance(o, dict) and o.get("id")}
+                    blob = os.path.join(tmp, "field.json")
+                    with open(blob, "w", encoding="utf-8") as fh:
+                        json.dump(current, fh)
+                    ns = argparse.Namespace(
+                        repo=repo, options_json=blob, field_id="", ensure_option=value,
+                        color=color, field_name=field_name)
+                    try:
+                        cmd_apply(ns)
+                    except SystemExit as exc:             # 0 = applied, 3 = already present
+                        if exc.code not in (0, 3):
+                            problems.append(f"append of {field_name}={value!r} failed (exit {exc.code})")
+                            break
+                    # DISAPPEARANCE CHECK. `cmd_apply`'s readback proves OUR option landed; it cannot
+                    # see that someone else's vanished. An option id we observed before the write and
+                    # cannot see after it means a concurrent writer's set was clobbered — report it
+                    # loudly rather than let a silently-emptied field look like a clean pre-seed.
+                    after = _read_single_select_field(repo, owner, project, field_name)
+                    if after is not None:
+                        after_ids = {o.get("id") for o in (after.get("options") or [])
+                                     if isinstance(o, dict) and o.get("id")}
+                        lost = sorted(i for i in before_ids - after_ids if i)
+                        if lost:
+                            problems.append(
+                                f"appending {field_name}={value!r} lost pre-existing option id(s) "
+                                f"{lost} — a concurrent option-set write clobbered them; the item "
+                                "values assigned to those options are gone and need re-setting")
+                appended.append(f"{field_name}={value}")
     return appended, problems
 
 

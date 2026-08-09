@@ -504,41 +504,44 @@ def apply_frozen(frozen_path: str, repo: str | None = None, backend: str | None 
         if ident.startswith("#") and ident[1:].isdigit():
             logical_to_number[row["logical_id"]] = int(ident[1:])
 
-    # PRE-SEED the single-select options this transaction is about to set (#208). /idc:init creates
-    # `Wave` with exactly one option and `Phase` with one, and nothing ever appends more — so a
-    # two-wave plan on a fresh board fails closed at `Wave 2`, as does any domain Plan invents. The
-    # frozen transaction already names every value it needs, so the pre-seed is derived from it, never
-    # guessed: an option is created only because an operation below is about to set that exact value.
-    #
-    # Deliberately BEFORE the apply and deliberately FAIL-SOFT. The `set-field` operations keep their
-    # own fail-closed refusal for a missing option (pinned honest by PR #207), so a pre-seed that
-    # cannot reach the board must not introduce a second failure mode — it reports and lets the
-    # existing refusal be the thing that stops the run.
-    if backend == "github" and owner and project:
-        wanted = {}
-        for operation in bundle.get("operations") or []:
-            if operation.get("op") == "set-field" and operation.get("field") in _PRESEED_FIELDS:
-                value = str(operation.get("value") or "").strip()
-                if value:
-                    wanted.setdefault(operation["field"], []).append(value)
-        if wanted:
-            try:
-                import idc_stage_options as SO  # noqa: PLC0415 — lazy: only the github path needs it
-                appended, problems = SO.ensure_options(repo, owner, project, wanted)
-            except Exception as exc:  # noqa: BLE001 — never let pre-seeding break the apply
-                appended, problems = [], [f"option pre-seed raised {exc}"]
-            for pair in appended:
-                sys.stderr.write(f"idc-tracker-transaction: pre-seeded board option {pair}\n")
-            for problem in problems:
-                sys.stderr.write(f"idc-tracker-transaction: option pre-seed incomplete — {problem} "
-                                 "(the set-field refusal below remains the fail-closed gate)\n")
-
     obligation_path = None
     applied_operations = []
     remaining_operations = list(bundle.get("operations") or [])
     try:
         if remaining_operations:
             obligation_path = _write_obligation(repo, bundle, "pending", applied_operations, remaining_operations)
+        # PRE-SEED the single-select options this transaction is about to set (#208).
+        # ORDERING, load-bearing: this runs AFTER the pending obligation is persisted, because
+        # it performs LIVE BOARD WRITES. A board mutation that precedes its recovery record
+        # leaves state changed with nothing to recover from if the process dies here — the
+        # obligation-before-mutation rule the transaction contract is built on. /idc:init creates
+        # `Wave` with exactly one option and `Phase` with one, and nothing ever appends more — so a
+        # two-wave plan on a fresh board fails closed at `Wave 2`, as does any domain Plan invents. The
+        # frozen transaction already names every value it needs, so the pre-seed is derived from it, never
+        # guessed: an option is created only because an operation below is about to set that exact value.
+        #
+        # Deliberately BEFORE the apply and deliberately FAIL-SOFT. The `set-field` operations keep their
+        # own fail-closed refusal for a missing option (pinned honest by PR #207), so a pre-seed that
+        # cannot reach the board must not introduce a second failure mode — it reports and lets the
+        # existing refusal be the thing that stops the run.
+        if backend == "github" and owner and project:
+            wanted = {}
+            for operation in bundle.get("operations") or []:
+                if operation.get("op") == "set-field" and operation.get("field") in _PRESEED_FIELDS:
+                    value = str(operation.get("value") or "").strip()
+                    if value:
+                        wanted.setdefault(operation["field"], []).append(value)
+            if wanted:
+                try:
+                    import idc_stage_options as SO  # noqa: PLC0415 — lazy: only the github path needs it
+                    appended, problems = SO.ensure_options(repo, owner, project, wanted)
+                except Exception as exc:  # noqa: BLE001 — never let pre-seeding break the apply
+                    appended, problems = [], [f"option pre-seed raised {exc}"]
+                for pair in appended:
+                    sys.stderr.write(f"idc-tracker-transaction: pre-seeded board option {pair}\n")
+                for problem in problems:
+                    sys.stderr.write(f"idc-tracker-transaction: option pre-seed incomplete — {problem} "
+                                     "(the set-field refusal below remains the fail-closed gate)\n")
         for index, operation in enumerate(bundle.get("operations") or []):
             entries_before = _scan_journal(repo)
             runtime = _execute_operation(ctx, operation, logical_to_number)

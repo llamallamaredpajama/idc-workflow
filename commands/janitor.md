@@ -49,13 +49,20 @@ if [ "$backend" = "github" ]; then
   owner=$(gh repo view --json owner -q .owner.login)
   num=$(grep -E '^project_number:' docs/workflow/tracker-config.yaml | grep -oE '[0-9]+')
   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_janitor.py" \
-    --repo "$PWD" --backend github --owner "$owner" --project "$num" $ARGUMENTS
+    --repo "$PWD" --backend github --owner "$owner" --project "$num" \
+    --check-journal-divergence $ARGUMENTS
 else
   # filesystem backend (the default): the board is TRACKER.md's state block.
   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_git_janitor.py" \
-    --repo "$PWD" --tracker "$PWD/TRACKER.md" $ARGUMENTS
+    --repo "$PWD" --tracker "$PWD/TRACKER.md" --check-journal-divergence $ARGUMENTS
 fi
 ```
+
+`--check-journal-divergence` is **not optional here**. The journal↔board pass is what produces the
+board-truth findings the reconciler can repair — including the terminal-item Stage backfill (#213),
+which is the ONLY sanctioned repair for a Done item whose Stage is missing. Without the flag the
+janitor cannot see it, so `--apply-safe` would silently have nothing to apply and doctor's advice to
+run it would be a dead end.
 
 The scanner's exit code is the machine-readable verdict (mirrors `idc_autorun_drain.py`):
 

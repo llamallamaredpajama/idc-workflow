@@ -180,4 +180,105 @@ janitor --apply-safe --json >/dev/null
 between two asserted values is a decision, and the reconciler makes none — it may only fill in a
 value that is MISSING. (Board was '$BEFORE', is now '$(gov_field "$T" "$other" Stage)'.)"
 
-echo "PASS: a terminal item's missing Stage is repaired by the reconciler from journal truth — journaled as janitor-repair, never an engine op, converging on re-scan, leaving Status untouched, and refusing to pick a winner when both sides assert a Stage"
+# ── 6. NON-TERMINAL items keep their manual finding ──────────────────────────────────────────────
+# The machine contract authorizes this door for a TERMINAL item — the one no door can repair. A
+# non-terminal item is still `move`-able, so it needs no backdoor; and auto-stamping one is actively
+# unsafe: a journal-expected `Recirculation` on an `In Progress` row is the worked_forbidden_stages
+# pair the engine refuses outright, so the reconciler would write a state no door would accept.
+live="$(eng create-ticket --title 'nonterminal blank stage' --stage 'Recirculation' --status 'Todo')"
+eng claim --num "$live" --agent tester >/dev/null 2>&1 || true
+python3 - "$T" "$live" <<'PY'
+import json, sys
+path, num = sys.argv[1], sys.argv[2]
+raw = open(path, encoding="utf-8").read()
+begin = raw.index('{\n  "next_number"')
+depth, i = 0, begin
+while i < len(raw):
+    if raw[i] == "{": depth += 1
+    elif raw[i] == "}":
+        depth -= 1
+        if depth == 0: break
+    i += 1
+doc = json.loads(raw[begin:i + 1])
+for issue in doc.get("issues", []):
+    if str(issue.get("number")) == num:
+        issue["stage"] = ""
+        issue["status"] = "In Progress"
+open(path, "w", encoding="utf-8").write(raw[:begin] + json.dumps(doc, indent=2) + raw[i + 1:])
+PY
+janitor --json > "$REPO/nonterminal.json"
+python3 - "$REPO/nonterminal.json" "$live" <<'PY' || exit 1
+import json, sys
+report = json.load(open(sys.argv[1], encoding="utf-8"))
+num = int(sys.argv[2])
+bad = [f for f in report.get("findings", [])
+       if f.get("dim") == "stage" and f.get("number") == num and f.get("tier") == "SAFE-FIX"]
+if bad:
+    print("FAIL: #213: a NON-TERMINAL item with a blank Stage was classified SAFE-FIX. The reconciler "
+          "is authorized for a terminal item — the one no door can repair — and auto-stamping a "
+          "non-terminal one can write a Stage/Status pair the engine itself refuses "
+          "(worked_forbidden_stages). Finding: %r" % bad)
+    raise SystemExit(1)
+PY
+
+# ── 7. the repair RE-PROVES its precondition before writing ──────────────────────────────────────
+# The finding is classified during the scan; another writer can fill the Stage in — with a DIFFERENT
+# value — before apply. Applying the cached finding would overwrite an asserted value and journal a
+# stale repair, which is exactly the conflict this door refuses to decide.
+race="$(eng create-ticket --title 'raced stage' --stage 'Buildable' --status 'Todo')"
+python3 - "$T" "$race" <<'PY'
+import json, sys
+path, num = sys.argv[1], sys.argv[2]
+raw = open(path, encoding="utf-8").read()
+begin = raw.index('{\n  "next_number"')
+depth, i = 0, begin
+while i < len(raw):
+    if raw[i] == "{": depth += 1
+    elif raw[i] == "}":
+        depth -= 1
+        if depth == 0: break
+    i += 1
+doc = json.loads(raw[begin:i + 1])
+for issue in doc.get("issues", []):
+    if str(issue.get("number")) == num:
+        issue["stage"] = ""
+        issue["status"] = "Done"
+open(path, "w", encoding="utf-8").write(raw[:begin] + json.dumps(doc, indent=2) + raw[i + 1:])
+PY
+timeout "$T_S" python3 - "$GOV_PLUGIN/scripts" "$REPO" "$T" "$race" <<'PY' >"$REPO/race.out" 2>&1
+import sys
+scripts, repo, tracker, num = sys.argv[1:5]
+sys.path.insert(0, scripts)
+import idc_git_janitor as J
+
+# The finding as the scan produced it: Stage is blank, backfill 'Buildable'.
+finding = {"tier": J.SAFE_FIX, "dim": "stage", "name": "#%s" % num, "number": int(num),
+           "op": "set-stage", "stage": "Buildable", "detail": "scan-time"}
+ctx = {"repo": repo, "tracker": tracker}
+
+# ...but another writer got there first with a DIFFERENT value.
+real_live = J._live_stage
+J._live_stage = lambda n, b, c: "Recirculation"
+ok, note = J._apply_stage(finding, ctx)
+J._live_stage = real_live
+print("ok=%s note=%s" % (ok, note))
+PY
+grep -q "ok=False" "$REPO/race.out" \
+  || fail "#213: the repair applied a CACHED finding without re-proving the Stage was still blank. If
+another writer filled it between scan and apply, this overwrites an asserted value and journals a
+stale repair — the very conflict this door refuses to decide. Got:
+$(cat "$REPO/race.out")"
+grep -qi "no longer blank" "$REPO/race.out" \
+  || fail "#213: the refusal must name the raced precondition. Got: $(cat "$REPO/race.out")"
+
+# ── 8. the SHIPPED janitor path can actually reach this repair ───────────────────────────────────
+# The finding is produced by the journal↔board pass, which only runs under
+# --check-journal-divergence. /idc:janitor --apply-safe is the path doctor tells operators to run —
+# if that invocation omits the flag, the repair is unreachable in production and this whole lane
+# would be proving something no operator can trigger.
+grep -q -- '--check-journal-divergence' "$GOV_PLUGIN/commands/janitor.md" \
+  || fail "#213: commands/janitor.md does not pass --check-journal-divergence, so the shipped
+\`/idc:janitor --apply-safe\` never produces the Stage finding and the repair is unreachable — doctor's
+advice to run it would be a dead end"
+
+echo "PASS: a terminal item's missing Stage is repaired by the reconciler from journal truth — journaled as janitor-repair, never an engine op, converging on re-scan, leaving Status untouched, and refusing to pick a winner when both sides assert a Stage, refusing non-terminal items, re-proving the precondition before writing, and reachable from the shipped janitor path"

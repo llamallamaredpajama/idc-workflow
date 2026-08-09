@@ -95,6 +95,11 @@ BUILD_ISSUE_RE = re.compile(r"build[-/]?(\d+)\b")
 
 SAFE_FIX, REPORT_ONLY, RISKY, COHERENT = "SAFE-FIX", "REPORT-ONLY", "RISKY", "COHERENT"
 
+# The board's one terminal Status. Mirrors templates/workflow-machine.yaml::terminal_status — the
+# Stage backfill (#213) is authorized for a TERMINAL item only, because that is the item no
+# sanctioned door can repair.
+TERMINAL_STATUS = "Done"
+
 
 def is_idc(name):
     return bool(IDC_NAME_RE.match(name or ""))
@@ -1132,12 +1137,25 @@ def _journal_stage_fix(ctx, backend, number, stage, verified):
 
 
 def _apply_stage(f, ctx):
-    """Stamp the journal's Stage onto a board row that has none (#213)."""
+    """Stamp the journal's Stage onto a board row that has none (#213).
+
+    RE-PROVES the precondition immediately before writing. The finding was classified during the scan,
+    and between then and here another actor can fill the Stage in — with a DIFFERENT value. Applying
+    the cached finding would then overwrite an asserted value and journal a stale repair, which is
+    exactly the conflict case this door refuses to decide. Re-read, and refuse if it is no longer
+    blank; the next scan reclassifies it as the manual conflict it has become."""
     stage = f.get("stage")
     number = f.get("number")
     if not stage or number is None:
         return False, "stage backfill finding is missing its value or item number"
     backend = "github" if ctx.get("owner") else "filesystem"
+    live = _live_stage(number, backend, ctx)
+    if live is None:
+        return False, "could not re-read the item's Stage before repairing it (refusing to write blind)"
+    if live:
+        return False, (f"Stage is no longer blank (now {live!r}) — another writer filled it after the "
+                       "scan; a value that contradicts the journal is a manual reconcile, never an "
+                       "automatic overwrite")
     if backend == "github":
         ok, note = _github_set_single_select("Stage", stage, f.get("item_id"), ctx)
     else:
@@ -1146,6 +1164,28 @@ def _apply_stage(f, ctx):
         _journal_stage_fix(ctx, backend, number, stage,
                            f.get("detail") or "journal-recorded Stage")
     return ok, note
+
+
+def _live_stage(number, backend, ctx):
+    """This item's CURRENT board Stage ('' when blank), or None when it cannot be read."""
+    try:
+        if backend == "github":
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import idc_gh_board
+            for row in idc_gh_board.fetch_items(ctx["owner"], ctx["project"], ctx["repo"]):
+                if row.get("number") == number:
+                    return row.get("stage") or ""
+            return None
+        helper = os.path.join(os.path.dirname(os.path.abspath(__file__)), "idc_tracker_fs.py")
+        p = subprocess.run(["python3", helper, "--tracker", ctx["tracker"], "show",
+                            "--num", str(number), "--field", "Stage"],
+                           capture_output=True, text=True)
+        if p.returncode != 0:
+            return None
+        value = p.stdout.strip()
+        return "" if value in ("", "\u2014", "-") else value
+    except Exception:  # noqa: BLE001 — unreadable is None (refuse), never "blank" (write)
+        return None
 
 
 def _fs_set_stage(number, stage, ctx):
@@ -1218,48 +1258,23 @@ def _apply_board(f, ctx):
 
 
 def _github_set_single_select(field_name, option_name, item_id, ctx):
-    """Set ANY single-select field to a named option for one board item.
+    """Set a single-select field through the SHIPPED github primitive.
 
-    Generalized from the Status/Done writer so the Stage backfill (#213) reuses the same resolution
-    and the same fail-closed posture rather than growing a second `gh project item-edit` call site.
-    Resolves the project NODE id (PVT_…, never the integer project number — the documented gotcha),
-    the field id and the option id once per (field, option), cached on ctx."""
+    `idc_gh_board.set_single_select` is the one sanctioned field-write door: it resolves the project
+    NODE id (item-edit --project-id needs PVT_…, not the integer) and runs through that module's
+    timeout- and rate-limit-aware `_gh` path. Reusing it keeps this repair BOUNDED — a raw
+    subprocess here could hang `/idc:janitor --apply-safe` on a network or auth stall — and avoids a
+    second `gh project item-edit` call site that would drift from the first."""
     if not item_id:
         return False, "no project item id"
-    repo, owner, project = ctx["repo"], ctx["owner"], ctx["project"]
-    cache_key = f"ss_ids::{field_name}::{option_name}"
-    if cache_key not in ctx:
+    try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import idc_gh_board
-        try:
-            pid = idc_gh_board._resolve_project_node_id(owner, project, repo)
-        except idc_gh_board.BoardReadError:
-            ctx[cache_key] = None
-            return False, "could not resolve project node id"
-        fields, ok = gh_json(["project", "field-list", str(project), "--owner", owner,
-                              "--format", "json"], repo)
-        field_id = opt_id = None
-        if ok and isinstance(fields, dict):
-            for fld in (fields.get("fields") or []):
-                if fld.get("name") == field_name:
-                    field_id = fld.get("id")
-                    for o in (fld.get("options") or []):
-                        if o.get("name") == option_name:
-                            opt_id = o.get("id")
-        ctx[cache_key] = (pid, field_id, opt_id) if (field_id and opt_id) else None
-    ids = ctx[cache_key]
-    if not ids:
-        return False, f"could not resolve the {field_name} field / {option_name!r} option"
-    pid, field_id, opt_id = ids
-    try:
-        p = subprocess.run(
-            ["gh", "project", "item-edit", "--id", item_id, "--project-id", pid,
-             "--field-id", field_id, "--single-select-option-id", opt_id],
-            cwd=repo, capture_output=True, text=True)
-    except (OSError, ValueError):
-        return False, "gh project item-edit invocation failed"
-    return p.returncode == 0, (f"set {field_name}={option_name}" if p.returncode == 0
-                               else "gh project item-edit failed")
+        idc_gh_board.set_single_select(ctx["owner"], ctx["project"], ctx["repo"],
+                                       item_id, field_name, option_name)
+    except Exception as exc:  # noqa: BLE001 — every failure becomes the reported (False, note)
+        return False, f"{field_name} write failed: {exc}"
+    return True, f"set {field_name}={option_name}"
 
 
 def _github_set_status_done(item_id, ctx):
@@ -1517,7 +1532,12 @@ def check_journal_divergence(ctx, findings, journal_path):
 
         if "stage" in expected_item and expected_item.get("stage") != act_stage:
             want = expected_item.get("stage")
-            if not act_stage and want:
+            # TERMINAL ONLY. The machine contract authorizes the reconciler for a Done item, whose
+            # Stage no door can repair; a NON-terminal item is still `move`-able, so it needs no
+            # backdoor and keeps its manual finding. Restricting it also removes a real hazard: with
+            # a blank Stage and Status="In Progress", stamping a journal-expected "Recirculation"
+            # would write the worked_forbidden_stages pair the engine refuses outright.
+            if not act_stage and want and act_status == TERMINAL_STATUS:
                 # BACKFILL (#213). The board carries NO Stage and the journal — the sanctioned record
                 # of how this item got here — carries exactly one. Writing it decides nothing: it
                 # copies the value a guarded door already recorded onto the row that lost it.

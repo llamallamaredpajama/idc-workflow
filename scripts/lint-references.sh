@@ -40,6 +40,18 @@
 #      `idc_path_gate.py authorize` verb (V-DOOR) nor the scenario mint fixture
 #      `tests/smoke/lib/path_gate_authorize.py`, which ships inside the plugin package. Minting is
 #      admission-side. Negation cue / lint-allow exempt, exactly as Rule N.
+#   S. Every BARE repo-relative shipped-path token (`scripts/x.py`, `templates/x.yaml`) resolves to a
+#      real file. Rule B covers only the `${CLAUDE_PLUGIN_ROOT}/…` and `../…` spellings, but the
+#      DOMINANT way shipped prose names a helper is the bare form — so a helper renamed out from
+#      under its prose stayed lint-CLEAN (#211). Only PLUGIN-OWNED top dirs are checked: a
+#      `docs/workflow/…` token names the GOVERNED repo's file, never one of ours. Negation
+#      cue / lint-allow exempt, exactly as Rule N (prose that names a path to say it is NOT the one).
+#   T. No shipped surface names a helper by ALIAS alone. IDC calls the read-only next-action helper
+#      "the oracle"; its shipped file is `scripts/idc_next_action.py`. A playbook that says "call the
+#      oracle" without naming that file ANYWHERE in the document leaves the reader to guess it — and
+#      a real e2e driver guessed `scripts/idc_oracle.py`, which has never shipped (#211). Rule S
+#      cannot catch that class: there is no stale token to dangle, only an unbound alias. Each alias
+#      in ALIAS_BINDINGS must therefore be bound to its real helper at least once per file.
 #
 # Exit 0 = clean. Exit 1 = findings printed as <file>:<line>: <rule> <excerpt>.
 # Lines containing "lint-allow" are exempt for Rules B–K (use sparingly, with a reason);
@@ -70,6 +82,19 @@ HISTORY_ALLOW='^(CHANGELOG\.md|docs/dev/)'
 # (doctor.md's Codex-mirror check legitimately describes ~/.claude/skills this way). The username
 # class is case-insensitive so a Capitalized `/Users/Jeremy` is caught too.
 PERSONAL_PATH_RE='~/\.claude/(agents|skills|commands|plugins)[A-Za-z0-9._/-]|/Users/[A-Za-z]+'
+
+# Rule S — the BARE repo-relative shipped-path token. One definition, used by both the detector and
+# the per-line extractor so the two can never drift (a token the extractor cannot re-find would make
+# a detected line silently report nothing). The leading class deliberately excludes `/` `$` `{` `-`
+# and the path chars, so `${CLAUDE_PLUGIN_ROOT}/scripts/x.py`, `../scripts/x.py` and
+# `docs/workflow/scripts/x.py` are NOT matched — the first two are Rule B's, the third is a governed
+# repo's file. `-` is last inside the bracket expression (literal), per POSIX.
+BARE_PATH_RE='(^|[^A-Za-z0-9._/${-])(scripts|hooks|templates|agents|skills|commands|tests)/[A-Za-z0-9._/-]+\.(py|sh|ya?ml|json|md|ts)'
+
+# Rule T — alias→helper bindings, `<alias-regex>|<helper-file>`. Add a row when shipped prose starts
+# calling a helper by a spoken name; the row is what forces that name to stay attached to a real
+# shipping file. Kept as data so the rule never needs editing to cover a new alias.
+ALIAS_BINDINGS='oracle|idc_next_action.py'
 
 filtered_grep() { # pattern, file — grep -n minus lint-allow lines
   grep -nE -- "$1" "$2" 2>/dev/null | grep -v 'lint-allow' || true
@@ -234,6 +259,39 @@ for f in $MD_FILES; do
     printf '%s\n' "$line_txt" | grep -qiE '\b(no|never|not|without|dont|don.t|deleted|removed|refuses)\b' && continue
     report "$f:$lineno: [path-gate-mint-directive] shipped prose points a caller at a Path Gate minting door; minting is admission-side (idc_command_entry_gate / idc_command_contract), idc_path_gate.py has no authorize verb, and the scenario fixture is not an authorization door: ${line_txt}"
   done < <(filtered_grep "idc_path_gate\.py['\"\`]?[[:space:]]+authorize([[:space:]]|['\"\`]|$)|path_gate_authorize\.py" "$f")
+
+  # Rule S — BARE shipped-path integrity (the other half of Rule B). Rule B resolves only the
+  # `${CLAUDE_PLUGIN_ROOT}/…` and `../…` spellings; the bare repo-relative form is how most shipped
+  # prose actually names a helper (`scripts/idc_next_action.py`, `templates/workflow-machine.yaml`),
+  # and it was unchecked — so a helper renamed out from under its prose left a stale name shipping
+  # CLEAN (#211). Scope is deliberately the PLUGIN-OWNED top dirs only: `docs/workflow/…` and
+  # `.claude/…` tokens name files in the GOVERNED repo, which does not exist at lint time.
+  # The leading-char class excludes `/` and `$`, so a ${CLAUDE_PLUGIN_ROOT}- or ../-prefixed token is
+  # left to Rule B and never double-reported here. A negation cue on the line is exempt — the Rule N/R
+  # idiom for prose that names a path precisely to say it is NOT the one (commands/update.md's
+  # "**not** templates/docs-tree/workflow-machine.yaml" is the live example).
+  while IFS= read -r hit; do
+    [ -z "$hit" ] && continue
+    lineno="${hit%%:*}"; line_txt="${hit#*:}"
+    printf '%s\n' "$line_txt" | grep -qiE '\b(no|never|not|without|dont|don.t|instead|rather|unrelated)\b' && continue
+    for tok in $(printf '%s\n' "$line_txt" \
+        | grep -oE "$BARE_PATH_RE" \
+        | sed -E 's|^[^A-Za-z]+||' | sort -u); do
+      [ -f "$tok" ] || report "$f:$lineno: [dangling-shipped-path] $tok does not resolve to a file in this repo"
+    done
+  done < <(filtered_grep "$BARE_PATH_RE" "$f")
+
+  # Rule T — an alias must be BOUND to the helper it names. See the header note: the failure this
+  # closes is a reader guessing a filename the alias never gave them. One entry per line,
+  # `<alias-regex>|<helper-file>`; a file that uses the alias must name the helper somewhere in it.
+  while IFS='|' read -r alias helper; do
+    [ -z "$alias" ] && continue
+    grep -qiE -- "$alias" "$f" 2>/dev/null || continue
+    grep -qF -- "$helper" "$f" 2>/dev/null && continue
+    report "$f: [unbound-helper-alias] this file calls it the \"${alias}\" but never names \`$helper\` — bind the alias to its real shipped helper at least once, or a reader must guess the filename"
+  done <<EOF
+$ALIAS_BINDINGS
+EOF
 done
 
 # Rule O — workflow-machine.yaml cross-check.

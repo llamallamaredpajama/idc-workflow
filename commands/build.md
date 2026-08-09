@@ -64,8 +64,9 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" status \
   --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --json
 ```
 
-Before the final answer, call the oracle and finish the contract; the final prose **quotes the
-oracle's next command/reason**, never an improvised handoff:
+Before the final answer, call the next-action oracle (`scripts/idc_next_action.py` — there is no
+other oracle helper; do not improvise a filename from the alias) and finish the contract. The final
+prose **quotes the oracle's next command/reason**, never an improvised handoff:
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_next_action.py" --repo "$PWD" --json

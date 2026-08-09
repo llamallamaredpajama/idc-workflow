@@ -26,6 +26,15 @@
 #   5. an idc- reference split across a line break        -> [split-component-ref]
 # (The audit's optional shellcheck-CI note is out of scope for this rule-level test.)
 #
+# Later rules pinned here as they landed:
+#   Q. every .github/workflows `uses:` is SHA-pinned      -> [unpinned-action]
+#   R. no shipped prose points at a Path Gate mint door   -> [path-gate-mint-directive]
+#   S. a BARE repo-relative shipped-path token resolves   -> [dangling-shipped-path]   (#211)
+#   T. a helper ALIAS is bound to its real shipped file   -> [unbound-helper-alias]    (#211)
+# S and T are the two halves of the #211 gap: a helper renamed out from under its prose (S), and a
+# spoken alias that never says which file it means (T) — the one that actually bit, when an e2e
+# driver read "call the oracle" and executed the never-shipped `scripts/idc_oracle.py`.
+#
 # Usage: bash tests/smoke/phase1-lint-rules.sh   (exit 0 = pass)
 set -uo pipefail
 PLUGIN="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -192,5 +201,69 @@ R="$(mk_repo r-prohibition)"
 printf 'There is no `idc_path_gate.py authorize` verb; minting is admission-side.\n' \
   > "$R/templates/probe.md"
 expect_clean "Rule R control: a prohibition naming the deleted verb is exempt" "$R"
+
+# ---- Rule S: a BARE repo-relative shipped-path token must resolve -------------------------------
+# Rule B resolved only the `${CLAUDE_PLUGIN_ROOT}/…` and `../…` spellings, but the bare form is how
+# most shipped prose actually names a helper — so a helper renamed out from under its prose shipped
+# lint-CLEAN (#211: a real e2e driver executed `scripts/idc_oracle.py`, which has never shipped).
+R="$(mk_repo s-bare)"
+printf 'Close the record with `scripts/idc_oracle.py --repo . --json`.\n' > "$R/templates/probe.md"
+expect_fail "Rule S: a bare scripts/<helper> token that does not resolve" "$R" "[dangling-shipped-path]"
+# A non-.py shipped surface counts too — a retired template is the same class of stale reference.
+R="$(mk_repo s-template)"
+printf 'Copy it from `templates/retired-machine.yaml` during scaffold.\n' > "$R/templates/probe.md"
+expect_fail "Rule S: a bare templates/<file> token that does not resolve" "$R" "[dangling-shipped-path]"
+# Control: a bare token that DOES resolve must stay clean, or the rule is a blanket refusal of the
+# dominant spelling and gets suppressed instead of fixed.
+R="$(mk_repo s-resolves)"
+printf 'The linter itself lives at `scripts/lint-references.sh` and runs before every commit.\n' \
+  > "$R/templates/probe.md"
+expect_clean "Rule S control: a bare token that resolves is clean" "$R"
+# Control: a GOVERNED-repo path must NEVER be resolved against the plugin checkout. `docs/workflow/…`
+# is the single most common path token in shipped prose and exists only after /idc:init runs in the
+# USER's repo — resolving it here would red-flag every correct playbook.
+R="$(mk_repo s-governed)"
+printf 'The engine table is scaffolded to `docs/workflow/workflow-machine.yaml` in the governed repo.\n' \
+  > "$R/templates/probe.md"
+expect_clean "Rule S control: a governed-repo docs/workflow path is out of scope" "$R"
+# Control: the Rule N/R negation-cue idiom — prose that names a path precisely to say it is NOT the
+# one resolved (commands/update.md's live "**not** templates/docs-tree/workflow-machine.yaml").
+R="$(mk_repo s-negation)"
+printf 'It resolves to the top-level table, **not** `templates/docs-tree/workflow-machine.yaml`.\n' \
+  > "$R/templates/probe.md"
+expect_clean "Rule S control: a negation-cue line naming a deliberately-absent path is exempt" "$R"
+# Control: a ${CLAUDE_PLUGIN_ROOT}-prefixed dangling token stays RULE B's finding and must not be
+# double-reported — two tags for one defect makes the report unreadable and the counts wrong.
+R="$(mk_repo s-noclash)"
+printf 'Run `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_gone.py" --repo .`.\n' > "$R/templates/probe.md"
+expect_fail "Rule S/B: a plugin-root-prefixed dangling token is Rule B's" "$R" "[dangling-path]"
+out="$(run_lint "$R")"
+printf '%s' "$out" | grep -qF "[dangling-shipped-path]" \
+  && fail "Rule S must not double-report a \${CLAUDE_PLUGIN_ROOT}-prefixed token Rule B already owns. Output:
+$out"
+
+# ---- Rule T: a helper alias must be BOUND to its real shipped file ------------------------------
+# The #211 root cause Rule S cannot see: there was no stale TOKEN to dangle, only an unbound alias.
+# IDC's prose calls the read-only next-action helper "the oracle"; a playbook that instructs a call
+# without naming `idc_next_action.py` anywhere leaves the reader to guess the filename, and the e2e
+# driver guessed `idc_oracle.py`. So the alias must be bound at least once per file that uses it.
+R="$(mk_repo t-unbound)"
+printf 'Before the final answer, call the oracle and quote its next command.\n' > "$R/templates/probe.md"
+expect_fail "Rule T: a file using the 'oracle' alias without naming its helper" "$R" "[unbound-helper-alias]"
+# Control: the SAME prose becomes clean the moment the alias is bound — proving the rule keys on the
+# binding, not merely on the word appearing.
+R="$(mk_repo t-bound)"
+: > "$R/scripts/idc_next_action.py"     # the binding target must exist, or Rule S fires first
+printf 'Before the final answer, call the oracle (`scripts/idc_next_action.py`) and quote its next command.\n' \
+  > "$R/templates/probe.md"
+expect_clean "Rule T control: naming idc_next_action.py binds the alias" "$R"
+# Control: binding it ANYWHERE in the file counts — a document may use the spoken name freely once it
+# has said which file it means, which is the whole point of a file-scoped rule rather than a per-line one.
+R="$(mk_repo t-boundfar)"
+: > "$R/scripts/idc_next_action.py"     # same: bind to a file that really ships
+{ printf 'The next-action oracle is `scripts/idc_next_action.py`.\n\n'
+  printf 'Later: call the oracle. Then the oracle again. The oracle decides the handoff.\n'; } \
+  > "$R/templates/probe.md"
+expect_clean "Rule T control: one binding covers every later alias use in the file" "$R"
 
 echo "PASS: lint-references catches all five MIN-9 blind-spot classes, sees every valid uses: spelling without false-positiving a quoted pin (Rule Q), refuses a '..' local-action ref, blocks shipped prose that points at a Path Gate minting door (Rule R), and honors lint-allow"

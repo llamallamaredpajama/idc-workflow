@@ -1925,17 +1925,26 @@ def resolve_backend(args):
 
 def _config_project_number(repo):
     """tracker-config.yaml::project_number as a digit string, or None when the file/key is absent,
-    unreadable, ambiguous, or still an unfilled template token. Grep-parse, an independent copy per
-    the repo's no-yq convention (mirrors idc_git_finish.read_config; deliberately no cross-unit
-    dependency)."""
+    unreadable, ambiguous, non-integer, or still an unfilled template token. Grep-parse, an
+    independent copy per the repo's no-yq convention (mirrors idc_git_finish.read_config;
+    deliberately no cross-unit dependency)."""
     cfg = os.path.join(repo, "docs", "workflow", "tracker-config.yaml")
     values = []
     try:
         with open(cfg, encoding="utf-8") as fh:
             for line in fh:
-                m = re.match(r'^project_number:\s*"?([^"#\n]*)"?', line)
-                if m:
-                    values.append(m.group(1).strip())
+                m = re.match(r"^project_number:(.*)$", line)
+                if m is None:
+                    continue
+                raw = m.group(1).strip()
+                if raw.startswith('"'):
+                    # The FULL quoted scalar, a comment allowed only after the closing quote — a
+                    # partial-scalar read (`"7#8"` -> 7) would aim standalone writes at the wrong
+                    # board; an unterminated quote reads as no value at all.
+                    q = re.match(r'^"([^"]*)"\s*(?:#.*)?$', raw)
+                    values.append(q.group(1).strip() if q else "")
+                else:
+                    values.append(raw.split("#", 1)[0].strip())
     except (OSError, UnicodeError):
         return None
     return values[0] if len(values) == 1 and values[0].isdigit() else None
@@ -1958,18 +1967,19 @@ def resolve_github_defaults(repo, owner, project):
                 "project: docs/workflow/tracker-config.yaml carries no filled integer "
                 "project_number — pass --project, or scaffold the config (/idc:init fills it)")
     if owner is None:
+        # Through the board module's gh runner, never a raw subprocess: _gh classifies a throttle as
+        # RateLimitError — re-raised so the resumable exit-3 contract survives resolution (an exit-2
+        # denial here would tell a drain the op was refused when it merely needs to wait) — scrubs
+        # stderr at the read, and turns timeouts / non-UTF-8 output into BoardReadError, so the door
+        # refuses cleanly instead of leaking a decode traceback.
         detail = "empty output"
         try:
-            proc = subprocess.run(["gh", "repo", "view", "--json", "owner", "-q", ".owner.login"],
-                                  cwd=repo, capture_output=True, text=True, timeout=60)
-        except OSError as e:
-            proc, detail = None, str(e)
-        except subprocess.TimeoutExpired:
-            proc, detail = None, "gh timed out"
-        if proc is not None:
-            owner = (proc.stdout.strip() or None) if proc.returncode == 0 else None
-            if owner is None:
-                detail = _child_stderr(proc) or detail
+            owner = idc_gh_board._gh(
+                ["repo", "view", "--json", "owner", "-q", ".owner.login"], repo).strip() or None
+        except idc_gh_board.RateLimitError:
+            raise
+        except idc_gh_board.BoardReadError as e:
+            owner, detail = None, str(e)
         if owner is None:
             problems.append(
                 f"owner: `gh repo view` could not name the repo owner ({detail}) — pass --owner, "
@@ -1986,7 +1996,9 @@ def main():
     machine = load_machine(machine_path_for(repo, args.machine))
     # Backend + ctx resolution can REFUSE (#153: a present-but-unreadable/corrupt tracker-config;
     # session 4731f696: a standalone github invocation whose owner/project cannot be resolved) — map
-    # both to the same exit-2 denial contract as every other TransitionError, before any write.
+    # both to the same exit-2 denial contract as every other TransitionError, before any write. A
+    # throttled owner lookup is NOT a denial: it takes the same resumable exit-3 verdict as a
+    # throttled op, so a drain pauses instead of recording a refusal.
     try:
         backend = resolve_backend(args)
         tracker = args.tracker or os.path.join(repo, "TRACKER.md")
@@ -1995,6 +2007,8 @@ def main():
             ctx = github_ctx(repo, owner, project, machine)
         else:
             ctx = fs_ctx(repo, tracker, machine)
+    except idc_gh_board.RateLimitError as e:
+        idc_gh_board.emit_rate_limit_verdict(e)  # exit 3 (resumable), pinned verdict
     except TransitionError as e:
         sys.stderr.write(f"idc-transition: {e}\n")
         sys.exit(2)

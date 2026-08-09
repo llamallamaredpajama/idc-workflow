@@ -33,10 +33,12 @@ export FIX="$WORK"
 REPO="$WORK/repo"
 mkdir -p "$REPO/docs/workflow"
 
-# --- governed-repo fixture: github backend, filled project_number (what /idc:init leaves) --------
+# --- governed-repo fixture: github backend, filled project_number (what /idc:init leaves —
+#     including the template's inline comment after the quoted value, which the full-scalar
+#     parser must tolerate) ------------------------------------------------------------------------
 cat > "$REPO/docs/workflow/tracker-config.yaml" <<'CFG'
 backend: github
-project_number: "7"
+project_number: "7"     # integer; from `gh project create`
 field_ids:
   Status: "F_status"
 CFG
@@ -53,6 +55,8 @@ cat > "$WORK/bin/gh" <<'STUB'
 echo "$1 $2" >> "$FIX/gh.log"
 if [ "$1" = "repo" ] && [ "$2" = "view" ]; then
   if [ -e "$FIX/fail-repo-view" ]; then echo "gh: not a git repository" >&2; exit 1; fi
+  if [ -e "$FIX/ratelimit-repo-view" ]; then echo "API rate limit exceeded for user" >&2; exit 1; fi
+  if [ -e "$FIX/garble-repo-view" ]; then printf '\377'; exit 0; fi
   echo "tester"; exit 0
 fi
 if [ "$1" = "project" ] && [ "$2" = "view" ]; then echo "PVT_test"; exit 0; fi
@@ -112,6 +116,24 @@ printf '%s' "$OUT" | grep -q -- "--owner" || fail "owner-unresolvable refusal mu
 printf '%s' "$OUT" | grep -q "Traceback" && fail "owner-unresolvable must refuse cleanly, never traceback"
 rm -f "$WORK/fail-repo-view"
 
+# B2. THROTTLED owner lookup is NOT a denial: a rate-limited `gh repo view` must take the module's
+#     resumable exit-3 path with the pinned verdict, never the exit-2 refusal (a drain would record
+#     a refused op that merely needs to wait). (Red: classify the throttle as a missing owner.)
+touch "$WORK/ratelimit-repo-view"
+run_engine move --num 708 --to-status Todo
+[ "$RC" = "3" ] || fail "throttled owner lookup must exit 3 (resumable), got exit $RC: $(printf '%s' "$OUT" | tail -3)"
+printf '%s' "$OUT" | grep -q "rate-limited until" || fail "throttled owner lookup must print the pinned rate-limited verdict"
+rm -f "$WORK/ratelimit-repo-view"
+
+# B3. Non-UTF-8 bytes from `gh repo view` stdout: clean exit-2 refusal naming --owner — never a
+#     decode traceback. (Red: run the lookup through a raw subprocess with no ValueError handling.)
+touch "$WORK/garble-repo-view"
+run_engine move --num 708 --to-status Todo
+[ "$RC" = "2" ] || fail "garbled owner lookup must refuse with exit 2, got exit $RC: $(printf '%s' "$OUT" | tail -3)"
+printf '%s' "$OUT" | grep -q -- "--owner" || fail "garbled owner refusal must name --owner as the way through"
+printf '%s' "$OUT" | grep -q "Traceback" && fail "garbled owner lookup must refuse cleanly, never traceback"
+rm -f "$WORK/garble-repo-view"
+
 # ============================================================================================
 # C. project_number unfilled (the pre-init template token): clean exit-2 refusal NAMING
 #    project_number / --project — never a traceback.
@@ -125,6 +147,19 @@ run_engine move --num 708 --to-status Todo
 printf '%s' "$OUT" | grep -q "project_number" || fail "unfilled-project refusal must name project_number"
 printf '%s' "$OUT" | grep -q -- "--project" || fail "unfilled-project refusal must name --project as the way through"
 printf '%s' "$OUT" | grep -q "Traceback" && fail "unfilled project_number must refuse cleanly, never traceback"
+
+# C2. PARTIAL-SCALAR read: `project_number: "7#8"` is valid YAML whose scalar is NOT an integer —
+#     the old comment-stripping regex read it as 7 and aimed the write at the wrong board. Must
+#     refuse, before ANY gh call. (Red: restore the `[^"#\n]*` capture in _config_project_number.)
+: > "$WORK/gh.log"
+cat > "$REPO/docs/workflow/tracker-config.yaml" <<'CFG'
+backend: github
+project_number: "7#8"
+CFG
+run_engine --owner tester move --num 708 --to-status Todo
+[ "$RC" = "2" ] || fail "non-integer quoted project_number must refuse with exit 2, got exit $RC: $(printf '%s' "$OUT" | tail -3)"
+printf '%s' "$OUT" | grep -q "project_number" || fail "non-integer-project refusal must name project_number"
+[ ! -s "$WORK/gh.log" ] || fail "non-integer project_number must refuse before any gh call; saw: $(tr '\n' ',' < "$WORK/gh.log")"
 cat > "$REPO/docs/workflow/tracker-config.yaml" <<'CFG'
 backend: github
 project_number: "7"

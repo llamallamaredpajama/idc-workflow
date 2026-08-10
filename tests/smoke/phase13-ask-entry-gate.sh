@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# idc-assert-class: behavior
 # phase13-ask-entry-gate.sh — `/idc:ask` routes safely through the admission gate.
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

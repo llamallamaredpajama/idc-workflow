@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# idc-assert-class: behavior
 # phase13-ask-registration.sh — `ask` is a registered, READ-ONLY 14th command.
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

@@ -2,6 +2,14 @@
 
 All notable changes for the IDC Workflow plugin are documented in this file.
 
+## 6.3.0 — 2026-08-09
+
+**`/idc:ask` is a plain-language front door for the pipeline.** Say what you want and a deterministic,
+read-only resolver either names one safe IDC command or deliberately refuses to guess. A confident route
+opens the target command's ordinary lifecycle record and asks for a one-line `y`/`n` confirmation before
+anything happens. Ambiguous, install-lifecycle, unreadable, and rate-limited requests stay advisory:
+they can read live state and explain the next step, but never receive write authority.
+
 ## 6.2.0 — 2026-08-09
 
 Four defects found by *operating* a fully-governed, github-backed repo rather than by testing one.

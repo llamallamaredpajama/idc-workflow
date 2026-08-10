@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# idc-assert-class: behavior
 # phase13-ask-resolver.sh — the /idc:ask intent resolver decision table.
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

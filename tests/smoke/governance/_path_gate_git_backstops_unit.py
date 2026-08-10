@@ -220,8 +220,15 @@ class GitBackstopTests(unittest.TestCase):
                 start_new_session=True,
                 env=env,
             )
+            # These two bounds only need to distinguish "died on SIGTERM" from "hung forever", so they
+            # are generous rather than tight. At 5s each they flaked when the release gate ran this lane
+            # beside another suite: a loaded machine took >5s to reap the process group, which reds the
+            # lane for a scheduling delay and looks exactly like a real regression. A hook that truly
+            # ignores SIGTERM still fails here — it just takes longer to say so, and still BOUNDED
+            # (`communicate(timeout=…)` raises), so a hang can never masquerade as a slow pass.
+            HANG_BOUND_S = 30
             try:
-                deadline = time.monotonic() + 5
+                deadline = time.monotonic() + HANG_BOUND_S
                 while time.monotonic() < deadline:
                     buffers = list(runtime_tmp.glob("idc-path-gate-pre-push.*"))
                     if ready.exists() and buffers:
@@ -233,7 +240,7 @@ class GitBackstopTests(unittest.TestCase):
                     self.fail("managed hook did not start its sleeping child and stdin buffer")
 
                 os.killpg(proc.pid, signal.SIGTERM)
-                proc.communicate(timeout=5)
+                proc.communicate(timeout=HANG_BOUND_S)
             finally:
                 if proc.poll() is None:
                     os.killpg(proc.pid, signal.SIGKILL)

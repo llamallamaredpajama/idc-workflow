@@ -2,6 +2,59 @@
 
 All notable changes for the IDC Workflow plugin are documented in this file.
 
+## 6.2.0 — 2026-08-09
+
+Four defects found by *operating* a fully-governed, github-backed repo rather than by testing one.
+Three of them only bite once `pathway_enforcement.mode: controlled` is on, and the fourth is why
+nobody noticed: the repo in question had never been enforcing at all.
+
+**An unset pathway posture is no longer indistinguishable from a chosen one.** A
+`WORKFLOW-config.yaml` written before the `pathway_enforcement` stanza existed reads exactly like a
+deliberate `mode: off`, so a fully-governed repo ran with **every** Path Gate denial downgraded to an
+advisory while its operator believed the gate was enforcing. Nothing reported it: absent is a legal
+value, so `/idc:doctor` passed it and `/idc:update` stayed quiet. The runtime default is unchanged and
+still fail-closed — an ungoverned repo must not start denying because it never opted in — but the
+diagnostics can now tell "never declared" from "declared off". `/idc:doctor` Row 4b gains a fourth
+outcome, **UNDECLARED**, which prints the exact stanza to paste and what adopting `controlled`
+requires; `/idc:update` now *runs* that same door and relays it by exit code, so the advisory the
+template always promised is no longer prose a session could skip. A downgraded denial also names its
+own cause instead of implying the gate is merely being lenient. Declaring `mode: off` explicitly
+silences all of it: an operator who has chosen a posture is never nagged about it again.
+
+**`controlled` no longer refuses to commit the pipeline's own output.** The transition journal is
+machine-owned, so the shared gate refused it — before consulting the authorization, which means no
+authorization could ever admit it. Every sanctioned board write appends to that journal, and it has to
+travel with the repository (a clone whose board is non-empty and whose journal is missing reads as
+INDETERMINATE), so `git add -A && git commit` died on the pipeline's own product with no way forward.
+Gitignoring it — the remedy #184 used for the install receipt — would break every fresh clone. The git
+backstops now admit an **add or modify** of the journal, and nothing else: `TRACKER.md` stays refused
+(a hand-edited tracker must not be publishable), a **removal** still requires the witnessed-uninstall
+shape (#201), and the Write/Edit/Bash doors still refuse hand-editing the journal where that happens.
+
+**An apostrophe in a commit message no longer blocks the commit.** The interlock's lexer knew nothing
+about here-documents, so it read the *body* of `git commit -F - <<'EOF'` as shell syntax: `don't`
+became an unterminated quote and the command was refused as unparseable — reported as opaque shell
+indirection whenever the prose also happened to contain a word like "source". Bodies are data, and are
+now removed before any lexing. The `<<DELIM` operator survives, so a mutation smuggled into an
+interpreter here-document is still denied, and `apply_patch` — whose body *is* its file list — is still
+read from the untouched text. An unterminated here-document is left alone rather than truncated.
+
+**`/idc:janitor --bootstrap` converges on a direct-to-main repo.** The baseline finding compared the
+adoption receipt's pinned default-branch head against the live one as a plain inequality, and
+`--bootstrap` pins the head as it stands *before* writing its own three reconciliation state files —
+which are tracked, so committing them moved the head past the pin and re-raised the finding the
+bootstrap was run to clear. Re-bootstrapping re-pinned and re-dirtied the same files: no fixpoint.
+Pinning "the head after the write" was never available, because the bootstrap does not commit those
+files. The check now asks what it always meant to ask — did **product** work land on the default branch
+outside a receipted path — so bookkeeping-only progress is clean while a product commit, a commit that
+mixes product work with bookkeeping, and an unreadable range all still raise.
+
+Four existing governance scenarios caught a first, too-broad version of the second fix that would have
+made a hand-edited tracker publishable; the shipped fix keeps them green. One residual is recorded in
+`docs/dev/known-debts.md`: a runtime with no per-tool hook (Codex, Pi) can now commit a hand-edited
+journal, accepted because journal corruption is already caught downstream and the alternative is an
+unusable `controlled` posture.
+
 ## 6.1.0 — 2026-08-09
 
 The backlog release: ten open issues closed, each one a door that could not be walked through

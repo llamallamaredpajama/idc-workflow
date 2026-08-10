@@ -181,10 +181,11 @@ install receipt. `/idc:doctor`'s first check fails loudly if IDC is ever enabled
 
 ## The commands
 
-Thirteen slash entry points:
+Fourteen slash entry points:
 
 | Command | What it is |
 |---------|------|
+| `/idc:ask` | plain-language front door — name what you want; IDC routes and confirms before it acts |
 | `/idc:think` | Think → the one gate — brainstorm → crystallize PRD + TRD → the Think PR gate |
 | `/idc:intake` | Intake — capture an idea into the Consideration inbox without derailing the run |
 | `/idc:plan` | Planning — admitted idea → goal-contract issues |

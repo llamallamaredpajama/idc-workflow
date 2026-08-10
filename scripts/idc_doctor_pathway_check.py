@@ -12,15 +12,20 @@ creation time, though: a `WORKFLOW-config.yaml` hand-edited to `controlled` afte
 adopted from elsewhere — sails past it and then reads as fully governed. Doctor is the standing
 diagnostic, so this is where the claim is re-checked on every run.
 
-Three answers, and the third is the load-bearing one:
+Four answers, and the last two are the load-bearing ones:
 
-  * exit 0 — HONEST. The claim matches the backend (any github posture; filesystem declaring `off`).
+  * exit 0 — HONEST. The claim matches the backend (a github posture the operator DECLARED; filesystem
+             declaring `off`).
   * exit 1 — DISHONEST. Backend `filesystem` while the config claims `controlled`/`app-locked`; OR a
              claiming mode on a host whose `python3` cannot run the runtime hooks (see below).
              A named one-line refusal goes to stderr.
   * exit 2 — INDETERMINATE. The claim could not be established: `WORKFLOW-config.yaml` missing or
              unreadable, the tracker backend missing/unreadable/unrecognized, or the shared runtime
              preflight could not be executed to judge the hook runtime.
+  * exit 3 — UNDECLARED. Backend `github` with NO `pathway_enforcement` stanza at all: the runtime
+             correctly defaults to `off`, so the repo enforces NOTHING while looking fully governed.
+             Nothing chose that; a config predating the stanza reads identically to a deliberate
+             `mode: off`. Carries the stanza to paste. Never written for the operator.
 
 WHY THE HOOK RUNTIME IS PART OF THE CLAIM (F57). Half of what `controlled`/`app-locked` promise is
 LOCAL: "supported runtime hooks deny off-path mutations". Those hooks need Python 3.10 or newer —
@@ -81,6 +86,16 @@ FILESYSTEM_BACKEND = "filesystem"
 EXIT_HONEST = 0
 EXIT_DISHONEST = 1
 EXIT_INDETERMINATE = 2
+# UNDECLARED: backend `github` with NO `pathway_enforcement` stanza at all. Not dishonest (the repo
+# claims nothing) and not indeterminate (everything was readable) — but not the clean bill of health
+# `off` used to earn either, because the operator never chose this posture and nothing ever said so.
+EXIT_UNDECLARED = 3
+
+# The stanza an operator pastes to adopt the backend-appropriate default. Printed verbatim by the
+# UNDECLARED row so adopting it is a copy, not a docs hunt. `/idc:init` scaffolds exactly this for a
+# github-backed repo; this door NEVER writes it, because WORKFLOW-config.yaml is operator data.
+PATHWAY_STANZA_TO_PASTE = """pathway_enforcement:
+  mode: controlled"""
 
 # The verdict token an honest run prints. Deliberately absent from every other exit path so a
 # surface that greps this output can never read "cannot tell" as "clean".
@@ -192,6 +207,27 @@ def classify(repo):
             f"never honest (the runtime fails closed on it). Set a recognized mode in "
             f"{CONFIG_RELPATH}, then re-run `/idc:doctor`.")
 
+    # An ABSENT stanza on the `github` backend is its own answer. `pathway_mode()` reports it as `off`
+    # — correct as the runtime's fail-closed default — but absent-on-github and a deliberate
+    # `mode: off` are NOT the same fact, and reporting both as honest is how a fully-governed repo ran
+    # with every Path Gate denial downgraded to observe while the operator believed it was enforcing.
+    # A repo whose config predates the stanza (no `/idc:init` since) lands here, which is exactly the
+    # population that needs telling. Reported for `github` only: on `filesystem` there is no
+    # integration boundary to enforce, so `off` is the right posture and silence is right too.
+    if backend != FILESYSTEM_BACKEND and PG.pathway_mode_state(root) == PG.PATHWAY_KEY_ABSENT:
+        return EXIT_UNDECLARED, (
+            f"{CONFIG_RELPATH} declares NO `pathway_enforcement` stanza, so the Path Gate runs with "
+            f"mode `off`: every local off-path mutation this repo makes is DOWNGRADED TO AN ADVISORY "
+            f"and nothing is enforced. This is the fail-closed default for a repo that never opted in, "
+            f"not a posture anyone chose — a config written before this stanza existed reads exactly "
+            f"like a deliberate `mode: off`. To adopt the backend-appropriate default that "
+            f"`/idc:init` now scaffolds for a `{backend}` repo, add to {CONFIG_RELPATH}:\n"
+            f"{PATHWAY_STANZA_TO_PASTE}\n"
+            f"Adopting `controlled` also requires the `idc/pathway-integrity` check and its repository "
+            f"ruleset to be installed, or merges will block with nothing able to satisfy them. To keep "
+            f"this repo non-enforcing, declare `mode: off` explicitly and this row goes quiet. "
+            f"{CONFIG_RELPATH} is operator data: no IDC command will write this for you.")
+
     if backend == FILESYSTEM_BACKEND and mode in CLAIMING_MODES:
         return EXIT_DISHONEST, (
             f"the `{FILESYSTEM_BACKEND}` tracker backend claims `pathway_enforcement.mode: {mode}` "
@@ -222,7 +258,8 @@ def classify(repo):
 def main(argv=None):
     p = argparse.ArgumentParser(
         description="Is this repo's pathway-security claim honest for its tracker backend? "
-                    "(0 honest, 1 dishonest, 2 indeterminate — indeterminate is never honest.)")
+                    "(0 honest, 1 dishonest, 2 indeterminate, 3 undeclared — only 0 is a clean "
+                    "bill of health.)")
     p.add_argument("--repo", default=".", help="the governed repo root (holds WORKFLOW-config.yaml)")
     args = p.parse_args(argv)
 

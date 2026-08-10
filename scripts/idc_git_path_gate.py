@@ -224,9 +224,71 @@ def _run_git(repo: str, *args: str) -> str:
     return (proc.stdout or "").strip()
 
 
+# The statuses that mean a protected machine surface is being RECORDED rather than REMOVED. Renames
+# (`R`) are deliberately absent: a rename endpoint moves machine-owned state out of its contracted
+# path, which is a removal in every sense the uninstall door cares about.
+_RECORDED_STATUSES = frozenset("ACMT")
+
+
+def _parse_name_status_z(out: str) -> list[tuple[str, str]]:
+    """(status, path) records out of a `--name-status -z` payload; a rename/copy yields BOTH endpoints."""
+    fields = [field for field in out.split("\0") if field != ""]
+    records: list[tuple[str, str]] = []
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        index += 1
+        # Rename/copy records carry two paths; every other status carries one.
+        arity = 2 if status[:1] in {"R", "C"} else 1
+        for _ in range(arity):
+            if index >= len(fields):
+                break
+            records.append((status[:1], fields[index]))
+            index += 1
+    return records
+
+
+def _drop_recorded_machine_state(records: Iterable[tuple[str, str]]) -> list[str]:
+    """The gated path set for `records`, minus append-only machine logs the commit merely RECORDS.
+
+    WHY THIS EXEMPTION EXISTS. Committing the transition journal is how the pipeline PUBLISHES it, not
+    a hand-repair of it: it is clone-portable repo state (the janitor reports a non-empty board with no
+    journal as INDETERMINATE, so it has to travel) and every sanctioned board write appends to it. The
+    shared gate refuses a protected path BEFORE it consults the authorization, so under `controlled`
+    that publish step was unshippable with nothing an authorization could ever do about it —
+    `git add -A && git commit` died on the pipeline's own output. This is the trap #184 fixed for the
+    install receipt by gitignoring it; that remedy is not available here, because a gitignored journal
+    never reaches a clone.
+
+    WHAT IS STILL DENIED, PRECISELY:
+      * Only the narrow `PG.is_recordable_machine_log` family is dropped, NOT every protected surface.
+        `TRACKER.md` and its peers stay refused, because refusing a hand-edited tracker at publish time
+        is a deliberate, tested guard.
+      * Only ADD/COPY/MODIFY/TYPECHANGE is dropped. A DELETE — or a rename endpoint — still reaches the
+        gate, so the uninstall push door (issue #201) is untouched: removing machine-owned state remains
+        admissible only for a witnessed, shape-verified uninstall commit, and "delete the anchor" still
+        cannot become a universal key.
+      * Hand-mutation is still refused where it HAPPENS rather than where it is recorded: the Write/Edit
+        and Bash-writer doors evaluate these same paths through `PG.is_protected_machine_surface` and
+        deny them unconditionally. This widens only what git plumbing may carry, which is the one thing
+        no authorization could express.
+    """
+    paths: list[str] = []
+    seen: set[str] = set()
+    for status, rel in records:
+        rel = rel.strip()
+        if not rel or rel in seen:
+            continue
+        if status in _RECORDED_STATUSES and PG.is_recordable_machine_log(rel):
+            continue
+        seen.add(rel)
+        paths.append(rel)
+    return paths
+
+
 def _collect_pre_commit_paths(repo: str) -> list[str]:
-    out = _run_git(repo, "diff", "--cached", "--name-only", "--diff-filter=ACDMRTUXB")
-    return [line.strip() for line in out.splitlines() if line.strip()]
+    out = _run_git(repo, "diff", "--cached", "--name-status", "-z", "--diff-filter=ACDMRTUXB")
+    return _drop_recorded_machine_state(_parse_name_status_z(out))
 
 
 def _remote_ref_shas(repo: str, remote: str) -> list[str]:
@@ -319,23 +381,9 @@ def _collect_pre_push_paths(
 
 def _commit_name_status(repo: str, commit: str) -> list[tuple[str, str]]:
     """(status, path) for every path the commit touches; a rename/copy yields BOTH endpoints."""
-    out = _run_git(
+    return _parse_name_status_z(_run_git(
         repo, "diff-tree", "--root", "--no-commit-id", "--name-status", "-r", "-z", commit
-    )
-    fields = [field for field in out.split("\0") if field != ""]
-    records: list[tuple[str, str]] = []
-    index = 0
-    while index < len(fields):
-        status = fields[index]
-        index += 1
-        # Rename/copy records carry two paths; every other status carries one.
-        arity = 2 if status[:1] in {"R", "C"} else 1
-        for _ in range(arity):
-            if index >= len(fields):
-                break
-            records.append((status[:1], fields[index]))
-            index += 1
-    return records
+    ))
 
 
 def _tree_has(repo: str, commit: str, relpath: str) -> bool:
@@ -572,7 +620,12 @@ def _exempt_witnessed_uninstall_paths(
 
     Everything else in an exempted commit — its ordinary paths — stays in the gated set and is still
     judged against the live authorization boundary, so the exemption removes exactly the part no
-    authorization could ever cover and nothing more."""
+    authorization could ever cover and nothing more.
+
+    A commit that merely RECORDS an append-only machine log (adds/modifies the transition journal) is
+    exempted for that path too, witness or not — the push-side twin of `_drop_recorded_machine_state`,
+    which documents why and why the family is deliberately narrow. Removals still need the witness, so
+    the uninstall door is unchanged, and every other protected surface stays gated."""
     witnessed = PG.read_uninstall_witness(repo)
     paths: list[str] = []
     seen: set[str] = set()
@@ -580,6 +633,20 @@ def _exempt_witnessed_uninstall_paths(
         exempt: set[str] = set()
         if commit.lower() in witnessed and uninstall_commit_problem(repo, commit) is None:
             exempt = {rel for rel in rels if PG.is_protected_machine_surface(rel)}
+        else:
+            # Recorded (never removed) machine-owned state, attributed per commit like everything
+            # else here: a path this commit only adds/modifies is exempt, while the SAME path deleted
+            # by another outgoing commit still reaches the gate.
+            try:
+                records = _commit_name_status(repo, commit)
+            except RuntimeError:
+                records = []          # cannot attribute statuses → gate every path (fail closed)
+            recorded = {rel for status, rel in records if status in _RECORDED_STATUSES}
+            removed = {rel for status, rel in records if status not in _RECORDED_STATUSES}
+            exempt = {
+                rel for rel in rels
+                if rel in recorded and rel not in removed and PG.is_recordable_machine_log(rel)
+            }
         for rel in rels:
             if rel in exempt or rel in seen:
                 continue

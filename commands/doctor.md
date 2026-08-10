@@ -90,7 +90,7 @@ reads, no board and no network:
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_doctor_pathway_check.py" --repo "$PWD"
 ```
 - exit **0** → **PASS** (note the reported `backend=… , pathway_enforcement.mode=…`): the claim
-  matches the backend — any `github` posture, or `filesystem` declaring `off`.
+  matches the backend — any `github` posture the operator **declared**, or `filesystem` declaring `off`.
 - exit **1** → **FAIL**, for either of the two ways a claim goes unhonored: the `filesystem` backend
   claims `controlled`/`app-locked` (fix hint: "set `pathway_enforcement.mode: off` in
   `WORKFLOW-config.yaml`, or move this repo to the `github` backend (`/idc:init`) — the filesystem
@@ -106,6 +106,16 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_doctor_pathway_check.py" --repo "$PWD
   Path Gate parser reports an unreadable config as `off`, which is the right fail-closed default for
   enforcement but is not evidence of honesty). Fix hint: "restore `WORKFLOW-config.yaml` +
   `docs/workflow/tracker-config.yaml` (`/idc:init`), then re-run `/idc:doctor`."
+- exit **3** → **FAIL**, **never PASS**: a `github`-backed repo declares **no `pathway_enforcement`
+  stanza at all**, so the Path Gate runs `off` and every off-path mutation is downgraded to an
+  advisory — the repo looks fully governed and enforces nothing. Nobody chose that: a
+  `WORKFLOW-config.yaml` written before this stanza existed reads identically to a deliberate
+  `mode: off`, which is why this needs its own row rather than passing as one. **Quote the stanza the
+  door prints on stderr verbatim in the row** — it is the exact text to paste — and name what adopting
+  `controlled` requires (the `idc/pathway-integrity` check + its ruleset installed, or merges block
+  with nothing able to satisfy them). Fix hint: "paste the printed `pathway_enforcement` stanza into
+  `WORKFLOW-config.yaml`, or declare `mode: off` explicitly to keep this repo non-enforcing." **Never
+  write it for the operator** — `WORKFLOW-config.yaml` is operator data.
 This is a **sub-row of check 4** (like `5b` under `5`): report it in the table under row 4 and fold
 its result into row 4's persisted `result` — a `4b` FAIL makes row 4 FAIL — so the ten-row report
 contract stays exactly as it is.

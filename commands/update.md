@@ -296,24 +296,31 @@ values it carries.
 **Backend-aware pathway default — advise, never flip.** A fresh `/idc:init` now scaffolds a
 github-backed repo as `pathway_enforcement.mode: controlled` and a filesystem-backed repo as `off`.
 An **already-governed** repo keeps whatever posture it has: `WORKFLOW-config.yaml` is operator data,
-so update **never** rewrites the mode. Read the repo's backend and its declared mode, then report:
+so update **never** rewrites the mode.
+
+Run the **same deterministic door `/idc:doctor` Row 4b runs** — it decides, you only relay. This is
+mandatory, not discretionary: the advisory used to live only as prose here, so a repo whose config
+predated the stanza could be resynced with nobody ever told it was enforcing nothing.
 
 ```bash
-# read-only: the same shipped parser the Path Gate itself uses, so the advisory can never disagree
-PYTHONPATH="${CLAUDE_PLUGIN_ROOT}/scripts" python3 -c \
-  'import sys; import idc_path_gate as G; print(G.pathway_mode(sys.argv[1]))' "$ROOT"
+# read-only: two file reads, no board, no network. Exit code IS the answer.
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_doctor_pathway_check.py" --repo "$ROOT"
 ```
 
-- **github backend still on `off`** → report `preserved — pathway default advisory: this version
-  scaffolds github-backed repos as controlled; set pathway_enforcement.mode: controlled by hand to
-  adopt it`, and name what adopting it requires (the `idc/pathway-integrity` check + ruleset must be
-  installed, or merges will block with nothing to satisfy them). It is an **advisory**: do not edit
-  the file, do not offer a replace.
-- **filesystem backend claiming `controlled` / `app-locked`** → report it as a **finding**: the
-  filesystem tracker makes no hard pathway-security claim (spec §2.1), so that config advertises
-  protection the repo cannot deliver. Tell the operator to set `mode: off` or migrate to the github
-  backend. Still never rewrite the file yourself.
-- **anything else** → say nothing; the posture is coherent.
+Relay by exit code, quoting the door's stderr verbatim — never paraphrase it, never edit the file,
+never offer a replace:
+
+- exit **3** (github backend, **no `pathway_enforcement` stanza at all**) → report `preserved —
+  pathway enforcement is UNDECLARED: this repo runs mode off and enforces nothing`, then quote the
+  stanza the door prints as the exact text to paste, plus what adopting `controlled` requires (the
+  `idc/pathway-integrity` check + ruleset installed, or merges block with nothing able to satisfy
+  them). Mention that declaring `mode: off` explicitly silences the row while keeping today's
+  behaviour.
+- exit **1** (filesystem backend claiming `controlled`/`app-locked`, or a claiming mode whose hook
+  runtime cannot run) → report it as a **finding**, quoting the reason. That config advertises
+  protection the repo cannot deliver (spec §2.1).
+- exit **2** → report that the posture **could not be established** and why; never call it coherent.
+- exit **0** → say nothing; the posture is declared and coherent.
 
 `app-locked` is never advised as a default — it stays an opt-in profile.
 

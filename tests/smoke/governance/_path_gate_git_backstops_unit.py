@@ -363,5 +363,92 @@ class GitBackstopTests(unittest.TestCase):
         self.assertNotIn("rc=$?", content)
 
 
+class RecordedMachineStateTests(unittest.TestCase):
+    """Committing machine-owned state is PUBLISHING it, not hand-repairing it.
+
+    The shared gate refuses a protected machine surface before it ever consults the authorization, so
+    under `controlled` the pipeline's own output (the transition journal, appended by every sanctioned
+    board write) was unshippable: `git add -A && git commit` died with nothing an authorization could
+    do about it. These assert the narrow exemption AND that it stops exactly where the uninstall door
+    (#201) begins — a REMOVAL of machine-owned state still reaches the gate.
+
+    Red-when-broken: widen `_RECORDED_STATUSES` to include "D" => the deletion tests flip; swap
+    `is_recordable_machine_log` back to the broad `is_protected_machine_surface` => the TRACKER.md test
+    flips; make `is_recordable_machine_log` constantly False => the journal tests flip; revert
+    `_collect_pre_commit_paths` to `--name-only` => every staged test flips.
+    """
+
+    def test_staged_tracker_edit_is_still_gated(self) -> None:
+        """The exemption is the journal family ONLY. TRACKER.md is the filesystem board, and a
+        hand-edited tracker must stay unpublishable (uninstall-push-door.sh case 3)."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / "repo"
+            init_repo(repo)
+            commit_file(repo, "TRACKER.md", "ticket: demo\n", "test: baseline")
+            (repo / "TRACKER.md").write_text("ticket: HAND-EDITED\n", encoding="utf-8")
+            run_git(repo, "add", "--", "TRACKER.md")
+
+            self.assertEqual(["TRACKER.md"], gate._collect_pre_commit_paths(str(repo)))
+
+    def test_staged_journal_add_is_not_gated(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / "repo"
+            init_repo(repo)
+            commit_file(repo, "seed.txt", "seed\n", "test: seed")
+            journal = repo / "docs" / "workflow" / "transition-journal.ndjson"
+            journal.parent.mkdir(parents=True, exist_ok=True)
+            journal.write_text('{"op":"move"}\n', encoding="utf-8")
+            run_git(repo, "add", "--", "docs/workflow/transition-journal.ndjson")
+
+            self.assertEqual([], gate._collect_pre_commit_paths(str(repo)))
+
+    def test_staged_journal_modify_is_not_gated_but_ordinary_paths_still_are(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / "repo"
+            init_repo(repo)
+            commit_file(repo, "docs/workflow/transition-journal.ndjson", '{"op":"a"}\n', "test: journal")
+            (repo / "docs" / "workflow" / "transition-journal.ndjson").write_text(
+                '{"op":"a"}\n{"op":"b"}\n', encoding="utf-8")
+            (repo / "src.ts").write_text("export const x = 1;\n", encoding="utf-8")
+            run_git(repo, "add", "-A")
+
+            # The journal drops out; the ordinary path still faces the authorization boundary.
+            self.assertEqual(["src.ts"], gate._collect_pre_commit_paths(str(repo)))
+
+    def test_staged_protected_deletion_is_still_gated(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / "repo"
+            init_repo(repo)
+            commit_file(repo, "TRACKER.md", "ticket: demo\n", "test: baseline")
+            (repo / "TRACKER.md").unlink()
+            run_git(repo, "add", "-u", "--", "TRACKER.md")
+
+            self.assertEqual(["TRACKER.md"], gate._collect_pre_commit_paths(str(repo)))
+
+    def test_pre_push_exempts_recorded_state_but_not_a_removal(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / "repo"
+            init_repo(repo)
+            base = commit_file(repo, "seed.txt", "seed\n", "test: seed")
+
+            # One commit RECORDS the journal; a later one REMOVES it.
+            add = commit_file(repo, "docs/workflow/transition-journal.ndjson", '{"op":"a"}\n',
+                              "test: record journal")
+            recorded = gate._exempt_witnessed_uninstall_paths(
+                str(repo), gate._collect_pre_push_commits(
+                    str(repo), [f"refs/heads/main {add} refs/heads/main {base}\n"], remote="origin"))
+            self.assertEqual([], recorded)
+
+            (repo / "docs" / "workflow" / "transition-journal.ndjson").unlink()
+            run_git(repo, "add", "-u", "--", "docs/workflow/transition-journal.ndjson")
+            run_git(repo, "commit", "-qm", "test: remove journal")
+            removed_tip = run_git(repo, "rev-parse", "HEAD")
+            removed = gate._exempt_witnessed_uninstall_paths(
+                str(repo), gate._collect_pre_push_commits(
+                    str(repo), [f"refs/heads/main {removed_tip} refs/heads/main {add}\n"],
+                    remote="origin"))
+            self.assertEqual(["docs/workflow/transition-journal.ndjson"], removed)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

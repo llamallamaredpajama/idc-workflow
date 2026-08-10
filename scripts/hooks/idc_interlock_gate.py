@@ -596,6 +596,70 @@ def _join_line_continuations(command):
     return _LINE_CONT_RE.sub("", command)
 
 
+# A here-document redirect: `<<DELIM`, `<<'DELIM'`, `<<"DELIM"`, and the tab-stripping `<<-` form. The
+# lookbehind/alternation shape excludes the herestring `<<<`, which has no body to remove: at the first
+# `<` the delimiter alternation would have to match `<` (it cannot), and every later position is
+# rejected by the lookbehind.
+_HEREDOC_OP_RE = re.compile(
+    r"(?<!<)<<(-?)[ \t]*(?:'([^']*)'|\"([^\"]*)\"|([A-Za-z_][A-Za-z0-9_]*))"
+)
+
+
+def _heredoc_openers(line):
+    """[(delimiter, tab_stripping)] for every here-document `line` opens, in body order."""
+    openers = []
+    for m in _HEREDOC_OP_RE.finditer(line):
+        delim = m.group(2) if m.group(2) is not None else (
+            m.group(3) if m.group(3) is not None else m.group(4))
+        if delim:
+            openers.append((delim, bool(m.group(1))))
+    return openers
+
+
+def _strip_heredoc_bodies(command):
+    r"""Remove here-document BODIES, keeping each `<<DELIM` operator token itself.
+
+    THE BUG THIS FIXES. `shlex` knows nothing about here-documents, so the BODY was lexed as shell
+    syntax. A `git commit -F - <<'EOF'` message is ordinary prose, and one apostrophe in "don't" is an
+    unterminated quote to the lexer: the command was then refused as unparseable — as
+    `opaque-shell-indirection` when the prose also happened to contain a word like "source"/"sh"
+    (`_mentions_interpreter_form` reads the same text), else as an unprovable mutation target. Under
+    `controlled` that denied an ordinary commit for having an apostrophe in its message. Bodies are
+    data, never the command, so they are removed before any lexing or classification.
+
+    WHAT THIS DOES NOT WEAKEN. The operator token survives, so `_has_interpreter_heredoc` still sees an
+    interpreter here-document and still denies it — the guard that actually covers a mutation smuggled
+    in a body (`python3 - <<'EOF' … EOF`). Redirect targets, and every other word outside the body,
+    are untouched because they sit on the opener line.
+
+    CONSERVATIVE BY CONSTRUCTION. A body is removed ONLY once its terminator line is found. An
+    unterminated — or misdetected — here-document leaves the remaining text exactly as it was, so the
+    fail-closed paths still see what they saw before rather than a silently truncated command. Runs
+    BEFORE comment-stripping and continuation-joining, both of which would otherwise process body
+    prose as shell text (and continuation-joining would fuse body lines, hiding the terminator).
+    """
+    if "<<" not in command:
+        return command
+    lines = command.splitlines(keepends=True)
+    kept = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        kept.append(line)
+        index += 1
+        for delim, dashed in _heredoc_openers(line):
+            end = None
+            for probe in range(index, len(lines)):
+                candidate = lines[probe].rstrip("\r\n")
+                if (candidate.strip() if dashed else candidate) == delim:
+                    end = probe
+                    break
+            if end is None:
+                break            # unterminated: leave the rest of the text untouched
+            index = end + 1      # drop the body AND its terminator line
+    return "".join(kept)
+
+
 # Chars after which a `#` begins a new word (so `#` there opens a shell comment): the start of the
 # string, whitespace, or a shell metacharacter. A `#` glued to a word (`foo#bar`, `$(cmd)#`) is literal.
 _WORD_BOUNDARY_CHARS = set(" \t\n\r;|&()<>")
@@ -1339,6 +1403,11 @@ def collect_findings(command, cwd, plugin_root, depth=0, seen=None):
     # never classified as executable, and a `\`+newline inside a comment (literal to bash) cannot pull a
     # following real command up into the stripped region. Applied here so it covers direct classification
     # AND every recursive path (script bodies, inner substitutions) that routes through collect_findings.
+    # Here-document BODIES are data, not command text: remove them FIRST so neither the comment
+    # stripper nor the lexer ever reads message prose as shell syntax (an apostrophe in a `git commit
+    # -F -` body used to fail the lex and deny the commit). The `<<DELIM` operator survives, so the
+    # interpreter-heredoc deny below is unaffected.
+    command = _strip_heredoc_bodies(command)
     command = _strip_shell_comments(command)
     # round-7 Fix 2: collapse `\`+newline line-continuations, so BOTH the direct per-segment classifier
     # AND the token-level indirection inspection (`_lex`, stdin targets, `bash -c` payloads) see the
@@ -2451,8 +2520,15 @@ def _analyze_shell_mutations(command, cwd, repo_root, plugin_root, depth=0, seen
         seen = frozenset()
     if not command or not command.strip():
         return analysis
-    cleaned = _join_line_continuations(_strip_shell_comments(command))
-    patch_paths, saw_apply_patch = _extract_apply_patch_paths(cleaned, cwd, repo_root)
+    # `apply_patch` carries its file list INSIDE the here-document body, so it must be read from the
+    # un-stripped text — it is the one payload whose body IS the mutation declaration, and its own
+    # regex extractor never lexed the body as shell syntax anyway.
+    prepared = _join_line_continuations(_strip_shell_comments(command))
+    patch_paths, saw_apply_patch = _extract_apply_patch_paths(prepared, cwd, repo_root)
+    # Everything downstream lexes, so it gets the body-stripped text: prose in a `git commit -F -`
+    # message is data, and lexing it turned an apostrophe into an unprovable mutation target.
+    # `_has_interpreter_heredoc` below still sees the surviving `<<DELIM` operator.
+    cleaned = _join_line_continuations(_strip_shell_comments(_strip_heredoc_bodies(command)))
     if saw_apply_patch:
         if patch_paths:
             analysis.add_paths(patch_paths)

@@ -482,6 +482,55 @@ def _diff_sha256(repo, base, head):
     return _sha256_hex(raw) if rc == 0 else ""
 
 
+# The machine-owned governed-tree state a reconciliation bootstrap (or an ordinary sanctioned board
+# write) produces on its own. Committing these is bookkeeping, never the un-receipted product work the
+# baseline finding exists to route — see `_only_machine_state_moved`.
+_MACHINE_STATE_RELPATHS = frozenset({
+    RB.MARKER_RELPATH.replace(os.sep, "/"),
+    RB.RECEIPT_RELPATH.replace(os.sep, "/"),
+    RB.CHECKPOINT_RELPATH.replace(os.sep, "/"),
+    RB.SEEN_RELPATH.replace(os.sep, "/"),
+    JOURNAL_REL.replace(os.sep, "/"),
+    "docs/workflow/install-receipt.yaml",
+})
+_MACHINE_STATE_PREFIXES = ("docs/workflow/journal-archive/",)
+
+
+def _is_machine_state_path(rel):
+    rel = (rel or "").strip().replace(os.sep, "/")
+    if not rel:
+        return False
+    if rel in _MACHINE_STATE_RELPATHS or rel.startswith(".idc-"):
+        return True
+    return rel.startswith(_MACHINE_STATE_PREFIXES)
+
+
+def _only_machine_state_moved(repo, base, head):
+    """Does `base..head` change NOTHING but machine-owned reconciliation/journal state?
+
+    THE TREADMILL THIS BREAKS. `--bootstrap` pins the adoption receipt to the default-branch head as it
+    stands BEFORE the bootstrap writes its own three state files — and those files are tracked
+    governed-tree state, so committing them (which the operator must) moves the head PAST the pin and
+    re-raises the very finding the bootstrap was run to clear. Re-bootstrapping re-pinned and re-dirtied
+    the same files, so on a direct-to-main repo the loop had no fixpoint: 1 finding → `--bootstrap` →
+    clean → commit the state → 1 finding, forever. Pinning "the head after the write" is not available
+    as a remedy: the bootstrap writes those files but never commits them, so the resulting sha does not
+    exist yet when the receipt is minted.
+
+    So the head-moved test asks the question it always meant to ask — did PRODUCT work land on the
+    default branch outside a receipted path — instead of "did the sha change". A range that carries any
+    ordinary path still raises the finding, including a mixed commit that touches product files
+    alongside the bookkeeping.
+
+    Fail-closed: an unreadable range (a rewritten or absent base) returns False, so the finding is
+    raised rather than silently dropped."""
+    out, rc = git(["diff", "--name-only", f"{base}..{head}"], repo)
+    if rc != 0:
+        return False
+    rels = [line.strip() for line in out.splitlines() if line.strip()]
+    return bool(rels) and all(_is_machine_state_path(rel) for rel in rels)
+
+
 def _source_pin(repo, base, head):
     return {
         "repository": _repo_identity(repo),
@@ -922,7 +971,14 @@ def scan(ctx):
     if receipt:
         baseline_head = (receipt.get("default_branch") or {}).get("head") or ""
         current_head = tip_sha(repo, "refs/heads/" + default)
-        if baseline_head and current_head and current_head != baseline_head:
+        if (
+            baseline_head
+            and current_head
+            and current_head != baseline_head
+            # A range that only carries the bootstrap's own bookkeeping is not un-receipted product
+            # work; counting it made `--bootstrap` a treadmill with no fixpoint.
+            and not _only_machine_state_moved(repo, baseline_head, current_head)
+        ):
             findings.append(finding(
                 RISKY,
                 "baseline",

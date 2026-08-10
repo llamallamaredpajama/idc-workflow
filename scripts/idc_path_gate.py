@@ -126,20 +126,33 @@ def _is_git_worktree(repo: str) -> bool:
     return proc.returncode == 0 and (proc.stdout or "").strip() == "true"
 
 
-def pathway_mode(repo: str) -> str:
-    """Read the scaffolded pathway posture without taking a YAML dependency.
+# How a `pathway_enforcement` key was (or was not) declared — see `_pathway_block_value`.
+PATHWAY_CONFIG_UNREADABLE = "unreadable"
+PATHWAY_KEY_ABSENT = "absent"
+PATHWAY_KEY_DECLARED = "declared"
 
-    Returns one of PATHWAY_MODES, or `UNKNOWN_MODE` when the config IS readable and explicitly declares
-    a `mode:` whose value is not a recognized mode (a typo / malformed value). A config that is missing,
-    unreadable, or declares no `mode:` returns `off` (an ungoverned or non-enforcing repo). The
-    distinction is load-bearing: `off` downgrades a would-be denial to observe, while `UNKNOWN_MODE`
-    does NOT — a malformed mode must fail closed rather than silently disable enforcement (F10)."""
+
+def _pathway_block_value(repo: str, key: str) -> tuple[str, str | None]:
+    """`(state, raw_value)` for `pathway_enforcement.<key>` in WORKFLOW-config.yaml, no YAML dependency.
+
+    THE ONE block parse for that stanza — `pathway_mode` and `pathway_attempt_ceiling` both read it
+    through here, so the two can no longer drift about what a config declares (they used to be
+    duplicated line for line, with a comment asking future editors to keep them in step by hand).
+
+    `state` is one of:
+      * `PATHWAY_CONFIG_UNREADABLE` — the config is missing or could not be opened. Callers decide what
+        an unanswerable question means for them; it is NOT the same fact as a declared value.
+      * `PATHWAY_KEY_ABSENT` — the config IS readable but declares no such key (no
+        `pathway_enforcement:` block at all, or a block without this key).
+      * `PATHWAY_KEY_DECLARED` — the key is declared; `raw_value` is its value with surrounding quotes
+        stripped (possibly the empty string, which is a malformed declaration, not an absence).
+    """
     config_path = os.path.join(repo_root(repo), "WORKFLOW-config.yaml")
     try:
         with open(config_path, encoding="utf-8") as fh:
             lines = fh.readlines()
     except OSError:
-        return "off"
+        return PATHWAY_CONFIG_UNREADABLE, None
 
     block_indent: int | None = None
     for raw_line in lines:
@@ -154,11 +167,41 @@ def pathway_mode(repo: str) -> str:
             continue
         if indent <= block_indent:
             break
-        key, separator, raw_value = stripped.partition(":")
-        if separator and key.strip() == "mode":
-            value = raw_value.strip().strip("\"'")
-            return value if value in PATHWAY_MODES else UNKNOWN_MODE
-    return "off"
+        found_key, separator, raw_value = stripped.partition(":")
+        if separator and found_key.strip() == key:
+            return PATHWAY_KEY_DECLARED, raw_value.strip().strip("\"'")
+    return PATHWAY_KEY_ABSENT, None
+
+
+def pathway_mode_state(repo: str) -> str:
+    """Whether this repo DECLARES `pathway_enforcement.mode` — one of the three PATHWAY_* states above.
+
+    `pathway_mode()` deliberately answers `off` for all of "explicitly off", "declares no mode", and
+    "I could not read your config", because the RUNTIME gate needs one fail-closed answer. That
+    collapse is also how a fully-governed github repo ran with every denial downgraded to observe while
+    the operator believed it was enforcing: an absent stanza was indistinguishable from a deliberate
+    `mode: off`, and nothing anywhere said so. Diagnostics (`/idc:doctor` Row 4b, `/idc:update`'s
+    pathway advisory) ask THIS instead, so "you never set a posture" can be reported as its own fact
+    without weakening the runtime default."""
+    state, _ = _pathway_block_value(repo, "mode")
+    return state
+
+
+def pathway_mode(repo: str) -> str:
+    """Read the scaffolded pathway posture without taking a YAML dependency.
+
+    Returns one of PATHWAY_MODES, or `UNKNOWN_MODE` when the config IS readable and explicitly declares
+    a `mode:` whose value is not a recognized mode (a typo / malformed value). A config that is missing,
+    unreadable, or declares no `mode:` returns `off` (an ungoverned or non-enforcing repo). The
+    distinction is load-bearing: `off` downgrades a would-be denial to observe, while `UNKNOWN_MODE`
+    does NOT — a malformed mode must fail closed rather than silently disable enforcement (F10).
+
+    An absent stanza still answers `off` HERE, on purpose — an ungoverned repo must not start denying
+    because it never opted in. `pathway_mode_state()` is what tells the two apart for reporting."""
+    state, value = _pathway_block_value(repo, "mode")
+    if state != PATHWAY_KEY_DECLARED:
+        return "off"
+    return value if value in PATHWAY_MODES else UNKNOWN_MODE
 
 
 def pathway_attempt_ceiling(repo: str):
@@ -173,39 +216,15 @@ def pathway_attempt_ceiling(repo: str):
         can surface the operator's mistake instead of silently swallowing it, mirroring `pathway_mode`'s
         ABSENT(`off`) vs MALFORMED(`UNKNOWN_MODE`) split (F23). Not a fail-open — the ceiling only bounds
         a retry loop, so a malformed value still errs to the safe default — but the silent swallow hid
-        the config error.
-
-    Mirrors `pathway_mode`'s block parse line for line so the two cannot disagree about the
-    `pathway_enforcement:` block a config declares."""
-    config_path = os.path.join(repo_root(repo), "WORKFLOW-config.yaml")
-    try:
-        with open(config_path, encoding="utf-8") as fh:
-            lines = fh.readlines()
-    except OSError:
+        the config error."""
+    state, value = _pathway_block_value(repo, "attempt_ceiling")
+    if state != PATHWAY_KEY_DECLARED:
         return None
-
-    block_indent: int | None = None
-    for raw_line in lines:
-        content = raw_line.split("#", 1)[0].rstrip()
-        if not content.strip():
-            continue
-        indent = len(content) - len(content.lstrip())
-        stripped = content.strip()
-        if block_indent is None:
-            if stripped == "pathway_enforcement:":
-                block_indent = indent
-            continue
-        if indent <= block_indent:
-            break
-        key, separator, raw_value = stripped.partition(":")
-        if separator and key.strip() == "attempt_ceiling":
-            value = raw_value.strip().strip("\"'")
-            try:
-                parsed = int(value)
-            except ValueError:
-                return MALFORMED_ATTEMPT_CEILING          # declared but not an integer
-            return parsed if parsed > 0 else MALFORMED_ATTEMPT_CEILING  # declared but non-positive
-    return None
+    try:
+        parsed = int(value)
+    except ValueError:
+        return MALFORMED_ATTEMPT_CEILING              # declared but not an integer
+    return parsed if parsed > 0 else MALFORMED_ATTEMPT_CEILING  # declared but non-positive
 
 
 def current_branch(repo: str) -> str:
@@ -668,6 +687,34 @@ def _contains_protected_machine_path(relpath: str) -> bool:
         if fixed_prefix and fixed_prefix.startswith(candidate + "/"):
             return True
     return False
+
+
+# The protected surfaces that are APPEND-ONLY MACHINE LOGS, and so must be PUBLISHABLE. The transition
+# journal has to travel with the repository — the janitor reports a non-empty board with no journal as
+# INDETERMINATE, so a gitignored journal (the remedy #184 used for the install receipt) would break
+# every fresh clone — and every sanctioned board write appends to it. A commit that merely RECORDS one
+# of these is ordinary forward progress, not a hand-repair, so the git backstops let it through.
+#
+# DELIBERATELY NARROW — do not widen this to the rest of PROTECTED_MACHINE_RULES. `TRACKER.md` in
+# particular IS the filesystem board, and refusing a hand-edited tracker at publish time is a tested
+# guard (`tests/smoke/governance/uninstall-push-door.sh` case 3 pushes a stray hand edit and requires
+# the refusal; `path-gate-git-backstops.sh` requires a smuggled lower-commit edit to be caught even
+# when the tip restores the tree). Those files are machine-local or re-mintable; this one is a log
+# that has to reach the remote.
+RECORDABLE_MACHINE_LOG_RULES = [
+    "docs/workflow/transition-journal.ndjson",
+    "docs/workflow/transition-journal.ndjson.*",
+]
+
+
+def is_recordable_machine_log(relpath: str) -> bool:
+    """Is `relpath` an append-only machine log a commit may carry? See RECORDABLE_MACHINE_LOG_RULES.
+
+    Only ever consulted for a RECORD (add/modify) by the git backstops. A REMOVAL of one of these is
+    still a protected mutation, so the uninstall push door (#201) is untouched, and the write doors
+    (Write/Edit/Bash) still refuse hand-editing it through `is_protected_machine_surface`."""
+    candidate = relpath.casefold()
+    return any(fnmatch.fnmatchcase(candidate, rule.casefold()) for rule in RECORDABLE_MACHINE_LOG_RULES)
 
 
 def is_protected_machine_surface(relpath: str) -> bool:
@@ -1231,15 +1278,36 @@ def _evaluate_request(repo: str, plugin_root: str, request: dict[str, Any]) -> d
     return _allow("IDC Path Gate: mutation is inside the live authorization boundary")
 
 
+def _observe_cause(repo: str) -> str:
+    """WHY this repository is only observing — appended to every downgraded denial.
+
+    A bare "would deny" reads as though enforcement is on and merely lenient about this one mutation.
+    It is not: the whole posture is non-enforcing, and the operator has no way to tell WHICH of the
+    three reasons applies. Saying it at the point of use makes the downgrade self-diagnosing, which is
+    what was missing when a github-backed repo ran fully unenforced because its config predated the
+    `pathway_enforcement` stanza."""
+    if os.environ.get("IDC_HOOKS_OBSERVE_ONLY", "") == "1":
+        return "observe: IDC_HOOKS_OBSERVE_ONLY=1 is set in this environment"
+    state = pathway_mode_state(repo)
+    if state == PATHWAY_KEY_ABSENT:
+        return ("observe: pathway_enforcement mode is 'off' — the stanza is ABSENT from "
+                "WORKFLOW-config.yaml, so nothing is enforced. Run `/idc:doctor` for the stanza to paste")
+    if state == PATHWAY_CONFIG_UNREADABLE:
+        return ("observe: pathway_enforcement mode is 'off' — WORKFLOW-config.yaml is missing or "
+                "unreadable, so no posture could be read. Run `/idc:doctor`")
+    return "observe: pathway_enforcement mode is 'off' in WORKFLOW-config.yaml"
+
+
 def evaluate_request(repo: str, plugin_root: str, request: dict[str, Any]) -> dict[str, Any]:
     """Evaluate once, then apply the repository's transport-independent enforcement posture."""
     decision = _evaluate_request(repo, plugin_root, request)
     if decision.get("allowed"):
         return decision
     if os.environ.get("IDC_HOOKS_OBSERVE_ONLY", "") == "1" or pathway_mode(repo) == "off":
+        reason = str(decision.get("reason") or "IDC Path Gate would deny this mutation")
         return {
             "allowed": True,
-            "observe": str(decision.get("reason") or "IDC Path Gate would deny this mutation"),
+            "observe": f"{reason} ({_observe_cause(repo)})",
         }
     return decision
 

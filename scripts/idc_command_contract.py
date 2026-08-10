@@ -80,10 +80,10 @@ except ImportError:                                      # a lone relocated copy
         scrub = staticmethod(
             lambda text: text and "[child output withheld — the credential table is not importable]")
 
-# The thirteen governed `/idc:*` entry points. Kept in lockstep with commands/*.md and the
+# The fourteen governed `/idc:*` entry points. Kept in lockstep with commands/*.md and the
 # UserPromptExpansion matcher in hooks/hooks.json.
 COMMANDS = {
-    "autorun", "build", "doctor", "init", "intake", "janitor", "pause",
+    "ask", "autorun", "build", "doctor", "init", "intake", "janitor", "pause",
     "plan", "recirculate", "resume", "think", "uninstall", "update",
 }
 
@@ -204,6 +204,7 @@ _PAUSE_HELPER = "idc_pause_check.py"
 # A resume blocker comes from this one — "the pause record could not be removed" — and is grounded by
 # re-reading the record, not by re-running the quiescence check, which is a different question.
 _PAUSE_STATE_HELPER = "idc_pause_state.py"
+_NEXT_ACTION_HELPER = "idc_next_action.py"
 # WHICH pause-state operation each command performs, so its blocker is re-derived against the right
 # one. `/idc:pause` drives the WRITE (request/confirm); `/idc:resume` and `/idc:autorun`'s preflight
 # drive the same CLEAR — which is why autorun carries this helper too: `commands/autorun.md` tells a
@@ -225,6 +226,7 @@ _JANITOR_BLOCKED_EXIT = 2
 # manufacture a blocked stop. Commands with NO re-derivable helper carry no `blocked_external` claim at
 # all (see _CLAIM_TABLE — not claimable, fail closed).
 _BLOCKER_HELPERS = {
+    "ask":         {_NEXT_ACTION_HELPER},
     "intake":      _INTAKE_HELPERS,
     "build":       {_DRAIN_HELPER},
     # The drain is autorun's own blocker; the pause-state helper is the PREFLIGHT's. `commands/autorun.md`
@@ -570,6 +572,22 @@ def _check_blocker(command: str, refs: dict, repo: str, session: str) -> Closeou
                          f"blocked_external cites exit {blocker.get('exit')} but a read-only re-run of "
                          f"the pause quiescence check exits {code} — the cited exit must MATCH what the "
                          "helper actually does now")
+    elif base == _NEXT_ACTION_HELPER:
+        try:
+            import idc_next_action as NEXT  # noqa: E402 — re-run the read-only oracle
+            action = NEXT.decide(repo)
+        except Exception:  # noqa: BLE001 — an unknown current result cannot ground a blocker
+            return _fail("blocked-external-oracle-unproven",
+                         "blocked_external citing the next-action oracle could not re-run it")
+        if action.verdict not in ("invalid", "blocked_external"):
+            return _fail("blocked-external-oracle-not-blocked",
+                         "blocked_external citing the next-action oracle requires its fresh read to "
+                         "remain invalid or rate-limited")
+        expected_exit = 3 if action.reason_code == "rate-limited" else 2
+        if code != expected_exit:
+            return _fail("blocked-external-oracle-exit-mismatch",
+                         f"blocked_external cites exit {code} but the next-action oracle now exits "
+                         f"{expected_exit}; the cited exit must match the fresh read")
     else:
         # A helper on no re-derivation path (no durable receipt, not safely re-runnable) cannot ground a
         # blocked stop — a caller exit/diagnostic is never accepted as ground truth (wave-4 finding 1).
@@ -1851,6 +1869,24 @@ def _verify_decomposition(repo: str, matrix_rel: object, children: list) -> Clos
 
 def _claim_plan_no_action(refs: dict, repo: str, session: str) -> CloseoutResult:
     return _check_no_action("plan", repo)
+
+
+def _claim_ask_oracle_read(refs: dict, repo: str, session: str) -> CloseoutResult:
+    """`/idc:ask complete` honestly offers one thing: a fresh readable oracle result."""
+    action = _oracle_action(repo)
+    if action is None:
+        return _fail("ask-oracle-unread",
+                     "/idc:ask complete requires a fresh, valid next-action oracle read")
+    return CloseoutResult(True, "ok", "ask recommendation re-derived from a live oracle read", {})
+
+
+def _claim_ask_no_action(refs: dict, repo: str, session: str) -> CloseoutResult:
+    """`/idc:ask no_action` is honest only at the pipeline's real fixpoint."""
+    action = _oracle_action(repo)
+    if action is None or action.verdict != "no_action":
+        return _fail("ask-oracle-not-fixpoint",
+                     "/idc:ask no_action requires the next-action oracle to report a fixpoint")
+    return CloseoutResult(True, "ok", "ask fixpoint re-derived from a live oracle read", {})
 
 
 def _claim_plan_matrix(refs: dict, repo: str, session: str) -> CloseoutResult:
@@ -3474,6 +3510,11 @@ _PAUSABLE_STAGES = ("build", "autorun", "recirculate")
 _CLAIM_PAUSED = (Claim("deliberate-pause", _claim_paused),)
 
 _CLAIM_TABLE = {
+    "ask": {
+        "complete": (Claim("ask-oracle-read", _claim_ask_oracle_read),),
+        "no_action": (Claim("ask-oracle-fixpoint", _claim_ask_no_action),),
+        "blocked_external": (_claim_blocker_for("ask"),),
+    },
     "intake": {
         "complete": (Claim("intake-manifest-reviewed", _claim_intake_manifest_reviewed),
                      Claim("intake-pr-merged", _claim_intake_pr_merged)),

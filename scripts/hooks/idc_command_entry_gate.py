@@ -59,7 +59,7 @@ WORKFLOW_COMMANDS = {"think", "intake", "plan", "build", "recirculate", "autorun
 # work rather than starting it, writes no board state, and is the operator's graceful alternative to a
 # hard kill. Refusing to let someone pause a running pipe because the install receipt has drifted would
 # force exactly the ungraceful interruption this command exists to replace.
-RECOVERY_COMMANDS = {"doctor", "update", "uninstall", "janitor", "pause"}
+RECOVERY_COMMANDS = {"ask", "doctor", "update", "uninstall", "janitor", "pause"}
 # `init` bootstraps a not-yet-governed repo: it is ALLOWED to expand but does NOT open a record in the
 # entry gate — commands/init.md opens its own lifecycle record right after it writes
 # tracker-config.yaml (Task 6). So init is the one governed command whose registration the entry gate
@@ -99,8 +99,8 @@ AUTH_WRITE_FAILED_REASON = (
     "state. Check that the repository Git directory is writable, then retry the IDC command."
 )
 
-AUTH_REQUIRED_COMMANDS = set(C.COMMANDS) - {"doctor", "pause"}
-BASELINE_ALLOWED_COMMANDS = {"doctor", "update", "janitor", "pause", "uninstall", "init"}
+AUTH_REQUIRED_COMMANDS = set(C.COMMANDS) - {"doctor", "pause", "ask"}
+BASELINE_ALLOWED_COMMANDS = {"ask", "doctor", "update", "janitor", "pause", "uninstall", "init"}
 
 BASELINE_PENDING_REASON = (
     "IDC refused to expand this command because the repository is baseline-pending under "
@@ -312,7 +312,7 @@ def _fail_closed_or_allow(payload, command, why, plugin_root):
 
 def _ensure_path_gate_auth(payload, command, registration, auth_snapshot):
     """Write/refresh the shared Path Gate authorization for commands that legitimately mutate the
-    repository. Read-only commands (`doctor`, `pause`) do not need one. The gate is keyed by the
+    repository. Read-only commands (`ask`, `doctor`, `pause`) do not need one. The gate is keyed by the
     already-open active command record's nonce, so a later finish naturally retires it when the
     record leaves the active set.
 

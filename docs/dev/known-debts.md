@@ -106,3 +106,15 @@ Remaining findings from `docs/dev/2026-06-11-fidelity-audit.md` deliberately tri
 - **Nit (CI hardening):** `bash -n` can't catch bash-3.2-only incompatibilities
   (shellcheck adoption is a candidate); the linter's Rule-4 header comment names the
   original project (it is the rule's own description; the regex must keep the literal).
+- **A hand-edited transition journal is publishable from a runtime with no per-tool hook
+  (deliberate keep).** The git backstops now admit an add/modify of
+  `docs/workflow/transition-journal.ndjson` (`PG.is_recordable_machine_log`), because the journal must
+  travel with the repository and every sanctioned board write appends to it — before this, `controlled`
+  hard-denied committing the pipeline's own output, with nothing an authorization could do about it.
+  Under Claude the write doors still refuse hand-editing it; under Codex/Pi, which run no PreToolUse
+  hook, the pre-commit backstop *was* the only catch, so a hand-edited journal can now be committed
+  there. Accepted rather than closed: the journal is an append-only log whose corruption is already
+  detected downstream (`scan_journal_strict`, and `check_journal_divergence` reports a journal that
+  disagrees with the board as INDETERMINATE rather than clean), and the alternative is an unusable
+  `controlled` posture. The exemption is deliberately narrow — `TRACKER.md` and every other protected
+  surface stay refused, and a REMOVAL still needs the witnessed-uninstall shape (#201).

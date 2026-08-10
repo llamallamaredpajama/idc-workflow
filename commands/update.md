@@ -315,7 +315,8 @@ never offer a replace:
   stanza the door prints as the exact text to paste, plus what adopting `controlled` requires (the
   `idc/pathway-integrity` check + ruleset installed, or merges block with nothing able to satisfy
   them). Mention that declaring `mode: off` explicitly silences the row while keeping today's
-  behaviour.
+  behavior — an operator who has *chosen* `off` is never nagged again, which is why exit 0 covers a
+  declared `off` and this row does not.
 - exit **1** (filesystem backend claiming `controlled`/`app-locked`, or a claiming mode whose hook
   runtime cannot run) → report it as a **finding**, quoting the reason. That config advertises
   protection the repo cannot deliver (spec §2.1).

@@ -224,9 +224,9 @@ def _run_git(repo: str, *args: str) -> str:
     return (proc.stdout or "").strip()
 
 
-# The statuses that mean a protected machine surface is being RECORDED rather than REMOVED. Renames
-# (`R`) are deliberately absent: a rename endpoint moves machine-owned state out of its contracted
-# path, which is a removal in every sense the uninstall door cares about.
+# The diff statuses that mean a path is being RECORDED rather than REMOVED. Renames (`R`) are
+# deliberately absent: a rename endpoint moves machine-owned state out of its contracted path, which is
+# a removal in every sense the uninstall door cares about.
 _RECORDED_STATUSES = frozenset("ACMT")
 
 
@@ -633,10 +633,12 @@ def _exempt_witnessed_uninstall_paths(
         exempt: set[str] = set()
         if commit.lower() in witnessed and uninstall_commit_problem(repo, commit) is None:
             exempt = {rel for rel in rels if PG.is_protected_machine_surface(rel)}
-        else:
-            # Recorded (never removed) machine-owned state, attributed per commit like everything
-            # else here: a path this commit only adds/modifies is exempt, while the SAME path deleted
-            # by another outgoing commit still reaches the gate.
+        elif any(PG.is_recordable_machine_log(rel) for rel in rels):
+            # Recorded (never removed) machine logs, attributed per commit like everything else here:
+            # a path this commit only adds/modifies is exempt, while the SAME path deleted by another
+            # outgoing commit still reaches the gate. The status re-read costs one `diff-tree`, so it
+            # runs ONLY for the commits that actually carry a log path — the vast majority of a push
+            # never touches one and pays nothing.
             try:
                 records = _commit_name_status(repo, commit)
             except RuntimeError:

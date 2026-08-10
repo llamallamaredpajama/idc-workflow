@@ -61,6 +61,20 @@ def _matches(normalized: str, cue: str) -> bool:
     return " " + cue + " " in normalized
 
 
+def _negated(normalized: str, cue: str) -> bool:
+    """Whether ``cue`` is immediately rejected instead of requested.
+
+    `_normalized` deliberately turns punctuation into spaces, so both ``don't resume``
+    and ``dont resume`` arrive as token sequences we can inspect without guessing at
+    word boundaries. A negative request must never become an authorization-bearing
+    route to the command the operator explicitly ruled out.
+    """
+    return any(
+        " " + prefix + " " + cue + " " in normalized
+        for prefix in ("not", "never", "no", "dont", "don t")
+    )
+
+
 def _result(verdict: str, command: str | None, command_args: str, reason_code: str,
             matched: list[str] | None = None, oracle: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
@@ -85,7 +99,7 @@ def resolve_keywords(text: str) -> dict[str, Any]:
     matches: list[tuple[str, str]] = []
     for command, cues in KEYWORDS.items():
         for cue in cues:
-            if _matches(normalized, cue):
+            if _matches(normalized, cue) and not _negated(normalized, cue):
                 matches.append((command, cue))
 
     commands = {command for command, _cue in matches}
@@ -94,7 +108,8 @@ def resolve_keywords(text: str) -> dict[str, Any]:
     if len(commands) == 1:
         command = next(iter(commands))
         cue = next(cue for candidate, cue in matches if candidate == command)
-        return _result("route", command, "", "keyword-" + command, [cue])
+        if command in ROUTABLE:
+            return _result("route", command, "", "keyword-" + command, [cue])
     return _result("advisory", None, "", "no-match")
 
 

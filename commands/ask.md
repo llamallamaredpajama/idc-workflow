@@ -45,7 +45,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   --status <complete|no_action|blocked_external> --evidence-json '<envelope>'
 ```
 
-- `complete` — a fresh oracle read backed a named recommendation.
+- `complete` — the oracle returns an actionable named recommendation.
 - `no_action` — the oracle reports a fixpoint: nothing to do, and saying so is the product.
 - `blocked_external` — the oracle could not read (rate-limited or invalid state); cite
   `blocker:{helper:"idc_next_action.py", exit:<2|3>, diagnostic:"<why>"}`.

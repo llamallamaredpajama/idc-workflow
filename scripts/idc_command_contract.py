@@ -1872,11 +1872,17 @@ def _claim_plan_no_action(refs: dict, repo: str, session: str) -> CloseoutResult
 
 
 def _claim_ask_oracle_read(refs: dict, repo: str, session: str) -> CloseoutResult:
-    """`/idc:ask complete` honestly offers one thing: a fresh readable oracle result."""
+    """`/idc:ask complete` requires a fresh actionable named recommendation."""
     action = _oracle_action(repo)
-    if action is None:
-        return _fail("ask-oracle-unread",
-                     "/idc:ask complete requires a fresh, valid next-action oracle read")
+    if (
+        action is None
+        or action.verdict != "action"
+        or not isinstance(action.command, str)
+        or not action.command.strip()
+    ):
+        return _fail("ask-oracle-not-action",
+                     "/idc:ask complete requires the next-action oracle to return an actionable "
+                     "named recommendation")
     return CloseoutResult(True, "ok", "ask recommendation re-derived from a live oracle read", {})
 
 

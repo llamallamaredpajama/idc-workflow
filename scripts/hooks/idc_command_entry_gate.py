@@ -131,26 +131,49 @@ def _ask_text(payload):
     return args if isinstance(args, str) else ""
 
 
-def _resolve_ask(payload):
+def _ask_route_preamble(plugin_root, target):
+    """Return confirmation text followed by the exact resolved command playbook.
+
+    UserPromptExpansion appends `additionalContext` alongside the original `/idc:ask`
+    command body. A route must therefore inject the target body explicitly; otherwise
+    confirmation would continue into the advisory ask playbook and try to close the
+    wrong lifecycle record.
+    """
+    playbook_path = os.path.join(plugin_root, "commands", target + ".md")
+    with open(playbook_path, encoding="utf-8") as handle:
+        playbook = handle.read().strip()
+    if not playbook:
+        raise ValueError(f"resolved /idc:{target} playbook is empty")
+    return (
+        ASK_CONFIRM_PREAMBLE
+        + f"\n\nResolved `/idc:{target}` playbook:\n\n"
+        + playbook
+    )
+
+
+def _resolve_ask(payload, plugin_root):
     """Fail softly into advisory `/idc:ask`, or retarget a verified resolver route."""
-    cwd = payload.get("cwd") or os.getcwd()
     try:
         import idc_ask_resolve as ASK  # noqa: E402 — lazy: resolver failure must not brick admission
+        cwd = payload.get("cwd") or os.getcwd()
         result = ASK.resolve(cwd, _ask_text(payload))
+        if isinstance(result, dict) and result.get("verdict") == "route":
+            target = result.get("command")
+            args = result.get("command_args")
+            if (
+                isinstance(target, str)
+                and target in ASK.ROUTABLE
+                and target in C.COMMANDS
+                and isinstance(args, str)
+            ):
+                retargeted = dict(payload)
+                retargeted["command_args"] = args
+                retargeted["command_source"] = "ask"
+                return target, retargeted, _ask_route_preamble(plugin_root, target)
+        reason = result.get("reason_code") if isinstance(result, dict) else "oracle-invalid"
+        if not isinstance(reason, str) or not reason:
+            reason = "oracle-invalid"
     except Exception:  # noqa: BLE001 — `/idc:ask` remains a recovery/advisory surface
-        result = None
-
-    if isinstance(result, dict) and result.get("verdict") == "route":
-        target = result.get("command")
-        args = result.get("command_args")
-        if target in ASK.ROUTABLE and target in C.COMMANDS and isinstance(args, str):
-            retargeted = dict(payload)
-            retargeted["command_args"] = args
-            retargeted["command_source"] = "ask"
-            return target, retargeted, ASK_CONFIRM_PREAMBLE
-
-    reason = result.get("reason_code") if isinstance(result, dict) else "oracle-invalid"
-    if not isinstance(reason, str) or not reason:
         reason = "oracle-invalid"
     advisory = (
         f"IDC Ask advisory ({reason}): the resolver did not confidently name one command. "
@@ -336,7 +359,7 @@ def _restore_path_gate_auth(cwd, snapshot, expected_nonce):
     return PG.restore_authorization_snapshot(cwd, snapshot, expected_nonce)
 
 
-def _fail_closed_or_allow(payload, command, why, plugin_root):
+def _fail_closed_or_allow(payload, command, why, plugin_root, preamble=""):
     """The unverifiable-freshness fork: fail CLOSED for the six workflow commands (block with the
     repair message); ALLOW recovery/diagnostic + init commands (they must run to diagnose or migrate
     the repo). This fork is only reached AFTER freshness has proven the runtime is NOT positively
@@ -356,7 +379,7 @@ def _fail_closed_or_allow(payload, command, why, plugin_root):
                 _block(AUTH_WRITE_FAILED_REASON)
             # A recovery command may still expand on a ledger write failure, but must not claim a
             # record exists. `_emit_context` is terminal and releases the lock via finally.
-            _emit_context(command, plugin_root, reg == _REG_OPENED)
+            _emit_context(command, plugin_root, reg == _REG_OPENED, preamble)
     _block(REPAIR_REASON)
 
 
@@ -481,7 +504,7 @@ def _admit(payload, plugin_root, command, preamble=""):
     if result.running_version is None:
         # The running plugin manifest could not be read → we cannot bind the runtime at all.
         _fail_closed_or_allow(payload, command,
-                              "the running plugin manifest could not be read", plugin_root)
+                              "the running plugin manifest could not be read", plugin_root, preamble)
     if result.verdict == "stale":
         _block(STALE_REASON)  # blocks EVERY command, recovery ones included (stale code is unsafe)
     if H.is_governed_repo(cwd) and command not in BASELINE_ALLOWED_COMMANDS and _baseline_pending(cwd):
@@ -516,14 +539,14 @@ def main():
         # Not a namespaced IDC command this gate governs → say nothing, allow the normal flow.
         sys.exit(0)
     preamble = ""
-    if command == "ask":
-        command, payload, preamble = _resolve_ask(payload)
     try:
+        if command == "ask":
+            command, payload, preamble = _resolve_ask(payload, plugin_root)
         _admit(payload, plugin_root, command, preamble)
     except SystemExit:
         raise
     except Exception as exc:  # noqa: BLE001 — an unverifiable gate error is fail-closed for workflow
-        _fail_closed_or_allow(payload, command, f"unexpected gate error: {exc}", plugin_root)
+        _fail_closed_or_allow(payload, command, f"unexpected gate error: {exc}", plugin_root, preamble)
     sys.exit(0)
 
 

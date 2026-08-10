@@ -50,6 +50,8 @@ OUT="$(emit_ask ask-route 'stop work here' | python3 "$GATE" "$REPO_ROOT")"
 printf '%s' "$OUT" | grep -q '/idc:pause' || fail "confident ask did not inject pause context"
 printf '%s' "$OUT" | grep -q 'You reached this command through /idc:ask' \
   || fail "confident ask did not inject the mandatory confirmation preamble"
+printf '%s' "$OUT" | grep -q 'You are running `/idc:pause`' \
+  || fail "confident ask did not inject the resolved pause playbook"
 RECORD="$(active_record ask-route pause)" || fail "confident ask did not open a pause record"
 printf '%s' "$RECORD" | grep -q '"source": "ask"' \
   || fail "retargeted pause record did not record ask as its source"
@@ -71,5 +73,54 @@ printf '%s' "$OUT" | grep -q 'lifecycle-command' \
 active_record ask-lifecycle ask >/dev/null || fail "lifecycle ask did not open an ask record"
 python3 "$CONTRACT" status --repo "$REPO" --session ask-lifecycle --json | grep -q '"command": "uninstall"' \
   && fail "lifecycle ask opened an uninstall record"
+
+# 4. A recovery-admitted route still carries its mandatory confirmation and resolved playbook.
+printf 'receipt_version: 2\n' > "$REPO/docs/workflow/install-receipt.yaml"
+OUT="$(emit_ask ask-invalid-receipt 'stop work here' | python3 "$GATE" "$REPO_ROOT")"
+printf '%s' "$OUT" | grep -q 'You reached this command through /idc:ask' \
+  || fail "recovery-routed ask lost its mandatory confirmation preamble"
+printf '%s' "$OUT" | grep -q 'You are running `/idc:pause`' \
+  || fail "recovery-routed ask did not inject the resolved pause playbook"
+active_record ask-invalid-receipt pause >/dev/null \
+  || fail "recovery-routed ask did not open the retargeted pause record"
+
+# 5. Malformed resolver output is advisory, never an admission-hook crash.
+python3 - "$REPO_ROOT" "$REPO" <<'PY' || fail "malformed resolver output did not fall back to advisory"
+import os, sys
+sys.path.insert(0, os.path.join(sys.argv[1], "scripts", "hooks"))
+sys.path.insert(0, os.path.join(sys.argv[1], "scripts"))
+import idc_ask_resolve as ASK
+import idc_command_entry_gate as G
+
+original = ASK.resolve
+try:
+    ASK.resolve = lambda repo, text: {"verdict": "route", "command": [], "command_args": ""}
+    command, payload, context = G._resolve_ask(
+        {"cwd": sys.argv[2], "command_args": "stop"}, sys.argv[1]
+    )
+finally:
+    ASK.resolve = original
+assert command == "ask", (command, payload, context)
+assert "advisory" in context, context
+PY
+
+# 6. `ask complete` requires an actionable named oracle recommendation, not any readable verdict.
+python3 - "$REPO_ROOT" <<'PY' || fail "ask complete accepted a non-action oracle verdict"
+import os, sys
+from types import SimpleNamespace
+sys.path.insert(0, os.path.join(sys.argv[1], "scripts"))
+import idc_command_contract as C
+
+original = C._oracle_action
+try:
+    C._oracle_action = lambda repo: SimpleNamespace(verdict="no_action", command=None)
+    refused = C._claim_ask_oracle_read({}, "/ignored", "session")
+    assert not refused.ok, refused
+    C._oracle_action = lambda repo: SimpleNamespace(verdict="action", command="/idc:plan")
+    accepted = C._claim_ask_oracle_read({}, "/ignored", "session")
+    assert accepted.ok, accepted
+finally:
+    C._oracle_action = original
+PY
 
 echo "PASS: phase13-ask-entry-gate"

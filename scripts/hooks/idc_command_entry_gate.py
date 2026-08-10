@@ -34,6 +34,7 @@ Invocation: idc_command_entry_gate.py <PLUGIN_ROOT>   (UserPromptExpansion paylo
 """
 import contextlib
 import os
+import re
 import subprocess
 import sys
 
@@ -110,6 +111,54 @@ BASELINE_PENDING_REASON = (
     "available while the baseline is pending."
 )
 
+ASK_CONFIRM_PREAMBLE = """You reached this command through /idc:ask, so the operator did not name it — the resolver did.
+Before you take ANY action, state in ONE line: which command this is, in plain English what it
+will do, and why it fits what they said. Then stop and wait for `y` or `n`.
+
+On `y`: proceed with the playbook below.
+On `n` (or anything that is not a yes): take no action, close this command's lifecycle record with
+status `no_action`, and ask the operator what they meant instead. Do not guess a second time."""
+
+
+def _ask_text(payload):
+    """The operator text after `/idc:ask`, from the real prompt payload when available."""
+    prompt = payload.get("prompt")
+    if isinstance(prompt, str):
+        match = re.match(r"^\s*/?idc:ask(?:\s+(.*?))?\s*$", prompt, re.DOTALL)
+        if match:
+            return match.group(1) or ""
+    args = payload.get("command_args")
+    return args if isinstance(args, str) else ""
+
+
+def _resolve_ask(payload):
+    """Fail softly into advisory `/idc:ask`, or retarget a verified resolver route."""
+    cwd = payload.get("cwd") or os.getcwd()
+    try:
+        import idc_ask_resolve as ASK  # noqa: E402 — lazy: resolver failure must not brick admission
+        result = ASK.resolve(cwd, _ask_text(payload))
+    except Exception:  # noqa: BLE001 — `/idc:ask` remains a recovery/advisory surface
+        result = None
+
+    if isinstance(result, dict) and result.get("verdict") == "route":
+        target = result.get("command")
+        args = result.get("command_args")
+        if target in ASK.ROUTABLE and target in C.COMMANDS and isinstance(args, str):
+            retargeted = dict(payload)
+            retargeted["command_args"] = args
+            retargeted["command_source"] = "ask"
+            return target, retargeted, ASK_CONFIRM_PREAMBLE
+
+    reason = result.get("reason_code") if isinstance(result, dict) else "oracle-invalid"
+    if not isinstance(reason, str) or not reason:
+        reason = "oracle-invalid"
+    advisory = (
+        f"IDC Ask advisory ({reason}): the resolver did not confidently name one command. "
+        "This is a deliberate refusal to guess; read the advisory playbook below and give the "
+        "operator a plain-language recommendation."
+    )
+    return "ask", payload, advisory
+
 
 def _normalize_command(command_name):
     """Strip one leading slash and accept ONLY `idc:<command>`; return the bare `<command>` (e.g.
@@ -155,12 +204,13 @@ def _bootstrap_context(command, plugin_root):
     )
 
 
-def _emit_context(command, plugin_root, opened):
+def _emit_context(command, plugin_root, opened, preamble=""):
     """Emit the additionalContext that matches reality: the record-owed message iff a record was
     actually opened, otherwise the bootstrap message that claims no record."""
-    if opened:
-        H.prompt_expansion_context(_context(command, plugin_root))
-    H.prompt_expansion_context(_bootstrap_context(command, plugin_root))
+    context = _context(command, plugin_root) if opened else _bootstrap_context(command, plugin_root)
+    if preamble:
+        context = preamble + "\n\n" + context
+    H.prompt_expansion_context(context)
 
 
 # The outcome of an attempt to open a command's lifecycle record, so the caller can emit context that
@@ -421,7 +471,7 @@ def _baseline_pending(cwd):
         return True
 
 
-def _admit(payload, plugin_root, command):
+def _admit(payload, plugin_root, command, preamble=""):
     cwd = payload.get("cwd") or os.getcwd()
     # Task-1 freshness. An InvalidReceiptError (or any other exception) propagates to the caller's
     # fail-closed handler; here we only decide on a CLEAN evaluation. The cache-first precedence in
@@ -455,7 +505,7 @@ def _admit(payload, plugin_root, command):
             payload, command, registration, auth_snapshot
         ):
             _block(AUTH_WRITE_FAILED_REASON)
-        _emit_context(command, plugin_root, reg == _REG_OPENED)
+        _emit_context(command, plugin_root, reg == _REG_OPENED, preamble)
 
 
 def main():
@@ -465,8 +515,11 @@ def main():
     if command is None:
         # Not a namespaced IDC command this gate governs → say nothing, allow the normal flow.
         sys.exit(0)
+    preamble = ""
+    if command == "ask":
+        command, payload, preamble = _resolve_ask(payload)
     try:
-        _admit(payload, plugin_root, command)
+        _admit(payload, plugin_root, command, preamble)
     except SystemExit:
         raise
     except Exception as exc:  # noqa: BLE001 — an unverifiable gate error is fail-closed for workflow

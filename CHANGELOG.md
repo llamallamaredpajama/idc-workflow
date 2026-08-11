@@ -9,7 +9,10 @@ read-only resolver either recommends one exact IDC invocation or deliberately re
 never substitutes the target playbook, opens the target lifecycle record, or receives target write
 authority: the operator explicitly invokes the recommendation if they want it to run. Oracle-supplied
 arguments such as `--unit U1` are preserved. Generic continuation language consults live state rather
-than blindly recommending Resume, while explicit pause/resume requests remain deterministic.
+than blindly recommending Resume; Resume is recommended only when the durable pause state is confirmed,
+otherwise the live oracle names the real next command. The exact structured recommendation is stored
+on Ask's own lifecycle record, so `complete` validates what Ask actually recommended rather than an
+unrelated later oracle answer.
 
 Lifecycle admission also fails closed when a mutating recovery command cannot save its command record,
 including the damaged-install recovery path. Read-only Ask and Doctor can still diagnose without that

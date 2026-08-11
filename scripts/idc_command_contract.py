@@ -86,6 +86,10 @@ COMMANDS = {
     "ask", "autorun", "build", "doctor", "init", "intake", "janitor", "pause",
     "plan", "recirculate", "resume", "think", "uninstall", "update",
 }
+ASK_ROUTABLE_COMMANDS = frozenset({
+    "pause", "resume", "doctor", "janitor",
+    "think", "intake", "plan", "build", "recirculate", "autorun",
+})
 
 # Commands whose Path Gate authorization is minted BY `start` ITSELF, inside the same admission
 # transaction that opens the lifecycle record (V-DOOR).
@@ -1872,7 +1876,41 @@ def _claim_plan_no_action(refs: dict, repo: str, session: str) -> CloseoutResult
 
 
 def _claim_ask_oracle_read(refs: dict, repo: str, session: str) -> CloseoutResult:
-    """`/idc:ask complete` requires a fresh actionable named recommendation."""
+    """Prove the exact entry recommendation, or re-derive an advisory-path oracle action.
+
+    Keyword recommendations (pause/resume/doctor/janitor) do not necessarily match the pipeline
+    oracle, so the entry gate stamps the exact structured recommendation on Ask's own active record.
+    An advisory Ask with no entry recommendation may still close complete when the live oracle now
+    provides an actionable named command.
+    """
+    active = [
+        record for record in idc_ledger.active_commands(repo, session)
+        if record.get("command") == "ask"
+    ]
+    if len(active) != 1:
+        return _fail(
+            "ask-record-unavailable",
+            "/idc:ask complete requires exactly one active Ask record owned by this session",
+        )
+    recommendation_state = active[0].get("ask_recommendation_state")
+    if recommendation_state == "routed":
+        recommendation = normalize_ask_recommendation("ask", active[0].get("ask_recommendation"))
+        if recommendation is None:
+            return _fail(
+                "ask-recommendation-invalid",
+                "/idc:ask complete refused because its routed recommendation is missing or invalid",
+            )
+        return CloseoutResult(
+            True,
+            "ok",
+            "ask recommendation validated from its active lifecycle record",
+            {"ask_recommendation": recommendation},
+        )
+    if recommendation_state != "advisory":
+        return _fail(
+            "ask-recommendation-state-invalid",
+            "/idc:ask complete refused because its routed/advisory entry state is missing or invalid",
+        )
     action = _oracle_action(repo)
     if (
         action is None
@@ -3653,6 +3691,23 @@ def args_digest(text: str) -> str:
     return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
 
 
+def normalize_ask_recommendation(command: str, value: object) -> dict | None:
+    """Validate the structured, non-executing recommendation stamped on an Ask record."""
+    if command != "ask" or not isinstance(value, dict):
+        return None
+    target = value.get("command")
+    args = value.get("command_args")
+    reason = value.get("reason_code")
+    if target not in ASK_ROUTABLE_COMMANDS or not isinstance(args, str) or not isinstance(reason, str):
+        return None
+    # The recommendation is Markdown context, never a shell payload. Refuse line/control delimiters
+    # that could turn one inert inline invocation into extra model-authored instructions.
+    if not reason or any(token in args for token in ("\r", "\n", "`")) \
+            or any(token in reason for token in ("\r", "\n", "`")):
+        return None
+    return {"command": target, "command_args": args, "reason_code": reason}
+
+
 _DOC_ARG_RE = re.compile(r"(?:^|\s)--doc(?:=|\s+)(\S+)")
 _UNIT_ARG_RE = re.compile(r"(?:^|\s)--unit(?:=|\s+)(\S+)")
 
@@ -3852,7 +3907,7 @@ def validate_closeout(command: str, status: str, evidence: object,
 
 
 def register_start(cwd: str, session_id: str, command: str, plugin_version: str,
-                   args_text: str, source: str) -> dict:
+                   args_text: str, source: str, ask_recommendation: object = None) -> dict:
     """Open (idempotently upsert) the command's active lifecycle record — the entry gate's helper.
     Computes the argument digest and delegates the single ledger write. Assumes freshness/admission
     was already decided by the caller (the entry gate). Returns the record dict when the write
@@ -3877,6 +3932,7 @@ def register_start(cwd: str, session_id: str, command: str, plugin_version: str,
         return None
     plan_admitted = _plan_admitted_at_start(command, cwd)
     build_frontier = _build_frontier_at_start(command, cwd, build_requested)
+    ask_recommendation = normalize_ask_recommendation(command, ask_recommendation)
     return idc_ledger.command_start(
         cwd, session_id, command, plugin_version, args_digest(args_text or ""), source or "",
         intake_manifest=intake_manifest, intake_units=intake_units, recirc_requested=recirc_requested,
@@ -3884,7 +3940,7 @@ def register_start(cwd: str, session_id: str, command: str, plugin_version: str,
         nonce=_make_nonce(), build_frontier=build_frontier,
         uninstall_receipt_source=uninstall_receipt_source,
         uninstall_receipt_sha256=uninstall_receipt_sha256,
-        entry_conditions=entry_conditions(cwd))
+        entry_conditions=entry_conditions(cwd), ask_recommendation=ask_recommendation)
 
 
 def active_records(cwd: str, session_id: str) -> list:

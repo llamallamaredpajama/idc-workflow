@@ -22,6 +22,7 @@ if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
 import idc_next_action as NEXT  # noqa: E402 — the shared read-only oracle
+import idc_pause_state as PAUSE  # noqa: E402 — the one durable confirmed-pause reader
 
 
 ROUTABLE = frozenset({
@@ -108,6 +109,11 @@ def resolve_keywords(text: str) -> dict[str, Any]:
     if len(commands) == 1:
         command = next(iter(commands))
         cue = next(cue for candidate, cue in matches if candidate == command)
+        if command == "resume":
+            # Resume is a state transition, not a synonym for generic continuation. The pure
+            # keyword pass cannot prove the repository is paused; `resolve()` performs that live
+            # read and otherwise falls through to the ordinary next-action oracle.
+            return _result("advisory", None, "", "resume-state-required", [cue])
         if command in ROUTABLE:
             return _result("route", command, "", "keyword-" + command, [cue])
     return _result("advisory", None, "", "no-match")
@@ -139,7 +145,14 @@ def _split_command(command: object) -> tuple[str | None, str]:
 def resolve(repo: str, text: str) -> dict[str, Any]:
     """Return the one safe route, or an advisory answer, for ``text`` in ``repo``."""
     keyword_result = resolve_keywords(text)
-    if keyword_result["reason_code"] != "no-match":
+    if keyword_result["reason_code"] == "resume-state-required":
+        if PAUSE.is_paused(repo):
+            return _result(
+                "route", "resume", "", "confirmed-pause", keyword_result.get("matched")
+            )
+        # Not paused: "resume" / "pick up" means "what should happen next", and only the live
+        # workflow oracle can answer that without inventing a state transition.
+    elif keyword_result["reason_code"] != "no-match":
         return keyword_result
 
     try:

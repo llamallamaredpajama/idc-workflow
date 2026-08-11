@@ -138,7 +138,7 @@ def _ask_route_preamble(target, args, reason):
     )
 
 
-def _resolve_ask(payload, plugin_root):
+def _resolve_ask(payload, _plugin_root):
     """Return advisory `/idc:ask` context, optionally with one exact recommendation."""
     try:
         import idc_ask_resolve as ASK  # noqa: E402 — lazy: resolver failure must not brick admission
@@ -156,7 +156,18 @@ def _resolve_ask(payload, plugin_root):
                 reason = result.get("reason_code")
                 if not isinstance(reason, str) or not reason:
                     reason = "resolved"
-                return "ask", payload, _ask_route_preamble(target, args, reason)
+                recommendation = C.normalize_ask_recommendation("ask", {
+                    "command": target,
+                    "command_args": args.strip(),
+                    "reason_code": reason,
+                })
+                if recommendation is not None:
+                    routed_payload = dict(payload)
+                    routed_payload["_idc_ask_recommendation"] = recommendation
+                    return "ask", routed_payload, _ask_route_preamble(
+                        target, recommendation["command_args"], reason
+                    )
+                result = None  # invalid recommendation shape falls through to oracle-invalid
         reason = result.get("reason_code") if isinstance(result, dict) else "oracle-invalid"
         if not isinstance(reason, str) or not reason:
             reason = "oracle-invalid"
@@ -260,7 +271,8 @@ def _register_if_governed(payload, plugin_root, command, running=None):
         with L.capture_command_start() as captured:
             written = C.register_start(cwd, session_id, command, running,
                                        payload.get("command_args") or "",
-                                       payload.get("command_source") or "")
+                                       payload.get("command_source") or "",
+                                       ask_recommendation=payload.get("_idc_ask_recommendation"))
     except L.ObligationConflict as exc:
         # A narrowing/replacing restart was REFUSED by the ledger (round-6 BLOCKS 1, rule A): the PRIOR
         # obligation record is left fully intact (the ledger raises BEFORE persisting anything), and the

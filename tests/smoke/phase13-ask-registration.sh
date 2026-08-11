@@ -44,4 +44,17 @@ assert "ask" not in G.AUTH_REQUIRED_COMMANDS, sorted(G.AUTH_REQUIRED_COMMANDS)
 assert "ask" in G.BASELINE_ALLOWED_COMMANDS, sorted(G.BASELINE_ALLOWED_COMMANDS)
 PY
 
+# 5. the ledger accepts a structured Ask recommendation field only as part of Ask's own record.
+python3 - "$REPO_ROOT" <<'PY' || fail "ask recommendation is not part of the durable record contract"
+import inspect, os, sys
+sys.path.insert(0, os.path.join(sys.argv[1], "scripts"))
+sys.path.insert(0, os.path.join(sys.argv[1], "scripts", "hooks"))
+import idc_command_contract as C
+import idc_ledger as L
+import idc_ask_resolve as R
+assert "ask_recommendation" in inspect.signature(C.register_start).parameters
+assert "ask_recommendation" in inspect.signature(L.command_start).parameters
+assert set(R.ROUTABLE) == set(C.ASK_ROUTABLE_COMMANDS)
+PY
+
 echo "PASS: phase13-ask-registration"

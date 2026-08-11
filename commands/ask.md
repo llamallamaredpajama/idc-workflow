@@ -39,13 +39,18 @@ plainly rather than appearing to stall.
 
 ## 3 — Closeout
 
+If the entry status showed that no active Ask record exists because the ledger could not be written,
+do not run `finish` (there is no record it could close). Give the read-only recommendation, state that
+its lifecycle could not be recorded, and stop without claiming a recorded closeout.
+
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/idc_command_contract.py" finish \
   --repo "$PWD" --session "$CLAUDE_CODE_SESSION_ID" --command ask \
   --status <complete|no_action|blocked_external> --evidence-json '<envelope>'
 ```
 
-- `complete` — the oracle returns an actionable named recommendation.
+- `complete` — the entry gate stored an exact recommendation, or the advisory path's live oracle
+  returns an actionable named recommendation.
 - `no_action` — the oracle reports a fixpoint: nothing to do, and saying so is the product.
 - `blocked_external` — the oracle could not read (rate-limited or invalid state); cite
   `blocker:{helper:"idc_next_action.py", exit:<2|3>, diagnostic:"<why>"}`.

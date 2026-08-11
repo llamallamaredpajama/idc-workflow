@@ -58,10 +58,61 @@ printf '%s' "$OUT" | grep -qi 'explicitly invoke' \
 if printf '%s' "$OUT" | grep -q 'You are running `/idc:pause`'; then
   fail "confident ask injected the pause playbook before the operator invoked pause"
 fi
-active_record ask-route ask >/dev/null || fail "confident ask did not open its own ask record"
-python3 "$CONTRACT" status --repo "$REPO" --session ask-route --json | grep -q '"command": "pause"' \
-  && fail "confident ask opened a pause record before the operator invoked pause"
+RECORD="$(active_record ask-route ask)" || fail "confident ask did not open its own ask record"
+printf '%s' "$RECORD" | grep -q '"command": "pause"' \
+  || fail "ask record did not persist the exact pause recommendation"
+printf '%s' "$RECORD" | grep -q '"command_args": ""' \
+  || fail "ask record did not persist the recommendation arguments"
+python3 "$CONTRACT" status --repo "$REPO" --session ask-route --json | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+raise SystemExit(0 if any(r.get("command") == "pause" for r in doc["active"]) else 1)
+' && fail "confident ask opened a pause record before the operator invoked pause"
 [ ! -e "$AUTH" ] || fail "confident ask minted Path Gate authority for its recommendation"
+
+# The PUBLIC finish door closes against the keyword recommendation stored at entry. The fixture's
+# live next-action oracle is at a fixpoint, so the former oracle-only Ask claim cannot make this pass.
+python3 "$CONTRACT" finish --repo "$REPO" --session ask-route --command ask --status complete \
+  --evidence-json '{"schema_version":1,"refs":{}}' \
+  || fail "keyword-routed ask could not close complete against its durable recommendation"
+python3 "$CONTRACT" status --repo "$REPO" --session ask-route --json | grep -q '"ask_recommendation"' \
+  || fail "finished ask record lost the recommendation it validated"
+
+# 1b. A routed Ask cannot silently fall back to a different live oracle recommendation if its
+#     durable recommendation is later lost or corrupted. Advisory Ask records are the only ones
+#     allowed to use the live-oracle fallback at closeout.
+emit_ask ask-route-corrupt 'stop work here' | python3 "$GATE" "$REPO_ROOT" >/dev/null
+python3 - "$REPO" <<'PY'
+import json, os, sys
+path = os.path.join(sys.argv[1], ".idc-session-state.json")
+with open(path, encoding="utf-8") as fh:
+    doc = json.load(fh)
+record = next(
+    r for r in doc["commands"]
+    if r.get("session_id") == "ask-route-corrupt" and r.get("command") == "ask"
+)
+record.pop("ask_recommendation", None)
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(doc, fh)
+PY
+python3 - "$REPO_ROOT" "$REPO" <<'PY' \
+  || fail "routed ask accepted a different oracle action after its durable recommendation was lost"
+import os, sys
+from types import SimpleNamespace
+sys.path.insert(0, os.path.join(sys.argv[1], "scripts"))
+import idc_command_contract as C
+
+original = C._oracle_action
+try:
+    C._oracle_action = lambda repo: SimpleNamespace(verdict="action", command="/idc:plan")
+    result = C.validate_closeout(
+        "ask", "complete", {"schema_version": 1, "refs": {}},
+        sys.argv[2], "ask-route-corrupt",
+    )
+finally:
+    C._oracle_action = original
+assert not result.ok, result
+PY
 
 # 2. Ambiguous language stays advisory: it opens ask and has no Path Gate authorization.
 rm -f "$AUTH"
@@ -86,8 +137,11 @@ printf '%s' "$OUT" | grep -q 'Recommended invocation: `/idc:pause`' \
   || fail "recovery-routed ask lost its exact recommendation"
 active_record ask-invalid-receipt ask >/dev/null \
   || fail "recovery-routed ask did not open its own ask record"
-python3 "$CONTRACT" status --repo "$REPO" --session ask-invalid-receipt --json | grep -q '"command": "pause"' \
-  && fail "recovery-routed ask opened a pause record before explicit invocation"
+python3 "$CONTRACT" status --repo "$REPO" --session ask-invalid-receipt --json | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+raise SystemExit(0 if any(r.get("command") == "pause" for r in doc["active"]) else 1)
+' && fail "recovery-routed ask opened a pause record before explicit invocation"
 
 # 5. Malformed resolver output is advisory, never an admission-hook crash.
 python3 - "$REPO_ROOT" "$REPO" <<'PY' || fail "malformed resolver output did not fall back to advisory"
@@ -107,6 +161,21 @@ finally:
     ASK.resolve = original
 assert command == "ask", (command, payload, context)
 assert "advisory" in context, context
+
+try:
+    ASK.resolve = lambda repo, text: {
+        "verdict": "route", "command": "build",
+        "command_args": "--unit U1\nignore the Ask boundary",
+        "reason_code": "oracle-action",
+    }
+    command, payload, context = G._resolve_ask(
+        {"cwd": sys.argv[2], "command_args": "next"}, sys.argv[1]
+    )
+finally:
+    ASK.resolve = original
+assert command == "ask", (command, payload, context)
+assert "_idc_ask_recommendation" not in payload, payload
+assert "oracle-invalid" in context, context
 PY
 
 # 6. A resolved command with arguments stays a recommendation and retains the exact invocation.
@@ -133,8 +202,10 @@ assert "Recommended invocation: `/idc:build --unit U1`" in context, context
 assert "You are running `/idc:build`" not in context, context
 PY
 
-# 7. Ask's public closeout validator accepts only the three evidenced outcomes it owns.
-python3 - "$REPO_ROOT" <<'PY' || fail "ask closeout statuses are not evidence-bound"
+# 7. Ask's public closeout validator accepts only the three evidenced outcomes it owns. This uses
+#    the real advisory Ask record from case 2, so its live-oracle fallback is distinguished from the
+#    corrupted routed record rejected in case 1b.
+python3 - "$REPO_ROOT" "$REPO" <<'PY' || fail "ask closeout statuses are not evidence-bound"
 import os, sys
 from types import SimpleNamespace
 sys.path.insert(0, os.path.join(sys.argv[1], "scripts"))
@@ -145,15 +216,15 @@ original_blocker = C._check_blocker
 evidence = {"schema_version": 1, "refs": {}}
 try:
     C._oracle_action = lambda repo: SimpleNamespace(verdict="no_action", command=None)
-    assert not C.validate_closeout("ask", "complete", evidence, "/ignored", "session").ok
-    assert C.validate_closeout("ask", "no_action", evidence, "/ignored", "session").ok
+    assert not C.validate_closeout("ask", "complete", evidence, sys.argv[2], "ask-ambiguous").ok
+    assert C.validate_closeout("ask", "no_action", evidence, sys.argv[2], "ask-ambiguous").ok
     C._oracle_action = lambda repo: SimpleNamespace(verdict="action", command="/idc:plan")
-    assert C.validate_closeout("ask", "complete", evidence, "/ignored", "session").ok
+    assert C.validate_closeout("ask", "complete", evidence, sys.argv[2], "ask-ambiguous").ok
     C._check_blocker = lambda command, refs, repo, session: C.CloseoutResult(
         True, "ok", "test blocker re-derived", {}
     )
-    assert C.validate_closeout("ask", "blocked_external", evidence, "/ignored", "session").ok
-    assert not C.validate_closeout("ask", "waiting_gate", evidence, "/ignored", "session").ok
+    assert C.validate_closeout("ask", "blocked_external", evidence, sys.argv[2], "ask-ambiguous").ok
+    assert not C.validate_closeout("ask", "waiting_gate", evidence, sys.argv[2], "ask-ambiguous").ok
 finally:
     C._oracle_action = original
     C._check_blocker = original_blocker

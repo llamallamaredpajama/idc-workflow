@@ -14,8 +14,9 @@ import idc_ask_resolve as R
 CASES = [
     ("stop work here",                 "route",    "pause",   "keyword-pause"),
     ("I'm done for now",               "route",    "pause",   "keyword-pause"),
-    ("pick up where we left off",      "route",    "resume",  "keyword-resume"),
-    ("carry on",                       "route",    "resume",  "keyword-resume"),
+    ("pick up where we left off",      "advisory", None,      "resume-state-required"),
+    ("carry on",                       "advisory", None,      "resume-state-required"),
+    ("resume",                         "advisory", None,      "resume-state-required"),
     ("is anything broken?",            "route",    "doctor",  "keyword-doctor"),
     ("tidy up the board",              "route",    "janitor", "keyword-janitor"),
     # conflict -> never guess
@@ -65,6 +66,7 @@ ORACLE_CASES = [
     (action("blocked_external"), "advisory", None, "", "oracle-rate-limited"),
 ]
 original_decide = R.NEXT.decide
+original_paused = R.PAUSE.is_paused
 try:
     for oracle_action, verdict, command, command_args, reason in ORACLE_CASES:
         R.NEXT.decide = lambda repo, value=oracle_action: value
@@ -81,8 +83,23 @@ try:
     assert (got["verdict"], got["command"], got["reason_code"]) == (
         "advisory", None, "oracle-invalid"
     ), got
+
+    # Resume-shaped language routes to Resume only when the durable pause state is genuinely
+    # confirmed. In an ordinary active repo it falls through to the oracle's real next action.
+    R.PAUSE.is_paused = lambda repo: True
+    got = R.resolve("/paused", "pick up where we left off")
+    assert (got["verdict"], got["command"], got["reason_code"]) == (
+        "route", "resume", "confirmed-pause"
+    ), got
+    R.PAUSE.is_paused = lambda repo: False
+    R.NEXT.decide = lambda repo: action("action", "/idc:build --unit U2")
+    got = R.resolve("/active", "pick up where we left off")
+    assert (got["verdict"], got["command"], got["command_args"], got["reason_code"]) == (
+        "route", "build", "--unit U2", "oracle-action"
+    ), got
 finally:
     R.NEXT.decide = original_decide
+    R.PAUSE.is_paused = original_paused
 
 # --- CLI failure contract: an unreadable/non-directory repo is a deliberate exit 2 ---
 with tempfile.TemporaryDirectory() as work:

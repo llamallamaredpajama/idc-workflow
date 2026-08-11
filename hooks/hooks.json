@@ -80,7 +80,7 @@
     ],
     "UserPromptExpansion": [
       {
-        "matcher": "^idc:(autorun|build|doctor|init|intake|janitor|pause|plan|recirculate|resume|think|uninstall|update)$",
+        "matcher": "^idc:(ask|autorun|build|doctor|init|intake|janitor|pause|plan|recirculate|resume|think|uninstall|update)$",
         "hooks": [
           {
             "type": "command",

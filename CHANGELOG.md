@@ -2,6 +2,23 @@
 
 All notable changes for the IDC Workflow plugin are documented in this file.
 
+## 6.4.0 — 2026-08-11
+
+**`/idc:ask` is a plain-language front door for the pipeline.** Say what you want and a deterministic,
+read-only resolver either recommends one exact IDC invocation or deliberately refuses to guess. Ask
+never substitutes the target playbook, opens the target lifecycle record, or receives target write
+authority: the operator explicitly invokes the recommendation if they want it to run. Oracle-supplied
+arguments such as `--unit U1` are preserved. Generic continuation language consults live state rather
+than blindly recommending Resume; Resume is recommended only when the durable pause state is confirmed,
+otherwise the live oracle names the real next command. The exact structured recommendation is stored
+on Ask's own lifecycle record, so `complete` validates what Ask actually recommended rather than an
+unrelated later oracle answer.
+
+Lifecycle admission also fails closed when a mutating recovery command cannot save its command record,
+including the damaged-install recovery path. Read-only Ask and Doctor can still diagnose without that
+record; Update, Uninstall, and Janitor cannot mutate without a durable obligation and nonce-bound Path
+Gate authority.
+
 ## 6.3.0 — 2026-08-11
 
 **IDC guards your application code, not your desk.** In a `controlled` repository the Path Gate asked

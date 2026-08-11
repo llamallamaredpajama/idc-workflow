@@ -146,7 +146,7 @@ _SHIPPED_SCRIPTS = frozenset({
     "hooks/idc_post_issue_create.py", "hooks/idc_recirc_closeout_gate_hook.sh",
     "hooks/idc_recirc_closeout_gate.py", "hooks/idc_stop_fixpoint_gate_hook.sh",
     "hooks/idc_stop_fixpoint_gate.py", "hooks/idc_verdict_gate_hook.sh",
-    "hooks/idc_verdict_gate.py", "idc_acceptance_check.py", "idc_autorun_drain.py",
+    "hooks/idc_verdict_gate.py", "idc_acceptance_check.py", "idc_ask_resolve.py", "idc_autorun_drain.py",
     "idc_board_lint.py", "idc_brownfield_scan.py", "idc_build_receipt.py",
     "idc_command_contract.py", "idc_config_keys.py", "idc_consideration_check.py",
     "idc_credential_shapes.py", "idc_dag.py", "idc_doctor_pathway_check.py", "idc_emit_marker.py",

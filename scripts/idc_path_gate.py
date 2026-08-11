@@ -121,7 +121,7 @@ UNGOVERNED_ROOT_FILE_RULES = [
 # checkout of the repository reads the same one.
 UNINSTALL_WITNESS_RELPATH = os.path.join("idc-path-gate", "uninstall-witness.json")
 _OID_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
-READ_ONLY_COMMANDS = {"doctor", "pause"}
+READ_ONLY_COMMANDS = {"ask", "doctor", "pause"}
 DEFAULT_TTL_SECONDS = 4 * 60 * 60
 PATHWAY_MODES = {"off", "controlled", "app-locked"}
 # A config that is readable and explicitly declares a `mode:` value we do not recognize (a typo like
@@ -848,7 +848,7 @@ def _default_profile(command: str) -> tuple[list[str], list[str]]:
 
 def _role_action_ceiling(command: str) -> set[str]:
     """The mutation actions a command's ROLE may ever be granted. A read-only command
-    (`doctor`/`pause`) has an empty ceiling — it can never mint a write/edit/git grant, no matter what
+    (`ask`/`doctor`/`pause`) has an empty ceiling — it can never mint a write/edit/git grant, no matter what
     actions a caller passes to `write_authorization` (F2). Deliberately NOT derived from
     `_default_profile`: a claim-gated command (build) has an EMPTY entry default yet a full mutation
     ceiling — the claim transaction, not the entry, is what grants it."""
@@ -1155,7 +1155,7 @@ def write_authorization(
     allowed_actions = _normalize_actions(allowed_actions)
     # Enforce the command's role action ceiling: a read-only command can never be granted a mutation
     # action, even when one is explicitly requested. This closes the escalation where any active
-    # record — including a read-only doctor/pause record — could mint a broad write/edit/git grant.
+    # record — including a read-only ask/doctor/pause record — could mint a broad write/edit/git grant.
     ceiling = _role_action_ceiling(command)
     over_ceiling = [a for a in allowed_actions if a in MUTATION_ACTIONS and a not in ceiling]
     if over_ceiling:

@@ -80,12 +80,16 @@ except ImportError:                                      # a lone relocated copy
         scrub = staticmethod(
             lambda text: text and "[child output withheld — the credential table is not importable]")
 
-# The thirteen governed `/idc:*` entry points. Kept in lockstep with commands/*.md and the
+# The fourteen governed `/idc:*` entry points. Kept in lockstep with commands/*.md and the
 # UserPromptExpansion matcher in hooks/hooks.json.
 COMMANDS = {
-    "autorun", "build", "doctor", "init", "intake", "janitor", "pause",
+    "ask", "autorun", "build", "doctor", "init", "intake", "janitor", "pause",
     "plan", "recirculate", "resume", "think", "uninstall", "update",
 }
+ASK_ROUTABLE_COMMANDS = frozenset({
+    "pause", "resume", "doctor", "janitor",
+    "think", "intake", "plan", "build", "recirculate", "autorun",
+})
 
 # Commands whose Path Gate authorization is minted BY `start` ITSELF, inside the same admission
 # transaction that opens the lifecycle record (V-DOOR).
@@ -204,6 +208,7 @@ _PAUSE_HELPER = "idc_pause_check.py"
 # A resume blocker comes from this one — "the pause record could not be removed" — and is grounded by
 # re-reading the record, not by re-running the quiescence check, which is a different question.
 _PAUSE_STATE_HELPER = "idc_pause_state.py"
+_NEXT_ACTION_HELPER = "idc_next_action.py"
 # WHICH pause-state operation each command performs, so its blocker is re-derived against the right
 # one. `/idc:pause` drives the WRITE (request/confirm); `/idc:resume` and `/idc:autorun`'s preflight
 # drive the same CLEAR — which is why autorun carries this helper too: `commands/autorun.md` tells a
@@ -225,6 +230,7 @@ _JANITOR_BLOCKED_EXIT = 2
 # manufacture a blocked stop. Commands with NO re-derivable helper carry no `blocked_external` claim at
 # all (see _CLAIM_TABLE — not claimable, fail closed).
 _BLOCKER_HELPERS = {
+    "ask":         {_NEXT_ACTION_HELPER},
     "intake":      _INTAKE_HELPERS,
     "build":       {_DRAIN_HELPER},
     # The drain is autorun's own blocker; the pause-state helper is the PREFLIGHT's. `commands/autorun.md`
@@ -570,6 +576,22 @@ def _check_blocker(command: str, refs: dict, repo: str, session: str) -> Closeou
                          f"blocked_external cites exit {blocker.get('exit')} but a read-only re-run of "
                          f"the pause quiescence check exits {code} — the cited exit must MATCH what the "
                          "helper actually does now")
+    elif base == _NEXT_ACTION_HELPER:
+        try:
+            import idc_next_action as NEXT  # noqa: E402 — re-run the read-only oracle
+            action = NEXT.decide(repo)
+        except Exception:  # noqa: BLE001 — an unknown current result cannot ground a blocker
+            return _fail("blocked-external-oracle-unproven",
+                         "blocked_external citing the next-action oracle could not re-run it")
+        if action.verdict not in ("invalid", "blocked_external"):
+            return _fail("blocked-external-oracle-not-blocked",
+                         "blocked_external citing the next-action oracle requires its fresh read to "
+                         "remain invalid or rate-limited")
+        expected_exit = 3 if action.reason_code == "rate-limited" else 2
+        if code != expected_exit:
+            return _fail("blocked-external-oracle-exit-mismatch",
+                         f"blocked_external cites exit {code} but the next-action oracle now exits "
+                         f"{expected_exit}; the cited exit must match the fresh read")
     else:
         # A helper on no re-derivation path (no durable receipt, not safely re-runnable) cannot ground a
         # blocked stop — a caller exit/diagnostic is never accepted as ground truth (wave-4 finding 1).
@@ -1851,6 +1873,64 @@ def _verify_decomposition(repo: str, matrix_rel: object, children: list) -> Clos
 
 def _claim_plan_no_action(refs: dict, repo: str, session: str) -> CloseoutResult:
     return _check_no_action("plan", repo)
+
+
+def _claim_ask_oracle_read(refs: dict, repo: str, session: str) -> CloseoutResult:
+    """Prove the exact entry recommendation, or re-derive an advisory-path oracle action.
+
+    Keyword recommendations (pause/resume/doctor/janitor) do not necessarily match the pipeline
+    oracle, so the entry gate stamps the exact structured recommendation on Ask's own active record.
+    An advisory Ask with no entry recommendation may still close complete when the live oracle now
+    provides an actionable named command.
+    """
+    active = [
+        record for record in idc_ledger.active_commands(repo, session)
+        if record.get("command") == "ask"
+    ]
+    if len(active) != 1:
+        return _fail(
+            "ask-record-unavailable",
+            "/idc:ask complete requires exactly one active Ask record owned by this session",
+        )
+    recommendation_state = active[0].get("ask_recommendation_state")
+    if recommendation_state == "routed":
+        recommendation = normalize_ask_recommendation("ask", active[0].get("ask_recommendation"))
+        if recommendation is None:
+            return _fail(
+                "ask-recommendation-invalid",
+                "/idc:ask complete refused because its routed recommendation is missing or invalid",
+            )
+        return CloseoutResult(
+            True,
+            "ok",
+            "ask recommendation validated from its active lifecycle record",
+            {"ask_recommendation": recommendation},
+        )
+    if recommendation_state != "advisory":
+        return _fail(
+            "ask-recommendation-state-invalid",
+            "/idc:ask complete refused because its routed/advisory entry state is missing or invalid",
+        )
+    action = _oracle_action(repo)
+    if (
+        action is None
+        or action.verdict != "action"
+        or not isinstance(action.command, str)
+        or not action.command.strip()
+    ):
+        return _fail("ask-oracle-not-action",
+                     "/idc:ask complete requires the next-action oracle to return an actionable "
+                     "named recommendation")
+    return CloseoutResult(True, "ok", "ask recommendation re-derived from a live oracle read", {})
+
+
+def _claim_ask_no_action(refs: dict, repo: str, session: str) -> CloseoutResult:
+    """`/idc:ask no_action` is honest only at the pipeline's real fixpoint."""
+    action = _oracle_action(repo)
+    if action is None or action.verdict != "no_action":
+        return _fail("ask-oracle-not-fixpoint",
+                     "/idc:ask no_action requires the next-action oracle to report a fixpoint")
+    return CloseoutResult(True, "ok", "ask fixpoint re-derived from a live oracle read", {})
 
 
 def _claim_plan_matrix(refs: dict, repo: str, session: str) -> CloseoutResult:
@@ -3474,6 +3554,11 @@ _PAUSABLE_STAGES = ("build", "autorun", "recirculate")
 _CLAIM_PAUSED = (Claim("deliberate-pause", _claim_paused),)
 
 _CLAIM_TABLE = {
+    "ask": {
+        "complete": (Claim("ask-oracle-read", _claim_ask_oracle_read),),
+        "no_action": (Claim("ask-oracle-fixpoint", _claim_ask_no_action),),
+        "blocked_external": (_claim_blocker_for("ask"),),
+    },
     "intake": {
         "complete": (Claim("intake-manifest-reviewed", _claim_intake_manifest_reviewed),
                      Claim("intake-pr-merged", _claim_intake_pr_merged)),
@@ -3604,6 +3689,23 @@ def args_digest(text: str) -> str:
     fingerprint recorded on the lifecycle record (so a closeout can be tied to the exact invocation
     without persisting the possibly-sensitive argument text itself)."""
     return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+
+def normalize_ask_recommendation(command: str, value: object) -> dict | None:
+    """Validate the structured, non-executing recommendation stamped on an Ask record."""
+    if command != "ask" or not isinstance(value, dict):
+        return None
+    target = value.get("command")
+    args = value.get("command_args")
+    reason = value.get("reason_code")
+    if target not in ASK_ROUTABLE_COMMANDS or not isinstance(args, str) or not isinstance(reason, str):
+        return None
+    # The recommendation is Markdown context, never a shell payload. Refuse line/control delimiters
+    # that could turn one inert inline invocation into extra model-authored instructions.
+    if not reason or any(token in args for token in ("\r", "\n", "`")) \
+            or any(token in reason for token in ("\r", "\n", "`")):
+        return None
+    return {"command": target, "command_args": args, "reason_code": reason}
 
 
 _DOC_ARG_RE = re.compile(r"(?:^|\s)--doc(?:=|\s+)(\S+)")
@@ -3805,7 +3907,7 @@ def validate_closeout(command: str, status: str, evidence: object,
 
 
 def register_start(cwd: str, session_id: str, command: str, plugin_version: str,
-                   args_text: str, source: str) -> dict:
+                   args_text: str, source: str, ask_recommendation: object = None) -> dict:
     """Open (idempotently upsert) the command's active lifecycle record — the entry gate's helper.
     Computes the argument digest and delegates the single ledger write. Assumes freshness/admission
     was already decided by the caller (the entry gate). Returns the record dict when the write
@@ -3830,6 +3932,7 @@ def register_start(cwd: str, session_id: str, command: str, plugin_version: str,
         return None
     plan_admitted = _plan_admitted_at_start(command, cwd)
     build_frontier = _build_frontier_at_start(command, cwd, build_requested)
+    ask_recommendation = normalize_ask_recommendation(command, ask_recommendation)
     return idc_ledger.command_start(
         cwd, session_id, command, plugin_version, args_digest(args_text or ""), source or "",
         intake_manifest=intake_manifest, intake_units=intake_units, recirc_requested=recirc_requested,
@@ -3837,7 +3940,7 @@ def register_start(cwd: str, session_id: str, command: str, plugin_version: str,
         nonce=_make_nonce(), build_frontier=build_frontier,
         uninstall_receipt_source=uninstall_receipt_source,
         uninstall_receipt_sha256=uninstall_receipt_sha256,
-        entry_conditions=entry_conditions(cwd))
+        entry_conditions=entry_conditions(cwd), ask_recommendation=ask_recommendation)
 
 
 def active_records(cwd: str, session_id: str) -> list:

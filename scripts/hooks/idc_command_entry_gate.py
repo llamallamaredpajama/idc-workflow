@@ -34,6 +34,7 @@ Invocation: idc_command_entry_gate.py <PLUGIN_ROOT>   (UserPromptExpansion paylo
 """
 import contextlib
 import os
+import re
 import subprocess
 import sys
 
@@ -59,7 +60,7 @@ WORKFLOW_COMMANDS = {"think", "intake", "plan", "build", "recirculate", "autorun
 # work rather than starting it, writes no board state, and is the operator's graceful alternative to a
 # hard kill. Refusing to let someone pause a running pipe because the install receipt has drifted would
 # force exactly the ungraceful interruption this command exists to replace.
-RECOVERY_COMMANDS = {"doctor", "update", "uninstall", "janitor", "pause"}
+RECOVERY_COMMANDS = {"ask", "doctor", "update", "uninstall", "janitor", "pause"}
 # `init` bootstraps a not-yet-governed repo: it is ALLOWED to expand but does NOT open a record in the
 # entry gate — commands/init.md opens its own lifecycle record right after it writes
 # tracker-config.yaml (Task 6). So init is the one governed command whose registration the entry gate
@@ -99,8 +100,8 @@ AUTH_WRITE_FAILED_REASON = (
     "state. Check that the repository Git directory is writable, then retry the IDC command."
 )
 
-AUTH_REQUIRED_COMMANDS = set(C.COMMANDS) - {"doctor", "pause"}
-BASELINE_ALLOWED_COMMANDS = {"doctor", "update", "janitor", "pause", "uninstall", "init"}
+AUTH_REQUIRED_COMMANDS = set(C.COMMANDS) - {"doctor", "pause", "ask"}
+BASELINE_ALLOWED_COMMANDS = {"ask", "doctor", "update", "janitor", "pause", "uninstall", "init"}
 
 BASELINE_PENDING_REASON = (
     "IDC refused to expand this command because the repository is baseline-pending under "
@@ -109,6 +110,75 @@ BASELINE_PENDING_REASON = (
     "`/idc:doctor`, `/idc:update`, `/idc:janitor`, `/idc:pause`, and `/idc:uninstall` remain "
     "available while the baseline is pending."
 )
+
+def _ask_text(payload):
+    """The operator text after `/idc:ask`, from the real prompt payload when available."""
+    prompt = payload.get("prompt")
+    if isinstance(prompt, str):
+        match = re.match(r"^\s*/?idc:ask(?:\s+(.*?))?\s*$", prompt, re.DOTALL)
+        if match:
+            return match.group(1) or ""
+    args = payload.get("command_args")
+    return args if isinstance(args, str) else ""
+
+
+def _ask_route_preamble(target, args, reason):
+    """Describe one exact recommendation without turning Ask into the target command.
+
+    UserPromptExpansion cannot replace the operator's original invocation. Injecting a target
+    playbook here would therefore run it under `/idc:ask` without a second, explicit command entry
+    event. Ask stays read-only: it names the exact command (including oracle-derived arguments), and
+    the operator invokes that command separately if they want it to run.
+    """
+    invocation = f"/idc:{target}" + (f" {args.strip()}" if args.strip() else "")
+    return (
+        f"IDC Ask recommendation ({reason}). Recommended invocation: `{invocation}`. "
+        "This is advice only: `/idc:ask` has not opened the recommended command's lifecycle record "
+        "or received its write authority. To continue, explicitly invoke the exact command above."
+    )
+
+
+def _resolve_ask(payload, _plugin_root):
+    """Return advisory `/idc:ask` context, optionally with one exact recommendation."""
+    try:
+        import idc_ask_resolve as ASK  # noqa: E402 — lazy: resolver failure must not brick admission
+        cwd = payload.get("cwd") or os.getcwd()
+        result = ASK.resolve(cwd, _ask_text(payload))
+        if isinstance(result, dict) and result.get("verdict") == "route":
+            target = result.get("command")
+            args = result.get("command_args")
+            if (
+                isinstance(target, str)
+                and target in ASK.ROUTABLE
+                and target in C.COMMANDS
+                and isinstance(args, str)
+            ):
+                reason = result.get("reason_code")
+                if not isinstance(reason, str) or not reason:
+                    reason = "resolved"
+                recommendation = C.normalize_ask_recommendation("ask", {
+                    "command": target,
+                    "command_args": args.strip(),
+                    "reason_code": reason,
+                })
+                if recommendation is not None:
+                    routed_payload = dict(payload)
+                    routed_payload["_idc_ask_recommendation"] = recommendation
+                    return "ask", routed_payload, _ask_route_preamble(
+                        target, recommendation["command_args"], reason
+                    )
+                result = None  # invalid recommendation shape falls through to oracle-invalid
+        reason = result.get("reason_code") if isinstance(result, dict) else "oracle-invalid"
+        if not isinstance(reason, str) or not reason:
+            reason = "oracle-invalid"
+    except Exception:  # noqa: BLE001 — `/idc:ask` remains a recovery/advisory surface
+        reason = "oracle-invalid"
+    advisory = (
+        f"IDC Ask advisory ({reason}): the resolver did not confidently name one command. "
+        "This is a deliberate refusal to guess; read the advisory playbook below and give the "
+        "operator a plain-language recommendation."
+    )
+    return "ask", payload, advisory
 
 
 def _normalize_command(command_name):
@@ -155,12 +225,13 @@ def _bootstrap_context(command, plugin_root):
     )
 
 
-def _emit_context(command, plugin_root, opened):
+def _emit_context(command, plugin_root, opened, preamble=""):
     """Emit the additionalContext that matches reality: the record-owed message iff a record was
     actually opened, otherwise the bootstrap message that claims no record."""
-    if opened:
-        H.prompt_expansion_context(_context(command, plugin_root))
-    H.prompt_expansion_context(_bootstrap_context(command, plugin_root))
+    context = _context(command, plugin_root) if opened else _bootstrap_context(command, plugin_root)
+    if preamble:
+        context = preamble + "\n\n" + context
+    H.prompt_expansion_context(context)
 
 
 # The outcome of an attempt to open a command's lifecycle record, so the caller can emit context that
@@ -200,7 +271,8 @@ def _register_if_governed(payload, plugin_root, command, running=None):
         with L.capture_command_start() as captured:
             written = C.register_start(cwd, session_id, command, running,
                                        payload.get("command_args") or "",
-                                       payload.get("command_source") or "")
+                                       payload.get("command_source") or "",
+                                       ask_recommendation=payload.get("_idc_ask_recommendation"))
     except L.ObligationConflict as exc:
         # A narrowing/replacing restart was REFUSED by the ledger (round-6 BLOCKS 1, rule A): the PRIOR
         # obligation record is left fully intact (the ledger raises BEFORE persisting anything), and the
@@ -286,7 +358,7 @@ def _restore_path_gate_auth(cwd, snapshot, expected_nonce):
     return PG.restore_authorization_snapshot(cwd, snapshot, expected_nonce)
 
 
-def _fail_closed_or_allow(payload, command, why, plugin_root):
+def _fail_closed_or_allow(payload, command, why, plugin_root, preamble=""):
     """The unverifiable-freshness fork: fail CLOSED for the six workflow commands (block with the
     repair message); ALLOW recovery/diagnostic + init commands (they must run to diagnose or migrate
     the repo). This fork is only reached AFTER freshness has proven the runtime is NOT positively
@@ -300,19 +372,24 @@ def _fail_closed_or_allow(payload, command, why, plugin_root):
             if reg == _REG_CONFLICT:
                 # Defensive mirror of `_admit`: never run against an unstamped obligation.
                 _block(detail)
+            if reg == _REG_WRITE_FAILED and command in AUTH_REQUIRED_COMMANDS:
+                # Recovery access does not make a mutating command safe to run without a durable
+                # obligation. Without its record it cannot receive nonce-bound write authority or
+                # be held to closeout. Read-only recovery commands may still diagnose.
+                _block(WRITE_FAILED_REASON)
             if reg == _REG_OPENED and not _ensure_path_gate_auth(
                 payload, command, registration, auth_snapshot
             ):
                 _block(AUTH_WRITE_FAILED_REASON)
             # A recovery command may still expand on a ledger write failure, but must not claim a
             # record exists. `_emit_context` is terminal and releases the lock via finally.
-            _emit_context(command, plugin_root, reg == _REG_OPENED)
+            _emit_context(command, plugin_root, reg == _REG_OPENED, preamble)
     _block(REPAIR_REASON)
 
 
 def _ensure_path_gate_auth(payload, command, registration, auth_snapshot):
     """Write/refresh the shared Path Gate authorization for commands that legitimately mutate the
-    repository. Read-only commands (`doctor`, `pause`) do not need one. The gate is keyed by the
+    repository. Read-only commands (`ask`, `doctor`, `pause`) do not need one. The gate is keyed by the
     already-open active command record's nonce, so a later finish naturally retires it when the
     record leaves the active set.
 
@@ -421,7 +498,7 @@ def _baseline_pending(cwd):
         return True
 
 
-def _admit(payload, plugin_root, command):
+def _admit(payload, plugin_root, command, preamble=""):
     cwd = payload.get("cwd") or os.getcwd()
     # Task-1 freshness. An InvalidReceiptError (or any other exception) propagates to the caller's
     # fail-closed handler; here we only decide on a CLEAN evaluation. The cache-first precedence in
@@ -431,7 +508,7 @@ def _admit(payload, plugin_root, command):
     if result.running_version is None:
         # The running plugin manifest could not be read → we cannot bind the runtime at all.
         _fail_closed_or_allow(payload, command,
-                              "the running plugin manifest could not be read", plugin_root)
+                              "the running plugin manifest could not be read", plugin_root, preamble)
     if result.verdict == "stale":
         _block(STALE_REASON)  # blocks EVERY command, recovery ones included (stale code is unsafe)
     if H.is_governed_repo(cwd) and command not in BASELINE_ALLOWED_COMMANDS and _baseline_pending(cwd):
@@ -448,14 +525,15 @@ def _admit(payload, plugin_root, command):
             # The ledger refused to narrow/replace the active obligation. Surface its remediation;
             # admitting instead would run a command whose obligation Stop could not enforce.
             _block(detail)
-        if reg == _REG_WRITE_FAILED and command in WORKFLOW_COMMANDS:
-            # A workflow command must not run unrecorded; Stop could not enforce its closeout.
+        if reg == _REG_WRITE_FAILED and command in AUTH_REQUIRED_COMMANDS:
+            # Any command that can mutate the repository must not run unrecorded; Stop could not
+            # enforce its closeout and Path Gate authority could not bind to a persisted nonce.
             _block(WRITE_FAILED_REASON)
         if reg == _REG_OPENED and not _ensure_path_gate_auth(
             payload, command, registration, auth_snapshot
         ):
             _block(AUTH_WRITE_FAILED_REASON)
-        _emit_context(command, plugin_root, reg == _REG_OPENED)
+        _emit_context(command, plugin_root, reg == _REG_OPENED, preamble)
 
 
 def main():
@@ -465,12 +543,15 @@ def main():
     if command is None:
         # Not a namespaced IDC command this gate governs → say nothing, allow the normal flow.
         sys.exit(0)
+    preamble = ""
     try:
-        _admit(payload, plugin_root, command)
+        if command == "ask":
+            command, payload, preamble = _resolve_ask(payload, plugin_root)
+        _admit(payload, plugin_root, command, preamble)
     except SystemExit:
         raise
     except Exception as exc:  # noqa: BLE001 — an unverifiable gate error is fail-closed for workflow
-        _fail_closed_or_allow(payload, command, f"unexpected gate error: {exc}", plugin_root)
+        _fail_closed_or_allow(payload, command, f"unexpected gate error: {exc}", plugin_root, preamble)
     sys.exit(0)
 
 

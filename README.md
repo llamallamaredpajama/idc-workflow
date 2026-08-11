@@ -5,9 +5,9 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-6.3.0-e8e7df?style=flat-square&labelColor=1a1a1a" alt="version 6.3.0">
+  <img src="https://img.shields.io/badge/version-6.4.0-e8e7df?style=flat-square&labelColor=1a1a1a" alt="version 6.4.0">
   <img src="https://img.shields.io/badge/Claude%20Code-plugin-e8e7df?style=flat-square&labelColor=1a1a1a" alt="Claude Code plugin">
-  <img src="https://img.shields.io/badge/commands-13-e8e7df?style=flat-square&labelColor=1a1a1a" alt="13 commands">
+  <img src="https://img.shields.io/badge/commands-14-e8e7df?style=flat-square&labelColor=1a1a1a" alt="14 commands">
   <img src="https://img.shields.io/badge/runtime-Claude%20%C2%B7%20Codex%20%C2%B7%20Pi-e8e7df?style=flat-square&labelColor=1a1a1a" alt="runtimes">
   <img src="https://img.shields.io/badge/pathway-off%20%7C%20controlled%20%7C%20app--locked-c8dc00?style=flat-square&labelColor=1a1a1a" alt="pathway enforcement profiles">
   <img src="https://img.shields.io/badge/license-MIT-e8e7df?style=flat-square&labelColor=1a1a1a" alt="MIT license">
@@ -211,10 +211,11 @@ install receipt. `/idc:doctor`'s first check fails loudly if IDC is ever enabled
 
 ## The commands
 
-Thirteen slash entry points:
+Fourteen slash entry points:
 
 | Command | What it is |
 |---------|------|
+| `/idc:ask` | plain-language front door — recommends one exact invocation; you choose whether to run it |
 | `/idc:think` | Think → the one gate — brainstorm → crystallize PRD + TRD → the Think PR gate |
 | `/idc:intake` | Intake — capture an idea into the Consideration inbox without derailing the run |
 | `/idc:plan` | Planning — admitted idea → goal-contract issues |
@@ -357,7 +358,8 @@ wires Pi.
 
 This repo is the plugin **and** its own marketplace:
 
-- **13 commands** — the pipeline (`think · intake · plan · build · recirculate · autorun`), the run controls (`pause · resume`), plus the
+- **14 commands** — `/idc:ask`, the read-only front door that recommends one exact invocation; the pipeline
+  (`think · intake · plan · build · recirculate · autorun`), the run controls (`pause · resume`), plus the
   `janitor` reconciler, `init`, `doctor`, and the lifecycle pair `update` / `uninstall`.
 
   Each entry point admits scope at exactly one altitude, and none of them may do another's job:
@@ -399,7 +401,7 @@ bash tests/smoke/run-all.sh
 .claude-plugin/   plugin.json (manifest) + marketplace.json (self-hosted marketplace)
 agents/           9 agents — stage playbooks + implementer + finisher + review coordinator/agent
 skills/           13 reusable procedures (runtime adapters, tracker, review engine, …)
-commands/         13 slash commands (think|intake|plan|build|recirculate|autorun|pause|resume|janitor|init|doctor|update|uninstall)
+commands/         14 slash commands (ask|think|intake|plan|build|recirculate|autorun|pause|resume|janitor|init|doctor|update|uninstall)
 templates/        per-project scaffold copied by /idc:init
 scripts/          lint-references.sh, release check, the filesystem tracker + stage helpers,
                   install-codex.sh / install-pi.sh, run-evals.sh

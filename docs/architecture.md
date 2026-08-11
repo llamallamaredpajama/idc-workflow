@@ -129,11 +129,12 @@ no sanctioned Pi merge helper has landed yet. So where this document says the pi
 when green," that is the Claude/Codex behavior — a Pi run stops one deliberate step short, at the
 merge gate, until that helper exists.
 
-## The thirteen commands — one altitude each
+## The fourteen commands — one altitude each
 
-IDC ships **13 slash entry points**:
+IDC ships **14 slash entry points**:
 
 ```text
+ask
 think | intake | plan | build | recirculate | autorun
 pause | resume | janitor | init | doctor | update | uninstall
 ```
@@ -148,7 +149,9 @@ admits scope at exactly one altitude, and none may do another's job:
 - **Build** consumes eligible schema-checked Buildables only.
 - **Autorun** drains durable tracker/intake state only.
 
-The remaining seven are operational, not scope-bearing: `pause` / `resume` stop a long autonomous run
+`ask` is the plain-language front door: say what you want and IDC recommends one exact invocation or
+deliberately refuses to guess. It stays read-only; only an explicit later invocation enters the
+recommended command. The remaining seven are operational, not scope-bearing: `pause` / `resume` stop a long autonomous run
 on purpose and pick it back up, `janitor` reconciles, `init` scaffolds, `doctor` diagnoses, and
 `update` / `uninstall` are the lifecycle pair.
 

@@ -560,7 +560,7 @@ def command_start(cwd, session_id, command, plugin_version, args_sha256, source,
                   intake_manifest=None, intake_units=None, recirc_requested=None,
                   build_requested=None, plan_admitted=None, uninstall_flags=None, nonce=None,
                   build_frontier=None, uninstall_receipt_source=None, uninstall_receipt_sha256=None,
-                  entry_conditions=None):
+                  entry_conditions=None, ask_recommendation=None):
     """Atomic UPSERT of the active command record by (session_id, command) — never duplicates an
     active record (a re-entry of the same command in the same session updates the one record in
     place). REPO-GATED: a silent no-op outside a governed repo (returns `{}`). Preserves the taint
@@ -588,6 +588,18 @@ def command_start(cwd, session_id, command, plugin_version, args_sha256, source,
         "source": source or "",
         "closeout": None,
     }
+    if command == "ask":
+        # Distinguish a genuinely advisory Ask from a routed Ask whose durable recommendation was
+        # later lost or damaged. Closeout may consult the live oracle only for the former.
+        rec["ask_recommendation_state"] = (
+            "routed" if isinstance(ask_recommendation, dict) else "advisory"
+        )
+        if isinstance(ask_recommendation, dict):
+            rec["ask_recommendation"] = {
+                "command": str(ask_recommendation.get("command") or ""),
+                "command_args": str(ask_recommendation.get("command_args") or ""),
+                "reason_code": str(ask_recommendation.get("reason_code") or ""),
+            }
     # Durable intake-mode marker (finding 2): a Think run started with `--doc/--unit` records its
     # intake manifest (repo-relative) + selected units on the record, so the Think closeout re-verifies
     # exact-once coverage from the RECORD — never inferable only from caller-supplied finish input.

@@ -29,14 +29,17 @@ Everything else flows autonomously.
 `Think → Plan → Build`, with the `Recirculator` as the only retrograde path and `Autorun` as the
 one-shot drainer that traverses the whole pipe.
 
-IDC ships **13 slash surfaces**:
+IDC ships **14 slash surfaces**:
 
 ```text
+ask
 think | intake | plan | build | recirculate | autorun
 pause | resume | janitor | init | doctor | update | uninstall
 ```
 
-The pipeline is `/idc:think`, `/idc:intake`, `/idc:plan`, `/idc:build`, `/idc:recirculate`,
+`/idc:ask` is the plain-language front door: say what you want and IDC recommends one exact invocation
+or deliberately refuses to guess. Ask stays read-only; you explicitly invoke the recommendation if you
+want it to run. The pipeline is `/idc:think`, `/idc:intake`, `/idc:plan`, `/idc:build`, `/idc:recirculate`,
 `/idc:autorun`; the rest are operational — `/idc:pause` / `/idc:resume` (stop a long run on purpose
 and pick it back up), `/idc:janitor` (reconciler), `/idc:init` (per-project scaffold), `/idc:doctor`
 (read-only health check), and `/idc:update` / `/idc:uninstall` (lifecycle).

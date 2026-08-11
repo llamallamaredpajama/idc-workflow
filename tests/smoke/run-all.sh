@@ -124,6 +124,9 @@ for t in \
   phase10-pause-resume \
   phase11-honesty-repro \
   phase12-trace-mirror \
+  phase13-ask-registration \
+  phase13-ask-resolver \
+  phase13-ask-entry-gate \
   phase-governance; do
   # Assertion-class rollup (design §E.4 / audit RC6): tally each phase by WHAT its green proves, so
   # "all green" can never be silently over-read as end-to-end behavioral proof. The class is declared

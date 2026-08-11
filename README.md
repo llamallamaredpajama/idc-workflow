@@ -108,6 +108,36 @@ IDC names three `pathway_enforcement.mode` profiles: `off | controlled | app-loc
 
 The filesystem tracker remains useful for hermetic tests and local demonstrations. It must stay `off` and makes no hard pathway-security claim.
 
+**What enforcement covers — application code, not your desk.** An enforcing profile guards the
+repository's *source tree*. It deliberately does **not** gate the surfaces that are not application
+code, and those need no claim, no command, and no ceremony in any mode:
+
+| Never gated | Still gated |
+|---|---|
+| `.vscode/`, `.idea/` | your source tree |
+| everything under `docs/`, and root-level prose (`*.md`, `*.rst`, `*.txt`) | `docs/workflow/` — IDC's own machine area |
+| root license/notice files and harmless repository metadata (`.gitignore`, `.gitattributes`, `.editorconfig`, `.dockerignore`) | `docs/workflow/tracker-config.yaml` — the governance anchor |
+| | machine-written state (`TRACKER.md`, the transition journal, receipts) |
+| | live IDC enforcement controls (`WORKFLOW-config.yaml`) |
+| | executable/security policy (`.claude/`, `.github/`, `.devcontainer/`, `CODEOWNERS`) |
+| | credentials and secret-capable config (`.env*`, `.npmrc`, `.yarnrc*`) |
+| | dependency/build/container manifests, lockfiles, and application tooling config |
+
+Prose rules are **root-level only** (plus everything under `docs/`), deliberately: `commands/*.md`
+and `skills/*/SKILL.md` in a markdown-authored application are shipped program text, and a repo-wide
+`*.md` rule would hand an agent its own instruction set to rewrite without a claim. IDC itself is
+that application, which is how the case was found.
+
+The exact rules live in `UNGOVERNED_DIRS` / `UNGOVERNED_ROOT_FILE_RULES` in `scripts/idc_path_gate.py`,
+and the same answer is used by the Write/Edit door and the commit/push doors, so a change that is
+free to make is also free to commit. Two exclusions are deliberate: the **governance anchor**, whose
+presence in the worktree is what arms every IDC gate (a hand edit would silently ungovern the
+repository), and anything already **machine-owned**, which outranks these rules — `TRACKER.md` stays
+refused despite the blanket `*.md` rule. Root rules are slash-free and case-sensitive, so nested and
+case-variant application paths cannot inherit an exemption. A request that mixes both kinds is
+judged on the application paths it carries, so a README riding along with a source change does not
+free the source change.
+
 **The one gate.** At the **end of Think**, the PRD + TRD ride a **Think PR** — they stay **draft until
 you merge it** (merge = approval = admission). You get a push notification with a plain-terms summary +
 the diff and open the gate from the GitHub web UI — on your phone, in-session, or later. The PRD always

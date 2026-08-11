@@ -10,7 +10,7 @@
 #   A. CONTROL — the gate genuinely enforces (application code IS denied). Without this a gate that
 #      denied nothing would make every "allowed" probe below vacuously green.
 #   B. Low-risk desk surfaces are admitted: project docs, editor preferences, harmless repository
-#      metadata, and the operator's own WORKFLOW-config.yaml.
+#      metadata.
 #   C. The deliberate exclusions still deny: the governance anchor (a hand edit would silently
 #      ungovern the repository), machine-owned state under the `*.md` rule (`TRACKER.md`), executable
 #      automation, credential-capable config, dependency/build manifests, case variants, nested
@@ -76,7 +76,6 @@ probe allow '[".gitignore"]'                   "repository plumbing (.gitignore)
 probe allow '[".gitattributes"]'               "repository plumbing (.gitattributes)"
 probe allow '[".editorconfig"]'                "repository plumbing (.editorconfig)"
 probe allow '[".dockerignore"]'                "repository plumbing (.dockerignore)"
-probe allow '["WORKFLOW-config.yaml"]'         "the operator's own IDC settings"
 probe allow '[".vscode/settings.json","README.md",".gitignore"]' "several ungoverned paths at once"
 
 # ── C. the deliberate exclusions still deny ───────────────────────────────────────────────────────
@@ -89,6 +88,7 @@ probe deny '["docs/workflow/code-reviews/v.json"]'   "review verdicts under docs
 probe deny '["docs/workflow/pillar-matrices/m.yaml"]' "pillar matrices under docs/workflow/"
 probe deny '[".env"]'                                "secret material (.env)"
 probe deny '[".env.local"]'                          "secret material (.env.local)"
+probe deny '["WORKFLOW-config.yaml"]'                "live Path Gate enforcement controls"
 probe deny '[".npmrc"]'                              "credential-capable package-manager config (.npmrc)"
 probe deny '[".yarnrc.yml"]'                         "credential-capable package-manager config (.yarnrc.yml)"
 probe deny '[".claude/settings.json"]'               "agent harness policy (.claude/)"
@@ -177,7 +177,7 @@ door deny  "docs/workflow/tracker-config.yaml" "the governance anchor at the Wri
 door deny  ".env"                              "secret material at the Write/Edit door"
 door deny  ".github/workflows/ci.yml"          "executable CI policy at the Write/Edit door"
 door deny  ".npmrc"                            "credential-capable config at the Write/Edit door"
-door allow "WORKFLOW-config.yaml"              "the operator's IDC settings at the Write/Edit door"
+door deny  "WORKFLOW-config.yaml"              "live Path Gate enforcement controls at the Write/Edit door"
 door allow ".vscode/settings.json"             "editor preferences at the Write/Edit door"
 door allow "README.md"                         "root prose at the Write/Edit door"
 door allow ".gitignore"                        "repository plumbing at the Write/Edit door"

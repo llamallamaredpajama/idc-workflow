@@ -14,10 +14,10 @@ past the Write tool died again at `git commit`.
 
 A path is now classified before any authorization is consulted. The deliberately narrow
 **ungoverned surfaces** — editor preferences under `.vscode/` and `.idea/`, everything under `docs/`,
-root-level prose and license/notice files, harmless repository metadata (`.gitignore`,
-`.gitattributes`, `.editorconfig`, `.dockerignore`), and the operator-owned `WORKFLOW-config.yaml` —
-need no authorization and are invisible to an authorization's allowed/denied boundary, in every
-mode. The classification is shared, so the Write/Edit door and the commit/push doors cannot drift.
+root-level prose and license/notice files, and harmless repository metadata (`.gitignore`,
+`.gitattributes`, `.editorconfig`, `.dockerignore`) — need no authorization and are invisible to an
+authorization's allowed/denied boundary, in every mode. The classification is shared, so the
+Write/Edit door and the commit/push doors cannot drift.
 
 Four boundaries are deliberate. **Machine-owned state is checked first**, so `TRACKER.md` stays
 refused despite the root `*.md` rule. **`docs/workflow/` is subtracted** from the otherwise-free
@@ -33,7 +33,8 @@ free the source change.
 
 Executable or security-bearing configuration stays gated: `.claude/`, `.github/`, `.devcontainer/`,
 `CODEOWNERS`, credential-capable config such as `.npmrc`/`.yarnrc*`, `.env*`, dependency/build/
-container manifests, lockfiles, and application tooling configuration.
+container manifests, lockfiles, application tooling configuration, and `WORKFLOW-config.yaml`
+(because it contains the live Path Gate enforcement posture).
 
 ## 6.2.0 — 2026-08-09
 

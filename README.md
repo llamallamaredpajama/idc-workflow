@@ -117,8 +117,8 @@ code, and those need no claim, no command, and no ceremony in any mode:
 | `.vscode/`, `.idea/` | your source tree |
 | everything under `docs/`, and root-level prose (`*.md`, `*.rst`, `*.txt`) | `docs/workflow/` — IDC's own machine area |
 | root license/notice files and harmless repository metadata (`.gitignore`, `.gitattributes`, `.editorconfig`, `.dockerignore`) | `docs/workflow/tracker-config.yaml` — the governance anchor |
-| `WORKFLOW-config.yaml` — your own IDC settings | |
 | | machine-written state (`TRACKER.md`, the transition journal, receipts) |
+| | live IDC enforcement controls (`WORKFLOW-config.yaml`) |
 | | executable/security policy (`.claude/`, `.github/`, `.devcontainer/`, `CODEOWNERS`) |
 | | credentials and secret-capable config (`.env*`, `.npmrc`, `.yarnrc*`) |
 | | dependency/build/container manifests, lockfiles, and application tooling config |

@@ -61,8 +61,8 @@ PROTECTED_MACHINE_RULES = [
 GOVERNANCE_ANCHOR_RELPATH = "docs/workflow/tracker-config.yaml"
 # ── ungoverned surfaces: what IDC does NOT guard ─────────────────────────────────────────────────
 # A governed repository is not uniformly application code. Project documentation, editor preferences,
-# harmless repository metadata, and the operator-owned IDC config are the OPERATOR'S DESK — editing
-# them is not the kind of work a Build unit's declared boundary exists to keep honest. Before this
+# and harmless repository metadata are the OPERATOR'S DESK — editing them is not the kind of work a
+# Build unit's declared boundary exists to keep honest. Before this
 # list existed the gate had no notion of a non-application path at all: it asked only "is this path
 # inside the repository?", so `.vscode/settings.json`, `.gitignore` and `README.md` were each refused
 # exactly like `src/checkout.py` unless the operator first claimed a board item.
@@ -82,9 +82,8 @@ GOVERNANCE_ANCHOR_RELPATH = "docs/workflow/tracker-config.yaml"
 #     build, container, and tooling manifests. These can change what runs or who may approve it, so
 #     they remain application-governed even when a human thinks of them as configuration.
 #   * `.env*` and friends — secret material is never desk furniture.
-# `WORKFLOW-config.yaml` IS free: it is documented as operator data ("the posture you set here is
-# the posture that stays"), and refusing the operator their own settings file is the complaint that
-# produced this list.
+#   * `WORKFLOW-config.yaml` — although operator-owned, it contains `pathway_enforcement`, so freeing
+#     the whole file would let an unauthorised session turn this gate off before changing code.
 UNGOVERNED_EXCEPT_DIRS = [
     "docs/workflow",
 ]
@@ -109,7 +108,6 @@ UNGOVERNED_ROOT_FILE_RULES = [
     "LICENSE",
     "LICENSE.*",
     "NOTICE",
-    "WORKFLOW-config.yaml",
     ".gitignore",
     ".gitattributes",
     ".editorconfig",

@@ -2,22 +2,22 @@
 # path-gate-ungoverned-surfaces.sh — IDC guards APPLICATION CODE, not the operator's desk.
 #
 # The defect this lane pins: the shared Path Gate asked only "is this path inside the repository?",
-# so in a `controlled` repo EVERY file — `.claude/settings.json`, `package.json`, `.gitignore`,
-# `README.md` — was refused exactly like `src/app.py` unless a board item had been claimed first.
-# Ordinary configuration and documentation work was impossible without ceremony.
+# so in a `controlled` repo EVERY file — `.vscode/settings.json`, `.gitignore`, and `README.md` —
+# was refused exactly like `src/app.py` unless a board item had been claimed first. Ordinary editor,
+# repository-metadata, and documentation work was impossible without ceremony.
 #
 # What is asserted here, against ONE fixture with NO live authorization:
 #   A. CONTROL — the gate genuinely enforces (application code IS denied). Without this a gate that
 #      denied nothing would make every "allowed" probe below vacuously green.
-#   B. The ungoverned surfaces are admitted: harness, CI, tooling, manifests, prose, and the
-#      operator's own WORKFLOW-config.yaml.
+#   B. Low-risk desk surfaces are admitted: project docs, editor preferences, harmless repository
+#      metadata, and the operator's own WORKFLOW-config.yaml.
 #   C. The deliberate exclusions still deny: the governance anchor (a hand edit would silently
-#      ungovern the repository), machine-owned state under the `*.md` rule (`TRACKER.md`), the rest
-#      of `docs/workflow/`, secret material, a MIXED request that also carries application code, and
-#      the whole-repository target.
-#   D. The git commit door inherits the same answer — a config-only commit is admitted while an
-#      application-code commit is refused — so being unblocked at the Write tool is not undone at
-#      commit time.
+#      ungovern the repository), machine-owned state under the `*.md` rule (`TRACKER.md`), executable
+#      automation, credential-capable config, dependency/build manifests, case variants, nested
+#      wildcard lookalikes, a MIXED request that carries application code, and the whole-repository
+#      target.
+#   D. The git commit AND push doors inherit the same answer: a low-risk desk-only history is
+#      admitted, while mixed and application histories are refused.
 set -uo pipefail
 . "$(dirname "$0")/lib.sh"
 
@@ -27,8 +27,8 @@ GIT_GATE="$GOV_PLUGIN/scripts/idc_git_path_gate.py"
 [ -f "$GIT_GATE" ] || gov_fail "idc_git_path_gate.py not found at $GIT_GATE"
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
-REPO="$WORK/repo"
-mkdir -p "$REPO/docs/workflow" "$REPO/src" "$REPO/.claude" "$REPO/.github/workflows"
+REPO="$WORK/repo"; REMOTE="$WORK/remote.git"
+mkdir -p "$REPO/docs/workflow" "$REPO/src" "$REPO/.vscode" "$REPO/.idea"
 (
   cd "$REPO"
   git init -q
@@ -36,6 +36,8 @@ mkdir -p "$REPO/docs/workflow" "$REPO/src" "$REPO/.claude" "$REPO/.github/workfl
   git config user.email idc@example.test
   git config user.name 'IDC Ungoverned Surfaces'
 )
+git init --bare -q "$REMOTE"
+git -C "$REPO" remote add origin "$REMOTE"
 # A GOVERNED, ENFORCING repository with NO authorization minted — the exact state an operator sits in
 # when they open a repo to change a setting.
 printf 'backend: filesystem\n' > "$REPO/docs/workflow/tracker-config.yaml"
@@ -44,6 +46,7 @@ printf 'ticket: demo\n' > "$REPO/TRACKER.md"
 printf 'print("app")\n' > "$REPO/src/app.py"
 git -C "$REPO" add .
 git -C "$REPO" commit -qm 'test: seed ungoverned-surface fixture' >/dev/null
+git -C "$REPO" push -u origin main >/dev/null 2>&1
 
 # `evaluate` exits 0 on allow, 2 on deny — assert the exit status, not scraped prose.
 probe() { # probe <expect: allow|deny> <json-path-array> <label>
@@ -63,23 +66,18 @@ probe() { # probe <expect: allow|deny> <json-path-array> <label>
 probe deny '["src/app.py"]' "CONTROL: application code with no authorization"
 
 # ── B. the operator's desk is admitted ────────────────────────────────────────────────────────────
-probe allow '[".claude/settings.json"]'        "the agent harness (.claude/)"
-probe allow '[".github/workflows/ci.yml"]'     "CI definitions (.github/)"
 probe allow '[".vscode/settings.json"]'        "editor settings (.vscode/)"
+probe allow '[".idea/workspace.xml"]'           "editor settings (.idea/)"
 probe allow '["README.md"]'                    "root prose (README.md)"
 probe allow '["docs/adr/0001-choice.md"]'      "project documentation (docs/)"
 probe allow '["CHANGELOG.md"]'                 "root prose (CHANGELOG.md)"
-probe allow '["package.json"]'                 "a dependency manifest (package.json)"
-probe allow '["pyproject.toml"]'               "a dependency manifest (pyproject.toml)"
-probe allow '["uv.lock"]'                      "a lockfile (uv.lock)"
-probe allow '["Makefile"]'                     "a build manifest (Makefile)"
-probe allow '["Dockerfile"]'                   "a container manifest (Dockerfile)"
+probe allow '["LICENSE"]'                      "the repository license"
 probe allow '[".gitignore"]'                   "repository plumbing (.gitignore)"
+probe allow '[".gitattributes"]'               "repository plumbing (.gitattributes)"
 probe allow '[".editorconfig"]'                "repository plumbing (.editorconfig)"
-probe allow '["tsconfig.json"]'                "tooling configuration (tsconfig.json)"
-probe allow '[".eslintrc.json"]'               "tooling configuration (.eslintrc.json)"
+probe allow '[".dockerignore"]'                "repository plumbing (.dockerignore)"
 probe allow '["WORKFLOW-config.yaml"]'         "the operator's own IDC settings"
-probe allow '[".claude/settings.json","README.md","package.json"]' "several ungoverned paths at once"
+probe allow '[".vscode/settings.json","README.md",".gitignore"]' "several ungoverned paths at once"
 
 # ── C. the deliberate exclusions still deny ───────────────────────────────────────────────────────
 # The anchor is what ARMS every IDC gate; freeing it would make "this repo is governed" hand-editable.
@@ -91,8 +89,25 @@ probe deny '["docs/workflow/code-reviews/v.json"]'   "review verdicts under docs
 probe deny '["docs/workflow/pillar-matrices/m.yaml"]' "pillar matrices under docs/workflow/"
 probe deny '[".env"]'                                "secret material (.env)"
 probe deny '[".env.local"]'                          "secret material (.env.local)"
-probe deny '["src/config.json"]'                     "a manifest-named file nested in the source tree"
-probe deny '["src/package.json"]'                    "a manifest name nested in the source tree, not at the root"
+probe deny '[".npmrc"]'                              "credential-capable package-manager config (.npmrc)"
+probe deny '[".yarnrc.yml"]'                         "credential-capable package-manager config (.yarnrc.yml)"
+probe deny '[".claude/settings.json"]'               "agent harness policy (.claude/)"
+probe deny '[".github/workflows/ci.yml"]'            "executable CI policy (.github/workflows/)"
+probe deny '[".github/CODEOWNERS"]'                  "review ownership policy (.github/CODEOWNERS)"
+probe deny '["CODEOWNERS"]'                          "review ownership policy (root CODEOWNERS)"
+probe deny '[".devcontainer/devcontainer.json"]'     "executable development-container policy"
+probe deny '["package.json"]'                       "dependency and executable-script manifest"
+probe deny '["pyproject.toml"]'                     "dependency and build manifest"
+probe deny '["uv.lock"]'                            "dependency lockfile"
+probe deny '["Makefile"]'                           "executable build manifest"
+probe deny '["Dockerfile"]'                         "executable container manifest"
+probe deny '["tsconfig.json"]'                      "application tooling configuration"
+probe deny '[".eslintrc.json"]'                     "application tooling configuration"
+probe deny '["requirements/dev.txt"]'               "nested path that must not match a root wildcard"
+probe deny '["tsconfig/app.json"]'                  "nested path that must not match a root wildcard"
+probe deny '[".eslintrc/custom.json"]'              "nested path that must not match a root wildcard"
+probe deny '["Docs/api.py"]'                        "case-variant application directory on a case-sensitive checkout"
+probe deny '[".Vscode/settings.json"]'              "case-variant editor directory on a case-sensitive checkout"
 # Prose rules are ROOT-ONLY (plus docs/). A markdown-authored application — this plugin's own
 # `commands/*.md` and `skills/*/SKILL.md` are shipped program text — must not hand an agent its
 # instruction set to rewrite unclaimed.
@@ -107,17 +122,27 @@ python3 "$GIT_GATE" install-hooks --repo "$REPO" --plugin-root "$GOV_PLUGIN" >/d
   || gov_fail "could not install the git path-gate hooks into the fixture"
 
 printf 'node_modules/\n' >> "$REPO/.gitignore"
-printf '{"model":"opus"}\n' > "$REPO/.claude/settings.json"
-git -C "$REPO" add .gitignore .claude/settings.json
+printf '{"editor.formatOnSave":true}\n' > "$REPO/.vscode/settings.json"
+git -C "$REPO" add .gitignore .vscode/settings.json
 git -C "$REPO" commit -qm 'chore: adjust local configuration' >/dev/null 2>&1 \
   || gov_fail "the commit door refused a configuration-only commit — the Write door being open is undone at commit time"
+git -C "$REPO" push origin main >/dev/null 2>&1 \
+  || gov_fail "the push door refused a low-risk desk-only history — the commit door being open is undone at push time"
 
 printf 'print("changed")\n' > "$REPO/src/app.py"
-git -C "$REPO" add src/app.py
-if git -C "$REPO" commit -qm 'feat: unauthorized application change' >/dev/null 2>&1; then
-  gov_fail "the commit door admitted an unauthorized APPLICATION-code commit — enforcement is gone, not narrowed"
+printf 'mixed\n' >> "$REPO/README.md"
+git -C "$REPO" add src/app.py README.md
+if git -C "$REPO" commit -qm 'feat: mixed desk and application change' >/dev/null 2>&1; then
+  gov_fail "the commit door admitted a MIXED request because README.md rode with unauthorized application code"
 fi
-git -C "$REPO" reset -q HEAD src/app.py
+git -C "$REPO" reset -q HEAD src/app.py README.md
+
+git -C "$REPO" add src/app.py
+git -C "$REPO" commit --no-verify -qm 'test: bypass pre-commit for push-door proof'
+if git -C "$REPO" push origin main >/dev/null 2>&1; then
+  gov_fail "the push door admitted an unauthorized application-code history"
+fi
+git -C "$REPO" reset --hard -q origin/main
 
 # ── E. the REAL PreToolUse door agrees ────────────────────────────────────────────────────────────
 # The door an operator actually hits is the Write/Edit interlock, not the core CLI. Two contract
@@ -150,11 +175,12 @@ door deny  "src/app.py"                        "CONTROL: application code at the
 door deny  "TRACKER.md"                        "machine-owned state at the Write/Edit door"
 door deny  "docs/workflow/tracker-config.yaml" "the governance anchor at the Write/Edit door"
 door deny  ".env"                              "secret material at the Write/Edit door"
-door allow ".claude/settings.json"             "the agent harness at the Write/Edit door"
+door deny  ".github/workflows/ci.yml"          "executable CI policy at the Write/Edit door"
+door deny  ".npmrc"                            "credential-capable config at the Write/Edit door"
 door allow "WORKFLOW-config.yaml"              "the operator's IDC settings at the Write/Edit door"
-door allow "package.json"                      "a dependency manifest at the Write/Edit door"
+door allow ".vscode/settings.json"             "editor preferences at the Write/Edit door"
 door allow "README.md"                         "root prose at the Write/Edit door"
 door allow ".gitignore"                        "repository plumbing at the Write/Edit door"
 door allow "docs/adr/0001-choice.md"           "project documentation at the Write/Edit door"
 
-echo "PASS: the Path Gate frees repository configuration, harness, tooling, manifests and prose while application code, the governance anchor, machine state and secrets stay gated (core, Write/Edit door and commit door all agree)"
+echo "PASS: the Path Gate frees low-risk docs/editor/repository desk surfaces while application code, executable policy, dependency/build configuration, credentials, governance anchors and machine state stay gated (core, Write/Edit, commit and push doors agree)"

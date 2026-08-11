@@ -138,8 +138,8 @@ reason_has 'outside the live authorization boundary'
 # ...and the ungoverned surfaces are invisible to the boundary in BOTH directions: free without an
 # authorization, and still free under one whose allowed_paths do not mention them.
 allow_case write docs/notes.md T-42 NODE-7
-allow_case write .claude/settings.json T-42 NODE-7
-allow_case write package.json T-42 NODE-7
+allow_case write .vscode/settings.json T-42 NODE-7
+allow_case write README.md T-42 NODE-7
 deny_case write TRACKER.md T-42 NODE-7
 
 # ── identity is REQUIRED and must match (V-AUTH stage 3 — the F3 flip) ───────────────────────────

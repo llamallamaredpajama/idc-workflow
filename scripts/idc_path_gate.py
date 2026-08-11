@@ -60,26 +60,28 @@ PROTECTED_MACHINE_RULES = [
 # ungoverning commit, and is the only shape the uninstall push door can ever admit (issue #201).
 GOVERNANCE_ANCHOR_RELPATH = "docs/workflow/tracker-config.yaml"
 # ── ungoverned surfaces: what IDC does NOT guard ─────────────────────────────────────────────────
-# A governed repository is not uniformly application code. Its agent/editor harness, CI definitions,
-# dependency manifests, tooling configuration, and prose documents are the OPERATOR'S DESK — editing
+# A governed repository is not uniformly application code. Project documentation, editor preferences,
+# harmless repository metadata, and the operator-owned IDC config are the OPERATOR'S DESK — editing
 # them is not the kind of work a Build unit's declared boundary exists to keep honest. Before this
 # list existed the gate had no notion of a non-application path at all: it asked only "is this path
-# inside the repository?", so `.claude/settings.json`, `package.json`, `.gitignore` and `README.md`
-# were each refused exactly like `src/checkout.py` unless the operator first claimed a board item.
-# That made ordinary desk work impossible in a `controlled` repository.
+# inside the repository?", so `.vscode/settings.json`, `.gitignore` and `README.md` were each refused
+# exactly like `src/checkout.py` unless the operator first claimed a board item.
 #
 # A path matching one of these rules is NEVER path-gated: it needs no authorization, and it is
 # invisible to an authorization's allowed/denied boundary. Evaluated AFTER PROTECTED_MACHINE_RULES,
 # so machine-owned state stays refused even though the bare `*.md` rule below would otherwise cover
 # `TRACKER.md`.
 #
-# DELIBERATELY GATED, and the reason each is not on this list:
+# DELIBERATELY GATED, and the reason each is not on this narrow list:
 #   * `docs/workflow/**` (UNGOVERNED_EXCEPT_DIRS) — IDC's own machine area inside an otherwise-free
 #     `docs/` tree: the governance anchor above (whose presence is what ARMS every IDC gate, so a
 #     hand edit could silently ungovern the repository), the install receipt, the journal, the
 #     review verdicts, the pillar matrices.
-#   * `.env*` and friends — never mentioned here, so they stay gated; secret material is not desk
-#     furniture.
+#   * Agent/runtime policy (`.claude/`), executable automation (`.github/`, `.devcontainer/`),
+#     review policy (`CODEOWNERS`), credential-capable config (`.npmrc`, `.yarnrc*`), and dependency,
+#     build, container, and tooling manifests. These can change what runs or who may approve it, so
+#     they remain application-governed even when a human thinks of them as configuration.
+#   * `.env*` and friends — secret material is never desk furniture.
 # `WORKFLOW-config.yaml` IS free: it is documented as operator data ("the posture you set here is
 # the posture that stays"), and refusing the operator their own settings file is the complaint that
 # produced this list.
@@ -87,93 +89,31 @@ UNGOVERNED_EXCEPT_DIRS = [
     "docs/workflow",
 ]
 UNGOVERNED_DIRS = [
-    ".claude",
-    ".github",
     ".vscode",
     ".idea",
-    ".devcontainer",
     "docs",
 ]
-# Prose globs, matched ONLY at the repository root. Nested prose is covered by `docs/` above.
+# Root globs are matched ONLY when the candidate has no slash. Nested prose is covered by `docs/`
+# above; everything else nested stays governed.
 # DELIBERATELY NOT REPO-WIDE: `*` spans `/` under fnmatch, so a blanket `*.md` would free markdown
 # ANYWHERE — and in a markdown-authored application the markdown IS the application. This plugin is
 # the worked example: its `commands/*.md`, `agents/*.md` and `skills/*/SKILL.md` are shipped program
 # text, and a repo-wide prose rule would have handed an agent its own instruction set to rewrite
-# unclaimed. Root prose (README, CHANGELOG, CONTRIBUTING) and `docs/` carry no such risk.
+# unclaimed. Matching is deliberately case-sensitive: a case-variant directory on a case-sensitive
+# checkout is a different application path, not an alias for the named desk surface.
 UNGOVERNED_ROOT_FILE_RULES = [
     "*.md",
     "*.mdx",
     "*.rst",
     "*.txt",
-]
-UNGOVERNED_FILE_RULES = [
     "LICENSE",
     "LICENSE.*",
     "NOTICE",
-    "CODEOWNERS",
-    # IDC's operator-owned settings (the machine-owned anchor beside it stays gated — see above).
     "WORKFLOW-config.yaml",
-    # Repository plumbing.
     ".gitignore",
     ".gitattributes",
     ".editorconfig",
     ".dockerignore",
-    ".npmrc",
-    ".yarnrc*",
-    ".nvmrc",
-    ".node-version",
-    ".python-version",
-    ".ruby-version",
-    ".tool-versions",
-    ".pre-commit-config.yaml",
-    # Dependency + build manifests (root-anchored: a repo-relative name with no `/` cannot match a
-    # nested file, so a vendored `package.json` deep in the source tree stays gated).
-    "package.json",
-    "package-lock.json",
-    "pnpm-lock.yaml",
-    "pnpm-workspace.yaml",
-    "yarn.lock",
-    "bun.lockb",
-    "pyproject.toml",
-    "setup.py",
-    "setup.cfg",
-    "requirements*.txt",
-    "uv.lock",
-    "poetry.lock",
-    "Pipfile",
-    "Pipfile.lock",
-    "Cargo.toml",
-    "Cargo.lock",
-    "go.mod",
-    "go.sum",
-    "Gemfile",
-    "Gemfile.lock",
-    "Makefile",
-    "justfile",
-    "Justfile",
-    "Dockerfile",
-    "Dockerfile.*",
-    "docker-compose*.yml",
-    "docker-compose*.yaml",
-    # Tooling configuration.
-    "tsconfig*.json",
-    "jsconfig*.json",
-    ".eslintrc*",
-    "eslint.config.*",
-    ".prettierrc*",
-    "prettier.config.*",
-    "vite.config.*",
-    "webpack.config.*",
-    "rollup.config.*",
-    "babel.config.*",
-    "jest.config.*",
-    "vitest.config.*",
-    "ruff.toml",
-    ".ruff.toml",
-    "mypy.ini",
-    "tox.ini",
-    "pytest.ini",
-    ".flake8",
 ]
 # Machine-owned witness of the uninstall removal commits a sanctioned door admitted. Written ONLY by
 # `idc_git_path_gate.py witness-uninstall` (fixed code) and only after that door re-derives the
@@ -852,19 +792,17 @@ def is_ungoverned_path(relpath: str) -> bool:
     reads the same answer the gate itself acts on. Callers must still consult
     `is_protected_machine_surface` FIRST — a protected surface is refused whether or not a rule here
     would otherwise free it, which is what keeps `TRACKER.md` denied under the `*.md` rule."""
-    candidate = (relpath or "").casefold().strip("/")
+    candidate = (relpath or "").strip("/")
     if not candidate or candidate == ".":
         # The whole-repository target. It reaches application code, so it is never free.
         return False
-    if any(_under_dir(candidate, base.casefold()) for base in UNGOVERNED_EXCEPT_DIRS):
+    if any(_under_dir(candidate, base) for base in UNGOVERNED_EXCEPT_DIRS):
         return False
-    if any(_under_dir(candidate, base.casefold()) for base in UNGOVERNED_DIRS):
+    if any(_under_dir(candidate, base) for base in UNGOVERNED_DIRS):
         return True
-    if "/" not in candidate and any(
-        fnmatch.fnmatchcase(candidate, rule.casefold()) for rule in UNGOVERNED_ROOT_FILE_RULES
-    ):
-        return True
-    return any(fnmatch.fnmatchcase(candidate, rule.casefold()) for rule in UNGOVERNED_FILE_RULES)
+    return "/" not in candidate and any(
+        fnmatch.fnmatchcase(candidate, rule) for rule in UNGOVERNED_ROOT_FILE_RULES
+    )
 
 
 def _find_active_record_by_nonce(repo: str, command: str, nonce: str) -> dict[str, Any] | None:

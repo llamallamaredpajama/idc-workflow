@@ -114,25 +114,29 @@ code, and those need no claim, no command, and no ceremony in any mode:
 
 | Never gated | Still gated |
 |---|---|
-| `.claude/`, `.github/`, `.vscode/`, `.idea/`, `.devcontainer/` | your source tree |
+| `.vscode/`, `.idea/` | your source tree |
 | everything under `docs/`, and root-level prose (`*.md`, `*.rst`, `*.txt`) | `docs/workflow/` — IDC's own machine area |
-| dependency + build manifests (`package.json`, `pyproject.toml`, lockfiles, `Makefile`, `Dockerfile`, …) | `docs/workflow/tracker-config.yaml` — the governance anchor |
-| tooling config (`tsconfig*`, `.eslintrc*`, `ruff.toml`, `.pre-commit-config.yaml`, …) | machine-written state (`TRACKER.md`, the transition journal, receipts) |
-| repository plumbing (`.gitignore`, `.editorconfig`, `.nvmrc`, …) | secret material (`.env*`) |
+| root license/notice files and harmless repository metadata (`.gitignore`, `.gitattributes`, `.editorconfig`, `.dockerignore`) | `docs/workflow/tracker-config.yaml` — the governance anchor |
 | `WORKFLOW-config.yaml` — your own IDC settings | |
+| | machine-written state (`TRACKER.md`, the transition journal, receipts) |
+| | executable/security policy (`.claude/`, `.github/`, `.devcontainer/`, `CODEOWNERS`) |
+| | credentials and secret-capable config (`.env*`, `.npmrc`, `.yarnrc*`) |
+| | dependency/build/container manifests, lockfiles, and application tooling config |
 
 Prose rules are **root-level only** (plus everything under `docs/`), deliberately: `commands/*.md`
 and `skills/*/SKILL.md` in a markdown-authored application are shipped program text, and a repo-wide
 `*.md` rule would hand an agent its own instruction set to rewrite without a claim. IDC itself is
 that application, which is how the case was found.
 
-The exact rules live in `UNGOVERNED_DIRS` / `UNGOVERNED_FILE_RULES` in `scripts/idc_path_gate.py`,
+The exact rules live in `UNGOVERNED_DIRS` / `UNGOVERNED_ROOT_FILE_RULES` in `scripts/idc_path_gate.py`,
 and the same answer is used by the Write/Edit door and the commit/push doors, so a change that is
 free to make is also free to commit. Two exclusions are deliberate: the **governance anchor**, whose
 presence in the worktree is what arms every IDC gate (a hand edit would silently ungovern the
 repository), and anything already **machine-owned**, which outranks these rules — `TRACKER.md` stays
-refused despite the blanket `*.md` rule. A request that mixes both kinds is judged on the application
-paths it carries, so a README riding along with a source change does not free the source change.
+refused despite the blanket `*.md` rule. Root rules are slash-free and case-sensitive, so nested and
+case-variant application paths cannot inherit an exemption. A request that mixes both kinds is
+judged on the application paths it carries, so a README riding along with a source change does not
+free the source change.
 
 **The one gate.** At the **end of Think**, the PRD + TRD ride a **Think PR** — they stay **draft until
 you merge it** (merge = approval = admission). You get a push notification with a plain-terms summary +

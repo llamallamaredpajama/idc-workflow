@@ -2,6 +2,37 @@
 
 All notable changes for the IDC Workflow plugin are documented in this file.
 
+## 6.3.0 — 2026-08-11
+
+**IDC guards your application code, not your desk.** In a `controlled` repository the Path Gate asked
+one question — "is this path inside the repository?" — and refused everything that wasn't already
+covered by a live authorization. It had no notion of a non-application path at all, so
+`.claude/settings.json`, `package.json`, `.gitignore` and `README.md` were each refused exactly like
+`src/app.py` unless a board item had been claimed first. Changing a lint rule or an editor setting
+meant opening a ticket, and because the commit and push doors evaluate the same core, work that got
+past the Write tool died again at `git commit`. The reported symptom was the honest one: ordinary work
+in a governed repo was impossible.
+
+A path is now classified before any authorization is consulted. The **ungoverned surfaces** — the
+agent/editor/CI harness (`.claude/`, `.github/`, `.vscode/`, `.idea/`, `.devcontainer/`), everything
+under `docs/`, root-level prose, dependency and build manifests, tooling configuration, repository
+plumbing, and the operator-owned `WORKFLOW-config.yaml` — need no authorization and are invisible to
+an authorization's allowed/denied boundary, in every mode. Everything else is gated exactly as before.
+The classification is shared, so the Write/Edit door and the git doors cannot drift: a change that is
+free to make is free to commit.
+
+Three boundaries are deliberate. **Machine-owned state is checked first**, so `TRACKER.md` stays
+refused despite the root `*.md` rule. **`docs/workflow/` is subtracted** from the otherwise-free
+`docs/` tree, because it holds the governance anchor whose presence is what arms every IDC gate — a
+hand edit there would silently ungovern the repository. And **prose rules are root-level only**: `*`
+spans `/` under `fnmatch`, so a repo-wide `*.md` rule would free markdown anywhere, and in a
+markdown-authored application the markdown *is* the application — this plugin's own `commands/*.md`
+and `skills/*/SKILL.md` are shipped program text. A request mixing ungoverned and application paths is
+judged on the application paths it carries, so a README riding along with a source change does not
+free the source change.
+
+`.env*` is not on the list and stays gated.
+
 ## 6.2.0 — 2026-08-09
 
 Four defects found by *operating* a fully-governed, github-backed repo rather than by testing one.

@@ -129,7 +129,17 @@ reason_has 'protected machine-owned surface'
 authorize
 allow_case write src/app.ts T-42 NODE-7
 deny_case write src/tracker-link.md T-42 NODE-7
-deny_case write docs/notes.md T-42 NODE-7
+# Application code outside the authorization's `src`/`tests` scope is refused BY THE BOUNDARY. This
+# case used `docs/notes.md`, which no longer exercises the boundary at all: `docs/` became an
+# UNGOVERNED SURFACE (UNGOVERNED_DIRS), so prose is outside this gate's jurisdiction rather than
+# inside-and-denied. The boundary assertion is kept, on a path that is genuinely application code.
+deny_case write lib/helper.ts T-42 NODE-7
+reason_has 'outside the live authorization boundary'
+# ...and the ungoverned surfaces are invisible to the boundary in BOTH directions: free without an
+# authorization, and still free under one whose allowed_paths do not mention them.
+allow_case write docs/notes.md T-42 NODE-7
+allow_case write .claude/settings.json T-42 NODE-7
+allow_case write package.json T-42 NODE-7
 deny_case write TRACKER.md T-42 NODE-7
 
 # ── identity is REQUIRED and must match (V-AUTH stage 3 — the F3 flip) ───────────────────────────

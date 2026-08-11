@@ -149,8 +149,9 @@ admits scope at exactly one altitude, and none may do another's job:
 - **Build** consumes eligible schema-checked Buildables only.
 - **Autorun** drains durable tracker/intake state only.
 
-`ask` is the plain-language front door: say what you want and IDC routes you to the right command,
-always confirming first. The remaining seven are operational, not scope-bearing: `pause` / `resume` stop a long autonomous run
+`ask` is the plain-language front door: say what you want and IDC recommends one exact invocation or
+deliberately refuses to guess. It stays read-only; only an explicit later invocation enters the
+recommended command. The remaining seven are operational, not scope-bearing: `pause` / `resume` stop a long autonomous run
 on purpose and pick it back up, `janitor` reconciles, `init` scaffolds, `doctor` diagnoses, and
 `update` / `uninstall` are the lifecycle pair.
 

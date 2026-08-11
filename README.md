@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-6.3.0-e8e7df?style=flat-square&labelColor=1a1a1a" alt="version 6.3.0">
+  <img src="https://img.shields.io/badge/version-6.4.0-e8e7df?style=flat-square&labelColor=1a1a1a" alt="version 6.4.0">
   <img src="https://img.shields.io/badge/Claude%20Code-plugin-e8e7df?style=flat-square&labelColor=1a1a1a" alt="Claude Code plugin">
   <img src="https://img.shields.io/badge/commands-14-e8e7df?style=flat-square&labelColor=1a1a1a" alt="14 commands">
   <img src="https://img.shields.io/badge/runtime-Claude%20%C2%B7%20Codex%20%C2%B7%20Pi-e8e7df?style=flat-square&labelColor=1a1a1a" alt="runtimes">
@@ -215,7 +215,7 @@ Fourteen slash entry points:
 
 | Command | What it is |
 |---------|------|
-| `/idc:ask` | plain-language front door — name what you want; IDC routes and confirms before it acts |
+| `/idc:ask` | plain-language front door — recommends one exact invocation; you choose whether to run it |
 | `/idc:think` | Think → the one gate — brainstorm → crystallize PRD + TRD → the Think PR gate |
 | `/idc:intake` | Intake — capture an idea into the Consideration inbox without derailing the run |
 | `/idc:plan` | Planning — admitted idea → goal-contract issues |
@@ -358,7 +358,7 @@ wires Pi.
 
 This repo is the plugin **and** its own marketplace:
 
-- **14 commands** — `/idc:ask`, the plain-language front door that routes and confirms first; the pipeline
+- **14 commands** — `/idc:ask`, the read-only front door that recommends one exact invocation; the pipeline
   (`think · intake · plan · build · recirculate · autorun`), the run controls (`pause · resume`), plus the
   `janitor` reconciler, `init`, `doctor`, and the lifecycle pair `update` / `uninstall`.
 

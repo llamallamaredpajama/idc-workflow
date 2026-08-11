@@ -28,6 +28,11 @@ CASES = [
                                        "advisory", None,      None),
     # An explicit rejection is never a route to the rejected command.
     ("do not resume",                "advisory", None,      None),
+    # Generic continuation language needs live-state analysis. It must not bypass the oracle and
+    # blindly recommend resume in a repository whose pipeline is already active.
+    ("continue",                    "advisory", None,      None),
+    ("keep going",                  "advisory", None,      None),
+    ("where were we",               "advisory", None,      None),
 ]
 for text, verdict, command, reason in CASES:
     got = R.resolve_keywords(text)

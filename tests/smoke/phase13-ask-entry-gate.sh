@@ -45,21 +45,25 @@ print(json.dumps(matches[0], sort_keys=True))
 ' "$2"
 }
 
-# 1. A confident request retargets to pause and records that ask was its source.
+# 1. A confident request recommends pause but remains the read-only ask command. The operator must
+#    explicitly invoke the recommendation; ask must not inject the target playbook, open its record,
+#    or mint its write authority before that explicit invocation.
+AUTH="$(python3 "$PATH_GATE" auth-path --repo "$REPO")"
+rm -f "$AUTH"
 OUT="$(emit_ask ask-route 'stop work here' | python3 "$GATE" "$REPO_ROOT")"
-printf '%s' "$OUT" | grep -q '/idc:pause' || fail "confident ask did not inject pause context"
-printf '%s' "$OUT" | grep -q 'You reached this command through /idc:ask' \
-  || fail "confident ask did not inject the mandatory confirmation preamble"
-printf '%s' "$OUT" | grep -q 'You are running `/idc:pause`' \
-  || fail "confident ask did not inject the resolved pause playbook"
-RECORD="$(active_record ask-route pause)" || fail "confident ask did not open a pause record"
-printf '%s' "$RECORD" | grep -q '"source": "ask"' \
-  || fail "retargeted pause record did not record ask as its source"
-python3 "$CONTRACT" status --repo "$REPO" --session ask-route --json | grep -q '"command": "ask"' \
-  && fail "confident ask opened an ask record instead of pause"
+printf '%s' "$OUT" | grep -q 'Recommended invocation: `/idc:pause`' \
+  || fail "confident ask did not emit the exact pause recommendation"
+printf '%s' "$OUT" | grep -qi 'explicitly invoke' \
+  || fail "confident ask did not say the operator must explicitly invoke the recommendation"
+if printf '%s' "$OUT" | grep -q 'You are running `/idc:pause`'; then
+  fail "confident ask injected the pause playbook before the operator invoked pause"
+fi
+active_record ask-route ask >/dev/null || fail "confident ask did not open its own ask record"
+python3 "$CONTRACT" status --repo "$REPO" --session ask-route --json | grep -q '"command": "pause"' \
+  && fail "confident ask opened a pause record before the operator invoked pause"
+[ ! -e "$AUTH" ] || fail "confident ask minted Path Gate authority for its recommendation"
 
 # 2. Ambiguous language stays advisory: it opens ask and has no Path Gate authorization.
-AUTH="$(python3 "$PATH_GATE" auth-path --repo "$REPO")"
 rm -f "$AUTH"
 OUT="$(emit_ask ask-ambiguous 'stop and then pick up later' | python3 "$GATE" "$REPO_ROOT")"
 printf '%s' "$OUT" | grep -q 'advisory' || fail "ambiguous ask did not inject advisory context"
@@ -74,15 +78,16 @@ active_record ask-lifecycle ask >/dev/null || fail "lifecycle ask did not open a
 python3 "$CONTRACT" status --repo "$REPO" --session ask-lifecycle --json | grep -q '"command": "uninstall"' \
   && fail "lifecycle ask opened an uninstall record"
 
-# 4. A recovery-admitted route still carries its mandatory confirmation and resolved playbook.
+# 4. An invalid-receipt recovery route remains an ask recommendation; it does not silently become
+#    the target command merely because ask itself is allowed as a recovery surface.
 printf 'receipt_version: 2\n' > "$REPO/docs/workflow/install-receipt.yaml"
 OUT="$(emit_ask ask-invalid-receipt 'stop work here' | python3 "$GATE" "$REPO_ROOT")"
-printf '%s' "$OUT" | grep -q 'You reached this command through /idc:ask' \
-  || fail "recovery-routed ask lost its mandatory confirmation preamble"
-printf '%s' "$OUT" | grep -q 'You are running `/idc:pause`' \
-  || fail "recovery-routed ask did not inject the resolved pause playbook"
-active_record ask-invalid-receipt pause >/dev/null \
-  || fail "recovery-routed ask did not open the retargeted pause record"
+printf '%s' "$OUT" | grep -q 'Recommended invocation: `/idc:pause`' \
+  || fail "recovery-routed ask lost its exact recommendation"
+active_record ask-invalid-receipt ask >/dev/null \
+  || fail "recovery-routed ask did not open its own ask record"
+python3 "$CONTRACT" status --repo "$REPO" --session ask-invalid-receipt --json | grep -q '"command": "pause"' \
+  && fail "recovery-routed ask opened a pause record before explicit invocation"
 
 # 5. Malformed resolver output is advisory, never an admission-hook crash.
 python3 - "$REPO_ROOT" "$REPO" <<'PY' || fail "malformed resolver output did not fall back to advisory"
@@ -104,23 +109,54 @@ assert command == "ask", (command, payload, context)
 assert "advisory" in context, context
 PY
 
-# 6. `ask complete` requires an actionable named oracle recommendation, not any readable verdict.
-python3 - "$REPO_ROOT" <<'PY' || fail "ask complete accepted a non-action oracle verdict"
+# 6. A resolved command with arguments stays a recommendation and retains the exact invocation.
+python3 - "$REPO_ROOT" "$REPO" <<'PY' || fail "ask route lost arguments or retargeted the command"
+import os, sys
+sys.path.insert(0, os.path.join(sys.argv[1], "scripts", "hooks"))
+sys.path.insert(0, os.path.join(sys.argv[1], "scripts"))
+import idc_ask_resolve as ASK
+import idc_command_entry_gate as G
+
+original = ASK.resolve
+try:
+    ASK.resolve = lambda repo, text: {
+        "verdict": "route", "command": "build", "command_args": "--unit U1"
+    }
+    command, payload, context = G._resolve_ask(
+        {"cwd": sys.argv[2], "command_args": "what is next?"}, sys.argv[1]
+    )
+finally:
+    ASK.resolve = original
+assert command == "ask", (command, payload, context)
+assert payload["command_args"] == "what is next?", payload
+assert "Recommended invocation: `/idc:build --unit U1`" in context, context
+assert "You are running `/idc:build`" not in context, context
+PY
+
+# 7. Ask's public closeout validator accepts only the three evidenced outcomes it owns.
+python3 - "$REPO_ROOT" <<'PY' || fail "ask closeout statuses are not evidence-bound"
 import os, sys
 from types import SimpleNamespace
 sys.path.insert(0, os.path.join(sys.argv[1], "scripts"))
 import idc_command_contract as C
 
 original = C._oracle_action
+original_blocker = C._check_blocker
+evidence = {"schema_version": 1, "refs": {}}
 try:
     C._oracle_action = lambda repo: SimpleNamespace(verdict="no_action", command=None)
-    refused = C._claim_ask_oracle_read({}, "/ignored", "session")
-    assert not refused.ok, refused
+    assert not C.validate_closeout("ask", "complete", evidence, "/ignored", "session").ok
+    assert C.validate_closeout("ask", "no_action", evidence, "/ignored", "session").ok
     C._oracle_action = lambda repo: SimpleNamespace(verdict="action", command="/idc:plan")
-    accepted = C._claim_ask_oracle_read({}, "/ignored", "session")
-    assert accepted.ok, accepted
+    assert C.validate_closeout("ask", "complete", evidence, "/ignored", "session").ok
+    C._check_blocker = lambda command, refs, repo, session: C.CloseoutResult(
+        True, "ok", "test blocker re-derived", {}
+    )
+    assert C.validate_closeout("ask", "blocked_external", evidence, "/ignored", "session").ok
+    assert not C.validate_closeout("ask", "waiting_gate", evidence, "/ignored", "session").ok
 finally:
     C._oracle_action = original
+    C._check_blocker = original_blocker
 PY
 
 echo "PASS: phase13-ask-entry-gate"

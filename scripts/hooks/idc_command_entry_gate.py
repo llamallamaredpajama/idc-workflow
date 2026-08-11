@@ -111,15 +111,6 @@ BASELINE_PENDING_REASON = (
     "available while the baseline is pending."
 )
 
-ASK_CONFIRM_PREAMBLE = """You reached this command through /idc:ask, so the operator did not name it — the resolver did.
-Before you take ANY action, state in ONE line: which command this is, in plain English what it
-will do, and why it fits what they said. Then stop and wait for `y` or `n`.
-
-On `y`: proceed with the playbook below.
-On `n` (or anything that is not a yes): take no action, close this command's lifecycle record with
-status `no_action`, and ask the operator what they meant instead. Do not guess a second time."""
-
-
 def _ask_text(payload):
     """The operator text after `/idc:ask`, from the real prompt payload when available."""
     prompt = payload.get("prompt")
@@ -131,28 +122,24 @@ def _ask_text(payload):
     return args if isinstance(args, str) else ""
 
 
-def _ask_route_preamble(plugin_root, target):
-    """Return confirmation text followed by the exact resolved command playbook.
+def _ask_route_preamble(target, args, reason):
+    """Describe one exact recommendation without turning Ask into the target command.
 
-    UserPromptExpansion appends `additionalContext` alongside the original `/idc:ask`
-    command body. A route must therefore inject the target body explicitly; otherwise
-    confirmation would continue into the advisory ask playbook and try to close the
-    wrong lifecycle record.
+    UserPromptExpansion cannot replace the operator's original invocation. Injecting a target
+    playbook here would therefore run it under `/idc:ask` without a second, explicit command entry
+    event. Ask stays read-only: it names the exact command (including oracle-derived arguments), and
+    the operator invokes that command separately if they want it to run.
     """
-    playbook_path = os.path.join(plugin_root, "commands", target + ".md")
-    with open(playbook_path, encoding="utf-8") as handle:
-        playbook = handle.read().strip()
-    if not playbook:
-        raise ValueError(f"resolved /idc:{target} playbook is empty")
+    invocation = f"/idc:{target}" + (f" {args.strip()}" if args.strip() else "")
     return (
-        ASK_CONFIRM_PREAMBLE
-        + f"\n\nResolved `/idc:{target}` playbook:\n\n"
-        + playbook
+        f"IDC Ask recommendation ({reason}). Recommended invocation: `{invocation}`. "
+        "This is advice only: `/idc:ask` has not opened the recommended command's lifecycle record "
+        "or received its write authority. To continue, explicitly invoke the exact command above."
     )
 
 
 def _resolve_ask(payload, plugin_root):
-    """Fail softly into advisory `/idc:ask`, or retarget a verified resolver route."""
+    """Return advisory `/idc:ask` context, optionally with one exact recommendation."""
     try:
         import idc_ask_resolve as ASK  # noqa: E402 — lazy: resolver failure must not brick admission
         cwd = payload.get("cwd") or os.getcwd()
@@ -166,10 +153,10 @@ def _resolve_ask(payload, plugin_root):
                 and target in C.COMMANDS
                 and isinstance(args, str)
             ):
-                retargeted = dict(payload)
-                retargeted["command_args"] = args
-                retargeted["command_source"] = "ask"
-                return target, retargeted, _ask_route_preamble(plugin_root, target)
+                reason = result.get("reason_code")
+                if not isinstance(reason, str) or not reason:
+                    reason = "resolved"
+                return "ask", payload, _ask_route_preamble(target, args, reason)
         reason = result.get("reason_code") if isinstance(result, dict) else "oracle-invalid"
         if not isinstance(reason, str) or not reason:
             reason = "oracle-invalid"
@@ -373,6 +360,11 @@ def _fail_closed_or_allow(payload, command, why, plugin_root, preamble=""):
             if reg == _REG_CONFLICT:
                 # Defensive mirror of `_admit`: never run against an unstamped obligation.
                 _block(detail)
+            if reg == _REG_WRITE_FAILED and command in AUTH_REQUIRED_COMMANDS:
+                # Recovery access does not make a mutating command safe to run without a durable
+                # obligation. Without its record it cannot receive nonce-bound write authority or
+                # be held to closeout. Read-only recovery commands may still diagnose.
+                _block(WRITE_FAILED_REASON)
             if reg == _REG_OPENED and not _ensure_path_gate_auth(
                 payload, command, registration, auth_snapshot
             ):
@@ -521,8 +513,9 @@ def _admit(payload, plugin_root, command, preamble=""):
             # The ledger refused to narrow/replace the active obligation. Surface its remediation;
             # admitting instead would run a command whose obligation Stop could not enforce.
             _block(detail)
-        if reg == _REG_WRITE_FAILED and command in WORKFLOW_COMMANDS:
-            # A workflow command must not run unrecorded; Stop could not enforce its closeout.
+        if reg == _REG_WRITE_FAILED and command in AUTH_REQUIRED_COMMANDS:
+            # Any command that can mutate the repository must not run unrecorded; Stop could not
+            # enforce its closeout and Path Gate authority could not bind to a persisted nonce.
             _block(WRITE_FAILED_REASON)
         if reg == _REG_OPENED and not _ensure_path_gate_auth(
             payload, command, registration, auth_snapshot

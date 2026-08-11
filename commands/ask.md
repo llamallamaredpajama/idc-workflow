@@ -1,5 +1,5 @@
 ---
-description: IDC Ask — say what you want in plain English and IDC routes you to the right command. Reads live state, explains where you stand, never acts without confirming.
+description: IDC Ask — say what you want in plain English and get one exact command recommendation. Reads live state and never opens or runs the recommended command.
 argument-hint: '[what you want, in plain English]'
 ---
 

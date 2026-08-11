@@ -37,8 +37,9 @@ think | intake | plan | build | recirculate | autorun
 pause | resume | janitor | init | doctor | update | uninstall
 ```
 
-`/idc:ask` is the plain-language front door: say what you want and IDC routes you to the right command,
-always confirming first. The pipeline is `/idc:think`, `/idc:intake`, `/idc:plan`, `/idc:build`, `/idc:recirculate`,
+`/idc:ask` is the plain-language front door: say what you want and IDC recommends one exact invocation
+or deliberately refuses to guess. Ask stays read-only; you explicitly invoke the recommendation if you
+want it to run. The pipeline is `/idc:think`, `/idc:intake`, `/idc:plan`, `/idc:build`, `/idc:recirculate`,
 `/idc:autorun`; the rest are operational — `/idc:pause` / `/idc:resume` (stop a long run on purpose
 and pick it back up), `/idc:janitor` (reconciler), `/idc:init` (per-project scaffold), `/idc:doctor`
 (read-only health check), and `/idc:update` / `/idc:uninstall` (lifecycle).

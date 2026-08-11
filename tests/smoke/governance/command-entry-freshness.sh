@@ -291,7 +291,7 @@ no_active "$REPO_G" S-wf-think think \
   || gov_fail "(g1) status shows an active record even though the ledger write failed (Fix 2)"
 echo "  ok (g1) a workflow command whose obligation cannot be recorded is BLOCKED (not admitted); no active record"
 
-# (g2) a RECOVERY command (doctor) on the SAME write-failure must still EXPAND to help the operator,
+# (g2) a READ-ONLY recovery command (doctor) on the SAME write-failure must still EXPAND to help the operator,
 #      but with the BOOTSTRAP context that does NOT falsely claim a record opened — and NO active
 #      record exists. It must NOT be blocked (recovery may run to diagnose) and must NOT claim a record.
 #      Red-when-broken: emit the record-owed context on the recovery write-fail path (opened=True) ⇒
@@ -321,7 +321,36 @@ if printf '%s' "$OUT" | grep -q '"decision": "block"'; then
 fi
 no_active "$REPO_G" S-wf-doctor doctor \
   || gov_fail "(g2) status shows an active record for a recovery command whose ledger write failed (Fix 2)"
-echo "  ok (g2) a recovery command on a write-failure expands with bootstrap context (no false 'record opened'); no active record"
+echo "  ok (g2) a read-only recovery command on a write-failure expands with bootstrap context (no false 'record opened'); no active record"
+
+# (g2b) A MUTATING recovery command is different: without a recorded lifecycle obligation it could
+#       neither receive nonce-bound Path Gate authority nor be forced through closeout. It must block
+#       on the clean-receipt path instead of expanding unrecorded.
+chmod 500 "$REPO_G"
+OUT="$(emit_expansion_g idc:update '' "$REPO_G" S-wf-update | python3 "$ENTRY_GATE" "$CURRENT_PLUGIN")"; RC=$?
+chmod 700 "$REPO_G"
+[ "$RC" -eq 0 ] || gov_fail "(g2b) mutating recovery write-failure crashed instead of cleanly blocking"
+printf '%s' "$OUT" | grep -q '"decision": "block"' \
+  || gov_fail "(g2b) mutating recovery command expanded without a lifecycle record"
+printf '%s' "$OUT" | grep -q 'could not record the command' \
+  || gov_fail "(g2b) mutating recovery refusal did not name the lifecycle write failure"
+no_active "$REPO_G" S-wf-update update \
+  || gov_fail "(g2b) failed mutating recovery admission left an active record"
+
+# (g2c) The same rule holds on the invalid-receipt recovery fork. Invalid receipts let update in to
+#       repair them only when its lifecycle obligation can actually be recorded.
+printf 'receipt_version: 2\n' > "$REPO_G/docs/workflow/install-receipt.yaml"
+chmod 500 "$REPO_G"
+OUT="$(emit_expansion_g idc:update '' "$REPO_G" S-wf-update-invalid | python3 "$ENTRY_GATE" "$CURRENT_PLUGIN")"; RC=$?
+chmod 700 "$REPO_G"
+printf 'receipt_version: 2\nplugin_version: 4.0.0\n' > "$REPO_G/docs/workflow/install-receipt.yaml"
+[ "$RC" -eq 0 ] || gov_fail "(g2c) invalid-receipt mutating recovery write-failure crashed"
+printf '%s' "$OUT" | grep -q '"decision": "block"' \
+  || gov_fail "(g2c) invalid-receipt mutating recovery command expanded without a lifecycle record"
+printf '%s' "$OUT" | grep -q 'could not record the command' \
+  || gov_fail "(g2c) invalid-receipt mutating recovery refusal named the wrong reason"
+no_active "$REPO_G" S-wf-update-invalid update \
+  || gov_fail "(g2c) invalid-receipt failed admission left an active record"
 
 # (g3) a FAILED `command_finish` write must be reported as a FAILURE (non-zero) AND MUST leave the
 #      command ACTIVE — otherwise the Stop closeout gate would believe an un-closed command was closed.
@@ -405,4 +434,4 @@ printf '%s' "$OUT" | grep -q 'additionalContext' \
   || gov_fail "(h4) a same-manifest restart did not UNION its units (got '$(think_field "$REPO_H" S-conflict intake_units)', want 'U0,U1')"
 echo "  ok (h) the entry hook DENIES a cross-manifest think restart with the conflict's remediation, leaves the prior obligation intact, and still admits a benign same-manifest restart (unioning units)"
 
-echo "PASS: the command entry gate refuses a stale runtime with an actionable reload instruction, admits a current runtime while opening its lifecycle record, opens a record for a recovery command allowed on an invalid receipt, blocks a stale runtime even when the receipt is invalid (positive-stale precedence), does not crash on a wrong-shape plugin manifest (Fix 1), and honestly handles a failed ledger write (Fix 2): a workflow command is BLOCKED and unrecorded (g1), a recovery command still expands with bootstrap context and no false 'record opened' claim (g2), and a failed command_finish reports failure while leaving the command active (g3); DENIES a cross-manifest think restart with the ObligationConflict's own remediation while leaving the prior obligation intact and still admitting a benign same-manifest restart (h); plus the admission-category matrix (workflow fail-closed on an invalid receipt; recovery/janitor/init may expand; all blocked when positively stale)"
+echo "PASS: the command entry gate refuses a stale runtime with an actionable reload instruction, admits a current runtime while opening its lifecycle record, opens a record for a recovery command allowed on an invalid receipt, blocks a stale runtime even when the receipt is invalid (positive-stale precedence), does not crash on a wrong-shape plugin manifest (Fix 1), and honestly handles a failed ledger write (Fix 2): workflow and mutating recovery commands are BLOCKED and unrecorded (g1/g2b/g2c), a read-only recovery command still expands with bootstrap context and no false 'record opened' claim (g2), and a failed command_finish reports failure while leaving the command active (g3); DENIES a cross-manifest think restart with the ObligationConflict's own remediation while leaving the prior obligation intact and still admitting a benign same-manifest restart (h); plus the admission-category matrix (workflow fail-closed on an invalid receipt; recovery/janitor/init may expand only when required lifecycle state persists; all blocked when positively stale)"

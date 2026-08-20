@@ -1,0 +1,14 @@
+V-PIN SHA lookup — executed 2026-07-28 via `gh api repos/<owner>/<repo>/git/ref/tags/<tag>`
+Both tags are lightweight (object.type == "commit"), so object.sha IS the commit SHA.
+
+actions/checkout   @v4  -> 11d5960a326750d5838078e36cf38b85af677262   (latest v4 point release: v4.4.0)
+oven-sh/setup-bun  @v2  -> 0c5077e51419868618aeaa5fe8019c62421857d6   (latest v2 point release: v2.2.0)
+
+actions/checkout@v4 resolves to the SAME sha the plan doc recorded on 2026-07-27 (11d5960a...),
+so pinning it is a provable no-op today.
+
+Lines to change (4 total, all currently unpinned):
+  .github/workflows/ci.yml:13                    actions/checkout@v4
+  .github/workflows/ci.yml:22                    oven-sh/setup-bun@v2
+  .github/workflows/idc-pathway-integrity.yml:52 actions/checkout@v4
+  .github/workflows/idc-pathway-integrity.yml:61 actions/checkout@v4
